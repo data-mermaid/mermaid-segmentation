@@ -1,0 +1,8 @@
+## Not really an environment file yet
+- pip install -e .
+- pip install albumentations
+- pip install segmentation-models-pytorch
+
+## For scraper
+- pip install selenium
+- pip install webdriver-manager
