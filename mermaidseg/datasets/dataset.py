@@ -57,7 +57,7 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         self.df_annotations = pd.read_parquet(self.annotations_path)
         self.df_images = self.df_annotations[
             ["image_id", "region_id", "region_name"]
-        ].drop_duplicates(subset=["image_id"])
+        ].drop_duplicates(subset=["image_id"]).reset_index(drop=True) ## NEWLY Added
         self.split = split
         self.transform = transform
         self.s3 = boto3.client("s3")
