@@ -7,7 +7,8 @@ date: 17-09-2025
 Functions:
     get_legend_elements: Generate legend elements for benthic attributes and optionally growth forms for use in matplotlib plots.
 """
-from typing import Any, List, Tuple
+
+from typing import List, Tuple, Union
 
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -15,7 +16,7 @@ from matplotlib import pyplot as plt
 
 def get_legend_elements(
     annotations: pd.DataFrame, include_growth_form: bool = False
-) -> Any[List, Tuple]:
+) -> Union[List, Tuple[List, List]]:
     """
     Generate legend elements for benthic attributes and optionally growth forms for use in matplotlib plots.
     Parameters
