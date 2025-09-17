@@ -2,7 +2,7 @@
 - pip install -e .
 - pip install albumentations
 - pip install segmentation-models-pytorch
-
+- pip install black pylint pyright isort
 ## For scraper
 - pip install selenium
 - pip install webdriver-manager
