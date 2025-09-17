@@ -6,40 +6,41 @@ date: 28-08-2025
 
 Functions:
     get_image_s3: Fetches an image from an S3 bucket and returns it as a PIL Image object.
-    create_annotation_mask: Creates an annotation mask for a given image. 
+    create_annotation_mask: Creates an annotation mask for a given image.
     calculate_weights: Calculate class weights for a given dataset.
 """
 
-from typing import Tuple, Dict
 import io
+from typing import Dict, Tuple
 
-import pandas as pd
-import numpy as np 
 import boto3
+import numpy as np
+import pandas as pd
+import torch
 from PIL import Image
-import torch 
-
 from tqdm import tqdm
 
+
 def get_image_s3(
-    image_id: str,
     s3: boto3.client,
-    bucket: str = "coral-reef-training",
+    bucket: str,
+    key: str,
     thumbnail: bool = False,
 ):
     """
     Fetches an image from an S3 bucket and returns it as a PIL Image object.
     Args:
-        image_id (str): The identifier of the image to retrieve.
-        s3 (boto3.client): The boto3 S3 client used to access the bucket.
-        bucket (str, optional): The name of the S3 bucket. Defaults to "coral-reef-training".
-        thumbnail (bool, optional): If True, fetches the thumbnail version of the image. Defaults to False.
+        s3 (boto3.client): The Boto3 S3 client used to interact with S3.
+        bucket (str): The name of the S3 bucket.
+        key (str): The key (path) of the image in the S3 bucket.
+        thumbnail (bool, optional): If True, fetches the thumbnail version of the image by modifying the key. Defaults to False.
     Returns:
-        PIL.Image.Image: The image loaded from S3.
+        PIL.Image.Image: The image loaded from S3 as a PIL Image object.
     """
-    key = (
-        f"mermaid/{image_id}_thumbnail.png" if thumbnail else f"mermaid/{image_id}.png"
-    )
+
+    if thumbnail:
+        key = key.replace(".png", "_thumbnail.png")
+
     response = s3.get_object(Bucket=bucket, Key=key)
     image_data = response["Body"].read()
 
@@ -48,31 +49,38 @@ def get_image_s3(
 
 
 def create_annotation_mask(
-    annotations: pd.DataFrame, 
-    shape: Tuple[int, int], 
-    label2id: Dict["str", int]
-):
+    annotations: pd.DataFrame, shape: Tuple[int, int], label2id: Dict[str, int]
+) -> np.ndarray:
     """
-    Creates an annotation mask for a given image. 
+    Creates an annotation mask for a given image based on provided annotations.
+    Args:
+        annotations (pd.DataFrame): DataFrame containing annotation rows with 'row', 'col', and 'benthic_attribute_name' columns.
+        shape (Tuple[int, int]): Shape of the output mask (height, width).
+        label2id (Dict[str, int]): Mapping from label names to integer IDs.
+    Returns:
+        np.ndarray: Annotation mask with integer class IDs.
     """
     mask = np.zeros(shape[:2])
-    for i, annotation in annotations.iterrows():
-        mask[annotation['row'], annotation['col']] =  label2id[annotation["benthic_attribute_name"]]
-    return mask    
+    for _, annotation in annotations.iterrows():
+        if annotation["benthic_attribute_name"] is not None:
+            mask[annotation["row"], annotation["col"]] = label2id[
+                annotation["benthic_attribute_name"]
+            ]
+    return mask
 
 
-def calculate_weights(dataset, const = 2000000):
+def calculate_weights(dataset, const=2000000) -> torch.Tensor:
     """
     Calculate class weights for a given dataset.
-    This function computes the weights for each class in the dataset based on 
-    the frequency of each class label. The weights are inversely proportional 
+    This function computes the weights for each class in the dataset based on
+    the frequency of each class label. The weights are inversely proportional
     to the square root of the class frequency, adjusted by a constant value.
     Args:
-        dataset (Dataset): The dataset object which contains images and labels. 
-                            It should have an attribute `N_classes` indicating 
+        dataset (Dataset): The dataset object which contains images and labels.
+                            It should have an attribute `N_classes` indicating
                             the number of classes.
-        const (int, optional): A constant value added to the class frequency 
-                                to avoid division by zero and to smooth the weights. 
+        const (int, optional): A constant value added to the class frequency
+                                to avoid division by zero and to smooth the weights.
                                 Default is 2000000.
     Returns:
         torch.Tensor: A tensor of weights for each class, normalized by the mean weight.
@@ -81,7 +89,7 @@ def calculate_weights(dataset, const = 2000000):
     label_counts = {}
     label_counts = {i: 0 for i in range(dataset.N_classes)}
     for i in tqdm(range(len(dataset))):
-        image, label, _ = dataset[i]
+        _, label, _ = dataset[i]
         unique_labels = np.unique(label, return_counts=True)
         for label_id, count in zip(*unique_labels):
             label_counts[label_id] += int(count)
