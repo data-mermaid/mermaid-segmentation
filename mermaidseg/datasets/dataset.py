@@ -11,6 +11,7 @@ Classes:
 
 from typing import Any, List, Optional, Tuple, Union
 
+import albumentations as A
 import boto3
 import numpy as np
 import pandas as pd
@@ -49,14 +50,14 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
     df_annotations: pd.DataFrame
     df_images: pd.DataFrame
     split: Optional[str]
-    transform: Optional
+    transform: Optional[A.BasicTransform]
 
     def __init__(
         self,
         annotations_path: str = "s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet",
         source_bucket: str = "coral-reef-training",
         split: Optional[str] = None,
-        transform: Optional = None,
+        transform: Optional[A.BasicTransform] = None,
     ):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
@@ -152,7 +153,7 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         mask = create_annotation_mask(annotations, image.shape, self.label2id)
         if self.transform:
             transformed = self.transform(image=image, mask=mask)
-            image = transformed["image"].transpose(2, 0, 1)  
+            image = transformed["image"].transpose(2, 0, 1)
             mask = transformed["mask"]
         return image, mask, annotations
 
@@ -167,22 +168,33 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
             annotations: List of annotation DataFrames
         """
         images, masks, annotations = zip(*batch)
-        
+
         # Handle empty batch
         if len(images) == 0:
             return torch.tensor([]), torch.tensor([]), []
-        
+
         # Convert to tensors if they aren't already
         if isinstance(images[0], torch.Tensor):
             images = torch.stack(images)
             masks = torch.stack(masks)
         else:
             # Convert numpy arrays to tensors for consistency
-            images = torch.stack([torch.from_numpy(img) if isinstance(img, np.ndarray) else img for img in images])
-            masks = torch.stack([torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask for mask in masks])
-        
+            images = torch.stack(
+                [
+                    torch.from_numpy(img) if isinstance(img, np.ndarray) else img
+                    for img in images
+                ]
+            )
+            masks = torch.stack(
+                [
+                    torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask
+                    for mask in masks
+                ]
+            )
+
         return images, masks
-    
+
+
 class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
     """
     A PyTorch Dataset for loading annotated coral reef images from a CoralNet sources.
@@ -210,7 +222,7 @@ class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
     df_annotations: pd.DataFrame
     df_images: pd.DataFrame
     split: Optional[str]
-    transform: Optional
+    transform: Optional[A.BasicTransform]
 
     def __init__(
         self,
@@ -218,7 +230,7 @@ class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         source_bucket: str = "dev-datamermaid-sm-sources",
         source_s3_prefix: str = "coralnet-public-images",
         split: Optional[str] = None,
-        transform: Optional = None,
+        transform: Optional[A.BasicTransform] = None,
     ):
         self.source_ids = source_ids
         self.source_bucket = source_bucket
