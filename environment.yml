@@ -3,6 +3,9 @@
 - pip install albumentations
 - pip install segmentation-models-pytorch
 - pip install black pylint pyright isort
+
+- pip install anytree # Not that relevant yet, mostly for explorations of hierarchical class structures 
+
 ## For scraper
 - pip install selenium
 - pip install webdriver-manager
