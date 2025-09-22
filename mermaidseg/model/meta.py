@@ -159,13 +159,10 @@ class MetaModel:
         """
 
         inputs = inputs.to(self.device).float()
-
         if target_dim is None:
             target_dim = (inputs.size(-2), inputs.size(-1))
-
         outputs = self.model(inputs)
-
-        if hasattr(outputs, "logits") and self.loss is not None:
+        if hasattr(outputs, "logits") and not hasattr(self, "loss"):
             outputs = outputs.logits
 
         outputs = F.interpolate(
