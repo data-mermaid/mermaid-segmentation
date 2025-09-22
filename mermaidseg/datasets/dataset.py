@@ -75,7 +75,7 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
 
         self.s3 = boto3.client("s3")
 
-        self.num_classes = self.df_annotations["benthic_attribute_name"].nunique()
+        self.num_classes = self.df_annotations["benthic_attribute_name"].nunique()+1 # +1 for background
         self.id2label = {
             i: attribute
             for i, attribute in enumerate(
@@ -94,7 +94,7 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
                 .index.tolist(),
                 sns.color_palette(
                     "deep",
-                    n_colors=self.num_classes,
+                    n_colors=self.num_classes-1,
                 ).as_hex(),
             )
         )
@@ -275,7 +275,7 @@ class Mermaid15Dataset(MermaidDataset):
             .reset_index(drop=True)
         )
 
-        self.num_classes = len(self.classes_mermaid15)
+        self.num_classes = len(self.classes_mermaid15)+1 # +1 for background
         self.id2label = {
             i: attribute for i, attribute in enumerate(self.classes_mermaid15, start=1)
         }
@@ -287,7 +287,7 @@ class Mermaid15Dataset(MermaidDataset):
                 self.classes_mermaid15,
                 sns.color_palette(
                     "deep",
-                    n_colors=self.num_classes,
+                    n_colors=self.num_classes-1,
                 ).as_hex(),
             )
         )
@@ -496,11 +496,11 @@ class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         self.split = split
         self.transform = transform
 
-        self.num_classes = self.df_annotations["benthic_attribute_name"].nunique()
+        self.num_classes = self.df_annotations["benthic_attribute_name"].nunique()+1 # +1 for background
         self.id2label = {
             i: attribute
             for i, attribute in enumerate(
-                self.df_annotations["benthic_attribute_name"]
+                self.df_annotations["benthic_attribute_name"] ##TODO: See if you need to update these things (id2label needs to start with one, here and above) 
                 .value_counts()
                 .index.tolist()
             )
