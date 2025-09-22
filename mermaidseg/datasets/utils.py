@@ -11,7 +11,7 @@ Functions:
 """
 
 import io
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import boto3
 import numpy as np
@@ -49,7 +49,10 @@ def get_image_s3(
 
 
 def create_annotation_mask(
-    annotations: pd.DataFrame, shape: Tuple[int, int], label2id: Dict[str, int]
+    annotations: pd.DataFrame,
+    shape: Tuple[int, int],
+    label2id: Dict[str, int],
+    padding: Optional[int] = None,
 ) -> np.ndarray:
     """
     Creates an annotation mask for a given image based on provided annotations.
@@ -63,9 +66,16 @@ def create_annotation_mask(
     mask = np.zeros(shape[:2])
     for _, annotation in annotations.iterrows():
         if annotation["benthic_attribute_name"] is not None:
-            mask[annotation["row"], annotation["col"]] = label2id[
-                annotation["benthic_attribute_name"]
-            ]
+            if padding is not None and padding > 0:
+                mask[
+                    annotation["row"] - padding : annotation["row"] + padding,
+                    annotation["col"] - padding : annotation["col"] + padding,
+                ] = label2id[annotation["benthic_attribute_name"]]
+            else:
+                mask[annotation["row"], annotation["col"]] = label2id[
+                    annotation["benthic_attribute_name"]
+                ]
+
     return mask
 
 
