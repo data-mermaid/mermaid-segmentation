@@ -51,6 +51,7 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
     df_images: pd.DataFrame
     split: Optional[str]
     transform: Optional[A.BasicTransform]
+    padding: Optional[int]
 
     def __init__(
         self,
@@ -58,6 +59,7 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         source_bucket: str = "coral-reef-training",
         split: Optional[str] = None,
         transform: Optional[A.BasicTransform] = None,
+        padding: Optional[int] = None,
     ):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
@@ -69,6 +71,8 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         )
         self.split = split
         self.transform = transform
+        self.padding = padding
+
         self.s3 = boto3.client("s3")
 
         self.num_classes = self.df_annotations["benthic_attribute_name"].nunique()
@@ -143,14 +147,193 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
             * image.shape[1]
         ).astype(int)
 
-        # annotations["benthic_color"] = annotations["benthic_attribute_name"].apply(
-        #     lambda x: self.vis_dict["benthic"][x]
-        # )
-        # annotations["growth_form_marker"] = annotations["growth_form_name"].apply(
-        #     lambda x: self.vis_dict["growth_form"][str(x)]
-        # )
+        annotations["benthic_color"] = annotations["benthic_attribute_name"].apply(
+            lambda x: self.vis_dict["benthic"][x]
+        )
+        annotations["growth_form_marker"] = annotations["growth_form_name"].apply(
+            lambda x: self.vis_dict["growth_form"][str(x)]
+        )
 
         mask = create_annotation_mask(annotations, image.shape, self.label2id)
+        if self.transform:
+            transformed = self.transform(image=image, mask=mask)
+            image = transformed["image"].transpose(2, 0, 1)
+            mask = transformed["mask"]
+        return image, mask, annotations
+
+    def collate_fn(self, batch):
+        """
+        Collate function for MermaidDataset and CoralNetDataset.
+        Args:
+            batch: List of tuples (image, mask, annotations)
+        Returns:
+            images: Tensor or ndarray batch of images
+            masks: Tensor or ndarray batch of masks
+            annotations: List of annotation DataFrames
+        """
+        images, masks, annotations = zip(*batch)
+
+        # Handle empty batch
+        if len(images) == 0:
+            return torch.tensor([]), torch.tensor([]), []
+
+        # Convert to tensors if they aren't already
+        if isinstance(images[0], torch.Tensor):
+            images = torch.stack(images)
+            masks = torch.stack(masks)
+        else:
+            # Convert numpy arrays to tensors for consistency
+            images = torch.stack(
+                [
+                    torch.from_numpy(img) if isinstance(img, np.ndarray) else img
+                    for img in images
+                ]
+            )
+            masks = torch.stack(
+                [
+                    torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask
+                    for mask in masks
+                ]
+            )
+
+        return images, masks
+
+
+class Mermaid15Dataset(MermaidDataset):
+    """
+    A subset of the Mermaid dataset with only 15 select classes for experimentation purposes. Labels chosen as most common ones and a few select ones.
+    This dataset reads image annotations from a Parquet file, retrieves images from S3, and applies optional transformations.
+    Each item returned is a tuple containing the image (as a tensor or ndarray) and a placeholder for the target (currently None).
+    Attributes:
+        annotations_path (str): Path to the Parquet file containing image annotations.
+        df_annotations (pd.DataFrame): DataFrame with all annotation data.
+        df_images (pd.DataFrame): DataFrame with unique image entries.
+        split (Optional[str]): Optional dataset split identifier (e.g., 'train', 'val', 'test').
+        transform (Optional): Optional transformation function to apply to images.
+        s3 (boto3.client): Boto3 S3 client for accessing images.
+    Args:
+        annotations_path (str, optional): S3 path to the Parquet file with annotations. Defaults to a preset path.
+        split (Optional[str], optional): Dataset split identifier. Defaults to None.
+        transform (Optional, optional): Transformation function for images. Defaults to None.
+    Methods:
+        __len__(): Returns the number of annotation entries.
+        __getitem__(idx): Retrieves the image at the given index, applies transformations, and returns it with a placeholder target.
+    """
+
+    annotations_path: str
+    source_bucket: str
+    df_annotations: pd.DataFrame
+    df_images: pd.DataFrame
+    split: Optional[str]
+    transform: Optional[A.BasicTransform]
+    padding: Optional[int]
+
+    def __init__(
+        self,
+        annotations_path: str = "s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet",
+        source_bucket: str = "coral-reef-training",
+        split: Optional[str] = None,
+        transform: Optional[A.BasicTransform] = None,
+        padding: Optional[int] = None,
+    ):
+
+        super().__init__(
+            annotations_path=annotations_path,
+            source_bucket=source_bucket,
+            split=split,
+            transform=transform,
+        )
+        self.padding = padding
+
+        self.classes_mermaid15 = [
+            "Macroalgae",
+            "Rubble",
+            "Sand",
+            "Porites",
+            "Crustose coralline algae",
+            "Bare substrate",
+            "Hard coral",
+            "Turf algae",
+            "Millepora",
+            "Tape",
+            "Soft coral",
+            "Acropora",
+            "Pocillopora",
+            "Porites lobata",
+            "Montipora",
+        ]
+
+        self.df_annotations = self.df_annotations[
+            self.df_annotations["benthic_attribute_name"].apply(
+                lambda x: x in self.classes_mermaid15
+            )
+        ]
+
+        self.df_images = (
+            self.df_annotations[["image_id", "region_id", "region_name"]]
+            .drop_duplicates(subset=["image_id"])
+            .reset_index(drop=True)
+        )
+
+        self.num_classes = len(self.classes_mermaid15)
+        self.id2label = {
+            i: attribute for i, attribute in enumerate(self.classes_mermaid15, start=1)
+        }
+        self.label2id = {v: k for k, v in self.id2label.items()}
+
+        self.vis_dict = {}
+        self.vis_dict["benthic"] = dict(
+            zip(
+                self.classes_mermaid15,
+                sns.color_palette(
+                    "deep",
+                    n_colors=self.num_classes,
+                ).as_hex(),
+            )
+        )
+
+    def __len__(self):
+        return self.df_images.shape[0]
+
+    def __getitem__(self, idx: int) -> Tuple[Union[torch.Tensor, NDArray[Any]], Any]:
+        image_id = self.df_images.loc[idx, "image_id"]
+        key = f"mermaid/{image_id}_thumbnail.png"
+        image = np.array(
+            get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB")
+        )
+
+        annotations = self.df_annotations.loc[
+            self.df_annotations["image_id"] == image_id,
+            [
+                "point_id",
+                "row",
+                "col",
+                "benthic_attribute_id",
+                "benthic_attribute_name",
+                "growth_form_id",
+                "growth_form_name",
+            ],
+        ]
+
+        # Scale annotations to image size (if using thumbnails)
+        annotations["row"] = (
+            annotations["row"]
+            / (annotations["row"].max() + annotations["row"].min())
+            * image.shape[0]
+        ).astype(int)
+
+        annotations["col"] = (
+            annotations["col"]
+            / (annotations["col"].max() + annotations["col"].min())
+            * image.shape[1]
+        ).astype(int)
+
+        annotations["benthic_color"] = annotations["benthic_attribute_name"].apply(
+            lambda x: self.vis_dict["benthic"][x]
+        )
+        mask = create_annotation_mask(
+            annotations, image.shape, self.label2id, padding=self.padding
+        )
         if self.transform:
             transformed = self.transform(image=image, mask=mask)
             image = transformed["image"].transpose(2, 0, 1)
@@ -386,4 +569,5 @@ class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         label_mapping = {
             label["provider_id"]: label["benthic_attribute_name"] for label in labelset
         }
+        return label_mapping
         return label_mapping
