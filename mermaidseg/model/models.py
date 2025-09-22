@@ -17,6 +17,7 @@ from typing import Any
 import torch
 from transformers import SegformerForSemanticSegmentation
 
+
 class Segformer(torch.nn.Module):
     """
     Wrapper around the Segformer segmentation model.
@@ -56,9 +57,12 @@ class Segformer(torch.nn.Module):
         #     encoder_name, id2label={i: i for i in range(1, num_classes)}, **kwargs
         # )
         self.model = SegformerForSemanticSegmentation.from_pretrained(
-                encoder_name, id2label={i:i for i in range(0, num_classes)}, 
-                semantic_loss_ignore_index = 0, ignore_mismatched_sizes=True, **kwargs
-            )
+            encoder_name,
+            id2label={i: i for i in range(0, num_classes + 1)}, # do we need a plus one here 
+            semantic_loss_ignore_index=0,
+            ignore_mismatched_sizes=True,
+            **kwargs
+        )
         # self.freeze_encoder()  # Freeze the backbone - should this be done by default
 
     def forward(self, x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
