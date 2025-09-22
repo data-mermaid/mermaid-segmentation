@@ -58,7 +58,9 @@ class Segformer(torch.nn.Module):
         # )
         self.model = SegformerForSemanticSegmentation.from_pretrained(
             encoder_name,
-            id2label={i: i for i in range(0, num_classes + 1)}, # do we need a plus one here 
+            id2label={
+                i: i for i in range(0, num_classes)
+            },  # do we need a plus one here
             semantic_loss_ignore_index=0,
             ignore_mismatched_sizes=True,
             **kwargs
