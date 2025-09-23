@@ -480,19 +480,19 @@ class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
                 "Label ID": "coralnet_id",
             }
         )
-        # self.df_annotations["benthic_attribute_name"] = self.df_annotations[
-        #     "coralnet_id"
-        # ].apply(lambda x: self.labelmapping.get(str(x), None))
-        # self.df_annotations = self.df_annotations[
-        #     ["source_id", "image_id", "row", "col", "benthic_attribute_name"]
-        # ]  # Can add new columns here if needed, keeping only most important for the start
-        # self.df_images = (
-        #     self.df_annotations[
-        #         ["source_id", "image_id"]  # Can add new columns here if needed
-        #     ]
-        #     .drop_duplicates(subset=["source_id", "image_id"])
-        #     .reset_index(drop=True)
-        # )
+        self.df_annotations["benthic_attribute_name"] = self.df_annotations[
+            "coralnet_id"
+        ].apply(lambda x: self.labelmapping.get(str(x), None))
+        self.df_annotations = self.df_annotations[
+            ["source_id", "image_id", "row", "col", "benthic_attribute_name"]
+        ]  # Can add new columns here if needed, keeping only most important for the start
+        self.df_images = (
+            self.df_annotations[
+                ["source_id", "image_id"]  # Can add new columns here if needed
+            ]
+            .drop_duplicates(subset=["source_id", "image_id"])
+            .reset_index(drop=True)
+        )
         self.split = split
         self.transform = transform
 
