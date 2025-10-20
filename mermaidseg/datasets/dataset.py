@@ -570,4 +570,3 @@ class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
             label["provider_id"]: label["benthic_attribute_name"] for label in labelset
         }
         return label_mapping
-        return label_mapping
