@@ -2,7 +2,7 @@
 title: mermaidseg.model.models
 abstract: Module that contains segmentation model network architectures.
 author: Viktor Domazetoski
-date: 21-09-2025
+date: 21-10-2025
 
 Classes:
     Segformer(torch.nn.Module)
@@ -10,12 +10,59 @@ Classes:
         forward
         freeze_encoder
         unfreeze_encoder
+    Dinov2ForSemanticSegmentation(torch.nn.Module)
+        __init__
+        forward
+        freeze_encoder
+        unfreeze_encoder
+    LinearClassifier(torch.nn.Module)
+        __init__
+        forward
 """
 
 from typing import Any
 
 import torch
-from transformers import SegformerForSemanticSegmentation
+from transformers import Dinov2Model, SegformerForSemanticSegmentation
+from transformers.modeling_outputs import SemanticSegmenterOutput
+
+
+class LinearClassifier(torch.nn.Module):
+    """
+    A linear classifier module that performs pixel-wise classification on reshaped embeddings.
+    This module takes input embeddings, reshapes them to a 2D spatial format, and applies
+    a 1x1 convolution to perform classification. It's commonly used as a classification
+    head for segmentation tasks.
+    Args:
+        in_channels (int): Number of input channels in the embeddings.
+        tokenW (int, optional): Width of the token/patch grid. Defaults to 32.
+        tokenH (int, optional): Height of the token/patch grid. Defaults to 32.
+        num_labels (int, optional): Number of output classes/labels. Defaults to 1.
+    Attributes:
+        in_channels (int): Number of input channels.
+        width (int): Width dimension for reshaping.
+        height (int): Height dimension for reshaping.
+        classifier (torch.nn.Conv2d): 1x1 convolution layer for classification.
+    Forward:
+        Args:
+            embeddings (torch.Tensor): Input embeddings tensor to be classified.
+        Returns:
+            torch.Tensor: Classification output with shape (batch_size, num_labels, tokenH, tokenW).
+    """
+
+    def __init__(self, in_channels, tokenW=32, tokenH=32, num_labels=1):
+        super(LinearClassifier, self).__init__()
+
+        self.in_channels = in_channels
+        self.width = tokenW
+        self.height = tokenH
+        self.classifier = torch.nn.Conv2d(in_channels, num_labels, (1, 1))
+
+    def forward(self, embeddings):
+        embeddings = embeddings.reshape(-1, self.height, self.width, self.in_channels)
+        embeddings = embeddings.permute(0, 3, 1, 2)
+
+        return self.classifier(embeddings)
 
 
 class Segformer(torch.nn.Module):
@@ -100,84 +147,109 @@ class Segformer(torch.nn.Module):
             param.requires_grad = True
 
 
-# class DPTDino(torch.nn.Module):
-#     """
-#     Wrapper around the DPT semantic segmentation model with a DINO backbone.
-#     It allows customization of the encoder and the number of output classes, and includes methods to freeze or unfreeze
-#     the encoder layers.
-#         model (DPTForSemanticSegmentation): The initialized DPT model for semantic segmentation.
-#     Methods:
-#         __init__(encoder_name: str = "facebook/dinov2-base", num_classes: int = 2, **kwargs: Any):
-#             Initializes the Segformer model with a specified encoder and number of output classes.
-#         forward(x: torch.Tensor) -> torch.Tensor:
-#             Performs a forward pass through the model.
-#     """
+# self.model = Dinov2ForSemanticSegmentation.from_pretrained("facebook/dinov2-base",
+#                                                                        id2label={i:i for i in range(0, N_classes)},
+#                                                                        num_labels=N_classes)
 
-#     def __init__(
-#         self, encoder_name: str = "facebook/dinov2-base", num_classes: int = 2, **kwargs: Any
-#     ):
-#         super().__init__()
-#         dinov2_config = Dinov2Config(reshape_hidden_states=True).from_pretrained(encoder_name)
-#         dinov2_backbone = Dinov2Model.from_pretrained(encoder_name, reshape_hidden_states=True)
-#         self.backbone = dinov2_backbone
-#         if encoder_name == "facebook/dinov2-base":
-#             self.indices = (2, 5, 8, 11)
-#         elif encoder_name == "facebook/dinov2-giant":
-#             self.indices = (9, 19, 29, 39)
 
-#         config = DPTConfig(
-#             num_labels=num_classes,
-#             ignore_index=0,
-#             semantic_loss_ignore_index=0,
-#             is_hybrid=False,
-#             backbone_out_indices=self.indices,
-#             backbone_config=dinov2_config
-#         )
+class Dinov2ForSemanticSegmentation(torch.nn.Module):
+    """
+    Wrapper around the DINOv2 model for semantic segmentation.
+    This class provides an interface to initialize, train, and use a DINOv2 model for semantic segmentation tasks.
+    It allows customization of the encoder and the number of output classes, and includes methods to freeze or unfreeze
+    the encoder layers.
+        encoder (Dinov2Model): The DINOv2 encoder model.
+        head (LinearClassifier): The classification head for segmentation.
+    Methods:
+        __init__(encoder_name: str = "facebook/dinov2-base", num_classes: int = 2, **kwargs: Any):
+            Initializes the DINOv2 model with a specified encoder and number of output classes.
+        forward(x: torch.Tensor) -> torch.Tensor:
+            Performs a forward pass through the model.
+        freeze_encoder():
+            Freezes the encoder layers to prevent them from being updated during training.
+        unfreeze_encoder():
+            Unfreezes the encoder layers to allow them to be updated during training.
+    """
 
-#         # Load the DPT segmentation model
-#         dpt_model = DPTForSemanticSegmentation(config)
+    def __init__(
+        self,
+        encoder_name: str = "facebook/dinov2-base",
+        num_classes: int = 2,
+        **kwargs: Any
+    ):
+        """
+        Initializes the semantic segmentation model with a specified encoder and number of classes.
+        Args:
+            encoder_name (str): The name of the HF encoder to use for the model. Defaults to "facebook/dinov2-base".
+            num_classes (int): The number of output classes for semantic segmentation. Defaults to 2.
+            **kwargs (Any): Additional keyword arguments to pass to the model initialization.
+        Attributes:
+            encoder (Dinov2Model): The initialized DINOv2 encoder model.
+            head (LinearClassifier): The classification head for segmentation.
+        Note:
+            The encoder is frozen by default using the `freeze_encoder` method.
+        """
+        super().__init__()
 
-#         self.neck = dpt_model.neck
-#         self.head = dpt_model.head
+        self.encoder = Dinov2Model.from_pretrained(encoder_name, **kwargs)
+        # Assuming hidden_size=768 for dinov2-base, adjust as needed
+        hidden_size = self.encoder.config.hidden_size
+        self.head = LinearClassifier(
+            hidden_size, 37, 37, num_classes
+        )  # The tokenW and tokenH are hardcoded for 518x518 inputs (as the patch size is 14)
 
-#     def forward(self, pixel_values, labels=None):
-#         features = self.backbone(pixel_values, output_hidden_states = True)
-#         features = [features.hidden_states[i] for i in self.indices]
+        # self.freeze_encoder()  # Freeze the backbone - should this be done by default
 
-#         h, w = pixel_values.shape[-2:]
-#         if h != w: # In a non square image
-#             if(h%14 != 0 or w %14 !=0):
-#                 raise ValueError("Height and width must be divisible by the patch size (14).")
+    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> torch.Tensor:
+        """
+        Perform a forward pass through the model.
+        Args:
+            x (torch.Tensor): Input tensor to the model.
+            labels (torch.Tensor, optional): Ground truth labels for loss computation.
+        Returns:
+            torch.Tensor: Output tensor after passing through the model.
+        """
+        # use frozen features
+        outputs = self.encoder(x, **kwargs)
+        # get the patch embeddings - so we exclude the CLS token
+        patch_embeddings = outputs.last_hidden_state[:, 1:, :]
 
-#             patch_height = h//14
-#             patch_width = w//14
-#             features = self.neck(features, patch_height=patch_height, patch_width=patch_width)
-#         else:
-#             features = self.neck(features)
+        # convert to logits and upsample to the size of the pixel values
+        logits = self.head(patch_embeddings)
+        logits = torch.nn.functional.interpolate(
+            logits, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
 
-#         logits = self.head(features)
-#         logits = torch.nn.functional.interpolate(logits,
-#                                                  size=pixel_values.shape[-2:],
-#                                                  mode="bilinear",
-#                                                  align_corners=False)
+        loss = None
+        if labels is not None:
+            logits = torch.nn.functional.interpolate(
+                logits, size=labels.shape[-2:], mode="bilinear", align_corners=False
+            )
+            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=0)
+            loss = loss_fct(logits.squeeze(), labels.squeeze())
 
-#         loss = None
-#         if labels is not None:
-#             logits = torch.nn.functional.interpolate(logits,
-#                                                      size=labels.shape[-2:],
-#                                                      mode="bilinear",
-#                                                      align_corners=False)
-#             # important: we're going to use 0 here as ignore index instead of the default -100
-#             # as we don't want the model to learn to predict background
-#             loss_fct = torch.nn.CrossEntropyLoss(ignore_index=0)
-#             loss = loss_fct(logits.squeeze(), labels.squeeze())
+        return SemanticSegmenterOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
-#         return SemanticSegmenterOutput(
-#             loss=loss,
-#             logits=logits,
-#         )
+    def freeze_encoder(self) -> None:
+        """
+        Freezes the encoder layers of the model by setting the `requires_grad`
+        attribute of their parameters to `False`. This prevents the encoder
+        layers from being updated during training, effectively making them
+        static while allowing other parts of the model to be trained.
+        """
+        for param in self.encoder.parameters():
+            param.requires_grad = False
 
-#         return SemanticSegmenterOutput(
-#             loss=loss,
-#             logits=logits,
-#         )
+    def unfreeze_encoder(self) -> None:
+        """
+        Unfreezes the encoder layers of the model by setting the `requires_grad`
+        attribute of all parameters in the encoder to True.
+        This allows these layers to be trainable during the training process.
+        """
+        for param in self.encoder.parameters():
+            param.requires_grad = True
