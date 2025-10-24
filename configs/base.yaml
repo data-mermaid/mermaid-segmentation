@@ -1,0 +1,9 @@
+run_name: "base"
+
+logger:
+  uri: "segmentation"
+  experiment_name: "temporary_experiment_1"
+  log_epochs: 5
+
+data:
+  batch_size: 4
