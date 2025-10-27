@@ -1,6 +1,8 @@
 model_checkpoints/*
 model_runs/*
 data/*
+segmentation/*
+test1/*
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
