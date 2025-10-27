@@ -105,7 +105,9 @@ class MetaModel:
 
         self.training_kwargs = training_kwargs
 
-        self.model = getattr(mermaidseg.model.models, self.model_name)(**model_kwargs)
+        self.model = getattr(mermaidseg.model.models, self.model_name)(
+            num_classes=self.num_classes, **model_kwargs
+        )
 
         ## Load model checkpoint if necessary
         if model_checkpoint:
