@@ -9,6 +9,7 @@ Classes:
     CoralNetDataset - A PyTorch Dataset for loading annotated coral reef images from CoralNet sources.
 """
 
+import io
 from typing import Any, List, Optional, Tuple, Union
 
 import albumentations as A
@@ -75,7 +76,9 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
 
         self.s3 = boto3.client("s3")
 
-        self.num_classes = self.df_annotations["benthic_attribute_name"].nunique()+1 # +1 for background
+        self.num_classes = (
+            self.df_annotations["benthic_attribute_name"].nunique() + 1
+        )  # +1 for background
         self.id2label = {
             i: attribute
             for i, attribute in enumerate(
@@ -94,7 +97,7 @@ class MermaidDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
                 .index.tolist(),
                 sns.color_palette(
                     "deep",
-                    n_colors=self.num_classes-1,
+                    n_colors=self.num_classes - 1,
                 ).as_hex(),
             )
         )
@@ -242,8 +245,8 @@ class Mermaid15Dataset(MermaidDataset):
             source_bucket=source_bucket,
             split=split,
             transform=transform,
+            padding=padding,
         )
-        self.padding = padding
 
         self.classes_mermaid15 = [
             "Macroalgae",
@@ -275,7 +278,7 @@ class Mermaid15Dataset(MermaidDataset):
             .reset_index(drop=True)
         )
 
-        self.num_classes = len(self.classes_mermaid15)+1 # +1 for background
+        self.num_classes = len(self.classes_mermaid15) + 1  # +1 for background
         self.id2label = {
             i: attribute for i, attribute in enumerate(self.classes_mermaid15, start=1)
         }
@@ -287,7 +290,7 @@ class Mermaid15Dataset(MermaidDataset):
                 self.classes_mermaid15,
                 sns.color_palette(
                     "deep",
-                    n_colors=self.num_classes-1,
+                    n_colors=self.num_classes - 1,
                 ).as_hex(),
             )
         )
@@ -378,6 +381,172 @@ class Mermaid15Dataset(MermaidDataset):
         return images, masks
 
 
+class CoralNet15Dataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
+    """
+    A subset of the Mermaid dataset with only 15 select classes for experimentation purposes. Labels chosen as most common ones and a few select ones.
+    Each item returned is a tuple containing the image (as a tensor or ndarray) and a placeholder for the target (currently None).
+    Attributes:
+        source_path (str): Path to the Parquet file containing image annotations.
+        df_annotations (pd.DataFrame): DataFrame with all annotation data.
+        df_images (pd.DataFrame): DataFrame with unique image entries.
+        split (Optional[str]): Optional dataset split identifier (e.g., 'train', 'val', 'test').
+        transform (Optional): Optional transformation function to apply to images.
+        s3 (boto3.client): Boto3 S3 client for accessing images.
+    Args:
+        annotations_path (str, optional): S3 path to the Parquet file with annotations. Defaults to a preset path.
+        split (Optional[str], optional): Dataset split identifier. Defaults to None.
+        transform (Optional, optional): Transformation function for images. Defaults to None.
+    Methods:
+        __len__(): Returns the number of annotation entries.
+        __getitem__(idx): Retrieves the image at the given index, applies transformations, and returns it with a placeholder target.
+    """
+
+    source_ids: List[Union[int, str]]
+    source_bucket: str
+    source_s3_prefix: str
+    s3: boto3.client
+    df_annotations: pd.DataFrame
+    df_images: pd.DataFrame
+    split: Optional[str]
+    transform: Optional[A.BasicTransform]
+    padding: Optional[int]
+
+    def __init__(
+        self,
+        source_ids: List[Union[int, str]],
+        source_bucket: str = "dev-datamermaid-sm-sources",
+        source_s3_prefix: str = "coralnet-public-images",
+        split: Optional[str] = None,
+        transform: Optional[A.BasicTransform] = None,
+        padding: Optional[int] = None,
+    ):
+        self.source_ids = source_ids
+        self.source_bucket = source_bucket
+        self.source_s3_prefix = source_s3_prefix
+        self.s3 = boto3.client("s3")
+        self.padding = padding
+
+        print("Initialize CoralNet to Mermaid LabelMapping")
+        self.labelmapping = self.initialize_coralnet_mapping()
+
+        self.source_bucket = source_bucket
+        self.df_annotations = pd.read_parquet(
+            f"s3://{self.source_bucket}/{self.source_s3_prefix}/annotations_1-100.csv"
+        )
+        self.df_images = pd.read_parquet(
+            f"s3://{self.source_bucket}/{self.source_s3_prefix}/images_1-100.csv"
+        )
+        self.split = split
+        self.transform = transform
+
+        self.classes_mermaid15 = [
+            "Macroalgae",
+            "Rubble",
+            "Sand",
+            "Porites",
+            "Crustose coralline algae",
+            "Bare substrate",
+            "Hard coral",
+            "Turf algae",
+            "Millepora",
+            "Tape",
+            "Soft coral",
+            "Acropora",
+            "Pocillopora",
+            "Porites lobata",
+            "Montipora",
+        ]
+
+        self.df_annotations = self.df_annotations[
+            self.df_annotations["benthic_attribute_name"].apply(
+                lambda x: x in self.classes_mermaid15
+            )
+        ]
+
+        image_filter = self.df_annotations["image_id"].unique()
+        self.df_images = self.df_images[
+            self.df_images["image_id"].apply(lambda x: x in image_filter)
+        ].reset_index(drop=True)
+        self.num_classes = (
+            self.df_annotations["benthic_attribute_name"].nunique() + 1
+        )  # +1 for background
+        self.id2label = {
+            i: attribute
+            for i, attribute in enumerate(
+                self.df_annotations[
+                    "benthic_attribute_name"
+                ]  ##TODO: See if you need to update these things (id2label needs to start with one, here and above)
+                .value_counts()
+                .index.tolist()
+            )
+        }
+        self.label2id = {v: k for k, v in self.id2label.items()}
+
+        self.vis_dict = {}
+        self.vis_dict["benthic"] = dict(
+            zip(
+                self.df_annotations["benthic_attribute_name"]
+                .value_counts()
+                .index.tolist(),
+                sns.color_palette(
+                    "deep",
+                    n_colors=self.num_classes,
+                ).as_hex(),
+            )
+        )
+
+    def __len__(self):
+        return self.df_images.shape[0]
+
+    def __getitem__(self, idx: int) -> Tuple[Union[torch.Tensor, NDArray[Any]], Any]:
+        image_id = self.df_images.loc[idx, "image_id"]
+        source_id = self.df_images.loc[idx, "source_id"]
+        key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
+        image = np.array(
+            get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB")
+        )
+
+        annotations = self.df_annotations.loc[
+            (self.df_annotations["source_id"] == source_id)
+            * (self.df_annotations["image_id"] == image_id),
+            [
+                # "point_id",
+                "row",
+                "col",
+                # "benthic_attribute_id",
+                "benthic_attribute_name",
+                # "growth_form_id",
+                # "growth_form_name",
+            ],
+        ]
+        annotations["benthic_color"] = annotations["benthic_attribute_name"].apply(
+            lambda x: self.vis_dict["benthic"].get(x, "#222222")
+        )
+
+        mask = create_annotation_mask(annotations, image.shape, self.label2id)
+        if self.transform:
+            transformed = self.transform(image=image)
+            image = transformed["image"]
+        return image, mask, annotations
+
+    def initialize_coralnet_mapping(
+        self,
+        mapping_endpoint="https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
+    ):
+        response = requests.get(mapping_endpoint)
+        data = response.json()
+        labelset = data["results"]
+
+        while data["next"]:
+            response = requests.get(data["next"])
+            data = response.json()
+            labelset.extend(data["results"])
+        label_mapping = {
+            label["provider_id"]: label["benthic_attribute_name"] for label in labelset
+        }
+        return label_mapping
+
+
 class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
     """
     A PyTorch Dataset for loading annotated coral reef images from a CoralNet sources.
@@ -448,12 +617,23 @@ class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
                 )
                 self.df_annotations["source_id"] = source_id
             else:
-                df_tmp = pd.read_csv(
-                    f"s3://{self.source_bucket}/{self.source_s3_prefix}/s{source_id}/annotations.csv"
+                obj = self.s3.get_object(
+                    Bucket=self.source_bucket,
+                    Key=f"{self.source_s3_prefix}/s{source_id}/annotations.csv",
                 )
-                df_images = pd.read_csv(
-                    f"s3://{self.source_bucket}/{self.source_s3_prefix}/s{source_id}/image_list.csv"
+                df_tmp = pd.read_csv(io.BytesIO(obj["Body"].read()))
+
+                obj = self.s3.get_object(
+                    Bucket=self.source_bucket,
+                    Key=f"{self.source_s3_prefix}/s{source_id}/image_list.csv",
                 )
+                df_images = pd.read_csv(io.BytesIO(obj["Body"].read()))
+                # df_tmp = pd.read_csv(
+                #     f"s3://{self.source_bucket}/{self.source_s3_prefix}/s{source_id}/annotations.csv"
+                # )
+                # df_images = pd.read_csv(
+                #     f"s3://{self.source_bucket}/{self.source_s3_prefix}/s{source_id}/image_list.csv"
+                # )
                 df_images["Name"] = df_images["Name"].apply(
                     lambda x: x.replace(" - Confirmed", "")
                 )
@@ -496,11 +676,15 @@ class CoralNetDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         self.split = split
         self.transform = transform
 
-        self.num_classes = self.df_annotations["benthic_attribute_name"].nunique()+1 # +1 for background
+        self.num_classes = (
+            self.df_annotations["benthic_attribute_name"].nunique() + 1
+        )  # +1 for background
         self.id2label = {
             i: attribute
             for i, attribute in enumerate(
-                self.df_annotations["benthic_attribute_name"] ##TODO: See if you need to update these things (id2label needs to start with one, here and above) 
+                self.df_annotations[
+                    "benthic_attribute_name"
+                ]  ##TODO: See if you need to update these things (id2label needs to start with one, here and above)
                 .value_counts()
                 .index.tolist()
             )
