@@ -116,11 +116,11 @@ def train_model(
 
             best_model_flag = (
                 best_results[metric_of_interest]
-                > val_metric_results[metric_of_interest]
+                < val_metric_results[metric_of_interest]
             )
 
-            if metric_of_interest in ["mIoU"]:
-                best_model_flag = not best_model_flag
+            # if metric_of_interest in ["mIoU"]:
+            #     best_model_flag = not best_model_flag
 
             if best_model_flag:
                 best_results[metric_of_interest] = val_metric_results[
