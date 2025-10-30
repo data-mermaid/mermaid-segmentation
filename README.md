@@ -1,68 +1,68 @@
+# MermaidSeg
+
+Codebase for the training, evaluation and usage of image segmentation models of coral data. 
+The codebase contains data loaders, augmentations, preprocessors, models, training & evaluation scripts.
+
+## File Structure
+
+```
+├── nbs/ # Jupyter notebooks
+    ├── Model_Run.ipynb # Notebook used to train end-to-end image segmentation models for a given dataset and configuration file
+    ├── Model_Evaluation.ipynb # Notebook containing the code to quantitatively and qualitatively analyze the trained segmentation models 
+├── mermaidseg/
+    ├── datasets # Contains scripts related to dataset loading, preprocessing and data augmentations.
+        ├── dataset.py # Contains dataset classes that can be used to acquire and load coral data, including images and annotations. Currently includes the MermaidDataset and CoralNetDataset classes.
+        ├── utils.py # Contains utility functions related to datasets 
+    ├── model # Contains everything related to training and evaluating segmentation models.
+        ├── models.py # Contains the different model implementations
+        ├── meta.py # Contains the metamodel class that is initialized with a model and set of hyperparameters, with train, eval and predict methods.
+        ├── train.py # Contains the model training function.
+        ├── eval.py # Contains evaluation classes & functions.
+        ├── loss.py # Contains implementations of different loss functions.
+    ├── io.py # Contains config & args set ups
+    ├── logger.py # Contains classes & functions related to logging training with MLFlow and saving checkpoints & results
+    └── visualization.py # Functions related to the visualization of images based on different criteria
+├── configs/ # Configuration files for different runs/models
+└── .gitignore 
+└── .environment.yml # Environment for setup with conda/micromamba
+└── .pyproject.toml
+└── README.md
+```
+
 ## Usage
 
+### Installation
+
+Prerequisites
+- Python 3.11+
+- AWS credentials configured (to from S3)
+
+Install locally:
+```bash
+git clone https://github.com/your-org/mermaid-segmentation.git
+cd mermaid-segmentation
+python -m venv .venv
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+pip install -e .
+```
+
 ### Dataset
-
-In order to access and traverse through MERMAID data (including images and annotations) you would need to access the `mermaid_confirmed_annotations.parquet` file with a library such as `pandas`: 
-
-```python
-import pandas as pd 
-
-annotations_path = "s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet" # Location of the annotations file
-
-df_annotations = pd.read_parquet(annotations_path) # Pandas DataFrame containing each image alongside the 25 image annotations for benthic attributes and growth forms
-    
-df_images = df_annotations[ 
-    ["image_id", "region_id", "region_name"]
-].drop_duplicates(subset=["image_id"])  # Pandas DataFrame containing each image in the dataset
-```
-
-Then you can extract the image and annotations for a image from this DataFrame as such:
+In order to access and traverse through MERMAID data we can use the code within the mermaidseg codebase, starting with the `MermaidDataset` class, which already includes the functionality allowing for ML research.
+Similarly, in order to access and traverse through CoralNet data we can use the analogous `CoralNetDataset` class that has the same functionality.
 
 ```python
-import boto3
-import io
-from PIL import Image
+from mermaidseg.datasets.dataset import MermaidDataset, CoralNet
+from mermaidseg.datasets.utils import get_coralnet_sources
 
-def get_image_s3(
-    image_id: str,
-    s3: boto3.client,
-    bucket: str = "coral-reef-training",
-    thumbnail: bool = False,
-):
-    """
-    Fetches an image from an S3 bucket and returns it as a PIL Image object.
-    Args:
-        image_id (str): The identifier of the image to retrieve.
-        s3 (boto3.client): The boto3 S3 client used to access the bucket.
-        bucket (str, optional): The name of the S3 bucket. Defaults to "coral-reef-training".
-        thumbnail (bool, optional): If True, fetches the thumbnail version of the image. Defaults to False.
-    Returns:
-        PIL.Image.Image: The image loaded from S3.
-    """
-    key = (
-        f"mermaid/{image_id}_thumbnail.png" if thumbnail else f"mermaid/{image_id}.png"
-    )
-    response = s3.get_object(Bucket=bucket, Key=key)
-    image_data = response["Body"].read()
+# Mermaid
+dataset_mermaid = MermaidDataset()
+idx = 0
+image, mask, annotations = dataset[idx] # This function returns the image, annotations alongside a semantic segmentation mask.
 
-    image = Image.open(io.BytesIO(image_data))
-    return image
 
-s3 = boto3.client("s3") # Initialize S3 cliant using boto
-idx = 0 # The index of the image we want to access - between 0 and the number of images 
-image_id = df_images.loc[idx, "image_id"]
-image = get_image_s3(image_id, s3, thumbnail=False).convert("RGB") # Retrieving the image from the bucket using the above-defined function
-
-annotations = df_annotations.loc[df_annotations["image_id"] == image_id]
-```
-
-Alternatively, especially for machine learning use cases, you can use the code within the mermaidseg codebase, starting with the `MermaidDataset` class, which already includes this functionality and further steps allowing for ML research.
-
-```python
-from mermaidseg.datasets.dataset import MermaidDataset
-
-dataset = MermaidDataset()
-
+# CoralNet
+all_coralnet_sources = get_coralnet_sources()
+dataset_coralnet = CoralNet(source_ids = all_coralnet_sources)
 idx = 0
 image, mask, annotations = dataset[idx] # This function returns the image, annotations alongside a semantic segmentation mask.
 ```
@@ -93,3 +93,8 @@ plt.legend(handles=growth_legend_elements, bbox_to_anchor=(0.99, 0.4),
 plt.axis("off")
 plt.show() 
 ```
+
+### Segmentation Models
+To train segmentation models using a specified config file one can use the `nbs/Model_Run.ipynb` notebook or run the corresponding script using ```python scripts/train.py`.
+
+To evaluate any trained segmentation model, you can use the notebook `nbs/Model_Evaluation.ipynb` which contains both quantitative performance analyses through dataset level performance metrics and qualitative analyses by visualizing model results and corresponding class probabilities. 
