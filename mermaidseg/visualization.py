@@ -2,14 +2,16 @@
 title: mermaidseg.visualization
 abstract: Module that contains visualization functions and utilities.
 author: Viktor Domazetoski
-date: 17-09-2025
+date: 30-10-2025
 
 Functions:
     get_legend_elements: Generate legend elements for benthic attributes and optionally growth forms for use in matplotlib plots.
+    denormalize_image: Denormalizes an image that was previously normalized using the given mean and standard deviation.
 """
 
 from typing import List, Tuple, Union
 
+import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
@@ -80,3 +82,26 @@ def get_legend_elements(
     ]
 
     return benthic_legend_elements, growth_legend_elements
+
+
+def denormalize_image(
+    image,
+    mean=np.array([0.485, 0.456, 0.406]),
+    std=np.array([0.229, 0.224, 0.225]),
+):
+    """
+    Denormalizes an image that was previously normalized using the given mean and standard deviation.
+    Args:
+        image (Union[torch.Tensor, numpy.ndarray]): The normalized image to be denormalized.
+                                                    Expected shape is (C, H, W).
+        mean (numpy.ndarray, optional): The mean used for normalization.
+                                        Default is np.array([0.485, 0.456, 0.406]) as used in ImageNet.
+        std (numpy.ndarray, optional): The standard deviation used for normalization.
+                                        Default is np.array([0.229, 0.224, 0.225]) as used in ImageNet.
+    Returns:
+        numpy.ndarray: The denormalized image with pixel values in the range [0, 255] and dtype uint8.
+    """
+
+    unnormalized_image = (image * std[:, None, None]) + mean[:, None, None]
+    unnormalized_image = (unnormalized_image * 255).astype(np.uint8)
+    return unnormalized_image
