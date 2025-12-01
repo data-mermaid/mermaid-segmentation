@@ -11,6 +11,7 @@ Classes:
 """
 
 import io
+from ast import Raise
 from typing import Any, List, Optional, Tuple, Union
 
 import albumentations as A
@@ -93,11 +94,26 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
                 )
             ]
 
-            self.df_images = (
-                self.df_annotations[["image_id", "region_id", "region_name"]]
-                .drop_duplicates(subset=["image_id"])
-                .reset_index(drop=True)  # TODO: Update based on CoralNet
-            )
+            if "region_id" in self.df_annotations.columns:  # Added for MermaidDataset
+                self.df_images = (
+                    self.df_annotations[["image_id", "region_id", "region_name"]]
+                    .drop_duplicates(subset=["image_id"])
+                    .reset_index(drop=True)
+                )
+            elif (
+                "source_id" in self.df_annotations.columns
+            ):  # Added for CoralNetDataset
+                self.df_images = (
+                    self.df_annotations[
+                        ["source_id", "image_id"]  # Can add new columns here if needed
+                    ]
+                    .drop_duplicates(subset=["source_id", "image_id"])
+                    .reset_index(drop=True)
+                )
+            else:
+                raise ValueError(
+                    "Unknown dataset structure for filtering images based on class_subset."
+                )
 
             self.num_classes = len(self.class_subset) + 1  # +1 for background
             self.id2label = {
@@ -362,6 +378,14 @@ class CoralNetDataset(BaseCoralDataset):
                     lambda x: x not in self.blacklist_sources
                 )
             ]
+        if self.whitelist_sources is not None or self.blacklist_sources is not None:
+            self.df_images = (
+                self.df_annotations[
+                    ["source_id", "image_id"]  # Can add new columns here if needed
+                ]
+                .drop_duplicates(subset=["source_id", "image_id"])
+                .reset_index(drop=True)
+            )
         super().__init__(
             df_annotations=self.df_annotations, df_images=self.df_images, **base_kwargs
         )
@@ -370,7 +394,9 @@ class CoralNetDataset(BaseCoralDataset):
         """
         Load annotations from a Parquet file on S3.
         """
-        annotations_path = f"s3://{self.source_bucket}/{self.source_s3_prefix}/coralnet_annotations_30112025.parquet"
+        annotations_path = (
+            f"s3://{self.source_bucket}/coralnet_annotations_30112025.parquet"
+        )
         self.df_annotations = pd.read_parquet(annotations_path)
 
         self.df_annotations["benthic_attribute_name"] = self.df_annotations[
