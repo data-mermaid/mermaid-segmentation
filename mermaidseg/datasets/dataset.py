@@ -295,42 +295,6 @@ class MermaidDataset(BaseCoralDataset):
         return image
 
 
-class Mermaid15Dataset(MermaidDataset):
-    """
-    A subset of the Mermaid dataset with only 15 select classes for experimentation purposes.
-    Labels chosen as most common 15 classes, defined explicitly to avoid discrepancies based on data distribution.
-    """
-
-    def __init__(
-        self,
-        **mermaid_kwargs,
-    ):
-        classes_mermaid15 = [
-            "Macroalgae",
-            "Rubble",
-            "Sand",
-            "Porites",
-            "Crustose coralline algae",
-            "Bare substrate",
-            "Hard coral",
-            "Turf algae",
-            "Millepora",
-            "Tape",
-            "Soft coral",
-            "Acropora",
-            "Pocillopora",
-            "Porites lobata",
-            "Montipora",
-        ]
-
-        mermaid_kwargs.pop("class_subset", None)  # Remove if exists to avoid conflict
-
-        super().__init__(
-            class_subset=classes_mermaid15,
-            **mermaid_kwargs,
-        )
-
-
 class CoralNetDataset(BaseCoralDataset):
     """
     A PyTorch Dataset for loading annotated coral reef images from a CoralNet sources.
@@ -438,14 +402,6 @@ class CoralNetDataset(BaseCoralDataset):
             response = requests.get(data["next"])
             data = response.json()
             labelset.extend(data["results"])
-        label_mapping = {
-            label["provider_id"]: label["benthic_attribute_name"] for label in labelset
-        }
-        return label_mapping
-        label_mapping = {
-            label["provider_id"]: label["benthic_attribute_name"] for label in labelset
-        }
-        return label_mapping
         label_mapping = {
             label["provider_id"]: label["benthic_attribute_name"] for label in labelset
         }
