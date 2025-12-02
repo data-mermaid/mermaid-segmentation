@@ -123,9 +123,7 @@ class MetaModel:
         ## Load training procedure: optimizer, scheduler, loss
         if "loss" in training_kwargs:
             loss = training_kwargs.loss.pop("type", None)
-            self.loss = getattr(mermaidseg.model.loss, loss)(
-                params=self.model.parameters(), **training_kwargs.optimizer
-            )
+            self.loss = getattr(mermaidseg.model.loss, loss)(**training_kwargs.loss)
         # else:
         #     self.loss = None  # Often the case for HF models where the loss is already included in the model
 
