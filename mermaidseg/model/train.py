@@ -71,7 +71,7 @@ def train_model(
         end_epoch = meta_model.training_kwargs.epochs
     if end_epoch == -1:
         end_epoch = start_epoch + meta_model.training_kwargs.epochs
-
+    metrics_epoch = {}
     for epoch in range(start_epoch, end_epoch):
         epoch_loss_dict = {}
         epoch_start_time = time.time()
@@ -94,25 +94,24 @@ def train_model(
 
         epoch_loss_dict["train/time_taken"] = time.time() - epoch_start_time
 
-        if logger is None:
-            continue
-
         logger.log(
             epoch_loss_dict,
             step=epoch,
         )
-
+        metrics_epoch[epoch] = {"loss": epoch_loss_dict}
         if epoch % logger.log_epochs > 0 and epoch < (end_epoch - 1):
             continue
 
-        _ = evaluate_and_log(
+        train_metric_results = evaluate_and_log(
             evaluator, train_loader, meta_model, logger, epoch, "train"
         )
+        metrics_epoch[epoch]["train_metrics"] = train_metric_results
 
         if val_loader is not None:
             val_metric_results = evaluate_and_log(
                 evaluator, val_loader, meta_model, logger, epoch, "validation"
             )
+            metrics_epoch[epoch]["validation_metrics"] = val_metric_results
 
             best_model_flag = (
                 best_results[metric_of_interest]
@@ -134,6 +133,7 @@ def train_model(
             _ = evaluate_and_log(
                 evaluator, test_loader, meta_model, logger, epoch, "test"
             )
+        return metrics_epoch
 
 
 def evaluate_and_log(
@@ -164,14 +164,14 @@ def evaluate_and_log(
         loader,
         meta_model,
     )
-
-    logger.log(
-        {
-            f"{split}/{metric_name}": metric
-            for metric_name, metric in metric_results.items()
-        },
-        step=epoch,
-    )
+    if logger is not None:
+        logger.log(
+            {
+                f"{split}/{metric_name}": metric
+                for metric_name, metric in metric_results.items()
+            },
+            step=epoch,
+        )
     print(f"{split} metrics")
     print(metric_results)
 
