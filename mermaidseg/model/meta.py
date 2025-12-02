@@ -13,12 +13,15 @@ from typing import Any, Dict, Optional, Union
 import albumentations as A
 import mermaidseg.model.loss
 import mermaidseg.model.models
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
 import transformers
 from mermaidseg.datasets.concepts import labels_to_concepts
 from mermaidseg.io import ConfigDict
+
+# from mermaidseg.model.eval import Evaluator
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -78,6 +81,7 @@ class MetaModel:
     loss: Optional[torch.nn.Module]
     optimizer: torch.optim.Optimizer
     scheduler: Optional[torch.optim.lr_scheduler.LRScheduler]
+    concept_matrix: Optional[pd.DataFrame]
 
     def __init__(
         self,
@@ -96,6 +100,7 @@ class MetaModel:
                 },
             }
         ),
+        concept_matrix: Optional[pd.DataFrame] = None,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
@@ -106,6 +111,7 @@ class MetaModel:
         self.model_checkpoint = model_checkpoint
 
         self.training_kwargs = training_kwargs
+        self.concept_matrix = concept_matrix
 
         self.model = getattr(mermaidseg.model.models, self.model_name)(
             num_classes=self.num_classes, **model_kwargs
@@ -206,7 +212,10 @@ class MetaModel:
         inputs = inputs.to(self.device).float()
         labels = labels.long().to(self.device)
 
-        if hasattr(self, "loss") and self.loss is not None:
+        if self.concept_matrix is not None and self.loss is not None:
+            outputs = self.model(inputs)
+
+        elif hasattr(self, "loss") and self.loss is not None:
             outputs = self.model(inputs)
             loss = self.loss(outputs, labels)
         else:
@@ -221,6 +230,16 @@ class MetaModel:
             align_corners=False,
         )
 
+        if self.concept_matrix is not None and self.loss is not None:
+            concept_labels = labels_to_concepts(labels, self.concept_matrix)
+            concept_labels = concept_labels.to(self.device).float()
+
+            label_mask = (labels > 0).unsqueeze(1).to(self.device)
+            per_element_loss = self.loss(outputs, concept_labels)
+            masked_loss = per_element_loss * label_mask
+            denom = label_mask.sum() * outputs.shape[1] + 1e-8
+            loss = masked_loss.sum() / denom
+
         assert loss is not None, "Loss is not computed for the given batch."
         assert isinstance(outputs, torch.Tensor)
 
@@ -231,6 +250,9 @@ class MetaModel:
         train_loader: DataLoader[
             Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
         ],
+        evaluator: Optional[
+            Any
+        ] = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> float:
         """
         Trains the model for one epoch using the provided data loader.
@@ -246,17 +268,51 @@ class MetaModel:
         """
 
         running_loss = 0.0
+        metric_results: Dict[str, Union[float, NDArray[np.float64]]] = {}
 
         for data in tqdm(train_loader):
-            __, loss = self.batch_predict_loss(data)
+            _, labels = data
+            labels = labels.long().to(self.device)
+            outputs, loss = self.batch_predict_loss(data)
+
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             loss.backward()  # Double check
             self.optimizer.step()
             running_loss += loss.item()
             self.optimizer.zero_grad()
 
+            if self.concept_matrix is not None and evaluator is not None:
+                concept_labels = labels_to_concepts(labels, self.concept_matrix)
+                concept_labels = concept_labels.to(self.device).float()
+                outputs = torch.sigmoid(outputs)
+                outputs = (outputs > 0.5).float()
+                outputs += 1
+                outputs *= (labels.unsqueeze(1) != 0)
+                concept_labels+= 1
+                concept_labels *= (labels.unsqueeze(1) != 0)
+                
+                ## Update metrics
+                for metric in evaluator.metric_dict.values():
+                    metric.update(outputs, concept_labels)
+
+            elif evaluator is not None:
+                outputs = outputs.argmax(dim=1)
+                ## Update metrics
+                for metric in evaluator.metric_dict.values():
+                    metric.update(outputs, labels)
+
+        ## Compute metrics
+        if evaluator is not None:
+            for metric_name in evaluator.metric_dict:
+                metric_results[metric_name] = (
+                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
+                )
+                if metric_results[metric_name].ndim == 0:
+                    metric_results[metric_name] = metric_results[metric_name].item()
+                evaluator.metric_dict[metric_name].reset()
+
         last_loss = running_loss / len(train_loader)
-        return last_loss
+        return last_loss, metric_results
 
     @torch.no_grad()
     def validation_epoch(
@@ -264,6 +320,9 @@ class MetaModel:
         val_loader: DataLoader[
             Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
         ],
+        evaluator: Optional[
+            Any
+        ] = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> float:
         """
         Calculates the validation loss of the model for one epoch using the provided data loader.
@@ -275,14 +334,48 @@ class MetaModel:
         """
 
         running_loss = 0.0
+        metric_results: Dict[str, Union[float, NDArray[np.float64]]] = {}
 
         for data in tqdm(val_loader):
-            __, loss = self.batch_predict_loss(data)
+            _, labels = data
+            labels = labels.long().to(self.device)
+
+            outputs, loss = self.batch_predict_loss(data)
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running_loss += loss.item()
 
+            if self.concept_matrix is not None and evaluator is not None:
+                concept_labels = labels_to_concepts(labels, self.concept_matrix)
+                concept_labels = concept_labels.to(self.device).float()
+                outputs = torch.sigmoid(outputs)
+                outputs = (outputs > 0.5).float()
+                outputs += 1
+                outputs *= (labels.unsqueeze(1) != 0)
+                concept_labels+= 1
+                concept_labels *= (labels.unsqueeze(1) != 0)
+                
+                ## Update metrics
+                for metric in evaluator.metric_dict.values():
+                    metric.update(outputs, concept_labels)
+
+            elif evaluator is not None:
+                outputs = outputs.argmax(dim=1)
+                ## Update metrics
+                for metric in evaluator.metric_dict.values():
+                    metric.update(outputs, labels)
+
+        ## Compute metrics
+        if evaluator is not None:
+            for metric_name in evaluator.metric_dict:
+                metric_results[metric_name] = (
+                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
+                )
+                if metric_results[metric_name].ndim == 0:
+                    metric_results[metric_name] = metric_results[metric_name].item()
+                evaluator.metric_dict[metric_name].reset()
+
         last_loss = running_loss / len(val_loader)
-        return last_loss
+        return last_loss, metric_results
 
     @torch.no_grad()  # type:ignore
     def predict(
@@ -306,88 +399,3 @@ class MetaModel:
         pred = self.batch_predict(inputs)
         pred = pred.argmax(dim=1).cpu().numpy()[0]
         return pred
-
-
-class MetaConceptModel(MetaModel):
-    def __init__(
-        self,
-        run_name: str,
-        num_concepts: int,
-        model_kwargs: ConfigDict,
-        device: Union[str, torch.device] = "cuda",
-        model_checkpoint: Optional[str] = None,
-        training_kwargs: ConfigDict = ConfigDict(
-            {
-                "epochs": 50,
-                "optimizer": {
-                    "type": "AdamW",
-                    "lr": 0.001,
-                    "weight_decay": 0.01,
-                },
-            }
-        ),
-        concept_matrix: pd.DataFrame = None,
-    ):
-        super().__init__(
-            run_name,
-            num_concepts,
-            model_kwargs,
-            device,
-            model_checkpoint,
-            training_kwargs,
-        )
-        self.concept_matrix = concept_matrix
-
-    def batch_predict_loss(
-        self,
-        batch: Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]],
-        target_dim: Optional[tuple[int, int]] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        loss = None
-        inputs, labels = batch
-
-        if target_dim is None:
-            target_dim = (inputs.size(-2), inputs.size(-1))
-
-        inputs = inputs.to(self.device).float()
-        labels = labels.long().to(self.device)
-
-        concept_labels = labels_to_concepts(labels, self.concept_matrix)
-        concept_labels = concept_labels.to(
-            self.device
-        ).float()  # (B, C, H_label, W_label)
-
-        outputs = self.model(inputs)
-
-        # If spatial sizes differ, resize targets to match logits (nearest for multi-hot)
-        # TODO: Double check which way around
-        # if concept_labels.shape[2:] != outputs.shape[2:]:
-        #     outputs = F.interpolate(outputs, size=concept_labels.shape[2:], mode="nearest")
-
-        outputs = F.interpolate(
-            outputs,
-            size=target_dim,
-            mode="bilinear",  ##TODO: Check bilinear or nearest
-            align_corners=False,
-        )
-
-        # loss = self.loss(outputs, concept_labels)
-        label_mask = (labels > 0).unsqueeze(1).to(self.device)  # (B,1,H,W)
-        # loss = (loss * label_mask) / (
-        #     label_mask.sum() * label_mask.shape[1] + 1e-8
-        # )  # broadcast mask over channel dim
-
-        per_element_loss = self.loss(
-            outputs, concept_labels
-        )  # (B, C, H_patch, W_patch)
-        masked_loss = per_element_loss * label_mask  # broadcast mask over channel dim
-
-        denom = (
-            label_mask.sum() * outputs.shape[1] + 1e-8
-        )  # valid_pixels * num_concepts
-        loss = masked_loss.sum() / denom
-
-        assert loss is not None, "Loss is not computed for the given batch."
-        assert isinstance(outputs, torch.Tensor)
-
-        return outputs, loss
