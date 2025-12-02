@@ -17,6 +17,8 @@ Functions:
 import argparse
 from typing import Any, Dict, Optional
 
+import pandas as pd
+from pathlib import Path
 import yaml
 
 
@@ -115,7 +117,31 @@ def setup_config(
         return ConfigDict(base_config)
     config = load_config(config_path)
     updated_config = update_config(base_config, config)
-    return ConfigDict(updated_config)
+
+    cfg = ConfigDict(updated_config)
+
+    if isinstance(cfg.data.class_subset, str) and Path(cfg.data.class_subset).is_file():
+        with open(cfg.data.class_subset, "r") as f:
+            class_subset = [line.strip() for line in f.readlines()]
+        cfg.data.class_subset = class_subset
+
+    if (
+        isinstance(cfg.data.whitelist_sources, str)
+        and Path(cfg.data.whitelist_sources).is_file()
+    ):
+        cfg.data.whitelist_sources = pd.read_csv(
+            cfg.data.whitelist_sources, header=None
+        )
+
+    if (
+        isinstance(cfg.data.blacklist_sources, str)
+        and Path(cfg.data.blacklist_sources).is_file()
+    ):
+        cfg.data.blacklist_sources = pd.read_csv(
+            cfg.data.blacklist_sources, header=None
+        )
+
+    return cfg
 
 
 def get_parser() -> argparse.ArgumentParser:
