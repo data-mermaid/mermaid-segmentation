@@ -21,6 +21,13 @@ try:
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
 
+try:
+    import wandb
+
+    WANDB_IMPORT_ERROR = None
+except ImportError as err:
+    WANDB_IMPORT_ERROR = err
+
 import os
 import time
 from datetime import datetime, timedelta
@@ -95,7 +102,8 @@ class Logger:
         log_epochs=5,
         log_checkpoint=50,
         checkpoint_dir=".",
-        mlflow=True,
+        enable_mlflow=True,
+        enable_wandb=False,
     ):
         """
         Initializes the logger for tracking experiments and benchmarks.
@@ -105,11 +113,16 @@ class Logger:
             log_epochs (int, optional): Frequency of logging epochs. Defaults to 5.
             log_checkpoint (int, optional): Frequency of logging checkpoints. Defaults to 50.
             checkpoint_dir (str, optional): Directory to save checkpoints. Defaults to ".".
+            enable_mlflow (bool, optional): Flag to enable or disable MLflow logging. Defaults to True.
+            enable_wandb (bool, optional): Flag to enable or disable Weights & Biases logging. Defaults to False.
         Attributes:
             config (dict): Stores the configuration dictionary for the experiment.
             log_epochs (int): Frequency of logging epochs.
             log_checkpoint (int): Frequency of logging checkpoints.
             checkpoint_dir (str): Directory to save checkpoints.
+            run_name (str): Name of the current run, derived from the meta model.
+            enable_mlflow (bool): Flag indicating whether MLflow logging is enabled.
+            enable_wandb (bool): Flag indicating whether Weights & Biases logging is enabled.
         """
 
         self.config = config
@@ -117,33 +130,40 @@ class Logger:
         self.log_checkpoint = log_checkpoint
         self.checkpoint_dir = checkpoint_dir
         self.run_name = meta_model.run_name
-        self.mlflow = mlflow
+        self.enable_mlflow = enable_mlflow
+        self.enable_wandb = enable_wandb
 
-        if not mlflow:
-            return
+        if enable_mlflow:
+            self.enabled = (self.config.logger.experiment_name is not None) and (
+                MLFLOW_IMPORT_ERROR is None
+            )
 
-        self.enabled = (self.config.logger.experiment_name is not None) and (
-            MLFLOW_IMPORT_ERROR is None
-        )
+            # If mlflow is available, ensure there is an active run and log basic params/tags.
+            if not self.enabled:
+                return
 
-        # If mlflow is available, ensure there is an active run and log basic params/tags.
-        if not self.enabled:
-            return
+            duration = mlflow_connect(self.config.uri)
+            print(f"Connected in {duration.seconds} seconds")
+            mlflow.set_experiment(self.config.logger.experiment_name)
+            # If no active run, start one
+            if mlflow.active_run() is None:
+                print(f"Starting RUN: {str(self.run_name)}")
+                mlflow.start_run(run_name=self.run_name)
+            else:
+                print(f"Run {str(self.run_name)} already active")
 
-        duration = mlflow_connect(self.config.uri)
-        print(f"Connected in {duration.seconds} seconds")
-        mlflow.set_experiment(self.config.logger.experiment_name)
-        # If no active run, start one
-        if mlflow.active_run() is None:
-            print(f"Starting RUN: {str(self.run_name)}")
-            mlflow.start_run(run_name=self.run_name)
-        else:
-            print(f"Run {str(self.run_name)} already active")
+            if config is not None:
+                print("Logging config...")
+                config["num_classes"] = int(meta_model.num_classes)
+                mlflow.log_dict(config, "config/config.json")
 
-        if config is not None:
-            print("Logging config...")
-            config["num_classes"] = int(meta_model.num_classes)
-            mlflow.log_dict(config, "config/config.json")
+        if enable_wandb:
+            self.logger = wandb.init(
+                project=self.config.logger.experiment_name,
+                name=self.run_name,
+                config=config,
+            )
+            self.logger.config.update({"num_classes": int(meta_model.num_classes)})
 
     def log(self, log_dict, step):
         """
@@ -152,14 +172,16 @@ class Logger:
             log_dict (Dict[str, Any]): A dictionary containing the log data to be recorded.
             step (int): The current step or iteration associated with the log entry.
         """
-        if not self.mlflow or not self.enabled:
-            return
-        # Ensure there is an active mlflow run while logging metrics/artifacts
-        if mlflow.active_run() is None:
-            mlflow.start_run(run_name=self.run_name)
+        if self.enable_mlflow and  not self.enabled:
+            # Ensure there is an active mlflow run while logging metrics/artifacts
+            if mlflow.active_run() is None:
+                mlflow.start_run(run_name=self.run_name)
 
-        for k, v in (log_dict or {}).items():
-            mlflow.log_metric(k, float(v), step=step)
+            for k, v in (log_dict or {}).items():
+                mlflow.log_metric(k, float(v), step=step)
+
+        if self.enable_wandb:
+            self.logger.log(log_dict, step = step)
 
     def save_model_checkpoint(
         self,
@@ -194,7 +216,7 @@ class Logger:
         Note:
             The model is moved to the CPU before saving its state dictionary.
         """
-        if not self.mlflow or not self.enabled:
+        if not self.enable_wandb and (not self.enable_mlflow or not self.enabled):
             return
         timestamp = time.strftime("%Y%m%d%H")
 
