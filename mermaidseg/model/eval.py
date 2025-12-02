@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import torch
+import tqdm
 from mermaidseg.model.meta import MetaModel
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
@@ -104,7 +105,7 @@ class Evaluator:
         meta_model.model.eval()
         metric_results: Dict[str, Union[float, NDArray[np.float64]]] = {}
 
-        for data in dataloader:
+        for data in tqdm.tqdm(dataloader):
             inputs, labels = data
             labels = labels.long().to(self.device)
             outputs = meta_model.batch_predict(inputs)
