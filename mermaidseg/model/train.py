@@ -64,6 +64,7 @@ def train_model(
     Returns:
         None
     """
+
     best_results = {"epoch": -1, metric_of_interest: 0}
 
     if start_epoch == -1:
@@ -78,9 +79,22 @@ def train_model(
         print(f"EPOCH: {epoch}")
 
         meta_model.model.train(True)
-        train_loss = meta_model.train_epoch(train_loader)
+        train_loss, train_metric_results = meta_model.train_epoch(
+            train_loader, evaluator
+        )
         print(f"LOSS train {train_loss}")
+        print(f"TRAIN METRICS: {train_metric_results}")
         epoch_loss_dict["train/loss"] = train_loss
+        metrics_epoch[epoch] = {"train_metrics": train_metric_results}
+        if logger is not None and len(train_metric_results) > 0:
+            logger.log(
+                {
+                    f"{"train"}/{metric_name}": metric
+                    for metric_name, metric in train_metric_results.items()
+                },
+                step=epoch,
+            )
+        epoch_loss_dict["train/time_taken"] = time.time() - epoch_start_time
 
         if hasattr(meta_model, "scheduler"):
             meta_model.scheduler.step()
@@ -88,46 +102,44 @@ def train_model(
         if val_loader is not None:
 
             meta_model.model.eval()
-            val_loss = meta_model.validation_epoch(val_loader)
+            val_loss, val_metric_results = meta_model.validation_epoch(
+                val_loader, evaluator
+            )
             print(f"LOSS valid {val_loss}")
-            epoch_loss_dict["validation/loss"] = val_loss
+            print(f"VALID METRICS: {val_metric_results}")
 
-        epoch_loss_dict["train/time_taken"] = time.time() - epoch_start_time
+            epoch_loss_dict["validation/loss"] = val_loss
+            metrics_epoch[epoch]["validation_metrics"] = val_metric_results
+            if logger is not None and len(val_metric_results) > 0:
+                logger.log(
+                    {
+                        f"{"validation"}/{metric_name}": metric
+                        for metric_name, metric in val_metric_results.items()
+                    },
+                    step=epoch,
+                )
+
+                best_model_flag = (
+                    best_results[metric_of_interest]
+                    < val_metric_results[metric_of_interest]
+                )
+
+                if best_model_flag:
+                    best_results[metric_of_interest] = val_metric_results[
+                        metric_of_interest
+                    ]
+                    best_results["epoch"] = epoch
+
+                    logger.save_model_checkpoint(meta_model, epoch, val_metric_results)
 
         logger.log(
             epoch_loss_dict,
             step=epoch,
         )
-        metrics_epoch[epoch] = {"loss": epoch_loss_dict}
+
+        metrics_epoch[epoch]["loss"] = epoch_loss_dict
         if epoch % logger.log_epochs > 0 and epoch < (end_epoch - 1):
             continue
-
-        train_metric_results = evaluate_and_log(
-            evaluator, train_loader, meta_model, logger, epoch, "train"
-        )
-        metrics_epoch[epoch]["train_metrics"] = train_metric_results
-
-        if val_loader is not None:
-            val_metric_results = evaluate_and_log(
-                evaluator, val_loader, meta_model, logger, epoch, "validation"
-            )
-            metrics_epoch[epoch]["validation_metrics"] = val_metric_results
-
-            best_model_flag = (
-                best_results[metric_of_interest]
-                < val_metric_results[metric_of_interest]
-            )
-
-            # if metric_of_interest in ["mIoU"]:
-            #     best_model_flag = not best_model_flag
-
-            if best_model_flag:
-                best_results[metric_of_interest] = val_metric_results[
-                    metric_of_interest
-                ]
-                best_results["epoch"] = epoch
-
-                logger.save_model_checkpoint(meta_model, epoch, val_metric_results)
 
         if test_loader is not None:
             _ = evaluate_and_log(
