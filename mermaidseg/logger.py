@@ -89,7 +89,13 @@ class Logger:
     """
 
     def __init__(
-        self, config, meta_model, log_epochs=5, log_checkpoint=50, checkpoint_dir="."
+        self,
+        config,
+        meta_model,
+        log_epochs=5,
+        log_checkpoint=50,
+        checkpoint_dir=".",
+        mlflow=True,
     ):
         """
         Initializes the logger for tracking experiments and benchmarks.
@@ -111,6 +117,10 @@ class Logger:
         self.log_checkpoint = log_checkpoint
         self.checkpoint_dir = checkpoint_dir
         self.run_name = meta_model.run_name
+        self.mlflow = mlflow
+
+        if not mlflow:
+            return
 
         self.enabled = (self.config.logger.experiment_name is not None) and (
             MLFLOW_IMPORT_ERROR is None
@@ -142,7 +152,7 @@ class Logger:
             log_dict (Dict[str, Any]): A dictionary containing the log data to be recorded.
             step (int): The current step or iteration associated with the log entry.
         """
-        if not self.enabled:
+        if not self.mlflow or not self.enabled:
             return
         # Ensure there is an active mlflow run while logging metrics/artifacts
         if mlflow.active_run() is None:
@@ -184,6 +194,8 @@ class Logger:
         Note:
             The model is moved to the CPU before saving its state dictionary.
         """
+        if not self.mlflow or not self.enabled:
+            return
         timestamp = time.strftime("%Y%m%d%H")
 
         checkpoint: Dict[str, Any] = {
