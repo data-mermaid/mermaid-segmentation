@@ -152,7 +152,10 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
     def __getitem__(self, idx: int) -> Tuple[Union[torch.Tensor, NDArray[Any]], Any]:
         image_id = self.df_images.loc[idx, "image_id"]
         row_kwargs = self.df_images.loc[idx].to_dict()
-        image = self.read_image(**row_kwargs)
+        try:
+            image = self.read_image(**row_kwargs)
+        except Exception:
+            return None, None, None
 
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
@@ -189,7 +192,15 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
             masks: Tensor or ndarray batch of masks
             annotations: List of annotation DataFrames
         """
-        images, masks, annotations = zip(*batch)
+        # images, masks, annotations = zip(*batch)
+
+        # Filter out entries where image or mask is None
+        filtered = [
+            (img, msk, ann)
+            for img, msk, ann in batch
+            if img is not None and msk is not None
+        ]
+        images, masks, annotations = zip(*filtered)
 
         # Handle empty batch
         if len(images) == 0:
