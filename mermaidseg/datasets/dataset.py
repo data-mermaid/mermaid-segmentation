@@ -177,10 +177,6 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
             image = transformed["image"].transpose(2, 0, 1)
             mask = transformed["mask"]
 
-        if self.concept_mapping_flag:
-            mask = labels_to_concepts(
-                mask, benthic_concept_matrix=self.benthic_concept_matrix
-            )
         return image, mask, annotations
 
     def collate_fn(self, batch):
