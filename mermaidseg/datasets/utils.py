@@ -63,6 +63,7 @@ def create_annotation_mask(
     Returns:
         np.ndarray: Annotation mask with integer class IDs.
     """
+    ## TODO: Make Padding percentage based so that it is applicable to all class sizes
     mask = np.zeros(shape[:2])
     for _, annotation in annotations.iterrows():
         if annotation["benthic_attribute_name"] is not None:
