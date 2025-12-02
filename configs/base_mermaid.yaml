@@ -1,0 +1,29 @@
+run_name: "base"
+
+logger:
+  uri: "segmentation"
+  experiment_name: "temporary_experiment_1"
+  log_epochs: 5
+
+data:
+  name: "MermaidDataset"
+  batch_size: 4
+  class_subset: [
+            "Macroalgae",
+            "Rubble",
+            "Sand",
+            "Porites",
+            "Crustose coralline algae",
+            "Bare substrate",
+            "Hard coral",
+            "Turf algae",
+            "Millepora",
+            "Tape",
+            "Soft coral",
+            "Acropora",
+            "Pocillopora",
+            "Porites lobata",
+            "Montipora",
+        ]
+  padding: 7
+  concept_mapping_flag: False
