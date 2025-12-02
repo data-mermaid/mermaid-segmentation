@@ -35,7 +35,5 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
         kwargs: Additional keyword arguments that are passed to the base `torch.nn.CrossEntropyLoss` class.
     """
 
-    def __init__(
-        self, reduction: str = "none", ignore_index: int = -1, **kwargs: Any
-    ) -> None:
-        super().__init__(ignore_index=ignore_index, reduction=reduction, **kwargs)
+    def __init__(self, reduction: str = "none", **kwargs: Any) -> None:
+        super().__init__(reduction=reduction, **kwargs)
