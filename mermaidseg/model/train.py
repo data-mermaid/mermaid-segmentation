@@ -133,7 +133,7 @@ def train_model(
             _ = evaluate_and_log(
                 evaluator, test_loader, meta_model, logger, epoch, "test"
             )
-        return metrics_epoch
+    return metrics_epoch
 
 
 def evaluate_and_log(
