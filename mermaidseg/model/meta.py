@@ -287,10 +287,10 @@ class MetaModel:
                 outputs = torch.sigmoid(outputs)
                 outputs = (outputs > 0.5).float()
                 outputs += 1
-                outputs *= (labels.unsqueeze(1) != 0)
-                concept_labels+= 1
-                concept_labels *= (labels.unsqueeze(1) != 0)
-                
+                outputs *= labels.unsqueeze(1) != 0
+                concept_labels += 1
+                concept_labels *= labels.unsqueeze(1) != 0
+
                 ## Update metrics
                 for metric in evaluator.metric_dict.values():
                     metric.update(outputs, concept_labels)
@@ -350,10 +350,10 @@ class MetaModel:
                 outputs = torch.sigmoid(outputs)
                 outputs = (outputs > 0.5).float()
                 outputs += 1
-                outputs *= (labels.unsqueeze(1) != 0)
-                concept_labels+= 1
-                concept_labels *= (labels.unsqueeze(1) != 0)
-                
+                outputs *= labels.unsqueeze(1) != 0
+                concept_labels += 1
+                concept_labels *= labels.unsqueeze(1) != 0
+
                 ## Update metrics
                 for metric in evaluator.metric_dict.values():
                     metric.update(outputs, concept_labels)
