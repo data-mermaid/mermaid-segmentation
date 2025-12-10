@@ -9,9 +9,6 @@
 
 run_name: "linear-dinov2-base_run"
 
-data:
-  batch_size: 4
-
 augmentation:
   train:
     Resize:

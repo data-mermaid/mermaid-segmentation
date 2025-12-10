@@ -9,9 +9,6 @@
 
 run_name: "linear-dinov2-base_run"
 
-data:
-  batch_size: 4
-
 augmentation:
   train:
     Resize:
@@ -46,7 +43,7 @@ model:
   input_size: [518, 518]
 
 training:
-  epochs: 10
+  epochs: 100
   loss: 
     type: CrossEntropyLoss
     ignore_index: 0
