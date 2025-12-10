@@ -156,11 +156,11 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
             image = self.read_image(**row_kwargs)
         except Exception:
             return None, None, None
-
+        # column_name = "image_id" # This needs to be point_id for 
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
             [
-                "point_id",
+                # "point_id",
                 "row",
                 "col",
                 # "benthic_attribute_id",
