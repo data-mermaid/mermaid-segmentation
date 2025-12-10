@@ -5,6 +5,7 @@ segmentation/*
 test1/*
 nbs/mlruns/*
 nbs/model_checkpoints/*
+*/wandb/*
 nbs_tmp/*  
 scraping/*.csv
 

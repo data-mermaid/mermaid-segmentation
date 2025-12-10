@@ -21,19 +21,21 @@ try:
 except ImportError as err:
     MLFLOW_IMPORT_ERROR = err
 
-try:
-    import wandb
-
-    WANDB_IMPORT_ERROR = None
-except ImportError as err:
-    WANDB_IMPORT_ERROR = err
-
 import os
 import time
 from datetime import datetime, timedelta
 
 import torch
+import wandb
 from mermaidseg.model.meta import MetaModel
+
+# try:
+#     import wandb
+
+#     WANDB_IMPORT_ERROR = None
+# except ImportError as err:
+#     WANDB_IMPORT_ERROR = err
+
 
 URI = "segmentation"  # Update as an argument in config
 
@@ -172,7 +174,7 @@ class Logger:
             log_dict (Dict[str, Any]): A dictionary containing the log data to be recorded.
             step (int): The current step or iteration associated with the log entry.
         """
-        if self.enable_mlflow and  not self.enabled:
+        if self.enable_mlflow and not self.enabled:
             # Ensure there is an active mlflow run while logging metrics/artifacts
             if mlflow.active_run() is None:
                 mlflow.start_run(run_name=self.run_name)
@@ -181,7 +183,7 @@ class Logger:
                 mlflow.log_metric(k, float(v), step=step)
 
         if self.enable_wandb:
-            self.logger.log(log_dict, step = step)
+            self.logger.log(log_dict, step=step)
 
     def save_model_checkpoint(
         self,
