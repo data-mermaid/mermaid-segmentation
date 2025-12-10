@@ -1,4 +1,4 @@
-model_checkpoints/*
+*/model_checkpoints/*
 model_runs/*
 data/*
 segmentation/*
