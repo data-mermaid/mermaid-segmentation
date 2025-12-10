@@ -69,6 +69,47 @@ def initialize_benthic_hierarchy(
     return hierarchy_dict
 
 
+def get_hierarchy_level(
+    concept_list: list[str], hierarchy_dict: dict[str, str]
+) -> dict[str, int | None]:
+    """
+    Determine the hierarchy level for each concept in a list based on a parent mapping.
+    The function calculates the level of each concept by counting the number of
+    steps required to reach a root node (a node with no parent) using the provided
+    hierarchy dictionary. If a cycle is detected in the hierarchy, the level for that
+    concept is set to None.
+    Args:
+        concept_list: A list of concept labels (strings) for which to determine levels.
+        hierarchy_dict: A mapping (e.g., dict) where each key is a concept label and its
+            value is the parent concept label or None to indicate the top of the hierarchy.
+    Returns:
+        dict: A dictionary mapping each concept label to its hierarchy level (int) or
+        None if a cycle is detected.
+    """
+    levels = {}
+    for col in concept_list:
+        level = 0
+        current = col
+        visited = {current}
+        while True:
+            parent = hierarchy_dict.get(current)
+            # stop if no parent recorded
+            if parent is None:
+                break
+            # detect cycles
+            if parent in visited:
+                level = None  # indicate cycle
+                break
+            level += 1
+            visited.add(parent)
+            # if parent exists but we don't have its parent info, count it and stop
+            if parent not in hierarchy_dict:
+                break
+            current = parent
+        levels[col] = level
+    return levels
+
+
 def generate_hierarchy_path(label: str, hierarchy_dict: dict[str, str]) -> list[str]:
     """
     Generate the upward hierarchy path for a given label using a parent mapping.
@@ -124,8 +165,13 @@ def initialize_benthic_concepts(
     benthic_concept_set = list(benthic_concept_set)
     benthic_concept_set.sort()
 
+    levels = get_hierarchy_level(benthic_concept_set, hierarchy_dict)
+    tuples = [(col, levels.get(col)) for col in benthic_concept_set]
     benthic_concept_matrix = pd.DataFrame(
         0, index=labelset_benthic, columns=benthic_concept_set
+    )
+    benthic_concept_matrix.columns = pd.MultiIndex.from_tuples(
+        tuples, names=["concept", "level"]
     )
 
     for label in labelset_benthic:
@@ -202,3 +248,76 @@ def labels_to_concepts(
     labels = labels.astype(np.int64)
     mapped = lookup[labels]
     return np.transpose(mapped, (0, 3, 1, 2))
+
+
+def postprocess_predicted_concepts(
+    pixel_probs: np.ndarray,
+    concept_matrix: pd.DataFrame,
+    threshold: float = 0.5,
+) -> np.ndarray:
+    """
+    Vectorized hierarchical concept prediction for a batch.
+
+    Args:
+        pixel_probs: array of shape (B, H, W, num_concepts) or (H, W, num_concepts)
+        concept_matrix: DataFrame with MultiIndex columns (name, level)
+        threshold: minimum probability threshold
+
+    Returns:
+        Array of shape (B, H, W) or (H, W) with predicted concept indices (0-indexed into concept_matrix columns)
+        Returns -1 for pixels where no concept exceeds threshold at any level.
+    """
+    original_shape = pixel_probs.shape
+    if pixel_probs.ndim == 3:
+        pixel_probs = pixel_probs[np.newaxis, ...]  # add batch dim
+
+    B, C, H, W = pixel_probs.shape
+
+    # Flatten spatial dims for easier processing
+    flat_probs = pixel_probs.reshape(B * H * W, C)  # (N, C)
+
+    # Extract levels
+    concept_levels = concept_matrix.columns.get_level_values("level").to_numpy()
+
+    # Initialize predictions to -1 (no prediction)
+    predictions = np.full(B * H * W, -1, dtype=np.int32)
+
+    # Traverse levels from finest to coarsest
+    for level in [4, 3, 2, 1, 0]:
+        level_mask = concept_levels == level
+
+        if not level_mask.any():
+            continue
+
+        # Get probs for this level: (N, num_concepts_at_level)
+        level_probs = flat_probs[:, level_mask]
+
+        # Find pixels that haven't been assigned yet
+        unassigned = predictions == -1
+
+        # Among unassigned pixels, find which have any concept > threshold at this level
+        max_prob_at_level = level_probs[unassigned].max(axis=1)  # (num_unassigned,)
+        above_threshold = max_prob_at_level > threshold
+
+        if above_threshold.any():
+            # Get the best concept index (among concepts at this level) for each pixel
+            best_concept_in_level = level_probs[unassigned].argmax(
+                axis=1
+            )  # (num_unassigned,)
+
+            # Map back to global concept indices
+            level_indices = np.where(level_mask)[0]
+            global_indices = level_indices[best_concept_in_level]
+
+            # Assign predictions for pixels that are above threshold
+            unassigned_indices = np.where(unassigned)[0]
+            pixels_to_assign = unassigned_indices[above_threshold]
+            predictions[pixels_to_assign] = global_indices[above_threshold]
+
+    # Reshape back to spatial dims
+    predictions = predictions.reshape(B, H, W)
+    predictions += 1
+    if len(original_shape) == 3:
+        predictions = predictions[0]  # remove batch dim
+
+    return predictions
