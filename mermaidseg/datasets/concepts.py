@@ -11,7 +11,7 @@ functions:
 - map_benthic_to_concept: Map a benthic class label to its corresponding concept one-hot vector.
 """
 
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -253,6 +253,7 @@ def labels_to_concepts(
 def postprocess_predicted_concepts(
     pixel_probs: np.ndarray,
     concept_matrix: pd.DataFrame,
+    conceptid2labelid: dict[int, int],
     threshold: float = 0.5,
 ) -> np.ndarray:
     """
@@ -285,7 +286,6 @@ def postprocess_predicted_concepts(
     # Traverse levels from finest to coarsest
     for level in [4, 3, 2, 1, 0]:
         level_mask = concept_levels == level
-
         if not level_mask.any():
             continue
 
@@ -294,21 +294,19 @@ def postprocess_predicted_concepts(
 
         # Find pixels that haven't been assigned yet
         unassigned = predictions == -1
-
+        if not unassigned.any():
+            break  # all pixels assigned
         # Among unassigned pixels, find which have any concept > threshold at this level
         max_prob_at_level = level_probs[unassigned].max(axis=1)  # (num_unassigned,)
         above_threshold = max_prob_at_level > threshold
-
         if above_threshold.any():
             # Get the best concept index (among concepts at this level) for each pixel
             best_concept_in_level = level_probs[unassigned].argmax(
                 axis=1
             )  # (num_unassigned,)
-
             # Map back to global concept indices
             level_indices = np.where(level_mask)[0]
             global_indices = level_indices[best_concept_in_level]
-
             # Assign predictions for pixels that are above threshold
             unassigned_indices = np.where(unassigned)[0]
             pixels_to_assign = unassigned_indices[above_threshold]
@@ -316,8 +314,9 @@ def postprocess_predicted_concepts(
 
     # Reshape back to spatial dims
     predictions = predictions.reshape(B, H, W)
-    predictions += 1
     if len(original_shape) == 3:
         predictions = predictions[0]  # remove batch dim
+
+    predictions = np.vectorize(lambda x: conceptid2labelid.get(int(x), 0))(predictions)
 
     return predictions
