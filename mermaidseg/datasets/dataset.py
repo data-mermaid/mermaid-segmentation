@@ -68,6 +68,7 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
     id2concept: Optional[dict[int, str]] = None
     concept2id: Optional[dict[str, int]] = None
     benthic_concept_matrix: Optional[np.ndarray] = None
+    conceptid2labelid: Optional[dict[int, int]] = None
 
     def __init__(
         self,
@@ -156,7 +157,7 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
             image = self.read_image(**row_kwargs)
         except Exception:
             return None, None, None
-        # column_name = "image_id" # This needs to be point_id for 
+        # column_name = "image_id" # This needs to be point_id for
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
             [
@@ -228,6 +229,10 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         return images, masks
 
     def initialize_concept_mapping(self):
+        """
+        Initialize concept mapping attributes for the dataset.
+        Sets up the mapping between benthic attributes and concepts based on a predefined hierarchy.
+        """
         hierarchy_dict = initialize_benthic_hierarchy()
         class_set = list(self.id2label.values())
         benthic_concept_set, benthic_concept_matrix = initialize_benthic_concepts(
@@ -239,6 +244,15 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         }
         self.concept2id = {v: k for k, v in self.id2concept.items()}
         self.benthic_concept_matrix = benthic_concept_matrix
+        self.conceptid2labelid = {}
+        for ind, label in self.id2label.items():
+            col_ind = int(
+                np.where(
+                    self.benthic_concept_matrix.columns.get_level_values("concept")
+                    == label
+                )[0][0]
+            )
+            self.conceptid2labelid[col_ind] = ind
 
 
 class MermaidDataset(BaseCoralDataset):
