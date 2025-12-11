@@ -108,7 +108,7 @@ class Evaluator:
         for data in tqdm.tqdm(dataloader):
             inputs, labels = data
             labels = labels.long().to(self.device)
-            outputs = meta_model.batch_predict(inputs)
+            outputs, concept_outputs = meta_model.batch_predict(inputs)
             outputs = outputs.argmax(dim=1)
             ## Update metrics
             for metric in self.metric_dict.values():
@@ -159,7 +159,7 @@ class Evaluator:
             data = next(iter(dataloader))
             inputs, labels = data
 
-            outputs = meta_model.batch_predict(inputs)
+            outputs, concept_outputs = meta_model.batch_predict(inputs)
             if not proba:
                 outputs = outputs.argmax(dim=1)
 

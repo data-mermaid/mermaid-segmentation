@@ -18,7 +18,10 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 import transformers
-from mermaidseg.datasets.concepts import labels_to_concepts
+from mermaidseg.datasets.concepts import (
+    labels_to_concepts,
+    postprocess_predicted_concepts,
+)
 from mermaidseg.io import ConfigDict
 
 # from mermaidseg.model.eval import Evaluator
@@ -82,6 +85,7 @@ class MetaModel:
     optimizer: torch.optim.Optimizer
     scheduler: Optional[torch.optim.lr_scheduler.LRScheduler]
     concept_matrix: Optional[pd.DataFrame]
+    conceptid2labelid: Optional[dict[int, int]]
 
     def __init__(
         self,
@@ -90,6 +94,7 @@ class MetaModel:
         model_kwargs: ConfigDict,
         device: Union[str, torch.device] = "cuda",
         model_checkpoint: Optional[str] = None,
+        training_mode: str = "standard",  # One of "standard", "concept", "concept-bottleneck"
         training_kwargs: ConfigDict = ConfigDict(
             {
                 "epochs": 50,
@@ -101,6 +106,7 @@ class MetaModel:
             }
         ),
         concept_matrix: Optional[pd.DataFrame] = None,
+        conceptid2labelid: Optional[dict[int, int]] = None,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
@@ -110,9 +116,16 @@ class MetaModel:
         self.model_kwargs = model_kwargs
         self.model_checkpoint = model_checkpoint
 
+        self.training_mode = training_mode
+        assert self.training_mode in [
+            "standard",
+            "concept",
+            "concept-bottleneck",
+        ], f"Invalid training_mode: {self.training_mode}"
+
         self.training_kwargs = training_kwargs
         self.concept_matrix = concept_matrix
-
+        self.conceptid2labelid = conceptid2labelid
         self.model = getattr(mermaidseg.model.models, self.model_name)(
             num_classes=self.num_classes, **model_kwargs
         )
@@ -169,19 +182,24 @@ class MetaModel:
         inputs = inputs.to(self.device).float()
         if target_dim is None:
             target_dim = (inputs.size(-2), inputs.size(-1))
-        outputs = self.model(inputs)
-        if hasattr(outputs, "logits") and not hasattr(self, "loss"):
-            outputs = outputs.logits
 
-        outputs = F.interpolate(
-            outputs,
-            size=target_dim,
-            mode="bilinear",
-            align_corners=False,
-        )
+        segmentation_outputs = self.model(inputs)
+
+        if self.training_mode == "concept-bottleneck":
+            concept_outputs = segmentation_outputs.hidden_states
+            outputs = segmentation_outputs.logits
+        elif self.training_mode == "concept":
+            concept_outputs = segmentation_outputs.logits
+            outputs = postprocess_predicted_concepts(
+                concept_outputs.detach().cpu().numpy(),
+                self.concept_matrix,
+                self.conceptid2labelid,
+            )
+        else:
+            outputs = segmentation_outputs.logits
 
         assert isinstance(outputs, torch.Tensor)
-        return outputs
+        return outputs, concept_outputs
 
     def batch_predict_loss(
         self,
@@ -204,6 +222,9 @@ class MetaModel:
         """
 
         loss = None
+        outputs = None
+        concept_outputs = None
+
         inputs, labels = batch
 
         if target_dim is None:
@@ -212,38 +233,34 @@ class MetaModel:
         inputs = inputs.to(self.device).float()
         labels = labels.long().to(self.device)
 
-        if self.concept_matrix is not None and self.loss is not None:
-            outputs = self.model(inputs)
+        segmentation_outputs = self.model(inputs)
 
-        elif hasattr(self, "loss") and self.loss is not None:
-            outputs = self.model(inputs)
-            loss = self.loss(outputs, labels)
+        if self.training_mode == "concept-bottleneck":
+            concept_outputs = segmentation_outputs.hidden_states
+            outputs = segmentation_outputs.logits
+        elif self.training_mode == "concept":
+            concept_outputs = segmentation_outputs.logits
+            outputs = postprocess_predicted_concepts(
+                concept_outputs.detach().cpu().numpy(),
+                self.concept_matrix,
+                self.conceptid2labelid,
+            )
         else:
-            outputs = self.model(inputs, labels=labels)
-            loss = outputs.loss
-            outputs = outputs.logits
+            outputs = segmentation_outputs.logits
 
-        outputs = F.interpolate(
-            outputs,
-            size=target_dim,
-            mode="bilinear",
-            align_corners=False,
-        )
-
-        if self.concept_matrix is not None and self.loss is not None:
+        if self.training_mode == "concept-bottleneck":
             concept_labels = labels_to_concepts(labels, self.concept_matrix)
-            concept_labels = concept_labels.to(self.device).float()
-
-            label_mask = (labels > 0).unsqueeze(1).to(self.device)
-            per_element_loss = self.loss(outputs, concept_labels)
-            masked_loss = per_element_loss * label_mask
-            denom = label_mask.sum() * outputs.shape[1] + 1e-8
-            loss = masked_loss.sum() / denom
+            loss = self.loss(outputs, labels, concept_outputs, concept_labels)
+        elif self.training_mode == "concept":
+            concept_labels = labels_to_concepts(labels, self.concept_matrix)
+            loss = self.loss(concept_outputs, concept_labels, labels)
+        else:
+            loss = self.loss(outputs, labels)
 
         assert loss is not None, "Loss is not computed for the given batch."
         assert isinstance(outputs, torch.Tensor)
 
-        return outputs, loss
+        return loss, outputs, concept_outputs
 
     def train_epoch(
         self,
@@ -273,7 +290,7 @@ class MetaModel:
         for data in tqdm(train_loader):
             _, labels = data
             labels = labels.long().to(self.device)
-            outputs, loss = self.batch_predict_loss(data)
+            loss, outputs, concept_outputs = self.batch_predict_loss(data)
 
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             loss.backward()  # Double check
@@ -281,22 +298,9 @@ class MetaModel:
             running_loss += loss.item()
             self.optimizer.zero_grad()
 
-            if self.concept_matrix is not None and evaluator is not None:
-                concept_labels = labels_to_concepts(labels, self.concept_matrix)
-                concept_labels = concept_labels.to(self.device).float()
-                outputs = torch.sigmoid(outputs)
-                outputs = (outputs > 0.5).float()
-                outputs += 1
-                outputs *= labels.unsqueeze(1) != 0
-                concept_labels += 1
-                concept_labels *= labels.unsqueeze(1) != 0
-
-                ## Update metrics
-                for metric in evaluator.metric_dict.values():
-                    metric.update(outputs, concept_labels)
-
-            elif evaluator is not None:
-                outputs = outputs.argmax(dim=1)
+            if evaluator is not None:
+                if outputs.ndim > 3:
+                    outputs = outputs.argmax(dim=1)
                 ## Update metrics
                 for metric in evaluator.metric_dict.values():
                     metric.update(outputs, labels)
@@ -340,26 +344,13 @@ class MetaModel:
             _, labels = data
             labels = labels.long().to(self.device)
 
-            outputs, loss = self.batch_predict_loss(data)
+            loss, outputs, concept_outputs = self.batch_predict_loss(data)
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running_loss += loss.item()
 
-            if self.concept_matrix is not None and evaluator is not None:
-                concept_labels = labels_to_concepts(labels, self.concept_matrix)
-                concept_labels = concept_labels.to(self.device).float()
-                outputs = torch.sigmoid(outputs)
-                outputs = (outputs > 0.5).float()
-                outputs += 1
-                outputs *= labels.unsqueeze(1) != 0
-                concept_labels += 1
-                concept_labels *= labels.unsqueeze(1) != 0
-
-                ## Update metrics
-                for metric in evaluator.metric_dict.values():
-                    metric.update(outputs, concept_labels)
-
-            elif evaluator is not None:
-                outputs = outputs.argmax(dim=1)
+            if evaluator is not None:
+                if outputs.ndim > 3:
+                    outputs = outputs.argmax(dim=1)
                 ## Update metrics
                 for metric in evaluator.metric_dict.values():
                     metric.update(outputs, labels)
