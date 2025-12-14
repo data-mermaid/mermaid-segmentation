@@ -7,7 +7,7 @@ nbs/mlruns/*
 nbs/model_checkpoints/*
 */wandb/*
 nbs_tmp/*  
-scraping/*.csv
+scraping/source*.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
