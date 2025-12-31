@@ -91,7 +91,8 @@ class MetaModel:
         self,
         run_name: str,
         num_classes: int,
-        model_kwargs: ConfigDict,
+        num_concepts: Optional[int] = None,
+        model_kwargs: ConfigDict = ConfigDict({}),
         device: Union[str, torch.device] = "cuda",
         model_checkpoint: Optional[str] = None,
         training_mode: str = "standard",  # One of "standard", "concept", "concept-bottleneck"
@@ -110,6 +111,7 @@ class MetaModel:
     ):
         self.run_name = run_name
         self.num_classes = num_classes
+        self.num_concepts = num_concepts
         self.device = device
 
         self.model_name = model_kwargs.pop("name", None)
@@ -126,9 +128,20 @@ class MetaModel:
         self.training_kwargs = training_kwargs
         self.concept_matrix = concept_matrix
         self.conceptid2labelid = conceptid2labelid
-        self.model = getattr(mermaidseg.model.models, self.model_name)(
-            num_classes=self.num_classes, **model_kwargs
-        )
+        if self.training_mode == "concept-bottleneck":
+            self.model = getattr(mermaidseg.model.models, self.model_name)(
+                num_classes=self.num_classes,
+                num_concepts=self.num_concepts,
+                **model_kwargs,
+            )
+        elif self.training_mode == "concept":
+            self.model = getattr(mermaidseg.model.models, self.model_name)(
+                num_classes=self.num_concepts, **model_kwargs
+            )
+        else:
+            self.model = getattr(mermaidseg.model.models, self.model_name)(
+                num_classes=self.num_classes, **model_kwargs
+            )
 
         ## Load model checkpoint if necessary
         if model_checkpoint:
@@ -188,15 +201,18 @@ class MetaModel:
         if self.training_mode == "concept-bottleneck":
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
+            concept_outputs = torch.sigmoid(concept_outputs)
         elif self.training_mode == "concept":
             concept_outputs = segmentation_outputs.logits
             outputs = postprocess_predicted_concepts(
                 concept_outputs.detach().cpu().numpy(),
                 self.concept_matrix,
                 self.conceptid2labelid,
-            )
+            ).to(self.device)
+            concept_outputs = torch.sigmoid(concept_outputs)
         else:
             outputs = segmentation_outputs.logits
+            concept_outputs = None
 
         assert isinstance(outputs, torch.Tensor)
         return outputs, concept_outputs
@@ -232,29 +248,29 @@ class MetaModel:
 
         inputs = inputs.to(self.device).float()
         labels = labels.long().to(self.device)
-
         segmentation_outputs = self.model(inputs)
 
         if self.training_mode == "concept-bottleneck":
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
+            concept_labels = labels_to_concepts(labels, self.concept_matrix)
+            loss = self.loss(outputs, labels, concept_outputs, concept_labels)
+            concept_outputs = torch.sigmoid(concept_outputs)
+
         elif self.training_mode == "concept":
             concept_outputs = segmentation_outputs.logits
+            concept_labels = labels_to_concepts(labels, self.concept_matrix)
+            loss = self.loss(concept_outputs, concept_labels, labels)
+            concept_outputs = torch.sigmoid(concept_outputs)
             outputs = postprocess_predicted_concepts(
                 concept_outputs.detach().cpu().numpy(),
                 self.concept_matrix,
                 self.conceptid2labelid,
-            )
+            ).to(self.device)
+
         else:
             outputs = segmentation_outputs.logits
-
-        if self.training_mode == "concept-bottleneck":
-            concept_labels = labels_to_concepts(labels, self.concept_matrix)
-            loss = self.loss(outputs, labels, concept_outputs, concept_labels)
-        elif self.training_mode == "concept":
-            concept_labels = labels_to_concepts(labels, self.concept_matrix)
-            loss = self.loss(concept_outputs, concept_labels, labels)
-        else:
+            concept_outputs = None
             loss = self.loss(outputs, labels)
 
         assert loss is not None, "Loss is not computed for the given batch."
@@ -299,11 +315,38 @@ class MetaModel:
             self.optimizer.zero_grad()
 
             if evaluator is not None:
-                if outputs.ndim > 3:
-                    outputs = outputs.argmax(dim=1)
+                if self.training_mode in ("concept"):
+                    concept_labels = labels_to_concepts(labels, self.concept_matrix)
+                    print(concept_labels.shape, concept_labels.dtype)
+                    concept_labels = postprocess_predicted_concepts(
+                        concept_labels,
+                        self.concept_matrix,
+                        self.conceptid2labelid,
+                    )
+                    concept_labels = (
+                        torch.from_numpy(concept_labels).long().to(self.device)
+                    )
+                    metric.update(outputs, concept_labels)
+                else:
+                    if outputs.ndim > 3:
+                        outputs = outputs.argmax(dim=1)
+                    ## Update metrics
+                    for metric in evaluator.metric_dict.values():
+                        metric.update(outputs, labels)
+
+            if self.training_mode in ("concept-bottleneck", "concept"):
                 ## Update metrics
-                for metric in evaluator.metric_dict.values():
-                    metric.update(outputs, labels)
+                for metric in evaluator.concept_metric_dict.values():
+                    concept_outputs = (concept_outputs > 0.5).float()
+                    concept_outputs += 1
+                    concept_outputs *= labels.unsqueeze(1) != 0
+
+                    concept_labels = labels_to_concepts(labels, self.concept_matrix)
+                    concept_labels += 1
+                    concept_labels *= labels.unsqueeze(1) != 0
+
+                    for metric in evaluator.concept_metric_dict.values():
+                        metric.update(concept_outputs, concept_labels)
 
         ## Compute metrics
         if evaluator is not None:
@@ -314,6 +357,22 @@ class MetaModel:
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
+
+            if self.training_mode in ("concept-bottleneck", "concept"):
+                for metric_name in evaluator.concept_metric_dict:
+                    metric_results[metric_name] = (
+                        evaluator.concept_metric_dict[metric_name]
+                        .compute()
+                        .cpu()
+                        .numpy()
+                    )
+                    if metric_results[metric_name].ndim == 0:
+                        metric_results[metric_name] = metric_results[metric_name].item()
+                    else:
+                        metric_results[metric_name] = metric_results[metric_name][
+                            2
+                        ].item()
+                    evaluator.concept_metric_dict[metric_name].reset()
 
         last_loss = running_loss / len(train_loader)
         return last_loss, metric_results
@@ -349,11 +408,35 @@ class MetaModel:
             running_loss += loss.item()
 
             if evaluator is not None:
-                if outputs.ndim > 3:
-                    outputs = outputs.argmax(dim=1)
+                if self.training_mode in ("concept"):
+                    concept_labels = labels_to_concepts(labels, self.concept_matrix)
+                    concept_labels = postprocess_predicted_concepts(
+                        concept_labels, self.concept_matrix, self.conceptid2labelid
+                    )
+                    concept_labels = (
+                        torch.from_numpy(concept_labels).long().to(self.device)
+                    )
+                    metric.update(outputs, concept_labels)
+                else:
+                    if outputs.ndim > 3:
+                        outputs = outputs.argmax(dim=1)
+                    ## Update metrics
+                    for metric in evaluator.metric_dict.values():
+                        metric.update(outputs, labels)
+
+            if self.training_mode in ("concept-bottleneck", "concept"):
                 ## Update metrics
-                for metric in evaluator.metric_dict.values():
-                    metric.update(outputs, labels)
+                for metric in evaluator.concept_metric_dict.values():
+                    concept_outputs = (concept_outputs > 0.5).float()
+                    concept_outputs += 1
+                    concept_outputs *= labels.unsqueeze(1) != 0
+
+                    concept_labels = labels_to_concepts(labels, self.concept_matrix)
+                    concept_labels += 1
+                    concept_labels *= labels.unsqueeze(1) != 0
+
+                    for metric in evaluator.concept_metric_dict.values():
+                        metric.update(concept_outputs, concept_labels)
 
         ## Compute metrics
         if evaluator is not None:
@@ -364,6 +447,18 @@ class MetaModel:
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
+
+        if self.training_mode in ("concept-bottleneck", "concept"):
+            for metric_name in evaluator.concept_metric_dict:
+                metric_results[metric_name] = (
+                    evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
+                )
+                if metric_results[metric_name].ndim == 0:
+                    metric_results[metric_name] = metric_results[metric_name].item()
+                else:
+                    metric_results[metric_name] = metric_results[metric_name][2].item()
+
+                evaluator.concept_metric_dict[metric_name].reset()
 
         last_loss = running_loss / len(val_loader)
         return last_loss, metric_results
