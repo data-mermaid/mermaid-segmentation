@@ -55,7 +55,7 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
             torch.Tensor: The computed total loss.
         """
         per_element_loss = super().forward(concept_outputs, concept_labels)
-        label_mask = (labels > 0).unsqueeze(1).to(self.device)
+        label_mask = (labels > 0).unsqueeze(1)
 
         masked_loss = per_element_loss * label_mask
         denom = label_mask.sum() * concept_outputs.shape[1] + 1e-8
@@ -109,9 +109,10 @@ class ConceptBottleneckLoss(torch.nn.Module):
         Returns:
             torch.Tensor: The computed total loss.
         """
+
         class_loss_value = self.class_loss(outputs, labels)
 
-        label_mask = (labels > 0).unsqueeze(1).to(self.device)
+        label_mask = (labels > 0).unsqueeze(1)
         per_element_loss = self.concept_loss(concept_outputs, concept_labels)
 
         masked_loss = per_element_loss * label_mask
