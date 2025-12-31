@@ -21,10 +21,14 @@ from typing import Any, Dict, Optional, Union
 import numpy as np
 import torch
 import tqdm
+from mermaidseg.datasets.concepts import (
+    labels_to_concepts,
+    postprocess_predicted_concepts,
+)
 from mermaidseg.model.meta import MetaModel
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
-from torchmetrics.classification import Accuracy, F1Score, JaccardIndex
+from torchmetrics.classification import AUROC, Accuracy, F1Score, JaccardIndex
 from torchmetrics.metric import Metric
 
 
@@ -59,6 +63,8 @@ class Evaluator:
         num_classes: int,
         device: Union[str, torch.device] = "cuda",
         metric_dict: Optional[Dict[str, Metric]] = None,
+        calculate_concept_metrics: bool = False,
+        concept_metric_dict: Optional[Dict[str, Metric]] = {},
         ignore_index: int = 0,
         **kwargs: Any
     ):
@@ -78,6 +84,19 @@ class Evaluator:
                     **kwargs
                 ).to(self.device),
             }
+
+        if calculate_concept_metrics:
+            if concept_metric_dict:
+                self.concept_metric_dict = concept_metric_dict
+            else:
+                self.concept_metric_dict = {
+                    # "auc": AUROC(
+                    #     task="multiclass", average="none", num_classes=3, ignore_index=0
+                    # ).to(self.device),
+                    "f1_concept": F1Score(
+                        task="multiclass", average="none", num_classes=3, ignore_index=0
+                    ).to(self.device)
+                }
 
     @torch.no_grad()
     def evaluate_model(
@@ -104,15 +123,46 @@ class Evaluator:
         """
         meta_model.model.eval()
         metric_results: Dict[str, Union[float, NDArray[np.float64]]] = {}
-
+        print(self.metric_dict)
+        print(self.concept_metric_dict)
+        print(meta_model.training_mode)
         for data in tqdm.tqdm(dataloader):
             inputs, labels = data
             labels = labels.long().to(self.device)
             outputs, concept_outputs = meta_model.batch_predict(inputs)
-            outputs = outputs.argmax(dim=1)
-            ## Update metrics
-            for metric in self.metric_dict.values():
-                metric.update(outputs, labels)
+
+            if meta_model.training_mode in ("concept"):
+                concept_labels = labels_to_concepts(labels, meta_model.concept_matrix)
+                # print(concept_labels)
+                # print(concept_labels.shape, concept_labels.dtype)
+                # concept_labels = postprocess_predicted_concepts(
+                #         concept_labels, meta_model.concept_matrix, meta_model.conceptid2labelid,
+                #     )
+                # concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
+                # metric.update(outputs, concept_labels)
+            else:
+                if outputs.ndim > 3:
+                    outputs = outputs.argmax(dim=1)
+                ## Update metrics
+                for metric in self.metric_dict.values():
+                    metric.update(outputs, labels)
+
+            if meta_model.training_mode in ("concept-bottleneck", "concept"):
+                ## Update metrics
+                for metric in self.concept_metric_dict.values():
+                    concept_outputs = (concept_outputs > 0.5).float()
+                    concept_outputs += 1
+                    concept_outputs *= labels.unsqueeze(1) != 0
+
+                    concept_labels = labels_to_concepts(
+                        labels, meta_model.concept_matrix
+                    )
+                    concept_labels += 1
+                    concept_labels *= labels.unsqueeze(1) != 0
+
+                    for metric in self.concept_metric_dict.values():
+                        metric.update(concept_outputs, concept_labels)
+
         ## Compute metrics
         for metric_name in self.metric_dict:
             metric_results[metric_name] = (
@@ -121,6 +171,19 @@ class Evaluator:
             if metric_results[metric_name].ndim == 0:
                 metric_results[metric_name] = metric_results[metric_name].item()
             self.metric_dict[metric_name].reset()
+
+        if meta_model.training_mode in ("concept-bottleneck", "concept"):
+            for metric_name in self.concept_metric_dict:
+                metric_results[metric_name] = (
+                    self.concept_metric_dict[metric_name].compute().cpu().numpy()
+                )
+                if metric_results[metric_name].ndim == 0:
+                    metric_results[metric_name] = metric_results[metric_name].item()
+                else:
+                    metric_results[metric_name] = metric_results[
+                        metric_name
+                    ]  # [2].item()
+                self.concept_metric_dict[metric_name].reset()
 
         self.epoch += 1
         return metric_results
