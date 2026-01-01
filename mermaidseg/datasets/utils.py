@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
+from torch.utils.data import Dataset, default_collate
 from tqdm import tqdm
 
 
@@ -80,7 +81,7 @@ def create_annotation_mask(
     return mask
 
 
-def calculate_weights(dataset, const=2000000) -> torch.Tensor:
+def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
     """
     Calculate class weights for a given dataset.
     This function computes the weights for each class in the dataset based on
@@ -97,7 +98,6 @@ def calculate_weights(dataset, const=2000000) -> torch.Tensor:
         torch.Tensor: A tensor of weights for each class, normalized by the mean weight.
     """
 
-    label_counts = {}
     label_counts = {i: 0 for i in range(dataset.N_classes)}
     for i in tqdm(range(len(dataset))):
         _, label, _ = dataset[i]
@@ -112,3 +112,13 @@ def calculate_weights(dataset, const=2000000) -> torch.Tensor:
     weight /= weight.mean()
 
     return weight
+
+
+def _joint_collate(batch: list) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Collate function to combine a list of samples into a batch.
+    """
+    images, labels = zip(*batch)
+    images = default_collate(images)
+    labels = default_collate(labels)
+    return images, labels
