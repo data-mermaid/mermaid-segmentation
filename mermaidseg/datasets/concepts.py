@@ -11,7 +11,7 @@ functions:
 - map_benthic_to_concept: Map a benthic class label to its corresponding concept one-hot vector.
 """
 
-from typing import Optional, Union
+from typing import Union
 
 import numpy as np
 import pandas as pd
@@ -317,6 +317,5 @@ def postprocess_predicted_concepts(
     if len(original_shape) == 3:
         predictions = predictions[0]  # remove batch dim
 
-    predictions = np.vectorize(lambda x: conceptid2labelid.get(int(x), 0))(predictions)
-
-    return predictions
+    # predictions = np.vectorize(lambda x: conceptid2labelid.get(int(x), 0))(predictions)
+    return torch.from_numpy(predictions).long()
