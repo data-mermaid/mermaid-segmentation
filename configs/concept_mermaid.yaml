@@ -25,5 +25,5 @@ data:
             "Porites lobata",
             "Montipora",
         ]
-  padding: 7
+  padding: 20
   concept_mapping_flag: True

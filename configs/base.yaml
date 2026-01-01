@@ -2,8 +2,13 @@ run_name: "base"
 
 logger:
   uri: "segmentation"
-  experiment_name: "temporary_experiment_1"
+  experiment_name: "mermaid"
   log_epochs: 5
 
 data:
+  name: "MermaidDataset"
   batch_size: 4
+  class_subset: ["Macroalgae", "Hard Coral", "Soft Coral", "Sponge"]
+  padding: 3
+  whitelist_sources: [23, 57, 69, 70, 82, 109, 155]
+  concept_mapping_flag: False
