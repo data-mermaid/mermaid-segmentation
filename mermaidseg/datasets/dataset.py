@@ -10,8 +10,6 @@ Classes:
     CoralNetDataset - A PyTorch Dataset for loading annotated coral reef images from CoralNet sources.
 """
 
-import io
-from ast import Raise
 from typing import Any, List, Optional, Tuple, Union
 
 import albumentations as A
@@ -19,9 +17,7 @@ import boto3
 import numpy as np
 import pandas as pd
 import requests
-import seaborn as sns
 import torch
-import tqdm
 from datasets import concatenate_datasets, load_dataset
 from mermaidseg.datasets.concepts import (
     initialize_benthic_concepts,
@@ -195,7 +191,7 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
             image = transformed["image"].transpose(2, 0, 1)
             mask = transformed["mask"]
 
-        return image, mask, annotations
+        return image, mask  # , annotations
 
     def collate_fn(self, batch):
         """
@@ -682,3 +678,41 @@ class CoralscapesDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]])
                 )[0][0]
             )
             self.conceptid2labelid[col_ind] = ind
+
+    def collate_fn(self, batch):
+        """
+        Collate function for MermaidDataset and CoralNetDataset.
+        Args:
+            batch: List of tuples (image, mask, annotations)
+        Returns:
+            images: Tensor or ndarray batch of images
+            masks: Tensor or ndarray batch of masks
+            annotations: List of annotation DataFrames
+        """
+
+        images, masks = zip(*batch)
+
+        # Handle empty batch
+        if len(images) == 0:
+            return torch.tensor([]), torch.tensor([]), []
+
+        # Convert to tensors if they aren't already
+        if isinstance(images[0], torch.Tensor):
+            images = torch.stack(images)
+            masks = torch.stack(masks)
+        else:
+            # Convert numpy arrays to tensors for consistency
+            images = torch.stack(
+                [
+                    torch.from_numpy(img) if isinstance(img, np.ndarray) else img
+                    for img in images
+                ]
+            )
+            masks = torch.stack(
+                [
+                    torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask
+                    for mask in masks
+                ]
+            )
+
+        return images, masks
