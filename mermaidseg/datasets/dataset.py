@@ -22,10 +22,10 @@ import requests
 import seaborn as sns
 import torch
 import tqdm
+from datasets import concatenate_datasets, load_dataset
 from mermaidseg.datasets.concepts import (
     initialize_benthic_concepts,
     initialize_benthic_hierarchy,
-    labels_to_concepts,
 )
 from mermaidseg.datasets.utils import create_annotation_mask, get_image_s3
 from numpy.typing import NDArray
@@ -43,15 +43,30 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         split (Optional[str]): Optional dataset split identifier (e.g., 'train', 'val', 'test').
         transform (Optional): Optional transformation function to apply to images.
         padding (Optional[int]): Padding value for point annotations of the segmentation mask.
+        class_subset (Optional[List[str]]): Optional list of benthic attribute names to filter the dataset.
+        num_classes (int): Number of unique benthic attribute classes in the dataset.
+        id2label (dict[int, str]): Mapping from class IDs to benthic attribute names
+        label2id (dict[str, int]): Mapping from benthic attribute names to class IDs
+        concept_mapping_flag (bool): Flag indicating whether to initialize concept mapping.
+        num_concepts (Optional[int]): Number of unique concepts in the dataset (if concept mapping is enabled).
+        id2concept (Optional[dict[int, str]]): Mapping from concept IDs to concept names (if concept mapping is enabled).
+        concept2id (Optional[dict[str, int]]): Mapping from concept names to concept IDs (if concept mapping is enabled).
+        benthic_concept_matrix (Optional[np.ndarray]): Benthic attribute to concept mapping matrix (if concept mapping is enabled).
+        conceptid2labelid (Optional[dict[int, int]]): Mapping from concept IDs to benthic attribute class IDs (if concept mapping is enabled).
     Args:
-        annotations_path (str, optional): S3 path to the Parquet file with annotations. Defaults to a preset path.
+        df_annotations (pd.DataFrame): DataFrame with all annotation data.
+        df_images (pd.DataFrame): DataFrame with unique image entries.
         split (Optional[str], optional): Dataset split identifier. Defaults to None.
         transform (Optional, optional): Transformation function for images. Defaults to None.
+        padding (Optional[int], optional): Padding value for point annotations of the segmentation mask. Defaults to None.
+        class_subset (Optional[List[str]], optional): Optional list of benthic attribute names to filter the dataset. Defaults to None.
+        concept_mapping_flag (bool, optional): Flag indicating whether to initialize concept mapping. Defaults to False.
     Methods:
         __len__(): Returns the number of annotation entries.
         __getitem__(idx): Retrieves the image at the given index, applies transformations, and returns it with a placeholder target.
         read_image(image_id): Abstract method to read an image given its ID. Must be implemented in subclasses.
         collate_fn(batch): Custom collate function to handle batching of images, masks, and annotations.
+        initialize_concept_mapping(): Initializes concept mapping attributes for the dataset.
     """
 
     df_annotations: pd.DataFrame
@@ -157,7 +172,6 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
             image = self.read_image(**row_kwargs)
         except Exception:
             return None, None, None
-        # column_name = "image_id" # This needs to be point_id for
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
             [
@@ -259,7 +273,7 @@ class MermaidDataset(BaseCoralDataset):
     """
     A PyTorch Dataset for loading MERMAID annotated coral reef images from a Parquet file stored on S3.
     This dataset reads image annotations from a Parquet file, retrieves images from S3, and applies optional transformations.
-    Each item returned is a tuple containing the image (as a tensor or ndarray) and a placeholder for the target (currently None).
+    Each item returned is a tuple containing the image (as a tensor or ndarray) and and the target.
     Attributes:
         annotations_path (str): Path to the Parquet file containing image annotations.
         source_bucket (str): S3 bucket name containing the dataset files.
@@ -267,6 +281,10 @@ class MermaidDataset(BaseCoralDataset):
     Args:
         annotations_path (str, optional): S3 path to the Parquet file with annotations. Defaults to a preset path.
         source_bucket (str, optional): S3 bucket name containing the dataset files. Defaults to "coral-reef-training".
+        **base_kwargs: Additional keyword arguments passed to the BaseCoralDataset constructor.
+    Methods:
+        load_annotations(annotations_path): Loads annotations from the specified Parquet file on S3.
+        read_image(image_id): Reads an image given its ID from S3.
     """
 
     annotations_path: str
@@ -318,11 +336,21 @@ class MermaidDataset(BaseCoralDataset):
 
 class CoralNetDataset(BaseCoralDataset):
     """
-    A PyTorch Dataset for loading annotated coral reef images from a CoralNet sources.
-    Each item returned is a tuple containing the image (as a tensor or ndarray) and a placeholder for the target (currently None).
+    A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file stored on S3.
+    This dataset reads image annotations from a Parquet file, retrieves images from S3, and applies optional transformations.
+    Each item returned is a tuple containing the image (as a tensor or ndarray) and and the target.
     Attributes:
+        annotations_path (str): Path to the Parquet file containing image annotations.
+        This is created by merging all annotations of CoralNet sources in a separate notebook /nbs/datasets/CoralNet_Annotations.ipynb.
+        source_bucket (str): S3 bucket name containing the dataset files.
+        s3 (boto3.client): Boto3 S3 client for accessing images.
     Args:
+        annotations_path (str, optional): S3 path to the Parquet file with annotations. Defaults to a preset path.
+        source_bucket (str, optional): S3 bucket name containing the dataset files. Defaults to "coral-reef-training".
+        **base_kwargs: Additional keyword arguments passed to the BaseCoralDataset constructor.
     Methods:
+        load_annotations(annotations_path): Loads annotations from the specified Parquet file on S3.
+        read_image(image_id): Reads an image given its ID from S3.
     """
 
     source_ids: List[Union[int, str]]
@@ -334,12 +362,14 @@ class CoralNetDataset(BaseCoralDataset):
 
     def __init__(
         self,
+        annotations_path="coralnet_annotations_30112025.parquet",
         source_bucket: str = "dev-datamermaid-sm-sources",
         source_s3_prefix: str = "coralnet-public-images",
         whitelist_sources: Optional[List[Union[int, str]]] = None,
         blacklist_sources: Optional[List[Union[int, str]]] = None,
         **base_kwargs,
     ):
+        self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
         self.s3 = boto3.client("s3")
@@ -379,9 +409,7 @@ class CoralNetDataset(BaseCoralDataset):
         """
         Load annotations from a Parquet file on S3.
         """
-        annotations_path = (
-            f"s3://{self.source_bucket}/coralnet_annotations_30112025.parquet"
-        )
+        annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         self.df_annotations = pd.read_parquet(annotations_path)
 
         self.df_annotations["benthic_attribute_name"] = self.df_annotations[
@@ -402,6 +430,9 @@ class CoralNetDataset(BaseCoralDataset):
         return self.df_annotations, self.df_images
 
     def read_image(self, image_id: str, source_id: str, **row_kwargs) -> NDArray[Any]:
+        """
+        Read an image given its ID from S3.
+        """
         key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
         image = np.array(
             get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB")
@@ -427,3 +458,227 @@ class CoralNetDataset(BaseCoralDataset):
             label["provider_id"]: label["benthic_attribute_name"] for label in labelset
         }
         return label_mapping
+
+
+class CoralscapesDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
+    """
+    A PyTorch Dataset for loading Coralscapes annotated coral reef images from the Hugging Face Datasets library and mapping them to specified MERMAID classes.
+    This dataset reads image annotations from the Coralscapes dataset, retrieves images, and applies optional transformations.
+    Each item returned is a tuple containing the image (as a tensor or ndarray) and and the target.
+    Attributes:
+        split (Optional[str]): Optional dataset split identifier (e.g., 'train', 'val', 'test').
+        transform (Optional): Optional transformation function to apply to images.
+        padding (Optional[int]): Padding value for point annotations of the segmentation mask.
+        class_subset (Optional[List[str]]): Optional list of benthic attribute names to filter the dataset.
+        num_classes (int): Number of unique benthic attribute classes in the dataset.
+        id2label (dict[int, str]): Mapping from class IDs to benthic attribute names
+        label2id (dict[str, int]): Mapping from benthic attribute names to class IDs
+        concept_mapping_flag (bool): Flag indicating whether to initialize concept mapping.
+        num_concepts (Optional[int]): Number of unique concepts in the dataset (if concept mapping is enabled).
+        id2concept (Optional[dict[int, str]]): Mapping from concept IDs to concept names (if concept mapping is enabled).
+        concept2id (Optional[dict[str, int]]): Mapping from concept names to concept IDs (if concept mapping is enabled).
+        benthic_concept_matrix (Optional[np.ndarray]): Benthic attribute to concept mapping matrix (if concept mapping is enabled).
+        conceptid2labelid (Optional[dict[int, int]]): Mapping from concept IDs to benthic attribute class IDs (if concept mapping is enabled).
+    """
+
+    split: Optional[str]
+    transform: Optional[A.BasicTransform]
+    padding: Optional[int]
+    class_subset: Optional[List[str]]
+    num_classes: int
+    id2label: dict[int, str]
+    label2id: dict[str, int]
+    concept_mapping_flag: bool = False
+    num_concepts: Optional[int] = None
+    id2concept: Optional[dict[int, str]] = None
+    concept2id: Optional[dict[str, int]] = None
+    benthic_concept_matrix: Optional[np.ndarray] = None
+    conceptid2labelid: Optional[dict[int, int]] = None
+
+    def __init__(
+        self,
+        split: Optional[str] = None,
+        transform: Optional[A.BasicTransform] = None,
+        class_subset: Optional[List[str]] = None,
+        concept_mapping_flag: bool = False,
+    ):
+
+        self.split = split
+        self.transform = transform
+        self.class_subset = class_subset
+        self.concept_mapping_flag = concept_mapping_flag
+
+        self.dataset = load_dataset("EPFL-ECEO/coralscapes")
+
+        if self.split is not None:
+            self.dataset = self.dataset[self.split]
+        else:
+            self.dataset = concatenate_datasets(
+                [
+                    self.dataset["train"],
+                    self.dataset["validation"],
+                    self.dataset["test"],
+                ]
+            )
+
+        if self.class_subset is not None:
+            self.num_classes = len(self.class_subset) + 1  # +1 for background
+            self.id2label = {
+                i: attribute for i, attribute in enumerate(self.class_subset, start=1)
+            }
+            self.label2id = {v: k for k, v in self.id2label.items()}
+
+        self.labelmapping = self.initialize_coralscapes_mapping()
+
+        if concept_mapping_flag:
+            self.initialize_concept_mapping()
+
+    def initialize_coralscapes_mapping(self):
+        """
+        Initialize the label mapping between the Coralscapes 39-class dataset and MERMAID.
+        """
+        id2label_coralscapes = {
+            "1": "seagrass",
+            "2": "trash",
+            "3": "other coral dead",
+            "4": "other coral bleached",
+            "5": "sand",
+            "6": "other coral alive",
+            "7": "human",
+            "8": "transect tools",
+            "9": "fish",
+            "10": "algae covered substrate",
+            "11": "other animal",
+            "12": "unknown hard substrate",
+            "13": "background",
+            "14": "dark",
+            "15": "transect line",
+            "16": "massive/meandering bleached",
+            "17": "massive/meandering alive",
+            "18": "rubble",
+            "19": "branching bleached",
+            "20": "branching dead",
+            "21": "millepora",
+            "22": "branching alive",
+            "23": "massive/meandering dead",
+            "24": "clam",
+            "25": "acropora alive",
+            "26": "sea cucumber",
+            "27": "turbinaria",
+            "28": "table acropora alive",
+            "29": "sponge",
+            "30": "anemone",
+            "31": "pocillopora alive",
+            "32": "table acropora dead",
+            "33": "meandering bleached",
+            "34": "stylophora alive",
+            "35": "sea urchin",
+            "36": "meandering alive",
+            "37": "meandering dead",
+            "38": "crown of thorn",
+            "39": "dead clam",
+        }
+        coralscapes_39_to_mermaid = {
+            "human": ["Unknown"],
+            "background": ["Unknown", "Obscured"],
+            "fish": ["Unknown"],
+            "sand": ["Sand"],
+            "rubble": ["Rubble"],
+            "unknown hard substrate": ["Bare substrate"],
+            "algae covered substrate": ["Turf algae"],
+            "dark": ["Unknown"],
+            "branching bleached": ["Bleached coral"],
+            "branching dead": ["Dead coral"],
+            "branching alive": ["Hard coral"],
+            "stylophora alive": ["Stylophora"],
+            "pocillopora alive": ["Pocillopora"],
+            "acropora alive": ["Acropora"],
+            "table acropora alive": ["Acropora"],
+            "table acropora dead": ["Dead coral"],
+            "millepora": ["Milleporidae"],
+            "turbinaria": ["Turbinaria reniformis"],
+            "other coral": ["Bleached coral"],
+            "other coral dead": ["Dead coral"],
+            "other coral alive": [
+                "Hard coral"
+            ],  # Not fully correct as it can include soft corals but no specific mapping available
+            "other coral bleached": ["Bleached coral"],  # Newly added
+            "massive/meandering alive": ["Hard coral"],
+            "massive/meandering dead": ["Dead coral"],
+            "massive/meandering bleached": ["Bleached coral"],
+            "meandering alive": ["Hard coral"],
+            "meandering dead": ["Dead coral"],
+            "meandering bleached": ["Bleached coral"],
+            "transect line": ["Tape"],
+            "transect tools": ["Unknown"],
+            "sea urchin": ["Sea urchin"],
+            "sea cucumber": ["Sea cucumber"],
+            "anemone": ["Anemone"],
+            "sponge": ["Sponge"],
+            "clam": ["Tridacna giant clam"],
+            "other animal": ["Other invertebrates"],
+            "trash": ["Trash"],
+            "seagrass": ["Seagrass"],
+            "crown of thorn": ["Acanthaster planci"],
+            "dead clam": ["Unknown"],
+        }
+        if self.class_subset is None:
+            self.class_subset = set(
+                [
+                    mermaid_class[0]
+                    for mermaid_class in coralscapes_39_to_mermaid.values()
+                ]
+            )
+            self.id2label = {
+                i: label for i, label in enumerate(sorted(self.class_subset), start=1)
+            }
+            self.label2id = {label: i for i, label in self.id2label.items()}
+        id_coralscapes_to_mermaid = {
+            int(k): self.label2id.get(coralscapes_39_to_mermaid[v][0], 0)
+            for k, v in id2label_coralscapes.items()
+        }
+        id_coralscapes_to_mermaid[0] = (
+            0  # Adding mapping for background / unlabeled class
+        )
+
+        return id_coralscapes_to_mermaid
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> Tuple[Union[torch.Tensor, NDArray[Any]], Any]:
+        image, mask = np.array(self.dataset[idx]["image"]), self.dataset[idx]["label"]
+        mask = np.vectorize(self.labelmapping.get)(mask)
+
+        if self.transform:
+            transformed = self.transform(image=image, mask=mask)
+            image = transformed["image"].transpose(2, 0, 1)
+            mask = transformed["mask"]
+
+        return image, mask
+
+    def initialize_concept_mapping(self):
+        """
+        Initialize concept mapping attributes for the dataset.
+        Sets up the mapping between benthic attributes and concepts based on a predefined hierarchy.
+        """
+        hierarchy_dict = initialize_benthic_hierarchy()
+        class_set = list(self.id2label.values())
+        benthic_concept_set, benthic_concept_matrix = initialize_benthic_concepts(
+            class_set, hierarchy_dict
+        )
+        self.num_concepts = len(benthic_concept_set)
+        self.id2concept = {
+            i: attribute for i, attribute in enumerate(benthic_concept_set, start=1)
+        }
+        self.concept2id = {v: k for k, v in self.id2concept.items()}
+        self.benthic_concept_matrix = benthic_concept_matrix
+        self.conceptid2labelid = {}
+        for ind, label in self.id2label.items():
+            col_ind = int(
+                np.where(
+                    self.benthic_concept_matrix.columns.get_level_values("concept")
+                    == label
+                )[0][0]
+            )
+            self.conceptid2labelid[col_ind] = ind
