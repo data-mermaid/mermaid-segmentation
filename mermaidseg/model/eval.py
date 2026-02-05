@@ -131,21 +131,21 @@ class Evaluator:
             labels = labels.long().to(self.device)
             outputs, concept_outputs = meta_model.batch_predict(inputs)
 
-            if meta_model.training_mode in ("concept"):
-                concept_labels = labels_to_concepts(labels, meta_model.concept_matrix)
-                # print(concept_labels)
-                # print(concept_labels.shape, concept_labels.dtype)
-                # concept_labels = postprocess_predicted_concepts(
-                #         concept_labels, meta_model.concept_matrix, meta_model.conceptid2labelid,
-                #     )
-                # concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
-                # metric.update(outputs, concept_labels)
-            else:
-                if outputs.ndim > 3:
-                    outputs = outputs.argmax(dim=1)
-                ## Update metrics
-                for metric in self.metric_dict.values():
-                    metric.update(outputs, labels)
+            # if meta_model.training_mode in ("concept"):
+            #     concept_labels = labels_to_concepts(labels, meta_model.concept_matrix)
+            #     # print(concept_labels)
+            #     # print(concept_labels.shape, concept_labels.dtype)
+            #     # concept_labels = postprocess_predicted_concepts(
+            #     #         concept_labels, meta_model.concept_matrix, meta_model.conceptid2labelid,
+            #     #     )
+            #     # concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
+            #     # metric.update(outputs, concept_labels)
+            # else:
+            if outputs.ndim > 3:
+                outputs = outputs.argmax(dim=1)
+            ## Update metrics
+            for metric in self.metric_dict.values():
+                metric.update(outputs, labels)
 
             if meta_model.training_mode in ("concept-bottleneck", "concept"):
                 ## Update metrics
