@@ -7,11 +7,19 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 
 ```
 ├── nbs/ # Jupyter notebooks
-    ├── Model_Run.ipynb # Notebook used to train end-to-end image segmentation models for a given dataset and configuration file
+    ├── Base_Pipeline.ipynb # Notebook used to train end-to-end (non-concept) image segmentation models for a given dataset and configuration file
+    ├── Concept_Bottleneck_Pipeline.ipynb # Notebook used to train end-to-end concept-bottleneck image segmentation models for a given dataset and configuration file
     ├── Model_Evaluation.ipynb # Notebook containing the code to quantitatively and qualitatively analyze the trained segmentation models 
+    ├── datasets/
+        ├── Dataset_Exploration.ipynb # Shows usage of currently implemented dataset classes and concept mapping
+        ├── CoralNet_Annotations.ipynb # Notebook on how to map extracted CoralNet sources to a datasets readable format (not that relevant for now)
+    ├── nb_experiments/
+        ├── Time_Test.ipynb # Data I/O timing tests
+        
 ├── mermaidseg/
     ├── datasets # Contains scripts related to dataset loading, preprocessing and data augmentations.
-        ├── dataset.py # Contains dataset classes that can be used to acquire and load coral data, including images and annotations. Currently includes the MermaidDataset and CoralNetDataset classes.
+        ├── dataset.py # Contains dataset classes that can be used to acquire and load coral data, including images and annotations. Currently includes the MermaidDataset, CoralNetDataset and CoralscapesDataset classes.
+        ├── concepts.py # Contains functionality related to working with concepts
         ├── utils.py # Contains utility functions related to datasets 
     ├── model # Contains everything related to training and evaluating segmentation models.
         ├── models.py # Contains the different model implementations
@@ -22,6 +30,7 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
     ├── io.py # Contains config & args set ups
     ├── logger.py # Contains classes & functions related to logging training with MLFlow and saving checkpoints & results
     └── visualization.py # Functions related to the visualization of images based on different criteria
+
 ├── configs/ # Configuration files for different runs/models
 └── .gitignore 
 └── .environment.yml # Environment for setup with conda/micromamba
@@ -41,9 +50,8 @@ Install locally:
 ```bash
 git clone https://github.com/your-org/mermaid-segmentation.git
 cd mermaid-segmentation
-python -m venv .venv
-source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -e .
+# Then pip install any additional libraries required from the environment.yml file, depending on use case. 
 ```
 
 ### Dataset
@@ -95,6 +103,6 @@ plt.show()
 ```
 
 ### Segmentation Models
-To train segmentation models using a specified config file one can use the `nbs/Model_Run.ipynb` notebook or run the corresponding script using ```python scripts/train.py`.
+To train segmentation models using a specified config file one can use the `nbs/Base_Pipeline.ipynb` or `nbs/Concept_Bottleneck_Pipeline.ipynb` notebooks.
 
 To evaluate any trained segmentation model, you can use the notebook `nbs/Model_Evaluation.ipynb` which contains both quantitative performance analyses through dataset level performance metrics and qualitative analyses by visualizing model results and corresponding class probabilities. 
