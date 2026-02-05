@@ -629,6 +629,7 @@ class CoralscapesDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]])
                 i: label for i, label in enumerate(sorted(self.class_subset), start=1)
             }
             self.label2id = {label: i for i, label in self.id2label.items()}
+            self.num_classes = len(self.class_subset) + 1  # +1 for background
         id_coralscapes_to_mermaid = {
             int(k): self.label2id.get(coralscapes_39_to_mermaid[v][0], 0)
             for k, v in id2label_coralscapes.items()
