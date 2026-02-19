@@ -44,15 +44,50 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 
 Prerequisites
 - Python 3.11+
-- AWS credentials configured (to from S3)
+- AWS credentials configured with `mermaid-core` profile (for S3 access)
+- Hugging Face account and token (for DINOv3 models; see [Hugging Face Setup](#hugging-face-setup) below)
+- uv (recommended) or pip
 
-Install locally:
+**Quick setup with uv** (recommended):
+```bash
+git clone https://github.com/your-org/mermaid-segmentation.git
+cd mermaid-segmentation
+
+# Install uv if needed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Configure AWS access
+aws configure --profile mermaid-core
+echo "AWS_PROFILE=mermaid-core" >> .env
+
+# Configure Hugging Face (required for DINOv3 models)
+hf auth login
+# Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
+
+# Install dependencies
+uv sync
+
+```
+
+**Traditional setup**:
 ```bash
 git clone https://github.com/your-org/mermaid-segmentation.git
 cd mermaid-segmentation
 pip install -e .
-# Then pip install any additional libraries required from the environment.yml file, depending on use case. 
+# Then pip install any additional libraries required from the environment.yml file, depending on use case.
 ```
+
+
+### Hugging Face Setup
+
+DINOv3 models (e.g. `facebook/dinov3-vitb16-pretrain-lvd1689m`) are gated on Hugging Face and require authentication:
+
+1. **Request access**: Visit the [model page](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m), sign in, and accept the license to request access.
+2. **Authenticate** using one of these methods:
+   - **CLI login** (recommended): Run `hf auth login` and paste your token when prompted.
+   - **Environment variable**: Add `HF_TOKEN=hf_xxxxxxxxxxxx` to your `.env` file (create from `.env.example`). Create a token at [hf.co/settings/tokens](https://hf.co/settings/tokens).
+
+If using `.env` with direnv, ensure you run `direnv allow` and restart the Jupyter kernel so it picks up the token.
 
 ### Dataset
 In order to access and traverse through MERMAID data we can use the code within the mermaidseg codebase, starting with the `MermaidDataset` class, which already includes the functionality allowing for ML research.

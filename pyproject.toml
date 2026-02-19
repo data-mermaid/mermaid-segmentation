@@ -6,6 +6,69 @@ build-backend = "setuptools.build_meta"
 name = "mermaidseg"
 version = "0.1.0"
 description = "A package for the segmentation of MERMAID coral data."
+requires-python = ">=3.11"
+dependencies = [
+    "albumentations",
+    "boto3",
+    "numpy>=1.24,<2",
+    "pandas",
+    "pillow",
+    "requests",
+    "torch>=2.0,<2.3",
+    "transformers",
+    "datasets",
+    "s3fs",
+    "segmentation-models-pytorch",
+    "wandb",
+    "pyyaml",
+    "tqdm",
+    "torchmetrics",
+    "anytree",
+    "openpyxl",
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
+    "huggingface-hub>=0.36.2",
+    "seaborn>=0.13.2",
+]
+
+[project.optional-dependencies]
+notebooks = [
+    "jupyter",
+    "ipykernel",
+    "ipywidgets",
+]
+scraping = [
+    "selenium",
+    "webdriver-manager",
+]
+
+[dependency-groups]
+tests = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+]
+lint = [
+    "ruff>=0.6.0",
+    "pre-commit>=3.0",
+]
+docs = [
+    "sphinx>=7.0",
+    "pydata-sphinx-theme>=0.15",
+]
 
 [tool.setuptools]
-packages = { find = { where = ["."] } }
+packages = { find = { where = ["."], include = ["mermaidseg*"] } }
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mermaidseg"]
+
+[tool.ruff.format]
+quote-style = "double"
