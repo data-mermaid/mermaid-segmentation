@@ -1,0 +1,123 @@
+name: Ask
+description: Describe and refine problem statement and proposed solution
+title: "[Ask] "
+labels: ["ask"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to define the problem you are trying to solve and outline the proposed solution architecture.
+
+  - type: textarea
+    id: problem-statement
+    attributes:
+      label: Problem Statement
+      description: Describe the problem you are trying to solve.
+      placeholder: What problem needs to be addressed?
+    validations:
+      required: true
+
+  - type: textarea
+    id: desired-outcome
+    attributes:
+      label: Desired Outcome
+      description: Describe what outcome will be enabled if successful. What about the existing process will change as a result of your success? How will it change?
+      placeholder: What will success look like?
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-state
+    attributes:
+      label: Current State
+      description: Describe the current state and its shortcomings. Why does this need to change?
+      placeholder: What is the current situation and why is it inadequate?
+
+  - type: textarea
+    id: success-criteria
+    attributes:
+      label: Success Criteria
+      description: Describe what requirements need to be met in order to consider the project a success.
+      placeholder: What needs to be achieved?
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: |
+        To the extent possible, estimate the impact of project if successful.
+        How much of an improvement do you need for this to be valuable?
+      placeholder: Quantify the expected impact
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Metrics
+      description: |
+        Describe the metrics you will use to measure success.
+        - Be specific in how a metric is defined for the purpose of this problem
+        - This may contain a combination of business metrics and technical metrics
+        - This should also include metrics that we wish to balance against our primary metric
+      placeholder: |
+        - Primary metric: ...
+        - Secondary metrics: ...
+        - Balancing metrics: ...
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Describe any constraints that the solution must consider.
+      placeholder: Time, budget, technical, regulatory, or other constraints
+
+  - type: textarea
+    id: solution-architecture
+    attributes:
+      label: Solution Architecture
+      description: Describe or link to the solution architecture documentation.
+      placeholder: Link to docs/solution-architecture.md or describe the proposed approach
+
+  - type: textarea
+    id: data-requirements
+    attributes:
+      label: Data Requirements
+      description: |
+        List datasets needed and link to data acquisition or creation issues.
+        Link to datasets from repo or existing data catalog.
+      placeholder: |
+        - Dataset 1: [description] (#issue-number)
+        - Dataset 2: [description] (#issue-number)
+
+  - type: textarea
+    id: exploration
+    attributes:
+      label: Understanding and Exploration
+      description: Link to explore issues and docs/notebooks/knowledge base that inform your solution.
+      placeholder: |
+        - Exploration #1: ...
+        - Related notebook: ...
+
+  - type: textarea
+    id: experiments
+    attributes:
+      label: Approaches and Experiments
+      description: Link to experiment issues.
+      placeholder: |
+        - Experiment #1: ...
+        - Experiment #2: ...
+
+  - type: textarea
+    id: background
+    attributes:
+      label: Background Information
+      description: Link to docs or sources with relevant research, examples, documents, etc. from internal or external sources.
+      placeholder: Links to relevant background materials
+
+  - type: textarea
+    id: related-projects
+    attributes:
+      label: Related Projects
+      description: Link to any related projects or repos that you found during research portion of project.
+      placeholder: Links to related work

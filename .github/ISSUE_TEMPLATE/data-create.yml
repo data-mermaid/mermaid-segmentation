@@ -1,0 +1,73 @@
+name: Create Dataset
+description: Describe dataset to be created and acceptance criteria
+title: "Create [name] Dataset"
+labels: ["data"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to document the creation of a new dataset derived from existing sources.
+
+  - type: input
+    id: dataset-name
+    attributes:
+      label: Dataset Name
+      description: Give your new dataset a descriptive name.
+      placeholder: my_processed_dataset
+    validations:
+      required: true
+
+  - type: textarea
+    id: dataset-description
+    attributes:
+      label: Dataset Description
+      description: Explain what information this dataset represents and why this representation of the data is useful.
+      placeholder: This dataset contains...
+    validations:
+      required: true
+
+  - type: textarea
+    id: parent-sources
+    attributes:
+      label: Parent Sources
+      description: |
+        List all data sources used as input to create the new dataset. 
+        Link to reference in repo and/or data catalogue.
+      placeholder: |
+        - Parent dataset 1: ...
+        - Parent dataset 2: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: transformation-logic
+    attributes:
+      label: Transformation Logic
+      description: Describe how the parent sources are transformed to create this dataset.
+      placeholder: |
+        - Join datasets on...
+        - Filter for...
+        - Aggregate by...
+
+  - type: textarea
+    id: reference
+    attributes:
+      label: Reference
+      description: Link to data dictionary, description document, and/or data catalog entry (if applicable).
+      placeholder: Link to documentation
+
+  - type: textarea
+    id: known-issues
+    attributes:
+      label: Known Issues
+      description: |
+        List any known issues associated with creating this dataset. 
+        Once complete, make sure to update the docs to note key issues.
+      placeholder: Known challenges, limitations, or caveats
+
+  - type: textarea
+    id: ask-reference
+    attributes:
+      label: Related Ask Issue
+      description: Link to the Ask issue this dataset creation supports.
+      placeholder: "#issue-number"

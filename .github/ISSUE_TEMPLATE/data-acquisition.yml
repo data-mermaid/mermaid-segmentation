@@ -1,0 +1,61 @@
+name: Data Acquisition
+description: Describe data requirements for provisioning an existing data set
+title: "Get [name] Dataset"
+labels: ["data"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to request access to or retrieval of an existing dataset.
+
+  - type: textarea
+    id: dataset-description
+    attributes:
+      label: Dataset Description
+      description: |
+        Explain what data you need and why. Be as specific as possible. This will allow the team retrieving the data to focus their efforts and decrease the time to deliver the dataset.
+        
+        Include details such as:
+        - Sample size needed
+        - Date range required
+        - Columns required (if known)
+        - Specific subsets needed (line of business, type of customer, etc)
+      placeholder: Describe the data you need and the specific requirements
+    validations:
+      required: true
+
+  - type: textarea
+    id: source-system
+    attributes:
+      label: Source System
+      description: |
+        If you know where the data is sourced from, list it here. 
+        If you know the specific schema/table/collection, specify it here.
+      placeholder: |
+        Source: ...
+        Schema/Table: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reference
+    attributes:
+      label: Reference
+      description: If there is a data catalogue entry or existing data dictionary for this dataset, link to it here.
+      placeholder: Link to data catalog or data dictionary
+
+  - type: textarea
+    id: known-issues
+    attributes:
+      label: Known Issues
+      description: |
+        Describe known issues with the dataset pertinent to this problem. 
+        Once a solution is determined, you should update the docs based on what you find.
+      placeholder: Any known data quality issues, limitations, or gotchas
+
+  - type: textarea
+    id: ask-reference
+    attributes:
+      label: Related Ask Issue
+      description: Link to the Ask issue this data acquisition supports.
+      placeholder: "#issue-number"

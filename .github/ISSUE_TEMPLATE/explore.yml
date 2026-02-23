@@ -1,0 +1,66 @@
+name: Explore
+description: Publish results of exploration to expand knowledge and understanding about the data to solve the problem
+title: "[Explore] "
+labels: ["explore"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to document data exploration efforts and discoveries.
+
+  - type: textarea
+    id: overview
+    attributes:
+      label: Overview
+      description: Description of the scope of your exploration including relevant datasets and problem of interest.
+      placeholder: This exploration investigates...
+    validations:
+      required: true
+
+  - type: textarea
+    id: goals
+    attributes:
+      label: Goals
+      description: List the questions you plan to answer during this exploration.
+      placeholder: |
+        - [ ] Question 1
+        - [ ] Question 2
+        - [ ] Question 3
+    validations:
+      required: true
+
+  - type: textarea
+    id: discoveries
+    attributes:
+      label: What was discovered during this exploration?
+      description: Describe the overall content of your exploration effort. For each key insight, briefly describe what you uncovered and link to artifacts (notebooks, visualizations, etc.).
+      placeholder: |
+        ### Discovery 1
+        Brief description of insight. [Link to artifact]
+        
+        ### Discovery 2
+        Brief description of insight. [Link to artifact]
+
+  - type: textarea
+    id: next-steps
+    attributes:
+      label: Next Steps
+      description: What are the next actions you will take as a result of what you discovered?
+      placeholder: |
+        - Create experiment to test...
+        - Acquire additional data for...
+        - Further explore...
+
+  - type: textarea
+    id: data-reference
+    attributes:
+      label: Related Data Issues
+      description: Link to the data acquisition or creation issues that provided the datasets for this exploration.
+      placeholder: "#issue-number, #issue-number"
+
+  - type: textarea
+    id: ask-reference
+    attributes:
+      label: Related Ask Issue
+      description: Link to the Ask issue this exploration supports.
+      placeholder: "#issue-number"

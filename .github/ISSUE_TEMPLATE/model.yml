@@ -1,0 +1,79 @@
+name: Model
+description: Productionalize model and prepare for deployment
+title: "Implement [name] model"
+labels: ["model"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to document model productionalization and deployment preparation.
+
+  - type: textarea
+    id: ask-reference
+    attributes:
+      label: Ask Reference
+      description: Link to the Ask issue this model addresses.
+      placeholder: "#issue-number"
+    validations:
+      required: true
+
+  - type: textarea
+    id: experiment-reference
+    attributes:
+      label: Based on Experiment
+      description: Link to the experiment issue this model was created from.
+      placeholder: "#issue-number"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe what your model is doing and how you intend to deploy it.
+      placeholder: This model predicts... and will be deployed as...
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation-steps
+    attributes:
+      label: Implementation Steps
+      description: |
+        Capture the steps necessary to productionalize model. Create and link issues as appropriate.
+        This is a great place to start adding automated tests.
+      placeholder: |
+        - [ ] Parametrize model inputs and parameters
+        - [ ] Define and create API schema for model consumption
+        - [ ] Profile model performance characteristics
+        - [ ] Create unit tests
+        - [ ] Create integration tests
+        - [ ] Set up monitoring and logging
+        - [ ] Document model usage
+
+  - type: textarea
+    id: deployment-plan
+    attributes:
+      label: Deployment Plan
+      description: Describe how the model will be deployed and integrated into production systems.
+      placeholder: |
+        - Deployment method: ...
+        - Infrastructure: ...
+        - Rollout strategy: ...
+
+  - type: textarea
+    id: monitoring
+    attributes:
+      label: Monitoring and Maintenance
+      description: Describe how model performance will be monitored and maintained.
+      placeholder: |
+        - Performance metrics to track: ...
+        - Alerting thresholds: ...
+        - Retraining strategy: ...
+
+  - type: textarea
+    id: documentation
+    attributes:
+      label: Documentation
+      description: Link to or describe model documentation (model card, API docs, usage examples).
+      placeholder: Links to documentation
