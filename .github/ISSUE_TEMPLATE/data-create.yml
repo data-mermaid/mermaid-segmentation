@@ -31,7 +31,7 @@ body:
     attributes:
       label: Parent Sources
       description: |
-        List all data sources used as input to create the new dataset. 
+        List all data sources used as input to create the new dataset.
         Link to reference in repo and/or data catalogue.
       placeholder: |
         - Parent dataset 1: ...
@@ -61,7 +61,7 @@ body:
     attributes:
       label: Known Issues
       description: |
-        List any known issues associated with creating this dataset. 
+        List any known issues associated with creating this dataset.
         Once complete, make sure to update the docs to note key issues.
       placeholder: Known challenges, limitations, or caveats
 

@@ -14,7 +14,7 @@ body:
       label: Dataset Description
       description: |
         Explain what data you need and why. Be as specific as possible. This will allow the team retrieving the data to focus their efforts and decrease the time to deliver the dataset.
-        
+
         Include details such as:
         - Sample size needed
         - Date range required
@@ -29,7 +29,7 @@ body:
     attributes:
       label: Source System
       description: |
-        If you know where the data is sourced from, list it here. 
+        If you know where the data is sourced from, list it here.
         If you know the specific schema/table/collection, specify it here.
       placeholder: |
         Source: ...
@@ -49,7 +49,7 @@ body:
     attributes:
       label: Known Issues
       description: |
-        Describe known issues with the dataset pertinent to this problem. 
+        Describe known issues with the dataset pertinent to this problem.
         Once a solution is determined, you should update the docs based on what you find.
       placeholder: Any known data quality issues, limitations, or gotchas
 

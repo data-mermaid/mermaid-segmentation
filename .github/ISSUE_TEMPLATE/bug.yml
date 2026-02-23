@@ -53,9 +53,9 @@ body:
         - Python version: [e.g., 3.11.5]
         - Package versions: [e.g., torch==2.1.0]
       value: |
-        - OS: 
-        - Python version: 
-        - Package versions: 
+        - OS:
+        - Python version:
+        - Package versions:
 
   - type: textarea
     id: error-logs
