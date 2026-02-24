@@ -109,16 +109,12 @@ class ConceptHead(torch.nn.Module):
         classifier (torch.nn.Conv2d): 1x1 convolution layer for classification.
     """
 
-    def __init__(
-        self, in_channels: int, token_width: int, token_height: int, num_concepts: int
-    ):
+    def __init__(self, in_channels: int, token_width: int, token_height: int, num_concepts: int):
         super().__init__()
         self.in_channels = in_channels
         self.width = token_width
         self.height = token_height
-        self.concept_classifier = torch.nn.Conv2d(
-            in_channels, num_concepts, kernel_size=1
-        )
+        self.concept_classifier = torch.nn.Conv2d(in_channels, num_concepts, kernel_size=1)
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
         """
@@ -163,9 +159,7 @@ class Segformer(torch.nn.Module):
             Unfreezes the encoder layers to allow them to be updated during training.
     """
 
-    def __init__(
-        self, encoder_name: str = "nvidia/mit-b2", num_classes: int = 2, **kwargs: Any
-    ):
+    def __init__(self, encoder_name: str = "nvidia/mit-b2", num_classes: int = 2, **kwargs: Any):
         """
         Initializes the semantic segmentation model with a specified encoder and number of classes.
         Args:
@@ -185,12 +179,10 @@ class Segformer(torch.nn.Module):
         # )
         self.model = SegformerForSemanticSegmentation.from_pretrained(
             encoder_name,
-            id2label={
-                i: i for i in range(0, num_classes)
-            },  # do we need a plus one here
+            id2label={i: i for i in range(0, num_classes)},  # do we need a plus one here
             semantic_loss_ignore_index=0,
             ignore_mismatched_sizes=True,
-            **kwargs
+            **kwargs,
         )
         # self.freeze_encoder()  # Freeze the backbone - should this be done by default
 
@@ -256,7 +248,7 @@ class LinearDINOv2(torch.nn.Module):
         encoder_name: str = "facebook/dinov2-base",
         num_classes: int = 2,
         input_size: tuple[int, int] = (518, 518),
-        **kwargs: Any
+        **kwargs: Any,
     ):
         """
         Initializes the semantic segmentation model with a specified encoder and number of classes.
@@ -362,7 +354,7 @@ class LinearDINOv3(torch.nn.Module):
         encoder_name: str = "facebook/dinov3-vits16-pretrain-lvd1689m",
         num_classes: int = 2,
         input_size: tuple[int, int] = (512, 512),
-        **kwargs: Any
+        **kwargs: Any,
     ):
         """
         Initializes the semantic segmentation model with a specified encoder and number of classes.
@@ -380,9 +372,7 @@ class LinearDINOv3(torch.nn.Module):
         super().__init__()
 
         token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
-        self.encoder = AutoModel.from_pretrained(
-            encoder_name, token=token, **kwargs
-        )
+        self.encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
         # Assuming hidden_size=768 for dinov2-base, adjust as needed
         hidden_size = self.encoder.config.hidden_size
         patch_size = self.encoder.config.patch_size
@@ -471,7 +461,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         num_classes: int = 2,
         num_concepts: int = 2,
         input_size: tuple[int, int] = (512, 512),
-        **kwargs: Any
+        **kwargs: Any,
     ):
         """
         Initializes the semantic segmentation model with a specified encoder and number of classes.
@@ -489,9 +479,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         super().__init__()
 
         token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
-        self.encoder = AutoModel.from_pretrained(
-            encoder_name, token=token, **kwargs
-        )
+        self.encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
         # Assuming hidden_size=768 for dinov2-base, adjust as needed
         hidden_size = self.encoder.config.hidden_size
         patch_size = self.encoder.config.patch_size
@@ -500,9 +488,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         self.concept_head = LinearClassifier(
             hidden_size, self.token_width, self.token_height, num_concepts
         )  # The tokenW and tokenH are calculated based on input_size and patch_size
-        self.concept_classifier = torch.nn.Conv2d(
-            num_concepts, num_classes, kernel_size=1
-        )
+        self.concept_classifier = torch.nn.Conv2d(num_concepts, num_classes, kernel_size=1)
         # self.freeze_encoder()  # Freeze the backbone - should this be done by default
 
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> torch.Tensor:
@@ -538,9 +524,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         #     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=0)
         #     loss = loss_fct(logits.squeeze(), labels.squeeze())
 
-        return SemanticSegmenterOutput(
-            loss=loss, logits=logits, hidden_states=concept_logits
-        )
+        return SemanticSegmenterOutput(loss=loss, logits=logits, hidden_states=concept_logits)
 
     def freeze_encoder(self) -> None:
         """

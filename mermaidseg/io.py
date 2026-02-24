@@ -97,9 +97,7 @@ def _load_csv_if_path(value: Any, header: int | None = 0) -> Any:
     return value
 
 
-def setup_config(
-    config_path: str | None = None, config_base_path: str = "configs/base.yaml"
-):
+def setup_config(config_path: str | None = None, config_base_path: str = "configs/base.yaml"):
     """
     Set up configuration by loading and merging base and custom config files.
     This function loads a base configuration file and optionally merges it with
@@ -136,15 +134,9 @@ def setup_config(
 
     if "whitelist_sources" in cfg.data.keys():
         cfg.data.whitelist_sources = _load_csv_if_path(cfg.data.whitelist_sources)
-        cfg.data.whitelist_sources.train = _load_csv_if_path(
-            cfg.data.whitelist_sources.train
-        )
-        cfg.data.whitelist_sources.val = _load_csv_if_path(
-            cfg.data.whitelist_sources.val
-        )
-        cfg.data.whitelist_sources.test = _load_csv_if_path(
-            cfg.data.whitelist_sources.test
-        )
+        cfg.data.whitelist_sources.train = _load_csv_if_path(cfg.data.whitelist_sources.train)
+        cfg.data.whitelist_sources.val = _load_csv_if_path(cfg.data.whitelist_sources.val)
+        cfg.data.whitelist_sources.test = _load_csv_if_path(cfg.data.whitelist_sources.test)
     if "blacklist_sources" in cfg.data.keys():
         cfg.data.blacklist_sources = _load_csv_if_path(cfg.data.blacklist_sources)
 

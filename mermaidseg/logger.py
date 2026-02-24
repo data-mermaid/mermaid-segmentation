@@ -15,7 +15,6 @@ from typing import Any
 
 try:
     import mlflow
-    from mlflow.models import infer_signature
 
     MLFLOW_IMPORT_ERROR = None
 except ImportError as err:
@@ -74,10 +73,10 @@ def mlflow_connect(uri=URI) -> timedelta:
             raise RuntimeError(
                 "Could not connect to the MLflow tracking server."
                 " Is the tracking server up and running?"
-            )
+            ) from e
         # If it's some other kind of MlflowException, just re-raise
         # for debugging purposes.
-        raise e
+        raise
 
     time_after_connect = datetime.now()
     return time_after_connect - time_before_connect
@@ -236,7 +235,9 @@ class Logger:
         if hasattr(meta_model_run, "scheduler"):
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
-        model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_{timestamp}"
+        model_path = (
+            f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_{timestamp}"
+        )
         if epoch % self.log_checkpoint == 0:
             model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
 

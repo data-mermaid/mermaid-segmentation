@@ -24,11 +24,11 @@ from mermaidseg.model.meta import MetaModel
 def train_model(
     meta_model: MetaModel,
     evaluator: Evaluator,
-    train_loader: DataLoader[
-        tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
-    ],
-    val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]] | None = None,
-    test_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]] | None = None,
+    train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
+    val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
+    | None = None,
+    test_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
+    | None = None,
     logger: Logger | None = None,
     start_epoch: int = -1,
     end_epoch: int = -1,
@@ -75,9 +75,7 @@ def train_model(
         print(f"EPOCH: {epoch}")
 
         meta_model.model.train(True)
-        train_loss, train_metric_results = meta_model.train_epoch(
-            train_loader, evaluator
-        )
+        train_loss, train_metric_results = meta_model.train_epoch(train_loader, evaluator)
         print(f"LOSS train {train_loss}")
         print(f"TRAIN METRICS: {train_metric_results}")
         epoch_loss_dict["train/loss"] = train_loss
@@ -85,7 +83,7 @@ def train_model(
         if logger is not None and len(train_metric_results) > 0:
             logger.log(
                 {
-                    f"{"train"}/{metric_name}": metric
+                    f"train/{metric_name}": metric
                     for metric_name, metric in train_metric_results.items()
                 },
                 step=epoch,
@@ -96,11 +94,8 @@ def train_model(
             meta_model.scheduler.step()
 
         if val_loader is not None:
-
             meta_model.model.eval()
-            val_loss, val_metric_results = meta_model.validation_epoch(
-                val_loader, evaluator
-            )
+            val_loss, val_metric_results = meta_model.validation_epoch(val_loader, evaluator)
             print(f"LOSS valid {val_loss}")
             print(f"VALID METRICS: {val_metric_results}")
 
@@ -109,21 +104,18 @@ def train_model(
             if logger is not None and len(val_metric_results) > 0:
                 logger.log(
                     {
-                        f"{"validation"}/{metric_name}": metric
+                        f"validation/{metric_name}": metric
                         for metric_name, metric in val_metric_results.items()
                     },
                     step=epoch,
                 )
 
                 best_model_flag = (
-                    best_results[metric_of_interest]
-                    < val_metric_results[metric_of_interest]
+                    best_results[metric_of_interest] < val_metric_results[metric_of_interest]
                 )
 
                 if best_model_flag:
-                    best_results[metric_of_interest] = val_metric_results[
-                        metric_of_interest
-                    ]
+                    best_results[metric_of_interest] = val_metric_results[metric_of_interest]
                     best_results["epoch"] = epoch
 
                     logger.save_model_checkpoint(meta_model, epoch, val_metric_results)
@@ -138,17 +130,13 @@ def train_model(
             continue
 
         if test_loader is not None:
-            _ = evaluate_and_log(
-                evaluator, test_loader, meta_model, logger, epoch, "test"
-            )
+            _ = evaluate_and_log(evaluator, test_loader, meta_model, logger, epoch, "test")
     return metrics_epoch
 
 
 def evaluate_and_log(
     evaluator: Evaluator,
-    loader: DataLoader[
-        tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
-    ],
+    loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
     meta_model: MetaModel,
     logger: Logger,
     epoch: int,
@@ -174,10 +162,7 @@ def evaluate_and_log(
     )
     if logger is not None:
         logger.log(
-            {
-                f"{split}/{metric_name}": metric
-                for metric_name, metric in metric_results.items()
-            },
+            {f"{split}/{metric_name}": metric for metric_name, metric in metric_results.items()},
             step=epoch,
         )
     print(f"{split} metrics")

@@ -101,7 +101,7 @@ def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
     for i in tqdm(range(len(dataset))):
         _, label, _ = dataset[i]
         unique_labels = np.unique(label, return_counts=True)
-        for label_id, count in zip(*unique_labels):
+        for label_id, count in zip(*unique_labels, strict=False):
             label_counts[label_id] += int(count)
 
     weights = np.zeros(dataset.N_classes)
@@ -117,7 +117,7 @@ def _joint_collate(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Collate function to combine a list of samples into a batch.
     """
-    images, labels = zip(*batch)
+    images, labels = zip(*batch, strict=False)
     images = default_collate(images)
     labels = default_collate(labels)
     return images, labels
@@ -138,17 +138,11 @@ def get_coralnet_sources():
     if "CommonPrefixes" in response:
         folders_new = [prefix["Prefix"] for prefix in response["CommonPrefixes"]]
         folder = "coralnet-public-images/"
-        sub_response = s3.list_objects_v2(
-            Bucket=bucket_name, Prefix=folder, Delimiter="/"
-        )
+        sub_response = s3.list_objects_v2(Bucket=bucket_name, Prefix=folder, Delimiter="/")
         if "CommonPrefixes" in sub_response:
             print("Subfolders in coralnet-public-images/:")
-            folders_new = [
-                prefix["Prefix"] for prefix in sub_response["CommonPrefixes"]
-            ]
-            folders_new = [
-                folder.replace("coralnet-public-images/", "") for folder in folders_new
-            ]
+            folders_new = [prefix["Prefix"] for prefix in sub_response["CommonPrefixes"]]
+            folders_new = [folder.replace("coralnet-public-images/", "") for folder in folders_new]
         else:
             print("No subfolders found in coralnet-public-images/")
     else:

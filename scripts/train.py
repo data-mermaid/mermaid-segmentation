@@ -34,13 +34,14 @@ import copy
 
 import albumentations as A
 import torch
+from torch.utils.data import DataLoader, random_split
+
 from mermaidseg.datasets.dataset import CoralNet15Dataset, Mermaid15Dataset
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
 from mermaidseg.model.meta import MetaModel
 from mermaidseg.model.train import train_model
-from torch.utils.data import DataLoader, random_split
 
 device_count = torch.cuda.device_count()
 for i in range(device_count):

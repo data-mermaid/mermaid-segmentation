@@ -92,20 +92,11 @@ class MetaModel:
         run_name: str,
         num_classes: int,
         num_concepts: int | None = None,
-        model_kwargs: ConfigDict = ConfigDict({}),
+        model_kwargs: ConfigDict | None = None,
         device: str | torch.device = "cuda",
         model_checkpoint: str | None = None,
         training_mode: str = "standard",  # One of "standard", "concept", "concept-bottleneck"
-        training_kwargs: ConfigDict = ConfigDict(
-            {
-                "epochs": 50,
-                "optimizer": {
-                    "type": "AdamW",
-                    "lr": 0.001,
-                    "weight_decay": 0.01,
-                },
-            }
-        ),
+        training_kwargs: ConfigDict | None = None,
         concept_matrix: pd.DataFrame | None = None,
         conceptid2labelid: dict[int, int] | None = None,
     ):
@@ -113,6 +104,20 @@ class MetaModel:
         self.num_classes = num_classes
         self.num_concepts = num_concepts
         self.device = device
+
+        if model_kwargs is None:
+            model_kwargs = ConfigDict({})
+        if training_kwargs is None:
+            training_kwargs = ConfigDict(
+                {
+                    "epochs": 50,
+                    "optimizer": {
+                        "type": "AdamW",
+                        "lr": 0.001,
+                        "weight_decay": 0.01,
+                    },
+                }
+            )
 
         self.model_name = model_kwargs.pop("name", None)
         self.model_kwargs = model_kwargs
@@ -280,10 +285,9 @@ class MetaModel:
 
     def train_epoch(
         self,
-        train_loader: DataLoader[
-            tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
-        ],
-        evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
+        evaluator: Any
+        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> float:
         """
         Trains the model for one epoch using the provided data loader.
@@ -321,10 +325,9 @@ class MetaModel:
                         self.concept_matrix,
                         self.conceptid2labelid,
                     )
-                    concept_labels = (
-                        torch.from_numpy(concept_labels).long().to(self.device)
-                    )
-                    metric.update(outputs, concept_labels)
+                    concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
+                    for metric in evaluator.metric_dict.values():
+                        metric.update(outputs, concept_labels)
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
@@ -359,17 +362,12 @@ class MetaModel:
             if self.training_mode in ("concept-bottleneck", "concept"):
                 for metric_name in evaluator.concept_metric_dict:
                     metric_results[metric_name] = (
-                        evaluator.concept_metric_dict[metric_name]
-                        .compute()
-                        .cpu()
-                        .numpy()
+                        evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
                     )
                     if metric_results[metric_name].ndim == 0:
                         metric_results[metric_name] = metric_results[metric_name].item()
                     else:
-                        metric_results[metric_name] = metric_results[metric_name][
-                            2
-                        ].item()
+                        metric_results[metric_name] = metric_results[metric_name][2].item()
                     evaluator.concept_metric_dict[metric_name].reset()
 
         last_loss = running_loss / len(train_loader)
@@ -378,10 +376,9 @@ class MetaModel:
     @torch.no_grad()
     def validation_epoch(
         self,
-        val_loader: DataLoader[
-            tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
-        ],
-        evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
+        evaluator: Any
+        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> float:
         """
         Calculates the validation loss of the model for one epoch using the provided data loader.
@@ -409,10 +406,9 @@ class MetaModel:
                     concept_labels = postprocess_predicted_concepts(
                         concept_labels, self.concept_matrix, self.conceptid2labelid
                     )
-                    concept_labels = (
-                        torch.from_numpy(concept_labels).long().to(self.device)
-                    )
-                    metric.update(outputs, concept_labels)
+                    concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
+                    for metric in evaluator.metric_dict.values():
+                        metric.update(outputs, concept_labels)
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
