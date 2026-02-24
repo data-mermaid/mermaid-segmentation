@@ -21,7 +21,7 @@ body:
     id: impact
     attributes:
       label: Impact
-      description: Describe the expected impact and value this workstream will deliver.
+      description: What is the impact this is having on the product and if possible the end user and what is the sense of urgency
       placeholder: |
         This workstream will enable...
         Key benefits include...
@@ -32,7 +32,7 @@ body:
     id: goals
     attributes:
       label: Goals
-      description: List the specific goals and objectives for this workstream.
+      description: What are the goals of this workstream?
       placeholder: |
         - [ ] Goal 1
         - [ ] Goal 2
@@ -44,7 +44,7 @@ body:
     id: decision-points
     attributes:
       label: Decision Points
-      description: Identify key decisions that need to be made and their current status.
+      description: What are open questions that impact the direction and scope of this work
       placeholder: |
         ### Decision 1: [Title]
         **Status:** Pending/Decided
@@ -69,7 +69,7 @@ body:
     id: approach
     attributes:
       label: Approach
-      description: Outline the technical approach, methodology, and implementation strategy.
+      description: How will we approach this work. What are the steps to implementation. This should be as complete as possible while keeping in mind that work can be iterative and approaches are not always final implementation plans
       placeholder: |
         ### Technical Approach
         Describe the technical strategy...
@@ -83,7 +83,7 @@ body:
     id: outputs
     attributes:
       label: Outputs
-      description: List the expected deliverables, artifacts, and outputs from this workstream.
+      description: What is the output of this work? File type, model changes, UI changes etc
       placeholder: |
         - [ ] Output 1 (e.g., trained model, documentation, API)
         - [ ] Output 2
