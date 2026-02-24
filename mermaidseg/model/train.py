@@ -10,30 +10,26 @@ Functions:
 """
 
 import time
-from typing import Dict, Optional, Union
 
 import numpy as np
 import torch
+from numpy.typing import NDArray
+from torch.utils.data import DataLoader
+
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel
-from numpy.typing import NDArray
-from torch.utils.data import DataLoader
 
 
 def train_model(
     meta_model: MetaModel,
     evaluator: Evaluator,
     train_loader: DataLoader[
-        Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
+        tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
     ],
-    val_loader: Optional[
-        DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]
-    ] = None,
-    test_loader: Optional[
-        DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]
-    ] = None,
-    logger: Optional[Logger] = None,
+    val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]] | None = None,
+    test_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]] | None = None,
+    logger: Logger | None = None,
     start_epoch: int = -1,
     end_epoch: int = -1,
     metric_of_interest: str = "accuracy",
@@ -151,13 +147,13 @@ def train_model(
 def evaluate_and_log(
     evaluator: Evaluator,
     loader: DataLoader[
-        Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
+        tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
     ],
     meta_model: MetaModel,
     logger: Logger,
     epoch: int,
     split: str = "train",
-) -> Dict[str, Union[float, NDArray[np.float64]]]:
+) -> dict[str, float | NDArray[np.float64]]:
     """
     Evaluates a model using the provided evaluator, logs the metrics, and logs image predictions.
     Args:

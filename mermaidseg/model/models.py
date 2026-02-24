@@ -20,6 +20,7 @@ Classes:
         forward
 """
 
+import os
 from typing import Any
 
 import torch
@@ -378,7 +379,10 @@ class LinearDINOv3(torch.nn.Module):
         """
         super().__init__()
 
-        self.encoder = AutoModel.from_pretrained(encoder_name, **kwargs)
+        token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
+        self.encoder = AutoModel.from_pretrained(
+            encoder_name, token=token, **kwargs
+        )
         # Assuming hidden_size=768 for dinov2-base, adjust as needed
         hidden_size = self.encoder.config.hidden_size
         patch_size = self.encoder.config.patch_size
@@ -484,7 +488,10 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         """
         super().__init__()
 
-        self.encoder = AutoModel.from_pretrained(encoder_name, **kwargs)
+        token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
+        self.encoder = AutoModel.from_pretrained(
+            encoder_name, token=token, **kwargs
+        )
         # Assuming hidden_size=768 for dinov2-base, adjust as needed
         hidden_size = self.encoder.config.hidden_size
         patch_size = self.encoder.config.patch_size

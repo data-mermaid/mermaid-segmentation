@@ -8,26 +8,26 @@ Classes:
     MetaModel
 """
 
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 import albumentations as A
-import mermaidseg.model.loss
-import mermaidseg.model.models
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
 import transformers
-from mermaidseg.datasets.concepts import (
-    labels_to_concepts,
-    postprocess_predicted_concepts,
-)
-from mermaidseg.io import ConfigDict
 
 # from mermaidseg.model.eval import Evaluator
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+import mermaidseg.model.loss
+import mermaidseg.model.models
+from mermaidseg.datasets.concepts import (
+    labels_to_concepts,
+    postprocess_predicted_concepts,
+)
+from mermaidseg.io import ConfigDict
 
 
 class MetaModel:
@@ -77,24 +77,24 @@ class MetaModel:
     run_name: str
     model_name: str
     num_classes: int
-    device: Union[str, torch.device]
+    device: str | torch.device
     model_kwargs: ConfigDict
     training_kwargs: ConfigDict
-    model: Union[torch.nn.Module, transformers.PreTrainedModel]
-    loss: Optional[torch.nn.Module]
+    model: torch.nn.Module | transformers.PreTrainedModel
+    loss: torch.nn.Module | None
     optimizer: torch.optim.Optimizer
-    scheduler: Optional[torch.optim.lr_scheduler.LRScheduler]
-    concept_matrix: Optional[pd.DataFrame]
-    conceptid2labelid: Optional[dict[int, int]]
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None
+    concept_matrix: pd.DataFrame | None
+    conceptid2labelid: dict[int, int] | None
 
     def __init__(
         self,
         run_name: str,
         num_classes: int,
-        num_concepts: Optional[int] = None,
+        num_concepts: int | None = None,
         model_kwargs: ConfigDict = ConfigDict({}),
-        device: Union[str, torch.device] = "cuda",
-        model_checkpoint: Optional[str] = None,
+        device: str | torch.device = "cuda",
+        model_checkpoint: str | None = None,
         training_mode: str = "standard",  # One of "standard", "concept", "concept-bottleneck"
         training_kwargs: ConfigDict = ConfigDict(
             {
@@ -106,8 +106,8 @@ class MetaModel:
                 },
             }
         ),
-        concept_matrix: Optional[pd.DataFrame] = None,
-        conceptid2labelid: Optional[dict[int, int]] = None,
+        concept_matrix: pd.DataFrame | None = None,
+        conceptid2labelid: dict[int, int] | None = None,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
@@ -175,7 +175,7 @@ class MetaModel:
     def batch_predict(
         self,
         inputs: torch.Tensor,
-        target_dim: Optional[tuple[int, int]] = None,
+        target_dim: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         """
         Perform batch prediction using the model.
@@ -219,8 +219,8 @@ class MetaModel:
 
     def batch_predict_loss(
         self,
-        batch: Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]],
-        target_dim: Optional[tuple[int, int]] = None,
+        batch: tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor],
+        target_dim: tuple[int, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Perform batch prediction using the model and compute the loss if applicable.
@@ -281,11 +281,9 @@ class MetaModel:
     def train_epoch(
         self,
         train_loader: DataLoader[
-            Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
+            tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
         ],
-        evaluator: Optional[
-            Any
-        ] = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> float:
         """
         Trains the model for one epoch using the provided data loader.
@@ -301,7 +299,7 @@ class MetaModel:
         """
 
         running_loss = 0.0
-        metric_results: Dict[str, Union[float, NDArray[np.float64]]] = {}
+        metric_results: dict[str, float | NDArray[np.float64]] = {}
 
         for data in tqdm(train_loader):
             _, labels = data
@@ -381,11 +379,9 @@ class MetaModel:
     def validation_epoch(
         self,
         val_loader: DataLoader[
-            Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
+            tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
         ],
-        evaluator: Optional[
-            Any
-        ] = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> float:
         """
         Calculates the validation loss of the model for one epoch using the provided data loader.
@@ -397,7 +393,7 @@ class MetaModel:
         """
 
         running_loss = 0.0
-        metric_results: Dict[str, Union[float, NDArray[np.float64]]] = {}
+        metric_results: dict[str, float | NDArray[np.float64]] = {}
 
         for data in tqdm(val_loader):
             _, labels = data
@@ -466,9 +462,9 @@ class MetaModel:
     @torch.no_grad()  # type:ignore
     def predict(
         self,
-        image: Union[torch.Tensor, NDArray[Any]],
-        transform: Optional[A.BasicTransform] = None,
-    ) -> Union[NDArray[Any]]:
+        image: torch.Tensor | NDArray[Any],
+        transform: A.BasicTransform | None = None,
+    ) -> NDArray[Any]:
         """
         Predicts the output for a given input image using the model.
         Args:

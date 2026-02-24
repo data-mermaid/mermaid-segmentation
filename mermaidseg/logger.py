@@ -11,7 +11,7 @@ Functions:
     save_model_checkpoint() - Save model checkpoints with relevant metadata.
 """
 
-from typing import Any, Dict
+from typing import Any
 
 try:
     import mlflow
@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 
 import torch
 import wandb
+
 from mermaidseg.model.meta import MetaModel
 
 # try:
@@ -189,7 +190,7 @@ class Logger:
         self,
         meta_model_run: MetaModel,
         epoch: int,
-        metrics_dict: Dict[str, float],
+        metrics_dict: dict[str, float],
     ):
         """
         Saves a model checkpoint to a specified directory.
@@ -222,7 +223,7 @@ class Logger:
             return
         timestamp = time.strftime("%Y%m%d%H")
 
-        checkpoint: Dict[str, Any] = {
+        checkpoint: dict[str, Any] = {
             "config": self.config,
             "model_state_dict": meta_model_run.model.cpu().state_dict(),
             "optimizer_state_dict": meta_model_run.optimizer.state_dict(),

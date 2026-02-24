@@ -11,7 +11,6 @@ Functions:
 """
 
 import io
-from typing import Dict, Optional, Tuple
 
 import boto3
 import numpy as np
@@ -51,9 +50,9 @@ def get_image_s3(
 
 def create_annotation_mask(
     annotations: pd.DataFrame,
-    shape: Tuple[int, int],
-    label2id: Dict[str, int],
-    padding: Optional[int] = None,
+    shape: tuple[int, int],
+    label2id: dict[str, int],
+    padding: int | None = None,
 ) -> np.ndarray:
     """
     Creates an annotation mask for a given image based on provided annotations.
@@ -98,7 +97,7 @@ def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
         torch.Tensor: A tensor of weights for each class, normalized by the mean weight.
     """
 
-    label_counts = {i: 0 for i in range(dataset.N_classes)}
+    label_counts = dict.fromkeys(range(dataset.N_classes), 0)
     for i in tqdm(range(len(dataset))):
         _, label, _ = dataset[i]
         unique_labels = np.unique(label, return_counts=True)
@@ -114,7 +113,7 @@ def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
     return weight
 
 
-def _joint_collate(batch: list) -> Tuple[torch.Tensor, torch.Tensor]:
+def _joint_collate(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Collate function to combine a list of samples into a batch.
     """

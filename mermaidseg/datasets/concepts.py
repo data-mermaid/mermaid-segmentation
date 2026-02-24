@@ -11,7 +11,6 @@ functions:
 - map_benthic_to_concept: Map a benthic class label to its corresponding concept one-hot vector.
 """
 
-from typing import Union
 
 import numpy as np
 import pandas as pd
@@ -182,7 +181,7 @@ def initialize_benthic_concepts(
 
 
 def map_benthic_to_concept(
-    benthic_label: Union[str, int], benthic_concept_matrix: pd.DataFrame
+    benthic_label: str | int, benthic_concept_matrix: pd.DataFrame
 ) -> np.ndarray:
     """
     Map a benthic class label to its corresponding concept one-hot vector.
@@ -217,8 +216,8 @@ def map_benthic_to_concept(
 
 
 def labels_to_concepts(
-    labels: Union[torch.Tensor, np.ndarray], benthic_concept_matrix: pd.DataFrame
-) -> Union[torch.Tensor, np.ndarray]:
+    labels: torch.Tensor | np.ndarray, benthic_concept_matrix: pd.DataFrame
+) -> torch.Tensor | np.ndarray:
     """
     labels: torch.Tensor or np.ndarray with shape (B, H, W), dtype int (values 0..N)
     benthic_concept_matrix: pd.DataFrame returned by initialize_benthic_concepts

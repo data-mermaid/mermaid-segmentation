@@ -1,6 +1,6 @@
 # MermaidSeg
 
-Codebase for the training, evaluation and usage of image segmentation models of coral data. 
+Codebase for the training, evaluation and usage of image segmentation models of coral data.
 The codebase contains data loaders, augmentations, preprocessors, models, training & evaluation scripts.
 
 ## File Structure
@@ -9,18 +9,18 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 ├── nbs/ # Jupyter notebooks
     ├── Base_Pipeline.ipynb # Notebook used to train end-to-end (non-concept) image segmentation models for a given dataset and configuration file
     ├── Concept_Bottleneck_Pipeline.ipynb # Notebook used to train end-to-end concept-bottleneck image segmentation models for a given dataset and configuration file
-    ├── Model_Evaluation.ipynb # Notebook containing the code to quantitatively and qualitatively analyze the trained segmentation models 
+    ├── Model_Evaluation.ipynb # Notebook containing the code to quantitatively and qualitatively analyze the trained segmentation models
     ├── datasets/
         ├── Dataset_Exploration.ipynb # Shows usage of currently implemented dataset classes and concept mapping
         ├── CoralNet_Annotations.ipynb # Notebook on how to map extracted CoralNet sources to a datasets readable format (not that relevant for now)
     ├── nb_experiments/
         ├── Time_Test.ipynb # Data I/O timing tests
-        
+
 ├── mermaidseg/
     ├── datasets # Contains scripts related to dataset loading, preprocessing and data augmentations.
         ├── dataset.py # Contains dataset classes that can be used to acquire and load coral data, including images and annotations. Currently includes the MermaidDataset, CoralNetDataset and CoralscapesDataset classes.
         ├── concepts.py # Contains functionality related to working with concepts
-        ├── utils.py # Contains utility functions related to datasets 
+        ├── utils.py # Contains utility functions related to datasets
     ├── model # Contains everything related to training and evaluating segmentation models.
         ├── models.py # Contains the different model implementations
         ├── meta.py # Contains the metamodel class that is initialized with a model and set of hyperparameters, with train, eval and predict methods.
@@ -32,7 +32,7 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
     └── visualization.py # Functions related to the visualization of images based on different criteria
 
 ├── configs/ # Configuration files for different runs/models
-└── .gitignore 
+└── .gitignore
 └── .environment.yml # Environment for setup with conda/micromamba
 └── .pyproject.toml
 └── README.md
@@ -119,22 +119,22 @@ from mermaidseg.visualization import get_legend_elements
 fig, ax = plt.subplots(figsize = (8.5, 7), layout = "tight")
 plt.imshow(image)
 for i, annotation in annotations.iterrows():
-    plt.scatter(annotation['col'], annotation['row'], 
+    plt.scatter(annotation['col'], annotation['row'],
                 color=annotation["benthic_color"],
-                marker=annotation["growth_form_marker"], 
+                marker=annotation["growth_form_marker"],
                 s=80,
                 alpha=0.8)
 
 benthic_legend_elements, growth_legend_elements = get_legend_elements(annotations)
 
-first_legend = plt.legend(handles=benthic_legend_elements, bbox_to_anchor=(0.99, 1), 
+first_legend = plt.legend(handles=benthic_legend_elements, bbox_to_anchor=(0.99, 1),
                             loc='upper left', title='Benthic\nAttributes')
 plt.gca().add_artist(first_legend)
-plt.legend(handles=growth_legend_elements, bbox_to_anchor=(0.99, 0.4), 
+plt.legend(handles=growth_legend_elements, bbox_to_anchor=(0.99, 0.4),
           loc='center left', title='Growth\nForms')
 
 plt.axis("off")
-plt.show() 
+plt.show()
 ```
 
 ### Segmentation Models

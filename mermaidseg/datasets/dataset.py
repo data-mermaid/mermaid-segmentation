@@ -10,7 +10,7 @@ Classes:
     CoralNetDataset - A PyTorch Dataset for loading annotated coral reef images from CoralNet sources.
 """
 
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any
 
 import albumentations as A
 import boto3
@@ -19,16 +19,17 @@ import pandas as pd
 import requests
 import torch
 from datasets import concatenate_datasets, load_dataset
+from numpy.typing import NDArray
+from torch.utils.data import Dataset
+
 from mermaidseg.datasets.concepts import (
     initialize_benthic_concepts,
     initialize_benthic_hierarchy,
 )
 from mermaidseg.datasets.utils import create_annotation_mask, get_image_s3
-from numpy.typing import NDArray
-from torch.utils.data import Dataset
 
 
-class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
+class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     """
     A base PyTorch Dataset for loading annotated coral reef images.
     This dataset reads image annotations from an annotations file, retrieves images from S3, and applies optional transformations.
@@ -67,28 +68,28 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
 
     df_annotations: pd.DataFrame
     df_images: pd.DataFrame
-    split: Optional[str]
-    transform: Optional[A.BasicTransform]
-    padding: Optional[int]
-    class_subset: Optional[List[str]]
+    split: str | None
+    transform: A.BasicTransform | None
+    padding: int | None
+    class_subset: list[str] | None
     num_classes: int
     id2label: dict[int, str]
     label2id: dict[str, int]
     concept_mapping_flag: bool = False
-    num_concepts: Optional[int] = None
-    id2concept: Optional[dict[int, str]] = None
-    concept2id: Optional[dict[str, int]] = None
-    benthic_concept_matrix: Optional[np.ndarray] = None
-    conceptid2labelid: Optional[dict[int, int]] = None
+    num_concepts: int | None = None
+    id2concept: dict[int, str] | None = None
+    concept2id: dict[str, int] | None = None
+    benthic_concept_matrix: np.ndarray | None = None
+    conceptid2labelid: dict[int, int] | None = None
 
     def __init__(
         self,
         df_annotations: pd.DataFrame,
         df_images: pd.DataFrame,
-        split: Optional[str] = None,
-        transform: Optional[A.BasicTransform] = None,
-        padding: Optional[int] = None,
-        class_subset: Optional[List[str]] = None,
+        split: str | None = None,
+        transform: A.BasicTransform | None = None,
+        padding: int | None = None,
+        class_subset: list[str] | None = None,
         concept_mapping_flag: bool = False,
     ):
         self.df_annotations = df_annotations
@@ -161,7 +162,7 @@ class BaseCoralDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
         """
         raise NotImplementedError("Subclasses should implement this method.")
 
-    def __getitem__(self, idx: int) -> Tuple[Union[torch.Tensor, NDArray[Any]], Any]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         image_id = self.df_images.loc[idx, "image_id"]
         row_kwargs = self.df_images.loc[idx].to_dict()
         try:
@@ -307,7 +308,7 @@ class MermaidDataset(BaseCoralDataset):
 
     def load_annotations(
         self, annotations_path: str
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """
         Load annotations from a Parquet file on S3.
         """
@@ -349,20 +350,20 @@ class CoralNetDataset(BaseCoralDataset):
         read_image(image_id): Reads an image given its ID from S3.
     """
 
-    source_ids: List[Union[int, str]]
+    source_ids: list[int | str]
     source_bucket: str
     source_s3_prefix: str
     s3: boto3.client
-    whitelist_sources: Optional[List[Union[int, str]]]
-    blacklist_sources: Optional[List[Union[int, str]]]
+    whitelist_sources: list[int | str] | None
+    blacklist_sources: list[int | str] | None
 
     def __init__(
         self,
         annotations_path="coralnet_annotations_30112025.parquet",
         source_bucket: str = "dev-datamermaid-sm-sources",
         source_s3_prefix: str = "coralnet-public-images",
-        whitelist_sources: Optional[List[Union[int, str]]] = None,
-        blacklist_sources: Optional[List[Union[int, str]]] = None,
+        whitelist_sources: list[int | str] | None = None,
+        blacklist_sources: list[int | str] | None = None,
         **base_kwargs,
     ):
         self.annotations_path = annotations_path
@@ -456,7 +457,7 @@ class CoralNetDataset(BaseCoralDataset):
         return label_mapping
 
 
-class CoralscapesDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]]):
+class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     """
     A PyTorch Dataset for loading Coralscapes annotated coral reef images from the Hugging Face Datasets library and mapping them to specified MERMAID classes.
     This dataset reads image annotations from the Coralscapes dataset, retrieves images, and applies optional transformations.
@@ -477,25 +478,25 @@ class CoralscapesDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]])
         conceptid2labelid (Optional[dict[int, int]]): Mapping from concept IDs to benthic attribute class IDs (if concept mapping is enabled).
     """
 
-    split: Optional[str]
-    transform: Optional[A.BasicTransform]
-    padding: Optional[int]
-    class_subset: Optional[List[str]]
+    split: str | None
+    transform: A.BasicTransform | None
+    padding: int | None
+    class_subset: list[str] | None
     num_classes: int
     id2label: dict[int, str]
     label2id: dict[str, int]
     concept_mapping_flag: bool = False
-    num_concepts: Optional[int] = None
-    id2concept: Optional[dict[int, str]] = None
-    concept2id: Optional[dict[str, int]] = None
-    benthic_concept_matrix: Optional[np.ndarray] = None
-    conceptid2labelid: Optional[dict[int, int]] = None
+    num_concepts: int | None = None
+    id2concept: dict[int, str] | None = None
+    concept2id: dict[str, int] | None = None
+    benthic_concept_matrix: np.ndarray | None = None
+    conceptid2labelid: dict[int, int] | None = None
 
     def __init__(
         self,
-        split: Optional[str] = None,
-        transform: Optional[A.BasicTransform] = None,
-        class_subset: Optional[List[str]] = None,
+        split: str | None = None,
+        transform: A.BasicTransform | None = None,
+        class_subset: list[str] | None = None,
         concept_mapping_flag: bool = False,
     ):
 
@@ -643,7 +644,7 @@ class CoralscapesDataset(Dataset[Tuple[Union[torch.Tensor, NDArray[Any]], Any]])
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> Tuple[Union[torch.Tensor, NDArray[Any]], Any]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         image, mask = np.array(self.dataset[idx]["image"]), self.dataset[idx]["label"]
         mask = np.vectorize(self.labelmapping.get)(mask)
 

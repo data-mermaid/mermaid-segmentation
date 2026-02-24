@@ -9,7 +9,6 @@ Functions:
     denormalize_image: Denormalizes an image that was previously normalized using the given mean and standard deviation.
 """
 
-from typing import List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -18,7 +17,7 @@ from matplotlib import pyplot as plt
 
 def get_legend_elements(
     annotations: pd.DataFrame, include_growth_form: bool = False
-) -> Union[List, Tuple[List, List]]:
+) -> list | tuple[list, list]:
     """
     Generate legend elements for benthic attributes and optionally growth forms for use in matplotlib plots.
     Parameters

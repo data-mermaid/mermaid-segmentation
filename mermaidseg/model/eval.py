@@ -16,20 +16,20 @@ Classes:
         __init__
 """
 
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
 import tqdm
-from mermaidseg.datasets.concepts import (
-    labels_to_concepts,
-    postprocess_predicted_concepts,
-)
-from mermaidseg.model.meta import MetaModel
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
-from torchmetrics.classification import AUROC, Accuracy, F1Score, JaccardIndex
+from torchmetrics.classification import Accuracy, F1Score, JaccardIndex
 from torchmetrics.metric import Metric
+
+from mermaidseg.datasets.concepts import (
+    labels_to_concepts,
+)
+from mermaidseg.model.meta import MetaModel
 
 
 class Evaluator:
@@ -56,15 +56,15 @@ class Evaluator:
             Evaluates the given model on one image from the dataloader and returns the image, label, and prediction.
     """
 
-    metric_dict: Dict[str, Metric]
+    metric_dict: dict[str, Metric]
 
     def __init__(
         self,
         num_classes: int,
-        device: Union[str, torch.device] = "cuda",
-        metric_dict: Optional[Dict[str, Metric]] = None,
+        device: str | torch.device = "cuda",
+        metric_dict: dict[str, Metric] | None = None,
         calculate_concept_metrics: bool = False,
-        concept_metric_dict: Optional[Dict[str, Metric]] = {},
+        concept_metric_dict: dict[str, Metric] | None = {},
         ignore_index: int = 0,
         **kwargs: Any
     ):
@@ -102,10 +102,10 @@ class Evaluator:
     def evaluate_model(
         self,
         dataloader: DataLoader[
-            Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
+            tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
         ],
         meta_model: MetaModel,
-    ) -> Dict[str, Union[float, NDArray[np.float64]]]:
+    ) -> dict[str, float | NDArray[np.float64]]:
         """
         Evaluates the performance of a given meta-model on a dataset provided by the dataloader.
         Args:
@@ -122,7 +122,7 @@ class Evaluator:
                 with multiple dimensions).
         """
         meta_model.model.eval()
-        metric_results: Dict[str, Union[float, NDArray[np.float64]]] = {}
+        metric_results: dict[str, float | NDArray[np.float64]] = {}
         print(self.metric_dict)
         print(self.concept_metric_dict)
         print(meta_model.training_mode)
@@ -192,7 +192,7 @@ class Evaluator:
     def evaluate_image(
         self,
         dataloader: DataLoader[
-            Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
+            tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]
         ],
         meta_model: MetaModel,
         epoch: int = 0,
@@ -200,8 +200,8 @@ class Evaluator:
         proba: bool = False,
     ) -> tuple[
         NDArray[np.float64],
-        Union[NDArray[np.int_], int],
-        Union[NDArray[np.int_], int],
+        NDArray[np.int_] | int,
+        NDArray[np.int_] | int,
     ]:
         """
         Evaluates the given model on one image of the dataloader.
@@ -235,7 +235,7 @@ class Evaluator:
 
         image: NDArray[np.float64] = inputs[image_counter].cpu().numpy()
         label: NDArray[np.int_] = labels[image_counter].cpu().numpy()
-        pred: Union[NDArray[np.int_], NDArray[np.float_]] = (
+        pred: NDArray[np.int_] | NDArray[np.float_] = (
             outputs[image_counter].cpu().numpy()
         )
 
@@ -262,8 +262,8 @@ class EvaluatorSemanticSegmentation(Evaluator):
     def __init__(
         self,
         num_classes: int,
-        device: Union[str, torch.device] = "cuda",
-        metric_dict: Optional[Dict[str, Metric]] = None,
+        device: str | torch.device = "cuda",
+        metric_dict: dict[str, Metric] | None = None,
         ignore_index: int = 0,
         **kwargs: Any
     ):
