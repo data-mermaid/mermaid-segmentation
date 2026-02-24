@@ -1,0 +1,90 @@
+name: Workstreams
+description: Define and track major workstreams with clear goals, decision points, and expected outputs
+title: "[Workstreams] "
+labels: ["workstreams"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to document and track significant workstreams throughout the project lifecycle.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Provide a high-level overview of this workstream and its purpose.
+      placeholder: This workstream focuses on...
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Describe the expected impact and value this workstream will deliver.
+      placeholder: |
+        This workstream will enable...
+        Key benefits include...
+    validations:
+      required: true
+
+  - type: textarea
+    id: goals
+    attributes:
+      label: Goals
+      description: List the specific goals and objectives for this workstream.
+      placeholder: |
+        - [ ] Goal 1
+        - [ ] Goal 2
+        - [ ] Goal 3
+    validations:
+      required: true
+
+  - type: textarea
+    id: decision-points
+    attributes:
+      label: Decision Points
+      description: Identify key decisions that need to be made and their current status.
+      placeholder: |
+        ### Decision 1: [Title]
+        **Status:** Pending/Decided
+        **Options:** Option A, Option B
+        **Decision:** TBD
+
+        ### Decision 2: [Title]
+        **Status:** Pending/Decided
+        **Options:** Option A, Option B
+        **Decision:** TBD
+
+  - type: textarea
+    id: user-stories
+    attributes:
+      label: User Stories
+      description: Define the user stories that this workstream addresses.
+      placeholder: |
+        - As a [user type], I want [goal] so that [benefit]
+        - As a [user type], I want [goal] so that [benefit]
+
+  - type: textarea
+    id: approach
+    attributes:
+      label: Approach
+      description: Outline the technical approach, methodology, and implementation strategy.
+      placeholder: |
+        ### Technical Approach
+        Describe the technical strategy...
+
+        ### Implementation Steps
+        1. Step 1
+        2. Step 2
+        3. Step 3
+
+  - type: textarea
+    id: outputs
+    attributes:
+      label: Outputs
+      description: List the expected deliverables, artifacts, and outputs from this workstream.
+      placeholder: |
+        - [ ] Output 1 (e.g., trained model, documentation, API)
+        - [ ] Output 2
+        - [ ] Output 3
