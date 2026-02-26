@@ -47,13 +47,9 @@ coralnet_sources = np.sort(
 downloader = CoralNetDownloader(username=username, password=password)
 for source_id in coralnet_sources:
     print("Source ID", source_id)
-    if check_s3_prefix_exists(
-        bucket_name=bucket_name, s3_prefix=prefix, source_id=source_id
-    ):
+    if check_s3_prefix_exists(bucket_name=bucket_name, s3_prefix=prefix, source_id=source_id):
         continue
-    downloader.download_source(
-        source_id=source_id, bucket_name=bucket_name, s3_prefix=prefix
-    )
+    downloader.download_source(source_id=source_id, bucket_name=bucket_name, s3_prefix=prefix)
 
 # Now check for any other public CoralNet sources not in the pyspacer-bucket - Last run: 20.10.2025
 url = "https://coralnet.ucsd.edu/source/about/"
@@ -80,10 +76,6 @@ all_coralnet_sources = sorted({int(link.split("/")[-2]) for link in source_links
 downloader = CoralNetDownloader(username=username, password=password)
 for source_id in all_coralnet_sources:
     print("Source ID", source_id)
-    if check_s3_prefix_exists(
-        bucket_name=bucket_name, s3_prefix=prefix, source_id=source_id
-    ):
+    if check_s3_prefix_exists(bucket_name=bucket_name, s3_prefix=prefix, source_id=source_id):
         continue
-    downloader.download_source(
-        source_id=source_id, bucket_name=bucket_name, s3_prefix=prefix
-    )
+    downloader.download_source(source_id=source_id, bucket_name=bucket_name, s3_prefix=prefix)

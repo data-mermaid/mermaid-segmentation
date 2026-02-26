@@ -11,8 +11,6 @@ functions:
 - map_benthic_to_concept: Map a benthic class label to its corresponding concept one-hot vector.
 """
 
-from typing import Union
-
 import numpy as np
 import pandas as pd
 import requests
@@ -167,12 +165,8 @@ def initialize_benthic_concepts(
 
     levels = get_hierarchy_level(benthic_concept_set, hierarchy_dict)
     tuples = [(col, levels.get(col)) for col in benthic_concept_set]
-    benthic_concept_matrix = pd.DataFrame(
-        0, index=labelset_benthic, columns=benthic_concept_set
-    )
-    benthic_concept_matrix.columns = pd.MultiIndex.from_tuples(
-        tuples, names=["concept", "level"]
-    )
+    benthic_concept_matrix = pd.DataFrame(0, index=labelset_benthic, columns=benthic_concept_set)
+    benthic_concept_matrix.columns = pd.MultiIndex.from_tuples(tuples, names=["concept", "level"])
 
     for label in labelset_benthic:
         benthic_path = generate_hierarchy_path(label, hierarchy_dict)
@@ -182,7 +176,7 @@ def initialize_benthic_concepts(
 
 
 def map_benthic_to_concept(
-    benthic_label: Union[str, int], benthic_concept_matrix: pd.DataFrame
+    benthic_label: str | int, benthic_concept_matrix: pd.DataFrame
 ) -> np.ndarray:
     """
     Map a benthic class label to its corresponding concept one-hot vector.
@@ -205,20 +199,16 @@ def map_benthic_to_concept(
     if isinstance(benthic_label, str) and benthic_label in benthic_concept_matrix.index:
         benthic_one_hot = benthic_concept_matrix.loc[benthic_label, :].values
         return benthic_one_hot
-    elif isinstance(benthic_label, int) and benthic_label <= len(
-        benthic_concept_matrix.index
-    ):
+    elif isinstance(benthic_label, int) and benthic_label <= len(benthic_concept_matrix.index):
         benthic_one_hot = benthic_concept_matrix.iloc[benthic_label - 1, :].values
         return benthic_one_hot
     else:
-        raise ValueError(
-            f"Benthic label '{benthic_label}' not found in concept matrix index."
-        )
+        raise ValueError(f"Benthic label '{benthic_label}' not found in concept matrix index.")
 
 
 def labels_to_concepts(
-    labels: Union[torch.Tensor, np.ndarray], benthic_concept_matrix: pd.DataFrame
-) -> Union[torch.Tensor, np.ndarray]:
+    labels: torch.Tensor | np.ndarray, benthic_concept_matrix: pd.DataFrame
+) -> torch.Tensor | np.ndarray:
     """
     labels: torch.Tensor or np.ndarray with shape (B, H, W), dtype int (values 0..N)
     benthic_concept_matrix: pd.DataFrame returned by initialize_benthic_concepts
@@ -226,9 +216,7 @@ def labels_to_concepts(
     Background label 0 -> all zeros vector.
     """
     # build lookup: row 0 = zeros, rows 1..N = mapping of class i -> concept vector
-    vals = benthic_concept_matrix.values.astype(
-        np.float32
-    )  # shape (n_labels, n_concepts)
+    vals = benthic_concept_matrix.values.astype(np.float32)  # shape (n_labels, n_concepts)
     n_labels, n_concepts = vals.shape
     lookup = np.zeros((n_labels + 1, n_concepts), dtype=np.float32)
     lookup[1:] = (
@@ -301,9 +289,7 @@ def postprocess_predicted_concepts(
         above_threshold = max_prob_at_level > threshold
         if above_threshold.any():
             # Get the best concept index (among concepts at this level) for each pixel
-            best_concept_in_level = level_probs[unassigned].argmax(
-                axis=1
-            )  # (num_unassigned,)
+            best_concept_in_level = level_probs[unassigned].argmax(axis=1)  # (num_unassigned,)
             # Map back to global concept indices
             level_indices = np.where(level_mask)[0]
             global_indices = level_indices[best_concept_in_level]

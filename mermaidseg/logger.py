@@ -11,11 +11,10 @@ Functions:
     save_model_checkpoint() - Save model checkpoints with relevant metadata.
 """
 
-from typing import Any, Dict
+from typing import Any
 
 try:
     import mlflow
-    from mlflow.models import infer_signature
 
     MLFLOW_IMPORT_ERROR = None
 except ImportError as err:
@@ -27,6 +26,7 @@ from datetime import datetime, timedelta
 
 import torch
 import wandb
+
 from mermaidseg.model.meta import MetaModel
 
 # try:
@@ -73,10 +73,10 @@ def mlflow_connect(uri=URI) -> timedelta:
             raise RuntimeError(
                 "Could not connect to the MLflow tracking server."
                 " Is the tracking server up and running?"
-            )
+            ) from e
         # If it's some other kind of MlflowException, just re-raise
         # for debugging purposes.
-        raise e
+        raise
 
     time_after_connect = datetime.now()
     return time_after_connect - time_before_connect
@@ -189,7 +189,7 @@ class Logger:
         self,
         meta_model_run: MetaModel,
         epoch: int,
-        metrics_dict: Dict[str, float],
+        metrics_dict: dict[str, float],
     ):
         """
         Saves a model checkpoint to a specified directory.
@@ -222,7 +222,7 @@ class Logger:
             return
         timestamp = time.strftime("%Y%m%d%H")
 
-        checkpoint: Dict[str, Any] = {
+        checkpoint: dict[str, Any] = {
             "config": self.config,
             "model_state_dict": meta_model_run.model.cpu().state_dict(),
             "optimizer_state_dict": meta_model_run.optimizer.state_dict(),
@@ -235,7 +235,9 @@ class Logger:
         if hasattr(meta_model_run, "scheduler"):
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
-        model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_{timestamp}"
+        model_path = (
+            f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_{timestamp}"
+        )
         if epoch % self.log_checkpoint == 0:
             model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
 
