@@ -19,7 +19,7 @@ dependencies = [
     "datasets",
     "s3fs",
     "segmentation-models-pytorch",
-    "wandb",
+    "mlflow",
     "pyyaml",
     "tqdm",
     "torchmetrics",
@@ -29,6 +29,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "huggingface-hub>=0.36.2",
     "seaborn>=0.13.2",
+    "opencv-python-headless>=4.11.0.86",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,7 @@ notebooks = [
     "jupyter",
     "ipykernel",
     "ipywidgets",
+    "wandb", # moved here for now since we use mlflow for logging
 ]
 scraping = [
     "selenium",
