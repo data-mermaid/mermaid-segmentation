@@ -66,9 +66,8 @@ def get_mlflow_tracking_uri():
 def mlflow_connect(uri: str | None = None) -> timedelta:
     """
     Establish connection to MLflow tracking server and measure connection time.
-    Sets the MLflow tracking URI to "segmentation" and tests the connection by
-    performing a search operation. Measures and returns the time taken to establish
-    the connection.
+    Sets the MLflow tracking URI and tests the connection by performing a search
+    operation. Measures and returns the time taken to establish the connection.
     Args:
         uri: The MLflow tracking server URI to connect to. Defaults to auto-detected URI.
     Returns:
@@ -161,6 +160,7 @@ class Logger:
         self.enable_wandb = enable_wandb
         self.mlflow_run_id = None
         self.enabled = False
+        self.wandb_run = None
 
         if enable_mlflow:
             self.enabled = (
@@ -202,7 +202,7 @@ class Logger:
                             params.update(
                                 {
                                     f"model_{k}": v
-                                    for k, v in config.model.items()
+                                    for k, v in dict(config.model).items()
                                     if isinstance(v, str | int | float | bool)
                                 }
                             )
@@ -210,7 +210,7 @@ class Logger:
                             params.update(
                                 {
                                     f"training_{k}": v
-                                    for k, v in config.training.items()
+                                    for k, v in dict(config.training).items()
                                     if isinstance(v, str | int | float | bool)
                                 }
                             )
@@ -225,6 +225,12 @@ class Logger:
 
                 except Exception as e:
                     print(f"Warning: Failed to initialize MLflow logging: {e}")
+                    if self.mlflow_run_id is not None:
+                        try:
+                            mlflow.end_run()
+                        except Exception:
+                            pass
+                        self.mlflow_run_id = None
                     self.enabled = False
 
         if enable_wandb:
@@ -233,12 +239,12 @@ class Logger:
                 self.enable_wandb = False
             else:
                 try:
-                    self.logger = wandb.init(
+                    self.wandb_run = wandb.init(
                         project=self.config.logger.experiment_name,
                         name=self.run_name,
                         config=config,
                     )
-                    self.logger.config.update({"num_classes": int(meta_model.num_classes)})
+                    self.wandb_run.config.update({"num_classes": int(meta_model.num_classes)})
                 except Exception as e:
                     print(f"Warning: Failed to initialize wandb logging: {e}")
                     self.enable_wandb = False
@@ -265,9 +271,9 @@ class Logger:
             except Exception as e:
                 print(f"Warning: Failed to log metrics to MLflow: {e}")
 
-        if self.enable_wandb:
+        if self.enable_wandb and self.wandb_run is not None:
             try:
-                self.logger.log(log_dict, step=step)
+                self.wandb_run.log(log_dict, step=step)
             except Exception as e:
                 print(f"Warning: Failed to log metrics to wandb: {e}")
 
@@ -357,7 +363,7 @@ class Logger:
             except Exception as e:
                 print(f"Warning: Failed to end MLflow run: {e}")
 
-        if self.enable_wandb:
+        if self.enable_wandb and self.wandb_run is not None:
             try:
                 wandb.finish()
                 print(f"Ended wandb run: {self.run_name}")
