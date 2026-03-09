@@ -84,7 +84,7 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
     """
     if uri is None:
         uri = get_mlflow_tracking_uri()
-    
+
     mlflow.set_tracking_uri(uri=uri)
     try:
         # Do something to test the server connection.
@@ -160,81 +160,88 @@ class Logger:
         self.enable_mlflow = enable_mlflow
         self.enable_wandb = enable_wandb
         self.mlflow_run_id = None
+        self.enabled = False
 
         if enable_mlflow:
             self.enabled = (
-                self.config.logger.experiment_name is not None
-                and MLFLOW_IMPORT_ERROR is None
+                self.config.logger.experiment_name is not None and MLFLOW_IMPORT_ERROR is None
             )
 
-            # If mlflow is available, ensure there is an active run and log basic params/tags.
             if not self.enabled:
-                print("MLflow logging is disabled (experiment_name not set or mlflow not installed)")
-                return
+                print(
+                    "MLflow logging is disabled (experiment_name not set or mlflow not installed)"
+                )
 
-            try:
-                duration = mlflow_connect(self.config.uri)
-                print(f"Connected to MLflow in {duration.seconds} seconds")
-                mlflow.set_experiment(self.config.logger.experiment_name)
-                
-                # If no active run, start one
-                if mlflow.active_run() is None:
-                    print(f"Starting MLflow RUN: {str(self.run_name)}")
-                    run = mlflow.start_run(run_name=self.run_name)
-                    self.mlflow_run_id = run.info.run_id
-                else:
-                    print(f"MLflow run {str(self.run_name)} already active")
-                    self.mlflow_run_id = mlflow.active_run().info.run_id
+            if self.enabled:
+                try:
+                    duration = mlflow_connect(self.config.uri)
+                    print(f"Connected to MLflow in {duration.seconds} seconds")
+                    mlflow.set_experiment(self.config.logger.experiment_name)
 
-                if config is not None:
-                    print("Logging config to MLflow...")
-                    # Create a copy to avoid mutating input config
-                    config_to_log = copy.deepcopy(config)
-                    config_to_log["num_classes"] = int(meta_model.num_classes)
-                    mlflow.log_dict(config_to_log, "config/config.json")
-                    
-                    # Log key parameters
-                    params = {
-                        "num_classes": int(meta_model.num_classes),
-                        "run_name": self.run_name,
-                        "log_epochs": log_epochs,
-                        "log_checkpoint": log_checkpoint,
-                    }
-                    # Extract model and training params from config if available
-                    if hasattr(config, "model"):
-                        params.update({f"model_{k}": v for k, v in config.model.items() if isinstance(v, (str, int, float, bool))})
-                    if hasattr(config, "training"):
-                        params.update({f"training_{k}": v for k, v in config.training.items() if isinstance(v, (str, int, float, bool))})
-                    
-                    mlflow.log_params(params)
-                    
-                    # Set useful tags
-                    tags = {
-                        "model_type": meta_model.__class__.__name__,
-                        "framework": "pytorch",
-                    }
-                    mlflow.set_tags(tags)
-                    
-            except Exception as e:
-                print(f"Warning: Failed to initialize MLflow logging: {e}")
-                self.enabled = False
+                    if mlflow.active_run() is None:
+                        print(f"Starting MLflow RUN: {str(self.run_name)}")
+                        run = mlflow.start_run(run_name=self.run_name)
+                        self.mlflow_run_id = run.info.run_id
+                    else:
+                        print(f"MLflow run {str(self.run_name)} already active")
+                        self.mlflow_run_id = mlflow.active_run().info.run_id
+
+                    if config is not None:
+                        print("Logging config to MLflow...")
+                        config_to_log = copy.deepcopy(config)
+                        config_to_log["num_classes"] = int(meta_model.num_classes)
+                        mlflow.log_dict(config_to_log, "config/config.json")
+
+                        params = {
+                            "num_classes": int(meta_model.num_classes),
+                            "run_name": self.run_name,
+                            "log_epochs": log_epochs,
+                            "log_checkpoint": log_checkpoint,
+                        }
+                        if hasattr(config, "model"):
+                            params.update(
+                                {
+                                    f"model_{k}": v
+                                    for k, v in config.model.items()
+                                    if isinstance(v, str | int | float | bool)
+                                }
+                            )
+                        if hasattr(config, "training"):
+                            params.update(
+                                {
+                                    f"training_{k}": v
+                                    for k, v in config.training.items()
+                                    if isinstance(v, str | int | float | bool)
+                                }
+                            )
+
+                        mlflow.log_params(params)
+
+                        tags = {
+                            "model_type": meta_model.__class__.__name__,
+                            "framework": "pytorch",
+                        }
+                        mlflow.set_tags(tags)
+
+                except Exception as e:
+                    print(f"Warning: Failed to initialize MLflow logging: {e}")
+                    self.enabled = False
 
         if enable_wandb:
             if WANDB_IMPORT_ERROR is not None:
                 print("Warning: wandb is not installed. Wandb logging is disabled.")
                 self.enable_wandb = False
-                return
-            
-            try:
-                self.logger = wandb.init(
-                    project=self.config.logger.experiment_name,
-                    name=self.run_name,
-                    config=config,
-                )
-                self.logger.config.update({"num_classes": int(meta_model.num_classes)})
-            except Exception as e:
-                print(f"Warning: Failed to initialize wandb logging: {e}")
-                self.enable_wandb = False
+            else:
+                try:
+                    self.logger = wandb.init(
+                        project=self.config.logger.experiment_name,
+                        name=self.run_name,
+                        config=config,
+                    )
+                    self.logger.config.update({"num_classes": int(meta_model.num_classes)})
+                except Exception as e:
+                    print(f"Warning: Failed to initialize wandb logging: {e}")
+                    self.enable_wandb = False
 
     def log(self, log_dict, step):
         """
@@ -296,10 +303,8 @@ class Logger:
         The directory structure is created if it does not already exist.
         Note:
             The model is moved to the CPU before saving its state dictionary.
+            Local checkpoint is always saved; MLflow upload is optional.
         """
-        if not self.enable_wandb and (not self.enable_mlflow or not self.enabled):
-            return
-        
         timestamp = time.strftime("%Y%m%d%H")
 
         checkpoint: dict[str, Any] = {
@@ -323,23 +328,22 @@ class Logger:
 
         os.makedirs(os.path.dirname(model_path), exist_ok=True)
         torch.save(checkpoint, model_path)  # type: ignore
-        
-        # Log checkpoint to MLflow
+        print(f"Checkpoint saved locally: {model_path}")
+
+        # Log checkpoint to MLflow if enabled
         if self.enable_mlflow and self.enabled:
             try:
                 # Log the checkpoint file as an artifact
                 mlflow.log_artifact(model_path, artifact_path="checkpoints")
-                
+
                 # Log checkpoint metrics
-                checkpoint_metrics = {
-                    f"checkpoint/{k}": v for k, v in metrics_dict.items()
-                }
+                checkpoint_metrics = {f"checkpoint/{k}": v for k, v in metrics_dict.items()}
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
-                
+
                 print(f"Checkpoint logged to MLflow: {model_path}")
             except Exception as e:
                 print(f"Warning: Failed to log checkpoint to MLflow: {e}")
-    
+
     def end_run(self):
         """
         Properly end the MLflow and wandb runs.
@@ -352,18 +356,18 @@ class Logger:
                     print(f"Ended MLflow run: {self.run_name}")
             except Exception as e:
                 print(f"Warning: Failed to end MLflow run: {e}")
-        
+
         if self.enable_wandb:
             try:
                 wandb.finish()
                 print(f"Ended wandb run: {self.run_name}")
             except Exception as e:
                 print(f"Warning: Failed to end wandb run: {e}")
-    
+
     def __enter__(self):
         """Context manager entry."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - ensures runs are properly closed."""
         self.end_run()
