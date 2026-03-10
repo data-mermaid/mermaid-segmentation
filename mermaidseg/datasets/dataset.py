@@ -161,7 +161,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         try:
             image = self.read_image(**row_kwargs)
         except Exception:
-            return None, None, None
+            return None, None
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
             [
@@ -189,23 +189,19 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """
         Collate function for MermaidDataset and CoralNetDataset.
         Args:
-            batch: List of tuples (image, mask, annotations)
+            batch: List of tuples (image, mask)
         Returns:
             images: Tensor or ndarray batch of images
             masks: Tensor or ndarray batch of masks
-            annotations: List of annotation DataFrames
         """
-        # images, masks, annotations = zip(*batch)
-
         # Filter out entries where image or mask is None
-        filtered = [
-            (img, msk, ann) for img, msk, ann in batch if img is not None and msk is not None
-        ]
-        images, masks, annotations = zip(*filtered, strict=False)
+        filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
 
         # Handle empty batch
-        if len(images) == 0:
-            return torch.tensor([]), torch.tensor([]), []
+        if len(filtered) == 0:
+            return torch.tensor([]), torch.tensor([])
+
+        images, masks = zip(*filtered, strict=False)
 
         # Convert to tensors if they aren't already
         if isinstance(images[0], torch.Tensor):
