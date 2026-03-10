@@ -40,28 +40,47 @@ except ImportError as err:
     WANDB_IMPORT_ERROR = err
 
 
-def get_mlflow_tracking_uri():
-    """
-    Auto-detect MLflow tracking URI based on execution environment.
+LOCAL_DEFAULT_URI = "./segmentation"
 
-    Detects whether code is running on:
-    - SageMaker JupyterLab/Notebook instance
-    - Local development machine
+
+def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
+    """
+    Resolve MLflow tracking URI using a simple priority chain.
+
+    Priority order:
+        1. MLFLOW_TRACKING_URI environment variable (highest priority)
+        2. config_uri parameter (from YAML config)
+        3. Local file store default ("./segmentation")
+
+    Args:
+        config_uri: URI from configuration file (typically "segmentation" from YAML)
 
     Returns:
-        str: MLflow tracking URI appropriate for the environment.
+        str: MLflow tracking URI. Can be:
+            - SageMaker MLflow App ARN (arn:aws:sagemaker:...)
+            - HTTP(S) URL for remote tracking server
+            - Local file path for file-based store
 
-    Environment Detection:
-        - SageMaker: Checks for /opt/ml/metadata/resource-metadata.json
-        - Falls back to MLFLOW_TRACKING_URI environment variable
-        - Local default: "./segmentation" (file-based store relative to cwd)
-        - SageMaker default: "http://localhost:5000"
+    Examples:
+        >>> os.environ["MLFLOW_TRACKING_URI"] = "arn:aws:sagemaker:us-east-1:123:mlflow-app/my-app"
+        >>> get_mlflow_tracking_uri("segmentation")
+        'arn:aws:sagemaker:us-east-1:123:mlflow-app/my-app'
+
+        >>> del os.environ["MLFLOW_TRACKING_URI"]
+        >>> get_mlflow_tracking_uri("segmentation")
+        'segmentation'
+
+        >>> get_mlflow_tracking_uri(None)
+        './segmentation'
     """
-    if os.path.exists("/opt/ml/metadata/resource-metadata.json"):
-        mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
-        return mlflow_uri
+    env_uri = os.getenv("MLFLOW_TRACKING_URI")
+    if env_uri:
+        return env_uri
 
-    return os.getenv("MLFLOW_TRACKING_URI", "./segmentation")
+    if config_uri:
+        return config_uri
+
+    return LOCAL_DEFAULT_URI
 
 
 def mlflow_connect(uri: str | None = None) -> timedelta:
@@ -84,6 +103,16 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
     """
     if uri is None:
         uri = get_mlflow_tracking_uri()
+
+    # Check for sagemaker-mlflow plugin when using SageMaker MLflow App ARN
+    if uri and uri.startswith("arn:"):
+        try:
+            import sagemaker_mlflow  # noqa: F401
+        except ImportError:
+            logger.warning(
+                "URI is a SageMaker ARN but sagemaker-mlflow is not installed. "
+                "Install with: pip install sagemaker-mlflow"
+            )
 
     mlflow.set_tracking_uri(uri=uri)
     try:
@@ -175,7 +204,9 @@ class Logger:
 
             if self.enabled:
                 try:
-                    tracking_uri = getattr(self.config, "uri", None)
+                    config_uri = getattr(self.config, "uri", None)
+                    tracking_uri = get_mlflow_tracking_uri(config_uri)
+                    logger.info("MLflow tracking URI: %s", tracking_uri)
                     duration = mlflow_connect(tracking_uri)
                     logger.info("Connected to MLflow in %s seconds", duration.seconds)
                     mlflow.set_experiment(self.config.logger.experiment_name)
