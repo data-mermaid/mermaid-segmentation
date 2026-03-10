@@ -60,6 +60,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 aws configure --profile mermaid-core
 echo "AWS_PROFILE=mermaid-core" >> .env
 
+# Configure MLFlow Tracking
+echo "MLFLOW_TRACKING_URI=https://app-{replace_with_id}.mlflow.sagemaker.{region}.app.aws" >> .env
+
 # Configure Hugging Face (required for DINOv3 models)
 hf auth login
 # Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env

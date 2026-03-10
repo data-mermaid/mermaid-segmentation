@@ -2328,13 +2328,16 @@ dependencies = [
     { name = "pillow" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "requests-auth-aws-sigv4" },
     { name = "s3fs" },
+    { name = "sagemaker-mlflow" },
     { name = "seaborn" },
     { name = "segmentation-models-pytorch" },
     { name = "torch" },
     { name = "torchmetrics" },
     { name = "tqdm" },
     { name = "transformers" },
+    { name = "wandb" },
 ]
 
 [package.optional-dependencies]
@@ -2384,7 +2387,9 @@ requires-dist = [
     { name = "pillow" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "requests-auth-aws-sigv4", specifier = ">=0.7" },
     { name = "s3fs" },
+    { name = "sagemaker-mlflow", specifier = ">=0.2.0" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "segmentation-models-pytorch" },
     { name = "selenium", marker = "extra == 'scraping'" },
@@ -2392,6 +2397,7 @@ requires-dist = [
     { name = "torchmetrics" },
     { name = "tqdm" },
     { name = "transformers" },
+    { name = "wandb", specifier = ">=0.25.0" },
     { name = "wandb", marker = "extra == 'notebooks'" },
     { name = "webdriver-manager", marker = "extra == 'scraping'" },
 ]
@@ -3993,6 +3999,18 @@ wheels = [
 ]
 
 [[package]]
+name = "requests-auth-aws-sigv4"
+version = "0.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b3/bc/f695cd7d54327f925e22293d5b71b312dcdee0d8e720defc7a7a5f16a5ae/requests-auth-aws-sigv4-0.7.tar.gz", hash = "sha256:3d2a475cccbf85d4c93b8bd052d072e5c3f8e77022fd621b69a5b11ac2c139c8", size = 8128, upload-time = "2021-02-16T21:31:04.325Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/cd/112ece576115a8afa62faf3c10d13fb8c72233197926f3ea6321cc2cc44e/requests_auth_aws_sigv4-0.7-py3-none-any.whl", hash = "sha256:1f6c7f63a0696a8f131a2ff21a544380f43c11f54d72600f6f2a1d402bd41d41", size = 12075, upload-time = "2021-02-16T21:31:03.444Z" },
+]
+
+[[package]]
 name = "rfc3339-validator"
 version = "0.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -4225,6 +4243,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/d8/0c8a7dc9b41dcac53c4cbf9df2b9c83e0e0097203de8b37a712b345c0be5/safetensors-0.7.0-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:b0f6d66c1c538d5a94a73aa9ddca8ccc4227e6c9ff555322ea40bdd142391dd4", size = 677368, upload-time = "2025-11-19T15:18:41.627Z" },
     { url = "https://files.pythonhosted.org/packages/05/e5/cb4b713c8a93469e3c5be7c3f8d77d307e65fe89673e731f5c2bfd0a9237/safetensors-0.7.0-cp38-abi3-win32.whl", hash = "sha256:c74af94bf3ac15ac4d0f2a7c7b4663a15f8c2ab15ed0fc7531ca61d0835eccba", size = 326423, upload-time = "2025-11-19T15:18:45.74Z" },
     { url = "https://files.pythonhosted.org/packages/5d/e6/ec8471c8072382cb91233ba7267fd931219753bb43814cbc71757bfd4dab/safetensors-0.7.0-cp38-abi3-win_amd64.whl", hash = "sha256:d1239932053f56f3456f32eb9625590cc7582e905021f94636202a864d470755", size = 341380, upload-time = "2025-11-19T15:18:44.427Z" },
+]
+
+[[package]]
+name = "sagemaker-mlflow"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "boto3" },
+    { name = "mlflow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f8/af/2d61ab32c848728c375c88157817efcac4d6542e379ca7e2a9d84913470f/sagemaker_mlflow-0.2.0.tar.gz", hash = "sha256:88bb6b06d455c47fc2a746edb6467ea4d5a59ff41d6a0e499a11b0caf0896d01", size = 15655, upload-time = "2025-12-02T12:55:55.149Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/85/6a/2beff3c8e3dea3eb25cd1d6bf3fdec1535582f8d0a99ccdab339ad5a0ac2/sagemaker_mlflow-0.2.0-py3-none-any.whl", hash = "sha256:4a2a18c269053f7502b7ce44def4885b2b464a6d85b06f61363808167a88d7c2", size = 19824, upload-time = "2025-12-02T12:55:53.248Z" },
 ]
 
 [[package]]

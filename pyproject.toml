@@ -30,6 +30,9 @@ dependencies = [
     "huggingface-hub>=0.36.2",
     "seaborn>=0.13.2",
     "opencv-python-headless>=4.11.0.86",
+    "wandb>=0.25.0",
+    "sagemaker-mlflow>=0.2.0",
+    "requests-auth-aws-sigv4>=0.7",
 ]
 
 [project.optional-dependencies]
