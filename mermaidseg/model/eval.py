@@ -274,6 +274,18 @@ class EvaluatorSemanticSegmentation(Evaluator):
                     num_classes=num_classes,
                     ignore_index=ignore_index,
                 ).to(device),
+                "per_class_iou": JaccardIndex(
+                    task="multiclass" if num_classes > 2 else "binary",
+                    num_classes=num_classes,
+                    average="none",
+                    ignore_index=ignore_index,
+                ).to(device),
+                "per_class_f1": F1Score(
+                    task="multiclass" if num_classes > 2 else "binary",
+                    num_classes=num_classes,
+                    average="none",
+                    ignore_index=ignore_index,
+                ).to(device),
             }
         self.metric_dict = {
             metric_name: metric.to(device) for metric_name, metric in self.metric_dict.items()
