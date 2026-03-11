@@ -92,6 +92,9 @@ def train_model(
 
         if hasattr(meta_model, "scheduler"):
             meta_model.scheduler.step()
+            if logger is not None:
+                current_lr = meta_model.optimizer.param_groups[0]["lr"]
+                logger.log({"train/lr": current_lr}, step=epoch)
 
         if val_loader is not None:
             meta_model.model.eval()
