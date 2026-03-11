@@ -389,8 +389,16 @@ class Logger:
                 # Log the checkpoint file as an artifact
                 mlflow.log_artifact(model_path, artifact_path="checkpoints")
 
-                # Log checkpoint metrics
-                checkpoint_metrics = {f"checkpoint/{k}": v for k, v in metrics_dict.items()}
+                # Log checkpoint metrics (unpack arrays into per-class scalars)
+                checkpoint_metrics = {}
+                for k, v in metrics_dict.items():
+                    if isinstance(v, np.ndarray):
+                        for class_id, class_val in enumerate(v):
+                            class_name = (self.id2label or {}).get(class_id, f"class_{class_id}")
+                            checkpoint_metrics[f"checkpoint/{k}/{class_name}"] = float(class_val)
+                    else:
+                        checkpoint_metrics[f"checkpoint/{k}"] = float(v)
+
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
 
                 logger.info("Checkpoint logged to MLflow: %s", model_path)
