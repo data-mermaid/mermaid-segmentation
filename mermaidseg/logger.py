@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+import numpy as np
 import torch
 
 from mermaidseg.model.meta import MetaModel
@@ -160,6 +161,7 @@ class Logger:
         checkpoint_dir=".",
         enable_mlflow=True,
         enable_wandb=False,
+        id2label=None,
     ):
         """
         Initializes the logger for tracking experiments and benchmarks.
@@ -171,6 +173,7 @@ class Logger:
             checkpoint_dir (str, optional): Directory to save checkpoints. Defaults to ".".
             enable_mlflow (bool, optional): Flag to enable or disable MLflow logging. Defaults to True.
             enable_wandb (bool, optional): Flag to enable or disable Weights & Biases logging. Defaults to False.
+            id2label (dict, optional): Mapping from class IDs to class names for per-class metrics. Defaults to None.
         Attributes:
             config (dict): Stores the configuration dictionary for the experiment.
             log_epochs (int): Frequency of logging epochs.
@@ -179,6 +182,7 @@ class Logger:
             run_name (str): Name of the current run, derived from the meta model.
             enable_mlflow (bool): Flag indicating whether MLflow logging is enabled.
             enable_wandb (bool): Flag indicating whether Weights & Biases logging is enabled.
+            id2label (dict): Mapping from class IDs to class names for unpacking array metrics.
         """
 
         self.config = config
@@ -191,6 +195,7 @@ class Logger:
         self.mlflow_run_id = None
         self.enabled = False
         self.wandb_run = None
+        self.id2label = id2label
 
         if enable_mlflow:
             self.enabled = (
@@ -298,7 +303,16 @@ class Logger:
                     self.mlflow_run_id = run.info.run_id
 
                 # Batch log all metrics at once for better performance
-                metrics_to_log = {k: float(v) for k, v in (log_dict or {}).items()}
+                # Unpack array-valued metrics into per-class named scalars
+                metrics_to_log = {}
+                for k, v in (log_dict or {}).items():
+                    if isinstance(v, np.ndarray):
+                        for class_id, class_val in enumerate(v):
+                            class_name = (self.id2label or {}).get(class_id, f"class_{class_id}")
+                            metrics_to_log[f"{k}/{class_name}"] = float(class_val)
+                    else:
+                        metrics_to_log[k] = float(v)
+
                 if metrics_to_log:
                     mlflow.log_metrics(metrics_to_log, step=step)
             except Exception as e:
