@@ -162,6 +162,7 @@ class Logger:
         enable_mlflow=True,
         enable_wandb=False,
         id2label=None,
+        id2concept=None,
     ):
         """
         Initializes the logger for tracking experiments and benchmarks.
@@ -174,6 +175,7 @@ class Logger:
             enable_mlflow (bool, optional): Flag to enable or disable MLflow logging. Defaults to True.
             enable_wandb (bool, optional): Flag to enable or disable Weights & Biases logging. Defaults to False.
             id2label (dict, optional): Mapping from class IDs to class names for per-class metrics. Defaults to None.
+            id2concept (dict, optional): Mapping from concept IDs to concept names for per-concept metrics. Defaults to None.
         Attributes:
             config (dict): Stores the configuration dictionary for the experiment.
             log_epochs (int): Frequency of logging epochs.
@@ -183,6 +185,7 @@ class Logger:
             enable_mlflow (bool): Flag indicating whether MLflow logging is enabled.
             enable_wandb (bool): Flag indicating whether Weights & Biases logging is enabled.
             id2label (dict): Mapping from class IDs to class names for unpacking array metrics.
+            id2concept (dict): Mapping from concept IDs to concept names for unpacking array metrics.
         """
 
         self.config = config
@@ -196,6 +199,7 @@ class Logger:
         self.enabled = False
         self.wandb_run = None
         self.id2label = id2label
+        self.id2concept = id2concept
 
         if enable_mlflow:
             self.enabled = (
@@ -209,7 +213,7 @@ class Logger:
 
             if self.enabled:
                 try:
-                    config_uri = getattr(self.config, "uri", None)
+                    config_uri = getattr(self.config.logger, "uri", None)
                     tracking_uri = get_mlflow_tracking_uri(config_uri)
                     logger.info("MLflow tracking URI: %s", tracking_uri)
                     duration = mlflow_connect(tracking_uri)
@@ -261,6 +265,33 @@ class Logger:
                         }
                         mlflow.set_tags(tags)
 
+                        # Log concept metadata artifacts if available
+                        if self.id2label:
+                            mlflow.log_dict(self.id2label, "metadata/id2label.json")
+                        if self.id2concept:
+                            mlflow.log_dict(self.id2concept, "metadata/id2concept.json")
+                        if (
+                            hasattr(meta_model, "num_concepts")
+                            and meta_model.num_concepts is not None
+                        ):
+                            mlflow.log_param("num_concepts", int(meta_model.num_concepts))
+                        if (
+                            hasattr(meta_model, "conceptid2labelid")
+                            and meta_model.conceptid2labelid is not None
+                        ):
+                            mlflow.log_dict(
+                                meta_model.conceptid2labelid, "metadata/conceptid2labelid.json"
+                            )
+                        if (
+                            hasattr(meta_model, "concept_matrix")
+                            and meta_model.concept_matrix is not None
+                        ):
+                            # Log concept matrix as CSV for better readability
+                            concept_matrix_path = f"{checkpoint_dir}/concept_matrix.csv"
+                            meta_model.concept_matrix.to_csv(concept_matrix_path)
+                            mlflow.log_artifact(concept_matrix_path, artifact_path="metadata")
+                            logger.info("Logged concept matrix to MLflow")
+
                 except Exception as e:
                     logger.warning("Failed to initialize MLflow logging: %s", e)
                     if self.mlflow_run_id is not None:
@@ -303,13 +334,21 @@ class Logger:
                     self.mlflow_run_id = run.info.run_id
 
                 # Batch log all metrics at once for better performance
-                # Unpack array-valued metrics into per-class named scalars
+                # Unpack array-valued metrics into per-class or per-concept named scalars
                 metrics_to_log = {}
                 for k, v in (log_dict or {}).items():
                     if isinstance(v, np.ndarray):
-                        for class_id, class_val in enumerate(v):
-                            class_name = (self.id2label or {}).get(class_id, f"class_{class_id}")
-                            metrics_to_log[f"{k}/{class_name}"] = float(class_val)
+                        # Use id2concept for concept metrics, id2label for class metrics
+                        if "concept" in k.lower():
+                            id_map = self.id2concept or {}
+                            prefix = "concept"
+                        else:
+                            id_map = self.id2label or {}
+                            prefix = "class"
+
+                        for idx, val in enumerate(v):
+                            name = id_map.get(idx, f"{prefix}_{idx}")
+                            metrics_to_log[f"{k}/{name}"] = float(val)
                     else:
                         metrics_to_log[k] = float(v)
 
@@ -389,13 +428,21 @@ class Logger:
                 # Log the checkpoint file as an artifact
                 mlflow.log_artifact(model_path, artifact_path="checkpoints")
 
-                # Log checkpoint metrics (unpack arrays into per-class scalars)
+                # Log checkpoint metrics (unpack arrays into per-class or per-concept scalars)
                 checkpoint_metrics = {}
                 for k, v in metrics_dict.items():
                     if isinstance(v, np.ndarray):
-                        for class_id, class_val in enumerate(v):
-                            class_name = (self.id2label or {}).get(class_id, f"class_{class_id}")
-                            checkpoint_metrics[f"checkpoint/{k}/{class_name}"] = float(class_val)
+                        # Use id2concept for concept metrics, id2label for class metrics
+                        if "concept" in k.lower():
+                            id_map = self.id2concept or {}
+                            prefix = "concept"
+                        else:
+                            id_map = self.id2label or {}
+                            prefix = "class"
+
+                        for idx, val in enumerate(v):
+                            name = id_map.get(idx, f"{prefix}_{idx}")
+                            checkpoint_metrics[f"checkpoint/{k}/{name}"] = float(val)
                     else:
                         checkpoint_metrics[f"checkpoint/{k}"] = float(v)
 
