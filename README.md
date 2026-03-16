@@ -145,6 +145,17 @@ To train segmentation models using a specified config file one can use the `nbs/
 
 To evaluate any trained segmentation model, you can use the notebook `nbs/Model_Evaluation.ipynb` which contains both quantitative performance analyses through dataset level performance metrics and qualitative analyses by visualizing model results and corresponding class probabilities.
 
+### Concept Bottleneck Models
+
+When using concept bottleneck models (via `nbs/Concept_Bottleneck_Pipeline.ipynb`), the evaluation metrics use a hard-coded `num_classes=3` parameter. This is intentional and correct for the current implementation.
+
+**Why 3 classes?** Each concept in the bottleneck can have exactly three states:
+- **True (1)**: Concept is present
+- **False (0)**: Concept is absent
+- **Masked**: Concept is not evaluated for this pixel
+
+This ternary classification is reflected in the `F1Score` metric used for concept evaluation in `mermaidseg/model/eval.py`. Future implementations may explore multi-class concept labels (e.g., coral families), but this would require architectural changes across the codebase.
+
 ## DSLP Issue Workflow
 
 This project follows the [Data Science Lifecycle Process (DSLP)](https://github.com/dslp/dslp) for managing data science work. We use structured issue templates to track different stages of the workflow.
