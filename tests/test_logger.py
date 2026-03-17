@@ -7,12 +7,14 @@ from unittest.mock import MagicMock, patch
 
 import mlflow
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
 from mermaidseg.logger import (
     LOCAL_DEFAULT_URI,
     Logger,
+    WandbLogger,
     get_mlflow_tracking_uri,
     mlflow_connect,
 )
@@ -145,6 +147,20 @@ class TestLoggerInit:
         run = mlflow.get_run(lgr.mlflow_run_id)
         assert run.data.params["num_concepts"] == "5"
 
+    def test_concept_matrix_logging_does_not_disable_logger(
+        self, tmp_mlflow_uri, make_config, tmp_path
+    ):
+        missing_dir = tmp_path / "missing-dir"
+        assert not missing_dir.exists()
+        meta = FakeMetaModel(concept_matrix=pd.DataFrame({"a": [1, 2], "b": [3, 4]}))
+        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(missing_dir))
+        assert lgr.enabled is True
+        assert lgr.mlflow_run_id is not None
+
+    def test_log_checkpoint_zero_rejected(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        with pytest.raises(ValueError, match="log_checkpoint must be > 0"):
+            Logger(config=make_config(), meta_model=fake_meta_model, log_checkpoint=0)
+
 
 # ===================================================================
 # Logger.log
@@ -173,12 +189,11 @@ class TestLoggerLog:
     def test_wandb_fallback_logging(self, tmp_mlflow_uri, make_config, fake_meta_model):
         config = make_config()
         lgr = Logger(config=config, meta_model=fake_meta_model)
-        mock_wandb_run = MagicMock()
-        lgr.enable_wandb = True
-        lgr.wandb_run = mock_wandb_run
+        mock_wandb_logger = MagicMock(spec=WandbLogger)
+        lgr._wandb_logger = mock_wandb_logger
 
         lgr.log({"loss": 0.3}, step=5)
-        mock_wandb_run.log.assert_called_once_with({"loss": 0.3}, step=5)
+        mock_wandb_logger.log.assert_called_once_with({"loss": 0.3}, step=5)
 
 
 # ===================================================================
@@ -246,19 +261,52 @@ class TestSaveModelCheckpoint:
         lgr = Logger(
             config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
         )
-        mock_wandb_run = MagicMock()
-        lgr.enable_wandb = True
-        lgr.wandb_run = mock_wandb_run
+        mock_wandb_logger = MagicMock(spec=WandbLogger)
+        lgr._wandb_logger = mock_wandb_logger
 
-        with patch("mermaidseg.logger.wandb") as mock_wandb_mod:
-            mock_artifact = MagicMock()
-            mock_wandb_mod.Artifact.return_value = mock_artifact
+        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
 
-            lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
+        mock_wandb_logger.save_checkpoint.assert_called_once()
 
-            mock_wandb_mod.Artifact.assert_called_once()
-            mock_artifact.add_file.assert_called_once()
-            mock_wandb_run.log_artifact.assert_called_once_with(mock_artifact)
+    def test_save_local_models_false_skips_native_model_logging(
+        self, tmp_mlflow_uri, tmp_path, make_config
+    ):
+        meta = FakeMetaModel(run_name="skip-native-model")
+        config = make_config(logger={"save_local_models": False})
+        lgr = Logger(
+            config=config,
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+            log_checkpoint=50,
+        )
+        with patch("mermaidseg.logger.mlflow.pytorch.log_model") as mock_log_model:
+            lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
+        mock_log_model.assert_not_called()
+
+    def test_wandb_does_not_write_local_checkpoint_when_local_disabled(
+        self, tmp_path, make_config, monkeypatch
+    ):
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        meta = FakeMetaModel(run_name="wandb-no-local")
+        config = make_config(logger={"save_local_checkpoints": False})
+        with (
+            patch("mermaidseg.logger.WANDB_IMPORT_ERROR", None),
+            patch("mermaidseg.logger.wandb") as mock_wandb,
+            pytest.warns(DeprecationWarning, match="enable_wandb is deprecated"),
+        ):
+            mock_wandb.init.return_value = MagicMock()
+            mock_wandb.Artifact.return_value = MagicMock()
+            lgr = Logger(
+                config=config,
+                meta_model=meta,
+                checkpoint_dir=str(tmp_path),
+                log_checkpoint=50,
+                enable_mlflow=False,
+                enable_wandb=True,
+            )
+            lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.2})
+
+        assert not (tmp_path / "model_checkpoints" / "wandb-no-local").exists()
 
     def test_timestamp_based_name_for_non_checkpoint_epoch(
         self, tmp_mlflow_uri, tmp_path, make_config
@@ -332,15 +380,16 @@ class TestScenarios:
         with patch("mermaidseg.logger.wandb") as mock_wandb:
             mock_wandb.init.return_value = MagicMock()
             mock_wandb.Artifact.return_value = MagicMock()
-            lgr = Logger(
-                config=make_config(),
-                meta_model=meta,
-                log_epochs=1,
-                log_checkpoint=2,
-                checkpoint_dir=str(tmp_path),
-                enable_mlflow=False,
-                enable_wandb=True,
-            )
+            with pytest.warns(DeprecationWarning, match="enable_wandb is deprecated"):
+                lgr = Logger(
+                    config=make_config(),
+                    meta_model=meta,
+                    log_epochs=1,
+                    log_checkpoint=2,
+                    checkpoint_dir=str(tmp_path),
+                    enable_mlflow=False,
+                    enable_wandb=True,
+                )
             self._run_logger_lifecycle(lgr, meta)
         assert (tmp_path / "model_checkpoints" / "scenario_c").exists()
         assert lgr.enable_wandb is True
@@ -392,11 +441,10 @@ class TestLoggerLifecycle:
 
     def test_end_run_closes_wandb(self, tmp_mlflow_uri, make_config, fake_meta_model):
         lgr = Logger(config=make_config(), meta_model=fake_meta_model)
-        mock_wandb_run = MagicMock()
-        lgr.enable_wandb = True
-        lgr.wandb_run = mock_wandb_run
+        mock_wandb_logger = MagicMock(spec=WandbLogger)
+        lgr._wandb_logger = mock_wandb_logger
         lgr.end_run()
-        mock_wandb_run.finish.assert_called_once()
+        mock_wandb_logger.end_run.assert_called_once()
 
     def test_end_run_idempotent(self, tmp_mlflow_uri, make_config, fake_meta_model):
         lgr = Logger(config=make_config(), meta_model=fake_meta_model)
