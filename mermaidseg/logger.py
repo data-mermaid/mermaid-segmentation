@@ -219,6 +219,8 @@ class Logger:
         self._wandb_logger = None
         self.id2label = id2label
         self.id2concept = id2concept
+        logger_cfg = getattr(config, "logger", None)
+        experiment_name = getattr(logger_cfg, "experiment_name", None)
 
         # Keep one source of truth for local persistence.
         if save_local_checkpoints is None and save_local_models is not None:
@@ -232,9 +234,9 @@ class Logger:
         if save_local_checkpoints is not None:
             self.save_local_checkpoints = save_local_checkpoints
         else:
-            cfg_local = getattr(getattr(config, "logger", None), "save_local_checkpoints", None)
+            cfg_local = getattr(logger_cfg, "save_local_checkpoints", None)
             if cfg_local is None:
-                legacy_cfg = getattr(getattr(config, "logger", None), "save_local_models", None)
+                legacy_cfg = getattr(logger_cfg, "save_local_models", None)
                 if legacy_cfg is not None:
                     warnings.warn(
                         "config.logger.save_local_models is deprecated; use "
@@ -248,19 +250,19 @@ class Logger:
         self.save_local_models = self.save_local_checkpoints
 
         if enable_mlflow:
-            self.enabled = self.config.logger.experiment_name is not None
+            self.enabled = experiment_name is not None
 
             if not self.enabled:
                 logger.info("MLflow logging is disabled (experiment_name not set)")
 
             if self.enabled:
                 try:
-                    config_uri = getattr(self.config.logger, "uri", None)
+                    config_uri = getattr(logger_cfg, "uri", None)
                     tracking_uri = get_mlflow_tracking_uri(config_uri)
                     logger.info("MLflow tracking URI: %s", tracking_uri)
                     duration = mlflow_connect(tracking_uri)
                     logger.info("Connected to MLflow in %s seconds", duration.seconds)
-                    mlflow.set_experiment(self.config.logger.experiment_name)
+                    mlflow.set_experiment(experiment_name)
 
                     if mlflow.active_run() is None:
                         logger.info("Starting MLflow RUN: %s", self.run_name)
@@ -306,42 +308,8 @@ class Logger:
                             "framework": "pytorch",
                         }
                         mlflow.set_tags(tags)
-
-                        # Log concept metadata artifacts if available
-                        if self.id2label:
-                            mlflow.log_dict(self.id2label, "metadata/id2label.json")
-                        if self.id2concept:
-                            mlflow.log_dict(self.id2concept, "metadata/id2concept.json")
-                        if (
-                            hasattr(meta_model, "num_concepts")
-                            and meta_model.num_concepts is not None
-                        ):
-                            mlflow.log_param("num_concepts", int(meta_model.num_concepts))
-                        if (
-                            hasattr(meta_model, "conceptid2labelid")
-                            and meta_model.conceptid2labelid is not None
-                        ):
-                            mlflow.log_dict(
-                                meta_model.conceptid2labelid, "metadata/conceptid2labelid.json"
-                            )
-                        if (
-                            hasattr(meta_model, "concept_matrix")
-                            and meta_model.concept_matrix is not None
-                        ):
-                            concept_matrix_path = None
-                            try:
-                                with tempfile.NamedTemporaryFile(
-                                    mode="w", suffix=".csv", delete=False
-                                ) as tmp_file:
-                                    concept_matrix_path = tmp_file.name
-                                meta_model.concept_matrix.to_csv(concept_matrix_path)
-                                mlflow.log_artifact(concept_matrix_path, artifact_path="metadata")
-                                logger.info("Logged concept matrix to MLflow")
-                            except Exception as e:
-                                logger.warning("Failed to log concept matrix to MLflow: %s", e)
-                            finally:
-                                if concept_matrix_path and os.path.exists(concept_matrix_path):
-                                    os.remove(concept_matrix_path)
+                        # Log concept metadata
+                        self._log_concept_metadata(meta_model)
 
                 except Exception as e:
                     logger.warning("Failed to initialize MLflow logging: %s", e)
@@ -365,7 +333,7 @@ class Logger:
             else:
                 try:
                     self._wandb_logger = WandbLogger(
-                        project=self.config.logger.experiment_name,
+                        project=experiment_name or "mermaidseg",
                         run_name=self.run_name,
                         config=config,
                         num_classes=int(meta_model.num_classes),
@@ -378,6 +346,40 @@ class Logger:
     def _mlflow_active(self) -> bool:
         """True when MLflow logging is enabled and operational."""
         return self.enable_mlflow and self.enabled
+
+    def _log_concept_metadata(self, meta_model: MetaModel) -> None:
+        """Log concept-related metadata artifacts when available."""
+        if self.id2label:
+            mlflow.log_dict(self.id2label, "metadata/id2label.json")
+        if self.id2concept:
+            mlflow.log_dict(self.id2concept, "metadata/id2concept.json")
+
+        num_concepts = getattr(meta_model, "num_concepts", None)
+        if num_concepts is not None:
+            mlflow.log_param("num_concepts", int(num_concepts))
+
+        conceptid2labelid = getattr(meta_model, "conceptid2labelid", None)
+        if conceptid2labelid is not None:
+            mlflow.log_dict(conceptid2labelid, "metadata/conceptid2labelid.json")
+
+        concept_matrix = getattr(meta_model, "concept_matrix", None)
+        if concept_matrix is not None:
+            self._log_concept_matrix_artifact(concept_matrix)
+
+    def _log_concept_matrix_artifact(self, concept_matrix: Any) -> None:
+        """Log concept matrix CSV artifact while ensuring temp file cleanup."""
+        concept_matrix_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp_file:
+                concept_matrix_path = tmp_file.name
+            concept_matrix.to_csv(concept_matrix_path)
+            mlflow.log_artifact(concept_matrix_path, artifact_path="metadata")
+            logger.info("Logged concept matrix to MLflow")
+        except Exception as e:
+            logger.warning("Failed to log concept matrix to MLflow: %s", e)
+        finally:
+            if concept_matrix_path and os.path.exists(concept_matrix_path):
+                os.remove(concept_matrix_path)
 
     @property
     def enable_wandb(self) -> bool:

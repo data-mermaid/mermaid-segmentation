@@ -128,9 +128,27 @@ class TestLoggerInit:
         config = make_config(logger={"save_local_checkpoints": False})
         lgr = Logger(config=config, meta_model=fake_meta_model)
         assert lgr.save_local_checkpoints is False
+        assert lgr.save_local_models is False
+
+    def test_save_local_models_alias_sets_checkpoint_flag(
+        self, tmp_mlflow_uri, make_config, fake_meta_model
+    ):
+        config = make_config(logger={"save_local_checkpoints": None, "save_local_models": False})
+        with pytest.deprecated_call(match="save_local_models is deprecated"):
+            lgr = Logger(config=config, meta_model=fake_meta_model)
+        assert lgr.save_local_checkpoints is False
+        assert lgr.save_local_models is False
 
     def test_disabled_when_no_experiment_name(self, tmp_mlflow_uri, make_config, fake_meta_model):
         config = make_config(logger={"experiment_name": None})
+        lgr = Logger(config=config, meta_model=fake_meta_model)
+        assert lgr.enabled is False
+        assert lgr.mlflow_run_id is None
+
+    def test_disabled_when_logger_config_missing(
+        self, tmp_mlflow_uri, make_config, fake_meta_model
+    ):
+        config = make_config(logger=None)
         lgr = Logger(config=config, meta_model=fake_meta_model)
         assert lgr.enabled is False
         assert lgr.mlflow_run_id is None
