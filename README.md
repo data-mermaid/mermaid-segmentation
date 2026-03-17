@@ -145,6 +145,24 @@ To train segmentation models using a specified config file one can use the `nbs/
 
 To evaluate any trained segmentation model, you can use the notebook `nbs/Model_Evaluation.ipynb` which contains both quantitative performance analyses through dataset level performance metrics and qualitative analyses by visualizing model results and corresponding class probabilities.
 
+### Running Tests
+
+**Run all tests:**
+```bash
+uv run pytest tests/
+```
+
+**Run only unit tests (skip integration tests):**
+```bash
+uv run pytest tests/ -m "not integration"
+```
+
+**Run specific test file:**
+```bash
+uv run pytest tests/test_logger.py -v
+```
+
+
 ## DSLP Issue Workflow
 
 This project follows the [Data Science Lifecycle Process (DSLP)](https://github.com/dslp/dslp) for managing data science work. We use structured issue templates to track different stages of the workflow.
