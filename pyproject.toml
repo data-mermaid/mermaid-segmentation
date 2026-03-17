@@ -30,9 +30,9 @@ dependencies = [
     "huggingface-hub>=0.36.2",
     "seaborn>=0.13.2",
     "opencv-python-headless>=4.11.0.86",
-    "wandb>=0.25.0",
     "sagemaker-mlflow>=0.2.0",
     "requests-auth-aws-sigv4>=0.7",
+    "safetensors>=0.4.0",
 ]
 
 [project.optional-dependencies]
@@ -40,7 +40,7 @@ notebooks = [
     "jupyter",
     "ipykernel",
     "ipywidgets",
-    "wandb", # moved here for now since we use mlflow for logging
+    "wandb>=0.25.0",
 ]
 scraping = [
     "selenium",
@@ -77,3 +77,32 @@ known-first-party = ["mermaidseg"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+source = ["mermaidseg"]
+omit = ["tests/*", "*/conftest.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

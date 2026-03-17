@@ -138,6 +138,7 @@ logger = Logger(
     log_epochs=cfg.logger.log_epochs,
     log_checkpoint=cfg.logger.log_checkpoint,
     checkpoint_dir=".",
+    id2label=dataset_coralnet.id2label,
 )
 
 train_model(meta_model, evaluator, train_loader, val_loader, logger=logger)

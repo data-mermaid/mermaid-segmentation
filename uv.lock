@@ -2330,6 +2330,7 @@ dependencies = [
     { name = "requests" },
     { name = "requests-auth-aws-sigv4" },
     { name = "s3fs" },
+    { name = "safetensors" },
     { name = "sagemaker-mlflow" },
     { name = "seaborn" },
     { name = "segmentation-models-pytorch" },
@@ -2337,7 +2338,6 @@ dependencies = [
     { name = "torchmetrics" },
     { name = "tqdm" },
     { name = "transformers" },
-    { name = "wandb" },
 ]
 
 [package.optional-dependencies]
@@ -2389,6 +2389,7 @@ requires-dist = [
     { name = "requests" },
     { name = "requests-auth-aws-sigv4", specifier = ">=0.7" },
     { name = "s3fs" },
+    { name = "safetensors", specifier = ">=0.4.0" },
     { name = "sagemaker-mlflow", specifier = ">=0.2.0" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "segmentation-models-pytorch" },
@@ -2397,8 +2398,7 @@ requires-dist = [
     { name = "torchmetrics" },
     { name = "tqdm" },
     { name = "transformers" },
-    { name = "wandb", specifier = ">=0.25.0" },
-    { name = "wandb", marker = "extra == 'notebooks'" },
+    { name = "wandb", marker = "extra == 'notebooks'", specifier = ">=0.25.0" },
     { name = "webdriver-manager", marker = "extra == 'scraping'" },
 ]
 provides-extras = ["notebooks", "scraping"]

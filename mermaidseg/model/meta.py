@@ -366,8 +366,6 @@ class MetaModel:
                     )
                     if metric_results[metric_name].ndim == 0:
                         metric_results[metric_name] = metric_results[metric_name].item()
-                    else:
-                        metric_results[metric_name] = metric_results[metric_name][2].item()
                     evaluator.concept_metric_dict[metric_name].reset()
 
         last_loss = running_loss / len(train_loader)
@@ -447,8 +445,6 @@ class MetaModel:
                 )
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
-                else:
-                    metric_results[metric_name] = metric_results[metric_name][2].item()
 
                 evaluator.concept_metric_dict[metric_name].reset()
 
