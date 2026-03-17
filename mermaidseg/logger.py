@@ -222,6 +222,9 @@ class Logger:
         self.id2concept = id2concept
         logger_cfg = getattr(config, "logger", None)
         experiment_name = getattr(logger_cfg, "experiment_name", None)
+        self._log_system_metrics = getattr(logger_cfg, "system_metrics", True)
+        # Keep MLflow system metrics sampling explicit and stable across environments.
+        self._system_metrics_interval = getattr(logger_cfg, "system_metrics_sampling_interval", 10)
 
         # Keep one source of truth for local persistence.
         if save_local_checkpoints is None and save_local_models is not None:
@@ -264,10 +267,15 @@ class Logger:
                     duration = mlflow_connect(tracking_uri)
                     logger.info("Connected to MLflow in %s seconds", duration.seconds)
                     mlflow.set_experiment(experiment_name)
+                    if self._log_system_metrics and self._system_metrics_interval is not None:
+                        mlflow.set_system_metrics_sampling_interval(self._system_metrics_interval)
 
                     if mlflow.active_run() is None:
                         logger.info("Starting MLflow RUN: %s", self.run_name)
-                        run = mlflow.start_run(run_name=self.run_name)
+                        run = mlflow.start_run(
+                            run_name=self.run_name,
+                            log_system_metrics=self._log_system_metrics,
+                        )
                         self.mlflow_run_id = run.info.run_id
                     else:
                         logger.info("MLflow run %s already active", self.run_name)
@@ -394,7 +402,10 @@ class Logger:
         try:
             if mlflow.active_run() is None:
                 logger.warning("No active MLflow run, starting new run: %s", self.run_name)
-                run = mlflow.start_run(run_name=self.run_name)
+                run = mlflow.start_run(
+                    run_name=self.run_name,
+                    log_system_metrics=self._log_system_metrics,
+                )
                 self.mlflow_run_id = run.info.run_id
             return True
         except Exception as e:

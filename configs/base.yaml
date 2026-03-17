@@ -4,6 +4,8 @@ logger:
   uri: "segmentation"
   experiment_name: "mermaid"
   log_epochs: 5
+  system_metrics: true
+  system_metrics_sampling_interval: 10
 
 data:
   name: "MermaidDataset"
