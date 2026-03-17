@@ -6,6 +6,7 @@ date: 30-10-2025
 
 Classes:
     Logger - A class for logging metrics and configurations to an MLflow tracking server.
+    WandbLogger - Deprecated wandb logger; will be removed in a future release.
 Functions:
     get_mlflow_tracking_uri() - Auto-detect MLflow URI based on execution environment.
     mlflow_connect() - Connect to the MLflow tracking server and return the connection time.
@@ -15,7 +16,9 @@ Functions:
 import copy
 import logging
 import os
+import tempfile
 import time
+import warnings
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -139,7 +142,10 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
 
 class Logger:
     """
-    Logger class for managing mlflow logging and visualization during training and evaluation.
+    MLflow-focused logger for experiment tracking during training and evaluation.
+
+    wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy
+    ``WandbLogger`` delegate during the deprecation period.
     Attributes:
         config (dict): Configuration dictionary for the logger.
         log_epochs (int): Frequency of logging metrics in terms of epochs.
@@ -163,6 +169,8 @@ class Logger:
         enable_wandb=False,
         id2label=None,
         id2concept=None,
+        save_local_checkpoints=None,
+        save_local_models=None,
     ):
         """
         Initializes the logger for tracking experiments and benchmarks.
@@ -173,9 +181,15 @@ class Logger:
             log_checkpoint (int, optional): Frequency of logging checkpoints. Defaults to 50.
             checkpoint_dir (str, optional): Directory to save checkpoints. Defaults to ".".
             enable_mlflow (bool, optional): Flag to enable or disable MLflow logging. Defaults to True.
-            enable_wandb (bool, optional): Flag to enable or disable Weights & Biases logging. Defaults to False.
+            enable_wandb (bool, optional): **Deprecated.** If True, creates an internal
+                ``WandbLogger`` delegate and emits a ``DeprecationWarning``. Defaults to False.
             id2label (dict, optional): Mapping from class IDs to class names for per-class metrics. Defaults to None.
             id2concept (dict, optional): Mapping from concept IDs to concept names for per-concept metrics. Defaults to None.
+            save_local_checkpoints (bool, optional): Whether to save checkpoint files to disk.
+                Reads from ``config.logger.save_local_checkpoints`` when None. Defaults to True.
+            save_local_models (bool, optional): Whether to log native MLflow model artifacts
+                (``mlflow.pytorch.log_model``) for best checkpoints. Reads from
+                ``config.logger.save_local_models`` when None. Defaults to True.
         Attributes:
             config (dict): Stores the configuration dictionary for the experiment.
             log_epochs (int): Frequency of logging epochs.
@@ -183,23 +197,37 @@ class Logger:
             checkpoint_dir (str): Directory to save checkpoints.
             run_name (str): Name of the current run, derived from the meta model.
             enable_mlflow (bool): Flag indicating whether MLflow logging is enabled.
-            enable_wandb (bool): Flag indicating whether Weights & Biases logging is enabled.
             id2label (dict): Mapping from class IDs to class names for unpacking array metrics.
             id2concept (dict): Mapping from concept IDs to concept names for unpacking array metrics.
+            save_local_checkpoints (bool): Whether to persist checkpoint files locally.
+            save_local_models (bool): Whether to log native MLflow model artifacts.
         """
 
         self.config = config
         self.log_epochs = log_epochs
         self.log_checkpoint = log_checkpoint
+        if self.log_checkpoint <= 0:
+            raise ValueError("log_checkpoint must be > 0")
         self.checkpoint_dir = checkpoint_dir
         self.run_name = meta_model.run_name
         self.enable_mlflow = enable_mlflow
-        self.enable_wandb = enable_wandb
         self.mlflow_run_id = None
         self.enabled = False
-        self.wandb_run = None
+        self._wandb_logger = None
         self.id2label = id2label
         self.id2concept = id2concept
+
+        if save_local_checkpoints is not None:
+            self.save_local_checkpoints = save_local_checkpoints
+        else:
+            cfg_val = getattr(getattr(config, "logger", None), "save_local_checkpoints", None)
+            self.save_local_checkpoints = cfg_val if cfg_val is not None else True
+
+        if save_local_models is not None:
+            self.save_local_models = save_local_models
+        else:
+            cfg_val = getattr(getattr(config, "logger", None), "save_local_models", None)
+            self.save_local_models = cfg_val if cfg_val is not None else True
 
         if enable_mlflow:
             self.enabled = (
@@ -286,11 +314,20 @@ class Logger:
                             hasattr(meta_model, "concept_matrix")
                             and meta_model.concept_matrix is not None
                         ):
-                            # Log concept matrix as CSV for better readability
-                            concept_matrix_path = f"{checkpoint_dir}/concept_matrix.csv"
-                            meta_model.concept_matrix.to_csv(concept_matrix_path)
-                            mlflow.log_artifact(concept_matrix_path, artifact_path="metadata")
-                            logger.info("Logged concept matrix to MLflow")
+                            concept_matrix_path = None
+                            try:
+                                with tempfile.NamedTemporaryFile(
+                                    mode="w", suffix=".csv", delete=False
+                                ) as tmp_file:
+                                    concept_matrix_path = tmp_file.name
+                                meta_model.concept_matrix.to_csv(concept_matrix_path)
+                                mlflow.log_artifact(concept_matrix_path, artifact_path="metadata")
+                                logger.info("Logged concept matrix to MLflow")
+                            except Exception as e:
+                                logger.warning("Failed to log concept matrix to MLflow: %s", e)
+                            finally:
+                                if concept_matrix_path and os.path.exists(concept_matrix_path):
+                                    os.remove(concept_matrix_path)
 
                 except Exception as e:
                     logger.warning("Failed to initialize MLflow logging: %s", e)
@@ -303,20 +340,49 @@ class Logger:
                     self.enabled = False
 
         if enable_wandb:
+            warnings.warn(
+                "enable_wandb is deprecated and will be removed in a future release. "
+                "Use the MLflow-based Logger workflow instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             if WANDB_IMPORT_ERROR is not None:
                 logger.warning("wandb is not installed. Wandb logging is disabled.")
-                self.enable_wandb = False
             else:
                 try:
-                    self.wandb_run = wandb.init(
+                    self._wandb_logger = WandbLogger(
                         project=self.config.logger.experiment_name,
-                        name=self.run_name,
+                        run_name=self.run_name,
                         config=config,
+                        num_classes=int(meta_model.num_classes),
+                        _warn=False,
                     )
-                    self.wandb_run.config.update({"num_classes": int(meta_model.num_classes)})
                 except Exception as e:
                     logger.warning("Failed to initialize wandb logging: %s", e)
-                    self.enable_wandb = False
+
+    @property
+    def _mlflow_active(self) -> bool:
+        """True when MLflow logging is enabled and operational."""
+        return self.enable_mlflow and self.enabled
+
+    @property
+    def enable_wandb(self) -> bool:
+        """True when a ``WandbLogger`` delegate is active (deprecated)."""
+        return self._wandb_logger is not None
+
+    def _ensure_active_run(self) -> bool:
+        """Guarantee an active MLflow run exists. Returns True on success."""
+        if not self._mlflow_active:
+            return False
+        try:
+            if mlflow.active_run() is None:
+                logger.warning("No active MLflow run, starting new run: %s", self.run_name)
+                run = mlflow.start_run(run_name=self.run_name)
+                self.mlflow_run_id = run.info.run_id
+            return True
+        except Exception as e:
+            logger.warning("Failed to ensure active MLflow run: %s", e)
+            return False
 
     def log(self, log_dict, step):
         """
@@ -325,14 +391,8 @@ class Logger:
             log_dict (Dict[str, Any]): A dictionary containing the log data to be recorded.
             step (int): The current step or iteration associated with the log entry.
         """
-        if self.enable_mlflow and self.enabled:
+        if self._ensure_active_run():
             try:
-                # Ensure there is an active mlflow run while logging metrics/artifacts
-                if mlflow.active_run() is None:
-                    logger.warning("No active MLflow run, starting new run: %s", self.run_name)
-                    run = mlflow.start_run(run_name=self.run_name)
-                    self.mlflow_run_id = run.info.run_id
-
                 # Batch log all metrics at once for better performance
                 # Unpack array-valued metrics into per-class or per-concept named scalars
                 metrics_to_log = {}
@@ -357,11 +417,8 @@ class Logger:
             except Exception as e:
                 logger.warning("Failed to log metrics to MLflow: %s", e)
 
-        if self.enable_wandb and self.wandb_run is not None:
-            try:
-                self.wandb_run.log(log_dict, step=step)
-            except Exception as e:
-                logger.warning("Failed to log metrics to wandb: %s", e)
+        if self._wandb_logger is not None:
+            self._wandb_logger.log(log_dict, step=step)
 
     def save_model_checkpoint(
         self,
@@ -389,13 +446,14 @@ class Logger:
             `{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/`
         Naming conventions for the checkpoint file:
             - If the epoch is a multiple of `self.log_checkpoint` and greater than 0:
-              `model_epoch{epoch}`
+              ``model_epoch{epoch}``
             - Otherwise:
-              `model_{timestamp}`
+              ``model_{timestamp}``
         The directory structure is created if it does not already exist.
         Note:
             The model is moved to the CPU before saving its state dictionary.
-            Local checkpoint is always saved; MLflow upload is optional.
+            Local checkpoint saving is controlled by ``save_local_checkpoints``.
+            MLflow logging is independent of local persistence.
         """
         timestamp = time.strftime("%Y%m%d%H")
 
@@ -418,21 +476,31 @@ class Logger:
         if epoch % self.log_checkpoint == 0:
             model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
 
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        torch.save(checkpoint, model_path)  # type: ignore
-        logger.info("Checkpoint saved locally: %s", model_path)
+        # --- Local checkpoint persistence (optional) ---
+        local_checkpoint_saved = False
+        if self.save_local_checkpoints:
+            os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            torch.save(checkpoint, model_path)  # type: ignore
+            local_checkpoint_saved = True
+            logger.info("Checkpoint saved locally: %s", model_path)
+        else:
+            logger.info("Local checkpoint saving disabled, skipping disk write")
 
-        # Log checkpoint to MLflow if enabled
-        if self.enable_mlflow and self.enabled:
+        # --- MLflow artifact & model logging ---
+        if self._ensure_active_run():
             try:
-                # Log the checkpoint file as an artifact
-                mlflow.log_artifact(model_path, artifact_path="checkpoints")
+                if local_checkpoint_saved:
+                    mlflow.log_artifact(model_path, artifact_path="checkpoints")
+                else:
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        tmp_path = os.path.join(tmpdir, os.path.basename(model_path))
+                        torch.save(checkpoint, tmp_path)  # type: ignore
+                        mlflow.log_artifact(tmp_path, artifact_path="checkpoints")
 
                 # Log checkpoint metrics (unpack arrays into per-class or per-concept scalars)
                 checkpoint_metrics = {}
                 for k, v in metrics_dict.items():
                     if isinstance(v, np.ndarray):
-                        # Use id2concept for concept metrics, id2label for class metrics
                         if "concept" in k.lower():
                             id_map = self.id2concept or {}
                             prefix = "concept"
@@ -448,26 +516,46 @@ class Logger:
 
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
 
-                logger.info("Checkpoint logged to MLflow: %s", model_path)
-            except Exception as e:
-                logger.warning("Failed to log checkpoint to MLflow: %s", e)
+                scalar_metrics = {
+                    k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)
+                }
+                if self.save_local_models:
+                    mlflow.pytorch.log_model(
+                        pytorch_model=meta_model_run.model,
+                        name="best-model",
+                        metadata={
+                            "epoch": epoch,
+                            "timestamp": timestamp,
+                            "metrics": scalar_metrics,
+                            "run_name": meta_model_run.run_name,
+                        },
+                    )
+                    mlflow.set_tag("best_model_epoch", str(epoch))
+                    mlflow.log_metrics(
+                        {f"best_model/{k}": v for k, v in scalar_metrics.items()},
+                        step=epoch,
+                    )
 
-        if self.enable_wandb and self.wandb_run is not None:
-            try:
-                artifact = wandb.Artifact(
-                    f"checkpoint-epoch{epoch}",
-                    type="model",
-                    metadata=metrics_dict,
+                logger.info(
+                    "Checkpoint + MLflow PyTorch model logged (epoch %d): %s",
+                    epoch,
+                    model_path,
                 )
-                artifact.add_file(model_path)
-                self.wandb_run.log_artifact(artifact)
-                logger.info("Checkpoint logged to wandb: %s", model_path)
             except Exception as e:
-                logger.warning("Failed to log checkpoint to wandb: %s", e)
+                logger.warning("Failed to log checkpoint/model to MLflow: %s", e)
+
+        if self._wandb_logger is not None:
+            self._wandb_logger.save_checkpoint(
+                model_path=model_path,
+                epoch=epoch,
+                metrics_dict=metrics_dict,
+                checkpoint=checkpoint,
+                local_checkpoint_saved=local_checkpoint_saved,
+            )
 
     def end_run(self):
         """
-        Properly end the MLflow and wandb runs.
+        Properly end the MLflow run (and wandb delegate, if active).
         Should be called at the end of training to ensure proper cleanup.
         """
         if self.enable_mlflow and self.enabled:
@@ -478,12 +566,8 @@ class Logger:
             except Exception as e:
                 logger.warning("Failed to end MLflow run: %s", e)
 
-        if self.enable_wandb and self.wandb_run is not None:
-            try:
-                self.wandb_run.finish()
-                logger.info("Ended wandb run: %s", self.run_name)
-            except Exception as e:
-                logger.warning("Failed to end wandb run: %s", e)
+        if self._wandb_logger is not None:
+            self._wandb_logger.end_run()
 
     def __enter__(self):
         """Context manager entry."""
@@ -493,3 +577,93 @@ class Logger:
         """Context manager exit - ensures runs are properly closed."""
         self.end_run()
         return False
+
+
+class WandbLogger:
+    """Deprecated standalone wandb logger.
+
+    .. deprecated::
+        ``WandbLogger`` will be removed in a future release.
+        Migrate to the MLflow-based :class:`Logger` workflow.
+    """
+
+    def __init__(
+        self,
+        project: str,
+        run_name: str,
+        config,
+        num_classes: int,
+        *,
+        _warn: bool = True,
+    ):
+        if _warn:
+            warnings.warn(
+                "WandbLogger is deprecated and will be removed in a future release. "
+                "Use the MLflow-based Logger instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if WANDB_IMPORT_ERROR is not None:
+            raise ImportError(
+                "wandb is required for WandbLogger but is not installed. "
+                "Install with: pip install wandb"
+            ) from WANDB_IMPORT_ERROR
+
+        self.wandb_run = wandb.init(
+            project=project,
+            name=run_name,
+            config=config,
+        )
+        self.wandb_run.config.update({"num_classes": num_classes})
+
+    def log(self, log_dict, step):
+        """Log metrics to the active wandb run."""
+        if self.wandb_run is None:
+            return
+        try:
+            self.wandb_run.log(log_dict, step=step)
+        except Exception as e:
+            logger.warning("Failed to log metrics to wandb: %s", e)
+
+    def save_checkpoint(
+        self,
+        model_path: str,
+        epoch: int,
+        metrics_dict: dict[str, Any],
+        checkpoint: dict[str, Any],
+        local_checkpoint_saved: bool,
+    ):
+        """Log a model checkpoint artifact to wandb."""
+        if self.wandb_run is None:
+            return
+        temp_file_path = None
+        try:
+            artifact_file = model_path
+            if not local_checkpoint_saved:
+                with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp_file:
+                    temp_file_path = tmp_file.name
+                torch.save(checkpoint, temp_file_path)  # type: ignore
+                artifact_file = temp_file_path
+            artifact = wandb.Artifact(
+                f"checkpoint-epoch{epoch}",
+                type="model",
+                metadata=metrics_dict,
+            )
+            artifact.add_file(artifact_file)
+            self.wandb_run.log_artifact(artifact)
+            logger.info("Checkpoint logged to wandb: %s", model_path)
+        except Exception as e:
+            logger.warning("Failed to log checkpoint to wandb: %s", e)
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
+    def end_run(self):
+        """Finish the active wandb run."""
+        if self.wandb_run is None:
+            return
+        try:
+            self.wandb_run.finish()
+            logger.info("Ended wandb run")
+        except Exception as e:
+            logger.warning("Failed to end wandb run: %s", e)
