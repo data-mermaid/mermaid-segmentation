@@ -1,0 +1,20 @@
+name: Blank Issue
+description: Open-ended issue for anything that doesn't fit other templates
+title: ""
+labels: []
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the issue, idea, or question in your own words.
+      placeholder: What's on your mind?
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Anything else that might be helpful (links, screenshots, references, etc.)
+      placeholder: Optional — add any supporting details here
