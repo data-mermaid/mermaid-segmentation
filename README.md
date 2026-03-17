@@ -201,6 +201,16 @@ SafeTensors format ensures:
 - Fixed tensor shapes (prevents shape confusion attacks)
 - Fast zero-copy memory mapping
 - Self-contained metadata
+### Concept Bottleneck Models
+
+When using concept bottleneck models (via `nbs/Concept_Bottleneck_Pipeline.ipynb`), the evaluation metrics use a hard-coded `num_classes=3` parameter. This is intentional and correct for the current implementation.
+
+**Why 3 classes?** Each concept in the bottleneck can have exactly three states:
+- **True (1)**: Concept is present
+- **False (0)**: Concept is absent
+- **Masked**: Concept is not evaluated for this pixel
+
+This ternary classification is reflected in the `F1Score` metric used for concept evaluation in `mermaidseg/model/eval.py`. Future implementations may explore multi-class concept labels (e.g., coral families), but this would require architectural changes across the codebase.
 
 ## DSLP Issue Workflow
 
