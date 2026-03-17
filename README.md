@@ -163,6 +163,45 @@ uv run pytest tests/test_logger.py -v
 ```
 
 
+## Model Serialization Strategy
+
+We use a **hybrid approach** to model serialization, balancing safety, compatibility, and practical training needs:
+
+| Use Case | Format | Rationale |
+|----------|--------|-----------|
+| **Training Checkpoints** | `torch.save` (pickle) | Full state (model + optimizer + scheduler) needed for resume |
+| **MLflow Model Registry** | TorchScript graph (`export_model=True`) | Safer than pickle; prevents arbitrary code execution on load |
+| **Published/Shared Models** | SafeTensors | Secure format for public distribution; zero-copy memory mapping |
+
+### Why We Moved Away from Pickle-Only
+
+**Security Risk**: Pickle files can execute arbitrary Python code during deserialization. Loading an untrusted pickle file is equivalent to running untrusted code.
+
+**Our Mitigation Strategy**:
+1. **Internal Checkpoints** → Still use pickle (trusted, same-machine use only)
+2. **Registry/Deployment** → Use TorchScript graph export (safe for inference)
+3. **External Sharing** → Use SafeTensors (cannot execute code; fast mmap loading)
+
+### Exporting Models for Sharing
+
+```python
+from mermaidseg.logger import Logger
+
+# After training, export to SafeTensors for publication
+logger.save_safetensors_for_publish(
+    meta_model_run=meta_model,
+    epoch=best_epoch,
+    metrics_dict={"accuracy": best_acc},
+    artifact_path="publish/v1"
+)
+```
+
+SafeTensors format ensures:
+- No arbitrary code execution (unlike pickle)
+- Fixed tensor shapes (prevents shape confusion attacks)
+- Fast zero-copy memory mapping
+- Self-contained metadata
+
 ## DSLP Issue Workflow
 
 This project follows the [Data Science Lifecycle Process (DSLP)](https://github.com/dslp/dslp) for managing data science work. We use structured issue templates to track different stages of the workflow.

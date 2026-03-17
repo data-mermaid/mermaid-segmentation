@@ -6,14 +6,22 @@ date: 30-10-2025
 
 Classes:
     Logger - A class for logging metrics and configurations to an MLflow tracking server.
+             Uses hybrid serialization: pickle for training checkpoints, SafeTensors/graph
+             for published models.
     WandbLogger - Deprecated wandb logger; will be removed in a future release.
 Functions:
     get_mlflow_tracking_uri() - Auto-detect MLflow URI based on execution environment.
     mlflow_connect() - Connect to the MLflow tracking server and return the connection time.
     save_model_checkpoint() - Save model checkpoints with relevant metadata.
+
+Serialization Strategy:
+    - Training Checkpoints: torch.save (pickle) - full state for resume
+    - MLflow Model Registry: export_model=True (TorchScript) - safer for deployment
+    - Published Models: SafeTensors - secure for public sharing
 """
 
 import copy
+import json
 import logging
 import os
 import tempfile
@@ -22,19 +30,15 @@ import warnings
 from datetime import datetime, timedelta
 from typing import Any
 
+import mlflow
 import numpy as np
 import torch
+from safetensors.torch import save_file as save_safetensors
 
 from mermaidseg.model.meta import MetaModel
 
 logger = logging.getLogger(__name__)
 
-try:
-    import mlflow
-
-    MLFLOW_IMPORT_ERROR = None
-except ImportError as err:
-    MLFLOW_IMPORT_ERROR = err
 
 try:
     import wandb
@@ -42,7 +46,6 @@ try:
     WANDB_IMPORT_ERROR = None
 except ImportError as err:
     WANDB_IMPORT_ERROR = err
-
 
 LOCAL_DEFAULT_URI = "./segmentation"
 
@@ -187,9 +190,9 @@ class Logger:
             id2concept (dict, optional): Mapping from concept IDs to concept names for per-concept metrics. Defaults to None.
             save_local_checkpoints (bool, optional): Whether to save checkpoint files to disk.
                 Reads from ``config.logger.save_local_checkpoints`` when None. Defaults to True.
-            save_local_models (bool, optional): Whether to log native MLflow model artifacts
-                (``mlflow.pytorch.log_model``) for best checkpoints. Reads from
-                ``config.logger.save_local_models`` when None. Defaults to True.
+            save_local_models (bool, optional): Deprecated alias for
+                ``save_local_checkpoints``. When provided, it is treated as the same
+                switch so local checkpoint and local model logging stay aligned.
         Attributes:
             config (dict): Stores the configuration dictionary for the experiment.
             log_epochs (int): Frequency of logging epochs.
@@ -200,7 +203,7 @@ class Logger:
             id2label (dict): Mapping from class IDs to class names for unpacking array metrics.
             id2concept (dict): Mapping from concept IDs to concept names for unpacking array metrics.
             save_local_checkpoints (bool): Whether to persist checkpoint files locally.
-            save_local_models (bool): Whether to log native MLflow model artifacts.
+            save_local_models (bool): Mirrors ``save_local_checkpoints``.
         """
 
         self.config = config
@@ -217,27 +220,38 @@ class Logger:
         self.id2label = id2label
         self.id2concept = id2concept
 
+        # Keep one source of truth for local persistence.
+        if save_local_checkpoints is None and save_local_models is not None:
+            warnings.warn(
+                "save_local_models is deprecated; use save_local_checkpoints.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            save_local_checkpoints = save_local_models
+
         if save_local_checkpoints is not None:
             self.save_local_checkpoints = save_local_checkpoints
         else:
-            cfg_val = getattr(getattr(config, "logger", None), "save_local_checkpoints", None)
-            self.save_local_checkpoints = cfg_val if cfg_val is not None else True
+            cfg_local = getattr(getattr(config, "logger", None), "save_local_checkpoints", None)
+            if cfg_local is None:
+                legacy_cfg = getattr(getattr(config, "logger", None), "save_local_models", None)
+                if legacy_cfg is not None:
+                    warnings.warn(
+                        "config.logger.save_local_models is deprecated; use "
+                        "config.logger.save_local_checkpoints.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+                cfg_local = legacy_cfg
+            self.save_local_checkpoints = cfg_local if cfg_local is not None else True
 
-        if save_local_models is not None:
-            self.save_local_models = save_local_models
-        else:
-            cfg_val = getattr(getattr(config, "logger", None), "save_local_models", None)
-            self.save_local_models = cfg_val if cfg_val is not None else True
+        self.save_local_models = self.save_local_checkpoints
 
         if enable_mlflow:
-            self.enabled = (
-                self.config.logger.experiment_name is not None and MLFLOW_IMPORT_ERROR is None
-            )
+            self.enabled = self.config.logger.experiment_name is not None
 
             if not self.enabled:
-                logger.info(
-                    "MLflow logging is disabled (experiment_name not set or mlflow not installed)"
-                )
+                logger.info("MLflow logging is disabled (experiment_name not set)")
 
             if self.enabled:
                 try:
@@ -520,27 +534,35 @@ class Logger:
                     k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)
                 }
                 if self.save_local_models:
-                    mlflow.pytorch.log_model(
-                        pytorch_model=meta_model_run.model,
-                        name="best-model",
-                        metadata={
-                            "epoch": epoch,
-                            "timestamp": timestamp,
-                            "metrics": scalar_metrics,
-                            "run_name": meta_model_run.run_name,
-                        },
-                    )
+                    try:
+                        mlflow.pytorch.log_model(
+                            pytorch_model=meta_model_run.model,
+                            name="best-model",
+                            export_model=True,
+                            metadata={
+                                "epoch": epoch,
+                                "timestamp": timestamp,
+                                "metrics": scalar_metrics,
+                                "run_name": meta_model_run.run_name,
+                                "serialization": "torch_export",
+                            },
+                        )
+                        mlflow.set_tag("best_model_export_failed", "false")
+                    except Exception as export_err:
+                        export_error = str(export_err)
+                        logger.warning(
+                            "Model export failed; pickle fallback disabled: %s",
+                            export_error,
+                        )
+                        mlflow.set_tag("best_model_export_failed", "true")
+                        mlflow.set_tag("best_model_export_error", export_error[:500])
                     mlflow.set_tag("best_model_epoch", str(epoch))
                     mlflow.log_metrics(
                         {f"best_model/{k}": v for k, v in scalar_metrics.items()},
                         step=epoch,
                     )
 
-                logger.info(
-                    "Checkpoint + MLflow PyTorch model logged (epoch %d): %s",
-                    epoch,
-                    model_path,
-                )
+                logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
             except Exception as e:
                 logger.warning("Failed to log checkpoint/model to MLflow: %s", e)
 
@@ -552,6 +574,67 @@ class Logger:
                 checkpoint=checkpoint,
                 local_checkpoint_saved=local_checkpoint_saved,
             )
+
+    def save_safetensors_for_publish(
+        self,
+        meta_model_run: MetaModel,
+        epoch: int,
+        metrics_dict: dict[str, float],
+        artifact_path: str = "publish",
+    ):
+        """Export model weights as SafeTensors for secure sharing/publishing.
+
+        SafeTensors format provides:
+        - Zero-copy memory mapping for faster loading
+        - No arbitrary code execution (unlike pickle)
+        - Fixed tensor shapes (prevents shape attacks)
+        - Limited dtype support (prevents dtype confusion)
+
+        Use this when publishing models to public repositories or sharing
+        with external collaborators.
+
+        Args:
+            meta_model_run: MetaModel containing the model to export
+            epoch: Current training epoch
+            metrics_dict: Dictionary of metrics to include in metadata
+            artifact_path: MLflow artifact path for the output
+
+        """
+
+        if not self._ensure_active_run():
+            logger.warning("Cannot save safetensors: no active MLflow run")
+            return
+
+        try:
+            # Extract state dict and prepare metadata
+            state_dict = meta_model_run.model.state_dict()
+            metadata = {
+                "epoch": str(epoch),
+                "run_name": meta_model_run.run_name,
+                "model_class": meta_model_run.model.__class__.__name__,
+                **{k: str(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)},
+            }
+
+            # Save to temp file then log as artifact
+            with tempfile.TemporaryDirectory() as tmpdir:
+                safetensors_path = os.path.join(tmpdir, "model_weights.safetensors")
+                metadata_path = os.path.join(tmpdir, "metadata.json")
+
+                save_safetensors(state_dict, safetensors_path, metadata=metadata)
+
+                # Also save human-readable metadata
+                with open(metadata_path, "w") as f:
+                    json.dump(metadata, f, indent=2)
+
+                mlflow.log_artifact(safetensors_path, artifact_path=artifact_path)
+                mlflow.log_artifact(metadata_path, artifact_path=artifact_path)
+
+            logger.info(
+                "SafeTensors model exported to MLflow at '%s/model_weights.safetensors'",
+                artifact_path,
+            )
+        except Exception as e:
+            logger.warning("Failed to export SafeTensors model: %s", e)
 
     def end_run(self):
         """

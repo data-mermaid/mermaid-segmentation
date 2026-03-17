@@ -268,11 +268,11 @@ class TestSaveModelCheckpoint:
 
         mock_wandb_logger.save_checkpoint.assert_called_once()
 
-    def test_save_local_models_false_skips_native_model_logging(
+    def test_save_local_checkpoints_false_skips_native_model_logging(
         self, tmp_mlflow_uri, tmp_path, make_config
     ):
         meta = FakeMetaModel(run_name="skip-native-model")
-        config = make_config(logger={"save_local_models": False})
+        config = make_config(logger={"save_local_checkpoints": False})
         lgr = Logger(
             config=config,
             meta_model=meta,
