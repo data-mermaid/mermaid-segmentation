@@ -45,6 +45,7 @@ try:
 
     WANDB_IMPORT_ERROR = None
 except ImportError as err:
+    wandb = None
     WANDB_IMPORT_ERROR = err
 
 LOCAL_DEFAULT_URI = "./segmentation"
@@ -440,7 +441,7 @@ class Logger:
         self,
         meta_model_run: MetaModel,
         epoch: int,
-        metrics_dict: dict[str, float],
+        metrics_dict: dict[str, float | np.ndarray],
     ):
         """
         Saves a model checkpoint to a specified directory and logs to MLflow.
@@ -471,7 +472,7 @@ class Logger:
             Local checkpoint saving is controlled by ``save_local_checkpoints``.
             MLflow logging is independent of local persistence.
         """
-        timestamp = time.strftime("%Y%m%d%H")
+        timestamp = time.strftime("%Y%m%d%H%M%S")
 
         checkpoint: dict[str, Any] = {
             "config": self.config,
@@ -581,7 +582,7 @@ class Logger:
         self,
         meta_model_run: MetaModel,
         epoch: int,
-        metrics_dict: dict[str, float],
+        metrics_dict: dict[str, float | np.ndarray],
         artifact_path: str = "publish",
     ):
         """Export model weights as SafeTensors for secure sharing/publishing.
