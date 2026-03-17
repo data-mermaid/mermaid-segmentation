@@ -1,6 +1,6 @@
 name: Blank Issue
 description: Open-ended issue for anything that doesn't fit other templates
-title: ""
+title: "(issue)"
 labels: []
 body:
   - type: textarea
