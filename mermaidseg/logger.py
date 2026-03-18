@@ -6,7 +6,7 @@ date: 30-10-2025
 
 Classes:
     Logger - A class for logging metrics and configurations to an MLflow tracking server.
-             Uses hybrid serialization: pickle for training checkpoints, SafeTensors/graph
+             Uses hybrid serialization: pickle for training checkpoints, SafeTensors
              for published models.
     WandbLogger - Deprecated wandb logger; will be removed in a future release.
 Functions:
@@ -16,8 +16,11 @@ Functions:
 
 Serialization Strategy:
     - Training Checkpoints: torch.save (pickle) - full state for resume
-    - MLflow Model Registry: export_model=True (TorchScript) - safer for deployment
-    - Published Models: SafeTensors - secure for public sharing
+    - MLflow Model Logging (best-model): cloudpickle via mlflow.pytorch.log_model
+      (export_model=False). The pt2/TorchScript format (export_model=True) is
+      incompatible with ViT/DINOv2 architectures due to dynamic shapes and dataclass
+      outputs. Requires a trusted environment to load — do not expose publicly.
+    - Published Models: SafeTensors - zero-copy, no arbitrary code execution
 """
 
 import copy
@@ -472,16 +475,23 @@ class Logger:
             - Metrics dictionary.
         Checkpoints are saved in the directory:
             `{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/`
-        Naming conventions for the checkpoint file:
-            - If the epoch is a multiple of `self.log_checkpoint` and greater than 0:
-              ``model_epoch{epoch}``
-            - Otherwise:
-              ``model_{timestamp}``
+        Naming convention for the checkpoint file:
+            - ``model_epoch{epoch}``
         The directory structure is created if it does not already exist.
         Note:
             The model is moved to the CPU before saving its state dictionary.
             Local checkpoint saving is controlled by ``save_local_checkpoints``.
             MLflow logging is independent of local persistence.
+
+            **Serialization warning:** The MLflow ``best-model`` artifact is serialized
+            with cloudpickle (``export_model=False``). Loading it executes arbitrary code
+            and requires a trusted, matching Python environment. For external distribution
+            or public sharing, use ``save_safetensors_for_publish`` instead.
+
+            **Resume-training note:** Checkpoint files are named ``model_epoch{epoch}``.
+            Resuming training from a previous epoch will overwrite the existing file with
+            the same epoch number. Use a different ``checkpoint_dir`` or ``run_name``
+            when resuming to avoid silently overwriting prior checkpoints.
         """
         timestamp = time.strftime("%Y%m%d%H%M%S")
 
@@ -499,15 +509,20 @@ class Logger:
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
         model_path = (
-            f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_{timestamp}"
+            f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
         )
-        if epoch % self.log_checkpoint == 0:
-            model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
 
         # --- Local checkpoint persistence (optional) ---
         local_checkpoint_saved = False
         if self.save_local_checkpoints:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            if os.path.exists(model_path):
+                logger.warning(
+                    "Checkpoint file already exists and will be overwritten: %s. "
+                    "Use a different checkpoint_dir or run_name when resuming training "
+                    "to avoid silently overwriting prior checkpoints.",
+                    model_path,
+                )
             torch.save(checkpoint, model_path)  # type: ignore
             local_checkpoint_saved = True
             logger.info("Checkpoint saved locally: %s", model_path)
@@ -549,32 +564,41 @@ class Logger:
                 }
                 if self.save_local_models:
                     try:
+                        # export_model=False keeps cloudpickle serialization.
+                        # export_model=True (torch.export/pt2) is incompatible with
+                        # ViT/DINOv2 due to dynamic shapes and dataclass outputs.
+                        # MLflow >=3.10 will introduce serialization_format="pickle"
+                        # as an explicit parameter; use export_model=False for now.
                         mlflow.pytorch.log_model(
                             pytorch_model=meta_model_run.model,
                             name="best-model",
-                            export_model=True,
+                            export_model=False,
                             metadata={
                                 "epoch": epoch,
                                 "timestamp": timestamp,
                                 "metrics": scalar_metrics,
                                 "run_name": meta_model_run.run_name,
-                                "serialization": "torch_export",
+                                "serialization": "pickle",
                             },
                         )
-                        mlflow.set_tag("best_model_export_failed", "false")
+                        mlflow.set_tag("best_model_logged", "true")
                     except Exception as export_err:
-                        export_error = str(export_err)
+                        export_error = (
+                            str(export_err) or f"{type(export_err).__name__} (no message)"
+                        )
                         logger.warning(
-                            "Model export failed; pickle fallback disabled: %s",
+                            "Model logging failed: %s",
                             export_error,
                         )
-                        mlflow.set_tag("best_model_export_failed", "true")
-                        mlflow.set_tag("best_model_export_error", export_error[:500])
+                        mlflow.set_tag("best_model_logged", "false")
+                        mlflow.set_tag("best_model_log_error", export_error[:500])
                     mlflow.set_tag("best_model_epoch", str(epoch))
                     mlflow.log_metrics(
                         {f"best_model/{k}": v for k, v in scalar_metrics.items()},
                         step=epoch,
                     )
+                else:
+                    mlflow.set_tag("best_model_logged", "disabled")
 
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
             except Exception as e:
