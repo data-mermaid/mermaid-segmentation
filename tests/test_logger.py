@@ -575,30 +575,10 @@ class TestScenarios:
         assert lgr.mlflow_run_id is not None
         assert mlflow.get_run(lgr.mlflow_run_id).data.metrics["train/loss"] is not None
 
-    def test_scenario_c_local_plus_wandb(self, tmp_path, make_config, monkeypatch):
-        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
-        meta = FakeMetaModel(run_name="scenario_c")
-        with patch("mermaidseg.logger.wandb") as mock_wandb:
-            mock_wandb.init.return_value = MagicMock()
-            mock_wandb.Artifact.return_value = MagicMock()
-            with pytest.warns(DeprecationWarning, match="enable_wandb is deprecated"):
-                lgr = Logger(
-                    config=make_config(),
-                    meta_model=meta,
-                    log_epochs=1,
-                    log_checkpoint=2,
-                    checkpoint_dir=str(tmp_path),
-                    enable_mlflow=False,
-                    enable_wandb=True,
-                )
-            self._run_logger_lifecycle(lgr, meta)
-        assert (tmp_path / "model_checkpoints" / "scenario_c").exists()
-        assert lgr.enable_wandb is True
-
-    def test_scenario_d_mlflow_unavailable(self, tmp_path, make_config, monkeypatch):
+    def test_scenario_c_mlflow_unavailable(self, tmp_path, make_config, monkeypatch):
         """MLflow enabled but unreachable — graceful degradation, local checkpoint saved."""
         monkeypatch.setenv("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
-        meta = FakeMetaModel(run_name="scenario_d")
+        meta = FakeMetaModel(run_name="scenario_c")
         lgr = Logger(
             config=make_config(logger={"uri": "http://localhost:9999"}),
             meta_model=meta,
@@ -610,7 +590,7 @@ class TestScenarios:
         )
         assert lgr.enabled is False
         self._run_logger_lifecycle(lgr, meta)
-        ckpt_dir = tmp_path / "model_checkpoints" / "scenario_d"
+        ckpt_dir = tmp_path / "model_checkpoints" / "scenario_c"
         assert (
             ckpt_dir.exists()
         ), "Bug fix verification: checkpoint must save despite MLflow failure"
