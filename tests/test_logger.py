@@ -214,6 +214,53 @@ class TestLoggerLog:
         mock_wandb_logger.log.assert_called_once_with({"loss": 0.3}, step=5)
 
 
+class TestLogDataset:
+    def test_log_dataset_records_input(self, tmp_mlflow_uri, make_config):
+        meta = FakeMetaModel()
+        lgr = Logger(config=make_config(), meta_model=meta)
+
+        mock_ds = MagicMock()
+        mock_ds.annotations_path = "s3://bucket/data.parquet"
+        mock_ds.source_bucket = "bucket"
+        mock_ds.df_images = pd.DataFrame({"image_id": [1, 2, 3]})
+        mock_ds.num_classes = 3
+        mock_ds.__class__ = type("CoralReefDataset", (), {})
+
+        lgr.log_dataset(mock_ds, context="training")
+
+        inputs = mlflow.get_run(lgr.mlflow_run_id).inputs.dataset_inputs
+        assert len(inputs) > 0
+        assert inputs[0].dataset.name == "CoralReefDataset"
+
+    def test_log_dataset_graceful_on_missing_attrs(self, tmp_mlflow_uri, make_config):
+        meta = FakeMetaModel()
+        lgr = Logger(config=make_config(), meta_model=meta)
+
+        bare = object()
+        lgr.log_dataset(bare, context="training")
+
+    def test_log_datasets_iterates_sub_datasets(self, tmp_mlflow_uri, make_config):
+        meta = FakeMetaModel()
+        lgr = Logger(config=make_config(), meta_model=meta)
+
+        def _make_sub(name):
+            ds = MagicMock()
+            ds.annotations_path = f"s3://bucket/{name}.parquet"
+            ds.source_bucket = "bucket"
+            ds.df_images = pd.DataFrame({"image_id": [1]})
+            ds.num_classes = 3
+            ds.__class__ = type(name, (), {})
+            return ds
+
+        combined = MagicMock()
+        combined._datasets = [_make_sub("DatasetA"), _make_sub("DatasetB")]
+
+        lgr.log_datasets(combined, context="training")
+
+        inputs = mlflow.get_run(lgr.mlflow_run_id).inputs.dataset_inputs
+        assert len(inputs) == 2
+
+
 # ===================================================================
 # Logger.save_model_checkpoint
 # ===================================================================
