@@ -36,6 +36,8 @@ from typing import Any
 import mlflow
 import numpy as np
 import torch
+from mlflow.data.code_dataset_source import CodeDatasetSource
+from mlflow.data.meta_dataset import MetaDataset
 from safetensors.torch import save_file as save_safetensors
 
 from mermaidseg.model.meta import MetaModel
@@ -419,6 +421,33 @@ class Logger:
             else:
                 result[f"{prefix_sep}{k}"] = float(v)
         return result
+
+    def log_dataset(self, dataset, context: str = "training") -> None:
+        if not self._ensure_active_run():
+            return
+        try:
+            source = CodeDatasetSource(
+                tags={
+                    "annotations_path": getattr(dataset, "annotations_path", "unknown"),
+                    "source_bucket": getattr(dataset, "source_bucket", ""),
+                    "num_images": str(len(getattr(dataset, "df_images", []))),
+                    "num_classes": str(getattr(dataset, "num_classes", "")),
+                }
+            )
+            meta = MetaDataset(
+                source=source,
+                name=dataset.__class__.__name__,
+            )
+            mlflow.log_input(meta, context=context)
+        except Exception as e:
+            logger.warning("Failed to log dataset to MLflow: %s", e)
+
+    def log_datasets(self, dataset, context: str = "training") -> None:
+        if hasattr(dataset, "_datasets"):
+            for sub_dataset in dataset._datasets:
+                self.log_dataset(sub_dataset, context=context)
+        else:
+            self.log_dataset(dataset, context=context)
 
     @property
     def enable_wandb(self) -> bool:
