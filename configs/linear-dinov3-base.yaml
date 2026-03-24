@@ -9,6 +9,11 @@
 
 run_name: "linear-dinov3-base_run"
 
+logger:
+  experiment_name: "mermaid"
+  system_metrics: true
+  system_metrics_sampling_interval: 10
+
 augmentation:
   train:
     Resize:

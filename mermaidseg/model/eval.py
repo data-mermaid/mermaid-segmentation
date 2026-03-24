@@ -120,9 +120,6 @@ class Evaluator:
         """
         meta_model.model.eval()
         metric_results: dict[str, float | NDArray[np.float64]] = {}
-        print(self.metric_dict)
-        print(self.concept_metric_dict)
-        print(meta_model.training_mode)
         for data in tqdm.tqdm(dataloader):
             inputs, labels = data
             labels = labels.long().to(self.device)
@@ -145,18 +142,16 @@ class Evaluator:
                 metric.update(outputs, labels)
 
             if meta_model.training_mode in ("concept-bottleneck", "concept"):
-                ## Update metrics
+                concept_outputs = (concept_outputs > 0.5).float()
+                concept_outputs += 1
+                concept_outputs *= labels.unsqueeze(1) != 0
+
+                concept_labels = labels_to_concepts(labels, meta_model.concept_matrix)
+                concept_labels += 1
+                concept_labels *= labels.unsqueeze(1) != 0
+
                 for metric in self.concept_metric_dict.values():
-                    concept_outputs = (concept_outputs > 0.5).float()
-                    concept_outputs += 1
-                    concept_outputs *= labels.unsqueeze(1) != 0
-
-                    concept_labels = labels_to_concepts(labels, meta_model.concept_matrix)
-                    concept_labels += 1
-                    concept_labels *= labels.unsqueeze(1) != 0
-
-                    for metric in self.concept_metric_dict.values():
-                        metric.update(concept_outputs, concept_labels)
+                    metric.update(concept_outputs, concept_labels)
 
         ## Compute metrics
         for metric_name in self.metric_dict:

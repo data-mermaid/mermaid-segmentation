@@ -57,12 +57,6 @@ def fake_meta_model():
 
 
 @pytest.fixture()
-def sample_metrics():
-    """Sample metrics dict for checkpoint tests."""
-    return {"loss": 0.3, "accuracy": 0.9}
-
-
-@pytest.fixture()
 def make_config():
     """Factory that builds a ConfigDict with the keys Logger expects.
 

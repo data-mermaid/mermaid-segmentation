@@ -6,7 +6,7 @@ date: 30-10-2025
 
 Classes:
     Logger - A class for logging metrics and configurations to an MLflow tracking server.
-             Uses hybrid serialization: pickle for training checkpoints, SafeTensors/graph
+             Uses hybrid serialization: pickle for training checkpoints, SafeTensors
              for published models.
     WandbLogger - Deprecated wandb logger; will be removed in a future release.
 Functions:
@@ -16,8 +16,11 @@ Functions:
 
 Serialization Strategy:
     - Training Checkpoints: torch.save (pickle) - full state for resume
-    - MLflow Model Registry: export_model=True (TorchScript) - safer for deployment
-    - Published Models: SafeTensors - secure for public sharing
+    - MLflow Model Logging (best-model): cloudpickle via mlflow.pytorch.log_model
+      (export_model=False). The pt2/TorchScript format (export_model=True) is
+      incompatible with ViT/DINOv2 architectures due to dynamic shapes and dataclass
+      outputs. Requires a trusted environment to load — do not expose publicly.
+    - Published Models: SafeTensors - zero-copy, no arbitrary code execution
 """
 
 import copy
@@ -33,6 +36,8 @@ from typing import Any
 import mlflow
 import numpy as np
 import torch
+from mlflow.data.code_dataset_source import CodeDatasetSource
+from mlflow.data.meta_dataset import MetaDataset
 from safetensors.torch import save_file as save_safetensors
 
 from mermaidseg.model.meta import MetaModel
@@ -222,6 +227,9 @@ class Logger:
         self.id2concept = id2concept
         logger_cfg = getattr(config, "logger", None)
         experiment_name = getattr(logger_cfg, "experiment_name", None)
+        self._log_system_metrics = getattr(logger_cfg, "system_metrics", True)
+        # Keep MLflow system metrics sampling explicit and stable across environments.
+        self._system_metrics_interval = getattr(logger_cfg, "system_metrics_sampling_interval", 10)
 
         # Keep one source of truth for local persistence.
         if save_local_checkpoints is None and save_local_models is not None:
@@ -258,16 +266,28 @@ class Logger:
 
             if self.enabled:
                 try:
+                    # Disable PyTorch autologging. When enabled (the default),
+                    # MLflow intercepts mlflow.pytorch.log_model and attempts to
+                    # re-log training metrics that were already committed, causing
+                    # UniqueViolation on the metric_pk in the SageMaker PostgreSQL
+                    # backend. Must be called before mlflow_connect so no hooks are
+                    # registered before the tracking URI is set.
+                    mlflow.pytorch.autolog(disable=True)
                     config_uri = getattr(logger_cfg, "uri", None)
                     tracking_uri = get_mlflow_tracking_uri(config_uri)
                     logger.info("MLflow tracking URI: %s", tracking_uri)
                     duration = mlflow_connect(tracking_uri)
                     logger.info("Connected to MLflow in %s seconds", duration.seconds)
                     mlflow.set_experiment(experiment_name)
+                    if self._log_system_metrics and self._system_metrics_interval is not None:
+                        mlflow.set_system_metrics_sampling_interval(self._system_metrics_interval)
 
                     if mlflow.active_run() is None:
                         logger.info("Starting MLflow RUN: %s", self.run_name)
-                        run = mlflow.start_run(run_name=self.run_name)
+                        run = mlflow.start_run(
+                            run_name=self.run_name,
+                            log_system_metrics=self._log_system_metrics,
+                        )
                         self.mlflow_run_id = run.info.run_id
                     else:
                         logger.info("MLflow run %s already active", self.run_name)
@@ -382,6 +402,75 @@ class Logger:
             if concept_matrix_path and os.path.exists(concept_matrix_path):
                 os.remove(concept_matrix_path)
 
+    def _unpack_metrics(self, metrics_dict: dict, key_prefix: str = "") -> dict[str, float]:
+        """Unpack array-valued metrics into per-class/concept named scalars.
+
+        Array values are expanded using id2concept (for concept metrics) or id2label
+        (for class metrics). Scalar values are passed through as-is.
+
+        Args:
+            metrics_dict: Raw metrics dict, values may be float or np.ndarray.
+            key_prefix: Optional prefix prepended to every key (e.g. "checkpoint").
+        """
+        prefix_sep = f"{key_prefix}/" if key_prefix else ""
+        result: dict[str, float] = {}
+        for k, v in (metrics_dict or {}).items():
+            if isinstance(v, np.ndarray):
+                if "concept" in k.lower():
+                    id_map = self.id2concept or {}
+                    fallback = "concept"
+                else:
+                    id_map = self.id2label or {}
+                    fallback = "class"
+                for idx, val in enumerate(v):
+                    name = id_map.get(idx, f"{fallback}_{idx}")
+                    result[f"{prefix_sep}{k}/{name}"] = float(val)
+            else:
+                result[f"{prefix_sep}{k}"] = float(v)
+        return result
+
+    def log_dataset(self, dataset, context: str = "training") -> None:
+        """Log a single dataset as an MLflow dataset input with metadata tags.
+
+        Args:
+            dataset: Dataset instance (expects optional ``annotations_path``,
+                ``source_bucket``, ``df_images``, ``num_classes`` when present).
+            context: MLflow input context (e.g. ``"training"``).
+        """
+        if not self._ensure_active_run():
+            return
+        try:
+            source = CodeDatasetSource(
+                tags={
+                    "annotations_path": getattr(dataset, "annotations_path", ""),
+                    "source_bucket": getattr(dataset, "source_bucket", ""),
+                    "num_images": str(len(getattr(dataset, "df_images", []))),
+                    "num_classes": str(getattr(dataset, "num_classes", "")),
+                }
+            )
+            meta = MetaDataset(
+                source=source,
+                name=dataset.__class__.__name__,
+            )
+            mlflow.log_input(meta, context=context)
+        except Exception as e:
+            logger.warning("Failed to log dataset to MLflow: %s", e)
+
+    def log_datasets(self, dataset, context: str = "training") -> None:
+        """Log one or more datasets: unwrap combined/concat wrappers or log as one.
+
+        Args:
+            dataset: A single dataset, or a wrapper with ``_datasets`` (e.g. combined)
+                or ``datasets`` (e.g. PyTorch ``ConcatDataset``).
+            context: MLflow input context passed through to ``log_dataset``.
+        """
+        sub = getattr(dataset, "_datasets", None) or getattr(dataset, "datasets", None)
+        if sub is not None:
+            for sub_dataset in sub:
+                self.log_dataset(sub_dataset, context=context)
+        else:
+            self.log_dataset(dataset, context=context)
+
     @property
     def enable_wandb(self) -> bool:
         """True when a ``WandbLogger`` delegate is active (deprecated)."""
@@ -394,7 +483,10 @@ class Logger:
         try:
             if mlflow.active_run() is None:
                 logger.warning("No active MLflow run, starting new run: %s", self.run_name)
-                run = mlflow.start_run(run_name=self.run_name)
+                run = mlflow.start_run(
+                    run_name=self.run_name,
+                    log_system_metrics=self._log_system_metrics,
+                )
                 self.mlflow_run_id = run.info.run_id
             return True
         except Exception as e:
@@ -410,25 +502,7 @@ class Logger:
         """
         if self._ensure_active_run():
             try:
-                # Batch log all metrics at once for better performance
-                # Unpack array-valued metrics into per-class or per-concept named scalars
-                metrics_to_log = {}
-                for k, v in (log_dict or {}).items():
-                    if isinstance(v, np.ndarray):
-                        # Use id2concept for concept metrics, id2label for class metrics
-                        if "concept" in k.lower():
-                            id_map = self.id2concept or {}
-                            prefix = "concept"
-                        else:
-                            id_map = self.id2label or {}
-                            prefix = "class"
-
-                        for idx, val in enumerate(v):
-                            name = id_map.get(idx, f"{prefix}_{idx}")
-                            metrics_to_log[f"{k}/{name}"] = float(val)
-                    else:
-                        metrics_to_log[k] = float(v)
-
+                metrics_to_log = self._unpack_metrics(log_dict)
                 if metrics_to_log:
                     mlflow.log_metrics(metrics_to_log, step=step)
             except Exception as e:
@@ -461,16 +535,23 @@ class Logger:
             - Metrics dictionary.
         Checkpoints are saved in the directory:
             `{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/`
-        Naming conventions for the checkpoint file:
-            - If the epoch is a multiple of `self.log_checkpoint` and greater than 0:
-              ``model_epoch{epoch}``
-            - Otherwise:
-              ``model_{timestamp}``
+        Naming convention for the checkpoint file:
+            - ``model_epoch{epoch}``
         The directory structure is created if it does not already exist.
         Note:
             The model is moved to the CPU before saving its state dictionary.
             Local checkpoint saving is controlled by ``save_local_checkpoints``.
             MLflow logging is independent of local persistence.
+
+            **Serialization warning:** The MLflow ``best-model`` artifact is serialized
+            with cloudpickle (``export_model=False``). Loading it executes arbitrary code
+            and requires a trusted, matching Python environment. For external distribution
+            or public sharing, use ``save_safetensors_for_publish`` instead.
+
+            **Resume-training note:** Checkpoint files are named ``model_epoch{epoch}``.
+            Resuming training from a previous epoch will overwrite the existing file with
+            the same epoch number. Use a different ``checkpoint_dir`` or ``run_name``
+            when resuming to avoid silently overwriting prior checkpoints.
         """
         timestamp = time.strftime("%Y%m%d%H%M%S")
 
@@ -488,15 +569,20 @@ class Logger:
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
         model_path = (
-            f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_{timestamp}"
+            f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
         )
-        if epoch % self.log_checkpoint == 0:
-            model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
 
         # --- Local checkpoint persistence (optional) ---
         local_checkpoint_saved = False
         if self.save_local_checkpoints:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            if os.path.exists(model_path):
+                logger.warning(
+                    "Checkpoint file already exists and will be overwritten: %s. "
+                    "Use a different checkpoint_dir or run_name when resuming training "
+                    "to avoid silently overwriting prior checkpoints.",
+                    model_path,
+                )
             torch.save(checkpoint, model_path)  # type: ignore
             local_checkpoint_saved = True
             logger.info("Checkpoint saved locally: %s", model_path)
@@ -514,56 +600,44 @@ class Logger:
                         torch.save(checkpoint, tmp_path)  # type: ignore
                         mlflow.log_artifact(tmp_path, artifact_path="checkpoints")
 
-                # Log checkpoint metrics (unpack arrays into per-class or per-concept scalars)
-                checkpoint_metrics = {}
-                for k, v in metrics_dict.items():
-                    if isinstance(v, np.ndarray):
-                        if "concept" in k.lower():
-                            id_map = self.id2concept or {}
-                            prefix = "concept"
-                        else:
-                            id_map = self.id2label or {}
-                            prefix = "class"
-
-                        for idx, val in enumerate(v):
-                            name = id_map.get(idx, f"{prefix}_{idx}")
-                            checkpoint_metrics[f"checkpoint/{k}/{name}"] = float(val)
-                    else:
-                        checkpoint_metrics[f"checkpoint/{k}"] = float(v)
-
+                checkpoint_metrics = self._unpack_metrics(metrics_dict, key_prefix="checkpoint")
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
 
                 scalar_metrics = {
                     k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)
                 }
-                if self.save_local_models:
-                    try:
-                        mlflow.pytorch.log_model(
-                            pytorch_model=meta_model_run.model,
-                            name="best-model",
-                            export_model=True,
-                            metadata={
-                                "epoch": epoch,
-                                "timestamp": timestamp,
-                                "metrics": scalar_metrics,
-                                "run_name": meta_model_run.run_name,
-                                "serialization": "torch_export",
-                            },
-                        )
-                        mlflow.set_tag("best_model_export_failed", "false")
-                    except Exception as export_err:
-                        export_error = str(export_err)
-                        logger.warning(
-                            "Model export failed; pickle fallback disabled: %s",
-                            export_error,
-                        )
-                        mlflow.set_tag("best_model_export_failed", "true")
-                        mlflow.set_tag("best_model_export_error", export_error[:500])
-                    mlflow.set_tag("best_model_epoch", str(epoch))
-                    mlflow.log_metrics(
-                        {f"best_model/{k}": v for k, v in scalar_metrics.items()},
-                        step=epoch,
+                try:
+                    # export_model=False keeps cloudpickle serialization.
+                    # export_model=True (torch.export/pt2) is incompatible with
+                    # ViT/DINOv2 due to dynamic shapes and dataclass outputs.
+                    # MLflow >=3.10 will introduce serialization_format="pickle"
+                    # as an explicit parameter; use export_model=False for now.
+                    mlflow.pytorch.log_model(
+                        pytorch_model=meta_model_run.model,
+                        name="best-model",
+                        export_model=False,
+                        metadata={
+                            "epoch": epoch,
+                            "timestamp": timestamp,
+                            "metrics": scalar_metrics,
+                            "run_name": meta_model_run.run_name,
+                            "serialization": "pickle",
+                        },
                     )
+                    mlflow.set_tag("best_model_logged", "true")
+                except Exception as export_err:
+                    export_error = str(export_err) or f"{type(export_err).__name__} (no message)"
+                    logger.warning(
+                        "Model logging failed: %s",
+                        export_error,
+                    )
+                    mlflow.set_tag("best_model_logged", "false")
+                    mlflow.set_tag("best_model_log_error", export_error[:500])
+                mlflow.set_tag("best_model_epoch", str(epoch))
+                mlflow.log_metrics(
+                    {f"best_model/{k}": v for k, v in scalar_metrics.items()},
+                    step=epoch,
+                )
 
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
             except Exception as e:
