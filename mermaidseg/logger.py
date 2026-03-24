@@ -393,6 +393,33 @@ class Logger:
             if concept_matrix_path and os.path.exists(concept_matrix_path):
                 os.remove(concept_matrix_path)
 
+    def _unpack_metrics(self, metrics_dict: dict, key_prefix: str = "") -> dict[str, float]:
+        """Unpack array-valued metrics into per-class/concept named scalars.
+
+        Array values are expanded using id2concept (for concept metrics) or id2label
+        (for class metrics). Scalar values are passed through as-is.
+
+        Args:
+            metrics_dict: Raw metrics dict, values may be float or np.ndarray.
+            key_prefix: Optional prefix prepended to every key (e.g. "checkpoint").
+        """
+        prefix_sep = f"{key_prefix}/" if key_prefix else ""
+        result: dict[str, float] = {}
+        for k, v in (metrics_dict or {}).items():
+            if isinstance(v, np.ndarray):
+                if "concept" in k.lower():
+                    id_map = self.id2concept or {}
+                    fallback = "concept"
+                else:
+                    id_map = self.id2label or {}
+                    fallback = "class"
+                for idx, val in enumerate(v):
+                    name = id_map.get(idx, f"{fallback}_{idx}")
+                    result[f"{prefix_sep}{k}/{name}"] = float(val)
+            else:
+                result[f"{prefix_sep}{k}"] = float(v)
+        return result
+
     @property
     def enable_wandb(self) -> bool:
         """True when a ``WandbLogger`` delegate is active (deprecated)."""
@@ -424,25 +451,7 @@ class Logger:
         """
         if self._ensure_active_run():
             try:
-                # Batch log all metrics at once for better performance
-                # Unpack array-valued metrics into per-class or per-concept named scalars
-                metrics_to_log = {}
-                for k, v in (log_dict or {}).items():
-                    if isinstance(v, np.ndarray):
-                        # Use id2concept for concept metrics, id2label for class metrics
-                        if "concept" in k.lower():
-                            id_map = self.id2concept or {}
-                            prefix = "concept"
-                        else:
-                            id_map = self.id2label or {}
-                            prefix = "class"
-
-                        for idx, val in enumerate(v):
-                            name = id_map.get(idx, f"{prefix}_{idx}")
-                            metrics_to_log[f"{k}/{name}"] = float(val)
-                    else:
-                        metrics_to_log[k] = float(v)
-
+                metrics_to_log = self._unpack_metrics(log_dict)
                 if metrics_to_log:
                     mlflow.log_metrics(metrics_to_log, step=step)
             except Exception as e:
