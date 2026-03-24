@@ -286,10 +286,8 @@ class TestSaveModelCheckpoint:
 
         mock_wandb_logger.save_checkpoint.assert_called_once()
 
-    def test_save_local_checkpoints_false_skips_native_model_logging(
-        self, tmp_mlflow_uri, tmp_path, make_config
-    ):
-        meta = FakeMetaModel(run_name="skip-native-model")
+    def test_mlflow_model_logged_when_local_disabled(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="mlflow-no-local")
         config = make_config(logger={"save_local_checkpoints": False})
         lgr = Logger(
             config=config,
@@ -299,7 +297,7 @@ class TestSaveModelCheckpoint:
         )
         with patch("mermaidseg.logger.mlflow.pytorch.log_model") as mock_log_model:
             lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
-        mock_log_model.assert_not_called()
+        mock_log_model.assert_called_once()
 
     def test_wandb_does_not_write_local_checkpoint_when_local_disabled(
         self, tmp_path, make_config, monkeypatch
@@ -326,9 +324,7 @@ class TestSaveModelCheckpoint:
 
         assert not (tmp_path / "model_checkpoints" / "wandb-no-local").exists()
 
-    def test_timestamp_based_name_for_non_checkpoint_epoch(
-        self, tmp_mlflow_uri, tmp_path, make_config
-    ):
+    def test_checkpoint_always_uses_epoch_name(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="ts-name")
         config = make_config()
         lgr = Logger(
@@ -337,7 +333,7 @@ class TestSaveModelCheckpoint:
         lgr.save_model_checkpoint(meta, epoch=7, metrics_dict={"loss": 0.5})
         files = list((tmp_path / "model_checkpoints" / "ts-name").iterdir())
         assert len(files) == 1
-        assert "model_epoch" not in files[0].name
+        assert "model_epoch7" in files[0].name, f"Expected epoch-based name, got {files[0].name}"
 
 
 # ===================================================================
