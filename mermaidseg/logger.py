@@ -549,65 +549,44 @@ class Logger:
                         torch.save(checkpoint, tmp_path)  # type: ignore
                         mlflow.log_artifact(tmp_path, artifact_path="checkpoints")
 
-                # Log checkpoint metrics (unpack arrays into per-class or per-concept scalars)
-                checkpoint_metrics = {}
-                for k, v in metrics_dict.items():
-                    if isinstance(v, np.ndarray):
-                        if "concept" in k.lower():
-                            id_map = self.id2concept or {}
-                            prefix = "concept"
-                        else:
-                            id_map = self.id2label or {}
-                            prefix = "class"
-
-                        for idx, val in enumerate(v):
-                            name = id_map.get(idx, f"{prefix}_{idx}")
-                            checkpoint_metrics[f"checkpoint/{k}/{name}"] = float(val)
-                    else:
-                        checkpoint_metrics[f"checkpoint/{k}"] = float(v)
-
+                checkpoint_metrics = self._unpack_metrics(metrics_dict, key_prefix="checkpoint")
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
 
                 scalar_metrics = {
                     k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)
                 }
-                if self.save_local_models:
-                    try:
-                        # export_model=False keeps cloudpickle serialization.
-                        # export_model=True (torch.export/pt2) is incompatible with
-                        # ViT/DINOv2 due to dynamic shapes and dataclass outputs.
-                        # MLflow >=3.10 will introduce serialization_format="pickle"
-                        # as an explicit parameter; use export_model=False for now.
-                        mlflow.pytorch.log_model(
-                            pytorch_model=meta_model_run.model,
-                            name="best-model",
-                            export_model=False,
-                            metadata={
-                                "epoch": epoch,
-                                "timestamp": timestamp,
-                                "metrics": scalar_metrics,
-                                "run_name": meta_model_run.run_name,
-                                "serialization": "pickle",
-                            },
-                        )
-                        mlflow.set_tag("best_model_logged", "true")
-                    except Exception as export_err:
-                        export_error = (
-                            str(export_err) or f"{type(export_err).__name__} (no message)"
-                        )
-                        logger.warning(
-                            "Model logging failed: %s",
-                            export_error,
-                        )
-                        mlflow.set_tag("best_model_logged", "false")
-                        mlflow.set_tag("best_model_log_error", export_error[:500])
-                    mlflow.set_tag("best_model_epoch", str(epoch))
-                    mlflow.log_metrics(
-                        {f"best_model/{k}": v for k, v in scalar_metrics.items()},
-                        step=epoch,
+                try:
+                    # export_model=False keeps cloudpickle serialization.
+                    # export_model=True (torch.export/pt2) is incompatible with
+                    # ViT/DINOv2 due to dynamic shapes and dataclass outputs.
+                    # MLflow >=3.10 will introduce serialization_format="pickle"
+                    # as an explicit parameter; use export_model=False for now.
+                    mlflow.pytorch.log_model(
+                        pytorch_model=meta_model_run.model,
+                        name="best-model",
+                        export_model=False,
+                        metadata={
+                            "epoch": epoch,
+                            "timestamp": timestamp,
+                            "metrics": scalar_metrics,
+                            "run_name": meta_model_run.run_name,
+                            "serialization": "pickle",
+                        },
                     )
-                else:
-                    mlflow.set_tag("best_model_logged", "disabled")
+                    mlflow.set_tag("best_model_logged", "true")
+                except Exception as export_err:
+                    export_error = str(export_err) or f"{type(export_err).__name__} (no message)"
+                    logger.warning(
+                        "Model logging failed: %s",
+                        export_error,
+                    )
+                    mlflow.set_tag("best_model_logged", "false")
+                    mlflow.set_tag("best_model_log_error", export_error[:500])
+                mlflow.set_tag("best_model_epoch", str(epoch))
+                mlflow.log_metrics(
+                    {f"best_model/{k}": v for k, v in scalar_metrics.items()},
+                    step=epoch,
+                )
 
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
             except Exception as e:
