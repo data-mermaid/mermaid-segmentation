@@ -239,26 +239,46 @@ class TestLogDataset:
         bare = object()
         lgr.log_dataset(bare, context="training")
 
+        inputs = mlflow.get_run(lgr.mlflow_run_id).inputs.dataset_inputs
+        assert len(inputs) == 1
+        assert inputs[0].dataset.name == "object"
+
+    def _make_sub(self, name):
+        ds = MagicMock()
+        ds.annotations_path = f"s3://bucket/{name}.parquet"
+        ds.source_bucket = "bucket"
+        ds.df_images = pd.DataFrame({"image_id": [1]})
+        ds.num_classes = 3
+        ds.__class__ = type(name, (), {})
+        return ds
+
     def test_log_datasets_iterates_sub_datasets(self, tmp_mlflow_uri, make_config):
         meta = FakeMetaModel()
         lgr = Logger(config=make_config(), meta_model=meta)
 
-        def _make_sub(name):
-            ds = MagicMock()
-            ds.annotations_path = f"s3://bucket/{name}.parquet"
-            ds.source_bucket = "bucket"
-            ds.df_images = pd.DataFrame({"image_id": [1]})
-            ds.num_classes = 3
-            ds.__class__ = type(name, (), {})
-            return ds
-
         combined = MagicMock()
-        combined._datasets = [_make_sub("DatasetA"), _make_sub("DatasetB")]
+        combined._datasets = [self._make_sub("DatasetA"), self._make_sub("DatasetB")]
 
         lgr.log_datasets(combined, context="training")
 
         inputs = mlflow.get_run(lgr.mlflow_run_id).inputs.dataset_inputs
         assert len(inputs) == 2
+        names = {inp.dataset.name for inp in inputs}
+        assert names == {"DatasetA", "DatasetB"}
+
+    def test_log_datasets_supports_concat_dataset_attr(self, tmp_mlflow_uri, make_config):
+        meta = FakeMetaModel()
+        lgr = Logger(config=make_config(), meta_model=meta)
+
+        combined = MagicMock(spec=[])
+        combined.datasets = [self._make_sub("SourceA"), self._make_sub("SourceB")]
+
+        lgr.log_datasets(combined, context="training")
+
+        inputs = mlflow.get_run(lgr.mlflow_run_id).inputs.dataset_inputs
+        assert len(inputs) == 2
+        names = {inp.dataset.name for inp in inputs}
+        assert names == {"SourceA", "SourceB"}
 
 
 # ===================================================================
