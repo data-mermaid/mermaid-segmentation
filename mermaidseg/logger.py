@@ -266,6 +266,13 @@ class Logger:
 
             if self.enabled:
                 try:
+                    # Disable PyTorch autologging. When enabled (the default),
+                    # MLflow intercepts mlflow.pytorch.log_model and attempts to
+                    # re-log training metrics that were already committed, causing
+                    # UniqueViolation on the metric_pk in the SageMaker PostgreSQL
+                    # backend. Must be called before mlflow_connect so no hooks are
+                    # registered before the tracking URI is set.
+                    mlflow.pytorch.autolog(disable=True)
                     config_uri = getattr(logger_cfg, "uri", None)
                     tracking_uri = get_mlflow_tracking_uri(config_uri)
                     logger.info("MLflow tracking URI: %s", tracking_uri)
@@ -423,12 +430,19 @@ class Logger:
         return result
 
     def log_dataset(self, dataset, context: str = "training") -> None:
+        """Log a single dataset as an MLflow dataset input with metadata tags.
+
+        Args:
+            dataset: Dataset instance (expects optional ``annotations_path``,
+                ``source_bucket``, ``df_images``, ``num_classes`` when present).
+            context: MLflow input context (e.g. ``"training"``).
+        """
         if not self._ensure_active_run():
             return
         try:
             source = CodeDatasetSource(
                 tags={
-                    "annotations_path": getattr(dataset, "annotations_path", "unknown"),
+                    "annotations_path": getattr(dataset, "annotations_path", ""),
                     "source_bucket": getattr(dataset, "source_bucket", ""),
                     "num_images": str(len(getattr(dataset, "df_images", []))),
                     "num_classes": str(getattr(dataset, "num_classes", "")),
@@ -443,8 +457,16 @@ class Logger:
             logger.warning("Failed to log dataset to MLflow: %s", e)
 
     def log_datasets(self, dataset, context: str = "training") -> None:
-        if hasattr(dataset, "_datasets"):
-            for sub_dataset in dataset._datasets:
+        """Log one or more datasets: unwrap combined/concat wrappers or log as one.
+
+        Args:
+            dataset: A single dataset, or a wrapper with ``_datasets`` (e.g. combined)
+                or ``datasets`` (e.g. PyTorch ``ConcatDataset``).
+            context: MLflow input context passed through to ``log_dataset``.
+        """
+        sub = getattr(dataset, "_datasets", None) or getattr(dataset, "datasets", None)
+        if sub is not None:
+            for sub_dataset in sub:
                 self.log_dataset(sub_dataset, context=context)
         else:
             self.log_dataset(dataset, context=context)
