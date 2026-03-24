@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
@@ -165,6 +166,13 @@ class TestLoggerInit:
         run = mlflow.get_run(lgr.mlflow_run_id)
         assert run.data.params["num_concepts"] == "5"
 
+        client = mlflow.tracking.MlflowClient()
+        artifacts = client.list_artifacts(lgr.mlflow_run_id, path="metadata")
+        names = {a.path for a in artifacts}
+        assert "metadata/id2label.json" in names
+        assert "metadata/id2concept.json" in names
+        assert "metadata/conceptid2labelid.json" in names
+
     def test_concept_matrix_logging_does_not_disable_logger(
         self, tmp_mlflow_uri, make_config, tmp_path
     ):
@@ -178,6 +186,32 @@ class TestLoggerInit:
     def test_log_checkpoint_zero_rejected(self, tmp_mlflow_uri, make_config, fake_meta_model):
         with pytest.raises(ValueError, match="log_checkpoint must be > 0"):
             Logger(config=make_config(), meta_model=fake_meta_model, log_checkpoint=0)
+
+
+# ===================================================================
+# Logger._ensure_active_run
+# ===================================================================
+class TestEnsureActiveRun:
+    """Test mid-session run recovery when the MLflow run is dropped."""
+
+    def test_recovers_after_run_externally_ended(self, tmp_mlflow_uri, make_config):
+        meta = FakeMetaModel()
+        lgr = Logger(config=make_config(), meta_model=meta)
+        original_run_id = lgr.mlflow_run_id
+        assert mlflow.active_run() is not None
+
+        mlflow.end_run()
+        assert mlflow.active_run() is None
+
+        lgr.log({"loss": 0.5}, step=1)
+        assert mlflow.active_run() is not None
+        assert lgr.mlflow_run_id != original_run_id
+
+    def test_returns_false_when_mlflow_disabled(self, tmp_path, make_config, monkeypatch):
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        meta = FakeMetaModel()
+        lgr = Logger(config=make_config(), meta_model=meta, enable_mlflow=False)
+        assert lgr._ensure_active_run() is False
 
 
 # ===================================================================
@@ -204,6 +238,20 @@ class TestLoggerLog:
         assert metrics["dice/class_0"] == pytest.approx(0.1)
         assert metrics["dice/class_1"] == pytest.approx(0.2)
 
+    def test_ndarray_concept_metrics_use_id2concept(self, tmp_mlflow_uri, make_config):
+        meta = FakeMetaModel()
+        config = make_config()
+        lgr = Logger(
+            config=config,
+            meta_model=meta,
+            id2label={0: "coral", 1: "sand"},
+            id2concept={0: "hard", 1: "soft"},
+        )
+        lgr.log({"concept_accuracy": np.array([0.9, 0.85])}, step=1)
+        metrics = mlflow.get_run(lgr.mlflow_run_id).data.metrics
+        assert metrics["concept_accuracy/hard"] == pytest.approx(0.9)
+        assert metrics["concept_accuracy/soft"] == pytest.approx(0.85)
+
     def test_wandb_fallback_logging(self, tmp_mlflow_uri, make_config, fake_meta_model):
         config = make_config()
         lgr = Logger(config=config, meta_model=fake_meta_model)
@@ -215,6 +263,8 @@ class TestLoggerLog:
 
 
 class TestLogDataset:
+    """Test MLflow dataset input logging: single, combined, and graceful fallback."""
+
     def test_log_dataset_records_input(self, tmp_mlflow_uri, make_config):
         meta = FakeMetaModel()
         lgr = Logger(config=make_config(), meta_model=meta)
@@ -402,6 +452,76 @@ class TestSaveModelCheckpoint:
         assert len(files) == 1
         assert "model_epoch7" in files[0].name, f"Expected epoch-based name, got {files[0].name}"
 
+    def test_scheduler_state_included_in_checkpoint(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="sched-check")
+        lgr = Logger(
+            config=make_config(),
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+            log_checkpoint=50,
+        )
+        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
+        ckpt_file = list((tmp_path / "model_checkpoints" / "sched-check").iterdir())[0]
+        assert "scheduler_state_dict" in torch.load(ckpt_file, weights_only=False)
+
+
+# ===================================================================
+# Logger.save_safetensors_for_publish
+# ===================================================================
+class TestSaveSafetensorsForPublish:
+    """Test SafeTensors export: artifacts, metadata, error handling."""
+
+    def test_safetensors_artifacts_logged(self, tmp_mlflow_uri, make_config):
+        meta = FakeMetaModel(run_name="st-publish")
+        lgr = Logger(config=make_config(), meta_model=meta)
+        lgr.save_safetensors_for_publish(meta, epoch=10, metrics_dict={"loss": 0.15, "acc": 0.92})
+
+        client = mlflow.tracking.MlflowClient()
+        artifacts = client.list_artifacts(lgr.mlflow_run_id, path="publish")
+        names = {a.path for a in artifacts}
+        assert "publish/model_weights.safetensors" in names
+        assert "publish/metadata.json" in names
+
+    def test_safetensors_metadata_content(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="st-meta")
+        lgr = Logger(config=make_config(), meta_model=meta)
+        lgr.save_safetensors_for_publish(
+            meta, epoch=5, metrics_dict={"loss": 0.2, "iou": np.array([0.8, 0.7, 0.6])}
+        )
+
+        client = mlflow.tracking.MlflowClient()
+        local = client.download_artifacts(lgr.mlflow_run_id, "publish/metadata.json", str(tmp_path))
+        with open(local) as f:
+            md = json.load(f)
+        assert md["epoch"] == "5"
+        assert md["run_name"] == "st-meta"
+        assert md["model_class"] == "Linear"
+        assert md["loss"] == "0.2"
+        assert "iou" not in md
+
+    def test_safetensors_custom_artifact_path(self, tmp_mlflow_uri, make_config):
+        meta = FakeMetaModel(run_name="st-custom")
+        lgr = Logger(config=make_config(), meta_model=meta)
+        lgr.save_safetensors_for_publish(
+            meta, epoch=1, metrics_dict={"loss": 0.3}, artifact_path="custom/export"
+        )
+
+        client = mlflow.tracking.MlflowClient()
+        artifacts = client.list_artifacts(lgr.mlflow_run_id, path="custom/export")
+        names = {a.path for a in artifacts}
+        assert "custom/export/model_weights.safetensors" in names
+
+    def test_safetensors_noop_when_mlflow_disabled(self, tmp_path, make_config, monkeypatch):
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        meta = FakeMetaModel(run_name="st-noop")
+        lgr = Logger(
+            config=make_config(),
+            meta_model=meta,
+            enable_mlflow=False,
+        )
+        lgr.save_safetensors_for_publish(meta, epoch=1, metrics_dict={"loss": 0.5})
+        assert lgr.mlflow_run_id is None
+
 
 # ===================================================================
 # Scenario tests (mirror nbs/test_logger.ipynb scenarios A–D)
@@ -494,18 +614,6 @@ class TestScenarios:
         assert (
             ckpt_dir.exists()
         ), "Bug fix verification: checkpoint must save despite MLflow failure"
-
-    def test_scheduler_state_included_in_checkpoint(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="sched-check")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=50,
-        )
-        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
-        ckpt_file = list((tmp_path / "model_checkpoints" / "sched-check").iterdir())[0]
-        assert "scheduler_state_dict" in torch.load(ckpt_file, weights_only=False)
 
 
 # ===================================================================
