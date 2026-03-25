@@ -8,6 +8,7 @@ Classes:
     BaseCoralDataset - A base PyTorch Dataset for loading annotated coral reef images.
     MermaidDataset - A PyTorch Dataset for loading annotated coral reef images from MERMAID sources.
     CoralNetDataset - A PyTorch Dataset for loading annotated coral reef images from CoralNet sources.
+    CombinedCoralDataset - Combines multiple BaseCoralDataset instances with a shared label space.
 """
 
 from typing import Any
@@ -26,7 +27,7 @@ from mermaidseg.datasets.concepts import (
     initialize_benthic_concepts,
     initialize_benthic_hierarchy,
 )
-from mermaidseg.datasets.utils import create_annotation_mask, get_image_s3
+from mermaidseg.datasets.utils import _joint_collate, create_annotation_mask, get_image_s3
 
 
 class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
@@ -423,6 +424,52 @@ class CoralNetDataset(BaseCoralDataset):
             label["provider_id"]: label["benthic_attribute_name"] for label in labelset
         }
         return label_mapping
+
+
+class CombinedCoralDataset:
+    """
+    Wraps multiple BaseCoralDataset instances into a single dataset with a unified label space.
+
+    All constituent datasets must share an identical label2id mapping (i.e. constructed with the
+    same class_subset). Indexing and length are delegated to ConcatDataset. The _datasets
+    attribute is recognised by Logger.log_datasets for per-source MLflow logging.
+    """
+
+    def __init__(self, datasets: list):
+        if not datasets:
+            raise ValueError("datasets must be non-empty.")
+
+        def _root(ds):
+            """Unwrap Subset wrappers to reach the underlying BaseCoralDataset."""
+            while hasattr(ds, "dataset"):
+                ds = ds.dataset
+            return ds
+
+        roots = [_root(ds) for ds in datasets]
+        ref_label2id = roots[0].label2id
+        for root in roots[1:]:
+            if root.label2id != ref_label2id:
+                raise ValueError(
+                    f"All datasets must share the same label2id mapping. "
+                    f"Got {ref_label2id!r} vs {root.label2id!r}."
+                )
+
+        self._datasets = datasets
+        self._concat = torch.utils.data.ConcatDataset(datasets)
+
+        self.label2id = ref_label2id
+        self.id2label = {0: "background", **roots[0].id2label}
+        self.num_classes = roots[0].num_classes
+        self.class_subset = roots[0].class_subset
+
+    def __len__(self) -> int:
+        return len(self._concat)
+
+    def __getitem__(self, idx: int):
+        return self._concat[idx]
+
+    def collate_fn(self, batch):
+        return _joint_collate(batch)
 
 
 class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
