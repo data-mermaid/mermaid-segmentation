@@ -1,0 +1,26 @@
+run_name: "combined_base"
+
+logger:
+  uri: "segmentation"
+  experiment_name: "mermaid_combined"
+  log_epochs: 5
+
+data:
+  batch_size: 8
+  class_subset: [
+    "Turf algae",
+    "Sand",
+    "Crustose coralline algae",
+    "Macroalgae",
+    "Bare substrate",
+    "Acropora",
+    "Montipora",
+    "Pocillopora",
+    "Rubble",
+    "Soft coral",
+    "Porites",
+    "Hard coral",
+    "Millepora",
+  ]
+  padding: 7
+  concept_mapping_flag: False
