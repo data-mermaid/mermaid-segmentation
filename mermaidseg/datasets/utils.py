@@ -11,14 +11,22 @@ Functions:
 """
 
 import io
+import logging
 
 import boto3
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
+from botocore.exceptions import ClientError
+from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset, default_collate
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
+
+
+class DataLoadError(Exception):
+    """Raised when an image cannot be loaded from S3 or decoded."""
 
 
 def get_image_s3(
@@ -41,10 +49,22 @@ def get_image_s3(
     if thumbnail:
         key = key.replace(".png", "_thumbnail.png")
 
-    response = s3.get_object(Bucket=bucket, Key=key)
-    image_data = response["Body"].read()
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        image_data = response["Body"].read()
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        logger.warning(
+            "S3 error loading image (bucket=%s, key=%s): %s %s", bucket, key, error_code, e
+        )
+        raise DataLoadError(f"S3 ClientError for s3://{bucket}/{key}: {error_code}") from e
 
-    image = Image.open(io.BytesIO(image_data))
+    try:
+        image = Image.open(io.BytesIO(image_data))
+    except (UnidentifiedImageError, OSError) as e:
+        logger.warning("Corrupted image (bucket=%s, key=%s): %s", bucket, key, e)
+        raise DataLoadError(f"PIL cannot open image at s3://{bucket}/{key}") from e
+
     return image
 
 
@@ -64,18 +84,37 @@ def create_annotation_mask(
         np.ndarray: Annotation mask with integer class IDs.
     """
     ## TODO: Make Padding percentage based so that it is applicable to all class sizes
-    mask = np.zeros(shape[:2])
-    for _, annotation in annotations.iterrows():
-        if annotation["benthic_attribute_name"] is not None:
-            if padding is not None and padding > 0:
-                mask[
-                    annotation["row"] - padding : annotation["row"] + padding,
-                    annotation["col"] - padding : annotation["col"] + padding,
-                ] = label2id[annotation["benthic_attribute_name"]]
-            else:
-                mask[annotation["row"], annotation["col"]] = label2id[
-                    annotation["benthic_attribute_name"]
-                ]
+    mask = np.zeros(shape[:2], dtype=np.int64)
+
+    if annotations.empty:
+        return mask
+
+    valid = annotations[annotations["benthic_attribute_name"].notna()].copy()
+
+    unknown = set(valid["benthic_attribute_name"]) - set(label2id.keys())
+    if unknown:
+        logger.warning(
+            "create_annotation_mask: skipping %d unknown label(s): %s",
+            len(unknown),
+            sorted(unknown),
+        )
+        valid = valid[valid["benthic_attribute_name"].isin(label2id)]
+
+    if valid.empty:
+        return mask
+
+    rows = valid["row"].to_numpy(dtype=np.intp)
+    cols = valid["col"].to_numpy(dtype=np.intp)
+    label_ids = valid["benthic_attribute_name"].map(label2id).to_numpy(dtype=np.int64)
+
+    if padding is not None and padding > 0:
+        h, w = shape[:2]
+        for r, c, lid in zip(rows, cols, label_ids, strict=False):
+            r0, r1 = max(0, r - padding), min(h, r + padding)
+            c0, c1 = max(0, c - padding), min(w, c + padding)
+            mask[r0:r1, c0:c1] = lid
+    else:
+        mask[rows, cols] = label_ids
 
     return mask
 
@@ -140,35 +179,54 @@ def get_coralnet_sources():
         folder = "coralnet-public-images/"
         sub_response = s3.list_objects_v2(Bucket=bucket_name, Prefix=folder, Delimiter="/")
         if "CommonPrefixes" in sub_response:
-            print("Subfolders in coralnet-public-images/:")
+            logger.warning("Subfolders in coralnet-public-images/:")
             folders_new = [prefix["Prefix"] for prefix in sub_response["CommonPrefixes"]]
             folders_new = [folder.replace("coralnet-public-images/", "") for folder in folders_new]
         else:
-            print("No subfolders found in coralnet-public-images/")
+            logger.warning("No subfolders found in coralnet-public-images/")
     else:
-        print("No folders found in the bucket")
+        logger.warning("No folders found in the bucket")
 
     whitelist_sources = []
     for source in tqdm(folders_new):
         if not source.startswith("s"):
-            print(source)
+            logger.warning("Unexpected source folder name (no 's' prefix): %s", source)
 
         file_key = f"coralnet-public-images/{source}annotations.csv"
-
         try:
             s3.head_object(Bucket=bucket_name, Key=file_key)
-        except s3.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] == "404":
-                print(f"File {file_key} not found in bucket")
-                continue
+        except ClientError as e:
+            error_code = e.response["Error"]["Code"]
+            if error_code == "404":
+                logger.warning(
+                    "get_coralnet_sources: annotations.csv not found for source %s", source
+                )
+            else:
+                logger.warning(
+                    "get_coralnet_sources: unexpected S3 error for %s (code=%s): %s",
+                    file_key,
+                    error_code,
+                    e,
+                )
+            continue
 
         file_key = f"coralnet-public-images/{source}image_list.csv"
-
         try:
             s3.head_object(Bucket=bucket_name, Key=file_key)
-        except s3.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] == "404":
-                print(f"File {file_key} not found in bucket")
-                continue
+        except ClientError as e:
+            error_code = e.response["Error"]["Code"]
+            if error_code == "404":
+                logger.warning(
+                    "get_coralnet_sources: image_list.csv not found for source %s", source
+                )
+            else:
+                logger.warning(
+                    "get_coralnet_sources: unexpected S3 error for %s (code=%s): %s",
+                    file_key,
+                    error_code,
+                    e,
+                )
+            continue
+
         whitelist_sources.append(source)
     return whitelist_sources

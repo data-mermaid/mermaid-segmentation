@@ -10,6 +10,7 @@ Classes:
     CoralNetDataset - A PyTorch Dataset for loading annotated coral reef images from CoralNet sources.
 """
 
+import logging
 from typing import Any
 
 import albumentations as A
@@ -27,6 +28,20 @@ from mermaidseg.datasets.concepts import (
     initialize_benthic_hierarchy,
 )
 from mermaidseg.datasets.utils import create_annotation_mask, get_image_s3
+
+logger = logging.getLogger(__name__)
+
+
+def worker_init_fn(worker_id: int) -> None:
+    """Configure logging in DataLoader worker processes.
+
+    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0``
+    so that warnings emitted in worker subprocesses are visible.
+    """
+    logging.basicConfig(
+        level=logging.WARNING,
+        format=f"[worker-{worker_id}] %(levelname)s %(name)s: %(message)s",
+    )
 
 
 class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
@@ -160,7 +175,15 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         row_kwargs = self.df_images.loc[idx].to_dict()
         try:
             image = self.read_image(**row_kwargs)
-        except Exception:
+        except Exception as e:
+            source_info = {k: v for k, v in row_kwargs.items() if k != "image_id"}
+            logger.warning(
+                "Skipping image_id=%s (source=%s): %s: %s",
+                image_id,
+                source_info,
+                type(e).__name__,
+                e,
+            )
             return None, None
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
@@ -195,10 +218,22 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             masks: Tensor or ndarray batch of masks
         """
         # Filter out entries where image or mask is None
+        batch_size = len(batch)
         filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
+        n_skipped = batch_size - len(filtered)
+        if n_skipped > 0:
+            logger.warning(
+                "collate_fn: skipped %d/%d items in batch due to load errors",
+                n_skipped,
+                batch_size,
+            )
 
         # Handle empty batch
         if len(filtered) == 0:
+            logger.warning(
+                "collate_fn: entire batch of %d items was empty, returning empty tensors",
+                batch_size,
+            )
             return torch.tensor([]), torch.tensor([])
 
         images, masks = zip(*filtered, strict=False)
@@ -411,12 +446,14 @@ class CoralNetDataset(BaseCoralDataset):
         """
         Initialize CoralNet to MERMAID label mapping from provider API.
         """
-        response = requests.get(mapping_endpoint)
+        response = requests.get(mapping_endpoint, timeout=30)
+        response.raise_for_status()
         data = response.json()
         labelset = data["results"]
 
         while data["next"]:
-            response = requests.get(data["next"])
+            response = requests.get(data["next"], timeout=30)
+            response.raise_for_status()
             data = response.json()
             labelset.extend(data["results"])
         label_mapping = {
@@ -603,13 +640,27 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
-        image, mask = np.array(self.dataset[idx]["image"]), self.dataset[idx]["label"]
-        mask = np.vectorize(self.labelmapping.get)(mask)
+        try:
+            image = np.array(self.dataset[idx]["image"])
+            mask = self.dataset[idx]["label"]
+            mask = np.vectorize(self.labelmapping.get)(mask)
+        except Exception as e:
+            logger.warning("CoralscapesDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e)
+            return None, None
 
         if self.transform:
-            transformed = self.transform(image=image, mask=mask)
-            image = transformed["image"].transpose(2, 0, 1)
-            mask = transformed["mask"]
+            try:
+                transformed = self.transform(image=image, mask=mask)
+                image = transformed["image"].transpose(2, 0, 1)
+                mask = transformed["mask"]
+            except Exception as e:
+                logger.warning(
+                    "CoralscapesDataset: transform failed for idx=%d: %s: %s",
+                    idx,
+                    type(e).__name__,
+                    e,
+                )
+                return None, None
 
         return image, mask
 
@@ -638,20 +689,31 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     def collate_fn(self, batch):
         """
-        Collate function for MermaidDataset and CoralNetDataset.
+        Collate function for CoralscapesDataset.
         Args:
-            batch: List of tuples (image, mask, annotations)
+            batch: List of tuples (image, mask)
         Returns:
             images: Tensor or ndarray batch of images
             masks: Tensor or ndarray batch of masks
-            annotations: List of annotation DataFrames
         """
+        batch_size = len(batch)
+        filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
+        n_skipped = batch_size - len(filtered)
+        if n_skipped > 0:
+            logger.warning(
+                "CoralscapesDataset.collate_fn: skipped %d/%d items in batch due to load errors",
+                n_skipped,
+                batch_size,
+            )
 
-        images, masks = zip(*batch, strict=False)
+        if len(filtered) == 0:
+            logger.warning(
+                "CoralscapesDataset.collate_fn: entire batch of %d items was empty, returning empty tensors",
+                batch_size,
+            )
+            return torch.tensor([]), torch.tensor([])
 
-        # Handle empty batch
-        if len(images) == 0:
-            return torch.tensor([]), torch.tensor([]), []
+        images, masks = zip(*filtered, strict=False)
 
         # Convert to tensors if they aren't already
         if isinstance(images[0], torch.Tensor):
