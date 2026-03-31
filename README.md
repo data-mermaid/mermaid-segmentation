@@ -33,8 +33,8 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 
 ├── configs/ # Configuration files for different runs/models
 └── .gitignore
-└── .environment.yml # Environment for setup with conda/micromamba
-└── .pyproject.toml
+└── environment.yml # Legacy conda/micromamba environment
+└── pyproject.toml
 └── README.md
 ```
 
@@ -67,17 +67,19 @@ export MLFLOW_TRACKING_URI=arn:aws:sagemaker:{region}:{account-id}:mlflow-app/{a
 hf auth login
 # Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
 
-# Install dependencies
+# Install core dependencies
 uv sync
-
 ```
 
-**Traditional setup**:
+**Install optional dependency groups** as needed:
 ```bash
-git clone https://github.com/your-org/mermaid-segmentation.git
-cd mermaid-segmentation
-pip install -e .
-# Then pip install any additional libraries required from the environment.yml file, depending on use case.
+uv sync --group dev         # tests + lint (contributor setup)
+uv sync --group notebooks   # Jupyter, hvplot, ibis, great-tables
+uv sync --extra scraping    # selenium, webdriver-manager
+uv sync --extra smp         # segmentation-models-pytorch (optional model backend)
+
+# Combine
+uv sync --group dev --group notebooks
 ```
 
 
@@ -147,14 +149,18 @@ To evaluate any trained segmentation model, you can use the notebook `nbs/Model_
 
 ### Running Tests
 
+```bash
+uv sync --group tests
+```
+
 **Run all tests:**
 ```bash
-uv run pytest tests/
+uv run pytest
 ```
 
 **Run only unit tests (skip integration tests):**
 ```bash
-uv run pytest tests/ -m "not integration"
+uv run pytest -m "not integration"
 ```
 
 **Run specific test file:**
