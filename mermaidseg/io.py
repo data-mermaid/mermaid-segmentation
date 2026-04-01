@@ -15,7 +15,8 @@ Functions:
 """
 
 import argparse
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from pathlib import Path
@@ -38,7 +39,7 @@ class ConfigDict(dict):
         Allows setting dictionary keys as attributes.
     """
 
-    def __init__(self, dictionary: Dict[str, Any]):
+    def __init__(self, dictionary: dict[str, Any]):
         for key, value in dictionary.items():
             if isinstance(value, dict):
                 value = ConfigDict(value)
@@ -51,7 +52,7 @@ class ConfigDict(dict):
         self.__setitem__(key, value)
 
 
-def load_config(config_path: str) -> Dict[str, Any]:
+def load_config(config_path: str) -> dict[str, Any]:
     """
     Load configuration from a YAML file.
     Args:
@@ -60,7 +61,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         dict: Parsed configuration dictionary from the YAML file.
     """
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
     return config
 
@@ -90,9 +91,14 @@ def update_config(base_config: ConfigDict, config: ConfigDict) -> ConfigDict:
     return updated_config
 
 
-def setup_config(
-    config_path: Optional[str] = None, config_base_path: str = "configs/base.yaml"
-):
+def _load_csv_if_path(value: Any, header: int | None = 0) -> Any:
+    """Load CSV file if value is a file path, otherwise return as-is."""
+    if isinstance(value, str) and Path(value).is_file() and value.endswith(".csv"):
+        return pd.read_csv(value, header=header).values.flatten().tolist()
+    return value
+
+
+def setup_config(config_path: str | None = None, config_base_path: str = "configs/base.yaml"):
     """
     Set up configuration by loading and merging base and custom config files.
     This function loads a base configuration file and optionally merges it with
@@ -120,26 +126,20 @@ def setup_config(
 
     cfg = ConfigDict(updated_config)
 
-    if isinstance(cfg.data.class_subset, str) and Path(cfg.data.class_subset).is_file():
-        with open(cfg.data.class_subset, "r") as f:
-            class_subset = [line.strip() for line in f.readlines()]
-        cfg.data.class_subset = class_subset
+    # if isinstance(cfg.data.class_subset, str) and Path(cfg.data.class_subset).is_file():
+    #     # with open(cfg.data.class_subset, "r") as f:
+    #     #     class_subset = [line.strip() for line in f.readlines()]
+    #     # cfg.data.class_subset = class_subset
+    if "class_subset" in cfg.data.keys():
+        cfg.data.class_subset = _load_csv_if_path(cfg.data.class_subset)
 
-    if (
-        isinstance(cfg.data.whitelist_sources, str)
-        and Path(cfg.data.whitelist_sources).is_file()
-    ):
-        cfg.data.whitelist_sources = pd.read_csv(
-            cfg.data.whitelist_sources, header=None
-        )
-
-    if (
-        isinstance(cfg.data.blacklist_sources, str)
-        and Path(cfg.data.blacklist_sources).is_file()
-    ):
-        cfg.data.blacklist_sources = pd.read_csv(
-            cfg.data.blacklist_sources, header=None
-        )
+    if "whitelist_sources" in cfg.data.keys():
+        cfg.data.whitelist_sources = _load_csv_if_path(cfg.data.whitelist_sources)
+        cfg.data.whitelist_sources.train = _load_csv_if_path(cfg.data.whitelist_sources.train)
+        cfg.data.whitelist_sources.val = _load_csv_if_path(cfg.data.whitelist_sources.val)
+        cfg.data.whitelist_sources.test = _load_csv_if_path(cfg.data.whitelist_sources.test)
+    if "blacklist_sources" in cfg.data.keys():
+        cfg.data.blacklist_sources = _load_csv_if_path(cfg.data.blacklist_sources)
 
     return cfg
 

@@ -1,0 +1,81 @@
+name: Experiment
+description: Describe experiments and approaches for solving current problem
+title: "[Experiment] "
+labels: ["experiment"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to document experiments and modeling approaches.
+
+  - type: textarea
+    id: ask-reference
+    attributes:
+      label: Ask Reference
+      description: Link to the Ask issue this experiment addresses.
+      placeholder: "#issue-number"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What is the goal of this experiment? How are you attempting to solve the problem?
+      placeholder: This experiment tests...
+    validations:
+      required: true
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Metrics
+      description: |
+        What metric are you trying to model? Define this metric if it is not a standard metric.
+      placeholder: |
+        Primary metric: ...
+        Definition: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: assumptions
+    attributes:
+      label: Assumptions
+      description: |
+        Describe any assumptions you are making in building this model.
+        Describe what problems may arise if the assumptions are inaccurate.
+      placeholder: |
+        - Assumption 1: ...
+        - Risk if violated: ...
+
+  - type: textarea
+    id: approach
+    attributes:
+      label: Approach
+      description: Describe the modeling approach, algorithm, or technique you're using.
+      placeholder: |
+        - Model type: ...
+        - Features: ...
+        - Training strategy: ...
+
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: |
+        Summarize the results of this experiment (tldr).
+        Link to experiment tracking source (e.g., MLflow, Weights & Biases) if applicable.
+        Link to pull request where experiment was tried.
+      placeholder: |
+        **Experiment History:** [Link to experiment tracking]
+        **Related PR:** [Link to pull request]
+
+        Results summary: ...
+
+  - type: textarea
+    id: exploration-reference
+    attributes:
+      label: Related Exploration Issues
+      description: Link to any exploration issues that informed this experiment.
+      placeholder: "#issue-number, #issue-number"

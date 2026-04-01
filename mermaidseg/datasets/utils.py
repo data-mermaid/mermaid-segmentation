@@ -11,13 +11,13 @@ Functions:
 """
 
 import io
-from typing import Dict, Optional, Tuple
 
 import boto3
 import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
+from torch.utils.data import Dataset, default_collate
 from tqdm import tqdm
 
 
@@ -50,9 +50,9 @@ def get_image_s3(
 
 def create_annotation_mask(
     annotations: pd.DataFrame,
-    shape: Tuple[int, int],
-    label2id: Dict[str, int],
-    padding: Optional[int] = None,
+    shape: tuple[int, int],
+    label2id: dict[str, int],
+    padding: int | None = None,
 ) -> np.ndarray:
     """
     Creates an annotation mask for a given image based on provided annotations.
@@ -80,7 +80,7 @@ def create_annotation_mask(
     return mask
 
 
-def calculate_weights(dataset, const=2000000) -> torch.Tensor:
+def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
     """
     Calculate class weights for a given dataset.
     This function computes the weights for each class in the dataset based on
@@ -97,12 +97,11 @@ def calculate_weights(dataset, const=2000000) -> torch.Tensor:
         torch.Tensor: A tensor of weights for each class, normalized by the mean weight.
     """
 
-    label_counts = {}
-    label_counts = {i: 0 for i in range(dataset.N_classes)}
+    label_counts = dict.fromkeys(range(dataset.N_classes), 0)
     for i in tqdm(range(len(dataset))):
         _, label, _ = dataset[i]
         unique_labels = np.unique(label, return_counts=True)
-        for label_id, count in zip(*unique_labels):
+        for label_id, count in zip(*unique_labels, strict=False):
             label_counts[label_id] += int(count)
 
     weights = np.zeros(dataset.N_classes)
@@ -112,3 +111,64 @@ def calculate_weights(dataset, const=2000000) -> torch.Tensor:
     weight /= weight.mean()
 
     return weight
+
+
+def _joint_collate(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Collate function to combine a list of samples into a batch.
+    """
+    images, labels = zip(*batch, strict=False)
+    images = default_collate(images)
+    labels = default_collate(labels)
+    return images, labels
+
+
+def get_coralnet_sources():
+    """
+    Discover and validate CoralNet source folders stored in the S3 bucket "dev-datamermaid-sm-sources".
+    Returns:
+        whitelist: A list of all valid CoralNet source folder names that contain both
+              'annotations.csv' and 'image_list.csv' files.
+    """
+
+    s3 = boto3.client("s3")
+    bucket_name = "dev-datamermaid-sm-sources"
+
+    response = s3.list_objects_v2(Bucket=bucket_name, Delimiter="/")
+    if "CommonPrefixes" in response:
+        folders_new = [prefix["Prefix"] for prefix in response["CommonPrefixes"]]
+        folder = "coralnet-public-images/"
+        sub_response = s3.list_objects_v2(Bucket=bucket_name, Prefix=folder, Delimiter="/")
+        if "CommonPrefixes" in sub_response:
+            print("Subfolders in coralnet-public-images/:")
+            folders_new = [prefix["Prefix"] for prefix in sub_response["CommonPrefixes"]]
+            folders_new = [folder.replace("coralnet-public-images/", "") for folder in folders_new]
+        else:
+            print("No subfolders found in coralnet-public-images/")
+    else:
+        print("No folders found in the bucket")
+
+    whitelist_sources = []
+    for source in tqdm(folders_new):
+        if not source.startswith("s"):
+            print(source)
+
+        file_key = f"coralnet-public-images/{source}annotations.csv"
+
+        try:
+            s3.head_object(Bucket=bucket_name, Key=file_key)
+        except s3.exceptions.ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                print(f"File {file_key} not found in bucket")
+                continue
+
+        file_key = f"coralnet-public-images/{source}image_list.csv"
+
+        try:
+            s3.head_object(Bucket=bucket_name, Key=file_key)
+        except s3.exceptions.ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                print(f"File {file_key} not found in bucket")
+                continue
+        whitelist_sources.append(source)
+    return whitelist_sources

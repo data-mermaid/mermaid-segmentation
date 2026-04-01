@@ -16,16 +16,20 @@ Classes:
         __init__
 """
 
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
 import tqdm
-from mermaidseg.model.meta import MetaModel
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
 from torchmetrics.classification import Accuracy, F1Score, JaccardIndex
 from torchmetrics.metric import Metric
+
+from mermaidseg.datasets.concepts import (
+    labels_to_concepts,
+)
+from mermaidseg.model.meta import MetaModel
 
 
 class Evaluator:
@@ -52,17 +56,18 @@ class Evaluator:
             Evaluates the given model on one image from the dataloader and returns the image, label, and prediction.
     """
 
-    metric_dict: Dict[str, Metric]
+    metric_dict: dict[str, Metric]
 
     def __init__(
         self,
         num_classes: int,
-        device: Union[str, torch.device] = "cuda",
-        metric_dict: Optional[Dict[str, Metric]] = None,
+        device: str | torch.device = "cuda",
+        metric_dict: dict[str, Metric] | None = None,
+        calculate_concept_metrics: bool = False,
+        concept_metric_dict: dict[str, Metric] | None = None,
         ignore_index: int = 0,
-        **kwargs: Any
+        **kwargs: Any,
     ):
-
         self.epoch = 0
         self.device = device
         self.num_classes = num_classes
@@ -75,18 +80,29 @@ class Evaluator:
                     task="multiclass" if num_classes > 2 else "binary",
                     num_classes=int(num_classes),
                     ignore_index=ignore_index,
-                    **kwargs
+                    **kwargs,
                 ).to(self.device),
             }
+
+        if calculate_concept_metrics:
+            if concept_metric_dict:
+                self.concept_metric_dict = concept_metric_dict
+            else:
+                self.concept_metric_dict = {
+                    # "auc": AUROC(
+                    #     task="multiclass", average="none", num_classes=3, ignore_index=0
+                    # ).to(self.device),
+                    "f1_concept": F1Score(
+                        task="multiclass", average="none", num_classes=3, ignore_index=0
+                    ).to(self.device)
+                }
 
     @torch.no_grad()
     def evaluate_model(
         self,
-        dataloader: DataLoader[
-            Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
-        ],
+        dataloader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         meta_model: MetaModel,
-    ) -> Dict[str, Union[float, NDArray[np.float64]]]:
+    ) -> dict[str, float | NDArray[np.float64]]:
         """
         Evaluates the performance of a given meta-model on a dataset provided by the dataloader.
         Args:
@@ -103,24 +119,57 @@ class Evaluator:
                 with multiple dimensions).
         """
         meta_model.model.eval()
-        metric_results: Dict[str, Union[float, NDArray[np.float64]]] = {}
-
+        metric_results: dict[str, float | NDArray[np.float64]] = {}
         for data in tqdm.tqdm(dataloader):
             inputs, labels = data
             labels = labels.long().to(self.device)
-            outputs = meta_model.batch_predict(inputs)
-            outputs = outputs.argmax(dim=1)
+            outputs, concept_outputs = meta_model.batch_predict(inputs)
+
+            # if meta_model.training_mode in ("concept"):
+            #     concept_labels = labels_to_concepts(labels, meta_model.concept_matrix)
+            #     # print(concept_labels)
+            #     # print(concept_labels.shape, concept_labels.dtype)
+            #     # concept_labels = postprocess_predicted_concepts(
+            #     #         concept_labels, meta_model.concept_matrix, meta_model.conceptid2labelid,
+            #     #     )
+            #     # concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
+            #     # metric.update(outputs, concept_labels)
+            # else:
+            if outputs.ndim > 3:
+                outputs = outputs.argmax(dim=1)
             ## Update metrics
             for metric in self.metric_dict.values():
                 metric.update(outputs, labels)
+
+            if meta_model.training_mode in ("concept-bottleneck", "concept"):
+                concept_outputs = (concept_outputs > 0.5).float()
+                concept_outputs += 1
+                concept_outputs *= labels.unsqueeze(1) != 0
+
+                concept_labels = labels_to_concepts(labels, meta_model.concept_matrix)
+                concept_labels += 1
+                concept_labels *= labels.unsqueeze(1) != 0
+
+                for metric in self.concept_metric_dict.values():
+                    metric.update(concept_outputs, concept_labels)
+
         ## Compute metrics
         for metric_name in self.metric_dict:
-            metric_results[metric_name] = (
-                self.metric_dict[metric_name].compute().cpu().numpy()
-            )
+            metric_results[metric_name] = self.metric_dict[metric_name].compute().cpu().numpy()
             if metric_results[metric_name].ndim == 0:
                 metric_results[metric_name] = metric_results[metric_name].item()
             self.metric_dict[metric_name].reset()
+
+        if meta_model.training_mode in ("concept-bottleneck", "concept"):
+            for metric_name in self.concept_metric_dict:
+                metric_results[metric_name] = (
+                    self.concept_metric_dict[metric_name].compute().cpu().numpy()
+                )
+                if metric_results[metric_name].ndim == 0:
+                    metric_results[metric_name] = metric_results[metric_name].item()
+                else:
+                    metric_results[metric_name] = metric_results[metric_name]  # [2].item()
+                self.concept_metric_dict[metric_name].reset()
 
         self.epoch += 1
         return metric_results
@@ -128,17 +177,15 @@ class Evaluator:
     @torch.no_grad()
     def evaluate_image(
         self,
-        dataloader: DataLoader[
-            Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]
-        ],
+        dataloader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         meta_model: MetaModel,
         epoch: int = 0,
         log_epochs: int = 5,
         proba: bool = False,
     ) -> tuple[
         NDArray[np.float64],
-        Union[NDArray[np.int_], int],
-        Union[NDArray[np.int_], int],
+        NDArray[np.int_] | int,
+        NDArray[np.int_] | int,
     ]:
         """
         Evaluates the given model on one image of the dataloader.
@@ -166,15 +213,11 @@ class Evaluator:
         image_counter = (
             epoch % (log_epochs * 5) // 5
         )  # Rotating 5 images (assuming batch size above 5)
-        image_counter = image_counter % inputs.size(
-            dim=0
-        )  # In case we use a smaller batch size
+        image_counter = image_counter % inputs.size(dim=0)  # In case we use a smaller batch size
 
         image: NDArray[np.float64] = inputs[image_counter].cpu().numpy()
         label: NDArray[np.int_] = labels[image_counter].cpu().numpy()
-        pred: Union[NDArray[np.int_], NDArray[np.float_]] = (
-            outputs[image_counter].cpu().numpy()
-        )
+        pred: NDArray[np.int_] | NDArray[np.float_] = outputs[image_counter].cpu().numpy()
 
         return image, label, pred
 
@@ -199,18 +242,17 @@ class EvaluatorSemanticSegmentation(Evaluator):
     def __init__(
         self,
         num_classes: int,
-        device: Union[str, torch.device] = "cuda",
-        metric_dict: Optional[Dict[str, Metric]] = None,
+        device: str | torch.device = "cuda",
+        metric_dict: dict[str, Metric] | None = None,
         ignore_index: int = 0,
-        **kwargs: Any
+        **kwargs: Any,
     ):
-
         super().__init__(
             num_classes=num_classes,
             device=device,
             metric_dict=metric_dict,
             ignore_index=ignore_index,
-            **kwargs
+            **kwargs,
         )
 
         if metric_dict:
@@ -227,8 +269,19 @@ class EvaluatorSemanticSegmentation(Evaluator):
                     num_classes=num_classes,
                     ignore_index=ignore_index,
                 ).to(device),
+                "per_class_iou": JaccardIndex(
+                    task="multiclass" if num_classes > 2 else "binary",
+                    num_classes=num_classes,
+                    average="none",
+                    ignore_index=ignore_index,
+                ).to(device),
+                "per_class_f1": F1Score(
+                    task="multiclass" if num_classes > 2 else "binary",
+                    num_classes=num_classes,
+                    average="none",
+                    ignore_index=ignore_index,
+                ).to(device),
             }
         self.metric_dict = {
-            metric_name: metric.to(device)
-            for metric_name, metric in self.metric_dict.items()
+            metric_name: metric.to(device) for metric_name, metric in self.metric_dict.items()
         }

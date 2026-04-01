@@ -1,0 +1,17 @@
+run_name: "base"
+
+logger:
+  uri: "segmentation"
+  experiment_name: "temporary_experiment_1"
+  log_epochs: 5
+
+data:
+  name: "CoralNetDataset"
+  batch_size: 16
+  class_subset: "../configs/run1_class_subset.csv"
+  whitelist_sources:
+    train: "../configs/run1_train_sources.csv"
+    val: "../configs/run1_val_sources.csv"
+    test: "../configs/run1_test_sources.csv"
+  padding: 7
+  concept_mapping_flag: False

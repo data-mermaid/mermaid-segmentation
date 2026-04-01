@@ -1,18 +1,26 @@
 # MermaidSeg
 
-Codebase for the training, evaluation and usage of image segmentation models of coral data. 
+Codebase for the training, evaluation and usage of image segmentation models of coral data.
 The codebase contains data loaders, augmentations, preprocessors, models, training & evaluation scripts.
 
 ## File Structure
 
 ```
 ├── nbs/ # Jupyter notebooks
-    ├── Model_Run.ipynb # Notebook used to train end-to-end image segmentation models for a given dataset and configuration file
-    ├── Model_Evaluation.ipynb # Notebook containing the code to quantitatively and qualitatively analyze the trained segmentation models 
+    ├── Base_Pipeline.ipynb # Notebook used to train end-to-end (non-concept) image segmentation models for a given dataset and configuration file
+    ├── Concept_Bottleneck_Pipeline.ipynb # Notebook used to train end-to-end concept-bottleneck image segmentation models for a given dataset and configuration file
+    ├── Model_Evaluation.ipynb # Notebook containing the code to quantitatively and qualitatively analyze the trained segmentation models
+    ├── datasets/
+        ├── Dataset_Exploration.ipynb # Shows usage of currently implemented dataset classes and concept mapping
+        ├── CoralNet_Annotations.ipynb # Notebook on how to map extracted CoralNet sources to a datasets readable format (not that relevant for now)
+    ├── nb_experiments/
+        ├── Time_Test.ipynb # Data I/O timing tests
+
 ├── mermaidseg/
     ├── datasets # Contains scripts related to dataset loading, preprocessing and data augmentations.
-        ├── dataset.py # Contains dataset classes that can be used to acquire and load coral data, including images and annotations. Currently includes the MermaidDataset and CoralNetDataset classes.
-        ├── utils.py # Contains utility functions related to datasets 
+        ├── dataset.py # Contains dataset classes that can be used to acquire and load coral data, including images and annotations. Currently includes the MermaidDataset, CoralNetDataset and CoralscapesDataset classes.
+        ├── concepts.py # Contains functionality related to working with concepts
+        ├── utils.py # Contains utility functions related to datasets
     ├── model # Contains everything related to training and evaluating segmentation models.
         ├── models.py # Contains the different model implementations
         ├── meta.py # Contains the metamodel class that is initialized with a model and set of hyperparameters, with train, eval and predict methods.
@@ -22,8 +30,9 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
     ├── io.py # Contains config & args set ups
     ├── logger.py # Contains classes & functions related to logging training with MLFlow and saving checkpoints & results
     └── visualization.py # Functions related to the visualization of images based on different criteria
+
 ├── configs/ # Configuration files for different runs/models
-└── .gitignore 
+└── .gitignore
 └── .environment.yml # Environment for setup with conda/micromamba
 └── .pyproject.toml
 └── README.md
@@ -35,16 +44,53 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 
 Prerequisites
 - Python 3.11+
-- AWS credentials configured (to from S3)
+- AWS credentials configured with `mermaid-core` profile (for S3 access)
+- Hugging Face account and token (for DINOv3 models; see [Hugging Face Setup](#hugging-face-setup) below)
+- uv (recommended) or pip
 
-Install locally:
+**Quick setup with uv** (recommended):
 ```bash
 git clone https://github.com/your-org/mermaid-segmentation.git
 cd mermaid-segmentation
-python -m venv .venv
-source .venv/bin/activate   # or .venv\Scripts\activate on Windows
-pip install -e .
+
+# Install uv if needed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Configure AWS access
+aws configure --profile mermaid-core
+echo "AWS_PROFILE=mermaid-core" >> .env
+
+# Configure MLFlow Tracking (SageMaker MLflow App)
+export MLFLOW_TRACKING_URI=arn:aws:sagemaker:{region}:{account-id}:mlflow-app/{app-name}
+
+# Configure Hugging Face (required for DINOv3 models)
+hf auth login
+# Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
+
+# Install dependencies
+uv sync
+
 ```
+
+**Traditional setup**:
+```bash
+git clone https://github.com/your-org/mermaid-segmentation.git
+cd mermaid-segmentation
+pip install -e .
+# Then pip install any additional libraries required from the environment.yml file, depending on use case.
+```
+
+
+### Hugging Face Setup
+
+DINOv3 models (e.g. `facebook/dinov3-vitb16-pretrain-lvd1689m`) are gated on Hugging Face and require authentication:
+
+1. **Request access**: Visit the [model page](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m), sign in, and accept the license to request access.
+2. **Authenticate** using one of these methods:
+   - **CLI login** (recommended): Run `hf auth login` and paste your token when prompted.
+   - **Environment variable**: Add `HF_TOKEN=hf_xxxxxxxxxxxx` to your `.env` file (create from `.env.example`). Create a token at [hf.co/settings/tokens](https://hf.co/settings/tokens).
+
+If using `.env` with direnv, ensure you run `direnv allow` and restart the Jupyter kernel so it picks up the token.
 
 ### Dataset
 In order to access and traverse through MERMAID data we can use the code within the mermaidseg codebase, starting with the `MermaidDataset` class, which already includes the functionality allowing for ML research.
@@ -76,25 +122,126 @@ from mermaidseg.visualization import get_legend_elements
 fig, ax = plt.subplots(figsize = (8.5, 7), layout = "tight")
 plt.imshow(image)
 for i, annotation in annotations.iterrows():
-    plt.scatter(annotation['col'], annotation['row'], 
+    plt.scatter(annotation['col'], annotation['row'],
                 color=annotation["benthic_color"],
-                marker=annotation["growth_form_marker"], 
+                marker=annotation["growth_form_marker"],
                 s=80,
                 alpha=0.8)
 
 benthic_legend_elements, growth_legend_elements = get_legend_elements(annotations)
 
-first_legend = plt.legend(handles=benthic_legend_elements, bbox_to_anchor=(0.99, 1), 
+first_legend = plt.legend(handles=benthic_legend_elements, bbox_to_anchor=(0.99, 1),
                             loc='upper left', title='Benthic\nAttributes')
 plt.gca().add_artist(first_legend)
-plt.legend(handles=growth_legend_elements, bbox_to_anchor=(0.99, 0.4), 
+plt.legend(handles=growth_legend_elements, bbox_to_anchor=(0.99, 0.4),
           loc='center left', title='Growth\nForms')
 
 plt.axis("off")
-plt.show() 
+plt.show()
 ```
 
 ### Segmentation Models
-To train segmentation models using a specified config file one can use the `nbs/Model_Run.ipynb` notebook or run the corresponding script using ```python scripts/train.py`.
+To train segmentation models using a specified config file one can use the `nbs/Base_Pipeline.ipynb` or `nbs/Concept_Bottleneck_Pipeline.ipynb` notebooks.
 
-To evaluate any trained segmentation model, you can use the notebook `nbs/Model_Evaluation.ipynb` which contains both quantitative performance analyses through dataset level performance metrics and qualitative analyses by visualizing model results and corresponding class probabilities. 
+To evaluate any trained segmentation model, you can use the notebook `nbs/Model_Evaluation.ipynb` which contains both quantitative performance analyses through dataset level performance metrics and qualitative analyses by visualizing model results and corresponding class probabilities.
+
+### Running Tests
+
+**Run all tests:**
+```bash
+uv run pytest tests/
+```
+
+**Run only unit tests (skip integration tests):**
+```bash
+uv run pytest tests/ -m "not integration"
+```
+
+**Run specific test file:**
+```bash
+uv run pytest tests/test_logger.py -v
+```
+
+
+## Model Serialization Strategy
+
+We use a **hybrid approach** to model serialization, balancing safety, compatibility, and practical training needs:
+
+| Use Case | Format | Rationale |
+|----------|--------|-----------|
+| **Training Checkpoints** | `torch.save` (pickle) | Full state (model + optimizer + scheduler) needed for resume |
+| **MLflow Model Registry** | TorchScript graph (`export_model=True`) | Safer than pickle; prevents arbitrary code execution on load |
+| **Published/Shared Models** | SafeTensors | Secure format for public distribution; zero-copy memory mapping |
+
+### Why We Moved Away from Pickle-Only
+
+**Security Risk**: Pickle files can execute arbitrary Python code during deserialization. Loading an untrusted pickle file is equivalent to running untrusted code.
+
+**Our Mitigation Strategy**:
+1. **Internal Checkpoints** → Still use pickle (trusted, same-machine use only)
+2. **Registry/Deployment** → Use TorchScript graph export (safe for inference)
+3. **External Sharing** → Use SafeTensors (cannot execute code; fast mmap loading)
+
+### Exporting Models for Sharing
+
+```python
+from mermaidseg.logger import Logger
+
+# After training, export to SafeTensors for publication
+logger.save_safetensors_for_publish(
+    meta_model_run=meta_model,
+    epoch=best_epoch,
+    metrics_dict={"accuracy": best_acc},
+    artifact_path="publish/v1"
+)
+```
+
+SafeTensors format ensures:
+- No arbitrary code execution (unlike pickle)
+- Fixed tensor shapes (prevents shape confusion attacks)
+- Fast zero-copy memory mapping
+- Self-contained metadata
+### Concept Bottleneck Models
+
+When using concept bottleneck models (via `nbs/Concept_Bottleneck_Pipeline.ipynb`), the evaluation metrics use a hard-coded `num_classes=3` parameter. This is intentional and correct for the current implementation.
+
+**Why 3 classes?** Each concept in the bottleneck can have exactly three states:
+- **True (1)**: Concept is present
+- **False (0)**: Concept is absent
+- **Masked**: Concept is not evaluated for this pixel
+
+This ternary classification is reflected in the `F1Score` metric used for concept evaluation in `mermaidseg/model/eval.py`. Future implementations may explore multi-class concept labels (e.g., coral families), but this would require architectural changes across the codebase.
+
+## DSLP Issue Workflow
+
+This project follows the [Data Science Lifecycle Process (DSLP)](https://github.com/dslp/dslp) for managing data science work. We use structured issue templates to track different stages of the workflow.
+
+```mermaid
+flowchart TD
+    Ask["Ask\n(Problem Statement)"]
+    DataAcq["Data Acquisition"]
+    DataCreate["Data Create"]
+    Explore["Explore"]
+    Experiment["Experiment"]
+    Model["Model"]
+
+    Ask --> DataAcq
+    Ask --> DataCreate
+    DataAcq --> Explore
+    DataCreate --> Explore
+    Explore --> Experiment
+    Experiment -->|"successful"| Model
+    Experiment -->|"iterate"| Experiment
+```
+
+### Issue Types
+
+When creating a new issue, select the appropriate template:
+
+- **Ask**: Define the problem statement and proposed solution. This is the starting point for any data science initiative.
+- **Data Acquisition**: Request access to or retrieval of an existing dataset needed for the project.
+- **Data Create**: Document the creation of a new derived dataset from existing sources.
+- **Explore**: Capture data exploration efforts and discoveries that build understanding.
+- **Experiment**: Track modeling experiments and approaches for solving the problem.
+- **Model**: Productionalize a successful experiment and prepare it for deployment.
+- **Bug Report**: Report bugs, errors, or unexpected behavior in the codebase.

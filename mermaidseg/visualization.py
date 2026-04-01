@@ -9,8 +9,6 @@ Functions:
     denormalize_image: Denormalizes an image that was previously normalized using the given mean and standard deviation.
 """
 
-from typing import List, Tuple, Union
-
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -18,7 +16,7 @@ from matplotlib import pyplot as plt
 
 def get_legend_elements(
     annotations: pd.DataFrame, include_growth_form: bool = False
-) -> Union[List, Tuple[List, List]]:
+) -> list | tuple[list, list]:
     """
     Generate legend elements for benthic attributes and optionally growth forms for use in matplotlib plots.
     Parameters
@@ -40,9 +38,7 @@ def get_legend_elements(
     The function assumes that the color and marker codes are compatible with matplotlib.
     """
 
-    unique_benthic = annotations[
-        ["benthic_attribute_name", "benthic_color"]
-    ].drop_duplicates()
+    unique_benthic = annotations[["benthic_attribute_name", "benthic_color"]].drop_duplicates()
     benthic_legend_elements = [
         plt.Line2D(
             [0],
@@ -54,16 +50,14 @@ def get_legend_elements(
             markersize=10,
         )
         for name, color in zip(
-            unique_benthic["benthic_attribute_name"], unique_benthic["benthic_color"]
+            unique_benthic["benthic_attribute_name"], unique_benthic["benthic_color"], strict=False
         )
     ]
     if not include_growth_form:
         return benthic_legend_elements
 
     unique_growth = (
-        annotations[["growth_form_name", "growth_form_marker"]]
-        .astype(str)
-        .drop_duplicates()
+        annotations[["growth_form_name", "growth_form_marker"]].astype(str).drop_duplicates()
     )
 
     growth_legend_elements = [
@@ -77,7 +71,7 @@ def get_legend_elements(
             linestyle="None",
         )
         for name, marker in zip(
-            unique_growth["growth_form_name"], unique_growth["growth_form_marker"]
+            unique_growth["growth_form_name"], unique_growth["growth_form_marker"], strict=False
         )
     ]
 
@@ -86,8 +80,8 @@ def get_legend_elements(
 
 def denormalize_image(
     image,
-    mean=np.array([0.485, 0.456, 0.406]),
-    std=np.array([0.229, 0.224, 0.225]),
+    mean=None,
+    std=None,
 ):
     """
     Denormalizes an image that was previously normalized using the given mean and standard deviation.
@@ -101,6 +95,10 @@ def denormalize_image(
     Returns:
         numpy.ndarray: The denormalized image with pixel values in the range [0, 255] and dtype uint8.
     """
+    if mean is None:
+        mean = np.array([0.485, 0.456, 0.406])
+    if std is None:
+        std = np.array([0.229, 0.224, 0.225])
 
     unnormalized_image = (image * std[:, None, None]) + mean[:, None, None]
     unnormalized_image = (unnormalized_image * 255).astype(np.uint8)

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: DSLP Documentation
+    url: https://github.com/dslp/dslp
+    about: Learn more about the Data Science Lifecycle Process
