@@ -103,6 +103,22 @@ def test_create_annotation_mask_padding_bounds_clamped():
     assert np.all(mask[14:20, 14:20] == 1)
 
 
+def test_create_annotation_mask_overlapping_padding():
+    """When padding regions overlap, later annotations should overwrite earlier ones."""
+    # Two annotations close together: (10, 10) and (10, 14)
+    # With padding=3, their regions will overlap at rows 7-13, cols 10-17
+    annotations = _make_annotations([10, 10], [10, 14], ["Coral", "Sand"])
+    mask = create_annotation_mask(annotations, (20, 20), {"Coral": 1, "Sand": 2}, padding=3)
+
+    # The overlap region (cols 12-13) should have Sand (value 2) since Sand annotation is second
+    assert mask[10, 12] == 2
+    assert mask[10, 13] == 2
+
+    # Non-overlapping parts should have their respective values
+    assert mask[10, 9] == 1  # Coral only
+    assert mask[10, 16] == 2  # Sand only
+
+
 def test_create_annotation_mask_unknown_label_skipped(caplog):
     annotations = _make_annotations([5, 10], [5, 10], ["Coral", "UnknownLabel"])
 

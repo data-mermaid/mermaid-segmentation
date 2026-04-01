@@ -109,10 +109,15 @@ def create_annotation_mask(
 
     if padding is not None and padding > 0:
         h, w = shape[:2]
-        for r, c, lid in zip(rows, cols, label_ids, strict=False):
-            r0, r1 = max(0, r - padding), min(h, r + padding)
-            c0, c1 = max(0, c - padding), min(w, c + padding)
-            mask[r0:r1, c0:c1] = lid
+        # Vectorized bounds computation
+        r0 = np.maximum(0, rows - padding)
+        r1 = np.minimum(h, rows + padding)
+        c0 = np.maximum(0, cols - padding)
+        c1 = np.minimum(w, cols + padding)
+
+        # Apply padding regions (later annotations overwrite earlier ones)
+        for r0i, r1i, c0i, c1i, lid in zip(r0, r1, c0, c1, label_ids, strict=False):
+            mask[r0i:r1i, c0i:c1i] = lid
     else:
         mask[rows, cols] = label_ids
 
