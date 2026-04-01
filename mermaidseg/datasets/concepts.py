@@ -67,6 +67,47 @@ def initialize_benthic_hierarchy(
     return hierarchy_dict
 
 
+def get_hierarchy_level(
+    concept_list: list[str], hierarchy_dict: dict[str, str]
+) -> dict[str, int | None]:
+    """
+    Determine the hierarchy level for each concept in a list based on a parent mapping.
+    The function calculates the level of each concept by counting the number of
+    steps required to reach a root node (a node with no parent) using the provided
+    hierarchy dictionary. If a cycle is detected in the hierarchy, the level for that
+    concept is set to None.
+    Args:
+        concept_list: A list of concept labels (strings) for which to determine levels.
+        hierarchy_dict: A mapping (e.g., dict) where each key is a concept label and its
+            value is the parent concept label or None to indicate the top of the hierarchy.
+    Returns:
+        dict: A dictionary mapping each concept label to its hierarchy level (int) or
+        None if a cycle is detected.
+    """
+    levels = {}
+    for col in concept_list:
+        level = 0
+        current = col
+        visited = {current}
+        while True:
+            parent = hierarchy_dict.get(current)
+            # stop if no parent recorded
+            if parent is None:
+                break
+            # detect cycles
+            if parent in visited:
+                level = None  # indicate cycle
+                break
+            level += 1
+            visited.add(parent)
+            # if parent exists but we don't have its parent info, count it and stop
+            if parent not in hierarchy_dict:
+                break
+            current = parent
+        levels[col] = level
+    return levels
+
+
 def generate_hierarchy_path(label: str, hierarchy_dict: dict[str, str]) -> list[str]:
     """
     Generate the upward hierarchy path for a given label using a parent mapping.
@@ -124,8 +165,12 @@ def initialize_benthic_concepts(
 
     levels = get_hierarchy_level(benthic_concept_set, hierarchy_dict)
     tuples = [(col, levels.get(col)) for col in benthic_concept_set]
-    benthic_concept_matrix = pd.DataFrame(0, index=labelset_benthic, columns=benthic_concept_set)
-    benthic_concept_matrix.columns = pd.MultiIndex.from_tuples(tuples, names=["concept", "level"])
+    benthic_concept_matrix = pd.DataFrame(
+        0, index=labelset_benthic, columns=benthic_concept_set
+    )
+    benthic_concept_matrix.columns = pd.MultiIndex.from_tuples(
+        tuples, names=["concept", "level"]
+    )
 
     for label in labelset_benthic:
         benthic_path = generate_hierarchy_path(label, hierarchy_dict)
@@ -158,11 +203,15 @@ def map_benthic_to_concept(
     if isinstance(benthic_label, str) and benthic_label in benthic_concept_matrix.index:
         benthic_one_hot = benthic_concept_matrix.loc[benthic_label, :].values
         return benthic_one_hot
-    elif isinstance(benthic_label, int) and benthic_label <= len(benthic_concept_matrix.index):
+    elif isinstance(benthic_label, int) and benthic_label <= len(
+        benthic_concept_matrix.index
+    ):
         benthic_one_hot = benthic_concept_matrix.iloc[benthic_label - 1, :].values
         return benthic_one_hot
     else:
-        raise ValueError(f"Benthic label '{benthic_label}' not found in concept matrix index.")
+        raise ValueError(
+            f"Benthic label '{benthic_label}' not found in concept matrix index."
+        )
 
 
 def labels_to_concepts(
@@ -248,7 +297,9 @@ def postprocess_predicted_concepts(
         above_threshold = max_prob_at_level > threshold
         if above_threshold.any():
             # Get the best concept index (among concepts at this level) for each pixel
-            best_concept_in_level = level_probs[unassigned].argmax(axis=1)  # (num_unassigned,)
+            best_concept_in_level = level_probs[unassigned].argmax(
+                axis=1
+            )  # (num_unassigned,)
             # Map back to global concept indices
             level_indices = np.where(level_mask)[0]
             global_indices = level_indices[best_concept_in_level]
@@ -262,5 +313,6 @@ def postprocess_predicted_concepts(
     if len(original_shape) == 3:
         predictions = predictions[0]  # remove batch dim
 
-    # predictions = np.vectorize(lambda x: conceptid2labelid.get(int(x), 0))(predictions)
-    return torch.from_numpy(predictions).long()
+    predictions = np.vectorize(lambda x: conceptid2labelid.get(int(x), 0))(predictions)
+
+    return predictions
