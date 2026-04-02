@@ -1,14 +1,3 @@
-"""
-title: mermaidseg.model.train
-abstract: Module that contains the function used to train a model end-to-end and log the metrics & checkpoints.
-author: Viktor Domazetoski
-date: 22-10-2025
-
-Functions:
-    train_model()
-        Trains a model using the provided data loaders and logs the results.
-"""
-
 import time
 
 import numpy as np
@@ -56,7 +45,8 @@ def train_model(
         metric_of_interest (str, optional): The primary metric used to determine the best
             model during validation. Defaults to "accuracy".
     Returns:
-        None
+        dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
+            `train_metrics`, `validation_metrics` (if val_loader provided), and `loss`.
     """
 
     best_results = {"epoch": -1, metric_of_interest: 0}

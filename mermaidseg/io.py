@@ -1,19 +1,3 @@
-"""
-title: mermaidseg.io
-abstract: Module that contains input/output and config reading functionality.
-author: Viktor Domazetoski
-date: 20-10-2025
-
-Classes:
-    ConfigDict - A dictionary subclass that allows attribute-style access to dictionary keys.
-Functions:
-    load_config(config_path) - Load configuration from a YAML file.
-    update_config(base_config, config) - Update a base configuration dictionary with values from another configuration dictionary.
-    setup_config(config_path=None, config_base_path="configs/base.yaml") - Set up configuration by loading and merging base and custom config files.
-    get_parser() - Create and configure an argument parser for semantic segmentation training.
-    update_config_with_args(config, args) - Update configuration dictionary with command line arguments.
-"""
-
 import argparse
 from pathlib import Path
 from typing import Any
@@ -23,19 +7,10 @@ import yaml
 
 
 class ConfigDict(dict):
-    """A dictionary subclass that allows attribute-style access to dictionary keys. This class
-    recursively converts nested dictionaries into ConfigDict instances, enabling dot notation access
-    to dictionary keys.
+    """Dictionary subclass with attribute-style access.
 
-    Methods
-    -------
-    __init__(dictionary)
-        Initializes the ConfigDict with the given dictionary, converting nested
-        dictionaries to ConfigDict instances.
-    __getattr__(attr)
-        Allows access to dictionary keys as attributes.
-    __setattr__(key, value)
-        Allows setting dictionary keys as attributes.
+    Recursively converts nested dicts to `ConfigDict`, enabling dot-notation
+    access alongside standard dictionary operations.
     """
 
     def __init__(self, dictionary: dict[str, Any]):
@@ -143,8 +118,8 @@ def setup_config(config_path: str | None = None, config_base_path: str = "config
 
 
 def get_parser() -> argparse.ArgumentParser:
-    """
-    Create and configure an argument parser for semantic segmentation training.
+    """Create and configure an argument parser for semantic segmentation training.
+
     Returns:
         argparse.ArgumentParser: Configured argument parser with the following options:
             - run-name (str): Name identifier for the training run
@@ -177,8 +152,8 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> ConfigDict:
-    """
-    Update configuration dictionary with command line arguments.
+    """Update configuration dictionary with command line arguments.
+
     Updates the provided configuration dictionary with values from command line
     arguments if they are present. Only non-None argument values will override
     the corresponding configuration values.

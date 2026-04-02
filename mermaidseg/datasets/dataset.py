@@ -1,16 +1,3 @@
-"""
-title: mermaidseg.datasets.dataset
-abstract: Module that contains dataset classes & functionality.
-author: Viktor Domazetoski
-date: 30-11-2025
-
-Classes:
-    BaseCoralDataset - A base PyTorch Dataset for loading annotated coral reef images.
-    MermaidDataset - A PyTorch Dataset for loading annotated coral reef images from MERMAID sources.
-    CoralNetDataset - A PyTorch Dataset for loading annotated coral reef images from CoralNet sources.
-    CombinedCoralDataset - Combines multiple BaseCoralDataset instances with a shared label space.
-"""
-
 import logging
 from typing import Any
 
@@ -320,7 +307,8 @@ class CoralNetDataset(BaseCoralDataset):
     Each item returned is a tuple containing the image (as a tensor or ndarray) and and the target.
     Attributes:
         annotations_path (str): Path to the Parquet file containing image annotations.
-        This is created by merging all annotations of CoralNet sources in a separate notebook /nbs/datasets/CoralNet_Annotations.ipynb.
+            This is created by merging all annotations of CoralNet sources in a separate
+            notebook /nbs/datasets/CoralNet_Annotations.ipynb.
         source_bucket (str): S3 bucket name containing the dataset files.
         s3 (boto3.client): Boto3 S3 client for accessing images.
     Args:

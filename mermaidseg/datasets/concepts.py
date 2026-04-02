@@ -1,16 +1,3 @@
-"""
-title: mermaidseg.datasets.concepts
-abstract: Module that contains concept functionality.
-author: Viktor Domazetoski
-date: 19-11-2025
-
-functions:
-- initialize_benthic_hierarchy: Fetch and build a benthic attribute name hierarchy from a paginated JSON API.
-- generate_hierarchy_path: Generate the upward hierarchy path for a given label
-- initialize_benthic_concepts: Create a sorted list of unique benthic concepts derived from a set of labels.
-- map_benthic_to_concept: Map a benthic class label to its corresponding concept one-hot vector.
-"""
-
 import numpy as np
 import pandas as pd
 import requests
@@ -20,8 +7,8 @@ import torch
 def initialize_benthic_hierarchy(
     hierarchy_json_url: str = "https://api.datamermaid.org/v1/benthicattributes/",
 ):
-    """
-    Fetch and build a benthic attribute name hierarchy from a paginated JSON API.
+    """Fetch and build a benthic attribute name hierarchy from a paginated JSON API.
+
     This function retrieves benthic attribute records from a REST endpoint (default:
     "https://api.datamermaid.org/v1/benthicattributes/"), following pagination using
     the "next" field in the JSON response until all pages are collected. Each record
@@ -29,18 +16,16 @@ def initialize_benthic_hierarchy(
     constructs and returns a dictionary mapping each attribute name to its parent
     attribute name (or None if the attribute has no parent or the parent ID is not
     present in the retrieved results).
-    Parameters
-    ----------
-    hierarchy_json_url : str, optional
-        Base URL of the benthic attributes API to fetch. Defaults to
-        "https://api.datamermaid.org/v1/benthicattributes/". The function will issue
-        GET requests to this URL and to any subsequent URLs found in the "next"
-        field of the JSON responses.
-    Returns
-    -------
-    dict[str, Optional[str]]
-        A dictionary where keys are attribute names (str) and values are the parent
-        attribute names (str) or None.
+
+    Args:
+        hierarchy_json_url (str, optional): Base URL of the benthic attributes API to fetch.
+            Defaults to "https://api.datamermaid.org/v1/benthicattributes/". The function
+            will issue GET requests to this URL and to any subsequent URLs found in the
+            "next" field of the JSON responses.
+
+    Returns:
+        dict[str, Optional[str]]: A dictionary where keys are attribute names (str) and
+            values are the parent attribute names (str) or None.
     """
 
     response = requests.get(hierarchy_json_url, timeout=30)
@@ -143,10 +128,11 @@ def initialize_benthic_concepts(labelset_benthic: list[str], hierarchy_dict: dic
             hierarchical relationships used by `generate_hierarchy_path` to build
             a concept path for a given label.
     Returns:
-        benthic_concept_set (List[str]): A sorted list of unique concept names (strings) found across
-        all hierarchy paths for the provided labels.
-        benthic_concept_matrix (pd.DataFrame): A DataFrame with rows indexed by the original labels and columns by the unique concepts,
-        initialized with zeros.
+        tuple[list[str], pd.DataFrame]:
+            benthic_concept_set: A sorted list of unique concept names (strings) found across
+                all hierarchy paths for the provided labels.
+            benthic_concept_matrix: A DataFrame with rows indexed by the original labels and
+                columns by the unique concepts, initialized with zeros.
     """
 
     benthic_concept_set = set()
@@ -172,18 +158,14 @@ def initialize_benthic_concepts(labelset_benthic: list[str], hierarchy_dict: dic
 def map_benthic_to_concept(benthic_label: str | int, benthic_concept_matrix: pd.DataFrame) -> np.ndarray:
     """Map a benthic class label to its corresponding concept one-hot vector.
 
-    Parameters
-    ----------
-    benthic_label : str
-        The benthic class label to look up (commonly a string that matches
-        the DataFrame index of `benthic_concept_matrix`).
-    benthic_concept_matrix : pd.DataFrame
-        A DataFrame whose index contains benthic labels and whose columns
-        represent concept dimensions. Each row should encode the mapping
-        from a benthic label to a concept vector (e.g., one-hot or multi-hot).
-    Returns
-    -------
-    np.ndarray
+    Args:
+        benthic_label: The benthic class label to look up (commonly a string
+            that matches the DataFrame index of `benthic_concept_matrix`).
+        benthic_concept_matrix: A DataFrame whose index contains benthic labels
+            and whose columns represent concept dimensions. Each row encodes the
+            mapping from a benthic label to a concept vector (e.g., one-hot or
+            multi-hot).
+    Returns:
         A 1-D NumPy array containing the concept vector for the provided
         `benthic_label`. Shape will be (n_concepts,).
     """
@@ -196,11 +178,16 @@ def map_benthic_to_concept(benthic_label: str | int, benthic_concept_matrix: pd.
 
 
 def labels_to_concepts(labels: torch.Tensor | np.ndarray, benthic_concept_matrix: pd.DataFrame) -> torch.Tensor | np.ndarray:
-    """
-    labels: torch.Tensor or np.ndarray with shape (B, H, W), dtype int (values 0..N)
-    benthic_concept_matrix: pd.DataFrame returned by initialize_benthic_concepts
-    Returns: torch.Tensor (B, C, H, W) if input was torch.Tensor, otherwise np.ndarray (B, C, H, W)
-    Background label 0 -> all zeros vector.
+    """Map integer segmentation labels to concept vectors.
+
+    Args:
+        labels: Integer label map with shape (B, H, W), dtype int (values 0..N).
+            Label 0 is treated as background and maps to an all-zeros concept vector.
+        benthic_concept_matrix: DataFrame returned by `initialize_benthic_concepts`,
+            with rows indexed by benthic label and columns by concept dimension.
+    Returns:
+        Concept map with shape (B, C, H, W). Returns a `torch.Tensor` if the input
+        was a `torch.Tensor`, otherwise returns an `np.ndarray`.
     """
     # build lookup: row 0 = zeros, rows 1..N = mapping of class i -> concept vector
     vals = benthic_concept_matrix.to_numpy().astype(np.float32)  # shape (n_labels, n_concepts)

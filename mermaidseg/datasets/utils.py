@@ -1,15 +1,3 @@
-"""
-title: mermaidseg.datasets.utils
-abstract: Module that contains dataset loading and utility functions.
-author: Viktor Domazetoski
-date: 28-08-2025
-
-Functions:
-    get_image_s3: Fetches an image from an S3 bucket and returns it as a PIL Image object.
-    create_annotation_mask: Creates an annotation mask for a given image.
-    calculate_weights: Calculate class weights for a given dataset.
-"""
-
 import io
 import logging
 
@@ -75,13 +63,15 @@ def create_annotation_mask(
     """Creates an annotation mask for a given image based on provided annotations.
 
     Args:
-        annotations (pd.DataFrame): DataFrame containing annotation rows with 'row', 'col', and 'benthic_attribute_name' columns.
-        shape (Tuple[int, int]): Shape of the output mask (height, width).
-        label2id (Dict[str, int]): Mapping from label names to integer IDs.
+        annotations (pd.DataFrame): DataFrame with 'row', 'col', and 'benthic_attribute_name' columns.
+        shape (tuple[int, int]): Output mask shape (height, width).
+        label2id (dict[str, int]): Mapping from label names to integer class IDs.
+        padding (int | None, optional): Half-size of a square pad region around each point annotation.
+            If None or 0, only the exact annotation pixel is set. Defaults to None.
     Returns:
-        np.ndarray: Annotation mask with integer class IDs.
+        np.ndarray: Integer annotation mask with shape (height, width).
     """
-    ## TODO: Make Padding percentage based so that it is applicable to all class sizes
+    # TODO: Make padding percentage-based so it scales with image resolution
     mask = np.zeros(shape[:2], dtype=np.int64)
 
     if annotations.empty:

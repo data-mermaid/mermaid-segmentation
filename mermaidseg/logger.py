@@ -1,26 +1,10 @@
 """
-title: mermaidseg.logger
-abstract: Module that contains the mlflow and checkpoint logging functionality.
-author: Viktor Domazetoski
-date: 30-10-2025
-
-Classes:
-    Logger - A class for logging metrics and configurations to an MLflow tracking server.
-             Uses hybrid serialization: pickle for training checkpoints, SafeTensors
-             for published models.
-    WandbLogger - Deprecated wandb logger; will be removed in a future release.
-Functions:
-    get_mlflow_tracking_uri() - Auto-detect MLflow URI based on execution environment.
-    mlflow_connect() - Connect to the MLflow tracking server and return the connection time.
-    save_model_checkpoint() - Save model checkpoints with relevant metadata.
-
-Serialization Strategy:
-    - Training Checkpoints: torch.save (pickle) - full state for resume
-    - MLflow Model Logging (best-model): cloudpickle via mlflow.pytorch.log_model
-      (export_model=False). The pt2/TorchScript format (export_model=True) is
-      incompatible with ViT/DINOv2 architectures due to dynamic shapes and dataclass
-      outputs. Requires a trusted environment to load — do not expose publicly.
-    - Published Models: SafeTensors - zero-copy, no arbitrary code execution
+Serialization strategy:
+- Training checkpoints: torch.save (pickle) — full state for resume.
+- MLflow best-model logging: cloudpickle via mlflow.pytorch.log_model(export_model=False).
+  TorchScript (export_model=True) is incompatible with ViT/DINOv2 due to dynamic shapes
+  and dataclass outputs. Requires a trusted environment to load — do not expose publicly.
+- Published models: SafeTensors — zero-copy, no arbitrary code execution.
 """
 
 import contextlib
