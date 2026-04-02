@@ -33,7 +33,6 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 
 ├── configs/ # Configuration files for different runs/models
 └── .gitignore
-└── environment.yml # Legacy conda/micromamba environment
 └── pyproject.toml
 └── README.md
 ```
