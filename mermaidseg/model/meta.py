@@ -1,3 +1,4 @@
+import time
 from typing import Any
 
 import albumentations as A
@@ -246,29 +247,66 @@ class MetaModel:
         self,
         train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
-    ) -> float:
+    ) -> tuple[float, dict[str, float | NDArray[np.float64]], dict[str, float | int]]:
         """Trains the model for one epoch using the provided data loader.
 
         Args:
-            train_loader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
-            A DataLoader object that provides batches of training data.
+            train_loader: DataLoader providing batches of training data.
+            evaluator: Optional evaluator for computing per-epoch metrics.
+
         Returns:
-            float: The average loss over all batches in the epoch.
+            A 3-tuple of (average_loss, metric_results, timing) where timing
+            contains ``"data_loading_sec"``, ``"forward_sec"``,
+            ``"backward_sec"``, and ``"num_samples"``.
         """
 
         running_loss = 0.0
         metric_results: dict[str, float | NDArray[np.float64]] = {}
+        use_cuda = self.device != "cpu" and torch.cuda.is_available()
+
+        data_time_total = 0.0
+        forward_time_total = 0.0
+        backward_time_total = 0.0
+        num_samples = 0
+
+        if use_cuda:
+            torch.cuda.synchronize()
+        batch_end = time.perf_counter()
 
         for data in tqdm(train_loader):
+            if use_cuda:
+                torch.cuda.synchronize()
+            data_time_total += time.perf_counter() - batch_end
+
             _, labels = data
             labels = labels.long().to(self.device)
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            forward_start = time.perf_counter()
+
             loss, outputs, concept_outputs = self.batch_predict_loss(data)
 
+            if use_cuda:
+                torch.cuda.synchronize()
+            forward_time_total += time.perf_counter() - forward_start
+
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
-            loss.backward()  # Double check
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            backward_start = time.perf_counter()
+
+            loss.backward()
             self.optimizer.step()
-            running_loss += loss.item()
             self.optimizer.zero_grad()
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            backward_time_total += time.perf_counter() - backward_start
+
+            running_loss += loss.item()
+            num_samples += labels.size(0)
 
             if evaluator is not None:
                 if self.training_mode in ("concept"):
@@ -285,12 +323,10 @@ class MetaModel:
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
-                    # Update metrics
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, labels)
 
             if self.training_mode in ("concept-bottleneck", "concept"):
-                # Update metrics
                 for metric in evaluator.concept_metric_dict.values():
                     concept_outputs = (concept_outputs > 0.5).float()
                     concept_outputs += 1
@@ -303,7 +339,10 @@ class MetaModel:
                     for metric in evaluator.concept_metric_dict.values():
                         metric.update(concept_outputs, concept_labels)
 
-        # Compute metrics
+            if use_cuda:
+                torch.cuda.synchronize()
+            batch_end = time.perf_counter()
+
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
                 metric_results[metric_name] = evaluator.metric_dict[metric_name].compute().cpu().numpy()
@@ -319,7 +358,13 @@ class MetaModel:
                     evaluator.concept_metric_dict[metric_name].reset()
 
         last_loss = running_loss / len(train_loader)
-        return last_loss, metric_results
+        timing = {
+            "data_loading_sec": data_time_total,
+            "forward_sec": forward_time_total,
+            "backward_sec": backward_time_total,
+            "num_samples": num_samples,
+        }
+        return last_loss, metric_results, timing
 
     @torch.no_grad()
     def validation_epoch(

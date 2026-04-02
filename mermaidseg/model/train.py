@@ -46,7 +46,14 @@ def train_model(
             model during validation. Defaults to "accuracy".
     Returns:
         dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
-            `train_metrics`, `validation_metrics` (if val_loader provided), and `loss`.
+            ``train_metrics``, ``validation_metrics`` (if ``val_loader`` is provided), and
+            ``loss``. The ``loss`` sub-dict includes training loss plus timing metrics:
+            ``train/time_taken`` (full epoch wall time), ``train/data_loading_sec``,
+            ``train/forward_sec``, ``train/backward_sec``, ``train/samples_per_sec``,
+            ``train/data_loading_pct``, ``train/gpu_peak_memory_mb`` (CUDA only),
+            ``validation/time_taken`` (when ``val_loader`` is provided),
+            ``test/time_taken`` (when test evaluation runs), and
+            ``train/total_training_sec`` (final epoch only).
     """
 
     best_results = {"epoch": -1, metric_of_interest: 0}
@@ -57,23 +64,26 @@ def train_model(
     if end_epoch == -1:
         end_epoch = start_epoch + meta_model.training_kwargs.epochs
     metrics_epoch = {}
+    training_start = time.perf_counter()
     for epoch in range(start_epoch, end_epoch):
         epoch_loss_dict = {}
         epoch_start_time = time.time()
         print(f"EPOCH: {epoch}")
 
         meta_model.model.train(True)
-        train_loss, train_metric_results = meta_model.train_epoch(train_loader, evaluator)
+        train_loss, train_metric_results, train_timing = meta_model.train_epoch(train_loader, evaluator)
         print(f"LOSS train {train_loss}")
         print(f"TRAIN METRICS: {train_metric_results}")
         epoch_loss_dict["train/loss"] = train_loss
+        epoch_loss_dict["train/data_loading_sec"] = train_timing["data_loading_sec"]
+        epoch_loss_dict["train/forward_sec"] = train_timing["forward_sec"]
+        epoch_loss_dict["train/backward_sec"] = train_timing["backward_sec"]
         metrics_epoch[epoch] = {"train_metrics": train_metric_results}
         if logger is not None and len(train_metric_results) > 0:
             logger.log(
                 {f"train/{metric_name}": metric for metric_name, metric in train_metric_results.items()},
                 step=epoch,
             )
-        epoch_loss_dict["train/time_taken"] = time.time() - epoch_start_time
 
         if hasattr(meta_model, "scheduler"):
             meta_model.scheduler.step()
@@ -83,7 +93,9 @@ def train_model(
 
         if val_loader is not None:
             meta_model.model.eval()
+            val_start = time.time()
             val_loss, val_metric_results = meta_model.validation_epoch(val_loader, evaluator)
+            epoch_loss_dict["validation/time_taken"] = time.time() - val_start
             print(f"LOSS valid {val_loss}")
             print(f"VALID METRICS: {val_metric_results}")
 
@@ -103,6 +115,18 @@ def train_model(
 
                     logger.save_model_checkpoint(meta_model, epoch, val_metric_results)
 
+        epoch_wall = time.time() - epoch_start_time
+        epoch_loss_dict["train/time_taken"] = epoch_wall
+        epoch_loss_dict["train/samples_per_sec"] = train_timing["num_samples"] / epoch_wall
+        epoch_loss_dict["train/data_loading_pct"] = train_timing["data_loading_sec"] / epoch_wall * 100
+
+        if torch.cuda.is_available():
+            epoch_loss_dict["train/gpu_peak_memory_mb"] = torch.cuda.max_memory_allocated() / 1e6
+            torch.cuda.reset_peak_memory_stats()
+
+        if epoch == end_epoch - 1:
+            epoch_loss_dict["train/total_training_sec"] = time.perf_counter() - training_start
+
         logger.log(
             epoch_loss_dict,
             step=epoch,
@@ -113,7 +137,12 @@ def train_model(
             continue
 
         if test_loader is not None:
+            test_start = time.time()
             _ = evaluate_and_log(evaluator, test_loader, meta_model, logger, epoch, "test")
+            test_time = time.time() - test_start
+            epoch_loss_dict["test/time_taken"] = test_time
+            if logger is not None:
+                logger.log({"test/time_taken": test_time}, step=epoch)
     return metrics_epoch
 
 
