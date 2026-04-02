@@ -17,9 +17,8 @@ def check_s3_prefix_exists(bucket_name, s3_prefix, source_id):
     if "Contents" in response:
         print(f"Prefix exists: {prefix}")
         return True
-    else:
-        print(f"Prefix does not exist: {prefix}")
-        return False
+    print(f"Prefix does not exist: {prefix}")
+    return False
 
 
 # Configuration - Where to save the downloaded CoralNet images
@@ -40,9 +39,7 @@ if "CommonPrefixes" in response:
 else:
     print("No subdirectories found.")
 
-coralnet_sources = np.sort(
-    [int(source[1:-1]) for source in subdirectories if source[0] == "s"]
-).astype(str)
+coralnet_sources = np.sort([int(source[1:-1]) for source in subdirectories if source[0] == "s"]).astype(str)
 
 downloader = CoralNetDownloader(username=username, password=password)
 for source_id in coralnet_sources:
@@ -60,13 +57,7 @@ resp.raise_for_status()
 soup = BeautifulSoup(resp.text, "html.parser")
 anchors = soup.find_all("a", href=True)
 
-links = sorted(
-    {
-        urljoin(url, a["href"])
-        for a in anchors
-        if urlparse(urljoin(url, a["href"])).scheme in ("http", "https")
-    }
-)
+links = sorted({urljoin(url, a["href"]) for a in anchors if urlparse(urljoin(url, a["href"])).scheme in ("http", "https")})
 
 print("Found", len(links), "links on the page.")
 source_links = [link for link in links if "/source/" in link]

@@ -83,18 +83,22 @@ class TestMlflowConnect:
     def test_max_retries_raises_runtime_error(self, tmp_path):
         uri = str(tmp_path / "bogus")
         exc = mlflow.exceptions.MlflowException("Max retries exceeded with url")
-        with patch("mermaidseg.logger.mlflow.set_tracking_uri"):
-            with patch("mermaidseg.logger.mlflow.search_experiments", side_effect=exc):
-                with pytest.raises(RuntimeError, match="Could not connect"):
-                    mlflow_connect(uri)
+        with (
+            patch("mermaidseg.logger.mlflow.set_tracking_uri"),
+            patch("mermaidseg.logger.mlflow.search_experiments", side_effect=exc),
+            pytest.raises(RuntimeError, match="Could not connect"),
+        ):
+            mlflow_connect(uri)
 
     def test_other_mlflow_exception_reraised(self, tmp_path):
         uri = str(tmp_path / "bogus")
         exc = mlflow.exceptions.MlflowException("Something else broke")
-        with patch("mermaidseg.logger.mlflow.set_tracking_uri"):
-            with patch("mermaidseg.logger.mlflow.search_experiments", side_effect=exc):
-                with pytest.raises(mlflow.exceptions.MlflowException, match="Something else"):
-                    mlflow_connect(uri)
+        with (
+            patch("mermaidseg.logger.mlflow.set_tracking_uri"),
+            patch("mermaidseg.logger.mlflow.search_experiments", side_effect=exc),
+            pytest.raises(mlflow.exceptions.MlflowException, match="Something else"),
+        ):
+            mlflow_connect(uri)
 
 
 # ===================================================================
@@ -131,9 +135,7 @@ class TestLoggerInit:
         assert lgr.save_local_checkpoints is False
         assert lgr.save_local_models is False
 
-    def test_save_local_models_alias_sets_checkpoint_flag(
-        self, tmp_mlflow_uri, make_config, fake_meta_model
-    ):
+    def test_save_local_models_alias_sets_checkpoint_flag(self, tmp_mlflow_uri, make_config, fake_meta_model):
         config = make_config(logger={"save_local_checkpoints": None, "save_local_models": False})
         with pytest.deprecated_call(match="save_local_models is deprecated"):
             lgr = Logger(config=config, meta_model=fake_meta_model)
@@ -146,9 +148,7 @@ class TestLoggerInit:
         assert lgr.enabled is False
         assert lgr.mlflow_run_id is None
 
-    def test_disabled_when_logger_config_missing(
-        self, tmp_mlflow_uri, make_config, fake_meta_model
-    ):
+    def test_disabled_when_logger_config_missing(self, tmp_mlflow_uri, make_config, fake_meta_model):
         config = make_config(logger=None)
         lgr = Logger(config=config, meta_model=fake_meta_model)
         assert lgr.enabled is False
@@ -173,9 +173,7 @@ class TestLoggerInit:
         assert "metadata/id2concept.json" in names
         assert "metadata/conceptid2labelid.json" in names
 
-    def test_concept_matrix_logging_does_not_disable_logger(
-        self, tmp_mlflow_uri, make_config, tmp_path
-    ):
+    def test_concept_matrix_logging_does_not_disable_logger(self, tmp_mlflow_uri, make_config, tmp_path):
         missing_dir = tmp_path / "missing-dir"
         assert not missing_dir.exists()
         meta = FakeMetaModel(concept_matrix=pd.DataFrame({"a": [1, 2], "b": [3, 4]}))
@@ -340,9 +338,7 @@ class TestSaveModelCheckpoint:
     def test_local_checkpoint_written(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="ckpt-run")
         config = make_config()
-        lgr = Logger(
-            config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
-        )
+        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50)
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
         files = list((tmp_path / "model_checkpoints" / "ckpt-run").iterdir())
         assert len(files) == 1, f"Expected 1 checkpoint file, found {len(files)}: {files}"
@@ -351,18 +347,14 @@ class TestSaveModelCheckpoint:
     def test_local_checkpoint_skipped_when_disabled(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="ckpt-skip")
         config = make_config(logger={"save_local_checkpoints": False})
-        lgr = Logger(
-            config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
-        )
+        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50)
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.2})
         assert not (tmp_path / "model_checkpoints" / "ckpt-skip").exists()
 
     def test_mlflow_checkpoint_logged(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="mlf-ckpt")
         config = make_config()
-        lgr = Logger(
-            config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
-        )
+        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50)
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.3, "acc": 0.9})
 
         run = mlflow.get_run(lgr.mlflow_run_id)
@@ -377,14 +369,10 @@ class TestSaveModelCheckpoint:
         assert run.data.metrics["checkpoint/loss"] == pytest.approx(0.3)
         assert run.data.metrics["checkpoint/acc"] == pytest.approx(0.9)
 
-    def test_mlflow_artifact_uploaded_when_local_disabled(
-        self, tmp_mlflow_uri, tmp_path, make_config
-    ):
+    def test_mlflow_artifact_uploaded_when_local_disabled(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="tmp-upload")
         config = make_config(logger={"save_local_checkpoints": False})
-        lgr = Logger(
-            config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
-        )
+        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50)
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.4})
         client = mlflow.tracking.MlflowClient()
         artifacts = client.list_artifacts(lgr.mlflow_run_id, path="checkpoints")
@@ -393,9 +381,7 @@ class TestSaveModelCheckpoint:
     def test_wandb_artifact_logged(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="wb-art")
         config = make_config()
-        lgr = Logger(
-            config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
-        )
+        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50)
         mock_wandb_logger = MagicMock(spec=WandbLogger)
         lgr._wandb_logger = mock_wandb_logger
 
@@ -416,9 +402,7 @@ class TestSaveModelCheckpoint:
             lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
         mock_log_model.assert_called_once()
 
-    def test_wandb_does_not_write_local_checkpoint_when_local_disabled(
-        self, tmp_path, make_config, monkeypatch
-    ):
+    def test_wandb_does_not_write_local_checkpoint_when_local_disabled(self, tmp_path, make_config, monkeypatch):
         monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
         meta = FakeMetaModel(run_name="wandb-no-local")
         config = make_config(logger={"save_local_checkpoints": False})
@@ -444,9 +428,7 @@ class TestSaveModelCheckpoint:
     def test_checkpoint_always_uses_epoch_name(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="ts-name")
         config = make_config()
-        lgr = Logger(
-            config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
-        )
+        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50)
         lgr.save_model_checkpoint(meta, epoch=7, metrics_dict={"loss": 0.5})
         files = list((tmp_path / "model_checkpoints" / "ts-name").iterdir())
         assert len(files) == 1
@@ -485,9 +467,7 @@ class TestSaveSafetensorsForPublish:
     def test_safetensors_metadata_content(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="st-meta")
         lgr = Logger(config=make_config(), meta_model=meta)
-        lgr.save_safetensors_for_publish(
-            meta, epoch=5, metrics_dict={"loss": 0.2, "iou": np.array([0.8, 0.7, 0.6])}
-        )
+        lgr.save_safetensors_for_publish(meta, epoch=5, metrics_dict={"loss": 0.2, "iou": np.array([0.8, 0.7, 0.6])})
 
         client = mlflow.tracking.MlflowClient()
         local = client.download_artifacts(lgr.mlflow_run_id, "publish/metadata.json", str(tmp_path))
@@ -502,9 +482,7 @@ class TestSaveSafetensorsForPublish:
     def test_safetensors_custom_artifact_path(self, tmp_mlflow_uri, make_config):
         meta = FakeMetaModel(run_name="st-custom")
         lgr = Logger(config=make_config(), meta_model=meta)
-        lgr.save_safetensors_for_publish(
-            meta, epoch=1, metrics_dict={"loss": 0.3}, artifact_path="custom/export"
-        )
+        lgr.save_safetensors_for_publish(meta, epoch=1, metrics_dict={"loss": 0.3}, artifact_path="custom/export")
 
         client = mlflow.tracking.MlflowClient()
         artifacts = client.list_artifacts(lgr.mlflow_run_id, path="custom/export")
@@ -537,9 +515,7 @@ class TestScenarios:
                 {"train/loss": 1.0 - (epoch * 0.2), "train/accuracy": 0.5 + (epoch * 0.1)},
                 step=epoch,
             )
-        lgr.save_model_checkpoint(
-            meta_model, epoch=epochs - 1, metrics_dict={"accuracy": 0.66, "mean_iou": 0.76}
-        )
+        lgr.save_model_checkpoint(meta_model, epoch=epochs - 1, metrics_dict={"accuracy": 0.66, "mean_iou": 0.76})
         lgr.end_run()
 
     def test_scenario_a_local_only(self, tmp_path, make_config, monkeypatch):
@@ -591,9 +567,7 @@ class TestScenarios:
         assert lgr.enabled is False
         self._run_logger_lifecycle(lgr, meta)
         ckpt_dir = tmp_path / "model_checkpoints" / "scenario_c"
-        assert (
-            ckpt_dir.exists()
-        ), "Bug fix verification: checkpoint must save despite MLflow failure"
+        assert ckpt_dir.exists(), "Bug fix verification: checkpoint must save despite MLflow failure"
 
 
 # ===================================================================
@@ -621,11 +595,8 @@ class TestLoggerLifecycle:
         lgr.end_run()
         assert mlflow.active_run() is None
 
-    def test_context_manager_cleans_up_on_exception(
-        self, tmp_mlflow_uri, make_config, fake_meta_model
-    ):
+    def test_context_manager_cleans_up_on_exception(self, tmp_mlflow_uri, make_config, fake_meta_model):
         lgr = Logger(config=make_config(), meta_model=fake_meta_model)
-        with pytest.raises(ValueError, match="boom"):
-            with lgr:
-                raise ValueError("boom")
+        with pytest.raises(ValueError, match="boom"), lgr:
+            raise ValueError("boom")
         assert mlflow.active_run() is None

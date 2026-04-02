@@ -32,8 +32,8 @@ from transformers.modeling_outputs import SemanticSegmenterOutput
 
 
 class LinearClassifier(torch.nn.Module):
-    """
-    A linear classifier module that performs pixel-wise classification on reshaped embeddings.
+    """A linear classifier module that performs pixel-wise classification on reshaped embeddings.
+
     This module takes input embeddings, reshapes them to a 2D spatial format, and applies
     a 1x1 convolution to perform classification. It's commonly used as a classification
     head for segmentation tasks.
@@ -69,8 +69,8 @@ class LinearClassifier(torch.nn.Module):
         self.classifier = torch.nn.Conv2d(in_channels, num_labels, (1, 1))
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """
-        Run the model's forward pass on a batch of flattened embeddings.
+        """Run the model's forward pass on a batch of flattened embeddings.
+
         Parameters
         ----------
         embeddings : torch.Tensor
@@ -95,9 +95,9 @@ class LinearClassifier(torch.nn.Module):
 
 
 class ConceptHead(torch.nn.Module):
-    """
-    A concept classification head module that performs pixel-wise classification
-    on reshaped embeddings.
+    """A concept classification head module that performs pixel-wise classification on reshaped
+    embeddings.
+
     This module takes input embeddings, reshapes them to a 2D spatial format, and
     applies a 1x1 convolution to perform classification. It's commonly used as a classification
     head for segmentation tasks.
@@ -121,8 +121,8 @@ class ConceptHead(torch.nn.Module):
         self.concept_classifier = torch.nn.Conv2d(in_channels, num_concepts, kernel_size=1)
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """
-        Run the model's forward pass on a batch of flattened embeddings.
+        """Run the model's forward pass on a batch of flattened embeddings.
+
         Parameters
         ----------
         embeddings : torch.Tensor
@@ -146,8 +146,8 @@ class ConceptHead(torch.nn.Module):
 
 
 class LinearDINOv3(torch.nn.Module):
-    """
-    Wrapper around the DINOv3 model for semantic segmentation.
+    """Wrapper around the DINOv3 model for semantic segmentation.
+
     This class provides an interface to initialize, train, and use a DINOv3 model
     for semantic segmentation tasks. It allows customization of the encoder and the
     number of output classes, and includes methods to freeze or unfreeze the encoder layers.
@@ -174,8 +174,9 @@ class LinearDINOv3(torch.nn.Module):
         input_size: tuple[int, int] = (512, 512),
         **kwargs: Any,
     ):
-        """
-        Initializes the semantic segmentation model with a specified encoder and number of classes.
+        """Initializes the semantic segmentation model with a specified encoder and number of
+        classes.
+
         Args:
             encoder_name (str): The name of the HF encoder to use for the model.
                 Defaults to "facebook/dinov3-vits16-pretrain-lvd1689m".
@@ -206,8 +207,8 @@ class LinearDINOv3(torch.nn.Module):
         # self.freeze_encoder()  # Freeze the backbone - should this be done by default
 
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> torch.Tensor:
-        """
-        Perform a forward pass through the model.
+        """Perform a forward pass through the model.
+
         Args:
             x (torch.Tensor): Input tensor to the model.
             labels (torch.Tensor, optional): Ground truth labels for loss computation.
@@ -221,9 +222,7 @@ class LinearDINOv3(torch.nn.Module):
 
         # convert to logits and upsample to the size of the pixel values
         logits = self.head(patch_embeddings)
-        logits = torch.nn.functional.interpolate(
-            logits, size=x.shape[-2:], mode="bilinear", align_corners=False
-        )
+        logits = torch.nn.functional.interpolate(logits, size=x.shape[-2:], mode="bilinear", align_corners=False)
 
         loss = None
         # if labels is not None:
@@ -236,19 +235,19 @@ class LinearDINOv3(torch.nn.Module):
         return SemanticSegmenterOutput(loss=loss, logits=logits)
 
     def freeze_encoder(self) -> None:
-        """
-        Freezes the encoder layers of the model by setting the `requires_grad`
-        attribute of their parameters to `False`. This prevents the encoder
-        layers from being updated during training, effectively making them
+        """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
+        parameters to `False`.
+
+        This prevents the encoder layers from being updated during training, effectively making them
         static while allowing other parts of the model to be trained.
         """
         for param in self.encoder.parameters():
             param.requires_grad = False
 
     def unfreeze_encoder(self) -> None:
-        """
-        Unfreezes the encoder layers of the model by setting the `requires_grad`
-        attribute of all parameters in the encoder to True.
+        """Unfreezes the encoder layers of the model by setting the `requires_grad` attribute of all
+        parameters in the encoder to True.
+
         This allows these layers to be trainable during the training process.
         """
         for param in self.encoder.parameters():
@@ -256,8 +255,8 @@ class LinearDINOv3(torch.nn.Module):
 
 
 class ConceptBottleneckDINOv3(torch.nn.Module):
-    """
-    Wrapper around the DINOv3 model for semantic segmentation.
+    """Wrapper around the DINOv3 model for semantic segmentation.
+
     This class provides an interface to initialize, train, and use a DINOv3 model
     for semantic segmentation tasks. It allows customization of the encoder and the
     number of output classes, and includes methods to freeze or unfreeze the encoder layers.
@@ -285,8 +284,9 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         input_size: tuple[int, int] = (512, 512),
         **kwargs: Any,
     ):
-        """
-        Initializes the semantic segmentation model with a specified encoder and number of classes.
+        """Initializes the semantic segmentation model with a specified encoder and number of
+        classes.
+
         Args:
             encoder_name (str): The name of the HF encoder to use for the model.
                 Defaults to "facebook/dinov3-vits16-pretrain-lvd1689m".
@@ -317,8 +317,8 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         # self.freeze_encoder()  # Freeze the backbone - should this be done by default
 
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> torch.Tensor:
-        """
-        Perform a forward pass through the model.
+        """Perform a forward pass through the model.
+
         Args:
             x (torch.Tensor): Input tensor to the model.
             labels (torch.Tensor, optional): Ground truth labels for loss computation.
@@ -332,14 +332,10 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
 
         # convert to logits and upsample to the size of the pixel values
         concept_logits = self.concept_head(patch_embeddings)
-        concept_logits = torch.nn.functional.interpolate(
-            concept_logits, size=x.shape[-2:], mode="bilinear", align_corners=False
-        )
+        concept_logits = torch.nn.functional.interpolate(concept_logits, size=x.shape[-2:], mode="bilinear", align_corners=False)
         logits = self.concept_classifier(concept_logits)
 
-        logits = torch.nn.functional.interpolate(
-            logits, size=x.shape[-2:], mode="bilinear", align_corners=False
-        )
+        logits = torch.nn.functional.interpolate(logits, size=x.shape[-2:], mode="bilinear", align_corners=False)
         loss = None
 
         # if labels is not None:
@@ -352,19 +348,19 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         return SemanticSegmenterOutput(loss=loss, logits=logits, hidden_states=concept_logits)
 
     def freeze_encoder(self) -> None:
-        """
-        Freezes the encoder layers of the model by setting the `requires_grad`
-        attribute of their parameters to `False`. This prevents the encoder
-        layers from being updated during training, effectively making them
+        """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
+        parameters to `False`.
+
+        This prevents the encoder layers from being updated during training, effectively making them
         static while allowing other parts of the model to be trained.
         """
         for param in self.encoder.parameters():
             param.requires_grad = False
 
     def unfreeze_encoder(self) -> None:
-        """
-        Unfreezes the encoder layers of the model by setting the `requires_grad`
-        attribute of all parameters in the encoder to True.
+        """Unfreezes the encoder layers of the model by setting the `requires_grad` attribute of all
+        parameters in the encoder to True.
+
         This allows these layers to be trainable during the training process.
         """
         for param in self.encoder.parameters():

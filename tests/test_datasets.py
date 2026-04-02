@@ -31,11 +31,7 @@ def minimal_dataset() -> BaseCoralDataset:
             "col": [10, 20],
         }
     )
-    df_images = (
-        df_annotations[["image_id", "region_id", "region_name"]]
-        .drop_duplicates()
-        .reset_index(drop=True)
-    )
+    df_images = df_annotations[["image_id", "region_id", "region_name"]].drop_duplicates().reset_index(drop=True)
     return BaseCoralDataset(
         df_annotations=df_annotations,
         df_images=df_images,
@@ -56,11 +52,7 @@ def single_image_annotations() -> tuple[pd.DataFrame, pd.DataFrame]:
             "col": [5],
         }
     )
-    df_images = (
-        df_annotations[["image_id", "region_id", "region_name"]]
-        .drop_duplicates()
-        .reset_index(drop=True)
-    )
+    df_images = df_annotations[["image_id", "region_id", "region_name"]].drop_duplicates().reset_index(drop=True)
     return df_annotations, df_images
 
 

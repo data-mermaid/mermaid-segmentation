@@ -23,6 +23,7 @@ Serialization Strategy:
     - Published Models: SafeTensors - zero-copy, no arbitrary code execution
 """
 
+import contextlib
 import copy
 import json
 import logging
@@ -57,8 +58,7 @@ LOCAL_DEFAULT_URI = "./segmentation"
 
 
 def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
-    """
-    Resolve MLflow tracking URI using a simple priority chain.
+    """Resolve MLflow tracking URI using a simple priority chain.
 
     Priority order:
         1. MLFLOW_TRACKING_URI environment variable (highest priority)
@@ -97,8 +97,8 @@ def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
 
 
 def mlflow_connect(uri: str | None = None) -> timedelta:
-    """
-    Establish connection to MLflow tracking server and measure connection time.
+    """Establish connection to MLflow tracking server and measure connection time.
+
     Sets the MLflow tracking URI and tests the connection by performing a search
     operation. Measures and returns the time taken to establish the connection.
     Args:
@@ -122,10 +122,7 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
         try:
             import sagemaker_mlflow  # noqa: F401
         except ImportError:
-            logger.warning(
-                "URI is a SageMaker ARN but sagemaker-mlflow is not installed. "
-                "Install with: pip install sagemaker-mlflow"
-            )
+            logger.warning("URI is a SageMaker ARN but sagemaker-mlflow is not installed. Install with: pip install sagemaker-mlflow")
 
     mlflow.set_tracking_uri(uri=uri)
     try:
@@ -137,10 +134,7 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
         # unless you set MLFLOW_HTTP_REQUEST_MAX_RETRIES to
         # a low number.
         if "Max retries exceeded" in str(e):
-            raise RuntimeError(
-                "Could not connect to the MLflow tracking server."
-                " Is the tracking server up and running?"
-            ) from e
+            raise RuntimeError("Could not connect to the MLflow tracking server. Is the tracking server up and running?") from e
         # If it's some other kind of MlflowException, just re-raise
         # for debugging purposes.
         raise
@@ -150,8 +144,7 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
 
 
 class Logger:
-    """
-    MLflow-focused logger for experiment tracking during training and evaluation.
+    """MLflow-focused logger for experiment tracking during training and evaluation.
 
     wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy
     ``WandbLogger`` delegate during the deprecation period.
@@ -181,8 +174,8 @@ class Logger:
         save_local_checkpoints=None,
         save_local_models=None,
     ):
-        """
-        Initializes the logger for tracking experiments and benchmarks.
+        """Initializes the logger for tracking experiments and benchmarks.
+
         Args:
             config (dict, optional): Configuration dictionary for the experiment
             meta_model: Meta model object containing model metadata.
@@ -248,8 +241,7 @@ class Logger:
                 legacy_cfg = getattr(logger_cfg, "save_local_models", None)
                 if legacy_cfg is not None:
                     warnings.warn(
-                        "config.logger.save_local_models is deprecated; use "
-                        "config.logger.save_local_checkpoints.",
+                        "config.logger.save_local_models is deprecated; use config.logger.save_local_checkpoints.",
                         DeprecationWarning,
                         stacklevel=2,
                     )
@@ -306,21 +298,9 @@ class Logger:
                             "log_checkpoint": log_checkpoint,
                         }
                         if hasattr(config, "model"):
-                            params.update(
-                                {
-                                    f"model_{k}": v
-                                    for k, v in dict(config.model).items()
-                                    if isinstance(v, str | int | float | bool)
-                                }
-                            )
+                            params.update({f"model_{k}": v for k, v in dict(config.model).items() if isinstance(v, str | int | float | bool)})
                         if hasattr(config, "training"):
-                            params.update(
-                                {
-                                    f"training_{k}": v
-                                    for k, v in dict(config.training).items()
-                                    if isinstance(v, str | int | float | bool)
-                                }
-                            )
+                            params.update({f"training_{k}": v for k, v in dict(config.training).items() if isinstance(v, str | int | float | bool)})
 
                         mlflow.log_params(params)
 
@@ -335,17 +315,14 @@ class Logger:
                 except Exception as e:
                     logger.warning("Failed to initialize MLflow logging: %s", e)
                     if self.mlflow_run_id is not None:
-                        try:
+                        with contextlib.suppress(Exception):
                             mlflow.end_run()
-                        except Exception:
-                            pass
                         self.mlflow_run_id = None
                     self.enabled = False
 
         if enable_wandb:
             warnings.warn(
-                "enable_wandb is deprecated and will be removed in a future release. "
-                "Use the MLflow-based Logger workflow instead.",
+                "enable_wandb is deprecated and will be removed in a future release. Use the MLflow-based Logger workflow instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -477,7 +454,10 @@ class Logger:
         return self._wandb_logger is not None
 
     def _ensure_active_run(self) -> bool:
-        """Guarantee an active MLflow run exists. Returns True on success."""
+        """Guarantee an active MLflow run exists.
+
+        Returns True on success.
+        """
         if not self._mlflow_active:
             return False
         try:
@@ -494,8 +474,8 @@ class Logger:
             return False
 
     def log(self, log_dict, step):
-        """
-        Logs the provided dictionary of metrics along with the current step.
+        """Logs the provided dictionary of metrics along with the current step.
+
         Args:
             log_dict (Dict[str, Any]): A dictionary containing the log data to be recorded.
             step (int): The current step or iteration associated with the log entry.
@@ -568,9 +548,7 @@ class Logger:
         if hasattr(meta_model_run, "scheduler"):
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
-        model_path = (
-            f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
-        )
+        model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
 
         # --- Local checkpoint persistence (optional) ---
         local_checkpoint_saved = False
@@ -603,9 +581,7 @@ class Logger:
                 checkpoint_metrics = self._unpack_metrics(metrics_dict, key_prefix="checkpoint")
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
 
-                scalar_metrics = {
-                    k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)
-                }
+                scalar_metrics = {k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)}
                 try:
                     # export_model=False keeps cloudpickle serialization.
                     # export_model=True (torch.export/pt2) is incompatible with
@@ -675,7 +651,6 @@ class Logger:
             epoch: Current training epoch
             metrics_dict: Dictionary of metrics to include in metadata
             artifact_path: MLflow artifact path for the output
-
         """
 
         if not self._ensure_active_run():
@@ -714,8 +689,8 @@ class Logger:
             logger.warning("Failed to export SafeTensors model: %s", e)
 
     def end_run(self):
-        """
-        Properly end the MLflow run (and wandb delegate, if active).
+        """Properly end the MLflow run (and wandb delegate, if active).
+
         Should be called at the end of training to ensure proper cleanup.
         """
         if self.enable_mlflow and self.enabled:
@@ -758,16 +733,12 @@ class WandbLogger:
     ):
         if _warn:
             warnings.warn(
-                "WandbLogger is deprecated and will be removed in a future release. "
-                "Use the MLflow-based Logger instead.",
+                "WandbLogger is deprecated and will be removed in a future release. Use the MLflow-based Logger instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
         if WANDB_IMPORT_ERROR is not None:
-            raise ImportError(
-                "wandb is required for WandbLogger but is not installed. "
-                "Install with: pip install wandb"
-            ) from WANDB_IMPORT_ERROR
+            raise ImportError("wandb is required for WandbLogger but is not installed. Install with: pip install wandb") from WANDB_IMPORT_ERROR
 
         self.wandb_run = wandb.init(
             project=project,

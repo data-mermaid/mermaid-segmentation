@@ -33,8 +33,8 @@ from mermaidseg.model.meta import MetaModel
 
 
 class Evaluator:
-    """
-    Evaluator class for evaluating machine learning models.
+    """Evaluator class for evaluating machine learning models.
+
     This class provides methods to evaluate the performance of a meta-model on a dataset
     or a single image using various metrics. It supports automatic mixed precision (AMP)
     and can handle both multiclass and binary classification tasks.
@@ -92,9 +92,7 @@ class Evaluator:
                     # "auc": AUROC(
                     #     task="multiclass", average="none", num_classes=3, ignore_index=0
                     # ).to(self.device),
-                    "f1_concept": F1Score(
-                        task="multiclass", average="none", num_classes=3, ignore_index=0
-                    ).to(self.device)
+                    "f1_concept": F1Score(task="multiclass", average="none", num_classes=3, ignore_index=0).to(self.device)
                 }
 
     @torch.no_grad()
@@ -103,8 +101,8 @@ class Evaluator:
         dataloader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         meta_model: MetaModel,
     ) -> dict[str, float | NDArray[np.float64]]:
-        """
-        Evaluates the performance of a given meta-model on a dataset provided by the dataloader.
+        """Evaluates the performance of a given meta-model on a dataset provided by the dataloader.
+
         Args:
             dataloader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
                 A DataLoader object that provides batches of data. Each batch can either be a tuple
@@ -162,9 +160,7 @@ class Evaluator:
 
         if meta_model.training_mode in ("concept-bottleneck", "concept"):
             for metric_name in self.concept_metric_dict:
-                metric_results[metric_name] = (
-                    self.concept_metric_dict[metric_name].compute().cpu().numpy()
-                )
+                metric_results[metric_name] = self.concept_metric_dict[metric_name].compute().cpu().numpy()
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 else:
@@ -187,8 +183,8 @@ class Evaluator:
         NDArray[np.int_] | int,
         NDArray[np.int_] | int,
     ]:
-        """
-        Evaluates the given model on one image of the dataloader.
+        """Evaluates the given model on one image of the dataloader.
+
         Args:
             dataloader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
                 A DataLoader object that provides batches of data. Each batch can either be a tuple
@@ -210,9 +206,7 @@ class Evaluator:
             if not proba:
                 outputs = outputs.argmax(dim=1)
 
-        image_counter = (
-            epoch % (log_epochs * 5) // 5
-        )  # Rotating 5 images (assuming batch size above 5)
+        image_counter = epoch % (log_epochs * 5) // 5  # Rotating 5 images (assuming batch size above 5)
         image_counter = image_counter % inputs.size(dim=0)  # In case we use a smaller batch size
 
         image: NDArray[np.float64] = inputs[image_counter].cpu().numpy()
@@ -223,8 +217,8 @@ class Evaluator:
 
 
 class EvaluatorSemanticSegmentation(Evaluator):
-    """
-    A class for evaluating segmentation models, inheriting from the base `Evaluator` class.
+    """A class for evaluating segmentation models, inheriting from the base `Evaluator` class.
+
     Attributes:
         metric_dict (dict): A dictionary of metrics used for evaluation. Defaults to
             accuracy and mean IoU, configured for either binary or multiclass tasks
@@ -282,6 +276,4 @@ class EvaluatorSemanticSegmentation(Evaluator):
                     ignore_index=ignore_index,
                 ).to(device),
             }
-        self.metric_dict = {
-            metric_name: metric.to(device) for metric_name, metric in self.metric_dict.items()
-        }
+        self.metric_dict = {metric_name: metric.to(device) for metric_name, metric in self.metric_dict.items()}

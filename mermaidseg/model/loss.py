@@ -14,8 +14,9 @@ import torch
 
 
 class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
-    """
-    CrossEntropyLoss is a wrapper of `torch.nn.CrossEntropyLoss` that allows for additional customization.
+    """CrossEntropyLoss is a wrapper of `torch.nn.CrossEntropyLoss` that allows for additional
+    customization.
+
     Attributes:
         ignore_index (int): Specifies a target value that is ignored and does not contribute to the input gradient.
             This is useful for masking certain values in the target tensor. Defaults to -1.
@@ -27,8 +28,9 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
 
 
 class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
-    """
-    CrossEntropyLoss is a wrapper of `torch.nn.CrossEntropyLoss` that allows for additional customization.
+    """CrossEntropyLoss is a wrapper of `torch.nn.CrossEntropyLoss` that allows for additional
+    customization.
+
     Attributes:
         ignore_index (int): Specifies a target value that is ignored and does not contribute to the input gradient.
             This is useful for masking certain values in the target tensor. Defaults to -1.
@@ -44,8 +46,9 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
         concept_labels: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Computes the total loss as the sum of the classification loss and a weighted concept loss.
+        """Computes the total loss as the sum of the classification loss and a weighted concept
+        loss.
+
         Args:
             outputs (torch.Tensor): The model's output logits for classification.
             labels (torch.Tensor): The ground truth labels for classification.
@@ -59,14 +62,12 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
 
         masked_loss = per_element_loss * label_mask
         denom = label_mask.sum() * concept_outputs.shape[1] + 1e-8
-        loss = masked_loss.sum() / denom
-
-        return loss
+        return masked_loss.sum() / denom
 
 
 class ConceptBottleneckLoss(torch.nn.Module):
-    """
-    ConceptBottleneckLoss combines a classification loss with a concept prediction loss.
+    """ConceptBottleneckLoss combines a classification loss with a concept prediction loss.
+
     It computes the total loss as the sum of the classification loss and a weighted concept loss.
     Attributes:
         class_loss (torch.nn.Module): The loss function used for classification. Defaults to
@@ -99,8 +100,9 @@ class ConceptBottleneckLoss(torch.nn.Module):
         concept_outputs: torch.Tensor,
         concept_labels: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Computes the total loss as the sum of the classification loss and a weighted concept loss.
+        """Computes the total loss as the sum of the classification loss and a weighted concept
+        loss.
+
         Args:
             outputs (torch.Tensor): The model's output logits for classification.
             labels (torch.Tensor): The ground truth labels for classification.
@@ -119,5 +121,4 @@ class ConceptBottleneckLoss(torch.nn.Module):
         denom = label_mask.sum() * outputs.shape[1] + 1e-8
         concept_loss_value = masked_loss.sum() / denom
 
-        total_loss = class_loss_value + self.lambda_weight * concept_loss_value
-        return total_loss
+        return class_loss_value + self.lambda_weight * concept_loss_value

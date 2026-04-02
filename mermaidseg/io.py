@@ -23,10 +23,10 @@ import yaml
 
 
 class ConfigDict(dict):
-    """
-    A dictionary subclass that allows attribute-style access to dictionary keys.
-    This class recursively converts nested dictionaries into ConfigDict instances,
-    enabling dot notation access to dictionary keys.
+    """A dictionary subclass that allows attribute-style access to dictionary keys. This class
+    recursively converts nested dictionaries into ConfigDict instances, enabling dot notation access
+    to dictionary keys.
+
     Methods
     -------
     __init__(dictionary)
@@ -52,8 +52,8 @@ class ConfigDict(dict):
 
 
 def load_config(config_path: str) -> dict[str, Any]:
-    """
-    Load configuration from a YAML file.
+    """Load configuration from a YAML file.
+
     Args:
         config_path (str): Path to the YAML configuration file.
     Returns:
@@ -61,13 +61,12 @@ def load_config(config_path: str) -> dict[str, Any]:
     """
 
     with open(config_path, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    return config
+        return yaml.safe_load(f)
 
 
 def update_config(base_config: ConfigDict, config: ConfigDict) -> ConfigDict:
-    """
-    Update a base configuration dictionary with values from another configuration dictionary.
+    """Update a base configuration dictionary with values from another configuration dictionary.
+
     This function performs a recursive update where nested dictionaries are merged rather
     than completely replaced. For non-dictionary values, the new value overwrites the
     existing one.
@@ -93,13 +92,13 @@ def update_config(base_config: ConfigDict, config: ConfigDict) -> ConfigDict:
 def _load_csv_if_path(value: Any, header: int | None = 0) -> Any:
     """Load CSV file if value is a file path, otherwise return as-is."""
     if isinstance(value, str) and Path(value).is_file() and value.endswith(".csv"):
-        return pd.read_csv(value, header=header).values.flatten().tolist()
+        return pd.read_csv(value, header=header).to_numpy().flatten().tolist()
     return value
 
 
 def setup_config(config_path: str | None = None, config_base_path: str = "configs/base.yaml"):
-    """
-    Set up configuration by loading and merging base and custom config files.
+    """Set up configuration by loading and merging base and custom config files.
+
     This function loads a base configuration file and optionally merges it with
     a custom configuration file. If no custom config path is provided, only the
     base configuration is returned.
@@ -129,15 +128,15 @@ def setup_config(config_path: str | None = None, config_base_path: str = "config
     #     # with open(cfg.data.class_subset, "r") as f:
     #     #     class_subset = [line.strip() for line in f.readlines()]
     #     # cfg.data.class_subset = class_subset
-    if "class_subset" in cfg.data.keys():
+    if "class_subset" in cfg.data:
         cfg.data.class_subset = _load_csv_if_path(cfg.data.class_subset)
 
-    if "whitelist_sources" in cfg.data.keys():
+    if "whitelist_sources" in cfg.data:
         cfg.data.whitelist_sources = _load_csv_if_path(cfg.data.whitelist_sources)
         cfg.data.whitelist_sources.train = _load_csv_if_path(cfg.data.whitelist_sources.train)
         cfg.data.whitelist_sources.val = _load_csv_if_path(cfg.data.whitelist_sources.val)
         cfg.data.whitelist_sources.test = _load_csv_if_path(cfg.data.whitelist_sources.test)
-    if "blacklist_sources" in cfg.data.keys():
+    if "blacklist_sources" in cfg.data:
         cfg.data.blacklist_sources = _load_csv_if_path(cfg.data.blacklist_sources)
 
     return cfg

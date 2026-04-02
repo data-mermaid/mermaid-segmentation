@@ -62,18 +62,12 @@ def initialize_benthic_hierarchy(
         parent_id = attr["parent"]
         hierarchy_id_dict[node_id] = parent_id
         id2name_dict[node_id] = attr["name"]
-    hierarchy_dict = {
-        id2name_dict.get(node_id, None): id2name_dict.get(parent_id, None)
-        for node_id, parent_id in hierarchy_id_dict.items()
-    }
-    return hierarchy_dict
+    return {id2name_dict.get(node_id): id2name_dict.get(parent_id) for node_id, parent_id in hierarchy_id_dict.items()}
 
 
-def get_hierarchy_level(
-    concept_list: list[str], hierarchy_dict: dict[str, str]
-) -> dict[str, int | None]:
-    """
-    Determine the hierarchy level for each concept in a list based on a parent mapping.
+def get_hierarchy_level(concept_list: list[str], hierarchy_dict: dict[str, str]) -> dict[str, int | None]:
+    """Determine the hierarchy level for each concept in a list based on a parent mapping.
+
     The function calculates the level of each concept by counting the number of
     steps required to reach a root node (a node with no parent) using the provided
     hierarchy dictionary. If a cycle is detected in the hierarchy, the level for that
@@ -111,8 +105,8 @@ def get_hierarchy_level(
 
 
 def generate_hierarchy_path(label: str, hierarchy_dict: dict[str, str]) -> list[str]:
-    """
-    Generate the upward hierarchy path for a given label using a parent mapping.
+    """Generate the upward hierarchy path for a given label using a parent mapping.
+
     The function walks from the provided label to its parent, then that parent's
     parent, and so on, appending each visited node to a list until a label is
     not present in the mapping or its mapped value is None.
@@ -134,11 +128,9 @@ def generate_hierarchy_path(label: str, hierarchy_dict: dict[str, str]) -> list[
     return path
 
 
-def initialize_benthic_concepts(
-    labelset_benthic: list[str], hierarchy_dict: dict[str, str]
-) -> tuple[list[str], pd.DataFrame]:
-    """
-    Create a sorted list of unique benthic concepts derived from a set of labels.
+def initialize_benthic_concepts(labelset_benthic: list[str], hierarchy_dict: dict[str, str]) -> tuple[list[str], pd.DataFrame]:
+    """Create a sorted list of unique benthic concepts derived from a set of labels.
+
     This function iterates over each label in `labelset_benthic`, uses
     `generate_hierarchy_path(label, hierarchy_dict)` to obtain the hierarchical
     concept path for that label, collects all concepts into a set to ensure
@@ -173,15 +165,13 @@ def initialize_benthic_concepts(
     for label in labelset_benthic:
         benthic_path = generate_hierarchy_path(label, hierarchy_dict)
         for concept in benthic_path:
-            benthic_concept_matrix.at[label, concept] = 1
+            benthic_concept_matrix.loc[label, concept] = 1
     return benthic_concept_set, benthic_concept_matrix
 
 
-def map_benthic_to_concept(
-    benthic_label: str | int, benthic_concept_matrix: pd.DataFrame
-) -> np.ndarray:
-    """
-    Map a benthic class label to its corresponding concept one-hot vector.
+def map_benthic_to_concept(benthic_label: str | int, benthic_concept_matrix: pd.DataFrame) -> np.ndarray:
+    """Map a benthic class label to its corresponding concept one-hot vector.
+
     Parameters
     ----------
     benthic_label : str
@@ -199,18 +189,13 @@ def map_benthic_to_concept(
     """
 
     if isinstance(benthic_label, str) and benthic_label in benthic_concept_matrix.index:
-        benthic_one_hot = benthic_concept_matrix.loc[benthic_label, :].values
-        return benthic_one_hot
-    elif isinstance(benthic_label, int) and benthic_label <= len(benthic_concept_matrix.index):
-        benthic_one_hot = benthic_concept_matrix.iloc[benthic_label - 1, :].values
-        return benthic_one_hot
-    else:
-        raise ValueError(f"Benthic label '{benthic_label}' not found in concept matrix index.")
+        return benthic_concept_matrix.loc[benthic_label, :].to_numpy()
+    if isinstance(benthic_label, int) and benthic_label <= len(benthic_concept_matrix.index):
+        return benthic_concept_matrix.iloc[benthic_label - 1, :].to_numpy()
+    raise ValueError(f"Benthic label '{benthic_label}' not found in concept matrix index.")
 
 
-def labels_to_concepts(
-    labels: torch.Tensor | np.ndarray, benthic_concept_matrix: pd.DataFrame
-) -> torch.Tensor | np.ndarray:
+def labels_to_concepts(labels: torch.Tensor | np.ndarray, benthic_concept_matrix: pd.DataFrame) -> torch.Tensor | np.ndarray:
     """
     labels: torch.Tensor or np.ndarray with shape (B, H, W), dtype int (values 0..N)
     benthic_concept_matrix: pd.DataFrame returned by initialize_benthic_concepts
@@ -218,12 +203,10 @@ def labels_to_concepts(
     Background label 0 -> all zeros vector.
     """
     # build lookup: row 0 = zeros, rows 1..N = mapping of class i -> concept vector
-    vals = benthic_concept_matrix.values.astype(np.float32)  # shape (n_labels, n_concepts)
+    vals = benthic_concept_matrix.to_numpy().astype(np.float32)  # shape (n_labels, n_concepts)
     n_labels, n_concepts = vals.shape
     lookup = np.zeros((n_labels + 1, n_concepts), dtype=np.float32)
-    lookup[1:] = (
-        vals  # assumes integer label i corresponds to row i-1 (map_benthic_to_concept uses that convention)
-    )
+    lookup[1:] = vals  # assumes integer label i corresponds to row i-1 (map_benthic_to_concept uses that convention)
 
     # handle torch input
     if isinstance(labels, torch.Tensor):
@@ -231,8 +214,7 @@ def labels_to_concepts(
         labels_np = labels.detach().cpu().numpy().astype(np.int64)
         mapped = lookup[labels_np]  # shape (B, H, W, C)
         mapped = np.transpose(mapped, (0, 3, 1, 2))  # (B, C, H, W)
-        out = torch.from_numpy(mapped).to(device)
-        return out
+        return torch.from_numpy(mapped).to(device)
 
     # numpy input
     labels = labels.astype(np.int64)
@@ -246,8 +228,7 @@ def postprocess_predicted_concepts(
     conceptid2labelid: dict[int, int],
     threshold: float = 0.5,
 ) -> np.ndarray:
-    """
-    Vectorized hierarchical concept prediction for a batch.
+    """Vectorized hierarchical concept prediction for a batch.
 
     Args:
         pixel_probs: array of shape (B, H, W, num_concepts) or (H, W, num_concepts)
