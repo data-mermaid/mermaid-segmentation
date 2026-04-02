@@ -66,16 +66,26 @@ lint = [
 dev = [
     {include-group = "tests"},
     {include-group = "lint"},
+    "docformatter>=1.7.7",
 ]
 [tool.hatch.build.targets.wheel]
 packages = ["mermaidseg"]
 
 [tool.ruff]
 target-version = "py311"
-line-length = 100
+line-length = 150
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C4"]
+select = ["E", "F", "I", "UP", "B", "C4", "RET", "SIM", "PD"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/*.ipynb" = [
+    "F821",   # undefined names — common in exploratory notebook cells
+    "B018",   # useless expression — used to display values in notebooks
+    "E501",   # line too long — handled by docformatter; notebook cells are hard to wrap
+    "UP031"
+]
+
 
 [tool.ruff.lint.isort]
 known-first-party = ["mermaidseg"]

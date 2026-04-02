@@ -1,15 +1,3 @@
-"""
-title: mermaidseg.datasets.utils
-abstract: Module that contains dataset loading and utility functions.
-author: Viktor Domazetoski
-date: 28-08-2025
-
-Functions:
-    get_image_s3: Fetches an image from an S3 bucket and returns it as a PIL Image object.
-    create_annotation_mask: Creates an annotation mask for a given image.
-    calculate_weights: Calculate class weights for a given dataset.
-"""
-
 import io
 import logging
 
@@ -35,8 +23,8 @@ def get_image_s3(
     key: str,
     thumbnail: bool = False,
 ):
-    """
-    Fetches an image from an S3 bucket and returns it as a PIL Image object.
+    """Fetches an image from an S3 bucket and returns it as a PIL Image object.
+
     Args:
         s3 (boto3.client): The Boto3 S3 client used to interact with S3.
         bucket (str): The name of the S3 bucket.
@@ -54,9 +42,7 @@ def get_image_s3(
         image_data = response["Body"].read()
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
-        logger.warning(
-            "S3 error loading image (bucket=%s, key=%s): %s %s", bucket, key, error_code, e
-        )
+        logger.warning("S3 error loading image (bucket=%s, key=%s): %s %s", bucket, key, error_code, e)
         raise DataLoadError(f"S3 ClientError for s3://{bucket}/{key}: {error_code}") from e
 
     try:
@@ -74,16 +60,18 @@ def create_annotation_mask(
     label2id: dict[str, int],
     padding: int | None = None,
 ) -> np.ndarray:
-    """
-    Creates an annotation mask for a given image based on provided annotations.
+    """Creates an annotation mask for a given image based on provided annotations.
+
     Args:
-        annotations (pd.DataFrame): DataFrame containing annotation rows with 'row', 'col', and 'benthic_attribute_name' columns.
-        shape (Tuple[int, int]): Shape of the output mask (height, width).
-        label2id (Dict[str, int]): Mapping from label names to integer IDs.
+        annotations (pd.DataFrame): DataFrame with 'row', 'col', and 'benthic_attribute_name' columns.
+        shape (tuple[int, int]): Output mask shape (height, width).
+        label2id (dict[str, int]): Mapping from label names to integer class IDs.
+        padding (int | None, optional): Half-size of a square pad region around each point annotation.
+            If None or 0, only the exact annotation pixel is set. Defaults to None.
     Returns:
-        np.ndarray: Annotation mask with integer class IDs.
+        np.ndarray: Integer annotation mask with shape (height, width).
     """
-    ## TODO: Make Padding percentage based so that it is applicable to all class sizes
+    # TODO: Make padding percentage-based so it scales with image resolution
     mask = np.zeros(shape[:2], dtype=np.int64)
 
     if annotations.empty:
@@ -125,8 +113,8 @@ def create_annotation_mask(
 
 
 def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
-    """
-    Calculate class weights for a given dataset.
+    """Calculate class weights for a given dataset.
+
     This function computes the weights for each class in the dataset based on
     the frequency of each class label. The weights are inversely proportional
     to the square root of the class frequency, adjusted by a constant value.
@@ -158,9 +146,7 @@ def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
 
 
 def _joint_collate(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Collate function to combine a list of samples into a batch.
-    """
+    """Collate function to combine a list of samples into a batch."""
     images, labels = zip(*batch, strict=False)
     images = default_collate(images)
     labels = default_collate(labels)
@@ -168,8 +154,9 @@ def _joint_collate(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def get_coralnet_sources():
-    """
-    Discover and validate CoralNet source folders stored in the S3 bucket "dev-datamermaid-sm-sources".
+    """Discover and validate CoralNet source folders stored in the S3 bucket "dev-datamermaid-sm-
+    sources".
+
     Returns:
         whitelist: A list of all valid CoralNet source folder names that contain both
               'annotations.csv' and 'image_list.csv' files.
@@ -203,9 +190,7 @@ def get_coralnet_sources():
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             if error_code == "404":
-                logger.warning(
-                    "get_coralnet_sources: annotations.csv not found for source %s", source
-                )
+                logger.warning("get_coralnet_sources: annotations.csv not found for source %s", source)
             else:
                 logger.warning(
                     "get_coralnet_sources: unexpected S3 error for %s (code=%s): %s",
@@ -221,9 +206,7 @@ def get_coralnet_sources():
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             if error_code == "404":
-                logger.warning(
-                    "get_coralnet_sources: image_list.csv not found for source %s", source
-                )
+                logger.warning("get_coralnet_sources: image_list.csv not found for source %s", source)
             else:
                 logger.warning(
                     "get_coralnet_sources: unexpected S3 error for %s (code=%s): %s",

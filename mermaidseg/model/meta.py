@@ -1,13 +1,3 @@
-"""
-title: mermaidseg.model.meta
-abstract: Module that contains the MetaModel class which is the main ML model wrapper.
-author: Viktor Domazetoski
-date: 27-07-2025
-
-Classes:
-    MetaModel
-"""
-
 from typing import Any
 
 import albumentations as A
@@ -31,47 +21,28 @@ from mermaidseg.io import ConfigDict
 
 
 class MetaModel:
-    """
-    MetaModel is a class designed to handle the initialization, training, validation,
-    and prediction processes for machine learning models. It supports various tasks
-    such as classification, semantic segmentation, and object detection, and integrates
-    with PyTorch and Hugging Face Transformers.
+    """Wrapper for training and inference of segmentation models.
+
+    Handles model initialisation, optimizer/scheduler/loss wiring, and the
+    train/validation loop primitives. Supports three training modes:
+
+    - ``"standard"``: standard cross-entropy segmentation.
+    - ``"concept"``: outputs are concept logits mapped back to class predictions.
+    - ``"concept-bottleneck"``: joint segmentation + concept supervision.
+
     Attributes:
-        run_name (str): Name of the current run or experiment.
-        task (str): The type of task (e.g., "classification", "semantic_segmentation", "object_detection").
-        model_name (str): Name of the model architecture.
-        num_classes (int): Number of output classes for the task.
-        device (Union[str, torch.device]): Device to run the model on (e.g., "cuda" or "cpu").
-        model_kwargs (ConfigDict): Configuration dictionary for model-specific parameters.
-        training_kwargs (ConfigDict): Configuration dictionary for training parameters.
-        use_amp (bool): Whether to use Automatic Mixed Precision (AMP) for training.
-        scaler (torch.GradScaler): Gradient scaler for AMP.
-        model (Union[torch.nn.Module, transformers.PreTrainedModel]): The initialized model.
-        loss (Optional[torch.nn.Module]): The loss function used for training.
-        optimizer (torch.optim.Optimizer): The optimizer used for training.
-        scheduler (Optional[torch.optim.lr_scheduler.LRScheduler]): The learning rate scheduler.
-    Methods:
-        __init__(run_name, task, num_classes, model_kwargs, lora_kwargs=None, device="cuda",
-                 model_checkpoint=None, training_kwargs=ConfigDict):
-            Initializes the MetaModel with the specified parameters, loads the model,
-            and prepares it for training or inference.
-        batch_predict(inputs: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
-            Perform batch prediction using the model. Takes input data in the form of a tensor
-            or a dictionary of tensors, processes it on the appropriate device, and returns
-            the model's output.
-        batch_predict_loss(batch: Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]])
-            -> tuple[torch.Tensor, torch.Tensor]:
-            Returns the model's output predictions and the computed loss.
-        train_epoch(train_loader: DataLoader[torch.Tensor]) -> float:
-            Returns the average loss over all batches in the epoch.
-        validation_epoch(val_loader: DataLoader[torch.Tensor]) -> float:
-            Returns the average loss over all batches in the epoch.
-        predict(image: Union[torch.Tensor, NDArray[Any]], transform: Optional[A.BasicTransform] = None,
-                proba: Optional[str] = None, id2label: Optional[Dict[int, str]] = None)
-                -> Union[NDArray[Any], str, int]:
-            Makes predictions on the given input image. Optionally applies a transformation,
-            maps class IDs to labels, and applies a probability function (e.g., Softmax or Sigmoid).
-            Returns the predicted output.
+        run_name (str): Identifier for the current run/experiment.
+        model_name (str): Name of the model architecture (looked up in `mermaidseg.model.models`).
+        num_classes (int): Number of segmentation output classes.
+        device (str | torch.device): Device the model and tensors live on.
+        model_kwargs (ConfigDict): Model-specific config passed to the architecture.
+        training_kwargs (ConfigDict): Training hyperparameters (epochs, optimizer, scheduler, loss).
+        model (torch.nn.Module | transformers.PreTrainedModel): The instantiated model.
+        loss (torch.nn.Module | None): Loss function; None until `training_kwargs` provides one.
+        optimizer (torch.optim.Optimizer): Optimiser instance.
+        scheduler (torch.optim.lr_scheduler.LRScheduler | None): Optional LR scheduler.
+        concept_matrix (pd.DataFrame | None): Concept mapping matrix for CBM/concept modes.
+        conceptid2labelid (dict[int, int] | None): Maps concept IDs to class label IDs.
     """
 
     run_name: str
@@ -140,15 +111,10 @@ class MetaModel:
                 **model_kwargs,
             )
         elif self.training_mode == "concept":
-            self.model = getattr(mermaidseg.model.models, self.model_name)(
-                num_classes=self.num_concepts, **model_kwargs
-            )
+            self.model = getattr(mermaidseg.model.models, self.model_name)(num_classes=self.num_concepts, **model_kwargs)
         else:
-            self.model = getattr(mermaidseg.model.models, self.model_name)(
-                num_classes=self.num_classes, **model_kwargs
-            )
+            self.model = getattr(mermaidseg.model.models, self.model_name)(num_classes=self.num_classes, **model_kwargs)
 
-        ## Load model checkpoint if necessary
         if model_checkpoint:
             checkpoint = torch.load(model_checkpoint)
             if "model_state_dict" in checkpoint:
@@ -156,10 +122,7 @@ class MetaModel:
             else:
                 self.model.load_state_dict(checkpoint)
 
-        # Move to device
         self.model = self.model.to(device)
-
-        ## Load training procedure: optimizer, scheduler, loss
         if "loss" in training_kwargs:
             loss = training_kwargs.loss.pop("type", None)
             self.loss = getattr(mermaidseg.model.loss, loss)(**training_kwargs.loss)
@@ -167,23 +130,19 @@ class MetaModel:
         #     self.loss = None  # Often the case for HF models where the loss is already included in the model
 
         optimizer = training_kwargs.optimizer.pop("type", None)
-        self.optimizer = getattr(torch.optim, optimizer)(
-            params=self.model.parameters(), **training_kwargs.optimizer
-        )
+        self.optimizer = getattr(torch.optim, optimizer)(params=self.model.parameters(), **training_kwargs.optimizer)
 
         if "scheduler" in training_kwargs:
             scheduler = training_kwargs.scheduler.pop("type", None)
-            self.scheduler = getattr(torch.optim.lr_scheduler, scheduler)(
-                self.optimizer, **training_kwargs.scheduler
-            )
+            self.scheduler = getattr(torch.optim.lr_scheduler, scheduler)(self.optimizer, **training_kwargs.scheduler)
 
     def batch_predict(
         self,
         inputs: torch.Tensor,
         target_dim: tuple[int, int] | None = None,
-    ) -> torch.Tensor:
-        """
-        Perform batch prediction using the model.
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Perform batch prediction using the model.
+
         This method takes input data in the form of a tensor or a dictionary of tensors,
         processes it on the appropriate device, and returns the model's output.
         Args:
@@ -227,8 +186,8 @@ class MetaModel:
         batch: tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor],
         target_dim: tuple[int, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Perform batch prediction using the model and compute the loss if applicable.
+        """Perform batch prediction using the model and compute the loss if applicable.
+
         Args:
             batch (Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]):
                 The input batch for prediction. It can either be:
@@ -286,20 +245,15 @@ class MetaModel:
     def train_epoch(
         self,
         train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-        evaluator: Any
-        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> float:
-        """
-        Trains the model for one epoch using the provided data loader.
+        """Trains the model for one epoch using the provided data loader.
+
         Args:
             train_loader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
             A DataLoader object that provides batches of training data.
         Returns:
             float: The average loss over all batches in the epoch.
-        Notes:
-            - This method uses mixed precision training if `self.use_amp` is enabled.
-            - Gradients are scaled using `self.scaler` to prevent underflow during mixed precision training.
-            - The optimizer is stepped and updated after each batch.
         """
 
         running_loss = 0.0
@@ -331,12 +285,12 @@ class MetaModel:
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
-                    ## Update metrics
+                    # Update metrics
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, labels)
 
             if self.training_mode in ("concept-bottleneck", "concept"):
-                ## Update metrics
+                # Update metrics
                 for metric in evaluator.concept_metric_dict.values():
                     concept_outputs = (concept_outputs > 0.5).float()
                     concept_outputs += 1
@@ -349,21 +303,17 @@ class MetaModel:
                     for metric in evaluator.concept_metric_dict.values():
                         metric.update(concept_outputs, concept_labels)
 
-        ## Compute metrics
+        # Compute metrics
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
-                metric_results[metric_name] = (
-                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
-                )
+                metric_results[metric_name] = evaluator.metric_dict[metric_name].compute().cpu().numpy()
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
 
             if self.training_mode in ("concept-bottleneck", "concept"):
                 for metric_name in evaluator.concept_metric_dict:
-                    metric_results[metric_name] = (
-                        evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
-                    )
+                    metric_results[metric_name] = evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
                     if metric_results[metric_name].ndim == 0:
                         metric_results[metric_name] = metric_results[metric_name].item()
                     evaluator.concept_metric_dict[metric_name].reset()
@@ -375,11 +325,10 @@ class MetaModel:
     def validation_epoch(
         self,
         val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-        evaluator: Any
-        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> float:
-        """
-        Calculates the validation loss of the model for one epoch using the provided data loader.
+        """Calculates the validation loss of the model for one epoch using the provided data loader.
+
         Args:
             val_loader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
             A DataLoader object that provides batches of validation data.
@@ -401,21 +350,19 @@ class MetaModel:
             if evaluator is not None:
                 if self.training_mode in ("concept"):
                     concept_labels = labels_to_concepts(labels, self.concept_matrix)
-                    concept_labels = postprocess_predicted_concepts(
-                        concept_labels, self.concept_matrix, self.conceptid2labelid
-                    )
+                    concept_labels = postprocess_predicted_concepts(concept_labels, self.concept_matrix, self.conceptid2labelid)
                     concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, concept_labels)
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
-                    ## Update metrics
+                    # Update metrics
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, labels)
 
             if self.training_mode in ("concept-bottleneck", "concept"):
-                ## Update metrics
+                # Update metrics
                 for metric in evaluator.concept_metric_dict.values():
                     concept_outputs = (concept_outputs > 0.5).float()
                     concept_outputs += 1
@@ -428,21 +375,17 @@ class MetaModel:
                     for metric in evaluator.concept_metric_dict.values():
                         metric.update(concept_outputs, concept_labels)
 
-        ## Compute metrics
+        # Compute metrics
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
-                metric_results[metric_name] = (
-                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
-                )
+                metric_results[metric_name] = evaluator.metric_dict[metric_name].compute().cpu().numpy()
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
 
         if self.training_mode in ("concept-bottleneck", "concept"):
             for metric_name in evaluator.concept_metric_dict:
-                metric_results[metric_name] = (
-                    evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
-                )
+                metric_results[metric_name] = evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
 
@@ -457,8 +400,8 @@ class MetaModel:
         image: torch.Tensor | NDArray[Any],
         transform: A.BasicTransform | None = None,
     ) -> NDArray[Any]:
-        """
-        Predicts the output for a given input image using the model.
+        """Predicts the output for a given input image using the model.
+
         Args:
             image (Union[torch.Tensor, NDArray[Any]]): The input image as a PyTorch tensor or a NumPy array.
             transform (Optional[A.BasicTransform], optional): An optional transformation to apply to the image.
@@ -471,5 +414,4 @@ class MetaModel:
         inputs = torch.tensor(image).unsqueeze(0)
 
         pred = self.batch_predict(inputs)
-        pred = pred.argmax(dim=1).cpu().numpy()[0]
-        return pred
+        return pred.argmax(dim=1).cpu().numpy()[0]

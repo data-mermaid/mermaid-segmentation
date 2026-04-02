@@ -1,14 +1,3 @@
-"""
-title: mermaidseg.model.train
-abstract: Module that contains the function used to train a model end-to-end and log the metrics & checkpoints.
-author: Viktor Domazetoski
-date: 22-10-2025
-
-Functions:
-    train_model()
-        Trains a model using the provided data loaders and logs the results.
-"""
-
 import time
 
 import numpy as np
@@ -25,17 +14,15 @@ def train_model(
     meta_model: MetaModel,
     evaluator: Evaluator,
     train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-    val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
-    | None = None,
-    test_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
-    | None = None,
+    val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]] | None = None,
+    test_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]] | None = None,
     logger: Logger | None = None,
     start_epoch: int = -1,
     end_epoch: int = -1,
     metric_of_interest: str = "accuracy",
 ):
-    """
-    Trains a model using the provided data loaders and logs the results.
+    """Trains a model using the provided data loaders and logs the results.
+
     Args:
         meta_model (MetaModel): The meta-model to be trained, which includes the model,
             optimizer, scheduler, and training configurations.
@@ -58,7 +45,8 @@ def train_model(
         metric_of_interest (str, optional): The primary metric used to determine the best
             model during validation. Defaults to "accuracy".
     Returns:
-        None
+        dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
+            `train_metrics`, `validation_metrics` (if val_loader provided), and `loss`.
     """
 
     best_results = {"epoch": -1, metric_of_interest: 0}
@@ -82,10 +70,7 @@ def train_model(
         metrics_epoch[epoch] = {"train_metrics": train_metric_results}
         if logger is not None and len(train_metric_results) > 0:
             logger.log(
-                {
-                    f"train/{metric_name}": metric
-                    for metric_name, metric in train_metric_results.items()
-                },
+                {f"train/{metric_name}": metric for metric_name, metric in train_metric_results.items()},
                 step=epoch,
             )
         epoch_loss_dict["train/time_taken"] = time.time() - epoch_start_time
@@ -106,16 +91,11 @@ def train_model(
             metrics_epoch[epoch]["validation_metrics"] = val_metric_results
             if logger is not None and len(val_metric_results) > 0:
                 logger.log(
-                    {
-                        f"validation/{metric_name}": metric
-                        for metric_name, metric in val_metric_results.items()
-                    },
+                    {f"validation/{metric_name}": metric for metric_name, metric in val_metric_results.items()},
                     step=epoch,
                 )
 
-                best_model_flag = (
-                    best_results[metric_of_interest] < val_metric_results[metric_of_interest]
-                )
+                best_model_flag = best_results[metric_of_interest] < val_metric_results[metric_of_interest]
 
                 if best_model_flag:
                     best_results[metric_of_interest] = val_metric_results[metric_of_interest]
@@ -145,8 +125,8 @@ def evaluate_and_log(
     epoch: int,
     split: str = "train",
 ) -> dict[str, float | NDArray[np.float64]]:
-    """
-    Evaluates a model using the provided evaluator, logs the metrics, and logs image predictions.
+    """Evaluates a model using the provided evaluator, logs the metrics, and logs image predictions.
+
     Args:
         evaluator (Evaluator): The evaluator object used to compute metrics and evaluate the model.
         loader (DataLoader): A data loader providing the dataset for evaluation. The dataset can be
