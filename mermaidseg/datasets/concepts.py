@@ -43,13 +43,15 @@ def initialize_benthic_hierarchy(
         attribute names (str) or None.
     """
 
-    response = requests.get(hierarchy_json_url)
+    response = requests.get(hierarchy_json_url, timeout=30)
+    response.raise_for_status()
     data = response.json()
     benthic_attributes = data["results"]
 
     # Keep fetching next pages while there is a 'next' URL
     while data["next"]:
-        response = requests.get(data["next"])
+        response = requests.get(data["next"], timeout=30)
+        response.raise_for_status()
         data = response.json()
         benthic_attributes.extend(data["results"])
 
