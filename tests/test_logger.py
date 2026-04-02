@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 from mermaidseg.logger import (
     LOCAL_DEFAULT_URI,
@@ -600,3 +601,76 @@ class TestLoggerLifecycle:
         with pytest.raises(ValueError, match="boom"), lgr:
             raise ValueError("boom")
         assert mlflow.active_run() is None
+
+
+# ===================================================================
+# Logger.log_benchmark_context
+# ===================================================================
+class TestLogBenchmarkContext:
+    """Test benchmark tag logging for before/after comparison filtering."""
+
+    def test_sets_required_tags(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+        lgr.log_benchmark_context(label="baseline")
+        tags = mlflow.get_run(lgr.mlflow_run_id).data.tags
+        assert tags["benchmark.label"] == "baseline"
+        assert "benchmark.git_branch" in tags
+        assert "benchmark.git_sha" in tags
+
+    def test_dataset_variant_set_when_provided(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+        lgr.log_benchmark_context(label="optimized", dataset_variant="mermaid_only")
+        tags = mlflow.get_run(lgr.mlflow_run_id).data.tags
+        assert tags["benchmark.dataset_variant"] == "mermaid_only"
+
+    def test_dataset_variant_absent_when_not_provided(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+        lgr.log_benchmark_context(label="baseline")
+        tags = mlflow.get_run(lgr.mlflow_run_id).data.tags
+        assert "benchmark.dataset_variant" not in tags
+
+    def test_noop_when_mlflow_disabled(self, make_config, monkeypatch, fake_meta_model):
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        lgr = Logger(config=make_config(logger={"experiment_name": None}), meta_model=fake_meta_model)
+        lgr.log_benchmark_context(label="test")
+        assert lgr.mlflow_run_id is None
+
+
+# ===================================================================
+# Logger.log_dataloader_params
+# ===================================================================
+class TestLogDataloaderParams:
+    """Test DataLoader configuration logging as MLflow params."""
+
+    def _make_loader(self, batch_size: int = 4, num_workers: int = 0) -> DataLoader:
+        ds = TensorDataset(
+            torch.zeros(8, 3, 4, 4),
+            torch.zeros(8, 4, 4, dtype=torch.long),
+        )
+        return DataLoader(ds, batch_size=batch_size, num_workers=num_workers)
+
+    def test_logs_batch_size_and_num_workers(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+        lgr.log_dataloader_params(self._make_loader(batch_size=8, num_workers=0))
+        params = mlflow.get_run(lgr.mlflow_run_id).data.params
+        assert params["dataloader_batch_size"] == "8"
+        assert params["dataloader_num_workers"] == "0"
+
+    def test_logs_all_expected_keys(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+        lgr.log_dataloader_params(self._make_loader())
+        params = mlflow.get_run(lgr.mlflow_run_id).data.params
+        for key in ("dataloader_batch_size", "dataloader_num_workers", "dataloader_pin_memory", "dataloader_persistent_workers"):
+            assert key in params, f"Missing expected param: {key}"
+
+    def test_custom_prefix(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+        lgr.log_dataloader_params(self._make_loader(), prefix="train_loader")
+        params = mlflow.get_run(lgr.mlflow_run_id).data.params
+        assert "train_loader_batch_size" in params
+
+    def test_noop_when_mlflow_disabled(self, make_config, monkeypatch, fake_meta_model):
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        lgr = Logger(config=make_config(logger={"experiment_name": None}), meta_model=fake_meta_model)
+        lgr.log_dataloader_params(self._make_loader())
+        assert lgr.mlflow_run_id is None
