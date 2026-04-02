@@ -186,25 +186,23 @@ class MetaModel:
         self,
         batch: tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor],
         target_dim: tuple[int, int] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Perform batch prediction using the model and compute the loss if applicable.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, float]]:
+        """Perform batch prediction and compute the loss.
 
         Args:
-            batch (Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]):
-                The input batch for prediction. It can either be:
-                - A tuple containing input tensors and corresponding labels.
-                - A dictionary where keys are input names and values are input tensors.
-            target_dim (Optional[tuple[int, int]], optional): The target dimensions for resizing the model's output.
-                If not provided, the dimensions of the label tensor are used. Defaults to None.
+            batch: A tuple of (inputs, labels) or a dict of named tensors.
+            target_dim: Target spatial dimensions for output resizing.
+                Defaults to the input spatial dimensions.
         Returns:
-            Tuple[torch.Tensor, Optional[torch.Tensor]]:
-                - The model's output predictions.
-                - The computed loss if available, otherwise None.
+            A 4-tuple of (loss, outputs, concept_outputs, loss_components)
+            where loss_components is a dict of detached scalar values for
+            logging (non-empty only in concept-bottleneck mode).
         """
 
         loss = None
         outputs = None
         concept_outputs = None
+        loss_components: dict[str, float] = {}
 
         inputs, labels = batch
 
@@ -219,7 +217,7 @@ class MetaModel:
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
             concept_labels = labels_to_concepts(labels, self.concept_matrix)
-            loss = self.loss(outputs, labels, concept_outputs, concept_labels)
+            loss, loss_components = self.loss(outputs, labels, concept_outputs, concept_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
 
         elif self.training_mode == "concept":
@@ -241,7 +239,7 @@ class MetaModel:
         assert loss is not None, "Loss is not computed for the given batch."
         assert isinstance(outputs, torch.Tensor)
 
-        return loss, outputs, concept_outputs
+        return loss, outputs, concept_outputs, loss_components
 
     def train_epoch(
         self,
@@ -261,6 +259,7 @@ class MetaModel:
         """
 
         running_loss = 0.0
+        running_loss_components: dict[str, float] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
         use_cuda = self.device != "cpu" and torch.cuda.is_available()
 
@@ -285,7 +284,7 @@ class MetaModel:
                 torch.cuda.synchronize()
             forward_start = time.perf_counter()
 
-            loss, outputs, concept_outputs = self.batch_predict_loss(data)
+            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(data)
 
             if use_cuda:
                 torch.cuda.synchronize()
@@ -306,6 +305,8 @@ class MetaModel:
             backward_time_total += time.perf_counter() - backward_start
 
             running_loss += loss.item()
+            for k, v in loss_components.items():
+                running_loss_components[k] = running_loss_components.get(k, 0.0) + v
             num_samples += labels.size(0)
 
             if evaluator is not None:
@@ -358,6 +359,9 @@ class MetaModel:
                     evaluator.concept_metric_dict[metric_name].reset()
 
         last_loss = running_loss / len(train_loader)
+        avg_loss_components = {k: v / len(train_loader) for k, v in running_loss_components.items()}
+        for k, v in avg_loss_components.items():
+            metric_results[f"loss/{k}"] = v
         timing = {
             "data_loading_sec": data_time_total,
             "forward_sec": forward_time_total,
@@ -388,7 +392,7 @@ class MetaModel:
             _, labels = data
             labels = labels.long().to(self.device)
 
-            loss, outputs, concept_outputs = self.batch_predict_loss(data)
+            loss, outputs, concept_outputs, _ = self.batch_predict_loss(data)
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running_loss += loss.item()
 

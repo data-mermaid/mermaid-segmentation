@@ -12,6 +12,7 @@ import copy
 import json
 import logging
 import os
+import subprocess
 import tempfile
 import time
 import warnings
@@ -24,6 +25,7 @@ import torch
 from mlflow.data.code_dataset_source import CodeDatasetSource
 from mlflow.data.meta_dataset import MetaDataset
 from safetensors.torch import save_file as save_safetensors
+from torch.utils.data import DataLoader
 
 from mermaidseg.model.meta import MetaModel
 
@@ -431,6 +433,60 @@ class Logger:
                 self.log_dataset(sub_dataset, context=context)
         else:
             self.log_dataset(dataset, context=context)
+
+    def log_benchmark_context(
+        self,
+        label: str,
+        dataset_variant: str | None = None,
+    ) -> None:
+        """Set MLflow tags enabling before/after benchmark filtering in the UI."""
+        if not self._ensure_active_run():
+            return
+        try:
+            git_branch = "unknown"
+            git_sha = "unknown"
+            branch_result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+            )
+            if branch_result.returncode == 0:
+                git_branch = branch_result.stdout.strip()
+            sha_result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+            )
+            if sha_result.returncode == 0:
+                git_sha = sha_result.stdout.strip()
+
+            tags = {
+                "benchmark.label": label,
+                "benchmark.git_branch": git_branch,
+                "benchmark.git_sha": git_sha,
+            }
+            if dataset_variant is not None:
+                tags["benchmark.dataset_variant"] = dataset_variant
+            mlflow.set_tags(tags)
+        except Exception as e:
+            logger.warning("Failed to log benchmark context: %s", e)
+
+    def log_dataloader_params(self, loader: DataLoader, prefix: str = "dataloader") -> None:
+        """Log DataLoader configuration as MLflow params."""
+        if not self._ensure_active_run():
+            return
+        try:
+            mlflow.log_params(
+                {
+                    f"{prefix}_num_workers": loader.num_workers,
+                    f"{prefix}_pin_memory": loader.pin_memory,
+                    f"{prefix}_batch_size": loader.batch_size,
+                    f"{prefix}_persistent_workers": getattr(loader, "persistent_workers", False),
+                    f"{prefix}_prefetch_factor": getattr(loader, "prefetch_factor", None),
+                }
+            )
+        except Exception as e:
+            logger.warning("Failed to log dataloader params: %s", e)
 
     @property
     def enable_wandb(self) -> bool:
