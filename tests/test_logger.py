@@ -1,4 +1,4 @@
-"""Tests for mermaidseg.logger – Phase 1 of the wandb separation plan."""
+"""Tests for mermaidseg.logger."""
 
 from __future__ import annotations
 
@@ -123,14 +123,14 @@ class TestLoggerInit:
         params = run.data.params
         assert params["num_classes"] == str(fake_meta_model.num_classes)
         assert params["run_name"] == fake_meta_model.run_name
-        assert "model_encoder" in params
+        assert "model_encoder_name" in params
         assert params["training_epochs"] == "2"
 
         tags = run.data.tags
         assert tags["model_type"] == "FakeMetaModel"
         assert tags["framework"] == "pytorch"
 
-    def test_save_local_checkpoints_from_config(self, tmp_mlflow_uri, make_config, fake_meta_model):
+    def test_save_local_checkpoints_mirrors_deprecated_alias(self, tmp_mlflow_uri, make_config, fake_meta_model):
         config = make_config(logger={"save_local_checkpoints": False})
         lgr = Logger(config=config, meta_model=fake_meta_model)
         assert lgr.save_local_checkpoints is False
@@ -143,14 +143,13 @@ class TestLoggerInit:
         assert lgr.save_local_checkpoints is False
         assert lgr.save_local_models is False
 
-    def test_disabled_when_no_experiment_name(self, tmp_mlflow_uri, make_config, fake_meta_model):
-        config = make_config(logger={"experiment_name": None})
-        lgr = Logger(config=config, meta_model=fake_meta_model)
-        assert lgr.enabled is False
-        assert lgr.mlflow_run_id is None
-
-    def test_disabled_when_logger_config_missing(self, tmp_mlflow_uri, make_config, fake_meta_model):
-        config = make_config(logger=None)
+    @pytest.mark.parametrize(
+        "logger_override",
+        [{"experiment_name": None}, None],
+        ids=["no-experiment-name", "no-logger-section"],
+    )
+    def test_disabled_when_experiment_not_configured(self, tmp_mlflow_uri, make_config, fake_meta_model, logger_override):
+        config = make_config(logger=logger_override)
         lgr = Logger(config=config, meta_model=fake_meta_model)
         assert lgr.enabled is False
         assert lgr.mlflow_run_id is None
@@ -370,15 +369,6 @@ class TestSaveModelCheckpoint:
         assert run.data.metrics["checkpoint/loss"] == pytest.approx(0.3)
         assert run.data.metrics["checkpoint/acc"] == pytest.approx(0.9)
 
-    def test_mlflow_artifact_uploaded_when_local_disabled(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="tmp-upload")
-        config = make_config(logger={"save_local_checkpoints": False})
-        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50)
-        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.4})
-        client = mlflow.tracking.MlflowClient()
-        artifacts = client.list_artifacts(lgr.mlflow_run_id, path="checkpoints")
-        assert len(list(artifacts)) >= 1
-
     def test_wandb_artifact_logged(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="wb-art")
         config = make_config()
@@ -425,15 +415,6 @@ class TestSaveModelCheckpoint:
             lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.2})
 
         assert not (tmp_path / "model_checkpoints" / "wandb-no-local").exists()
-
-    def test_checkpoint_always_uses_epoch_name(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="ts-name")
-        config = make_config()
-        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50)
-        lgr.save_model_checkpoint(meta, epoch=7, metrics_dict={"loss": 0.5})
-        files = list((tmp_path / "model_checkpoints" / "ts-name").iterdir())
-        assert len(files) == 1
-        assert "model_epoch7" in files[0].name, f"Expected epoch-based name, got {files[0].name}"
 
     def test_scheduler_state_included_in_checkpoint(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="sched-check")

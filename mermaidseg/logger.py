@@ -129,6 +129,40 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
     return time_after_connect - time_before_connect
 
 
+def resume_run(run_id: str) -> mlflow.ActiveRun:
+    """Re-attach to an existing MLflow run by run_id after a kernel restart.
+
+    Ensures the tracking URI is set before attaching, so this works as long as
+    ``MLFLOW_TRACKING_URI`` is in the environment (e.g. after re-running the
+    notebook setup cell).
+
+    Args:
+        run_id: The MLflow run ID to resume, as printed after ``Logger`` init
+                or visible in the MLflow UI.
+
+    Returns:
+        An ``mlflow.ActiveRun`` context manager. Use as::
+
+            with resume_run("abc123") as run:
+                mlflow.log_metric("extra_metric", value)
+
+        Or assign it and manage context manually::
+
+            active_run = resume_run("abc123").__enter__()
+
+    Raises:
+        RuntimeError: If the run cannot be found at the configured tracking URI.
+    """
+    uri = get_mlflow_tracking_uri()
+    mlflow.set_tracking_uri(uri)
+    try:
+        return mlflow.start_run(run_id=run_id)
+    except mlflow.exceptions.MlflowException as e:
+        raise RuntimeError(
+            f"Could not resume MLflow run '{run_id}' at URI '{uri}'. Verify the run_id and that MLFLOW_TRACKING_URI is set correctly."
+        ) from e
+
+
 class Logger:
     """MLflow-focused logger for experiment tracking during training and evaluation.
 

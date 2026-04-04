@@ -1,4 +1,5 @@
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -8,6 +9,22 @@ from torch.utils.data import DataLoader
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel
+from mermaidseg.model.metric_policy import (
+    canonical_metric_name,
+    extract_metric_value,
+    metric_direction,
+)
+
+
+def _log_metric_dict(
+    logger: Logger | None,
+    prefix: str,
+    metric_results: dict[str, float | NDArray[np.float64]],
+    epoch: int,
+) -> None:
+    if logger is None or not metric_results:
+        return
+    logger.log({f"{prefix}/{name}": value for name, value in metric_results.items()}, step=epoch)
 
 
 def train_model(
@@ -20,8 +37,11 @@ def train_model(
     start_epoch: int = -1,
     end_epoch: int = -1,
     metric_of_interest: str = "accuracy",
+    early_stopping: bool = False,
+    early_stopping_patience: int = 10,
+    early_stopping_min_delta: float = 0.0,
 ):
-    """Trains a model using the provided data loaders and logs the results.
+    """Train a model, logging losses and metrics per epoch.
 
     Args:
         meta_model (MetaModel): The meta-model to be trained, which includes the model,
@@ -34,16 +54,24 @@ def train_model(
             Defaults to None. If provided, the model will be evaluated on the validation
             set after each epoch.
         test_loader (Optional[DataLoader], optional): DataLoader for the test dataset.
-            Defaults to None. If provided, the model will be evaluated on the test set
-            after each epoch.
+            Defaults to None. If provided, the model is evaluated periodically according
+            to ``logger.log_epochs`` (or every epoch when logger is None), plus the final epoch.
         logger (Optional[Logger], optional): Logger object for logging metrics and saving
             model checkpoints. Defaults to None.
         start_epoch (int, optional): The starting epoch for training. Defaults to -1, which
             will be set to 0 if not specified.
         end_epoch (int, optional): The ending epoch for training. Defaults to -1, which
             will be set based on the meta-model's training configuration if not specified.
-        metric_of_interest (str, optional): The primary metric used to determine the best
-            model during validation. Defaults to "accuracy".
+        metric_of_interest (str, optional): Metric used for checkpointing and early
+            stopping. Must resolve to one of ``loss``, ``accuracy``, ``miou``,
+            ``f1-score`` (aliases supported: ``mean_iou``, ``iou``, ``f1_score``,
+            ``f1``). Defaults to "accuracy".
+        early_stopping (bool, optional): Enables early stopping on validation
+            `metric_of_interest`. Defaults to False.
+        early_stopping_patience (int, optional): Number of consecutive epochs with no
+            improvement allowed before stopping early. Defaults to 10.
+        early_stopping_min_delta (float, optional): Minimum metric improvement required
+            to reset patience. Defaults to 0.0.
     Returns:
         dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
             ``train_metrics``, ``validation_metrics`` (if ``val_loader`` is provided), and
@@ -56,16 +84,25 @@ def train_model(
             ``train/total_training_sec`` (final epoch only).
     """
 
-    best_results = {"epoch": -1, metric_of_interest: 0}
+    metric_name = canonical_metric_name(metric_of_interest)
+    direction = metric_direction(metric_name)
+    best_metric_value = float("inf") if direction == "min" else float("-inf")
+    best_results = {"epoch": -1, metric_name: best_metric_value}
+    epochs_without_improvement = 0
+
+    if early_stopping and early_stopping_patience <= 0:
+        raise ValueError("early_stopping_patience must be > 0 when early_stopping is enabled.")
+    if early_stopping and val_loader is None:
+        raise ValueError("early_stopping requires val_loader.")
 
     if start_epoch == -1:
         start_epoch = 0
-        end_epoch = meta_model.training_kwargs.epochs
     if end_epoch == -1:
         end_epoch = start_epoch + meta_model.training_kwargs.epochs
     metrics_epoch = {}
     training_start = time.perf_counter()
     for epoch in range(start_epoch, end_epoch):
+        should_stop_early = False
         epoch_loss_dict = {}
         epoch_start_time = time.time()
         print(f"EPOCH: {epoch}")
@@ -79,17 +116,10 @@ def train_model(
         epoch_loss_dict["train/forward_sec"] = train_timing["forward_sec"]
         epoch_loss_dict["train/backward_sec"] = train_timing["backward_sec"]
         metrics_epoch[epoch] = {"train_metrics": train_metric_results}
-        if logger is not None and len(train_metric_results) > 0:
-            logger.log(
-                {f"train/{metric_name}": metric for metric_name, metric in train_metric_results.items()},
-                step=epoch,
-            )
+        _log_metric_dict(logger, "train", train_metric_results, epoch)
 
-        if hasattr(meta_model, "scheduler"):
-            meta_model.scheduler.step()
-            if logger is not None:
-                current_lr = meta_model.optimizer.param_groups[0]["lr"]
-                logger.log({"train/lr": current_lr}, step=epoch)
+        scheduler = getattr(meta_model, "scheduler", None)
+        metric_value: float | None = None
 
         if val_loader is not None:
             meta_model.model.eval()
@@ -101,19 +131,43 @@ def train_model(
 
             epoch_loss_dict["validation/loss"] = val_loss
             metrics_epoch[epoch]["validation_metrics"] = val_metric_results
-            if logger is not None and len(val_metric_results) > 0:
-                logger.log(
-                    {f"validation/{metric_name}": metric for metric_name, metric in val_metric_results.items()},
-                    step=epoch,
-                )
+            _log_metric_dict(logger, "validation", val_metric_results, epoch)
 
-                best_model_flag = best_results[metric_of_interest] < val_metric_results[metric_of_interest]
+            metric_value = extract_metric_value(metric_name, val_loss, val_metric_results)
+            if direction == "min":
+                improved = metric_value < (best_metric_value - early_stopping_min_delta)
+            else:
+                improved = metric_value > (best_metric_value + early_stopping_min_delta)
 
-                if best_model_flag:
-                    best_results[metric_of_interest] = val_metric_results[metric_of_interest]
-                    best_results["epoch"] = epoch
-
+            if improved:
+                best_metric_value = metric_value
+                best_results[metric_name] = metric_value
+                best_results["epoch"] = epoch
+                epochs_without_improvement = 0
+                if logger is not None:
                     logger.save_model_checkpoint(meta_model, epoch, val_metric_results)
+            else:
+                epochs_without_improvement += 1
+
+            if early_stopping and epochs_without_improvement >= early_stopping_patience:
+                print(f"Early stopping triggered: no '{metric_name}' improvement for {early_stopping_patience} epoch(s).")
+                should_stop_early = True
+
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                if metric_value is not None:
+                    scheduler.step(metric_value)
+                else:
+                    warnings.warn(
+                        "Skipping ReduceLROnPlateau step because no validation metric is available.",
+                        stacklevel=2,
+                    )
+            else:
+                scheduler.step()
+
+            if logger is not None:
+                current_lr = meta_model.optimizer.param_groups[0]["lr"]
+                logger.log({"train/lr": current_lr}, step=epoch)
 
         epoch_wall = time.time() - epoch_start_time
         epoch_loss_dict["train/time_taken"] = epoch_wall
@@ -127,13 +181,23 @@ def train_model(
         if epoch == end_epoch - 1:
             epoch_loss_dict["train/total_training_sec"] = time.perf_counter() - training_start
 
-        logger.log(
-            epoch_loss_dict,
-            step=epoch,
-        )
+        if logger is not None:
+            logger.log(
+                epoch_loss_dict,
+                step=epoch,
+            )
 
         metrics_epoch[epoch]["loss"] = epoch_loss_dict
-        if epoch % logger.log_epochs > 0 and epoch < (end_epoch - 1):
+        log_every = logger.log_epochs if logger is not None else 1
+        if log_every <= 0:
+            log_every = 1
+
+        if should_stop_early:
+            if test_loader is not None:
+                _ = evaluate_and_log(evaluator, test_loader, meta_model, logger, epoch, "test")
+            break
+
+        if epoch % log_every > 0 and epoch < (end_epoch - 1):
             continue
 
         if test_loader is not None:
@@ -150,18 +214,18 @@ def evaluate_and_log(
     evaluator: Evaluator,
     loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
     meta_model: MetaModel,
-    logger: Logger,
+    logger: Logger | None,
     epoch: int,
     split: str = "train",
 ) -> dict[str, float | NDArray[np.float64]]:
-    """Evaluates a model using the provided evaluator, logs the metrics, and logs image predictions.
+    """Evaluate a split and optionally log its metrics.
 
     Args:
         evaluator (Evaluator): The evaluator object used to compute metrics and evaluate the model.
         loader (DataLoader): A data loader providing the dataset for evaluation. The dataset can be
             either a tuple of tensors or a dictionary of tensors.
         meta_model (MetaModel): The model to be evaluated.
-        logger (Logger): The logger object used to log metrics and image predictions.
+        logger (Logger | None): Optional logger used to log metrics and image predictions.
         epoch (int): The current epoch number, used for logging purposes.
         split (str, optional): The dataset split being evaluated (e.g., "train", "validation", "test").
             Defaults to "train".
@@ -172,11 +236,7 @@ def evaluate_and_log(
         loader,
         meta_model,
     )
-    if logger is not None:
-        logger.log(
-            {f"{split}/{metric_name}": metric for metric_name, metric in metric_results.items()},
-            step=epoch,
-        )
+    _log_metric_dict(logger, split, metric_results, epoch)
     print(f"{split} metrics")
     print(metric_results)
 
