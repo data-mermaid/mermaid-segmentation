@@ -375,14 +375,14 @@ class MetaModel:
         self,
         val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
-    ) -> float:
-        """Calculates the validation loss of the model for one epoch using the provided data loader.
+    ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
+        """Calculate the validation loss and metrics for one epoch.
 
         Args:
-            val_loader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
-            A DataLoader object that provides batches of validation data.
+            val_loader: DataLoader providing batches of validation data.
+            evaluator: Optional evaluator for computing per-epoch metrics.
         Returns:
-            float: The average loss over all batches in the epoch.
+            A 2-tuple of (average_loss, metric_results).
         """
 
         running_loss = 0.0

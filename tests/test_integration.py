@@ -126,11 +126,16 @@ def test_metamodel_train_epoch_returns_loss_and_metrics(minimal_config, tiny_loa
     meta = make_meta_model(minimal_config, run_name="test-epoch")
     evaluator = EvaluatorSemanticSegmentation(num_classes=NUM_CLASSES, device="cpu")
 
-    loss, metrics = meta.train_epoch(tiny_loader, evaluator)
+    loss, metrics, timing = meta.train_epoch(tiny_loader, evaluator)
 
     assert isinstance(loss, float)
     assert loss >= 0
     assert isinstance(metrics, dict)
+    assert isinstance(timing, dict)
+    assert "data_loading_sec" in timing
+    assert "forward_sec" in timing
+    assert "backward_sec" in timing
+    assert "num_samples" in timing
 
 
 @pytest.mark.integration

@@ -225,20 +225,31 @@ def _run_training(args: argparse.Namespace) -> None:
         val_loader = [next(iter(val_loader))]
         test_loader = None
 
-    meta_model = MetaModel(cfg, device=device)
+    num_classes = dataset.num_classes
+    id2label = getattr(dataset, "id2label", None)
+    training_mode = cfg.get("training_mode", "standard")
+
+    meta_model = MetaModel(
+        run_name=cfg.run_name,
+        num_classes=num_classes,
+        model_kwargs=cfg.model,
+        training_kwargs=cfg.training,
+        training_mode=training_mode,
+        device=device,
+    )
     evaluator = EvaluatorSemanticSegmentation(
-        num_classes=meta_model.num_classes,
-        id2label=meta_model.id2label,
+        num_classes=num_classes,
+        device=device,
     )
 
     with Logger(
-        cfg_logger,
-        meta_model,
+        config=cfg_logger,
+        meta_model=meta_model,
         log_epochs=cfg_logger.logger.log_epochs,
         log_checkpoint=cfg_logger.logger.get("log_checkpoint", 50),
         checkpoint_dir=".",
         enable_mlflow=True,
-        id2label=meta_model.id2label,
+        id2label=id2label,
     ) as logger:
         if logger.mlflow_run_id is not None:
             logging.info("MLflow run_id: %s", logger.mlflow_run_id)

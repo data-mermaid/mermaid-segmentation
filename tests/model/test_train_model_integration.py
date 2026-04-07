@@ -50,7 +50,8 @@ class FakeMetaModel:
         self._val_idx = 0
 
     def train_epoch(self, _loader, _evaluator):
-        return self._train_loss, dict(self._train_metrics)
+        timing = {"data_loading_sec": 0.0, "forward_sec": 0.0, "backward_sec": 0.0, "num_samples": 2}
+        return self._train_loss, dict(self._train_metrics), timing
 
     def validation_epoch(self, _loader, _evaluator):
         idx = min(self._val_idx, len(self._val_metrics_seq) - 1)
