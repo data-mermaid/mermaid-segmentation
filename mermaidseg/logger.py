@@ -84,22 +84,11 @@ def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
 
 
 def mlflow_connect(uri: str | None = None) -> timedelta:
-    """Establish connection to MLflow tracking server and measure connection time.
+    """Set the MLflow tracking URI and verify connectivity.
 
-    Sets the MLflow tracking URI and tests the connection by performing a search
-    operation. Measures and returns the time taken to establish the connection.
-    Args:
-        uri: The MLflow tracking server URI to connect to. Defaults to auto-detected URI.
-    Returns:
-        timedelta: The time taken to establish the connection to the MLflow server.
-    Raises:
-        RuntimeError: If the connection to the MLflow tracking server fails due to
-                     max retries being exceeded, indicating the server may be down.
-        mlflow.exceptions.MlflowException: For other MLflow-related errors that
-                                         occur during connection or search operations.
-    Note:
-        The connection test may take a long time to fail unless
-        MLFLOW_HTTP_REQUEST_MAX_RETRIES is set to a low number.
+    Returns the time taken to establish the connection. The connection test
+    may take a long time to fail unless ``MLFLOW_HTTP_REQUEST_MAX_RETRIES``
+    is set to a low number.
     """
     if uri is None:
         uri = get_mlflow_tracking_uri()
@@ -169,16 +158,6 @@ class Logger:
 
     wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy
     ``WandbLogger`` delegate during the deprecation period.
-    Attributes:
-        config (dict): Configuration dictionary for the logger.
-        log_epochs (int): Frequency of logging metrics in terms of epochs.
-        log_checkpoint (int): Frequency of saving checkpoints.
-        checkpoint_dir (str): Directory to save checkpoints.
-    Methods:
-        __init__(config, meta_model, log_epochs=5, log_checkpoint=50, checkpoint_dir="."):
-            Initializes the Logger instance with the given parameters and sets up the MLflow logger.
-        log(log_dict, step):
-            Logs a dictionary of metrics to the MLflow logger at a specific step.
     """
 
     def __init__(
@@ -195,36 +174,6 @@ class Logger:
         save_local_checkpoints=None,
         save_local_models=None,
     ):
-        """Initializes the logger for tracking experiments and benchmarks.
-
-        Args:
-            config (dict, optional): Configuration dictionary for the experiment
-            meta_model: Meta model object containing model metadata.
-            log_epochs (int, optional): Frequency of logging epochs. Defaults to 5.
-            log_checkpoint (int, optional): Frequency of logging checkpoints. Defaults to 50.
-            checkpoint_dir (str, optional): Directory to save checkpoints. Defaults to ".".
-            enable_mlflow (bool, optional): Flag to enable or disable MLflow logging. Defaults to True.
-            enable_wandb (bool, optional): **Deprecated.** If True, creates an internal
-                ``WandbLogger`` delegate and emits a ``DeprecationWarning``. Defaults to False.
-            id2label (dict, optional): Mapping from class IDs to class names for per-class metrics. Defaults to None.
-            id2concept (dict, optional): Mapping from concept IDs to concept names for per-concept metrics. Defaults to None.
-            save_local_checkpoints (bool, optional): Whether to save checkpoint files to disk.
-                Reads from ``config.logger.save_local_checkpoints`` when None. Defaults to True.
-            save_local_models (bool, optional): Deprecated alias for
-                ``save_local_checkpoints``. When provided, it is treated as the same
-                switch so local checkpoint and local model logging stay aligned.
-        Attributes:
-            config (dict): Stores the configuration dictionary for the experiment.
-            log_epochs (int): Frequency of logging epochs.
-            log_checkpoint (int): Frequency of logging checkpoints.
-            checkpoint_dir (str): Directory to save checkpoints.
-            run_name (str): Name of the current run, derived from the meta model.
-            enable_mlflow (bool): Flag indicating whether MLflow logging is enabled.
-            id2label (dict): Mapping from class IDs to class names for unpacking array metrics.
-            id2concept (dict): Mapping from concept IDs to concept names for unpacking array metrics.
-            save_local_checkpoints (bool): Whether to persist checkpoint files locally.
-            save_local_models (bool): Mirrors ``save_local_checkpoints``.
-        """
 
         self.config = config
         self.log_epochs = log_epochs
@@ -386,19 +335,14 @@ class Logger:
             self._log_concept_matrix_artifact(concept_matrix)
 
     def _log_concept_matrix_artifact(self, concept_matrix: Any) -> None:
-        """Log concept matrix CSV artifact while ensuring temp file cleanup."""
-        concept_matrix_path = None
         try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp_file:
-                concept_matrix_path = tmp_file.name
-            concept_matrix.to_csv(concept_matrix_path)
-            mlflow.log_artifact(concept_matrix_path, artifact_path="metadata")
-            logger.info("Logged concept matrix to MLflow")
+            with tempfile.TemporaryDirectory() as tmpdir:
+                csv_path = os.path.join(tmpdir, "concept_matrix.csv")
+                concept_matrix.to_csv(csv_path)
+                mlflow.log_artifact(csv_path, artifact_path="metadata")
+                logger.info("Logged concept matrix to MLflow")
         except Exception as e:
             logger.warning("Failed to log concept matrix to MLflow: %s", e)
-        finally:
-            if concept_matrix_path and os.path.exists(concept_matrix_path):
-                os.remove(concept_matrix_path)
 
     def _unpack_metrics(self, metrics_dict: dict, key_prefix: str = "") -> dict[str, float]:
         """Unpack array-valued metrics into per-class/concept named scalars.
@@ -529,32 +473,43 @@ class Logger:
         return self._wandb_logger is not None
 
     def _ensure_active_run(self) -> bool:
-        """Guarantee an active MLflow run exists.
-
-        Returns True on success.
-        """
+        """Guarantee an active MLflow run exists, resuming the original when possible."""
         if not self._mlflow_active:
             return False
         try:
-            if mlflow.active_run() is None:
-                logger.warning("No active MLflow run, starting new run: %s", self.run_name)
-                run = mlflow.start_run(
-                    run_name=self.run_name,
-                    log_system_metrics=self._log_system_metrics,
-                )
-                self.mlflow_run_id = run.info.run_id
+            if mlflow.active_run() is not None:
+                return True
+
+            # Try to resume the original run so metrics stay in one place.
+            original_run_id = self.mlflow_run_id
+            if original_run_id is not None:
+                try:
+                    run = mlflow.start_run(
+                        run_id=original_run_id,
+                        log_system_metrics=self._log_system_metrics,
+                    )
+                    logger.info("Resumed MLflow run %s", original_run_id)
+                    return True
+                except Exception:
+                    logger.warning(
+                        "Could not resume MLflow run %s — starting a new run",
+                        original_run_id,
+                    )
+
+            run = mlflow.start_run(
+                run_name=self.run_name,
+                log_system_metrics=self._log_system_metrics,
+            )
+            self.mlflow_run_id = run.info.run_id
+            if original_run_id is not None:
+                mlflow.set_tag("resumed_from_run_id", original_run_id)
+            logger.warning("Started new MLflow run %s (was %s)", self.mlflow_run_id, original_run_id)
             return True
         except Exception as e:
             logger.warning("Failed to ensure active MLflow run: %s", e)
             return False
 
     def log(self, log_dict, step):
-        """Logs the provided dictionary of metrics along with the current step.
-
-        Args:
-            log_dict (Dict[str, Any]): A dictionary containing the log data to be recorded.
-            step (int): The current step or iteration associated with the log entry.
-        """
         if self._ensure_active_run():
             try:
                 metrics_to_log = self._unpack_metrics(log_dict)
@@ -572,41 +527,17 @@ class Logger:
         epoch: int,
         metrics_dict: dict[str, float | np.ndarray],
     ):
-        """
-        Saves a model checkpoint to a specified directory and logs to MLflow.
-        Args:
-            meta_model_run (MetaModel): An instance of the MetaModel class containing
-                the model, optimizer, and optionally a scheduler.
-            epoch (int): The current epoch number.
-            metrics_dict (Dict[str, float]): A dictionary containing metrics to be saved
-                with the checkpoint.
-        The checkpoint includes:
-            - Configuration settings (`self.config`).
-            - Model state dictionary (`model_state_dict`).
-            - Optimizer state dictionary (`optimizer_state_dict`).
-            - Scheduler state dictionary (`scheduler_state_dict`), if available.
-            - Current epoch number.
-            - Timestamp of the checkpoint creation.
-            - Metrics dictionary.
-        Checkpoints are saved in the directory:
-            `{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/`
-        Naming convention for the checkpoint file:
-            - ``model_epoch{epoch}``
-        The directory structure is created if it does not already exist.
-        Note:
-            The model is moved to the CPU before saving its state dictionary.
-            Local checkpoint saving is controlled by ``save_local_checkpoints``.
-            MLflow logging is independent of local persistence.
+        """Save a model checkpoint locally and/or to MLflow.
 
-            **Serialization warning:** The MLflow ``best-model`` artifact is serialized
-            with cloudpickle (``export_model=False``). Loading it executes arbitrary code
-            and requires a trusted, matching Python environment. For external distribution
-            or public sharing, use ``save_safetensors_for_publish`` instead.
+        Local persistence is controlled by ``save_local_checkpoints``.
+        MLflow logging is independent of local persistence.
 
-            **Resume-training note:** Checkpoint files are named ``model_epoch{epoch}``.
-            Resuming training from a previous epoch will overwrite the existing file with
-            the same epoch number. Use a different ``checkpoint_dir`` or ``run_name``
-            when resuming to avoid silently overwriting prior checkpoints.
+        The MLflow ``best-model`` artifact uses pickle (``torch.save``).
+        For external distribution, use ``save_safetensors_for_publish`` instead.
+
+        Checkpoint files are named ``model_epoch{epoch}`` — resuming from a
+        previous epoch will overwrite the file unless ``checkpoint_dir`` or
+        ``run_name`` differs.
         """
         timestamp = time.strftime("%Y%m%d%H%M%S")
 
@@ -625,7 +556,6 @@ class Logger:
 
         model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
 
-        # --- Local checkpoint persistence (optional) ---
         local_checkpoint_saved = False
         if self.save_local_checkpoints:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
@@ -642,7 +572,6 @@ class Logger:
         else:
             logger.info("Local checkpoint saving disabled, skipping disk write")
 
-        # --- MLflow artifact & model logging ---
         if self._ensure_active_run():
             try:
                 if local_checkpoint_saved:
@@ -718,30 +647,13 @@ class Logger:
         metrics_dict: dict[str, float | np.ndarray],
         artifact_path: str = "publish",
     ):
-        """Export model weights as SafeTensors for secure sharing/publishing.
-
-        SafeTensors format provides:
-        - Zero-copy memory mapping for faster loading
-        - No arbitrary code execution (unlike pickle)
-        - Fixed tensor shapes (prevents shape attacks)
-        - Limited dtype support (prevents dtype confusion)
-
-        Use this when publishing models to public repositories or sharing
-        with external collaborators.
-
-        Args:
-            meta_model_run: MetaModel containing the model to export
-            epoch: Current training epoch
-            metrics_dict: Dictionary of metrics to include in metadata
-            artifact_path: MLflow artifact path for the output
-        """
+        """Export model weights as SafeTensors for secure, pickle-free sharing."""
 
         if not self._ensure_active_run():
             logger.warning("Cannot save safetensors: no active MLflow run")
             return
 
         try:
-            # Extract state dict and prepare metadata
             state_dict = meta_model_run.model.state_dict()
             metadata = {
                 "epoch": str(epoch),
@@ -750,14 +662,12 @@ class Logger:
                 **{k: str(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)},
             }
 
-            # Save to temp file then log as artifact
             with tempfile.TemporaryDirectory() as tmpdir:
                 safetensors_path = os.path.join(tmpdir, "model_weights.safetensors")
                 metadata_path = os.path.join(tmpdir, "metadata.json")
 
                 save_safetensors(state_dict, safetensors_path, metadata=metadata)
 
-                # Also save human-readable metadata
                 with open(metadata_path, "w") as f:
                     json.dump(metadata, f, indent=2)
 
@@ -788,11 +698,9 @@ class Logger:
             self._wandb_logger.end_run()
 
     def __enter__(self):
-        """Context manager entry."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - ensures runs are properly closed."""
         self.end_run()
         return False
 

@@ -1,3 +1,4 @@
+import logging
 import time
 import warnings
 
@@ -64,8 +65,7 @@ def train_model(
             will be set based on the meta-model's training configuration if not specified.
         metric_of_interest (str, optional): Metric used for checkpointing and early
             stopping. Must resolve to one of ``loss``, ``accuracy``, ``miou``,
-            ``f1-score`` (aliases supported: ``mean_iou``, ``iou``, ``f1_score``,
-            ``f1``). Defaults to "accuracy".
+            ``f1-score``. Defaults to "accuracy".
         early_stopping (bool, optional): Enables early stopping on validation
             `metric_of_interest`. Defaults to False.
         early_stopping_patience (int, optional): Number of consecutive epochs with no
@@ -105,12 +105,12 @@ def train_model(
         should_stop_early = False
         epoch_loss_dict = {}
         epoch_start_time = time.time()
-        print(f"EPOCH: {epoch}")
+        logging.info("EPOCH: %d", epoch)
 
         meta_model.model.train(True)
         train_loss, train_metric_results, train_timing = meta_model.train_epoch(train_loader, evaluator)
-        print(f"LOSS train {train_loss}")
-        print(f"TRAIN METRICS: {train_metric_results}")
+        logging.info("LOSS train %s", train_loss)
+        logging.info("TRAIN METRICS: %s", train_metric_results)
         epoch_loss_dict["train/loss"] = train_loss
         epoch_loss_dict["train/data_loading_sec"] = train_timing["data_loading_sec"]
         epoch_loss_dict["train/forward_sec"] = train_timing["forward_sec"]
@@ -126,8 +126,8 @@ def train_model(
             val_start = time.time()
             val_loss, val_metric_results = meta_model.validation_epoch(val_loader, evaluator)
             epoch_loss_dict["validation/time_taken"] = time.time() - val_start
-            print(f"LOSS valid {val_loss}")
-            print(f"VALID METRICS: {val_metric_results}")
+            logging.info("LOSS valid %s", val_loss)
+            logging.info("VALID METRICS: %s", val_metric_results)
 
             epoch_loss_dict["validation/loss"] = val_loss
             metrics_epoch[epoch]["validation_metrics"] = val_metric_results
@@ -150,7 +150,7 @@ def train_model(
                 epochs_without_improvement += 1
 
             if early_stopping and epochs_without_improvement >= early_stopping_patience:
-                print(f"Early stopping triggered: no '{metric_name}' improvement for {early_stopping_patience} epoch(s).")
+                logging.info("Early stopping triggered: no '%s' improvement for %d epoch(s).", metric_name, early_stopping_patience)
                 should_stop_early = True
 
         if scheduler is not None:
@@ -188,9 +188,7 @@ def train_model(
             )
 
         metrics_epoch[epoch]["loss"] = epoch_loss_dict
-        log_every = logger.log_epochs if logger is not None else 1
-        if log_every <= 0:
-            log_every = 1
+        log_every = max(logger.log_epochs, 1) if logger is not None else 1
 
         if should_stop_early:
             if test_loader is not None:
@@ -237,15 +235,6 @@ def evaluate_and_log(
         meta_model,
     )
     _log_metric_dict(logger, split, metric_results, epoch)
-    print(f"{split} metrics")
-    print(metric_results)
-
-    # logger.log_image_predictions(
-    #     *evaluator.evaluate_image(
-    #         loader, meta_model, epoch=epoch, log_epochs=logger.log_epochs
-    #     ),
-    #     epoch,
-    #     split=split,
-    # )
+    logging.info("%s metrics: %s", split, metric_results)
 
     return metric_results

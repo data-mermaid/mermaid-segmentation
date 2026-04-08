@@ -192,7 +192,7 @@ class TestLoggerInit:
 class TestEnsureActiveRun:
     """Test mid-session run recovery when the MLflow run is dropped."""
 
-    def test_recovers_after_run_externally_ended(self, tmp_mlflow_uri, make_config):
+    def test_resumes_original_run_after_externally_ended(self, tmp_mlflow_uri, make_config):
         meta = FakeMetaModel()
         lgr = Logger(config=make_config(), meta_model=meta)
         original_run_id = lgr.mlflow_run_id
@@ -203,7 +203,19 @@ class TestEnsureActiveRun:
 
         lgr.log({"loss": 0.5}, step=1)
         assert mlflow.active_run() is not None
-        assert lgr.mlflow_run_id != original_run_id
+        assert lgr.mlflow_run_id == original_run_id
+
+    def test_falls_back_to_new_run_when_resume_fails(self, tmp_mlflow_uri, make_config):
+        meta = FakeMetaModel()
+        lgr = Logger(config=make_config(), meta_model=meta)
+        mlflow.end_run()
+
+        lgr.mlflow_run_id = "nonexistent_run_id_12345"
+        lgr.log({"loss": 0.5}, step=1)
+        assert mlflow.active_run() is not None
+        assert lgr.mlflow_run_id != "nonexistent_run_id_12345"
+        tags = mlflow.get_run(lgr.mlflow_run_id).data.tags
+        assert tags.get("resumed_from_run_id") == "nonexistent_run_id_12345"
 
     def test_returns_false_when_mlflow_disabled(self, tmp_path, make_config, monkeypatch):
         monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
