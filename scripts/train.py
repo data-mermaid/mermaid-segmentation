@@ -201,6 +201,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=sorted(SUPPORTED_METRIC_NAMES),
         help="metric used for checkpointing and early stopping",
     )
+    base.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="random seed for reproducibility",
+    )
     return base
 
 
@@ -256,10 +262,11 @@ def _run_training(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info("Device: %s", device)
 
-    seed = 42
+    seed = args.seed
     torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    logging.info("Seed: %d", seed)
 
     transforms = {split: A.Compose([getattr(A, name)(**params) for name, params in augs.items()]) for split, augs in cfg.augmentation.items()}
 
