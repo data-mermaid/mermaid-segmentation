@@ -19,7 +19,23 @@
 set -eux
 trap 'echo "[LCC ERROR] Failed at line $LINENO — check ~/lcc-setup.log or CloudWatch /aws/sagemaker/studio" >&2' ERR
 
-PROJECT_DIR="$HOME/mermaid-segmentation"
+if [ -z "${PROJECT_DIR:-}" ]; then
+    for candidate in \
+        "$HOME/mermaid-segmentation" \
+        "$HOME/SageMaker/mermaid-segmentation" \
+        "$PWD/mermaid-segmentation"; do
+        if [ -f "$candidate/pyproject.toml" ]; then
+            PROJECT_DIR="$candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "${PROJECT_DIR:-}" ] || [ ! -f "$PROJECT_DIR/.jupyter/jupyter_lab_config.py" ]; then
+    echo "[LCC] Could not determine PROJECT_DIR. Set PROJECT_DIR to the repo path before running."
+    exit 1
+fi
+
 LOG_FILE="$HOME/lcc-setup.log"
 
 # Redirect all subsequent output to the persistent EFS log.
@@ -42,31 +58,6 @@ mkdir -p "$HOME/.jupyter"
 cp "$PROJECT_DIR/.jupyter/jupyter_lab_config.py" "$HOME/.jupyter/jupyter_lab_config.py"
 echo "[LCC] Jupyter config deployed to ~/.jupyter/"
 
-# Set the SageMaker space idle timeout to 60 minutes.
-# Studio spaces use native AppLifecycleManagement — no autostop.py cron needed.
-# (The AWS autostop.py sample targets classic notebook instances, not Studio spaces.)
-# Requires sagemaker:UpdateSpace on the execution role; fails silently if absent.
-METADATA=/opt/ml/metadata/resource-metadata.json
-if [ -f "$METADATA" ]; then
-    DOMAIN_ID=$(python3 -c "import json; print(json.load(open('$METADATA'))['DomainId'])")
-    SPACE_NAME=$(python3 -c "import json; print(json.load(open('$METADATA'))['SpaceName'])")
-    AWS_REGION=$(python3 -c "import json; d=json.load(open('$METADATA')); print(d.get('DomainRegion', 'us-east-1'))" 2>/dev/null \
-        || echo "${AWS_DEFAULT_REGION:-us-east-1}")
-    aws sagemaker update-space \
-        --region "$AWS_REGION" \
-        --domain-id "$DOMAIN_ID" \
-        --space-name "$SPACE_NAME" \
-        --space-settings '{
-          "JupyterLabAppSettings": {
-            "AppLifecycleManagement": {
-              "IdleSettings": {"IdleTimeoutInMinutes": 60}
-            }
-          }
-        }' \
-        && echo "[LCC] Space idle timeout set to 60 min" \
-        || echo "[LCC] Could not set idle timeout — check sagemaker:UpdateSpace permission"
-fi
-
 # Background the slow work so the LCC exits within the 5-minute limit.
 #
 # First run:  uv sync ~60s + ipykernel install ~10s = ~70s total (fine in background).
@@ -79,9 +70,9 @@ nohup bash -c "
   set -euo pipefail
   export PATH=\"$HOME/.local/bin:\$PATH\"
   cd '$PROJECT_DIR'
-  echo '[LCC bg] Starting uv sync \$(date)'
+  echo \"[LCC bg] Starting uv sync \$(date)\"
   uv sync --group notebooks --locked
-  echo '[LCC bg] uv sync complete \$(date)'
+  echo \"[LCC bg] uv sync complete \$(date)\"
   uv run python -m ipykernel install \
       --user \
       --name=mermaid-seg \
@@ -92,7 +83,7 @@ import mermaidseg, mlflow
 v = getattr(mermaidseg, '__version__', 'dev')
 print(f'[LCC bg] OK: mermaidseg={v}, mlflow={mlflow.__version__}')
 \"
-  echo '[LCC bg] ===== Sync complete \$(date) ====='
+  echo \"[LCC bg] ===== Sync complete \$(date) =====\"
 " >> "$LOG_FILE" 2>&1 &
 
 echo "[LCC] Background job PID: $!"
