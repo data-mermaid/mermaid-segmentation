@@ -1,9 +1,10 @@
 """
 Serialization strategy:
 - Training checkpoints: torch.save (pickle) — full state for resume.
-- MLflow best-model logging: cloudpickle via mlflow.pytorch.log_model(export_model=False).
-  TorchScript (export_model=True) is incompatible with ViT/DINOv2 due to dynamic shapes
-  and dataclass outputs. Requires a trusted environment to load — do not expose publicly.
+- MLflow best-model logging: torch.save to a temp dir then mlflow.log_artifact.
+  We avoid mlflow.pytorch.log_model because its internal session flush triggers
+  UniqueViolation on the SageMaker managed MLflow PostgreSQL backend.
+  Load with torch.load('model.pt').
 - Published models: SafeTensors — zero-copy, no arbitrary code execution.
 """
 
@@ -656,35 +657,38 @@ class Logger:
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
 
                 scalar_metrics = {k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)}
-                try:
-                    # Drain the async metrics queue before log_model. On the
-                    # SageMaker PostgreSQL backend, log_model triggers an
-                    # internal batch flush that re-sends already-committed
-                    # metrics, causing UniqueViolation on metric_pk.
-                    if hasattr(mlflow, "flush_async_logging"):
-                        mlflow.flush_async_logging()
 
-                    mlflow.pytorch.log_model(
-                        pytorch_model=meta_model_run.model,
-                        name="best-model",
-                        export_model=False,
-                        metadata={
-                            "epoch": epoch,
-                            "timestamp": timestamp,
-                            "metrics": scalar_metrics,
-                            "run_name": meta_model_run.run_name,
-                            "serialization": "pickle",
-                        },
-                    )
-                    mlflow.set_tag("best_model_logged", "true")
-                except Exception as export_err:
-                    export_error = str(export_err) or f"{type(export_err).__name__} (no message)"
-                    logger.warning(
-                        "Model logging failed: %s",
-                        export_error,
-                    )
-                    mlflow.set_tag("best_model_logged", "false")
-                    mlflow.set_tag("best_model_log_error", export_error[:500])
+                # Log best model as a plain artifact instead of
+                # mlflow.pytorch.log_model() which triggers an internal
+                # PostgreSQL session flush on the SageMaker managed MLflow
+                # backend, re-inserting already-committed metrics and
+                # causing UniqueViolation on metric_pk.
+                if local_checkpoint_saved:
+                    mlflow.log_artifact(model_path, artifact_path="best-model")
+                else:
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        best_pt = os.path.join(tmpdir, "model.pt")
+                        torch.save(checkpoint, best_pt)  # type: ignore
+                        mlflow.log_artifact(best_pt, artifact_path="best-model")
+
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    metadata_path = os.path.join(tmpdir, "metadata.json")
+                    with open(metadata_path, "w") as f:
+                        json.dump(
+                            {
+                                "epoch": epoch,
+                                "timestamp": timestamp,
+                                "metrics": scalar_metrics,
+                                "run_name": meta_model_run.run_name,
+                                "model_class": meta_model_run.model.__class__.__name__,
+                                "serialization": "pickle",
+                                "load_with": "ckpt = torch.load('model.pt'); model.load_state_dict(ckpt['model_state_dict'])",
+                            },
+                            f,
+                            indent=2,
+                        )
+                    mlflow.log_artifact(metadata_path, artifact_path="best-model")
+                mlflow.set_tag("best_model_logged", "true")
                 mlflow.set_tag("best_model_epoch", str(epoch))
                 mlflow.log_metrics(
                     {f"best_model/{k}": v for k, v in scalar_metrics.items()},
@@ -694,6 +698,9 @@ class Logger:
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
             except Exception as e:
                 logger.warning("Failed to log checkpoint/model to MLflow: %s", e)
+                with contextlib.suppress(Exception):
+                    mlflow.set_tag("best_model_logged", "false")
+                    mlflow.set_tag("best_model_log_error", str(e)[:500])
 
         if self._wandb_logger is not None:
             self._wandb_logger.save_checkpoint(

@@ -389,9 +389,39 @@ class TestSaveModelCheckpoint:
             checkpoint_dir=str(tmp_path),
             log_checkpoint=50,
         )
-        with patch("mermaidseg.logger.mlflow.pytorch.log_model") as mock_log_model:
+        with patch("mermaidseg.logger.mlflow.log_artifact") as mock_log_artifact:
             lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
-        mock_log_model.assert_called_once()
+        best_model_calls = [c for c in mock_log_artifact.call_args_list if "best-model" in str(c)]
+        assert len(best_model_calls) >= 1
+
+    def test_checkpoint_metrics_logged(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="sync-metrics")
+        config = make_config(logger={"save_local_checkpoints": False})
+        lgr = Logger(
+            config=config,
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+            log_checkpoint=50,
+        )
+        with patch("mermaidseg.logger.mlflow.log_metrics") as mock_log_metrics:
+            lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
+
+        checkpoint_calls = [call for call in mock_log_metrics.call_args_list if any(k.startswith("checkpoint/") for k in call.args[0])]
+        assert checkpoint_calls, "Expected at least one checkpoint metric logging call"
+
+    def test_model_logging_sets_best_model_tag(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="verify-model-tag")
+        config = make_config(logger={"save_local_checkpoints": False})
+        lgr = Logger(
+            config=config,
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+            log_checkpoint=50,
+        )
+        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
+        run = mlflow.get_run(lgr.mlflow_run_id)
+        assert run.data.tags["best_model_logged"] == "true"
+        assert run.data.tags["best_model_epoch"] == "50"
 
     def test_wandb_does_not_write_local_checkpoint_when_local_disabled(self, tmp_path, make_config, monkeypatch):
         monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
