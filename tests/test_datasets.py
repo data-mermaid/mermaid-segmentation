@@ -178,3 +178,47 @@ def test_base_dataset_getitem_skips_and_logs_on_read_failure(single_image_annota
     assert result == (None, None)
     assert "img1" in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+def test_base_dataset_records_failure_context(single_image_annotations):
+    df_annotations, df_images = single_image_annotations
+    ds = _AlwaysFailDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+        split="train",
+    )
+
+    _ = ds[0]
+    failures = ds.load_failures_df()
+    assert len(failures) == 1
+
+    row = failures.iloc[0]
+    assert row["dataset_class"] == "_AlwaysFailDataset"
+    assert row["split"] == "train"
+    assert row["image_id"] == "img1"
+    assert row["region_name"] == "r1"
+    assert row["annotation_count"] == 1
+    assert row["annotation_labels"] == "Coral"
+    assert not row["missing_annotations"]
+    assert row["error_type"] == "RuntimeError"
+    assert "simulated read failure" in row["error_message"]
+
+
+def test_base_dataset_saves_failure_report_as_parquet(single_image_annotations, tmp_path):
+    df_annotations, df_images = single_image_annotations
+    ds = _AlwaysFailDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+    )
+
+    _ = ds[0]
+    output_path = tmp_path / "load_failures.parquet"
+    saved_path = ds.save_load_failures(output_path)
+
+    assert saved_path == output_path
+    assert output_path.exists()
+    saved_df = pd.read_parquet(output_path)
+    assert len(saved_df) == 1
+    assert saved_df.iloc[0]["image_id"] == "img1"

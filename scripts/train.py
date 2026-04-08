@@ -31,6 +31,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -43,7 +44,7 @@ from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
 from mermaidseg.model.meta import MetaModel
-from mermaidseg.model.metric_policy import METRIC_POLICY
+from mermaidseg.model.metric_policy import SUPPORTED_METRIC_NAMES
 from mermaidseg.model.train import train_model
 
 _METADATA = Path("/opt/ml/metadata/resource-metadata.json")
@@ -80,9 +81,11 @@ def _write_pid(pid_file: Path) -> None:
 
 
 def _stop_current_space() -> None:
-    """Stop the SageMaker space immediately.
+    """Stop the SageMaker JupyterLab app via delete_app.
 
-    No-op outside SageMaker.
+    SageMaker has no ``stop_space`` API.  The documented way to stop a
+    running JupyterLab app is ``delete_app`` — this terminates the
+    instance while keeping EFS data intact.  No-op outside SageMaker.
     """
     if not _METADATA.exists():
         logging.info("Not running on SageMaker — skipping auto-shutdown")
@@ -92,14 +95,56 @@ def _stop_current_space() -> None:
 
     info = json.loads(_METADATA.read_text())
     try:
-        boto3.client("sagemaker").stop_space(DomainId=info["DomainId"], SpaceName=info["SpaceName"])
+        boto3.client("sagemaker").delete_app(
+            DomainId=info["DomainId"],
+            SpaceName=info["SpaceName"],
+            AppType="JupyterLab",
+            AppName=info.get("AppName", "default"),
+        )
         logging.info(
             "Space shutdown initiated (DomainId=%s, SpaceName=%s)",
             info["DomainId"],
             info["SpaceName"],
         )
     except botocore.exceptions.ClientError as e:
-        logging.warning("Auto-shutdown failed (check sagemaker:StopSpace permission): %s", e)
+        logging.warning("Auto-shutdown failed (check sagemaker:DeleteApp permission): %s", e)
+
+
+def _batch_is_non_empty(batch: object) -> bool:
+    if not isinstance(batch, (tuple, list)) or len(batch) < 2:
+        return True
+    images, labels = batch[0], batch[1]
+    if isinstance(images, torch.Tensor) and images.numel() == 0:
+        return False
+    return not (isinstance(labels, torch.Tensor) and labels.numel() == 0)
+
+
+def _take_first_non_empty_batch(loader: object, split: str) -> tuple[torch.Tensor, torch.Tensor]:
+    for batch in loader:
+        if _batch_is_non_empty(batch):
+            return batch
+    raise RuntimeError(f"Dry run could not find a non-empty batch for split '{split}'. Check data access credentials and dataset availability.")
+
+
+def _save_failure_report_if_available(
+    dataset: object,
+    log_dir: Path,
+    explicit_output_path: str | None = None,
+) -> Path | None:
+    num_failures = getattr(dataset, "num_load_failures", None)
+    save_failures = getattr(dataset, "save_load_failures", None)
+    if not callable(num_failures) or not callable(save_failures):
+        return None
+    n_failures = int(num_failures())
+    if n_failures == 0:
+        return None
+
+    report_path = (
+        Path(explicit_output_path) if explicit_output_path else (log_dir / f"data_load_failures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet")
+    )
+    saved_path = Path(save_failures(report_path))
+    logging.warning("Saved %d data-load failure records to %s", n_failures, saved_path)
+    return saved_path
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -127,6 +172,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="directory for log files and PID file",
     )
     base.add_argument(
+        "--failure-report-path",
+        type=str,
+        default=None,
+        help="optional parquet path for data-load failure report (default: logs/data_load_failures_<timestamp>.parquet)",
+    )
+    base.add_argument(
         "--early-stopping",
         action="store_true",
         help="enable early stopping on validation metric_of_interest",
@@ -147,7 +198,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--metric-of-interest",
         type=str,
         default="accuracy",
-        choices=sorted(METRIC_POLICY),
+        choices=sorted(SUPPORTED_METRIC_NAMES),
         help="metric used for checkpointing and early stopping",
     )
     return base
@@ -178,6 +229,9 @@ def main() -> None:
         _cleanup_pid(pid_file)
 
     if args.auto_shutdown:
+        _SHUTDOWN_GRACE_SEC = 5
+        logging.info("Waiting %ds for MLflow flush before shutdown...", _SHUTDOWN_GRACE_SEC)
+        time.sleep(_SHUTDOWN_GRACE_SEC)
         _stop_current_space()
 
 
@@ -204,17 +258,29 @@ def _run_training(args: argparse.Namespace) -> None:
 
     seed = 42
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
-    transforms = {
-        split: A.Compose([getattr(A, name)(**params) for name, params in augmentations.items()]) for split, augmentations in cfg.augmentation.items()
-    }
+    transforms = {split: A.Compose([getattr(A, name)(**params) for name, params in augs.items()]) for split, augs in cfg.augmentation.items()}
 
     dataset_name = cfg.data.pop("name", None)
     batch_size = cfg.data.pop("batch_size", 8)
 
     dataset = getattr(mermaidseg.datasets.dataset, dataset_name)(transform=transforms["train"], **cfg.data)
     logging.info("Dataset: %s (%d samples)", dataset_name, len(dataset))
+    collate_fn = getattr(dataset, "collate_fn", None)
+    report_written = False
+
+    def _write_failure_report_once() -> None:
+        nonlocal report_written
+        if report_written:
+            return
+        path = _save_failure_report_if_available(
+            dataset=dataset,
+            log_dir=Path(args.log_dir),
+            explicit_output_path=args.failure_report_path,
+        )
+        report_written = path is not None
 
     total = len(dataset)
     train_size = int(0.7 * total)
@@ -228,9 +294,10 @@ def _run_training(args: argparse.Namespace) -> None:
         batch_size=batch_size,
         shuffle=True,
         drop_last=True,
+        collate_fn=collate_fn,
     )
-    val_loader = DataLoader(val_ds, batch_size=batch_size)
-    test_loader = DataLoader(test_ds, batch_size=batch_size)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, collate_fn=collate_fn)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, collate_fn=collate_fn)
 
     if args.dry_run:
         max_dry_epochs = 3
@@ -239,8 +306,12 @@ def _run_training(args: argparse.Namespace) -> None:
             cfg.training.epochs = max_dry_epochs
             logging.info("Dry run: capping epochs %d → %d", actual_epochs, max_dry_epochs)
         logging.info("Dry run: limiting to 1 batch per epoch")
-        train_loader = [next(iter(train_loader))]
-        val_loader = [next(iter(val_loader))]
+        try:
+            train_loader = [_take_first_non_empty_batch(train_loader, "train")]
+            val_loader = [_take_first_non_empty_batch(val_loader, "val")]
+        except RuntimeError:
+            _write_failure_report_once()
+            raise
         test_loader = None
 
     num_classes = dataset.num_classes
@@ -272,18 +343,21 @@ def _run_training(args: argparse.Namespace) -> None:
         if logger.mlflow_run_id is not None:
             logging.info("MLflow run_id: %s", logger.mlflow_run_id)
 
-        train_model(
-            meta_model=meta_model,
-            evaluator=evaluator,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            test_loader=test_loader,
-            logger=logger,
-            metric_of_interest=args.metric_of_interest,
-            early_stopping=args.early_stopping,
-            early_stopping_patience=args.early_stopping_patience,
-            early_stopping_min_delta=args.early_stopping_min_delta,
-        )
+        try:
+            train_model(
+                meta_model=meta_model,
+                evaluator=evaluator,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                test_loader=test_loader,
+                logger=logger,
+                metric_of_interest=args.metric_of_interest,
+                early_stopping=args.early_stopping,
+                early_stopping_patience=args.early_stopping_patience,
+                early_stopping_min_delta=args.early_stopping_min_delta,
+            )
+        finally:
+            _write_failure_report_once()
         logging.info("Training complete")
 
 

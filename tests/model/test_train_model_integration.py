@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
 import mermaidseg.model.train as train_module
 from mermaidseg.model.train import train_model
-from scripts.train import _build_parser
+from scripts.train import (
+    _build_parser,
+    _configure_third_party_loggers,
+    _save_failure_report_if_available,
+    _take_first_non_empty_batch,
+)
 
 
 class StubLogger:
@@ -287,3 +295,59 @@ def test_cli_metric_of_interest_argument_is_supported() -> None:
                 "precision",
             ]
         )
+
+
+def test_configure_third_party_loggers_suppresses_botocore_token_info() -> None:
+    botocore_logger = logging.getLogger("botocore.tokens")
+    original_level = botocore_logger.level
+    try:
+        botocore_logger.setLevel(logging.INFO)
+        _configure_third_party_loggers()
+        assert botocore_logger.level == logging.WARNING
+    finally:
+        botocore_logger.setLevel(original_level)
+
+
+def test_take_first_non_empty_batch_skips_empty_batch() -> None:
+    empty = (torch.tensor([]), torch.tensor([]))
+    valid = (
+        torch.zeros(1, 3, 8, 8),
+        torch.zeros(1, 8, 8, dtype=torch.long),
+    )
+    picked = _take_first_non_empty_batch([empty, valid], "train")
+    assert picked[0].shape[0] == 1
+
+
+def test_take_first_non_empty_batch_raises_if_none_found() -> None:
+    with pytest.raises(RuntimeError, match="non-empty batch"):
+        _take_first_non_empty_batch([(torch.tensor([]), torch.tensor([]))], "train")
+
+
+def test_save_failure_report_if_available_returns_none_without_failures(tmp_path: Path) -> None:
+    class _Dataset:
+        @staticmethod
+        def num_load_failures() -> int:
+            return 0
+
+        @staticmethod
+        def save_load_failures(_path):
+            raise AssertionError("save_load_failures should not be called when there are no failures")
+
+    assert _save_failure_report_if_available(_Dataset(), tmp_path) is None
+
+
+def test_save_failure_report_if_available_writes_parquet(tmp_path: Path) -> None:
+    class _Dataset:
+        @staticmethod
+        def num_load_failures() -> int:
+            return 2
+
+        @staticmethod
+        def save_load_failures(path):
+            pd.DataFrame([{"image_id": "a"}, {"image_id": "b"}]).to_parquet(path, index=False)
+            return Path(path)
+
+    report_path = _save_failure_report_if_available(_Dataset(), tmp_path)
+    assert report_path is not None
+    assert report_path.exists()
+    assert report_path.suffix == ".parquet"
