@@ -144,7 +144,7 @@ def resume_run(run_id: str) -> mlflow.ActiveRun:
         RuntimeError: If the run cannot be found at the configured tracking URI.
     """
     uri = get_mlflow_tracking_uri()
-    mlflow.set_tracking_uri(uri)
+    mlflow_connect(uri)
     try:
         return mlflow.start_run(run_id=run_id)
     except mlflow.exceptions.MlflowException as e:
@@ -424,20 +424,23 @@ class Logger:
         try:
             git_branch = "unknown"
             git_sha = "unknown"
-            branch_result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True,
-                text=True,
-            )
-            if branch_result.returncode == 0:
-                git_branch = branch_result.stdout.strip()
-            sha_result = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
-                capture_output=True,
-                text=True,
-            )
-            if sha_result.returncode == 0:
-                git_sha = sha_result.stdout.strip()
+            try:
+                branch_result = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                )
+                if branch_result.returncode == 0:
+                    git_branch = branch_result.stdout.strip()
+                sha_result = subprocess.run(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                )
+                if sha_result.returncode == 0:
+                    git_sha = sha_result.stdout.strip()
+            except FileNotFoundError:
+                logger.debug("git not found on PATH — benchmark git tags will be 'unknown'")
 
             tags = {
                 "benchmark.label": label,
@@ -526,14 +529,17 @@ class Logger:
         meta_model_run: MetaModel,
         epoch: int,
         metrics_dict: dict[str, float | np.ndarray],
+        is_best: bool = True,
     ):
         """Save a model checkpoint locally and/or to MLflow.
 
         Local persistence is controlled by ``save_local_checkpoints``.
         MLflow logging is independent of local persistence.
 
-        The MLflow ``best-model`` artifact uses pickle (``torch.save``).
-        For external distribution, use ``save_safetensors_for_publish`` instead.
+        When ``is_best`` is True (the default), the checkpoint is also written
+        to the ``best-model`` artifact path and tagged accordingly.  Pass
+        ``is_best=False`` to save a checkpoint without overwriting the current
+        best model.
 
         Checkpoint files are named ``model_epoch{epoch}`` — resuming from a
         previous epoch will overwrite the file unless ``checkpoint_dir`` or
@@ -587,49 +593,51 @@ class Logger:
 
                 scalar_metrics = {k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)}
 
-                # Log best model as a plain artifact instead of
-                # mlflow.pytorch.log_model() which triggers an internal
-                # PostgreSQL session flush on the SageMaker managed MLflow
-                # backend, re-inserting already-committed metrics and
-                # causing UniqueViolation on metric_pk.
-                if local_checkpoint_saved:
-                    mlflow.log_artifact(model_path, artifact_path="best-model")
-                else:
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        best_pt = os.path.join(tmpdir, "model.pt")
-                        torch.save(checkpoint, best_pt)  # type: ignore
-                        mlflow.log_artifact(best_pt, artifact_path="best-model")
+                if is_best:
+                    # Log best model as a plain artifact instead of
+                    # mlflow.pytorch.log_model() which triggers an internal
+                    # PostgreSQL session flush on the SageMaker managed MLflow
+                    # backend, re-inserting already-committed metrics and
+                    # causing UniqueViolation on metric_pk.
+                    if local_checkpoint_saved:
+                        mlflow.log_artifact(model_path, artifact_path="best-model")
+                    else:
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            best_pt = os.path.join(tmpdir, "model.pt")
+                            torch.save(checkpoint, best_pt)  # type: ignore
+                            mlflow.log_artifact(best_pt, artifact_path="best-model")
 
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    metadata_path = os.path.join(tmpdir, "metadata.json")
-                    with open(metadata_path, "w") as f:
-                        json.dump(
-                            {
-                                "epoch": epoch,
-                                "timestamp": timestamp,
-                                "metrics": scalar_metrics,
-                                "run_name": meta_model_run.run_name,
-                                "model_class": meta_model_run.model.__class__.__name__,
-                                "serialization": "pickle",
-                                "load_with": "ckpt = torch.load('model.pt'); model.load_state_dict(ckpt['model_state_dict'])",
-                            },
-                            f,
-                            indent=2,
-                        )
-                    mlflow.log_artifact(metadata_path, artifact_path="best-model")
-                mlflow.set_tag("best_model_logged", "true")
-                mlflow.set_tag("best_model_epoch", str(epoch))
-                mlflow.log_metrics(
-                    {f"best_model/{k}": v for k, v in scalar_metrics.items()},
-                    step=epoch,
-                )
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        metadata_path = os.path.join(tmpdir, "metadata.json")
+                        with open(metadata_path, "w") as f:
+                            json.dump(
+                                {
+                                    "epoch": epoch,
+                                    "timestamp": timestamp,
+                                    "metrics": scalar_metrics,
+                                    "run_name": meta_model_run.run_name,
+                                    "model_class": meta_model_run.model.__class__.__name__,
+                                    "serialization": "pickle",
+                                    "load_with": "ckpt = torch.load('model.pt'); model.load_state_dict(ckpt['model_state_dict'])",
+                                },
+                                f,
+                                indent=2,
+                            )
+                        mlflow.log_artifact(metadata_path, artifact_path="best-model")
+                    mlflow.set_tag("best_model_logged", "true")
+                    mlflow.set_tag("best_model_epoch", str(epoch))
+                    mlflow.log_metrics(
+                        {f"best_model/{k}": v for k, v in scalar_metrics.items()},
+                        step=epoch,
+                    )
 
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
             except Exception as e:
                 logger.warning("Failed to log checkpoint/model to MLflow: %s", e)
-                with contextlib.suppress(Exception):
-                    mlflow.set_tag("best_model_logged", "false")
-                    mlflow.set_tag("best_model_log_error", str(e)[:500])
+                if is_best:
+                    with contextlib.suppress(Exception):
+                        mlflow.set_tag("best_model_logged", "false")
+                        mlflow.set_tag("best_model_log_error", str(e)[:500])
 
         if self._wandb_logger is not None:
             self._wandb_logger.save_checkpoint(
