@@ -49,6 +49,11 @@ from mermaidseg.model.train import train_model
 _METADATA = Path("/opt/ml/metadata/resource-metadata.json")
 
 
+def _configure_third_party_loggers() -> None:
+    """Reduce verbosity from chatty third-party libraries."""
+    logging.getLogger("botocore.tokens").setLevel(logging.WARNING)
+
+
 def _setup_logging(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -61,6 +66,7 @@ def _setup_logging(log_dir: Path) -> None:
             logging.FileHandler(log_file),
         ],
     )
+    _configure_third_party_loggers()
     logging.info("Logging to %s", log_file)
 
 
