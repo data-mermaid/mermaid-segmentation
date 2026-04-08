@@ -179,6 +179,13 @@ def _run_training(args: argparse.Namespace) -> None:
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
+    if not os.getenv("MLFLOW_TRACKING_URI"):
+        logging.warning(
+            "MLFLOW_TRACKING_URI is not set — MLflow will log to a local filesystem store. "
+            "Set MLFLOW_TRACKING_URI to the SageMaker MLflow App ARN for remote tracking:\n"
+            '    export MLFLOW_TRACKING_URI="arn:aws:sagemaker:us-east-1:ACCOUNT:mlflow-app/APP-ID"'
+        )
+
     cfg = setup_config(
         config_path=args.config,
         config_base_path=args.config_base,
@@ -220,7 +227,12 @@ def _run_training(args: argparse.Namespace) -> None:
     test_loader = DataLoader(test_ds, batch_size=batch_size)
 
     if args.dry_run:
-        logging.info("Dry run: limiting to 1 batch")
+        max_dry_epochs = 3
+        actual_epochs = cfg.training.epochs
+        if actual_epochs > max_dry_epochs:
+            cfg.training.epochs = max_dry_epochs
+            logging.info("Dry run: capping epochs %d → %d", actual_epochs, max_dry_epochs)
+        logging.info("Dry run: limiting to 1 batch per epoch")
         train_loader = [next(iter(train_loader))]
         val_loader = [next(iter(val_loader))]
         test_loader = None
