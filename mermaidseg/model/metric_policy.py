@@ -13,11 +13,13 @@ METRIC_POLICY = {
     "f1-score": "max",
 }
 
+SUPPORTED_METRIC_NAMES = tuple(sorted(METRIC_POLICY))
+
 
 def canonical_metric_name(metric_of_interest: str) -> str:
-    key = metric_of_interest.lower()
+    key = metric_of_interest.lower().strip()
     if key not in METRIC_POLICY:
-        allowed = ", ".join(sorted(METRIC_POLICY))
+        allowed = ", ".join(SUPPORTED_METRIC_NAMES)
         raise ValueError(f"Unsupported metric_of_interest '{metric_of_interest}'. Allowed metrics: {allowed}.")
     return key
 

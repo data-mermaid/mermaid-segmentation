@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from mermaidseg.model.metric_policy import (
+    SUPPORTED_METRIC_NAMES,
     canonical_metric_name,
     extract_metric_value,
     metric_direction,
@@ -26,6 +27,9 @@ class TestCanonicalMetricName:
     def test_rejects_unknown_metric(self):
         with pytest.raises(ValueError, match="Unsupported metric_of_interest"):
             canonical_metric_name("precision")
+
+    def test_supported_names_are_canonical_only(self):
+        assert SUPPORTED_METRIC_NAMES == ("accuracy", "f1-score", "loss", "miou")
 
 
 class TestMetricDirection:
