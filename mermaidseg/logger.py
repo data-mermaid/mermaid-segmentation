@@ -657,11 +657,13 @@ class Logger:
 
                 scalar_metrics = {k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)}
                 try:
-                    # export_model=False keeps cloudpickle serialization.
-                    # export_model=True (torch.export/pt2) is incompatible with
-                    # ViT/DINOv2 due to dynamic shapes and dataclass outputs.
-                    # MLflow >=3.10 will introduce serialization_format="pickle"
-                    # as an explicit parameter; use export_model=False for now.
+                    # Drain the async metrics queue before log_model. On the
+                    # SageMaker PostgreSQL backend, log_model triggers an
+                    # internal batch flush that re-sends already-committed
+                    # metrics, causing UniqueViolation on metric_pk.
+                    if hasattr(mlflow, "flush_async_logging"):
+                        mlflow.flush_async_logging()
+
                     mlflow.pytorch.log_model(
                         pytorch_model=meta_model_run.model,
                         name="best-model",
