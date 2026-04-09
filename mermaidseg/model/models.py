@@ -115,7 +115,7 @@ class LinearDINOv3(torch.nn.Module):
 
     def __init__(
         self,
-        encoder_name: str = "facebook/dinov3-vits16-pretrain-lvd1689m",
+        encoder_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
         num_classes: int = 2,
         input_size: tuple[int, int] = (512, 512),
         **kwargs: Any,
@@ -124,7 +124,7 @@ class LinearDINOv3(torch.nn.Module):
 
         Args:
             encoder_name (str): HuggingFace model ID for the DINOv3 encoder.
-                Defaults to "facebook/dinov3-vits16-pretrain-lvd1689m".
+                Defaults to "facebook/dinov3-vitb16-pretrain-lvd1689m".
             num_classes (int): Number of segmentation output classes. Defaults to 2.
             input_size (tuple[int, int]): Expected (height, width) of input images.
                 Determines the token grid size. Defaults to (512, 512).
@@ -204,7 +204,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
 
     def __init__(
         self,
-        encoder_name: str = "facebook/dinov3-vits16-pretrain-lvd1689m",
+        encoder_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
         num_classes: int = 2,
         num_concepts: int = 2,
         input_size: tuple[int, int] = (512, 512),
@@ -214,7 +214,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
 
         Args:
             encoder_name (str): HuggingFace model ID for the DINOv3 encoder.
-                Defaults to "facebook/dinov3-vits16-pretrain-lvd1689m".
+                Defaults to "facebook/dinov3-vitb16-pretrain-lvd1689m".
             num_classes (int): Number of segmentation output classes. Defaults to 2.
             num_concepts (int): Number of intermediate concept dimensions. Defaults to 2.
             input_size (tuple[int, int]): Expected (height, width) of input images.

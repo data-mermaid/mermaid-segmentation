@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from typing import Any
 
 import albumentations as A
@@ -85,6 +86,9 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     concept2id: dict[str, int] | None = None
     benthic_concept_matrix: np.ndarray | None = None
     conceptid2labelid: dict[int, int] | None = None
+    _load_failures: list[dict[str, Any]]
+    _annotation_count_by_image: dict[str, int]
+    _annotation_labels_by_image: dict[str, str]
 
     def __init__(
         self,
@@ -140,6 +144,14 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         if concept_mapping_flag:
             self.initialize_concept_mapping()
 
+        annotation_counts = self.df_annotations.groupby("image_id").size()
+        self._annotation_count_by_image = {str(k): int(v) for k, v in annotation_counts.items()}
+        annotation_labels = self.df_annotations.groupby("image_id")["benthic_attribute_name"].apply(
+            lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)}))
+        )
+        self._annotation_labels_by_image = {str(k): v for k, v in annotation_labels.items()}
+        self._load_failures = []
+
     def __len__(self):
         return self.df_images.shape[0]
 
@@ -156,6 +168,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         try:
             image = self.read_image(**row_kwargs)
         except Exception as e:
+            self._record_load_failure(image_id=image_id, row_kwargs=row_kwargs, error=e)
             source_info = {k: v for k, v in row_kwargs.items() if k != "image_id"}
             logger.warning(
                 "Skipping image_id=%s (source=%s): %s: %s",
@@ -187,6 +200,48 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             mask = transformed["mask"]
 
         return image, mask  # , annotations
+
+    def _record_load_failure(self, image_id: Any, row_kwargs: dict[str, Any], error: Exception) -> None:
+        image_id_str = str(image_id)
+        record = {
+            "timestamp_utc": pd.Timestamp.utcnow().isoformat(),
+            "dataset_class": self.__class__.__name__,
+            "split": self.split,
+            "image_id": image_id_str,
+            "region_id": row_kwargs.get("region_id"),
+            "region_name": row_kwargs.get("region_name"),
+            "source_id": row_kwargs.get("source_id"),
+            "annotation_count": int(self._annotation_count_by_image.get(image_id_str, 0)),
+            "annotation_labels": self._annotation_labels_by_image.get(image_id_str, ""),
+            "missing_annotations": image_id_str not in self._annotation_count_by_image,
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "annotations_path": getattr(self, "annotations_path", None),
+            "source_bucket": getattr(self, "source_bucket", None),
+        }
+        self._load_failures.append(record)
+
+    def num_load_failures(self) -> int:
+        """Return the number of recorded data-loading failures."""
+        return len(self._load_failures)
+
+    def load_failures_df(self) -> pd.DataFrame:
+        """Return a DataFrame with all recorded data-loading failures."""
+        return pd.DataFrame(self._load_failures)
+
+    def save_load_failures(self, output_path: str | Path) -> Path:
+        """Save recorded data-loading failures to a parquet report.
+
+        Args:
+            output_path: Destination parquet file path.
+
+        Returns:
+            The resolved output path written.
+        """
+        path = Path(output_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.load_failures_df().to_parquet(path, index=False)
+        return path
 
     def collate_fn(self, batch):
         """Collate function for MermaidDataset and CoralNetDataset.

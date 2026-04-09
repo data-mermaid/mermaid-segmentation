@@ -85,7 +85,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
         labels: torch.Tensor,
         concept_outputs: torch.Tensor,
         concept_labels: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, float]]:
         """Computes the total loss as the sum of the classification loss and a weighted concept
         loss.
 
@@ -95,7 +95,9 @@ class ConceptBottleneckLoss(torch.nn.Module):
             concept_outputs (torch.Tensor): The model's output logits for concept prediction.
             concept_labels (torch.Tensor): The ground truth labels for concept prediction.
         Returns:
-            torch.Tensor: The computed total loss.
+            A 2-tuple of (total_loss, loss_components) where total_loss is the
+            scalar tensor for backprop and loss_components is a dict of detached
+            component values for logging.
         """
 
         class_loss_value = self.class_loss(outputs, labels)
@@ -107,4 +109,9 @@ class ConceptBottleneckLoss(torch.nn.Module):
         denom = label_mask.sum() * outputs.shape[1] + 1e-8
         concept_loss_value = masked_loss.sum() / denom
 
-        return class_loss_value + self.lambda_weight * concept_loss_value
+        total_loss = class_loss_value + self.lambda_weight * concept_loss_value
+        loss_components = {
+            "class_loss": class_loss_value.item(),
+            "concept_loss": concept_loss_value.item(),
+        }
+        return total_loss, loss_components

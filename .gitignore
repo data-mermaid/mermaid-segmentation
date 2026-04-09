@@ -6,6 +6,7 @@ test1/*
 nbs/segmentation/*
 nbs/mlruns/*
 nbs/model_checkpoints/*
+nbs/profiler_logs/*
 */wandb/*
 nbs_tmp/*
 scraping/source*.csv
@@ -224,3 +225,5 @@ __marimo__/
 .claude/
 
 .cursor/
+
+.worktrees/

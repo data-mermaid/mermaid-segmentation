@@ -1,3 +1,4 @@
+import time
 from typing import Any
 
 import albumentations as A
@@ -185,25 +186,23 @@ class MetaModel:
         self,
         batch: tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor],
         target_dim: tuple[int, int] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Perform batch prediction using the model and compute the loss if applicable.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, float]]:
+        """Perform batch prediction and compute the loss.
 
         Args:
-            batch (Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]):
-                The input batch for prediction. It can either be:
-                - A tuple containing input tensors and corresponding labels.
-                - A dictionary where keys are input names and values are input tensors.
-            target_dim (Optional[tuple[int, int]], optional): The target dimensions for resizing the model's output.
-                If not provided, the dimensions of the label tensor are used. Defaults to None.
+            batch: A tuple of (inputs, labels) or a dict of named tensors.
+            target_dim: Target spatial dimensions for output resizing.
+                Defaults to the input spatial dimensions.
         Returns:
-            Tuple[torch.Tensor, Optional[torch.Tensor]]:
-                - The model's output predictions.
-                - The computed loss if available, otherwise None.
+            A 4-tuple of (loss, outputs, concept_outputs, loss_components)
+            where loss_components is a dict of detached scalar values for
+            logging (non-empty only in concept-bottleneck mode).
         """
 
         loss = None
         outputs = None
         concept_outputs = None
+        loss_components: dict[str, float] = {}
 
         inputs, labels = batch
 
@@ -218,7 +217,7 @@ class MetaModel:
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
             concept_labels = labels_to_concepts(labels, self.concept_matrix)
-            loss = self.loss(outputs, labels, concept_outputs, concept_labels)
+            loss, loss_components = self.loss(outputs, labels, concept_outputs, concept_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
 
         elif self.training_mode == "concept":
@@ -240,35 +239,75 @@ class MetaModel:
         assert loss is not None, "Loss is not computed for the given batch."
         assert isinstance(outputs, torch.Tensor)
 
-        return loss, outputs, concept_outputs
+        return loss, outputs, concept_outputs, loss_components
 
     def train_epoch(
         self,
         train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
-    ) -> float:
+    ) -> tuple[float, dict[str, float | NDArray[np.float64]], dict[str, float | int]]:
         """Trains the model for one epoch using the provided data loader.
 
         Args:
-            train_loader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
-            A DataLoader object that provides batches of training data.
+            train_loader: DataLoader providing batches of training data.
+            evaluator: Optional evaluator for computing per-epoch metrics.
+
         Returns:
-            float: The average loss over all batches in the epoch.
+            A 3-tuple of (average_loss, metric_results, timing) where timing
+            contains ``"data_loading_sec"``, ``"forward_sec"``,
+            ``"backward_sec"``, and ``"num_samples"``.
         """
 
         running_loss = 0.0
+        running_loss_components: dict[str, float] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
+        use_cuda = self.device != "cpu" and torch.cuda.is_available()
+
+        data_time_total = 0.0
+        forward_time_total = 0.0
+        backward_time_total = 0.0
+        num_samples = 0
+
+        if use_cuda:
+            torch.cuda.synchronize()
+        batch_end = time.perf_counter()
 
         for data in tqdm(train_loader):
+            if use_cuda:
+                torch.cuda.synchronize()
+            data_time_total += time.perf_counter() - batch_end
+
             _, labels = data
             labels = labels.long().to(self.device)
-            loss, outputs, concept_outputs = self.batch_predict_loss(data)
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            forward_start = time.perf_counter()
+
+            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(data)
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            forward_time_total += time.perf_counter() - forward_start
 
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
-            loss.backward()  # Double check
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            backward_start = time.perf_counter()
+
+            loss.backward()
             self.optimizer.step()
-            running_loss += loss.item()
             self.optimizer.zero_grad()
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            backward_time_total += time.perf_counter() - backward_start
+
+            running_loss += loss.item()
+            for k, v in loss_components.items():
+                running_loss_components[k] = running_loss_components.get(k, 0.0) + v
+            num_samples += labels.size(0)
 
             if evaluator is not None:
                 if self.training_mode in ("concept"):
@@ -285,12 +324,10 @@ class MetaModel:
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
-                    # Update metrics
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, labels)
 
             if self.training_mode in ("concept-bottleneck", "concept"):
-                # Update metrics
                 for metric in evaluator.concept_metric_dict.values():
                     concept_outputs = (concept_outputs > 0.5).float()
                     concept_outputs += 1
@@ -303,7 +340,10 @@ class MetaModel:
                     for metric in evaluator.concept_metric_dict.values():
                         metric.update(concept_outputs, concept_labels)
 
-        # Compute metrics
+            if use_cuda:
+                torch.cuda.synchronize()
+            batch_end = time.perf_counter()
+
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
                 metric_results[metric_name] = evaluator.metric_dict[metric_name].compute().cpu().numpy()
@@ -319,21 +359,30 @@ class MetaModel:
                     evaluator.concept_metric_dict[metric_name].reset()
 
         last_loss = running_loss / len(train_loader)
-        return last_loss, metric_results
+        avg_loss_components = {k: v / len(train_loader) for k, v in running_loss_components.items()}
+        for k, v in avg_loss_components.items():
+            metric_results[f"loss/{k}"] = v
+        timing = {
+            "data_loading_sec": data_time_total,
+            "forward_sec": forward_time_total,
+            "backward_sec": backward_time_total,
+            "num_samples": num_samples,
+        }
+        return last_loss, metric_results, timing
 
     @torch.no_grad()
     def validation_epoch(
         self,
         val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
-    ) -> float:
-        """Calculates the validation loss of the model for one epoch using the provided data loader.
+    ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
+        """Calculate the validation loss and metrics for one epoch.
 
         Args:
-            val_loader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
-            A DataLoader object that provides batches of validation data.
+            val_loader: DataLoader providing batches of validation data.
+            evaluator: Optional evaluator for computing per-epoch metrics.
         Returns:
-            float: The average loss over all batches in the epoch.
+            A 2-tuple of (average_loss, metric_results).
         """
 
         running_loss = 0.0
@@ -343,7 +392,7 @@ class MetaModel:
             _, labels = data
             labels = labels.long().to(self.device)
 
-            loss, outputs, concept_outputs = self.batch_predict_loss(data)
+            loss, outputs, concept_outputs, _ = self.batch_predict_loss(data)
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running_loss += loss.item()
 
