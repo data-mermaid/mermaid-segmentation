@@ -165,7 +165,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
             [
-                "point_id",
+                # "point_id",
                 "row",
                 "col",
                 # "benthic_attribute_id",
