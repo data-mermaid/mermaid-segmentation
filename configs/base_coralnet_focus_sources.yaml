@@ -1,0 +1,17 @@
+run_name: "base_focus_sources"
+
+logger:
+  uri: "segmentation"
+  experiment_name: "temporary_experiment_1"
+  log_epochs: 5
+
+data:
+  name: "CoralNetDataset"
+  batch_size: 16
+  class_subset: "../configs/run1_class_subset.csv"
+  whitelist_sources:
+    train: "../configs/focus_sources_train.csv"
+    val: "../configs/focus_sources_val.csv"
+    test: "../configs/focus_sources_test.csv"
+  padding: 7
+  concept_mapping_flag: False
