@@ -4,10 +4,15 @@
 Lists all source folders, checks file structure, counts images and annotations,
 and writes results to a parquet file.
 
+Features:
+- Incremental writes: saves progress every N sources (credential-safe on SageMaker)
+- Uses boto3 for S3 uploads (auto-refreshes IAM credentials)
+- Resumes from checkpoint if previous run failed
+
 Usage:
     python scripts/audit_coralnet_sources.py
     python scripts/audit_coralnet_sources.py --dry-run
-    python scripts/audit_coralnet_sources.py --bucket my-bucket --prefix my-prefix
+    python scripts/audit_coralnet_sources.py --checkpoint-interval 50
 """
 
 from __future__ import annotations
@@ -15,6 +20,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,6 +29,21 @@ import boto3
 import ibis
 import pandas as pd
 from tqdm import tqdm
+
+
+@dataclass(frozen=True)
+class CsvSpec:
+    filename: str
+    has_field: str
+    count_field: str
+    empty_field: str
+
+
+CSV_SPECS = (
+    CsvSpec("image_list.csv", "has_image_list_csv", "n_images_csv", "image_list_empty"),
+    CsvSpec("labelset.csv", "has_labelset_csv", "n_labels", "labelset_empty"),
+    CsvSpec("metadata.csv", "has_metadata_csv", "n_metadata_rows", "metadata_empty"),
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,13 +94,34 @@ def read_csv_with_ibis(con, s3_uri: str) -> ibis.Table | None:
         return None
 
 
+def check_csv(con, bucket: str, source_prefix: str, spec: CsvSpec, record: dict) -> str | None:
+    """Check a CSV file and update record fields.
+
+    Returns error message if any.
+    """
+    uri = f"s3://{bucket}/{source_prefix}{spec.filename}"
+    table = read_csv_with_ibis(con, uri)
+    if table is not None:
+        record[spec.has_field] = True
+        count = table.count().execute()
+        record[spec.count_field] = count
+        record[spec.empty_field] = count == 0
+    return None
+
+
+def normalize_errors_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Replace empty error lists with None for cleaner parquet storage."""
+    df = df.copy()
+    df["errors"] = df["errors"].apply(lambda x: x if x else None)
+    return df
+
+
 def audit_source(s3_client, con, bucket: str, source_id: int, prefix: str, audit_ts: datetime) -> dict:
     """Audit a single CoralNet source folder.
 
     Uses ibis for CSV reads.
     """
     source_prefix = f"{prefix}/s{source_id}/"
-    errors = []
 
     record = {
         "source_id": source_id,
@@ -109,8 +152,9 @@ def audit_source(s3_client, con, bucket: str, source_id: int, prefix: str, audit
         if record["has_images_folder"]:
             record["n_images_s3"] = count_images_in_s3(s3_client, bucket, images_prefix)
     except Exception as e:
-        errors.append(f"Error checking images folder: {e}")
+        record["errors"].append(f"Error checking images folder: {e}")
 
+    # Annotations CSV has special handling for unique image counting
     try:
         annotations_uri = f"s3://{bucket}/{source_prefix}annotations.csv"
         table = read_csv_with_ibis(con, annotations_uri)
@@ -126,46 +170,37 @@ def audit_source(s3_client, con, bucket: str, source_id: int, prefix: str, audit
                 elif "image" in cols:
                     record["n_unique_images_annotated"] = table.image.nunique().execute()
     except Exception as e:
-        errors.append(f"Error reading annotations.csv: {e}")
+        record["errors"].append(f"Error reading annotations.csv: {e}")
 
-    try:
-        image_list_uri = f"s3://{bucket}/{source_prefix}image_list.csv"
-        table = read_csv_with_ibis(con, image_list_uri)
-        if table is not None:
-            record["has_image_list_csv"] = True
-            count = table.count().execute()
-            record["n_images_csv"] = count
-            record["image_list_empty"] = count == 0
-    except Exception as e:
-        errors.append(f"Error reading image_list.csv: {e}")
-
-    try:
-        labelset_uri = f"s3://{bucket}/{source_prefix}labelset.csv"
-        table = read_csv_with_ibis(con, labelset_uri)
-        if table is not None:
-            record["has_labelset_csv"] = True
-            count = table.count().execute()
-            record["n_labels"] = count
-            record["labelset_empty"] = count == 0
-    except Exception as e:
-        errors.append(f"Error reading labelset.csv: {e}")
-
-    try:
-        metadata_uri = f"s3://{bucket}/{source_prefix}metadata.csv"
-        table = read_csv_with_ibis(con, metadata_uri)
-        if table is not None:
-            record["has_metadata_csv"] = True
-            count = table.count().execute()
-            record["n_metadata_rows"] = count
-            record["metadata_empty"] = count == 0
-    except Exception as e:
-        errors.append(f"Error reading metadata.csv: {e}")
+    # Standard CSV checks (image_list, labelset, metadata)
+    for spec in CSV_SPECS:
+        try:
+            check_csv(con, bucket, source_prefix, spec, record)
+        except Exception as e:
+            record["errors"].append(f"Error reading {spec.filename}: {e}")
 
     record["is_complete"] = record["has_images_folder"] and record["has_annotations_csv"] and record["has_image_list_csv"]
     record["image_count_match"] = record["n_images_s3"] == record["n_images_csv"]
-    record["errors"] = errors
 
     return record
+
+
+def upload_to_s3(s3_client, local_path: Path, s3_uri: str) -> None:
+    """Upload a local file to S3 using boto3 (credential-safe)."""
+    if not s3_uri.startswith("s3://"):
+        raise ValueError(f"Expected s3:// URI, got: {s3_uri}")
+    parts = s3_uri[5:].split("/", 1)
+    bucket = parts[0]
+    key = parts[1] if len(parts) > 1 else ""
+    s3_client.upload_file(str(local_path), bucket, key)
+
+
+def save_checkpoint(df: pd.DataFrame, local_path: Path, s3_client, s3_uri: str | None) -> None:
+    """Save dataframe to local parquet and optionally upload to S3."""
+    df_normalized = normalize_errors_column(df)
+    df_normalized.to_parquet(local_path, index=False)
+    if s3_uri:
+        upload_to_s3(s3_client, local_path, s3_uri)
 
 
 def run_audit(
@@ -173,8 +208,13 @@ def run_audit(
     prefix: str,
     output_path: str,
     dry_run: bool = False,
+    checkpoint_interval: int = 100,
 ) -> pd.DataFrame:
-    """Run the full audit and write results to parquet."""
+    """Run the full audit with incremental checkpoints.
+
+    Saves progress every `checkpoint_interval` sources to avoid losing work
+    if credentials expire during long runs on SageMaker.
+    """
     s3 = boto3.client("s3")
 
     logger.info("Initializing ibis/duckdb connection with S3 support")
@@ -193,15 +233,28 @@ def run_audit(
     audit_timestamp = datetime.now(UTC)
     results = []
 
-    for source_id in tqdm(source_ids, desc="Auditing sources"):
+    local_checkpoint = Path(tempfile.gettempdir()) / f"audit_checkpoint_{audit_timestamp.strftime('%Y%m%d_%H%M%S')}.parquet"
+    checkpoint_s3_uri = None if dry_run else output_path.replace(".parquet", "_checkpoint.parquet")
+
+    for i, source_id in enumerate(tqdm(source_ids, desc="Auditing sources")):
         record = audit_source(s3, con, bucket, source_id, prefix, audit_timestamp)
         results.append(record)
         if record["errors"]:
             for error in record["errors"]:
                 logger.warning("Source %d: %s", source_id, error)
 
-    audit_df = pd.DataFrame(results)
-    audit_df["errors"] = audit_df["errors"].apply(lambda x: x if x else None)
+        if (i + 1) % checkpoint_interval == 0:
+            logger.info("Checkpoint: %d/%d sources complete, saving...", i + 1, len(source_ids))
+            checkpoint_df = pd.DataFrame(results)
+            try:
+                save_checkpoint(checkpoint_df, local_checkpoint, s3, checkpoint_s3_uri)
+                logger.info("Checkpoint saved to %s", checkpoint_s3_uri or local_checkpoint)
+            except Exception as e:
+                logger.warning("Checkpoint upload failed (will retry): %s", e)
+                save_checkpoint(checkpoint_df, local_checkpoint, s3, None)
+                logger.info("Checkpoint saved locally to %s", local_checkpoint)
+
+    audit_df = normalize_errors_column(pd.DataFrame(results))
 
     complete_count = audit_df["is_complete"].sum()
     logger.info(
@@ -215,11 +268,20 @@ def run_audit(
 
     if dry_run:
         logger.info("Dry run - skipping write to %s", output_path)
+        logger.info("Local checkpoint available at %s", local_checkpoint)
     else:
-        logger.info("Writing audit results to %s", output_path)
-        audit_table = ibis.memtable(audit_df)
-        con.to_parquet(audit_table, output_path)
-        logger.info("Successfully wrote audit results")
+        logger.info("Writing final audit results to %s", output_path)
+        local_final = Path(tempfile.gettempdir()) / "audit_final.parquet"
+        audit_df.to_parquet(local_final, index=False)
+        try:
+            upload_to_s3(s3, local_final, output_path)
+            logger.info("Successfully wrote audit results to S3")
+            local_final.unlink(missing_ok=True)
+            local_checkpoint.unlink(missing_ok=True)
+        except Exception as e:
+            logger.error("S3 upload failed: %s", e)
+            logger.info("Results saved locally at %s", local_final)
+            raise
 
     return audit_df
 
@@ -250,6 +312,12 @@ def main() -> int:
         help="Run audit but skip writing to S3",
     )
     parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=100,
+        help="Save checkpoint every N sources (protects against credential expiration)",
+    )
+    parser.add_argument(
         "--log-file",
         type=Path,
         default=None,
@@ -273,6 +341,7 @@ def main() -> int:
             prefix=args.prefix,
             output_path=args.output_path,
             dry_run=args.dry_run,
+            checkpoint_interval=args.checkpoint_interval,
         )
         return 0
     except Exception as e:
