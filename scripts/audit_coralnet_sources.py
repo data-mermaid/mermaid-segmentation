@@ -179,7 +179,13 @@ def audit_source(s3_client, con, bucket: str, source_id: int, prefix: str, audit
         except Exception as e:
             record["errors"].append(f"Error reading {spec.filename}: {e}")
 
-    record["is_complete"] = record["has_images_folder"] and record["has_annotations_csv"] and record["has_image_list_csv"]
+    record["is_complete"] = (
+        record["has_images_folder"]
+        and record["has_annotations_csv"]
+        and record["has_image_list_csv"]
+        and record["has_annotations_csv"]
+        and record["n_annotations"] > 0
+    )
     record["image_count_match"] = record["n_images_s3"] == record["n_images_csv"]
 
     return record
@@ -258,7 +264,7 @@ def run_audit(
 
     complete_count = audit_df["is_complete"].sum()
     logger.info(
-        "Audit complete: %d/%d sources are complete (%.1f%%)",
+        "Audit complete: %d/%d sources have non-empty annotations (%.1f%%)",
         complete_count,
         len(audit_df),
         complete_count / len(audit_df) * 100,
