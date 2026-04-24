@@ -1,0 +1,30 @@
+run_name: "coralnet_three_sources_sagemaker"
+
+logger:
+  uri: "segmentation"
+  experiment_name: "coralnet_three_sources_test"
+  log_epochs: 5
+  system_metrics: true
+  system_metrics_sampling_interval: 10
+
+data:
+  batch_size: 8
+  whitelist_sources: [3363, 3681, 6924]
+
+model:
+  name: "LinearDINOv3"
+  encoder_name: "facebook/dinov3-vitb16-pretrain-lvd1689m"
+
+training:
+  epochs: 5
+  loss:
+    type: CrossEntropyLoss
+    ignore_index: 0
+  optimizer:
+    type: AdamW
+    lr: 0.00005
+    weight_decay: 0.01
+  scheduler:
+    type: PolynomialLR
+    power: 1
+    total_iters: 10
