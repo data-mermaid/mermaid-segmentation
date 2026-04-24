@@ -83,29 +83,57 @@ def count_images_in_s3(s3_client, bucket: str, images_prefix: str) -> int:
     return count
 
 
-def read_csv_with_ibis(con, s3_uri: str) -> ibis.Table | None:
-    """Read a CSV from S3 using ibis.
+def refresh_duckdb_credentials(con) -> None:
+    """Refresh DuckDB S3 credentials to prevent expiration during long runs.
 
-    Returns None if read fails.
+    On SageMaker, IAM role credentials from IMDS expire after ~1 hour. DuckDB httpfs does not auto-
+    refresh, so we must recreate the secret.
+    """
+    con.raw_sql("CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER CREDENTIAL_CHAIN)")
+
+
+def check_s3_object_exists(s3_client, bucket: str, key: str) -> bool:
+    """Check if an S3 object exists using boto3 head_object."""
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+        return True
+    except s3_client.exceptions.ClientError:
+        return False
+
+
+def read_csv_with_ibis(con, s3_uri: str) -> tuple[ibis.Table | None, str | None]:
+    """Read a CSV from S3 using ibis with lenient parsing.
+
+    Uses null_padding=True to handle malformed CSVs with extra columns. Returns (table,
+    error_message) tuple.
     """
     try:
-        return con.read_csv(s3_uri)
-    except Exception:
-        return None
+        return con.read_csv(s3_uri, null_padding=True), None
+    except Exception as e:
+        return None, str(e)
 
 
-def check_csv(con, bucket: str, source_prefix: str, spec: CsvSpec, record: dict) -> str | None:
-    """Check a CSV file and update record fields.
+def check_csv(con, s3_client, bucket: str, source_prefix: str, spec: CsvSpec, record: dict) -> str | None:
+    """Check a CSV file and update record fields, with boto3 fallback.
 
-    Returns error message if any.
+    If ibis read fails, uses boto3 head_object to verify file existence. Returns error message if
+    any.
     """
     uri = f"s3://{bucket}/{source_prefix}{spec.filename}"
-    table = read_csv_with_ibis(con, uri)
+    key = f"{source_prefix}{spec.filename}"
+    read_failed_field = spec.has_field.replace("has_", "") + "_read_failed"
+
+    table, error = read_csv_with_ibis(con, uri)
     if table is not None:
         record[spec.has_field] = True
         count = table.count().execute()
         record[spec.count_field] = count
         record[spec.empty_field] = count == 0
+    elif error is not None:
+        if check_s3_object_exists(s3_client, bucket, key):
+            record[spec.has_field] = True
+            record[read_failed_field] = True
+            return f"{spec.filename} exists but ibis read failed: {error}"
     return None
 
 
@@ -141,6 +169,10 @@ def audit_source(s3_client, con, bucket: str, source_id: int, prefix: str, audit
         "image_list_empty": False,
         "labelset_empty": False,
         "metadata_empty": False,
+        "annotations_csv_read_failed": False,
+        "image_list_csv_read_failed": False,
+        "labelset_csv_read_failed": False,
+        "metadata_csv_read_failed": False,
         "is_complete": False,
         "image_count_match": False,
         "errors": [],
@@ -157,7 +189,8 @@ def audit_source(s3_client, con, bucket: str, source_id: int, prefix: str, audit
     # Annotations CSV has special handling for unique image counting
     try:
         annotations_uri = f"s3://{bucket}/{source_prefix}annotations.csv"
-        table = read_csv_with_ibis(con, annotations_uri)
+        annotations_key = f"{source_prefix}annotations.csv"
+        table, error = read_csv_with_ibis(con, annotations_uri)
         if table is not None:
             record["has_annotations_csv"] = True
             count = table.count().execute()
@@ -169,13 +202,20 @@ def audit_source(s3_client, con, bucket: str, source_id: int, prefix: str, audit
                     record["n_unique_images_annotated"] = table.Name.nunique().execute()
                 elif "image" in cols:
                     record["n_unique_images_annotated"] = table.image.nunique().execute()
+        elif error is not None:
+            if check_s3_object_exists(s3_client, bucket, annotations_key):
+                record["has_annotations_csv"] = True
+                record["annotations_csv_read_failed"] = True
+                record["errors"].append(f"annotations.csv exists but ibis read failed: {error}")
     except Exception as e:
         record["errors"].append(f"Error reading annotations.csv: {e}")
 
     # Standard CSV checks (image_list, labelset, metadata)
     for spec in CSV_SPECS:
         try:
-            check_csv(con, bucket, source_prefix, spec, record)
+            error_msg = check_csv(con, s3_client, bucket, source_prefix, spec, record)
+            if error_msg:
+                record["errors"].append(error_msg)
         except Exception as e:
             record["errors"].append(f"Error reading {spec.filename}: {e}")
 
@@ -183,8 +223,7 @@ def audit_source(s3_client, con, bucket: str, source_id: int, prefix: str, audit
         record["has_images_folder"]
         and record["has_annotations_csv"]
         and record["has_image_list_csv"]
-        and record["has_annotations_csv"]
-        and record["n_annotations"] > 0
+        and (record["n_annotations"] > 0 or record["annotations_csv_read_failed"])
     )
     record["image_count_match"] = record["n_images_s3"] == record["n_images_csv"]
 
@@ -259,6 +298,8 @@ def run_audit(
                 logger.warning("Checkpoint upload failed (will retry): %s", e)
                 save_checkpoint(checkpoint_df, local_checkpoint, s3, None)
                 logger.info("Checkpoint saved locally to %s", local_checkpoint)
+            refresh_duckdb_credentials(con)
+            logger.debug("Refreshed DuckDB S3 credentials")
 
     audit_df = normalize_errors_column(pd.DataFrame(results))
 
