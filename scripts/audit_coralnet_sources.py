@@ -104,6 +104,19 @@ def check_s3_object_exists(s3_client, bucket: str, key: str) -> bool:
         raise
 
 
+def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
+    """Parse s3://bucket/key into (bucket, key) tuple."""
+    if not s3_uri.startswith("s3://"):
+        raise ValueError(f"Expected s3:// URI, got: {s3_uri}")
+    parts = s3_uri[5:].split("/", 1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
+def has_error_patterns(errors: list[str] | None, patterns: list[str]) -> bool:
+    """Check if any error message contains any of the given patterns."""
+    return any(any(p in str(e) for p in patterns) for e in (errors or []))
+
+
 def read_csv_with_ibis(con, s3_uri: str) -> tuple[ibis.Table | None, str | None]:
     """Read a CSV from S3 using ibis with lenient parsing.
 
@@ -235,11 +248,7 @@ def audit_source(s3_client, con, bucket: str, source_id: int, prefix: str, audit
 
 def upload_to_s3(s3_client, local_path: Path, s3_uri: str) -> None:
     """Upload a local file to S3 using boto3 (credential-safe)."""
-    if not s3_uri.startswith("s3://"):
-        raise ValueError(f"Expected s3:// URI, got: {s3_uri}")
-    parts = s3_uri[5:].split("/", 1)
-    bucket = parts[0]
-    key = parts[1] if len(parts) > 1 else ""
+    bucket, key = parse_s3_uri(s3_uri)
     s3_client.upload_file(str(local_path), bucket, key)
 
 
@@ -257,11 +266,15 @@ def run_audit(
     output_path: str,
     dry_run: bool = False,
     checkpoint_interval: int = 100,
+    resume_from: str | None = None,
 ) -> pd.DataFrame:
     """Run the full audit with incremental checkpoints.
 
     Saves progress every `checkpoint_interval` sources to avoid losing work
     if credentials expire during long runs on SageMaker.
+
+    Args:
+        resume_from: Path to checkpoint parquet to resume from (skips already-audited source_ids)
     """
     s3 = boto3.client("s3")
 
@@ -279,7 +292,29 @@ def run_audit(
         return pd.DataFrame()
 
     audit_timestamp = datetime.now(UTC)
-    results = []
+    results: list[dict] = []
+
+    if resume_from:
+        checkpoint_path = Path(resume_from)
+        if checkpoint_path.exists():
+            checkpoint_df = pd.read_parquet(checkpoint_path)
+        elif resume_from.startswith("s3://"):
+            tmp_checkpoint = Path(tempfile.gettempdir()) / "resume_checkpoint.parquet"
+            bucket_name, key = parse_s3_uri(resume_from)
+            s3.download_file(bucket_name, key, str(tmp_checkpoint))
+            checkpoint_df = pd.read_parquet(tmp_checkpoint)
+            tmp_checkpoint.unlink(missing_ok=True)
+        else:
+            raise FileNotFoundError(f"Checkpoint not found: {resume_from}")
+
+        audited_ids = set(checkpoint_df["source_id"])
+        source_ids = [s for s in source_ids if s not in audited_ids]
+        results = checkpoint_df.to_dict("records")
+        logger.info(
+            "Resumed from checkpoint: %d sources already audited, %d remaining",
+            len(audited_ids),
+            len(source_ids),
+        )
 
     local_checkpoint = Path(tempfile.gettempdir()) / f"audit_checkpoint_{audit_timestamp.strftime('%Y%m%d_%H%M%S')}.parquet"
     checkpoint_s3_uri = None if dry_run else output_path.replace(".parquet", "_checkpoint.parquet")
@@ -315,6 +350,25 @@ def run_audit(
     )
     logger.info("Total images (S3): %d", audit_df["n_images_s3"].sum())
     logger.info("Total annotations: %d", audit_df["n_annotations"].sum())
+
+    parsing_errors = audit_df["errors"].apply(lambda e: has_error_patterns(e, ["CSV Error", "Expected", "columns", "found"])).sum()
+    credential_errors = audit_df["errors"].apply(lambda e: has_error_patterns(e, ["ExpiredToken", "HTTP 400", "credentials"])).sum()
+    read_failed_count = audit_df["annotations_csv_read_failed"].sum()
+    other_errors = max(0, read_failed_count - parsing_errors - credential_errors)
+
+    logger.info(
+        "Error breakdown: %d parsing errors, %d credential errors, %d other read failures",
+        parsing_errors,
+        credential_errors,
+        other_errors,
+    )
+
+    if credential_errors > 0:
+        logger.warning(
+            "%d sources had credential errors. On SageMaker, use smaller --checkpoint-interval "
+            "(e.g., 50) to refresh credentials more frequently, or use --resume-from to continue.",
+            credential_errors,
+        )
 
     if dry_run:
         logger.info("Dry run - skipping write to %s", output_path)
@@ -373,6 +427,12 @@ def main() -> int:
         default=None,
         help="Optional log file path",
     )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Resume audit from checkpoint parquet (local path or s3:// URI). Skips already-audited source_ids.",
+    )
 
     args = parser.parse_args()
 
@@ -392,6 +452,7 @@ def main() -> int:
             output_path=args.output_path,
             dry_run=args.dry_run,
             checkpoint_interval=args.checkpoint_interval,
+            resume_from=args.resume_from,
         )
         return 0
     except Exception as e:
