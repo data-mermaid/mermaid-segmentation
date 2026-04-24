@@ -28,6 +28,7 @@ from pathlib import Path
 import boto3
 import ibis
 import pandas as pd
+from botocore.exceptions import ClientError
 from tqdm import tqdm
 
 
@@ -97,8 +98,10 @@ def check_s3_object_exists(s3_client, bucket: str, key: str) -> bool:
     try:
         s3_client.head_object(Bucket=bucket, Key=key)
         return True
-    except s3_client.exceptions.ClientError:
-        return False
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "404":
+            return False
+        raise
 
 
 def read_csv_with_ibis(con, s3_uri: str) -> tuple[ibis.Table | None, str | None]:
