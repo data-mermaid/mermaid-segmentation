@@ -71,6 +71,21 @@ def _setup_logging(log_dir: Path) -> None:
     logging.info("Logging to %s", log_file)
 
 
+def _preview_config_value(value: object, limit: int = 5) -> str:
+    if value is None:
+        return "None"
+    if isinstance(value, dict):
+        return f"{type(value).__name__}(keys={list(value.keys())})"
+    if isinstance(value, (str, bytes)):
+        return repr(value)
+    try:
+        values = list(value)
+    except TypeError:
+        return repr(value)
+    suffix = "" if len(values) <= limit else f", ... ({len(values)} total)"
+    return f"{values[:limit]}{suffix}"
+
+
 def _cleanup_pid(pid_file: Path) -> None:
     pid_file.unlink(missing_ok=True)
 
@@ -270,8 +285,26 @@ def _run_training(args: argparse.Namespace) -> None:
 
     transforms = {split: A.Compose([getattr(A, name)(**params) for name, params in augs.items()]) for split, augs in cfg.augmentation.items()}
 
+    logging.info(
+        "Config sources: config=%s; config_base=%s; data_keys=%s",
+        args.config,
+        args.config_base,
+        list(cfg.data.keys()),
+    )
+    logging.info(
+        "Data config before dataset construction: name=%s; class_subset=%s; "
+        "whitelist_sources=%s; blacklist_sources=%s; padding=%s; concept_mapping_flag=%s",
+        cfg.data.get("name"),
+        _preview_config_value(cfg.data.get("class_subset")),
+        _preview_config_value(cfg.data.get("whitelist_sources")),
+        _preview_config_value(cfg.data.get("blacklist_sources")),
+        cfg.data.get("padding"),
+        cfg.data.get("concept_mapping_flag"),
+    )
+
     dataset_name = cfg.data.pop("name", None)
     batch_size = cfg.data.pop("batch_size", 8)
+    logging.info("Constructing dataset %s with batch_size=%s", dataset_name, batch_size)
 
     dataset = getattr(mermaidseg.datasets.dataset, dataset_name)(transform=transforms["train"], **cfg.data)
     logging.info("Dataset: %s (%d samples)", dataset_name, len(dataset))

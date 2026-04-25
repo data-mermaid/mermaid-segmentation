@@ -64,10 +64,14 @@ def update_config(base_config: ConfigDict, config: ConfigDict) -> ConfigDict:
     return updated_config
 
 
-def _load_csv_if_path(value: Any, header: int | None = 0) -> Any:
+def _load_csv_if_path(value: Any, header: int | None = 0, base_dir: Path | None = None) -> Any:
     """Load CSV file if value is a file path, otherwise return as-is."""
-    if isinstance(value, str) and Path(value).is_file() and value.endswith(".csv"):
-        return pd.read_csv(value, header=header).to_numpy().flatten().tolist()
+    if isinstance(value, str) and value.endswith(".csv"):
+        path = Path(value)
+        if not path.is_file() and base_dir is not None:
+            path = base_dir / value
+        if path.is_file():
+            return pd.read_csv(path, header=header).to_numpy().flatten().tolist()
     return value
 
 
@@ -91,28 +95,29 @@ def setup_config(config_path: str | None = None, config_base_path: str = "config
         base configuration during the merge process.
     """
 
+    config_dir = Path(config_path or config_base_path).parent
     base_config = load_config(config_base_path)
     if config_path is None:
-        return ConfigDict(base_config)
-    config = load_config(config_path)
-    updated_config = update_config(base_config, config)
+        cfg = ConfigDict(base_config)
+        config_dir = Path(config_base_path).parent
+    else:
+        config = load_config(config_path)
+        updated_config = update_config(base_config, config)
+        cfg = ConfigDict(updated_config)
 
-    cfg = ConfigDict(updated_config)
-
-    # if isinstance(cfg.data.class_subset, str) and Path(cfg.data.class_subset).is_file():
-    #     # with open(cfg.data.class_subset, "r") as f:
-    #     #     class_subset = [line.strip() for line in f.readlines()]
-    #     # cfg.data.class_subset = class_subset
     if "class_subset" in cfg.data:
-        cfg.data.class_subset = _load_csv_if_path(cfg.data.class_subset)
+        cfg.data.class_subset = _load_csv_if_path(cfg.data.class_subset, base_dir=config_dir)
 
     if "whitelist_sources" in cfg.data:
-        cfg.data.whitelist_sources = _load_csv_if_path(cfg.data.whitelist_sources)
-        cfg.data.whitelist_sources.train = _load_csv_if_path(cfg.data.whitelist_sources.train)
-        cfg.data.whitelist_sources.val = _load_csv_if_path(cfg.data.whitelist_sources.val)
-        cfg.data.whitelist_sources.test = _load_csv_if_path(cfg.data.whitelist_sources.test)
+        cfg.data.whitelist_sources = _load_csv_if_path(cfg.data.whitelist_sources, base_dir=config_dir)
+        if isinstance(cfg.data.whitelist_sources, dict):
+            for split, sources in cfg.data.whitelist_sources.items():
+                cfg.data.whitelist_sources[split] = _load_csv_if_path(sources, base_dir=config_dir)
     if "blacklist_sources" in cfg.data:
-        cfg.data.blacklist_sources = _load_csv_if_path(cfg.data.blacklist_sources)
+        cfg.data.blacklist_sources = _load_csv_if_path(cfg.data.blacklist_sources, base_dir=config_dir)
+        if isinstance(cfg.data.blacklist_sources, dict):
+            for split, sources in cfg.data.blacklist_sources.items():
+                cfg.data.blacklist_sources[split] = _load_csv_if_path(sources, base_dir=config_dir)
 
     return cfg
 

@@ -21,6 +21,21 @@ from mermaidseg.datasets.utils import _joint_collate, create_annotation_mask, ge
 logger = logging.getLogger(__name__)
 
 
+def _preview_sequence(value: Any, limit: int = 5) -> str:
+    if value is None:
+        return "None"
+    if isinstance(value, dict):
+        return f"{type(value).__name__}(keys={list(value.keys())})"
+    if isinstance(value, (str, bytes)):
+        return repr(value)
+    try:
+        values = list(value)
+    except TypeError:
+        return repr(value)
+    suffix = "" if len(values) <= limit else f", ... ({len(values)} total)"
+    return f"{values[:limit]}{suffix}"
+
+
 def worker_init_fn(worker_id: int) -> None:
     """Configure logging in DataLoader worker processes.
 
@@ -108,8 +123,28 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.class_subset = class_subset
         self.concept_mapping_flag = concept_mapping_flag
 
+        logger.info(
+            "Initializing %s: annotations=%d rows columns=%s; images=%d rows columns=%s; class_subset=%s; padding=%s; concept_mapping_flag=%s",
+            type(self).__name__,
+            len(self.df_annotations),
+            list(self.df_annotations.columns),
+            len(self.df_images),
+            list(self.df_images.columns),
+            _preview_sequence(self.class_subset),
+            self.padding,
+            self.concept_mapping_flag,
+        )
+
         if self.class_subset is not None:
+            rows_before_class_subset = len(self.df_annotations)
             self.df_annotations = self.df_annotations[self.df_annotations["benthic_attribute_name"].apply(lambda x: x in self.class_subset)]
+            logger.info(
+                "After class_subset filter in %s: annotations %d -> %d rows; columns=%s",
+                type(self).__name__,
+                rows_before_class_subset,
+                len(self.df_annotations),
+                list(self.df_annotations.columns),
+            )
 
             if "region_id" in self.df_annotations.columns:  # Added for MermaidDataset
                 self.df_images = (
@@ -124,7 +159,19 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
                     .reset_index(drop=True)
                 )
             else:
-                raise ValueError("Unknown dataset structure for filtering images based on class_subset.")
+                raise ValueError(
+                    "Unknown dataset structure for filtering images based on class_subset. "
+                    f"Annotation columns: {list(self.df_annotations.columns)}; "
+                    f"image columns: {list(self.df_images.columns)}; "
+                    f"class_subset: {_preview_sequence(self.class_subset)}"
+                )
+
+            logger.info(
+                "After rebuilding images for class_subset in %s: images=%d rows columns=%s",
+                type(self).__name__,
+                len(self.df_images),
+                list(self.df_images.columns),
+            )
 
             self.num_classes = len(self.class_subset) + 1  # +1 for background
             self.id2label = dict(enumerate(self.class_subset, start=1))
@@ -140,6 +187,13 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
                 )
             )
             self.label2id = {v: k for k, v in self.id2label.items()}
+
+        logger.info(
+            "Dataset labels for %s: num_classes=%d; labels=%s",
+            type(self).__name__,
+            self.num_classes,
+            _preview_sequence(self.id2label.values()),
+        )
 
         if concept_mapping_flag:
             self.initialize_concept_mapping()
@@ -397,16 +451,55 @@ class CoralNetDataset(BaseCoralDataset):
         self.s3 = boto3.client("s3")
         self.whitelist_sources = whitelist_sources
         self.blacklist_sources = blacklist_sources
+        logger.info(
+            "Initializing CoralNetDataset: annotations_path=s3://%s/%s; source_s3_prefix=%s; whitelist_sources=%s; blacklist_sources=%s",
+            self.source_bucket,
+            self.annotations_path,
+            self.source_s3_prefix,
+            _preview_sequence(self.whitelist_sources),
+            _preview_sequence(self.blacklist_sources),
+        )
+        if isinstance(self.whitelist_sources, dict):
+            logger.warning(
+                "CoralNetDataset received whitelist_sources as a mapping with keys=%s. This dataset currently expects a flat list of source IDs.",
+                list(self.whitelist_sources.keys()),
+            )
+        if isinstance(self.blacklist_sources, dict):
+            logger.warning(
+                "CoralNetDataset received blacklist_sources as a mapping with keys=%s. This dataset currently expects a flat list of source IDs.",
+                list(self.blacklist_sources.keys()),
+            )
         if self.whitelist_sources is not None and self.blacklist_sources is not None:
             raise ValueError("Cannot specify both whitelist and blacklist sources.")
 
         self.labelmapping = self.initialize_coralnet_mapping()
         self.df_annotations, self.df_images = self.load_annotations()
+        logger.info(
+            "Loaded CoralNet annotations: annotations=%d rows columns=%s; images=%d rows; unique_sources=%d",
+            len(self.df_annotations),
+            list(self.df_annotations.columns),
+            len(self.df_images),
+            self.df_annotations["source_id"].nunique(),
+        )
 
         if self.whitelist_sources is not None:
+            rows_before_whitelist = len(self.df_annotations)
             self.df_annotations = self.df_annotations[self.df_annotations["source_id"].apply(lambda x: x in self.whitelist_sources)]
+            logger.info(
+                "After whitelist_sources filter: annotations %d -> %d rows; remaining_sources=%s",
+                rows_before_whitelist,
+                len(self.df_annotations),
+                _preview_sequence(sorted(self.df_annotations["source_id"].dropna().unique())),
+            )
         if self.blacklist_sources is not None:
+            rows_before_blacklist = len(self.df_annotations)
             self.df_annotations = self.df_annotations[self.df_annotations["source_id"].apply(lambda x: x not in self.blacklist_sources)]
+            logger.info(
+                "After blacklist_sources filter: annotations %d -> %d rows; remaining_sources=%s",
+                rows_before_blacklist,
+                len(self.df_annotations),
+                _preview_sequence(sorted(self.df_annotations["source_id"].dropna().unique())),
+            )
         if self.whitelist_sources is not None or self.blacklist_sources is not None:
             self.df_images = (
                 self.df_annotations[
@@ -414,6 +507,11 @@ class CoralNetDataset(BaseCoralDataset):
                 ]
                 .drop_duplicates(subset=["source_id", "image_id"])
                 .reset_index(drop=True)
+            )
+            logger.info(
+                "After source filtering, CoralNet images=%d rows columns=%s",
+                len(self.df_images),
+                list(self.df_images.columns),
             )
         super().__init__(df_annotations=self.df_annotations, df_images=self.df_images, **base_kwargs)
 
