@@ -77,8 +77,11 @@ def create_annotation_mask(
     if annotations.empty:
         return mask
 
-    valid = annotations[annotations["benthic_attribute_name"].notna()].copy()
-
+    valid = annotations[
+        annotations["benthic_attribute_name"].notna()
+        & (annotations["row"] <= shape[0] - 1)
+        & (annotations["col"] <= shape[1] - 1)
+    ].copy()
     unknown = set(valid["benthic_attribute_name"]) - set(label2id.keys())
     if unknown:
         logger.warning(
@@ -94,9 +97,9 @@ def create_annotation_mask(
     rows = valid["row"].to_numpy(dtype=np.intp)
     cols = valid["col"].to_numpy(dtype=np.intp)
     label_ids = valid["benthic_attribute_name"].map(label2id).to_numpy(dtype=np.int64)
-
+    h, w = shape[:2]
+    
     if padding is not None and padding > 0:
-        h, w = shape[:2]
         # Vectorized bounds computation
         r0 = np.maximum(0, rows - padding)
         r1 = np.minimum(h, rows + padding)
@@ -108,7 +111,6 @@ def create_annotation_mask(
             mask[r0i:r1i, c0i:c1i] = lid
     else:
         mask[rows, cols] = label_ids
-
     return mask
 
 

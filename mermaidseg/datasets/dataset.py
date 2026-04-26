@@ -1,4 +1,6 @@
 import logging
+import io
+import json
 from pathlib import Path
 from typing import Any
 
@@ -459,6 +461,249 @@ class CoralNetDataset(BaseCoralDataset):
             labelset.extend(data["results"])
         return {label["provider_id"]: label["benthic_attribute_name"] for label in labelset}
 
+
+class ExternalSparseCoralDataset(BaseCoralDataset):
+    """S3-backed dataset for externally processed sparse point annotations.
+
+    Expected optimized layout:
+      optimized_datasets/<dataset>/classes.json
+      optimized_datasets/<dataset>/colors.json
+      optimized_datasets/<dataset>/image_manifest.parquet
+      optimized_datasets/<dataset>/annotations.parquet
+      optimized_datasets/<dataset>/images/<site>/<files...>
+      optimized_datasets/<dataset>/labels/<site>/<files...>
+    """
+
+    source_bucket: str
+    source_prefix: str
+    dataset_name: str
+    dataset_root_prefix: str
+    s3: boto3.client
+    classes_json: dict[str, int]
+    colors_json: dict[str, list[int]]
+    image_key_by_id: dict[str, str]
+
+    def __init__(
+        self,
+        source_bucket: str,
+        source_prefix: str,
+        dataset_name: str,
+        **base_kwargs,
+    ):
+        self.source_bucket = source_bucket
+        self.source_prefix = source_prefix.strip("/")
+        self.dataset_name = dataset_name.strip("/")
+        self.dataset_root_prefix = f"{self.source_prefix}/{self.dataset_name}".strip("/")
+        self.s3 = boto3.client("s3")
+
+        self.classes_json = self._read_json_key(f"{self.dataset_root_prefix}/classes.json")
+        self.colors_json = self._read_json_key(f"{self.dataset_root_prefix}/colors.json")
+
+        image_manifest = self._read_parquet_key(f"{self.dataset_root_prefix}/image_manifest.parquet")
+        annotations = self._read_parquet_key(f"{self.dataset_root_prefix}/annotations.parquet")
+
+        required_image_cols = {"source_id", "image_id", "image_key"}
+        required_annotation_cols = {"source_id", "image_id", "row", "col", "benthic_attribute_name"}
+
+        if not required_image_cols.issubset(image_manifest.columns):
+            raise ValueError(
+                f"image_manifest.parquet must contain columns {sorted(required_image_cols)}; "
+                f"found {list(image_manifest.columns)}"
+            )
+        if not required_annotation_cols.issubset(annotations.columns):
+            raise ValueError(
+                f"annotations.parquet must contain columns {sorted(required_annotation_cols)}; "
+                f"found {list(annotations.columns)}"
+            )
+
+        self.image_key_by_id = dict(zip(image_manifest["image_id"].astype(str), image_manifest["image_key"].astype(str)))
+
+        self.df_annotations = annotations.copy()
+        self.df_annotations["source_id"] = self.df_annotations["source_id"].astype(str)
+        self.df_annotations["image_id"] = self.df_annotations["image_id"].astype(str)
+        self.df_annotations["benthic_attribute_name"] = self.df_annotations["benthic_attribute_name"].astype(str)
+        self.df_annotations["row"] = pd.to_numeric(self.df_annotations["row"], errors="coerce").astype("Int64")
+        self.df_annotations["col"] = pd.to_numeric(self.df_annotations["col"], errors="coerce").astype("Int64")
+        self.df_annotations = self.df_annotations.dropna(subset=["row", "col", "benthic_attribute_name"]).copy()
+        self.df_annotations["row"] = self.df_annotations["row"].astype(int)
+        self.df_annotations["col"] = self.df_annotations["col"].astype(int)
+
+        self.df_images = (
+            image_manifest[["source_id", "image_id"]]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+
+        super().__init__(df_annotations=self.df_annotations, df_images=self.df_images, **base_kwargs)
+
+    def _read_json_key(self, key: str) -> dict[str, Any]:
+        body = self.s3.get_object(Bucket=self.source_bucket, Key=key)["Body"].read()
+        return json.loads(body.decode("utf-8"))
+
+    def _read_parquet_key(self, key: str) -> pd.DataFrame:
+        body = self.s3.get_object(Bucket=self.source_bucket, Key=key)["Body"].read()
+        return pd.read_parquet(io.BytesIO(body))
+
+    def read_image(self, image_id: str, source_id: str, **row_kwargs) -> NDArray[Any]:
+        key = self.image_key_by_id.get(image_id)
+        if key is None:
+            raise FileNotFoundError(f"Missing image key for image_id={image_id} source_id={source_id}")
+        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
+
+
+class ExternalDenseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
+    """S3-backed dataset for externally processed dense segmentation masks.
+
+    Expected optimized layout:
+      optimized_datasets/<dataset>/classes.json
+      optimized_datasets/<dataset>/colors.json
+      optimized_datasets/<dataset>/sample_manifest.parquet
+      optimized_datasets/<dataset>/images/<site>/<files...>
+      optimized_datasets/<dataset>/labels/<site>/<files...>
+    """
+
+    source_bucket: str
+    source_prefix: str
+    dataset_name: str
+    dataset_root_prefix: str
+    s3: boto3.client
+    transform: A.BasicTransform | None
+    class_subset: list[str] | None
+    classes_json: dict[str, int]
+    colors_json: dict[str, list[int]]
+    label2id: dict[str, int]
+    id2label: dict[int, str]
+    num_classes: int
+    remap_lut: np.ndarray | None
+    samples: list[dict[str, str]]
+    image_key_by_id: dict[str, str]
+    mask_key_by_id: dict[str, str]
+
+    def __init__(
+        self,
+        source_bucket: str,
+        source_prefix: str,
+        dataset_name: str,
+        transform: A.BasicTransform | None = None,
+        class_subset: list[str] | None = None,
+    ):
+        self.source_bucket = source_bucket
+        self.source_prefix = source_prefix.strip("/")
+        self.dataset_name = dataset_name.strip("/")
+        self.dataset_root_prefix = f"{self.source_prefix}/{self.dataset_name}".strip("/")
+        self.s3 = boto3.client("s3")
+        self.transform = transform
+        self.class_subset = class_subset
+
+        self.classes_json = self._read_json_key(f"{self.dataset_root_prefix}/classes.json")
+        self.colors_json = self._read_json_key(f"{self.dataset_root_prefix}/colors.json")
+
+        self.label2id = dict(self.classes_json)
+        self.id2label = {int(v): str(k) for k, v in self.label2id.items()}
+        self.num_classes = len(set(self.label2id.values()))
+
+        self.image_key_by_id, self.mask_key_by_id, self.samples = self._load_sample_manifest()
+        self.remap_lut = self._build_subset_lut()
+
+    def _read_json_key(self, key: str) -> dict[str, Any]:
+        body = self.s3.get_object(Bucket=self.source_bucket, Key=key)["Body"].read()
+        return json.loads(body.decode("utf-8"))
+
+    def _read_parquet_key(self, key: str) -> pd.DataFrame:
+        body = self.s3.get_object(Bucket=self.source_bucket, Key=key)["Body"].read()
+        return pd.read_parquet(io.BytesIO(body))
+
+    def _load_sample_manifest(self) -> tuple[dict[str, str], dict[str, str], list[dict[str, str]]]:
+        manifest_key = f"{self.dataset_root_prefix}/sample_manifest.parquet"
+        df = self._read_parquet_key(manifest_key)
+
+        required_cols = {"source_id", "image_id", "image_key", "mask_key"}
+        if not required_cols.issubset(df.columns):
+            raise ValueError(
+                f"{manifest_key} must contain columns {sorted(required_cols)}; "
+                f"found {list(df.columns)}"
+            )
+
+        df = df.copy()
+        df["source_id"] = df["source_id"].astype(str)
+        df["image_id"] = df["image_id"].astype(str)
+        df["image_key"] = df["image_key"].astype(str)
+        df["mask_key"] = df["mask_key"].astype(str)
+
+        image_map = dict(zip(df["image_id"], df["image_key"]))
+        mask_map = dict(zip(df["image_id"], df["mask_key"]))
+        samples = df[["image_id", "source_id"]].drop_duplicates().to_dict("records")
+
+        return image_map, mask_map, samples
+
+    def _build_subset_lut(self) -> np.ndarray | None:
+        if self.class_subset is None:
+            return None
+
+        kept = set(self.class_subset)
+        max_id = max(int(v) for v in self.label2id.values())
+        lut = np.zeros(max_id + 1, dtype=np.uint8)
+
+        for name, class_id in self.label2id.items():
+            class_id_int = int(class_id)
+            if name in kept:
+                lut[class_id_int] = np.uint8(class_id_int)
+            else:
+                lut[class_id_int] = np.uint8(0)
+
+        return lut
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        sample = self.samples[idx]
+        image_id = sample["image_id"]
+
+        image_key = self.image_key_by_id[image_id]
+        mask_key = self.mask_key_by_id[image_id]
+
+        image = np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=image_key).convert("RGB"))
+        mask = np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=mask_key))
+        if mask.ndim == 3:
+            mask = mask[..., 0]
+        mask = mask.astype(np.uint8, copy=False)
+
+        if self.remap_lut is not None:
+            clip_max = len(self.remap_lut) - 1
+            mask = self.remap_lut[np.clip(mask, 0, clip_max)]
+
+        if self.transform:
+            transformed = self.transform(image=image, mask=mask)
+            image = transformed["image"].transpose(2, 0, 1)
+            mask = transformed["mask"]
+
+        return image, mask
+
+    def collate_fn(self, batch):
+        batch_size = len(batch)
+        filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
+        n_skipped = batch_size - len(filtered)
+        if n_skipped > 0:
+            logger.warning(
+                "ExternalDenseCoralDataset.collate_fn: skipped %d/%d items in batch due to load errors",
+                n_skipped,
+                batch_size,
+            )
+
+        if len(filtered) == 0:
+            return torch.tensor([]), torch.tensor([])
+
+        images, masks = zip(*filtered, strict=False)
+
+        if isinstance(images[0], torch.Tensor):
+            images = torch.stack(images)
+            masks = torch.stack(masks)
+        else:
+            images = torch.stack([torch.from_numpy(img) if isinstance(img, np.ndarray) else img for img in images])
+            masks = torch.stack([torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask for mask in masks])
+
+        return images, masks
 
 class CombinedCoralDataset:
     """Wraps multiple BaseCoralDataset instances into a single dataset with a unified label space.
