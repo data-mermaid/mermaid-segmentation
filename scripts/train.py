@@ -40,6 +40,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 import mermaidseg.datasets.dataset
+from mermaidseg.datasets.dataset import worker_init_fn
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
@@ -207,6 +208,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=42,
         help="random seed for reproducibility",
     )
+    base.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader num_workers (default: 0)",
+    )
     return base
 
 
@@ -296,15 +303,20 @@ def _run_training(args: argparse.Namespace) -> None:
     generator = torch.Generator().manual_seed(seed)
     train_ds, val_ds, test_ds = random_split(dataset, [train_size, val_size, test_size], generator=generator)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        drop_last=True,
-        collate_fn=collate_fn,
-    )
-    val_loader = DataLoader(val_ds, batch_size=batch_size, collate_fn=collate_fn)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, collate_fn=collate_fn)
+    num_workers = args.num_workers
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "collate_fn": collate_fn,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["worker_init_fn"] = worker_init_fn
+
+    train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, **loader_kwargs)
+    test_loader = DataLoader(test_ds, **loader_kwargs)
 
     if args.dry_run:
         max_dry_epochs = 3
@@ -349,6 +361,10 @@ def _run_training(args: argparse.Namespace) -> None:
     ) as logger:
         if logger.mlflow_run_id is not None:
             logging.info("MLflow run_id: %s", logger.mlflow_run_id)
+
+        logger.log_dataloader_params(train_loader, prefix="train_loader")
+        logger.log_dataloader_params(val_loader, prefix="val_loader")
+        logger.log_dataloader_params(test_loader, prefix="test_loader")
 
         try:
             train_model(
