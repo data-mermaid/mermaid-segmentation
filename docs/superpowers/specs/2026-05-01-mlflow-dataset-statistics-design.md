@@ -193,8 +193,8 @@ logger.log_dataset_statistics({"train": train_ds, "val": val_ds, "test": test_ds
 ### `nbs/Base_Pipeline.ipynb`
 Same pattern, in the cell that follows `Logger(...)` initialization, alongside the existing `logger.log_dataset(...)` call.
 
-### `nbs/Combined_Pipeline.ipynb` and `nbs/Concept_Bottleneck_Pipeline.ipynb`
-Same pattern — combined wrappers handled by `_resolve_annotations` recursion.
+### `nbs/Combined_Pipeline.ipynb`
+Same pattern — combined wrappers handled by `_resolve_annotations` recursion. The concept-bottleneck notebook is intentionally not wired in this iteration; CBM stats live with the broader CBM workstream.
 
 ## Testing
 
@@ -237,6 +237,5 @@ PR #88 (`Add num_workers logging to mlflow`) introduces `random_split` → Subse
 
 - **Pixel-level mask statistics** — open follow-up issue once #72 lands. Captures actual segmentation pixel distribution per class per split (more truthful than annotation-point counts for segmentation models).
 - **Temporal drift columns** (survey year, season) — `df_annotations` does not currently carry survey date; would require expanding the parquet schemas. Open as separate Data ticket.
-- **`concept_counts.csv` for the concept-bottleneck model** — CBM has its own pipeline and concept hierarchy from MERMAID's API; track as a follow-up tied to the CBM workstream so concept-level QA mirrors class-level QA logged here.
 - **`id2label_hash` in `train_summary.yaml`** — would let the MLflow UI distinguish runs that silently changed `class_subset`. Nice-to-have; defer.
 - **Cross-run drift visualization** — handled via MLflow UI / downstream tooling.
