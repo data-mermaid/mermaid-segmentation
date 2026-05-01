@@ -23,6 +23,7 @@ from typing import Any
 
 import mlflow
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 from mlflow.data.code_dataset_source import CodeDatasetSource
@@ -57,7 +58,6 @@ def _resolve_annotations(split):
 
     Never raises.
     """
-    import pandas as pd
 
     if isinstance(split, Subset):
         parent = split.dataset
@@ -93,15 +93,20 @@ def _resolve_annotations(split):
     return None
 
 
+# class_kind values for class_counts.csv. Keep these in sync with the spec
+# (docs/superpowers/specs/2026-05-01-mlflow-dataset-statistics-design.md).
+KIND_BACKGROUND = "background"
+KIND_TARGET = "target"
+KIND_UNCLASSIFIED = "unclassified"
 _UNCLASSIFIED_NAMES = {"other", "unknown", "unclassified"}
 
 
 def _classify_kind(class_id: int, class_name: str) -> str:
     if class_id == 0:
-        return "background"
+        return KIND_BACKGROUND
     if class_name.strip().lower() in _UNCLASSIFIED_NAMES:
-        return "unclassified"
-    return "target"
+        return KIND_UNCLASSIFIED
+    return KIND_TARGET
 
 
 def _compute_class_counts(resolved_splits: dict, parent_id2label: dict[int, str]) -> Any:
@@ -112,33 +117,37 @@ def _compute_class_counts(resolved_splits: dict, parent_id2label: dict[int, str]
     ``parent_id2label`` is the post-``class_subset`` mapping; id 0 (background)
     is implicit and added to the output.
     """
-    import pandas as pd
 
-    rows: list[dict] = []
     # Build the canonical class list: id 0 background, then id2label entries.
-    all_classes: list[tuple[int, str]] = [(0, "background")]
+    all_classes: list[tuple[int, str]] = [(0, KIND_BACKGROUND)]
     all_classes.extend(sorted(parent_id2label.items()))
-
+    class_names = [name for _, name in all_classes]
     split_names = list(resolved_splits.keys())
 
     # Counts are matched by exact ``benthic_attribute_name`` equality against
     # ``id2label`` values. The dataset pipeline guarantees consistent casing —
     # any drift would silently zero out a class here.
-    for class_id, class_name in all_classes:
-        row: dict = {
-            "class_id": class_id,
-            "class_name": class_name,
-            "class_kind": _classify_kind(class_id, class_name),
-        }
-        for split_name in split_names:
-            df_ann, _df_img, _ = resolved_splits[split_name]
-            ann_count = int((df_ann["benthic_attribute_name"] == class_name).sum())
-            img_count = int(df_ann.loc[df_ann["benthic_attribute_name"] == class_name, "image_id"].nunique())
-            row[f"{split_name}_annotations"] = ann_count
-            row[f"{split_name}_images"] = img_count
-        rows.append(row)
+    df = pd.DataFrame(
+        [
+            {
+                "class_id": class_id,
+                "class_name": class_name,
+                "class_kind": _classify_kind(class_id, class_name),
+            }
+            for class_id, class_name in all_classes
+        ]
+    )
 
-    df = pd.DataFrame(rows)
+    # One groupby per split (instead of two scans per class × split).
+    for split_name in split_names:
+        df_ann, _df_img, _ = resolved_splits[split_name]
+        per_class = (
+            df_ann.groupby("benthic_attribute_name")
+            .agg(annotations=("image_id", "size"), images=("image_id", "nunique"))
+            .reindex(class_names, fill_value=0)
+        )
+        df[f"{split_name}_annotations"] = per_class["annotations"].astype(int).to_numpy()
+        df[f"{split_name}_images"] = per_class["images"].astype(int).to_numpy()
 
     # Per-split fraction-of-annotations (relative to all classes within that split).
     for split_name in split_names:
@@ -175,7 +184,6 @@ def _compute_source_stats(resolved_splits: dict) -> Any:
     coexist in the same frame, distinguished by ``source_type``. ``source_key``
     is always a string (CoralNet ints get cast).
     """
-    import pandas as pd
 
     split_names = list(resolved_splits.keys())
     rows_by_key: dict[tuple[str, str], dict] = {}
@@ -225,44 +233,35 @@ def _compute_class_by_source(resolved_splits: dict, parent_id2label: dict[int, s
     Zero-count rows are omitted to keep file size sane when there are many sources × classes ×
     splits. Background (id 0) is excluded — annotation rows never carry the background class.
     """
-    import pandas as pd
 
     label2id = {name: cid for cid, name in parent_id2label.items()}
+    cols = ["source_key", "source_type", "class_id", "class_name", "split", "annotations", "images"]
 
-    rows: list[dict] = []
+    frames: list[Any] = []
     for split_name, (df_ann, _df_img, _) in resolved_splits.items():
-        cols = _source_columns(df_ann)
-        if cols is None or df_ann.empty:
+        src_cols = _source_columns(df_ann)
+        if src_cols is None or df_ann.empty:
             continue
-        source_type, key_col = cols
+        source_type, key_col = src_cols
         grouped = (
-            df_ann.assign(_source_key=df_ann[key_col].astype(str))
-            .groupby(["_source_key", "benthic_attribute_name"])
+            df_ann.assign(source_key=df_ann[key_col].astype(str))
+            .groupby(["source_key", "benthic_attribute_name"])
             .agg(annotations=("image_id", "size"), images=("image_id", "nunique"))
             .reset_index()
         )
-        for _, r in grouped.iterrows():
-            class_name = r["benthic_attribute_name"]
-            class_id = label2id.get(class_name)
-            if class_id is None:
-                # Annotation references a class not in id2label (e.g. filtered post-build).
-                continue
-            rows.append(
-                {
-                    "source_key": r["_source_key"],
-                    "source_type": source_type,
-                    "class_id": class_id,
-                    "class_name": class_name,
-                    "split": split_name,
-                    "annotations": int(r["annotations"]),
-                    "images": int(r["images"]),
-                }
-            )
+        # Drop annotations whose class is not in id2label (e.g. filtered post-build).
+        grouped = grouped[grouped["benthic_attribute_name"].isin(label2id)]
+        if grouped.empty:
+            continue
+        grouped["source_type"] = source_type
+        grouped["split"] = split_name
+        grouped["class_name"] = grouped["benthic_attribute_name"]
+        grouped["class_id"] = grouped["benthic_attribute_name"].map(label2id).astype(int)
+        frames.append(grouped[cols])
 
-    cols = ["source_key", "source_type", "class_id", "class_name", "split", "annotations", "images"]
-    if not rows:
+    if not frames:
         return pd.DataFrame(columns=cols)
-    return pd.DataFrame(rows)[cols].sort_values(["source_type", "source_key", "class_id", "split"]).reset_index(drop=True)
+    return pd.concat(frames, ignore_index=True).sort_values(["source_type", "source_key", "class_id", "split"]).reset_index(drop=True)
 
 
 def _compute_train_summary(
@@ -276,7 +275,7 @@ def _compute_train_summary(
     computed over the **training** split only, and exclude classes whose
     ``class_kind`` is ``background`` or ``unclassified``.
     """
-    eligible_count = sum(1 for cid, name in parent_id2label.items() if _classify_kind(cid, name) == "target")
+    eligible_count = sum(1 for cid, name in parent_id2label.items() if _classify_kind(cid, name) == KIND_TARGET)
 
     summary: dict = {
         "total_images": 0,
@@ -302,7 +301,7 @@ def _compute_train_summary(
         # Per-image annotation density distribution. Re-index against df_img so
         # images with zero annotations contribute a 0 (not NaN, not absent).
         if n_images:
-            counts = df_ann.groupby("image_id").size().reindex(df_img["image_id"].tolist(), fill_value=0).astype(int)
+            counts = df_ann.groupby("image_id").size().reindex(df_img["image_id"], fill_value=0).astype(int)
             annotations_per_image[split_name] = {
                 "mean": float(counts.mean()),
                 "median": float(counts.median()),
@@ -327,26 +326,23 @@ def _compute_train_summary(
     train = resolved_splits.get("train")
     if train is not None:
         df_ann, _df_img, _ = train
-        eligible_names = [name for cid, name in parent_id2label.items() if _classify_kind(cid, name) == "target"]
+        eligible_names = [name for cid, name in parent_id2label.items() if _classify_kind(cid, name) == KIND_TARGET]
         counts = df_ann["benthic_attribute_name"].value_counts().reindex(eligible_names, fill_value=0).sort_values(ascending=False)
         total = int(counts.sum())
 
-        def _topk_share(k: int) -> float:
-            if total == 0:
-                return 0.0
-            return float(counts.head(k).sum() / total)
-
-        summary["top1_share"] = _topk_share(1)
-        summary["top3_share"] = _topk_share(3)
-        summary["top5_share"] = _topk_share(5)
-
-        if total > 0:
+        if total == 0:
+            summary["top1_share"] = 0.0
+            summary["top3_share"] = 0.0
+            summary["top5_share"] = 0.0
+            summary["effective_num_classes"] = 0.0
+        else:
+            summary["top1_share"] = float(counts.head(1).sum() / total)
+            summary["top3_share"] = float(counts.head(3).sum() / total)
+            summary["top5_share"] = float(counts.head(5).sum() / total)
             probs = (counts / total).to_numpy()
             probs = probs[probs > 0]  # Mask zeros — log(0) is -inf.
             entropy = float(-(probs * np.log(probs)).sum())
             summary["effective_num_classes"] = float(math.exp(entropy))
-        else:
-            summary["effective_num_classes"] = 0.0
 
     return summary
 
@@ -797,44 +793,41 @@ class Logger:
         """
         if not self._ensure_active_run():
             return
-        try:
-            resolved: dict = {}
-            for split_name, split in splits.items():
-                try:
-                    r = _resolve_annotations(split)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("Failed to resolve split %s: %s", split_name, e)
-                    continue
-                if r is None:
-                    continue
-                resolved[split_name] = r
 
-            if not resolved:
-                logger.warning("log_dataset_statistics: no splits resolved; nothing to log")
-                return
+        resolved: dict = {}
+        for split_name, split in splits.items():
+            try:
+                r = _resolve_annotations(split)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to resolve split %s: %s", split_name, e)
+                continue
+            if r is None:
+                continue
+            resolved[split_name] = r
 
-            parent_id2label = next(iter(resolved.values()))[2]
-            class_subset = getattr(getattr(self.config, "data", None), "class_subset", None)
+        if not resolved:
+            logger.warning("log_dataset_statistics: no splits resolved; nothing to log")
+            return
 
-            self._log_csv_artifact(
-                f"{artifact_dir}/class_counts.csv",
-                lambda: _compute_class_counts(resolved, parent_id2label),
-            )
-            self._log_csv_artifact(
-                f"{artifact_dir}/source_stats.csv",
-                lambda: _compute_source_stats(resolved),
-            )
-            self._log_csv_artifact(
-                f"{artifact_dir}/class_by_source.csv",
-                lambda: _compute_class_by_source(resolved, parent_id2label),
-            )
-            self._log_yaml_artifact(
-                f"{artifact_dir}/train_summary.yaml",
-                lambda: _compute_train_summary(resolved, parent_id2label, class_subset),
-            )
+        parent_id2label = next(iter(resolved.values()))[2]
+        class_subset = getattr(getattr(self.config, "data", None), "class_subset", None)
 
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to log dataset statistics: %s", e)
+        self._log_csv_artifact(
+            f"{artifact_dir}/class_counts.csv",
+            lambda: _compute_class_counts(resolved, parent_id2label),
+        )
+        self._log_csv_artifact(
+            f"{artifact_dir}/source_stats.csv",
+            lambda: _compute_source_stats(resolved),
+        )
+        self._log_csv_artifact(
+            f"{artifact_dir}/class_by_source.csv",
+            lambda: _compute_class_by_source(resolved, parent_id2label),
+        )
+        self._log_yaml_artifact(
+            f"{artifact_dir}/train_summary.yaml",
+            lambda: _compute_train_summary(resolved, parent_id2label, class_subset),
+        )
 
     @staticmethod
     def _log_csv_artifact(path: str, build) -> None:

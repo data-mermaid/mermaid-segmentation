@@ -17,13 +17,12 @@ from torch.utils.data import Subset
 class StubDataset:
     """Stand-in for ``MermaidDataset`` / ``CoralNetDataset``.
 
-    Only carries the four attributes the logger reads.
+    Only carries the three attributes the logger reads via ``_resolve_annotations``.
     """
 
     df_annotations: pd.DataFrame
     df_images: pd.DataFrame
     id2label: dict[int, str]
-    num_classes: int
 
     def __len__(self) -> int:
         return len(self.df_images)
@@ -66,12 +65,7 @@ def make_mermaid_stub(
     df_annotations = pd.DataFrame(rows)
     df_images = df_annotations[["image_id", "region_id", "region_name"]].drop_duplicates(subset=["image_id"]).reset_index(drop=True)
     id2label = dict(enumerate(class_subset, start=1))
-    return StubDataset(
-        df_annotations=df_annotations,
-        df_images=df_images,
-        id2label=id2label,
-        num_classes=len(class_subset) + 1,
-    )
+    return StubDataset(df_annotations=df_annotations, df_images=df_images, id2label=id2label)
 
 
 def make_coralnet_stub(
@@ -95,12 +89,7 @@ def make_coralnet_stub(
     df_annotations = pd.DataFrame(rows)
     df_images = df_annotations[["source_id", "image_id"]].drop_duplicates(subset=["image_id"]).reset_index(drop=True)
     id2label = dict(enumerate(class_subset, start=1))
-    return StubDataset(
-        df_annotations=df_annotations,
-        df_images=df_images,
-        id2label=id2label,
-        num_classes=len(class_subset) + 1,
-    )
+    return StubDataset(df_annotations=df_annotations, df_images=df_images, id2label=id2label)
 
 
 def random_split_indices(stub: StubDataset, splits: dict[str, list[int]]) -> dict[str, Subset]:
