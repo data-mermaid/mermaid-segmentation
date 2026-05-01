@@ -44,6 +44,16 @@ except ImportError as err:
 LOCAL_DEFAULT_URI = "./segmentation"
 
 
+def _resolve_annotations(split):
+    """Resolve a split into ``(df_annotations, df_images, id2label)``.
+
+    Returns ``None`` if the input is an unsupported shape; never raises.
+    """
+    if hasattr(split, "df_annotations") and hasattr(split, "df_images") and hasattr(split, "id2label"):
+        return split.df_annotations, split.df_images, split.id2label
+    return None
+
+
 def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
     """Resolve MLflow tracking URI using a simple priority chain.
 

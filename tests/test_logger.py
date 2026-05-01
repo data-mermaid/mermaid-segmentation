@@ -17,9 +17,11 @@ from mermaidseg.logger import (
     LOCAL_DEFAULT_URI,
     Logger,
     WandbLogger,
+    _resolve_annotations,
     get_mlflow_tracking_uri,
     mlflow_connect,
 )
+from tests._dataset_stubs import make_mermaid_stub
 
 from .conftest import FakeMetaModel
 
@@ -697,3 +699,22 @@ class TestLogDataloaderParams:
         lgr = Logger(config=make_config(logger={"experiment_name": None}), meta_model=fake_meta_model)
         lgr.log_dataloader_params(self._make_loader())
         assert lgr.mlflow_run_id is None
+
+
+# ===================================================================
+# _resolve_annotations
+# ===================================================================
+class TestResolveAnnotations:
+    def test_plain_dataset_returns_attributes_unchanged(self):
+        stub = make_mermaid_stub(
+            image_to_classes={
+                "img-1": ["Acropora", "Porites"],
+                "img-2": ["Macroalgae"],
+            },
+            image_to_region={"img-1": "Indonesia", "img-2": "Indonesia"},
+            class_subset=["Acropora", "Porites", "Macroalgae"],
+        )
+        df_ann, df_img, id2label = _resolve_annotations(stub)
+        assert df_ann is stub.df_annotations
+        assert df_img is stub.df_images
+        assert id2label is stub.id2label
