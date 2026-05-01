@@ -737,3 +737,54 @@ class TestResolveAnnotations:
         assert sorted(df_ann["image_id"].unique().tolist()) == ["img-1", "img-3"]
         assert sorted(df_img["image_id"].tolist()) == ["img-1", "img-3"]
         assert id2label == stub.id2label
+
+    def test_concat_wrapper_concatenates_children(self):
+        stub_a = make_mermaid_stub(
+            image_to_classes={"a-1": ["Acropora"]},
+            image_to_region={"a-1": "Indonesia"},
+            class_subset=["Acropora", "Porites"],
+        )
+        stub_b = make_mermaid_stub(
+            image_to_classes={"b-1": ["Porites"]},
+            image_to_region={"b-1": "Caribbean"},
+            class_subset=["Acropora", "Porites"],
+        )
+        from tests._dataset_stubs import ConcatStub
+
+        wrapper = ConcatStub(_datasets=[stub_a, stub_b])
+
+        df_ann, df_img, id2label = _resolve_annotations(wrapper)
+        assert sorted(df_ann["image_id"].tolist()) == ["a-1", "b-1"]
+        assert sorted(df_img["image_id"].tolist()) == ["a-1", "b-1"]
+        assert id2label == stub_a.id2label
+
+    def test_concat_wrapper_warns_on_id2label_mismatch(self, caplog):
+        import logging
+
+        stub_a = make_mermaid_stub(
+            image_to_classes={"a-1": ["Acropora"]},
+            image_to_region={"a-1": "X"},
+            class_subset=["Acropora"],
+        )
+        stub_b = make_mermaid_stub(
+            image_to_classes={"b-1": ["Porites"]},
+            image_to_region={"b-1": "Y"},
+            class_subset=["Porites"],
+        )
+        from tests._dataset_stubs import ConcatStub
+
+        wrapper = ConcatStub(_datasets=[stub_a, stub_b])
+
+        with caplog.at_level(logging.WARNING, logger="mermaidseg.logger"):
+            _, _, id2label = _resolve_annotations(wrapper)
+
+        assert id2label == stub_a.id2label  # first child wins
+        assert any("id2label mismatch" in r.message for r in caplog.records)
+
+    def test_unknown_shape_returns_none_and_warns(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="mermaidseg.logger"):
+            result = _resolve_annotations(object())
+        assert result is None
+        assert any("unsupported split shape" in r.message.lower() for r in caplog.records)

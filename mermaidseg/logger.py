@@ -47,13 +47,16 @@ LOCAL_DEFAULT_URI = "./segmentation"
 def _resolve_annotations(split):
     """Resolve a split into ``(df_annotations, df_images, id2label)``.
 
-    Handles three input shapes:
+    Handles four input shapes:
       * Plain dataset with ``df_annotations`` / ``df_images`` / ``id2label``
       * PyTorch ``Subset`` (filters parent annotations by subset image ids)
       * Combined / ``ConcatDataset``-style wrapper exposing ``_datasets`` or ``datasets``
+      * Unknown — returns ``None`` and logs a warning
 
-    Returns ``None`` for any other shape; never raises.
+    Never raises.
     """
+    import pandas as pd
+
     if isinstance(split, Subset):
         parent = split.dataset
         resolved = _resolve_annotations(parent)
@@ -64,9 +67,27 @@ def _resolve_annotations(split):
         df_annotations = parent_ann[parent_ann["image_id"].isin(df_images["image_id"])]
         return df_annotations, df_images, id2label
 
+    children = getattr(split, "_datasets", None) or getattr(split, "datasets", None)
+    if children is not None:
+        resolved_children = [_resolve_annotations(c) for c in children]
+        resolved_children = [r for r in resolved_children if r is not None]
+        if not resolved_children:
+            return None
+        ann_frames = [r[0] for r in resolved_children]
+        img_frames = [r[1] for r in resolved_children]
+        id2labels = [r[2] for r in resolved_children]
+        if any(m != id2labels[0] for m in id2labels[1:]):
+            logger.warning("id2label mismatch across combined children; using first child's mapping")
+        return (
+            pd.concat(ann_frames, ignore_index=True),
+            pd.concat(img_frames, ignore_index=True),
+            id2labels[0],
+        )
+
     if hasattr(split, "df_annotations") and hasattr(split, "df_images") and hasattr(split, "id2label"):
         return split.df_annotations, split.df_images, split.id2label
 
+    logger.warning("Unsupported split shape: %s — skipping", type(split).__name__)
     return None
 
 
