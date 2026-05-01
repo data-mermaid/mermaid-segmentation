@@ -17,6 +17,7 @@ from mermaidseg.logger import (
     LOCAL_DEFAULT_URI,
     Logger,
     WandbLogger,
+    _compute_class_by_source,
     _compute_class_counts,
     _compute_source_stats,
     _resolve_annotations,
@@ -918,3 +919,38 @@ class TestComputeSourceStats:
         assert set(df["source_type"]) == {"source"}
         assert set(df["source_key"]) == {"42", "7"}
         assert df["source_key"].dtype == object  # strings, not ints
+
+
+# ===================================================================
+# _compute_class_by_source
+# ===================================================================
+class TestComputeClassBySource:
+    def test_long_format_omits_zero_rows(self):
+        stub = make_mermaid_stub(
+            image_to_classes={
+                "img-1": ["Acropora"],
+                "img-2": ["Porites"],
+            },
+            image_to_region={"img-1": "Indonesia", "img-2": "Caribbean"},
+            class_subset=["Acropora", "Porites"],
+        )
+        from torch.utils.data import Subset
+
+        resolved = {
+            "train": _resolve_annotations(Subset(stub, [0])),
+            "val": _resolve_annotations(Subset(stub, [1])),
+        }
+        df = _compute_class_by_source(resolved, parent_id2label=stub.id2label)
+
+        assert list(df.columns) == [
+            "source_key",
+            "source_type",
+            "class_id",
+            "class_name",
+            "split",
+            "annotations",
+            "images",
+        ]
+        # No zero-count rows: only (Indonesia, Acropora, train) and (Caribbean, Porites, val)
+        assert len(df) == 2
+        assert df.set_index(["source_key", "class_name", "split"]).loc[("Indonesia", "Acropora", "train"), "annotations"] == 1

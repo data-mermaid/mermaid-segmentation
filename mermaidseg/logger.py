@@ -214,6 +214,52 @@ def _compute_source_stats(resolved_splits: dict) -> Any:
     return df[ordered].sort_values(["source_type", "source_key"]).reset_index(drop=True)
 
 
+def _compute_class_by_source(resolved_splits: dict, parent_id2label: dict[int, str]) -> Any:
+    """Long-format source × class × split frame.
+
+    Zero-count rows are omitted to keep file size sane when there are many sources × classes ×
+    splits. Background (id 0) is excluded — annotation rows never carry the background class.
+    """
+    import pandas as pd
+
+    label2id = {name: cid for cid, name in parent_id2label.items()}
+
+    rows: list[dict] = []
+    for split_name, (df_ann, _df_img, _) in resolved_splits.items():
+        cols = _source_columns(df_ann)
+        if cols is None or df_ann.empty:
+            continue
+        source_type, key_col = cols
+        grouped = (
+            df_ann.assign(_source_key=df_ann[key_col].astype(str))
+            .groupby(["_source_key", "benthic_attribute_name"], observed=True)
+            .agg(annotations=("image_id", "size"), images=("image_id", "nunique"))
+            .reset_index()
+        )
+        for _, r in grouped.iterrows():
+            class_name = r["benthic_attribute_name"]
+            class_id = label2id.get(class_name)
+            if class_id is None:
+                # Annotation references a class not in id2label (e.g. filtered post-build).
+                continue
+            rows.append(
+                {
+                    "source_key": r["_source_key"],
+                    "source_type": source_type,
+                    "class_id": class_id,
+                    "class_name": class_name,
+                    "split": split_name,
+                    "annotations": int(r["annotations"]),
+                    "images": int(r["images"]),
+                }
+            )
+
+    cols = ["source_key", "source_type", "class_id", "class_name", "split", "annotations", "images"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows)[cols].sort_values(["source_type", "source_key", "class_id", "split"]).reset_index(drop=True)
+
+
 def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
     """Resolve MLflow tracking URI using a simple priority chain.
 
