@@ -17,6 +17,7 @@ from mermaidseg.logger import (
     LOCAL_DEFAULT_URI,
     Logger,
     WandbLogger,
+    _compute_class_counts,
     _resolve_annotations,
     get_mlflow_tracking_uri,
     mlflow_connect,
@@ -788,3 +789,85 @@ class TestResolveAnnotations:
             result = _resolve_annotations(object())
         assert result is None
         assert any("unsupported split shape" in r.message.lower() for r in caplog.records)
+
+
+# ===================================================================
+# _compute_class_counts
+# ===================================================================
+class TestComputeClassCounts:
+    def _splits(self):
+        stub = make_mermaid_stub(
+            image_to_classes={
+                "img-1": ["Acropora", "Acropora", "Porites"],
+                "img-2": ["Acropora"],
+                "img-3": ["Other"],  # unclassified row
+                "img-4": ["Porites"],
+            },
+            image_to_region={"img-1": "A", "img-2": "A", "img-3": "B", "img-4": "B"},
+            class_subset=["Acropora", "Porites", "Other"],
+        )
+        from torch.utils.data import Subset
+
+        return {
+            "train": Subset(stub, [0, 1]),  # img-1, img-2
+            "val": Subset(stub, [2]),  # img-3
+            "test": Subset(stub, [3]),  # img-4
+        }, stub
+
+    def test_class_counts_schema_and_values(self):
+        splits, stub = self._splits()
+        resolved = {k: _resolve_annotations(v) for k, v in splits.items()}
+
+        df = _compute_class_counts(resolved, parent_id2label=stub.id2label)
+
+        assert list(df.columns) == [
+            "class_id",
+            "class_name",
+            "class_kind",
+            "train_annotations",
+            "val_annotations",
+            "test_annotations",
+            "train_images",
+            "val_images",
+            "test_images",
+            "train_fraction",
+            "val_fraction",
+            "test_fraction",
+        ]
+        # Background row plus three classes.
+        assert df["class_id"].tolist() == [0, 1, 2, 3]
+        assert df["class_name"].tolist() == ["background", "Acropora", "Porites", "Other"]
+        assert df["class_kind"].tolist() == ["background", "target", "target", "unclassified"]
+
+        acropora = df.set_index("class_name").loc["Acropora"]
+        assert acropora["train_annotations"] == 3  # 2 + 1
+        assert acropora["val_annotations"] == 0
+        assert acropora["test_annotations"] == 0
+        assert acropora["train_images"] == 2
+
+        # Fractions sum to 1.0 within each split (zero rows summed to total)
+        assert abs(df["train_fraction"].sum() - 1.0) < 1e-9
+
+    def test_class_kind_qualified_other_stays_target(self):
+        stub = make_mermaid_stub(
+            image_to_classes={"img-1": ["Other Invertebrates"]},
+            image_to_region={"img-1": "A"},
+            class_subset=["Other Invertebrates"],
+        )
+        from torch.utils.data import Subset
+
+        resolved = {"train": _resolve_annotations(Subset(stub, [0]))}
+        df = _compute_class_counts(resolved, parent_id2label=stub.id2label)
+        kind = df.set_index("class_name").loc["Other Invertebrates", "class_kind"]
+        assert kind == "target"
+
+    def test_empty_split_yields_zero_row_not_missing(self):
+        splits, stub = self._splits()
+        # Drop the 'val' split entirely.
+        resolved = {"train": _resolve_annotations(splits["train"])}
+        df = _compute_class_counts(resolved, parent_id2label=stub.id2label)
+        # No val/test columns should appear in the schema when those splits aren't passed.
+        for col in df.columns:
+            assert "val_" not in col and "test_" not in col
+        # Train-only fractions still sum to 1.
+        assert abs(df["train_fraction"].sum() - 1.0) < 1e-9

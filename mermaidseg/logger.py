@@ -91,6 +91,64 @@ def _resolve_annotations(split):
     return None
 
 
+_UNCLASSIFIED_NAMES = {"other", "unknown", "unclassified"}
+
+
+def _classify_kind(class_id: int, class_name: str) -> str:
+    if class_id == 0:
+        return "background"
+    if class_name.strip().lower() in _UNCLASSIFIED_NAMES:
+        return "unclassified"
+    return "target"
+
+
+def _compute_class_counts(resolved_splits: dict, parent_id2label: dict[int, str]) -> Any:
+    """Per-class × split counts and fractions. Includes implicit background row at id=0.
+
+    ``resolved_splits`` is a mapping from split-name to the tuple returned by
+    ``_resolve_annotations`` (callers must drop ``None`` results before calling).
+    ``parent_id2label`` is the post-``class_subset`` mapping; id 0 (background)
+    is implicit and added to the output.
+    """
+    import pandas as pd
+
+    rows: list[dict] = []
+    # Build the canonical class list: id 0 background, then id2label entries.
+    all_classes: list[tuple[int, str]] = [(0, "background")]
+    all_classes.extend(sorted(parent_id2label.items()))
+
+    split_names = list(resolved_splits.keys())
+
+    for class_id, class_name in all_classes:
+        row: dict = {
+            "class_id": class_id,
+            "class_name": class_name,
+            "class_kind": _classify_kind(class_id, class_name),
+        }
+        for split_name in split_names:
+            df_ann, _df_img, _ = resolved_splits[split_name]
+            ann_count = int((df_ann["benthic_attribute_name"] == class_name).sum())
+            img_count = int(df_ann.loc[df_ann["benthic_attribute_name"] == class_name, "image_id"].nunique())
+            row[f"{split_name}_annotations"] = ann_count
+            row[f"{split_name}_images"] = img_count
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    # Per-split fraction-of-annotations (relative to all classes within that split).
+    for split_name in split_names:
+        col = f"{split_name}_annotations"
+        total = df[col].sum()
+        df[f"{split_name}_fraction"] = df[col] / total if total else 0.0
+
+    # Reorder: identity, then per-split *_annotations / *_images, then *_fraction.
+    ordered = ["class_id", "class_name", "class_kind"]
+    ordered += [f"{s}_annotations" for s in split_names]
+    ordered += [f"{s}_images" for s in split_names]
+    ordered += [f"{s}_fraction" for s in split_names]
+    return df[ordered]
+
+
 def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
     """Resolve MLflow tracking URI using a simple priority chain.
 
