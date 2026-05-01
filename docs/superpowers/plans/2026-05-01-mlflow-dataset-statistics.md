@@ -935,7 +935,13 @@ class TestComputeTrainSummary:
 Run: `uv run pytest tests/test_logger.py::TestComputeTrainSummary -v`
 Expected: FAIL with `ImportError`.
 
-- [ ] **Step 3: Implement `_compute_train_summary`**
+- [ ] **Step 3: Add `import math` to `mermaidseg/logger.py` if not present**
+
+`numpy` is already imported as `np` at line 24. Add `import math` to the top of the file alongside the other stdlib imports if it's not already there.
+
+- [ ] **Step 4: Implement `_compute_train_summary`**
+
+Add to `mermaidseg/logger.py`:
 
 ```python
 def _compute_train_summary(
@@ -949,8 +955,6 @@ def _compute_train_summary(
     computed over the **training** split only, and exclude classes whose
     ``class_kind`` is ``background`` or ``unclassified``.
     """
-    import math
-
     summary: dict = {
         "total_images": 0,
         "total_annotations": 0,
@@ -1018,9 +1022,8 @@ def _compute_train_summary(
 
         if total > 0:
             probs = (counts / total).to_numpy()
-            # Mask zero entries — log(0) is -inf.
-            probs = probs[probs > 0]
-            entropy = -float((probs * (probs.tolist() and __import__("numpy").log(probs))).sum())
+            probs = probs[probs > 0]  # Mask zeros — log(0) is -inf.
+            entropy = float(-(probs * np.log(probs)).sum())
             summary["effective_num_classes"] = float(math.exp(entropy))
         else:
             summary["effective_num_classes"] = 0.0
@@ -1028,33 +1031,12 @@ def _compute_train_summary(
     return summary
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 5: Run tests**
 
 Run: `uv run pytest tests/test_logger.py::TestComputeTrainSummary -v`
 Expected: PASS.
 
-- [ ] **Step 5: Refactor entropy calc for clarity**
-
-The `__import__("numpy")` workaround in step 3 is ugly. Add `import numpy as np` to the top of `mermaidseg/logger.py` if not already imported (it is — line 24), and rewrite the entropy block:
-
-```python
-        if total > 0:
-            probs = (counts / total).to_numpy()
-            probs = probs[probs > 0]
-            entropy = float(-(probs * np.log(probs)).sum())
-            summary["effective_num_classes"] = float(math.exp(entropy))
-        else:
-            summary["effective_num_classes"] = 0.0
-```
-
-Also add `import math` at the top of `mermaidseg/logger.py` if not present.
-
-- [ ] **Step 6: Re-run tests**
-
-Run: `uv run pytest tests/test_logger.py::TestComputeTrainSummary -v`
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add mermaidseg/logger.py tests/test_logger.py
@@ -1072,9 +1054,7 @@ git commit -m "feat(logger): _compute_train_summary emits topK shares and densit
 - [ ] **Step 1: Write the failing test**
 
 ```python
-import os
 from unittest.mock import patch
-import yaml
 
 
 class TestLogDatasetStatistics:
@@ -1302,36 +1282,33 @@ git commit -m "feat(scripts): wire log_dataset_statistics into train.py"
 - Modify: `nbs/Combined_Pipeline.ipynb`
 - Modify: `nbs/Concept_Bottleneck_Pipeline.ipynb`
 
-- [ ] **Step 1: For each notebook, find the cell that calls `logger.log_dataset(...)` (or `logger.log_datasets(...)`)**
+Variable names confirmed by grep:
+- `Base_Pipeline.ipynb` → `train_dataset, val_dataset, test_dataset` (line ~212), existing `logger.log_dataset(dataset_dict["train"], context="training")` at line ~359
+- `Concept_Bottleneck_Pipeline.ipynb` → same names (line ~194)
+- `Combined_Pipeline.ipynb` → `combined_train, combined_val, combined_test` (line ~271), existing `logger.log_datasets(combined_train, context="training")` at line ~433
 
-Use grep:
+- [ ] **Step 1: Add `logger.log_dataset_statistics(...)` line after each existing `log_dataset(s)` call**
 
-```bash
-grep -n "logger.log_dataset" nbs/Base_Pipeline.ipynb nbs/Combined_Pipeline.ipynb nbs/Concept_Bottleneck_Pipeline.ipynb
-```
-
-- [ ] **Step 2: Add a `logger.log_dataset_statistics(...)` line after each existing `log_dataset` / `log_datasets` call**
-
-For `Base_Pipeline.ipynb` and `Concept_Bottleneck_Pipeline.ipynb` (which use `random_split`):
+For `Base_Pipeline.ipynb` and `Concept_Bottleneck_Pipeline.ipynb`:
 
 ```python
 logger.log_dataset_statistics({"train": train_dataset, "val": val_dataset, "test": test_dataset})
 ```
 
-For `Combined_Pipeline.ipynb` (which uses combined wrappers):
+For `Combined_Pipeline.ipynb`:
 
 ```python
 logger.log_dataset_statistics({"train": combined_train, "val": combined_val, "test": combined_test})
 ```
 
-(Adjust variable names to match what each notebook actually defines — confirm via the surrounding cells.)
+In each notebook, this line goes in the same cell as the existing `logger.log_dataset(...)` / `logger.log_datasets(...)` call, immediately after it.
 
-- [ ] **Step 3: Verify each notebook still parses as JSON**
+- [ ] **Step 2: Verify each notebook still parses as JSON**
 
 Run: `uv run python -c "import json; [json.load(open(p)) for p in ['nbs/Base_Pipeline.ipynb', 'nbs/Combined_Pipeline.ipynb', 'nbs/Concept_Bottleneck_Pipeline.ipynb']]"`
 Expected: no error.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add nbs/Base_Pipeline.ipynb nbs/Combined_Pipeline.ipynb nbs/Concept_Bottleneck_Pipeline.ipynb
