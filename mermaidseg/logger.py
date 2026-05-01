@@ -149,6 +149,71 @@ def _compute_class_counts(resolved_splits: dict, parent_id2label: dict[int, str]
     return df[ordered]
 
 
+def _source_columns(df_annotations) -> tuple[str, str] | None:
+    """Return ``(source_type, source_key_column)`` based on which columns are present.
+
+    Mirrors the existing ``BaseCoralDataset.__init__`` branch — ``region_id`` for
+    Mermaid, ``source_id`` for CoralNet. Returns ``None`` if neither is present
+    (caller will emit a zero-row frame).
+    """
+    if "region_id" in df_annotations.columns:
+        return "region", "region_name"
+    if "source_id" in df_annotations.columns:
+        return "source", "source_id"
+    return None
+
+
+def _compute_source_stats(resolved_splits: dict) -> Any:
+    """Per-source × split image and annotation counts.
+
+    Mermaid-shaped (``region_*``) and CoralNet-shaped (``source_id``) rows
+    coexist in the same frame, distinguished by ``source_type``. ``source_key``
+    is always a string (CoralNet ints get cast).
+    """
+    import pandas as pd
+
+    split_names = list(resolved_splits.keys())
+    rows_by_key: dict[tuple[str, str], dict] = {}
+
+    for split_name in split_names:
+        df_ann, df_img, _ = resolved_splits[split_name]
+        cols = _source_columns(df_ann)
+        if cols is None:
+            continue
+        source_type, key_col = cols
+
+        # Image counts: from df_img (one row per image).
+        img_per_source = df_img[key_col].astype(str).value_counts().to_dict()
+        # Annotation counts: from df_ann.
+        ann_per_source = df_ann[key_col].astype(str).value_counts().to_dict()
+
+        for source_key in set(img_per_source) | set(ann_per_source):
+            row = rows_by_key.setdefault(
+                (source_type, source_key),
+                {"source_key": source_key, "source_type": source_type},
+            )
+            row[f"{split_name}_images"] = img_per_source.get(source_key, 0)
+            row[f"{split_name}_annotations"] = ann_per_source.get(source_key, 0)
+
+    # Zero-fill any missing per-split columns so the schema is uniform.
+    for row in rows_by_key.values():
+        for split_name in split_names:
+            row.setdefault(f"{split_name}_images", 0)
+            row.setdefault(f"{split_name}_annotations", 0)
+
+    df = pd.DataFrame(list(rows_by_key.values()))
+    if df.empty:
+        cols = ["source_key", "source_type"]
+        for split_name in split_names:
+            cols += [f"{split_name}_images", f"{split_name}_annotations"]
+        return pd.DataFrame(columns=cols)
+
+    ordered = ["source_key", "source_type"]
+    ordered += [f"{s}_images" for s in split_names]
+    ordered += [f"{s}_annotations" for s in split_names]
+    return df[ordered].sort_values(["source_type", "source_key"]).reset_index(drop=True)
+
+
 def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
     """Resolve MLflow tracking URI using a simple priority chain.
 

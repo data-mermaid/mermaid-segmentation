@@ -18,6 +18,7 @@ from mermaidseg.logger import (
     Logger,
     WandbLogger,
     _compute_class_counts,
+    _compute_source_stats,
     _resolve_annotations,
     get_mlflow_tracking_uri,
     mlflow_connect,
@@ -871,3 +872,49 @@ class TestComputeClassCounts:
             assert "val_" not in col and "test_" not in col
         # Train-only fractions still sum to 1.
         assert abs(df["train_fraction"].sum() - 1.0) < 1e-9
+
+
+# ===================================================================
+# _compute_source_stats
+# ===================================================================
+class TestComputeSourceStats:
+    def test_mermaid_region_rows(self):
+        stub = make_mermaid_stub(
+            image_to_classes={
+                "img-1": ["Acropora"],
+                "img-2": ["Acropora", "Porites"],
+            },
+            image_to_region={"img-1": "Indonesia", "img-2": "Caribbean"},
+            class_subset=["Acropora", "Porites"],
+        )
+        from torch.utils.data import Subset
+
+        resolved = {
+            "train": _resolve_annotations(Subset(stub, [0])),
+            "val": _resolve_annotations(Subset(stub, [1])),
+        }
+        df = _compute_source_stats(resolved)
+
+        assert set(df["source_type"]) == {"region"}
+        idx = df.set_index("source_key")
+        assert idx.loc["Indonesia", "train_images"] == 1
+        assert idx.loc["Indonesia", "val_images"] == 0
+        assert idx.loc["Caribbean", "val_annotations"] == 2
+        assert "test_images" not in df.columns  # test split not provided
+
+    def test_coralnet_source_rows_cast_to_str(self):
+        from tests._dataset_stubs import make_coralnet_stub
+
+        stub = make_coralnet_stub(
+            image_to_classes={"img-1": ["Acropora"], "img-2": ["Porites"]},
+            image_to_source={"img-1": 42, "img-2": 7},
+            class_subset=["Acropora", "Porites"],
+        )
+        from torch.utils.data import Subset
+
+        resolved = {"train": _resolve_annotations(Subset(stub, [0, 1]))}
+        df = _compute_source_stats(resolved)
+
+        assert set(df["source_type"]) == {"source"}
+        assert set(df["source_key"]) == {"42", "7"}
+        assert df["source_key"].dtype == object  # strings, not ints
