@@ -121,6 +121,9 @@ def _compute_class_counts(resolved_splits: dict, parent_id2label: dict[int, str]
 
     split_names = list(resolved_splits.keys())
 
+    # Counts are matched by exact ``benthic_attribute_name`` equality against
+    # ``id2label`` values. The dataset pipeline guarantees consistent casing —
+    # any drift would silently zero out a class here.
     for class_id, class_name in all_classes:
         row: dict = {
             "class_id": class_id,
@@ -234,7 +237,7 @@ def _compute_class_by_source(resolved_splits: dict, parent_id2label: dict[int, s
         source_type, key_col = cols
         grouped = (
             df_ann.assign(_source_key=df_ann[key_col].astype(str))
-            .groupby(["_source_key", "benthic_attribute_name"], observed=True)
+            .groupby(["_source_key", "benthic_attribute_name"])
             .agg(annotations=("image_id", "size"), images=("image_id", "nunique"))
             .reset_index()
         )
@@ -273,12 +276,18 @@ def _compute_train_summary(
     computed over the **training** split only, and exclude classes whose
     ``class_kind`` is ``background`` or ``unclassified``.
     """
+    eligible_count = sum(1 for cid, name in parent_id2label.items() if _classify_kind(cid, name) == "target")
+
     summary: dict = {
         "total_images": 0,
         "total_annotations": 0,
         "splits": {},
         "class_subset": list(class_subset) if class_subset is not None else None,
-        "num_classes": len(parent_id2label) + 1,  # +1 for background
+        # ``num_classes`` matches the model output dimension (background + every id2label entry).
+        # ``eligible_num_classes`` is the upper bound for ``effective_num_classes`` — target
+        # classes only, excluding background and unclassified buckets.
+        "num_classes": len(parent_id2label) + 1,
+        "eligible_num_classes": eligible_count,
     }
 
     annotations_per_image: dict[str, dict] = {}
@@ -807,37 +816,39 @@ class Logger:
             parent_id2label = next(iter(resolved.values()))[2]
             class_subset = getattr(getattr(self.config, "data", None), "class_subset", None)
 
-            artifacts = {
-                f"{artifact_dir}/class_counts.csv": (
-                    "csv",
-                    lambda: _compute_class_counts(resolved, parent_id2label),
-                ),
-                f"{artifact_dir}/source_stats.csv": (
-                    "csv",
-                    lambda: _compute_source_stats(resolved),
-                ),
-                f"{artifact_dir}/class_by_source.csv": (
-                    "csv",
-                    lambda: _compute_class_by_source(resolved, parent_id2label),
-                ),
-                f"{artifact_dir}/train_summary.yaml": (
-                    "yaml",
-                    lambda: _compute_train_summary(resolved, parent_id2label, class_subset),
-                ),
-            }
-
-            for path, (kind, builder) in artifacts.items():
-                try:
-                    payload = builder()
-                    if kind == "csv":
-                        mlflow.log_text(payload.to_csv(index=False), path)
-                    else:
-                        mlflow.log_text(yaml.safe_dump(payload, sort_keys=False), path)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("Failed to log %s: %s", path, e)
+            self._log_csv_artifact(
+                f"{artifact_dir}/class_counts.csv",
+                lambda: _compute_class_counts(resolved, parent_id2label),
+            )
+            self._log_csv_artifact(
+                f"{artifact_dir}/source_stats.csv",
+                lambda: _compute_source_stats(resolved),
+            )
+            self._log_csv_artifact(
+                f"{artifact_dir}/class_by_source.csv",
+                lambda: _compute_class_by_source(resolved, parent_id2label),
+            )
+            self._log_yaml_artifact(
+                f"{artifact_dir}/train_summary.yaml",
+                lambda: _compute_train_summary(resolved, parent_id2label, class_subset),
+            )
 
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to log dataset statistics: %s", e)
+
+    @staticmethod
+    def _log_csv_artifact(path: str, build) -> None:
+        try:
+            mlflow.log_text(build().to_csv(index=False), path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to log %s: %s", path, e)
+
+    @staticmethod
+    def _log_yaml_artifact(path: str, build) -> None:
+        try:
+            mlflow.log_text(yaml.safe_dump(build(), sort_keys=False), path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to log %s: %s", path, e)
 
     @property
     def enable_wandb(self) -> bool:

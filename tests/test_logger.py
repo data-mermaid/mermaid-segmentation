@@ -995,6 +995,9 @@ class TestComputeTrainSummary:
         assert summary["splits"]["test"] == {"images": 1, "annotations": 0}
         assert summary["class_subset"] == ["Acropora", "Porites", "Macroalgae"]
         assert summary["num_classes"] == 4
+        # eligible = target classes only (excludes background and unclassified).
+        # Class subset is ["Acropora", "Porites", "Macroalgae"] — all targets.
+        assert summary["eligible_num_classes"] == 3
 
         # top-K shares: train has Acropora=3, Porites=1 → top1=0.75
         assert abs(summary["top1_share"] - 0.75) < 1e-9
@@ -1002,8 +1005,8 @@ class TestComputeTrainSummary:
         assert abs(summary["top3_share"] - 1.0) < 1e-9
         assert abs(summary["top5_share"] - 1.0) < 1e-9
 
-        # effective_num_classes = exp(entropy) ∈ [1, num_eligible]
-        assert 1.0 <= summary["effective_num_classes"] <= 3.0
+        # effective_num_classes = exp(entropy), bounded above by eligible_num_classes
+        assert 1.0 <= summary["effective_num_classes"] <= summary["eligible_num_classes"]
 
         # Annotations-per-image distribution catches the zero-annotation image
         assert summary["annotations_per_image"]["test"]["min"] == 0
