@@ -20,6 +20,7 @@ from mermaidseg.logger import (
     _compute_class_by_source,
     _compute_class_counts,
     _compute_source_stats,
+    _compute_train_summary,
     _resolve_annotations,
     get_mlflow_tracking_uri,
     mlflow_connect,
@@ -954,3 +955,57 @@ class TestComputeClassBySource:
         # No zero-count rows: only (Indonesia, Acropora, train) and (Caribbean, Porites, val)
         assert len(df) == 2
         assert df.set_index(["source_key", "class_name", "split"]).loc[("Indonesia", "Acropora", "train"), "annotations"] == 1
+
+
+# ===================================================================
+# _compute_train_summary
+# ===================================================================
+class TestComputeTrainSummary:
+    def test_summary_metrics_and_distribution(self):
+        stub = make_mermaid_stub(
+            image_to_classes={
+                "img-1": ["Acropora", "Acropora", "Porites"],
+                "img-2": ["Acropora"],
+                "img-3": ["Macroalgae"],
+                "img-4": [],  # an image with zero annotations (loss-of-points scenario)
+            },
+            image_to_region={"img-1": "A", "img-2": "A", "img-3": "B", "img-4": "B"},
+            class_subset=["Acropora", "Porites", "Macroalgae"],
+        )
+        # Re-add the zero-annotation image — make_mermaid_stub drops images with no rows
+        # because df_images is built from df_annotations. Patch by hand:
+        stub.df_images = pd.concat(
+            [stub.df_images, pd.DataFrame([{"image_id": "img-4", "region_id": "B", "region_name": "B"}])],
+            ignore_index=True,
+        )
+
+        from torch.utils.data import Subset
+
+        resolved = {
+            "train": _resolve_annotations(Subset(stub, [0, 1])),  # img-1, img-2
+            "val": _resolve_annotations(Subset(stub, [2])),  # img-3
+            "test": _resolve_annotations(Subset(stub, [3])),  # img-4 (no anns)
+        }
+
+        summary = _compute_train_summary(resolved, parent_id2label=stub.id2label, class_subset=["Acropora", "Porites", "Macroalgae"])
+
+        assert summary["total_images"] == 4
+        assert summary["total_annotations"] == 5
+        assert summary["splits"]["train"] == {"images": 2, "annotations": 4}
+        assert summary["splits"]["test"] == {"images": 1, "annotations": 0}
+        assert summary["class_subset"] == ["Acropora", "Porites", "Macroalgae"]
+        assert summary["num_classes"] == 4
+
+        # top-K shares: train has Acropora=3, Porites=1 → top1=0.75
+        assert abs(summary["top1_share"] - 0.75) < 1e-9
+        # Only 2 eligible classes in train → top3 / top5 clamp to total = 1.0
+        assert abs(summary["top3_share"] - 1.0) < 1e-9
+        assert abs(summary["top5_share"] - 1.0) < 1e-9
+
+        # effective_num_classes = exp(entropy) ∈ [1, num_eligible]
+        assert 1.0 <= summary["effective_num_classes"] <= 3.0
+
+        # Annotations-per-image distribution catches the zero-annotation image
+        assert summary["annotations_per_image"]["test"]["min"] == 0
+        assert summary["annotations_per_image"]["train"]["max"] == 3
+        assert summary["annotations_per_image"]["train"]["mean"] == 2.0

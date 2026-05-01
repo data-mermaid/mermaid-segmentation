@@ -12,6 +12,7 @@ import contextlib
 import copy
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
@@ -258,6 +259,86 @@ def _compute_class_by_source(resolved_splits: dict, parent_id2label: dict[int, s
     if not rows:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows)[cols].sort_values(["source_type", "source_key", "class_id", "split"]).reset_index(drop=True)
+
+
+def _compute_train_summary(
+    resolved_splits: dict,
+    parent_id2label: dict[int, str],
+    class_subset: list[str] | None,
+) -> dict:
+    """Summary metrics dict serialized to ``train_summary.yaml``.
+
+    Class-balance metrics (``top1/3/5_share``, ``effective_num_classes``) are
+    computed over the **training** split only, and exclude classes whose
+    ``class_kind`` is ``background`` or ``unclassified``.
+    """
+    summary: dict = {
+        "total_images": 0,
+        "total_annotations": 0,
+        "splits": {},
+        "class_subset": list(class_subset) if class_subset is not None else None,
+        "num_classes": len(parent_id2label) + 1,  # +1 for background
+    }
+
+    annotations_per_image: dict[str, dict] = {}
+
+    for split_name, (df_ann, df_img, _) in resolved_splits.items():
+        n_images = int(len(df_img))
+        n_annotations = int(len(df_ann))
+        summary["splits"][split_name] = {"images": n_images, "annotations": n_annotations}
+        summary["total_images"] += n_images
+        summary["total_annotations"] += n_annotations
+
+        # Per-image annotation density distribution. Re-index against df_img so
+        # images with zero annotations contribute a 0 (not NaN, not absent).
+        if n_images:
+            counts = df_ann.groupby("image_id").size().reindex(df_img["image_id"].tolist(), fill_value=0).astype(int)
+            annotations_per_image[split_name] = {
+                "mean": float(counts.mean()),
+                "median": float(counts.median()),
+                "p10": float(counts.quantile(0.10)),
+                "p90": float(counts.quantile(0.90)),
+                "min": int(counts.min()),
+                "max": int(counts.max()),
+            }
+        else:
+            annotations_per_image[split_name] = {
+                "mean": 0.0,
+                "median": 0.0,
+                "p10": 0.0,
+                "p90": 0.0,
+                "min": 0,
+                "max": 0,
+            }
+
+    summary["annotations_per_image"] = annotations_per_image
+
+    # Class-balance metrics over the training split, eligible classes only.
+    train = resolved_splits.get("train")
+    if train is not None:
+        df_ann, _df_img, _ = train
+        eligible_names = [name for cid, name in parent_id2label.items() if _classify_kind(cid, name) == "target"]
+        counts = df_ann["benthic_attribute_name"].value_counts().reindex(eligible_names, fill_value=0).sort_values(ascending=False)
+        total = int(counts.sum())
+
+        def _topk_share(k: int) -> float:
+            if total == 0:
+                return 0.0
+            return float(counts.head(k).sum() / total)
+
+        summary["top1_share"] = _topk_share(1)
+        summary["top3_share"] = _topk_share(3)
+        summary["top5_share"] = _topk_share(5)
+
+        if total > 0:
+            probs = (counts / total).to_numpy()
+            probs = probs[probs > 0]  # Mask zeros — log(0) is -inf.
+            entropy = float(-(probs * np.log(probs)).sum())
+            summary["effective_num_classes"] = float(math.exp(entropy))
+        else:
+            summary["effective_num_classes"] = 0.0
+
+    return summary
 
 
 def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
