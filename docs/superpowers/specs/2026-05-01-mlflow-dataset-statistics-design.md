@@ -64,7 +64,7 @@ Per benthic-attribute distribution across splits. Headline artifact for class-im
 | `total_annotations` | int | sum across splits |
 | `total_images` | int | sum across splits |
 
-One row per class in the parent dataset's `id2label`. Zero-fill for classes absent from a split.
+One row per class in the parent dataset's `id2label`. This `id2label` is already post-`class_subset` filtering (constructed in `BaseCoralDataset.__init__`), so unwanted classes do not appear here. Zero-fill for classes absent from a split.
 
 ### `source_stats.csv`
 Per source/region distribution.
@@ -94,7 +94,7 @@ splits:
 class_subset: [str, ...] | null   # from config.data.class_subset
 num_classes: int
 class_imbalance_ratio: float       # max_class_count / min_class_count over training split (excluding background)
-mean_annotations_per_image: float
+mean_annotations_per_image: float  # training split only
 ```
 
 `class_imbalance_ratio` excludes background and uses the training split only. If min count is 0, the ratio is `null` and a warning is emitted (signals an empty class).
@@ -107,7 +107,7 @@ Single private helper:
 def _resolve_annotations(split) -> tuple[pd.DataFrame, pd.DataFrame, dict[int, str]] | None
 ```
 
-Handles three input shapes:
+Handles four input shapes:
 
 1. **Plain dataset** (`MermaidDataset` / `CoralNetDataset`):
    - Returns `(dataset.df_annotations, dataset.df_images, dataset.id2label)` directly.
