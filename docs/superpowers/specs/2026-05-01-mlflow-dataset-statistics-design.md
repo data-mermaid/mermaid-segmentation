@@ -121,7 +121,6 @@ top3_share: float                       # share going to the top-3 classes
 top5_share: float                       # share going to the top-5 classes
                                         # If fewer than K eligible classes exist, the share is computed over the available classes (effectively the full eligible distribution).
 effective_num_classes: float            # exp(entropy) over the training class distribution
-classes_below_50_train: int             # count of classes with <50 training annotations
 # Annotations-per-image distribution per split.
 annotations_per_image:
   train: { mean: float, median: float, p10: float, p90: float, min: int, max: int }
@@ -132,8 +131,9 @@ annotations_per_image:
 **Why these summaries (vs. `max_count / min_count` ratio):** with severe coral-reef class imbalance, `max/min` is dominated by rare classes (often 0, giving null) and is identical run-to-run — it does not distinguish a healthy run from a broken one. The replacements:
 - `topK_share` flags long-tail collapse (suddenly top-3 = 95% means most classes were filtered out).
 - `effective_num_classes` is a single scalar that drops cleanly when the long tail collapses.
-- `classes_below_50_train` is what actually flags "you can't learn this class."
 - The annotations-per-image distribution catches misjoined data (e.g. images that lost their points during the join — `min: 0` immediately).
+
+A "minimum-annotations-per-class" trainability threshold was considered but rejected — once we train on all sources, the count loses meaning as a per-run QA signal, and `topK_share` + `effective_num_classes` already cover long-tail collapse.
 
 ## Subset & wrapper resolution
 
@@ -211,7 +211,7 @@ Add to `tests/test_logger.py` following existing patterns (`tmp_mlflow_uri` fixt
 - Class absent from a split → CSV has zero counts (not missing rows).
 - MermaidDataset (region) vs CoralNetDataset (source) → `source_type` column tagged correctly across both `source_stats.csv` and `class_by_source.csv`.
 - `class_kind` tagging: a class named `"Other"` → `unclassified`; the synthetic background → `background`; named coral classes → `target`.
-- Summary metrics: `top1_share` + `top3_share` + `top5_share` are non-decreasing; `effective_num_classes` falls within `[1, num_classes]`; `classes_below_50_train` matches a hand-counted fixture.
+- Summary metrics: `top1_share` + `top3_share` + `top5_share` are non-decreasing; `effective_num_classes` falls within `[1, num_classes]`.
 - Annotations-per-image distribution: median/p10/p90 match a hand-computed fixture; `min: 0` surfaces correctly when an image has no annotations.
 - One split unresolvable → other splits still logged, warning emitted.
 - `mlflow.log_text` raises on one artifact → other three still written.
