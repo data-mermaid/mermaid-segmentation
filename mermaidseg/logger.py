@@ -26,7 +26,7 @@ import torch
 from mlflow.data.code_dataset_source import CodeDatasetSource
 from mlflow.data.meta_dataset import MetaDataset
 from safetensors.torch import save_file as save_safetensors
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from mermaidseg.model.meta import MetaModel
 
@@ -47,10 +47,26 @@ LOCAL_DEFAULT_URI = "./segmentation"
 def _resolve_annotations(split):
     """Resolve a split into ``(df_annotations, df_images, id2label)``.
 
-    Returns ``None`` if the input is an unsupported shape; never raises.
+    Handles three input shapes:
+      * Plain dataset with ``df_annotations`` / ``df_images`` / ``id2label``
+      * PyTorch ``Subset`` (filters parent annotations by subset image ids)
+      * Combined / ``ConcatDataset``-style wrapper exposing ``_datasets`` or ``datasets``
+
+    Returns ``None`` for any other shape; never raises.
     """
+    if isinstance(split, Subset):
+        parent = split.dataset
+        resolved = _resolve_annotations(parent)
+        if resolved is None:
+            return None
+        parent_ann, parent_img, id2label = resolved
+        df_images = parent_img.iloc[list(split.indices)].reset_index(drop=True)
+        df_annotations = parent_ann[parent_ann["image_id"].isin(df_images["image_id"])]
+        return df_annotations, df_images, id2label
+
     if hasattr(split, "df_annotations") and hasattr(split, "df_images") and hasattr(split, "id2label"):
         return split.df_annotations, split.df_images, split.id2label
+
     return None
 
 

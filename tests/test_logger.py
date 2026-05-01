@@ -718,3 +718,22 @@ class TestResolveAnnotations:
         assert df_ann is stub.df_annotations
         assert df_img is stub.df_images
         assert id2label is stub.id2label
+
+    def test_subset_filters_annotations_by_subset_image_ids(self):
+        stub = make_mermaid_stub(
+            image_to_classes={
+                "img-1": ["Acropora"],
+                "img-2": ["Porites"],
+                "img-3": ["Macroalgae"],
+            },
+            image_to_region={"img-1": "A", "img-2": "B", "img-3": "C"},
+            class_subset=["Acropora", "Porites", "Macroalgae"],
+        )
+        from torch.utils.data import Subset
+
+        subset = Subset(stub, [0, 2])  # img-1 and img-3
+        df_ann, df_img, id2label = _resolve_annotations(subset)
+
+        assert sorted(df_ann["image_id"].unique().tolist()) == ["img-1", "img-3"]
+        assert sorted(df_img["image_id"].tolist()) == ["img-1", "img-3"]
+        assert id2label == stub.id2label
