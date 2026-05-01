@@ -70,7 +70,7 @@ One row per class in the parent dataset's `id2label`. This `id2label` is already
 
 **`class_kind` policy** (case-insensitive match on `class_name`):
 - `background` → the synthetic background class added by `BaseCoralDataset` (id 0).
-- `unclassified` → names matching `Other`, `Unknown`, `Unclassified`. These rows are kept as their own classes (not folded into background) and are visible in counts so reviewers can see how much of the dataset is unlabeled noise.
+- `unclassified` → names whose lowercased form is exactly `other`, `unknown`, or `unclassified`. Qualified names like `"Other Invertebrates"` remain `target` (they are real, distinct classes the model is trained on). These rows are kept as their own classes (not folded into background) and are visible in counts so reviewers can see how much of the dataset is unlabeled noise.
 - `target` → all remaining named classes.
 
 ### `source_stats.csv`
@@ -119,6 +119,7 @@ num_classes: int
 top1_share: float                       # share of training annotations going to the top class
 top3_share: float                       # share going to the top-3 classes
 top5_share: float                       # share going to the top-5 classes
+                                        # If fewer than K eligible classes exist, the share is computed over the available classes (effectively the full eligible distribution).
 effective_num_classes: float            # exp(entropy) over the training class distribution
 classes_below_50_train: int             # count of classes with <50 training annotations
 # Annotations-per-image distribution per split.
