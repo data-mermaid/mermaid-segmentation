@@ -10,6 +10,16 @@
 
 **Spec:** [docs/superpowers/specs/2026-05-01-mlflow-dataset-statistics-design.md](../specs/2026-05-01-mlflow-dataset-statistics-design.md)
 
+## Execution rules (karpathy guidelines)
+
+Each task below traces to the spec — do not invent extra features, columns, abstractions, or "flexibility" not asked for. Specifically:
+
+- **Surface assumptions, don't hide them.** If something in this plan is unclear or contradicts the spec, stop and ask — don't pick silently.
+- **Surgical edits only.** Touch only the files this plan names. Do not "improve" adjacent code, formatting, comments, or unrelated tests. If you notice unrelated dead code or inconsistency, mention it but don't delete it.
+- **Match existing style.** Follow the patterns already in `mermaidseg/logger.py` (lazy imports inside helpers if reasonable, `try/except` shape, `_ensure_active_run()` gating, `logger.warning(...)` calls).
+- **Verify before claiming done.** A task is complete only when the test in its final step actually passes — run the command, check the output. No "should pass" claims without evidence.
+- **Frequent commits.** Commit at every task boundary as the plan specifies; don't batch commits across tasks.
+
 ---
 
 ## File Structure
@@ -1140,7 +1150,11 @@ class TestLogDatasetStatistics:
 Run: `uv run pytest tests/test_logger.py::TestLogDatasetStatistics -v`
 Expected: FAIL with `AttributeError: 'Logger' object has no attribute 'log_dataset_statistics'`.
 
-- [ ] **Step 3: Add `log_dataset_statistics` to `Logger`**
+- [ ] **Step 3: Add `import yaml` to `mermaidseg/logger.py` module-level imports**
+
+Add `import yaml` alongside the other stdlib/third-party imports at the top of the file (don't import inside the method body).
+
+- [ ] **Step 4: Add `log_dataset_statistics` to `Logger`**
 
 Add method to `Logger` class in `mermaidseg/logger.py`, near `log_dataloader_params`:
 
@@ -1209,8 +1223,7 @@ Add method to `Logger` class in `mermaidseg/logger.py`, near `log_dataloader_par
                     if kind == "csv":
                         mlflow.log_text(payload.to_csv(index=False), path)
                     else:
-                        import yaml as _yaml
-                        mlflow.log_text(_yaml.safe_dump(payload, sort_keys=False), path)
+                        mlflow.log_text(yaml.safe_dump(payload, sort_keys=False), path)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("Failed to log %s: %s", path, e)
 
@@ -1218,17 +1231,17 @@ Add method to `Logger` class in `mermaidseg/logger.py`, near `log_dataloader_par
             logger.warning("Failed to log dataset statistics: %s", e)
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 5: Run tests**
 
 Run: `uv run pytest tests/test_logger.py::TestLogDatasetStatistics -v`
 Expected: all 3 tests PASS.
 
-- [ ] **Step 5: Run the full logger test file**
+- [ ] **Step 6: Run the full logger test file**
 
 Run: `uv run pytest tests/test_logger.py -v`
 Expected: all existing tests still PASS, plus the new ones.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add mermaidseg/logger.py tests/test_logger.py
