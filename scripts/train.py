@@ -350,6 +350,8 @@ def _run_training(args: argparse.Namespace) -> None:
         if logger.mlflow_run_id is not None:
             logging.info("MLflow run_id: %s", logger.mlflow_run_id)
 
+        logger.log_dataset_statistics({"train": train_ds, "val": val_ds, "test": test_ds})
+
         try:
             train_model(
                 meta_model=meta_model,
