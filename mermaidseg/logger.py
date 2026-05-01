@@ -24,6 +24,7 @@ from typing import Any
 import mlflow
 import numpy as np
 import torch
+import yaml
 from mlflow.data.code_dataset_source import CodeDatasetSource
 from mlflow.data.meta_dataset import MetaDataset
 from safetensors.torch import save_file as save_safetensors
@@ -766,6 +767,77 @@ class Logger:
             )
         except Exception as e:
             logger.warning("Failed to log dataloader params: %s", e)
+
+    def log_dataset_statistics(
+        self,
+        splits: dict,
+        *,
+        artifact_dir: str = "dataset_stats",
+    ) -> None:
+        """Log per-run dataset distribution statistics as MLflow artifacts.
+
+        Emits four artifacts under ``artifact_dir/``:
+          * ``class_counts.csv`` — per-class × split counts and fractions
+          * ``source_stats.csv`` — per region/source × split image and annotation counts
+          * ``class_by_source.csv`` — long-format drift matrix
+          * ``train_summary.yaml`` — top-K shares, effective_num_classes, density distribution
+
+        Strictly read-only against datasets. Per-split resolution failures and
+        per-artifact write failures are isolated — one bad split or one failed
+        artifact does not block the rest.
+        """
+        if not self._ensure_active_run():
+            return
+        try:
+            resolved: dict = {}
+            for split_name, split in splits.items():
+                try:
+                    r = _resolve_annotations(split)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Failed to resolve split %s: %s", split_name, e)
+                    continue
+                if r is None:
+                    continue
+                resolved[split_name] = r
+
+            if not resolved:
+                logger.warning("log_dataset_statistics: no splits resolved; nothing to log")
+                return
+
+            parent_id2label = next(iter(resolved.values()))[2]
+            class_subset = getattr(getattr(self.config, "data", None), "class_subset", None)
+
+            artifacts = {
+                f"{artifact_dir}/class_counts.csv": (
+                    "csv",
+                    lambda: _compute_class_counts(resolved, parent_id2label),
+                ),
+                f"{artifact_dir}/source_stats.csv": (
+                    "csv",
+                    lambda: _compute_source_stats(resolved),
+                ),
+                f"{artifact_dir}/class_by_source.csv": (
+                    "csv",
+                    lambda: _compute_class_by_source(resolved, parent_id2label),
+                ),
+                f"{artifact_dir}/train_summary.yaml": (
+                    "yaml",
+                    lambda: _compute_train_summary(resolved, parent_id2label, class_subset),
+                ),
+            }
+
+            for path, (kind, builder) in artifacts.items():
+                try:
+                    payload = builder()
+                    if kind == "csv":
+                        mlflow.log_text(payload.to_csv(index=False), path)
+                    else:
+                        mlflow.log_text(yaml.safe_dump(payload, sort_keys=False), path)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Failed to log %s: %s", path, e)
+
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to log dataset statistics: %s", e)
 
     @property
     def enable_wandb(self) -> bool:
