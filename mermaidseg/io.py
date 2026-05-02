@@ -65,9 +65,16 @@ def update_config(base_config: ConfigDict, config: ConfigDict) -> ConfigDict:
 
 
 def _load_csv_if_path(value: Any, header: int | None = 0) -> Any:
-    """Load CSV file if value is a file path, otherwise return as-is."""
-    if isinstance(value, str) and Path(value).is_file() and value.endswith(".csv"):
-        return pd.read_csv(value, header=header).to_numpy().flatten().tolist()
+    """Load CSV file if value is a path to an existing ``.csv`` file, otherwise return as-is."""
+    if value is None:
+        return value
+    path: Path | None = None
+    if isinstance(value, Path):
+        path = value
+    elif isinstance(value, str) and value.endswith(".csv"):
+        path = Path(value)
+    if path is not None and path.is_file() and path.suffix.lower() == ".csv":
+        return pd.read_csv(path, header=header).to_numpy().flatten().tolist()
     return value
 
 

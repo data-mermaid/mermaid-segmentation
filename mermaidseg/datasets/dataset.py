@@ -642,14 +642,14 @@ class ExternalDenseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]
 
         kept = set(self.class_subset)
         max_id = max(int(v) for v in self.label2id.values())
-        lut = np.zeros(max_id + 1, dtype=np.uint8)
+        lut = np.zeros(max_id + 1, dtype=np.uint16)
 
         for name, class_id in self.label2id.items():
             class_id_int = int(class_id)
             if name in kept:
-                lut[class_id_int] = np.uint8(class_id_int)
+                lut[class_id_int] = np.uint16(class_id_int)
             else:
-                lut[class_id_int] = np.uint8(0)
+                lut[class_id_int] = np.uint16(0)
 
         return lut
 
@@ -667,7 +667,7 @@ class ExternalDenseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]
         mask = np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=mask_key))
         if mask.ndim == 3:
             mask = mask[..., 0]
-        mask = mask.astype(np.uint8, copy=False)
+        mask = mask.astype(np.uint16, copy=False)
 
         if self.remap_lut is not None:
             clip_max = len(self.remap_lut) - 1

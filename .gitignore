@@ -9,6 +9,7 @@ nbs/model_checkpoints/*
 nbs/profiler_logs/*
 */wandb/*
 nbs_tmp/*
+scratch_mapped_preprocessed_datasets/
 scraping/source*.csv
 
 # Byte-compiled / optimized / DLL files
