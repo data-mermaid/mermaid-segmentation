@@ -112,7 +112,7 @@ def _stop_current_space() -> None:
 
 
 def _batch_is_non_empty(batch: object) -> bool:
-    if not isinstance(batch, (tuple, list)) or len(batch) < 2:
+    if not isinstance(batch, tuple | list) or len(batch) < 2:
         return True
     images, labels = batch[0], batch[1]
     if isinstance(images, torch.Tensor) and images.numel() == 0:
