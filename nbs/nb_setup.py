@@ -67,7 +67,9 @@ def check_aws_session() -> None:
         print(f"AWS account : {identity['Account']}")
         print(f"IAM ARN     : {identity['Arn']}")
     except botocore.exceptions.NoCredentialsError:
-        print("AWS credentials not found. On SageMaker this should not happen — check the execution role.")
+        print(
+            "AWS credentials not found. On SageMaker this should not happen — check the execution role."
+        )
     except botocore.exceptions.ClientError as e:
         print(f"AWS session error: {e}")
 

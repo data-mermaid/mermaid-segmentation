@@ -124,7 +124,9 @@ def _take_first_non_empty_batch(loader: object, split: str) -> tuple[torch.Tenso
     for batch in loader:
         if _batch_is_non_empty(batch):
             return batch
-    raise RuntimeError(f"Dry run could not find a non-empty batch for split '{split}'. Check data access credentials and dataset availability.")
+    raise RuntimeError(
+        f"Dry run could not find a non-empty batch for split '{split}'. Check data access credentials and dataset availability."
+    )
 
 
 def _save_failure_report_if_available(
@@ -141,7 +143,9 @@ def _save_failure_report_if_available(
         return None
 
     report_path = (
-        Path(explicit_output_path) if explicit_output_path else (log_dir / f"data_load_failures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet")
+        Path(explicit_output_path)
+        if explicit_output_path
+        else (log_dir / f"data_load_failures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet")
     )
     saved_path = Path(save_failures(report_path))
     logging.warning("Saved %d data-load failure records to %s", n_failures, saved_path)
@@ -275,12 +279,17 @@ def _run_training(args: argparse.Namespace) -> None:
         torch.cuda.manual_seed_all(seed)
     logging.info("Seed: %d", seed)
 
-    transforms = {split: A.Compose([getattr(A, name)(**params) for name, params in augs.items()]) for split, augs in cfg.augmentation.items()}
+    transforms = {
+        split: A.Compose([getattr(A, name)(**params) for name, params in augs.items()])
+        for split, augs in cfg.augmentation.items()
+    }
 
     dataset_name = cfg.data.pop("name", None)
     batch_size = cfg.data.pop("batch_size", 8)
 
-    dataset = getattr(mermaidseg.datasets.dataset, dataset_name)(transform=transforms["train"], **cfg.data)
+    dataset = getattr(mermaidseg.datasets.dataset, dataset_name)(
+        transform=transforms["train"], **cfg.data
+    )
     logging.info("Dataset: %s (%d samples)", dataset_name, len(dataset))
     collate_fn = getattr(dataset, "collate_fn", None)
     report_written = False
@@ -301,7 +310,9 @@ def _run_training(args: argparse.Namespace) -> None:
     val_size = int(0.15 * total)
     test_size = total - train_size - val_size
     generator = torch.Generator().manual_seed(seed)
-    train_ds, val_ds, test_ds = random_split(dataset, [train_size, val_size, test_size], generator=generator)
+    train_ds, val_ds, test_ds = random_split(
+        dataset, [train_size, val_size, test_size], generator=generator
+    )
 
     num_workers = args.num_workers
     loader_kwargs = {

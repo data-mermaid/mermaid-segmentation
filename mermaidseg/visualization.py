@@ -3,7 +3,9 @@ import pandas as pd
 from matplotlib import pyplot as plt
 
 
-def get_legend_elements(annotations: pd.DataFrame, include_growth_form: bool = False) -> list | tuple[list, list]:
+def get_legend_elements(
+    annotations: pd.DataFrame, include_growth_form: bool = False
+) -> list | tuple[list, list]:
     """Generate matplotlib legend elements for benthic attributes and optionally growth forms.
 
     Args:
@@ -29,12 +31,16 @@ def get_legend_elements(annotations: pd.DataFrame, include_growth_form: bool = F
             label=name,
             markersize=10,
         )
-        for name, color in zip(unique_benthic["benthic_attribute_name"], unique_benthic["benthic_color"], strict=False)
+        for name, color in zip(
+            unique_benthic["benthic_attribute_name"], unique_benthic["benthic_color"], strict=False
+        )
     ]
     if not include_growth_form:
         return benthic_legend_elements
 
-    unique_growth = annotations[["growth_form_name", "growth_form_marker"]].astype(str).drop_duplicates()
+    unique_growth = (
+        annotations[["growth_form_name", "growth_form_marker"]].astype(str).drop_duplicates()
+    )
 
     growth_legend_elements = [
         plt.Line2D(
@@ -46,7 +52,9 @@ def get_legend_elements(annotations: pd.DataFrame, include_growth_form: bool = F
             markersize=10,
             linestyle="None",
         )
-        for name, marker in zip(unique_growth["growth_form_name"], unique_growth["growth_form_marker"], strict=False)
+        for name, marker in zip(
+            unique_growth["growth_form_name"], unique_growth["growth_form_marker"], strict=False
+        )
     ]
 
     return benthic_legend_elements, growth_legend_elements

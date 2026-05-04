@@ -32,8 +32,10 @@ def train_model(
     meta_model: MetaModel,
     evaluator: Evaluator,
     train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-    val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]] | None = None,
-    test_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]] | None = None,
+    val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
+    | None = None,
+    test_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
+    | None = None,
     logger: Logger | None = None,
     start_epoch: int = -1,
     end_epoch: int = -1,
@@ -108,7 +110,9 @@ def train_model(
         logging.info("EPOCH: %d", epoch)
 
         meta_model.model.train(True)
-        train_loss, train_metric_results, train_timing = meta_model.train_epoch(train_loader, evaluator)
+        train_loss, train_metric_results, train_timing = meta_model.train_epoch(
+            train_loader, evaluator
+        )
         logging.info("LOSS train %s", train_loss)
         logging.info("TRAIN METRICS: %s", train_metric_results)
         epoch_loss_dict["train/loss"] = train_loss
@@ -150,7 +154,11 @@ def train_model(
                 epochs_without_improvement += 1
 
             if early_stopping and epochs_without_improvement >= early_stopping_patience:
-                logging.info("Early stopping triggered: no '%s' improvement for %d epoch(s).", metric_name, early_stopping_patience)
+                logging.info(
+                    "Early stopping triggered: no '%s' improvement for %d epoch(s).",
+                    metric_name,
+                    early_stopping_patience,
+                )
                 should_stop_early = True
 
         if scheduler is not None:
@@ -172,7 +180,9 @@ def train_model(
         epoch_wall = time.time() - epoch_start_time
         epoch_loss_dict["train/time_taken"] = epoch_wall
         epoch_loss_dict["train/samples_per_sec"] = train_timing["num_samples"] / epoch_wall
-        epoch_loss_dict["train/data_loading_pct"] = train_timing["data_loading_sec"] / epoch_wall * 100
+        epoch_loss_dict["train/data_loading_pct"] = (
+            train_timing["data_loading_sec"] / epoch_wall * 100
+        )
 
         if torch.cuda.is_available():
             epoch_loss_dict["train/gpu_peak_memory_mb"] = torch.cuda.max_memory_allocated() / 1e6

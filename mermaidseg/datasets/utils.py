@@ -42,7 +42,9 @@ def get_image_s3(
         image_data = response["Body"].read()
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
-        logger.warning("S3 error loading image (bucket=%s, key=%s): %s %s", bucket, key, error_code, e)
+        logger.warning(
+            "S3 error loading image (bucket=%s, key=%s): %s %s", bucket, key, error_code, e
+        )
         raise DataLoadError(f"S3 ClientError for s3://{bucket}/{key}: {error_code}") from e
 
     try:
@@ -190,7 +192,9 @@ def get_coralnet_sources():
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             if error_code == "404":
-                logger.warning("get_coralnet_sources: annotations.csv not found for source %s", source)
+                logger.warning(
+                    "get_coralnet_sources: annotations.csv not found for source %s", source
+                )
             else:
                 logger.warning(
                     "get_coralnet_sources: unexpected S3 error for %s (code=%s): %s",
@@ -206,7 +210,9 @@ def get_coralnet_sources():
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             if error_code == "404":
-                logger.warning("get_coralnet_sources: image_list.csv not found for source %s", source)
+                logger.warning(
+                    "get_coralnet_sources: image_list.csv not found for source %s", source
+                )
             else:
                 logger.warning(
                     "get_coralnet_sources: unexpected S3 error for %s (code=%s): %s",

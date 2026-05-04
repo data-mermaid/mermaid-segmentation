@@ -47,10 +47,15 @@ def initialize_benthic_hierarchy(
         parent_id = attr["parent"]
         hierarchy_id_dict[node_id] = parent_id
         id2name_dict[node_id] = attr["name"]
-    return {id2name_dict.get(node_id): id2name_dict.get(parent_id) for node_id, parent_id in hierarchy_id_dict.items()}
+    return {
+        id2name_dict.get(node_id): id2name_dict.get(parent_id)
+        for node_id, parent_id in hierarchy_id_dict.items()
+    }
 
 
-def get_hierarchy_level(concept_list: list[str], hierarchy_dict: dict[str, str]) -> dict[str, int | None]:
+def get_hierarchy_level(
+    concept_list: list[str], hierarchy_dict: dict[str, str]
+) -> dict[str, int | None]:
     """Determine the hierarchy level for each concept in a list based on a parent mapping.
 
     The function calculates the level of each concept by counting the number of
@@ -113,7 +118,9 @@ def generate_hierarchy_path(label: str, hierarchy_dict: dict[str, str]) -> list[
     return path
 
 
-def initialize_benthic_concepts(labelset_benthic: list[str], hierarchy_dict: dict[str, str]) -> tuple[list[str], pd.DataFrame]:
+def initialize_benthic_concepts(
+    labelset_benthic: list[str], hierarchy_dict: dict[str, str]
+) -> tuple[list[str], pd.DataFrame]:
     """Create a sorted list of unique benthic concepts derived from a set of labels.
 
     This function iterates over each label in `labelset_benthic`, uses
@@ -155,7 +162,9 @@ def initialize_benthic_concepts(labelset_benthic: list[str], hierarchy_dict: dic
     return benthic_concept_set, benthic_concept_matrix
 
 
-def map_benthic_to_concept(benthic_label: str | int, benthic_concept_matrix: pd.DataFrame) -> np.ndarray:
+def map_benthic_to_concept(
+    benthic_label: str | int, benthic_concept_matrix: pd.DataFrame
+) -> np.ndarray:
     """Map a benthic class label to its corresponding concept one-hot vector.
 
     Args:
@@ -177,7 +186,9 @@ def map_benthic_to_concept(benthic_label: str | int, benthic_concept_matrix: pd.
     raise ValueError(f"Benthic label '{benthic_label}' not found in concept matrix index.")
 
 
-def labels_to_concepts(labels: torch.Tensor | np.ndarray, benthic_concept_matrix: pd.DataFrame) -> torch.Tensor | np.ndarray:
+def labels_to_concepts(
+    labels: torch.Tensor | np.ndarray, benthic_concept_matrix: pd.DataFrame
+) -> torch.Tensor | np.ndarray:
     """Map integer segmentation labels to concept vectors.
 
     Args:
@@ -193,7 +204,9 @@ def labels_to_concepts(labels: torch.Tensor | np.ndarray, benthic_concept_matrix
     vals = benthic_concept_matrix.to_numpy().astype(np.float32)  # shape (n_labels, n_concepts)
     n_labels, n_concepts = vals.shape
     lookup = np.zeros((n_labels + 1, n_concepts), dtype=np.float32)
-    lookup[1:] = vals  # assumes integer label i corresponds to row i-1 (map_benthic_to_concept uses that convention)
+    lookup[1:] = (
+        vals  # assumes integer label i corresponds to row i-1 (map_benthic_to_concept uses that convention)
+    )
 
     # handle torch input
     if isinstance(labels, torch.Tensor):

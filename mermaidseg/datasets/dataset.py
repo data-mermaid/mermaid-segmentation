@@ -109,11 +109,17 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.concept_mapping_flag = concept_mapping_flag
 
         if self.class_subset is not None:
-            self.df_annotations = self.df_annotations[self.df_annotations["benthic_attribute_name"].apply(lambda x: x in self.class_subset)]
+            self.df_annotations = self.df_annotations[
+                self.df_annotations["benthic_attribute_name"].apply(
+                    lambda x: x in self.class_subset
+                )
+            ]
 
             if "region_id" in self.df_annotations.columns:  # Added for MermaidDataset
                 self.df_images = (
-                    self.df_annotations[["image_id", "region_id", "region_name"]].drop_duplicates(subset=["image_id"]).reset_index(drop=True)
+                    self.df_annotations[["image_id", "region_id", "region_name"]]
+                    .drop_duplicates(subset=["image_id"])
+                    .reset_index(drop=True)
                 )
             elif "source_id" in self.df_annotations.columns:  # Added for CoralNetDataset
                 self.df_images = (
@@ -124,14 +130,18 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
                     .reset_index(drop=True)
                 )
             else:
-                raise ValueError("Unknown dataset structure for filtering images based on class_subset.")
+                raise ValueError(
+                    "Unknown dataset structure for filtering images based on class_subset."
+                )
 
             self.num_classes = len(self.class_subset) + 1  # +1 for background
             self.id2label = dict(enumerate(self.class_subset, start=1))
             self.label2id = {v: k for k, v in self.id2label.items()}
 
         else:
-            self.num_classes = self.df_annotations["benthic_attribute_name"].nunique() + 1  # +1 for background
+            self.num_classes = (
+                self.df_annotations["benthic_attribute_name"].nunique() + 1
+            )  # +1 for background
 
             self.id2label = dict(
                 enumerate(
@@ -201,7 +211,9 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
         return image, mask  # , annotations
 
-    def _record_load_failure(self, image_id: Any, row_kwargs: dict[str, Any], error: Exception) -> None:
+    def _record_load_failure(
+        self, image_id: Any, row_kwargs: dict[str, Any], error: Exception
+    ) -> None:
         image_id_str = str(image_id)
         record = {
             "timestamp_utc": pd.Timestamp.utcnow().isoformat(),
@@ -279,8 +291,12 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             masks = torch.stack(masks)
         else:
             # Convert numpy arrays to tensors for consistency
-            images = torch.stack([torch.from_numpy(img) if isinstance(img, np.ndarray) else img for img in images])
-            masks = torch.stack([torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask for mask in masks])
+            images = torch.stack(
+                [torch.from_numpy(img) if isinstance(img, np.ndarray) else img for img in images]
+            )
+            masks = torch.stack(
+                [torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask for mask in masks]
+            )
 
         return images, masks
 
@@ -291,14 +307,20 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """
         hierarchy_dict = initialize_benthic_hierarchy()
         class_set = list(self.id2label.values())
-        benthic_concept_set, benthic_concept_matrix = initialize_benthic_concepts(class_set, hierarchy_dict)
+        benthic_concept_set, benthic_concept_matrix = initialize_benthic_concepts(
+            class_set, hierarchy_dict
+        )
         self.num_concepts = len(benthic_concept_set)
         self.id2concept = dict(enumerate(benthic_concept_set, start=1))
         self.concept2id = {v: k for k, v in self.id2concept.items()}
         self.benthic_concept_matrix = benthic_concept_matrix
         self.conceptid2labelid = {}
         for ind, label in self.id2label.items():
-            col_ind = int(np.where(self.benthic_concept_matrix.columns.get_level_values("concept") == label)[0][0])
+            col_ind = int(
+                np.where(self.benthic_concept_matrix.columns.get_level_values("concept") == label)[
+                    0
+                ][0]
+            )
             self.conceptid2labelid[col_ind] = ind
 
 
@@ -337,12 +359,18 @@ class MermaidDataset(BaseCoralDataset):
 
         self.df_annotations, self.df_images = self.load_annotations(self.annotations_path)
 
-        super().__init__(df_annotations=self.df_annotations, df_images=self.df_images, **base_kwargs)
+        super().__init__(
+            df_annotations=self.df_annotations, df_images=self.df_images, **base_kwargs
+        )
 
     def load_annotations(self, annotations_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Load annotations from a Parquet file on S3."""
         df_annotations = pd.read_parquet(annotations_path)
-        df_images = df_annotations[["image_id", "region_id", "region_name"]].drop_duplicates(subset=["image_id"]).reset_index(drop=True)
+        df_images = (
+            df_annotations[["image_id", "region_id", "region_name"]]
+            .drop_duplicates(subset=["image_id"])
+            .reset_index(drop=True)
+        )
         return df_annotations, df_images
 
     def read_image(self, image_id: str, **row_kwargs) -> NDArray[Any]:
@@ -404,9 +432,13 @@ class CoralNetDataset(BaseCoralDataset):
         self.df_annotations, self.df_images = self.load_annotations()
 
         if self.whitelist_sources is not None:
-            self.df_annotations = self.df_annotations[self.df_annotations["source_id"].apply(lambda x: x in self.whitelist_sources)]
+            self.df_annotations = self.df_annotations[
+                self.df_annotations["source_id"].apply(lambda x: x in self.whitelist_sources)
+            ]
         if self.blacklist_sources is not None:
-            self.df_annotations = self.df_annotations[self.df_annotations["source_id"].apply(lambda x: x not in self.blacklist_sources)]
+            self.df_annotations = self.df_annotations[
+                self.df_annotations["source_id"].apply(lambda x: x not in self.blacklist_sources)
+            ]
         if self.whitelist_sources is not None or self.blacklist_sources is not None:
             self.df_images = (
                 self.df_annotations[
@@ -415,14 +447,18 @@ class CoralNetDataset(BaseCoralDataset):
                 .drop_duplicates(subset=["source_id", "image_id"])
                 .reset_index(drop=True)
             )
-        super().__init__(df_annotations=self.df_annotations, df_images=self.df_images, **base_kwargs)
+        super().__init__(
+            df_annotations=self.df_annotations, df_images=self.df_images, **base_kwargs
+        )
 
     def load_annotations(self):
         """Load annotations from a Parquet file on S3."""
         annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         self.df_annotations = pd.read_parquet(annotations_path)
 
-        self.df_annotations["benthic_attribute_name"] = self.df_annotations["coralnet_id"].apply(lambda x: self.labelmapping.get(str(x), None))
+        self.df_annotations["benthic_attribute_name"] = self.df_annotations["coralnet_id"].apply(
+            lambda x: self.labelmapping.get(str(x), None)
+        )
 
         self.df_annotations = self.df_annotations[
             ["source_id", "image_id", "row", "col", "benthic_attribute_name"]
@@ -482,7 +518,9 @@ class CombinedCoralDataset:
         ref_label2id = roots[0].label2id
         for root in roots[1:]:
             if root.label2id != ref_label2id:
-                raise ValueError(f"All datasets must share the same label2id mapping. Got {ref_label2id!r} vs {root.label2id!r}.")
+                raise ValueError(
+                    f"All datasets must share the same label2id mapping. Got {ref_label2id!r} vs {root.label2id!r}."
+                )
 
         self._datasets = datasets
         self._concat = torch.utils.data.ConcatDataset(datasets)
@@ -637,7 +675,9 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             "turbinaria": ["Turbinaria reniformis"],
             "other coral": ["Bleached coral"],
             "other coral dead": ["Dead coral"],
-            "other coral alive": ["Hard coral"],  # Not fully correct as it can include soft corals but no specific mapping available
+            "other coral alive": [
+                "Hard coral"
+            ],  # Not fully correct as it can include soft corals but no specific mapping available
             "other coral bleached": ["Bleached coral"],  # Newly added
             "massive/meandering alive": ["Hard coral"],
             "massive/meandering dead": ["Dead coral"],
@@ -659,11 +699,16 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             "dead clam": ["Unknown"],
         }
         if self.class_subset is None:
-            self.class_subset = {mermaid_class[0] for mermaid_class in coralscapes_39_to_mermaid.values()}
+            self.class_subset = {
+                mermaid_class[0] for mermaid_class in coralscapes_39_to_mermaid.values()
+            }
             self.id2label = dict(enumerate(sorted(self.class_subset), start=1))
             self.label2id = {label: i for i, label in self.id2label.items()}
             self.num_classes = len(self.class_subset) + 1  # +1 for background
-        id_coralscapes_to_mermaid = {int(k): self.label2id.get(coralscapes_39_to_mermaid[v][0], 0) for k, v in id2label_coralscapes.items()}
+        id_coralscapes_to_mermaid = {
+            int(k): self.label2id.get(coralscapes_39_to_mermaid[v][0], 0)
+            for k, v in id2label_coralscapes.items()
+        }
         id_coralscapes_to_mermaid[0] = 0  # Adding mapping for background / unlabeled class
 
         return id_coralscapes_to_mermaid
@@ -703,14 +748,20 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """
         hierarchy_dict = initialize_benthic_hierarchy()
         class_set = list(self.id2label.values())
-        benthic_concept_set, benthic_concept_matrix = initialize_benthic_concepts(class_set, hierarchy_dict)
+        benthic_concept_set, benthic_concept_matrix = initialize_benthic_concepts(
+            class_set, hierarchy_dict
+        )
         self.num_concepts = len(benthic_concept_set)
         self.id2concept = dict(enumerate(benthic_concept_set, start=1))
         self.concept2id = {v: k for k, v in self.id2concept.items()}
         self.benthic_concept_matrix = benthic_concept_matrix
         self.conceptid2labelid = {}
         for ind, label in self.id2label.items():
-            col_ind = int(np.where(self.benthic_concept_matrix.columns.get_level_values("concept") == label)[0][0])
+            col_ind = int(
+                np.where(self.benthic_concept_matrix.columns.get_level_values("concept") == label)[
+                    0
+                ][0]
+            )
             self.conceptid2labelid[col_ind] = ind
 
     def collate_fn(self, batch):
@@ -747,7 +798,11 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             masks = torch.stack(masks)
         else:
             # Convert numpy arrays to tensors for consistency
-            images = torch.stack([torch.from_numpy(img) if isinstance(img, np.ndarray) else img for img in images])
-            masks = torch.stack([torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask for mask in masks])
+            images = torch.stack(
+                [torch.from_numpy(img) if isinstance(img, np.ndarray) else img for img in images]
+            )
+            masks = torch.stack(
+                [torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask for mask in masks]
+            )
 
         return images, masks

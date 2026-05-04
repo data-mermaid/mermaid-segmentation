@@ -121,7 +121,9 @@ def test_evaluator_returns_metrics(minimal_config, tiny_loader, make_meta_model)
 
 
 @pytest.mark.integration
-def test_metamodel_train_epoch_returns_loss_and_metrics(minimal_config, tiny_loader, make_meta_model):
+def test_metamodel_train_epoch_returns_loss_and_metrics(
+    minimal_config, tiny_loader, make_meta_model
+):
     """MetaModel.train_epoch returns loss and metric dict."""
     meta = make_meta_model(minimal_config, run_name="test-epoch")
     evaluator = EvaluatorSemanticSegmentation(num_classes=NUM_CLASSES, device="cpu")
@@ -139,7 +141,9 @@ def test_metamodel_train_epoch_returns_loss_and_metrics(minimal_config, tiny_loa
 
 
 @pytest.mark.integration
-def test_metamodel_validation_epoch_returns_loss_and_metrics(minimal_config, tiny_loader, make_meta_model):
+def test_metamodel_validation_epoch_returns_loss_and_metrics(
+    minimal_config, tiny_loader, make_meta_model
+):
     """MetaModel.validation_epoch returns loss and metric dict in eval mode."""
     meta = make_meta_model(minimal_config, run_name="test-val-epoch")
     evaluator = EvaluatorSemanticSegmentation(num_classes=NUM_CLASSES, device="cpu")

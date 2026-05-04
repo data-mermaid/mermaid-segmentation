@@ -162,10 +162,16 @@ def mock_dinov3_encoder(monkeypatch):
                 seq_len = _np + (H // _ps) * (W // _ps)
                 if pattern == "arange":
                     states = (
-                        torch.arange(seq_len * _hs, dtype=pixel_values.dtype, device=pixel_values.device).reshape(1, seq_len, _hs).expand(B, -1, -1)
+                        torch.arange(
+                            seq_len * _hs, dtype=pixel_values.dtype, device=pixel_values.device
+                        )
+                        .reshape(1, seq_len, _hs)
+                        .expand(B, -1, -1)
                     )
                 else:
-                    states = torch.zeros(B, seq_len, _hs, device=pixel_values.device, dtype=pixel_values.dtype)
+                    states = torch.zeros(
+                        B, seq_len, _hs, device=pixel_values.device, dtype=pixel_values.dtype
+                    )
                 return SimpleNamespace(last_hidden_state=states)
 
         return _MockEncoder()

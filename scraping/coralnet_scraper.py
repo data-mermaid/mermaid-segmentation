@@ -24,7 +24,9 @@ class CoralNetDownloader:
         self.password = password
         self.session = requests.Session()
         self.session.headers.update(
-            {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
         )
         self.logged_in = False
         self.s3 = boto3.client("s3")
@@ -53,7 +55,9 @@ class CoralNetDownloader:
             headers = {"Referer": self.LOGIN_URL}
 
             # Submit login
-            login_response = self.session.post(self.LOGIN_URL, data=data, headers=headers, timeout=30, allow_redirects=True)
+            login_response = self.session.post(
+                self.LOGIN_URL, data=data, headers=headers, timeout=30, allow_redirects=True
+            )
 
             # Check if login was successful by looking for sign out button or redirect
             if "Sign out" in login_response.text or login_response.url != self.LOGIN_URL:
@@ -86,7 +90,9 @@ class CoralNetDownloader:
             print(f"ERROR: Permission check failed for source {source_id}: {str(e)}")
             return False
 
-    def download_metadata(self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images") -> tuple[bool, int]:
+    def download_metadata(
+        self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images"
+    ) -> tuple[bool, int]:
         """Download metadata for a source."""
         success = False
         total_images_number = 0
@@ -102,7 +108,9 @@ class CoralNetDownloader:
             try:
                 image_status_header = soup.find("h4", string="Image Status")
                 if image_status_header:
-                    table = image_status_header.find_next_sibling("table", class_="detail_box_table")
+                    table = image_status_header.find_next_sibling(
+                        "table", class_="detail_box_table"
+                    )
                     if table:
                         # Find the row where one of the <td> contains 'Total images:'
                         total_images_row = None
@@ -115,7 +123,9 @@ class CoralNetDownloader:
                             link = total_images_row.find("a")
                             if link:
                                 try:
-                                    total_images_number = int(link.get_text().strip().replace(",", ""))
+                                    total_images_number = int(
+                                        link.get_text().strip().replace(",", "")
+                                    )
                                 except Exception:
                                     total_images_number = 0
                                 print(f"Total images: {total_images_number}")
@@ -186,7 +196,9 @@ class CoralNetDownloader:
             s3_key = f"{s3_prefix}/s{source_id}/metadata.csv"
 
             # Upload to S3
-            self.s3.put_object(Bucket=bucket_name, Key=s3_key, Body=csv_buffer.getvalue(), ContentType="text/csv")
+            self.s3.put_object(
+                Bucket=bucket_name, Key=s3_key, Body=csv_buffer.getvalue(), ContentType="text/csv"
+            )
 
             print(f"✓ Metadata saved to s3://{bucket_name}/{s3_key}")
             success = True
@@ -196,7 +208,9 @@ class CoralNetDownloader:
 
         return success, total_images_number
 
-    def download_labelset(self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images") -> bool:
+    def download_labelset(
+        self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images"
+    ) -> bool:
         """Download labelset for a source."""
         success = False
 
@@ -239,7 +253,9 @@ class CoralNetDownloader:
                             short_codes.append("")
 
             if label_ids:
-                labelset_df = pd.DataFrame({"Label ID": label_ids, "Name": names, "Short Code": short_codes})
+                labelset_df = pd.DataFrame(
+                    {"Label ID": label_ids, "Name": names, "Short Code": short_codes}
+                )
 
                 # Save to S3 instead of local file
                 csv_buffer = io.StringIO()
@@ -269,7 +285,9 @@ class CoralNetDownloader:
 
         return success
 
-    def download_annotations(self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images") -> bool:
+    def download_annotations(
+        self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images"
+    ) -> bool:
         """Download annotations for a source."""
         success = False
 
@@ -328,7 +346,9 @@ class CoralNetDownloader:
             s3_key = f"{s3_prefix}/s{source_id}/annotations.csv"
 
             # Upload to S3
-            self.s3.put_object(Bucket=bucket_name, Key=s3_key, Body=csv_buffer.getvalue(), ContentType="text/csv")
+            self.s3.put_object(
+                Bucket=bucket_name, Key=s3_key, Body=csv_buffer.getvalue(), ContentType="text/csv"
+            )
             # filepath = os.path.join(output_dir, "labelset.csv")
             # labelset_df.to_csv(filepath, index=False)
 
@@ -430,7 +450,9 @@ class CoralNetDownloader:
 
             original_img_elements = response_soup.select("div#original_image_container > img")
             if not original_img_elements:
-                raise ValueError(f"CoralNet image {image_page_url}: couldn't find image on the image-view page. Maybe it's in a private source.")
+                raise ValueError(
+                    f"CoralNet image {image_page_url}: couldn't find image on the image-view page. Maybe it's in a private source."
+                )
             image_url = original_img_elements[0].attrs.get("src")
             image_urls.append(image_url)
 
@@ -461,7 +483,9 @@ class CoralNetDownloader:
             print(f"Warning: Failed to download {url}: {e}")
             return path, False
 
-    def download_image_to_s3(self, url: str, bucket_name: str, s3_key: str, timeout: int = 30) -> tuple[str, bool]:
+    def download_image_to_s3(
+        self, url: str, bucket_name: str, s3_key: str, timeout: int = 30
+    ) -> tuple[str, bool]:
         """Download a single image and upload directly to S3."""
         try:
             # Check if object already exists in S3
@@ -475,7 +499,9 @@ class CoralNetDownloader:
             response.raise_for_status()
 
             # Upload directly to S3 without saving locally
-            self.s3.upload_fileobj(response.raw, bucket_name, s3_key, ExtraArgs={"ContentType": "image/jpeg"})
+            self.s3.upload_fileobj(
+                response.raw, bucket_name, s3_key, ExtraArgs={"ContentType": "image/jpeg"}
+            )
 
             return s3_key, True
 
@@ -498,7 +524,9 @@ class CoralNetDownloader:
         s3_key = f"{s3_prefix}/s{source_id}/image_list.csv"
 
         # Upload to S3
-        self.s3.put_object(Bucket=bucket_name, Key=s3_key, Body=csv_buffer.getvalue(), ContentType="text/csv")
+        self.s3.put_object(
+            Bucket=bucket_name, Key=s3_key, Body=csv_buffer.getvalue(), ContentType="text/csv"
+        )
 
         print(f"✓ Images saved to s3://{bucket_name}/{s3_key}")
         success = True
@@ -515,9 +543,13 @@ class CoralNetDownloader:
         with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as executor:
             futures = []
             for _, row in valid_images.iterrows():
-                name = row["Image Page"].replace("/image/", "").replace("/view/", "")  # .split("image/")[1].split("/view/")[0] #row['Name']
+                name = (
+                    row["Image Page"].replace("/image/", "").replace("/view/", "")
+                )  # .split("image/")[1].split("/view/")[0] #row['Name']
                 url = row["Image URL"]
-                clean_name = name + ".jpg"  # name.replace(".jpg", "").replace(" - Confirmed", "") + ".jpg"
+                clean_name = (
+                    name + ".jpg"
+                )  # name.replace(".jpg", "").replace(" - Confirmed", "") + ".jpg"
                 s3_key = f"{s3_prefix}/s{source_id}/images/{clean_name}"
 
                 # path = os.path.join(image_dir.replace(".jpg", ""), name.replace(".jpg", "").replace(" - Confirmed", "") + ".jpg")
@@ -540,7 +572,9 @@ class CoralNetDownloader:
                 if completed % 10 == 0 or completed == len(futures):
                     print(f"Progress: {completed}/{len(futures)} images processed")
 
-        print(f"✓ Uploaded {successful}/{len(valid_images)} images to s3://{bucket_name}/{s3_prefix}/s{source_id}/images/")
+        print(
+            f"✓ Uploaded {successful}/{len(valid_images)} images to s3://{bucket_name}/{s3_prefix}/s{source_id}/images/"
+        )
 
     def download_source(
         self,
@@ -570,7 +604,9 @@ class CoralNetDownloader:
 
         # Download metadata
         if download_metadata:
-            metadata_success, n_images = self.download_metadata(source_id, bucket_name=bucket_name, s3_prefix=s3_prefix)
+            metadata_success, n_images = self.download_metadata(
+                source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
+            )
             if not metadata_success:
                 print("Warning: Failed to download metadata")
 
@@ -580,11 +616,15 @@ class CoralNetDownloader:
                 return True
 
         # Download labelset
-        if download_labelset and not self.download_labelset(source_id, bucket_name=bucket_name, s3_prefix=s3_prefix):
+        if download_labelset and not self.download_labelset(
+            source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
+        ):
             print("Warning: Failed to download labelset")
 
         # Download annotations
-        if download_annotations and not self.download_annotations(source_id, bucket_name=bucket_name, s3_prefix=s3_prefix):
+        if download_annotations and not self.download_annotations(
+            source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
+        ):
             print("Warning: Failed to download annotations")
             return success  # Temporary addition to skip very large sources
 
@@ -597,7 +637,9 @@ class CoralNetDownloader:
                 images_df["Image URL"] = image_urls
 
                 # Download images
-                self.download_images(images_df, source_id, bucket_name=bucket_name, s3_prefix=s3_prefix)
+                self.download_images(
+                    images_df, source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
+                )
             else:
                 print("Warning: No images found or failed to retrieve image list")
 
