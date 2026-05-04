@@ -84,9 +84,9 @@ select = ["E", "F", "I", "UP", "B", "C4", "RET", "SIM", "PD"]
     "F821",   # undefined names — common in exploratory notebook cells
     "B018",   # useless expression — used to display values in notebooks
     "E501",   # line too long — handled by docformatter; notebook cells are hard to wrap
-    "UP031"
+    "UP031",
+    "PD003",  # pandas-vet: prefer isna — wrong for Ibis .isnull() / SQL NULL
 ]
-
 
 [tool.ruff.lint.isort]
 known-first-party = ["mermaidseg"]
