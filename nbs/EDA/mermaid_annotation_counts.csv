@@ -1,0 +1,439 @@
+ba_gf,num_annotations,num_images
+Macroalgae,46565,7141
+Bare substrate,30897,4350
+Sand,28646,4786
+Rubble,27018,5195
+Turf algae,23067,4225
+Crustose coralline algae,19265,4594
+Soft coral,11084,2592
+Hard coral,9055,2657
+Dead coral,7064,1411
+Sargassum,5318,796
+Porites,5311,1125
+Acropora__Branching,5083,701
+Porites__Massive,4303,1510
+Acropora,4251,812
+Xenia,2461,244
+Galaxea__Columnar,2187,220
+Porites__Branching,2024,381
+Cyanobacteria,1856,839
+Sponge,1702,689
+Pocillopora,1688,666
+Millepora,1642,677
+Tape,1551,745
+Rock,1523,243
+Acropora__Plates or tables,1141,200
+Other,1067,338
+Hard coral__Branching,1002,223
+Montipora,1001,454
+Hard coral__Massive,964,329
+Goniopora,803,199
+Echinopora,772,177
+Platygyra,665,240
+Porites lobata,605,184
+Acropora__Digitate,578,224
+Hard coral__Encrusting,571,230
+Galaxea__Submassive,435,68
+Goniastrea,412,239
+Montipora__Encrusting,399,176
+Diploastrea__Massive,385,47
+Hard coral__Plates or tables,379,61
+Sarcophyton,348,157
+Pavona,347,146
+Fimbriaphyllia,335,35
+Heliopora,331,125
+Porites__Submassive,324,99
+Seagrass,324,174
+Hard coral__Foliose,321,89
+Favites,303,171
+Hard coral__Submassive,290,86
+Turbinaria-algae,278,121
+Dead Coral with Algae,271,77
+Acropora__Corymbose,262,106
+Turbinaria-coral,262,62
+Dictyota,258,93
+Galaxea,258,118
+Bleached coral,246,62
+Porites lutea,234,82
+Microdictyon,226,50
+Other invertebrates,223,188
+Pocillopora__Corymbose,216,120
+Lobophyllia__Massive,216,46
+Lobophora,215,67
+Dipsastraea,213,130
+Millepora__Branching,205,30
+Silt,201,29
+Caulerpa racemosa,195,32
+Acropora cervicornis,189,34
+Ascidian,186,112
+Echinopora__Encrusting,184,54
+Rhodophyta,179,52
+Sinularia,176,70
+Halimeda,168,88
+Platygyra__Massive,166,68
+Zoanthid,165,91
+Fungia,164,114
+Echinopora__Foliose,162,44
+Porites__Encrusting,155,77
+Favites__Massive,151,72
+Padina,147,39
+Coralline algae,142,50
+Lobophyllia,141,60
+Stylophora,131,64
+Astreopora,127,38
+Diploastrea__Submassive,120,15
+Porites astreoides,120,53
+Porites__Columnar,119,14
+Seriatopora,118,48
+Palythoa,118,22
+Goniastrea__Massive,115,76
+Rhytisma,105,33
+Diploastrea,104,26
+Symphyllia,101,31
+Montipora__Branching,97,36
+Epilithic algal matrix,96,16
+Pocillopora__Branching,91,56
+Xeniidae,89,38
+Anemone,89,34
+Seriatopora__Branching,85,44
+Isopora,84,31
+Alveopora,77,16
+Dendronephthya,75,37
+Goniastrea__Columnar,74,5
+Peyssonnelid algae,73,38
+Dipsastraea__Massive,70,46
+Discosoma,70,17
+Leptastrea,67,50
+Echinophyllia,66,16
+Obscured,63,51
+Unknown,61,42
+Pachyseris,61,15
+Diploastrea heliopora,61,20
+Acropora millepora,60,30
+Bleached coral__Branching,60,13
+Favia,59,29
+Fungia__Mushroom coral,58,49
+Porites__Digitate,58,18
+Porites lobata__Massive,58,12
+Acanthastrea,56,25
+Tubastraea,53,11
+Astreopora__Massive,53,12
+Acropora__Columnar,50,13
+Plerogyra__Submassive,50,6
+Gorgonian,50,26
+Hard coral__Digitate,50,16
+Merulina__Encrusting,49,6
+Sea urchin,48,29
+Bleached soft coral,48,12
+Dead coral__Plates or tables,47,9
+Goniastrea__Submassive,45,30
+Cladophora,45,22
+Goniastrea retiformis,43,37
+Hydroid,43,29
+Soft coral__Branching,42,11
+Crinoid,42,34
+Fungiidae,42,34
+Montipora__Foliose,42,20
+Acropora__Arborescent,41,13
+Sandalolitha,41,29
+Ramicrusta,41,11
+Lobophytum,39,23
+Porites annae,38,12
+Galaxea__Encrusting,37,24
+Turbinaria-coral__Encrusting,37,9
+Diploastrea__Encrusting,36,5
+Psammocora,36,27
+Hydnophora,36,12
+Montipora__Plates or tables,36,14
+Porites__Arborescent,36,12
+Cespitularia,35,21
+Turbinaria-coral__Plates or tables,34,4
+Seriatopora hystrix,34,23
+Chlorophyta,33,19
+Isopora__Branching,32,7
+Junceella,31,28
+Dead coral__Branching,31,14
+Jania,29,18
+Porites rus,27,11
+Asparagopsis,26,14
+Isopora__Encrusting,26,13
+Acropora palmata__Branching,25,3
+Favites__Encrusting,25,16
+Acropora cytherea,24,6
+Porites porites,24,13
+Herpolitha,24,16
+Montipora capricornis,24,14
+Stylophora__Corymbose,24,9
+Sea cucumber,23,17
+Platygyra__Submassive,22,10
+Pavona__Submassive,22,6
+Porites astreoides__Massive,22,8
+Seriatopora hystrix__Branching,22,12
+Gorgonia ventalina,21,11
+Dead coral__Corymbose,21,16
+Millepora complanata,21,9
+Goniopora__Massive,21,4
+Cyphastrea,20,8
+Acropora pharaonis,20,1
+Leptoria__Massive,20,7
+Lobophyllia__Submassive,20,6
+Millepora__Arborescent,20,1
+Porites furcata,20,11
+Isopora__Massive,20,3
+Merulinidae__Encrusting,20,5
+Favites__Submassive,19,17
+Plerogyra__Massive,19,4
+Montipora__Submassive,18,7
+Porites__Corymbose,18,2
+Oxypora,17,3
+Recently killed coral,17,13
+Tubipora musica__Columnar,17,1
+Isopora__Columnar,16,11
+Porites cylindrica,16,6
+Coscinaraea,16,14
+Pachyseris__Plates or tables,15,3
+Halomitra__Mushroom coral,15,2
+Hard coral__Corymbose,15,7
+Pavona__Encrusting,15,14
+Tunicate,14,12
+Acropora palmata,14,2
+Montipora__Columnar,14,3
+Pavona__Massive,14,6
+Ctenactis__Mushroom coral,14,8
+Acanthastrea__Massive,14,5
+Platygyra__Encrusting,14,12
+Hydnophora rigida__Branching,14,2
+Turbinaria stellulata,13,10
+Acropora pharaonis__Plates or tables,13,4
+Pocillopora damicornis,13,7
+Diploria labyrinthiformis,13,6
+Coralimorph,13,6
+Echinopora__Branching,13,5
+Montipora digitata,12,1
+Aglaophenia,12,12
+Montipora__Massive,12,8
+Caulerpa racemosa__Foliose,12,2
+Porites rus__Submassive,12,1
+Leptastrea__Encrusting,11,6
+Lobophytum__Encrusting,11,2
+Orbicella faveolata,11,1
+Sponge__Encrusting,11,5
+Invertebrate,11,7
+Fungia__Submassive,11,9
+Turbinaria mesenterina,11,7
+Goniastrea retiformis__Massive,11,8
+Linkia sea star,11,11
+Porites astreoides__Submassive,11,6
+Porites porites__Massive,10,1
+Porites__Foliose,10,3
+Pocillopora__Submassive,10,5
+Tridacna giant clam,10,7
+Goniopora__Submassive,10,4
+Peyssonnelia,10,4
+Porites rus__Massive,9,3
+Paramontastraea peresi__Massive,9,8
+Gorgonia,9,4
+Pavona__Foliose,9,3
+Plerogyra,9,6
+Montastraea,9,6
+Echinopora__Plates or tables,9,1
+Coscinaraea__Encrusting,8,5
+Litophyton,8,3
+Goniastrea__Encrusting,8,5
+Stylophora__Branching,8,7
+Green algae,8,5
+Montipora stellata__Branching,8,1
+Isopora__Submassive,8,6
+Zoanthid__Encrusting,7,1
+Cyphastrea__Encrusting,7,4
+Galaxea fascicularis__Encrusting,7,5
+Gardineroseris__Massive,7,3
+Rhytisma__Encrusting,7,4
+Soft coral__Encrusting,7,3
+Phaeophyceae,7,6
+Cycloseris,7,5
+Galaxea__Massive,6,5
+Merulina scabricula,6,3
+Turbinaria mesenterina__Plates or tables,6,1
+Pavona__Arborescent,6,2
+Tridacna,6,6
+Turbinaria reniformis,6,5
+Diploria,6,3
+Turbinaria mesenterina__Foliose,6,1
+Porites lichen,6,4
+Porifera,6,6
+Oculina varicosa,6,2
+Pocillopora__Columnar,6,2
+Porites__Plates or tables,6,3
+Isopora__Digitate,6,1
+Hard coral__Columnar,6,4
+Paramontastraea peresi,6,5
+Siderastrea siderea,6,4
+Acropora muricata__Branching,6,2
+Anacropora__Branching,6,4
+Astrea,6,4
+Astreopora__Encrusting,6,5
+Sinularia__Encrusting,5,1
+Astreopora__Submassive,5,4
+Pectinia,5,5
+Galaxea fascicularis,5,5
+Tubipora,5,3
+Porifera__Massive,5,1
+Cycloseris costulata,5,5
+Meandrina meandrites,5,5
+Pavona__Columnar,5,1
+Macroalgae__Foliose,5,3
+Porifera__Encrusting,4,3
+Acropora millepora__Plates or tables,4,1
+Leptoria phrygia,4,1
+Holothuria,4,3
+Stephanocoenia intersepta,4,4
+Pocillopora meandrina,4,2
+Fishing net,4,2
+Plesiastrea,4,3
+Turbinaria-coral__Foliose,4,2
+Leptoseris,4,4
+Pachyseris__Foliose,4,3
+Turbinaria reniformis__Encrusting,4,3
+Cliona,4,2
+Cycloseris__Mushroom coral,4,4
+Pectinia__Branching,4,4
+Coeloseris__Massive,4,1
+Rubble__Foliose,4,2
+Gardineroseris,4,4
+Merulina,4,4
+plastic,4,3
+Acropora tenuis__Branching,4,1
+Sponge__Submassive,3,1
+Siderastrea radians,3,2
+Siderastrea,3,2
+Stylophora pistillata,3,2
+Coralline algae__Arborescent,3,2
+Pavona varians__Encrusting,3,3
+Hard coral__Mushroom coral,3,3
+Madracis,3,1
+Merulina__Foliose,3,2
+Goniastrea retiformis__Encrusting,3,3
+Cladiella,3,3
+Chrysocystis fragilis,3,1
+Dipsastraea__Submassive,3,2
+Pavona venosa__Submassive,3,2
+Pavona venosa,3,2
+Dipsastraea__Encrusting,3,3
+Psammocora__Encrusting,3,3
+Porites__Mushroom coral,3,2
+Algal assemblage,3,1
+Mycedium__Plates or tables,3,1
+Pachyseris__Encrusting,3,2
+Pocillopora__Encrusting,3,1
+Psammocora__Massive,3,2
+Plesiastrea versipora__Encrusting,3,1
+Lobophyllia hemprichii,3,2
+Plesiastrea versipora,3,3
+Porites monticulosa__Massive,3,1
+Cyphastrea__Massive,3,3
+Goniopora lobata,3,2
+Tubipora musica__Encrusting,2,1
+Leptastrea__Submassive,2,2
+Platygyra__Foliose,2,1
+Dipsastraea favus__Massive,2,1
+Millepora alcicornis,2,2
+Pectinia__Foliose,2,2
+Echinophyllia__Encrusting,2,1
+Dipsastraea__Foliose,2,2
+Pavona__Corymbose,2,1
+Hydnophora__Submassive,2,2
+Rubble__Branching,2,1
+Sponge__Foliose,2,2
+Acropora samoensis__Digitate,2,2
+Leptastrea__Massive,2,2
+Cliona__Encrusting,2,2
+Gracilaria,2,2
+Leptoseris__Encrusting,2,2
+Cyphastrea serailia,2,1
+Plesiastrea__Submassive,2,1
+Plesiastrea__Encrusting,2,1
+Porites lutea__Massive,2,1
+Leptoseris__Foliose,2,2
+Orbicella annularis,2,1
+Pocillopora damicornis__Branching,2,1
+Porites astreoides__Plates or tables,2,2
+Montipora stellata,2,1
+Favia fragum,2,2
+Favia__Massive,2,2
+Fungiidae__Mushroom coral,2,2
+Faviidae,2,1
+Astrea__Encrusting,2,1
+Amphiroa,2,1
+Acropora abrolhosensis,2,2
+Acanthaster planci,2,2
+Agaricia,1,1
+Agaricia__Encrusting,1,1
+Amphiroa__Branching,1,1
+Acropora millepora__Submassive,1,1
+Unknown__Encrusting,1,1
+Stylophora pistillata__Corymbose,1,1
+Tridacna maxima,1,1
+Tridacna squamosa,1,1
+Coelastrea,1,1
+Coscinaraea__Submassive,1,1
+Zoanthidae,1,1
+Leptoria,1,1
+Leptoria__Encrusting,1,1
+Palauastrea__Branching,1,1
+Foraminifera,1,1
+Fungia__Plates or tables,1,1
+Porites astreoides__Mushroom coral,1,1
+Porites colonensis,1,1
+Porites furcata__Foliose,1,1
+Echinopora lamellosa__Foliose,1,1
+Echinopora__Submassive,1,1
+Pleuractis__Mushroom coral,1,1
+Mycedium,1,1
+Oulophyllia__Massive,1,1
+Porites furcata__Submassive,1,1
+Porites lobata__Submassive,1,1
+Pseudodiploria strigosa,1,1
+Lobophyllia__Encrusting,1,1
+Pleuractis,1,1
+Rhodophyta__Encrusting,1,1
+Danafungia,1,1
+Turbinaria turbinata,1,1
+Millepora__Massive,1,1
+Millepora__Submassive,1,1
+Montastraea__Encrusting,1,1
+Goniastrea__Foliose,1,1
+Halomitra,1,1
+Hard coral__Arborescent,1,1
+Montastraea__Massive,1,1
+Montipora australiensis,1,1
+Montipora spumosa,1,1
+Dead coral__Foliose,1,1
+Dead coral__Massive,1,1
+Dead coral__Submassive,1,1
+Merulina__Submassive,1,1
+Millepora__Encrusting,1,1
+Platygyra lamellina,1,1
+Echinophyllia aspera,1,1
+Echinophyllia__Plates or tables,1,1
+Bleached coral__Digitate,1,1
+Heliopora__Submassive,1,1
+Herpolitha__Mushroom coral,1,1
+Pavona varians,1,1
+Cliona delitrix,1,1
+Palythoa caribaeorum,1,1
+Millepora__Foliose,1,1
+Ctenactis,1,1
+Cycloseris__Branching,1,1
+Stylocoeniella,1,1
+Stylophora pistillata__Branching,1,1
+Agaricia agaricites,1,1
+Stylophora__Submassive,1,1
+Trachyphyllia,1,1
+Astreopora__Foliose,1,1
+Barabattoia,1,1
+Blastomussa,1,1
+Sponge__Branching,1,1
+Favia__Submassive,1,1
+Faviidae__Encrusting,1,1
+Favites abdita,1,1
