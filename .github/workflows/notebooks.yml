@@ -14,6 +14,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --frozen --group notebooks-ci
       - name: Lint all notebook cells
-        run: uv run nbqa ruff nbs/ scraping/
+        run: uv run --group notebooks-ci nbqa ruff nbs/ scraping/

@@ -13,4 +13,5 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Check lockfile is up to date
         run: uv lock --check
-      - run: uv sync --frozen --group lint
+      - run: uv run --group lint ruff check .
+      - run: uv run --group lint ruff format --check .
