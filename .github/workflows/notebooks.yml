@@ -1,9 +1,12 @@
-name: Notebook Quality
+name: Notebook Quality One-Shot
 
 on:
-  pull_request:
+  workflow_dispatch:
+  push:
+    branches: [main]
     paths:
       - 'nbs/**/*.ipynb'
+      - 'scraping/**/*.ipynb'
 
 jobs:
   notebooks:
@@ -12,5 +15,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen --group notebooks-ci
-      - name: Lint notebook cells
-        run: uv run nbqa ruff nbs/
+      - name: Lint all notebook cells
+        run: uv run nbqa ruff nbs/ scraping/
