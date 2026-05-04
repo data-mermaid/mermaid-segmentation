@@ -53,12 +53,12 @@ tests = [
     "pytest-cov>=4.0",
 ]
 lint = [
-    "ruff>=0.6.0",
+    "ruff>=0.15.8",
     "pre-commit>=3.0",
 ]
 notebooks-ci = [
     "nbqa>=1.9",
-    "ruff>=0.6.0",
+    "ruff>=0.15.8",
 ]
 dev = [
     {include-group = "tests"},

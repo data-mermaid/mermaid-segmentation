@@ -2458,15 +2458,15 @@ dev = [
     { name = "pre-commit", specifier = ">=3.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=4.0" },
-    { name = "ruff", specifier = ">=0.6.0" },
+    { name = "ruff", specifier = ">=0.15.8" },
 ]
 lint = [
     { name = "pre-commit", specifier = ">=3.0" },
-    { name = "ruff", specifier = ">=0.6.0" },
+    { name = "ruff", specifier = ">=0.15.8" },
 ]
 notebooks-ci = [
     { name = "nbqa", specifier = ">=1.9" },
-    { name = "ruff", specifier = ">=0.6.0" },
+    { name = "ruff", specifier = ">=0.15.8" },
 ]
 tests = [
     { name = "pytest", specifier = ">=8.0" },
