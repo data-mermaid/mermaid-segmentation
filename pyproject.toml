@@ -56,9 +56,14 @@ lint = [
     "ruff>=0.6.0",
     "pre-commit>=3.0",
 ]
-docs = [
-    "sphinx>=7.0",
-    "pydata-sphinx-theme>=0.15",
+notebooks-ci = [
+    "nbqa>=1.9",
+    "ruff>=0.6.0",
+]
+dev = [
+    {include-group = "tests"},
+    {include-group = "lint"},
+    "docformatter>=1.7.7",
 ]
 
 [tool.setuptools]

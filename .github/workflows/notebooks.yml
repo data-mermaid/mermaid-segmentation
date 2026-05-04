@@ -1,0 +1,16 @@
+name: Notebook Quality
+
+on:
+  pull_request:
+    paths:
+      - 'nbs/**/*.ipynb'
+
+jobs:
+  notebooks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --group notebooks-ci
+      - name: Lint notebook cells
+        run: uv run nbqa ruff nbs/

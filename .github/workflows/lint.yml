@@ -11,6 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --group lint
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
+      - name: Check lockfile is up to date
+        run: uv lock --check
+      - run: uv sync --frozen --group lint
