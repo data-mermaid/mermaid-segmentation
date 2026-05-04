@@ -98,7 +98,9 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
         try:
             import sagemaker_mlflow  # noqa: F401
         except ImportError:
-            logger.warning("URI is a SageMaker ARN but sagemaker-mlflow is not installed. Install with: pip install sagemaker-mlflow")
+            logger.warning(
+                "URI is a SageMaker ARN but sagemaker-mlflow is not installed. Install with: pip install sagemaker-mlflow"
+            )
 
     mlflow.set_tracking_uri(uri=uri)
     try:
@@ -110,7 +112,9 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
         # unless you set MLFLOW_HTTP_REQUEST_MAX_RETRIES to
         # a low number.
         if "Max retries exceeded" in str(e):
-            raise RuntimeError("Could not connect to the MLflow tracking server. Is the tracking server up and running?") from e
+            raise RuntimeError(
+                "Could not connect to the MLflow tracking server. Is the tracking server up and running?"
+            ) from e
         # If it's some other kind of MlflowException, just re-raise
         # for debugging purposes.
         raise
@@ -174,7 +178,6 @@ class Logger:
         save_local_checkpoints=None,
         save_local_models=None,
     ):
-
         self.config = config
         self.log_epochs = log_epochs
         self.log_checkpoint = log_checkpoint
@@ -268,9 +271,21 @@ class Logger:
                             "log_checkpoint": log_checkpoint,
                         }
                         if hasattr(config, "model"):
-                            params.update({f"model_{k}": v for k, v in dict(config.model).items() if isinstance(v, str | int | float | bool)})
+                            params.update(
+                                {
+                                    f"model_{k}": v
+                                    for k, v in dict(config.model).items()
+                                    if isinstance(v, str | int | float | bool)
+                                }
+                            )
                         if hasattr(config, "training"):
-                            params.update({f"training_{k}": v for k, v in dict(config.training).items() if isinstance(v, str | int | float | bool)})
+                            params.update(
+                                {
+                                    f"training_{k}": v
+                                    for k, v in dict(config.training).items()
+                                    if isinstance(v, str | int | float | bool)
+                                }
+                            )
 
                         mlflow.log_params(params)
 
@@ -506,7 +521,9 @@ class Logger:
             self.mlflow_run_id = run.info.run_id
             if original_run_id is not None:
                 mlflow.set_tag("resumed_from_run_id", original_run_id)
-            logger.warning("Started new MLflow run %s (was %s)", self.mlflow_run_id, original_run_id)
+            logger.warning(
+                "Started new MLflow run %s (was %s)", self.mlflow_run_id, original_run_id
+            )
             return True
         except Exception as e:
             logger.warning("Failed to ensure active MLflow run: %s", e)
@@ -560,7 +577,9 @@ class Logger:
         if hasattr(meta_model_run, "scheduler"):
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
-        model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
+        model_path = (
+            f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
+        )
 
         local_checkpoint_saved = False
         if self.save_local_checkpoints:
@@ -591,7 +610,9 @@ class Logger:
                 checkpoint_metrics = self._unpack_metrics(metrics_dict, key_prefix="checkpoint")
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
 
-                scalar_metrics = {k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)}
+                scalar_metrics = {
+                    k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)
+                }
 
                 if is_best:
                     # Log best model as a plain artifact instead of
@@ -737,7 +758,9 @@ class WandbLogger:
                 stacklevel=2,
             )
         if WANDB_IMPORT_ERROR is not None:
-            raise ImportError("wandb is required for WandbLogger but is not installed. Install with: pip install wandb") from WANDB_IMPORT_ERROR
+            raise ImportError(
+                "wandb is required for WandbLogger but is not installed. Install with: pip install wandb"
+            ) from WANDB_IMPORT_ERROR
 
         self.wandb_run = wandb.init(
             project=project,

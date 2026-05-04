@@ -155,7 +155,9 @@ class LinearDINOv3(torch.nn.Module):
 
         # convert to logits and upsample to the size of the pixel values
         logits = self.head(patch_embeddings)
-        logits = torch.nn.functional.interpolate(logits, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        logits = torch.nn.functional.interpolate(
+            logits, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
 
         loss = None
         # if labels is not None:
@@ -229,7 +231,9 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         patch_size = self.encoder.config.patch_size
         self.token_width = input_size[1] // patch_size
         self.token_height = input_size[0] // patch_size
-        self.concept_head = LinearClassifier(hidden_size, self.token_width, self.token_height, num_concepts)
+        self.concept_head = LinearClassifier(
+            hidden_size, self.token_width, self.token_height, num_concepts
+        )
         self.concept_classifier = torch.nn.Conv2d(num_concepts, num_classes, kernel_size=1)
 
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
@@ -248,10 +252,14 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
 
         # convert to logits and upsample to the size of the pixel values
         concept_logits = self.concept_head(patch_embeddings)
-        concept_logits = torch.nn.functional.interpolate(concept_logits, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        concept_logits = torch.nn.functional.interpolate(
+            concept_logits, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
         logits = self.concept_classifier(concept_logits)
 
-        logits = torch.nn.functional.interpolate(logits, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        logits = torch.nn.functional.interpolate(
+            logits, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
         loss = None
 
         # if labels is not None:
