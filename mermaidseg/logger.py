@@ -812,34 +812,27 @@ class Logger:
         parent_id2label = next(iter(resolved.values()))[2]
         class_subset = getattr(getattr(self.config, "data", None), "class_subset", None)
 
-        self._log_csv_artifact(
+        self._log_text_artifact(
             f"{artifact_dir}/class_counts.csv",
-            lambda: _compute_class_counts(resolved, parent_id2label),
+            lambda: _compute_class_counts(resolved, parent_id2label).to_csv(index=False),
         )
-        self._log_csv_artifact(
+        self._log_text_artifact(
             f"{artifact_dir}/source_stats.csv",
-            lambda: _compute_source_stats(resolved),
+            lambda: _compute_source_stats(resolved).to_csv(index=False),
         )
-        self._log_csv_artifact(
+        self._log_text_artifact(
             f"{artifact_dir}/class_by_source.csv",
-            lambda: _compute_class_by_source(resolved, parent_id2label),
+            lambda: _compute_class_by_source(resolved, parent_id2label).to_csv(index=False),
         )
-        self._log_yaml_artifact(
+        self._log_text_artifact(
             f"{artifact_dir}/train_summary.yaml",
-            lambda: _compute_train_summary(resolved, parent_id2label, class_subset),
+            lambda: yaml.safe_dump(_compute_train_summary(resolved, parent_id2label, class_subset), sort_keys=False),
         )
 
     @staticmethod
-    def _log_csv_artifact(path: str, build) -> None:
+    def _log_text_artifact(path: str, build_text) -> None:
         try:
-            mlflow.log_text(build().to_csv(index=False), path)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to log %s: %s", path, e)
-
-    @staticmethod
-    def _log_yaml_artifact(path: str, build) -> None:
-        try:
-            mlflow.log_text(yaml.safe_dump(build(), sort_keys=False), path)
+            mlflow.log_text(build_text(), path)
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to log %s: %s", path, e)
 

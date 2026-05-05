@@ -25,7 +25,8 @@ from mermaidseg.logger import (
     get_mlflow_tracking_uri,
     mlflow_connect,
 )
-from tests._dataset_stubs import make_mermaid_stub
+from tests._dataset_stubs import ConcatStub, make_coralnet_stub, make_mermaid_stub
+from torch.utils.data import Subset
 
 from .conftest import FakeMetaModel
 
@@ -733,7 +734,6 @@ class TestResolveAnnotations:
             image_to_region={"img-1": "A", "img-2": "B", "img-3": "C"},
             class_subset=["Acropora", "Porites", "Macroalgae"],
         )
-        from torch.utils.data import Subset
 
         subset = Subset(stub, [0, 2])  # img-1 and img-3
         df_ann, df_img, id2label = _resolve_annotations(subset)
@@ -753,7 +753,6 @@ class TestResolveAnnotations:
             image_to_region={"b-1": "Caribbean"},
             class_subset=["Acropora", "Porites"],
         )
-        from tests._dataset_stubs import ConcatStub
 
         wrapper = ConcatStub(_datasets=[stub_a, stub_b])
 
@@ -775,7 +774,6 @@ class TestResolveAnnotations:
             image_to_region={"b-1": "Y"},
             class_subset=["Porites"],
         )
-        from tests._dataset_stubs import ConcatStub
 
         wrapper = ConcatStub(_datasets=[stub_a, stub_b])
 
@@ -809,7 +807,6 @@ class TestComputeClassCounts:
             image_to_region={"img-1": "A", "img-2": "A", "img-3": "B", "img-4": "B"},
             class_subset=["Acropora", "Porites", "Other"],
         )
-        from torch.utils.data import Subset
 
         return {
             "train": Subset(stub, [0, 1]),  # img-1, img-2
@@ -857,7 +854,6 @@ class TestComputeClassCounts:
             image_to_region={"img-1": "A"},
             class_subset=["Other Invertebrates"],
         )
-        from torch.utils.data import Subset
 
         resolved = {"train": _resolve_annotations(Subset(stub, [0]))}
         df = _compute_class_counts(resolved, parent_id2label=stub.id2label)
@@ -889,7 +885,6 @@ class TestComputeSourceStats:
             image_to_region={"img-1": "Indonesia", "img-2": "Caribbean"},
             class_subset=["Acropora", "Porites"],
         )
-        from torch.utils.data import Subset
 
         resolved = {
             "train": _resolve_annotations(Subset(stub, [0])),
@@ -905,14 +900,12 @@ class TestComputeSourceStats:
         assert "test_images" not in df.columns  # test split not provided
 
     def test_coralnet_source_rows_cast_to_str(self):
-        from tests._dataset_stubs import make_coralnet_stub
 
         stub = make_coralnet_stub(
             image_to_classes={"img-1": ["Acropora"], "img-2": ["Porites"]},
             image_to_source={"img-1": 42, "img-2": 7},
             class_subset=["Acropora", "Porites"],
         )
-        from torch.utils.data import Subset
 
         resolved = {"train": _resolve_annotations(Subset(stub, [0, 1]))}
         df = _compute_source_stats(resolved)
@@ -935,7 +928,6 @@ class TestComputeClassBySource:
             image_to_region={"img-1": "Indonesia", "img-2": "Caribbean"},
             class_subset=["Acropora", "Porites"],
         )
-        from torch.utils.data import Subset
 
         resolved = {
             "train": _resolve_annotations(Subset(stub, [0])),
@@ -979,7 +971,6 @@ class TestComputeTrainSummary:
             ignore_index=True,
         )
 
-        from torch.utils.data import Subset
 
         resolved = {
             "train": _resolve_annotations(Subset(stub, [0, 1])),  # img-1, img-2
@@ -1020,7 +1011,6 @@ class TestComputeTrainSummary:
 class TestLogDatasetStatistics:
     def test_happy_path_writes_four_artifacts(self, tmp_mlflow_uri, make_config, fake_meta_model, tmp_path):
 
-        from torch.utils.data import Subset
 
         stub = make_mermaid_stub(
             image_to_classes={
@@ -1065,7 +1055,6 @@ class TestLogDatasetStatistics:
     def test_artifact_failure_does_not_drop_others(self, tmp_mlflow_uri, make_config, fake_meta_model, caplog):
         from unittest.mock import patch
 
-        from torch.utils.data import Subset
 
         stub = make_mermaid_stub(
             image_to_classes={"img-1": ["Acropora"]},
