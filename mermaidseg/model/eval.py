@@ -61,7 +61,9 @@ class Evaluator:
                     # "auc": AUROC(
                     #     task="multiclass", average="none", num_classes=3, ignore_index=0
                     # ).to(self.device),
-                    "f1_concept": F1Score(task="multiclass", average="none", num_classes=3, ignore_index=0).to(self.device)
+                    "f1_concept": F1Score(
+                        task="multiclass", average="none", num_classes=3, ignore_index=0
+                    ).to(self.device)
                 }
 
     @torch.no_grad()
@@ -127,7 +129,9 @@ class Evaluator:
 
         if meta_model.training_mode in ("concept-bottleneck", "concept"):
             for metric_name in self.concept_metric_dict:
-                metric_results[metric_name] = self.concept_metric_dict[metric_name].compute().cpu().numpy()
+                metric_results[metric_name] = (
+                    self.concept_metric_dict[metric_name].compute().cpu().numpy()
+                )
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 self.concept_metric_dict[metric_name].reset()
@@ -169,7 +173,9 @@ class Evaluator:
             if not proba:
                 outputs = outputs.argmax(dim=1)
 
-        image_counter = epoch % (log_epochs * 5) // 5  # Rotating 5 images (assuming batch size above 5)
+        image_counter = (
+            epoch % (log_epochs * 5) // 5
+        )  # Rotating 5 images (assuming batch size above 5)
         image_counter = image_counter % inputs.size(dim=0)  # In case we use a smaller batch size
 
         image: NDArray[np.float64] = inputs[image_counter].cpu().numpy()
@@ -239,4 +245,6 @@ class EvaluatorSemanticSegmentation(Evaluator):
                     ignore_index=ignore_index,
                 ).to(device),
             }
-        self.metric_dict = {metric_name: metric.to(device) for metric_name, metric in self.metric_dict.items()}
+        self.metric_dict = {
+            metric_name: metric.to(device) for metric_name, metric in self.metric_dict.items()
+        }

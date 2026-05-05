@@ -1,92 +1,90 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "mermaidseg"
 version = "0.1.0"
-description = "A package for the training, evaluation and usage of image segmentation models for coral reef data."
-readme = "README.md"
+description = "A package for the segmentation of MERMAID coral data."
 requires-python = ">=3.11"
-
 dependencies = [
-    "albumentations>=2.0",
-    "boto3>=1.42",
-    "numpy>=1.24,<2",        # <2: numpy 2.0 C-API breaks torch and compiled extensions
-    "pandas>=2.0",
-    "pillow>=10.0",
-    "requests>=2.32",
-    "torch>=2.0,<2.3",       # <2.3: SageMaker image compatibility; Intel macOS has no newer torch wheels on PyPI
-    "transformers>=4.40,<5",  # 5.x requires torch>=2.4; keep 4.x for torch<2.3 / Intel macOS
-    "datasets>=2.0",
-    "s3fs>=0.4",
-    "mlflow>=2.0",
-    "psutil>=5.9.0", # This is for MLFlow system metrics logging
-    "pyyaml>=6.0",
-    "nvidia-ml-py>=12.0.0", # This is for MLFlow system metrics logging
-    "tqdm>=4.60",
-    "torchmetrics>=1.0",
-    "anytree>=2.0",
-    "openpyxl>=3.1",
+    "albumentations",
+    "boto3",
+    "numpy>=1.24,<2",
+    "pandas",
+    "pillow",
+    "requests",
+    "torch>=2.0,<2.3",
+    "transformers",
+    "datasets",
+    "s3fs",
+    "segmentation-models-pytorch",
+    "mlflow",
+    "pyyaml",
+    "tqdm",
+    "torchmetrics",
+    "anytree",
+    "openpyxl",
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
     "huggingface-hub>=0.36.2",
+    "seaborn>=0.13.2",
+    "opencv-python-headless>=4.11.0.86",
     "sagemaker-mlflow>=0.2.0",
     "requests-auth-aws-sigv4>=0.7",
     "safetensors>=0.4.0",
 ]
 
 [project.optional-dependencies]
-scraping = [
-    "selenium>=4.0",
-    "webdriver-manager>=4.0",
+notebooks = [
+    "jupyter",
+    "ipykernel",
+    "ipywidgets",
+    "wandb>=0.25.0",
 ]
-smp = [
-    "segmentation-models-pytorch>=0.5",
+scraping = [
+    "selenium",
+    "webdriver-manager",
 ]
 
 [dependency-groups]
-notebooks = [
-    "jupyter>=1.1",
-    "torch-tb-profiler>=0.4.0",
-    "ipykernel>=7.2.0",
-    "ipywidgets>=8.0",
-    "matplotlib>=3.10.8",
-    "seaborn>=0.13.2",
-    "wandb>=0.25.0",
-    "ibis-framework[duckdb]>=12.0.0",
-    "hvplot>=0.11.0",
-    "great-tables>=0.15.0",
-]
 tests = [
     "pytest>=8.0",
     "pytest-cov>=4.0",
 ]
 lint = [
-    "ruff>=0.6.0",
+    "ruff>=0.15.8",
     "pre-commit>=3.0",
+]
+notebooks-ci = [
+    "nbqa>=1.9",
+    "ruff>=0.15.8",
 ]
 dev = [
     {include-group = "tests"},
     {include-group = "lint"},
     "docformatter>=1.7.7",
 ]
-[tool.hatch.build.targets.wheel]
-packages = ["mermaidseg"]
+
+[tool.setuptools]
+packages = { find = { where = ["."], include = ["mermaidseg*"] } }
 
 [tool.ruff]
 target-version = "py311"
-line-length = 150
+line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "RET", "SIM", "PD"]
+ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/*.ipynb" = [
     "F821",   # undefined names — common in exploratory notebook cells
     "B018",   # useless expression — used to display values in notebooks
     "E501",   # line too long — handled by docformatter; notebook cells are hard to wrap
-    "UP031"
+    "UP031",
+    "PD003", # pandas-vet: prefer isna — wrong for Ibis .isnull() / SQL NULL
 ]
-
 
 [tool.ruff.lint.isort]
 known-first-party = ["mermaidseg"]

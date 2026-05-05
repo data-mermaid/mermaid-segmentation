@@ -112,9 +112,13 @@ class MetaModel:
                 **model_kwargs,
             )
         elif self.training_mode == "concept":
-            self.model = getattr(mermaidseg.model.models, self.model_name)(num_classes=self.num_concepts, **model_kwargs)
+            self.model = getattr(mermaidseg.model.models, self.model_name)(
+                num_classes=self.num_concepts, **model_kwargs
+            )
         else:
-            self.model = getattr(mermaidseg.model.models, self.model_name)(num_classes=self.num_classes, **model_kwargs)
+            self.model = getattr(mermaidseg.model.models, self.model_name)(
+                num_classes=self.num_classes, **model_kwargs
+            )
 
         if model_checkpoint:
             checkpoint = torch.load(model_checkpoint)
@@ -131,11 +135,15 @@ class MetaModel:
         #     self.loss = None  # Often the case for HF models where the loss is already included in the model
 
         optimizer = training_kwargs.optimizer.pop("type", None)
-        self.optimizer = getattr(torch.optim, optimizer)(params=self.model.parameters(), **training_kwargs.optimizer)
+        self.optimizer = getattr(torch.optim, optimizer)(
+            params=self.model.parameters(), **training_kwargs.optimizer
+        )
 
         if "scheduler" in training_kwargs:
             scheduler = training_kwargs.scheduler.pop("type", None)
-            self.scheduler = getattr(torch.optim.lr_scheduler, scheduler)(self.optimizer, **training_kwargs.scheduler)
+            self.scheduler = getattr(torch.optim.lr_scheduler, scheduler)(
+                self.optimizer, **training_kwargs.scheduler
+            )
 
     def batch_predict(
         self,
@@ -244,7 +252,8 @@ class MetaModel:
     def train_epoch(
         self,
         train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-        evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        evaluator: Any
+        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> tuple[float, dict[str, float | NDArray[np.float64]], dict[str, float | int]]:
         """Trains the model for one epoch using the provided data loader.
 
@@ -346,14 +355,18 @@ class MetaModel:
 
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
-                metric_results[metric_name] = evaluator.metric_dict[metric_name].compute().cpu().numpy()
+                metric_results[metric_name] = (
+                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
+                )
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
 
             if self.training_mode in ("concept-bottleneck", "concept"):
                 for metric_name in evaluator.concept_metric_dict:
-                    metric_results[metric_name] = evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
+                    metric_results[metric_name] = (
+                        evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
+                    )
                     if metric_results[metric_name].ndim == 0:
                         metric_results[metric_name] = metric_results[metric_name].item()
                     evaluator.concept_metric_dict[metric_name].reset()
@@ -374,7 +387,8 @@ class MetaModel:
     def validation_epoch(
         self,
         val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-        evaluator: Any | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        evaluator: Any
+        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch.
 
@@ -399,7 +413,9 @@ class MetaModel:
             if evaluator is not None:
                 if self.training_mode in ("concept"):
                     concept_labels = labels_to_concepts(labels, self.concept_matrix)
-                    concept_labels = postprocess_predicted_concepts(concept_labels, self.concept_matrix, self.conceptid2labelid)
+                    concept_labels = postprocess_predicted_concepts(
+                        concept_labels, self.concept_matrix, self.conceptid2labelid
+                    )
                     concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, concept_labels)
@@ -427,14 +443,18 @@ class MetaModel:
         # Compute metrics
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
-                metric_results[metric_name] = evaluator.metric_dict[metric_name].compute().cpu().numpy()
+                metric_results[metric_name] = (
+                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
+                )
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
 
         if self.training_mode in ("concept-bottleneck", "concept"):
             for metric_name in evaluator.concept_metric_dict:
-                metric_results[metric_name] = evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
+                metric_results[metric_name] = (
+                    evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
+                )
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
 

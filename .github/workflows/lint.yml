@@ -1,0 +1,17 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Check lockfile is up to date
+        run: uv lock --check
+      - run: uv run --group lint ruff check .
+      - run: uv run --group lint ruff format --check .
