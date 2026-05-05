@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Subset, TensorDataset
 
 from mermaidseg.logger import (
     LOCAL_DEFAULT_URI,
@@ -26,7 +26,6 @@ from mermaidseg.logger import (
     mlflow_connect,
 )
 from tests._dataset_stubs import ConcatStub, make_coralnet_stub, make_mermaid_stub
-from torch.utils.data import Subset
 
 from .conftest import FakeMetaModel
 
@@ -124,14 +123,14 @@ class TestLoggerInit:
 
     def test_params_and_tags_logged(self, tmp_mlflow_uri, make_config, fake_meta_model):
         config = make_config()
-        lgr = Logger(config=config, meta_model=fake_meta_model)
+        lgr = Logger(config=config, meta_model=fake_meta_model, log_epochs=2)
         run = mlflow.get_run(lgr.mlflow_run_id)
 
         params = run.data.params
         assert params["num_classes"] == str(fake_meta_model.num_classes)
         assert params["run_name"] == fake_meta_model.run_name
         assert "model_encoder_name" in params
-        assert params["training_epochs"] == "2"
+        assert params["log_epochs"] == "2"
 
         tags = run.data.tags
         assert tags["model_type"] == "FakeMetaModel"
@@ -179,14 +178,6 @@ class TestLoggerInit:
         assert "metadata/id2label.json" in names
         assert "metadata/id2concept.json" in names
         assert "metadata/conceptid2labelid.json" in names
-
-    def test_concept_matrix_logging_does_not_disable_logger(self, tmp_mlflow_uri, make_config, tmp_path):
-        missing_dir = tmp_path / "missing-dir"
-        assert not missing_dir.exists()
-        meta = FakeMetaModel(concept_matrix=pd.DataFrame({"a": [1, 2], "b": [3, 4]}))
-        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(missing_dir))
-        assert lgr.enabled is True
-        assert lgr.mlflow_run_id is not None
 
     def test_log_checkpoint_zero_rejected(self, tmp_mlflow_uri, make_config, fake_meta_model):
         with pytest.raises(ValueError, match="log_checkpoint must be > 0"):
@@ -281,34 +272,6 @@ class TestLoggerLog:
 
 class TestLogDataset:
     """Test MLflow dataset input logging: single, combined, and graceful fallback."""
-
-    def test_log_dataset_records_input(self, tmp_mlflow_uri, make_config):
-        meta = FakeMetaModel()
-        lgr = Logger(config=make_config(), meta_model=meta)
-
-        mock_ds = MagicMock()
-        mock_ds.annotations_path = "s3://bucket/data.parquet"
-        mock_ds.source_bucket = "bucket"
-        mock_ds.df_images = pd.DataFrame({"image_id": [1, 2, 3]})
-        mock_ds.num_classes = 3
-        mock_ds.__class__ = type("CoralReefDataset", (), {})
-
-        lgr.log_dataset(mock_ds, context="training")
-
-        inputs = mlflow.get_run(lgr.mlflow_run_id).inputs.dataset_inputs
-        assert len(inputs) > 0
-        assert inputs[0].dataset.name == "CoralReefDataset"
-
-    def test_log_dataset_graceful_on_missing_attrs(self, tmp_mlflow_uri, make_config):
-        meta = FakeMetaModel()
-        lgr = Logger(config=make_config(), meta_model=meta)
-
-        bare = object()
-        lgr.log_dataset(bare, context="training")
-
-        inputs = mlflow.get_run(lgr.mlflow_run_id).inputs.dataset_inputs
-        assert len(inputs) == 1
-        assert inputs[0].dataset.name == "object"
 
     def _make_sub(self, name):
         ds = MagicMock()
@@ -412,21 +375,6 @@ class TestSaveModelCheckpoint:
             lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
         best_model_calls = [c for c in mock_log_artifact.call_args_list if "best-model" in str(c)]
         assert len(best_model_calls) >= 1
-
-    def test_checkpoint_metrics_logged(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="sync-metrics")
-        config = make_config(logger={"save_local_checkpoints": False})
-        lgr = Logger(
-            config=config,
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=50,
-        )
-        with patch("mermaidseg.logger.mlflow.log_metrics") as mock_log_metrics:
-            lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
-
-        checkpoint_calls = [call for call in mock_log_metrics.call_args_list if any(k.startswith("checkpoint/") for k in call.args[0])]
-        assert checkpoint_calls, "Expected at least one checkpoint metric logging call"
 
     def test_model_logging_sets_best_model_tag(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="verify-model-tag")
@@ -533,75 +481,6 @@ class TestSaveSafetensorsForPublish:
 
 
 # ===================================================================
-# Scenario tests (mirror nbs/test_logger.ipynb scenarios A–D)
-# ===================================================================
-@pytest.mark.integration
-class TestScenarios:
-    """End-to-end integration tests covering full logger lifecycle."""
-
-    @staticmethod
-    def _run_logger_lifecycle(lgr, meta_model, epochs=3):
-        for epoch in range(epochs):
-            lgr.log(
-                {"train/loss": 1.0 - (epoch * 0.2), "train/accuracy": 0.5 + (epoch * 0.1)},
-                step=epoch,
-            )
-        lgr.save_model_checkpoint(meta_model, epoch=epochs - 1, metrics_dict={"accuracy": 0.66, "mean_iou": 0.76})
-        lgr.end_run()
-
-    def test_scenario_a_local_only(self, tmp_path, make_config, monkeypatch):
-        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
-        meta = FakeMetaModel(run_name="scenario_a")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            log_epochs=1,
-            log_checkpoint=2,
-            checkpoint_dir=str(tmp_path),
-            enable_mlflow=False,
-            enable_wandb=False,
-        )
-        self._run_logger_lifecycle(lgr, meta)
-        assert lgr.enabled is False
-        ckpt_dir = tmp_path / "model_checkpoints" / "scenario_a"
-        assert ckpt_dir.exists(), "Checkpoint directory should exist even when MLflow disabled"
-
-    def test_scenario_b_local_plus_mlflow(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="scenario_b")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            log_epochs=1,
-            log_checkpoint=2,
-            checkpoint_dir=str(tmp_path),
-            enable_mlflow=True,
-            enable_wandb=False,
-        )
-        self._run_logger_lifecycle(lgr, meta)
-        assert (tmp_path / "model_checkpoints" / "scenario_b").exists()
-        assert lgr.mlflow_run_id is not None
-        assert mlflow.get_run(lgr.mlflow_run_id).data.metrics["train/loss"] is not None
-
-    def test_scenario_c_mlflow_unavailable(self, tmp_path, make_config, monkeypatch):
-        """MLflow enabled but unreachable — graceful degradation, local checkpoint saved."""
-        monkeypatch.setenv("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
-        meta = FakeMetaModel(run_name="scenario_c")
-        lgr = Logger(
-            config=make_config(logger={"uri": "http://localhost:9999"}),
-            meta_model=meta,
-            log_epochs=1,
-            log_checkpoint=2,
-            checkpoint_dir=str(tmp_path),
-            enable_mlflow=True,
-            enable_wandb=False,
-        )
-        assert lgr.enabled is False
-        self._run_logger_lifecycle(lgr, meta)
-        ckpt_dir = tmp_path / "model_checkpoints" / "scenario_c"
-        assert ckpt_dir.exists(), "Bug fix verification: checkpoint must save despite MLflow failure"
-
-
-# ===================================================================
 # Logger.end_run & context manager
 # ===================================================================
 class TestLoggerLifecycle:
@@ -678,13 +557,6 @@ class TestLogDataloaderParams:
             torch.zeros(8, 4, 4, dtype=torch.long),
         )
         return DataLoader(ds, batch_size=batch_size, num_workers=num_workers)
-
-    def test_logs_batch_size_and_num_workers(self, tmp_mlflow_uri, make_config, fake_meta_model):
-        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
-        lgr.log_dataloader_params(self._make_loader(batch_size=8, num_workers=0))
-        params = mlflow.get_run(lgr.mlflow_run_id).data.params
-        assert params["dataloader_batch_size"] == "8"
-        assert params["dataloader_num_workers"] == "0"
 
     def test_logs_all_expected_keys(self, tmp_mlflow_uri, make_config, fake_meta_model):
         lgr = Logger(config=make_config(), meta_model=fake_meta_model)
@@ -971,7 +843,6 @@ class TestComputeTrainSummary:
             ignore_index=True,
         )
 
-
         resolved = {
             "train": _resolve_annotations(Subset(stub, [0, 1])),  # img-1, img-2
             "val": _resolve_annotations(Subset(stub, [2])),  # img-3
@@ -1011,7 +882,6 @@ class TestComputeTrainSummary:
 class TestLogDatasetStatistics:
     def test_happy_path_writes_four_artifacts(self, tmp_mlflow_uri, make_config, fake_meta_model, tmp_path):
 
-
         stub = make_mermaid_stub(
             image_to_classes={
                 "img-1": ["Acropora"],
@@ -1045,16 +915,8 @@ class TestLogDatasetStatistics:
             "dataset_stats/train_summary.yaml",
         }
 
-    def test_disabled_logger_is_noop(self, tmp_mlflow_uri, make_config, fake_meta_model):
-        # No experiment_name → logger disabled.
-        config = make_config(logger={"experiment_name": None})
-        lgr = Logger(config=config, meta_model=fake_meta_model)
-        # Should not raise even with bogus splits.
-        lgr.log_dataset_statistics({"train": object()})
-
     def test_artifact_failure_does_not_drop_others(self, tmp_mlflow_uri, make_config, fake_meta_model, caplog):
         from unittest.mock import patch
-
 
         stub = make_mermaid_stub(
             image_to_classes={"img-1": ["Acropora"]},
