@@ -36,15 +36,31 @@ from mermaidseg.model.meta import MetaModel
 logger = logging.getLogger(__name__)
 
 
-try:
-    import wandb
-
-    WANDB_IMPORT_ERROR = None
-except ImportError as err:
-    wandb = None
-    WANDB_IMPORT_ERROR = err
-
 LOCAL_DEFAULT_URI = "./segmentation"
+
+
+def _flatten_nested_params(prefix: str, value: Any) -> dict[str, Any]:
+    """Flatten nested config values into MLflow-compatible parameter keys."""
+    flat: dict[str, Any] = {}
+
+    if isinstance(value, dict):
+        for key, item in value.items():
+            flat.update(_flatten_nested_params(f"{prefix}_{key}", item))
+        return flat
+    if isinstance(value, (list, tuple)):
+        for idx, item in enumerate(value):
+            flat.update(_flatten_nested_params(f"{prefix}_{idx}", item))
+        return flat
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        flat[prefix] = value
+        return flat
+
+    try:
+        flat[prefix] = json.dumps(value)
+    except TypeError:
+        flat[prefix] = str(value)
+    return flat
 
 
 def _resolve_annotations(split):
@@ -457,11 +473,7 @@ def resume_run(run_id: str) -> mlflow.ActiveRun:
 
 
 class Logger:
-    """MLflow-focused logger for experiment tracking during training and evaluation.
-
-    wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy
-    ``WandbLogger`` delegate during the deprecation period.
-    """
+    """MLflow-focused logger for experiment tracking during training and evaluation."""
 
     def __init__(
         self,
@@ -471,7 +483,6 @@ class Logger:
         log_checkpoint=50,
         checkpoint_dir=".",
         enable_mlflow=True,
-        enable_wandb=False,
         id2label=None,
         id2concept=None,
         save_local_checkpoints=None,
@@ -488,7 +499,6 @@ class Logger:
         self.enable_mlflow = enable_mlflow
         self.mlflow_run_id = None
         self.enabled = False
-        self._wandb_logger = None
         self.id2label = id2label
         self.id2concept = id2concept
         logger_cfg = getattr(config, "logger", None)
@@ -571,9 +581,11 @@ class Logger:
                             "log_checkpoint": log_checkpoint,
                         }
                         if hasattr(config, "model"):
-                            params.update({f"model_{k}": v for k, v in dict(config.model).items() if isinstance(v, str | int | float | bool)})
+                            model_cfg = dict(config.model)
+                            params["model_config"] = json.dumps(model_cfg, sort_keys=True, default=str)
+                            params.update(_flatten_nested_params("model", model_cfg))
                         if hasattr(config, "training"):
-                            params.update({f"training_{k}": v for k, v in dict(config.training).items() if isinstance(v, str | int | float | bool)})
+                            params.update(_flatten_nested_params("training", dict(config.training)))
 
                         mlflow.log_params(params)
 
@@ -592,26 +604,6 @@ class Logger:
                             mlflow.end_run()
                         self.mlflow_run_id = None
                     self.enabled = False
-
-        if enable_wandb:
-            warnings.warn(
-                "enable_wandb is deprecated and will be removed in a future release. Use the MLflow-based Logger workflow instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if WANDB_IMPORT_ERROR is not None:
-                logger.warning("wandb is not installed. Wandb logging is disabled.")
-            else:
-                try:
-                    self._wandb_logger = WandbLogger(
-                        project=experiment_name or "mermaidseg",
-                        run_name=self.run_name,
-                        config=config,
-                        num_classes=int(meta_model.num_classes),
-                        _warn=False,
-                    )
-                except Exception as e:
-                    logger.warning("Failed to initialize wandb logging: %s", e)
 
     @property
     def _mlflow_active(self) -> bool:
@@ -836,11 +828,6 @@ class Logger:
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to log %s: %s", path, e)
 
-    @property
-    def enable_wandb(self) -> bool:
-        """True when a ``WandbLogger`` delegate is active (deprecated)."""
-        return self._wandb_logger is not None
-
     def _ensure_active_run(self) -> bool:
         """Guarantee an active MLflow run exists, resuming the original when possible."""
         if not self._mlflow_active:
@@ -886,9 +873,6 @@ class Logger:
                     mlflow.log_metrics(metrics_to_log, step=step)
             except Exception as e:
                 logger.warning("Failed to log metrics to MLflow: %s", e)
-
-        if self._wandb_logger is not None:
-            self._wandb_logger.log(log_dict, step=step)
 
     def save_model_checkpoint(
         self,
@@ -1005,15 +989,6 @@ class Logger:
                         mlflow.set_tag("best_model_logged", "false")
                         mlflow.set_tag("best_model_log_error", str(e)[:500])
 
-        if self._wandb_logger is not None:
-            self._wandb_logger.save_checkpoint(
-                model_path=model_path,
-                epoch=epoch,
-                metrics_dict=metrics_dict,
-                checkpoint=checkpoint,
-                local_checkpoint_saved=local_checkpoint_saved,
-            )
-
     def save_safetensors_for_publish(
         self,
         meta_model_run: MetaModel,
@@ -1056,7 +1031,7 @@ class Logger:
             logger.warning("Failed to export SafeTensors model: %s", e)
 
     def end_run(self):
-        """Properly end the MLflow run (and wandb delegate, if active).
+        """Properly end the MLflow run.
 
         Should be called at the end of training to ensure proper cleanup.
         """
@@ -1068,98 +1043,9 @@ class Logger:
             except Exception as e:
                 logger.warning("Failed to end MLflow run: %s", e)
 
-        if self._wandb_logger is not None:
-            self._wandb_logger.end_run()
-
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.end_run()
         return False
-
-
-class WandbLogger:
-    """Deprecated standalone wandb logger.
-
-    .. deprecated::
-        ``WandbLogger`` will be removed in a future release.
-        Migrate to the MLflow-based :class:`Logger` workflow.
-    """
-
-    def __init__(
-        self,
-        project: str,
-        run_name: str,
-        config,
-        num_classes: int,
-        *,
-        _warn: bool = True,
-    ):
-        if _warn:
-            warnings.warn(
-                "WandbLogger is deprecated and will be removed in a future release. Use the MLflow-based Logger instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        if WANDB_IMPORT_ERROR is not None:
-            raise ImportError("wandb is required for WandbLogger but is not installed. Install with: pip install wandb") from WANDB_IMPORT_ERROR
-
-        self.wandb_run = wandb.init(
-            project=project,
-            name=run_name,
-            config=config,
-        )
-        self.wandb_run.config.update({"num_classes": num_classes})
-
-    def log(self, log_dict, step):
-        """Log metrics to the active wandb run."""
-        if self.wandb_run is None:
-            return
-        try:
-            self.wandb_run.log(log_dict, step=step)
-        except Exception as e:
-            logger.warning("Failed to log metrics to wandb: %s", e)
-
-    def save_checkpoint(
-        self,
-        model_path: str,
-        epoch: int,
-        metrics_dict: dict[str, Any],
-        checkpoint: dict[str, Any],
-        local_checkpoint_saved: bool,
-    ):
-        """Log a model checkpoint artifact to wandb."""
-        if self.wandb_run is None:
-            return
-        temp_file_path = None
-        try:
-            artifact_file = model_path
-            if not local_checkpoint_saved:
-                with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp_file:
-                    temp_file_path = tmp_file.name
-                torch.save(checkpoint, temp_file_path)  # type: ignore
-                artifact_file = temp_file_path
-            artifact = wandb.Artifact(
-                f"checkpoint-epoch{epoch}",
-                type="model",
-                metadata=metrics_dict,
-            )
-            artifact.add_file(artifact_file)
-            self.wandb_run.log_artifact(artifact)
-            logger.info("Checkpoint logged to wandb: %s", model_path)
-        except Exception as e:
-            logger.warning("Failed to log checkpoint to wandb: %s", e)
-        finally:
-            if temp_file_path and os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-
-    def end_run(self):
-        """Finish the active wandb run."""
-        if self.wandb_run is None:
-            return
-        try:
-            self.wandb_run.finish()
-            logger.info("Ended wandb run")
-        except Exception as e:
-            logger.warning("Failed to end wandb run: %s", e)
