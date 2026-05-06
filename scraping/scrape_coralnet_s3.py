@@ -17,9 +17,8 @@ def check_s3_prefix_exists(bucket_name, s3_prefix, source_id):
     if "Contents" in response:
         print(f"Prefix exists: {prefix}")
         return True
-    else:
-        print(f"Prefix does not exist: {prefix}")
-        return False
+    print(f"Prefix does not exist: {prefix}")
+    return False
 
 
 # Configuration - Where to save the downloaded CoralNet images

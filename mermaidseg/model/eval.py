@@ -1,21 +1,3 @@
-"""
-title: mermaidseg.model.eval
-abstract: Module that contains the Evaluator classes which are used to calculate model performance metrics.
-author: Viktor Domazetoski
-date: 22-08-2025
-
-Classes:
-    Evaluator
-        __init__
-        evaluate_model()
-            Evaluates the performance of a given meta-model on a dataset provided by the dataloader.
-        evaluate_image()
-            Evaluates the given model on one image of the dataloader.
-
-    EvaluatorSemanticSegmentation(Evaluator)
-        __init__
-"""
-
 from typing import Any
 
 import numpy as np
@@ -33,27 +15,14 @@ from mermaidseg.model.meta import MetaModel
 
 
 class Evaluator:
-    """
-    Evaluator class for evaluating machine learning models.
-    This class provides methods to evaluate the performance of a meta-model on a dataset
-    or a single image using various metrics. It supports automatic mixed precision (AMP)
-    and can handle both multiclass and binary classification tasks.
+    """Base evaluator for machine learning models.
+
+    Accumulates metrics across batches and supports both multiclass and binary tasks.
     Attributes:
-        metric_dict (Dict[str, Metric]): A dictionary of metrics to evaluate the model.
-        epoch (int): The current epoch number.
-        device (Union[str, torch.device]): The device to run the evaluation on (e.g., "cuda" or "cpu").
-        num_classes (int): The number of classes in the classification task.
-    Methods:
-        __init__(num_classes: int, device: Union[str, torch.device] = "cuda",
-                 metric_dict: Optional[Dict[str, Metric]] = None, ignore_index: int = 0, **kwargs: Any):
-            Initializes the Evaluator with the specified number of classes, device, and metrics.
-        evaluate_model(dataloader: DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]],
-                       meta_model: MetaModel) -> Dict[str, Union[float, NDArray[np.float64]]]:
-            Evaluates the performance of a given meta-model on a dataset provided by the dataloader.
-        evaluate_image(dataloader: DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]],
-                       meta_model: MetaModel, epoch: int = 0, log_epochs: int = 5) -> tuple[
-                           NDArray[np.float64], Union[NDArray[np.int_], int, str], Union[NDArray[np.int_], int, str]]:
-            Evaluates the given model on one image from the dataloader and returns the image, label, and prediction.
+        metric_dict (dict[str, Metric]): Metrics to accumulate and compute.
+        epoch (int): Current epoch counter (incremented after each `evaluate_model` call).
+        device (str | torch.device): Device metrics tensors are moved to.
+        num_classes (int): Number of output classes.
     """
 
     metric_dict: dict[str, Metric]
@@ -103,8 +72,8 @@ class Evaluator:
         dataloader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         meta_model: MetaModel,
     ) -> dict[str, float | NDArray[np.float64]]:
-        """
-        Evaluates the performance of a given meta-model on a dataset provided by the dataloader.
+        """Evaluates the performance of a given meta-model on a dataset provided by the dataloader.
+
         Args:
             dataloader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
                 A DataLoader object that provides batches of data. Each batch can either be a tuple
@@ -137,7 +106,6 @@ class Evaluator:
             # else:
             if outputs.ndim > 3:
                 outputs = outputs.argmax(dim=1)
-            ## Update metrics
             for metric in self.metric_dict.values():
                 metric.update(outputs, labels)
 
@@ -153,7 +121,6 @@ class Evaluator:
                 for metric in self.concept_metric_dict.values():
                     metric.update(concept_outputs, concept_labels)
 
-        ## Compute metrics
         for metric_name in self.metric_dict:
             metric_results[metric_name] = self.metric_dict[metric_name].compute().cpu().numpy()
             if metric_results[metric_name].ndim == 0:
@@ -167,8 +134,6 @@ class Evaluator:
                 )
                 if metric_results[metric_name].ndim == 0:
                     metric_results[metric_name] = metric_results[metric_name].item()
-                else:
-                    metric_results[metric_name] = metric_results[metric_name]  # [2].item()
                 self.concept_metric_dict[metric_name].reset()
 
         self.epoch += 1
@@ -187,18 +152,16 @@ class Evaluator:
         NDArray[np.int_] | int,
         NDArray[np.int_] | int,
     ]:
-        """
-        Evaluates the given model on one image of the dataloader.
+        """Return one image, its ground-truth label, and the model prediction.
+
         Args:
-            dataloader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
-                A DataLoader object that provides batches of data. Each batch can either be a tuple
-                of input tensors and labels or a dictionary containing "pixel_values" and "labels".
-            meta_model (MetaModel):
-                The meta-model to be evaluated. It contains the model and additional configurations
-                such as whether to use automatic mixed precision (AMP).
-            epoch (int, optional): The epoch number for logging purposes. Defaults to 0.
+            dataloader: DataLoader to pull a single batch from.
+            meta_model: Model used for prediction.
+            epoch (int, optional): Used to rotate which image in the batch is returned. Defaults to 0.
+            log_epochs (int, optional): Controls rotation period. Defaults to 5.
+            proba (bool, optional): If True, return raw logits instead of argmax. Defaults to False.
         Returns:
-            dict: A dictionary containing the computed metric results.
+            tuple[NDArray, NDArray, NDArray]: (image, label, prediction) arrays for one sample.
         """
 
         meta_model.model.eval()
@@ -223,8 +186,8 @@ class Evaluator:
 
 
 class EvaluatorSemanticSegmentation(Evaluator):
-    """
-    A class for evaluating segmentation models, inheriting from the base `Evaluator` class.
+    """A class for evaluating segmentation models, inheriting from the base `Evaluator` class.
+
     Attributes:
         metric_dict (dict): A dictionary of metrics used for evaluation. Defaults to
             accuracy and mean IoU, configured for either binary or multiclass tasks

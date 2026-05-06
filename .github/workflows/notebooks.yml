@@ -1,0 +1,18 @@
+name: Notebook Quality One-Shot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'nbs/**/*.ipynb'
+      - 'scraping/**/*.ipynb'
+
+jobs:
+  notebooks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Lint all notebook cells
+        run: uv run --group notebooks-ci nbqa ruff nbs/ scraping/

@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 
 
 class CoralNetDownloader:
-    """Main downloader class for CoralNet sources using requests"""
+    """Main downloader class for CoralNet sources using requests."""
 
     CORALNET_URL = "https://coralnet.ucsd.edu"
     LOGIN_URL = "https://coralnet.ucsd.edu/accounts/login/"
@@ -32,7 +32,7 @@ class CoralNetDownloader:
         self.s3 = boto3.client("s3")
 
     def login(self) -> bool:
-        """Log in to CoralNet using requests session"""
+        """Log in to CoralNet using requests session."""
         success = False
         try:
             # Get login page to extract CSRF token
@@ -73,7 +73,7 @@ class CoralNetDownloader:
         return success
 
     def check_permissions(self, source_id: int) -> bool:
-        """Check permissions for accessing a source"""
+        """Check permissions for accessing a source."""
         try:
             url = f"{self.CORALNET_URL}/source/{source_id}/"
             response = self.session.get(url, timeout=30)
@@ -81,7 +81,7 @@ class CoralNetDownloader:
 
             if "Page could not be found" in response.text:
                 raise Exception("Source does not exist")
-            elif "don't have permission" in response.text:
+            if "don't have permission" in response.text:
                 raise Exception("Permission denied")
 
             return True
@@ -93,7 +93,7 @@ class CoralNetDownloader:
     def download_metadata(
         self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images"
     ) -> tuple[bool, int]:
-        """Download metadata for a source"""
+        """Download metadata for a source."""
         success = False
         total_images_number = 0
 
@@ -211,7 +211,7 @@ class CoralNetDownloader:
     def download_labelset(
         self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images"
     ) -> bool:
-        """Download labelset for a source"""
+        """Download labelset for a source."""
         success = False
 
         try:
@@ -288,7 +288,7 @@ class CoralNetDownloader:
     def download_annotations(
         self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images"
     ) -> bool:
-        """Download annotations for a source"""
+        """Download annotations for a source."""
         success = False
 
         try:
@@ -371,8 +371,7 @@ class CoralNetDownloader:
         return success
 
     def get_images_on_page(self, browse_url: str) -> tuple[dict[str, str], str | None]:
-        """
-        Get a dictionary of image names and their URLs from the CoralNet browse page
+        """Get a dictionary of image names and their URLs from the CoralNet browse page.
 
         Args:
             session: requests.Session object with valid CoralNet login
@@ -405,8 +404,7 @@ class CoralNetDownloader:
         return images, next_page_url
 
     def get_images(self, source_id: int) -> tuple[pd.DataFrame | None, bool]:
-        """
-        Get a DataFrame of all images from a CoralNet source
+        """Get a DataFrame of all images from a CoralNet source.
 
         Args:
             session: requests.Session object with valid CoralNet login
@@ -436,8 +434,7 @@ class CoralNetDownloader:
         return images, success
 
     def get_image_urls(self, image_page_urls: list[str]) -> list[str | None]:
-        """
-        Get the direct image URLs from the CoralNet image page URLs
+        """Get the direct image URLs from the CoralNet image page URLs.
 
         Args:
             image_page_url: URL of the CoralNet image page
@@ -454,8 +451,7 @@ class CoralNetDownloader:
             original_img_elements = response_soup.select("div#original_image_container > img")
             if not original_img_elements:
                 raise ValueError(
-                    f"CoralNet image {image_page_url}: couldn't find image on the"
-                    f" image-view page. Maybe it's in a private source."
+                    f"CoralNet image {image_page_url}: couldn't find image on the image-view page. Maybe it's in a private source."
                 )
             image_url = original_img_elements[0].attrs.get("src")
             image_urls.append(image_url)
@@ -464,7 +460,7 @@ class CoralNetDownloader:
 
     @staticmethod
     def download_image(url: str, path: str, timeout: int = 30) -> tuple[str, bool]:
-        """Download a single image"""
+        """Download a single image."""
         if os.path.exists(path):
             return path, True
 
@@ -481,8 +477,7 @@ class CoralNetDownloader:
 
             if os.path.exists(path) and os.path.getsize(path) > 0:
                 return path, True
-            else:
-                return path, False
+            return path, False
 
         except Exception as e:
             print(f"Warning: Failed to download {url}: {e}")
@@ -491,7 +486,7 @@ class CoralNetDownloader:
     def download_image_to_s3(
         self, url: str, bucket_name: str, s3_key: str, timeout: int = 30
     ) -> tuple[str, bool]:
-        """Download a single image and upload directly to S3"""
+        """Download a single image and upload directly to S3."""
         try:
             # Check if object already exists in S3
             try:
@@ -521,7 +516,7 @@ class CoralNetDownloader:
         bucket_name: str,
         s3_prefix: str = "coralnet-public-images",
     ) -> None:
-        """Download all images from a DataFrame"""
+        """Download all images from a DataFrame."""
         # Save image list
         csv_buffer = io.StringIO()
         images_df.to_csv(csv_buffer, index=False)
@@ -563,9 +558,8 @@ class CoralNetDownloader:
 
                 # futures.append(executor.submit(self.download_image, url, path))
 
-            completed = 0
             successful = 0
-            for future in concurrent.futures.as_completed(futures):
+            for completed, future in enumerate(concurrent.futures.as_completed(futures), 1):
                 try:
                     path, success = future.result()
                     if success:
@@ -575,7 +569,6 @@ class CoralNetDownloader:
                 except Exception as e:
                     print(f"ERROR: {str(e)}")
 
-                completed += 1
                 if completed % 10 == 0 or completed == len(futures):
                     print(f"Progress: {completed}/{len(futures)} images processed")
 
@@ -593,13 +586,12 @@ class CoralNetDownloader:
         download_annotations: bool = True,
         download_images: bool = True,
     ) -> bool:
-        """Download all data for a source"""
+        """Download all data for a source."""
         print(f"\n=== Downloading Source {source_id} ===")
 
         # Login if needed
-        if not self.logged_in:
-            if not self.login():
-                raise Exception("Failed to login to CoralNet")
+        if not self.logged_in and not self.login():
+            raise Exception("Failed to login to CoralNet")
 
         # Check permissions
         if not self.check_permissions(source_id):
@@ -624,17 +616,17 @@ class CoralNetDownloader:
                 return True
 
         # Download labelset
-        if download_labelset:
-            if not self.download_labelset(source_id, bucket_name=bucket_name, s3_prefix=s3_prefix):
-                print("Warning: Failed to download labelset")
+        if download_labelset and not self.download_labelset(
+            source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
+        ):
+            print("Warning: Failed to download labelset")
 
         # Download annotations
-        if download_annotations:
-            if not self.download_annotations(
-                source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
-            ):
-                print("Warning: Failed to download annotations")
-                return success  # Temporary addition to skip very large sources
+        if download_annotations and not self.download_annotations(
+            source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
+        ):
+            print("Warning: Failed to download annotations")
+            return success  # Temporary addition to skip very large sources
 
         # Download images
         if download_images:
@@ -655,7 +647,7 @@ class CoralNetDownloader:
         return success
 
     def cleanup(self):
-        """Clean up resources"""
+        """Clean up resources."""
         if self.session:
             self.session.close()
         self.logged_in = False
