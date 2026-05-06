@@ -22,18 +22,4 @@ Work through these in order when you first join:
 
 ---
 
-## Quick reference
-
-| Topic | Page |
-|-------|------|
-| Install the project | [Getting Started](Getting-Started) |
-| Run notebooks | [Using Notebooks](Using-Notebooks) |
-| Branching, PRs, code review | [Git Workflow](Git-Workflow) |
-| Ruff, pre-commit, naming | [Code Style](Code-Style) |
-| Meetings, Slack, project board | [Team Process](Team-Process) |
-| Writing GitHub issues | [Writing Tickets](Writing-Tickets) |
-| Config files and MLflow | [Reproducibility](Reproducibility) |
-
----
-
 Questions? Post in Slack. There are no bad questions.

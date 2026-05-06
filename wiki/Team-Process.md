@@ -12,6 +12,12 @@ This page explains how we coordinate, communicate, and stay aligned as a team.
 
 **If something feels urgent or out of scope, raise it** — at the Monday meeting or in Slack. Don't start work on it unilaterally.
 
+**Review the following resources** :
+
+- [How to Contribute to Open Source](https://opensource.guide/how-to-contribute/)
+- [Version Control with Git](https://swcarpentry.github.io/git-novice/)
+- [Programming with Python](https://swcarpentry.github.io/python-novice-inflammation/)
+- [The Missing Semester of Your CS Education](https://missing.csail.mit.edu)
 ---
 
 ## Regular rhythms
@@ -38,7 +44,7 @@ These apply to everyone on the project:
 
 - **Respond to the weekly Slack bot check-in** — every week, no exceptions
 - **Attend Monday meetings** — or let the team know in advance if you can't
-- **Update colleagues in Slack regularly** — proactively, not reactively
+- **Update colleagues in Slack regularly** — proactively, not reactively, about progress, blockers
 - **Ask for help early.** If you've been stuck for more than a day, post in Slack. There are no bad questions, and staying quiet while blocked slows everyone down.
 - **Follow the agreed-upon plan.** Bring proposed changes to the Monday meeting rather than improvising.
 
@@ -49,7 +55,8 @@ These apply to everyone on the project:
 - **Blocked for more than a day**: post in Slack
 - **Scope or priority question**: raise it at the Monday meeting
 - **AWS/S3 access issue**: post in Slack with the exact error — this requires action from the team lead
-- **Interpersonal concern**: reach out to the team lead directly
+- **Interpersonal concern**: if reasonable, try to bring up concerns with the person directly. If that
+does not resolve the issue then please reach out to the team lead directly.
 
 ---
 

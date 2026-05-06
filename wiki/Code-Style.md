@@ -49,4 +49,5 @@ A focused change is easier to review, easier to revert if something goes wrong, 
 
 - Run `uv run pytest` — all tests should pass
 - Run `uv run ruff check .` — no errors
+- Run `uv run pre-commit .` - to ensure local hooks are run before pushing (expensive in Github Actions)
 - Read through your own diff before assigning a reviewer — catch the obvious things yourself first

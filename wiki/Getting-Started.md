@@ -2,8 +2,65 @@
 
 This page walks you from a fresh machine to a working development environment. Follow each step in order.
 
-**Prerequisites:** Python 3.11+, git, and an AWS account that has been granted access to the project's S3 bucket by the Sparkgeo and Mermaid.
+**Prerequisites:** Python 3.11+, and an AWS account that has been granted access to the project's S3 bucket by Sparkgeo and Mermaid.
 
+---
+
+## Install system tools
+
+Install the following before proceeding. If you already have them, verify they are up to date.
+
+**git**
+
+```bash
+# macOS
+brew install git
+
+# Linux (Debian/Ubuntu)
+sudo apt install git
+```
+
+**AWS CLI**
+
+ See: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+
+**direnv** — loads `.env` automatically when you `cd` into the repo
+
+See: https://direnv.net
+
+```bash
+# macOS
+brew install direnv
+
+# Linux (Debian/Ubuntu)
+sudo apt install direnv
+```
+
+After installing, add the shell hook to your profile (once):
+
+```bash
+# bash
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc
+
+# zsh
+echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
+```
+
+**GitHub CLI**
+
+```bash
+# macOS
+brew install gh
+
+# Linux — see https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+sudo apt install gh
+```
+
+Authenticate with GitHub after installing:
+
+```bash
+gh auth login
+```
 
 ---
 
@@ -36,6 +93,12 @@ Pre-commit runs Ruff (linting and formatting) automatically on each commit. Inst
 uv run pre-commit install
 ```
 
+Verify it is installed correctly :
+
+```bash
+uv run pre-commit --version
+```
+
 ## 5. Set up your environment file
 
 Copy the example environment file and fill in your values:
@@ -54,7 +117,22 @@ MLFLOW_TRACKING_URI=...         # get this value from the team lead
 
 ## 6. Authenticate with AWS
 
-This project uses AWS SSO. Run:
+This project uses AWS SSO. If you have not configured the `mermaid-core` profile yet, run the interactive setup first:
+
+```bash
+aws configure sso
+```
+
+When prompted, enter:
+
+| Field | Value |
+|---|---|
+| SSO session name | `mermaid` |
+| SSO start URL | get this from the team lead |
+| SSO region | `us-east-1` |
+| Default output format | `json` |
+
+Set the profile name to `mermaid-core` when asked. Once the profile exists, log in with:
 
 ```bash
 aws sso login --profile mermaid-core
