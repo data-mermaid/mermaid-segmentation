@@ -17,7 +17,8 @@ def _root_dataset(ds: Any) -> Any:
 
 
 class CombinedCoralDataset:
-    """Wraps multiple source datasets into a single dataset over the joint global source-label space.
+    """Wraps multiple source datasets into a single dataset over the joint global source-label
+    space.
 
     All constituent datasets must have been registered with the same
     :class:`SourceLabelRegistry` so their emitted source-label masks share a

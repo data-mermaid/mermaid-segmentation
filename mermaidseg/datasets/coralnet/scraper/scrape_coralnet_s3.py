@@ -5,6 +5,7 @@ import boto3
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
+
 from mermaidseg.datasets.coralnet.scraper.coralnet_scraper import CoralNetDownloader
 
 

@@ -112,16 +112,12 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
         if self.class_subset is not None:
             self.df_annotations = self.df_annotations[
-                self.df_annotations["source_label_name"].apply(
-                    lambda x: x in self.class_subset
-                )
+                self.df_annotations["source_label_name"].apply(lambda x: x in self.class_subset)
             ].reset_index(drop=True)
             self.df_images = self._derive_df_images_from_annotations(self.df_annotations)
             ordered_names = list(self.class_subset)
         else:
-            ordered_names = (
-                self.df_annotations["source_label_name"].value_counts().index.tolist()
-            )
+            ordered_names = self.df_annotations["source_label_name"].value_counts().index.tolist()
 
         self.source_id2name = dict(enumerate(ordered_names, start=1))
         self.source_name2id = {v: k for k, v in self.source_id2name.items()}
@@ -138,9 +134,8 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
         """Re-derive ``df_images`` after filtering ``df_annotations``.
 
-        The default implementation auto-detects column structure for the
-        bundled MERMAID and CoralNet shapes. Subclasses are encouraged to
-        override this when they have a fixed schema.
+        The default implementation auto-detects column structure for the bundled MERMAID and
+        CoralNet shapes. Subclasses are encouraged to override this when they have a fixed schema.
         """
         if "region_id" in df_annotations.columns:
             return (
@@ -181,7 +176,10 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return self.df_images.shape[0]
 
     def read_image(self, **row_kwargs: Any) -> NDArray[Any]:
-        """Read an image given the row metadata. Implemented by subclasses."""
+        """Read an image given the row metadata.
+
+        Implemented by subclasses.
+        """
         raise NotImplementedError("Subclasses should implement this method.")
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:

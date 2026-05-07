@@ -40,8 +40,8 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 import mermaidseg.datasets
-from mermaidseg.datasets import worker_init_fn
 from mermaidseg.dataset_reconciliation import SourceLabelRegistry
+from mermaidseg.datasets import worker_init_fn
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
@@ -295,9 +295,7 @@ def _run_training(args: argparse.Namespace) -> None:
         # being a per-dataset filter (whose semantics changed to source-space).
         cfg.data.pop("class_subset", None)
 
-    dataset = getattr(mermaidseg.datasets, dataset_name)(
-        transform=transforms["train"], **cfg.data
-    )
+    dataset = getattr(mermaidseg.datasets, dataset_name)(transform=transforms["train"], **cfg.data)
     logging.info("Dataset: %s (%d samples)", dataset_name, len(dataset))
 
     registry = SourceLabelRegistry(

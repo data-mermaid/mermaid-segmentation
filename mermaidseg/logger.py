@@ -469,9 +469,7 @@ class Logger:
                     "metadata/concept_id2name.json",
                 )
             mlflow.log_param("num_target_classes", int(registry.num_target_classes))
-            mlflow.log_param(
-                "num_global_source_classes", int(registry.num_global_source_classes)
-            )
+            mlflow.log_param("num_global_source_classes", int(registry.num_global_source_classes))
         except Exception as e:
             logger.warning("Failed to log SourceLabelRegistry to MLflow: %s", e)
 

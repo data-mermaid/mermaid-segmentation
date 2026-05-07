@@ -30,7 +30,6 @@ from mermaidseg.dataset_reconciliation.concepts import (
 from mermaidseg.dataset_reconciliation.label_mapping import (
     coralscapes_to_mermaid,
     fetch_coralnet_to_mermaid,
-    fetch_mermaid_target_labels,
 )
 
 
@@ -106,13 +105,9 @@ class SourceLabelRegistry:
         for ds in datasets:
             name = getattr(ds, "SOURCE_NAME", None)
             if not name:
-                raise ValueError(
-                    f"Dataset {type(ds).__name__} does not declare SOURCE_NAME"
-                )
+                raise ValueError(f"Dataset {type(ds).__name__} does not declare SOURCE_NAME")
             if name in seen_sources:
-                raise ValueError(
-                    f"Duplicate SOURCE_NAME '{name}' across registered datasets"
-                )
+                raise ValueError(f"Duplicate SOURCE_NAME '{name}' across registered datasets")
             seen_sources.add(name)
 
         self.datasets = list(datasets)
@@ -131,9 +126,7 @@ class SourceLabelRegistry:
             for local_id, source_name in sorted(ds.source_id2name.items()):
                 global_id = local_id + running_offset
                 self.global_id2source[global_id] = (ds.SOURCE_NAME, source_name)
-                ds_target_for_source.append(
-                    resolved_maps[ds.SOURCE_NAME].get(source_name)
-                )
+                ds_target_for_source.append(resolved_maps[ds.SOURCE_NAME].get(source_name))
             per_dataset_target_lists.append(ds_target_for_source)
             running_offset += len(ds.source_id2name)
         self.dataset_offsets = offsets
@@ -229,9 +222,7 @@ class SourceLabelRegistry:
         concept_hierarchy: dict[str, str],
     ) -> None:
         """Build the ``source_to_concepts`` lookup tensor and concept metadata."""
-        target_label_names = [
-            self.target_id2label[i] for i in sorted(self.target_id2label)
-        ]
+        target_label_names = [self.target_id2label[i] for i in sorted(self.target_id2label)]
         concept_set, concept_matrix = initialize_benthic_concepts(
             target_label_names, concept_hierarchy
         )
@@ -266,7 +257,7 @@ class SourceLabelRegistry:
         """Number of global source classes (excluding background)."""
         return int(self.source_to_target.shape[0]) - 1
 
-    def to(self, device: torch.device | str) -> "SourceLabelRegistry":
+    def to(self, device: torch.device | str) -> SourceLabelRegistry:
         """Move the lookup tensors onto ``device`` (in-place) and return self."""
         self.source_to_target = self.source_to_target.to(device)
         if self.source_to_concepts is not None:

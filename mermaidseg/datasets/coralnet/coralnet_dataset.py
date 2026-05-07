@@ -22,8 +22,8 @@ from mermaidseg.datasets.utils import get_image_s3
 
 
 class CoralNetDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file
-    stored on S3.
+    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file stored
+    on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in CoralNet's own provider-ID label
@@ -116,8 +116,6 @@ class CoralNetDataset(BaseCoralDataset):
             .reset_index(drop=True)
         )
 
-    def read_image(
-        self, image_id: str, source_id: str, **row_kwargs: Any
-    ) -> NDArray[Any]:
+    def read_image(self, image_id: str, source_id: str, **row_kwargs: Any) -> NDArray[Any]:
         key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
         return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
