@@ -116,6 +116,10 @@ class SourceLabelRegistry:
             provided_maps, fetch_remote=fetch_remote
         )
 
+        # Assign each dataset a disjoint offset in the global source-ID space and
+        # record the (source, source_name) pair for every global ID. We also
+        # accumulate `per_dataset_target_lists` so we can derive a default
+        # `target_labels` below when the caller did not supply one.
         self.global_id2source = {}
         per_dataset_target_lists: list[list[str | None]] = []
         offsets: dict[str, int] = {}
@@ -132,6 +136,8 @@ class SourceLabelRegistry:
         self.dataset_offsets = offsets
         num_global_source = running_offset
 
+        # Default target vocabulary: the alphabetical union of every non-null
+        # MERMAID target name produced by the resolved per-dataset maps.
         if target_labels is None:
             target_label_set: set[str] = set()
             for tgt_list in per_dataset_target_lists:
@@ -140,6 +146,8 @@ class SourceLabelRegistry:
                         target_label_set.add(tgt)
             target_labels = sorted(target_label_set)
 
+        # Optional caller-provided whitelist; targets outside `subset` collapse
+        # to background in `source_to_target` below.
         if target_label_subset is not None:
             subset = set(target_label_subset)
             target_labels = [t for t in target_labels if t in subset]
@@ -150,8 +158,11 @@ class SourceLabelRegistry:
         self.target_label2id = {v: k for k, v in self.target_id2label.items()}
         self.num_target_classes = len(self.target_id2label) + 1  # +1 for background
 
+        # Dense lookup `global_source_id -> target_class_id`; index 0 stays
+        # background, and any source name without a target (or filtered out by
+        # `subset`) is left as 0 so it collapses to background at train time.
         source_to_target_np = np.zeros(num_global_source + 1, dtype=np.int64)
-        for ds, tgt_list in zip(self.datasets, per_dataset_target_lists, strict=False):
+        for ds in self.datasets:
             offset = self.dataset_offsets[ds.SOURCE_NAME]
             for local_id, source_name in sorted(ds.source_id2name.items()):
                 target_name = resolved_maps[ds.SOURCE_NAME].get(source_name)
