@@ -3,41 +3,6 @@
 Codebase for the training, evaluation and usage of image segmentation models of coral data.
 The codebase contains data loaders, augmentations, preprocessors, models, training & evaluation scripts.
 
-## File Structure
-
-```
-├── nbs/ # Jupyter notebooks
-    ├── Base_Pipeline.ipynb # Notebook used to train end-to-end (non-concept) image segmentation models for a given dataset and configuration file
-    ├── Concept_Bottleneck_Pipeline.ipynb # Notebook used to train end-to-end concept-bottleneck image segmentation models for a given dataset and configuration file
-    ├── Model_Evaluation.ipynb # Notebook containing the code to quantitatively and qualitatively analyze the trained segmentation models
-    ├── datasets/
-        ├── Dataset_Exploration.ipynb # Shows usage of currently implemented dataset classes and concept mapping
-        ├── CoralNet_Annotations.ipynb # Notebook on how to map extracted CoralNet sources to a datasets readable format (not that relevant for now)
-    ├── nb_experiments/
-        ├── Time_Test.ipynb # Data I/O timing tests
-
-├── mermaidseg/
-    ├── datasets # Contains scripts related to dataset loading, preprocessing and data augmentations.
-        ├── dataset.py # Contains dataset classes that can be used to acquire and load coral data, including images and annotations. Currently includes the MermaidDataset, CoralNetDataset and CoralscapesDataset classes.
-        ├── concepts.py # Contains functionality related to working with concepts
-        ├── utils.py # Contains utility functions related to datasets
-    ├── model # Contains everything related to training and evaluating segmentation models.
-        ├── models.py # Contains the different model implementations
-        ├── meta.py # Contains the metamodel class that is initialized with a model and set of hyperparameters, with train, eval and predict methods.
-        ├── train.py # Contains the model training function.
-        ├── eval.py # Contains evaluation classes & functions.
-        ├── loss.py # Contains implementations of different loss functions.
-    ├── io.py # Contains config & args set ups
-    ├── logger.py # Contains classes & functions related to logging training with MLFlow and saving checkpoints & results
-    └── visualization.py # Functions related to the visualization of images based on different criteria
-
-├── configs/ # Configuration files for different runs/models
-└── .gitignore
-└── .environment.yml # Environment for setup with conda/micromamba
-└── .pyproject.toml
-└── README.md
-```
-
 ## Usage
 
 ### Installation
@@ -67,17 +32,19 @@ export MLFLOW_TRACKING_URI=arn:aws:sagemaker:{region}:{account-id}:mlflow-app/{a
 hf auth login
 # Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
 
-# Install dependencies
+# Install core dependencies
 uv sync
-
 ```
 
-**Traditional setup**:
+**Install optional dependency groups** as needed:
 ```bash
-git clone https://github.com/your-org/mermaid-segmentation.git
-cd mermaid-segmentation
-pip install -e .
-# Then pip install any additional libraries required from the environment.yml file, depending on use case.
+uv sync --group dev         # tests + lint (contributor setup)
+uv sync --group notebooks   # Jupyter, hvplot, ibis, great-tables
+uv sync --extra scraping    # selenium, webdriver-manager
+uv sync --extra smp         # segmentation-models-pytorch (optional model backend)
+
+# Combine
+uv sync --group dev --group notebooks
 ```
 
 
@@ -147,14 +114,18 @@ To evaluate any trained segmentation model, you can use the notebook `nbs/Model_
 
 ### Running Tests
 
+```bash
+uv sync --group tests
+```
+
 **Run all tests:**
 ```bash
-uv run pytest tests/
+uv run pytest
 ```
 
 **Run only unit tests (skip integration tests):**
 ```bash
-uv run pytest tests/ -m "not integration"
+uv run pytest -m "not integration"
 ```
 
 **Run specific test file:**

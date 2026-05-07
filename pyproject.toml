@@ -20,9 +20,7 @@ dependencies = [
     "s3fs",
     "segmentation-models-pytorch",
     "mlflow",
-    "psutil>=5.9.0",
     "pyyaml",
-    "nvidia-ml-py>=12.0.0",
     "tqdm",
     "torchmetrics",
     "anytree",
@@ -55,12 +53,17 @@ tests = [
     "pytest-cov>=4.0",
 ]
 lint = [
-    "ruff>=0.6.0",
+    "ruff>=0.15.8",
     "pre-commit>=3.0",
 ]
-docs = [
-    "sphinx>=7.0",
-    "pydata-sphinx-theme>=0.15",
+notebooks-ci = [
+    "nbqa>=1.9",
+    "ruff>=0.15.8",
+]
+dev = [
+    {include-group = "tests"},
+    {include-group = "lint"},
+    "docformatter>=1.7.7",
 ]
 
 [tool.setuptools]
@@ -71,8 +74,17 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C4"]
+select = ["E", "F", "I", "UP", "B", "C4", "RET", "SIM", "PD"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/*.ipynb" = [
+    "F821",   # undefined names — common in exploratory notebook cells
+    "B018",   # useless expression — used to display values in notebooks
+    "E501",   # line too long — handled by docformatter; notebook cells are hard to wrap
+    "UP031",
+    "PD003", # pandas-vet: prefer isna — wrong for Ibis .isnull() / SQL NULL
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["mermaidseg"]

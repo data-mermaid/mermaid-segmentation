@@ -1,19 +1,3 @@
-"""
-title: mermaidseg.io
-abstract: Module that contains input/output and config reading functionality.
-author: Viktor Domazetoski
-date: 20-10-2025
-
-Classes:
-    ConfigDict - A dictionary subclass that allows attribute-style access to dictionary keys.
-Functions:
-    load_config(config_path) - Load configuration from a YAML file.
-    update_config(base_config, config) - Update a base configuration dictionary with values from another configuration dictionary.
-    setup_config(config_path=None, config_base_path="configs/base.yaml") - Set up configuration by loading and merging base and custom config files.
-    get_parser() - Create and configure an argument parser for semantic segmentation training.
-    update_config_with_args(config, args) - Update configuration dictionary with command line arguments.
-"""
-
 import argparse
 from pathlib import Path
 from typing import Any
@@ -23,19 +7,10 @@ import yaml
 
 
 class ConfigDict(dict):
-    """
-    A dictionary subclass that allows attribute-style access to dictionary keys.
-    This class recursively converts nested dictionaries into ConfigDict instances,
-    enabling dot notation access to dictionary keys.
-    Methods
-    -------
-    __init__(dictionary)
-        Initializes the ConfigDict with the given dictionary, converting nested
-        dictionaries to ConfigDict instances.
-    __getattr__(attr)
-        Allows access to dictionary keys as attributes.
-    __setattr__(key, value)
-        Allows setting dictionary keys as attributes.
+    """Dictionary subclass with attribute-style access.
+
+    Recursively converts nested dicts to `ConfigDict`, enabling dot-notation
+    access alongside standard dictionary operations.
     """
 
     def __init__(self, dictionary: dict[str, Any]):
@@ -52,8 +27,8 @@ class ConfigDict(dict):
 
 
 def load_config(config_path: str) -> dict[str, Any]:
-    """
-    Load configuration from a YAML file.
+    """Load configuration from a YAML file.
+
     Args:
         config_path (str): Path to the YAML configuration file.
     Returns:
@@ -61,13 +36,12 @@ def load_config(config_path: str) -> dict[str, Any]:
     """
 
     with open(config_path, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    return config
+        return yaml.safe_load(f)
 
 
 def update_config(base_config: ConfigDict, config: ConfigDict) -> ConfigDict:
-    """
-    Update a base configuration dictionary with values from another configuration dictionary.
+    """Update a base configuration dictionary with values from another configuration dictionary.
+
     This function performs a recursive update where nested dictionaries are merged rather
     than completely replaced. For non-dictionary values, the new value overwrites the
     existing one.
@@ -93,13 +67,13 @@ def update_config(base_config: ConfigDict, config: ConfigDict) -> ConfigDict:
 def _load_csv_if_path(value: Any, header: int | None = 0) -> Any:
     """Load CSV file if value is a file path, otherwise return as-is."""
     if isinstance(value, str) and Path(value).is_file() and value.endswith(".csv"):
-        return pd.read_csv(value, header=header).values.flatten().tolist()
+        return pd.read_csv(value, header=header).to_numpy().flatten().tolist()
     return value
 
 
 def setup_config(config_path: str | None = None, config_base_path: str = "configs/base.yaml"):
-    """
-    Set up configuration by loading and merging base and custom config files.
+    """Set up configuration by loading and merging base and custom config files.
+
     This function loads a base configuration file and optionally merges it with
     a custom configuration file. If no custom config path is provided, only the
     base configuration is returned.
@@ -129,23 +103,23 @@ def setup_config(config_path: str | None = None, config_base_path: str = "config
     #     # with open(cfg.data.class_subset, "r") as f:
     #     #     class_subset = [line.strip() for line in f.readlines()]
     #     # cfg.data.class_subset = class_subset
-    if "class_subset" in cfg.data.keys():
+    if "class_subset" in cfg.data:
         cfg.data.class_subset = _load_csv_if_path(cfg.data.class_subset)
 
-    if "whitelist_sources" in cfg.data.keys():
+    if "whitelist_sources" in cfg.data:
         cfg.data.whitelist_sources = _load_csv_if_path(cfg.data.whitelist_sources)
         cfg.data.whitelist_sources.train = _load_csv_if_path(cfg.data.whitelist_sources.train)
         cfg.data.whitelist_sources.val = _load_csv_if_path(cfg.data.whitelist_sources.val)
         cfg.data.whitelist_sources.test = _load_csv_if_path(cfg.data.whitelist_sources.test)
-    if "blacklist_sources" in cfg.data.keys():
+    if "blacklist_sources" in cfg.data:
         cfg.data.blacklist_sources = _load_csv_if_path(cfg.data.blacklist_sources)
 
     return cfg
 
 
 def get_parser() -> argparse.ArgumentParser:
-    """
-    Create and configure an argument parser for semantic segmentation training.
+    """Create and configure an argument parser for semantic segmentation training.
+
     Returns:
         argparse.ArgumentParser: Configured argument parser with the following options:
             - run-name (str): Name identifier for the training run
@@ -178,8 +152,8 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> ConfigDict:
-    """
-    Update configuration dictionary with command line arguments.
+    """Update configuration dictionary with command line arguments.
+
     Updates the provided configuration dictionary with values from command line
     arguments if they are present. Only non-None argument values will override
     the corresponding configuration values.

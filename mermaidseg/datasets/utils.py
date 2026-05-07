@@ -1,24 +1,20 @@
-"""
-title: mermaidseg.datasets.utils
-abstract: Module that contains dataset loading and utility functions.
-author: Viktor Domazetoski
-date: 28-08-2025
-
-Functions:
-    get_image_s3: Fetches an image from an S3 bucket and returns it as a PIL Image object.
-    create_annotation_mask: Creates an annotation mask for a given image.
-    calculate_weights: Calculate class weights for a given dataset.
-"""
-
 import io
+import logging
 
 import boto3
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
+from botocore.exceptions import ClientError
+from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset, default_collate
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
+
+
+class DataLoadError(Exception):
+    """Raised when an image cannot be loaded from S3 or decoded."""
 
 
 def get_image_s3(
@@ -27,8 +23,8 @@ def get_image_s3(
     key: str,
     thumbnail: bool = False,
 ):
-    """
-    Fetches an image from an S3 bucket and returns it as a PIL Image object.
+    """Fetches an image from an S3 bucket and returns it as a PIL Image object.
+
     Args:
         s3 (boto3.client): The Boto3 S3 client used to interact with S3.
         bucket (str): The name of the S3 bucket.
@@ -41,10 +37,22 @@ def get_image_s3(
     if thumbnail:
         key = key.replace(".png", "_thumbnail.png")
 
-    response = s3.get_object(Bucket=bucket, Key=key)
-    image_data = response["Body"].read()
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        image_data = response["Body"].read()
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        logger.warning(
+            "S3 error loading image (bucket=%s, key=%s): %s %s", bucket, key, error_code, e
+        )
+        raise DataLoadError(f"S3 ClientError for s3://{bucket}/{key}: {error_code}") from e
 
-    image = Image.open(io.BytesIO(image_data))
+    try:
+        image = Image.open(io.BytesIO(image_data))
+    except (UnidentifiedImageError, OSError) as e:
+        logger.warning("Corrupted image (bucket=%s, key=%s): %s", bucket, key, e)
+        raise DataLoadError(f"PIL cannot open image at s3://{bucket}/{key}") from e
+
     return image
 
 
@@ -54,35 +62,61 @@ def create_annotation_mask(
     label2id: dict[str, int],
     padding: int | None = None,
 ) -> np.ndarray:
-    """
-    Creates an annotation mask for a given image based on provided annotations.
+    """Creates an annotation mask for a given image based on provided annotations.
+
     Args:
-        annotations (pd.DataFrame): DataFrame containing annotation rows with 'row', 'col', and 'benthic_attribute_name' columns.
-        shape (Tuple[int, int]): Shape of the output mask (height, width).
-        label2id (Dict[str, int]): Mapping from label names to integer IDs.
+        annotations (pd.DataFrame): DataFrame with 'row', 'col', and 'benthic_attribute_name' columns.
+        shape (tuple[int, int]): Output mask shape (height, width).
+        label2id (dict[str, int]): Mapping from label names to integer class IDs.
+        padding (int | None, optional): Half-size of a square pad region around each point annotation.
+            If None or 0, only the exact annotation pixel is set. Defaults to None.
     Returns:
-        np.ndarray: Annotation mask with integer class IDs.
+        np.ndarray: Integer annotation mask with shape (height, width).
     """
-    ## TODO: Make Padding percentage based so that it is applicable to all class sizes
-    mask = np.zeros(shape[:2])
-    for _, annotation in annotations.iterrows():
-        if annotation["benthic_attribute_name"] is not None:
-            if padding is not None and padding > 0:
-                mask[
-                    annotation["row"] - padding : annotation["row"] + padding,
-                    annotation["col"] - padding : annotation["col"] + padding,
-                ] = label2id[annotation["benthic_attribute_name"]]
-            else:
-                mask[annotation["row"], annotation["col"]] = label2id[
-                    annotation["benthic_attribute_name"]
-                ]
+    # TODO: Make padding percentage-based so it scales with image resolution
+    mask = np.zeros(shape[:2], dtype=np.int64)
+
+    if annotations.empty:
+        return mask
+
+    valid = annotations[annotations["benthic_attribute_name"].notna()].copy()
+
+    unknown = set(valid["benthic_attribute_name"]) - set(label2id.keys())
+    if unknown:
+        logger.warning(
+            "create_annotation_mask: skipping %d unknown label(s): %s",
+            len(unknown),
+            sorted(unknown),
+        )
+        valid = valid[valid["benthic_attribute_name"].isin(label2id)]
+
+    if valid.empty:
+        return mask
+
+    rows = valid["row"].to_numpy(dtype=np.intp)
+    cols = valid["col"].to_numpy(dtype=np.intp)
+    label_ids = valid["benthic_attribute_name"].map(label2id).to_numpy(dtype=np.int64)
+
+    if padding is not None and padding > 0:
+        h, w = shape[:2]
+        # Vectorized bounds computation
+        r0 = np.maximum(0, rows - padding)
+        r1 = np.minimum(h, rows + padding)
+        c0 = np.maximum(0, cols - padding)
+        c1 = np.minimum(w, cols + padding)
+
+        # Apply padding regions (later annotations overwrite earlier ones)
+        for r0i, r1i, c0i, c1i, lid in zip(r0, r1, c0, c1, label_ids, strict=False):
+            mask[r0i:r1i, c0i:c1i] = lid
+    else:
+        mask[rows, cols] = label_ids
 
     return mask
 
 
 def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
-    """
-    Calculate class weights for a given dataset.
+    """Calculate class weights for a given dataset.
+
     This function computes the weights for each class in the dataset based on
     the frequency of each class label. The weights are inversely proportional
     to the square root of the class frequency, adjusted by a constant value.
@@ -114,9 +148,7 @@ def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
 
 
 def _joint_collate(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Collate function to combine a list of samples into a batch.
-    """
+    """Collate function to combine a list of samples into a batch."""
     images, labels = zip(*batch, strict=False)
     images = default_collate(images)
     labels = default_collate(labels)
@@ -124,8 +156,9 @@ def _joint_collate(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def get_coralnet_sources():
-    """
-    Discover and validate CoralNet source folders stored in the S3 bucket "dev-datamermaid-sm-sources".
+    """Discover and validate CoralNet source folders stored in the S3 bucket "dev-datamermaid-sm-
+    sources".
+
     Returns:
         whitelist: A list of all valid CoralNet source folder names that contain both
               'annotations.csv' and 'image_list.csv' files.
@@ -140,35 +173,54 @@ def get_coralnet_sources():
         folder = "coralnet-public-images/"
         sub_response = s3.list_objects_v2(Bucket=bucket_name, Prefix=folder, Delimiter="/")
         if "CommonPrefixes" in sub_response:
-            print("Subfolders in coralnet-public-images/:")
+            logger.warning("Subfolders in coralnet-public-images/:")
             folders_new = [prefix["Prefix"] for prefix in sub_response["CommonPrefixes"]]
             folders_new = [folder.replace("coralnet-public-images/", "") for folder in folders_new]
         else:
-            print("No subfolders found in coralnet-public-images/")
+            logger.warning("No subfolders found in coralnet-public-images/")
     else:
-        print("No folders found in the bucket")
+        logger.warning("No folders found in the bucket")
 
     whitelist_sources = []
     for source in tqdm(folders_new):
         if not source.startswith("s"):
-            print(source)
+            logger.warning("Unexpected source folder name (no 's' prefix): %s", source)
 
         file_key = f"coralnet-public-images/{source}annotations.csv"
-
         try:
             s3.head_object(Bucket=bucket_name, Key=file_key)
-        except s3.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] == "404":
-                print(f"File {file_key} not found in bucket")
-                continue
+        except ClientError as e:
+            error_code = e.response["Error"]["Code"]
+            if error_code == "404":
+                logger.warning(
+                    "get_coralnet_sources: annotations.csv not found for source %s", source
+                )
+            else:
+                logger.warning(
+                    "get_coralnet_sources: unexpected S3 error for %s (code=%s): %s",
+                    file_key,
+                    error_code,
+                    e,
+                )
+            continue
 
         file_key = f"coralnet-public-images/{source}image_list.csv"
-
         try:
             s3.head_object(Bucket=bucket_name, Key=file_key)
-        except s3.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] == "404":
-                print(f"File {file_key} not found in bucket")
-                continue
+        except ClientError as e:
+            error_code = e.response["Error"]["Code"]
+            if error_code == "404":
+                logger.warning(
+                    "get_coralnet_sources: image_list.csv not found for source %s", source
+                )
+            else:
+                logger.warning(
+                    "get_coralnet_sources: unexpected S3 error for %s (code=%s): %s",
+                    file_key,
+                    error_code,
+                    e,
+                )
+            continue
+
         whitelist_sources.append(source)
     return whitelist_sources

@@ -1,15 +1,5 @@
-"""
-title: mermaidseg.datasets.dataset
-abstract: Module that contains dataset classes & functionality.
-author: Viktor Domazetoski
-date: 30-11-2025
-
-Classes:
-    BaseCoralDataset - A base PyTorch Dataset for loading annotated coral reef images.
-    MermaidDataset - A PyTorch Dataset for loading annotated coral reef images from MERMAID sources.
-    CoralNetDataset - A PyTorch Dataset for loading annotated coral reef images from CoralNet sources.
-"""
-
+import logging
+from pathlib import Path
 from typing import Any
 
 import albumentations as A
@@ -26,14 +16,29 @@ from mermaidseg.datasets.concepts import (
     initialize_benthic_concepts,
     initialize_benthic_hierarchy,
 )
-from mermaidseg.datasets.utils import create_annotation_mask, get_image_s3
+from mermaidseg.datasets.utils import _joint_collate, create_annotation_mask, get_image_s3
+
+logger = logging.getLogger(__name__)
+
+
+def worker_init_fn(worker_id: int) -> None:
+    """Configure logging in DataLoader worker processes.
+
+    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0``
+    so that warnings emitted in worker subprocesses are visible.
+    """
+    logging.basicConfig(
+        level=logging.WARNING,
+        format=f"[worker-{worker_id}] %(levelname)s %(name)s: %(message)s",
+    )
 
 
 class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
-    """
-    A base PyTorch Dataset for loading annotated coral reef images.
-    This dataset reads image annotations from an annotations file, retrieves images from S3, and applies optional transformations.
-    The dataset is designed to be extended for specific data sources by implementing the read_image method and initializing the df_images and df_annotation arguments.
+    """A base PyTorch Dataset for loading annotated coral reef images.
+
+    This dataset reads image annotations from an annotations file, retrieves images from S3, and applies optional
+    transformations. The dataset is designed to be extended for specific data sources by implementing the read_image
+    method and initializing the df_images and df_annotation arguments.
     Attributes:
         df_annotations (pd.DataFrame): DataFrame with all annotation data.
         df_images (pd.DataFrame): DataFrame with unique image entries.
@@ -81,6 +86,9 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     concept2id: dict[str, int] | None = None
     benthic_concept_matrix: np.ndarray | None = None
     conceptid2labelid: dict[int, int] | None = None
+    _load_failures: list[dict[str, Any]]
+    _annotation_count_by_image: dict[str, int]
+    _annotation_labels_by_image: dict[str, str]
 
     def __init__(
         self,
@@ -146,12 +154,21 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         if concept_mapping_flag:
             self.initialize_concept_mapping()
 
+        annotation_counts = self.df_annotations.groupby("image_id").size()
+        self._annotation_count_by_image = {str(k): int(v) for k, v in annotation_counts.items()}
+        annotation_labels = self.df_annotations.groupby("image_id")["benthic_attribute_name"].apply(
+            lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)}))
+        )
+        self._annotation_labels_by_image = {str(k): v for k, v in annotation_labels.items()}
+        self._load_failures = []
+
     def __len__(self):
         return self.df_images.shape[0]
 
     def read_image(self, **row_kwargs) -> NDArray[Any]:
-        """
-        Read an image given its ID. Needs to be implemented in subclasses.
+        """Read an image given its ID.
+
+        Needs to be implemented in subclasses.
         """
         raise NotImplementedError("Subclasses should implement this method.")
 
@@ -160,7 +177,16 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         row_kwargs = self.df_images.loc[idx].to_dict()
         try:
             image = self.read_image(**row_kwargs)
-        except Exception:
+        except Exception as e:
+            self._record_load_failure(image_id=image_id, row_kwargs=row_kwargs, error=e)
+            source_info = {k: v for k, v in row_kwargs.items() if k != "image_id"}
+            logger.warning(
+                "Skipping image_id=%s (source=%s): %s: %s",
+                image_id,
+                source_info,
+                type(e).__name__,
+                e,
+            )
             return None, None
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
@@ -185,9 +211,53 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
         return image, mask  # , annotations
 
-    def collate_fn(self, batch):
+    def _record_load_failure(
+        self, image_id: Any, row_kwargs: dict[str, Any], error: Exception
+    ) -> None:
+        image_id_str = str(image_id)
+        record = {
+            "timestamp_utc": pd.Timestamp.utcnow().isoformat(),
+            "dataset_class": self.__class__.__name__,
+            "split": self.split,
+            "image_id": image_id_str,
+            "region_id": row_kwargs.get("region_id"),
+            "region_name": row_kwargs.get("region_name"),
+            "source_id": row_kwargs.get("source_id"),
+            "annotation_count": int(self._annotation_count_by_image.get(image_id_str, 0)),
+            "annotation_labels": self._annotation_labels_by_image.get(image_id_str, ""),
+            "missing_annotations": image_id_str not in self._annotation_count_by_image,
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "annotations_path": getattr(self, "annotations_path", None),
+            "source_bucket": getattr(self, "source_bucket", None),
+        }
+        self._load_failures.append(record)
+
+    def num_load_failures(self) -> int:
+        """Return the number of recorded data-loading failures."""
+        return len(self._load_failures)
+
+    def load_failures_df(self) -> pd.DataFrame:
+        """Return a DataFrame with all recorded data-loading failures."""
+        return pd.DataFrame(self._load_failures)
+
+    def save_load_failures(self, output_path: str | Path) -> Path:
+        """Save recorded data-loading failures to a parquet report.
+
+        Args:
+            output_path: Destination parquet file path.
+
+        Returns:
+            The resolved output path written.
         """
-        Collate function for MermaidDataset and CoralNetDataset.
+        path = Path(output_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.load_failures_df().to_parquet(path, index=False)
+        return path
+
+    def collate_fn(self, batch):
+        """Collate function for MermaidDataset and CoralNetDataset.
+
         Args:
             batch: List of tuples (image, mask)
         Returns:
@@ -195,10 +265,22 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             masks: Tensor or ndarray batch of masks
         """
         # Filter out entries where image or mask is None
+        batch_size = len(batch)
         filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
+        n_skipped = batch_size - len(filtered)
+        if n_skipped > 0:
+            logger.warning(
+                "collate_fn: skipped %d/%d items in batch due to load errors",
+                n_skipped,
+                batch_size,
+            )
 
         # Handle empty batch
         if len(filtered) == 0:
+            logger.warning(
+                "collate_fn: entire batch of %d items was empty, returning empty tensors",
+                batch_size,
+            )
             return torch.tensor([]), torch.tensor([])
 
         images, masks = zip(*filtered, strict=False)
@@ -219,8 +301,8 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return images, masks
 
     def initialize_concept_mapping(self):
-        """
-        Initialize concept mapping attributes for the dataset.
+        """Initialize concept mapping attributes for the dataset.
+
         Sets up the mapping between benthic attributes and concepts based on a predefined hierarchy.
         """
         hierarchy_dict = initialize_benthic_hierarchy()
@@ -243,8 +325,9 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
 
 class MermaidDataset(BaseCoralDataset):
-    """
-    A PyTorch Dataset for loading MERMAID annotated coral reef images from a Parquet file stored on S3.
+    """A PyTorch Dataset for loading MERMAID annotated coral reef images from a Parquet file stored
+    on S3.
+
     This dataset reads image annotations from a Parquet file, retrieves images from S3, and applies optional transformations.
     Each item returned is a tuple containing the image (as a tensor or ndarray) and and the target.
     Attributes:
@@ -281,9 +364,7 @@ class MermaidDataset(BaseCoralDataset):
         )
 
     def load_annotations(self, annotations_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Load annotations from a Parquet file on S3.
-        """
+        """Load annotations from a Parquet file on S3."""
         df_annotations = pd.read_parquet(annotations_path)
         df_images = (
             df_annotations[["image_id", "region_id", "region_name"]]
@@ -293,24 +374,24 @@ class MermaidDataset(BaseCoralDataset):
         return df_annotations, df_images
 
     def read_image(self, image_id: str, **row_kwargs) -> NDArray[Any]:
-        """
-        Read an image given its ID. Needs to be implemented in subclasses.
+        """Read an image given its ID.
+
+        Needs to be implemented in subclasses.
         """
         key = f"mermaid/{image_id}.png"  # f"mermaid/{image_id}_thumbnail.png"
-        image = np.array(
-            get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB")
-        )
-        return image
+        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
 
 
 class CoralNetDataset(BaseCoralDataset):
-    """
-    A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file stored on S3.
+    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file stored
+    on S3.
+
     This dataset reads image annotations from a Parquet file, retrieves images from S3, and applies optional transformations.
     Each item returned is a tuple containing the image (as a tensor or ndarray) and and the target.
     Attributes:
         annotations_path (str): Path to the Parquet file containing image annotations.
-        This is created by merging all annotations of CoralNet sources in a separate notebook /nbs/datasets/CoralNet_Annotations.ipynb.
+            This is created by merging all annotations of CoralNet sources in a separate
+            notebook /nbs/datasets/CoralNet_Annotations.ipynb.
         source_bucket (str): S3 bucket name containing the dataset files.
         s3 (boto3.client): Boto3 S3 client for accessing images.
     Args:
@@ -371,9 +452,7 @@ class CoralNetDataset(BaseCoralDataset):
         )
 
     def load_annotations(self):
-        """
-        Load annotations from a Parquet file on S3.
-        """
+        """Load annotations from a Parquet file on S3."""
         annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         self.df_annotations = pd.read_parquet(annotations_path)
 
@@ -395,39 +474,76 @@ class CoralNetDataset(BaseCoralDataset):
         return self.df_annotations, self.df_images
 
     def read_image(self, image_id: str, source_id: str, **row_kwargs) -> NDArray[Any]:
-        """
-        Read an image given its ID from S3.
-        """
+        """Read an image given its ID from S3."""
         key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
-        image = np.array(
-            get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB")
-        )
-        return image
+        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
 
     def initialize_coralnet_mapping(
         self,
         mapping_endpoint="https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
     ):
-        """
-        Initialize CoralNet to MERMAID label mapping from provider API.
-        """
-        response = requests.get(mapping_endpoint)
+        """Initialize CoralNet to MERMAID label mapping from provider API."""
+        response = requests.get(mapping_endpoint, timeout=30)
+        response.raise_for_status()
         data = response.json()
         labelset = data["results"]
 
         while data["next"]:
-            response = requests.get(data["next"])
+            response = requests.get(data["next"], timeout=30)
+            response.raise_for_status()
             data = response.json()
             labelset.extend(data["results"])
-        label_mapping = {
-            label["provider_id"]: label["benthic_attribute_name"] for label in labelset
-        }
-        return label_mapping
+        return {label["provider_id"]: label["benthic_attribute_name"] for label in labelset}
+
+
+class CombinedCoralDataset:
+    """Wraps multiple BaseCoralDataset instances into a single dataset with a unified label space.
+
+    All constituent datasets must share an identical label2id mapping (i.e. constructed with the
+    same class_subset). Indexing and length are delegated to ConcatDataset. The _datasets attribute
+    is recognised by Logger.log_datasets for per-source MLflow logging.
+    """
+
+    def __init__(self, datasets: list):
+        if not datasets:
+            raise ValueError("datasets must be non-empty.")
+
+        def _root(ds):
+            """Unwrap Subset wrappers to reach the underlying BaseCoralDataset."""
+            while hasattr(ds, "dataset"):
+                ds = ds.dataset
+            return ds
+
+        roots = [_root(ds) for ds in datasets]
+        ref_label2id = roots[0].label2id
+        for root in roots[1:]:
+            if root.label2id != ref_label2id:
+                raise ValueError(
+                    f"All datasets must share the same label2id mapping. Got {ref_label2id!r} vs {root.label2id!r}."
+                )
+
+        self._datasets = datasets
+        self._concat = torch.utils.data.ConcatDataset(datasets)
+
+        self.label2id = ref_label2id
+        self.id2label = {0: "background", **roots[0].id2label}
+        self.num_classes = roots[0].num_classes
+        self.class_subset = roots[0].class_subset
+
+    def __len__(self) -> int:
+        return len(self._concat)
+
+    def __getitem__(self, idx: int):
+        return self._concat[idx]
+
+    def collate_fn(self, batch):
+        return _joint_collate(batch)
 
 
 class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
-    """
-    A PyTorch Dataset for loading Coralscapes annotated coral reef images from the Hugging Face Datasets library and mapping them to specified MERMAID classes.
+    """A PyTorch Dataset for loading Coralscapes annotated coral reef images from the Hugging Face
+    Datasets library and mapping them to specified MERMAID classes.
+
     This dataset reads image annotations from the Coralscapes dataset, retrieves images, and applies optional transformations.
     Each item returned is a tuple containing the image (as a tensor or ndarray) and and the target.
     Attributes:
@@ -496,9 +612,7 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             self.initialize_concept_mapping()
 
     def initialize_coralscapes_mapping(self):
-        """
-        Initialize the label mapping between the Coralscapes 39-class dataset and MERMAID.
-        """
+        """Initialize the label mapping between the Coralscapes 39-class dataset and MERMAID."""
         id2label_coralscapes = {
             "1": "seagrass",
             "2": "trash",
@@ -603,19 +717,33 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
-        image, mask = np.array(self.dataset[idx]["image"]), self.dataset[idx]["label"]
-        mask = np.vectorize(self.labelmapping.get)(mask)
+        try:
+            image = np.array(self.dataset[idx]["image"])
+            mask = self.dataset[idx]["label"]
+            mask = np.vectorize(self.labelmapping.get)(mask)
+        except Exception as e:
+            logger.warning("CoralscapesDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e)
+            return None, None
 
         if self.transform:
-            transformed = self.transform(image=image, mask=mask)
-            image = transformed["image"].transpose(2, 0, 1)
-            mask = transformed["mask"]
+            try:
+                transformed = self.transform(image=image, mask=mask)
+                image = transformed["image"].transpose(2, 0, 1)
+                mask = transformed["mask"]
+            except Exception as e:
+                logger.warning(
+                    "CoralscapesDataset: transform failed for idx=%d: %s: %s",
+                    idx,
+                    type(e).__name__,
+                    e,
+                )
+                return None, None
 
         return image, mask
 
     def initialize_concept_mapping(self):
-        """
-        Initialize concept mapping attributes for the dataset.
+        """Initialize concept mapping attributes for the dataset.
+
         Sets up the mapping between benthic attributes and concepts based on a predefined hierarchy.
         """
         hierarchy_dict = initialize_benthic_hierarchy()
@@ -637,21 +765,32 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             self.conceptid2labelid[col_ind] = ind
 
     def collate_fn(self, batch):
-        """
-        Collate function for MermaidDataset and CoralNetDataset.
+        """Collate function for CoralscapesDataset.
+
         Args:
-            batch: List of tuples (image, mask, annotations)
+            batch: List of tuples (image, mask)
         Returns:
             images: Tensor or ndarray batch of images
             masks: Tensor or ndarray batch of masks
-            annotations: List of annotation DataFrames
         """
+        batch_size = len(batch)
+        filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
+        n_skipped = batch_size - len(filtered)
+        if n_skipped > 0:
+            logger.warning(
+                "CoralscapesDataset.collate_fn: skipped %d/%d items in batch due to load errors",
+                n_skipped,
+                batch_size,
+            )
 
-        images, masks = zip(*batch, strict=False)
+        if len(filtered) == 0:
+            logger.warning(
+                "CoralscapesDataset.collate_fn: entire batch of %d items was empty, returning empty tensors",
+                batch_size,
+            )
+            return torch.tensor([]), torch.tensor([])
 
-        # Handle empty batch
-        if len(images) == 0:
-            return torch.tensor([]), torch.tensor([]), []
+        images, masks = zip(*filtered, strict=False)
 
         # Convert to tensors if they aren't already
         if isinstance(images[0], torch.Tensor):
