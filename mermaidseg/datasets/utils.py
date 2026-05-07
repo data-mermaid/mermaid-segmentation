@@ -59,19 +59,23 @@ def get_image_s3(
 def create_annotation_mask(
     annotations: pd.DataFrame,
     shape: tuple[int, int],
-    label2id: dict[str, int],
+    source_name2id: dict[str, int],
     padding: int | None = None,
 ) -> np.ndarray:
-    """Creates an annotation mask for a given image based on provided annotations.
+    """Creates a source-space annotation mask for a given image.
 
     Args:
-        annotations (pd.DataFrame): DataFrame with 'row', 'col', and 'benthic_attribute_name' columns.
+        annotations (pd.DataFrame): DataFrame with 'row', 'col', and
+            'source_label_name' columns. ``source_label_name`` holds labels in
+            the source dataset's own label space.
         shape (tuple[int, int]): Output mask shape (height, width).
-        label2id (dict[str, int]): Mapping from label names to integer class IDs.
+        source_name2id (dict[str, int]): Mapping from source-space label names
+            to integer class IDs (1..N; 0 is reserved for background).
         padding (int | None, optional): Half-size of a square pad region around each point annotation.
             If None or 0, only the exact annotation pixel is set. Defaults to None.
     Returns:
-        np.ndarray: Integer annotation mask with shape (height, width).
+        np.ndarray: Integer annotation mask with shape (height, width). Values
+        are 0 (background) or local source-class IDs (1..N).
     """
     # TODO: Make padding percentage-based so it scales with image resolution
     mask = np.zeros(shape[:2], dtype=np.int64)
@@ -79,23 +83,23 @@ def create_annotation_mask(
     if annotations.empty:
         return mask
 
-    valid = annotations[annotations["benthic_attribute_name"].notna()].copy()
+    valid = annotations[annotations["source_label_name"].notna()].copy()
 
-    unknown = set(valid["benthic_attribute_name"]) - set(label2id.keys())
+    unknown = set(valid["source_label_name"]) - set(source_name2id.keys())
     if unknown:
         logger.warning(
             "create_annotation_mask: skipping %d unknown label(s): %s",
             len(unknown),
             sorted(unknown),
         )
-        valid = valid[valid["benthic_attribute_name"].isin(label2id)]
+        valid = valid[valid["source_label_name"].isin(source_name2id)]
 
     if valid.empty:
         return mask
 
     rows = valid["row"].to_numpy(dtype=np.intp)
     cols = valid["col"].to_numpy(dtype=np.intp)
-    label_ids = valid["benthic_attribute_name"].map(label2id).to_numpy(dtype=np.int64)
+    label_ids = valid["source_label_name"].map(source_name2id).to_numpy(dtype=np.int64)
 
     if padding is not None and padding > 0:
         h, w = shape[:2]

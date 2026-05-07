@@ -32,19 +32,20 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
         self,
         concept_outputs: torch.Tensor,
         concept_labels: torch.Tensor,
-        labels: torch.Tensor,
+        target_labels: torch.Tensor,
     ) -> torch.Tensor:
         """Compute masked BCE loss over foreground pixels.
 
         Args:
             concept_outputs (torch.Tensor): Concept logits with shape (B, C, H, W).
             concept_labels (torch.Tensor): Binary concept targets with shape (B, C, H, W).
-            labels (torch.Tensor): Segmentation labels with shape (B, H, W); background == 0.
+            target_labels (torch.Tensor): Target-space segmentation labels with shape
+                (B, H, W); background == 0.
         Returns:
             torch.Tensor: Scalar loss value.
         """
         per_element_loss = super().forward(concept_outputs, concept_labels)
-        label_mask = (labels > 0).unsqueeze(1)
+        label_mask = (target_labels > 0).unsqueeze(1)
 
         masked_loss = per_element_loss * label_mask
         denom = label_mask.sum() * concept_outputs.shape[1] + 1e-8
@@ -82,7 +83,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
     def forward(
         self,
         outputs: torch.Tensor,
-        labels: torch.Tensor,
+        target_labels: torch.Tensor,
         concept_outputs: torch.Tensor,
         concept_labels: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, float]]:
@@ -91,7 +92,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
 
         Args:
             outputs (torch.Tensor): The model's output logits for classification.
-            labels (torch.Tensor): The ground truth labels for classification.
+            target_labels (torch.Tensor): The target-space ground truth labels for classification.
             concept_outputs (torch.Tensor): The model's output logits for concept prediction.
             concept_labels (torch.Tensor): The ground truth labels for concept prediction.
         Returns:
@@ -100,9 +101,9 @@ class ConceptBottleneckLoss(torch.nn.Module):
             component values for logging.
         """
 
-        class_loss_value = self.class_loss(outputs, labels)
+        class_loss_value = self.class_loss(outputs, target_labels)
 
-        label_mask = (labels > 0).unsqueeze(1)
+        label_mask = (target_labels > 0).unsqueeze(1)
         per_element_loss = self.concept_loss(concept_outputs, concept_labels)
 
         masked_loss = per_element_loss * label_mask

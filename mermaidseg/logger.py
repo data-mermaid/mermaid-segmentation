@@ -391,18 +391,26 @@ class Logger:
 
         Args:
             dataset: Dataset instance (expects optional ``annotations_path``,
-                ``source_bucket``, ``df_images``, ``num_classes`` when present).
+                ``source_bucket``, ``df_images``, ``num_source_classes`` /
+                ``num_classes`` when present).
             context: MLflow input context (e.g. ``"training"``).
         """
         if not self._ensure_active_run():
             return
         try:
+            num_source_classes = getattr(
+                dataset, "num_source_classes", getattr(dataset, "num_classes", "")
+            )
+            source_name = getattr(dataset, "SOURCE_NAME", "")
+            global_offset = getattr(dataset, "global_offset", "")
             source = CodeDatasetSource(
                 tags={
                     "annotations_path": getattr(dataset, "annotations_path", ""),
                     "source_bucket": getattr(dataset, "source_bucket", ""),
                     "num_images": str(len(getattr(dataset, "df_images", []))),
-                    "num_classes": str(getattr(dataset, "num_classes", "")),
+                    "num_source_classes": str(num_source_classes),
+                    "source_name": str(source_name),
+                    "global_offset": str(global_offset),
                 }
             )
             meta = MetaDataset(
@@ -427,6 +435,45 @@ class Logger:
                 self.log_dataset(sub_dataset, context=context)
         else:
             self.log_dataset(dataset, context=context)
+
+    def log_reconciliation(self, registry) -> None:
+        """Log the joint :class:`SourceLabelRegistry` artifacts to MLflow.
+
+        Saves ``global_id2source``, ``target_id2label``, ``source_to_target``
+        and (when present) ``concept_id2name`` so MLflow runs are
+        self-describing.
+        """
+        if not self._ensure_active_run():
+            return
+        try:
+            mlflow.log_dict(
+                {str(k): list(v) for k, v in registry.global_id2source.items()},
+                "metadata/global_id2source.json",
+            )
+            mlflow.log_dict(
+                {str(k): v for k, v in registry.target_id2label.items()},
+                "metadata/target_id2label.json",
+            )
+            mlflow.log_dict(
+                {str(k): v for k, v in registry.dataset_offsets.items()},
+                "metadata/dataset_offsets.json",
+            )
+            source_to_target = registry.source_to_target.detach().cpu().tolist()
+            mlflow.log_dict(
+                {str(i): int(v) for i, v in enumerate(source_to_target)},
+                "metadata/source_to_target.json",
+            )
+            if registry.concept_id2name:
+                mlflow.log_dict(
+                    {str(k): v for k, v in registry.concept_id2name.items()},
+                    "metadata/concept_id2name.json",
+                )
+            mlflow.log_param("num_target_classes", int(registry.num_target_classes))
+            mlflow.log_param(
+                "num_global_source_classes", int(registry.num_global_source_classes)
+            )
+        except Exception as e:
+            logger.warning("Failed to log SourceLabelRegistry to MLflow: %s", e)
 
     def log_benchmark_context(
         self,

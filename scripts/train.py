@@ -39,8 +39,9 @@ import albumentations as A
 import torch
 from torch.utils.data import DataLoader, random_split
 
-import mermaidseg.datasets.dataset
-from mermaidseg.datasets.dataset import worker_init_fn
+import mermaidseg.datasets
+from mermaidseg.datasets import worker_init_fn
+from mermaidseg.dataset_reconciliation import SourceLabelRegistry
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
@@ -286,11 +287,24 @@ def _run_training(args: argparse.Namespace) -> None:
 
     dataset_name = cfg.data.pop("name", None)
     batch_size = cfg.data.pop("batch_size", 8)
+    concept_mapping_flag = cfg.data.pop("concept_mapping_flag", False)
+    target_label_subset = cfg.data.get("class_subset", None)
+    if dataset_name != "MermaidDataset" and "class_subset" in cfg.data:
+        # For non-MERMAID datasets, the legacy ``class_subset`` field is in target
+        # label space and is therefore handled by SourceLabelRegistry instead of
+        # being a per-dataset filter (whose semantics changed to source-space).
+        cfg.data.pop("class_subset", None)
 
-    dataset = getattr(mermaidseg.datasets.dataset, dataset_name)(
+    dataset = getattr(mermaidseg.datasets, dataset_name)(
         transform=transforms["train"], **cfg.data
     )
     logging.info("Dataset: %s (%d samples)", dataset_name, len(dataset))
+
+    registry = SourceLabelRegistry(
+        [dataset],
+        target_label_subset=target_label_subset,
+        compute_concepts=concept_mapping_flag,
+    ).to(device)
     collate_fn = getattr(dataset, "collate_fn", None)
     report_written = False
 
@@ -344,17 +358,22 @@ def _run_training(args: argparse.Namespace) -> None:
             raise
         test_loader = None
 
-    num_classes = dataset.num_classes
-    id2label = getattr(dataset, "id2label", None)
+    num_classes = registry.num_target_classes
+    id2label = {0: "background", **registry.target_id2label}
     training_mode = cfg.get("training_mode", "standard")
 
     meta_model = MetaModel(
         run_name=cfg.run_name,
         num_classes=num_classes,
+        num_concepts=registry.num_concepts or None,
         model_kwargs=cfg.model,
         training_kwargs=cfg.training,
         training_mode=training_mode,
         device=device,
+        source_to_target_lookup=registry.source_to_target,
+        source_to_concepts_lookup=registry.source_to_concepts,
+        concept_matrix=registry.concept_matrix,
+        conceptid2labelid=registry.conceptid2labelid(),
     )
     evaluator = EvaluatorSemanticSegmentation(
         num_classes=num_classes,
@@ -376,6 +395,7 @@ def _run_training(args: argparse.Namespace) -> None:
         logger.log_dataloader_params(train_loader, prefix="train_loader")
         logger.log_dataloader_params(val_loader, prefix="val_loader")
         logger.log_dataloader_params(test_loader, prefix="test_loader")
+        logger.log_reconciliation(registry)
 
         try:
             train_model(
