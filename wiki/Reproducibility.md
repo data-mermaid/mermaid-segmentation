@@ -2,13 +2,13 @@
 
 Reproducibility is what separates research from guesswork. If a result can't be reproduced — by you six months from now, or by a teammate next week — it might as well not exist.
 
-This project has two non-negotiables:
+This project has two paths towards training a model `train.py` and Jupyter Notebooks.
 
 ---
 
 ## 1. Config YAMLs for everything
 
-All hyperparameters, dataset splits, model architecture choices, and training settings belong in a config file under `configs/`. Never hardcode these values in a notebook or script.
+All hyperparameters, dataset splits, model architecture choices, and training settings belong in a config file under `configs/`.
 
 If it affects the result, it belongs in the config.
 
@@ -29,13 +29,13 @@ training:
   batch_size: 8
 ```
 
-The config file is committed to the repo. Your results are then tied to a specific, reviewable set of decisions — not scattered across notebook cells.
+The config file is committed to the repo. Your results are then tied to a specific, reviewable set of decisions — not scattered across notebook cells. Config set in notebooks should be at the very top for easy review.
 
 ---
 
 ## 2. Every experiment logs to MLflow
 
-Every run — including exploratory ones, failed ones, and quick tests — gets logged to MLflow. If it didn't get logged, it didn't happen (for the team).
+Every run — including exploratory ones, failed ones, and quick tests — gets logged to MLflow. If it didn't get logged, it didn't happen (for the team). MLFlow logging is set up to track local experiments (on your PC) as well as through Sagemaker.
 
 MLflow is the shared record of what's been tried, what worked, and what didn't. Teammates can't see your local results, and memory is unreliable.
 
@@ -43,7 +43,8 @@ MLflow is the shared record of what's been tried, what worked, and what didn't. 
 
 ## The loop in practice
 
-There are two entry points for training, and choosing the right one matters for reproducibility.
+There are two entry points for training, notebooks or train.py. Both can be used to experiment locally, or on a small subset.
+Once you have verified your approach with a small subset, moving your training to SageMaker on the full dataset.
 
 **Notebooks — for early exploration:**
 Use `nbs/Base_Pipeline.ipynb` (or the CBM variant) when you're testing an initial idea on a small sample. Notebooks are well-suited for quick iteration: checking that a config loads correctly, validating that a model runs on a small data subset, or inspecting intermediate outputs before committing to a full run.
@@ -63,7 +64,7 @@ Once an idea has been validated in a notebook, graduate to `scripts/train.py` fo
 uv run python scripts/train.py --config configs/my_experiment.yaml
 ```
 
-If you're preparing a model to share with the team or register in MLflow for deployment, it should have been trained through `train.py`, not a notebook.
+If you're preparing a model to share with the team or register in MLflow for model registration, it should ideally been trained through `train.py`, not a notebook.
 
 Both entry points read the same config file and log to the same MLflow experiment — the difference is reliability and reproducibility at scale.
 

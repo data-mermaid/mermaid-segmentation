@@ -4,6 +4,8 @@ Good GitHub issues make collaboration possible. They capture why work is being d
 
 All contributions are valued — not just code. A well-written bug report, a documentation fix, or a question that surfaces a gap in our onboarding is a genuine contribution. If you're not sure whether something is worth an issue, open one anyway. The worst outcome is a short conversation.
 
+Ticket writing for data science projects is still a work in progress, if you have ideas for making a smoother process please surface these concerns to Lauren directly! The DSLP approach described below, orients the higher level goals and deliverables for a data science project with multiple collaborators.
+
 ---
 
 ## The DSLP workflow
