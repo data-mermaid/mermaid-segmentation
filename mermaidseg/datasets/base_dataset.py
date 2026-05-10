@@ -115,15 +115,13 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
                 self.df_annotations["source_label_name"].apply(lambda x: x in self.class_subset)
             ].reset_index(drop=True)
             self.df_images = self._derive_df_images_from_annotations(self.df_annotations)
-            ordered_names = list(self.class_subset)
-        else:
-            ordered_names = self.df_annotations["source_label_name"].value_counts().index.tolist()
 
+        ordered_names = self.df_annotations["source_label_name"].value_counts().index.tolist()
         self.source_id2name = dict(enumerate(ordered_names, start=1))
         self.source_name2id = {v: k for k, v in self.source_id2name.items()}
         self.num_source_classes = len(self.source_id2name) + 1  # +1 for background
 
-        annotation_counts = self.df_annotations.groupby("image_id").size()
+        annotation_counts = self.df_annotations["image_id"].value_counts()
         self._annotation_count_by_image = {str(k): int(v) for k, v in annotation_counts.items()}
         annotation_labels = self.df_annotations.groupby("image_id")["source_label_name"].apply(
             lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)}))
