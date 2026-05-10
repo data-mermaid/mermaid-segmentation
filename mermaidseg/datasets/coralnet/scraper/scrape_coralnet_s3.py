@@ -2,7 +2,6 @@ import getpass
 from urllib.parse import urljoin, urlparse
 
 import boto3
-import numpy as np
 import requests
 from bs4 import BeautifulSoup
 
