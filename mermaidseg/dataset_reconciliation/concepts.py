@@ -82,10 +82,10 @@ def generate_hierarchy_path(label: str, hierarchy_dict: dict[str, str]) -> list[
 
 
 def generate_taxonomic_id_mapping(df: pd.DataFrame, taxonomic_col: str):
-    """
-    Generate a mapping of values at different taxonomic ranks to unique integer IDs.
-    "not given" is always mapped to 0, "none" (if exists) is mapped to 1,
-    and the rest of the values are mapped to integers starting from 2, sorted alphabetically.
+    """Generate a mapping of values at different taxonomic ranks to unique integer IDs.
+
+    "not given" is always mapped to 0, "none" (if exists) is mapped to 1, and the rest of the values
+    are mapped to integers starting from 2, sorted alphabetically.
     """
     sorted_values = sorted(df[taxonomic_col].dropna().unique())
     sorted_values = (
@@ -97,8 +97,8 @@ def generate_taxonomic_id_mapping(df: pd.DataFrame, taxonomic_col: str):
 
 
 def generate_one_hot_id_mapping(df: pd.DataFrame, taxonomic_col: str):
-    """
-    Generate a mapping for one hot (not really) encoded concepts.
+    """Generate a mapping for one hot (not really) encoded concepts.
+
     "not given" is always mapped to 0.
     If the concept contains both true and false values, then map true to 2 and false to 1.
     Otherwise, map all values to 0 since they don't represent a meaningful concept.
@@ -126,10 +126,8 @@ def generate_one_hot_id_mapping(df: pd.DataFrame, taxonomic_col: str):
 def initialize_taxonomic_concept_mapping(
     df_mapping: pd.DataFrame,
 ) -> tuple[torch.Tensor, dict[str, dict]]:
-    """
-    Initialize taxonomic concept mapping by generating a mapping from source labels to taxonomic concepts
-    and a dictionary of names to ID mappings for each taxonomic rank.
-    """
+    """Initialize taxonomic concept mapping by generating a mapping from source labels to taxonomic
+    concepts and a dictionary of names to ID mappings for each taxonomic rank."""
     taxonomic_concept_columns = [
         "kingdom",
         "phylum",
@@ -161,10 +159,8 @@ def initialize_taxonomic_concept_mapping(
 def initialize_one_hot_concept_mapping(
     df_mapping: pd.DataFrame,
 ) -> tuple[torch.Tensor, dict[str, dict]]:
-    """
-    Initialize one hot concept mapping by generating a mapping from source labels to the one hot concepts
-    and a dictionary of names to ID mappings for each taxonomic rank.
-    """
+    """Initialize one hot concept mapping by generating a mapping from source labels to the one hot
+    concepts and a dictionary of names to ID mappings for each taxonomic rank."""
     morphologic_concept_columns = (
         [
             "oval",
@@ -230,11 +226,11 @@ def initialize_benthic_concepts(
     mapping_location: str = "s3://dev-datamermaid-sm-sources/coralnet-public-images/temporary/class_to_concepts.csv",
     global_id2source: dict | None = None,
 ):
-    """
-    The function initializes benthic concepts by loading a concept mapping file,
-    subsetting it to the source label registry, and generating mappings for taxonomic and one-hot encoded concepts.
-    It returns the processed concept mapping DataFrame, tensors for source to concept mappings,
-    and dictionaries for taxonomic and one-hot concept ID mappings.
+    """The function initializes benthic concepts by loading a concept mapping file, subsetting it to
+    the source label registry, and generating mappings for taxonomic and one-hot encoded concepts.
+
+    It returns the processed concept mapping DataFrame, tensors for source to concept mappings, and
+    dictionaries for taxonomic and one-hot concept ID mappings.
     """
     df_mapping = pd.read_csv(mapping_location)
 
