@@ -9,7 +9,7 @@ attribute space is done at training time by the
 [`SourceLabelRegistry`](../../dataset_reconciliation/registry.py) and
 [`fetch_coralnet_to_mermaid`](../../dataset_reconciliation/label_mapping.py).
 
-The dataset class reads the annotations from the a parquet file (currently: s3://dev-datamermaid-sm-sources/coralnet_annotations_30112025.parquet), from which the images are also derived. 
+The dataset class reads the annotations from the a parquet file (currently: s3://dev-datamermaid-sm-sources/coralnet_annotations_30112025.parquet), from which the images are also derived.
 
 ## Layout
 

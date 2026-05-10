@@ -532,13 +532,9 @@ class CoralNetDownloader:
         with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as executor:
             futures = []
             for _, row in valid_images.iterrows():
-                name = (
-                    row["Image Page"].replace("/image/", "").replace("/view/", "")
-                ) 
+                name = row["Image Page"].replace("/image/", "").replace("/view/", "")
                 url = row["Image URL"]
-                clean_name = (
-                    name + ".jpg"
-                ) 
+                clean_name = name + ".jpg"
                 s3_key = f"{s3_prefix}/s{source_id}/images/{clean_name}"
                 futures.append(executor.submit(self.download_image_to_s3, url, bucket_name, s3_key))
 
@@ -608,7 +604,7 @@ class CoralNetDownloader:
         ):
             print(f"Warning: Failed to download annotations for source {source_id}")
             success = False
-            return success 
+            return success
 
         # Download images
         if download_images:
@@ -621,23 +617,33 @@ class CoralNetDownloader:
                 images_df.to_csv(csv_buffer, index=False)
                 s3_key = f"{s3_prefix}/s{source_id}/image_list.csv"
                 self.s3.put_object(
-                    Bucket=bucket_name, Key=s3_key, Body=csv_buffer.getvalue(), ContentType="text/csv"
+                    Bucket=bucket_name,
+                    Key=s3_key,
+                    Body=csv_buffer.getvalue(),
+                    ContentType="text/csv",
                 )
                 print(f"✓ Images saved to s3://{bucket_name}/{s3_key}")
-                
+
                 for start in range(0, len(images_df), batch_size):
                     end = start + batch_size
                     # Get image URLs
-                    image_urls = self.get_image_urls(images_df.loc[start:end, "Image Page"].tolist())
+                    image_urls = self.get_image_urls(
+                        images_df.loc[start:end, "Image Page"].tolist()
+                    )
                     images_df.loc[start:end, "Image URL"] = image_urls
 
                     # Download images
                     self.download_images(
-                        images_df.loc[start:end], source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
+                        images_df.loc[start:end],
+                        source_id,
+                        bucket_name=bucket_name,
+                        s3_prefix=s3_prefix,
                     )
             else:
-                print(f"Warning: No images found or failed to retrieve image list for source {source_id}")
-        
+                print(
+                    f"Warning: No images found or failed to retrieve image list for source {source_id}"
+                )
+
         print(f"✓ Completed downloading source {source_id}")
         return success
 
