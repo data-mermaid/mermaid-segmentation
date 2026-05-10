@@ -602,7 +602,7 @@ class CoralNetDownloader:
             source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
         ):
             print(f"Warning: Failed to download annotations for source {source_id}")
-            return False 
+            return False
 
         # Download images
         if download_images:
