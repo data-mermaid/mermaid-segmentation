@@ -81,38 +81,199 @@ def generate_hierarchy_path(label: str, hierarchy_dict: dict[str, str]) -> list[
     return path
 
 
+def generate_taxonomic_id_mapping(df: pd.DataFrame, taxonomic_col: str):
+    """
+    Generate a mapping of values at different taxonomic ranks to unique integer IDs.
+    "not given" is always mapped to 0, "none" (if exists) is mapped to 1,
+    and the rest of the values are mapped to integers starting from 2, sorted alphabetically.
+    """
+    sorted_values = sorted(df[taxonomic_col].dropna().unique())
+    sorted_values = (
+        ["not_given"]
+        + ["none" if "none" in sorted_values else []]
+        + [v for v in sorted_values if v not in ["not_given", "none"]]
+    )
+    return {value: idx for idx, value in enumerate(sorted_values)}
+
+
+def generate_one_hot_id_mapping(df: pd.DataFrame, taxonomic_col: str):
+    """
+    Generate a mapping for one hot (not really) encoded concepts.
+    "not given" is always mapped to 0.
+    If the concept contains both true and false values, then map true to 2 and false to 1.
+    Otherwise, map all values to 0 since they don't represent a meaningful concept.
+    TODO: update FALSE, False once concept mapping is fixed
+    """
+    unique_values = df[taxonomic_col].dropna().unique()
+
+    mapping = {}
+    mapping["not given"] = 0
+
+    if (False in unique_values or "FALSE" in unique_values) and (
+        True in unique_values or "TRUE" in unique_values
+    ):
+        mapping[False] = 1
+        mapping["FALSE"] = 1
+        mapping[True] = 2
+        mapping["TRUE"] = 2
+    else:
+        for value in unique_values:
+            mapping[value] = 0
+    return mapping
+    # return {"not given": 0, False: 1, "FALSE": 1, True: 2, "TRUE": 2}
+
+
+def initialize_taxonomic_concept_mapping(
+    df_mapping: pd.DataFrame,
+) -> tuple[torch.Tensor, dict[str, dict]]:
+    """
+    Initialize taxonomic concept mapping by generating a mapping from source labels to taxonomic concepts
+    and a dictionary of names to ID mappings for each taxonomic rank.
+    """
+    taxonomic_concept_columns = [
+        "kingdom",
+        "phylum",
+        "class",
+        "order",
+        "family",
+        "genus",
+        "species",
+    ]
+    df_mapping_taxonomic = df_mapping[
+        ["global_id", "source_label_class_name", "source_dataset_source"]
+    ].copy()
+    taxonomic_name2id = {}
+    for col in taxonomic_concept_columns:
+        taxonomic_name2id[col] = generate_taxonomic_id_mapping(df_mapping, col)
+        df_mapping_taxonomic[col] = df_mapping[col].map(taxonomic_name2id[col])
+    df_mapping_taxonomic = df_mapping_taxonomic.sort_values("global_id").reset_index(drop=True)
+
+    source_to_taxonomic_concepts_np = np.zeros(
+        (df_mapping_taxonomic.shape[0] + 1, len(taxonomic_concept_columns)), dtype=np.int64
+    )
+    source_to_taxonomic_concepts_np[df_mapping_taxonomic["global_id"].to_numpy()] = (
+        df_mapping_taxonomic[taxonomic_concept_columns].to_numpy()
+    )
+    source_to_taxonomic_concepts = torch.from_numpy(source_to_taxonomic_concepts_np).long()
+    return source_to_taxonomic_concepts, taxonomic_name2id
+
+
+def initialize_one_hot_concept_mapping(
+    df_mapping: pd.DataFrame,
+) -> tuple[torch.Tensor, dict[str, dict]]:
+    """
+    Initialize one hot concept mapping by generating a mapping from source labels to the one hot concepts
+    and a dictionary of names to ID mappings for each taxonomic rank.
+    """
+    morphologic_concept_columns = (
+        [
+            "oval",
+            "arborescent",
+            "encrusting",
+            "digitate",
+            "meandroid",
+            "columnar",
+            "free_living",
+            "plating",
+            "fleshy",
+            "submassive",
+            "round",
+            "massive",
+            "tubular",
+            "bushy",
+            "external_polyps",
+            "foliose",
+            "solitary",
+            "brain",
+            "phaceloid",
+            "branching",
+            "tabular",
+            "corymbose",
+            "lobed_brain",
+            "cup_coral",
+        ],
+    )
+    health_concept_columns = (["dead", "bleached"],)
+    noncoral_concept_columns = [
+        "algae",
+        "background",
+        "anthropogenic",
+        "trash",
+        "transect",
+        "macroalgae",
+        "dark",
+    ]
+    one_hot_concept_columns = (
+        morphologic_concept_columns + health_concept_columns + noncoral_concept_columns
+    )
+
+    df_mapping_one_hot = df_mapping[
+        ["global_id", "source_label_class_name", "source_dataset_source"]
+    ].copy()
+    one_hot_name2id = {}
+    for col in one_hot_concept_columns:
+        one_hot_name2id[col] = generate_one_hot_id_mapping(df_mapping, col)
+        df_mapping_one_hot[col] = df_mapping[col].map(one_hot_name2id[col])
+    df_mapping_one_hot = df_mapping_one_hot.sort_values("global_id").reset_index(drop=True)
+
+    source_to_one_hot_concepts_np = np.zeros(
+        (df_mapping_one_hot.shape[0] + 1, len(one_hot_concept_columns)), dtype=np.int64
+    )
+    source_to_one_hot_concepts_np[df_mapping_one_hot["global_id"].to_numpy()] = df_mapping_one_hot[
+        one_hot_concept_columns
+    ].to_numpy()
+    source_to_one_hot_concepts = torch.from_numpy(source_to_one_hot_concepts_np).long()
+    return source_to_one_hot_concepts, one_hot_name2id
+
+
 def initialize_benthic_concepts(
-    labelset_benthic: list[str], hierarchy_dict: dict[str, str]
-) -> tuple[list[str], pd.DataFrame]:
-    """Create a sorted list of unique benthic concepts and the (label, concept) DataFrame."""
-    benthic_concept_set: set[str] = set()
-    for label in labelset_benthic:
-        benthic_path = generate_hierarchy_path(label, hierarchy_dict)
-        for concept in benthic_path:
-            benthic_concept_set.add(concept)
-    benthic_concept_list = sorted(benthic_concept_set)
+    mapping_location: str = "s3://dev-datamermaid-sm-sources/coralnet-public-images/temporary/class_to_concepts.csv",
+    global_id2source: dict | None = None,
+):
+    """
+    The function initializes benthic concepts by loading a concept mapping file,
+    subsetting it to the source label registry, and generating mappings for taxonomic and one-hot encoded concepts.
+    It returns the processed concept mapping DataFrame, tensors for source to concept mappings,
+    and dictionaries for taxonomic and one-hot concept ID mappings.
+    """
+    df_mapping = pd.read_csv(mapping_location)
 
-    levels = get_hierarchy_level(benthic_concept_list, hierarchy_dict)
-    tuples = [(col, levels.get(col)) for col in benthic_concept_list]
-    benthic_concept_matrix = pd.DataFrame(0, index=labelset_benthic, columns=benthic_concept_list)
-    benthic_concept_matrix.columns = pd.MultiIndex.from_tuples(tuples, names=["concept", "level"])
+    if global_id2source is not None:
+        df_id2source = pd.DataFrame(
+            global_id2source.values(), columns=["source_dataset_source", "source_label_class_name"]
+        )
+        df_id2source["global_id"] = global_id2source.keys()
+        df_id2source = df_id2source[
+            ["global_id", "source_dataset_source", "source_label_class_name"]
+        ]
 
-    for label in labelset_benthic:
-        benthic_path = generate_hierarchy_path(label, hierarchy_dict)
-        for concept in benthic_path:
-            benthic_concept_matrix.loc[label, concept] = 1
-    return benthic_concept_list, benthic_concept_matrix
+        # The following are temporary ##TODO: REMOVE AFTER Fixes in concept mapping file
+        # df_id2source["source_label_class_name"] = df_id2source["source_label_class_name"].apply(lambda s: coralnet_id_to_label_random.get(s, s))
+        # df_id2source["source_label_class_name"] = df_id2source["source_label_class_name"].apply(lambda s: s.lower())
 
+        df_mapping = df_mapping.merge(
+            df_id2source, on=["source_label_class_name", "source_dataset_source"], how="inner"
+        )
 
-def map_benthic_to_concept(
-    benthic_label: str | int, benthic_concept_matrix: pd.DataFrame
-) -> np.ndarray:
-    """Map a benthic class label to its corresponding concept one-hot vector."""
-    if isinstance(benthic_label, str) and benthic_label in benthic_concept_matrix.index:
-        return benthic_concept_matrix.loc[benthic_label, :].to_numpy()
-    if isinstance(benthic_label, int) and benthic_label <= len(benthic_concept_matrix.index):
-        return benthic_concept_matrix.iloc[benthic_label - 1, :].to_numpy()
-    raise ValueError(f"Benthic label '{benthic_label}' not found in concept matrix index.")
+        if df_mapping.shape[0] != df_id2source.shape[0]:
+            raise ValueError(
+                "The concept map has a different number of rows than the source label registry after merging. "
+                "Please check the mapping and registry for consistency as some source labels in the registry may not have a corresponding mapping entry or vice versa."
+            )
+
+    source_to_taxonomic_concepts, taxonomic_mapping_dictionary = (
+        initialize_taxonomic_concept_mapping(df_mapping)
+    )
+
+    source_to_one_hot_concepts, one_hot_mapping_dictionary = initialize_one_hot_concept_mapping(
+        df_mapping
+    )
+
+    source_to_concepts = torch.cat(
+        [source_to_taxonomic_concepts, source_to_one_hot_concepts], dim=1
+    )
+
+    return df_mapping, source_to_concepts, taxonomic_mapping_dictionary, one_hot_mapping_dictionary
 
 
 def source_labels_to_concepts(
