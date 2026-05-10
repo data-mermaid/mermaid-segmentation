@@ -68,11 +68,7 @@ class MermaidDataset(BaseCoralDataset):
         df_annotations = df_annotations.rename(
             columns={"benthic_attribute_name": "source_label_name"}
         )
-        df_images = (
-            df_annotations[["image_id", "region_id", "region_name"]]
-            .drop_duplicates(subset=["image_id"])
-            .reset_index(drop=True)
-        )
+        df_images = self._derive_df_images_from_annotations(df_annotations)
         return df_annotations, df_images
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
