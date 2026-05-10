@@ -577,7 +577,6 @@ class CoralNetDownloader:
         if not self.check_permissions(source_id):
             raise Exception(f"Cannot access source {source_id}")
 
-        success = True
         n_images = 0
 
         # Download metadata
@@ -603,8 +602,7 @@ class CoralNetDownloader:
             source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
         ):
             print(f"Warning: Failed to download annotations for source {source_id}")
-            success = False
-            return success
+            return False 
 
         # Download images
         if download_images:
@@ -645,7 +643,7 @@ class CoralNetDownloader:
                 )
 
         print(f"✓ Completed downloading source {source_id}")
-        return success
+        return True
 
     def cleanup(self):
         """Clean up resources."""
