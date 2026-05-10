@@ -121,12 +121,19 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.source_name2id = {v: k for k, v in self.source_id2name.items()}
         self.num_source_classes = len(self.source_id2name) + 1  # +1 for background
 
+<<<<<<< HEAD
         annotation_counts = self.df_annotations["image_id"].value_counts()
         self._annotation_count_by_image = {str(k): int(v) for k, v in annotation_counts.items()}
         annotation_labels = self.df_annotations.groupby("image_id")["source_label_name"].apply(
             lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)}))
+=======
+        self._annotation_count_by_image = self.df_annotations["image_id"].value_counts().to_dict()
+        self._annotation_labels_by_image = (
+            self.df_annotations.groupby("image_id")["source_label_name"]
+            .apply(lambda values: ",".join(sorted(set(values))))
+            .to_dict()
+>>>>>>> 3309c07 (Address PR feedback from Viktor)
         )
-        self._annotation_labels_by_image = {str(k): v for k, v in annotation_labels.items()}
         self._load_failures = []
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
@@ -221,18 +228,17 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _record_load_failure(
         self, image_id: Any, row_kwargs: dict[str, Any], error: Exception
     ) -> None:
-        image_id_str = str(image_id)
         record = {
             "timestamp_utc": pd.Timestamp.utcnow().isoformat(),
             "dataset_class": self.__class__.__name__,
             "split": self.split,
-            "image_id": image_id_str,
+            "image_id": image_id,
             "region_id": row_kwargs.get("region_id"),
             "region_name": row_kwargs.get("region_name"),
             "source_id": row_kwargs.get("source_id"),
-            "annotation_count": int(self._annotation_count_by_image.get(image_id_str, 0)),
-            "annotation_labels": self._annotation_labels_by_image.get(image_id_str, ""),
-            "missing_annotations": image_id_str not in self._annotation_count_by_image,
+            "annotation_count": int(self._annotation_count_by_image.get(image_id, 0)),
+            "annotation_labels": self._annotation_labels_by_image.get(image_id, ""),
+            "missing_annotations": image_id not in self._annotation_count_by_image,
             "error_type": type(error).__name__,
             "error_message": str(error),
             "annotations_path": getattr(self, "annotations_path", None),
