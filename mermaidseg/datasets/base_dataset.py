@@ -124,7 +124,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self._annotation_count_by_image = self.df_annotations["image_id"].value_counts().to_dict()
         self._annotation_labels_by_image = (
             self.df_annotations.groupby("image_id")["source_label_name"]
-            .apply(lambda values: ",".join(sorted(set(values))))
+            .apply(lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)})))
             .to_dict()
         )
         self._load_failures = []
