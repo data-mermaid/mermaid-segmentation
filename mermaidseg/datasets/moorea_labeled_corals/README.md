@@ -32,5 +32,3 @@ In total, the data repository contains 2055 images, of which 53 are damaged/miss
 | 2009      | 695      | 132112                  | 133072                   | 21                    | 0                      |
 | 2010      | 689      | 113256                  | 120324                   | 26                    | 53                     |
 | **TOTAL** | **2055** | **376628**              | **386441**               | **29**                | **53**                 |
-
-
