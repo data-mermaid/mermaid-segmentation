@@ -374,9 +374,7 @@ def upload_images(
         logger.info("No new images to upload.")
         return uploaded
 
-    logger.info(
-        "Uploading %d new image objects with %d workers...", len(tasks), cfg.upload_workers
-    )
+    logger.info("Uploading %d new image objects with %d workers...", len(tasks), cfg.upload_workers)
 
     def _upload(region: str, local: Path, key: str) -> str:
         s3_client = boto3.client("s3")
@@ -524,11 +522,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     valid_pairs = pd.DataFrame(
-        [
-            (region, image_id)
-            for region, ids in valid_image_ids.items()
-            for image_id in ids
-        ],
+        [(region, image_id) for region, ids in valid_image_ids.items() for image_id in ids],
         columns=["region", "image_id"],
     )
     n_before = len(df_annotations)
