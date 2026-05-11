@@ -27,5 +27,5 @@ PAC_IDN_PHL | Pacific Ocean, Indonesia and Philippines | 1608 | 118600 | 67 | 30
 PAC_SLB | Pacific Ocean, Solomon Islands | 732 | 59200 | 55 | 0
 PAC_TLS | Pacific Ocean, Timor-Leste | 864 | 71600 | 59 | 0
 PAC_TWN | Pacific Ocean, Taiwan | 638 | 50000 | 54 | 0
-PAC_USA | Pacific Ocean, USA (Hawaii) | 1153 | 83100 | 39 | 0 
-| | TOTAL | 11357 | 858370 | 194 | 30 
+PAC_USA | Pacific Ocean, USA (Hawaii) | 1153 | 83100 | 39 | 0
+| | TOTAL | 11357 | 858370 | 194 | 30
