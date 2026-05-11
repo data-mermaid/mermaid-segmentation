@@ -263,9 +263,9 @@ class MetaModel:
         segmentation_outputs = self.model(images)
 
         if self.training_mode == "concept-bottleneck":
-            assert target_concepts is not None, (
-                "target_concepts must be provided in 'concept-bottleneck' mode"
-            )
+            assert (
+                target_concepts is not None
+            ), "target_concepts must be provided in 'concept-bottleneck' mode"
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
             loss, loss_components = self.loss(
@@ -274,9 +274,7 @@ class MetaModel:
             concept_outputs = torch.sigmoid(concept_outputs)
 
         elif self.training_mode == "concept":
-            assert target_concepts is not None, (
-                "target_concepts must be provided in 'concept' mode"
-            )
+            assert target_concepts is not None, "target_concepts must be provided in 'concept' mode"
             concept_outputs = segmentation_outputs.logits
             loss = self.loss(concept_outputs, target_concepts, target_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
@@ -392,9 +390,7 @@ class MetaModel:
                 concept_outputs += 1
                 concept_outputs *= target_labels.unsqueeze(1) != 0
 
-                masked_target_concepts = (target_concepts + 1) * (
-                    target_labels.unsqueeze(1) != 0
-                )
+                masked_target_concepts = (target_concepts + 1) * (target_labels.unsqueeze(1) != 0)
 
                 for metric in evaluator.concept_metric_dict.values():
                     metric.update(concept_outputs, masked_target_concepts)
