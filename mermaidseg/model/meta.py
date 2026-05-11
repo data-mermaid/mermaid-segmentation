@@ -234,15 +234,18 @@ class MetaModel:
 
     def batch_predict_loss(
         self,
-        batch: tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor],
+        images: torch.Tensor,
+        target_labels: torch.Tensor,
+        target_concepts: torch.Tensor | None = None,
         target_dim: tuple[int, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, float]]:
         """Perform batch prediction and compute the loss.
 
         Args:
-            batch: A tuple of ``(inputs, source_labels)``. ``source_labels`` are
-                expected to be in the joint global source-label space
-                (see :class:`SourceLabelRegistry`).
+            images: Image tensor batch (already on-device, float).
+            target_labels: Target-space label tensor (already on-device, long).
+            target_concepts: Target concept tensor. Required for ``"concept"``
+                and ``"concept-bottleneck"`` modes; unused otherwise.
             target_dim: Target spatial dimensions for output resizing.
                 Defaults to the input spatial dimensions.
         Returns:
@@ -254,30 +257,28 @@ class MetaModel:
         concept_outputs = None
         loss_components: dict[str, float] = {}
 
-        inputs, source_labels = batch
-
         if target_dim is None:
-            target_dim = (inputs.size(-2), inputs.size(-1))
+            target_dim = (images.size(-2), images.size(-1))
 
-        inputs = inputs.to(self.device).float()
-        source_labels = source_labels.long().to(self.device)
-        target_labels = self._to_target_labels(source_labels)
-
-        segmentation_outputs = self.model(inputs)
+        segmentation_outputs = self.model(images)
 
         if self.training_mode == "concept-bottleneck":
+            assert target_concepts is not None, (
+                "target_concepts must be provided in 'concept-bottleneck' mode"
+            )
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
-            concept_labels = self._to_concept_labels(source_labels)
             loss, loss_components = self.loss(
-                outputs, target_labels, concept_outputs, concept_labels
+                outputs, target_labels, concept_outputs, target_concepts
             )
             concept_outputs = torch.sigmoid(concept_outputs)
 
         elif self.training_mode == "concept":
+            assert target_concepts is not None, (
+                "target_concepts must be provided in 'concept' mode"
+            )
             concept_outputs = segmentation_outputs.logits
-            concept_labels = self._to_concept_labels(source_labels)
-            loss = self.loss(concept_outputs, concept_labels, target_labels)
+            loss = self.loss(concept_outputs, target_concepts, target_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
             outputs = postprocess_predicted_concepts(
                 concept_outputs.detach().cpu().numpy(),
@@ -330,15 +331,23 @@ class MetaModel:
                 torch.cuda.synchronize()
             data_time_total += time.perf_counter() - batch_end
 
-            _, source_labels = data
+            images, source_labels = data
+            images = images.to(self.device).float()
             source_labels = source_labels.long().to(self.device)
             target_labels = self._to_target_labels(source_labels)
+            target_concepts = (
+                self._to_concept_labels(source_labels)
+                if self.training_mode in ("concept", "concept-bottleneck")
+                else None
+            )
 
             if use_cuda:
                 torch.cuda.synchronize()
             forward_start = time.perf_counter()
 
-            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(data)
+            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
+                images, target_labels, target_concepts
+            )
 
             if use_cuda:
                 torch.cuda.synchronize()
@@ -364,15 +373,14 @@ class MetaModel:
             num_samples += target_labels.size(0)
 
             if evaluator is not None:
-                if self.training_mode in ("concept"):
-                    concept_labels = self._to_concept_labels(source_labels)
-                    concept_labels = postprocess_predicted_concepts(
-                        concept_labels.detach().cpu().numpy(),
+                if self.training_mode == "concept":
+                    target_concept_preds = postprocess_predicted_concepts(
+                        target_concepts.detach().cpu().numpy(),
                         self.concept_matrix,
                         self.conceptid2labelid,
                     ).to(self.device)
                     for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, concept_labels)
+                        metric.update(outputs, target_concept_preds)
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
@@ -380,17 +388,16 @@ class MetaModel:
                         metric.update(outputs, target_labels)
 
             if self.training_mode in ("concept-bottleneck", "concept"):
+                concept_outputs = (concept_outputs > 0.5).float()
+                concept_outputs += 1
+                concept_outputs *= target_labels.unsqueeze(1) != 0
+
+                masked_target_concepts = (target_concepts + 1) * (
+                    target_labels.unsqueeze(1) != 0
+                )
+
                 for metric in evaluator.concept_metric_dict.values():
-                    concept_outputs = (concept_outputs > 0.5).float()
-                    concept_outputs += 1
-                    concept_outputs *= target_labels.unsqueeze(1) != 0
-
-                    concept_labels = self._to_concept_labels(source_labels)
-                    concept_labels += 1
-                    concept_labels *= target_labels.unsqueeze(1) != 0
-
-                    for metric in evaluator.concept_metric_dict.values():
-                        metric.update(concept_outputs, concept_labels)
+                    metric.update(concept_outputs, masked_target_concepts)
 
             if use_cuda:
                 torch.cuda.synchronize()
@@ -439,24 +446,31 @@ class MetaModel:
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 
         for data in tqdm(val_loader):
-            _, source_labels = data
+            images, source_labels = data
+            images = images.to(self.device).float()
             source_labels = source_labels.long().to(self.device)
             target_labels = self._to_target_labels(source_labels)
+            target_concepts = (
+                self._to_concept_labels(source_labels)
+                if self.training_mode in ("concept", "concept-bottleneck")
+                else None
+            )
 
-            loss, outputs, concept_outputs, _ = self.batch_predict_loss(data)
+            loss, outputs, concept_outputs, _ = self.batch_predict_loss(
+                images, target_labels, target_concepts
+            )
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running_loss += loss.item()
 
             if evaluator is not None:
-                if self.training_mode in ("concept"):
-                    concept_labels = self._to_concept_labels(source_labels)
-                    concept_labels = postprocess_predicted_concepts(
-                        concept_labels.detach().cpu().numpy(),
+                if self.training_mode == "concept":
+                    target_concept_preds = postprocess_predicted_concepts(
+                        target_concepts.detach().cpu().numpy(),
                         self.concept_matrix,
                         self.conceptid2labelid,
                     ).to(self.device)
                     for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, concept_labels)
+                        metric.update(outputs, target_concept_preds)
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
@@ -469,12 +483,12 @@ class MetaModel:
                     concept_outputs += 1
                     concept_outputs *= target_labels.unsqueeze(1) != 0
 
-                    concept_labels = self._to_concept_labels(source_labels)
-                    concept_labels += 1
-                    concept_labels *= target_labels.unsqueeze(1) != 0
+                    masked_target_concepts = (target_concepts + 1) * (
+                        target_labels.unsqueeze(1) != 0
+                    )
 
                     for metric in evaluator.concept_metric_dict.values():
-                        metric.update(concept_outputs, concept_labels)
+                        metric.update(concept_outputs, masked_target_concepts)
 
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
