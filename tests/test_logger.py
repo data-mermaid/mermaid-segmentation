@@ -619,9 +619,9 @@ class TestScenarios:
         assert lgr.enabled is False
         self._run_logger_lifecycle(lgr, meta)
         ckpt_dir = tmp_path / "model_checkpoints" / "scenario_c"
-        assert ckpt_dir.exists(), (
-            "Bug fix verification: checkpoint must save despite MLflow failure"
-        )
+        assert (
+            ckpt_dir.exists()
+        ), "Bug fix verification: checkpoint must save despite MLflow failure"
 
 
 # ===================================================================
