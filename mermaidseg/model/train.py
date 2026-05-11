@@ -85,7 +85,6 @@ def train_model(
             ``test/time_taken`` (when test evaluation runs), and
             ``train/total_training_sec`` (final epoch only).
     """
-
     metric_name = canonical_metric_name(metric_of_interest)
     direction = metric_direction(metric_name)
     best_metric_value = float("inf") if direction == "min" else float("-inf")

@@ -1,8 +1,7 @@
 """Per-source PyTorch datasets.
 
-Each subpackage exposes a dataset that emits labels in its own source label
-space. Cross-dataset label/concept mapping lives in
-:mod:`mermaidseg.dataset_reconciliation`.
+Each subpackage exposes a dataset that emits labels in its own source label space. Cross-dataset
+label/concept mapping lives in :mod:`mermaidseg.dataset_reconciliation`.
 """
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset, worker_init_fn

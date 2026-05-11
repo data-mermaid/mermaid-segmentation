@@ -9,8 +9,8 @@ import yaml
 class ConfigDict(dict):
     """Dictionary subclass with attribute-style access.
 
-    Recursively converts nested dicts to `ConfigDict`, enabling dot-notation
-    access alongside standard dictionary operations.
+    Recursively converts nested dicts to `ConfigDict`, enabling dot-notation access alongside
+    standard dictionary operations.
     """
 
     def __init__(self, dictionary: dict[str, Any]):
@@ -34,7 +34,6 @@ def load_config(config_path: str) -> dict[str, Any]:
     Returns:
         dict: Parsed configuration dictionary from the YAML file.
     """
-
     with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -90,7 +89,6 @@ def setup_config(config_path: str | None = None, config_base_path: str = "config
         The custom configuration will override any conflicting settings in the
         base configuration during the merge process.
     """
-
     base_config = load_config(config_base_path)
     if config_path is None:
         return ConfigDict(base_config)
@@ -175,7 +173,6 @@ def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> Con
         - lr: config["training"]["optimizer"]["lr"]
         - log_epochs: config["logger"]["log_epochs"]
     """
-
     if args.run_name:
         config["run_name"] = args.run_name
     if args.model:

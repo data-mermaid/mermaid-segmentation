@@ -1,9 +1,8 @@
 """Source-dataset to MERMAID benthic-attribute target-label mappings.
 
-Provides the HTTP fetchers + static dicts that translate a source-space label
-(CoralNet provider IDs, Coralscapes 1..39 names, MERMAID benthic-attribute
-names) into MERMAID benthic-attribute target names, plus the GPU helper
-``source_labels_to_target_labels`` used at training time.
+Provides the HTTP fetchers + static dicts that translate a source-space label (CoralNet provider
+IDs, Coralscapes 1..39 names, MERMAID benthic-attribute names) into MERMAID benthic-attribute target
+names, plus the GPU helper ``source_labels_to_target_labels`` used at training time.
 """
 
 from __future__ import annotations
@@ -37,9 +36,8 @@ def fetch_coralnet_to_mermaid(
 ) -> dict[str, str]:
     """Fetch the CoralNet provider ID -> MERMAID benthic-attribute name mapping.
 
-    Returns a dict keyed by stringified CoralNet provider ID with values equal
-    to the MERMAID benthic-attribute name (or ``None`` if the CoralNet label
-    is not yet mapped).
+    Returns a dict keyed by stringified CoralNet provider ID with values equal to the MERMAID
+    benthic-attribute name (or ``None`` if the CoralNet label is not yet mapped).
     """
     response = requests.get(mapping_endpoint, timeout=30)
     response.raise_for_status()
@@ -56,9 +54,9 @@ def fetch_coralnet_to_mermaid(
 def coralscapes_to_mermaid() -> dict[str, list[str]]:
     """Static Coralscapes 39-class -> MERMAID benthic-attribute mapping.
 
-    Mapping was previously embedded inside ``CoralscapesDataset``. The first
-    element of each value list is treated as the canonical MERMAID label;
-    subsequent elements are alternative interpretations not currently used.
+    Mapping was previously embedded inside ``CoralscapesDataset``. The first element of each value
+    list is treated as the canonical MERMAID label; subsequent elements are alternative
+    interpretations not currently used.
     """
     return {
         "human": ["Unknown"],

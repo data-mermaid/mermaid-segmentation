@@ -1,9 +1,8 @@
 """Benthic-attribute concept hierarchy and source-label-to-concept mapping.
 
-Exposes the helpers that fetch the MERMAID benthic-attribute hierarchy, build
-a label/concept matrix from a list of label names, and a GPU-friendly
-``source_labels_to_concepts`` lookup driven by a precomputed ``(N+1, C)``
-float tensor (with row 0 as the all-zeros background row).
+Exposes the helpers that fetch the MERMAID benthic-attribute hierarchy, build a label/concept matrix
+from a list of label names, and a GPU-friendly ``source_labels_to_concepts`` lookup driven by a
+precomputed ``(N+1, C)`` float tensor (with row 0 as the all-zeros background row).
 """
 
 from __future__ import annotations
@@ -19,8 +18,8 @@ def initialize_benthic_hierarchy(
 ) -> dict[str, str | None]:
     """Fetch and build a benthic-attribute name -> parent-name hierarchy.
 
-    See the original implementation in ``mermaidseg.datasets.concepts`` (now
-    moved here) for full docstring.
+    See the original implementation in ``mermaidseg.datasets.concepts`` (now moved here) for full
+    docstring.
     """
     response = requests.get(hierarchy_json_url, timeout=30)
     response.raise_for_status()

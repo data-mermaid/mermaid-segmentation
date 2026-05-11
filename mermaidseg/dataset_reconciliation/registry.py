@@ -278,9 +278,8 @@ class SourceLabelRegistry:
     def conceptid2labelid(self) -> dict[int, int] | None:
         """Backward-compat helper used by ``postprocess_predicted_concepts``.
 
-        Returns a dict mapping per-concept-column index (``benthic_concept_matrix``
-        column ordering, 0-indexed) to the corresponding target label ID
-        (1-indexed, 0 if not a leaf class).
+        Returns a dict mapping per-concept-column index (``benthic_concept_matrix`` column ordering,
+        0-indexed) to the corresponding target label ID (1-indexed, 0 if not a leaf class).
         """
         if self._concept_matrix is None:
             return None
