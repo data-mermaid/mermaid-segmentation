@@ -178,9 +178,8 @@ class MetaModel:
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
 
-        When ``source_to_target_lookup`` is ``None``, source labels are assumed
-        to already be in target space (identity passthrough — useful for
-        single-source or synthetic pipelines).
+        When ``source_to_target_lookup`` is ``None``, source labels are assumed to already be in
+        target space (identity passthrough — useful for single-source or synthetic pipelines).
         """
         if self.source_to_target_lookup is None:
             return source_labels
@@ -251,7 +250,6 @@ class MetaModel:
         Returns:
             A 4-tuple of ``(loss, outputs, concept_outputs, loss_components)``.
         """
-
         loss = None
         outputs = None
         concept_outputs = None
@@ -263,9 +261,9 @@ class MetaModel:
         segmentation_outputs = self.model(images)
 
         if self.training_mode == "concept-bottleneck":
-            assert (
-                target_concepts is not None
-            ), "target_concepts must be provided in 'concept-bottleneck' mode"
+            assert target_concepts is not None, (
+                "target_concepts must be provided in 'concept-bottleneck' mode"
+            )
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
             loss, loss_components = self.loss(
@@ -309,7 +307,6 @@ class MetaModel:
         Returns:
             A 3-tuple of ``(average_loss, metric_results, timing)``.
         """
-
         running_loss = 0.0
         running_loss_components: dict[str, float] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
@@ -437,7 +434,6 @@ class MetaModel:
         | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch."""
-
         running_loss = 0.0
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 

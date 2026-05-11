@@ -133,8 +133,7 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _build_native_to_local(self) -> np.ndarray:
         """Build a vectorized lookup from native Coralscapes IDs to local source IDs.
 
-        Native ID ``0`` and any class not present in ``class_subset`` map to
-        ``0`` (background).
+        Native ID ``0`` and any class not present in ``class_subset`` map to ``0`` (background).
         """
         native_id2name = CORALSCAPES_ID2NAME
         max_native = max(native_id2name) + 1

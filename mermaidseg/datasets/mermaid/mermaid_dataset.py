@@ -59,10 +59,9 @@ class MermaidDataset(BaseCoralDataset):
     def load_annotations(self, annotations_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Load annotations from a Parquet file on S3.
 
-        For MERMAID, the source-space label name *is* the canonical
-        ``benthic_attribute_name`` field. This helper renames the column to the
-        unified ``source_label_name`` convention used by
-        :class:`BaseCoralDataset`.
+        For MERMAID, the source-space label name *is* the canonical ``benthic_attribute_name``
+        field. This helper renames the column to the unified ``source_label_name`` convention used
+        by :class:`BaseCoralDataset`.
         """
         df_annotations = pd.read_parquet(annotations_path)
         df_annotations = df_annotations.rename(

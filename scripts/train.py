@@ -85,9 +85,9 @@ def _write_pid(pid_file: Path) -> None:
 def _stop_current_space() -> None:
     """Stop the SageMaker JupyterLab app via delete_app.
 
-    SageMaker has no ``stop_space`` API.  The documented way to stop a
-    running JupyterLab app is ``delete_app`` — this terminates the
-    instance while keeping EFS data intact.  No-op outside SageMaker.
+    SageMaker has no ``stop_space`` API.  The documented way to stop a running JupyterLab app is
+    ``delete_app`` — this terminates the instance while keeping EFS data intact.  No-op outside
+    SageMaker.
     """
     if not _METADATA.exists():
         logging.info("Not running on SageMaker — skipping auto-shutdown")

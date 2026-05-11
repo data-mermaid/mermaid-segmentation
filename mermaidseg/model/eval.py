@@ -136,7 +136,6 @@ class Evaluator:
         NDArray[np.int_] | int,
     ]:
         """Return one image, its ground-truth target label, and the model prediction."""
-
         meta_model.model.eval()
         with torch.no_grad():
             data = next(iter(dataloader))
