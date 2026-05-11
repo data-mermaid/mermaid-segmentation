@@ -6,6 +6,12 @@ on:
     branches: [main]
     paths:
       - '**/*.ipynb'
+  pull_request:
+    paths:
+      - '**/*.ipynb'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   notebooks:
