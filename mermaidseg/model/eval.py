@@ -8,9 +8,6 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import Accuracy, F1Score, JaccardIndex
 from torchmetrics.metric import Metric
 
-from mermaidseg.datasets.concepts import (
-    labels_to_concepts,
-)
 from mermaidseg.model.meta import MetaModel
 
 
@@ -18,11 +15,15 @@ class Evaluator:
     """Base evaluator for machine learning models.
 
     Accumulates metrics across batches and supports both multiclass and binary tasks.
+    Operates on ``(inputs, source_labels)`` batches and converts the source
+    labels to target-space labels via ``meta_model._to_target_labels`` for
+    metric computation.
+
     Attributes:
         metric_dict (dict[str, Metric]): Metrics to accumulate and compute.
         epoch (int): Current epoch counter (incremented after each `evaluate_model` call).
         device (str | torch.device): Device metrics tensors are moved to.
-        num_classes (int): Number of output classes.
+        num_classes (int): Number of output (target) classes.
     """
 
     metric_dict: dict[str, Metric]
@@ -58,9 +59,6 @@ class Evaluator:
                 self.concept_metric_dict = concept_metric_dict
             else:
                 self.concept_metric_dict = {
-                    # "auc": AUROC(
-                    #     task="multiclass", average="none", num_classes=3, ignore_index=0
-                    # ).to(self.device),
                     "f1_concept": F1Score(
                         task="multiclass", average="none", num_classes=3, ignore_index=0
                     ).to(self.device)
@@ -72,51 +70,36 @@ class Evaluator:
         dataloader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         meta_model: MetaModel,
     ) -> dict[str, float | NDArray[np.float64]]:
-        """Evaluates the performance of a given meta-model on a dataset provided by the dataloader.
+        """Evaluate ``meta_model`` over ``dataloader``.
 
         Args:
-            dataloader (DataLoader[Union[tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]]):
-                A DataLoader object that provides batches of data. Each batch can either be a tuple
-                of input tensors and labels or a dictionary containing "pixel_values" and "labels".
-            meta_model (MetaModel):
-                The meta-model to be evaluated. It contains the model and additional configurations
-                such as whether to use automatic mixed precision (AMP).
+            dataloader: DataLoader yielding ``(inputs, source_labels)`` batches.
+            meta_model: The model wrapper providing ``batch_predict`` and the
+                source/target lookup tensors.
         Returns:
-            Dict[str, Union[float, NDArray[np.float64]]]:
-                A dictionary containing the computed metrics. Each key corresponds to a metric name,
-                and the value is either a float (for scalar metrics) or a NumPy array (for metrics
-                with multiple dimensions).
+            Dict of metric_name -> scalar/array result.
         """
         meta_model.model.eval()
         metric_results: dict[str, float | NDArray[np.float64]] = {}
         for data in tqdm.tqdm(dataloader):
-            inputs, labels = data
-            labels = labels.long().to(self.device)
+            inputs, source_labels = data
+            source_labels = source_labels.long().to(self.device)
+            target_labels = meta_model._to_target_labels(source_labels)
             outputs, concept_outputs = meta_model.batch_predict(inputs)
 
-            # if meta_model.training_mode in ("concept"):
-            #     concept_labels = labels_to_concepts(labels, meta_model.concept_matrix)
-            #     # print(concept_labels)
-            #     # print(concept_labels.shape, concept_labels.dtype)
-            #     # concept_labels = postprocess_predicted_concepts(
-            #     #         concept_labels, meta_model.concept_matrix, meta_model.conceptid2labelid,
-            #     #     )
-            #     # concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
-            #     # metric.update(outputs, concept_labels)
-            # else:
             if outputs.ndim > 3:
                 outputs = outputs.argmax(dim=1)
             for metric in self.metric_dict.values():
-                metric.update(outputs, labels)
+                metric.update(outputs, target_labels)
 
             if meta_model.training_mode in ("concept-bottleneck", "concept"):
                 concept_outputs = (concept_outputs > 0.5).float()
                 concept_outputs += 1
-                concept_outputs *= labels.unsqueeze(1) != 0
+                concept_outputs *= target_labels.unsqueeze(1) != 0
 
-                concept_labels = labels_to_concepts(labels, meta_model.concept_matrix)
+                concept_labels = meta_model._to_concept_labels(source_labels)
                 concept_labels += 1
-                concept_labels *= labels.unsqueeze(1) != 0
+                concept_labels *= target_labels.unsqueeze(1) != 0
 
                 for metric in self.concept_metric_dict.values():
                     metric.update(concept_outputs, concept_labels)
@@ -152,22 +135,13 @@ class Evaluator:
         NDArray[np.int_] | int,
         NDArray[np.int_] | int,
     ]:
-        """Return one image, its ground-truth label, and the model prediction.
-
-        Args:
-            dataloader: DataLoader to pull a single batch from.
-            meta_model: Model used for prediction.
-            epoch (int, optional): Used to rotate which image in the batch is returned. Defaults to 0.
-            log_epochs (int, optional): Controls rotation period. Defaults to 5.
-            proba (bool, optional): If True, return raw logits instead of argmax. Defaults to False.
-        Returns:
-            tuple[NDArray, NDArray, NDArray]: (image, label, prediction) arrays for one sample.
-        """
+        """Return one image, its ground-truth target label, and the model prediction."""
 
         meta_model.model.eval()
         with torch.no_grad():
             data = next(iter(dataloader))
-            inputs, labels = data
+            inputs, source_labels = data
+            target_labels = meta_model._to_target_labels(source_labels.long().to(self.device))
 
             outputs, concept_outputs = meta_model.batch_predict(inputs)
             if not proba:
@@ -179,7 +153,7 @@ class Evaluator:
         image_counter = image_counter % inputs.size(dim=0)  # In case we use a smaller batch size
 
         image: NDArray[np.float64] = inputs[image_counter].cpu().numpy()
-        label: NDArray[np.int_] = labels[image_counter].cpu().numpy()
+        label: NDArray[np.int_] = target_labels[image_counter].cpu().numpy()
         pred: NDArray[np.int_] | NDArray[np.float_] = outputs[image_counter].cpu().numpy()
 
         return image, label, pred
@@ -193,7 +167,7 @@ class EvaluatorSemanticSegmentation(Evaluator):
             accuracy and mean IoU, configured for either binary or multiclass tasks
             based on the number of classes.
     Args:
-        num_classes (int): The number of classes in the classification task.
+        num_classes (int): The number of (target) classes in the classification task.
         device (Union[str, torch.device], optional): The device on which the metrics will be computed.
             Defaults to "cuda".
         metric_dict (Optional[Dict[str, Metric]], optional): A dictionary of pre-defined metrics. If not provided,

@@ -5,7 +5,8 @@ import boto3
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
-from coralnet_scraper import CoralNetDownloader
+
+from mermaidseg.datasets.coralnet.scraper.coralnet_scraper import CoralNetDownloader
 
 
 def check_s3_prefix_exists(bucket_name, s3_prefix, source_id):

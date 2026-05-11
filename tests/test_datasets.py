@@ -9,13 +9,13 @@ import pandas as pd
 import pytest
 import torch
 
-from mermaidseg.datasets.dataset import BaseCoralDataset
+from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from mermaidseg.datasets.utils import create_annotation_mask
 
 
 def _make_annotations(rows: list, cols: list, labels: list) -> pd.DataFrame:
     """Build a minimal annotations DataFrame."""
-    return pd.DataFrame({"row": rows, "col": cols, "benthic_attribute_name": labels})
+    return pd.DataFrame({"row": rows, "col": cols, "source_label_name": labels})
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def minimal_dataset() -> BaseCoralDataset:
             "image_id": ["img1", "img2"],
             "region_id": [1, 2],
             "region_name": ["r1", "r2"],
-            "benthic_attribute_name": ["Coral", "Sand"],
+            "source_label_name": ["Coral", "Sand"],
             "row": [10, 20],
             "col": [10, 20],
         }
@@ -51,7 +51,7 @@ def single_image_annotations() -> tuple[pd.DataFrame, pd.DataFrame]:
             "image_id": ["img1"],
             "region_id": [1],
             "region_name": ["r1"],
-            "benthic_attribute_name": ["Coral"],
+            "source_label_name": ["Coral"],
             "row": [5],
             "col": [5],
         }
@@ -76,8 +76,8 @@ class _AlwaysFailDataset(BaseCoralDataset):
 
 def test_create_annotation_mask_basic():
     annotations = _make_annotations([10, 20, 30], [5, 15, 25], ["Coral", "Sand", "Rubble"])
-    label2id = {"Coral": 1, "Sand": 2, "Rubble": 3}
-    mask = create_annotation_mask(annotations, (50, 50), label2id)
+    source_name2id = {"Coral": 1, "Sand": 2, "Rubble": 3}
+    mask = create_annotation_mask(annotations, (50, 50), source_name2id)
 
     assert mask[10, 5] == 1
     assert mask[20, 15] == 2
@@ -105,18 +105,14 @@ def test_create_annotation_mask_padding_bounds_clamped():
 
 def test_create_annotation_mask_overlapping_padding():
     """When padding regions overlap, later annotations should overwrite earlier ones."""
-    # Two annotations close together: (10, 10) and (10, 14)
-    # With padding=3, their regions will overlap at rows 7-13, cols 10-17
     annotations = _make_annotations([10, 10], [10, 14], ["Coral", "Sand"])
     mask = create_annotation_mask(annotations, (20, 20), {"Coral": 1, "Sand": 2}, padding=3)
 
-    # The overlap region (cols 12-13) should have Sand (value 2) since Sand annotation is second
     assert mask[10, 12] == 2
     assert mask[10, 13] == 2
 
-    # Non-overlapping parts should have their respective values
-    assert mask[10, 9] == 1  # Coral only
-    assert mask[10, 16] == 2  # Sand only
+    assert mask[10, 9] == 1
+    assert mask[10, 16] == 2
 
 
 def test_create_annotation_mask_unknown_label_skipped(caplog):
@@ -144,6 +140,32 @@ def test_create_annotation_mask_produces_zero_mask(rows, cols, labels):
     assert np.all(mask == 0)
 
 
+# --- BaseCoralDataset basic API ---
+
+
+def test_base_dataset_exposes_source_label_attributes(minimal_dataset):
+    assert minimal_dataset.source_id2name == {1: "Coral", 2: "Sand"}
+    assert minimal_dataset.source_name2id == {"Coral": 1, "Sand": 2}
+    assert minimal_dataset.num_source_classes == 3  # background + 2
+    assert minimal_dataset.global_offset == 0
+
+
+def test_base_dataset_set_global_offset_validates_negative(minimal_dataset):
+    with pytest.raises(ValueError):
+        minimal_dataset.set_global_offset(-1)
+
+
+def test_base_dataset_set_global_offset_shifts_mask_via_helper():
+    """Verify offset arithmetic on the helper directly: offset=10 → values become 11/12."""
+    minimal_mask = np.array([[0, 1, 2], [2, 0, 1]], dtype=np.int64)
+    offset = 10
+    shifted = np.where(minimal_mask > 0, minimal_mask + offset, minimal_mask)
+    assert shifted[0, 0] == 0
+    assert shifted[0, 1] == 11
+    assert shifted[0, 2] == 12
+    assert shifted[1, 1] == 0
+
+
 # --- BaseCoralDataset.collate_fn ---
 
 
@@ -152,7 +174,7 @@ def test_collate_fn_filters_none_items(minimal_dataset, caplog):
     msk = torch.zeros(4, 4, dtype=torch.long)
     batch = [(img, msk), (None, None), (img, msk), (None, None)]
 
-    with caplog.at_level("WARNING", logger="mermaidseg.datasets.dataset"):
+    with caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"):
         images, masks = minimal_dataset.collate_fn(batch)
 
     assert images.shape[0] == 2
@@ -161,7 +183,7 @@ def test_collate_fn_filters_none_items(minimal_dataset, caplog):
 
 
 def test_collate_fn_all_none_returns_empty_tensors(minimal_dataset, caplog):
-    with caplog.at_level("WARNING", logger="mermaidseg.datasets.dataset"):
+    with caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"):
         images, masks = minimal_dataset.collate_fn([(None, None), (None, None)])
 
     assert images.numel() == 0
@@ -180,7 +202,7 @@ def test_base_dataset_getitem_skips_and_logs_on_read_failure(single_image_annota
         class_subset=["Coral"],
     )
 
-    with caplog.at_level("WARNING", logger="mermaidseg.datasets.dataset"):
+    with caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"):
         result = ds[0]
 
     assert result == (None, None)

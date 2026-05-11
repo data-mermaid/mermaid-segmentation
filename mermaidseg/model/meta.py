@@ -14,9 +14,12 @@ from tqdm import tqdm
 
 import mermaidseg.model.loss
 import mermaidseg.model.models
-from mermaidseg.datasets.concepts import (
-    labels_to_concepts,
+from mermaidseg.dataset_reconciliation.concepts import (
     postprocess_predicted_concepts,
+    source_labels_to_concepts,
+)
+from mermaidseg.dataset_reconciliation.label_mapping import (
+    source_labels_to_target_labels,
 )
 from mermaidseg.io import ConfigDict
 
@@ -31,10 +34,16 @@ class MetaModel:
     - ``"concept"``: outputs are concept logits mapped back to class predictions.
     - ``"concept-bottleneck"``: joint segmentation + concept supervision.
 
+    Source-label datasets emit ``source_labels`` in the joint global source
+    space (see :class:`SourceLabelRegistry`); ``MetaModel`` converts them to
+    ``target_labels`` (and optional ``concept_labels``) on-device via long-tensor
+    lookups passed via ``source_to_target_lookup`` and
+    ``source_to_concepts_lookup``.
+
     Attributes:
         run_name (str): Identifier for the current run/experiment.
         model_name (str): Name of the model architecture (looked up in `mermaidseg.model.models`).
-        num_classes (int): Number of segmentation output classes.
+        num_classes (int): Number of segmentation output (target) classes.
         device (str | torch.device): Device the model and tensors live on.
         model_kwargs (ConfigDict): Model-specific config passed to the architecture.
         training_kwargs (ConfigDict): Training hyperparameters (epochs, optimizer, scheduler, loss).
@@ -42,8 +51,14 @@ class MetaModel:
         loss (torch.nn.Module | None): Loss function; None until `training_kwargs` provides one.
         optimizer (torch.optim.Optimizer): Optimiser instance.
         scheduler (torch.optim.lr_scheduler.LRScheduler | None): Optional LR scheduler.
-        concept_matrix (pd.DataFrame | None): Concept mapping matrix for CBM/concept modes.
-        conceptid2labelid (dict[int, int] | None): Maps concept IDs to class label IDs.
+        source_to_target_lookup (torch.Tensor | None): 1-D long tensor of shape ``(N+1,)``
+            mapping global source IDs to target label IDs. ``None`` enables identity passthrough
+            (synthetic / single-source pipelines whose source space already matches target space).
+        source_to_concepts_lookup (torch.Tensor | None): Float tensor of shape ``(N+1, C)`` for
+            CBM/concept modes.
+        concept_matrix (pd.DataFrame | None): Pandas concept matrix retained for
+            :func:`postprocess_predicted_concepts` (uses MultiIndex level metadata).
+        conceptid2labelid (dict[int, int] | None): Maps concept IDs to target label IDs.
     """
 
     run_name: str
@@ -56,6 +71,8 @@ class MetaModel:
     loss: torch.nn.Module | None
     optimizer: torch.optim.Optimizer
     scheduler: torch.optim.lr_scheduler.LRScheduler | None
+    source_to_target_lookup: torch.Tensor | None
+    source_to_concepts_lookup: torch.Tensor | None
     concept_matrix: pd.DataFrame | None
     conceptid2labelid: dict[int, int] | None
 
@@ -69,6 +86,8 @@ class MetaModel:
         model_checkpoint: str | None = None,
         training_mode: str = "standard",  # One of "standard", "concept", "concept-bottleneck"
         training_kwargs: ConfigDict | None = None,
+        source_to_target_lookup: torch.Tensor | None = None,
+        source_to_concepts_lookup: torch.Tensor | None = None,
         concept_matrix: pd.DataFrame | None = None,
         conceptid2labelid: dict[int, int] | None = None,
     ):
@@ -103,8 +122,19 @@ class MetaModel:
         ], f"Invalid training_mode: {self.training_mode}"
 
         self.training_kwargs = training_kwargs
+        self.source_to_target_lookup = (
+            source_to_target_lookup.to(device).long()
+            if source_to_target_lookup is not None
+            else None
+        )
+        self.source_to_concepts_lookup = (
+            source_to_concepts_lookup.to(device).float()
+            if source_to_concepts_lookup is not None
+            else None
+        )
         self.concept_matrix = concept_matrix
         self.conceptid2labelid = conceptid2labelid
+
         if self.training_mode == "concept-bottleneck":
             self.model = getattr(mermaidseg.model.models, self.model_name)(
                 num_classes=self.num_classes,
@@ -145,6 +175,24 @@ class MetaModel:
                 self.optimizer, **training_kwargs.scheduler
             )
 
+    def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
+        """Map source-space labels to target-space labels via the lookup tensor.
+
+        When ``source_to_target_lookup`` is ``None``, source labels are assumed
+        to already be in target space (identity passthrough — useful for
+        single-source or synthetic pipelines).
+        """
+        if self.source_to_target_lookup is None:
+            return source_labels
+        return source_labels_to_target_labels(source_labels, self.source_to_target_lookup)
+
+    def _to_concept_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
+        if self.source_to_concepts_lookup is None:
+            raise RuntimeError(
+                "MetaModel.source_to_concepts_lookup is not set; cannot run concept modes."
+            )
+        return source_labels_to_concepts(source_labels, self.source_to_concepts_lookup)
+
     def batch_predict(
         self,
         inputs: torch.Tensor,
@@ -152,19 +200,13 @@ class MetaModel:
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Perform batch prediction using the model.
 
-        This method takes input data in the form of a tensor or a dictionary of tensors,
-        processes it on the appropriate device, and returns the model's output.
         Args:
-            inputs (Union[torch.Tensor, Dict[str, torch.Tensor]]):
-                The input data for prediction. It can be a single tensor or a dictionary
-                where keys are input names and values are tensors.
-            target_dim (Optional[tuple[int, int]], optional): The target dimensions for resizing the model's output.
-                If not provided, the dimensions of the input tensor are used. Defaults to None.
+            inputs (torch.Tensor): Image tensor batch.
+            target_dim (Optional[tuple[int, int]], optional): Spatial size to
+                resize logits to. Defaults to the input spatial size.
         Returns:
-            torch.Tensor: The output tensor from the model. If the model's output contains
-            attributes like `logits` or `out`, those are extracted and returned.
+            tuple[torch.Tensor, torch.Tensor | None]: ``(outputs, concept_outputs)``.
         """
-
         inputs = inputs.to(self.device).float()
         if target_dim is None:
             target_dim = (inputs.size(-2), inputs.size(-1))
@@ -192,19 +234,22 @@ class MetaModel:
 
     def batch_predict_loss(
         self,
-        batch: tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor],
+        images: torch.Tensor,
+        target_labels: torch.Tensor,
+        target_concepts: torch.Tensor | None = None,
         target_dim: tuple[int, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, float]]:
         """Perform batch prediction and compute the loss.
 
         Args:
-            batch: A tuple of (inputs, labels) or a dict of named tensors.
+            images: Image tensor batch (already on-device, float).
+            target_labels: Target-space label tensor (already on-device, long).
+            target_concepts: Target concept tensor. Required for ``"concept"``
+                and ``"concept-bottleneck"`` modes; unused otherwise.
             target_dim: Target spatial dimensions for output resizing.
                 Defaults to the input spatial dimensions.
         Returns:
-            A 4-tuple of (loss, outputs, concept_outputs, loss_components)
-            where loss_components is a dict of detached scalar values for
-            logging (non-empty only in concept-bottleneck mode).
+            A 4-tuple of ``(loss, outputs, concept_outputs, loss_components)``.
         """
 
         loss = None
@@ -212,26 +257,26 @@ class MetaModel:
         concept_outputs = None
         loss_components: dict[str, float] = {}
 
-        inputs, labels = batch
-
         if target_dim is None:
-            target_dim = (inputs.size(-2), inputs.size(-1))
+            target_dim = (images.size(-2), images.size(-1))
 
-        inputs = inputs.to(self.device).float()
-        labels = labels.long().to(self.device)
-        segmentation_outputs = self.model(inputs)
+        segmentation_outputs = self.model(images)
 
         if self.training_mode == "concept-bottleneck":
+            assert (
+                target_concepts is not None
+            ), "target_concepts must be provided in 'concept-bottleneck' mode"
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
-            concept_labels = labels_to_concepts(labels, self.concept_matrix)
-            loss, loss_components = self.loss(outputs, labels, concept_outputs, concept_labels)
+            loss, loss_components = self.loss(
+                outputs, target_labels, concept_outputs, target_concepts
+            )
             concept_outputs = torch.sigmoid(concept_outputs)
 
         elif self.training_mode == "concept":
+            assert target_concepts is not None, "target_concepts must be provided in 'concept' mode"
             concept_outputs = segmentation_outputs.logits
-            concept_labels = labels_to_concepts(labels, self.concept_matrix)
-            loss = self.loss(concept_outputs, concept_labels, labels)
+            loss = self.loss(concept_outputs, target_concepts, target_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
             outputs = postprocess_predicted_concepts(
                 concept_outputs.detach().cpu().numpy(),
@@ -242,7 +287,7 @@ class MetaModel:
         else:
             outputs = segmentation_outputs.logits
             concept_outputs = None
-            loss = self.loss(outputs, labels)
+            loss = self.loss(outputs, target_labels)
 
         assert loss is not None, "Loss is not computed for the given batch."
         assert isinstance(outputs, torch.Tensor)
@@ -258,13 +303,11 @@ class MetaModel:
         """Trains the model for one epoch using the provided data loader.
 
         Args:
-            train_loader: DataLoader providing batches of training data.
+            train_loader: DataLoader yielding ``(inputs, source_labels)`` batches.
             evaluator: Optional evaluator for computing per-epoch metrics.
 
         Returns:
-            A 3-tuple of (average_loss, metric_results, timing) where timing
-            contains ``"data_loading_sec"``, ``"forward_sec"``,
-            ``"backward_sec"``, and ``"num_samples"``.
+            A 3-tuple of ``(average_loss, metric_results, timing)``.
         """
 
         running_loss = 0.0
@@ -286,14 +329,23 @@ class MetaModel:
                 torch.cuda.synchronize()
             data_time_total += time.perf_counter() - batch_end
 
-            _, labels = data
-            labels = labels.long().to(self.device)
+            images, source_labels = data
+            images = images.to(self.device).float()
+            source_labels = source_labels.long().to(self.device)
+            target_labels = self._to_target_labels(source_labels)
+            target_concepts = (
+                self._to_concept_labels(source_labels)
+                if self.training_mode in ("concept", "concept-bottleneck")
+                else None
+            )
 
             if use_cuda:
                 torch.cuda.synchronize()
             forward_start = time.perf_counter()
 
-            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(data)
+            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
+                images, target_labels, target_concepts
+            )
 
             if use_cuda:
                 torch.cuda.synchronize()
@@ -316,38 +368,32 @@ class MetaModel:
             running_loss += loss.item()
             for k, v in loss_components.items():
                 running_loss_components[k] = running_loss_components.get(k, 0.0) + v
-            num_samples += labels.size(0)
+            num_samples += target_labels.size(0)
 
             if evaluator is not None:
-                if self.training_mode in ("concept"):
-                    concept_labels = labels_to_concepts(labels, self.concept_matrix)
-                    print(concept_labels.shape, concept_labels.dtype)
-                    concept_labels = postprocess_predicted_concepts(
-                        concept_labels,
+                if self.training_mode == "concept":
+                    target_concept_preds = postprocess_predicted_concepts(
+                        target_concepts.detach().cpu().numpy(),
                         self.concept_matrix,
                         self.conceptid2labelid,
-                    )
-                    concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
+                    ).to(self.device)
                     for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, concept_labels)
+                        metric.update(outputs, target_concept_preds)
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
                     for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, labels)
+                        metric.update(outputs, target_labels)
 
             if self.training_mode in ("concept-bottleneck", "concept"):
+                concept_outputs = (concept_outputs > 0.5).float()
+                concept_outputs += 1
+                concept_outputs *= target_labels.unsqueeze(1) != 0
+
+                masked_target_concepts = (target_concepts + 1) * (target_labels.unsqueeze(1) != 0)
+
                 for metric in evaluator.concept_metric_dict.values():
-                    concept_outputs = (concept_outputs > 0.5).float()
-                    concept_outputs += 1
-                    concept_outputs *= labels.unsqueeze(1) != 0
-
-                    concept_labels = labels_to_concepts(labels, self.concept_matrix)
-                    concept_labels += 1
-                    concept_labels *= labels.unsqueeze(1) != 0
-
-                    for metric in evaluator.concept_metric_dict.values():
-                        metric.update(concept_outputs, concept_labels)
+                    metric.update(concept_outputs, masked_target_concepts)
 
             if use_cuda:
                 torch.cuda.synchronize()
@@ -390,57 +436,56 @@ class MetaModel:
         evaluator: Any
         | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
-        """Calculate the validation loss and metrics for one epoch.
-
-        Args:
-            val_loader: DataLoader providing batches of validation data.
-            evaluator: Optional evaluator for computing per-epoch metrics.
-        Returns:
-            A 2-tuple of (average_loss, metric_results).
-        """
+        """Calculate the validation loss and metrics for one epoch."""
 
         running_loss = 0.0
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 
         for data in tqdm(val_loader):
-            _, labels = data
-            labels = labels.long().to(self.device)
+            images, source_labels = data
+            images = images.to(self.device).float()
+            source_labels = source_labels.long().to(self.device)
+            target_labels = self._to_target_labels(source_labels)
+            target_concepts = (
+                self._to_concept_labels(source_labels)
+                if self.training_mode in ("concept", "concept-bottleneck")
+                else None
+            )
 
-            loss, outputs, concept_outputs, _ = self.batch_predict_loss(data)
+            loss, outputs, concept_outputs, _ = self.batch_predict_loss(
+                images, target_labels, target_concepts
+            )
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running_loss += loss.item()
 
             if evaluator is not None:
-                if self.training_mode in ("concept"):
-                    concept_labels = labels_to_concepts(labels, self.concept_matrix)
-                    concept_labels = postprocess_predicted_concepts(
-                        concept_labels, self.concept_matrix, self.conceptid2labelid
-                    )
-                    concept_labels = torch.from_numpy(concept_labels).long().to(self.device)
+                if self.training_mode == "concept":
+                    target_concept_preds = postprocess_predicted_concepts(
+                        target_concepts.detach().cpu().numpy(),
+                        self.concept_matrix,
+                        self.conceptid2labelid,
+                    ).to(self.device)
                     for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, concept_labels)
+                        metric.update(outputs, target_concept_preds)
                 else:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
-                    # Update metrics
                     for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, labels)
+                        metric.update(outputs, target_labels)
 
             if self.training_mode in ("concept-bottleneck", "concept"):
-                # Update metrics
                 for metric in evaluator.concept_metric_dict.values():
                     concept_outputs = (concept_outputs > 0.5).float()
                     concept_outputs += 1
-                    concept_outputs *= labels.unsqueeze(1) != 0
+                    concept_outputs *= target_labels.unsqueeze(1) != 0
 
-                    concept_labels = labels_to_concepts(labels, self.concept_matrix)
-                    concept_labels += 1
-                    concept_labels *= labels.unsqueeze(1) != 0
+                    masked_target_concepts = (target_concepts + 1) * (
+                        target_labels.unsqueeze(1) != 0
+                    )
 
                     for metric in evaluator.concept_metric_dict.values():
-                        metric.update(concept_outputs, concept_labels)
+                        metric.update(concept_outputs, masked_target_concepts)
 
-        # Compute metrics
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
                 metric_results[metric_name] = (
@@ -469,15 +514,7 @@ class MetaModel:
         image: torch.Tensor | NDArray[Any],
         transform: A.BasicTransform | None = None,
     ) -> NDArray[Any]:
-        """Predicts the output for a given input image using the model.
-
-        Args:
-            image (Union[torch.Tensor, NDArray[Any]]): The input image as a PyTorch tensor or a NumPy array.
-            transform (Optional[A.BasicTransform], optional): An optional transformation to apply to the image.
-                Defaults to None.
-        Returns:
-            Union[NDArray[Any]]: The predicted output.
-        """
+        """Predict the (target-space) segmentation for a single image."""
         if transform:
             image = transform(image=image)["image"]
         inputs = torch.tensor(image).unsqueeze(0)
