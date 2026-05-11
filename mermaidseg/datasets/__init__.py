@@ -10,6 +10,7 @@ from mermaidseg.datasets.catlin_seaview import CatlinSeaviewDataset
 from mermaidseg.datasets.coralnet import CoralNetDataset
 from mermaidseg.datasets.coralscapes import CoralscapesDataset
 from mermaidseg.datasets.mermaid import MermaidDataset
+from mermaidseg.datasets.moorea_labeled_corals import MooreaLabeledCoralsDataset
 
 __all__ = [
     "BaseCoralDataset",
@@ -17,5 +18,6 @@ __all__ = [
     "CoralNetDataset",
     "CoralscapesDataset",
     "MermaidDataset",
+    "MooreaLabeledCoralsDataset",
     "worker_init_fn",
 ]

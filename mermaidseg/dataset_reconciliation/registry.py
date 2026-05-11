@@ -31,6 +31,7 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     coralscapes_to_mermaid,
     fetch_catlin_seaview_to_mermaid,
     fetch_coralnet_to_mermaid,
+    fetch_moorea_labeled_corals_to_mermaid,
 )
 
 
@@ -229,6 +230,19 @@ class SourceLabelRegistry:
                 resolved[name] = {
                     src: tgt
                     for src, tgt in catlin_to_target.items()
+                    if tgt is not None and src in ds.source_name2id
+                }
+                continue
+            if name == "moorea_labeled_corals":
+                if not fetch_remote:
+                    raise ValueError(
+                        "moorea_labeled_corals source-to-target mapping requires "
+                        "fetch_remote=True or an explicit entry in source_to_target_name_maps"
+                    )
+                moorea_to_target = fetch_moorea_labeled_corals_to_mermaid()
+                resolved[name] = {
+                    src: tgt
+                    for src, tgt in moorea_to_target.items()
                     if tgt is not None and src in ds.source_name2id
                 }
                 continue
