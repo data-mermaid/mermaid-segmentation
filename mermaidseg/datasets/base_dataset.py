@@ -121,18 +121,11 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.source_name2id = {v: k for k, v in self.source_id2name.items()}
         self.num_source_classes = len(self.source_id2name) + 1  # +1 for background
 
-<<<<<<< HEAD
-        annotation_counts = self.df_annotations["image_id"].value_counts()
-        self._annotation_count_by_image = {str(k): int(v) for k, v in annotation_counts.items()}
-        annotation_labels = self.df_annotations.groupby("image_id")["source_label_name"].apply(
-            lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)}))
-=======
         self._annotation_count_by_image = self.df_annotations["image_id"].value_counts().to_dict()
         self._annotation_labels_by_image = (
             self.df_annotations.groupby("image_id")["source_label_name"]
-            .apply(lambda values: ",".join(sorted(set(values))))
+            .apply(lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)})))
             .to_dict()
->>>>>>> 3309c07 (Address PR feedback from Viktor)
         )
         self._load_failures = []
 
