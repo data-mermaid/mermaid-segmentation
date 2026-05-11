@@ -25,8 +25,8 @@ from mermaidseg.datasets.utils import get_image_s3
 
 
 class MooreaLabeledCoralsDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading Moorea Labeled Corals annotated coral reef images
-    from a Parquet file stored on S3.
+    """A PyTorch Dataset for loading Moorea Labeled Corals annotated coral reef images from a
+    Parquet file stored on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in the Moorea Labeled Corals source
