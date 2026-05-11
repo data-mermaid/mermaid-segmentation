@@ -164,7 +164,6 @@ class MetaModel:
             torch.Tensor: The output tensor from the model. If the model's output contains
             attributes like `logits` or `out`, those are extracted and returned.
         """
-
         inputs = inputs.to(self.device).float()
         if target_dim is None:
             target_dim = (inputs.size(-2), inputs.size(-1))
@@ -206,7 +205,6 @@ class MetaModel:
             where loss_components is a dict of detached scalar values for
             logging (non-empty only in concept-bottleneck mode).
         """
-
         loss = None
         outputs = None
         concept_outputs = None
@@ -266,7 +264,6 @@ class MetaModel:
             contains ``"data_loading_sec"``, ``"forward_sec"``,
             ``"backward_sec"``, and ``"num_samples"``.
         """
-
         running_loss = 0.0
         running_loss_components: dict[str, float] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
@@ -398,7 +395,6 @@ class MetaModel:
         Returns:
             A 2-tuple of (average_loss, metric_results).
         """
-
         running_loss = 0.0
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 

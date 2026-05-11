@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 def worker_init_fn(worker_id: int) -> None:
     """Configure logging in DataLoader worker processes.
 
-    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0``
-    so that warnings emitted in worker subprocesses are visible.
+    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so that warnings emitted
+    in worker subprocesses are visible.
     """
     logging.basicConfig(
         level=logging.WARNING,

@@ -19,7 +19,6 @@ def get_legend_elements(
             elements for benthic attributes. If True, a tuple
             ``(benthic_legend_elements, growth_legend_elements)``.
     """
-
     unique_benthic = annotations[["benthic_attribute_name", "benthic_color"]].drop_duplicates()
     benthic_legend_elements = [
         plt.Line2D(

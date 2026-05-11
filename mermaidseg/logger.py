@@ -86,9 +86,8 @@ def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
 def mlflow_connect(uri: str | None = None) -> timedelta:
     """Set the MLflow tracking URI and verify connectivity.
 
-    Returns the time taken to establish the connection. The connection test
-    may take a long time to fail unless ``MLFLOW_HTTP_REQUEST_MAX_RETRIES``
-    is set to a low number.
+    Returns the time taken to establish the connection. The connection test may take a long time to
+    fail unless ``MLFLOW_HTTP_REQUEST_MAX_RETRIES`` is set to a low number.
     """
     if uri is None:
         uri = get_mlflow_tracking_uri()
@@ -160,8 +159,8 @@ def resume_run(run_id: str) -> mlflow.ActiveRun:
 class Logger:
     """MLflow-focused logger for experiment tracking during training and evaluation.
 
-    wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy
-    ``WandbLogger`` delegate during the deprecation period.
+    wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy ``WandbLogger``
+    delegate during the deprecation period.
     """
 
     def __init__(
@@ -550,17 +549,15 @@ class Logger:
     ):
         """Save a model checkpoint locally and/or to MLflow.
 
-        Local persistence is controlled by ``save_local_checkpoints``.
-        MLflow logging is independent of local persistence.
+        Local persistence is controlled by ``save_local_checkpoints``. MLflow logging is independent
+        of local persistence.
 
-        When ``is_best`` is True (the default), the checkpoint is also written
-        to the ``best-model`` artifact path and tagged accordingly.  Pass
-        ``is_best=False`` to save a checkpoint without overwriting the current
-        best model.
+        When ``is_best`` is True (the default), the checkpoint is also written to the ``best-model``
+        artifact path and tagged accordingly.  Pass ``is_best=False`` to save a checkpoint without
+        overwriting the current best model.
 
-        Checkpoint files are named ``model_epoch{epoch}`` — resuming from a
-        previous epoch will overwrite the file unless ``checkpoint_dir`` or
-        ``run_name`` differs.
+        Checkpoint files are named ``model_epoch{epoch}`` — resuming from a previous epoch will
+        overwrite the file unless ``checkpoint_dir`` or ``run_name`` differs.
         """
         timestamp = time.strftime("%Y%m%d%H%M%S")
 
@@ -677,7 +674,6 @@ class Logger:
         artifact_path: str = "publish",
     ):
         """Export model weights as SafeTensors for secure, pickle-free sharing."""
-
         if not self._ensure_active_run():
             logger.warning("Cannot save safetensors: no active MLflow run")
             return

@@ -163,7 +163,6 @@ class Evaluator:
         Returns:
             tuple[NDArray, NDArray, NDArray]: (image, label, prediction) arrays for one sample.
         """
-
         meta_model.model.eval()
         with torch.no_grad():
             data = next(iter(dataloader))

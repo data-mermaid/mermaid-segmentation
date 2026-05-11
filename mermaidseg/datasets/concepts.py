@@ -27,7 +27,6 @@ def initialize_benthic_hierarchy(
         dict[str, Optional[str]]: A dictionary where keys are attribute names (str) and
             values are the parent attribute names (str) or None.
     """
-
     response = requests.get(hierarchy_json_url, timeout=30)
     response.raise_for_status()
     data = response.json()
@@ -109,7 +108,6 @@ def generate_hierarchy_path(label: str, hierarchy_dict: dict[str, str]) -> list[
         the top ancestor. The first element is the original label, followed by its
         parent, the parent's parent, etc.
     """
-
     path = [label]
     label_tmp = label
     while label_tmp in hierarchy_dict and hierarchy_dict[label_tmp] is not None:
@@ -141,7 +139,6 @@ def initialize_benthic_concepts(
             benthic_concept_matrix: A DataFrame with rows indexed by the original labels and
                 columns by the unique concepts, initialized with zeros.
     """
-
     benthic_concept_set = set()
     for label in labelset_benthic:
         benthic_path = generate_hierarchy_path(label, hierarchy_dict)
@@ -178,7 +175,6 @@ def map_benthic_to_concept(
         A 1-D NumPy array containing the concept vector for the provided
         `benthic_label`. Shape will be (n_concepts,).
     """
-
     if isinstance(benthic_label, str) and benthic_label in benthic_concept_matrix.index:
         return benthic_concept_matrix.loc[benthic_label, :].to_numpy()
     if isinstance(benthic_label, int) and benthic_label <= len(benthic_concept_matrix.index):
