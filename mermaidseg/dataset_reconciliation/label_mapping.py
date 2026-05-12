@@ -53,6 +53,7 @@ def fetch_coralnet_to_mermaid(
     return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
 
 
+<<<<<<< HEAD
 def fetch_catlin_seaview_to_mermaid(
     mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=Catlin%20Seaview",
 ) -> dict[str, str]:
@@ -107,6 +108,8 @@ def fetch_moorea_labeled_corals_to_mermaid(
     return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
 
 
+=======
+>>>>>>> origin/main
 def coralscapes_to_mermaid() -> dict[str, list[str]]:
     """Static Coralscapes 39-class -> MERMAID benthic-attribute mapping.
 

@@ -1,5 +1,6 @@
 # MERMAID dataset
 
+<<<<<<< HEAD
 PyTorch dataset and supporting code for the MERMAID source dataset.
 
 The dataset class ([`MermaidDataset`](mermaid_dataset.py)) emits annotation
@@ -23,4 +24,9 @@ The MERMAID dataset is a continuously growing dataset with images uploaded by us
 - We apply padding to the annotations, with the assumption that for a specific point (pixel being) assigned to a class, the neighbouring pixels are very likely to also be in that class as these labels come either from a image classification approach that makes a prediction based on a image crop around the point, or a manual annotation, both of which are most likely not precise to a pixel level.
 
 ## Note
+=======
+The MERMAID Dataset can be used through the MermaidDataset class. This class reads the annotations from the mermaid_confirmed_annotations.parquet file found in the coral reef training S3 Bucket which can be found as the df_annotations attribute of the class, and from which the df_images attribute is also derived. The annotations of each image are done in a systematic approach, such that 25 points are taken in a 5x5 grid across the image (visualizations may not show this as currently a RandomCrop is used). From the annotations dataframe, which contains the label for a specific row & column in the image, we generate annotation masks which equal 0 (for background) and a class id for each annotated point (based on the id2label attribute).
+
+We apply padding to the annotations, with the assumption that for a specific point (pixel being) assigned to a class, the neighbouring pixels are very likely to also be in that class as these labels come either from a image classification approach that makes a prediction based on a image crop around the point, or a manual annotation, both of which are most likely not precise to a pixel level.
+>>>>>>> origin/main
 As the mermaid_confirmed_annotations.parquet is continuously being updated, each run currently might have slightly different results due to changes in the (number of) images. As a solution to this, we can potentially save occasional copies of the file (e.g. at the end of every month).

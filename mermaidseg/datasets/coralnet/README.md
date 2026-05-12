@@ -1,5 +1,6 @@
 # CoralNet dataset
 
+<<<<<<< HEAD
 PyTorch dataset and supporting code for the CoralNet source dataset.
 
 The dataset class ([`CoralNetDataset`](coralnet_dataset.py)) emits annotation
@@ -28,3 +29,9 @@ CoralNet (https://coralnet.ucsd.edu/) is an online repository of annotated coral
 
 ## Note
 The parquet file currently only contains a subset of the sources and annotations and needs to be updated.
+=======
+The CoralNet Dataset can be used through the CoralNetDataset class. This class reads the annotations from the coralnet_annotations_30112025.parquet file found in the dev-datamermaid-sm-sources S3 Bucket which can be found as the df_annotations attribute of the class, and from which the df_images attribute is also derived. Unlike the systematic annotation of MERMAID, annotations in CoralNet are usually acquired through random sampling or just human labels across the image (which result in random annotations). From the annotations dataframe, which contains the label for a specific row & column in the image, we generate annotation masks which equal 0 (for background) and a class id for each annotated point (based on the id2label attribute). The CoralNet classes are mapped to MERMAID classes using the LabelMapping API endpoint.
+
+We apply padding to the annotations, with the assumption that for a specific point (pixel being) assigned to a class, the neighbouring pixels are very likely to also be in that class as these labels come either from a image classification approach that makes a prediction based on a image crop around the point, or a manual annotation, both of which are most likely not precise to a pixel level.
+The parquet file currently only contains a subset of the sources in order to speed up data loading, and can be updated using the mermaidseg/nbs/datasets/CoralNet_Annotations.ipynb notebook.
+>>>>>>> origin/main
