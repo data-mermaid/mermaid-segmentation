@@ -29,13 +29,9 @@ from mermaidseg.dataset_reconciliation.concepts import (
 )
 from mermaidseg.dataset_reconciliation.label_mapping import (
     coralscapes_to_mermaid,
-<<<<<<< HEAD
     fetch_catlin_seaview_to_mermaid,
     fetch_coralnet_to_mermaid,
     fetch_moorea_labeled_corals_to_mermaid,
-=======
-    fetch_coralnet_to_mermaid,
->>>>>>> origin/main
 )
 
 
@@ -69,13 +65,8 @@ class SourceLabelRegistry:
         source_to_target_name_maps: Optional mapping
             ``{SOURCE_NAME: {source_label_name: target_label_name}}``. Defaults
             are looked up per ``SOURCE_NAME``: ``mermaid`` is identity,
-<<<<<<< HEAD
             ``coralscapes`` uses the static dict, ``coralnet`` and
             ``catlin_seaview`` are fetched from the MERMAID API.
-=======
-            ``coralscapes`` uses the static dict, ``coralnet`` is fetched from
-            the MERMAID API.
->>>>>>> origin/main
         concept_hierarchy: Optional benthic-attribute name->parent-name dict.
             If supplied (or if ``compute_concepts=True`` and not supplied), it
             is fetched from the MERMAID API.
@@ -229,7 +220,6 @@ class SourceLabelRegistry:
                     if tgt is not None and src in ds.source_name2id
                 }
                 continue
-<<<<<<< HEAD
             if name == "catlin_seaview":
                 if not fetch_remote:
                     raise ValueError(
@@ -256,8 +246,6 @@ class SourceLabelRegistry:
                     if tgt is not None and src in ds.source_name2id
                 }
                 continue
-=======
->>>>>>> origin/main
             if name in _BUILTIN_DEFAULT_FETCHERS:
                 resolved[name] = _BUILTIN_DEFAULT_FETCHERS[name](ds)
                 continue
