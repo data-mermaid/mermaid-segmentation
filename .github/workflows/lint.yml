@@ -3,7 +3,19 @@ name: Lint
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.py"
+      - "**/*.pyi"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/lint.yml"
   pull_request:
+    paths:
+      - "**/*.py"
+      - "**/*.pyi"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/lint.yml"
 
 jobs:
   lint:
@@ -11,7 +23,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: Detect changed Python files
+        id: changed-python-files
+        uses: tj-actions/changed-files@v46
+        with:
+          files: |
+            **/*.py
+            **/*.pyi
       - name: Check lockfile is up to date
         run: uv lock --check
-      - run: uv run --group lint ruff check .
-      - run: uv run --group lint ruff format --check .
+      - name: Ruff check (changed files only)
+        if: steps.changed-python-files.outputs.any_changed == 'true'
+        run: uv run --group lint ruff check ${{ steps.changed-python-files.outputs.all_changed_files }}
+      - name: Ruff format check (changed files only)
+        if: steps.changed-python-files.outputs.any_changed == 'true'
+        run: uv run --group lint ruff format --check ${{ steps.changed-python-files.outputs.all_changed_files }}
