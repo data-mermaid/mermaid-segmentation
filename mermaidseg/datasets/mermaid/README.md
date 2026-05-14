@@ -6,7 +6,7 @@ The dataset class ([`MermaidDataset`](mermaid_dataset.py)) emits annotation
 masks in the **MERMAID benthic attribute label space**. The MERMAID label
 space is the canonical target space used by
 [`SourceLabelRegistry`](../../dataset_reconciliation/registry.py); the
-`source -> target` mapping for MERMAID is therefore the identity (modulo the
+`source -> target` mapping for MERMAID is therefore the identity (minus the
 global offset assigned by the registry).
 
 The dataset class reads the annotations from the a parquet file (s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet), from which the images are also derived.

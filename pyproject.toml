@@ -14,7 +14,7 @@ dependencies = [
     "pandas",
     "pillow",
     "requests",
-    "torch>=2.2,<2.8",      
+    "torch>=2.4,<2.8",      
     "transformers",
     "datasets>=3.0",       
     "s3fs",
@@ -38,7 +38,6 @@ dependencies = [
 [project.optional-dependencies]
 notebooks = [
     "jupyter",
-    "ipykernel",
     "ipywidgets",
     "wandb>=0.25.0",
 ]
@@ -55,10 +54,6 @@ tests = [
 lint = [
     "ruff>=0.15.8",
     "pre-commit>=3.0",
-]
-notebooks-ci = [
-    "nbqa>=1.9",
-    "ruff>=0.15.8",
 ]
 dev = [
     {include-group = "tests"},
