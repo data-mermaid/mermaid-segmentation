@@ -14,7 +14,7 @@ dependencies = [
     "pandas",
     "pillow",
     "requests",
-    "torch>=2.0,<2.3",
+    "torch>=2.4,<2.8",      
     "transformers",
     "datasets",
     "s3fs",
