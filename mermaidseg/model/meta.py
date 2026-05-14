@@ -263,9 +263,9 @@ class MetaModel:
         segmentation_outputs = self.model(images)
 
         if self.training_mode == "concept-bottleneck":
-            assert (
-                target_concepts is not None
-            ), "target_concepts must be provided in 'concept-bottleneck' mode"
+            assert target_concepts is not None, (
+                "target_concepts must be provided in 'concept-bottleneck' mode"
+            )
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
             loss, loss_components = self.loss(
