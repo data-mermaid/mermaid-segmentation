@@ -2,7 +2,6 @@ import getpass
 from urllib.parse import urljoin, urlparse
 
 import boto3
-import numpy as np
 import requests
 from bs4 import BeautifulSoup
 
@@ -29,27 +28,6 @@ prefix = "coralnet-public-images"
 # User credentials for CoralNet
 username = input("CoralNet username: ")
 password = getpass.getpass("CoralNet password: ")
-
-# Initialize list of CoralNet public sources in the pyspacer-bucket
-s3 = boto3.client("s3")
-coralnet_bucket_name = "2310-coralnet-public-sources"
-
-response = s3.list_objects_v2(Bucket=coralnet_bucket_name, Delimiter="/")
-if "CommonPrefixes" in response:
-    subdirectories = [prefix["Prefix"] for prefix in response["CommonPrefixes"]]
-else:
-    print("No subdirectories found.")
-
-coralnet_sources = np.sort(
-    [int(source[1:-1]) for source in subdirectories if source[0] == "s"]
-).astype(str)
-
-downloader = CoralNetDownloader(username=username, password=password)
-for source_id in coralnet_sources:
-    print("Source ID", source_id)
-    if check_s3_prefix_exists(bucket_name=bucket_name, s3_prefix=prefix, source_id=source_id):
-        continue
-    downloader.download_source(source_id=source_id, bucket_name=bucket_name, s3_prefix=prefix)
 
 # Now check for any other public CoralNet sources not in the pyspacer-bucket - Last run: 20.10.2025
 url = "https://coralnet.ucsd.edu/source/about/"

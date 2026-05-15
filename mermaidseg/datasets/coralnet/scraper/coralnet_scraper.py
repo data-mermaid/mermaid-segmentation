@@ -517,18 +517,7 @@ class CoralNetDownloader:
         s3_prefix: str = "coralnet-public-images",
     ) -> None:
         """Download all images from a DataFrame."""
-        # Save image list
-        csv_buffer = io.StringIO()
-        images_df.to_csv(csv_buffer, index=False)
 
-        s3_key = f"{s3_prefix}/s{source_id}/image_list.csv"
-
-        # Upload to S3
-        self.s3.put_object(
-            Bucket=bucket_name, Key=s3_key, Body=csv_buffer.getvalue(), ContentType="text/csv"
-        )
-
-        print(f"✓ Images saved to s3://{bucket_name}/{s3_key}")
         success = True
 
         # Filter out rows without URLs
@@ -543,20 +532,11 @@ class CoralNetDownloader:
         with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as executor:
             futures = []
             for _, row in valid_images.iterrows():
-                name = (
-                    row["Image Page"].replace("/image/", "").replace("/view/", "")
-                )  # .split("image/")[1].split("/view/")[0] #row['Name']
+                name = row["Image Page"].replace("/image/", "").replace("/view/", "")
                 url = row["Image URL"]
-                clean_name = (
-                    name + ".jpg"
-                )  # name.replace(".jpg", "").replace(" - Confirmed", "") + ".jpg"
+                clean_name = name + ".jpg"
                 s3_key = f"{s3_prefix}/s{source_id}/images/{clean_name}"
-
-                # path = os.path.join(image_dir.replace(".jpg", ""), name.replace(".jpg", "").replace(" - Confirmed", "") + ".jpg")
-                # print(path)
                 futures.append(executor.submit(self.download_image_to_s3, url, bucket_name, s3_key))
-
-                # futures.append(executor.submit(self.download_image, url, path))
 
             successful = 0
             for completed, future in enumerate(concurrent.futures.as_completed(futures), 1):
@@ -595,11 +575,8 @@ class CoralNetDownloader:
 
         # Check permissions
         if not self.check_permissions(source_id):
-            print(f"Cannot access source {source_id}")
-            return True
-            # raise Exception(f"Cannot access source {source_id}")
+            raise Exception(f"Cannot access source {source_id}")
 
-        success = True
         n_images = 0
 
         # Download metadata
@@ -612,39 +589,61 @@ class CoralNetDownloader:
 
             if n_images == 0:
                 print("Source appears to be empty")
-                # os.makedirs(os.path.join(source_dir, "empty"), exist_ok=True)
                 return True
 
         # Download labelset
         if download_labelset and not self.download_labelset(
             source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
         ):
-            print("Warning: Failed to download labelset")
+            print(f"Warning: Failed to download labelset for source {source_id}")
 
         # Download annotations
         if download_annotations and not self.download_annotations(
             source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
         ):
-            print("Warning: Failed to download annotations")
-            return success  # Temporary addition to skip very large sources
+            print(f"Warning: Failed to download annotations for source {source_id}")
+            return False
 
         # Download images
         if download_images:
             images_df, images_success = self.get_images(source_id)
+            batch_size = 1000
             if images_success and images_df is not None and len(images_df) > 0:
-                # Get image URLs
-                image_urls = self.get_image_urls(images_df["Image Page"].tolist())
-                images_df["Image URL"] = image_urls
-
-                # Download images
-                self.download_images(
-                    images_df, source_id, bucket_name=bucket_name, s3_prefix=s3_prefix
+                images_df = images_df.reset_index(drop=True)
+                # Save image list
+                csv_buffer = io.StringIO()
+                images_df.to_csv(csv_buffer, index=False)
+                s3_key = f"{s3_prefix}/s{source_id}/image_list.csv"
+                self.s3.put_object(
+                    Bucket=bucket_name,
+                    Key=s3_key,
+                    Body=csv_buffer.getvalue(),
+                    ContentType="text/csv",
                 )
+                print(f"✓ Images saved to s3://{bucket_name}/{s3_key}")
+
+                for start in range(0, len(images_df), batch_size):
+                    end = start + batch_size
+                    # Get image URLs
+                    image_urls = self.get_image_urls(
+                        images_df.loc[start:end, "Image Page"].tolist()
+                    )
+                    images_df.loc[start:end, "Image URL"] = image_urls
+
+                    # Download images
+                    self.download_images(
+                        images_df.loc[start:end],
+                        source_id,
+                        bucket_name=bucket_name,
+                        s3_prefix=s3_prefix,
+                    )
             else:
-                print("Warning: No images found or failed to retrieve image list")
+                print(
+                    f"Warning: No images found or failed to retrieve image list for source {source_id}"
+                )
 
         print(f"✓ Completed downloading source {source_id}")
-        return success
+        return True
 
     def cleanup(self):
         """Clean up resources."""
