@@ -78,9 +78,6 @@ select = ["E", "F", "I", "UP", "B", "C4", "RET", "SIM", "PD"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/verify_dataset_stats_subset.py" = [
-    "E402", # imports after sys.path bootstrap so `tests.*` resolves when run as a file
-]
 "**/*.ipynb" = [
     "F821",   # undefined names — common in exploratory notebook cells
     "B018",   # useless expression — used to display values in notebooks
