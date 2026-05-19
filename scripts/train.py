@@ -394,6 +394,7 @@ def _run_training(args: argparse.Namespace) -> None:
         logger.log_dataloader_params(val_loader, prefix="val_loader")
         logger.log_dataloader_params(test_loader, prefix="test_loader")
         logger.log_reconciliation(registry)
+        logger.log_dataset_statistics({"train": train_ds, "val": val_ds, "test": test_ds}, registry)
 
         try:
             train_model(
