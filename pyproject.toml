@@ -14,9 +14,9 @@ dependencies = [
     "pandas",
     "pillow",
     "requests",
-    "torch>=2.4,<2.8",      
+    "torch>=2.4,<2.8",
     "transformers",
-    "datasets>=3.0",       
+    "datasets>=3.0",
     "s3fs",
     "segmentation-models-pytorch",
     "mlflow",
@@ -33,7 +33,11 @@ dependencies = [
     "sagemaker-mlflow>=0.2.0",
     "requests-auth-aws-sigv4>=0.7",
     "safetensors>=0.4.0",
+    "ibis-framework[duckdb]>=9.0",
 ]
+
+[project.scripts]
+coralnet-etl = "mermaidseg.datasets.coralnet.etl.__main__:main"
 
 [project.optional-dependencies]
 notebooks = [
