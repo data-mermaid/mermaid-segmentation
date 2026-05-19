@@ -304,9 +304,7 @@ def build_manifest(
         },
         "tile_size": TILE,
         "num_classes_incl_unlabeled": len(classes),
-        "stats": {
-            site: {"num_tiles": num_tiles_per_site.get(site, 0)} for site in MOSAICS
-        },
+        "stats": {site: {"num_tiles": num_tiles_per_site.get(site, 0)} for site in MOSAICS},
         "num_uploaded_this_run": num_uploaded_this_run,
     }
 
@@ -334,7 +332,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="By default, tile keys already in S3 are skipped; pass to re-upload.",
     )
     parser.add_argument("--upload-workers", type=int, default=16)
-    parser.add_argument("--dry-run", action="store_true", help="Compute everything but skip S3 writes.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Compute everything but skip S3 writes."
+    )
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -379,7 +379,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parquet_uri = f"s3://{args.bucket}/{annotations_key}"
     if args.dry_run:
-        logger.info("[dry-run] Would write parquet (%d rows) to %s", len(df_annotations), parquet_uri)
+        logger.info(
+            "[dry-run] Would write parquet (%d rows) to %s", len(df_annotations), parquet_uri
+        )
     else:
         logger.info("Writing %d annotation rows -> %s", len(df_annotations), parquet_uri)
         df_annotations.to_parquet(parquet_uri, engine="pyarrow", index=False)
@@ -395,7 +397,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     s3 = boto3.client("s3")
-    classes_uri = upload_json(s3, args.bucket, f"{prefix}/classes.json", classes_global, args.dry_run)
+    classes_uri = upload_json(
+        s3, args.bucket, f"{prefix}/classes.json", classes_global, args.dry_run
+    )
     colors_uri = upload_json(s3, args.bucket, f"{prefix}/colors.json", colors_global, args.dry_run)
     manifest = build_manifest(
         bucket=args.bucket,

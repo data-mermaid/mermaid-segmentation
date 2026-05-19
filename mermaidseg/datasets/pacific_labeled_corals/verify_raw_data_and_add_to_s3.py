@@ -130,9 +130,7 @@ def collect_subset_inputs(
             imgs_dir = subset_dir / "imgs"
             for required in (imagemap_path, ann_path, imgs_dir):
                 if not required.exists():
-                    raise FileNotFoundError(
-                        f"Missing expected file/dir: {required}"
-                    )
+                    raise FileNotFoundError(f"Missing expected file/dir: {required}")
             out[(site, subset)] = {
                 "subset_dir": subset_dir,
                 "imagemap": read_imagemap(imagemap_path),
@@ -244,9 +242,7 @@ def build_annotations_df(
 
     df = pd.DataFrame.from_records(records)
     if df.empty:
-        raise RuntimeError(
-            "No usable annotation rows were assembled; check --data-dir layout."
-        )
+        raise RuntimeError("No usable annotation rows were assembled; check --data-dir layout.")
 
     df = df.astype(
         {
@@ -343,9 +339,7 @@ def upload_images(
         logger.info("No new images to upload.")
         return 0
 
-    logger.info(
-        "Uploading %d image objects with %d workers ...", len(tasks), workers
-    )
+    logger.info("Uploading %d image objects with %d workers ...", len(tasks), workers)
 
     def _upload(local: Path, key: str) -> None:
         boto3.client("s3").upload_file(str(local), bucket, key)
@@ -375,8 +369,7 @@ def upload_json(s3, bucket: str, key: str, payload: dict, dry_run: bool) -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Verify a manually downloaded Pacific Labeled Corals dataset and "
-            "upload to S3."
+            "Verify a manually downloaded Pacific Labeled Corals dataset and upload to S3."
         ),
     )
     parser.add_argument(
@@ -391,9 +384,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--bucket", default="dev-datamermaid-sm-sources")
-    parser.add_argument(
-        "--prefix", default="external_validation_datasets/pacific_labeled_corals"
-    )
+    parser.add_argument("--prefix", default="external_validation_datasets/pacific_labeled_corals")
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument(
         "--no-skip-existing-s3",
@@ -445,9 +436,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     label_names = sorted(labelid_to_name.values())
     classes, colors = build_classes_and_colors(label_names)
-    logger.info(
-        "Built classes.json with %d entries (incl. unlabeled).", len(classes)
-    )
+    logger.info("Built classes.json with %d entries (incl. unlabeled).", len(classes))
 
     subset_inputs = collect_subset_inputs(data_root)
     n_imagemap_entries = sum(len(info["imagemap"]) for info in subset_inputs.values())
@@ -466,9 +455,7 @@ def main(argv: list[str] | None = None) -> int:
         labelid_to_name=labelid_to_name,
     )
 
-    n_unique_images = (
-        df_annotations.drop_duplicates(["site", "subset", "image_id"]).shape[0]
-    )
+    n_unique_images = df_annotations.drop_duplicates(["site", "subset", "image_id"]).shape[0]
     logger.info(
         "Built annotations DataFrame: %d rows across %d unique images.",
         len(df_annotations),
@@ -551,9 +538,7 @@ def main(argv: list[str] | None = None) -> int:
             "num_images_uploaded_this_run": num_uploaded,
         },
     }
-    manifest_uri = upload_json(
-        s3, args.bucket, f"{prefix}/manifest.json", manifest, args.dry_run
-    )
+    manifest_uri = upload_json(s3, args.bucket, f"{prefix}/manifest.json", manifest, args.dry_run)
 
     print(f"Parquet:  {parquet_uri}")
     print(f"Manifest: {manifest_uri}")

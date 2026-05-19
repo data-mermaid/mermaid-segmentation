@@ -99,18 +99,12 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
         if whitelist_sites is not None and blacklist_sites is not None:
             raise ValueError("Cannot specify both whitelist_sites and blacklist_sites.")
         if whitelist_subsets is not None and blacklist_subsets is not None:
-            raise ValueError(
-                "Cannot specify both whitelist_subsets and blacklist_subsets."
-            )
+            raise ValueError("Cannot specify both whitelist_subsets and blacklist_subsets.")
         if annotator_column not in VALID_ANNOTATOR_COLUMNS:
             raise ValueError(
-                f"annotator_column={annotator_column!r} not in "
-                f"{VALID_ANNOTATOR_COLUMNS}"
+                f"annotator_column={annotator_column!r} not in {VALID_ANNOTATOR_COLUMNS}"
             )
-        if (
-            fallback_annotator is not None
-            and fallback_annotator not in VALID_ANNOTATOR_COLUMNS
-        ):
+        if fallback_annotator is not None and fallback_annotator not in VALID_ANNOTATOR_COLUMNS:
             raise ValueError(
                 f"fallback_annotator={fallback_annotator!r} not in "
                 f"{VALID_ANNOTATOR_COLUMNS} (or None)"
