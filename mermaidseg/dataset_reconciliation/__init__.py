@@ -27,3 +27,5 @@ __all__ = [
     "source_labels_to_concepts",
     "source_labels_to_target_labels",
 ]
+
+from mermaidseg.dataset_reconciliation import dataset_stats  # noqa: F401
