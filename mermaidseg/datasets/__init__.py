@@ -11,6 +11,7 @@ from mermaidseg.datasets.coralnet import CoralNetDataset
 from mermaidseg.datasets.coralscapes import CoralscapesDataset
 from mermaidseg.datasets.mermaid import MermaidDataset
 from mermaidseg.datasets.moorea_labeled_corals import MooreaLabeledCoralsDataset
+from mermaidseg.datasets.ucsd_mosaics import UCSDMosaicsDataset
 
 __all__ = [
     "BaseCoralDataset",
@@ -19,5 +20,6 @@ __all__ = [
     "CoralscapesDataset",
     "MermaidDataset",
     "MooreaLabeledCoralsDataset",
+    "UCSDMosaicsDataset",
     "worker_init_fn",
 ]
