@@ -46,7 +46,7 @@ class MetaModel:
         num_classes (int): Number of segmentation output (target) classes.
         device (str | torch.device): Device the model and tensors live on.
         model_kwargs (ConfigDict): Model-specific config passed to the architecture.
-        training_kwargs (ConfigDict): Training hyperparameters 
+        training_kwargs (ConfigDict): Training hyperparameters
             (epochs, iterations_per_train_epoch, iterations_per_val_epoch, optimizer, scheduler, loss).
         model (torch.nn.Module | transformers.PreTrainedModel): The instantiated model.
         loss (torch.nn.Module | None): Loss function; None until `training_kwargs` provides one.
