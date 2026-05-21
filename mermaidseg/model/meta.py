@@ -46,7 +46,8 @@ class MetaModel:
         num_classes (int): Number of segmentation output (target) classes.
         device (str | torch.device): Device the model and tensors live on.
         model_kwargs (ConfigDict): Model-specific config passed to the architecture.
-        training_kwargs (ConfigDict): Training hyperparameters (epochs, optimizer, scheduler, loss).
+        training_kwargs (ConfigDict): Training hyperparameters 
+            (epochs, iterations_per_train_epoch, iterations_per_val_epoch, optimizer, scheduler, loss).
         model (torch.nn.Module | transformers.PreTrainedModel): The instantiated model.
         loss (torch.nn.Module | None): Loss function; None until `training_kwargs` provides one.
         optimizer (torch.optim.Optimizer): Optimiser instance.
@@ -122,6 +123,12 @@ class MetaModel:
         ], f"Invalid training_mode: {self.training_mode}"
 
         self.training_kwargs = training_kwargs
+        self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
+        self._train_loader_iter = None
+        self._train_loader_id = None
+        self.iterations_per_val_epoch = training_kwargs.get("iterations_per_val_epoch")
+        self._val_loader_iter = None
+        self._val_loader_id = None
         self.source_to_target_lookup = (
             source_to_target_lookup.to(device).long()
             if source_to_target_lookup is not None
@@ -310,6 +317,12 @@ class MetaModel:
             A 3-tuple of ``(average_loss, metric_results, timing)``.
         """
 
+        iterations_per_train_epoch = self.iterations_per_train_epoch
+        if iterations_per_train_epoch is None:
+            iterations_per_train_epoch = len(train_loader)
+        if iterations_per_train_epoch <= 0:
+            raise ValueError("iterations_per_train_epoch must be > 0.")
+
         running_loss = 0.0
         running_loss_components: dict[str, float] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
@@ -324,7 +337,19 @@ class MetaModel:
             torch.cuda.synchronize()
         batch_end = time.perf_counter()
 
-        for data in tqdm(train_loader):
+        if self._train_loader_id != id(train_loader):
+            self._train_loader_iter = iter(train_loader)
+            self._train_loader_id = id(train_loader)
+
+        for _ in tqdm(range(iterations_per_train_epoch)):
+            assert self._train_loader_iter is not None
+            try:
+                data = next(self._train_loader_iter)
+            except StopIteration:
+                self._train_loader_iter = iter(train_loader)
+                self._train_loader_id = id(train_loader)
+                data = next(self._train_loader_iter)
+
             if use_cuda:
                 torch.cuda.synchronize()
             data_time_total += time.perf_counter() - batch_end
@@ -438,10 +463,27 @@ class MetaModel:
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch."""
 
+        iterations_per_val_epoch = self.iterations_per_val_epoch
+        if iterations_per_val_epoch is None:
+            iterations_per_val_epoch = len(val_loader)
+        if iterations_per_val_epoch <= 0:
+            raise ValueError("iterations_per_val_epoch must be > 0.")
+
         running_loss = 0.0
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 
-        for data in tqdm(val_loader):
+        if self._val_loader_id != id(val_loader):
+            self._val_loader_iter = iter(val_loader)
+            self._val_loader_id = id(val_loader)
+
+        for _ in tqdm(range(iterations_per_val_epoch)):
+            assert self._val_loader_iter is not None
+            try:
+                data = next(self._val_loader_iter)
+            except StopIteration:
+                self._val_loader_iter = iter(val_loader)
+                self._val_loader_id = id(val_loader)
+                data = next(self._val_loader_iter)
             images, source_labels = data
             images = images.to(self.device).float()
             source_labels = source_labels.long().to(self.device)
