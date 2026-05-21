@@ -20,6 +20,7 @@ from mermaidseg.logger import (
     get_mlflow_tracking_uri,
     mlflow_connect,
 )
+from tests._dataset_stubs import make_mermaid_stub, make_registry_stub
 
 from .conftest import FakeMetaModel
 
@@ -740,3 +741,86 @@ class TestLogDataloaderParams:
         )
         lgr.log_dataloader_params(self._make_loader())
         assert lgr.mlflow_run_id is None
+
+
+# ===================================================================
+# Logger.log_dataset_statistics
+# ===================================================================
+
+
+class TestLogDatasetStatistics:
+    def _stub_and_registry(self):
+        stub = make_mermaid_stub(
+            image_to_classes={
+                "img-1": ["Acropora"],
+                "img-2": ["Porites"],
+                "img-3": ["Acropora", "Porites"],
+            },
+            image_to_region={"img-1": "A", "img-2": "B", "img-3": "B"},
+            source_id2name={1: "Acropora", 2: "Porites"},
+            global_offset=0,
+        )
+        registry = make_registry_stub(
+            target_id2label={1: "Acropora", 2: "Porites"},
+            source_to_target_pairs=[(1, 1), (2, 2)],
+        )
+        return stub, registry
+
+    def test_happy_path_writes_four_artifacts(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        from torch.utils.data import Subset
+
+        stub, registry = self._stub_and_registry()
+        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+        try:
+            lgr.log_dataset_statistics(
+                {"train": Subset(stub, [0]), "val": Subset(stub, [1]), "test": Subset(stub, [2])},
+                registry,
+            )
+            run_id = lgr.mlflow_run_id
+        finally:
+            lgr.end_run()
+
+        client = mlflow.MlflowClient()
+        artifacts = {a.path for a in client.list_artifacts(run_id, "dataset_stats")}
+        assert artifacts == {
+            "dataset_stats/class_counts.csv",
+            "dataset_stats/source_stats.csv",
+            "dataset_stats/class_by_source.csv",
+            "dataset_stats/train_summary.yaml",
+        }
+
+    def test_disabled_logger_is_noop(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        _, registry = self._stub_and_registry()
+        lgr = Logger(
+            config=make_config(logger={"experiment_name": None}), meta_model=fake_meta_model
+        )
+        lgr.log_dataset_statistics({"train": object()}, registry)  # must not raise
+
+    def test_artifact_failure_does_not_drop_others(
+        self, tmp_mlflow_uri, make_config, fake_meta_model
+    ):
+        from torch.utils.data import Subset
+
+        stub, registry = self._stub_and_registry()
+        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+
+        real_log_text = mlflow.log_text
+
+        def fake_log_text(text, artifact_file):
+            if artifact_file.endswith("class_counts.csv"):
+                raise RuntimeError("boom")
+            return real_log_text(text, artifact_file)
+
+        try:
+            with patch("mermaidseg.logger.mlflow.log_text", side_effect=fake_log_text):
+                lgr.log_dataset_statistics({"train": Subset(stub, [0])}, registry)
+            run_id = lgr.mlflow_run_id
+        finally:
+            lgr.end_run()
+
+        client = mlflow.MlflowClient()
+        artifacts = {a.path for a in client.list_artifacts(run_id, "dataset_stats")}
+        assert "dataset_stats/class_counts.csv" not in artifacts
+        assert "dataset_stats/source_stats.csv" in artifacts
+        assert "dataset_stats/class_by_source.csv" in artifacts
+        assert "dataset_stats/train_summary.yaml" in artifacts

@@ -23,11 +23,19 @@ from typing import Any
 import mlflow
 import numpy as np
 import torch
+import yaml
 from mlflow.data.code_dataset_source import CodeDatasetSource
 from mlflow.data.meta_dataset import MetaDataset
 from safetensors.torch import save_file as save_safetensors
 from torch.utils.data import DataLoader
 
+from mermaidseg.dataset_reconciliation.dataset_stats import (
+    compute_class_by_source,
+    compute_class_counts,
+    compute_source_stats,
+    compute_train_summary,
+    resolve_split_annotations,
+)
 from mermaidseg.model.meta import MetaModel
 
 logger = logging.getLogger(__name__)
@@ -472,6 +480,74 @@ class Logger:
             mlflow.log_param("num_global_source_classes", int(registry.num_global_source_classes))
         except Exception as e:
             logger.warning("Failed to log SourceLabelRegistry to MLflow: %s", e)
+
+    def log_dataset_statistics(
+        self,
+        splits: dict,
+        registry,
+        *,
+        artifact_dir: str = "dataset_stats",
+    ) -> None:
+        """Log per-run dataset distribution statistics as MLflow artifacts.
+
+        Emits four files under ``artifact_dir/``:
+
+        * ``class_counts.csv`` — target-space per-class × split counts
+        * ``source_stats.csv`` — per region/source × split image and annotation counts
+        * ``class_by_source.csv`` — long-format source × class × split drift matrix
+        * ``train_summary.yaml`` — topK shares, effective_num_classes, density distribution
+
+        Strictly read-only against datasets. Per-split resolution failures and
+        per-artifact write failures are isolated.
+        """
+        if not self._ensure_active_run():
+            return
+
+        resolved: dict = {}
+        for split_name, split in splits.items():
+            try:
+                r = resolve_split_annotations(split, registry)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to resolve split %s: %s", split_name, e)
+                continue
+            if r is None:
+                continue
+            resolved[split_name] = r
+
+        if not resolved:
+            logger.warning("log_dataset_statistics: no splits resolved; nothing to log")
+            return
+
+        self._log_csv_artifact(
+            f"{artifact_dir}/class_counts.csv",
+            lambda: compute_class_counts(resolved, registry),
+        )
+        self._log_csv_artifact(
+            f"{artifact_dir}/source_stats.csv",
+            lambda: compute_source_stats(resolved),
+        )
+        self._log_csv_artifact(
+            f"{artifact_dir}/class_by_source.csv",
+            lambda: compute_class_by_source(resolved, registry),
+        )
+        self._log_yaml_artifact(
+            f"{artifact_dir}/train_summary.yaml",
+            lambda: compute_train_summary(resolved, registry),
+        )
+
+    @staticmethod
+    def _log_csv_artifact(path: str, build) -> None:
+        try:
+            mlflow.log_text(build().to_csv(index=False), path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to log %s: %s", path, e)
+
+    @staticmethod
+    def _log_yaml_artifact(path: str, build) -> None:
+        try:
+            mlflow.log_text(yaml.safe_dump(build(), sort_keys=False), path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to log %s: %s", path, e)
 
     def log_benchmark_context(
         self,
