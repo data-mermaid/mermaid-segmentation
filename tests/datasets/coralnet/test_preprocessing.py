@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, Mock
 import pandas as pd
 from PIL import Image
 
+from mermaidseg.datasets.coralnet.preprocessing.manifest import build_manifest
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
     get_pending_items,
     phase_1_scan_for_resize,
@@ -215,3 +216,54 @@ def test_phase_2_resize_one_image(tmp_path):
     checkpoint_df_updated = read_checkpoint(checkpoint_path)
     assert checkpoint_df_updated.loc[0, "status"] == "completed"
     assert checkpoint_df_updated.loc[0, "resize_timestamp"] is not None
+
+
+def test_manifest_schema_is_correct():
+    """Manifest has required columns."""
+    df_images = pd.DataFrame(
+        {
+            "source_id": [1, 1, 2],
+            "image_id": ["a", "b", "c"],
+            "width": [3000, 800, 2500],
+            "height": [2000, 600, 1500],
+        }
+    )
+
+    checkpoint_df = pd.DataFrame(
+        {
+            "source_id": [1, 1, 2],
+            "image_id": ["a", "b", "c"],
+            "status": ["completed", "failed", "completed"],
+            "resize_timestamp": [datetime.now(), None, datetime.now()],
+            "error_message": [None, "decode failed", None],
+        }
+    )
+
+    output_prefix = "etl-outputs/coralnet"
+    threshold = 2048
+
+    manifest_df = build_manifest(
+        df_images=df_images,
+        df_checkpoint=checkpoint_df,
+        output_prefix=output_prefix,
+        threshold=threshold,
+    )
+
+    # Check schema
+    required_columns = [
+        "source_id",
+        "image_id",
+        "original_width",
+        "original_height",
+        "resized_width",
+        "resized_height",
+        "output_s3_key",
+        "resize_timestamp",
+        "status",
+    ]
+    for col in required_columns:
+        assert col in manifest_df.columns, f"Missing column: {col}"
+
+    # Check data
+    assert len(manifest_df) == 3
+    assert manifest_df.loc[0, "original_width"] == 3000
