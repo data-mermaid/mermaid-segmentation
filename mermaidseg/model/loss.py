@@ -103,11 +103,12 @@ class ConceptBottleneckLoss(torch.nn.Module):
 
         class_loss_value = self.class_loss(outputs, target_labels)
 
-        label_mask = (target_labels > 0).unsqueeze(1)
+        concept_mask = concept_labels==0
+        concept_labels = concept_labels-1
         per_element_loss = self.concept_loss(concept_outputs, concept_labels)
 
-        masked_loss = per_element_loss * label_mask
-        denom = label_mask.sum() * outputs.shape[1] + 1e-8
+        masked_loss = per_element_loss * concept_mask
+        denom = concept_mask.sum() * outputs.shape[1] + 1e-8
         concept_loss_value = masked_loss.sum() / denom
 
         total_loss = class_loss_value + self.lambda_weight * concept_loss_value
