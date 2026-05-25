@@ -35,13 +35,7 @@ data:
                           6834, 6920, 6928, 6931, 6968, 7054]
 
   mermaid: 
-    train:
-    
-  catlin_seaview:
-    train:
-      whitelist_regions: ["ATL", "IND_CHA", "IND_MDV", "PAC_AUS"]
-    val:
-      whitelist_regions: ["PAC_IDN_PHL", "PAC_SLB", "PAC_TLS", "PAC_TWN", "PAC_USA"]
+    val: None # We currently have no validation data for the mermaid dataset, so we set this to None to avoid speculation.
 
   coralscapes:
     train:

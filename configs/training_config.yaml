@@ -1,5 +1,16 @@
 training:
     training_mode: "standard"
+    loss:
+        type: CrossEntropyLoss
+        ignore_index: 0
+    optimizer:
+        type: AdamW
+        lr: 0.00005
+        weight_decay: 0.01
+    scheduler:
+        type: PolynomialLR
+        power: 1
+        total_iters: 10
     epochs: 10
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
@@ -17,4 +28,4 @@ training:
                     'Siderastrea siderea', 'Soft coral', 'Sponge', 'Stylophora', 'Symphyllia', 'Turbinaria-algae', 
                     'Turbinaria-coral', 'Turf algae', 'Zoanthid']
     padding: 3
-    lr: 0.00001
+    label_roll_up: True
