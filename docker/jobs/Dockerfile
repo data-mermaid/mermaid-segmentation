@@ -28,8 +28,7 @@ COPY scripts ./scripts
 COPY configs ./configs
 
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e . && \
-    pip install --no-cache-dir albumentations segmentation-models-pytorch boto3 pydantic pyyaml
+    pip install --no-cache-dir -e .
 
 COPY docker/jobs/entrypoint.sh /opt/ml/code/entrypoint.sh
 RUN chmod +x /opt/ml/code/entrypoint.sh
