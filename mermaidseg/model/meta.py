@@ -125,10 +125,10 @@ class MetaModel:
         self.training_kwargs = training_kwargs
         self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
         self._train_loader_iter = None
-        self._train_loader_id = None
+        self._train_loader = None
         self.iterations_per_val_epoch = training_kwargs.get("iterations_per_val_epoch")
         self._val_loader_iter = None
-        self._val_loader_id = None
+        self._val_loader = None
         self.source_to_target_lookup = (
             source_to_target_lookup.to(device).long()
             if source_to_target_lookup is not None
@@ -337,9 +337,9 @@ class MetaModel:
             torch.cuda.synchronize()
         batch_end = time.perf_counter()
 
-        if self._train_loader_id != id(train_loader):
+        if self._train_loader is not train_loader:
+            self._train_loader = train_loader
             self._train_loader_iter = iter(train_loader)
-            self._train_loader_id = id(train_loader)
 
         for _ in tqdm(range(iterations_per_train_epoch)):
             assert self._train_loader_iter is not None
@@ -347,7 +347,7 @@ class MetaModel:
                 data = next(self._train_loader_iter)
             except StopIteration:
                 self._train_loader_iter = iter(train_loader)
-                self._train_loader_id = id(train_loader)
+                self._train_loader = train_loader
                 data = next(self._train_loader_iter)
 
             if use_cuda:
@@ -472,9 +472,9 @@ class MetaModel:
         running_loss = 0.0
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 
-        if self._val_loader_id != id(val_loader):
+        if self._val_loader is not val_loader:
+            self._val_loader = val_loader
             self._val_loader_iter = iter(val_loader)
-            self._val_loader_id = id(val_loader)
 
         for _ in tqdm(range(iterations_per_val_epoch)):
             assert self._val_loader_iter is not None
@@ -482,7 +482,7 @@ class MetaModel:
                 data = next(self._val_loader_iter)
             except StopIteration:
                 self._val_loader_iter = iter(val_loader)
-                self._val_loader_id = id(val_loader)
+                self._val_loader = val_loader
                 data = next(self._val_loader_iter)
             images, source_labels = data
             images = images.to(self.device).float()
