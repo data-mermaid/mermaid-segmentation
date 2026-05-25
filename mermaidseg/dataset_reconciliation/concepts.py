@@ -8,10 +8,40 @@ float tensor (with row 0 as the all-zeros background row).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import requests
 import torch
+
+
+DEFAULT_CLASS_TO_CONCEPTS_CSV = (
+    Path(__file__).resolve().parents[2] / "configs" / "class_to_concepts.csv"
+)
+
+
+## TODO: Temporary Fix
+import requests 
+def fetch_coralnet_id2label(
+    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
+) -> dict[str, str]:
+    """Fetch the CoralNet provider ID -> MERMAID benthic-attribute name mapping.
+
+    Returns a dict keyed by stringified CoralNet provider ID with values equal
+    to the MERMAID benthic-attribute name (or ``None`` if the CoralNet label
+    is not yet mapped).
+    """
+    response = requests.get(mapping_endpoint, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    labelset = list(data["results"])
+    while data.get("next"):
+        response = requests.get(data["next"], timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        labelset.extend(data["results"])
+    return {str(label["provider_id"]): label["provider_label"] for label in labelset}
 
 
 def initialize_benthic_hierarchy(
@@ -96,7 +126,36 @@ def generate_taxonomic_id_mapping(df: pd.DataFrame, taxonomic_col: str):
     return {value: idx for idx, value in enumerate(sorted_values)}
 
 
-def generate_one_hot_id_mapping(df: pd.DataFrame, taxonomic_col: str):
+def generate_taxonomic_binary_id_mapping(
+    df: pd.DataFrame, taxonomic_col: str
+) -> dict[str, list[int]] | None:
+    """Generate binary-style encodings for a taxonomic rank.
+
+    The concrete values for a rank become one column each. ``not_given`` maps
+    to all zeros, ``none`` maps to all ones, and each concrete value maps to 2
+    in its own column and 1 in the others.
+    """
+    concrete_values = sorted(
+        value
+        for value in df[taxonomic_col].dropna().unique()
+        if value not in ["not_given", "none"]
+    )
+    if not concrete_values:
+        return None
+
+    width = len(concrete_values)
+    mapping: dict[str, list[int]] = {
+        "not_given": [0] * width,
+        "none": [1] * width,
+    }
+    for index, value in enumerate(concrete_values):
+        encoded = [1] * width
+        encoded[index] = 2
+        mapping[value] = encoded
+    return mapping
+
+
+def generate_binary_concept_id_mapping(df: pd.DataFrame, taxonomic_col: str)-> dict[str | int] | None:
     """Generate a mapping for one hot (not really) encoded concepts.
 
     "not given" is always mapped to 0.
@@ -106,25 +165,17 @@ def generate_one_hot_id_mapping(df: pd.DataFrame, taxonomic_col: str):
     """
     unique_values = df[taxonomic_col].dropna().unique()
 
-    mapping = {}
-    mapping["not given"] = 0
-
     if (False in unique_values or "FALSE" in unique_values) and (
         True in unique_values or "TRUE" in unique_values
     ):
-        mapping[False] = 1
-        mapping["FALSE"] = 1
-        mapping[True] = 2
-        mapping["TRUE"] = 2
+        return {"not_given": 0, False: 1, "FALSE": 1, True: 2, "TRUE": 2}
     else:
-        for value in unique_values:
-            mapping[value] = 0
-    return mapping
-    # return {"not given": 0, False: 1, "FALSE": 1, True: 2, "TRUE": 2}
+        return None
 
 
 def initialize_taxonomic_concept_mapping(
     df_mapping: pd.DataFrame,
+    num_global_source: int
 ) -> tuple[torch.Tensor, dict[str, dict]]:
     """Initialize taxonomic concept mapping by generating a mapping from source labels to taxonomic
     concepts and a dictionary of names to ID mappings for each taxonomic rank."""
@@ -143,11 +194,10 @@ def initialize_taxonomic_concept_mapping(
     taxonomic_name2id = {}
     for col in taxonomic_concept_columns:
         taxonomic_name2id[col] = generate_taxonomic_id_mapping(df_mapping, col)
-        df_mapping_taxonomic[col] = df_mapping[col].map(taxonomic_name2id[col])
+        df_mapping_taxonomic[col] = df_mapping[col].apply(lambda x: taxonomic_name2id[col].get(x, 0))
     df_mapping_taxonomic = df_mapping_taxonomic.sort_values("global_id").reset_index(drop=True)
-
     source_to_taxonomic_concepts_np = np.zeros(
-        (df_mapping_taxonomic.shape[0] + 1, len(taxonomic_concept_columns)), dtype=np.int64
+        (num_global_source + 1, len(taxonomic_concept_columns)), dtype=np.int64
     )
     source_to_taxonomic_concepts_np[df_mapping_taxonomic["global_id"].to_numpy()] = (
         df_mapping_taxonomic[taxonomic_concept_columns].to_numpy()
@@ -156,13 +206,73 @@ def initialize_taxonomic_concept_mapping(
     return source_to_taxonomic_concepts, taxonomic_name2id
 
 
-def initialize_one_hot_concept_mapping(
+def initialize_taxonomic_binary_concept_mapping(
     df_mapping: pd.DataFrame,
+    num_global_source: int,
+) -> tuple[torch.Tensor, dict[str, dict[str, list[int]]]]:
+    """Initialize a binary-style taxonomic concept mapping.
+
+    Each concrete value within a taxonomic rank gets its own output column.
+    ``not_given`` is encoded as all zeros and ``none`` is encoded as all ones.
+    Concrete values are encoded as 2 at their own column and 1 everywhere else.
+    """
+    taxonomic_concept_columns = [
+        "kingdom",
+        "phylum",
+        "class",
+        "order",
+        "family",
+        "genus",
+        "species",
+    ]
+    df_mapping_taxonomic = df_mapping[
+        ["global_id", "source_label_class_name", "source_dataset_source"]
+    ].copy()
+    taxonomic_name2id: dict[str, dict[str, list[int]]] = {}
+    binary_concept_columns: list[str] = []
+
+    for col in taxonomic_concept_columns:
+        taxonomic_binary_mapping = generate_taxonomic_binary_id_mapping(df_mapping, col)
+        if taxonomic_binary_mapping is None:
+            continue
+
+        taxonomic_name2id[col] = taxonomic_binary_mapping
+        concrete_values = [
+            value for value in taxonomic_binary_mapping if value not in ["not_given", "none"]
+        ]
+        encoded_columns = pd.DataFrame(
+            df_mapping[col]
+            .apply(
+                lambda value: taxonomic_binary_mapping.get(
+                    value, taxonomic_binary_mapping["not_given"]
+                )
+            )
+            .tolist(),
+            columns=[f"{col}__{value}" for value in concrete_values],
+            index=df_mapping.index,
+        )
+        df_mapping_taxonomic = pd.concat([df_mapping_taxonomic, encoded_columns], axis=1)
+        binary_concept_columns.extend(encoded_columns.columns.tolist())
+
+    df_mapping_taxonomic = df_mapping_taxonomic.sort_values("global_id").reset_index(drop=True)
+    source_to_taxonomic_concepts_np = np.zeros(
+        (num_global_source + 1, len(binary_concept_columns)), dtype=np.int64
+    )
+    if binary_concept_columns:
+        source_to_taxonomic_concepts_np[df_mapping_taxonomic["global_id"].to_numpy()] = (
+            df_mapping_taxonomic[binary_concept_columns].to_numpy()
+        )
+    source_to_taxonomic_concepts = torch.from_numpy(source_to_taxonomic_concepts_np).long()
+    return source_to_taxonomic_concepts, taxonomic_name2id
+
+
+def initialize_binary_concept_mapping(
+    df_mapping: pd.DataFrame,
+    num_global_source: int
 ) -> tuple[torch.Tensor, dict[str, dict]]:
-    """Initialize one hot concept mapping by generating a mapping from source labels to the one hot
+    """Initialize binary concept mapping by generating a mapping from source labels to the binary
     concepts and a dictionary of names to ID mappings for each taxonomic rank."""
     morphologic_concept_columns = (
-        [
             "oval",
             "arborescent",
             "encrusting",
@@ -187,10 +297,9 @@ def initialize_one_hot_concept_mapping(
             "corymbose",
             "lobed_brain",
             "cup_coral",
-        ],
     )
-    health_concept_columns = (["dead", "bleached"],)
-    noncoral_concept_columns = [
+    health_concept_columns = ("dead", "bleached")
+    noncoral_concept_columns = (
         "algae",
         "background",
         "anthropogenic",
@@ -198,33 +307,38 @@ def initialize_one_hot_concept_mapping(
         "transect",
         "macroalgae",
         "dark",
-    ]
-    one_hot_concept_columns = (
+    )
+    binary_concept_columns = list(
         morphologic_concept_columns + health_concept_columns + noncoral_concept_columns
     )
 
-    df_mapping_one_hot = df_mapping[
+    df_mapping_binary = df_mapping[
         ["global_id", "source_label_class_name", "source_dataset_source"]
     ].copy()
-    one_hot_name2id = {}
-    for col in one_hot_concept_columns:
-        one_hot_name2id[col] = generate_one_hot_id_mapping(df_mapping, col)
-        df_mapping_one_hot[col] = df_mapping[col].map(one_hot_name2id[col])
-    df_mapping_one_hot = df_mapping_one_hot.sort_values("global_id").reset_index(drop=True)
+    binary_name2id = {}
+    valid_binary_concept_columns = []
+    for col in binary_concept_columns:
+        binary_mapping = generate_binary_concept_id_mapping(df_mapping, col)
+        if binary_mapping is not None:
+            binary_name2id[col] = binary_mapping
+            valid_binary_concept_columns.append(col)
+            df_mapping_binary[col] = df_mapping[col].apply(lambda x: binary_name2id[col].get(x,0))
 
+    df_mapping_binary = df_mapping_binary.sort_values("global_id").reset_index(drop=True)
     source_to_one_hot_concepts_np = np.zeros(
-        (df_mapping_one_hot.shape[0] + 1, len(one_hot_concept_columns)), dtype=np.int64
+        (num_global_source + 1, len(valid_binary_concept_columns)), dtype=np.int64
     )
-    source_to_one_hot_concepts_np[df_mapping_one_hot["global_id"].to_numpy()] = df_mapping_one_hot[
-        one_hot_concept_columns
+    source_to_one_hot_concepts_np[df_mapping_binary["global_id"].to_numpy()] = df_mapping_binary[
+        valid_binary_concept_columns
     ].to_numpy()
     source_to_one_hot_concepts = torch.from_numpy(source_to_one_hot_concepts_np).long()
-    return source_to_one_hot_concepts, one_hot_name2id
-
+    return source_to_one_hot_concepts, binary_name2id
 
 def initialize_benthic_concepts(
-    mapping_location: str = "s3://dev-datamermaid-sm-sources/coralnet-public-images/temporary/class_to_concepts.csv",
+    mapping_location: str | Path = DEFAULT_CLASS_TO_CONCEPTS_CSV,
     global_id2source: dict | None = None,
+    global_idmask: dict | None = None,
+    binary_taxonomy_encoding: bool = True,
 ):
     """The function initializes benthic concepts by loading a concept mapping file, subsetting it to
     the source label registry, and generating mappings for taxonomic and one-hot encoded concepts.
@@ -233,8 +347,15 @@ def initialize_benthic_concepts(
     dictionaries for taxonomic and one-hot concept ID mappings.
     """
     df_mapping = pd.read_csv(mapping_location)
+    num_global_source = len(global_id2source) if global_id2source is not None else len(df_mapping)
 
     if global_id2source is not None:
+        if global_idmask is not None:
+            global_id2source = {
+                global_id: source
+                for global_id, source in global_id2source.items()
+                if global_idmask.get(global_id, False)
+            }
         df_id2source = pd.DataFrame(
             global_id2source.values(), columns=["source_dataset_source", "source_label_class_name"]
         )
@@ -242,34 +363,41 @@ def initialize_benthic_concepts(
         df_id2source = df_id2source[
             ["global_id", "source_dataset_source", "source_label_class_name"]
         ]
-
-        # The following are temporary ##TODO: REMOVE AFTER Fixes in concept mapping file
-        # df_id2source["source_label_class_name"] = df_id2source["source_label_class_name"].apply(lambda s: coralnet_id_to_label_random.get(s, s))
-        # df_id2source["source_label_class_name"] = df_id2source["source_label_class_name"].apply(lambda s: s.lower())
+        
+        ## TODO: Update
+        ## The following are temporary: 
+        if "coralnet" in df_id2source["source_dataset_source"].unique():
+            coralnet_id2label = fetch_coralnet_id2label()
+            df_id2source["source_label_class_name"] = df_id2source["source_label_class_name"].apply(lambda s: coralnet_id2label.get(s, s))
+        df_id2source["source_label_class_name"] = df_id2source["source_label_class_name"].apply(lambda s: s.lower())
 
         df_mapping = df_mapping.merge(
-            df_id2source, on=["source_label_class_name", "source_dataset_source"], how="inner"
+            df_id2source, on=["source_label_class_name", "source_dataset_source"], how="right"
         )
 
+        ### TODO: FIX BUG 
         if df_mapping.shape[0] != df_id2source.shape[0]:
             raise ValueError(
                 "The concept map has a different number of rows than the source label registry after merging. "
                 "Please check the mapping and registry for consistency as some source labels in the registry may not have a corresponding mapping entry or vice versa."
             )
 
-    source_to_taxonomic_concepts, taxonomic_mapping_dictionary = (
-        initialize_taxonomic_concept_mapping(df_mapping)
+    if binary_taxonomy_encoding:
+        source_to_taxonomic_concepts, taxonomic_mapping_dictionary = initialize_taxonomic_binary_concept_mapping(
+            df_mapping = df_mapping, num_global_source = num_global_source
+        )
+    else:
+        source_to_taxonomic_concepts, taxonomic_mapping_dictionary = (
+            initialize_taxonomic_concept_mapping(df_mapping = df_mapping, num_global_source = num_global_source)
+        )
+
+    source_to_binary_concepts, binary_mapping_dictionary = initialize_binary_concept_mapping(
+        df_mapping = df_mapping, num_global_source = num_global_source
     )
 
-    source_to_one_hot_concepts, one_hot_mapping_dictionary = initialize_one_hot_concept_mapping(
-        df_mapping
-    )
-
-    source_to_concepts = torch.cat(
-        [source_to_taxonomic_concepts, source_to_one_hot_concepts], dim=1
-    )
-
-    return df_mapping, source_to_concepts, taxonomic_mapping_dictionary, one_hot_mapping_dictionary
+    source_to_concepts = torch.cat([source_to_taxonomic_concepts, source_to_binary_concepts], dim=1)
+    concept_value2id = {**taxonomic_mapping_dictionary, **binary_mapping_dictionary}
+    return df_mapping, source_to_concepts, concept_value2id
 
 
 def source_labels_to_concepts(
