@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import io
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Any
 
+import boto3
+import pandas as pd
 from PIL import Image
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,112 @@ def resize_image_to_threshold(
     img_resized.save(output, format="JPEG", quality=95)
     output.seek(0)
     return output
+
+
+def _s3_key_for(prefix: str, source_id: int, image_id: str) -> str:
+    """S3 key for a CoralNet original image."""
+    return f"{prefix}/s{source_id}/images/{image_id}.jpg"
+
+
+def _resized_s3_key_for(prefix: str, source_id: int, image_id: str, threshold: int) -> str:
+    """S3 key for a resized image."""
+    return f"{prefix}/resized/{threshold}/s{source_id}/images/{image_id}.jpg"
+
+
+def _check_resized_exists(
+    bucket: str,
+    output_prefix: str,
+    source_id: int,
+    image_id: str,
+    threshold: int,
+    s3_client: Any,
+) -> bool:
+    """Check if resized image exists on S3."""
+    key = _resized_s3_key_for(output_prefix, source_id, image_id, threshold)
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def phase_1_scan_for_resize(
+    df_images: pd.DataFrame,
+    bucket: str,
+    output_prefix: str,
+    threshold: int = 2048,
+    s3_client: Any | None = None,
+    workers: int = 32,
+) -> pd.DataFrame:
+    """Phase 1: Scan which images need resizing and don't yet exist on S3.
+
+    Args:
+        df_images: Images parquet with columns [source_id, image_id, width, height, needs_resize]
+        bucket: S3 bucket name
+        output_prefix: S3 prefix for ETL outputs
+        threshold: Resize threshold (longest edge, pixels)
+        s3_client: Boto3 S3 client (created if None)
+        workers: ThreadPoolExecutor concurrency for S3 checks
+
+    Returns:
+        DataFrame with columns [source_id, image_id, width, height, original_s3_key, output_s3_key]
+        for images that need resizing and don't yet exist on S3.
+    """
+    if s3_client is None:
+        s3_client = boto3.client("s3")
+
+    # Filter to images that need resizing
+    df_todo = df_images[df_images["needs_resize"]].copy()
+
+    if len(df_todo) == 0:
+        logger.info("No images need resizing")
+        return pd.DataFrame(
+            columns=["source_id", "image_id", "width", "height", "original_s3_key", "output_s3_key"]
+        )
+
+    # Check which ones don't yet exist on S3
+    def check_and_build_row(row: pd.Series) -> dict[str, Any] | None:
+        source_id = int(row["source_id"])
+        image_id = str(row["image_id"])
+        exists = _check_resized_exists(
+            bucket=bucket,
+            output_prefix=output_prefix,
+            source_id=source_id,
+            image_id=image_id,
+            threshold=threshold,
+            s3_client=s3_client,
+        )
+        if exists:
+            return None  # Skip, already resized
+        return {
+            "source_id": source_id,
+            "image_id": image_id,
+            "width": int(row["width"]),
+            "height": int(row["height"]),
+            "original_s3_key": _s3_key_for(output_prefix, source_id, image_id),
+            "output_s3_key": _resized_s3_key_for(output_prefix, source_id, image_id, threshold),
+        }
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(check_and_build_row, row): idx for idx, row in df_todo.iterrows()
+        }
+        rows = []
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Phase 1: Scanning"):
+            try:
+                result = future.result()
+                if result is not None:
+                    rows.append(result)
+            except Exception as e:
+                logger.error("Error checking S3 for resized image: %s", e)
+
+    return (
+        pd.DataFrame(rows)
+        if rows
+        else pd.DataFrame(
+            columns=["source_id", "image_id", "width", "height", "original_s3_key", "output_s3_key"]
+        )
+    )
 
 
 @dataclass
