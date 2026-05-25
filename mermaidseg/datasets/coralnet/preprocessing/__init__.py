@@ -3,11 +3,7 @@
 Resize images exceeding 2048px longest edge, store on S3, and maintain checkpoint/manifest.
 """
 
-try:
-    from .manifest import build_manifest
-except ImportError:
-    build_manifest = None
+from .manifest import build_manifest
+from .resize import phase_1_scan_for_resize, phase_2_resize_all
 
-from .resize import run_phase_1_scan, run_phase_2_resize
-
-__all__ = ["run_phase_1_scan", "run_phase_2_resize", "build_manifest"]
+__all__ = ["phase_1_scan_for_resize", "phase_2_resize_all", "build_manifest"]
