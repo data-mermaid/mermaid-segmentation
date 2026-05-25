@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from io import BytesIO
 from unittest.mock import Mock
 
@@ -9,8 +10,11 @@ import pandas as pd
 from PIL import Image
 
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
+    get_pending_items,
     phase_1_scan_for_resize,
+    read_checkpoint,
     resize_image_to_threshold,
+    write_checkpoint,
 )
 
 
@@ -104,3 +108,46 @@ def test_phase_1_scan_builds_todo_list():
     assert todo_df.iloc[0]["source_id"] == 2
     assert "original_s3_key" in todo_df.columns
     assert "output_s3_key" in todo_df.columns
+
+
+def test_checkpoint_write_and_read(tmp_path):
+    """Checkpoint parquet can be written and read back."""
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+
+    # Write
+    df_checkpoint = pd.DataFrame(
+        {
+            "source_id": [1, 1, 2],
+            "image_id": ["img_a", "img_b", "img_c"],
+            "status": ["completed", "pending", "failed"],
+            "resize_timestamp": [datetime.now(), None, datetime.now()],
+            "error_message": [None, None, "PIL decode failed"],
+        }
+    )
+
+    write_checkpoint(checkpoint_path, df_checkpoint)
+
+    # Read
+    df_read = read_checkpoint(checkpoint_path)
+
+    assert len(df_read) == 3
+    assert list(df_read["status"]) == ["completed", "pending", "failed"]
+    assert pd.isna(df_read.loc[1, "resize_timestamp"])
+
+
+def test_checkpoint_pending_items_extracted():
+    """Only pending items are returned for processing."""
+    df_checkpoint = pd.DataFrame(
+        {
+            "source_id": [1, 1, 2, 2],
+            "image_id": ["a", "b", "c", "d"],
+            "status": ["completed", "pending", "failed", "pending"],
+            "resize_timestamp": [datetime.now(), None, datetime.now(), None],
+            "error_message": [None, None, "error", None],
+        }
+    )
+
+    df_pending = get_pending_items(df_checkpoint)
+
+    assert len(df_pending) == 2
+    assert list(df_pending["image_id"]) == ["b", "d"]

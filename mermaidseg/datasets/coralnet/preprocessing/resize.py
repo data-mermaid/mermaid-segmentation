@@ -6,6 +6,7 @@ import io
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -14,6 +15,15 @@ from PIL import Image
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+
+
+CHECKPOINT_SCHEMA = {
+    "source_id": "int32",
+    "image_id": "string",
+    "status": "string",
+    "resize_timestamp": "object",  # datetime
+    "error_message": "string",
+}
 
 
 def resize_image_to_threshold(
@@ -173,3 +183,75 @@ class ResizeConfig:
     workers: int = 16
     checkpoint_every: int = 500
     temp_dir: str = "/tmp/coralnet-resize-checkpoint"
+
+
+def write_checkpoint(checkpoint_path: Path | str, df: pd.DataFrame) -> None:
+    """Write checkpoint parquet to disk.
+
+    Args:
+        checkpoint_path: Path to write checkpoint parquet
+        df: DataFrame with columns [source_id, image_id, status, resize_timestamp, error_message]
+    """
+    df = df.copy()
+    df["source_id"] = df["source_id"].astype("int32")
+    df["image_id"] = df["image_id"].astype("string")
+    df["status"] = df["status"].astype("string")
+    df.to_parquet(checkpoint_path, engine="pyarrow", index=False)
+    logger.info("Checkpoint written: %s", checkpoint_path)
+
+
+def read_checkpoint(checkpoint_path: Path | str) -> pd.DataFrame:
+    """Read checkpoint parquet from disk.
+
+    Args:
+        checkpoint_path: Path to checkpoint parquet
+
+    Returns:
+        DataFrame with checkpoint data, or empty DataFrame with correct schema if file doesn't exist.
+    """
+    if not Path(checkpoint_path).exists():
+        return pd.DataFrame(columns=list(CHECKPOINT_SCHEMA.keys()))
+    return pd.read_parquet(checkpoint_path)
+
+
+def get_pending_items(df_checkpoint: pd.DataFrame) -> pd.DataFrame:
+    """Extract only pending items from checkpoint.
+
+    Args:
+        df_checkpoint: Checkpoint DataFrame
+
+    Returns:
+        Subset of df_checkpoint with status == "pending"
+    """
+    return df_checkpoint[df_checkpoint["status"] == "pending"].copy()
+
+
+def init_checkpoint_from_todo(df_todo: pd.DataFrame) -> pd.DataFrame:
+    """Create initial checkpoint from todo list.
+
+    Args:
+        df_todo: Todo list DataFrame with columns [source_id, image_id, ...]
+
+    Returns:
+        Checkpoint DataFrame with all items marked as "pending"
+    """
+    return pd.DataFrame(
+        {
+            "source_id": df_todo["source_id"],
+            "image_id": df_todo["image_id"],
+            "status": "pending",
+            "resize_timestamp": None,
+            "error_message": None,
+        }
+    )
+
+
+# Placeholder functions for later tasks
+def run_phase_1_scan(*args, **kwargs):
+    """Phase 1: Scan for images that need resizing."""
+    raise NotImplementedError("Task 5")
+
+
+def run_phase_2_resize(*args, **kwargs):
+    """Phase 2: Resize images and upload to S3."""
+    raise NotImplementedError("Task 5")
