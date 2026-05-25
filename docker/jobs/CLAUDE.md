@@ -9,7 +9,7 @@ entrypoint runs via `CONTAINER_ENTRYPOINT_SCRIPT`.
 
 | File | What |
 | ---- | ---- |
-| `Dockerfile` | GPU image (PyTorch 2.3 CUDA 12.1, Python 3.11) with mermaidseg installed editable |
+| `Dockerfile` | GPU image (PyTorch 2.4.1 CUDA 12.4, Python 3.11) with mermaidseg installed editable |
 | `entrypoint.sh` | Shim: `exec`s the script named by `CONTAINER_ENTRYPOINT_SCRIPT` |
 | `local_smoke.sh` | Build + run-locally test (`bash local_smoke.sh [training\|processing]`) |
 
