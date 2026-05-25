@@ -1,6 +1,6 @@
 import argparse
-from copy import deepcopy
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
