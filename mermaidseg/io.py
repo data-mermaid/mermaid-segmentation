@@ -1,4 +1,5 @@
 import argparse
+from copy import deepcopy
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -62,7 +63,7 @@ class ConfigDict(dict):
                 self[key] = value
 
     def copy(self) -> "ConfigDict":
-        return ConfigDict(super().copy())
+        return ConfigDict(deepcopy(dict(self)))
 
 
 def _ensure_section(config: ConfigDict, *path: str) -> ConfigDict:
@@ -146,12 +147,13 @@ def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> Con
     return config
 
 
-def preprocess_data_config(data_cfg):
+def preprocess_data_config(data_cfg_orig):
+    data_cfg = data_cfg_orig.copy()
     if "default" in data_cfg.data:
         default = data_cfg.data.pop("default", None)
-        for dataset_name in data_cfg.data:
-            dataset_tmp = data_cfg.data.pop(dataset_name, None)
-            data_cfg.data[dataset_name] = default.copy()
+        for dataset_name in list(data_cfg.data.keys()):
+            dataset_tmp = data_cfg.data.get(dataset_name, None)
+            data_cfg.data[dataset_name] = default.copy() if default is not None else {}
             if dataset_tmp is not None:
                 data_cfg.data[dataset_name].update(dataset_tmp)
 
@@ -166,6 +168,8 @@ def preprocess_data_config(data_cfg):
                     [getattr(A, name)(**params) for name, params in transform_spec.items()]
                 )
 
+    return data_cfg
+
 
 def setup_config(config_path_dict: dict[str, str | None]) -> ConfigDict:
     """Load the base config, optionally merge overrides, and normalize data inputs."""
@@ -173,7 +177,7 @@ def setup_config(config_path_dict: dict[str, str | None]) -> ConfigDict:
     cfg = ConfigDict()
     if "data" in config_path_dict:
         data_cfg = load_config(config_path_dict["data"])
-        preprocess_data_config(data_cfg)
+        data_cfg = preprocess_data_config(data_cfg)
         if "data" in data_cfg:
             cfg.update(data_cfg)
         else:
