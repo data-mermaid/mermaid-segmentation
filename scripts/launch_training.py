@@ -12,6 +12,13 @@ Example
         --run-config sagemaker/runs/my-run.yaml \\
         --config-dir sagemaker/configs/my-run/ \\
         --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-EJVJ6AVFDWW2
+
+    # Submit and return immediately (no streaming logs):
+    uv run python scripts/launch_training.py \\
+        --run-config sagemaker/runs/my-run.yaml \\
+        --config-dir sagemaker/configs/my-run/ \\
+        --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-EJVJ6AVFDWW2 \\
+        --no-wait
 """
 from __future__ import annotations
 
@@ -106,6 +113,7 @@ def main(argv=None):
     parser.add_argument("--config-dir", required=True, type=Path)
     parser.add_argument("--mlflow-tracking-uri", required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-wait", action="store_true")
     args = parser.parse_args(argv)
 
     cfg = parse_run_config(
@@ -156,7 +164,16 @@ def main(argv=None):
             inputs[name] = TrainingInput(s3_data=ch.s3_uri, input_mode=ch.input_mode)
 
     log.info("Submitting TrainingJob...")
-    estimator.fit(inputs=inputs, wait=True, logs="All", job_name=run_id)
+    estimator.fit(
+        inputs=inputs,
+        wait=not args.no_wait,
+        logs=("All" if not args.no_wait else None),
+        job_name=run_id,
+    )
+    if args.no_wait:
+        log.info("Job submitted (--no-wait); run_id: %s", run_id)
+        log.info("CloudWatch: %s", cw_url)
+        return
     log.info("Job %s reached terminal state.", run_id)
     log.info("CloudWatch: %s", cw_url)
 

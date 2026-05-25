@@ -69,3 +69,24 @@ class BuildEstimatorKwargsTest(unittest.TestCase):
         )
         self.assertEqual(kwargs["environment"]["MLFLOW_TRACKING_SERVER"],
             "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-EJVJ6AVFDWW2")
+
+
+class CliArgsTest(unittest.TestCase):
+    def test_no_wait_flag_recognized(self):
+        """--no-wait must parse without error alongside required args."""
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--run-config", required=True, type=Path)
+        parser.add_argument("--config-dir", required=True, type=Path)
+        parser.add_argument("--mlflow-tracking-uri", required=True)
+        parser.add_argument("--dry-run", action="store_true")
+        parser.add_argument("--no-wait", action="store_true")
+        args = parser.parse_args([
+            "--run-config", "sagemaker/runs/example-training.yaml",
+            "--config-dir", "sagemaker/configs/example/",
+            "--mlflow-tracking-uri", "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-X",
+            "--no-wait",
+        ])
+        self.assertTrue(args.no_wait)
+        self.assertFalse(args.dry_run)
