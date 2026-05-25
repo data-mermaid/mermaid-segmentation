@@ -32,7 +32,9 @@ The script operates independently of the main ETL pipeline but consumes its outp
 
 **Input:** Images parquet from ETL
 Path: `s3://{bucket}/{output_prefix}/images.parquet`
-Columns: `source_id, image_id, width, height, needs_resize` (and others)
+Columns (pre-populated): `source_id, image_id, width, height, needs_resize`
+
+**Assumption:** The parquet already contains `width`, `height`, and `needs_resize` columns, computed during the ETL image scan phase. We assume this data is accurate and complete.
 
 **Process:**
 1. Read images parquet
@@ -40,7 +42,7 @@ Columns: `source_id, image_id, width, height, needs_resize` (and others)
    - Query S3 concurrently: does the resized version already exist?
    - Output path: `s3://{bucket}/{output_prefix}/resized/{threshold}/s{source_id}/images/{image_id}.jpg`
    - If not found → add to "todo" dataframe
-3. Write `todo.parquet` checkpoint file with columns: `[source_id, image_id, original_s3_key, output_s3_key]`
+3. Write `todo.parquet` checkpoint file with columns: `[source_id, image_id, width, height, original_s3_key, output_s3_key]`
 
 **Concurrency:** ThreadPoolExecutor with ~32 workers for S3 object-existence checks (following `images.py` pattern)
 
@@ -148,6 +150,7 @@ python -m mermaidseg.datasets.coralnet.preprocessing resize \
 **Input Validation:**
 - Images parquet must contain columns: `source_id, image_id, width, height, needs_resize`
 - Throw `ValueError` if missing
+- Assume `width`, `height`, `needs_resize` are pre-populated and accurate (trust ETL output)
 
 **Resize Validation:**
 - PIL must successfully open and decode original image before attempting resize
