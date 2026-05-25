@@ -1,0 +1,32 @@
+training:
+    training_mode: "concept-bottleneck"
+    loss:
+        type: ConceptBottleneckLoss
+        lambda_weight: 1
+        ignore_index: 0
+    epochs: 10
+    optimizer:
+        type: AdamW
+        lr: 0.00005
+        weight_decay: 0.01
+    scheduler:
+        type: PolynomialLR
+        power: 1
+        total_iters: 10
+    iterations_per_train_epoch: 1000
+    iterations_per_val_epoch: 200
+    batch_size: 4
+    class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Alveopora', 'Astrea', 'Astreopora', 
+                    'Bare substrate', 'Colpophyllia natans', 'Crustose coralline algae', 'Cyanobacteria', 
+                    'Cyphastrea', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia', 'Echinopora', 
+                    'Euphyllia', 'Favia', 'Favites', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea', 
+                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Hydnophora', 'Isopora', 
+                    'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis', 
+                    'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium', 
+                    'Orbicella annularis', 'Orbicella faveolata', 'Orbicella franksi', 'Pachyseris', 'Padina', 
+                    'Pavona', 'Pectinia', 'Platygyra', 'Pocillopora', 'Porites', 'Porites astreoides', 
+                    'Psammocora', 'Rock', 'Rubble', 'Sand', 'Sargassum', 'Sea urchin', 'Seagrass', 'Seriatopora', 
+                    'Siderastrea siderea', 'Soft coral', 'Sponge', 'Stylophora', 'Symphyllia', 'Turbinaria-algae', 
+                    'Turbinaria-coral', 'Turf algae', 'Zoanthid']
+    padding: 3
+    label_roll_up: True
