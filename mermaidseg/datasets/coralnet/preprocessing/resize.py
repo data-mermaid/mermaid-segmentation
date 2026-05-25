@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,9 @@ from PIL import Image
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+
+# Thread lock for checkpoint updates
+_checkpoint_lock = threading.Lock()
 
 
 CHECKPOINT_SCHEMA = {
@@ -244,6 +249,169 @@ def init_checkpoint_from_todo(df_todo: pd.DataFrame) -> pd.DataFrame:
             "error_message": None,
         }
     )
+
+
+def phase_2_resize_one_item(
+    todo_item: dict[str, Any],
+    bucket: str,
+    checkpoint_path: Path | str,
+    threshold: int = 2048,
+    s3_client: Any | None = None,
+) -> None:
+    """Resize one image: download, resize, upload, update checkpoint.
+
+    Args:
+        todo_item: Dict with keys [source_id, image_id, original_s3_key, output_s3_key, ...]
+        bucket: S3 bucket name
+        checkpoint_path: Path to checkpoint parquet
+        threshold: Resize threshold
+        s3_client: Boto3 S3 client
+    """
+    if s3_client is None:
+        s3_client = boto3.client("s3")
+
+    source_id = todo_item["source_id"]
+    image_id = todo_item["image_id"]
+    original_key = todo_item["original_s3_key"]
+    output_key = todo_item["output_s3_key"]
+
+    try:
+        # Download
+        logger.debug("Downloading %s", original_key)
+        response = s3_client.get_object(Bucket=bucket, Key=original_key)
+        original_bytes = io.BytesIO(response["Body"].read())
+
+        # Resize
+        logger.debug("Resizing %s/%s", source_id, image_id)
+        resized_bytes = resize_image_to_threshold(original_bytes, threshold=threshold)
+
+        # Upload
+        logger.debug("Uploading to %s", output_key)
+        s3_client.put_object(
+            Bucket=bucket,
+            Key=output_key,
+            Body=resized_bytes.getvalue(),
+            ContentType="image/jpeg",
+        )
+
+        # Verify upload
+        s3_client.head_object(Bucket=bucket, Key=output_key)
+
+        # Update checkpoint
+        with _checkpoint_lock:
+            df_checkpoint = read_checkpoint(checkpoint_path)
+            mask = (df_checkpoint["source_id"] == source_id) & (
+                df_checkpoint["image_id"] == image_id
+            )
+            df_checkpoint.loc[mask, "status"] = "completed"
+            df_checkpoint.loc[mask, "resize_timestamp"] = datetime.now()
+            write_checkpoint(checkpoint_path, df_checkpoint)
+
+        logger.info("Resized: %s/%s -> %s", source_id, image_id, output_key)
+
+    except Exception as e:
+        logger.error("Failed to resize %s/%s: %s", source_id, image_id, e)
+        with _checkpoint_lock:
+            df_checkpoint = read_checkpoint(checkpoint_path)
+            mask = (df_checkpoint["source_id"] == source_id) & (
+                df_checkpoint["image_id"] == image_id
+            )
+            df_checkpoint.loc[mask, "status"] = "failed"
+            df_checkpoint.loc[mask, "error_message"] = f"{type(e).__name__}: {e}"
+            write_checkpoint(checkpoint_path, df_checkpoint)
+
+
+def phase_2_resize_all(
+    df_todo: pd.DataFrame,
+    bucket: str,
+    output_prefix: str,
+    checkpoint_path: Path | str,
+    threshold: int = 2048,
+    workers: int = 16,
+    checkpoint_every: int = 500,
+    s3_client: Any | None = None,
+) -> tuple[int, int, int]:
+    """Phase 2: Download, resize, upload all items in todo list with checkpointing.
+
+    Args:
+        df_todo: DataFrame with columns [source_id, image_id, ..., original_s3_key, output_s3_key]
+        bucket: S3 bucket name
+        output_prefix: S3 prefix (for logging)
+        checkpoint_path: Path to checkpoint parquet
+        threshold: Resize threshold
+        workers: ThreadPoolExecutor concurrency
+        checkpoint_every: Flush checkpoint after N images
+        s3_client: Boto3 S3 client
+
+    Returns:
+        Tuple (num_resized, num_skipped, num_failed)
+    """
+    if s3_client is None:
+        s3_client = boto3.client("s3")
+
+    # Initialize checkpoint if not exists
+    if not Path(checkpoint_path).exists():
+        checkpoint_df = init_checkpoint_from_todo(df_todo)
+        write_checkpoint(checkpoint_path, checkpoint_df)
+
+    # Get pending items
+    checkpoint_df = read_checkpoint(checkpoint_path)
+    df_pending = get_pending_items(checkpoint_df)
+
+    if len(df_pending) == 0:
+        logger.info("No pending items in checkpoint")
+        completed = len(checkpoint_df[checkpoint_df["status"] == "completed"])
+        failed = len(checkpoint_df[checkpoint_df["status"] == "failed"])
+        return completed, 0, failed
+
+    # Merge pending with todo to get S3 keys
+    df_work = df_pending.merge(
+        df_todo[["source_id", "image_id", "original_s3_key", "output_s3_key"]],
+        on=["source_id", "image_id"],
+    )
+
+    num_resized = 0
+    num_failed = 0
+    processed_count = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                phase_2_resize_one_item,
+                row.to_dict(),
+                bucket,
+                checkpoint_path,
+                threshold,
+                s3_client,
+            ): idx
+            for idx, row in df_work.iterrows()
+        }
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Phase 2: Resizing"):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error("Resize failed: %s", e)
+            finally:
+                processed_count += 1
+                if processed_count % checkpoint_every == 0:
+                    checkpoint_df = read_checkpoint(checkpoint_path)
+                    logger.info("Checkpoint: processed %d / %d", processed_count, len(df_work))
+
+    # Final counts
+    checkpoint_df = read_checkpoint(checkpoint_path)
+    num_resized = len(checkpoint_df[checkpoint_df["status"] == "completed"])
+    num_failed = len(checkpoint_df[checkpoint_df["status"] == "failed"])
+    num_skipped = len(df_todo) - len(df_pending)
+
+    logger.info(
+        "Phase 2 complete: %d resized, %d skipped (already on S3), %d failed",
+        num_resized,
+        num_skipped,
+        num_failed,
+    )
+
+    return num_resized, num_skipped, num_failed
 
 
 # Placeholder functions for later tasks

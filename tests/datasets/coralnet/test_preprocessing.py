@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from io import BytesIO
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pandas as pd
 from PIL import Image
@@ -12,6 +12,7 @@ from PIL import Image
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
     get_pending_items,
     phase_1_scan_for_resize,
+    phase_2_resize_one_item,
     read_checkpoint,
     resize_image_to_threshold,
     write_checkpoint,
@@ -151,3 +152,66 @@ def test_checkpoint_pending_items_extracted():
 
     assert len(df_pending) == 2
     assert list(df_pending["image_id"]) == ["b", "d"]
+
+
+def test_phase_2_resize_one_image(tmp_path):
+    """Single image is downloaded, resized, and uploaded."""
+    # Create mock S3 client
+    mock_s3 = Mock()
+
+    # Mock GET (download): return a 3000x2000 JPEG
+    original_img = Image.new("RGB", (3000, 2000), color="red")
+    img_bytes = BytesIO()
+    original_img.save(img_bytes, format="JPEG")
+    img_bytes.seek(0)
+
+    mock_s3.get_object.return_value = {"Body": BytesIO(img_bytes.getvalue())}
+
+    # Mock PUT (upload): track calls
+    mock_s3.put_object = MagicMock()
+    mock_s3.head_object = MagicMock()
+
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+
+    # Create todo item
+    todo_item = {
+        "source_id": 1,
+        "image_id": "img_a",
+        "width": 3000,
+        "height": 2000,
+        "original_s3_key": "coralnet-public-images/s1/images/img_a.jpg",
+        "output_s3_key": "etl-outputs/coralnet/resized/2048/s1/images/img_a.jpg",
+    }
+
+    # Create initial checkpoint
+    checkpoint_df = pd.DataFrame(
+        {
+            "source_id": [1],
+            "image_id": ["img_a"],
+            "status": ["pending"],
+            "resize_timestamp": [None],
+            "error_message": [None],
+        }
+    )
+
+    write_checkpoint(checkpoint_path, checkpoint_df)
+
+    # Run Phase 2 on single item
+    phase_2_resize_one_item(
+        todo_item=todo_item,
+        bucket="test-bucket",
+        checkpoint_path=checkpoint_path,
+        threshold=2048,
+        s3_client=mock_s3,
+    )
+
+    # Verify PUT was called
+    assert mock_s3.put_object.called
+    call_args = mock_s3.put_object.call_args
+    assert call_args[1]["Bucket"] == "test-bucket"
+    assert call_args[1]["Key"] == "etl-outputs/coralnet/resized/2048/s1/images/img_a.jpg"
+
+    # Verify checkpoint updated to 'completed'
+    checkpoint_df_updated = read_checkpoint(checkpoint_path)
+    assert checkpoint_df_updated.loc[0, "status"] == "completed"
+    assert checkpoint_df_updated.loc[0, "resize_timestamp"] is not None
