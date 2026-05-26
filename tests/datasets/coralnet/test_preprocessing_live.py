@@ -37,13 +37,13 @@ def test_s3_client():
 
 
 @pytest.mark.live
-def test_phase_1_phase_2_end_to_end(test_bucket, test_s3_client, tmp_path):
-    """Full pipeline: Phase 1 scan -> Phase 2 resize -> manifest.
+def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, tmp_path):
+    """Full pipeline: scan → resize/upload → manifest.
 
     This test:
     1. Creates a test image and uploads to S3
-    2. Runs Phase 1 scan to identify resize candidates
-    3. Runs Phase 2 to resize and upload to resized/ prefix
+    2. Scans to identify resize candidates
+    3. Resizes and uploads to resized/ prefix
     4. Verifies resized image exists on S3
     5. Builds manifest and validates schema
     """
@@ -78,7 +78,7 @@ def test_phase_1_phase_2_end_to_end(test_bucket, test_s3_client, tmp_path):
         }
     )
 
-    # Phase 1: Scan for resize candidates
+    # Scan for resize candidates
     df_todo = scan_for_missing_resized_images(
         df_images=df_images,
         bucket=test_bucket,
@@ -88,10 +88,10 @@ def test_phase_1_phase_2_end_to_end(test_bucket, test_s3_client, tmp_path):
         workers=2,
     )
 
-    assert len(df_todo) == 1, "Phase 1 should identify 1 image to resize"
+    assert len(df_todo) == 1, "Scan should identify 1 image to resize"
     assert df_todo.iloc[0]["image_id"] == "test_img"
 
-    # Phase 2: Resize and upload
+    # Resize and upload
     checkpoint_path = tmp_path / "checkpoint.parquet"
     num_resized, num_skipped, num_failed = resize_and_upload_all_images(
         df_todo=df_todo,
@@ -154,7 +154,7 @@ def test_phase_1_phase_2_end_to_end(test_bucket, test_s3_client, tmp_path):
 
 
 @pytest.mark.live
-def test_phase_1_phase_2_multi_source(test_bucket, test_s3_client, tmp_path):
+def test_resize_and_upload_multi_source(test_bucket, test_s3_client, tmp_path):
     """Test pipeline with multiple sources (source_id=1, source_id=2).
 
     This test verifies that the pipeline correctly handles images from different sources, with mixed
@@ -198,7 +198,7 @@ def test_phase_1_phase_2_multi_source(test_bucket, test_s3_client, tmp_path):
         }
     )
 
-    # Phase 1: Scan for resize candidates
+    # Scan for resize candidates
     df_todo = scan_for_missing_resized_images(
         df_images=df_images,
         bucket=test_bucket,
@@ -215,7 +215,7 @@ def test_phase_1_phase_2_multi_source(test_bucket, test_s3_client, tmp_path):
     assert "s2_large" in image_ids
     assert "s1_small" not in image_ids
 
-    # Phase 2: Resize and upload
+    # Resize and upload
     checkpoint_path = tmp_path / "checkpoint.parquet"
     num_resized, num_skipped, num_failed = resize_and_upload_all_images(
         df_todo=df_todo,
@@ -252,11 +252,11 @@ def test_phase_1_phase_2_multi_source(test_bucket, test_s3_client, tmp_path):
 
 
 @pytest.mark.live
-def test_phase_1_respects_already_resized(test_bucket, test_s3_client, tmp_path):
-    """Test that Phase 1 skips images already resized on S3.
+def test_scan_respects_already_resized(test_bucket, test_s3_client, tmp_path):
+    """Test that scan skips images already resized on S3.
 
     This test verifies idempotency: if an image is already resized
-    and on S3, Phase 1 should not include it in the todo list.
+    and on S3, scan should not include it in the todo list.
     """
     # Skip if no S3 credentials
     try:

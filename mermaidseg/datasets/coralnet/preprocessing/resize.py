@@ -1,4 +1,5 @@
-"""Phase 1 (scan) and Phase 2 (resize) image preprocessing pipeline."""
+"""Image resizing preprocessing pipeline: scan for missing resized images, then resize and
+upload."""
 
 from __future__ import annotations
 
@@ -30,7 +31,14 @@ CHECKPOINT_SCHEMA = {
     "error_message": "string",
 }
 
-PHASE_1_COLUMNS = ["source_id", "image_id", "width", "height", "original_s3_key", "output_s3_key"]
+SCAN_OUTPUT_COLUMNS = [
+    "source_id",
+    "image_id",
+    "width",
+    "height",
+    "original_s3_key",
+    "output_s3_key",
+]
 
 
 def resize_image_to_threshold(
@@ -131,7 +139,7 @@ def scan_for_missing_resized_images(
 
     if len(df_todo) == 0:
         logger.info("No images need resizing")
-        return pd.DataFrame(columns=PHASE_1_COLUMNS)
+        return pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
 
     # Check which ones don't yet exist on S3
     def check_and_build_row(row: pd.Series) -> dict[str, Any] | None:
@@ -161,7 +169,9 @@ def scan_for_missing_resized_images(
             executor.submit(check_and_build_row, row): idx for idx, row in df_todo.iterrows()
         }
         rows = []
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Phase 1: Scanning"):
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="Scanning for missing resized images"
+        ):
             try:
                 result = future.result()
                 if result is not None:
@@ -169,7 +179,7 @@ def scan_for_missing_resized_images(
             except Exception as e:
                 logger.error("Error checking S3 for resized image: %s", e)
 
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=PHASE_1_COLUMNS)
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
 
 
 @dataclass

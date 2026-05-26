@@ -155,7 +155,7 @@ def test_checkpoint_pending_items_extracted():
     assert list(df_pending["image_id"]) == ["b", "d"]
 
 
-def test_phase_2_resize_one_image(tmp_path):
+def test_resize_and_upload_image_success(tmp_path):
     """Single image is downloaded, resized, and uploaded."""
     # Create mock S3 client
     mock_s3 = Mock()

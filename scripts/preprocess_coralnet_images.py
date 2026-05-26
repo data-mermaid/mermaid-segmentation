@@ -57,7 +57,7 @@ def resize_command(args: argparse.Namespace) -> None:
     # Create S3 client
     s3_client = boto3.client("s3")
 
-    # Phase 1: Scan
+    # Scan for images needing resize
     logger.info("Scanning for images needing resize...")
     df_todo = scan_for_missing_resized_images(
         df_images=df_images,
@@ -73,7 +73,7 @@ def resize_command(args: argparse.Namespace) -> None:
         logger.info("No images to resize. Done!")
         return
 
-    # Phase 2: Resize
+    # Resize and upload images
     checkpoint_path = Path(temp_dir) / "checkpoint.parquet"
     logger.info("Resizing and uploading images...")
     num_resized, num_skipped, num_failed = resize_and_upload_all_images(
@@ -165,7 +165,7 @@ def main() -> None:
         "--workers",
         default=16,
         type=int,
-        help="ThreadPoolExecutor concurrency for Phase 2",
+        help="ThreadPoolExecutor concurrency for image resizing",
     )
     resize_parser.add_argument(
         "--checkpoint-every",
