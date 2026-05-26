@@ -448,7 +448,7 @@ class MetaModel:
             "num_samples": num_samples,
         }
         return last_loss, metric_results, timing
-
+    
     @torch.no_grad()
     def validation_epoch(
         self,
