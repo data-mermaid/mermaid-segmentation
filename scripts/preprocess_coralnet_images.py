@@ -9,7 +9,7 @@ Usage:
         --threshold 2048 \\
         --workers 16
 
-This script orchestrates Phase 1 (scan) → Phase 2 (resize + upload) → Manifest → S3.
+This script orchestrates: scan → resize/upload → build manifest → upload to S3.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ import pandas as pd
 
 from mermaidseg.datasets.coralnet.preprocessing import (
     build_manifest,
-    phase_1_scan_for_resize,
-    phase_2_resize_all,
+    resize_and_upload_all_images,
+    scan_for_missing_resized_images,
 )
 
 logging.basicConfig(
@@ -58,8 +58,8 @@ def resize_command(args: argparse.Namespace) -> None:
     s3_client = boto3.client("s3")
 
     # Phase 1: Scan
-    logger.info("Phase 1: Scanning for images needing resize...")
-    df_todo = phase_1_scan_for_resize(
+    logger.info("Scanning for images needing resize...")
+    df_todo = scan_for_missing_resized_images(
         df_images=df_images,
         bucket=args.bucket,
         output_prefix=args.output_prefix,
@@ -67,7 +67,7 @@ def resize_command(args: argparse.Namespace) -> None:
         workers=args.workers,
         s3_client=s3_client,
     )
-    logger.info("Phase 1 complete: %d images need resizing", len(df_todo))
+    logger.info("Scan complete: %d images need resizing", len(df_todo))
 
     if len(df_todo) == 0:
         logger.info("No images to resize. Done!")
@@ -75,8 +75,8 @@ def resize_command(args: argparse.Namespace) -> None:
 
     # Phase 2: Resize
     checkpoint_path = Path(temp_dir) / "checkpoint.parquet"
-    logger.info("Phase 2: Resizing and uploading...")
-    num_resized, num_skipped, num_failed = phase_2_resize_all(
+    logger.info("Resizing and uploading images...")
+    num_resized, num_skipped, num_failed = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=args.bucket,
         output_prefix=args.output_prefix,

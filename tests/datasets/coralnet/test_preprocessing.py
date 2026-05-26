@@ -12,10 +12,10 @@ from PIL import Image
 from mermaidseg.datasets.coralnet.preprocessing.manifest import build_manifest
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
     get_pending_items,
-    phase_1_scan_for_resize,
-    phase_2_resize_one_item,
     read_checkpoint,
+    resize_and_upload_image,
     resize_image_to_threshold,
+    scan_for_missing_resized_images,
     write_checkpoint,
 )
 
@@ -71,8 +71,8 @@ def test_resize_image_square():
     assert resized_img.height == 2048
 
 
-def test_phase_1_scan_builds_todo_list():
-    """Phase 1 scan identifies images that need resizing and don't exist on S3."""
+def test_scan_for_missing_resized_images_builds_todo_list():
+    """Scan identifies images that need resizing and don't exist on S3."""
     # Create mock images parquet
     df_images = pd.DataFrame(
         {
@@ -94,8 +94,8 @@ def test_phase_1_scan_builds_todo_list():
 
     mock_s3.head_object.side_effect = head_object_side_effect
 
-    # Run Phase 1
-    todo_df = phase_1_scan_for_resize(
+    # Run scan
+    todo_df = scan_for_missing_resized_images(
         df_images=df_images,
         bucket="test-bucket",
         output_prefix="etl-outputs/coralnet",
@@ -197,8 +197,8 @@ def test_phase_2_resize_one_image(tmp_path):
 
     write_checkpoint(checkpoint_path, checkpoint_df)
 
-    # Run Phase 2 on single item
-    phase_2_resize_one_item(
+    # Run single image resize/upload
+    resize_and_upload_image(
         todo_item=todo_item,
         bucket="test-bucket",
         checkpoint_path=checkpoint_path,

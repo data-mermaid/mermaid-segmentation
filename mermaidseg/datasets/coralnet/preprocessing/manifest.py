@@ -6,6 +6,8 @@ import logging
 
 import pandas as pd
 
+from mermaidseg.datasets.coralnet.preprocessing.resize import _resized_s3_key_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,8 +54,8 @@ def build_manifest(
 
     # Build S3 keys
     df_manifest["output_s3_key"] = df_manifest.apply(
-        lambda row: (
-            f"{output_prefix}/resized/{threshold}/s{int(row['source_id'])}/images/{row['image_id']}.jpg"
+        lambda row: _resized_s3_key_for(
+            output_prefix, int(row["source_id"]), row["image_id"], threshold
         ),
         axis=1,
     )

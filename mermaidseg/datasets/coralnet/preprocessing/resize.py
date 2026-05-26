@@ -30,6 +30,8 @@ CHECKPOINT_SCHEMA = {
     "error_message": "string",
 }
 
+PHASE_1_COLUMNS = ["source_id", "image_id", "width", "height", "original_s3_key", "output_s3_key"]
+
 
 def resize_image_to_threshold(
     image_bytes: io.BytesIO,
@@ -99,7 +101,7 @@ def _check_resized_exists(
         return False
 
 
-def phase_1_scan_for_resize(
+def scan_for_missing_resized_images(
     df_images: pd.DataFrame,
     bucket: str,
     output_prefix: str,
@@ -107,7 +109,7 @@ def phase_1_scan_for_resize(
     s3_client: Any | None = None,
     workers: int = 32,
 ) -> pd.DataFrame:
-    """Phase 1: Scan which images need resizing and don't yet exist on S3.
+    """Scan which images need resizing and don't yet exist on S3.
 
     Args:
         df_images: Images parquet with columns [source_id, image_id, width, height, needs_resize]
@@ -129,9 +131,7 @@ def phase_1_scan_for_resize(
 
     if len(df_todo) == 0:
         logger.info("No images need resizing")
-        return pd.DataFrame(
-            columns=["source_id", "image_id", "width", "height", "original_s3_key", "output_s3_key"]
-        )
+        return pd.DataFrame(columns=PHASE_1_COLUMNS)
 
     # Check which ones don't yet exist on S3
     def check_and_build_row(row: pd.Series) -> dict[str, Any] | None:
@@ -169,13 +169,7 @@ def phase_1_scan_for_resize(
             except Exception as e:
                 logger.error("Error checking S3 for resized image: %s", e)
 
-    return (
-        pd.DataFrame(rows)
-        if rows
-        else pd.DataFrame(
-            columns=["source_id", "image_id", "width", "height", "original_s3_key", "output_s3_key"]
-        )
-    )
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=PHASE_1_COLUMNS)
 
 
 @dataclass
@@ -251,14 +245,43 @@ def init_checkpoint_from_todo(df_todo: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def phase_2_resize_one_item(
+def _update_checkpoint(
+    checkpoint_path: Path | str,
+    source_id: int,
+    image_id: str,
+    status: str,
+    resize_timestamp: datetime | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Atomically update checkpoint status for a single image.
+
+    Args:
+        checkpoint_path: Path to checkpoint parquet
+        source_id: Source dataset ID
+        image_id: Image ID
+        status: New status ('completed' or 'failed')
+        resize_timestamp: Timestamp of completion
+        error_message: Error message if status='failed'
+    """
+    with _checkpoint_lock:
+        df_checkpoint = read_checkpoint(checkpoint_path)
+        mask = (df_checkpoint["source_id"] == source_id) & (df_checkpoint["image_id"] == image_id)
+        df_checkpoint.loc[mask, "status"] = status
+        if resize_timestamp is not None:
+            df_checkpoint.loc[mask, "resize_timestamp"] = resize_timestamp
+        if error_message is not None:
+            df_checkpoint.loc[mask, "error_message"] = error_message
+        write_checkpoint(checkpoint_path, df_checkpoint)
+
+
+def resize_and_upload_image(
     todo_item: dict[str, Any],
     bucket: str,
     checkpoint_path: Path | str,
     threshold: int = 2048,
     s3_client: Any | None = None,
 ) -> None:
-    """Resize one image: download, resize, upload, update checkpoint.
+    """Resize a single image: download, resize, upload, update checkpoint.
 
     Args:
         todo_item: Dict with keys [source_id, image_id, original_s3_key, output_s3_key, ...]
@@ -298,30 +321,28 @@ def phase_2_resize_one_item(
         s3_client.head_object(Bucket=bucket, Key=output_key)
 
         # Update checkpoint
-        with _checkpoint_lock:
-            df_checkpoint = read_checkpoint(checkpoint_path)
-            mask = (df_checkpoint["source_id"] == source_id) & (
-                df_checkpoint["image_id"] == image_id
-            )
-            df_checkpoint.loc[mask, "status"] = "completed"
-            df_checkpoint.loc[mask, "resize_timestamp"] = datetime.now()
-            write_checkpoint(checkpoint_path, df_checkpoint)
+        _update_checkpoint(
+            checkpoint_path,
+            source_id,
+            image_id,
+            "completed",
+            resize_timestamp=datetime.now(),
+        )
 
         logger.info("Resized: %s/%s -> %s", source_id, image_id, output_key)
 
     except Exception as e:
         logger.error("Failed to resize %s/%s: %s", source_id, image_id, e)
-        with _checkpoint_lock:
-            df_checkpoint = read_checkpoint(checkpoint_path)
-            mask = (df_checkpoint["source_id"] == source_id) & (
-                df_checkpoint["image_id"] == image_id
-            )
-            df_checkpoint.loc[mask, "status"] = "failed"
-            df_checkpoint.loc[mask, "error_message"] = f"{type(e).__name__}: {e}"
-            write_checkpoint(checkpoint_path, df_checkpoint)
+        _update_checkpoint(
+            checkpoint_path,
+            source_id,
+            image_id,
+            "failed",
+            error_message=f"{type(e).__name__}: {e}",
+        )
 
 
-def phase_2_resize_all(
+def resize_and_upload_all_images(
     df_todo: pd.DataFrame,
     bucket: str,
     output_prefix: str,
@@ -331,7 +352,7 @@ def phase_2_resize_all(
     checkpoint_every: int = 500,
     s3_client: Any | None = None,
 ) -> tuple[int, int, int]:
-    """Phase 2: Download, resize, upload all items in todo list with checkpointing.
+    """Download, resize, and upload all images with checkpointing.
 
     Args:
         df_todo: DataFrame with columns [source_id, image_id, ..., original_s3_key, output_s3_key]
@@ -340,7 +361,7 @@ def phase_2_resize_all(
         checkpoint_path: Path to checkpoint parquet
         threshold: Resize threshold
         workers: ThreadPoolExecutor concurrency
-        checkpoint_every: Flush checkpoint after N images
+        checkpoint_every: (Deprecated; kept for compatibility)
         s3_client: Boto3 S3 client
 
     Returns:
@@ -370,14 +391,10 @@ def phase_2_resize_all(
         on=["source_id", "image_id"],
     )
 
-    num_resized = 0
-    num_failed = 0
-    processed_count = 0
-
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(
-                phase_2_resize_one_item,
+                resize_and_upload_image,
                 row.to_dict(),
                 bucket,
                 checkpoint_path,
@@ -387,16 +404,11 @@ def phase_2_resize_all(
             for idx, row in df_work.iterrows()
         }
 
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Phase 2: Resizing"):
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Resizing images"):
             try:
                 future.result()
             except Exception as e:
                 logger.error("Resize failed: %s", e)
-            finally:
-                processed_count += 1
-                if processed_count % checkpoint_every == 0:
-                    checkpoint_df = read_checkpoint(checkpoint_path)
-                    logger.info("Checkpoint: processed %d / %d", processed_count, len(df_work))
 
     # Final counts
     checkpoint_df = read_checkpoint(checkpoint_path)
@@ -405,21 +417,10 @@ def phase_2_resize_all(
     num_skipped = len(df_todo) - len(df_pending)
 
     logger.info(
-        "Phase 2 complete: %d resized, %d skipped (already on S3), %d failed",
+        "Resizing complete: %d resized, %d skipped (already on S3), %d failed",
         num_resized,
         num_skipped,
         num_failed,
     )
 
     return num_resized, num_skipped, num_failed
-
-
-# Placeholder functions for later tasks
-def run_phase_1_scan(*args, **kwargs):
-    """Phase 1: Scan for images that need resizing."""
-    raise NotImplementedError("Task 5")
-
-
-def run_phase_2_resize(*args, **kwargs):
-    """Phase 2: Resize images and upload to S3."""
-    raise NotImplementedError("Task 5")

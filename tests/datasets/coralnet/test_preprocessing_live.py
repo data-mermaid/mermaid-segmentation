@@ -19,8 +19,8 @@ import boto3
 
 from mermaidseg.datasets.coralnet.preprocessing.manifest import build_manifest
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
-    phase_1_scan_for_resize,
-    phase_2_resize_all,
+    resize_and_upload_all_images,
+    scan_for_missing_resized_images,
 )
 
 
@@ -79,7 +79,7 @@ def test_phase_1_phase_2_end_to_end(test_bucket, test_s3_client, tmp_path):
     )
 
     # Phase 1: Scan for resize candidates
-    df_todo = phase_1_scan_for_resize(
+    df_todo = scan_for_missing_resized_images(
         df_images=df_images,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -93,7 +93,7 @@ def test_phase_1_phase_2_end_to_end(test_bucket, test_s3_client, tmp_path):
 
     # Phase 2: Resize and upload
     checkpoint_path = tmp_path / "checkpoint.parquet"
-    num_resized, num_skipped, num_failed = phase_2_resize_all(
+    num_resized, num_skipped, num_failed = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -199,7 +199,7 @@ def test_phase_1_phase_2_multi_source(test_bucket, test_s3_client, tmp_path):
     )
 
     # Phase 1: Scan for resize candidates
-    df_todo = phase_1_scan_for_resize(
+    df_todo = scan_for_missing_resized_images(
         df_images=df_images,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -217,7 +217,7 @@ def test_phase_1_phase_2_multi_source(test_bucket, test_s3_client, tmp_path):
 
     # Phase 2: Resize and upload
     checkpoint_path = tmp_path / "checkpoint.parquet"
-    num_resized, num_skipped, num_failed = phase_2_resize_all(
+    num_resized, num_skipped, num_failed = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -301,7 +301,7 @@ def test_phase_1_respects_already_resized(test_bucket, test_s3_client, tmp_path)
     )
 
     # Phase 1 should skip this image (already resized)
-    df_todo = phase_1_scan_for_resize(
+    df_todo = scan_for_missing_resized_images(
         df_images=df_images,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -358,7 +358,7 @@ def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
     )
 
     # Phase 1
-    df_todo = phase_1_scan_for_resize(
+    df_todo = scan_for_missing_resized_images(
         df_images=df_images,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -371,7 +371,7 @@ def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
 
     # Phase 2 - process all items
     checkpoint_path = tmp_path / "checkpoint_recovery.parquet"
-    num_resized, num_skipped, num_failed = phase_2_resize_all(
+    num_resized, num_skipped, num_failed = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -390,7 +390,7 @@ def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
     assert (df_checkpoint["status"] == "completed").all()
 
     # Run Phase 2 again with same checkpoint (no new work should happen)
-    num_resized2, num_skipped2, num_failed2 = phase_2_resize_all(
+    num_resized2, num_skipped2, num_failed2 = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=test_bucket,
         output_prefix=test_prefix,
