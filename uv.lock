@@ -2520,10 +2520,8 @@ dependencies = [
     { name = "beautifulsoup4" },
     { name = "boto3" },
     { name = "datasets" },
-    { name = "great-tables" },
     { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and sys_platform == 'darwin'" },
     { name = "huggingface-hub", version = "1.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or sys_platform != 'darwin'" },
-    { name = "hvplot" },
     { name = "ibis-framework", extra = ["duckdb"] },
     { name = "ipykernel" },
     { name = "matplotlib" },
@@ -2550,6 +2548,8 @@ dependencies = [
 
 [package.optional-dependencies]
 notebooks = [
+    { name = "great-tables" },
+    { name = "hvplot" },
     { name = "ipywidgets" },
     { name = "jupyter" },
     { name = "wandb" },
@@ -2586,9 +2586,9 @@ requires-dist = [
     { name = "beautifulsoup4" },
     { name = "boto3" },
     { name = "datasets", specifier = ">=3.0" },
-    { name = "great-tables", specifier = ">=0.21.0" },
+    { name = "great-tables", marker = "extra == 'notebooks'", specifier = ">=0.21.0" },
     { name = "huggingface-hub", specifier = ">=0.36.2" },
-    { name = "hvplot", specifier = ">=0.12.2" },
+    { name = "hvplot", marker = "extra == 'notebooks'", specifier = ">=0.12.2" },
     { name = "ibis-framework", extras = ["duckdb"], specifier = ">=9.0" },
     { name = "ipykernel", specifier = ">=7.2.0" },
     { name = "ipywidgets", marker = "extra == 'notebooks'" },

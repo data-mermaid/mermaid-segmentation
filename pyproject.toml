@@ -35,8 +35,6 @@ dependencies = [
     "requests-auth-aws-sigv4>=0.7",
     "safetensors>=0.4.0",
     "ibis-framework[duckdb]>=9.0",
-    "hvplot>=0.12.2",
-    "great-tables>=0.21.0",
 ]
 
 [project.scripts]
@@ -48,6 +46,8 @@ notebooks = [
     "jupyter",
     "ipywidgets",
     "wandb>=0.25.0",
+    "hvplot>=0.12.2",
+    "great-tables>=0.21.0",
 ]
 scraping = [
     "selenium",

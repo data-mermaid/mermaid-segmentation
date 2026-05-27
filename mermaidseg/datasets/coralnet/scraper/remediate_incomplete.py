@@ -57,6 +57,26 @@ def _read_parquet(path: str | Path) -> pd.DataFrame:
     return pd.read_parquet(str(path))
 
 
+def _is_s3_uri(path: str) -> bool:
+    return path.startswith("s3://")
+
+
+def _parent_path(path: str) -> str:
+    path = path.split("?", 1)[0].rstrip("/")
+    if _is_s3_uri(path):
+        without_scheme = path[len("s3://") :]
+        bucket, _, key = without_scheme.partition("/")
+        parent_key = key.rsplit("/", 1)[0] if key and "/" in key else ""
+        return f"s3://{bucket}/{parent_key}" if parent_key else f"s3://{bucket}"
+    return str(Path(path).parent)
+
+
+def _join_path(base: str, name: str) -> str:
+    if _is_s3_uri(base):
+        return f"{base.rstrip('/')}/{name}"
+    return str(Path(base) / name)
+
+
 def cmd_probe(args: argparse.Namespace) -> int:
     incomplete = _read_parquet(args.incomplete_parquet)
     audit = _read_parquet(args.audit_parquet)
@@ -106,8 +126,9 @@ def cmd_probe(args: argparse.Namespace) -> int:
             time.sleep(args.delay_seconds)
 
     report = pd.DataFrame(rows).sort_values("source_id")
-    out_path = Path(args.report_out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = str(args.report_out)
+    if not _is_s3_uri(out_path):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     report.to_parquet(out_path, index=False)
     logger.info("Wrote %s (%d rows)", out_path, len(report))
     return 0
@@ -215,7 +236,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_probe.add_argument(
         "--report-out",
-        type=Path,
         default=None,
         help="default: reconciliation_report.parquet next to --audit-parquet",
     )
@@ -261,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="local path or s3:// URI",
     )
-    p_all.add_argument("--report-out", type=Path, default=None)
+    p_all.add_argument("--report-out", default=None)
     p_all.add_argument("--delay-seconds", type=float, default=0.0)
     p_all.add_argument("--bucket", default=get_bucket())
     p_all.add_argument("--prefix", default=get_prefix())
@@ -287,11 +307,11 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stdout,
     )
     if args.command in ("probe", "all"):
-        audit_dir = Path(args.audit_parquet).parent
+        audit_parent = _parent_path(str(args.audit_parquet))
         if getattr(args, "incomplete_parquet", None) is None:
-            args.incomplete_parquet = str(audit_dir / "incomplete_df.parquet")
+            args.incomplete_parquet = _join_path(audit_parent, "incomplete_df.parquet")
         if getattr(args, "report_out", None) is None:
-            args.report_out = audit_dir / "reconciliation_report.parquet"
+            args.report_out = _join_path(audit_parent, "reconciliation_report.parquet")
     return args.func(args)
 
 

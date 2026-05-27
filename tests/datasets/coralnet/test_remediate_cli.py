@@ -10,6 +10,8 @@ import pandas as pd
 
 from mermaidseg.datasets.coralnet.scraper.models import SourceProbe
 from mermaidseg.datasets.coralnet.scraper.remediate_incomplete import (
+    _join_path,
+    _parent_path,
     build_parser,
     cmd_probe,
     cmd_redownload,
@@ -20,6 +22,30 @@ def test_remediate_parser_has_subcommands():
     p = build_parser()
     actions = next(a for a in p._actions if getattr(a, "choices", None))
     assert set(actions.choices) == {"probe", "redownload", "all"}
+
+
+def test_s3_parent_and_join_path_helpers():
+    audit = "s3://bucket/prefix/run/coralnet_audit_20260526_abc.parquet"
+    parent = _parent_path(audit)
+    assert parent == "s3://bucket/prefix/run"
+    assert _join_path(parent, "incomplete_df.parquet") == (
+        "s3://bucket/prefix/run/incomplete_df.parquet"
+    )
+
+
+def test_probe_default_paths_for_s3_audit_parquet():
+    args = build_parser().parse_args(
+        [
+            "probe",
+            "--audit-parquet",
+            "s3://bucket/prefix/run/coralnet_audit_20260526_abc.parquet",
+        ]
+    )
+    audit_parent = _parent_path(str(args.audit_parquet))
+    incomplete = _join_path(audit_parent, "incomplete_df.parquet")
+    report = _join_path(audit_parent, "reconciliation_report.parquet")
+    assert incomplete == "s3://bucket/prefix/run/incomplete_df.parquet"
+    assert report == "s3://bucket/prefix/run/reconciliation_report.parquet"
 
 
 _CREDS_TARGET = (

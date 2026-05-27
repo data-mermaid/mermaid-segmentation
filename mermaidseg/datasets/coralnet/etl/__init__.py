@@ -1,7 +1,7 @@
 """Reproducible ETL for CoralNet annotations + image-size metadata.
 
 Builds three parquets per run (audit, annotations, images) under a versioned output prefix so
-training defaults can be pinned to a specific build. See ``.docs/CORALNET_ETL.md`` for usage.
+training defaults can be pinned to a specific build. See ``wiki/CoralNet-ETL.md`` for usage.
 """
 
 from __future__ import annotations

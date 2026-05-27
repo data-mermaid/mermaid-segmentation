@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
-from mermaidseg.datasets.coralnet.etl.images import build_images
+from mermaidseg.datasets.coralnet.etl.images import _next_part_index, build_images
 from mermaidseg.datasets.coralnet.etl.io import write_parquet_deterministic
 from mermaidseg.datasets.coralnet.etl.schemas import (
     IMAGES_PRIMARY_KEY,
@@ -119,3 +119,10 @@ def test_build_images_round_trips_through_parquet(
     assert {f.name for f in schema} == {f.name for f in IMAGES_SCHEMA}
     round = pq.read_table(out).to_pandas()
     assert len(round) == len(img_df)
+
+
+def test_next_part_index_uses_filename_max_not_loaded_count(tmp_path):
+    cp = tmp_path / "images.parquet"
+    (tmp_path / "images.part_00000.parquet").write_bytes(b"not parquet")
+    (tmp_path / "images.part_00001.parquet").write_bytes(b"not parquet")
+    assert _next_part_index(cp) == 2

@@ -69,6 +69,18 @@ def test_audit_source_ids_exclusive():
         cli._audit_source_ids_from_args(ns)
 
 
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        ("s3://b/prefix/ids.csv", "csv"),
+        ("s3://b/prefix/ids.parquet", "parquet"),
+        ("/tmp/ids.csv", "csv"),
+    ],
+)
+def test_path_suffix(path, expected):
+    assert cli._path_suffix(path) == expected
+
+
 def test_cli_audit_explicit_source_ids(
     monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
 ):

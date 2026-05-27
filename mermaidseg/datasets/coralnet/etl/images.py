@@ -138,6 +138,18 @@ def _load_checkpoint(
     return frames, seen
 
 
+def _next_part_index(checkpoint_path: Path) -> int:
+    """Return the next unused part index from existing ``*.part_NNNNN.parquet`` filenames."""
+    parent = checkpoint_path.parent
+    stem = checkpoint_path.stem
+    max_idx = -1
+    for part in parent.glob(f"{stem}.part_*.parquet"):
+        suffix = part.stem.removeprefix(f"{stem}.part_")
+        if suffix.isdigit():
+            max_idx = max(max_idx, int(suffix))
+    return max_idx + 1
+
+
 def _write_part(rows: list[dict[str, Any]], checkpoint_path: Path, index: int) -> Path:
     parent = checkpoint_path.parent
     stem = checkpoint_path.stem
@@ -205,7 +217,7 @@ def build_images(
     )
 
     new_rows: list[dict[str, Any]] = []
-    part_index = len(existing_frames)
+    part_index = _next_part_index(checkpoint) if checkpoint else 0
     buffer: list[dict[str, Any]] = []
 
     def flush() -> None:

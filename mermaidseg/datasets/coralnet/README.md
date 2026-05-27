@@ -51,8 +51,6 @@ export them (for example via `incomplete_df.parquet` in the EDA notebook), then:
    applies categorized fixes (omit `--dry-run` for real uploads). Sources whose
    overview shows **Confirmed: 0** (parsed from the Image Status table) get
    `skip_no_confirmed_annotations` and are not redownloaded. Optionally use
-   overview shows **Confirmed: 0** (parsed from the Image Status table) get
-   `skip_no_confirmed_annotations` and are not redownloaded. Optionally use
    `--clean-prefix` plus `CORALNET_*` credentials in the environment
    (`CORALNET_USERNAME` / `CORALNET_PASSWORD`).
 3. Re-audit only touched IDs:

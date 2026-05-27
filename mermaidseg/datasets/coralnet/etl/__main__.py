@@ -64,6 +64,14 @@ def _file_name(kind: str, version: str) -> str:
     return f"coralnet_{kind}_{version}.parquet"
 
 
+def _path_suffix(path: str) -> str:
+    base = path.split("?", 1)[0]
+    name = base.rsplit("/", 1)[-1] if base.startswith("s3://") else Path(base).name
+    if "." not in name:
+        return ""
+    return name.rsplit(".", 1)[-1].lower()
+
+
 def _audit_source_ids_from_args(args: argparse.Namespace) -> list[int] | None:
     has_csv = getattr(args, "source_ids", None)
     has_file = getattr(args, "source_ids_file", None)
@@ -73,7 +81,7 @@ def _audit_source_ids_from_args(args: argparse.Namespace) -> list[int] | None:
         return [int(x.strip()) for x in str(has_csv).split(",") if x.strip()]
     if has_file:
         path_str = str(has_file)
-        if path_str.startswith("s3://") or Path(path_str).suffix.lower() == ".parquet":
+        if _path_suffix(path_str) == "parquet":
             df = pd.read_parquet(path_str)
         else:
             df = pd.read_csv(path_str)
