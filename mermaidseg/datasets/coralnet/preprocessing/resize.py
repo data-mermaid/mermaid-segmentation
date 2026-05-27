@@ -359,10 +359,9 @@ def resize_and_upload_all_images(
     checkpoint_path: Path | str,
     threshold: int = 2048,
     workers: int = 16,
-    checkpoint_every: int = 500,
     s3_client: Any | None = None,
 ) -> tuple[int, int, int]:
-    """Download, resize, and upload all images with checkpointing.
+    """Download, resize, and upload all images with atomic checkpoint updates.
 
     Args:
         df_todo: DataFrame with columns [source_id, image_id, ..., original_s3_key, output_s3_key]
@@ -371,7 +370,6 @@ def resize_and_upload_all_images(
         checkpoint_path: Path to checkpoint parquet
         threshold: Resize threshold
         workers: ThreadPoolExecutor concurrency
-        checkpoint_every: (Deprecated; kept for compatibility)
         s3_client: Boto3 S3 client
 
     Returns:

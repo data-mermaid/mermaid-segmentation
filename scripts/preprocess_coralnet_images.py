@@ -83,7 +83,6 @@ def resize_command(args: argparse.Namespace) -> None:
         checkpoint_path=checkpoint_path,
         threshold=args.threshold,
         workers=args.workers,
-        checkpoint_every=args.checkpoint_every,
         s3_client=s3_client,
     )
 
@@ -166,12 +165,6 @@ def main() -> None:
         default=16,
         type=int,
         help="ThreadPoolExecutor concurrency for image resizing",
-    )
-    resize_parser.add_argument(
-        "--checkpoint-every",
-        default=500,
-        type=int,
-        help="Flush checkpoint after N images",
     )
     resize_parser.add_argument(
         "--temp-dir",
