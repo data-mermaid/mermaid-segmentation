@@ -1,6 +1,10 @@
 """Live Playwright smoke tests against coralnet.ucsd.edu (excluded from default pytest)."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
+
+pytest_plugins = ["tests.datasets.coralnet.conftest_live"]
 
 import io
 import re

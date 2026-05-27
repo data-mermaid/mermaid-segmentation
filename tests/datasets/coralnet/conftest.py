@@ -330,6 +330,3 @@ def paginated_downloader(fake_s3) -> CoralNetDownloader:
     dl._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
     dl._export_thread_local = threading.local()
     return dl
-
-
-pytest_plugins = ["tests.datasets.coralnet.conftest_live"]
