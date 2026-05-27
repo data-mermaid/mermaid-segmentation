@@ -9,6 +9,7 @@ description = "A package for the segmentation of MERMAID coral data."
 requires-python = ">=3.11"
 dependencies = [
     "albumentations",
+    "beautifulsoup4",
     "boto3",
     "numpy>=1.24,<2",
     "pandas",
@@ -33,17 +34,27 @@ dependencies = [
     "sagemaker-mlflow>=0.2.0",
     "requests-auth-aws-sigv4>=0.7",
     "safetensors>=0.4.0",
+    "ibis-framework[duckdb]>=9.0",
 ]
+
+[project.scripts]
+coralnet-etl = "mermaidseg.datasets.coralnet.etl.__main__:main"
+coralnet-remediate = "mermaidseg.datasets.coralnet.scraper.remediate_incomplete:main"
 
 [project.optional-dependencies]
 notebooks = [
     "jupyter",
     "ipywidgets",
     "wandb>=0.25.0",
+    "hvplot>=0.12.2",
+    "great-tables>=0.21.0",
 ]
 scraping = [
     "selenium",
     "webdriver-manager",
+]
+test-live = [
+    "playwright>=1.50",
 ]
 
 [dependency-groups]
@@ -96,11 +107,13 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "-ra",
+    "-m",
+    "not live",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
-    "live: marks tests as live integration tests requiring S3 access (deselect with '-m \"not live\"')",
+    "live: marks tests as live integration tests requiring S3 and/or CoralNet access (deselect with '-m \"not live\"')",
 ]
 
 [tool.coverage.run]

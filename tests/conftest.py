@@ -66,8 +66,8 @@ def fake_meta_model():
 def make_config():
     """Factory that builds a ConfigDict.
 
-    Override any nested value via keyword arguments, e.g.
-    ``make_config(logger={"experiment_name": "custom"})``.
+    Override any nested value via keyword arguments, e.g. ``make_config(logger={"experiment_name":
+    "custom"})``.
     """
 
     def _factory(**overrides: Any) -> ConfigDict:
