@@ -7,7 +7,6 @@ import io
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -180,18 +179,6 @@ def scan_for_missing_resized_images(
                 logger.error("Error checking S3 for resized image: %s", e)
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
-
-
-@dataclass
-class ResizeConfig:
-    """Configuration for image resizing."""
-
-    bucket: str
-    output_prefix: str
-    threshold: int = 2048
-    workers: int = 16
-    checkpoint_every: int = 500
-    temp_dir: str = "/tmp/coralnet-resize-checkpoint"
 
 
 def write_checkpoint(checkpoint_path: Path | str, df: pd.DataFrame) -> None:
