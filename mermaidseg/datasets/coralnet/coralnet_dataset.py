@@ -57,7 +57,7 @@ class CoralNetDataset(BaseCoralDataset):
 
     def __init__(
         self,
-        annotations_path: str = "coralnet_annotations_30052026.parquet",
+        annotations_path: str = "coralnet-public-images/coralnet_annotations_30052026.parquet",
         source_bucket: str = "dev-datamermaid-sm-sources",
         source_s3_prefix: str = "coralnet-public-images",
         whitelist_sources: list[int | str] | None = None,
