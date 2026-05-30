@@ -73,7 +73,6 @@ def test_resize_image_square():
 
 def test_scan_for_missing_resized_images_builds_todo_list():
     """Scan identifies images that need resizing and don't exist on S3."""
-    # Create mock images parquet
     df_images = pd.DataFrame(
         {
             "source_id": [1, 1, 2],
@@ -81,6 +80,11 @@ def test_scan_for_missing_resized_images_builds_todo_list():
             "width": [3000, 800, 2500],
             "height": [2000, 600, 1500],
             "needs_resize": [True, False, True],
+            "s3_key": [
+                "coralnet-public-images/s1/images/img_a.jpg",
+                "coralnet-public-images/s1/images/img_b.jpg",
+                "coralnet-public-images/s2/images/img_c.jpg",
+            ],
         }
     )
 
@@ -104,10 +108,11 @@ def test_scan_for_missing_resized_images_builds_todo_list():
         workers=2,
     )
 
-    # Should only include img_c (needs_resize=True and doesn't exist on S3)
     assert len(todo_df) == 1
     assert todo_df.iloc[0]["image_id"] == "img_c"
     assert todo_df.iloc[0]["source_id"] == 2
+    assert todo_df.iloc[0]["original_s3_key"] == "coralnet-public-images/s2/images/img_c.jpg"
+    assert todo_df.iloc[0]["output_s3_key"] == "etl-outputs/coralnet/resized/s2/images/img_c.jpg"
     assert "original_s3_key" in todo_df.columns
     assert "output_s3_key" in todo_df.columns
 
@@ -181,7 +186,7 @@ def test_resize_and_upload_image_success(tmp_path):
         "width": 3000,
         "height": 2000,
         "original_s3_key": "coralnet-public-images/s1/images/img_a.jpg",
-        "output_s3_key": "etl-outputs/coralnet/resized/2048/s1/images/img_a.jpg",
+        "output_s3_key": "etl-outputs/coralnet/resized/s1/images/img_a.jpg",
     }
 
     # Create initial checkpoint
@@ -210,7 +215,7 @@ def test_resize_and_upload_image_success(tmp_path):
     assert mock_s3.put_object.called
     call_args = mock_s3.put_object.call_args
     assert call_args[1]["Bucket"] == "test-bucket"
-    assert call_args[1]["Key"] == "etl-outputs/coralnet/resized/2048/s1/images/img_a.jpg"
+    assert call_args[1]["Key"] == "etl-outputs/coralnet/resized/s1/images/img_a.jpg"
 
     # Verify checkpoint updated to 'completed'
     checkpoint_df_updated = read_checkpoint(checkpoint_path)

@@ -75,6 +75,7 @@ def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, tmp_path):
             "width": [2000],
             "height": [1500],
             "needs_resize": [True],
+            "s3_key": [test_key],
         }
     )
 
@@ -107,7 +108,7 @@ def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, tmp_path):
     assert num_failed == 0, f"Expected 0 failed, got {num_failed}"
 
     # Verify resized image exists on S3
-    resized_key = f"{test_prefix}/resized/{threshold}/s1/images/test_img.jpg"
+    resized_key = f"{test_prefix}/resized/s1/images/test_img.jpg"
     response = test_s3_client.head_object(Bucket=test_bucket, Key=resized_key)
     assert response["ContentLength"] > 0, "Resized image should exist on S3"
 
@@ -195,6 +196,10 @@ def test_resize_and_upload_multi_source(test_bucket, test_s3_client, tmp_path):
             "width": [img["size"][0] for img in images_data],
             "height": [img["size"][1] for img in images_data],
             "needs_resize": [img["needs_resize"] for img in images_data],
+            "s3_key": [
+                f"{test_prefix}/s{img['source_id']}/images/{img['image_id']}.jpg"
+                for img in images_data
+            ],
         }
     )
 
@@ -233,7 +238,7 @@ def test_resize_and_upload_multi_source(test_bucket, test_s3_client, tmp_path):
     # Verify both resized images exist on S3
     for image_id in ["s1_large", "s2_large"]:
         source_id = 1 if image_id.startswith("s1") else 2
-        resized_key = f"{test_prefix}/resized/{threshold}/s{source_id}/images/{image_id}.jpg"
+        resized_key = f"{test_prefix}/resized/s{source_id}/images/{image_id}.jpg"
         response = test_s3_client.head_object(Bucket=test_bucket, Key=resized_key)
         assert response["ContentLength"] > 0, f"Resized image {image_id} should exist on S3"
 
@@ -282,7 +287,7 @@ def test_scan_respects_already_resized(test_bucket, test_s3_client, tmp_path):
     resized_img = Image.new("RGB", (1024, 768), color="green")
     resized_bytes = io.BytesIO()
     resized_img.save(resized_bytes, format="JPEG")
-    resized_key = f"{test_prefix}/resized/{threshold}/s1/images/test_img_idempotent.jpg"
+    resized_key = f"{test_prefix}/resized/s1/images/test_img_idempotent.jpg"
     test_s3_client.put_object(
         Bucket=test_bucket,
         Key=resized_key,
@@ -297,6 +302,7 @@ def test_scan_respects_already_resized(test_bucket, test_s3_client, tmp_path):
             "width": [2000],
             "height": [1500],
             "needs_resize": [True],
+            "s3_key": [original_key],
         }
     )
 
@@ -354,6 +360,9 @@ def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
             "width": [3000, 2500],
             "height": [2000, 1500],
             "needs_resize": [True, True],
+            "s3_key": [
+                f"{test_prefix}/s1/images/{img_data['image_id']}.jpg" for img_data in images_data
+            ],
         }
     )
 

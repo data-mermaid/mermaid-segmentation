@@ -13,13 +13,39 @@ from typing import Any
 
 import boto3
 import pandas as pd
+from botocore.config import Config
 from PIL import Image
 from tqdm import tqdm
+
+from mermaidseg.datasets.coralnet.etl.config import DEFAULT_PREFIX
 
 logger = logging.getLogger(__name__)
 
 # Thread lock for checkpoint updates
 _checkpoint_lock = threading.Lock()
+_s3_thread_local = threading.local()
+
+
+def make_resize_s3_client(*, max_pool_connections: int = 10) -> Any:
+    """Build an S3 client sized for concurrent resize/scan workers."""
+    config = Config(
+        retries={"max_attempts": 10, "mode": "adaptive"},
+        max_pool_connections=max_pool_connections,
+    )
+    return boto3.client("s3", config=config)
+
+
+def _init_s3_worker(max_pool_connections: int) -> None:
+    _s3_thread_local.s3 = make_resize_s3_client(max_pool_connections=max_pool_connections)
+
+
+def _resolve_s3_client(explicit_client: Any | None) -> Any:
+    if explicit_client is not None:
+        return explicit_client
+    client = getattr(_s3_thread_local, "s3", None)
+    if client is None:
+        client = make_resize_s3_client(max_pool_connections=10)
+    return client
 
 
 CHECKPOINT_SCHEMA = {
@@ -88,7 +114,7 @@ def _s3_key_for(prefix: str, source_id: int, image_id: str) -> str:
 
 def _resized_s3_key_for(prefix: str, source_id: int, image_id: str, threshold: int) -> str:
     """S3 key for a resized image."""
-    return f"{prefix}/resized/{threshold}/s{source_id}/images/{image_id}.jpg"
+    return f"{prefix}/resized/s{source_id}/images/{image_id}.jpg"
 
 
 def _check_resized_exists(
@@ -115,23 +141,26 @@ def scan_for_missing_resized_images(
     threshold: int = 2048,
     s3_client: Any | None = None,
     workers: int = 32,
+    source_prefix: str | None = None,
 ) -> pd.DataFrame:
     """Scan which images need resizing and don't yet exist on S3.
 
     Args:
         df_images: Images parquet with columns [source_id, image_id, width, height, needs_resize]
+            and optionally ``s3_key`` for the original object location.
         bucket: S3 bucket name
-        output_prefix: S3 prefix for ETL outputs
+        output_prefix: S3 prefix for resized image outputs
         threshold: Resize threshold (longest edge, pixels)
         s3_client: Boto3 S3 client (created if None)
         workers: ThreadPoolExecutor concurrency for S3 checks
+        source_prefix: Fallback prefix for original keys when ``s3_key`` is absent
 
     Returns:
         DataFrame with columns [source_id, image_id, width, height, original_s3_key, output_s3_key]
         for images that need resizing and don't yet exist on S3.
     """
-    if s3_client is None:
-        s3_client = boto3.client("s3")
+    source_prefix = source_prefix or DEFAULT_PREFIX
+    pool_size = workers + 4
 
     # Filter to images that need resizing
     df_todo = df_images[df_images["needs_resize"]].copy()
@@ -140,8 +169,8 @@ def scan_for_missing_resized_images(
         logger.info("No images need resizing")
         return pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
 
-    # Check which ones don't yet exist on S3
     def check_and_build_row(row: pd.Series) -> dict[str, Any] | None:
+        client = _resolve_s3_client(s3_client)
         source_id = int(row["source_id"])
         image_id = str(row["image_id"])
         exists = _check_resized_exists(
@@ -150,20 +179,28 @@ def scan_for_missing_resized_images(
             source_id=source_id,
             image_id=image_id,
             threshold=threshold,
-            s3_client=s3_client,
+            s3_client=client,
         )
         if exists:
             return None  # Skip, already resized
+        if "s3_key" in row.index and pd.notna(row["s3_key"]):
+            original_s3_key = str(row["s3_key"])
+        else:
+            original_s3_key = _s3_key_for(source_prefix, source_id, image_id)
         return {
             "source_id": source_id,
             "image_id": image_id,
             "width": int(row["width"]),
             "height": int(row["height"]),
-            "original_s3_key": _s3_key_for(output_prefix, source_id, image_id),
+            "original_s3_key": original_s3_key,
             "output_s3_key": _resized_s3_key_for(output_prefix, source_id, image_id, threshold),
         }
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        initializer=_init_s3_worker,
+        initargs=(pool_size,),
+    ) as executor:
         futures = {
             executor.submit(check_and_build_row, row): idx for idx, row in df_todo.iterrows()
         }
@@ -179,6 +216,45 @@ def scan_for_missing_resized_images(
                 logger.error("Error checking S3 for resized image: %s", e)
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
+
+
+def build_todo_from_checkpoint(
+    df_images: pd.DataFrame,
+    checkpoint_path: Path | str,
+    output_prefix: str,
+    threshold: int = 2048,
+    source_prefix: str | None = None,
+) -> pd.DataFrame:
+    """Build a resize todo list from pending checkpoint rows and an images parquet."""
+    source_prefix = source_prefix or DEFAULT_PREFIX
+    pending = get_pending_items(read_checkpoint(checkpoint_path))
+    if pending.empty:
+        return pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
+
+    df_keys = df_images.drop_duplicates(subset=["source_id", "image_id"])
+    merged = pending.merge(df_keys, on=["source_id", "image_id"], how="inner")
+    if merged.empty:
+        return pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
+
+    rows: list[dict[str, Any]] = []
+    for _, row in merged.iterrows():
+        source_id = int(row["source_id"])
+        image_id = str(row["image_id"])
+        if "s3_key" in row.index and pd.notna(row["s3_key"]):
+            original_s3_key = str(row["s3_key"])
+        else:
+            original_s3_key = _s3_key_for(source_prefix, source_id, image_id)
+        rows.append(
+            {
+                "source_id": source_id,
+                "image_id": image_id,
+                "width": int(row["width"]),
+                "height": int(row["height"]),
+                "original_s3_key": original_s3_key,
+                "output_s3_key": _resized_s3_key_for(output_prefix, source_id, image_id, threshold),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def write_checkpoint(checkpoint_path: Path | str, df: pd.DataFrame) -> None:
@@ -288,7 +364,7 @@ def resize_and_upload_image(
         s3_client: Boto3 S3 client
     """
     if s3_client is None:
-        s3_client = boto3.client("s3")
+        s3_client = _resolve_s3_client(None)
 
     source_id = todo_item["source_id"]
     image_id = todo_item["image_id"]
@@ -362,8 +438,7 @@ def resize_and_upload_all_images(
     Returns:
         Tuple (num_resized, num_skipped, num_failed)
     """
-    if s3_client is None:
-        s3_client = boto3.client("s3")
+    pool_size = workers + 4
 
     # Initialize checkpoint if not exists
     if not Path(checkpoint_path).exists():
@@ -386,7 +461,11 @@ def resize_and_upload_all_images(
         on=["source_id", "image_id"],
     )
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        initializer=_init_s3_worker,
+        initargs=(pool_size,),
+    ) as executor:
         futures = {
             executor.submit(
                 resize_and_upload_image,
@@ -394,7 +473,7 @@ def resize_and_upload_all_images(
                 bucket,
                 checkpoint_path,
                 threshold,
-                s3_client,
+                None if s3_client is None else s3_client,
             ): idx
             for idx, row in df_work.iterrows()
         }
