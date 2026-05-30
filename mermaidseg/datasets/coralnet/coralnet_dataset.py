@@ -57,7 +57,7 @@ class CoralNetDataset(BaseCoralDataset):
 
     def __init__(
         self,
-        annotations_path: str = "coralnet_annotations_30112025.parquet",
+        annotations_path: str = "coralnet_annotations_30052026.parquet",
         source_bucket: str = "dev-datamermaid-sm-sources",
         source_s3_prefix: str = "coralnet-public-images",
         whitelist_sources: list[int | str] | None = None,
@@ -101,9 +101,9 @@ class CoralNetDataset(BaseCoralDataset):
         """
         annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         df_annotations = pd.read_parquet(annotations_path)
-        df_annotations["source_label_name"] = df_annotations["coralnet_id"].astype(str)
+        df_annotations["source_label_name"] = df_annotations["coralnet_name"].astype(str)
         df_annotations = df_annotations[
-            ["source_id", "image_id", "row", "col", "coralnet_id", "source_label_name"]
+            ["source_id", "image_id", "row", "col", "coralnet_id", "coralnet_name", "source_label_name"]
         ]
 
         df_images = self._derive_df_images_from_annotations(df_annotations)

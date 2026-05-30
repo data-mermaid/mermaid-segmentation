@@ -20,30 +20,6 @@ DEFAULT_CLASS_TO_CONCEPTS_CSV = (
     Path(__file__).resolve().parents[2] / "configs" / "class_to_concepts.csv"
 )
 
-
-## TODO: Temporary Fix
-import requests 
-def fetch_coralnet_id2label(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
-) -> dict[str, str]:
-    """Fetch the CoralNet provider ID -> MERMAID benthic-attribute name mapping.
-
-    Returns a dict keyed by stringified CoralNet provider ID with values equal
-    to the MERMAID benthic-attribute name (or ``None`` if the CoralNet label
-    is not yet mapped).
-    """
-    response = requests.get(mapping_endpoint, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    labelset = list(data["results"])
-    while data.get("next"):
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        labelset.extend(data["results"])
-    return {str(label["provider_id"]): label["provider_label"] for label in labelset}
-
-
 def initialize_benthic_hierarchy(
     hierarchy_json_url: str = "https://api.datamermaid.org/v1/benthicattributes/",
 ) -> dict[str, str | None]:
@@ -364,18 +340,13 @@ def initialize_benthic_concepts(
             ["global_id", "source_dataset_source", "source_label_class_name"]
         ]
         
-        ## TODO: Update
-        ## The following are temporary: 
-        if "coralnet" in df_id2source["source_dataset_source"].unique():
-            coralnet_id2label = fetch_coralnet_id2label()
-            df_id2source["source_label_class_name"] = df_id2source["source_label_class_name"].apply(lambda s: coralnet_id2label.get(s, s))
         df_id2source["source_label_class_name"] = df_id2source["source_label_class_name"].apply(lambda s: s.lower())
 
         df_mapping = df_mapping.merge(
             df_id2source, on=["source_label_class_name", "source_dataset_source"], how="right"
         )
 
-        ### TODO: FIX BUG 
+        ### TODO: FIX BUG - This will be resolved once the class_to_concepts.csv file is fully updated
         if df_mapping.shape[0] != df_id2source.shape[0]:
             raise ValueError(
                 "The concept map has a different number of rows than the source label registry after merging. "

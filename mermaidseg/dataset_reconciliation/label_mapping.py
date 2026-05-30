@@ -35,9 +35,9 @@ def fetch_mermaid_target_labels(
 def fetch_coralnet_to_mermaid(
     mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
 ) -> dict[str, str]:
-    """Fetch the CoralNet provider ID -> MERMAID benthic-attribute name mapping.
+    """Fetch the CoralNet provider label -> MERMAID benthic-attribute name mapping.
 
-    Returns a dict keyed by stringified CoralNet provider ID with values equal
+    Returns a dict keyed by stringified CoralNet provider label with values equal
     to the MERMAID benthic-attribute name (or ``None`` if the CoralNet label
     is not yet mapped).
     """
@@ -50,7 +50,7 @@ def fetch_coralnet_to_mermaid(
         response.raise_for_status()
         data = response.json()
         labelset.extend(data["results"])
-    return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
+    return {str(label["provider_label"]): label["benthic_attribute_name"] for label in labelset}
 
 
 def fetch_catlin_seaview_to_mermaid(
