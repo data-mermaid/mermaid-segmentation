@@ -52,6 +52,7 @@ _BUILTIN_DEFAULT_FETCHERS = {
     "coralscapes": _coralscapes_source_to_target,
 }
 
+
 def roll_up_label(label: str, benthic_hierarchy: dict[str, str], subset: set[str]) -> str | None:
     if label in subset:
         return label
@@ -102,6 +103,7 @@ class SourceLabelRegistry:
     source_to_concepts: torch.Tensor | None
     global_id2source: dict[int, tuple[str, str]]
     dataset_offsets: dict[str, int]
+    concept_value2id: dict[str, int] | None
 
     def __init__(
         self,
@@ -113,6 +115,7 @@ class SourceLabelRegistry:
         label_roll_up: bool = False,
         target_label_subset: list[str] | set[str] | None = None,
         fetch_remote: bool = True,
+        concept_mapping_path: str | None = None,
     ):
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
@@ -173,7 +176,7 @@ class SourceLabelRegistry:
         self.target_id2label = dict(enumerate(target_labels, start=1))
         self.target_label2id = {v: k for k, v in self.target_id2label.items()}
         self.num_target_classes = len(self.target_id2label) + 1  # +1 for background
-        
+
         if label_roll_up:
             if benthic_hierarchy is None:
                 if not fetch_remote:
@@ -183,10 +186,10 @@ class SourceLabelRegistry:
                 benthic_hierarchy = initialize_benthic_hierarchy()
             if subset is None:
                 raise ValueError("label_roll_up=True requires target_label_subset to be set")
-            
+
         # Dense lookup `global_source_id -> target_class_id`; index 0 stays
         # background, and any source name without a target (or filtered out by
-        # `subset`) either has an attempted roll up to a parent class or 
+        # `subset`) either has an attempted roll up to a parent class or
         # is left as 0 so it collapses to background at train time.
         source_to_target_np = np.zeros(num_global_source + 1, dtype=np.int64)
         for ds in self.datasets:
@@ -202,14 +205,16 @@ class SourceLabelRegistry:
                 target_id = self.target_label2id.get(target_name, 0)
                 source_to_target_np[local_id + offset] = target_id
         self.source_to_target = torch.from_numpy(source_to_target_np).long()
-        self.global_idmask: dict[int, bool] = {global_id: source_to_target_np[global_id] != 0 for global_id in self.global_id2source}
+        self.global_idmask: dict[int, bool] = {
+            global_id: source_to_target_np[global_id] != 0 for global_id in self.global_id2source
+        }
         self.source_to_concepts = None
         self._concept_matrix = None
         self.concept_id2name: dict[int, str] | None = None
         self.concept_name2id: dict[str, int] | None = None
-        self.concept_value2id : dict[str, dict[str, int]] | None = None
+        self.concept_value2id: dict[str, dict[str, int]] | None = None
         if compute_concepts:
-            self._build_concepts()
+            self._build_concepts(concept_mapping_path=concept_mapping_path)
 
         for ds in self.datasets:
             ds.set_global_offset(self.dataset_offsets[ds.SOURCE_NAME])
@@ -300,8 +305,12 @@ class SourceLabelRegistry:
             )
         return resolved
 
-    def _build_concepts(self):
-        concept_matrix, source_to_concepts, concept_value2id = initialize_benthic_concepts(global_id2source=self.global_id2source, global_idmask=self.global_idmask)
+    def _build_concepts(self, concept_mapping_path: str | None = None):
+        concept_matrix, source_to_concepts, concept_value2id = initialize_benthic_concepts(
+            mapping_location=concept_mapping_path,
+            global_id2source=self.global_id2source,
+            global_idmask=self.global_idmask,
+        )
         self._concept_matrix = concept_matrix
         self.concept_id2name = dict(enumerate(concept_value2id.keys(), start=1))
         self.concept_name2id = {v: k for k, v in self.concept_id2name.items()}
