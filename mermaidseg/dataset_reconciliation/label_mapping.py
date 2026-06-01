@@ -54,7 +54,7 @@ def fetch_coralnet_to_mermaid(
 
 
 def fetch_catlin_seaview_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=Catlin%20Seaview",
+    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
 ) -> dict[str, str]:
     """Fetch the Catlin Seaview label-name -> MERMAID benthic-attribute name mapping.
 
@@ -78,7 +78,7 @@ def fetch_catlin_seaview_to_mermaid(
 
 
 def fetch_moorea_labeled_corals_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=Moorea%20Labeled%20Corals",
+    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
 ) -> dict[str, str]:
     """Fetch the Moorea Labeled Corals label-name -> MERMAID benthic-attribute name mapping.
 
@@ -108,7 +108,7 @@ def fetch_moorea_labeled_corals_to_mermaid(
 
 
 def fetch_pacific_labeled_corals_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=Pacific%20Labeled%20Corals",
+    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
 ) -> dict[str, str]:
     """Fetch the Pacific Labeled Corals label-name -> MERMAID benthic-attribute name mapping.
 
@@ -140,7 +140,7 @@ def fetch_pacific_labeled_corals_to_mermaid(
 
 
 def fetch_benthos_yuval_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=Benthos%20Yuval",
+    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
 ) -> dict[str, str]:
     """Fetch the Benthos Yuval label-name -> MERMAID benthic-attribute name mapping.
 
