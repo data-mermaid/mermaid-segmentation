@@ -103,7 +103,15 @@ class CoralNetDataset(BaseCoralDataset):
         df_annotations = pd.read_parquet(annotations_path)
         df_annotations["source_label_name"] = df_annotations["coralnet_name"].astype(str)
         df_annotations = df_annotations[
-            ["source_id", "image_id", "row", "col", "coralnet_id", "coralnet_name", "source_label_name"]
+            [
+                "source_id",
+                "image_id",
+                "row",
+                "col",
+                "coralnet_id",
+                "coralnet_name",
+                "source_label_name",
+            ]
         ]
 
         df_images = self._derive_df_images_from_annotations(df_annotations)
