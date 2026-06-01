@@ -1,0 +1,5 @@
+logger:
+  uri: "segmentation"
+  experiment_name: "mermaid"
+  system_metrics: true
+  system_metrics_sampling_interval: 10
