@@ -15,6 +15,7 @@ from tqdm import tqdm
 import mermaidseg.model.loss
 import mermaidseg.model.models
 from mermaidseg.dataset_reconciliation.concepts import (
+    TAXONOMIC_CONCEPTS,
     postprocess_predicted_concepts,
     source_labels_to_concepts,
 )
@@ -60,6 +61,7 @@ class MetaModel:
         concept_matrix (pd.DataFrame | None): Pandas concept matrix retained for
             :func:`postprocess_predicted_concepts` (uses MultiIndex level metadata).
         conceptid2labelid (dict[int, int] | None): Maps concept IDs to target label IDs.
+        concept_value2id (dict[str, dict[str, int]] | None): Maps concept names and values to IDs.
     """
 
     run_name: str
@@ -76,6 +78,7 @@ class MetaModel:
     source_to_concepts_lookup: torch.Tensor | None
     concept_matrix: pd.DataFrame | None
     conceptid2labelid: dict[int, int] | None
+    concept_value2id: dict[str, dict[str, int]] | None
 
     def __init__(
         self,
@@ -90,12 +93,13 @@ class MetaModel:
         source_to_concepts_lookup: torch.Tensor | None = None,
         concept_matrix: pd.DataFrame | None = None,
         conceptid2labelid: dict[int, int] | None = None,
+        concept_value2id: dict[str, dict[str, int]] | None = None,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
         self.num_concepts = num_concepts
         self.device = device
-        
+
         if model_kwargs is None:
             model_kwargs = ConfigDict({})
         if training_kwargs is None:
@@ -140,21 +144,17 @@ class MetaModel:
         )
         self.concept_matrix = concept_matrix
         self.conceptid2labelid = conceptid2labelid
+        self.concept_value2id = concept_value2id
 
+        model_cls = getattr(mermaidseg.model.models, self.model_name)
+        model_kwargs.setdefault("num_classes", self.num_classes)
         if self.training_mode == "concept-bottleneck":
-            self.model = getattr(mermaidseg.model.models, self.model_name)(
-                num_classes=self.num_classes,
-                num_concepts=self.num_concepts,
-                **model_kwargs,
-            )
+            model_kwargs.setdefault("num_concepts", self.num_concepts)
         elif self.training_mode == "concept":
-            self.model = getattr(mermaidseg.model.models, self.model_name)(
-                num_classes=self.num_concepts, **model_kwargs
-            )
-        else:
-            self.model = getattr(mermaidseg.model.models, self.model_name)(
-                num_classes=self.num_classes, **model_kwargs
-            )
+            model_kwargs.setdefault(
+                "num_classes", self.num_concepts
+            )  # Overwrite the number of classes to be the number of concepts, since the model is only predicting concepts which are then mapped to classes via postprocessing
+        self.model = model_cls(**model_kwargs)
 
         if model_checkpoint:
             checkpoint = torch.load(model_checkpoint)
@@ -165,21 +165,23 @@ class MetaModel:
 
         self.model = self.model.to(device)
         if "loss" in training_kwargs:
-            loss = training_kwargs.loss.pop("type", None)
-            self.loss = getattr(mermaidseg.model.loss, loss)(**training_kwargs.loss)
-        # else:
-        #     self.loss = None  # Often the case for HF models where the loss is already included in the model
+            loss_cls = getattr(mermaidseg.model.loss, training_kwargs.loss.pop("type", None))
+            loss_kwargs = dict(training_kwargs.loss)
+            if self.concept_value2id is not None and self.training_mode in (
+                "concept",
+                "concept-bottleneck",
+            ):
+                loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
+            self.loss = loss_cls(**loss_kwargs)
 
-        optimizer = training_kwargs.optimizer.pop("type", None)
-        self.optimizer = getattr(torch.optim, optimizer)(
-            params=self.model.parameters(), **training_kwargs.optimizer
-        )
+        optimizer_cls = getattr(torch.optim, training_kwargs.optimizer.pop("type", None))
+        self.optimizer = optimizer_cls(params=self.model.parameters(), **training_kwargs.optimizer)
 
         if "scheduler" in training_kwargs:
-            scheduler = training_kwargs.scheduler.pop("type", None)
-            self.scheduler = getattr(torch.optim.lr_scheduler, scheduler)(
-                self.optimizer, **training_kwargs.scheduler
+            scheduler_cls = getattr(
+                torch.optim.lr_scheduler, training_kwargs.scheduler.pop("type", None)
             )
+            self.scheduler = scheduler_cls(self.optimizer, **training_kwargs.scheduler)
 
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
@@ -198,6 +200,20 @@ class MetaModel:
                 "MetaModel.source_to_concepts_lookup is not set; cannot run concept modes."
             )
         return source_labels_to_concepts(source_labels, self.source_to_concepts_lookup)
+
+    def _concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
+        offset = 0
+        activated_parts = []
+
+        for concept in TAXONOMIC_CONCEPTS:
+            concept_values = self.concept_value2id[concept]
+            order_concept_length = len(list(concept_values.values())[0])
+            chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
+            activated_parts.append(torch.softmax(chunk, dim=1))
+            offset += order_concept_length
+
+        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...]))
+        return torch.cat(activated_parts, dim=1)
 
     def batch_predict(
         self,
@@ -222,7 +238,7 @@ class MetaModel:
         if self.training_mode == "concept-bottleneck":
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
-            concept_outputs = torch.sigmoid(concept_outputs)
+            concept_outputs = self._concept_outputs_activation(concept_outputs)
         elif self.training_mode == "concept":
             concept_outputs = segmentation_outputs.logits
             outputs = postprocess_predicted_concepts(
@@ -274,10 +290,10 @@ class MetaModel:
             )
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
+            concept_outputs = self._concept_outputs_activation(concept_outputs)
             loss, loss_components = self.loss(
                 outputs, target_labels, concept_outputs, target_concepts
             )
-            concept_outputs = torch.sigmoid(concept_outputs)
 
         elif self.training_mode == "concept":
             assert target_concepts is not None, "target_concepts must be provided in 'concept' mode"
@@ -410,11 +426,7 @@ class MetaModel:
                         metric.update(outputs, target_labels)
 
             if self.training_mode in ("concept-bottleneck", "concept"):
-                concept_outputs = (concept_outputs > 0.5).float()
-                concept_outputs += 1
-                for metric in evaluator.concept_metric_dict.values():
-                    metric.update(concept_outputs, target_concepts)
-
+                evaluator.evaluate_concepts(concept_outputs, target_concepts)
             if use_cuda:
                 torch.cuda.synchronize()
             batch_end = time.perf_counter()
@@ -448,7 +460,7 @@ class MetaModel:
             "num_samples": num_samples,
         }
         return last_loss, metric_results, timing
-    
+
     @torch.no_grad()
     def validation_epoch(
         self,
