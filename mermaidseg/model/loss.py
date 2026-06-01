@@ -2,6 +2,8 @@ from typing import Any
 
 import torch
 
+from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+
 
 class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
     """CrossEntropyLoss is a wrapper of `torch.nn.CrossEntropyLoss` that allows for additional
@@ -13,7 +15,7 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
         kwargs: Additional keyword arguments that are passed to the base `torch.nn.CrossEntropyLoss` class.
     """
 
-    def __init__(self, ignore_index: int = -1, **kwargs: Any) -> None:
+    def __init__(self, ignore_index: int = 0, **kwargs: Any) -> None:
         super().__init__(ignore_index=ignore_index, **kwargs)
 
 
@@ -60,7 +62,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
         class_loss (torch.nn.Module): The loss function used for classification. Defaults to
             `torch.nn.CrossEntropyLoss`.
         concept_loss (torch.nn.Module): The loss function used for concept prediction. Defaults to
-            `torch.nn.BCEWithLogitsLoss`.
+            `torch.nn.BCELoss`.
         ignore_index (int): Specifies a target value that is ignored and does not contribute to the input gradient
             for the classification loss. Defaults to -1.
         lambda_weight (float): The weight applied to the concept loss when computing the total loss. Defaults to 1.0.
@@ -69,9 +71,10 @@ class ConceptBottleneckLoss(torch.nn.Module):
 
     def __init__(
         self,
+        concept_value2id: dict[str, dict[str, int]],
         class_loss: torch.nn.Module = torch.nn.CrossEntropyLoss,
-        concept_loss: torch.nn.Module = torch.nn.BCEWithLogitsLoss,
-        ignore_index: int = -1,
+        concept_loss: torch.nn.Module = torch.nn.BCELoss,
+        ignore_index: int = 0,
         lambda_weight: float = 1.0,
         **kwargs: Any,
     ) -> None:
@@ -79,6 +82,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
         self.class_loss = class_loss(ignore_index=ignore_index, **kwargs)
         self.concept_loss = concept_loss(reduction="none", **kwargs)
         self.lambda_weight = lambda_weight
+        self.concept_value2id = concept_value2id
 
     def forward(
         self,
@@ -103,13 +107,32 @@ class ConceptBottleneckLoss(torch.nn.Module):
 
         class_loss_value = self.class_loss(outputs, target_labels)
 
-        concept_mask = concept_labels==0
-        concept_labels = concept_labels-1
-        per_element_loss = self.concept_loss(concept_outputs, concept_labels)
+        concept_loss_value = 0
+        offset = 0
 
-        masked_loss = per_element_loss * concept_mask
-        denom = concept_mask.sum() * outputs.shape[1] + 1e-8
-        concept_loss_value = masked_loss.sum() / denom
+        ### Calculate taxonomic concept loss
+        for concept in TAXONOMIC_CONCEPTS:
+            concept_values = self.concept_value2id[concept]
+            order_concept_length = len(
+                list(concept_values.values())[0]
+            )  # This is the length of the one-hot encoded vector for each taxonomic concept
+            concept_labels_order = concept_labels[:, offset : offset + order_concept_length, ...]
+            concept_outputs_order = concept_outputs[:, offset : offset + order_concept_length, ...]
+            offset += order_concept_length
+
+            concept_loss = self.calculate_individual_concept_loss(
+                concept_outputs_order, concept_labels_order
+            )
+            concept_loss_value += concept_loss
+
+        ### Calculate binary concept loss for all of the remaining concepts
+        concept_labels_binary = concept_labels[:, offset:, ...]
+        concept_outputs_binary = concept_outputs[:, offset:, ...]
+
+        concept_loss = self.calculate_individual_concept_loss(
+            concept_outputs_binary, concept_labels_binary
+        )
+        concept_loss_value += concept_loss
 
         total_loss = class_loss_value + self.lambda_weight * concept_loss_value
         loss_components = {
@@ -117,3 +140,12 @@ class ConceptBottleneckLoss(torch.nn.Module):
             "concept_loss": concept_loss_value.item(),
         }
         return total_loss, loss_components
+
+    def calculate_individual_concept_loss(
+        self, concept_outputs: torch.Tensor, concept_labels: torch.Tensor
+    ) -> torch.Tensor:
+        concept_mask = concept_labels > 0
+        concept_labels = torch.clamp(concept_labels - 1, 0.01, 0.99)  # -1→0.01, 0→0.01, 1→0.99
+        per_element_loss = self.concept_loss(concept_outputs, concept_labels)
+        denom = concept_mask.sum().clamp(min=1).float()
+        return (per_element_loss * concept_mask.detach()).sum() / denom
