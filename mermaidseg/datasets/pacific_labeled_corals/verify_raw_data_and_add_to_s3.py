@@ -253,7 +253,7 @@ def build_annotations_df(
             "image_ext": "string",
             "row": "int64",
             "col": "int64",
-            **{col: "string" for col in ALL_ANNOTATOR_COLS},
+            **dict.fromkeys(ALL_ANNOTATOR_COLS, "string"),
         }
     )
 
