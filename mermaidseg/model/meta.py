@@ -15,7 +15,6 @@ from tqdm import tqdm
 import mermaidseg.model.loss
 import mermaidseg.model.models
 from mermaidseg.dataset_reconciliation.concepts import (
-    TAXONOMIC_CONCEPTS,
     postprocess_predicted_concepts,
     source_labels_to_concepts,
 )
@@ -150,6 +149,7 @@ class MetaModel:
         model_kwargs.setdefault("num_classes", self.num_classes)
         if self.training_mode == "concept-bottleneck":
             model_kwargs.setdefault("num_concepts", self.num_concepts)
+            model_kwargs.setdefault("concept_value2id", self.concept_value2id)
         elif self.training_mode == "concept":
             model_kwargs.setdefault(
                 "num_classes", self.num_concepts
@@ -201,20 +201,6 @@ class MetaModel:
             )
         return source_labels_to_concepts(source_labels, self.source_to_concepts_lookup)
 
-    def _concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
-        offset = 0
-        activated_parts = []
-
-        for concept in TAXONOMIC_CONCEPTS:
-            concept_values = self.concept_value2id[concept]
-            order_concept_length = len(list(concept_values.values())[0])
-            chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
-            activated_parts.append(torch.softmax(chunk, dim=1))
-            offset += order_concept_length
-
-        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...]))
-        return torch.cat(activated_parts, dim=1)
-
     def batch_predict(
         self,
         inputs: torch.Tensor,
@@ -238,7 +224,6 @@ class MetaModel:
         if self.training_mode == "concept-bottleneck":
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
-            concept_outputs = self._concept_outputs_activation(concept_outputs)
         elif self.training_mode == "concept":
             concept_outputs = segmentation_outputs.logits
             outputs = postprocess_predicted_concepts(
@@ -290,7 +275,6 @@ class MetaModel:
             )
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
-            concept_outputs = self._concept_outputs_activation(concept_outputs)
             loss, loss_components = self.loss(
                 outputs, target_labels, concept_outputs, target_concepts
             )
