@@ -58,10 +58,7 @@ MORPHOLOGIC_CONCEPTS = [
     "cup_coral",
 ]
 
-HEALTH_CONCEPTS = [
-    "dead", 
-    "bleached"
-]
+HEALTH_CONCEPTS = ["dead", "bleached"]
 
 NONCORAL_CONCEPTS = [
     "algae",
@@ -73,8 +70,9 @@ NONCORAL_CONCEPTS = [
     "dark",
     "human",
     "sand",
-    "hard_substrate"
+    "hard_substrate",
 ]
+
 
 def initialize_benthic_hierarchy(
     hierarchy_json_url: str = "https://api.datamermaid.org/v1/benthicattributes/",
@@ -289,9 +287,7 @@ def initialize_binary_concept_mapping(
     """Initialize binary concept mapping by generating a mapping from source labels to the binary
     concepts and a dictionary of names to ID mappings for each taxonomic rank."""
 
-    binary_concept_columns = list(
-        MORPHOLOGIC_CONCEPTS + HEALTH_CONCEPTS + NONCORAL_CONCEPTS
-    )
+    binary_concept_columns = list(MORPHOLOGIC_CONCEPTS + HEALTH_CONCEPTS + NONCORAL_CONCEPTS)
 
     df_mapping_binary = df_mapping[
         ["global_id", "source_label_class_name", "source_dataset_source"]

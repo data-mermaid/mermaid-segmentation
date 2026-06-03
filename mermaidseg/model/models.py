@@ -4,7 +4,9 @@ from typing import Any
 import torch
 from transformers import AutoModel
 from transformers.modeling_outputs import SemanticSegmenterOutput
+
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+
 
 class LinearClassifier(torch.nn.Module):
     """A linear classifier module that performs pixel-wise classification on reshaped embeddings.
