@@ -31,6 +31,50 @@ TAXONOMIC_CONCEPTS = [
     "species",
 ]
 
+MORPHOLOGIC_CONCEPTS = [
+    "oval",
+    "arborescent",
+    "encrusting",
+    "digitate",
+    "meandroid",
+    "columnar",
+    "free_living",
+    "plating",
+    "fleshy",
+    "submassive",
+    "round",
+    "massive",
+    "tubular",
+    "bushy",
+    "external_polyps",
+    "foliose",
+    "solitary",
+    "brain",
+    "phaceloid",
+    "branching",
+    "tabular",
+    "corymbose",
+    "lobed_brain",
+    "cup_coral",
+]
+
+HEALTH_CONCEPTS = [
+    "dead", 
+    "bleached"
+]
+
+NONCORAL_CONCEPTS = [
+    "algae",
+    "background",
+    "anthropogenic",
+    "trash",
+    "transect",
+    "macroalgae",
+    "dark",
+    "human",
+    "sand",
+    "hard_substrate"
+]
 
 def initialize_benthic_hierarchy(
     hierarchy_json_url: str = "https://api.datamermaid.org/v1/benthicattributes/",
@@ -244,44 +288,9 @@ def initialize_binary_concept_mapping(
 ) -> tuple[torch.Tensor, dict[str, dict]]:
     """Initialize binary concept mapping by generating a mapping from source labels to the binary
     concepts and a dictionary of names to ID mappings for each taxonomic rank."""
-    morphologic_concept_columns = (
-        "oval",
-        "arborescent",
-        "encrusting",
-        "digitate",
-        "meandroid",
-        "columnar",
-        "free_living",
-        "plating",
-        "fleshy",
-        "submassive",
-        "round",
-        "massive",
-        "tubular",
-        "bushy",
-        "external_polyps",
-        "foliose",
-        "solitary",
-        "brain",
-        "phaceloid",
-        "branching",
-        "tabular",
-        "corymbose",
-        "lobed_brain",
-        "cup_coral",
-    )
-    health_concept_columns = ("dead", "bleached")
-    noncoral_concept_columns = (
-        "algae",
-        "background",
-        "anthropogenic",
-        "trash",
-        "transect",
-        "macroalgae",
-        "dark",
-    )
+
     binary_concept_columns = list(
-        morphologic_concept_columns + health_concept_columns + noncoral_concept_columns
+        MORPHOLOGIC_CONCEPTS + HEALTH_CONCEPTS + NONCORAL_CONCEPTS
     )
 
     df_mapping_binary = df_mapping[
@@ -297,14 +306,14 @@ def initialize_binary_concept_mapping(
             df_mapping_binary[col] = df_mapping[col].map(binary_name2id[col]).fillna(0).astype(int)
 
     df_mapping_binary = df_mapping_binary.sort_values("global_id").reset_index(drop=True)
-    source_to_one_hot_concepts_np = np.zeros(
+    source_to_binary_concepts_np = np.zeros(
         (num_global_source + 1, len(valid_binary_concept_columns)), dtype=np.int64
     )
-    source_to_one_hot_concepts_np[df_mapping_binary["global_id"].to_numpy()] = df_mapping_binary[
+    source_to_binary_concepts_np[df_mapping_binary["global_id"].to_numpy()] = df_mapping_binary[
         valid_binary_concept_columns
     ].to_numpy()
-    source_to_one_hot_concepts = torch.from_numpy(source_to_one_hot_concepts_np).long()
-    return source_to_one_hot_concepts, binary_name2id
+    source_to_binary_concepts = torch.from_numpy(source_to_binary_concepts_np).long()
+    return source_to_binary_concepts, binary_name2id
 
 
 def initialize_benthic_concepts(
