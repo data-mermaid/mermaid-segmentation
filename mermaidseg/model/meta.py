@@ -523,10 +523,7 @@ class MetaModel:
                         metric.update(outputs, target_labels)
 
             if self.training_mode in ("concept-bottleneck", "concept"):
-                concept_outputs = (concept_outputs > 0.5).float()
-                concept_outputs += 1
-                for metric in evaluator.concept_metric_dict.values():
-                    metric.update(concept_outputs, target_concepts)
+                evaluator.evaluate_concepts(concept_outputs, target_concepts)
 
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
