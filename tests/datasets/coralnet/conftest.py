@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from botocore.exceptions import ClientError
+from PIL import Image
 
 from mermaidseg.datasets.coralnet.scraper.downloader import CoralNetDownloader
 
@@ -305,8 +306,6 @@ def populate():
 @pytest.fixture
 def valid_rgb_jpeg_bytes() -> bytes:
     """Valid RGB JPEG (3 channels, 2048x1536)."""
-    from PIL import Image
-
     img = Image.new("RGB", (2048, 1536), color=(255, 0, 0))
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=95)
@@ -315,9 +314,7 @@ def valid_rgb_jpeg_bytes() -> bytes:
 
 @pytest.fixture
 def rgba_png_bytes() -> bytes:
-    """RGBA PNG (4 channels, 1024x768) - unsupported format."""
-    from PIL import Image
-
+    """RGBA PNG (4 channels, 1024x768) — recoverable; resize converts it to RGB."""
     img = Image.new("RGBA", (1024, 768), color=(255, 0, 0, 255))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -326,9 +323,7 @@ def rgba_png_bytes() -> bytes:
 
 @pytest.fixture
 def grayscale_jpeg_bytes() -> bytes:
-    """Grayscale JPEG (1 channel) - unsupported for RGB preprocessing."""
-    from PIL import Image
-
+    """Grayscale JPEG (1 channel, L mode) — recoverable; resize encodes L directly."""
     img = Image.new("L", (1024, 768), color=128)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=95)
@@ -338,8 +333,6 @@ def grayscale_jpeg_bytes() -> bytes:
 @pytest.fixture
 def truncated_jpeg_bytes() -> bytes:
     """Truncated JPEG (valid header but missing end marker and data)."""
-    from PIL import Image
-
     img = Image.new("RGB", (2048, 1536), color=(255, 0, 0))
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=95)

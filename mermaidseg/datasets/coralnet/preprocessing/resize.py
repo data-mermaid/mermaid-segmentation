@@ -79,6 +79,7 @@ def resize_image_to_threshold(
     Returns:
         BytesIO with resized JPEG (or original if no resize needed)
     """
+    image_bytes.seek(0)  # callers may have already read this buffer (e.g. during inspection)
     img = Image.open(image_bytes)
     img.load()
 
