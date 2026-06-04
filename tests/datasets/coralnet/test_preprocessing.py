@@ -529,6 +529,10 @@ def test_training_manifest_scales_coords_and_excludes():
     assert (out["row"] >= 0).all() and (out["row"] < out["load_height"]).all()
     assert (out["col"] >= 0).all() and (out["col"] < out["load_width"]).all()
 
+    # Coords/dims are stored as int16 (bounded by the 2048 resize threshold) to keep the file small.
+    for c in ("row", "col", "load_width", "load_height"):
+        assert out[c].dtype == "int16", (c, out[c].dtype)
+
     # Sub-threshold image: original key, coords unchanged, source_label_name = str(coralnet_id).
     sub = out[out["image_id"] == "sub"].iloc[0]
     assert sub["image_s3_key"] == "coralnet-public-images/s1/images/sub.jpg"

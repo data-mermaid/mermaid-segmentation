@@ -78,9 +78,15 @@ def main() -> int:
         threshold=args.threshold,
     )
 
+    # Single pass over the (joined) manifest for both counts; n_annotations is a cheap
+    # parquet-metadata count.
+    summary = manifest.aggregate(
+        total=manifest.count(),
+        resized=manifest.uses_resized_image.cast("int64").sum(),  # noqa: PD004 — ibis API
+    ).execute()
+    n_out = int(summary["total"].iloc[0])
+    n_resized = int(summary["resized"].iloc[0])
     n_annotations = annotations.count().execute()
-    n_out = manifest.count().execute()
-    n_resized = manifest.filter(manifest.uses_resized_image).count().execute()  # noqa: PD004 — ibis API
     logger.info(
         "Training manifest: %d annotation rows (%d excluded), %d on resized images",
         n_out,
@@ -88,7 +94,7 @@ def main() -> int:
         n_resized,
     )
 
-    manifest.to_parquet(out)
+    manifest.to_parquet(out, compression="zstd", row_group_size=122880)
     logger.info("Wrote %s", out)
     return 0
 

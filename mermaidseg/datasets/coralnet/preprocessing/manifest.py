@@ -200,10 +200,14 @@ def build_training_manifest(
         (out.row.cast("float64") * scale_y).floor().cast("int64"), out.load_height - 1
     )
 
+    # row/col and load dims are bounded by the resize threshold (<= 2048), so int16 stores them
+    # losslessly at a quarter of int64 — they dominate the file size at annotation scale.
     return (
         out.mutate(
-            row=ibis.greatest(row_scaled, ibis.literal(0)),
-            col=ibis.greatest(col_scaled, ibis.literal(0)),
+            row=ibis.greatest(row_scaled, ibis.literal(0)).cast("int16"),
+            col=ibis.greatest(col_scaled, ibis.literal(0)).cast("int16"),
+            load_width=out.load_width.cast("int16"),
+            load_height=out.load_height.cast("int16"),
             source_label_name=out.coralnet_id.cast("string"),
         )
         .select(
