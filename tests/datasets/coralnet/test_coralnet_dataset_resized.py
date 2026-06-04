@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
+import pytest
 from PIL import Image
 
 import mermaidseg.datasets.coralnet.coralnet_dataset as cnd
@@ -104,6 +105,13 @@ def test_getitem_places_label_at_point_with_correct_orientation(monkeypatch):
     # Single foreground class -> local id 1, placed exactly at (row=10, col=20).
     assert mask[10, 20] == 1
     assert int((mask != 0).sum()) == 1  # nothing else set; no transpose to (20, 10)
+
+
+def test_missing_required_column_raises(monkeypatch):
+    """A parquet missing a required column fails fast with a clear error, not a pandas KeyError."""
+    bad = _resized_parquet_df().drop(columns=["coralnet_id"])
+    with pytest.raises(ValueError, match="missing required columns.*coralnet_id"):
+        _make_dataset(monkeypatch, bad, [], lambda key: Image.new("RGB", (8, 8)))
 
 
 def test_collate_fn_skips_failed_loads(monkeypatch):

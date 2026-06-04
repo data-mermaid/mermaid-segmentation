@@ -77,6 +77,10 @@ class CoralNetDataset(BaseCoralDataset):
 
     SOURCE_NAME = "coralnet"
 
+    # Columns every CoralNet annotations parquet must provide. ``source_label_name`` is derived
+    # from ``coralnet_id``; ``image_s3_key`` is optional (present only in the resized parquet).
+    REQUIRED_COLUMNS: tuple[str, ...] = ("source_id", "image_id", "row", "col", "coralnet_id")
+
     annotations_path: str
     source_ids: list[int | str]
     source_bucket: str
@@ -131,6 +135,12 @@ class CoralNetDataset(BaseCoralDataset):
         """
         annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         df_annotations = pd.read_parquet(annotations_path)
+        missing = set(self.REQUIRED_COLUMNS) - set(df_annotations.columns)
+        if missing:
+            raise ValueError(
+                f"CoralNet annotations parquet at {annotations_path} is missing required "
+                f"columns: {sorted(missing)}"
+            )
         df_annotations["source_label_name"] = df_annotations["coralnet_id"].astype(str)
         columns = ["source_id", "image_id", "row", "col", "coralnet_id", "source_label_name"]
         # The resized training parquet carries a per-image resolved S3 key (resized or original)
