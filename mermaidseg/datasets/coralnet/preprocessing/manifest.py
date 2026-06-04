@@ -167,7 +167,16 @@ def build_training_manifest(
             load_height=load_height,
             uses_resized_image=use_resized,
         )
-        .filter((~joined.needs_resize) | use_resized)  # noqa: PD004 — ibis API
+        # Keep sub-threshold or completed-resize images, and only those with known original
+        # dimensions — null dims (e.g. header_status="not_found") can't be scaled or validated,
+        # and DuckDB's greatest(NULL, 0) would silently collapse their coords to (0, 0).
+        .filter(
+            ((~joined.needs_resize) | use_resized)  # noqa: PD004 — ibis API
+            & joined.width.notnull()
+            & joined.height.notnull()
+            & (joined.width > 0)
+            & (joined.height > 0)
+        )
         .select(
             "source_id",
             "image_id",

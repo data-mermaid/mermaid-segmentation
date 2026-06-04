@@ -477,17 +477,19 @@ def test_training_manifest_scales_coords_and_excludes():
     key; needs_resize-but-not-completed images (failed / absent from checkpoint) excluded."""
     images = pd.DataFrame(
         {
-            "source_id": [1, 1, 1, 1],
-            "image_id": ["sub", "big", "fail", "missing"],
+            "source_id": [1, 1, 1, 1, 1],
+            "image_id": ["sub", "big", "fail", "missing", "nodims"],
             "s3_key": [
                 "coralnet-public-images/s1/images/sub.jpg",
                 "coralnet-public-images/s1/images/big.jpg",
                 "coralnet-public-images/s1/images/fail.jpg",
                 "coralnet-public-images/s1/images/missing.jpg",
+                "coralnet-public-images/s1/images/nodims.jpg",
             ],
-            "width": [1000, 4000, 5000, 6000],
-            "height": [800, 2000, 3000, 3000],
-            "needs_resize": [False, True, True, True],
+            # "nodims" has unknown dimensions (e.g. header_status="not_found").
+            "width": [1000, 4000, 5000, 6000, None],
+            "height": [800, 2000, 3000, 3000, None],
+            "needs_resize": [False, True, True, True, False],
         }
     )
     # "missing" needs_resize but has no checkpoint row at all -> must be excluded.
@@ -502,11 +504,11 @@ def test_training_manifest_scales_coords_and_excludes():
     )
     annotations = pd.DataFrame(
         {
-            "source_id": [1, 1, 1, 1, 1],
-            "image_id": ["sub", "big", "big", "fail", "missing"],
-            "row": [400, 1000, 1999, 10, 10],
-            "col": [500, 2000, 3999, 10, 10],
-            "coralnet_id": [82, 91, 91, 7, 7],
+            "source_id": [1, 1, 1, 1, 1, 1],
+            "image_id": ["sub", "big", "big", "fail", "missing", "nodims"],
+            "row": [400, 1000, 1999, 10, 10, 10],
+            "col": [500, 2000, 3999, 10, 10, 10],
+            "coralnet_id": [82, 91, 91, 7, 7, 7],
         }
     )
 
@@ -518,8 +520,14 @@ def test_training_manifest_scales_coords_and_excludes():
         threshold=2048,
     ).to_pandas()
 
-    # Only sub-threshold + completed-resize images survive.
+    # Only sub-threshold + completed-resize images with known dims survive
+    # ("fail"/"missing" excluded for incomplete resize, "nodims" for null dimensions).
     assert set(out["image_id"]) == {"sub", "big"}
+
+    # Every surviving point is in bounds (no nulls, no out-of-range from null-dim collapse).
+    assert out["load_width"].notna().all() and out["load_height"].notna().all()
+    assert (out["row"] >= 0).all() and (out["row"] < out["load_height"]).all()
+    assert (out["col"] >= 0).all() and (out["col"] < out["load_width"]).all()
 
     # Sub-threshold image: original key, coords unchanged, source_label_name = str(coralnet_id).
     sub = out[out["image_id"] == "sub"].iloc[0]
