@@ -11,6 +11,7 @@ import boto3
 import pandas as pd
 
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
+    DEFAULT_CHECKPOINT_EVERY,
     build_todo_from_checkpoint,
     read_checkpoint,
     resize_and_upload_all_images,
@@ -110,6 +111,12 @@ def main() -> int:
         action="store_true",
         help="Resume: build todo from pending checkpoint rows (skip S3 head scan)",
     )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=DEFAULT_CHECKPOINT_EVERY,
+        help="Rows between checkpoint flushes (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     workers_default = default_worker_count()
@@ -134,11 +141,18 @@ def main() -> int:
         )
 
     logger.info("Loading %s", images_uri)
-    df = pd.read_parquet(images_uri)
+    # Size the s3fs/botocore connection pool to the worker count so the parquet load and any
+    # follow-on s3fs traffic don't churn through the default 10-connection pool.
+    storage_options = None
+    if images_uri.startswith("s3://"):
+        storage_options = {
+            "config_kwargs": {"max_pool_connections": max(workers_scan, workers_resize) + 4}
+        }
+    df = pd.read_parquet(images_uri, storage_options=storage_options)
     df_work = df.loc[df["needs_resize"]].copy()
     logger.info("needs_resize=True: %s / %s", f"{len(df_work):,}", f"{len(df):,}")
     logger.info(
-        "Workers scan=%s resize=%s (pool=%s per thread)",
+        "Workers scan=%s resize=%s (shared client pool=%s)",
         workers_scan,
         workers_resize,
         workers_resize + 4,
@@ -173,7 +187,7 @@ def main() -> int:
         return 0
 
     args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    num_resized, num_skipped, num_failed = resize_and_upload_all_images(
+    num_resized, num_skipped, num_failed, num_corrupted = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=args.bucket,
         output_prefix=args.output_prefix,
@@ -181,12 +195,14 @@ def main() -> int:
         threshold=args.threshold,
         workers=workers_resize,
         s3_client=None,
+        checkpoint_every=args.checkpoint_every,
     )
     log_checkpoint_summary(args.checkpoint)
     logger.info(
-        "Done: resized=%s skipped=%s failed=%s checkpoint=%s",
+        "Done: resized=%s skipped=%s corrupted=%s failed=%s checkpoint=%s",
         num_resized,
         num_skipped,
+        num_corrupted,
         num_failed,
         args.checkpoint,
     )
