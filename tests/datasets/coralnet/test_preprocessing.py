@@ -17,6 +17,7 @@ from mermaidseg.datasets.coralnet.preprocessing.inspect import (
 )
 from mermaidseg.datasets.coralnet.preprocessing.manifest import (
     build_manifest,
+    build_training_manifest,
     combine_checkpoints,
 )
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
@@ -469,6 +470,74 @@ def test_manifest_dimensions_and_keys_match_resize():
     assert manifest.loc["above", "output_s3_key"] == _resized_s3_key_for(
         "etl-outputs/coralnet", 2, "above", threshold
     )
+
+
+def test_training_manifest_scales_coords_and_excludes():
+    """Sub-threshold coords unchanged + original key; resized coords floored to load dims + resized
+    key; needs_resize-but-not-completed images (failed / absent from checkpoint) excluded."""
+    images = pd.DataFrame(
+        {
+            "source_id": [1, 1, 1, 1],
+            "image_id": ["sub", "big", "fail", "missing"],
+            "s3_key": [
+                "coralnet-public-images/s1/images/sub.jpg",
+                "coralnet-public-images/s1/images/big.jpg",
+                "coralnet-public-images/s1/images/fail.jpg",
+                "coralnet-public-images/s1/images/missing.jpg",
+            ],
+            "width": [1000, 4000, 5000, 6000],
+            "height": [800, 2000, 3000, 3000],
+            "needs_resize": [False, True, True, True],
+        }
+    )
+    # "missing" needs_resize but has no checkpoint row at all -> must be excluded.
+    checkpoint = pd.DataFrame(
+        {
+            "source_id": [1, 1],
+            "image_id": ["big", "fail"],
+            "status": ["completed", "failed"],
+            "resize_timestamp": [datetime.now(), None],
+            "error_message": [None, "decode failed"],
+        }
+    )
+    annotations = pd.DataFrame(
+        {
+            "source_id": [1, 1, 1, 1, 1],
+            "image_id": ["sub", "big", "big", "fail", "missing"],
+            "row": [400, 1000, 1999, 10, 10],
+            "col": [500, 2000, 3999, 10, 10],
+            "coralnet_id": [82, 91, 91, 7, 7],
+        }
+    )
+
+    out = build_training_manifest(
+        annotations=ibis.memtable(annotations),
+        images=ibis.memtable(images),
+        checkpoint=ibis.memtable(checkpoint),
+        output_prefix="dev/images",
+        threshold=2048,
+    ).to_pandas()
+
+    # Only sub-threshold + completed-resize images survive.
+    assert set(out["image_id"]) == {"sub", "big"}
+
+    # Sub-threshold image: original key, coords unchanged, source_label_name = str(coralnet_id).
+    sub = out[out["image_id"] == "sub"].iloc[0]
+    assert sub["image_s3_key"] == "coralnet-public-images/s1/images/sub.jpg"
+    assert (int(sub["row"]), int(sub["col"])) == (400, 500)
+    assert bool(sub["uses_resized_image"]) is False
+    assert sub["source_label_name"] == "82"
+
+    # Resized image: resized key, dims floored to threshold (4000 -> 2048, 2000 -> 1024).
+    big = out[out["image_id"] == "big"]
+    assert (big["image_s3_key"] == "dev/images/resized/s1/images/big.jpg").all()
+    assert big["uses_resized_image"].all()
+    assert (big["load_width"] == 2048).all() and (big["load_height"] == 1024).all()
+    coords = set(zip(big["row"].astype(int), big["col"].astype(int), strict=True))
+    # (1000,2000) -> (floor(1000*1024/2000), floor(2000*2048/4000)) = (512, 1024)
+    assert (512, 1024) in coords
+    # (1999,3999) -> (floor(1999*1024/2000), floor(3999*2048/4000)) = (1023, 2047), within bounds
+    assert (1023, 2047) in coords
 
 
 # ============================================================================
