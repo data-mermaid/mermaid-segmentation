@@ -132,20 +132,33 @@ class CoralNetDataset(BaseCoralDataset):
         annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         df_annotations = pd.read_parquet(annotations_path)
         df_annotations["source_label_name"] = df_annotations["coralnet_id"].astype(str)
-        df_annotations = df_annotations[
-            ["source_id", "image_id", "row", "col", "coralnet_id", "source_label_name"]
-        ]
+        columns = ["source_id", "image_id", "row", "col", "coralnet_id", "source_label_name"]
+        # The resized training parquet carries a per-image resolved S3 key (resized or original)
+        # with row/col already scaled to that image. The legacy parquet omits it, in which case
+        # read_image falls back to constructing the original key.
+        if "image_s3_key" in df_annotations.columns:
+            columns.append("image_s3_key")
+        df_annotations = df_annotations[columns]
 
         df_images = self._derive_df_images_from_annotations(df_annotations)
         return df_annotations, df_images
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
+        columns = ["source_id", "image_id"]
+        if "image_s3_key" in df_annotations.columns:
+            columns.append("image_s3_key")
         return (
-            df_annotations[["source_id", "image_id"]]
+            df_annotations[columns]
             .drop_duplicates(subset=["source_id", "image_id"])
             .reset_index(drop=True)
         )
 
-    def read_image(self, image_id: str, source_id: str, **row_kwargs: Any) -> NDArray[Any]:
-        key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
+    def read_image(
+        self,
+        image_id: str,
+        source_id: str,
+        image_s3_key: str | None = None,
+        **row_kwargs: Any,
+    ) -> NDArray[Any]:
+        key = image_s3_key or f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
         return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))

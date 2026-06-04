@@ -7,6 +7,9 @@ logger:
 
 data:
   name: "CoralNetDataset"
+  # Resized training parquet: per-image resolved S3 key (resized or original) with row/col
+  # pre-scaled to the loaded image. Built by scripts/build_coralnet_training_parquet.py (#126).
+  annotations_path: "etl-outputs/coralnet/20260526_807b611/coralnet_training_resized_20260526_807b611.parquet"
   batch_size: 16
   class_subset: "../configs/run1_class_subset.csv"
   whitelist_sources:
