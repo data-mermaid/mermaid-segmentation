@@ -29,6 +29,15 @@ class StubDataset:
     source_name2id: dict[str, int]
     global_offset: int
     SOURCE_NAME: str = "stub"
+    num_source_classes: int = 0
+    split: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.num_source_classes == 0:
+            self.num_source_classes = len(self.source_id2name) + 1
+
+    def set_global_offset(self, offset: int) -> None:
+        self.global_offset = int(offset)
 
     def __len__(self) -> int:
         return len(self.df_images)

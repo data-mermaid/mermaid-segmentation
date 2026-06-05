@@ -28,7 +28,7 @@ TAXONOMIC_CONCEPTS = [
     "order",
     "family",
     "genus",
-    "species",
+    #"species",
 ]
 
 MORPHOLOGIC_CONCEPTS = [
@@ -150,8 +150,8 @@ def generate_taxonomic_id_mapping(df: pd.DataFrame, taxonomic_col: str):
     sorted_values = sorted(df[taxonomic_col].dropna().unique())
     sorted_values = (
         ["not_given"]
-        + ["none" if "none" in sorted_values else []]
-        + [v for v in sorted_values if v not in ["not_given", "none"]]
+        #+ ["none" if "none" in sorted_values else []]
+        + [v for v in sorted_values if v not in ["not_given"]]
     )
     return {value: idx for idx, value in enumerate(sorted_values)}
 
@@ -166,7 +166,7 @@ def generate_taxonomic_binary_id_mapping(
     in its own column and 1 in the others.
     """
     concrete_values = sorted(
-        value for value in df[taxonomic_col].dropna().unique() if value not in ["not_given", "none"]
+        value for value in df[taxonomic_col].dropna().unique() if value not in ["not_given"]
     )
     if not concrete_values:
         return None
@@ -174,7 +174,7 @@ def generate_taxonomic_binary_id_mapping(
     width = len(concrete_values)
     mapping: dict[str, list[int]] = {
         "not_given": [0] * width,
-        "none": [1] * width,
+        #"none": [1] * width,
     }
     for index, value in enumerate(concrete_values):
         encoded = [1] * width
@@ -228,6 +228,100 @@ def initialize_taxonomic_concept_mapping(
     return source_to_taxonomic_concepts, taxonomic_name2id
 
 
+def encode_concept_channels_from_df(
+    df_mapping: pd.DataFrame,
+    *,
+    binary_taxonomy_encoding: bool = True,
+) -> tuple[pd.DataFrame, list[str], dict[str, dict]]:
+    """Encode concept channels from a mapping DataFrame.
+
+    Channel widths are derived from ``df_mapping`` alone (not from a registry
+    subset), so the same DataFrame always yields the same layout.
+
+    Returns:
+        encoded_df: meta columns plus one column per concept channel.
+        channel_names: ordered channel column names.
+        concept_value2id: structure expected by loss/model slicing.
+    """
+    meta_cols = ["source_dataset_source", "source_label_class_name"]
+    if "global_id" in df_mapping.columns:
+        meta_cols = ["global_id", *meta_cols]
+
+    encoded_parts: list[pd.DataFrame] = [df_mapping[meta_cols].copy()]
+    channel_names: list[str] = []
+    concept_value2id: dict[str, dict] = {}
+
+    if binary_taxonomy_encoding:
+        for col in TAXONOMIC_CONCEPTS:
+            taxonomic_binary_mapping = generate_taxonomic_binary_id_mapping(df_mapping, col)
+            if taxonomic_binary_mapping is None:
+                continue
+
+            concept_value2id[col] = taxonomic_binary_mapping
+            concrete_values = [
+                value for value in taxonomic_binary_mapping if value not in ["not_given"]
+            ]
+
+            mapped = df_mapping[col].map(taxonomic_binary_mapping)
+            mapped = mapped.apply(
+                lambda v, mapping=taxonomic_binary_mapping: (
+                    v if isinstance(v, list) else mapping["not_given"]
+                )
+            )
+            encoded_columns = pd.DataFrame(
+                mapped.tolist(),
+                columns=[f"{col}__{value}" for value in concrete_values],
+                index=df_mapping.index,
+            )
+            encoded_parts.append(encoded_columns)
+            channel_names.extend(encoded_columns.columns.tolist())
+    else:
+        taxonomic_name2id: dict[str, dict] = {}
+        taxonomic_encoded = df_mapping[meta_cols].copy()
+        for col in TAXONOMIC_CONCEPTS:
+            taxonomic_name2id[col] = generate_taxonomic_id_mapping(df_mapping, col)
+            taxonomic_encoded[col] = (
+                df_mapping[col].map(taxonomic_name2id[col]).fillna(0).astype(int)
+            )
+            channel_names.append(col)
+        concept_value2id.update(taxonomic_name2id)
+        encoded_parts = [taxonomic_encoded]
+
+    binary_concept_columns = list(MORPHOLOGIC_CONCEPTS + HEALTH_CONCEPTS + NONCORAL_CONCEPTS)
+    binary_encoded: dict[str, pd.Series] = {}
+    for col in binary_concept_columns:
+        if col not in df_mapping.columns:
+            continue
+        binary_mapping = generate_binary_concept_id_mapping(df_mapping, col)
+        if binary_mapping is not None:
+            concept_value2id[col] = binary_mapping
+            channel_names.append(col)
+            binary_encoded[col] = df_mapping[col].map(binary_mapping).fillna(0).astype(int)
+
+    if binary_encoded:
+        encoded_parts.append(pd.DataFrame(binary_encoded, index=df_mapping.index))
+
+    encoded_df = pd.concat(encoded_parts, axis=1)
+    return encoded_df, channel_names, concept_value2id
+
+
+def _concept_tensor_from_encoded_df(
+    encoded_df: pd.DataFrame,
+    channel_names: list[str],
+    num_global_source: int,
+) -> torch.Tensor:
+    """Build ``(N+1, C)`` lookup tensor from an encoded mapping frame."""
+    source_to_concepts_np = np.zeros(
+        (num_global_source + 1, len(channel_names)), dtype=np.int64
+    )
+    if not channel_names or "global_id" not in encoded_df.columns:
+        return torch.from_numpy(source_to_concepts_np).long()
+
+    sorted_df = encoded_df.sort_values("global_id").reset_index(drop=True)
+    source_to_concepts_np[sorted_df["global_id"].to_numpy()] = sorted_df[channel_names].to_numpy()
+    return torch.from_numpy(source_to_concepts_np).long()
+
+
 def initialize_taxonomic_binary_concept_mapping(
     df_mapping: pd.DataFrame,
     num_global_source: int,
@@ -238,46 +332,16 @@ def initialize_taxonomic_binary_concept_mapping(
     ``not_given`` is encoded as all zeros and ``none`` is encoded as all ones.
     Concrete values are encoded as 2 at their own column and 1 everywhere else.
     """
-
-    df_mapping_taxonomic = df_mapping[
-        ["global_id", "source_label_class_name", "source_dataset_source"]
-    ].copy()
-    taxonomic_name2id: dict[str, dict[str, list[int]]] = {}
-    binary_concept_columns: list[str] = []
-
-    for col in TAXONOMIC_CONCEPTS:
-        taxonomic_binary_mapping = generate_taxonomic_binary_id_mapping(df_mapping, col)
-        if taxonomic_binary_mapping is None:
-            continue
-
-        taxonomic_name2id[col] = taxonomic_binary_mapping
-        concrete_values = [
-            value for value in taxonomic_binary_mapping if value not in ["not_given", "none"]
-        ]
-
-        mapped = df_mapping[col].map(taxonomic_binary_mapping)
-        mapped = mapped.apply(
-            lambda v, mapping=taxonomic_binary_mapping: (
-                v if isinstance(v, list) else mapping["not_given"]
-            )
-        )
-        encoded_columns = pd.DataFrame(
-            mapped.tolist(),
-            columns=[f"{col}__{value}" for value in concrete_values],
-            index=df_mapping.index,
-        )
-        df_mapping_taxonomic = pd.concat([df_mapping_taxonomic, encoded_columns], axis=1)
-        binary_concept_columns.extend(encoded_columns.columns.tolist())
-
-    df_mapping_taxonomic = df_mapping_taxonomic.sort_values("global_id").reset_index(drop=True)
-    source_to_taxonomic_concepts_np = np.zeros(
-        (num_global_source + 1, len(binary_concept_columns)), dtype=np.int64
+    encoded_df, channel_names, concept_value2id = encode_concept_channels_from_df(
+        df_mapping, binary_taxonomy_encoding=True
     )
-    if binary_concept_columns:
-        source_to_taxonomic_concepts_np[df_mapping_taxonomic["global_id"].to_numpy()] = (
-            df_mapping_taxonomic[binary_concept_columns].to_numpy()
-        )
-    source_to_taxonomic_concepts = torch.from_numpy(source_to_taxonomic_concepts_np).long()
+    taxonomic_name2id = {
+        k: v for k, v in concept_value2id.items() if k in TAXONOMIC_CONCEPTS
+    }
+    taxonomic_channels = [c for c in channel_names if "__" in c]
+    source_to_taxonomic_concepts = _concept_tensor_from_encoded_df(
+        encoded_df, taxonomic_channels, num_global_source
+    )
     return source_to_taxonomic_concepts, taxonomic_name2id
 
 
@@ -286,29 +350,16 @@ def initialize_binary_concept_mapping(
 ) -> tuple[torch.Tensor, dict[str, dict]]:
     """Initialize binary concept mapping by generating a mapping from source labels to the binary
     concepts and a dictionary of names to ID mappings for each taxonomic rank."""
-
-    binary_concept_columns = list(MORPHOLOGIC_CONCEPTS + HEALTH_CONCEPTS + NONCORAL_CONCEPTS)
-
-    df_mapping_binary = df_mapping[
-        ["global_id", "source_label_class_name", "source_dataset_source"]
-    ].copy()
-    binary_name2id = {}
-    valid_binary_concept_columns = []
-    for col in binary_concept_columns:
-        binary_mapping = generate_binary_concept_id_mapping(df_mapping, col)
-        if binary_mapping is not None:
-            binary_name2id[col] = binary_mapping
-            valid_binary_concept_columns.append(col)
-            df_mapping_binary[col] = df_mapping[col].map(binary_name2id[col]).fillna(0).astype(int)
-
-    df_mapping_binary = df_mapping_binary.sort_values("global_id").reset_index(drop=True)
-    source_to_binary_concepts_np = np.zeros(
-        (num_global_source + 1, len(valid_binary_concept_columns)), dtype=np.int64
+    encoded_df, channel_names, concept_value2id = encode_concept_channels_from_df(
+        df_mapping, binary_taxonomy_encoding=True
     )
-    source_to_binary_concepts_np[df_mapping_binary["global_id"].to_numpy()] = df_mapping_binary[
-        valid_binary_concept_columns
-    ].to_numpy()
-    source_to_binary_concepts = torch.from_numpy(source_to_binary_concepts_np).long()
+    binary_name2id = {
+        k: v for k, v in concept_value2id.items() if k not in TAXONOMIC_CONCEPTS
+    }
+    binary_channels = [c for c in channel_names if "__" not in c]
+    source_to_binary_concepts = _concept_tensor_from_encoded_df(
+        encoded_df, binary_channels, num_global_source
+    )
     return source_to_binary_concepts, binary_name2id
 
 
@@ -357,30 +408,17 @@ def initialize_benthic_concepts(
         #         "Please check the mapping and registry for consistency as some source labels in the registry may not have a corresponding mapping entry or vice versa."
         #     )
 
-    if binary_taxonomy_encoding:
-        source_to_taxonomic_concepts, taxonomic_mapping_dictionary = (
-            initialize_taxonomic_binary_concept_mapping(
-                df_mapping=df_mapping, num_global_source=num_global_source
-            )
-        )
-    else:
-        source_to_taxonomic_concepts, taxonomic_mapping_dictionary = (
-            initialize_taxonomic_concept_mapping(
-                df_mapping=df_mapping, num_global_source=num_global_source
-            )
-        )
-
-    source_to_binary_concepts, binary_mapping_dictionary = initialize_binary_concept_mapping(
-        df_mapping=df_mapping, num_global_source=num_global_source
+    encoded_df, channel_names, concept_value2id = encode_concept_channels_from_df(
+        df_mapping, binary_taxonomy_encoding=binary_taxonomy_encoding
+    )
+    source_to_concepts = _concept_tensor_from_encoded_df(
+        encoded_df, channel_names, num_global_source
     )
 
-    source_to_concepts = torch.cat([source_to_taxonomic_concepts, source_to_binary_concepts], dim=1)
-    concept_value2id = {**taxonomic_mapping_dictionary, **binary_mapping_dictionary}
-
-    if list(concept_value2id.keys())[:7] != TAXONOMIC_CONCEPTS:
+    if list(concept_value2id.keys())[: len(TAXONOMIC_CONCEPTS)] != TAXONOMIC_CONCEPTS:
         raise ValueError(
-            f"The first 7 concepts in the concept_value2id mapping must be the taxonomic concepts in the following order: {TAXONOMIC_CONCEPTS}. "
-            f"Currently, the first 7 concepts are: {list(concept_value2id.keys())[:7]}. "
+            f"The first {len(TAXONOMIC_CONCEPTS)} concepts in the concept_value2id mapping must be the taxonomic concepts in the following order: {TAXONOMIC_CONCEPTS}. "
+            f"Currently, the first {len(TAXONOMIC_CONCEPTS)} concepts are: {list(concept_value2id.keys())[: len(TAXONOMIC_CONCEPTS)]}. "
             f"Please check the concept mapping initialization to ensure that the taxonomic concepts are correctly identified and ordered at the beginning of the mapping."
         )
     return df_mapping, source_to_concepts, concept_value2id

@@ -7,16 +7,15 @@ See ``README.md`` for dataset details.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
-import boto3
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
+from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.datasets.utils import get_image_s3
 
 logger = logging.getLogger(__name__)
@@ -46,7 +45,6 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
     annotations_path: str
     source_bucket: str
     source_s3_prefix: str
-    s3: boto3.client
     whitelist_sites: list[str] | None
     blacklist_sites: list[str] | None
 
@@ -73,7 +71,6 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
-        self.s3 = boto3.client("s3")
         self.whitelist_sites = whitelist_sites
         self.blacklist_sites = blacklist_sites
 
@@ -87,13 +84,15 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
 
     def load_annotations(self) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Load the annotations Parquet from S3 and apply site filters."""
-        annotations_uri = f"s3://{self.source_bucket}/{self.annotations_path}"
-        df_annotations = pd.read_parquet(annotations_uri)
+        df_annotations = LocalS3Cache.get().read_parquet(
+            self.source_bucket, self.annotations_path
+        )
 
         missing = set(self.REQUIRED_COLUMNS) - set(df_annotations.columns)
         if missing:
             raise ValueError(
-                f"Benthos Yuval annotations parquet at {annotations_uri} is missing required "
+                f"Benthos Yuval annotations parquet at "
+                f"s3://{self.source_bucket}/{self.annotations_path} is missing required "
                 f"columns: {sorted(missing)}"
             )
 
@@ -123,8 +122,8 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
     def _load_classes_json(self) -> dict[str, int]:
         """Fetch ``classes.json`` from S3 (used to interpret the dense mask PNGs)."""
         key = f"{self.source_s3_prefix}/classes.json"
-        body = self.s3.get_object(Bucket=self.source_bucket, Key=key)["Body"].read()
-        return {str(name): int(idx) for name, idx in json.loads(body).items()}
+        raw = LocalS3Cache.get().read_json(self.source_bucket, key)
+        return {str(name): int(idx) for name, idx in raw.items()}
 
     def _build_classes_global_to_local(self) -> np.ndarray:
         """Lookup table from classes.json IDs to local source IDs.
@@ -142,34 +141,22 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
 
     def read_image(self, image_id: str, site: str, **row_kwargs: Any) -> NDArray[Any]:
         key = f"{self.source_s3_prefix}/images/{site}/{image_id}.png"
-        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))
 
     def read_label(self, image_id: str, site: str, **row_kwargs: Any) -> NDArray[Any]:
         """Read the dense uint8 label PNG (in the ``classes.json`` ID space)."""
         key = f"{self.source_s3_prefix}/labels/{site}/{image_id}.png"
-        arr = np.asarray(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key))
+        arr = np.asarray(get_image_s3(s3=None, bucket=self.source_bucket, key=key))
         if arr.ndim == 3:
             arr = arr[..., 0]
         return arr.astype(np.uint8, copy=False)
 
-    def __getitem__(self, idx: int) -> tuple[Any, Any]:
+    def _load_item(self, idx: int) -> tuple[Any, Any]:
         image_id = self.df_images.loc[idx, "image_id"]
         site = self.df_images.loc[idx, "site"]
-        row_kwargs = self.df_images.loc[idx].to_dict()
 
-        try:
-            image = self.read_image(image_id=image_id, site=site)
-            raw_mask = self.read_label(image_id=image_id, site=site)
-        except Exception as e:
-            self._record_load_failure(image_id=image_id, row_kwargs=row_kwargs, error=e)
-            logger.warning(
-                "Skipping image_id=%s (site=%s): %s: %s",
-                image_id,
-                site,
-                type(e).__name__,
-                e,
-            )
-            return None, None
+        image = self.read_image(image_id=image_id, site=site)
+        raw_mask = self.read_label(image_id=image_id, site=site)
 
         local_mask = self._classes_global_to_local[raw_mask]
 

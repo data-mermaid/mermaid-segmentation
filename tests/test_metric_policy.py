@@ -11,12 +11,13 @@ from mermaidseg.model.metric_policy import (
     canonical_metric_name,
     extract_metric_value,
     metric_direction,
+    metric_result_key,
     to_scalar_metric,
 )
 
 
 class TestCanonicalMetricName:
-    @pytest.mark.parametrize("name", ["loss", "accuracy", "miou", "f1-score"])
+    @pytest.mark.parametrize("name", ["loss", "accuracy"])
     def test_accepts_known_metrics(self, name):
         assert canonical_metric_name(name) == name
 
@@ -24,19 +25,30 @@ class TestCanonicalMetricName:
         assert canonical_metric_name("LOSS") == "loss"
         assert canonical_metric_name("Accuracy") == "accuracy"
 
+    def test_accepts_full_accuracy_key(self):
+        assert canonical_metric_name("accuracy/classification") == "accuracy"
+
     def test_rejects_unknown_metric(self):
         with pytest.raises(ValueError, match="Unsupported metric_of_interest"):
             canonical_metric_name("precision")
 
     def test_supported_names_are_canonical_only(self):
-        assert SUPPORTED_METRIC_NAMES == ("accuracy", "f1-score", "loss", "miou")
+        assert SUPPORTED_METRIC_NAMES == ("accuracy", "loss")
+
+
+class TestMetricResultKey:
+    def test_accuracy_alias(self):
+        assert metric_result_key("accuracy") == "accuracy/classification"
+
+    def test_loss_alias(self):
+        assert metric_result_key("loss") == "loss"
 
 
 class TestMetricDirection:
     def test_loss_is_min(self):
         assert metric_direction("loss") == "min"
 
-    @pytest.mark.parametrize("name", ["accuracy", "miou", "f1-score"])
+    @pytest.mark.parametrize("name", ["accuracy"])
     def test_maximize_metrics(self, name):
         assert metric_direction(name) == "max"
 
@@ -56,7 +68,7 @@ class TestToScalarMetric:
 
     def test_rejects_non_scalar_array(self):
         with pytest.raises(ValueError, match="must be scalar"):
-            to_scalar_metric("miou", np.array([0.1, 0.2, 0.3]))
+            to_scalar_metric("accuracy/classification", np.array([0.1, 0.2, 0.3]))
 
     def test_rejects_list(self):
         with pytest.raises(ValueError, match="must be scalar"):
@@ -65,11 +77,12 @@ class TestToScalarMetric:
 
 class TestExtractMetricValue:
     def test_loss_uses_val_loss(self):
-        assert extract_metric_value("loss", 0.85, {"accuracy": 0.7}) == pytest.approx(0.85)
+        assert extract_metric_value("loss", 0.85, {"accuracy/classification": 0.7}) == pytest.approx(
+            0.85
+        )
 
-    @pytest.mark.parametrize("metric", ["accuracy", "miou", "f1-score"])
-    def test_extracts_from_results(self, metric):
-        result = extract_metric_value(metric, 0.5, {metric: 0.82})
+    def test_accuracy_alias_uses_classification_key(self):
+        result = extract_metric_value("accuracy", 0.5, {"accuracy/classification": 0.82})
         assert result == pytest.approx(0.82)
 
     def test_raises_when_metric_missing(self):

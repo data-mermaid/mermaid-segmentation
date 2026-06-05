@@ -109,6 +109,7 @@ def minimal_config():
                 "input_size": IMAGE_SIZE,
             },
             "training": {
+                "training_mode": "standard",
                 "epochs": 1,
                 "batch_size": 2,
                 "optimizer": {"type": "SGD", "lr": 0.01},

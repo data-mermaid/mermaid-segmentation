@@ -71,6 +71,25 @@ class _AlwaysFailDataset(BaseCoralDataset):
         raise RuntimeError("simulated read failure")
 
 
+class _SometimesFailDataset(BaseCoralDataset):
+    """Subclass whose read_image fails for specific image_ids only.
+
+    Used to verify that ``__getitem__`` recurses to the next index on failure
+    and eventually returns a valid sample.
+    """
+
+    fail_for: set[str]
+
+    def __init__(self, fail_for: set[str], **kwargs: Any):
+        super().__init__(**kwargs)
+        self.fail_for = fail_for
+
+    def read_image(self, **row_kwargs) -> Any:
+        if row_kwargs.get("image_id") in self.fail_for:
+            raise RuntimeError(f"simulated failure for {row_kwargs['image_id']}")
+        return np.zeros((8, 8, 3), dtype=np.uint8)
+
+
 # --- create_annotation_mask ---
 
 
@@ -194,7 +213,9 @@ def test_collate_fn_all_none_returns_empty_tensors(minimal_dataset, caplog):
 # --- BaseCoralDataset.__getitem__ ---
 
 
-def test_base_dataset_getitem_skips_and_logs_on_read_failure(single_image_annotations, caplog):
+def test_base_dataset_getitem_raises_when_all_items_fail(single_image_annotations, caplog):
+    """If every item in the dataset fails to load, ``__getitem__`` must raise
+    so the caller can't silently train on an empty stream."""
     df_annotations, df_images = single_image_annotations
     ds = _AlwaysFailDataset(
         df_annotations=df_annotations,
@@ -202,12 +223,73 @@ def test_base_dataset_getitem_skips_and_logs_on_read_failure(single_image_annota
         class_subset=["Coral"],
     )
 
-    with caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"):
-        result = ds[0]
+    with (
+        caplog.at_level("WARNING", logger="mermaidseg.datasets.utils"),
+        pytest.raises(RuntimeError, match="all 1 items failed to load"),
+    ):
+        _ = ds[0]
 
-    assert result == (None, None)
     assert "img1" in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+def test_base_dataset_getitem_recurses_to_next_index_on_failure(capsys):
+    """``__getitem__`` should skip failing indices and return the first
+    successful sample instead of returning ``(None, None)``."""
+    df_annotations = pd.DataFrame(
+        {
+            "image_id": ["bad1", "bad2", "good1"],
+            "region_id": [1, 2, 3],
+            "region_name": ["r1", "r2", "r3"],
+            "source_label_name": ["Coral", "Coral", "Coral"],
+            "row": [0, 0, 0],
+            "col": [0, 0, 0],
+        }
+    )
+    df_images = (
+        df_annotations[["image_id", "region_id", "region_name"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+    ds = _SometimesFailDataset(
+        fail_for={"bad1", "bad2"},
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+    )
+
+    image, mask = ds[0]
+    assert image is not None
+    assert mask is not None
+    assert image.shape == (8, 8, 3)
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "bad1" in combined
+    assert "bad2" in combined
+    assert ds.num_load_failures() == 2
+
+
+def test_base_dataset_emit_warning_writes_to_stdout_and_stderr(
+    single_image_annotations, capsys
+):
+    """Skip warnings must be visible on both stdout and stderr so DataLoader
+    workers (where ``logging`` is often unconfigured) don't drop them silently."""
+    df_annotations, df_images = single_image_annotations
+    ds = _AlwaysFailDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+    )
+
+    with pytest.raises(RuntimeError):
+        _ = ds[0]
+
+    captured = capsys.readouterr()
+    assert "img1" in captured.out
+    assert "img1" in captured.err
+    assert "WARNING" in captured.out
+    assert "WARNING" in captured.err
 
 
 def test_base_dataset_records_failure_context(single_image_annotations):
@@ -219,7 +301,8 @@ def test_base_dataset_records_failure_context(single_image_annotations):
         split="train",
     )
 
-    _ = ds[0]
+    with pytest.raises(RuntimeError):
+        _ = ds[0]
     failures = ds.load_failures_df()
     assert len(failures) == 1
 
@@ -243,7 +326,8 @@ def test_base_dataset_saves_failure_report_as_parquet(single_image_annotations, 
         class_subset=["Coral"],
     )
 
-    _ = ds[0]
+    with pytest.raises(RuntimeError):
+        _ = ds[0]
     output_path = tmp_path / "load_failures.parquet"
     saved_path = ds.save_load_failures(output_path)
 

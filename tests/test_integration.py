@@ -15,9 +15,50 @@ from __future__ import annotations
 import pytest
 import torch
 
+from mermaidseg.io import ConfigDict
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
 
 from .conftest import IMAGE_SIZE, NUM_CLASSES
+
+
+@pytest.mark.integration
+def test_concept_bottleneck_freezes_encoder(make_meta_model):
+    """Concept-bottleneck training freezes the DINOv3 encoder by default."""
+    from tests.test_loss_components import _concept_channel_count, _tiny_concept_value2id
+
+    concept_value2id = _tiny_concept_value2id()
+    num_concepts = _concept_channel_count(concept_value2id)
+    config = ConfigDict(
+        {
+            "model": {
+                "name": "ConceptBottleneckDINOv3",
+                "encoder_name": "facebook/dinov3-vits16-pretrain-lvd1689m",
+                "input_size": IMAGE_SIZE,
+                "concept_value2id": concept_value2id,
+            },
+            "training": {
+                "training_mode": "concept-bottleneck",
+                "epochs": 1,
+                "optimizer": {"type": "SGD", "lr": 0.01},
+                "loss": {"type": "ConceptBottleneckLoss", "concept_value2id": concept_value2id},
+            },
+        }
+    )
+    meta = make_meta_model(
+        config,
+        run_name="test-cbm-freeze",
+        num_concepts=num_concepts,
+        concept_value2id=concept_value2id,
+    )
+
+    encoder_frozen = all(not p.requires_grad for p in meta.model.encoder.parameters())
+    head_trainable = any(p.requires_grad for p in meta.model.concept_head.parameters())
+    classifier_trainable = any(p.requires_grad for p in meta.model.concept_classifier.parameters())
+
+    assert encoder_frozen
+    assert head_trainable
+    assert classifier_trainable
+    assert len(meta.optimizer.param_groups[0]["params"]) > 0
 
 
 @pytest.mark.integration
@@ -117,7 +158,7 @@ def test_evaluator_returns_metrics(minimal_config, tiny_loader, make_meta_model)
 
     assert isinstance(metrics, dict)
     assert len(metrics) > 0
-    assert "accuracy" in metrics or "miou" in metrics
+    assert "accuracy/classification" in metrics
 
 
 @pytest.mark.integration

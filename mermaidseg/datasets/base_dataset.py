@@ -20,7 +20,10 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
-from mermaidseg.datasets.utils import create_annotation_mask
+from collections.abc import Callable
+
+from mermaidseg.datasets.local_cache import CacheStatsHandles, LocalS3Cache
+from mermaidseg.datasets.utils import create_annotation_mask, emit_dataset_warning
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,17 @@ def worker_init_fn(worker_id: int) -> None:
         level=logging.WARNING,
         format=f"[worker-{worker_id}] %(levelname)s %(name)s: %(message)s",
     )
+
+
+def make_worker_init_fn(stats: CacheStatsHandles) -> Callable[[int], None]:
+    """Return a DataLoader worker init that configures logging and cache stats."""
+
+    def init_fn(worker_id: int) -> None:
+        worker_init_fn(worker_id)
+        LocalS3Cache.configure_from_env()
+        LocalS3Cache.get().attach_stats(stats)
+
+    return init_fn
 
 
 class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
@@ -181,21 +195,59 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         raise NotImplementedError("Subclasses should implement this method.")
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        """Return ``(image, source_labels)`` for ``idx``.
+
+        On any internal load/transform error we record the failure, emit a
+        warning to logger + stdout + stderr, and recurse on the *next* index
+        (wrapping around). This avoids returning ``(None, None)`` placeholders
+        that break ``default_collate`` (and any downstream code expecting a
+        valid tensor). If every item in the dataset fails, a ``RuntimeError``
+        is raised so the caller knows the dataset is unusable.
+        """
+        return self._safe_getitem(idx, attempts=0)
+
+    def _safe_getitem(
+        self, idx: int, attempts: int
+    ) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        n = len(self)
+        if n == 0:
+            raise RuntimeError(f"{self.__class__.__name__}: dataset is empty")
+
+        try:
+            return self._load_item(idx)
+        except Exception as e:
+            try:
+                image_id = self.df_images.loc[idx, "image_id"]
+                row_kwargs = self.df_images.loc[idx].to_dict()
+            except Exception:
+                image_id = None
+                row_kwargs = {}
+            self._record_load_failure(image_id=image_id, row_kwargs=row_kwargs, error=e)
+
+            source_info = {k: v for k, v in row_kwargs.items() if k != "image_id"}
+            emit_dataset_warning(
+                f"{self.__class__.__name__}: skipping idx={idx} image_id={image_id} "
+                f"(source={source_info}): {type(e).__name__}: {e}"
+            )
+
+            if attempts + 1 >= n:
+                raise RuntimeError(
+                    f"{self.__class__.__name__}: all {n} items failed to load; "
+                    f"last error: {type(e).__name__}: {e}"
+                ) from e
+
+            return self._safe_getitem((idx + 1) % n, attempts=attempts + 1)
+
+    def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        """Perform a single load (no error handling).
+
+        Subclasses should override this rather than :meth:`__getitem__` so they
+        inherit the recursive-on-failure behaviour for free.
+        """
         image_id = self.df_images.loc[idx, "image_id"]
         row_kwargs = self.df_images.loc[idx].to_dict()
-        try:
-            image = self.read_image(**row_kwargs)
-        except Exception as e:
-            self._record_load_failure(image_id=image_id, row_kwargs=row_kwargs, error=e)
-            source_info = {k: v for k, v in row_kwargs.items() if k != "image_id"}
-            logger.warning(
-                "Skipping image_id=%s (source=%s): %s: %s",
-                image_id,
-                source_info,
-                type(e).__name__,
-                e,
-            )
-            return None, None
+
+        image = self.read_image(**row_kwargs)
 
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
@@ -255,7 +307,12 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return path
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Collate function that filters out failed loads (``(None, None)`` items).
+        """Collate function that defensively filters out ``(None, None)`` items.
+
+        In normal operation :meth:`__getitem__` recovers from load failures by
+        recursing on the next index, so the batch should not contain ``None``
+        placeholders. This filter remains as a safety net for callers that
+        construct batches by hand or override ``__getitem__``.
 
         Args:
             batch: List of ``(image, source_labels)`` tuples possibly containing

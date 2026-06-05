@@ -23,6 +23,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from mermaidseg.dataset_reconciliation.concept_schema import (
+    ConceptSchema,
+    build_source_to_concepts,
+)
 from mermaidseg.dataset_reconciliation.concepts import (
     initialize_benthic_concepts,
     initialize_benthic_hierarchy,
@@ -116,6 +120,7 @@ class SourceLabelRegistry:
         target_label_subset: list[str] | set[str] | None = None,
         fetch_remote: bool = True,
         concept_mapping_path: str | None = None,
+        concept_schema: ConceptSchema | None = None,
     ):
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
@@ -214,7 +219,10 @@ class SourceLabelRegistry:
         self.concept_name2id: dict[str, int] | None = None
         self.concept_value2id: dict[str, dict[str, int]] | None = None
         if compute_concepts:
-            self._build_concepts(concept_mapping_path=concept_mapping_path)
+            self._build_concepts(
+                concept_mapping_path=concept_mapping_path,
+                concept_schema=concept_schema,
+            )
 
         for ds in self.datasets:
             ds.set_global_offset(self.dataset_offsets[ds.SOURCE_NAME])
@@ -305,7 +313,21 @@ class SourceLabelRegistry:
             )
         return resolved
 
-    def _build_concepts(self, concept_mapping_path: str | None = None):
+    def _build_concepts(
+        self,
+        concept_mapping_path: str | None = None,
+        concept_schema: ConceptSchema | None = None,
+    ):
+        if concept_schema is not None:
+            self._concept_matrix = None
+            self.concept_value2id = concept_schema.concept_value2id
+            self.concept_id2name = concept_schema.channel_id2name()
+            self.concept_name2id = {v: k for k, v in self.concept_id2name.items()}
+            self.source_to_concepts = build_source_to_concepts(
+                self.global_id2source, concept_schema
+            )
+            return
+
         concept_matrix, source_to_concepts, concept_value2id = initialize_benthic_concepts(
             mapping_location=concept_mapping_path,
             global_id2source=self.global_id2source,

@@ -24,12 +24,16 @@ from scripts.train import (
 class StubLogger:
     """Minimal logger stub for train_model tests."""
 
-    def __init__(self, log_epochs: int = 1):
+    def __init__(self, log_epochs: int = 1, checkpoint_dir: str = "."):
         self.log_epochs = log_epochs
+        self.checkpoint_dir = checkpoint_dir
         self.logged: list[tuple[dict[str, float], int]] = []
         self.checkpoint_epochs: list[int] = []
 
     def log(self, payload: dict[str, float], step: int) -> None:
+        self.logged.append((payload, step))
+
+    def log_training_metrics(self, payload: dict[str, float], step: int) -> None:
         self.logged.append((payload, step))
 
     def save_model_checkpoint(self, _meta_model, epoch: int, _metrics: dict[str, float]) -> None:
@@ -49,12 +53,13 @@ class FakeMetaModel:
         val_metrics_seq: list[dict[str, float | np.ndarray]] | None = None,
     ):
         self.training_kwargs = SimpleNamespace(epochs=epochs)
+        self.run_name = "fake-run"
         self.model = torch.nn.Linear(4, 2)
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.1)
         self._train_loss = train_loss
-        self._train_metrics = train_metrics or {"accuracy": 0.5}
+        self._train_metrics = train_metrics or {"accuracy/classification": 0.5}
         self._val_losses = val_losses or [0.9] * epochs
-        self._val_metrics_seq = val_metrics_seq or [{"accuracy": 0.5}] * epochs
+        self._val_metrics_seq = val_metrics_seq or [{"accuracy/classification": 0.5}] * epochs
         self._val_idx = 0
 
     def train_epoch(self, _loader, _evaluator):
@@ -101,13 +106,11 @@ def test_metric_of_interest_allowlist_rejects_unknown_metric() -> None:
         )
 
 
-@pytest.mark.parametrize("metric_name", ["accuracy", "miou", "f1-score", "loss"])
+@pytest.mark.parametrize("metric_name", ["accuracy", "loss"])
 def test_metric_of_interest_allowlist_accepts_known_metrics(metric_name: str) -> None:
     val_metrics = {
-        "accuracy": {"accuracy": 0.7},
-        "miou": {"miou": 0.4},
-        "f1-score": {"f1-score": 0.6},
-        "loss": {"accuracy": 0.5},
+        "accuracy": {"accuracy/classification": 0.7},
+        "loss": {"accuracy/classification": 0.5},
     }[metric_name]
     val_losses = [0.8]
     meta = FakeMetaModel(epochs=1, val_losses=val_losses, val_metrics_seq=[val_metrics])
@@ -131,7 +134,7 @@ def test_metric_direction_accuracy_maximize_and_loss_minimize() -> None:
     meta_accuracy = FakeMetaModel(
         epochs=2,
         val_losses=[0.9, 0.9],
-        val_metrics_seq=[{"accuracy": 0.7}, {"accuracy": 0.6}],
+        val_metrics_seq=[{"accuracy/classification": 0.7}, {"accuracy/classification": 0.6}],
     )
     train_model(
         meta_model=meta_accuracy,
@@ -147,7 +150,7 @@ def test_metric_direction_accuracy_maximize_and_loss_minimize() -> None:
     meta_loss = FakeMetaModel(
         epochs=2,
         val_losses=[1.0, 0.8],
-        val_metrics_seq=[{"accuracy": 0.5}, {"accuracy": 0.5}],
+        val_metrics_seq=[{"accuracy/classification": 0.5}, {"accuracy/classification": 0.5}],
     )
     train_model(
         meta_model=meta_loss,
@@ -176,7 +179,7 @@ def test_reduce_on_plateau_receives_validation_metric() -> None:
     meta = FakeMetaModel(
         epochs=2,
         val_losses=[0.9, 0.9],
-        val_metrics_seq=[{"accuracy": 0.4}, {"accuracy": 0.5}],
+        val_metrics_seq=[{"accuracy/classification": 0.4}, {"accuracy/classification": 0.5}],
     )
     scheduler = RecordingPlateau(meta.optimizer)
     meta.scheduler = scheduler
@@ -196,7 +199,7 @@ def test_non_scalar_metric_of_interest_raises_value_error() -> None:
     meta = FakeMetaModel(
         epochs=1,
         val_losses=[0.9],
-        val_metrics_seq=[{"miou": np.array([0.1, 0.2])}],
+        val_metrics_seq=[{"accuracy/classification": np.array([0.1, 0.2])}],
     )
     with pytest.raises(ValueError, match="must be scalar"):
         train_model(
@@ -204,7 +207,7 @@ def test_non_scalar_metric_of_interest_raises_value_error() -> None:
             evaluator=object(),
             train_loader=_tiny_loader(),
             val_loader=_tiny_loader(),
-            metric_of_interest="miou",
+            metric_of_interest="accuracy",
         )
 
 
@@ -213,11 +216,11 @@ def test_early_stopping_triggers_with_patience_and_min_delta() -> None:
         epochs=5,
         val_losses=[0.9, 0.9, 0.9, 0.9, 0.9],
         val_metrics_seq=[
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
+            {"accuracy/classification": 0.5},
+            {"accuracy/classification": 0.5},
+            {"accuracy/classification": 0.5},
+            {"accuracy/classification": 0.5},
+            {"accuracy/classification": 0.5},
         ],
     )
     metrics = train_model(
@@ -241,12 +244,11 @@ def test_early_stopping_runs_final_test_eval_on_stop_epoch(monkeypatch) -> None:
         evaluator,
         loader,
         meta_model,
-        logger,
         epoch,
         split="train",
     ):
         calls.append((epoch, split))
-        return {"accuracy": 0.5}
+        return {"accuracy/classification": 0.5}
 
     monkeypatch.setattr(train_module, "evaluate_and_log", _fake_evaluate_and_log)
 
@@ -254,11 +256,11 @@ def test_early_stopping_runs_final_test_eval_on_stop_epoch(monkeypatch) -> None:
         epochs=5,
         val_losses=[0.9, 0.9, 0.9, 0.9, 0.9],
         val_metrics_seq=[
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
+            {"accuracy/classification": 0.5},
+            {"accuracy/classification": 0.5},
+            {"accuracy/classification": 0.5},
+            {"accuracy/classification": 0.5},
+            {"accuracy/classification": 0.5},
         ],
     )
     logger = StubLogger(log_epochs=100)
@@ -286,10 +288,10 @@ def test_cli_metric_of_interest_argument_is_supported() -> None:
             "--config",
             "configs/linear-dinov3-base.yaml",
             "--metric-of-interest",
-            "miou",
+            "loss",
         ]
     )
-    assert args.metric_of_interest == "miou"
+    assert args.metric_of_interest == "loss"
 
     with pytest.raises(SystemExit):
         parser.parse_args(
@@ -357,4 +359,54 @@ def test_save_failure_report_if_available_writes_parquet(tmp_path: Path) -> None
     report_path = _save_failure_report_if_available(_Dataset(), tmp_path)
     assert report_path is not None
     assert report_path.exists()
-    assert report_path.suffix == ".parquet"
+
+
+def test_build_epoch_metrics_prefixes_loss_and_accuracy() -> None:
+    metrics = train_module.build_epoch_metrics(
+        "train",
+        1.25,
+        {
+            "loss/classification": 0.5,
+            "loss/kingdom": 0.1,
+            "accuracy/classification": 0.8,
+            "accuracy/kingdom": 0.7,
+        },
+    )
+    assert metrics["train/loss/total"] == pytest.approx(1.25)
+    assert metrics["train/loss/classification"] == pytest.approx(0.5)
+    assert metrics["train/accuracy/classification"] == pytest.approx(0.8)
+
+
+def test_local_metrics_csv_is_written(tmp_path: Path) -> None:
+    logger = StubLogger(checkpoint_dir=str(tmp_path))
+    meta = FakeMetaModel(
+        epochs=2,
+        train_metrics={
+            "loss/classification": 0.4,
+            "accuracy/classification": 0.6,
+        },
+        val_metrics_seq=[
+            {
+                "loss/classification": 0.3,
+                "accuracy/classification": 0.7,
+            },
+            {
+                "loss/classification": 0.2,
+                "accuracy/classification": 0.75,
+            },
+        ],
+    )
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+    )
+
+    csv_path = tmp_path / "model_checkpoints" / "fake-run" / "metrics.csv"
+    assert csv_path.exists()
+    frame = pd.read_csv(csv_path)
+    assert len(frame) == 2
+    assert "train/loss/total" in frame.columns
+    assert "validation/accuracy/classification" in frame.columns

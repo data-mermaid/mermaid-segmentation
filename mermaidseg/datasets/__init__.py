@@ -5,7 +5,8 @@ space. Cross-dataset label/concept mapping lives in
 :mod:`mermaidseg.dataset_reconciliation`.
 """
 
-from mermaidseg.datasets.base_dataset import BaseCoralDataset, worker_init_fn
+from mermaidseg.datasets.base_dataset import BaseCoralDataset, make_worker_init_fn, worker_init_fn
+from mermaidseg.datasets.local_cache import setup_local_cache
 from mermaidseg.datasets.benthos_yuval import BenthosYuvalCoralsDataset
 from mermaidseg.datasets.catlin_seaview import CatlinSeaviewDataset
 from mermaidseg.datasets.coralnet import CoralNetDataset
@@ -23,5 +24,7 @@ __all__ = [
     "MermaidDataset",
     "MooreaLabeledCoralsDataset",
     "PacificLabeledCoralsDataset",
+    "make_worker_init_fn",
+    "setup_local_cache",
     "worker_init_fn",
 ]

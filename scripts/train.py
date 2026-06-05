@@ -41,7 +41,7 @@ from torch.utils.data import DataLoader, random_split
 
 import mermaidseg.datasets
 from mermaidseg.dataset_reconciliation import SourceLabelRegistry
-from mermaidseg.datasets import worker_init_fn
+from mermaidseg.datasets import make_worker_init_fn, setup_local_cache
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
@@ -285,6 +285,8 @@ def _run_training(args: argparse.Namespace) -> None:
         for split, augs in cfg.augmentation.items()
     }
 
+    cache_stats = setup_local_cache(cfg.data)
+
     dataset_name = cfg.data.pop("name", None)
     batch_size = cfg.data.pop("batch_size", 8)
     concept_mapping_flag = cfg.data.pop("concept_mapping_flag", False)
@@ -335,7 +337,7 @@ def _run_training(args: argparse.Namespace) -> None:
     }
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = True
-        loader_kwargs["worker_init_fn"] = worker_init_fn
+        loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
 
     train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, **loader_kwargs)
@@ -358,7 +360,7 @@ def _run_training(args: argparse.Namespace) -> None:
 
     num_classes = registry.num_target_classes
     id2label = {0: "background", **registry.target_id2label}
-    training_mode = cfg.get("training_mode", "standard")
+    training_mode = cfg.training.get("training_mode", "standard")
 
     meta_model = MetaModel(
         run_name=cfg.run_name,
@@ -366,16 +368,19 @@ def _run_training(args: argparse.Namespace) -> None:
         num_concepts=registry.num_concepts or None,
         model_kwargs=cfg.model,
         training_kwargs=cfg.training,
-        training_mode=training_mode,
         device=device,
         source_to_target_lookup=registry.source_to_target,
         source_to_concepts_lookup=registry.source_to_concepts,
         concept_matrix=registry.concept_matrix,
         conceptid2labelid=registry.conceptid2labelid(),
+        concept_value2id=registry.concept_value2id,
     )
     evaluator = EvaluatorSemanticSegmentation(
         num_classes=num_classes,
         device=device,
+        calculate_concept_metrics=training_mode != "standard",
+        concept_value2id=registry.concept_value2id,
+        include_classification=training_mode != "concept",
     )
 
     with Logger(

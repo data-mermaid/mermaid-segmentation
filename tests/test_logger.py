@@ -18,6 +18,7 @@ from mermaidseg.logger import (
     Logger,
     WandbLogger,
     get_mlflow_tracking_uri,
+    is_training_metric,
     mlflow_connect,
 )
 from tests._dataset_stubs import make_mermaid_stub, make_registry_stub
@@ -281,6 +282,32 @@ class TestLoggerLog:
         mock_wandb_logger.log.assert_called_once_with({"loss": 0.3}, step=5)
 
 
+class TestLogTrainingMetrics:
+    def test_is_training_metric_allowlist(self):
+        assert is_training_metric("train/loss/total")
+        assert is_training_metric("validation/accuracy/classification")
+        assert not is_training_metric("train/time_taken")
+        assert not is_training_metric("test/loss/total")
+
+    def test_log_training_metrics_filters_disallowed_keys(
+        self, tmp_mlflow_uri, make_config, fake_meta_model
+    ):
+        config = make_config()
+        lgr = Logger(config=config, meta_model=fake_meta_model)
+        lgr.log_training_metrics(
+            {
+                "train/loss/total": 0.5,
+                "train/accuracy/classification": 0.8,
+                "train/time_taken": 12.0,
+            },
+            step=3,
+        )
+        metrics = mlflow.get_run(lgr.mlflow_run_id).data.metrics
+        assert metrics["train/loss/total"] == pytest.approx(0.5)
+        assert metrics["train/accuracy/classification"] == pytest.approx(0.8)
+        assert "train/time_taken" not in metrics
+
+
 class TestLogDataset:
     """Test MLflow dataset input logging: single, combined, and graceful fallback."""
 
@@ -391,10 +418,8 @@ class TestSaveModelCheckpoint:
         assert any("model_epoch50" in a.path for a in artifacts)
 
         assert run.data.tags.get("best_model_epoch") == "50"
-        assert "best_model/loss" in run.data.metrics
-
-        assert run.data.metrics["checkpoint/loss"] == pytest.approx(0.3)
-        assert run.data.metrics["checkpoint/acc"] == pytest.approx(0.9)
+        assert "best_model/loss" not in run.data.metrics
+        assert "checkpoint/loss" not in run.data.metrics
 
     def test_wandb_artifact_logged(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="wb-art")
@@ -423,7 +448,7 @@ class TestSaveModelCheckpoint:
         best_model_calls = [c for c in mock_log_artifact.call_args_list if "best-model" in str(c)]
         assert len(best_model_calls) >= 1
 
-    def test_checkpoint_metrics_logged(self, tmp_mlflow_uri, tmp_path, make_config):
+    def test_checkpoint_metrics_not_logged(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="sync-metrics")
         config = make_config(logger={"save_local_checkpoints": False})
         lgr = Logger(
@@ -440,7 +465,7 @@ class TestSaveModelCheckpoint:
             for call in mock_log_metrics.call_args_list
             if any(k.startswith("checkpoint/") for k in call.args[0])
         ]
-        assert checkpoint_calls, "Expected at least one checkpoint metric logging call"
+        assert not checkpoint_calls
 
     def test_model_logging_sets_best_model_tag(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="verify-model-tag")

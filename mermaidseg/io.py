@@ -163,17 +163,24 @@ def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> Con
     return config
 
 
+_RESERVED_DATA_KEYS = frozenset({"local_cache_dir", "local_cache_write_through"})
+
+
 def preprocess_data_config(data_cfg_orig):
     data_cfg = data_cfg_orig.copy()
     if "default" in data_cfg.data:
         default = data_cfg.data.pop("default", None)
         for dataset_name in list(data_cfg.data.keys()):
+            if dataset_name in _RESERVED_DATA_KEYS:
+                continue
             dataset_tmp = data_cfg.data.get(dataset_name, None)
             data_cfg.data[dataset_name] = default.copy() if default is not None else {}
             if dataset_tmp is not None:
                 data_cfg.data[dataset_name].update(dataset_tmp)
 
     for dataset_name in data_cfg.data:
+        if dataset_name in _RESERVED_DATA_KEYS:
+            continue
         for split_name in data_cfg.data[dataset_name]:
             split_cfg = data_cfg.data[dataset_name][split_name]
             # Use whichever key is present (only one should appear): 'augmentation' or 'transform'

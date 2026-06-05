@@ -1,4 +1,6 @@
 data:
+  local_cache_dir: /archive/vision/beery/red_sea_coral/cache_MERMAID
+  local_cache_write_through: true
   default: 
     train:
       transform:

@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from typing import Any
 
-import boto3
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
+from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.datasets.utils import get_image_s3
 
 
@@ -30,7 +30,6 @@ class MermaidDataset(BaseCoralDataset):
     Attributes:
         annotations_path (str): Path to the Parquet file containing image annotations.
         source_bucket (str): S3 bucket name containing the dataset files.
-        s3 (boto3.client): Boto3 S3 client for accessing images.
     Args:
         annotations_path (str, optional): S3 path to the Parquet file with annotations.
         source_bucket (str, optional): S3 bucket name containing the dataset files.
@@ -41,7 +40,6 @@ class MermaidDataset(BaseCoralDataset):
 
     annotations_path: str
     source_bucket: str
-    s3: boto3.client
 
     def __init__(
         self,
@@ -51,7 +49,6 @@ class MermaidDataset(BaseCoralDataset):
     ):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
-        self.s3 = boto3.client("s3")
 
         df_annotations, df_images = self.load_annotations(self.annotations_path)
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
@@ -64,7 +61,9 @@ class MermaidDataset(BaseCoralDataset):
         unified ``source_label_name`` convention used by
         :class:`BaseCoralDataset`.
         """
-        df_annotations = pd.read_parquet(annotations_path)
+        df_annotations = LocalS3Cache.get().read_parquet_ref(
+            annotations_path, self.source_bucket
+        )
         df_annotations = df_annotations.rename(
             columns={"benthic_attribute_name": "source_label_name"}
         )
@@ -80,4 +79,4 @@ class MermaidDataset(BaseCoralDataset):
 
     def read_image(self, image_id: str, **row_kwargs: Any) -> NDArray[Any]:
         key = f"mermaid/{image_id}.png"
-        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))

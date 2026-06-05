@@ -1,12 +1,16 @@
+import csv
 import logging
 import time
 import warnings
+from pathlib import Path
 
 import numpy as np
 import torch
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
 
+from mermaidseg.datasets.local_cache import LocalS3Cache
+from mermaidseg.datasets.utils import emit_cache_stats
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel
@@ -17,15 +21,58 @@ from mermaidseg.model.metric_policy import (
 )
 
 
-def _log_metric_dict(
-    logger: Logger | None,
+def build_epoch_metrics(
     prefix: str,
+    total_loss: float,
     metric_results: dict[str, float | NDArray[np.float64]],
-    epoch: int,
-) -> None:
-    if logger is None or not metric_results:
-        return
-    logger.log({f"{prefix}/{name}": value for name, value in metric_results.items()}, step=epoch)
+) -> dict[str, float]:
+    """Build scalar train/validation metrics for logging and CSV export."""
+    metrics: dict[str, float] = {f"{prefix}/loss/total": float(total_loss)}
+    for key, value in metric_results.items():
+        if not isinstance(value, (int, float, np.floating)):
+            continue
+        if key.startswith("loss/") or key.startswith("accuracy/"):
+            metrics[f"{prefix}/{key}"] = float(value)
+    return metrics
+
+
+class LocalMetricsWriter:
+    """Append per-epoch training metrics to a local CSV file."""
+
+    def __init__(self, csv_path: Path) -> None:
+        self.csv_path = csv_path
+        self._fieldnames: list[str] | None = None
+
+    def write(self, epoch: int, metrics: dict[str, float]) -> None:
+        row: dict[str, float | int | str] = {"epoch": epoch, **metrics}
+        self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not self.csv_path.exists():
+            self._fieldnames = ["epoch"] + sorted(metrics)
+            with self.csv_path.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=self._fieldnames)
+                writer.writeheader()
+                writer.writerow(row)
+            return
+
+        with self.csv_path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or ["epoch"])
+            rows = [dict(record) for record in reader]
+
+        new_keys = sorted(set(row) - set(fieldnames))
+        if new_keys:
+            fieldnames.extend(new_keys)
+            for record in rows:
+                for key in new_keys:
+                    record.setdefault(key, "")
+        self._fieldnames = fieldnames
+        rows.append({key: row.get(key, "") for key in fieldnames})
+
+        with self.csv_path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
 
 
 def train_model(
@@ -66,8 +113,8 @@ def train_model(
         end_epoch (int, optional): The ending epoch for training. Defaults to -1, which
             will be set based on the meta-model's training configuration if not specified.
         metric_of_interest (str, optional): Metric used for checkpointing and early
-            stopping. Must resolve to one of ``loss``, ``accuracy``, ``miou``,
-            ``f1-score``. Defaults to "accuracy".
+            stopping. Must resolve to ``loss`` or ``accuracy`` (classification accuracy).
+            Defaults to "accuracy".
         early_stopping (bool, optional): Enables early stopping on validation
             `metric_of_interest`. Defaults to False.
         early_stopping_patience (int, optional): Number of consecutive epochs with no
@@ -77,13 +124,8 @@ def train_model(
     Returns:
         dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
             ``train_metrics``, ``validation_metrics`` (if ``val_loader`` is provided), and
-            ``loss``. The ``loss`` sub-dict includes training loss plus timing metrics:
-            ``train/time_taken`` (full epoch wall time), ``train/data_loading_sec``,
-            ``train/forward_sec``, ``train/backward_sec``, ``train/samples_per_sec``,
-            ``train/data_loading_pct``, ``train/gpu_peak_memory_mb`` (CUDA only),
-            ``validation/time_taken`` (when ``val_loader`` is provided),
-            ``test/time_taken`` (when test evaluation runs), and
-            ``train/total_training_sec`` (final epoch only).
+            ``loss``. The ``loss`` sub-dict includes training loss plus timing metrics
+            kept locally for debugging.
     """
 
     metric_name = canonical_metric_name(metric_of_interest)
@@ -103,9 +145,21 @@ def train_model(
         end_epoch = start_epoch + meta_model.training_kwargs.epochs
     metrics_epoch = {}
     training_start = time.perf_counter()
+
+    local_metrics_writer: LocalMetricsWriter | None = None
+    if logger is not None:
+        csv_path = (
+            Path(logger.checkpoint_dir)
+            / "model_checkpoints"
+            / meta_model.run_name
+            / "metrics.csv"
+        )
+        local_metrics_writer = LocalMetricsWriter(csv_path)
+
     for epoch in range(start_epoch, end_epoch):
         should_stop_early = False
-        epoch_loss_dict = {}
+        epoch_loss_dict: dict[str, float] = {}
+        epoch_training_metrics: dict[str, float] = {}
         epoch_start_time = time.time()
         logging.info("EPOCH: %d", epoch)
 
@@ -115,12 +169,19 @@ def train_model(
         )
         logging.info("LOSS train %s", train_loss)
         logging.info("TRAIN METRICS: %s", train_metric_results)
+        train_cache_stats = LocalS3Cache.get().snapshot_stats()
+        emit_cache_stats(
+            f"EPOCH {epoch} train cache: {train_cache_stats.s3_fetches} fetched from S3, "
+            f"{train_cache_stats.local_hits} served from local"
+        )
         epoch_loss_dict["train/loss"] = train_loss
         epoch_loss_dict["train/data_loading_sec"] = train_timing["data_loading_sec"]
         epoch_loss_dict["train/forward_sec"] = train_timing["forward_sec"]
         epoch_loss_dict["train/backward_sec"] = train_timing["backward_sec"]
         metrics_epoch[epoch] = {"train_metrics": train_metric_results}
-        _log_metric_dict(logger, "train", train_metric_results, epoch)
+        epoch_training_metrics.update(
+            build_epoch_metrics("train", train_loss, train_metric_results)
+        )
 
         scheduler = getattr(meta_model, "scheduler", None)
         metric_value: float | None = None
@@ -132,12 +193,19 @@ def train_model(
             epoch_loss_dict["validation/time_taken"] = time.time() - val_start
             logging.info("LOSS valid %s", val_loss)
             logging.info("VALID METRICS: %s", val_metric_results)
+            val_cache_stats = LocalS3Cache.get().snapshot_stats()
+            emit_cache_stats(
+                f"EPOCH {epoch} val cache: {val_cache_stats.s3_fetches} fetched from S3, "
+                f"{val_cache_stats.local_hits} served from local"
+            )
 
             epoch_loss_dict["validation/loss"] = val_loss
             metrics_epoch[epoch]["validation_metrics"] = val_metric_results
-            _log_metric_dict(logger, "validation", val_metric_results, epoch)
+            epoch_training_metrics.update(
+                build_epoch_metrics("validation", val_loss, val_metric_results)
+            )
 
-            metric_value = extract_metric_value(metric_name, val_loss, val_metric_results)
+            metric_value = extract_metric_value(metric_of_interest, val_loss, val_metric_results)
             if direction == "min":
                 improved = metric_value < (best_metric_value - early_stopping_min_delta)
             else:
@@ -173,10 +241,6 @@ def train_model(
             else:
                 scheduler.step()
 
-            if logger is not None:
-                current_lr = meta_model.optimizer.param_groups[0]["lr"]
-                logger.log({"train/lr": current_lr}, step=epoch)
-
         epoch_wall = time.time() - epoch_start_time
         epoch_loss_dict["train/time_taken"] = epoch_wall
         epoch_loss_dict["train/samples_per_sec"] = train_timing["num_samples"] / epoch_wall
@@ -192,17 +256,17 @@ def train_model(
             epoch_loss_dict["train/total_training_sec"] = time.perf_counter() - training_start
 
         if logger is not None:
-            logger.log(
-                epoch_loss_dict,
-                step=epoch,
-            )
+            logger.log_training_metrics(epoch_training_metrics, step=epoch)
+
+        if local_metrics_writer is not None:
+            local_metrics_writer.write(epoch, epoch_training_metrics)
 
         metrics_epoch[epoch]["loss"] = epoch_loss_dict
         log_every = max(logger.log_epochs, 1) if logger is not None else 1
 
         if should_stop_early:
             if test_loader is not None:
-                _ = evaluate_and_log(evaluator, test_loader, meta_model, logger, epoch, "test")
+                _ = evaluate_and_log(evaluator, test_loader, meta_model, epoch, "test")
             break
 
         if epoch % log_every > 0 and epoch < (end_epoch - 1):
@@ -210,11 +274,8 @@ def train_model(
 
         if test_loader is not None:
             test_start = time.time()
-            _ = evaluate_and_log(evaluator, test_loader, meta_model, logger, epoch, "test")
-            test_time = time.time() - test_start
-            epoch_loss_dict["test/time_taken"] = test_time
-            if logger is not None:
-                logger.log({"test/time_taken": test_time}, step=epoch)
+            _ = evaluate_and_log(evaluator, test_loader, meta_model, epoch, "test")
+            epoch_loss_dict["test/time_taken"] = time.time() - test_start
     return metrics_epoch
 
 
@@ -222,18 +283,16 @@ def evaluate_and_log(
     evaluator: Evaluator,
     loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
     meta_model: MetaModel,
-    logger: Logger | None,
     epoch: int,
     split: str = "train",
 ) -> dict[str, float | NDArray[np.float64]]:
-    """Evaluate a split and optionally log its metrics.
+    """Evaluate a split and log metrics locally (stderr only, not MLflow).
 
     Args:
         evaluator (Evaluator): The evaluator object used to compute metrics and evaluate the model.
         loader (DataLoader): A data loader providing the dataset for evaluation. The dataset can be
             either a tuple of tensors or a dictionary of tensors.
         meta_model (MetaModel): The model to be evaluated.
-        logger (Logger | None): Optional logger used to log metrics and image predictions.
         epoch (int): The current epoch number, used for logging purposes.
         split (str, optional): The dataset split being evaluated (e.g., "train", "validation", "test").
             Defaults to "train".
@@ -244,7 +303,6 @@ def evaluate_and_log(
         loader,
         meta_model,
     )
-    _log_metric_dict(logger, split, metric_results, epoch)
-    logging.info("%s metrics: %s", split, metric_results)
+    logging.info("%s metrics (epoch %d): %s", split, epoch, metric_results)
 
     return metric_results
