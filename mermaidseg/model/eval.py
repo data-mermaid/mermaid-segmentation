@@ -228,9 +228,7 @@ class Evaluator:
             metric_key = f"accuracy/{concept}"
             if metric_key not in self.concept_metric_dict:
                 continue
-            self.concept_metric_dict[metric_key].update(
-                concept_outputs_order, concept_labels_order
-            )
+            self.concept_metric_dict[metric_key].update(concept_outputs_order, concept_labels_order)
 
         concept_labels_binary = concept_labels[:, offset:, ...]
         concept_outputs_binary = concept_outputs[:, offset:, ...]

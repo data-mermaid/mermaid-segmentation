@@ -10,9 +10,11 @@ is performed externally via
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import boto3
+import fsspec
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -20,8 +22,7 @@ from numpy.typing import NDArray
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from mermaidseg.datasets.utils import get_image_s3
 
-import json 
-import fsspec
+
 class CoralNetDataset(BaseCoralDataset):
     """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file stored
     on S3.
@@ -102,13 +103,19 @@ class CoralNetDataset(BaseCoralDataset):
         """
         annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         df_annotations = pd.read_parquet(annotations_path)
-        id2name_path = "s3://dev-datamermaid-sm-sources/coralnet-public-images/temporary/coralnet_id2name.json"
+        id2name_path = (
+            "s3://dev-datamermaid-sm-sources/coralnet-public-images/temporary/coralnet_id2name.json"
+        )
 
         with fsspec.open(id2name_path, "r") as f:
             coralnet_id2name = json.load(f)
 
-        df_annotations["coralnet_name"] = df_annotations["coralnet_id"].map(lambda x: coralnet_id2name.get(str(x)))
-        df_annotations["source_label_name"] = df_annotations["coralnet_name"].astype(str).str.lower()
+        df_annotations["coralnet_name"] = df_annotations["coralnet_id"].map(
+            lambda x: coralnet_id2name.get(str(x))
+        )
+        df_annotations["source_label_name"] = (
+            df_annotations["coralnet_name"].astype(str).str.lower()
+        )
 
         df_annotations = df_annotations[
             [

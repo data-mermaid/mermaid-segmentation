@@ -192,9 +192,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """
         return self._safe_getitem(idx, attempts=0)
 
-    def _safe_getitem(
-        self, idx: int, attempts: int
-    ) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def _safe_getitem(self, idx: int, attempts: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         n = len(self)
         if n == 0:
             raise RuntimeError(f"{self.__class__.__name__}: dataset is empty")

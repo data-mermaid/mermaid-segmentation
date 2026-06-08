@@ -16,7 +16,7 @@ def map_taxonomy_to_dense(binary_taxonomy: torch.Tensor) -> torch.Tensor:
     """
     sum_ = binary_taxonomy.sum(dim=1)
     is_none = sum_.eq(0)
-    is_not_given = sum_.eq(binary_taxonomy.size(1)) 
+    is_not_given = sum_.eq(binary_taxonomy.size(1))
 
     taxonomy_id = binary_taxonomy.argmax(dim=1) + 2
     return torch.where(

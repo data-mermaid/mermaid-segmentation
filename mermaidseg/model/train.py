@@ -147,10 +147,7 @@ def train_model(
     local_metrics_writer: LocalMetricsWriter | None = None
     if logger is not None:
         csv_path = (
-            Path(logger.checkpoint_dir)
-            / "model_checkpoints"
-            / meta_model.run_name
-            / "metrics.csv"
+            Path(logger.checkpoint_dir) / "model_checkpoints" / meta_model.run_name / "metrics.csv"
         )
         local_metrics_writer = LocalMetricsWriter(csv_path)
 

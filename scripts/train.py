@@ -35,9 +35,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import albumentations as A
 import torch
-from torch.utils.data import DataLoader, ConcatDataset, random_split
+from torch.utils.data import ConcatDataset, DataLoader
 
 from mermaidseg.dataset_reconciliation import (
     ConceptSchema,
@@ -45,7 +44,6 @@ from mermaidseg.dataset_reconciliation import (
     attach_registry,
     prepare_splits_for_registry,
 )
-
 from mermaidseg.datasets import (
     BenthosYuvalCoralsDataset,
     CatlinSeaviewDataset,
@@ -54,8 +52,8 @@ from mermaidseg.datasets import (
     MermaidDataset,
     MooreaLabeledCoralsDataset,
     PacificLabeledCoralsDataset,
-    worker_init_fn
-)   
+    worker_init_fn,
+)
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import Evaluator
@@ -296,12 +294,14 @@ def _run_training(args: argparse.Namespace) -> None:
             '    export MLFLOW_TRACKING_URI="arn:aws:sagemaker:us-east-1:ACCOUNT:mlflow-app/APP-ID"'
         )
 
-    cfg = setup_config({
-        "data": args.config_data,
-        "training": args.config_training,
-        "model": args.config_model,
-        "logger": args.config_logger,
-    })
+    cfg = setup_config(
+        {
+            "data": args.config_data,
+            "training": args.config_training,
+            "model": args.config_model,
+            "logger": args.config_logger,
+        }
+    )
 
     cfg = update_config_with_args(cfg, args)
     cfg_logger = copy.deepcopy(cfg)
@@ -340,12 +340,12 @@ def _run_training(args: argparse.Namespace) -> None:
             dataset_dict[(name, split)] = _build(name, split_cfg)
             print(f"{name:>24s} - {split:<5s}: {len(dataset_dict[(name, split)]):>7d} samples")
 
-    loader_kwargs = dict(
-        batch_size=cfg.training.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=torch.cuda.is_available(),
-        drop_last=True,
-    )
+    loader_kwargs = {
+        "batch_size": cfg.training.batch_size,
+        "num_workers": args.num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "drop_last": True,
+    }
     if args.num_workers > 0:
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["worker_init_fn"] = worker_init_fn
@@ -376,9 +376,12 @@ def _run_training(args: argparse.Namespace) -> None:
 
     print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
     assert registry.num_concepts == schema.num_channels
-    concept_id2name = schema.channel_id2name()
-    
-    logging.info("Dataset: %s (%d samples)", "Combined", (len(train_loader)+len(val_loader))*cfg.training.batch_size)
+
+    logging.info(
+        "Dataset: %s (%d samples)",
+        "Combined",
+        (len(train_loader) + len(val_loader)) * cfg.training.batch_size,
+    )
 
     # def _write_failure_report_once() -> None:
     #     nonlocal report_written
@@ -405,7 +408,6 @@ def _run_training(args: argparse.Namespace) -> None:
             print("TODO:Update")
             # _write_failure_report_once()
             raise
-        test_loader = None
 
     meta_model = MetaModel(
         run_name=cfg.run_name,

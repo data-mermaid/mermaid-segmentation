@@ -8,6 +8,9 @@ names) into MERMAID benthic-attribute target names, plus the GPU helper
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import requests
 import torch
 
@@ -31,8 +34,7 @@ def fetch_mermaid_target_labels(
         records.extend(data["results"])
     return sorted({rec["name"] for rec in records if rec.get("name") is not None})
 
-import json
-from pathlib import Path
+
 def fetch_coralnet_to_mermaid(
     mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
 ) -> dict[str, str]:
@@ -43,10 +45,12 @@ def fetch_coralnet_to_mermaid(
     is not yet mapped).
     """
     coralnet_to_mermaid_mapping_temporary_path = (
-    Path(__file__).resolve().parents[2] / "configs" / "coralnet_to_mermaid_mapping_temporary.json"
+        Path(__file__).resolve().parents[2]
+        / "configs"
+        / "coralnet_to_mermaid_mapping_temporary.json"
     )
-    
-    with open(coralnet_to_mermaid_mapping_temporary_path, "r") as f:
+
+    with open(coralnet_to_mermaid_mapping_temporary_path) as f:
         return json.load(f)
     # response = requests.get(mapping_endpoint, timeout=30)
     # response.raise_for_status()

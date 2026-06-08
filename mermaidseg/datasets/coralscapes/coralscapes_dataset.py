@@ -169,9 +169,7 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """
         return self._safe_getitem(idx, attempts=0)
 
-    def _safe_getitem(
-        self, idx: int, attempts: int
-    ) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def _safe_getitem(self, idx: int, attempts: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         n = len(self)
         if n == 0:
             raise RuntimeError("CoralscapesDataset: dataset is empty")
@@ -179,9 +177,7 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         try:
             return self._load_item(idx)
         except Exception as e:
-            emit_dataset_warning(
-                f"CoralscapesDataset: skipping idx={idx}: {type(e).__name__}: {e}"
-            )
+            emit_dataset_warning(f"CoralscapesDataset: skipping idx={idx}: {type(e).__name__}: {e}")
             if attempts + 1 >= n:
                 raise RuntimeError(
                     f"CoralscapesDataset: all {n} items failed to load; "
