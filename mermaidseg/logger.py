@@ -41,6 +41,18 @@ from mermaidseg.model.meta import MetaModel
 logger = logging.getLogger(__name__)
 
 
+def is_training_metric(key: str) -> bool:
+    """Return True when ``key`` is an allowed train/validation loss or accuracy metric."""
+    for split in ("train", "validation"):
+        prefix = f"{split}/"
+        if not key.startswith(prefix):
+            continue
+        suffix = key[len(prefix) :]
+        if suffix.startswith("loss/") or suffix.startswith("accuracy/"):
+            return True
+    return False
+
+
 try:
     import wandb
 
@@ -650,6 +662,22 @@ class Logger:
             logger.warning("Failed to ensure active MLflow run: %s", e)
             return False
 
+    def log_training_metrics(self, metrics: dict[str, float], step: int) -> None:
+        """Log only train/validation loss and accuracy metrics to MLflow."""
+        metrics_to_log = {
+            key: float(value)
+            for key, value in (metrics or {}).items()
+            if is_training_metric(key) and np.isscalar(value)
+        }
+        if self._ensure_active_run() and metrics_to_log:
+            try:
+                mlflow.log_metrics(metrics_to_log, step=step)
+            except Exception as e:
+                logger.warning("Failed to log training metrics to MLflow: %s", e)
+
+        if self._wandb_logger is not None and metrics_to_log:
+            self._wandb_logger.log(metrics_to_log, step=step)
+
     def log(self, log_dict, step):
         if self._ensure_active_run():
             try:
@@ -728,13 +756,6 @@ class Logger:
                         torch.save(checkpoint, tmp_path)  # type: ignore
                         mlflow.log_artifact(tmp_path, artifact_path="checkpoints")
 
-                checkpoint_metrics = self._unpack_metrics(metrics_dict, key_prefix="checkpoint")
-                mlflow.log_metrics(checkpoint_metrics, step=epoch)
-
-                scalar_metrics = {
-                    k: float(v) for k, v in metrics_dict.items() if not isinstance(v, np.ndarray)
-                }
-
                 if is_best:
                     # Log best model as a plain artifact instead of
                     # mlflow.pytorch.log_model() which triggers an internal
@@ -751,6 +772,11 @@ class Logger:
 
                     with tempfile.TemporaryDirectory() as tmpdir:
                         metadata_path = os.path.join(tmpdir, "metadata.json")
+                        scalar_metrics = {
+                            k: float(v)
+                            for k, v in metrics_dict.items()
+                            if not isinstance(v, np.ndarray)
+                        }
                         with open(metadata_path, "w") as f:
                             json.dump(
                                 {
@@ -768,10 +794,6 @@ class Logger:
                         mlflow.log_artifact(metadata_path, artifact_path="best-model")
                     mlflow.set_tag("best_model_logged", "true")
                     mlflow.set_tag("best_model_epoch", str(epoch))
-                    mlflow.log_metrics(
-                        {f"best_model/{k}": v for k, v in scalar_metrics.items()},
-                        step=epoch,
-                    )
 
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
             except Exception as e:
