@@ -3,51 +3,15 @@ import torch
 import tqdm
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
-from torchmetrics.classification import Accuracy, F1Score, JaccardIndex
+from torchmetrics.classification import Accuracy
 from torchmetrics.metric import Metric
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+from mermaidseg.model.concept_metrics import (
+    map_taxonomy_predictions_to_dense,
+    map_taxonomy_to_dense,
+)
 from mermaidseg.model.meta import MetaModel
-
-
-def map_taxonomy_to_dense(binary_taxonomy: torch.Tensor) -> torch.Tensor:
-    """Map taxonomic one-hot/binary labels to dense IDs.
-
-    Maps binary/one-hot taxonomy labels to dense IDs where:
-    - 0 represents None (all zeros)
-    - 1 represents Not Given (all ones)
-    - 2+ represents the argmax index + 2 (for other categories)
-    """
-    sum_ = binary_taxonomy.sum(dim=1)
-    is_none = sum_.eq(0)  # if all zeros, then sum == 0 which represents None
-    is_not_given = sum_.eq(
-        binary_taxonomy.size(1)
-    )  # if all ones, then sum == C which represents Not Given
-
-    taxonomy_id = (
-        binary_taxonomy.argmax(dim=1) + 2
-    )  # The remaining values start from 2, since 0 is None and 1 is Not Given. So if the argmax is 0, we want to assign it to 2, if it's 1, we want to assign it to 3, and so on.
-    return torch.where(
-        is_none,
-        torch.zeros_like(taxonomy_id),
-        torch.where(is_not_given, torch.ones_like(taxonomy_id), taxonomy_id),
-    )
-
-
-def map_taxonomy_predictions_to_dense(pred_taxonomy: torch.Tensor, threshold=0.5) -> torch.Tensor:
-    """Map predicted taxonomic scores to dense IDs.
-
-    Converts predicted taxonomy scores to dense IDs:
-    - If max probability > threshold: assign argmax + 2 (to account for None and Not Given)
-    - If max probability <= threshold: assign 1 (Not Given)
-    """
-    max_vals, argmax_idx = pred_taxonomy.max(dim=1)
-    return torch.where(
-        max_vals
-        > threshold,  # If the probability across the prediction is smaller than threshold, we will assign it to Not Given (1), otherwise we will assign it to the argmax + 2 (to account for None and Not Given)
-        argmax_idx + 2,
-        torch.ones_like(argmax_idx),
-    )
 
 
 class Evaluator:
@@ -76,39 +40,26 @@ class Evaluator:
         concept_metric_dict: dict[str, Metric] | None = None,
         concept_value2id: dict[str, dict[str, int]] | None = None,
         ignore_index: int = 0,
+        include_classification: bool = True,
     ):
         self.epoch = 0
         self.device = device
         self.num_classes = num_classes
         self.concept_value2id = concept_value2id
+        self._binary_accuracy_metrics: dict[str, Metric] = {}
 
         if metric_dict:
             self.metric_dict = metric_dict
-        else:
+        elif include_classification:
             self.metric_dict = {
-                "accuracy": Accuracy(
+                "accuracy/classification": Accuracy(
                     task="multiclass" if num_classes > 2 else "binary",
                     num_classes=num_classes,
-                    ignore_index=ignore_index,
-                ).to(device),
-                "mean_iou": JaccardIndex(
-                    task="multiclass" if num_classes > 2 else "binary",
-                    num_classes=num_classes,
-                    ignore_index=ignore_index,
-                ).to(device),
-                "per_class_iou": JaccardIndex(
-                    task="multiclass" if num_classes > 2 else "binary",
-                    num_classes=num_classes,
-                    average="none",
-                    ignore_index=ignore_index,
-                ).to(device),
-                "per_class_f1": F1Score(
-                    task="multiclass" if num_classes > 2 else "binary",
-                    num_classes=num_classes,
-                    average="none",
                     ignore_index=ignore_index,
                 ).to(device),
             }
+        else:
+            self.metric_dict = {}
 
         self.metric_dict = {
             metric_name: metric.to(device) for metric_name, metric in self.metric_dict.items()
@@ -118,33 +69,62 @@ class Evaluator:
             if concept_metric_dict:
                 self.concept_metric_dict = concept_metric_dict
             else:
-                self.concept_metric_dict = {
-                    "mean_concept_f1": F1Score(
-                        task="multiclass", average="none", num_classes=3, ignore_index=0
-                    ).to(self.device)
-                }
+                self.concept_metric_dict = {}
                 if self.concept_value2id is not None:
+                    for concept in TAXONOMIC_CONCEPTS:
+                        if concept not in self.concept_value2id:
+                            continue
+                        concept_values = self.concept_value2id[concept]
+                        order_concept_length = len(list(concept_values.values())[0]) + 2
+                        self.concept_metric_dict[f"accuracy/{concept}"] = Accuracy(
+                            task="multiclass",
+                            num_classes=order_concept_length,
+                            ignore_index=0,
+                        ).to(self.device)
                     for concept in self.concept_value2id:
-                        if concept in TAXONOMIC_CONCEPTS:
-                            concept_values = self.concept_value2id[concept]
-                            order_concept_length = (
-                                len(list(concept_values.values())[0]) + 2
-                            )  # +2 to account for the "None" and "Not Given" classes that we add to the taxonomic concepts
-                            self.concept_metric_dict[f"{concept}_f1"] = F1Score(
+                        if concept not in TAXONOMIC_CONCEPTS:
+                            self._binary_accuracy_metrics[concept] = Accuracy(
                                 task="multiclass",
-                                average="none",
-                                num_classes=order_concept_length,
+                                num_classes=3,
                                 ignore_index=0,
-                            ).to(self.device)
-                        else:
-                            self.concept_metric_dict[f"{concept}_f1"] = F1Score(
-                                task="multiclass", average="none", num_classes=3, ignore_index=0
                             ).to(self.device)
 
             self.concept_metric_dict = {
                 metric_name: metric.to(device)
                 for metric_name, metric in self.concept_metric_dict.items()
             }
+            self._binary_accuracy_metrics = {
+                metric_name: metric.to(device)
+                for metric_name, metric in self._binary_accuracy_metrics.items()
+            }
+        else:
+            self.concept_metric_dict = {}
+            self._binary_accuracy_metrics = {}
+
+    def compute_concept_metric_results(self) -> dict[str, float]:
+        return self._compute_concept_metric_results()
+
+    def _compute_concept_metric_results(self) -> dict[str, float]:
+        if not self.concept_metric_dict and not self._binary_accuracy_metrics:
+            return {}
+        metric_results: dict[str, float] = {}
+        for metric_name in self.concept_metric_dict:
+            value = self.concept_metric_dict[metric_name].compute().cpu().numpy()
+            if value.ndim == 0:
+                metric_results[metric_name] = float(value.item())
+            else:
+                metric_results[metric_name] = float(value.mean())
+            self.concept_metric_dict[metric_name].reset()
+
+        if self._binary_accuracy_metrics:
+            binary_values = []
+            for metric in self._binary_accuracy_metrics.values():
+                value = metric.compute().cpu().numpy()
+                binary_values.append(float(value.item() if value.ndim == 0 else value.mean()))
+                metric.reset()
+            metric_results["accuracy/multi_hot"] = sum(binary_values) / len(binary_values)
+
+        return metric_results
 
     @torch.no_grad()
     def evaluate_model(
@@ -169,22 +149,15 @@ class Evaluator:
             target_labels = meta_model._to_target_labels(source_labels)
             outputs, concept_outputs = meta_model.batch_predict(inputs)
 
-            if outputs.ndim > 3:
-                outputs = outputs.argmax(dim=1)
-            for metric in self.metric_dict.values():
-                metric.update(outputs, target_labels)
+            if self.metric_dict:
+                if outputs.ndim > 3:
+                    outputs = outputs.argmax(dim=1)
+                for metric in self.metric_dict.values():
+                    metric.update(outputs, target_labels)
 
             if meta_model.training_mode in ("concept-bottleneck", "concept"):
-                concept_outputs = (concept_outputs > 0.5).float()
-                concept_outputs += 1
-                concept_outputs *= target_labels.unsqueeze(1) != 0
-
                 concept_labels = meta_model._to_concept_labels(source_labels)
-                concept_labels += 1
-                concept_labels *= target_labels.unsqueeze(1) != 0
-
-                for metric in self.concept_metric_dict.values():
-                    metric.update(concept_outputs, concept_labels)
+                self.evaluate_concepts(concept_outputs, concept_labels)
 
         for metric_name in self.metric_dict:
             metric_results[metric_name] = self.metric_dict[metric_name].compute().cpu().numpy()
@@ -193,13 +166,7 @@ class Evaluator:
             self.metric_dict[metric_name].reset()
 
         if meta_model.training_mode in ("concept-bottleneck", "concept"):
-            for metric_name in self.concept_metric_dict:
-                metric_results[metric_name] = (
-                    self.concept_metric_dict[metric_name].compute().cpu().numpy()
-                )
-                if metric_results[metric_name].ndim == 0:
-                    metric_results[metric_name] = metric_results[metric_name].item()
-                self.concept_metric_dict[metric_name].reset()
+            metric_results.update(self._compute_concept_metric_results())
 
         self.epoch += 1
         return metric_results
@@ -241,17 +208,15 @@ class Evaluator:
         return image, label, pred
 
     def evaluate_concepts(self, concept_outputs, concept_labels):
-        """Update concept metrics for taxonomic and binary concepts."""
-        concept_outputs_mean = (concept_outputs > 0.5).float()
-        concept_outputs_mean += 1
-        for metric_name, metric in self.concept_metric_dict.items():
-            if "mean_concept" in metric_name:
-                metric.update(concept_outputs_mean, concept_labels)
+        """Update concept accuracy metrics for taxonomic and binary concepts."""
+        if self.concept_value2id is None:
+            return
 
         offset = 0
 
-        ### Calculate taxonomic concept metrics
         for concept in TAXONOMIC_CONCEPTS:
+            if concept not in self.concept_value2id:
+                continue
             concept_values = self.concept_value2id[concept]
             order_concept_length = len(list(concept_values.values())[0])
             concept_labels_order = concept_labels[:, offset : offset + order_concept_length, ...]
@@ -260,19 +225,28 @@ class Evaluator:
 
             concept_labels_order = map_taxonomy_to_dense(concept_labels_order)
             concept_outputs_order = map_taxonomy_predictions_to_dense(concept_outputs_order)
-            self.concept_metric_dict[f"{concept}_f1"].update(
+            metric_key = f"accuracy/{concept}"
+            if metric_key not in self.concept_metric_dict:
+                continue
+            self.concept_metric_dict[metric_key].update(
                 concept_outputs_order, concept_labels_order
             )
 
-        ### Calculate binary concept metrics
         concept_labels_binary = concept_labels[:, offset:, ...]
         concept_outputs_binary = concept_outputs[:, offset:, ...]
         concept_outputs_binary = (concept_outputs_binary > 0.5).float()
         concept_outputs_binary += 1
+        binary_offset = 0
         for concept in self.concept_value2id:
             if concept not in TAXONOMIC_CONCEPTS:
-                self.concept_metric_dict[f"{concept}_f1"].update(
-                    concept_outputs_binary[:, offset : offset + 1, ...],
-                    concept_labels_binary[:, offset : offset + 1, ...],
+                if concept not in self._binary_accuracy_metrics:
+                    binary_offset += 1
+                    continue
+                self._binary_accuracy_metrics[concept].update(
+                    concept_outputs_binary[:, binary_offset : binary_offset + 1, ...],
+                    concept_labels_binary[:, binary_offset : binary_offset + 1, ...],
                 )
-                offset += 1
+                binary_offset += 1
+
+
+EvaluatorSemanticSegmentation = Evaluator

@@ -124,6 +124,11 @@ class MetaModel:
             "concept-bottleneck",
         ], f"Invalid training_mode: {self.training_mode}"
 
+        freeze_encoder = training_kwargs.pop(
+            "freeze_encoder",
+            self.training_mode == "concept-bottleneck",
+        )
+
         self.training_kwargs = training_kwargs
         self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
         self._train_loader_iter = None
@@ -164,6 +169,10 @@ class MetaModel:
                 self.model.load_state_dict(checkpoint)
 
         self.model = self.model.to(device)
+        self.freeze_encoder = freeze_encoder
+        if freeze_encoder and hasattr(self.model, "freeze_encoder"):
+            self.model.freeze_encoder()
+
         if "loss" in training_kwargs:
             loss_cls = getattr(mermaidseg.model.loss, training_kwargs.loss.pop("type", None))
             loss_kwargs = dict(training_kwargs.loss)
@@ -175,7 +184,8 @@ class MetaModel:
             self.loss = loss_cls(**loss_kwargs)
 
         optimizer_cls = getattr(torch.optim, training_kwargs.optimizer.pop("type", None))
-        self.optimizer = optimizer_cls(params=self.model.parameters(), **training_kwargs.optimizer)
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = optimizer_cls(params=trainable_params, **training_kwargs.optimizer)
 
         if "scheduler" in training_kwargs:
             scheduler_cls = getattr(
@@ -282,7 +292,7 @@ class MetaModel:
         elif self.training_mode == "concept":
             assert target_concepts is not None, "target_concepts must be provided in 'concept' mode"
             concept_outputs = segmentation_outputs.logits
-            loss = self.loss(concept_outputs, target_concepts, target_labels)
+            loss, loss_components = self.loss(concept_outputs, target_concepts, target_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
             outputs = postprocess_predicted_concepts(
                 concept_outputs.detach().cpu().numpy(),
@@ -293,7 +303,7 @@ class MetaModel:
         else:
             outputs = segmentation_outputs.logits
             concept_outputs = None
-            loss = self.loss(outputs, target_labels)
+            loss, loss_components = self.loss(outputs, target_labels)
 
         assert loss is not None, "Loss is not computed for the given batch."
         assert isinstance(outputs, torch.Tensor)
@@ -315,6 +325,8 @@ class MetaModel:
         Returns:
             A 3-tuple of ``(average_loss, metric_results, timing)``.
         """
+        if self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
+            self.model.freeze_encoder()
 
         iterations_per_train_epoch = self.iterations_per_train_epoch
         if iterations_per_train_epoch is None:
@@ -409,7 +421,7 @@ class MetaModel:
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, target_labels)
 
-            if self.training_mode in ("concept-bottleneck", "concept"):
+            if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
                 evaluator.evaluate_concepts(concept_outputs, target_concepts)
             if use_cuda:
                 torch.cuda.synchronize()
@@ -425,16 +437,12 @@ class MetaModel:
                 evaluator.metric_dict[metric_name].reset()
 
             if self.training_mode in ("concept-bottleneck", "concept"):
-                for metric_name in evaluator.concept_metric_dict:
-                    metric_results[metric_name] = (
-                        evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
-                    )
-                    if metric_results[metric_name].ndim == 0:
-                        metric_results[metric_name] = metric_results[metric_name].item()
-                    evaluator.concept_metric_dict[metric_name].reset()
+                metric_results.update(evaluator.compute_concept_metric_results())
 
-        last_loss = running_loss / len(train_loader)
-        avg_loss_components = {k: v / len(train_loader) for k, v in running_loss_components.items()}
+        last_loss = running_loss / iterations_per_train_epoch
+        avg_loss_components = {
+            k: v / iterations_per_train_epoch for k, v in running_loss_components.items()
+        }
         for k, v in avg_loss_components.items():
             metric_results[f"loss/{k}"] = v
         timing = {
@@ -461,6 +469,7 @@ class MetaModel:
             raise ValueError("iterations_per_val_epoch must be > 0.")
 
         running_loss = 0.0
+        running_loss_components: dict[str, float] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 
         if self._val_loader is not val_loader:
@@ -485,11 +494,13 @@ class MetaModel:
                 else None
             )
 
-            loss, outputs, concept_outputs, _ = self.batch_predict_loss(
+            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
                 images, target_labels, target_concepts
             )
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running_loss += loss.item()
+            for k, v in loss_components.items():
+                running_loss_components[k] = running_loss_components.get(k, 0.0) + v
 
             if evaluator is not None:
                 if self.training_mode == "concept":
@@ -506,7 +517,7 @@ class MetaModel:
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, target_labels)
 
-            if self.training_mode in ("concept-bottleneck", "concept"):
+            if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
                 evaluator.evaluate_concepts(concept_outputs, target_concepts)
 
         if evaluator is not None:
@@ -518,17 +529,15 @@ class MetaModel:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
 
-        if self.training_mode in ("concept-bottleneck", "concept"):
-            for metric_name in evaluator.concept_metric_dict:
-                metric_results[metric_name] = (
-                    evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
-                )
-                if metric_results[metric_name].ndim == 0:
-                    metric_results[metric_name] = metric_results[metric_name].item()
+            if self.training_mode in ("concept-bottleneck", "concept"):
+                metric_results.update(evaluator.compute_concept_metric_results())
 
-                evaluator.concept_metric_dict[metric_name].reset()
-
-        last_loss = running_loss / len(val_loader)
+        last_loss = running_loss / iterations_per_val_epoch
+        avg_loss_components = {
+            k: v / iterations_per_val_epoch for k, v in running_loss_components.items()
+        }
+        for k, v in avg_loss_components.items():
+            metric_results[f"loss/{k}"] = v
         return last_loss, metric_results
 
     @torch.no_grad()  # type:ignore
