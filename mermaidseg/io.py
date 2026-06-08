@@ -145,21 +145,21 @@ def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> Con
 
     _set_config_value(config, ("run_name",), getattr(args, "run_name", None))
     _set_config_value(config, ("model", "name"), getattr(args, "model", None))
-    _set_config_value(config, ("model", "checkpoint"), getattr(args, "model-checkpoint", None))
+    _set_config_value(config, ("model", "checkpoint"), getattr(args, "model_checkpoint", None))
     _set_config_value(config, ("training", "epochs"), getattr(args, "epochs", None))
     _set_config_value(config, ("training", "optimizer", "lr"), getattr(args, "lr", None))
-    _set_config_value(config, ("data", "batch_size"), getattr(args, "batch-size", None))
+    _set_config_value(config, ("training", "batch_size"), getattr(args, "batch_size", None))
     _set_config_value(
         config,
         ("training", "iterations_per_train_epoch"),
-        getattr(args, "iterations-per-train-epoch", None),
+        getattr(args, "iterations_per_train_epoch", None),
     )
     _set_config_value(
         config,
         ("training", "iterations_per_val_epoch"),
-        getattr(args, "iterations-per-val-epoch", None),
+        getattr(args, "iterations_per_val_epoch", None),
     )
-    _set_config_value(config, ("logger", "log_epochs"), getattr(args, "log-epochs", None))
+    _set_config_value(config, ("logger", "log_epochs"), getattr(args, "log_epochs", None))
     return config
 
 
