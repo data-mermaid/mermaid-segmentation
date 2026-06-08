@@ -37,14 +37,28 @@ from pathlib import Path
 
 import albumentations as A
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, ConcatDataset, random_split
 
-import mermaidseg.datasets
-from mermaidseg.dataset_reconciliation import SourceLabelRegistry
-from mermaidseg.datasets import worker_init_fn
+from mermaidseg.dataset_reconciliation import (
+    ConceptSchema,
+    SourceLabelRegistry,
+    attach_registry,
+    prepare_splits_for_registry,
+)
+
+from mermaidseg.datasets import (
+    BenthosYuvalCoralsDataset,
+    CatlinSeaviewDataset,
+    CoralNetDataset,
+    CoralscapesDataset,
+    MermaidDataset,
+    MooreaLabeledCoralsDataset,
+    PacificLabeledCoralsDataset,
+    worker_init_fn
+)   
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
-from mermaidseg.model.eval import EvaluatorSemanticSegmentation
+from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel
 from mermaidseg.model.metric_policy import SUPPORTED_METRIC_NAMES
 from mermaidseg.model.train import train_model
@@ -156,10 +170,28 @@ def _save_failure_report_if_available(
 def _build_parser() -> argparse.ArgumentParser:
     base = get_parser()
     base.add_argument(
-        "--config-base",
+        "--config-data",
         type=str,
-        default="configs/base_mermaid.yaml",
-        help="path to base config file",
+        default="configs/data_config.yaml",
+        help="path to data config file",
+    )
+    base.add_argument(
+        "--config-model",
+        type=str,
+        default="configs/model_config_cbm.yaml",
+        help="path to model config file",
+    )
+    base.add_argument(
+        "--config-training",
+        type=str,
+        default="configs/training_config_cbm.yaml",
+        help="path to training config file",
+    )
+    base.add_argument(
+        "--config-logger",
+        type=str,
+        default="configs/logger_config.yaml",
+        help="path to logger config file",
     )
     base.add_argument(
         "--dry-run",
@@ -264,10 +296,13 @@ def _run_training(args: argparse.Namespace) -> None:
             '    export MLFLOW_TRACKING_URI="arn:aws:sagemaker:us-east-1:ACCOUNT:mlflow-app/APP-ID"'
         )
 
-    cfg = setup_config(
-        config_path=args.config,
-        config_base_path=args.config_base,
-    )
+    cfg = setup_config({
+        "data": args.config_data,
+        "training": args.config_training,
+        "model": args.config_model,
+        "logger": args.config_logger,
+    })
+
     cfg = update_config_with_args(cfg, args)
     cfg_logger = copy.deepcopy(cfg)
 
@@ -280,66 +315,81 @@ def _run_training(args: argparse.Namespace) -> None:
         torch.cuda.manual_seed_all(seed)
     logging.info("Seed: %d", seed)
 
-    transforms = {
-        split: A.Compose([getattr(A, name)(**params) for name, params in augs.items()])
-        for split, augs in cfg.augmentation.items()
+    DATASET_CLASSES = {
+        "pacific_labeled_corals": PacificLabeledCoralsDataset,
+        "moorea_labeled_corals": MooreaLabeledCoralsDataset,
+        "catlin_seaview": CatlinSeaviewDataset,
+        "mermaid": MermaidDataset,
+        "coralnet": CoralNetDataset,
+        "coralscapes": CoralscapesDataset,
+        "benthos_yuval": BenthosYuvalCoralsDataset,
     }
 
-    dataset_name = cfg.data.pop("name", None)
-    batch_size = cfg.data.pop("batch_size", 8)
-    concept_mapping_flag = cfg.data.pop("concept_mapping_flag", False)
-    target_label_subset = cfg.data.get("class_subset", None)
-    if dataset_name != "MermaidDataset" and "class_subset" in cfg.data:
-        # For non-MERMAID datasets, the legacy ``class_subset`` field is in target
-        # label space and is therefore handled by SourceLabelRegistry instead of
-        # being a per-dataset filter (whose semantics changed to source-space).
-        cfg.data.pop("class_subset", None)
+    # coralscapes uses a different signature (no `padding`)
+    def _build(name, split_cfg):
+        cls = DATASET_CLASSES[name]
+        if name == "coralscapes" or name == "benthos_yuval":
+            return cls(**split_cfg)
+        return cls(**split_cfg, padding=cfg.training.padding)
 
-    dataset = getattr(mermaidseg.datasets, dataset_name)(transform=transforms["train"], **cfg.data)
-    logging.info("Dataset: %s (%d samples)", dataset_name, len(dataset))
+    dataset_dict: dict[tuple[str, str], object] = {}
+    for name in DATASET_CLASSES:
+        for split, split_cfg in cfg.data[name].items():
+            if split_cfg is None or split_cfg == "None":
+                continue
+            dataset_dict[(name, split)] = _build(name, split_cfg)
+            print(f"{name:>24s} - {split:<5s}: {len(dataset_dict[(name, split)]):>7d} samples")
 
-    registry = SourceLabelRegistry(
-        [dataset],
-        target_label_subset=target_label_subset,
-        compute_concepts=concept_mapping_flag,
-    ).to(device)
-    collate_fn = getattr(dataset, "collate_fn", None)
-    report_written = False
-
-    def _write_failure_report_once() -> None:
-        nonlocal report_written
-        if report_written:
-            return
-        path = _save_failure_report_if_available(
-            dataset=dataset,
-            log_dir=Path(args.log_dir),
-            explicit_output_path=args.failure_report_path,
-        )
-        report_written = path is not None
-
-    total = len(dataset)
-    train_size = int(0.7 * total)
-    val_size = int(0.15 * total)
-    test_size = total - train_size - val_size
-    generator = torch.Generator().manual_seed(seed)
-    train_ds, val_ds, test_ds = random_split(
-        dataset, [train_size, val_size, test_size], generator=generator
+    loader_kwargs = dict(
+        batch_size=cfg.training.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True,
     )
-
-    num_workers = args.num_workers
-    loader_kwargs = {
-        "batch_size": batch_size,
-        "num_workers": num_workers,
-        "pin_memory": torch.cuda.is_available(),
-        "collate_fn": collate_fn,
-    }
-    if num_workers > 0:
+    if args.num_workers > 0:
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["worker_init_fn"] = worker_init_fn
 
-    train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **loader_kwargs)
-    val_loader = DataLoader(val_ds, **loader_kwargs)
-    test_loader = DataLoader(test_ds, **loader_kwargs)
+    concept_mapping_path = cfg.training.get("concept_mapping_path")
+
+    _, registry_datasets = prepare_splits_for_registry(dataset_dict)
+
+    run_sources = {ds.SOURCE_NAME for ds in registry_datasets}
+    schema = ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
+
+    registry = SourceLabelRegistry(
+        registry_datasets,
+        target_label_subset=cfg.training.class_subset,
+        compute_concepts=cfg.training.training_mode != "standard",
+        concept_mapping_path=concept_mapping_path,
+        concept_schema=schema,
+        label_roll_up=cfg.training.get("label_roll_up", False),
+    ).to(device)
+
+    attach_registry(registry, dataset_dict.values())
+
+    train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"]
+    val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
+
+    train_loader = DataLoader(ConcatDataset(train_datasets), shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
+
+    print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
+    assert registry.num_concepts == schema.num_channels
+    concept_id2name = schema.channel_id2name()
+    
+    logging.info("Dataset: %s (%d samples)", "Combined", (len(train_loader)+len(val_loader))*cfg.training.batch_size)
+
+    # def _write_failure_report_once() -> None:
+    #     nonlocal report_written
+    #     if report_written:
+    #         return
+    #     path = _save_failure_report_if_available(
+    #         dataset=dataset, # TODO: Has to be updated to work with multiple datasets
+    #         log_dir=Path(args.log_dir),
+    #         explicit_output_path=args.failure_report_path,
+    #     )
+    #     report_written = path is not None
 
     if args.dry_run:
         max_dry_epochs = 3
@@ -352,49 +402,52 @@ def _run_training(args: argparse.Namespace) -> None:
             train_loader = [_take_first_non_empty_batch(train_loader, "train")]
             val_loader = [_take_first_non_empty_batch(val_loader, "val")]
         except RuntimeError:
-            _write_failure_report_once()
+            print("TODO:Update")
+            # _write_failure_report_once()
             raise
         test_loader = None
 
-    num_classes = registry.num_target_classes
-    id2label = {0: "background", **registry.target_id2label}
-    training_mode = cfg.get("training_mode", "standard")
-
     meta_model = MetaModel(
         run_name=cfg.run_name,
-        num_classes=num_classes,
+        num_classes=registry.num_target_classes,
         num_concepts=registry.num_concepts or None,
-        model_kwargs=cfg.model,
-        training_kwargs=cfg.training,
-        training_mode=training_mode,
         device=device,
+        model_kwargs=cfg.model.copy(),
+        training_kwargs=cfg.training.copy(),
         source_to_target_lookup=registry.source_to_target,
         source_to_concepts_lookup=registry.source_to_concepts,
         concept_matrix=registry.concept_matrix,
         conceptid2labelid=registry.conceptid2labelid(),
+        concept_value2id=registry.concept_value2id,
     )
-    evaluator = EvaluatorSemanticSegmentation(
-        num_classes=num_classes,
+
+    evaluator = Evaluator(
+        num_classes=registry.num_target_classes,
         device=device,
+        calculate_concept_metrics=cfg.training.training_mode != "standard",
+        concept_value2id=registry.concept_value2id,
     )
+
+    cfg.logger.experiment_name = "mermaid"
+    cfg_logger.logger.experiment_name = "mermaid"
 
     with Logger(
         config=cfg_logger,
         meta_model=meta_model,
-        log_epochs=cfg_logger.logger.log_epochs,
+        log_epochs=cfg.logger.get("log_epochs", 1),
         log_checkpoint=cfg_logger.logger.get("log_checkpoint", 50),
         checkpoint_dir=".",
         enable_mlflow=True,
-        id2label=id2label,
+        id2label={0: "background", **registry.target_id2label},
     ) as logger:
         if logger.mlflow_run_id is not None:
             logging.info("MLflow run_id: %s", logger.mlflow_run_id)
 
         logger.log_dataloader_params(train_loader, prefix="train_loader")
         logger.log_dataloader_params(val_loader, prefix="val_loader")
-        logger.log_dataloader_params(test_loader, prefix="test_loader")
+        # logger.log_dataloader_params(test_loader, prefix="test_loader")
         logger.log_reconciliation(registry)
-        logger.log_dataset_statistics({"train": train_ds, "val": val_ds, "test": test_ds}, registry)
+        # logger.log_dataset_statistics({"train": train_ds, "val": val_ds, "test": test_ds}, registry)
 
         try:
             train_model(
@@ -402,7 +455,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 evaluator=evaluator,
                 train_loader=train_loader,
                 val_loader=val_loader,
-                test_loader=test_loader,
+                test_loader=None,
                 logger=logger,
                 metric_of_interest=args.metric_of_interest,
                 early_stopping=args.early_stopping,
@@ -410,7 +463,8 @@ def _run_training(args: argparse.Namespace) -> None:
                 early_stopping_min_delta=args.early_stopping_min_delta,
             )
         finally:
-            _write_failure_report_once()
+            print("TODO:Update")
+            # _write_failure_report_once()
         logging.info("Training complete")
 
 
