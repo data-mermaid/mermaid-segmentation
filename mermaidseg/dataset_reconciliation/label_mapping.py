@@ -31,7 +31,8 @@ def fetch_mermaid_target_labels(
         records.extend(data["results"])
     return sorted({rec["name"] for rec in records if rec.get("name") is not None})
 
-
+import json
+from pathlib import Path
 def fetch_coralnet_to_mermaid(
     mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
 ) -> dict[str, str]:
@@ -41,16 +42,22 @@ def fetch_coralnet_to_mermaid(
     to the MERMAID benthic-attribute name (or ``None`` if the CoralNet label
     is not yet mapped).
     """
-    response = requests.get(mapping_endpoint, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    labelset = list(data["results"])
-    while data.get("next"):
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        labelset.extend(data["results"])
-    return {str(label["provider_label"]): label["benthic_attribute_name"] for label in labelset}
+    coralnet_to_mermaid_mapping_temporary_path = (
+    Path(__file__).resolve().parents[2] / "configs" / "coralnet_to_mermaid_mapping_temporary.json"
+    )
+    
+    with open(coralnet_to_mermaid_mapping_temporary_path, "r") as f:
+        return json.load(f)
+    # response = requests.get(mapping_endpoint, timeout=30)
+    # response.raise_for_status()
+    # data = response.json()
+    # labelset = list(data["results"])
+    # while data.get("next"):
+    #     response = requests.get(data["next"], timeout=30)
+    #     response.raise_for_status()
+    #     data = response.json()
+    #     labelset.extend(data["results"])
+    # return {str(label["provider_label"]): label["benthic_attribute_name"] for label in labelset}
 
 
 def fetch_catlin_seaview_to_mermaid(
