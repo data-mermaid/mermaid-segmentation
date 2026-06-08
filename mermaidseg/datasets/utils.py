@@ -1,5 +1,6 @@
 import io
 import logging
+import sys
 
 import boto3
 import numpy as np
@@ -12,6 +13,19 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+def emit_dataset_warning(message: str) -> None:
+    """Emit a dataset-load warning via the logger AND raw stdout/stderr.
+
+    PyTorch DataLoader worker processes often have their ``logging`` handlers
+    unconfigured, which means ``logger.warning`` is silently dropped. To make
+    sure the user sees skip-and-recover messages no matter where they're
+    triggered (main process, worker, notebook, terminal), we additionally
+    ``print`` to both ``sys.stdout`` and ``sys.stderr`` with ``flush=True``.
+    """
+    logger.warning(message)
+    full = f"WARNING: {message}"
+    print(full, file=sys.stderr, flush=True)
+    print(full, file=sys.stdout, flush=True)
 
 class DataLoadError(Exception):
     """Raised when an image cannot be loaded from S3 or decoded."""

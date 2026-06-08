@@ -18,6 +18,8 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
+from mermaidseg.datasets.utils import emit_dataset_warning
+
 logger = logging.getLogger(__name__)
 
 
@@ -158,13 +160,39 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        """Return ``(image, source_labels)`` for ``idx``.
+
+        On any internal load/transform error we emit a warning to logger +
+        stdout + stderr and recurse on the *next* index (wrapping around),
+        instead of returning ``(None, None)`` placeholders that would break
+        ``default_collate``. If every item fails, a ``RuntimeError`` is raised.
+        """
+        return self._safe_getitem(idx, attempts=0)
+
+    def _safe_getitem(
+        self, idx: int, attempts: int
+    ) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        n = len(self)
+        if n == 0:
+            raise RuntimeError("CoralscapesDataset: dataset is empty")
+
         try:
-            image = np.array(self.dataset[idx]["image"])
-            native_mask = np.asarray(self.dataset[idx]["label"], dtype=np.int64)
-            mask = self._native_to_local[native_mask]
+            return self._load_item(idx)
         except Exception as e:
-            logger.warning("CoralscapesDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e)
-            return None, None
+            emit_dataset_warning(
+                f"CoralscapesDataset: skipping idx={idx}: {type(e).__name__}: {e}"
+            )
+            if attempts + 1 >= n:
+                raise RuntimeError(
+                    f"CoralscapesDataset: all {n} items failed to load; "
+                    f"last error: {type(e).__name__}: {e}"
+                ) from e
+            return self._safe_getitem((idx + 1) % n, attempts=attempts + 1)
+
+    def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        image = np.array(self.dataset[idx]["image"])
+        native_mask = np.asarray(self.dataset[idx]["label"], dtype=np.int64)
+        mask = self._native_to_local[native_mask]
 
         if self._global_offset:
             mask = np.where(mask > 0, mask + self._global_offset, mask).astype(
@@ -172,23 +200,19 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             )
 
         if self.transform:
-            try:
-                transformed = self.transform(image=image, mask=mask)
-                image = transformed["image"].transpose(2, 0, 1)
-                mask = transformed["mask"]
-            except Exception as e:
-                logger.warning(
-                    "CoralscapesDataset: transform failed for idx=%d: %s: %s",
-                    idx,
-                    type(e).__name__,
-                    e,
-                )
-                return None, None
+            transformed = self.transform(image=image, mask=mask)
+            image = transformed["image"].transpose(2, 0, 1)
+            mask = transformed["mask"]
 
         return image, mask
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Filter out failed loads and stack into batched tensors."""
+        """Defensively filter out ``(None, None)`` items and stack into batched tensors.
+
+        :meth:`__getitem__` now recurses on the next index when a load fails,
+        so ``(None, None)`` should not appear in normal operation. This
+        defensive filter remains for hand-built batches and custom overrides.
+        """
         batch_size = len(batch)
         filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
         n_skipped = batch_size - len(filtered)

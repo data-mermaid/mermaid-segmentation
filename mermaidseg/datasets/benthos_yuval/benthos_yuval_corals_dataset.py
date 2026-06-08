@@ -152,24 +152,12 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
             arr = arr[..., 0]
         return arr.astype(np.uint8, copy=False)
 
-    def __getitem__(self, idx: int) -> tuple[Any, Any]:
+    def _load_item(self, idx: int) -> tuple[Any, Any]:
         image_id = self.df_images.loc[idx, "image_id"]
         site = self.df_images.loc[idx, "site"]
-        row_kwargs = self.df_images.loc[idx].to_dict()
 
-        try:
-            image = self.read_image(image_id=image_id, site=site)
-            raw_mask = self.read_label(image_id=image_id, site=site)
-        except Exception as e:
-            self._record_load_failure(image_id=image_id, row_kwargs=row_kwargs, error=e)
-            logger.warning(
-                "Skipping image_id=%s (site=%s): %s: %s",
-                image_id,
-                site,
-                type(e).__name__,
-                e,
-            )
-            return None, None
+        image = self.read_image(image_id=image_id, site=site)
+        raw_mask = self.read_label(image_id=image_id, site=site)
 
         local_mask = self._classes_global_to_local[raw_mask]
 
