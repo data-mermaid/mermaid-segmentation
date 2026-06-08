@@ -260,7 +260,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         concept_logits = torch.nn.functional.interpolate(
             concept_logits, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
-        concept_outputs = self._concept_outputs_activation(concept_logits)
+        concept_outputs = self.concept_outputs_activation(concept_logits)
 
         logits = self.concept_classifier(concept_outputs)
 
@@ -297,7 +297,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         for param in self.encoder.parameters():
             param.requires_grad = True
 
-    def _concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
+    def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
         offset = 0
         activated_parts = []
 
