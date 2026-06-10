@@ -37,6 +37,21 @@ def _require_source_name(ds: Any) -> str:
     return name
 
 
+def _apply_source_vocabulary(
+    root: Any,
+    source_id2name: dict[int, str],
+    source_name2id: dict[str, int],
+    num_source_classes: int,
+) -> None:
+    """Apply canonical source maps, rebuilding any dataset-local id lookups."""
+    if hasattr(root, "set_source_vocabulary"):
+        root.set_source_vocabulary(source_id2name, source_name2id, num_source_classes)
+        return
+    root.source_id2name = dict(source_id2name)
+    root.source_name2id = dict(source_name2id)
+    root.num_source_classes = int(num_source_classes)
+
+
 def group_splits(
     dataset_dict: Mapping[tuple[str, str], Any],
 ) -> dict[str, list[tuple[str, str, Any]]]:
@@ -81,9 +96,12 @@ def apply_vocabularies(
         vocab = vocabularies[source_name]
         for _, _, ds in entries:
             root = _root_dataset(ds)
-            root.source_id2name = dict(vocab.source_id2name)
-            root.source_name2id = dict(vocab.source_name2id)
-            root.num_source_classes = vocab.num_source_classes
+            _apply_source_vocabulary(
+                root,
+                vocab.source_id2name,
+                vocab.source_name2id,
+                vocab.num_source_classes,
+            )
 
 
 def select_registry_representatives(
@@ -118,9 +136,12 @@ def attach_registry(
                 "Add a representative for this source to SourceLabelRegistry."
             )
         ref = ref_by_source[source_name]
-        root.source_id2name = dict(ref.source_id2name)
-        root.source_name2id = dict(ref.source_name2id)
-        root.num_source_classes = ref.num_source_classes
+        _apply_source_vocabulary(
+            root,
+            ref.source_id2name,
+            ref.source_name2id,
+            ref.num_source_classes,
+        )
         root.set_global_offset(registry.dataset_offsets[source_name])
 
 

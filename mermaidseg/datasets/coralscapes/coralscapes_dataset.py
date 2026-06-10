@@ -146,11 +146,30 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             lookup[native_id] = local_id
         return lookup
 
+    def set_source_vocabulary(
+        self,
+        source_id2name: dict[int, str],
+        source_name2id: dict[str, int],
+        num_source_classes: int,
+    ) -> None:
+        """Replace local source maps and rebuild the native-to-local lookup.
+
+        Called by :func:`mermaidseg.dataset_reconciliation.split_wiring.apply_vocabularies`
+        when the registry canonicalizes vocabulary across splits. Rebuilding
+        ``_native_to_local`` keeps emitted mask IDs aligned with registry lookup
+        tables.
+        """
+        self.source_id2name = dict(source_id2name)
+        self.source_name2id = dict(source_name2id)
+        self.num_source_classes = int(num_source_classes)
+        self._native_to_local = self._build_native_to_local()
+
     def set_global_offset(self, offset: int) -> None:
         """Set the global source-label offset assigned by the registry."""
         if offset < 0:
             raise ValueError(f"global offset must be non-negative, got {offset}")
         self._global_offset = int(offset)
+        self._native_to_local = self._build_native_to_local()
 
     @property
     def global_offset(self) -> int:
