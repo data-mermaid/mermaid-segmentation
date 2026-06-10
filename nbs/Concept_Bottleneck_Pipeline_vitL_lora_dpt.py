@@ -33,6 +33,10 @@ from mermaidseg.model.train import train_model
 
 from nb_setup import check_aws_session, check_env, check_mlflow_version
 
+# ViT-L encoder adapted with LoRA + a DPT segmentation head (concept-bottleneck variant).
+VITL_ENCODER_NAME = "facebook/dinov3-vitl16-pretrain-lvd1689m"
+
+
 # -- 0. Environment --------------------------------------------------------
 if not os.getenv("MLFLOW_TRACKING_URI"):
     os.environ["MLFLOW_TRACKING_URI"] = (
@@ -47,7 +51,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 for i in range(torch.cuda.device_count()):
     print(f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
 
-SEED = 1
+SEED = 3
 torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
@@ -60,17 +64,21 @@ cfg = setup_config(
     {
         "data": "../configs/data_config.yaml",
         "training": "../configs/training_config_cbm.yaml",
-        "model": "../configs/model_config_cbm.yaml",
+        "model": "../configs/model_config_cbm_dpt_lora_vitl.yaml",
         "logger": "../configs/logger_config.yaml",
     }
 )
-args = get_parser().parse_args("--run-name=mermaid_base_run_dinov3".split())
+args = get_parser().parse_args("--run-name=mermaid_base_run_dinov3_lora_dpt".split())
 cfg = update_config_with_args(cfg, args)
 
-# Hyperparameters for this ru
-cfg.training.iterations_per_train_epoch = 2000
-cfg.training.iterations_per_val_epoch = 200  # None => use full val set (len(val_loader))
-cfg.training.batch_size = 6
+# The LoRA/DPT model config already targets the ViT-L encoder; set it explicitly
+# so the value is unambiguous and gets logged below.
+cfg.model.encoder_name = VITL_ENCODER_NAME
+
+# Hyperparameters for this run
+cfg.training.iterations_per_train_epoch = 4000
+cfg.training.iterations_per_val_epoch = 400  # None => use full val set (len(val_loader))
+cfg.training.batch_size = 12
 
 # Set experiment on the config the Logger actually reads.
 cfg_logger = copy.deepcopy(cfg)
@@ -165,13 +173,6 @@ meta_model = MetaModel(
     conceptid2labelid=registry.conceptid2labelid(),
     concept_value2id=registry.concept_value2id,
 )
-CHECKPOINT = "model_checkpoint_init28"
-checkpoint = torch.load(CHECKPOINT, map_location=device, weights_only=False)
-meta_model.model.load_state_dict(checkpoint["model_state_dict"])
-meta_model.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-if hasattr(meta_model, "scheduler") and "scheduler_state_dict" in checkpoint:
-    meta_model.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-start_epoch = checkpoint["epoch"] + 1
 
 evaluator = Evaluator(
     num_classes=registry.num_target_classes,
@@ -219,6 +220,9 @@ with Logger(
             {str(k): v for k, v in concept_id2name.items()},
             "metadata/concept_id2name.json",
         )
+        mlflow.log_param("model/encoder_name", VITL_ENCODER_NAME)
+        mlflow.log_param("model/head", "dpt")
+        mlflow.log_param("model/adapter", "lora")
     run_id = run.info.run_id
     exp_id = run.info.experiment_id
     tracking_uri = mlflow.get_tracking_uri()
@@ -245,7 +249,7 @@ with Logger(
     )
 
     metrics_all: dict[int, dict] = {}
-    
+
     for epoch in range(cfg.training.epochs):
         metrics = train_model(
         meta_model=meta_model,
@@ -269,4 +273,3 @@ with Logger(
     print("Final train metrics     :", metrics[final_epoch].get("train_metrics"))
     print("Final validation metrics:", metrics[final_epoch].get("validation_metrics"))
     print(f"MLflow run URL       : {mlflow_run_url(tracking_uri, exp_id, run_id)}")
-

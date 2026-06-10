@@ -33,6 +33,78 @@ from mermaidseg.model.train import train_model
 
 from nb_setup import check_aws_session, check_env, check_mlflow_version
 
+# ViT-L encoder + ViT-B CBM checkpoint used to warm-start the bottleneck heads.
+VITL_ENCODER_NAME = "facebook/dinov3-vitl16-pretrain-lvd1689m"
+VITB_CBM_CHECKPOINT = None#"model_checkpoints/mermaid_base_run_dinov3_vith_10xmultihot_noclass_scratch/model_epoch3"
+
+CBM_STATE_KEYS = (
+    "concept_head.classifier.weight",
+    "concept_head.classifier.bias",
+    "concept_classifier.weight",
+    "concept_classifier.bias",
+)
+
+
+def _strip_encoder_model_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Older HF DINOv3 nested params under `encoder.model.*`; current versions use `encoder.*`."""
+    return {
+        (k.replace("encoder.model.", "encoder.", 1) if k.startswith("encoder.model.") else k): v
+        for k, v in state_dict.items()
+    }
+
+
+def load_cbm_layers_from_vitb_checkpoint(
+    model: torch.nn.Module,
+    checkpoint_path: str,
+    device: torch.device | str,
+) -> dict[str, list[str]]:
+    """Load trained CBM head weights from a ViT-B checkpoint into a ViT-L model.
+
+    The ViT-L encoder is left at its HuggingFace pretrain init. ``concept_classifier``
+    loads directly when shapes match. ``concept_head`` input channels differ
+    (768 vs 1024), so incoming weights are copied into the leading channel slice
+    and the remainder keeps the freshly initialized values.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    source_state = checkpoint.get("model_state_dict", checkpoint)
+    source_state = _strip_encoder_model_prefix(source_state)
+
+    target_state = model.state_dict()
+    loaded: list[str] = []
+    padded: list[str] = []
+    skipped: list[str] = []
+
+    for key in CBM_STATE_KEYS:
+        if key not in source_state:
+            skipped.append(f"{key} (missing in checkpoint)")
+            continue
+        if key not in target_state:
+            skipped.append(f"{key} (missing in target model)")
+            continue
+
+        source_tensor = source_state[key]
+        target_tensor = target_state[key]
+        if source_tensor.shape == target_tensor.shape:
+            target_state[key] = source_tensor
+            loaded.append(key)
+            continue
+
+        #if key == "concept_head.classifier.weight" and source_tensor.ndim == 4:
+        #    out_channels = min(source_tensor.shape[0], target_tensor.shape[0])
+        #    in_channels = min(source_tensor.shape[1], target_tensor.shape[1])
+        #    target_state[key][:out_channels, :in_channels].copy_(source_tensor[:out_channels, :in_channels])
+        #    padded.append(
+        #        f"{key}: copied ({out_channels}, {in_channels}) "
+        #        f"from {tuple(source_tensor.shape)} into {tuple(target_tensor.shape)}"
+        #    )
+        #    continue
+
+        skipped.append(f"{key}: shape mismatch {tuple(source_tensor.shape)} vs {tuple(target_tensor.shape)}")
+
+    model.load_state_dict(target_state)
+    return {"loaded": loaded, "padded": padded, "skipped": skipped}
+
+
 # -- 0. Environment --------------------------------------------------------
 if not os.getenv("MLFLOW_TRACKING_URI"):
     os.environ["MLFLOW_TRACKING_URI"] = (
@@ -47,7 +119,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 for i in range(torch.cuda.device_count()):
     print(f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
 
-SEED = 1
+SEED = 3
 torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
@@ -64,13 +136,15 @@ cfg = setup_config(
         "logger": "../configs/logger_config.yaml",
     }
 )
-args = get_parser().parse_args("--run-name=mermaid_base_run_dinov3".split())
+args = get_parser().parse_args("--run-name=mermaid_base_run_dinov3_1x1".split())
 cfg = update_config_with_args(cfg, args)
 
+cfg.model.encoder_name = VITL_ENCODER_NAME
+
 # Hyperparameters for this ru
-cfg.training.iterations_per_train_epoch = 2000
-cfg.training.iterations_per_val_epoch = 200  # None => use full val set (len(val_loader))
-cfg.training.batch_size = 6
+cfg.training.iterations_per_train_epoch = 4000
+cfg.training.iterations_per_val_epoch = 400  # None => use full val set (len(val_loader))
+cfg.training.batch_size = 12
 
 # Set experiment on the config the Logger actually reads.
 cfg_logger = copy.deepcopy(cfg)
@@ -165,14 +239,20 @@ meta_model = MetaModel(
     conceptid2labelid=registry.conceptid2labelid(),
     concept_value2id=registry.concept_value2id,
 )
-CHECKPOINT = "model_checkpoint_init28"
-checkpoint = torch.load(CHECKPOINT, map_location=device, weights_only=False)
-meta_model.model.load_state_dict(checkpoint["model_state_dict"])
-meta_model.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-if hasattr(meta_model, "scheduler") and "scheduler_state_dict" in checkpoint:
-    meta_model.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-start_epoch = checkpoint["epoch"] + 1
-
+"""
+cbm_load_report = load_cbm_layers_from_vitb_checkpoint(
+    meta_model.model,
+    VITB_CBM_CHECKPOINT,
+    device,
+)
+print(f"Loaded CBM layers from {VITB_CBM_CHECKPOINT}:")
+for key in ("loaded", "padded", "skipped"):
+    entries = cbm_load_report[key]
+    if entries:
+        print(f"  {key}:")
+        for entry in entries:
+            print(f"    - {entry}")
+"""
 evaluator = Evaluator(
     num_classes=registry.num_target_classes,
     device=device,
@@ -219,6 +299,8 @@ with Logger(
             {str(k): v for k, v in concept_id2name.items()},
             "metadata/concept_id2name.json",
         )
+        mlflow.log_param("model/encoder_name", VITL_ENCODER_NAME)
+        mlflow.log_param("init/vitb_cbm_checkpoint", VITB_CBM_CHECKPOINT)
     run_id = run.info.run_id
     exp_id = run.info.experiment_id
     tracking_uri = mlflow.get_tracking_uri()
@@ -245,7 +327,7 @@ with Logger(
     )
 
     metrics_all: dict[int, dict] = {}
-    
+
     for epoch in range(cfg.training.epochs):
         metrics = train_model(
         meta_model=meta_model,

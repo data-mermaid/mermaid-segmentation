@@ -11,24 +11,18 @@ def map_taxonomy_to_dense(binary_taxonomy: torch.Tensor) -> torch.Tensor:
 
     Maps binary/one-hot taxonomy labels to dense IDs where:
     - 0 represents not_given (all zeros)
-    - 1 represents none / not given (all ones)
-    - 2+ represents the argmax index + 2 (concrete category)
+    - 1..width represents the concrete category (argmax index + 1)
     """
     sum_ = binary_taxonomy.sum(dim=1)
-    is_none = sum_.eq(0)
-    is_not_given = sum_.eq(binary_taxonomy.size(1))
+    is_not_given = sum_.eq(0)
 
-    taxonomy_id = binary_taxonomy.argmax(dim=1) + 2
-    return torch.where(
-        is_none,
-        torch.zeros_like(taxonomy_id),
-        torch.where(is_not_given, torch.ones_like(taxonomy_id), taxonomy_id),
-    )
+    taxonomy_id = binary_taxonomy.argmax(dim=1) + 1
+    return torch.where(is_not_given, torch.zeros_like(taxonomy_id), taxonomy_id)
 
 
 def map_taxonomy_predictions_to_dense(pred_taxonomy: torch.Tensor) -> torch.Tensor:
-    """Map predicted taxonomic scores to dense IDs via argmax + 2."""
-    return pred_taxonomy.argmax(dim=1) + 2
+    """Map predicted taxonomic scores to dense IDs via argmax + 1."""
+    return pred_taxonomy.argmax(dim=1) + 1
 
 
 def taxonomic_target_and_mask(

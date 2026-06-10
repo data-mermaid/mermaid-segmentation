@@ -75,7 +75,7 @@ class Evaluator:
                         if concept not in self.concept_value2id:
                             continue
                         concept_values = self.concept_value2id[concept]
-                        order_concept_length = len(list(concept_values.values())[0]) + 2
+                        order_concept_length = len(list(concept_values.values())[0]) + 1
                         self.concept_metric_dict[f"accuracy/{concept}"] = Accuracy(
                             task="multiclass",
                             num_classes=order_concept_length,
@@ -242,10 +242,9 @@ class Evaluator:
                 if concept not in self._binary_accuracy_metrics:
                     binary_offset += 1
                     continue
-                self._binary_accuracy_metrics[concept].update(
-                    concept_outputs_binary[:, binary_offset : binary_offset + 1, ...],
-                    concept_labels_binary[:, binary_offset : binary_offset + 1, ...],
-                )
+                pred = concept_outputs_binary[:, binary_offset, ...].long()
+                tgt = concept_labels_binary[:, binary_offset, ...].long()
+                self._binary_accuracy_metrics[concept].update(pred, tgt)
                 binary_offset += 1
 
 

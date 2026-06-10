@@ -139,6 +139,22 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
                 lookup[int(global_id)] = int(local_id)
         return lookup
 
+    def set_source_vocabulary(
+        self,
+        source_id2name: dict[int, str],
+        source_name2id: dict[str, int],
+        num_source_classes: int,
+    ) -> None:
+        """Replace local source maps and rebuild the classes.json lookup."""
+        self.source_id2name = dict(source_id2name)
+        self.source_name2id = dict(source_name2id)
+        self.num_source_classes = int(num_source_classes)
+        self._classes_global_to_local = self._build_classes_global_to_local()
+
+    def set_global_offset(self, offset: int) -> None:
+        super().set_global_offset(offset)
+        self._classes_global_to_local = self._build_classes_global_to_local()
+
     def read_image(self, image_id: str, site: str, **row_kwargs: Any) -> NDArray[Any]:
         key = f"{self.source_s3_prefix}/images/{site}/{image_id}.png"
         return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))

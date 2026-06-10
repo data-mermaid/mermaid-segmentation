@@ -1,0 +1,16 @@
+model:
+  name: "LinearDPTLoRADINOv3"
+  encoder_name: "facebook/dinov3-vitl16-pretrain-lvd1689m"
+  input_size: [512, 512]
+  # DPT head: intermediate blocks reassembled into a multi-scale pyramid.
+  # out_indices defaults to 4 evenly spaced blocks (null = auto).
+  out_indices: null
+  neck_hidden_sizes: [256, 512, 1024, 1024]
+  fusion_hidden_size: 256
+  reassemble_factors: [4, 2, 1, 0.5]
+  # LoRA adapters on the frozen DINOv3 attention projections.
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  lora_bias: "none"

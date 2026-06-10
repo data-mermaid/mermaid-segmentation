@@ -28,6 +28,8 @@ from PIL import Image, ImageDraw
 
 from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
+    MORPHOLOGIC_CONCEPTS,
+    NONCORAL_CONCEPTS,
     TAXONOMIC_CONCEPTS,
 )
 from mermaidseg.io import ConfigDict, load_config, setup_config
@@ -435,10 +437,23 @@ def predict_concepts(
     encoder_out = model.encoder(image_tensor)
     # DINOv3 emits 5 prefix tokens (CLS + 4 register tokens); strip them.
     patch_embeddings = encoder_out.last_hidden_state[:, 5:, :]
-    concept_logits = model.concept_head(patch_embeddings)
+
+
+    """concept_logits = model.concept_head(patch_embeddings)
     concept_logits = torch.nn.functional.interpolate(
         concept_logits, size=image_tensor.shape[-2:], mode="bilinear", align_corners=False
     )
+    return model.concept_outputs_activation(concept_logits)    """
+
+    concept_features = model.concept_head(patch_embeddings)
+    # Upscale token grid to pixel resolution (e.g. 32×32 → 512×512 when patch_size=16)
+    concept_features = torch.nn.functional.interpolate(
+        concept_features,
+        scale_factor=model.patch_size,
+        mode="bilinear",
+        align_corners=False,
+    )
+    concept_logits = model.concept_proj(concept_features)
     return model.concept_outputs_activation(concept_logits)
 
 
@@ -903,6 +918,94 @@ def compose_concept_overlay(
         return _blend(display_rgb, color, alpha)
 
     return display_rgb
+
+
+ONEHOT_MODES: tuple[str, ...] = ("classes", *RANK_ORDER)
+ONEHOT_MODE_LABELS: dict[str, str] = {
+    "classes": "MERMAID Classification",
+    **{rank: rank.capitalize() for rank in RANK_ORDER},
+}
+
+
+def compose_onehot_overlay(
+    display_rgb: NDArray[np.uint8],
+    class_probs: NDArray[np.float32] | None,
+    concept_probs: NDArray[np.float32] | None,
+    class_palette: NDArray[np.uint8],
+    mode: str,
+    rank_index: dict[str, list[tuple[int, str]]],
+    rank_palettes: dict[str, dict[str, NDArray[np.uint8]]],
+    opacity: float,
+) -> NDArray[np.uint8]:
+    """Render a one-hot overlay: argmax label per pixel, alpha = argmax prob × opacity.
+
+    - ``classes``: argmax MERMAID class; color from ``class_palette``; alpha from softmax.
+    - Taxonomic ranks: argmax within rank; ``none`` values are always black.
+    """
+    opacity = float(np.clip(opacity, 0.0, 1.0))
+
+    if mode == "classes":
+        if class_probs is None:
+            return display_rgb
+        argmax = class_probs.argmax(axis=0)
+        alpha = np.take_along_axis(class_probs, argmax[None, ...], axis=0)[0] * opacity
+        color_per_pixel = class_palette[argmax]
+        return _blend(display_rgb, color_per_pixel, alpha)
+
+    if concept_probs is None or mode not in RANK_ORDER:
+        return display_rgb
+
+    entries = rank_index.get(mode, [])
+    palette = rank_palettes.get(mode, {})
+    if not entries or not palette:
+        return display_rgb
+
+    channel_idxs = np.asarray([idx for idx, _ in entries], dtype=np.int64)
+    values = [val for _, val in entries]
+    rank_probs = concept_probs[channel_idxs]
+    argmax = rank_probs.argmax(axis=0)
+    alpha = np.take_along_axis(rank_probs, argmax[None, ...], axis=0)[0] * opacity
+
+    color_lut = np.zeros((len(values), 3), dtype=np.uint8)
+    for i, value in enumerate(values):
+        if value == "none":
+            continue
+        rgb = palette.get(value)
+        if rgb is not None:
+            color_lut[i] = rgb
+    color_per_pixel = color_lut[argmax]
+    return _blend(display_rgb, color_per_pixel, alpha)
+
+
+def compose_multihot_overlay(
+    display_rgb: NDArray[np.uint8],
+    concept_probs: NDArray[np.float32] | None,
+    channel_idx: int,
+    opacity: float,
+    cmap: str = "viridis",
+) -> NDArray[np.uint8]:
+    """Render a multi-hot heatmap for one binary concept: colormap(prob), alpha = prob × opacity."""
+    if concept_probs is None:
+        return display_rgb
+
+    import matplotlib.cm as cm
+
+    opacity = float(np.clip(opacity, 0.0, 1.0))
+    prob = np.clip(concept_probs[channel_idx], 0.0, 1.0)
+    rgba = cm.get_cmap(cmap)(prob)
+    color_per_pixel = (rgba[..., :3] * 255.0).astype(np.uint8)
+    alpha = prob * opacity
+    return _blend(display_rgb, color_per_pixel, alpha)
+
+
+def build_morph_concept_choices(concept_names: list[str]) -> list[str]:
+    """Return multi-hot concept names (morphologic + non-coral) present in ``concept_names``."""
+    name_set = set(concept_names)
+    return [
+        name
+        for name in (*MORPHOLOGIC_CONCEPTS, *NONCORAL_CONCEPTS)
+        if name in name_set
+    ]
 
 
 # ---------------------------------------------------------------------------

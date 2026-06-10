@@ -4,12 +4,12 @@ training:
     concept_mapping_path: "../configs/class_to_concepts.csv"
     loss:
         type: ConceptBottleneckLoss
-        lambda_weight: 0.1
+        lambda_weight: 0.01
         ignore_index: 0
     epochs: 200
     optimizer:
         type: AdamW
-        lr: 0.0001
+        lr: 0.001
         weight_decay: 0.01
     scheduler:
         type: PolynomialLR
