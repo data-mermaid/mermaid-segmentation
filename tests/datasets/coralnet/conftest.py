@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from botocore.exceptions import ClientError
+from PIL import Image
 
 from mermaidseg.datasets.coralnet.scraper.downloader import CoralNetDownloader
 
@@ -295,6 +296,66 @@ def populate_source(
 @pytest.fixture
 def populate():
     return populate_source
+
+
+# ============================================================================
+# Image corruption and format fixtures for preprocessing robustness tests
+# ============================================================================
+
+
+@pytest.fixture
+def valid_rgb_jpeg_bytes() -> bytes:
+    """Valid RGB JPEG (3 channels, 2048x1536)."""
+    img = Image.new("RGB", (2048, 1536), color=(255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def rgba_png_bytes() -> bytes:
+    """RGBA PNG (4 channels, 1024x768) — recoverable; resize converts it to RGB."""
+    img = Image.new("RGBA", (1024, 768), color=(255, 0, 0, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.fixture
+def grayscale_jpeg_bytes() -> bytes:
+    """Grayscale JPEG (1 channel, L mode) — recoverable; resize encodes L directly."""
+    img = Image.new("L", (1024, 768), color=128)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def truncated_jpeg_bytes() -> bytes:
+    """Truncated JPEG (valid header but missing end marker and data)."""
+    img = Image.new("RGB", (2048, 1536), color=(255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    jpeg_data = buf.getvalue()
+    # Keep only first 50% of data, truncating mid-stream
+    return jpeg_data[: len(jpeg_data) // 2]
+
+
+@pytest.fixture
+def corrupted_header_jpeg_bytes() -> bytes:
+    """JPEG with corrupted header markers."""
+    # Start with valid JPEG but corrupt the SOI marker and data
+    jpeg_data = _make_jpeg_bytes(2048, 1536)
+    corrupted = bytearray(jpeg_data)
+    # Corrupt header bytes (not SOI/EOI, but SOF area)
+    corrupted[10:20] = b"\x00" * 10
+    return bytes(corrupted)
+
+
+@pytest.fixture
+def empty_bytes() -> bytes:
+    """Empty file (0 bytes)."""
+    return b""
 
 
 @pytest.fixture

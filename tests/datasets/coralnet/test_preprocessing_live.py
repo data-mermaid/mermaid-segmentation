@@ -94,7 +94,7 @@ def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, tmp_path):
 
     # Resize and upload
     checkpoint_path = tmp_path / "checkpoint.parquet"
-    num_resized, num_skipped, num_failed = resize_and_upload_all_images(
+    num_resized, num_skipped, num_failed, num_corrupted = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -106,6 +106,7 @@ def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, tmp_path):
 
     assert num_resized == 1, f"Expected 1 resized, got {num_resized}"
     assert num_failed == 0, f"Expected 0 failed, got {num_failed}"
+    assert num_corrupted == 0, f"Expected 0 corrupted, got {num_corrupted}"
 
     # Verify resized image exists on S3
     resized_key = f"{test_prefix}/resized/s1/images/test_img.jpg"
@@ -222,7 +223,7 @@ def test_resize_and_upload_multi_source(test_bucket, test_s3_client, tmp_path):
 
     # Resize and upload
     checkpoint_path = tmp_path / "checkpoint.parquet"
-    num_resized, num_skipped, num_failed = resize_and_upload_all_images(
+    num_resized, num_skipped, num_failed, num_corrupted = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -234,6 +235,7 @@ def test_resize_and_upload_multi_source(test_bucket, test_s3_client, tmp_path):
 
     assert num_resized == 2, f"Expected 2 resized, got {num_resized}"
     assert num_failed == 0, f"Expected 0 failed, got {num_failed}"
+    assert num_corrupted == 0, f"Expected 0 corrupted, got {num_corrupted}"
 
     # Verify both resized images exist on S3
     for image_id in ["s1_large", "s2_large"]:
@@ -380,7 +382,7 @@ def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
 
     # Phase 2 - process all items
     checkpoint_path = tmp_path / "checkpoint_recovery.parquet"
-    num_resized, num_skipped, num_failed = resize_and_upload_all_images(
+    num_resized, num_skipped, num_failed, num_corrupted = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -392,6 +394,7 @@ def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
 
     assert num_resized == 2, f"Expected 2 resized in first pass, got {num_resized}"
     assert num_failed == 0
+    assert num_corrupted == 0
 
     # Verify checkpoint shows both completed
     df_checkpoint = pd.read_parquet(checkpoint_path)
@@ -399,7 +402,7 @@ def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
     assert (df_checkpoint["status"] == "completed").all()
 
     # Run Phase 2 again with same checkpoint (no new work should happen)
-    num_resized2, num_skipped2, num_failed2 = resize_and_upload_all_images(
+    num_resized2, num_skipped2, num_failed2, num_corrupted2 = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=test_bucket,
         output_prefix=test_prefix,
@@ -412,3 +415,4 @@ def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
     # All items already completed, should be skipped
     assert num_resized2 == 0, "No new resizes on second pass (all completed)"
     assert num_skipped2 == 2, f"Expected 2 skipped, got {num_skipped2}"
+    assert num_corrupted2 == 0

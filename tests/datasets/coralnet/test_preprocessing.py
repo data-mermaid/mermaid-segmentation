@@ -6,13 +6,24 @@ from datetime import datetime
 from io import BytesIO
 from unittest.mock import MagicMock, Mock
 
+import ibis
 import pandas as pd
+import pytest
 from PIL import Image
 
-from mermaidseg.datasets.coralnet.preprocessing.manifest import build_manifest
+from mermaidseg.datasets.coralnet.preprocessing.inspect import (
+    IssueType,
+    inspect_image,
+)
+from mermaidseg.datasets.coralnet.preprocessing.manifest import (
+    build_manifest,
+    combine_checkpoints,
+)
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
+    _resized_s3_key_for,
     get_pending_items,
     read_checkpoint,
+    resize_and_upload_all_images,
     resize_and_upload_image,
     resize_image_to_threshold,
     scan_for_missing_resized_images,
@@ -71,8 +82,42 @@ def test_resize_image_square():
     assert resized_img.height == 2048
 
 
+def test_resize_converts_rgba_to_rgb_jpeg():
+    """RGBA images are converted to RGB so they can be JPEG-encoded (not RGBA-as-JPEG error)."""
+    img = Image.new("RGBA", (3000, 2000), color=(255, 0, 0, 128))
+    img_bytes = BytesIO()
+    img.save(img_bytes, format="PNG")
+    img_bytes.seek(0)
+
+    resized_bytes = resize_image_to_threshold(img_bytes, threshold=2048)
+    resized_img = Image.open(resized_bytes)
+    resized_img.load()
+
+    assert resized_img.format == "JPEG"
+    assert resized_img.mode == "RGB"
+    assert resized_img.width == 2048
+    assert resized_img.height == 1365
+
+
+def test_resize_converts_rgba_below_threshold():
+    """A small RGBA image is still re-encoded to RGB JPEG, not passed through as raw bytes."""
+    img = Image.new("RGBA", (800, 400), color=(0, 255, 0, 64))
+    img_bytes = BytesIO()
+    img.save(img_bytes, format="PNG")
+    img_bytes.seek(0)
+
+    resized_bytes = resize_image_to_threshold(img_bytes, threshold=1024)
+    resized_img = Image.open(resized_bytes)
+    resized_img.load()
+
+    assert resized_img.format == "JPEG"
+    assert resized_img.mode == "RGB"
+    assert resized_img.width == 800
+    assert resized_img.height == 400
+
+
 def test_scan_for_missing_resized_images_builds_todo_list():
-    """Scan identifies images that need resizing and don't exist on S3."""
+    """Scan lists the resized prefix once and diffs in memory — no per-image head_object."""
     df_images = pd.DataFrame(
         {
             "source_id": [1, 1, 2],
@@ -88,15 +133,14 @@ def test_scan_for_missing_resized_images_builds_todo_list():
         }
     )
 
-    # Mock S3 client: only img_a exists (img_b has needs_resize=False anyway)
+    # Mock S3 client: the resized prefix already contains img_a (img_b has needs_resize=False)
     mock_s3 = Mock()
-
-    def head_object_side_effect(Bucket, Key):
-        if "img_a" in Key:
-            return {"ContentLength": 1000}  # exists
-        raise Exception("NotFound")
-
-    mock_s3.head_object.side_effect = head_object_side_effect
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.return_value = [
+        {"Contents": [{"Key": "etl-outputs/coralnet/resized/s1/images/img_a.jpg"}]},
+        {},  # empty page (no Contents key) must not crash
+    ]
+    mock_s3.get_paginator.return_value = mock_paginator
 
     # Run scan
     todo_df = scan_for_missing_resized_images(
@@ -107,6 +151,13 @@ def test_scan_for_missing_resized_images_builds_todo_list():
         s3_client=mock_s3,
         workers=2,
     )
+
+    # Existence comes from one paginated LIST, never per-image HEADs
+    mock_s3.get_paginator.assert_called_once_with("list_objects_v2")
+    mock_paginator.paginate.assert_called_once_with(
+        Bucket="test-bucket", Prefix="etl-outputs/coralnet/resized/"
+    )
+    mock_s3.head_object.assert_not_called()
 
     assert len(todo_df) == 1
     assert todo_df.iloc[0]["image_id"] == "img_c"
@@ -160,8 +211,8 @@ def test_checkpoint_pending_items_extracted():
     assert list(df_pending["image_id"]) == ["b", "d"]
 
 
-def test_resize_and_upload_image_success(tmp_path):
-    """Single image is downloaded, resized, and uploaded."""
+def test_resize_and_upload_image_returns_completed_result():
+    """Worker downloads/resizes/uploads and RETURNS a checkpoint row; it does no checkpoint I/O."""
     # Create mock S3 client
     mock_s3 = Mock()
 
@@ -177,8 +228,6 @@ def test_resize_and_upload_image_success(tmp_path):
     mock_s3.put_object = MagicMock()
     mock_s3.head_object = MagicMock()
 
-    checkpoint_path = tmp_path / "checkpoint.parquet"
-
     # Create todo item
     todo_item = {
         "source_id": 1,
@@ -189,24 +238,10 @@ def test_resize_and_upload_image_success(tmp_path):
         "output_s3_key": "etl-outputs/coralnet/resized/s1/images/img_a.jpg",
     }
 
-    # Create initial checkpoint
-    checkpoint_df = pd.DataFrame(
-        {
-            "source_id": [1],
-            "image_id": ["img_a"],
-            "status": ["pending"],
-            "resize_timestamp": [None],
-            "error_message": [None],
-        }
-    )
-
-    write_checkpoint(checkpoint_path, checkpoint_df)
-
-    # Run single image resize/upload
-    resize_and_upload_image(
+    # Run single image resize/upload — no checkpoint path involved
+    result = resize_and_upload_image(
         todo_item=todo_item,
         bucket="test-bucket",
-        checkpoint_path=checkpoint_path,
         threshold=2048,
         s3_client=mock_s3,
     )
@@ -217,10 +252,124 @@ def test_resize_and_upload_image_success(tmp_path):
     assert call_args[1]["Bucket"] == "test-bucket"
     assert call_args[1]["Key"] == "etl-outputs/coralnet/resized/s1/images/img_a.jpg"
 
-    # Verify checkpoint updated to 'completed'
-    checkpoint_df_updated = read_checkpoint(checkpoint_path)
-    assert checkpoint_df_updated.loc[0, "status"] == "completed"
-    assert checkpoint_df_updated.loc[0, "resize_timestamp"] is not None
+    # No post-upload head_object verify — S3 PUT is strongly consistent
+    mock_s3.head_object.assert_not_called()
+
+    # Verify the returned result row, not any on-disk checkpoint
+    assert result["source_id"] == 1
+    assert result["image_id"] == "img_a"
+    assert result["status"] == "completed"
+    assert result["resize_timestamp"] is not None
+    assert result["skip_reason"] is None
+
+
+def _checkpoint_table(df: pd.DataFrame) -> ibis.Table:
+    """Memtable with the dtypes the checkpoint parquet schema guarantees in production."""
+    return ibis.memtable(
+        df.astype(
+            {
+                "resize_timestamp": "datetime64[ns]",
+                "error_message": "string",
+                "skip_reason": "string",
+            }
+        )
+    )
+
+
+def test_combine_checkpoints_later_run_wins():
+    """Rows reprocessed in a later checkpoint override the earlier run's status."""
+    ckpt_full = pd.DataFrame(
+        {
+            "source_id": [1, 1],
+            "image_id": ["a", "b"],
+            "status": ["completed", "skipped"],
+            "resize_timestamp": [datetime(2026, 5, 29), None],
+            "error_message": [None, None],
+            "skip_reason": [None, "corrupted_invalid_channels"],
+        }
+    )
+    ckpt_rgba = pd.DataFrame(
+        {
+            "source_id": [1],
+            "image_id": ["b"],
+            "status": ["completed"],
+            "resize_timestamp": [datetime(2026, 6, 3)],
+            "error_message": [None],
+            "skip_reason": [None],
+        }
+    )
+
+    combined = combine_checkpoints(
+        [_checkpoint_table(ckpt_full), _checkpoint_table(ckpt_rgba)]
+    ).to_pandas()
+
+    assert len(combined) == 2
+    by_id = combined.set_index("image_id")
+    assert by_id.loc["a", "status"] == "completed"
+    # 'b' was skipped in the first run but completed in the rgba rerun — later wins
+    assert by_id.loc["b", "status"] == "completed"
+    assert by_id.loc["b", "resize_timestamp"] == datetime(2026, 6, 3)
+
+
+def test_combine_checkpoints_most_recent_timestamp_wins_regardless_of_order():
+    """The freshest resize_timestamp wins even when checkpoints are passed out of order."""
+    ckpt_newer = pd.DataFrame(
+        {
+            "source_id": [1],
+            "image_id": ["a"],
+            "status": ["completed"],
+            "resize_timestamp": [datetime(2026, 6, 3)],
+            "error_message": [None],
+            "skip_reason": [None],
+        }
+    )
+    ckpt_older = pd.DataFrame(
+        {
+            "source_id": [1, 1],
+            "image_id": ["a", "b"],
+            "status": ["failed", "skipped"],
+            "resize_timestamp": [None, None],
+            "error_message": ["timeout", None],
+            "skip_reason": [None, "corrupted_invalid_channels"],
+        }
+    )
+
+    # Newer checkpoint listed first — positional keep="last" would wrongly pick the failed row
+    combined = combine_checkpoints(
+        [_checkpoint_table(ckpt_newer), _checkpoint_table(ckpt_older)]
+    ).to_pandas()
+
+    assert len(combined) == 2
+    by_id = combined.set_index("image_id")
+    assert by_id.loc["a", "status"] == "completed"
+    assert by_id.loc["a", "resize_timestamp"] == datetime(2026, 6, 3)
+    # 'b' has no timestamped row anywhere, so it keeps the later checkpoint's status
+    assert by_id.loc["b", "status"] == "skipped"
+
+
+def test_combine_checkpoints_empty_raises():
+    """An empty checkpoint list is a caller error, not a silent empty table."""
+    with pytest.raises(ValueError, match="at least one checkpoint"):
+        combine_checkpoints([])
+
+
+def test_combine_checkpoints_single_input_dedups():
+    """A single checkpoint passes through, still deduped by latest timestamp per image."""
+    ckpt = pd.DataFrame(
+        {
+            "source_id": [1, 1],
+            "image_id": ["a", "a"],
+            "status": ["failed", "completed"],
+            "resize_timestamp": [None, datetime(2026, 6, 3)],
+            "error_message": ["timeout", None],
+            "skip_reason": [None, None],
+        }
+    )
+
+    combined = combine_checkpoints([_checkpoint_table(ckpt)]).to_pandas()
+
+    assert len(combined) == 1
+    assert combined.iloc[0]["status"] == "completed"
 
 
 def test_manifest_schema_is_correct():
@@ -248,11 +397,11 @@ def test_manifest_schema_is_correct():
     threshold = 2048
 
     manifest_df = build_manifest(
-        df_images=df_images,
-        df_checkpoint=checkpoint_df,
+        images=ibis.memtable(df_images),
+        checkpoint=ibis.memtable(checkpoint_df),
         output_prefix=output_prefix,
         threshold=threshold,
-    )
+    ).to_pandas()
 
     # Check schema
     required_columns = [
@@ -272,3 +421,410 @@ def test_manifest_schema_is_correct():
     # Check data
     assert len(manifest_df) == 3
     assert manifest_df.loc[0, "original_width"] == 3000
+
+
+def test_manifest_dimensions_and_keys_match_resize():
+    """Below threshold keeps original dims; above threshold floors like the resize worker, and
+    output_s3_key matches _resized_s3_key_for."""
+    threshold = 2048
+    df_images = pd.DataFrame(
+        {
+            "source_id": [1, 2],
+            "image_id": ["below", "above"],
+            "width": [800, 3000],
+            "height": [600, 2000],
+        }
+    )
+    checkpoint_df = pd.DataFrame(
+        {
+            "source_id": [1, 2],
+            "image_id": ["below", "above"],
+            "status": ["completed", "completed"],
+            "resize_timestamp": [datetime.now(), datetime.now()],
+            "error_message": [None, None],
+        }
+    )
+
+    manifest = (
+        build_manifest(
+            images=ibis.memtable(df_images),
+            checkpoint=ibis.memtable(checkpoint_df),
+            output_prefix="etl-outputs/coralnet",
+            threshold=threshold,
+        )
+        .to_pandas()
+        .set_index("image_id")
+    )
+
+    # Below threshold: dimensions unchanged
+    assert manifest.loc["below", "resized_width"] == 800
+    assert manifest.loc["below", "resized_height"] == 600
+
+    # Above threshold: same int() truncation the resize worker applies
+    scale = threshold / 3000
+    assert manifest.loc["above", "resized_width"] == int(3000 * scale)
+    assert manifest.loc["above", "resized_height"] == int(2000 * scale)
+
+    # Keys match the single source of truth in resize.py
+    assert manifest.loc["above", "output_s3_key"] == _resized_s3_key_for(
+        "etl-outputs/coralnet", 2, "above", threshold
+    )
+
+
+# ============================================================================
+# Image inspection and robustness tests
+# ============================================================================
+
+
+def test_inspect_image_valid_rgb(valid_rgb_jpeg_bytes):
+    """Inspection passes for valid RGB JPEG."""
+    image_bytes = BytesIO(valid_rgb_jpeg_bytes)
+    inspection = inspect_image(image_bytes)
+
+    assert inspection.is_valid is True
+    assert inspection.issue_type == IssueType.VALID
+    assert inspection.channels == 3
+    assert inspection.format == "JPEG"
+    assert inspection.width == 2048
+    assert inspection.height == 1536
+
+
+def test_inspect_image_rgba_png(rgba_png_bytes):
+    """Inspection passes for RGBA PNG; the resize step converts it to RGB before JPEG encoding."""
+    image_bytes = BytesIO(rgba_png_bytes)
+    inspection = inspect_image(image_bytes)
+
+    assert inspection.is_valid is True
+    assert inspection.issue_type == IssueType.VALID
+    assert inspection.channels == 4
+    assert inspection.format == "PNG"
+
+
+def test_inspect_image_grayscale(grayscale_jpeg_bytes):
+    """Inspection passes for grayscale JPEG; the resize step encodes single-channel L directly."""
+    image_bytes = BytesIO(grayscale_jpeg_bytes)
+    inspection = inspect_image(image_bytes)
+
+    assert inspection.is_valid is True
+    assert inspection.issue_type == IssueType.VALID
+    assert inspection.channels == 1
+    assert inspection.format == "JPEG"
+
+
+def test_inspect_image_truncated(truncated_jpeg_bytes):
+    """Inspection fails for truncated JPEG."""
+    image_bytes = BytesIO(truncated_jpeg_bytes)
+    inspection = inspect_image(image_bytes)
+
+    assert inspection.is_valid is False
+    assert inspection.issue_type in (IssueType.TRUNCATED, IssueType.DECODE_FAILURE)
+    assert inspection.error_message is not None
+
+
+def test_inspect_image_corrupted_header(corrupted_header_jpeg_bytes):
+    """Inspection fails for JPEG with corrupted header."""
+    image_bytes = BytesIO(corrupted_header_jpeg_bytes)
+    inspection = inspect_image(image_bytes)
+
+    assert inspection.is_valid is False
+    assert inspection.issue_type in (
+        IssueType.DECODE_FAILURE,
+        IssueType.CORRUPTED_HEADER,
+        IssueType.UNSUPPORTED_FORMAT,
+    )
+
+
+def test_inspect_image_empty(empty_bytes):
+    """Inspection fails for empty file."""
+    image_bytes = BytesIO(empty_bytes)
+    inspection = inspect_image(image_bytes)
+
+    assert inspection.is_valid is False
+    assert inspection.issue_type == IssueType.ZERO_SIZE
+    assert "Empty" in inspection.error_message
+
+
+def test_inspect_image_none():
+    """Inspection fails for None input."""
+    inspection = inspect_image(None)
+
+    assert inspection.is_valid is False
+    assert inspection.issue_type == IssueType.ZERO_SIZE
+
+
+def test_resize_converts_and_uploads_rgba_png(rgba_png_bytes):
+    """Worker converts an RGBA PNG to RGB JPEG, uploads it, and returns a completed result."""
+    mock_s3 = MagicMock()
+
+    # Mock GET to return RGBA PNG bytes
+    mock_s3.get_object.return_value = {"Body": BytesIO(rgba_png_bytes)}
+    mock_s3.head_object = MagicMock()
+
+    todo_item = {
+        "source_id": 1,
+        "image_id": "rgba_img",
+        "original_s3_key": "coralnet-public-images/s1/images/rgba_img.png",
+        "output_s3_key": "etl-outputs/coralnet/resized/s1/images/rgba_img.jpg",
+    }
+
+    result = resize_and_upload_image(
+        todo_item=todo_item,
+        bucket="test-bucket",
+        threshold=2048,
+        s3_client=mock_s3,
+    )
+
+    # Verify PUT was called with a valid RGB JPEG
+    assert mock_s3.put_object.called
+    uploaded = mock_s3.put_object.call_args.kwargs["Body"]
+    out_img = Image.open(BytesIO(uploaded))
+    out_img.load()
+    assert out_img.format == "JPEG"
+    assert out_img.mode == "RGB"
+
+    # Worker returns a completed result row
+    assert result["status"] == "completed"
+
+
+def test_resize_mixed_batch(valid_rgb_jpeg_bytes, truncated_jpeg_bytes, tmp_path):
+    """Batch with valid + corrupted images: valid resized, corrupted skipped."""
+    # Create mock S3 with two images
+    mock_s3 = MagicMock()
+
+    def get_object_side_effect(Bucket, Key):
+        if "valid" in Key:
+            return {"Body": BytesIO(valid_rgb_jpeg_bytes)}
+        if "bad" in Key:
+            return {"Body": BytesIO(truncated_jpeg_bytes)}
+        raise Exception("NotFound")
+
+    mock_s3.get_object.side_effect = get_object_side_effect
+    mock_s3.put_object = MagicMock()
+    mock_s3.head_object = MagicMock()
+
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+
+    todo_df = pd.DataFrame(
+        [
+            {
+                "source_id": 1,
+                "image_id": "valid",
+                "original_s3_key": "coralnet-public-images/s1/images/valid.jpg",
+                "output_s3_key": "etl-outputs/coralnet/resized/s1/images/valid.jpg",
+            },
+            {
+                "source_id": 1,
+                "image_id": "bad",
+                "original_s3_key": "coralnet-public-images/s1/images/bad.jpg",
+                "output_s3_key": "etl-outputs/coralnet/resized/s1/images/bad.jpg",
+            },
+        ]
+    )
+
+    num_resized, num_skipped, num_failed, num_corrupted = resize_and_upload_all_images(
+        df_todo=todo_df,
+        bucket="test-bucket",
+        output_prefix="etl-outputs/coralnet",
+        checkpoint_path=checkpoint_path,
+        threshold=2048,
+        workers=2,
+        s3_client=mock_s3,
+    )
+
+    assert num_resized == 1, f"Expected 1 resized, got {num_resized}"
+    assert num_corrupted == 1, f"Expected 1 corrupted, got {num_corrupted}"
+    assert num_failed == 0, f"Expected 0 failed, got {num_failed}"
+
+    # Verify checkpoint
+    df_checkpoint = read_checkpoint(checkpoint_path)
+    assert len(df_checkpoint) == 2
+
+    completed = df_checkpoint[df_checkpoint["status"] == "completed"]
+    skipped = df_checkpoint[df_checkpoint["status"] == "skipped"]
+
+    assert len(completed) == 1
+    assert len(skipped) == 1
+    assert completed.iloc[0]["image_id"] == "valid"
+    assert skipped.iloc[0]["image_id"] == "bad"
+    assert "corrupted_" in str(skipped.iloc[0]["skip_reason"])
+
+
+def test_resize_resumes_only_pending_items(valid_rgb_jpeg_bytes, tmp_path):
+    """An existing checkpoint with completed rows is resumed: completed images are not re-
+    downloaded."""
+    mock_s3 = MagicMock()
+    mock_s3.get_object.return_value = {"Body": BytesIO(valid_rgb_jpeg_bytes)}
+    mock_s3.put_object = MagicMock()
+    mock_s3.head_object = MagicMock()
+
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+
+    # Pre-existing checkpoint: 'a' already completed, 'b' still pending.
+    write_checkpoint(
+        checkpoint_path,
+        pd.DataFrame(
+            {
+                "source_id": [1, 1],
+                "image_id": ["a", "b"],
+                "status": ["completed", "pending"],
+                "resize_timestamp": [datetime.now(), None],
+                "error_message": [None, None],
+                "skip_reason": [None, None],
+            }
+        ),
+    )
+
+    todo_df = pd.DataFrame(
+        [
+            {
+                "source_id": 1,
+                "image_id": "a",
+                "original_s3_key": "coralnet-public-images/s1/images/a.jpg",
+                "output_s3_key": "etl-outputs/coralnet/resized/s1/images/a.jpg",
+            },
+            {
+                "source_id": 1,
+                "image_id": "b",
+                "original_s3_key": "coralnet-public-images/s1/images/b.jpg",
+                "output_s3_key": "etl-outputs/coralnet/resized/s1/images/b.jpg",
+            },
+        ]
+    )
+
+    resize_and_upload_all_images(
+        df_todo=todo_df,
+        bucket="test-bucket",
+        output_prefix="etl-outputs/coralnet",
+        checkpoint_path=checkpoint_path,
+        threshold=2048,
+        workers=2,
+        s3_client=mock_s3,
+    )
+
+    # Only the pending image 'b' should have been downloaded.
+    assert mock_s3.get_object.call_count == 1
+    assert mock_s3.get_object.call_args.kwargs["Key"].endswith("/b.jpg")
+
+    # Both rows end up completed in the checkpoint.
+    df_final = read_checkpoint(checkpoint_path)
+    assert set(df_final[df_final["status"] == "completed"]["image_id"]) == {"a", "b"}
+
+
+def test_resume_summary_counts_never_negative(valid_rgb_jpeg_bytes, tmp_path):
+    """Resuming with a todo smaller than the checkpoint reports counts from the checkpoint
+    itself."""
+    mock_s3 = MagicMock()
+    mock_s3.get_object.return_value = {"Body": BytesIO(valid_rgb_jpeg_bytes)}
+
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+
+    # Old run: 'a' completed, 'c' corrupted; this run's todo only contains pending 'b'.
+    write_checkpoint(
+        checkpoint_path,
+        pd.DataFrame(
+            {
+                "source_id": [1, 1, 1],
+                "image_id": ["a", "b", "c"],
+                "status": ["completed", "pending", "skipped"],
+                "resize_timestamp": [datetime.now(), None, None],
+                "error_message": [None, None, None],
+                "skip_reason": [None, None, "corrupted_truncated"],
+            }
+        ),
+    )
+
+    todo_df = pd.DataFrame(
+        [
+            {
+                "source_id": 1,
+                "image_id": "b",
+                "original_s3_key": "coralnet-public-images/s1/images/b.jpg",
+                "output_s3_key": "etl-outputs/coralnet/resized/s1/images/b.jpg",
+            }
+        ]
+    )
+
+    num_resized, num_skipped, num_failed, num_corrupted = resize_and_upload_all_images(
+        df_todo=todo_df,
+        bucket="test-bucket",
+        output_prefix="etl-outputs/coralnet",
+        checkpoint_path=checkpoint_path,
+        threshold=2048,
+        workers=2,
+        s3_client=mock_s3,
+    )
+
+    # Old formula derived num_skipped from len(df_todo) and went negative on resume.
+    assert num_resized == 2  # 'a' from the old run + 'b' from this one
+    assert num_skipped == 0  # no non-corrupted skips anywhere in the checkpoint
+    assert num_failed == 0
+    assert num_corrupted == 1  # 'c'
+
+
+def test_resize_all_images_builds_one_pool_sized_client(
+    monkeypatch, valid_rgb_jpeg_bytes, tmp_path
+):
+    """With no client injected, the orchestrator builds ONE shared client with pool >= workers."""
+    from mermaidseg.datasets.coralnet.preprocessing import resize as resize_module
+
+    created_pools: list[int] = []
+
+    def fake_factory(*, max_pool_connections: int = 10):
+        created_pools.append(max_pool_connections)
+        client = MagicMock()
+        client.get_object.side_effect = lambda Bucket, Key: {"Body": BytesIO(valid_rgb_jpeg_bytes)}
+        return client
+
+    monkeypatch.setattr(resize_module, "make_resize_s3_client", fake_factory)
+
+    todo_df = pd.DataFrame(
+        [
+            {
+                "source_id": 1,
+                "image_id": f"img_{i}",
+                "original_s3_key": f"coralnet-public-images/s1/images/img_{i}.jpg",
+                "output_s3_key": f"etl-outputs/coralnet/resized/s1/images/img_{i}.jpg",
+            }
+            for i in range(4)
+        ]
+    )
+
+    resize_module.resize_and_upload_all_images(
+        df_todo=todo_df,
+        bucket="test-bucket",
+        output_prefix="etl-outputs/coralnet",
+        checkpoint_path=tmp_path / "checkpoint.parquet",
+        threshold=2048,
+        workers=4,
+        s3_client=None,
+    )
+
+    # Exactly one client, sized for the worker count — not one default-pool client per thread.
+    assert len(created_pools) == 1
+    assert created_pools[0] >= 4
+
+
+def test_checkpoint_tracks_skip_reason(tmp_path):
+    """Checkpoint parquet correctly marks corrupted vs already-existing skips."""
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+
+    # Simulate mixed statuses: completed, failed, corrupted skip, already-exists skip
+    df_checkpoint = pd.DataFrame(
+        {
+            "source_id": [1, 1, 1, 1],
+            "image_id": ["a", "b", "c", "d"],
+            "status": ["completed", "failed", "skipped", "pending"],
+            "resize_timestamp": [datetime.now(), None, None, None],
+            "error_message": [None, "PIL error", None, None],
+            "skip_reason": [None, None, "corrupted_invalid_channels", None],
+        }
+    )
+
+    write_checkpoint(checkpoint_path, df_checkpoint)
+    df_read = read_checkpoint(checkpoint_path)
+
+    # Verify columns exist and values preserved
+    assert "skip_reason" in df_read.columns
+    corrupted_row = df_read[df_read["image_id"] == "c"]
+    assert corrupted_row.iloc[0]["status"] == "skipped"
+    assert "corrupted_" in str(corrupted_row.iloc[0]["skip_reason"])

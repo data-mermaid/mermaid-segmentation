@@ -76,7 +76,7 @@ def resize_command(args: argparse.Namespace) -> None:
     # Resize and upload images
     checkpoint_path = Path(temp_dir) / "checkpoint.parquet"
     logger.info("Resizing and uploading images...")
-    num_resized, num_skipped, num_failed = resize_and_upload_all_images(
+    num_resized, num_skipped, num_failed, num_corrupted = resize_and_upload_all_images(
         df_todo=df_todo,
         bucket=args.bucket,
         output_prefix=args.output_prefix,
@@ -109,6 +109,7 @@ def resize_command(args: argparse.Namespace) -> None:
     logger.info("=== Complete ===")
     logger.info("Resized: %d", num_resized)
     logger.info("Skipped (already on S3): %d", num_skipped)
+    logger.info("Corrupted (skipped): %d", num_corrupted)
     logger.info("Failed: %d", num_failed)
     logger.info("Manifest: s3://%s/%s", args.bucket, manifest_s3_key)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import io
 import logging
-import threading
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -18,34 +18,31 @@ from PIL import Image
 from tqdm import tqdm
 
 from mermaidseg.datasets.coralnet.etl.config import DEFAULT_PREFIX
+from mermaidseg.datasets.coralnet.preprocessing.inspect import (
+    ImageInspection,
+    IssueType,
+    inspect_image,
+)
 
 logger = logging.getLogger(__name__)
 
-# Thread lock for checkpoint updates
-_checkpoint_lock = threading.Lock()
-_s3_thread_local = threading.local()
+# Rows between checkpoint flushes. Workers are pure (they return result rows); the orchestrator
+# applies them to an in-memory checkpoint and flushes to disk every this many completions, so a
+# crash loses at most this many results instead of rewriting the whole parquet per image.
+DEFAULT_CHECKPOINT_EVERY = 1000
 
 
 def make_resize_s3_client(*, max_pool_connections: int = 10) -> Any:
-    """Build an S3 client sized for concurrent resize/scan workers."""
+    """Build an S3 client sized for concurrent resize/scan workers.
+
+    boto3 clients are thread-safe, so the orchestrator builds one client with ``max_pool_connections
+    >= workers`` and shares it across all worker threads.
+    """
     config = Config(
         retries={"max_attempts": 10, "mode": "adaptive"},
         max_pool_connections=max_pool_connections,
     )
     return boto3.client("s3", config=config)
-
-
-def _init_s3_worker(max_pool_connections: int) -> None:
-    _s3_thread_local.s3 = make_resize_s3_client(max_pool_connections=max_pool_connections)
-
-
-def _resolve_s3_client(explicit_client: Any | None) -> Any:
-    if explicit_client is not None:
-        return explicit_client
-    client = getattr(_s3_thread_local, "s3", None)
-    if client is None:
-        client = make_resize_s3_client(max_pool_connections=10)
-    return client
 
 
 CHECKPOINT_SCHEMA = {
@@ -54,6 +51,7 @@ CHECKPOINT_SCHEMA = {
     "status": "string",
     "resize_timestamp": "object",  # datetime
     "error_message": "string",
+    "skip_reason": "string",  # "already_exists", "corrupted_[issue_type]", or null
 }
 
 SCAN_OUTPUT_COLUMNS = [
@@ -81,28 +79,30 @@ def resize_image_to_threshold(
     Returns:
         BytesIO with resized JPEG (or original if no resize needed)
     """
+    image_bytes.seek(0)  # callers may have already read this buffer (e.g. during inspection)
     img = Image.open(image_bytes)
     img.load()
 
     width, height = img.size
     longest_edge = max(width, height)
+    needs_resize = longest_edge > threshold
+    # JPEG can only encode RGB or grayscale; alpha/palette modes (RGBA, LA, P) must be converted.
+    needs_convert = img.mode not in ("RGB", "L")
 
-    # No resize needed
-    if longest_edge <= threshold:
+    # Fast path: already a JPEG in a JPEG-encodable mode and small enough — return bytes unchanged.
+    if not needs_resize and not needs_convert and img.format == "JPEG":
         image_bytes.seek(0)
         return image_bytes
 
-    # Calculate new dimensions
-    scale = threshold / longest_edge
-    new_width = int(width * scale)
-    new_height = int(height * scale)
+    if needs_resize:
+        scale = threshold / longest_edge
+        img = img.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
 
-    # Resize
-    img_resized = img.resize((new_width, new_height), Image.LANCZOS)
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
 
-    # Save to BytesIO
     output = io.BytesIO()
-    img_resized.save(output, format="JPEG", quality=95)
+    img.save(output, format="JPEG", quality=95)
     output.seek(0)
     return output
 
@@ -117,21 +117,19 @@ def _resized_s3_key_for(prefix: str, source_id: int, image_id: str, threshold: i
     return f"{prefix}/resized/s{source_id}/images/{image_id}.jpg"
 
 
-def _check_resized_exists(
-    bucket: str,
-    output_prefix: str,
-    source_id: int,
-    image_id: str,
-    threshold: int,
-    s3_client: Any,
-) -> bool:
-    """Check if resized image exists on S3."""
-    key = _resized_s3_key_for(output_prefix, source_id, image_id, threshold)
-    try:
-        s3_client.head_object(Bucket=bucket, Key=key)
-        return True
-    except Exception:
-        return False
+def _list_existing_resized_keys(s3_client: Any, bucket: str, output_prefix: str) -> set[str]:
+    """Return every object key under ``<output_prefix>/resized/`` via paginated LIST.
+
+    One LIST request covers 1000 objects, so this replaces hundreds of thousands of per-image
+    ``head_object`` calls with a few hundred sequential pages.
+    """
+    resized_prefix = f"{output_prefix}/resized/"
+    paginator = s3_client.get_paginator("list_objects_v2")
+    keys: set[str] = set()
+    for page in paginator.paginate(Bucket=bucket, Prefix=resized_prefix):
+        for obj in page.get("Contents", []):
+            keys.add(obj["Key"])
+    return keys
 
 
 def scan_for_missing_resized_images(
@@ -145,6 +143,9 @@ def scan_for_missing_resized_images(
 ) -> pd.DataFrame:
     """Scan which images need resizing and don't yet exist on S3.
 
+    Lists the resized output prefix once and diffs against the expected keys in memory — no
+    per-image S3 requests.
+
     Args:
         df_images: Images parquet with columns [source_id, image_id, width, height, needs_resize]
             and optionally ``s3_key`` for the original object location.
@@ -152,7 +153,7 @@ def scan_for_missing_resized_images(
         output_prefix: S3 prefix for resized image outputs
         threshold: Resize threshold (longest edge, pixels)
         s3_client: Boto3 S3 client (created if None)
-        workers: ThreadPoolExecutor concurrency for S3 checks
+        workers: Unused; retained for backward compatibility (the LIST is sequential)
         source_prefix: Fallback prefix for original keys when ``s3_key`` is absent
 
     Returns:
@@ -160,7 +161,6 @@ def scan_for_missing_resized_images(
         for images that need resizing and don't yet exist on S3.
     """
     source_prefix = source_prefix or DEFAULT_PREFIX
-    pool_size = workers + 4
 
     # Filter to images that need resizing
     df_todo = df_images[df_images["needs_resize"]].copy()
@@ -169,51 +169,33 @@ def scan_for_missing_resized_images(
         logger.info("No images need resizing")
         return pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
 
-    def check_and_build_row(row: pd.Series) -> dict[str, Any] | None:
-        client = _resolve_s3_client(s3_client)
-        source_id = int(row["source_id"])
-        image_id = str(row["image_id"])
-        exists = _check_resized_exists(
-            bucket=bucket,
-            output_prefix=output_prefix,
-            source_id=source_id,
-            image_id=image_id,
-            threshold=threshold,
-            s3_client=client,
-        )
-        if exists:
-            return None  # Skip, already resized
-        if "s3_key" in row.index and pd.notna(row["s3_key"]):
-            original_s3_key = str(row["s3_key"])
+    client = s3_client if s3_client is not None else make_resize_s3_client()
+    logger.info("Listing existing resized objects under s3://%s/%s/resized/", bucket, output_prefix)
+    existing = _list_existing_resized_keys(client, bucket, output_prefix)
+    logger.info("Found %d existing resized objects", len(existing))
+
+    rows: list[dict[str, Any]] = []
+    has_s3_key = "s3_key" in df_todo.columns
+    for row in df_todo.itertuples(index=False):
+        source_id = int(row.source_id)
+        image_id = str(row.image_id)
+        output_key = _resized_s3_key_for(output_prefix, source_id, image_id, threshold)
+        if output_key in existing:
+            continue  # Skip, already resized
+        if has_s3_key and pd.notna(row.s3_key):
+            original_s3_key = str(row.s3_key)
         else:
             original_s3_key = _s3_key_for(source_prefix, source_id, image_id)
-        return {
-            "source_id": source_id,
-            "image_id": image_id,
-            "width": int(row["width"]),
-            "height": int(row["height"]),
-            "original_s3_key": original_s3_key,
-            "output_s3_key": _resized_s3_key_for(output_prefix, source_id, image_id, threshold),
-        }
-
-    with ThreadPoolExecutor(
-        max_workers=workers,
-        initializer=_init_s3_worker,
-        initargs=(pool_size,),
-    ) as executor:
-        futures = {
-            executor.submit(check_and_build_row, row): idx for idx, row in df_todo.iterrows()
-        }
-        rows = []
-        for future in tqdm(
-            as_completed(futures), total=len(futures), desc="Scanning for missing resized images"
-        ):
-            try:
-                result = future.result()
-                if result is not None:
-                    rows.append(result)
-            except Exception as e:
-                logger.error("Error checking S3 for resized image: %s", e)
+        rows.append(
+            {
+                "source_id": source_id,
+                "image_id": image_id,
+                "width": int(row.width),
+                "height": int(row.height),
+                "original_s3_key": original_s3_key,
+                "output_s3_key": output_key,
+            }
+        )
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
 
@@ -262,14 +244,22 @@ def write_checkpoint(checkpoint_path: Path | str, df: pd.DataFrame) -> None:
 
     Args:
         checkpoint_path: Path to write checkpoint parquet
-        df: DataFrame with columns [source_id, image_id, status, resize_timestamp, error_message]
+        df: DataFrame with columns [source_id, image_id, status, resize_timestamp, error_message, skip_reason]
     """
     df = df.copy()
     df["source_id"] = df["source_id"].astype("int32")
     df["image_id"] = df["image_id"].astype("string")
     df["status"] = df["status"].astype("string")
-    df.to_parquet(checkpoint_path, engine="pyarrow", index=False)
-    logger.info("Checkpoint written: %s", checkpoint_path)
+    if "skip_reason" not in df.columns:
+        df["skip_reason"] = None
+    df["skip_reason"] = df["skip_reason"].astype("string")
+    # Write to a sibling temp file then atomically rename, so a crash mid-flush leaves the previous
+    # checkpoint intact rather than a half-written parquet.
+    checkpoint_path = Path(checkpoint_path)
+    tmp_path = checkpoint_path.with_name(f"{checkpoint_path.name}.tmp")
+    df.to_parquet(tmp_path, engine="pyarrow", index=False)
+    os.replace(tmp_path, checkpoint_path)
+    logger.debug("Checkpoint written: %s (%d rows)", checkpoint_path, len(df))
 
 
 def read_checkpoint(checkpoint_path: Path | str) -> pd.DataFrame:
@@ -314,57 +304,95 @@ def init_checkpoint_from_todo(df_todo: pd.DataFrame) -> pd.DataFrame:
             "status": "pending",
             "resize_timestamp": None,
             "error_message": None,
+            "skip_reason": None,
         }
     )
 
 
-def _update_checkpoint(
-    checkpoint_path: Path | str,
+def _validate_and_download(
+    bucket: str,
+    original_key: str,
+    source_id: int,
+    image_id: str,
+    s3_client: Any,
+) -> tuple[io.BytesIO | None, ImageInspection]:
+    """Download and validate image in one step.
+
+    Returns:
+        (image_bytes, inspection) where image_bytes is None if validation failed.
+    """
+    try:
+        response = s3_client.get_object(Bucket=bucket, Key=original_key)
+        image_bytes = io.BytesIO(response["Body"].read())
+        inspection = inspect_image(image_bytes)
+        if not inspection.is_valid:
+            logger.warning(
+                "Validation failed for %s/%s: %s — %s",
+                source_id,
+                image_id,
+                inspection.issue_type.value,
+                inspection.error_message,
+            )
+        return (image_bytes if inspection.is_valid else None, inspection)
+    except Exception as e:
+        logger.warning("Failed to download %s/%s: %s", source_id, image_id, e)
+        return (
+            None,
+            ImageInspection(
+                is_valid=False,
+                issue_type=IssueType.UNKNOWN,
+                format=None,
+                channels=None,
+                width=None,
+                height=None,
+                error_message=f"Download failed: {type(e).__name__}",
+            ),
+        )
+
+
+def _result_row(
     source_id: int,
     image_id: str,
     status: str,
+    *,
     resize_timestamp: datetime | None = None,
     error_message: str | None = None,
-) -> None:
-    """Atomically update checkpoint status for a single image.
-
-    Args:
-        checkpoint_path: Path to checkpoint parquet
-        source_id: Source dataset ID
-        image_id: Image ID
-        status: New status ('completed' or 'failed')
-        resize_timestamp: Timestamp of completion
-        error_message: Error message if status='failed'
-    """
-    with _checkpoint_lock:
-        df_checkpoint = read_checkpoint(checkpoint_path)
-        mask = (df_checkpoint["source_id"] == source_id) & (df_checkpoint["image_id"] == image_id)
-        df_checkpoint.loc[mask, "status"] = status
-        if resize_timestamp is not None:
-            df_checkpoint.loc[mask, "resize_timestamp"] = resize_timestamp
-        if error_message is not None:
-            df_checkpoint.loc[mask, "error_message"] = error_message
-        write_checkpoint(checkpoint_path, df_checkpoint)
+    skip_reason: str | None = None,
+) -> dict[str, Any]:
+    """Build a checkpoint result row for a single processed image."""
+    return {
+        "source_id": int(source_id),
+        "image_id": str(image_id),
+        "status": status,
+        "resize_timestamp": resize_timestamp,
+        "error_message": error_message,
+        "skip_reason": skip_reason,
+    }
 
 
 def resize_and_upload_image(
     todo_item: dict[str, Any],
     bucket: str,
-    checkpoint_path: Path | str,
     threshold: int = 2048,
     s3_client: Any | None = None,
-) -> None:
-    """Resize a single image: download, resize, upload, update checkpoint.
+) -> dict[str, Any]:
+    """Resize a single image: download, validate, resize, upload.
+
+    Pure worker — it touches S3 but never the checkpoint. The orchestrator applies the returned
+    row to the in-memory checkpoint and flushes it periodically.
 
     Args:
         todo_item: Dict with keys [source_id, image_id, original_s3_key, output_s3_key, ...]
         bucket: S3 bucket name
-        checkpoint_path: Path to checkpoint parquet
         threshold: Resize threshold
         s3_client: Boto3 S3 client
+
+    Returns:
+        A checkpoint result row (see :func:`_result_row`) with status
+        'completed', 'skipped', or 'failed'.
     """
     if s3_client is None:
-        s3_client = _resolve_s3_client(None)
+        s3_client = make_resize_s3_client()
 
     source_id = todo_item["source_id"]
     image_id = todo_item["image_id"]
@@ -372,10 +400,23 @@ def resize_and_upload_image(
     output_key = todo_item["output_s3_key"]
 
     try:
-        # Download
-        logger.debug("Downloading %s", original_key)
-        response = s3_client.get_object(Bucket=bucket, Key=original_key)
-        original_bytes = io.BytesIO(response["Body"].read())
+        # Download and validate
+        logger.debug("Downloading and validating %s", original_key)
+        original_bytes, inspection = _validate_and_download(
+            bucket=bucket,
+            original_key=original_key,
+            source_id=source_id,
+            image_id=image_id,
+            s3_client=s3_client,
+        )
+
+        if original_bytes is None:
+            return _result_row(
+                source_id,
+                image_id,
+                "skipped",
+                skip_reason=f"corrupted_{inspection.issue_type.value}",
+            )
 
         # Resize
         logger.debug("Resizing %s/%s", source_id, image_id)
@@ -390,29 +431,29 @@ def resize_and_upload_image(
             ContentType="image/jpeg",
         )
 
-        # Verify upload
-        s3_client.head_object(Bucket=bucket, Key=output_key)
-
-        # Update checkpoint
-        _update_checkpoint(
-            checkpoint_path,
-            source_id,
-            image_id,
-            "completed",
-            resize_timestamp=datetime.now(),
-        )
-
-        logger.info("Resized: %s/%s -> %s", source_id, image_id, output_key)
+        # No post-upload head_object verify: S3 PUT is strongly consistent, and a non-2xx response
+        # already raises out of put_object above.
+        logger.debug("Resized: %s/%s -> %s", source_id, image_id, output_key)
+        return _result_row(source_id, image_id, "completed", resize_timestamp=datetime.now())
 
     except Exception as e:
         logger.error("Failed to resize %s/%s: %s", source_id, image_id, e)
-        _update_checkpoint(
-            checkpoint_path,
-            source_id,
-            image_id,
-            "failed",
-            error_message=f"{type(e).__name__}: {e}",
-        )
+        return _result_row(source_id, image_id, "failed", error_message=f"{type(e).__name__}: {e}")
+
+
+def _summarise_checkpoint(checkpoint_df: pd.DataFrame) -> tuple[int, int, int, int]:
+    """Count (resized, skipped, failed, corrupted) from checkpoint statuses alone.
+
+    Counts come from the checkpoint, never from todo-list arithmetic — on a resume the todo can be
+    smaller than the checkpoint, which previously produced negative "skipped" counts.
+    """
+    num_resized = int((checkpoint_df["status"] == "completed").sum())
+    num_failed = int((checkpoint_df["status"] == "failed").sum())
+    is_skipped = checkpoint_df["status"] == "skipped"
+    is_corrupted = checkpoint_df["skip_reason"].str.startswith("corrupted_").fillna(False)
+    num_corrupted = int((is_skipped & is_corrupted).sum())
+    num_skipped = int((is_skipped & ~is_corrupted).sum())
+    return num_resized, num_skipped, num_failed, num_corrupted
 
 
 def resize_and_upload_all_images(
@@ -423,8 +464,13 @@ def resize_and_upload_all_images(
     threshold: int = 2048,
     workers: int = 16,
     s3_client: Any | None = None,
-) -> tuple[int, int, int]:
-    """Download, resize, and upload all images with atomic checkpoint updates.
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
+) -> tuple[int, int, int, int]:
+    """Download, resize, and upload all images, checkpointing in periodic batches.
+
+    Workers are pure (they return result rows); this orchestrator owns the checkpoint, applies each
+    returned row to an in-memory DataFrame, and flushes it to disk every ``checkpoint_every``
+    completions. That replaces the old per-image full-file read-modify-write under a global lock.
 
     Args:
         df_todo: DataFrame with columns [source_id, image_id, ..., original_s3_key, output_s3_key]
@@ -434,26 +480,27 @@ def resize_and_upload_all_images(
         threshold: Resize threshold
         workers: ThreadPoolExecutor concurrency
         s3_client: Boto3 S3 client
+        checkpoint_every: Rows between checkpoint flushes
 
     Returns:
-        Tuple (num_resized, num_skipped, num_failed)
+        Tuple (num_resized, num_skipped, num_failed, num_corrupted)
     """
-    pool_size = workers + 4
+    # One shared client for all worker threads (boto3 clients are thread-safe), with the connection
+    # pool sized to the concurrency so workers never queue on connections.
+    if s3_client is None:
+        s3_client = make_resize_s3_client(max_pool_connections=workers + 4)
 
     # Initialize checkpoint if not exists
     if not Path(checkpoint_path).exists():
-        checkpoint_df = init_checkpoint_from_todo(df_todo)
-        write_checkpoint(checkpoint_path, checkpoint_df)
+        write_checkpoint(checkpoint_path, init_checkpoint_from_todo(df_todo))
 
-    # Get pending items
-    checkpoint_df = read_checkpoint(checkpoint_path)
+    # Get pending items. Reset the index so positional .at updates line up with the row map below.
+    checkpoint_df = read_checkpoint(checkpoint_path).reset_index(drop=True)
     df_pending = get_pending_items(checkpoint_df)
 
     if len(df_pending) == 0:
         logger.info("No pending items in checkpoint")
-        completed = len(checkpoint_df[checkpoint_df["status"] == "completed"])
-        failed = len(checkpoint_df[checkpoint_df["status"] == "failed"])
-        return completed, 0, failed
+        return _summarise_checkpoint(checkpoint_df)
 
     # Merge pending with todo to get S3 keys
     df_work = df_pending.merge(
@@ -461,40 +508,61 @@ def resize_and_upload_all_images(
         on=["source_id", "image_id"],
     )
 
-    with ThreadPoolExecutor(
-        max_workers=workers,
-        initializer=_init_s3_worker,
-        initargs=(pool_size,),
-    ) as executor:
+    # Map (source_id, image_id) -> positional row index for O(1) in-memory status updates.
+    row_index: dict[tuple[int, str], int] = {
+        (int(sid), str(iid)): pos
+        for pos, (sid, iid) in enumerate(
+            zip(checkpoint_df["source_id"], checkpoint_df["image_id"], strict=True)
+        )
+    }
+
+    def apply_result(res: dict[str, Any]) -> None:
+        pos = row_index[(int(res["source_id"]), str(res["image_id"]))]
+        checkpoint_df.loc[pos, "status"] = res["status"]
+        if res["resize_timestamp"] is not None:
+            checkpoint_df.loc[pos, "resize_timestamp"] = res["resize_timestamp"]
+        if res["error_message"] is not None:
+            checkpoint_df.loc[pos, "error_message"] = res["error_message"]
+        if res["skip_reason"] is not None:
+            checkpoint_df.loc[pos, "skip_reason"] = res["skip_reason"]
+
+    since_flush = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(
                 resize_and_upload_image,
                 row.to_dict(),
                 bucket,
-                checkpoint_path,
                 threshold,
-                None if s3_client is None else s3_client,
+                s3_client,
             ): idx
             for idx, row in df_work.iterrows()
         }
 
         for future in tqdm(as_completed(futures), total=len(futures), desc="Resizing images"):
             try:
-                future.result()
+                result = future.result()
             except Exception as e:
                 logger.error("Resize failed: %s", e)
+                continue
+            apply_result(result)
+            since_flush += 1
+            if since_flush >= checkpoint_every:
+                write_checkpoint(checkpoint_path, checkpoint_df)
+                since_flush = 0
+
+    # Final flush of any rows since the last checkpoint.
+    write_checkpoint(checkpoint_path, checkpoint_df)
 
     # Final counts
-    checkpoint_df = read_checkpoint(checkpoint_path)
-    num_resized = len(checkpoint_df[checkpoint_df["status"] == "completed"])
-    num_failed = len(checkpoint_df[checkpoint_df["status"] == "failed"])
-    num_skipped = len(df_todo) - len(df_pending)
+    num_resized, num_skipped, num_failed, num_corrupted = _summarise_checkpoint(checkpoint_df)
 
     logger.info(
-        "Resizing complete: %d resized, %d skipped (already on S3), %d failed",
+        "Resizing complete: %d resized, %d already exist, %d corrupted, %d failed",
         num_resized,
         num_skipped,
+        num_corrupted,
         num_failed,
     )
 
-    return num_resized, num_skipped, num_failed
+    return num_resized, num_skipped, num_failed, num_corrupted
