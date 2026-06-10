@@ -34,6 +34,7 @@ AUDIT_SCHEMA: pa.Schema = pa.schema(
         pa.field("metadata_csv_read_failed", pa.bool_(), nullable=False),
         pa.field("is_complete", pa.bool_(), nullable=False),
         pa.field("image_count_match", pa.bool_(), nullable=False),
+        pa.field("image_list_covers_annotations", pa.bool_(), nullable=False),
         pa.field("errors", pa.list_(pa.string()), nullable=True),
     ]
 )

@@ -107,6 +107,7 @@ def _empty_record(source_id: int, audit_ts: datetime) -> dict[str, Any]:
         "metadata_csv_read_failed": False,
         "is_complete": False,
         "image_count_match": False,
+        "image_list_covers_annotations": False,
         "errors": [],
     }
 
@@ -205,13 +206,21 @@ def _audit_one_source(
         except Exception as e:  # noqa: BLE001
             record["errors"].append(f"Error reading {spec.filename}: {type(e).__name__}: {e}")
 
+    record["image_count_match"] = record["n_images_s3"] == record["n_images_csv"]
+    # image_list.csv is the only Name -> CoralNet image_id bridge the ETL has. When it lists fewer
+    # images than annotations.csv references, every uncovered annotated image is silently dropped
+    # downstream regardless of confirmed status. Gate on coverage so a truncated image_list can't
+    # masquerade as a usable source (see the 2026-06 image_list truncation incident).
+    record["image_list_covers_annotations"] = (
+        record["n_images_csv"] >= record["n_unique_images_annotated"]
+    )
     record["is_complete"] = bool(
         record["has_images_folder"]
         and record["has_annotations_csv"]
         and record["has_image_list_csv"]
         and record["n_annotations"] > 0
+        and record["image_list_covers_annotations"]
     )
-    record["image_count_match"] = record["n_images_s3"] == record["n_images_csv"]
     return record
 
 

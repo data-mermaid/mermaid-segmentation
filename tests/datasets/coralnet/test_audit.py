@@ -79,3 +79,37 @@ def test_audit_sources_respects_explicit_source_ids(fake_s3, sample_csv_factory,
         source_ids=[11],
     )
     assert df["source_id"].tolist() == [11]
+
+
+def test_truncated_image_list_fails_is_complete(fake_s3, sample_csv_factory, populate):
+    """image_list.csv listing fewer images than annotations reference must NOT be is_complete.
+
+    Regression for the 2026-06 truncation incident: all files present but a short image_list.csv
+    silently dropped most annotated images downstream.
+    """
+    bucket, prefix = "b", "p"
+    files = sample_csv_factory(source_id=9, n_images=5, n_points_per_image=2)
+    # Truncate image_list.csv to header + a single data row (lists 1 of 5 annotated images).
+    lines = files["image_list.csv"].decode().splitlines()
+    files["image_list.csv"] = ("\n".join(lines[:2]) + "\n").encode()
+    populate(fake_s3, bucket, prefix, 9, files)
+
+    df = audit_sources(bucket=bucket, prefix=prefix, workers=1, s3_client=fake_s3)
+    row = df.loc[df["source_id"] == 9].iloc[0]
+
+    assert row["has_image_list_csv"]  # file is present, just short
+    assert row["n_images_csv"] == 1
+    assert row["n_unique_images_annotated"] == 5
+    assert not row["image_list_covers_annotations"]
+    assert not row["is_complete"]
+
+
+def test_complete_source_covers_annotations(fake_s3, sample_csv_factory, populate):
+    bucket, prefix = "b", "p"
+    populate(fake_s3, bucket, prefix, 3, sample_csv_factory(source_id=3, n_images=4))
+    df = audit_sources(bucket=bucket, prefix=prefix, workers=1, s3_client=fake_s3)
+    row = df.loc[df["source_id"] == 3].iloc[0]
+    assert row["n_images_csv"] == 4
+    assert row["n_unique_images_annotated"] == 4
+    assert row["image_list_covers_annotations"]
+    assert row["is_complete"]
