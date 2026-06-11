@@ -34,7 +34,7 @@ def fetch_mermaid_target_labels(
     return sorted({rec["name"] for rec in records if rec.get("name") is not None})
 
 
-def fetch_coralnet_to_mermaid() -> dict[str, str]:
+def fetch_coralnet_to_mermaid() -> dict[str, str | None]:
     """Load the CoralNet provider label -> MERMAID benthic-attribute mapping from local config.
 
     Returns a dict keyed by stringified CoralNet provider label; values are the mapped MERMAID
@@ -50,12 +50,14 @@ def fetch_coralnet_to_mermaid() -> dict[str, str]:
         return json.load(f)
 
 
-def fetch_catlin_seaview_to_mermaid() -> dict[str, str]:
+def fetch_catlin_seaview_to_mermaid() -> dict[str, list[str]]:
     """Return the static Catlin Seaview label-name -> MERMAID benthic-attribute mapping.
 
     Keyed by the original Catlin label name; values are the mapped MERMAID benthic-attribute
     name(s). Labels absent from this map collapse to background at training time via
     :class:`SourceLabelRegistry`.
+
+    NOTE: values are ``list[str]`` but ``SourceLabelRegistry`` expects scalar targets; see #135.
     """
     return {
         "aarcheri": ["aplysina archeri"],
@@ -211,12 +213,14 @@ def fetch_catlin_seaview_to_mermaid() -> dict[str, str]:
     }
 
 
-def fetch_moorea_labeled_corals_to_mermaid() -> dict[str, str]:
+def fetch_moorea_labeled_corals_to_mermaid() -> dict[str, list[str]]:
     """Return the static Moorea Labeled Corals label-name -> MERMAID benthic-attribute mapping.
 
     Keyed by the original Moorea label name (e.g. ``"acrop"`` or ``"turf"``); values are the mapped
     MERMAID benthic-attribute name(s). Labels absent from this map collapse to background at
     training time via :class:`SourceLabelRegistry`.
+
+    NOTE: values are ``list[str]`` but ``SourceLabelRegistry`` expects scalar targets; see #135.
     """
     return {
         "acan": ["acanthastrea"],
@@ -248,12 +252,14 @@ def fetch_moorea_labeled_corals_to_mermaid() -> dict[str, str]:
     }
 
 
-def fetch_pacific_labeled_corals_to_mermaid() -> dict[str, str]:
+def fetch_pacific_labeled_corals_to_mermaid() -> dict[str, list[str]]:
     """Return the static Pacific Labeled Corals label-name -> MERMAID benthic-attribute mapping.
 
     Keyed by the original Pacific label name from the per-site ``labelmap.txt`` (e.g. ``"acropora"``
     or ``"cca"``); values are the mapped MERMAID benthic-attribute name(s). Labels absent from this
     map collapse to background at training time via :class:`SourceLabelRegistry`.
+
+    NOTE: values are ``list[str]`` but ``SourceLabelRegistry`` expects scalar targets; see #135.
     """
     return {
         "acropora": ["Acropora"],
@@ -280,7 +286,7 @@ def fetch_ucsd_mosaics_to_mermaid(
 ) -> dict[str, str]:
     """Fetch the UCSD Mosaics label-name -> MERMAID benthic-attribute name mapping.
 
-    Mirrors :func:`fetch_benthos_yuval_to_mermaid`: pages through the MERMAID
+    Pages through the MERMAID
     API label-mappings endpoint filtered to ``provider=UCSD Mosaics`` and
     returns a dict keyed by the UCSD Mosaics ``provider_id`` (which holds the
     original class name from ``classes.json``, e.g. ``"Acropora (branching)"``
@@ -305,12 +311,14 @@ def fetch_ucsd_mosaics_to_mermaid(
     return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
 
 
-def fetch_benthos_yuval_to_mermaid() -> dict[str, str]:
+def fetch_benthos_yuval_to_mermaid() -> dict[str, list[str]]:
     """Return the static Benthos Yuval label-name -> MERMAID benthic-attribute mapping.
 
     Keyed by the original Benthos label name (e.g. ``"algae"`` or ``"sand"``); values are the mapped
     MERMAID benthic-attribute name(s). Labels absent from this map collapse to background at
     training time via :class:`SourceLabelRegistry`.
+
+    NOTE: values are ``list[str]`` but ``SourceLabelRegistry`` expects scalar targets; see #135.
     """
     return {"algae": ["Turf algae"], "other": ["other"], "sand": ["Sand"], "sponge": ["Sponge"]}
 
