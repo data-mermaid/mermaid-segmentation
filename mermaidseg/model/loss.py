@@ -1,6 +1,38 @@
+from collections.abc import Iterator
 from typing import Any
 
 import torch
+
+from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+from mermaidseg.model.concept_metrics import (
+    calculate_multi_hot_concept_loss,
+    calculate_taxonomic_rank_loss,
+)
+
+
+def iter_concept_slices(
+    concept_value2id: dict[str, dict[str, int]],
+    concept_labels: torch.Tensor,
+    concept_outputs: torch.Tensor,
+) -> Iterator[tuple[str, torch.Tensor, torch.Tensor]]:
+    """Yield (name, labels_slice, outputs_slice) for each taxonomic rank and the binary tail."""
+    offset = 0
+    for concept in TAXONOMIC_CONCEPTS:
+        if concept not in concept_value2id:
+            continue
+        concept_values = concept_value2id[concept]
+        order_concept_length = len(list(concept_values.values())[0])
+        yield (
+            concept,
+            concept_labels[:, offset : offset + order_concept_length, ...],
+            concept_outputs[:, offset : offset + order_concept_length, ...],
+        )
+        offset += order_concept_length
+    yield (
+        "multi_hot",
+        concept_labels[:, offset:, ...],
+        concept_outputs[:, offset:, ...],
+    )
 
 
 class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
@@ -13,28 +45,64 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
         kwargs: Additional keyword arguments that are passed to the base `torch.nn.CrossEntropyLoss` class.
     """
 
-    def __init__(self, ignore_index: int = -1, **kwargs: Any) -> None:
+    def __init__(self, ignore_index: int = 0, **kwargs: Any) -> None:
         super().__init__(ignore_index=ignore_index, **kwargs)
+
+    def forward(
+        self,
+        outputs: torch.Tensor,
+        target_labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        loss = super().forward(outputs, target_labels)
+        return loss, {"classification": loss.item()}
 
 
 class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
     """BCE loss for concept prediction that masks background pixels before averaging.
 
-    Wraps `torch.nn.BCEWithLogitsLoss` with `reduction="none"` and applies a
-    foreground mask derived from `labels` so background pixels (label == 0) do
-    not contribute to the mean.
+    Wraps `torch.nn.BCEWithLogitsLoss` with `reduction="none"` and applies a foreground mask derived
+    from `labels` so background pixels (label == 0) do not contribute to the mean.
     """
 
-    def __init__(self, reduction: str = "none", **kwargs: Any) -> None:
+    def __init__(
+        self,
+        reduction: str = "none",
+        concept_value2id: dict[str, dict[str, int]] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(reduction=reduction, **kwargs)
+        self.concept_value2id = concept_value2id
+
+    def _slice_loss(
+        self,
+        name: str,
+        concept_outputs: torch.Tensor,
+        concept_labels: torch.Tensor,
+        target_labels: torch.Tensor,
+    ) -> torch.Tensor:
+        foreground_mask = target_labels > 0
+        if name == "multi_hot":
+            return calculate_multi_hot_concept_loss(
+                concept_outputs,
+                concept_labels,
+                self,
+                from_logits=True,
+                foreground_mask=foreground_mask,
+            )
+        return calculate_taxonomic_rank_loss(
+            concept_outputs,
+            concept_labels,
+            from_logits=True,
+            foreground_mask=foreground_mask,
+        )
 
     def forward(
         self,
         concept_outputs: torch.Tensor,
         concept_labels: torch.Tensor,
         target_labels: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute masked BCE loss over foreground pixels.
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute masked concept loss over foreground pixels.
 
         Args:
             concept_outputs (torch.Tensor): Concept logits with shape (B, C, H, W).
@@ -42,25 +110,48 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
             target_labels (torch.Tensor): Target-space segmentation labels with shape
                 (B, H, W); background == 0.
         Returns:
-            torch.Tensor: Scalar loss value.
+            A 2-tuple of (total_loss, loss_components) for logging.
         """
-        per_element_loss = super().forward(concept_outputs, concept_labels)
-        label_mask = (target_labels > 0).unsqueeze(1)
+        if self.concept_value2id is None:
+            foreground_mask = target_labels > 0
+            total_loss = calculate_multi_hot_concept_loss(
+                concept_outputs,
+                concept_labels,
+                self,
+                from_logits=True,
+                foreground_mask=foreground_mask,
+            )
+            return total_loss, {"concepts": total_loss.item()}
 
-        masked_loss = per_element_loss * label_mask
-        denom = label_mask.sum() * concept_outputs.shape[1] + 1e-8
-        return masked_loss.sum() / denom
+        loss_components: dict[str, float] = {}
+        concept_loss_value = torch.tensor(
+            0.0, device=concept_outputs.device, dtype=concept_outputs.dtype
+        )
+        for name, labels_slice, outputs_slice in iter_concept_slices(
+            self.concept_value2id, concept_labels, concept_outputs
+        ):
+            slice_loss = self._slice_loss(name, outputs_slice, labels_slice, target_labels)
+            loss_components[name] = slice_loss.item()
+            concept_loss_value = concept_loss_value + slice_loss
+
+        loss_components["concepts"] = concept_loss_value.item()
+        return concept_loss_value, loss_components
 
 
 class ConceptBottleneckLoss(torch.nn.Module):
     """ConceptBottleneckLoss combines a classification loss with a concept prediction loss.
 
     It computes the total loss as the sum of the classification loss and a weighted concept loss.
+    The concept loss operates on the model's concept *activations* (in ``[0, 1]``), not raw
+    logits — taxonomic groups are softmaxed and the binary tail is sigmoided inside the model
+    (see :class:`GroupedConceptActivation`). The default ``concept_loss`` is
+    :class:`torch.nn.BCELoss`, which expects probabilities.
+
     Attributes:
         class_loss (torch.nn.Module): The loss function used for classification. Defaults to
             `torch.nn.CrossEntropyLoss`.
-        concept_loss (torch.nn.Module): The loss function used for concept prediction. Defaults to
-            `torch.nn.BCEWithLogitsLoss`.
+        concept_loss (torch.nn.Module): The loss function used for concept prediction.
+            Receives concept activations in ``[0, 1]``. Defaults to `torch.nn.BCELoss`.
         ignore_index (int): Specifies a target value that is ignored and does not contribute to the input gradient
             for the classification loss. Defaults to -1.
         lambda_weight (float): The weight applied to the concept loss when computing the total loss. Defaults to 1.0.
@@ -69,9 +160,10 @@ class ConceptBottleneckLoss(torch.nn.Module):
 
     def __init__(
         self,
+        concept_value2id: dict[str, dict[str, int]],
         class_loss: torch.nn.Module = torch.nn.CrossEntropyLoss,
-        concept_loss: torch.nn.Module = torch.nn.BCEWithLogitsLoss,
-        ignore_index: int = -1,
+        concept_loss: torch.nn.Module = torch.nn.BCELoss,
+        ignore_index: int = 0,
         lambda_weight: float = 1.0,
         **kwargs: Any,
     ) -> None:
@@ -79,6 +171,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
         self.class_loss = class_loss(ignore_index=ignore_index, **kwargs)
         self.concept_loss = concept_loss(reduction="none", **kwargs)
         self.lambda_weight = lambda_weight
+        self.concept_value2id = concept_value2id
 
     def forward(
         self,
@@ -93,26 +186,36 @@ class ConceptBottleneckLoss(torch.nn.Module):
         Args:
             outputs (torch.Tensor): The model's output logits for classification.
             target_labels (torch.Tensor): The target-space ground truth labels for classification.
-            concept_outputs (torch.Tensor): The model's output logits for concept prediction.
+            concept_outputs (torch.Tensor): The model's concept activations in ``[0, 1]``
+                (per-group softmax for taxonomic ranks, sigmoid for the binary tail).
+                These are the same activations consumed by the model's class head.
             concept_labels (torch.Tensor): The ground truth labels for concept prediction.
         Returns:
             A 2-tuple of (total_loss, loss_components) where total_loss is the
             scalar tensor for backprop and loss_components is a dict of detached
             component values for logging.
         """
-
         class_loss_value = self.class_loss(outputs, target_labels)
+        if (target_labels > 0).sum() == 0:
+            class_loss_value = torch.tensor(0.0, device=outputs.device, dtype=outputs.dtype)
 
-        label_mask = (target_labels > 0).unsqueeze(1)
-        per_element_loss = self.concept_loss(concept_outputs, concept_labels)
+        loss_components: dict[str, float] = {"classification": class_loss_value.item()}
+        concept_loss_value = torch.tensor(
+            0.0, device=concept_outputs.device, dtype=concept_outputs.dtype
+        )
 
-        masked_loss = per_element_loss * label_mask
-        denom = label_mask.sum() * outputs.shape[1] + 1e-8
-        concept_loss_value = masked_loss.sum() / denom
+        for name, labels_slice, outputs_slice in iter_concept_slices(
+            self.concept_value2id, concept_labels, concept_outputs
+        ):
+            if name == "multi_hot":
+                slice_loss = calculate_multi_hot_concept_loss(
+                    outputs_slice, labels_slice, self.concept_loss
+                )
+            else:
+                slice_loss = calculate_taxonomic_rank_loss(outputs_slice, labels_slice)
+            loss_components[name] = slice_loss.item()
+            concept_loss_value = concept_loss_value + slice_loss
 
+        loss_components["concepts"] = concept_loss_value.item()
         total_loss = class_loss_value + self.lambda_weight * concept_loss_value
-        loss_components = {
-            "class_loss": class_loss_value.item(),
-            "concept_loss": concept_loss_value.item(),
-        }
         return total_loss, loss_components

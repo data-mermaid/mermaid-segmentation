@@ -1,8 +1,7 @@
 """Benthos Yuval PyTorch dataset (dense segmentation tiles).
 
-Reads tiles produced by ``verify_raw_data_and_add_to_s3.py`` and emits
-``(image, source_labels)`` pairs in the Benthos Yuval source-label space.
-See ``README.md`` for dataset details.
+Reads tiles produced by ``verify_raw_data_and_add_to_s3.py`` and emits ``(image, source_labels)``
+pairs in the Benthos Yuval source-label space. See ``README.md`` for dataset details.
 """
 
 from __future__ import annotations
@@ -129,8 +128,8 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
     def _build_classes_global_to_local(self) -> np.ndarray:
         """Lookup table from classes.json IDs to local source IDs.
 
-        Background, classes filtered out by ``class_subset``, and any unknown
-        class fall through to local ID 0.
+        Background, classes filtered out by ``class_subset``, and any unknown class fall through to
+        local ID 0.
         """
         max_global = max(self._classes_global.values()) + 1
         lookup = np.zeros(max_global, dtype=np.int64)
@@ -139,6 +138,22 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
             if local_id is not None:
                 lookup[int(global_id)] = int(local_id)
         return lookup
+
+    def set_source_vocabulary(
+        self,
+        source_id2name: dict[int, str],
+        source_name2id: dict[str, int],
+        num_source_classes: int,
+    ) -> None:
+        """Replace local source maps and rebuild the classes.json lookup."""
+        self.source_id2name = dict(source_id2name)
+        self.source_name2id = dict(source_name2id)
+        self.num_source_classes = int(num_source_classes)
+        self._classes_global_to_local = self._build_classes_global_to_local()
+
+    def set_global_offset(self, offset: int) -> None:
+        super().set_global_offset(offset)
+        self._classes_global_to_local = self._build_classes_global_to_local()
 
     def read_image(self, image_id: str, site: str, **row_kwargs: Any) -> NDArray[Any]:
         key = f"{self.source_s3_prefix}/images/{site}/{image_id}.png"
@@ -152,24 +167,12 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
             arr = arr[..., 0]
         return arr.astype(np.uint8, copy=False)
 
-    def __getitem__(self, idx: int) -> tuple[Any, Any]:
+    def _load_item(self, idx: int) -> tuple[Any, Any]:
         image_id = self.df_images.loc[idx, "image_id"]
         site = self.df_images.loc[idx, "site"]
-        row_kwargs = self.df_images.loc[idx].to_dict()
 
-        try:
-            image = self.read_image(image_id=image_id, site=site)
-            raw_mask = self.read_label(image_id=image_id, site=site)
-        except Exception as e:
-            self._record_load_failure(image_id=image_id, row_kwargs=row_kwargs, error=e)
-            logger.warning(
-                "Skipping image_id=%s (site=%s): %s: %s",
-                image_id,
-                site,
-                type(e).__name__,
-                e,
-            )
-            return None, None
+        image = self.read_image(image_id=image_id, site=site)
+        raw_mask = self.read_label(image_id=image_id, site=site)
 
         local_mask = self._classes_global_to_local[raw_mask]
 

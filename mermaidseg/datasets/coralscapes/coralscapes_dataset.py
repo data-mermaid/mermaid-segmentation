@@ -18,6 +18,8 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
+from mermaidseg.datasets.utils import emit_dataset_warning
+
 logger = logging.getLogger(__name__)
 
 
@@ -133,8 +135,7 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _build_native_to_local(self) -> np.ndarray:
         """Build a vectorized lookup from native Coralscapes IDs to local source IDs.
 
-        Native ID ``0`` and any class not present in ``class_subset`` map to
-        ``0`` (background).
+        Native ID ``0`` and any class not present in ``class_subset`` map to ``0`` (background).
         """
         native_id2name = CORALSCAPES_ID2NAME
         max_native = max(native_id2name) + 1
@@ -144,11 +145,30 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             lookup[native_id] = local_id
         return lookup
 
+    def set_source_vocabulary(
+        self,
+        source_id2name: dict[int, str],
+        source_name2id: dict[str, int],
+        num_source_classes: int,
+    ) -> None:
+        """Replace local source maps and rebuild the native-to-local lookup.
+
+        Called by :func:`mermaidseg.dataset_reconciliation.split_wiring.apply_vocabularies`
+        when the registry canonicalizes vocabulary across splits. Rebuilding
+        ``_native_to_local`` keeps emitted mask IDs aligned with registry lookup
+        tables.
+        """
+        self.source_id2name = dict(source_id2name)
+        self.source_name2id = dict(source_name2id)
+        self.num_source_classes = int(num_source_classes)
+        self._native_to_local = self._build_native_to_local()
+
     def set_global_offset(self, offset: int) -> None:
         """Set the global source-label offset assigned by the registry."""
         if offset < 0:
             raise ValueError(f"global offset must be non-negative, got {offset}")
         self._global_offset = int(offset)
+        self._native_to_local = self._build_native_to_local()
 
     @property
     def global_offset(self) -> int:
@@ -158,13 +178,22 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        """Return ``(image, source_labels)`` for ``idx``.
+
+        On any internal load/transform error we emit a warning to logger + stdout + stderr and
+        return ``(None, None)``. :meth:`collate_fn` filters out these placeholders, so a failed item
+        drops out of the batch instead of crashing the loader.
+        """
         try:
-            image = np.array(self.dataset[idx]["image"])
-            native_mask = np.asarray(self.dataset[idx]["label"], dtype=np.int64)
-            mask = self._native_to_local[native_mask]
+            return self._load_item(idx)
         except Exception as e:
-            logger.warning("CoralscapesDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e)
+            emit_dataset_warning(f"CoralscapesDataset: skipping idx={idx}: {type(e).__name__}: {e}")
             return None, None
+
+    def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        image = np.array(self.dataset[idx]["image"])
+        native_mask = np.asarray(self.dataset[idx]["label"], dtype=np.int64)
+        mask = self._native_to_local[native_mask]
 
         if self._global_offset:
             mask = np.where(mask > 0, mask + self._global_offset, mask).astype(
@@ -172,23 +201,18 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             )
 
         if self.transform:
-            try:
-                transformed = self.transform(image=image, mask=mask)
-                image = transformed["image"].transpose(2, 0, 1)
-                mask = transformed["mask"]
-            except Exception as e:
-                logger.warning(
-                    "CoralscapesDataset: transform failed for idx=%d: %s: %s",
-                    idx,
-                    type(e).__name__,
-                    e,
-                )
-                return None, None
+            transformed = self.transform(image=image, mask=mask)
+            image = transformed["image"].transpose(2, 0, 1)
+            mask = transformed["mask"]
 
         return image, mask
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Filter out failed loads and stack into batched tensors."""
+        """Filter out ``(None, None)`` items (failed loads) and stack into batched tensors.
+
+        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this filter drops
+        them so a failed item simply leaves the batch instead of crashing the loader.
+        """
         batch_size = len(batch)
         filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
         n_skipped = batch_size - len(filtered)

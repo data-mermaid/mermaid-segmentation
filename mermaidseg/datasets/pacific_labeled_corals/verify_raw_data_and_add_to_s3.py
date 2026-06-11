@@ -155,10 +155,9 @@ def assert_all_images_decode(
 ) -> None:
     """Strict integrity check: every imagemap entry must fully decode in PIL.
 
-    Raises ``RuntimeError`` listing the first few offenders if any image is
-    missing or fails to decode. The current Dryad release contains no
-    damaged or missing images, so we treat any failure as a hard error
-    rather than silently dropping rows.
+    Raises ``RuntimeError`` listing the first few offenders if any image is missing or fails to
+    decode. The current Dryad release contains no damaged or missing images, so we treat any failure
+    as a hard error rather than silently dropping rows.
     """
     tasks: list[Path] = []
     for (_site, _subset), info in subset_inputs.items():
@@ -196,10 +195,9 @@ def build_annotations_df(
 ) -> pd.DataFrame:
     """Construct the wide annotations DataFrame.
 
-    One row per ``(site, subset, raw_imageid, row, col)``; each annotator
-    column is mapped through ``labelid_to_name`` and falls back to ``pd.NA``
-    when the column is absent (reference subsets) or holds an unknown label
-    ID (matching the notebook's "labelid not in id_to_name -> skip" behavior
+    One row per ``(site, subset, raw_imageid, row, col)``; each annotator column is mapped through
+    ``labelid_to_name`` and falls back to ``pd.NA`` when the column is absent (reference subsets) or
+    holds an unknown label ID (matching the notebook's "labelid not in id_to_name -> skip" behavior
     for ``archived``, but applied uniformly across all annotator columns).
     """
     records: list[dict[str, object]] = []
@@ -253,7 +251,7 @@ def build_annotations_df(
             "image_ext": "string",
             "row": "int64",
             "col": "int64",
-            **{col: "string" for col in ALL_ANNOTATOR_COLS},
+            **dict.fromkeys(ALL_ANNOTATOR_COLS, "string"),
         }
     )
 

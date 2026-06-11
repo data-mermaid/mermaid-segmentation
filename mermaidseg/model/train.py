@@ -17,15 +17,47 @@ from mermaidseg.model.metric_policy import (
 )
 
 
-def _log_metric_dict(
-    logger: Logger | None,
-    prefix: str,
-    metric_results: dict[str, float | NDArray[np.float64]],
+def _loader_load_failure_count(loader: object) -> int | None:
+    """Return the cumulative load-failure count of a loader's dataset, or None if untracked."""
+    dataset = getattr(loader, "dataset", None)
+    if dataset is None or not hasattr(dataset, "num_load_failures"):
+        return None
+    try:
+        return int(dataset.num_load_failures())
+    except Exception:
+        return None
+
+
+def _enforce_load_failure_rate(
+    loader: object,
+    failures_before: int | None,
+    max_rate: float | None,
     epoch: int,
+    split: str = "train",
 ) -> None:
-    if logger is None or not metric_results:
+    """Raise if this epoch's dataset load-failure rate exceeds ``max_rate``.
+
+    A high rate over a single pass signals a systemic data problem (bad credentials, missing files,
+    truncated image lists) rather than a few corrupt samples, so we fail fast instead of silently
+    training on a shrunken/biased dataset. No-op when disabled or when the dataset does not track
+    load failures.
+    """
+    if max_rate is None or failures_before is None:
         return
-    logger.log({f"{prefix}/{name}": value for name, value in metric_results.items()}, step=epoch)
+    dataset = getattr(loader, "dataset", None)
+    size = len(dataset) if dataset is not None else 0
+    if size <= 0:
+        return
+    epoch_failures = _loader_load_failure_count(loader) - failures_before
+    rate = epoch_failures / size
+    if rate > max_rate:
+        raise RuntimeError(
+            f"Epoch {epoch}: {split} load-failure rate {rate:.1%} ({epoch_failures}/{size}) "
+            f"exceeds max_load_failure_rate={max_rate:.1%}. This usually indicates a systemic "
+            f"data problem (credentials, missing files, truncated image lists) rather than a few "
+            f"corrupt samples. Inspect the dataset load-failure report; pass "
+            f"max_load_failure_rate=None to disable this guard."
+        )
 
 
 def train_model(
@@ -43,6 +75,7 @@ def train_model(
     early_stopping: bool = False,
     early_stopping_patience: int = 10,
     early_stopping_min_delta: float = 0.0,
+    max_load_failure_rate: float | None = 0.05,
 ):
     """Train a model, logging losses and metrics per epoch.
 
@@ -66,26 +99,25 @@ def train_model(
         end_epoch (int, optional): The ending epoch for training. Defaults to -1, which
             will be set based on the meta-model's training configuration if not specified.
         metric_of_interest (str, optional): Metric used for checkpointing and early
-            stopping. Must resolve to one of ``loss``, ``accuracy``, ``miou``,
-            ``f1-score``. Defaults to "accuracy".
+            stopping. Must resolve to ``loss`` or ``accuracy`` (classification accuracy).
+            Defaults to "accuracy".
         early_stopping (bool, optional): Enables early stopping on validation
             `metric_of_interest`. Defaults to False.
         early_stopping_patience (int, optional): Number of consecutive epochs with no
             improvement allowed before stopping early. Defaults to 10.
         early_stopping_min_delta (float, optional): Minimum metric improvement required
             to reset patience. Defaults to 0.0.
+        max_load_failure_rate (float | None, optional): If set, raise once the per-epoch
+            dataset load-failure rate exceeds this fraction (e.g. 0.05 = 5%), to fail fast on
+            systemic data problems instead of silently training on a shrunken dataset. Set to
+            ``None`` to disable. Only enforced when the loader's dataset tracks load failures.
+            Defaults to 0.05.
     Returns:
         dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
             ``train_metrics``, ``validation_metrics`` (if ``val_loader`` is provided), and
-            ``loss``. The ``loss`` sub-dict includes training loss plus timing metrics:
-            ``train/time_taken`` (full epoch wall time), ``train/data_loading_sec``,
-            ``train/forward_sec``, ``train/backward_sec``, ``train/samples_per_sec``,
-            ``train/data_loading_pct``, ``train/gpu_peak_memory_mb`` (CUDA only),
-            ``validation/time_taken`` (when ``val_loader`` is provided),
-            ``test/time_taken`` (when test evaluation runs), and
-            ``train/total_training_sec`` (final epoch only).
+            ``loss``. The ``loss`` sub-dict includes training loss plus timing metrics
+            kept locally for debugging.
     """
-
     metric_name = canonical_metric_name(metric_of_interest)
     direction = metric_direction(metric_name)
     best_metric_value = float("inf") if direction == "min" else float("-inf")
@@ -103,16 +135,19 @@ def train_model(
         end_epoch = start_epoch + meta_model.training_kwargs.epochs
     metrics_epoch = {}
     training_start = time.perf_counter()
+
     for epoch in range(start_epoch, end_epoch):
         should_stop_early = False
-        epoch_loss_dict = {}
+        epoch_loss_dict: dict[str, float] = {}
         epoch_start_time = time.time()
         logging.info("EPOCH: %d", epoch)
 
         meta_model.model.train(True)
+        failures_before = _loader_load_failure_count(train_loader)
         train_loss, train_metric_results, train_timing = meta_model.train_epoch(
             train_loader, evaluator
         )
+        _enforce_load_failure_rate(train_loader, failures_before, max_load_failure_rate, epoch)
         logging.info("LOSS train %s", train_loss)
         logging.info("TRAIN METRICS: %s", train_metric_results)
         epoch_loss_dict["train/loss"] = train_loss
@@ -137,7 +172,7 @@ def train_model(
             metrics_epoch[epoch]["validation_metrics"] = val_metric_results
             _log_metric_dict(logger, "validation", val_metric_results, epoch)
 
-            metric_value = extract_metric_value(metric_name, val_loss, val_metric_results)
+            metric_value = extract_metric_value(metric_of_interest, val_loss, val_metric_results)
             if direction == "min":
                 improved = metric_value < (best_metric_value - early_stopping_min_delta)
             else:
@@ -192,10 +227,7 @@ def train_model(
             epoch_loss_dict["train/total_training_sec"] = time.perf_counter() - training_start
 
         if logger is not None:
-            logger.log(
-                epoch_loss_dict,
-                step=epoch,
-            )
+            logger.log(epoch_loss_dict, step=epoch)
 
         metrics_epoch[epoch]["loss"] = epoch_loss_dict
         log_every = max(logger.log_epochs, 1) if logger is not None else 1
@@ -211,11 +243,19 @@ def train_model(
         if test_loader is not None:
             test_start = time.time()
             _ = evaluate_and_log(evaluator, test_loader, meta_model, logger, epoch, "test")
-            test_time = time.time() - test_start
-            epoch_loss_dict["test/time_taken"] = test_time
-            if logger is not None:
-                logger.log({"test/time_taken": test_time}, step=epoch)
+            epoch_loss_dict["test/time_taken"] = time.time() - test_start
     return metrics_epoch
+
+
+def _log_metric_dict(
+    logger: Logger | None,
+    prefix: str,
+    metric_results: dict[str, float | NDArray[np.float64]],
+    epoch: int,
+) -> None:
+    if logger is None or not metric_results:
+        return
+    logger.log({f"{prefix}/{name}": value for name, value in metric_results.items()}, step=epoch)
 
 
 def evaluate_and_log(
@@ -245,6 +285,6 @@ def evaluate_and_log(
         meta_model,
     )
     _log_metric_dict(logger, split, metric_results, epoch)
-    logging.info("%s metrics: %s", split, metric_results)
+    logging.info("%s metrics (epoch %d): %s", split, epoch, metric_results)
 
     return metric_results

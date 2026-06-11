@@ -16,10 +16,12 @@ filename for backward compatibility; pin a specific build via
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
 import boto3
+import fsspec
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -131,9 +133,30 @@ class CoralNetDataset(BaseCoralDataset):
         """
         annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         df_annotations = pd.read_parquet(annotations_path)
-        df_annotations["source_label_name"] = df_annotations["coralnet_id"].astype(str)
+        id2name_path = (
+            "s3://dev-datamermaid-sm-sources/coralnet-public-images/temporary/coralnet_id2name.json"
+        )
+
+        with fsspec.open(id2name_path, "r") as f:
+            coralnet_id2name = json.load(f)
+
+        df_annotations["coralnet_name"] = df_annotations["coralnet_id"].map(
+            lambda x: coralnet_id2name.get(str(x))
+        )
+        df_annotations["source_label_name"] = (
+            df_annotations["coralnet_name"].astype(str).str.lower()
+        )
+
         df_annotations = df_annotations[
-            ["source_id", "image_id", "row", "col", "coralnet_id", "source_label_name"]
+            [
+                "source_id",
+                "image_id",
+                "row",
+                "col",
+                "coralnet_id",
+                "coralnet_name",
+                "source_label_name",
+            ]
         ]
 
         df_images = self._derive_df_images_from_annotations(df_annotations)
