@@ -139,6 +139,36 @@ def fetch_pacific_labeled_corals_to_mermaid(
     return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
 
 
+def fetch_ucsd_mosaics_to_mermaid(
+    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=UCSD%20Mosaics",
+) -> dict[str, str]:
+    """Fetch the UCSD Mosaics label-name -> MERMAID benthic-attribute name mapping.
+
+    Mirrors :func:`fetch_benthos_yuval_to_mermaid`: pages through the MERMAID
+    API label-mappings endpoint filtered to ``provider=UCSD Mosaics`` and
+    returns a dict keyed by the UCSD Mosaics ``provider_id`` (which holds the
+    original class name from ``classes.json``, e.g. ``"Acropora (branching)"``
+    or ``"Porites rus"``) with values equal to the MERMAID benthic-attribute
+    name (or ``None`` if the UCSD label is not yet mapped, in which case it
+    collapses to background at training time).
+
+    Note: the UCSD Mosaics provider mapping has not yet been populated on the
+    MERMAID side at the time of writing -- this fetcher will return an empty
+    dict in that case, which causes every UCSD Mosaics source label to fall
+    back to background through :class:`SourceLabelRegistry`.
+    """
+    response = requests.get(mapping_endpoint, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    labelset = list(data["results"])
+    while data.get("next"):
+        response = requests.get(data["next"], timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        labelset.extend(data["results"])
+    return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
+
+
 def fetch_benthos_yuval_to_mermaid(
     mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=Benthos%20Yuval",
 ) -> dict[str, str]:

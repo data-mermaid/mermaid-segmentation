@@ -34,6 +34,7 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     fetch_coralnet_to_mermaid,
     fetch_moorea_labeled_corals_to_mermaid,
     fetch_pacific_labeled_corals_to_mermaid,
+    fetch_ucsd_mosaics_to_mermaid,
 )
 
 
@@ -271,6 +272,19 @@ class SourceLabelRegistry:
                 resolved[name] = {
                     src: tgt
                     for src, tgt in benthos_to_target.items()
+                    if tgt is not None and src in ds.source_name2id
+                }
+                continue
+            if name == "ucsd_mosaics":
+                if not fetch_remote:
+                    raise ValueError(
+                        "ucsd_mosaics source-to-target mapping requires "
+                        "fetch_remote=True or an explicit entry in source_to_target_name_maps"
+                    )
+                ucsd_to_target = fetch_ucsd_mosaics_to_mermaid()
+                resolved[name] = {
+                    src: tgt
+                    for src, tgt in ucsd_to_target.items()
                     if tgt is not None and src in ds.source_name2id
                 }
                 continue
