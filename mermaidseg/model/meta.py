@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Any
 
@@ -22,6 +23,8 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     source_labels_to_target_labels,
 )
 from mermaidseg.io import ConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class MetaModel:
@@ -60,6 +63,7 @@ class MetaModel:
         concept_matrix (pd.DataFrame | None): Pandas concept matrix retained for
             :func:`postprocess_predicted_concepts` (uses MultiIndex level metadata).
         conceptid2labelid (dict[int, int] | None): Maps concept IDs to target label IDs.
+        concept_value2id (dict[str, dict[str, int]] | None): Maps concept names and values to IDs.
     """
 
     run_name: str
@@ -76,6 +80,7 @@ class MetaModel:
     source_to_concepts_lookup: torch.Tensor | None
     concept_matrix: pd.DataFrame | None
     conceptid2labelid: dict[int, int] | None
+    concept_value2id: dict[str, dict[str, int]] | None
 
     def __init__(
         self,
@@ -85,12 +90,12 @@ class MetaModel:
         model_kwargs: ConfigDict | None = None,
         device: str | torch.device = "cuda",
         model_checkpoint: str | None = None,
-        training_mode: str = "standard",  # One of "standard", "concept", "concept-bottleneck"
         training_kwargs: ConfigDict | None = None,
         source_to_target_lookup: torch.Tensor | None = None,
         source_to_concepts_lookup: torch.Tensor | None = None,
         concept_matrix: pd.DataFrame | None = None,
         conceptid2labelid: dict[int, int] | None = None,
+        concept_value2id: dict[str, dict[str, int]] | None = None,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
@@ -115,12 +120,17 @@ class MetaModel:
         self.model_kwargs = model_kwargs
         self.model_checkpoint = model_checkpoint
 
-        self.training_mode = training_mode
+        self.training_mode = training_kwargs.pop("training_mode", None)
         assert self.training_mode in [
             "standard",
             "concept",
             "concept-bottleneck",
         ], f"Invalid training_mode: {self.training_mode}"
+
+        freeze_encoder = training_kwargs.pop(
+            "freeze_encoder",
+            self.training_mode == "concept-bottleneck",
+        )
 
         self.training_kwargs = training_kwargs
         self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
@@ -141,21 +151,18 @@ class MetaModel:
         )
         self.concept_matrix = concept_matrix
         self.conceptid2labelid = conceptid2labelid
+        self.concept_value2id = concept_value2id
 
+        model_cls = getattr(mermaidseg.model.models, self.model_name)
+        model_kwargs.setdefault("num_classes", self.num_classes)
         if self.training_mode == "concept-bottleneck":
-            self.model = getattr(mermaidseg.model.models, self.model_name)(
-                num_classes=self.num_classes,
-                num_concepts=self.num_concepts,
-                **model_kwargs,
-            )
+            model_kwargs.setdefault("num_concepts", self.num_concepts)
+            model_kwargs.setdefault("concept_value2id", self.concept_value2id)
         elif self.training_mode == "concept":
-            self.model = getattr(mermaidseg.model.models, self.model_name)(
-                num_classes=self.num_concepts, **model_kwargs
-            )
-        else:
-            self.model = getattr(mermaidseg.model.models, self.model_name)(
-                num_classes=self.num_classes, **model_kwargs
-            )
+            model_kwargs.setdefault(
+                "num_classes", self.num_concepts
+            )  # Overwrite the number of classes to be the number of concepts, since the model is only predicting concepts which are then mapped to classes via postprocessing
+        self.model = model_cls(**model_kwargs)
 
         if model_checkpoint:
             checkpoint = torch.load(model_checkpoint)
@@ -165,29 +172,35 @@ class MetaModel:
                 self.model.load_state_dict(checkpoint)
 
         self.model = self.model.to(device)
-        if "loss" in training_kwargs:
-            loss = training_kwargs.loss.pop("type", None)
-            self.loss = getattr(mermaidseg.model.loss, loss)(**training_kwargs.loss)
-        # else:
-        #     self.loss = None  # Often the case for HF models where the loss is already included in the model
+        self.freeze_encoder = freeze_encoder
+        if freeze_encoder and hasattr(self.model, "freeze_encoder"):
+            self.model.freeze_encoder()
 
-        optimizer = training_kwargs.optimizer.pop("type", None)
-        self.optimizer = getattr(torch.optim, optimizer)(
-            params=self.model.parameters(), **training_kwargs.optimizer
-        )
+        if "loss" in training_kwargs:
+            loss_cls = getattr(mermaidseg.model.loss, training_kwargs.loss.pop("type", None))
+            loss_kwargs = dict(training_kwargs.loss)
+            if self.concept_value2id is not None and self.training_mode in (
+                "concept",
+                "concept-bottleneck",
+            ):
+                loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
+            self.loss = loss_cls(**loss_kwargs)
+
+        optimizer_cls = getattr(torch.optim, training_kwargs.optimizer.pop("type", None))
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = optimizer_cls(params=trainable_params, **training_kwargs.optimizer)
 
         if "scheduler" in training_kwargs:
-            scheduler = training_kwargs.scheduler.pop("type", None)
-            self.scheduler = getattr(torch.optim.lr_scheduler, scheduler)(
-                self.optimizer, **training_kwargs.scheduler
+            scheduler_cls = getattr(
+                torch.optim.lr_scheduler, training_kwargs.scheduler.pop("type", None)
             )
+            self.scheduler = scheduler_cls(self.optimizer, **training_kwargs.scheduler)
 
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
 
-        When ``source_to_target_lookup`` is ``None``, source labels are assumed
-        to already be in target space (identity passthrough — useful for
-        single-source or synthetic pipelines).
+        When ``source_to_target_lookup`` is ``None``, source labels are assumed to already be in
+        target space (identity passthrough — useful for single-source or synthetic pipelines).
         """
         if self.source_to_target_lookup is None:
             return source_labels
@@ -223,7 +236,6 @@ class MetaModel:
         if self.training_mode == "concept-bottleneck":
             concept_outputs = segmentation_outputs.hidden_states
             outputs = segmentation_outputs.logits
-            concept_outputs = torch.sigmoid(concept_outputs)
         elif self.training_mode == "concept":
             concept_outputs = segmentation_outputs.logits
             outputs = postprocess_predicted_concepts(
@@ -258,7 +270,6 @@ class MetaModel:
         Returns:
             A 4-tuple of ``(loss, outputs, concept_outputs, loss_components)``.
         """
-
         loss = None
         outputs = None
         concept_outputs = None
@@ -278,12 +289,11 @@ class MetaModel:
             loss, loss_components = self.loss(
                 outputs, target_labels, concept_outputs, target_concepts
             )
-            concept_outputs = torch.sigmoid(concept_outputs)
 
         elif self.training_mode == "concept":
             assert target_concepts is not None, "target_concepts must be provided in 'concept' mode"
             concept_outputs = segmentation_outputs.logits
-            loss = self.loss(concept_outputs, target_concepts, target_labels)
+            loss, loss_components = self.loss(concept_outputs, target_concepts, target_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
             outputs = postprocess_predicted_concepts(
                 concept_outputs.detach().cpu().numpy(),
@@ -294,7 +304,7 @@ class MetaModel:
         else:
             outputs = segmentation_outputs.logits
             concept_outputs = None
-            loss = self.loss(outputs, target_labels)
+            loss, loss_components = self.loss(outputs, target_labels)
 
         assert loss is not None, "Loss is not computed for the given batch."
         assert isinstance(outputs, torch.Tensor)
@@ -316,6 +326,8 @@ class MetaModel:
         Returns:
             A 3-tuple of ``(average_loss, metric_results, timing)``.
         """
+        if self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
+            self.model.freeze_encoder()
 
         iterations_per_train_epoch = self.iterations_per_train_epoch
         if iterations_per_train_epoch is None:
@@ -338,8 +350,8 @@ class MetaModel:
         batch_end = time.perf_counter()
 
         if self._train_loader is not train_loader:
-            self._train_loader = train_loader
             self._train_loader_iter = iter(train_loader)
+            self._train_loader = train_loader
 
         for _ in tqdm(range(iterations_per_train_epoch)):
             assert self._train_loader_iter is not None
@@ -355,6 +367,9 @@ class MetaModel:
             data_time_total += time.perf_counter() - batch_end
 
             images, source_labels = data
+            if images.numel() == 0:
+                logger.warning("train_epoch: skipping an empty batch (all items failed to load).")
+                continue
             images = images.to(self.device).float()
             source_labels = source_labels.long().to(self.device)
             target_labels = self._to_target_labels(source_labels)
@@ -410,16 +425,8 @@ class MetaModel:
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, target_labels)
 
-            if self.training_mode in ("concept-bottleneck", "concept"):
-                concept_outputs = (concept_outputs > 0.5).float()
-                concept_outputs += 1
-                concept_outputs *= target_labels.unsqueeze(1) != 0
-
-                masked_target_concepts = (target_concepts + 1) * (target_labels.unsqueeze(1) != 0)
-
-                for metric in evaluator.concept_metric_dict.values():
-                    metric.update(concept_outputs, masked_target_concepts)
-
+            if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
+                evaluator.evaluate_concepts(concept_outputs, target_concepts)
             if use_cuda:
                 torch.cuda.synchronize()
             batch_end = time.perf_counter()
@@ -434,16 +441,12 @@ class MetaModel:
                 evaluator.metric_dict[metric_name].reset()
 
             if self.training_mode in ("concept-bottleneck", "concept"):
-                for metric_name in evaluator.concept_metric_dict:
-                    metric_results[metric_name] = (
-                        evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
-                    )
-                    if metric_results[metric_name].ndim == 0:
-                        metric_results[metric_name] = metric_results[metric_name].item()
-                    evaluator.concept_metric_dict[metric_name].reset()
+                metric_results.update(evaluator.compute_concept_metric_results())
 
-        last_loss = running_loss / len(train_loader)
-        avg_loss_components = {k: v / len(train_loader) for k, v in running_loss_components.items()}
+        last_loss = running_loss / iterations_per_train_epoch
+        avg_loss_components = {
+            k: v / iterations_per_train_epoch for k, v in running_loss_components.items()
+        }
         for k, v in avg_loss_components.items():
             metric_results[f"loss/{k}"] = v
         timing = {
@@ -462,7 +465,6 @@ class MetaModel:
         | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch."""
-
         iterations_per_val_epoch = self.iterations_per_val_epoch
         if iterations_per_val_epoch is None:
             iterations_per_val_epoch = len(val_loader)
@@ -470,11 +472,12 @@ class MetaModel:
             raise ValueError("iterations_per_val_epoch must be > 0.")
 
         running_loss = 0.0
+        running_loss_components: dict[str, float] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 
         if self._val_loader is not val_loader:
-            self._val_loader = val_loader
             self._val_loader_iter = iter(val_loader)
+            self._val_loader = val_loader
 
         for _ in tqdm(range(iterations_per_val_epoch)):
             assert self._val_loader_iter is not None
@@ -485,6 +488,11 @@ class MetaModel:
                 self._val_loader = val_loader
                 data = next(self._val_loader_iter)
             images, source_labels = data
+            if images.numel() == 0:
+                logger.warning(
+                    "validation_epoch: skipping an empty batch (all items failed to load)."
+                )
+                continue
             images = images.to(self.device).float()
             source_labels = source_labels.long().to(self.device)
             target_labels = self._to_target_labels(source_labels)
@@ -494,11 +502,13 @@ class MetaModel:
                 else None
             )
 
-            loss, outputs, concept_outputs, _ = self.batch_predict_loss(
+            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
                 images, target_labels, target_concepts
             )
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running_loss += loss.item()
+            for k, v in loss_components.items():
+                running_loss_components[k] = running_loss_components.get(k, 0.0) + v
 
             if evaluator is not None:
                 if self.training_mode == "concept":
@@ -515,18 +525,8 @@ class MetaModel:
                     for metric in evaluator.metric_dict.values():
                         metric.update(outputs, target_labels)
 
-            if self.training_mode in ("concept-bottleneck", "concept"):
-                for metric in evaluator.concept_metric_dict.values():
-                    concept_outputs = (concept_outputs > 0.5).float()
-                    concept_outputs += 1
-                    concept_outputs *= target_labels.unsqueeze(1) != 0
-
-                    masked_target_concepts = (target_concepts + 1) * (
-                        target_labels.unsqueeze(1) != 0
-                    )
-
-                    for metric in evaluator.concept_metric_dict.values():
-                        metric.update(concept_outputs, masked_target_concepts)
+            if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
+                evaluator.evaluate_concepts(concept_outputs, target_concepts)
 
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
@@ -537,17 +537,15 @@ class MetaModel:
                     metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
 
-        if self.training_mode in ("concept-bottleneck", "concept"):
-            for metric_name in evaluator.concept_metric_dict:
-                metric_results[metric_name] = (
-                    evaluator.concept_metric_dict[metric_name].compute().cpu().numpy()
-                )
-                if metric_results[metric_name].ndim == 0:
-                    metric_results[metric_name] = metric_results[metric_name].item()
+            if self.training_mode in ("concept-bottleneck", "concept"):
+                metric_results.update(evaluator.compute_concept_metric_results())
 
-                evaluator.concept_metric_dict[metric_name].reset()
-
-        last_loss = running_loss / len(val_loader)
+        last_loss = running_loss / iterations_per_val_epoch
+        avg_loss_components = {
+            k: v / iterations_per_val_epoch for k, v in running_loss_components.items()
+        }
+        for k, v in avg_loss_components.items():
+            metric_results[f"loss/{k}"] = v
         return last_loss, metric_results
 
     @torch.no_grad()  # type:ignore

@@ -5,6 +5,8 @@ import torch
 from transformers import AutoModel
 from transformers.modeling_outputs import SemanticSegmenterOutput
 
+from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+
 
 class LinearClassifier(torch.nn.Module):
     """A linear classifier module that performs pixel-wise classification on reshaped embeddings.
@@ -202,6 +204,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         concept_classifier (torch.nn.Conv2d): 1×1 conv mapping concepts → classes.
         token_width (int): Width of the patch-token grid.
         token_height (int): Height of the patch-token grid.
+        concept_value2id (dict): Optional mapping of concept names to ID mappings for each taxonomic rank.
     """
 
     def __init__(
@@ -210,6 +213,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         num_classes: int = 2,
         num_concepts: int = 2,
         input_size: tuple[int, int] = (512, 512),
+        concept_value2id: dict[str, dict[str, int]] | None = None,
         **kwargs: Any,
     ):
         """Initialize encoder, concept head, and segmentation classifier.
@@ -227,6 +231,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
 
         token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
         self.encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
+        self.concept_value2id = concept_value2id
         hidden_size = self.encoder.config.hidden_size
         patch_size = self.encoder.config.patch_size
         self.token_width = input_size[1] // patch_size
@@ -255,7 +260,9 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         concept_logits = torch.nn.functional.interpolate(
             concept_logits, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
-        logits = self.concept_classifier(concept_logits)
+        concept_outputs = self.concept_outputs_activation(concept_logits)
+
+        logits = self.concept_classifier(concept_outputs)
 
         logits = torch.nn.functional.interpolate(
             logits, size=x.shape[-2:], mode="bilinear", align_corners=False
@@ -269,7 +276,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         #     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=0)
         #     loss = loss_fct(logits.squeeze(), labels.squeeze())
 
-        return SemanticSegmenterOutput(loss=loss, logits=logits, hidden_states=concept_logits)
+        return SemanticSegmenterOutput(loss=loss, logits=logits, hidden_states=concept_outputs)
 
     def freeze_encoder(self) -> None:
         """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
@@ -289,3 +296,17 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         """
         for param in self.encoder.parameters():
             param.requires_grad = True
+
+    def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
+        offset = 0
+        activated_parts = []
+
+        for concept in TAXONOMIC_CONCEPTS:
+            concept_values = self.concept_value2id[concept]
+            order_concept_length = len(list(concept_values.values())[0])
+            chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
+            activated_parts.append(torch.softmax(chunk, dim=1))
+            offset += order_concept_length
+
+        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...]))
+        return torch.cat(activated_parts, dim=1)

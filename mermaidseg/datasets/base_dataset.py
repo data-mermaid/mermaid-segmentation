@@ -20,7 +20,7 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
-from mermaidseg.datasets.utils import create_annotation_mask
+from mermaidseg.datasets.utils import create_annotation_mask, emit_dataset_warning
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 def worker_init_fn(worker_id: int) -> None:
     """Configure logging in DataLoader worker processes.
 
-    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so
-    that warnings emitted in worker subprocesses are visible.
+    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so that warnings emitted
+    in worker subprocesses are visible.
     """
     logging.basicConfig(
         level=logging.WARNING,
@@ -181,21 +181,40 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         raise NotImplementedError("Subclasses should implement this method.")
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
-        image_id = self.df_images.loc[idx, "image_id"]
-        row_kwargs = self.df_images.loc[idx].to_dict()
+        """Return ``(image, source_labels)`` for ``idx``.
+
+        On any internal load/transform error we record the failure, emit a warning to logger +
+        stdout + stderr, and return ``(None, None)``. The dataset's :meth:`collate_fn` filters out
+        these placeholders, so a failed item drops out of the batch instead of crashing the loader.
+        """
         try:
-            image = self.read_image(**row_kwargs)
+            return self._load_item(idx)
         except Exception as e:
+            try:
+                image_id = self.df_images.loc[idx, "image_id"]
+                row_kwargs = self.df_images.loc[idx].to_dict()
+            except Exception:
+                image_id = None
+                row_kwargs = {}
             self._record_load_failure(image_id=image_id, row_kwargs=row_kwargs, error=e)
+
             source_info = {k: v for k, v in row_kwargs.items() if k != "image_id"}
-            logger.warning(
-                "Skipping image_id=%s (source=%s): %s: %s",
-                image_id,
-                source_info,
-                type(e).__name__,
-                e,
+            emit_dataset_warning(
+                f"{self.__class__.__name__}: skipping idx={idx} image_id={image_id} "
+                f"(source={source_info}): {type(e).__name__}: {e}"
             )
             return None, None
+
+    def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        """Perform a single load (no error handling).
+
+        Subclasses should override this rather than :meth:`__getitem__` so they inherit the
+        recursive-on-failure behaviour for free.
+        """
+        image_id = self.df_images.loc[idx, "image_id"]
+        row_kwargs = self.df_images.loc[idx].to_dict()
+
+        image = self.read_image(**row_kwargs)
 
         annotations = self.df_annotations.loc[
             self.df_annotations["image_id"] == image_id,
@@ -255,7 +274,12 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return path
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Collate function that filters out failed loads (``(None, None)`` items).
+        """Collate function that filters out ``(None, None)`` items (failed loads).
+
+        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load (after
+        recording the failure and emitting a warning); this filter drops them so a failed
+        item simply leaves the batch instead of crashing the loader. If every item in the
+        batch failed, empty tensors are returned and the training loop skips the step.
 
         Args:
             batch: List of ``(image, source_labels)`` tuples possibly containing
