@@ -1,0 +1,72 @@
+data:
+  default:
+    train:
+      transform:
+        SmallestMaxSize:
+          max_size: 1024
+        RandomResizedCrop:
+          size: [512, 512]
+          scale: [0.2, 1]
+          ratio: [0.75, 1.33]
+        HorizontalFlip:
+          p: 0.5
+        VerticalFlip:
+          p: 0.5
+        Normalize:
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+    val:
+      transform:
+        Resize:
+          width: 512
+          height: 512
+        Normalize:
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+
+  coralnet:
+    train:
+      whitelist_sources: [1645, 1783, 1968, 2055, 3058, 3064, 3363, 3401, 3411,
+                          3425, 3460, 3478, 3681, 4342, 4559, 4721, 4882, 5155,
+                          5181, 5847, 6053, 6537, 6687, 6698, 6716, 6721, 6722,
+                          6733, 6839, 6855, 6868, 6920, 6924, 6929, 6931, 6932]
+    val:
+      whitelist_sources: [1776, 2297, 2759, 2978, 3573, 4353, 4596, 4710, 5086,
+                          5444, 6521, 6699, 6700, 6717, 6834, 6838, 6923, 6930,
+                          6968, 7116]
+
+  mermaid:
+    val: null  # No validation data available for the mermaid dataset.
+
+  coralscapes:
+    train:
+      split: train
+      transform:
+        RandomResizedCrop:
+          size: [512, 512]
+          scale: [0.2, 1]
+          ratio: [0.75, 1.33]
+        HorizontalFlip:
+          p: 0.5
+        Normalize:
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+    val:
+      split: validation
+      transform:
+        Resize:
+          width: 512
+          height: 512
+        Normalize:
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+
+  catlin_seaview:
+    train:
+      whitelist_regions: ["ATL", "IND_CHA", "IND_MDV", "PAC_AUS", "PAC_IDN_PHL", "PAC_SLB", "PAC_TLS", "PAC_TWN", "PAC_USA"]
+    val: null
+
+  moorea_labeled_corals:
+    train:
+      whitelist_years: ["2008", "2009", "2010"]
+    val: null

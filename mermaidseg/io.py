@@ -1,136 +1,118 @@
 import argparse
+from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import albumentations as A
 import pandas as pd
 import yaml
 
 
 class ConfigDict(dict):
-    """Dictionary subclass with attribute-style access.
+    """Dictionary subclass with attribute-style access."""
 
-    Recursively converts nested dicts to `ConfigDict`, enabling dot-notation
-    access alongside standard dictionary operations.
-    """
+    def __init__(self, dictionary: Mapping[str, Any] | None = None, **kwargs: Any):
+        super().__init__()
+        if dictionary is not None:
+            self.update(dictionary)
+        if kwargs:
+            self.update(kwargs)
 
-    def __init__(self, dictionary: dict[str, Any]):
-        for key, value in dictionary.items():
-            if isinstance(value, dict):
-                value = ConfigDict(value)
-            self[key] = value
+    @staticmethod
+    def _wrap(value: Any) -> Any:
+        if isinstance(value, ConfigDict):
+            return value
+        if isinstance(value, Mapping):
+            return ConfigDict(value)
+        if isinstance(value, list):
+            return [ConfigDict._wrap(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(ConfigDict._wrap(item) for item in value)
+        return value
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        super().__setitem__(key, self._wrap(value))
 
     def __getattr__(self, attr: str) -> Any:
-        return self.get(attr)
+        try:
+            return self[attr]
+        except KeyError as exc:
+            raise AttributeError(attr) from exc
 
     def __setattr__(self, key: str, value: Any) -> None:
-        self.__setitem__(key, value)
+        self[key] = value
 
-
-def load_config(config_path: str) -> dict[str, Any]:
-    """Load configuration from a YAML file.
-
-    Args:
-        config_path (str): Path to the YAML configuration file.
-    Returns:
-        dict: Parsed configuration dictionary from the YAML file.
-    """
-
-    with open(config_path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def update_config(base_config: ConfigDict, config: ConfigDict) -> ConfigDict:
-    """Update a base configuration dictionary with values from another configuration dictionary.
-
-    This function performs a recursive update where nested dictionaries are merged rather
-    than completely replaced. For non-dictionary values, the new value overwrites the
-    existing one.
-    Args:
-        base_config (ConfigDict): The base configuration dictionary to be updated.
-        config (ConfigDict): The configuration dictionary containing updates to apply.
-    Returns:
-        ConfigDict: A new configuration dictionary with the updated values. The original
-                   base_config is not modified.
-    """
-    updated_config = base_config.copy()
-    for key, value in config.items():
-        if key in updated_config:
-            if isinstance(value, dict):
-                updated_config[key].update(value)
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        for mapping in args:
+            for key, value in dict(mapping).items():
+                current = self.get(key)
+                if isinstance(current, Mapping) and isinstance(value, Mapping):
+                    nested = ConfigDict(current)
+                    nested.update(value)
+                    self[key] = nested
+                else:
+                    self[key] = value
+        for key, value in kwargs.items():
+            current = self.get(key)
+            if isinstance(current, Mapping) and isinstance(value, Mapping):
+                nested = ConfigDict(current)
+                nested.update(value)
+                self[key] = nested
             else:
-                updated_config[key] = value
-        else:
-            updated_config[key] = value
-    return updated_config
+                self[key] = value
+
+    def copy(self) -> "ConfigDict":
+        return ConfigDict(deepcopy(dict(self)))
 
 
-def _load_csv_if_path(value: Any, header: int | None = 0) -> Any:
-    """Load CSV file if value is a file path, otherwise return as-is."""
-    if isinstance(value, str) and Path(value).is_file() and value.endswith(".csv"):
-        return pd.read_csv(value, header=header).to_numpy().flatten().tolist()
+def _ensure_section(config: ConfigDict, *path: str) -> ConfigDict:
+    current = config
+    for key in path:
+        section = current.get(key)
+        if not isinstance(section, Mapping):
+            section = ConfigDict()
+            current[key] = section
+        elif not isinstance(section, ConfigDict):
+            section = ConfigDict(section)
+            current[key] = section
+        current = section
+    return current
+
+
+def _set_config_value(config: ConfigDict, path: tuple[str, ...], value: Any) -> None:
+    if value is None:
+        return
+    section = _ensure_section(config, *path[:-1]) if len(path) > 1 else config
+    section[path[-1]] = value
+
+
+def _load_csv_value(value: Any, header: int | None = 0) -> Any:
+    """Load CSV paths recursively while keeping non-path values unchanged."""
+    if isinstance(value, Mapping):
+        return ConfigDict(
+            {key: _load_csv_value(subvalue, header=header) for key, subvalue in value.items()}
+        )
+    if isinstance(value, (str, Path)):
+        path = Path(value).expanduser()
+        if path.is_file() and path.suffix == ".csv":
+            return pd.read_csv(path, header=header).to_numpy().flatten().tolist()
     return value
 
 
-def setup_config(config_path: str | None = None, config_base_path: str = "configs/base.yaml"):
-    """Set up configuration by loading and merging base and custom config files.
-
-    This function loads a base configuration file and optionally merges it with
-    a custom configuration file. If no custom config path is provided, only the
-    base configuration is returned.
-    Args:
-        config_path (str, optional): Path to the custom configuration file.
-            If None, only the base configuration will be used. Defaults to None.
-        config_base_path (str, optional): Path to the base configuration file.
-            Defaults to "configs/base.yaml".
-    Returns:
-        ConfigDict: A configuration dictionary object containing the merged
-            configuration settings. If config_path is None, contains only the
-            base configuration.
-    Note:
-        The custom configuration will override any conflicting settings in the
-        base configuration during the merge process.
-    """
-
-    base_config = load_config(config_base_path)
-    if config_path is None:
-        return ConfigDict(base_config)
-    config = load_config(config_path)
-    updated_config = update_config(base_config, config)
-
-    cfg = ConfigDict(updated_config)
-
-    # if isinstance(cfg.data.class_subset, str) and Path(cfg.data.class_subset).is_file():
-    #     # with open(cfg.data.class_subset, "r") as f:
-    #     #     class_subset = [line.strip() for line in f.readlines()]
-    #     # cfg.data.class_subset = class_subset
-    if "class_subset" in cfg.data:
-        cfg.data.class_subset = _load_csv_if_path(cfg.data.class_subset)
-
-    if "whitelist_sources" in cfg.data:
-        cfg.data.whitelist_sources = _load_csv_if_path(cfg.data.whitelist_sources)
-        cfg.data.whitelist_sources.train = _load_csv_if_path(cfg.data.whitelist_sources.train)
-        cfg.data.whitelist_sources.val = _load_csv_if_path(cfg.data.whitelist_sources.val)
-        cfg.data.whitelist_sources.test = _load_csv_if_path(cfg.data.whitelist_sources.test)
-    if "blacklist_sources" in cfg.data:
-        cfg.data.blacklist_sources = _load_csv_if_path(cfg.data.blacklist_sources)
-
-    return cfg
+def load_config(config_path: str | Path) -> ConfigDict:
+    """Load configuration from a YAML file."""
+    with Path(config_path).open(encoding="utf-8") as file:
+        loaded = yaml.safe_load(file) or {}
+    if not isinstance(loaded, Mapping):
+        raise ValueError(
+            f"Configuration file {config_path} must contain a mapping at the top level."
+        )
+    return ConfigDict(loaded)
 
 
 def get_parser() -> argparse.ArgumentParser:
-    """Create and configure an argument parser for semantic segmentation training.
-
-    Returns:
-        argparse.ArgumentParser: Configured argument parser with the following options:
-            - run-name (str): Name identifier for the training run
-            - model (str): Name of the model to use for training
-            - batch-size (int): Batch size for training
-            - epochs (int): Number of training epochs
-            - lr (float): Learning rate for optimization
-            - model-checkpoint (str): Path to model checkpoint file
-            - log-epochs (int): Frequency of logging (every N epochs)
-            - config (str): Path to configuration file
-    """
+    """Create and configure an argument parser for semantic segmentation training."""
     parser = argparse.ArgumentParser(description="Semantic Segmentation Run")
 
     # model and dataset
@@ -141,6 +123,12 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, help="batch size")
     parser.add_argument("--epochs", type=int, help="number of epochs to train")
     parser.add_argument("--lr", type=float, help="learning rate")
+    parser.add_argument(
+        "--iterations-per-train-epoch", type=int, help="iterations per training epoch"
+    )
+    parser.add_argument(
+        "--iterations-per-val-epoch", type=int, help="iterations per validation epoch"
+    )
 
     # checkpoint and log
     parser.add_argument("--model-checkpoint", type=str, help="path to model checkpoint")
@@ -152,44 +140,115 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> ConfigDict:
-    """Update configuration dictionary with command line arguments.
-
-    Updates the provided configuration dictionary with values from command line
-    arguments if they are present. Only non-None argument values will override
-    the corresponding configuration values.
-    Args:
-        config (ConfigDict): The configuration dictionary to update.
-        args (argparse.Namespace): Command line arguments namespace containing
-            potential override values.
-    Returns:
-        ConfigDict: The updated configuration dictionary with command line
-            argument values applied.
-    Note:
-        The function modifies the following configuration paths if corresponding
-        arguments are provided:
-        - run_name: config["run_name"]
-        - model: config["model"]["name"]
-        - model_checkpoint: config["model"]["checkpoint"]
-        - batch_size: config["data"]["batch_size"]
-        - epochs: config["training"]["epochs"]
-        - lr: config["training"]["optimizer"]["lr"]
-        - log_epochs: config["logger"]["log_epochs"]
-    """
-
-    if args.run_name:
-        config["run_name"] = args.run_name
-    if args.model:
-        config["model"]["name"] = args.model
-    if args.model_checkpoint:
-        if "model" not in config:
-            config["model"] = ConfigDict({"name": "segformer"})
-        config["model"]["checkpoint"] = args.model_checkpoint
-    if args.batch_size:
-        config["data"]["batch_size"] = args.batch_size
-    if args.epochs:
-        config["training"]["epochs"] = args.epochs
-    if args.lr:
-        config["training"]["optimizer"]["lr"] = args.lr
-    if args.log_epochs:
-        config["logger"]["log_epochs"] = args.log_epochs
+    """Update configuration with command-line overrides."""
+    _set_config_value(config, ("run_name",), getattr(args, "run_name", None))
+    _set_config_value(config, ("model", "name"), getattr(args, "model", None))
+    _set_config_value(config, ("model", "checkpoint"), getattr(args, "model_checkpoint", None))
+    _set_config_value(config, ("training", "epochs"), getattr(args, "epochs", None))
+    _set_config_value(config, ("training", "optimizer", "lr"), getattr(args, "lr", None))
+    _set_config_value(config, ("training", "batch_size"), getattr(args, "batch_size", None))
+    _set_config_value(
+        config,
+        ("training", "iterations_per_train_epoch"),
+        getattr(args, "iterations_per_train_epoch", None),
+    )
+    _set_config_value(
+        config,
+        ("training", "iterations_per_val_epoch"),
+        getattr(args, "iterations_per_val_epoch", None),
+    )
+    _set_config_value(config, ("logger", "log_epochs"), getattr(args, "log_epochs", None))
     return config
+
+
+def preprocess_data_config(data_cfg_orig):
+    data_cfg = data_cfg_orig.copy()
+    if "default" in data_cfg.data:
+        default = data_cfg.data.pop("default", None)
+        for dataset_name in list(data_cfg.data.keys()):
+            dataset_tmp = data_cfg.data.get(dataset_name, None)
+            data_cfg.data[dataset_name] = default.copy() if default is not None else {}
+            if dataset_tmp is not None:
+                data_cfg.data[dataset_name].update(dataset_tmp)
+
+    for dataset_name in data_cfg.data:
+        for split_name in data_cfg.data[dataset_name]:
+            split_cfg = data_cfg.data[dataset_name][split_name]
+            if not isinstance(split_cfg, Mapping):
+                continue
+            # Use whichever key is present (only one should appear): 'augmentation' or 'transform'
+            key = next((k for k in ("augmentation", "transform") if k in split_cfg), None)
+            if key:
+                transform_spec = split_cfg.pop(key)
+                split_cfg.transform = A.Compose(
+                    [getattr(A, name)(**params) for name, params in transform_spec.items()]
+                )
+
+    return data_cfg
+
+
+def setup_config(
+    config_path_dict: dict[str, str | None] | None = None,
+    *,
+    config_path: str | None = None,
+    config_base_path: str = "configs/base.yaml",
+) -> ConfigDict:
+    """Load configs and return a unified ConfigDict.
+
+    New API — pass a dict mapping section names to file paths::
+
+        setup_config({
+            "data":     "configs/data_config.yaml",
+            "training": "configs/training_config.yaml",
+            "model":    "configs/model_config.yaml",
+            "logger":   "configs/logger_config.yaml",
+        })
+
+    Legacy API — pass ``config_path`` / ``config_base_path`` keyword args
+    (the base YAML is loaded and the override YAML is merged on top)::
+
+        setup_config(config_path="configs/my_run.yaml",
+                     config_base_path="configs/base_mermaid.yaml")
+    """
+    if config_path_dict is None:
+        # Legacy path: merge base + override into a single flat ConfigDict.
+        cfg = ConfigDict(load_config(config_base_path))
+        if config_path is not None:
+            cfg.update(load_config(config_path))
+        if "data" in cfg:
+            if "class_subset" in cfg.data:
+                cfg.data["class_subset"] = _load_csv_value(cfg.data["class_subset"])
+            if "whitelist_sources" in cfg.data:
+                cfg.data["whitelist_sources"] = _load_csv_value(cfg.data["whitelist_sources"])
+            if "blacklist_sources" in cfg.data:
+                cfg.data["blacklist_sources"] = _load_csv_value(cfg.data["blacklist_sources"])
+        return cfg
+
+    cfg = ConfigDict()
+    if "data" in config_path_dict:
+        data_cfg = load_config(config_path_dict["data"])
+        data_cfg = preprocess_data_config(data_cfg)
+        if "data" in data_cfg:
+            cfg.update(data_cfg)
+        else:
+            cfg.data = data_cfg
+    if "model" in config_path_dict:
+        model_cfg = load_config(config_path_dict["model"])
+        if "model" in model_cfg:
+            cfg.update(model_cfg)
+        else:
+            cfg.model = model_cfg
+    if "training" in config_path_dict:
+        training_cfg = load_config(config_path_dict["training"])
+        if "training" in training_cfg:
+            cfg.update(training_cfg)
+        else:
+            cfg.training = training_cfg
+    if "logger" in config_path_dict:
+        logger_cfg = load_config(config_path_dict["logger"])
+        if "logger" in logger_cfg:
+            cfg.update(logger_cfg)
+        else:
+            cfg.logger = logger_cfg
+
+    return cfg
