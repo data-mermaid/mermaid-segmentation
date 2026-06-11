@@ -243,7 +243,12 @@ def train_model(
         if test_loader is not None:
             test_start = time.time()
             _ = evaluate_and_log(evaluator, test_loader, meta_model, logger, epoch, "test")
-            epoch_loss_dict["test/time_taken"] = time.time() - test_start
+            test_time = time.time() - test_start
+            epoch_loss_dict["test/time_taken"] = test_time
+            # epoch_loss_dict was already logged above (before test eval ran), so log this
+            # timing metric directly to keep it in MLflow (matches main's behavior).
+            if logger is not None:
+                logger.log({"test/time_taken": test_time}, step=epoch)
     return metrics_epoch
 
 

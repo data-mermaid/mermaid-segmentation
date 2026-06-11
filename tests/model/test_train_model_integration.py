@@ -441,3 +441,27 @@ def test_train_model_logs_main_metric_set_to_logger() -> None:
         "train/samples_per_sec",
     ):
         assert key in logged_keys, f"{key!r} was not logged (logged: {sorted(logged_keys)})"
+
+
+def test_train_model_logs_test_time_taken_to_logger(monkeypatch) -> None:
+    """Regression guard (#PR2 review): test/time_taken must reach the logger.
+
+    epoch_loss_dict is logged before the test split is evaluated, so test/time_taken is added after
+    that log and must be logged separately — otherwise it silently never reaches MLflow.
+    """
+    monkeypatch.setattr(train_module, "evaluate_and_log", lambda *a, **k: {"accuracy": 0.5})
+    meta = FakeMetaModel(epochs=1, val_losses=[0.8], val_metrics_seq=[{"accuracy": 0.7}])
+    logger = StubLogger(log_epochs=1)
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        test_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    logged_keys = {key for payload, _ in logger.logged for key in payload}
+    assert "test/time_taken" in logged_keys, (
+        f"test/time_taken not logged (got {sorted(logged_keys)})"
+    )
