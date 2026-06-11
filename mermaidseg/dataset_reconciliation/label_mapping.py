@@ -34,13 +34,11 @@ def fetch_mermaid_target_labels(
     return sorted({rec["name"] for rec in records if rec.get("name") is not None})
 
 
-def fetch_coralnet_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
-) -> dict[str, str]:
-    """Fetch the CoralNet provider label -> MERMAID benthic-attribute name mapping.
+def fetch_coralnet_to_mermaid() -> dict[str, str]:
+    """Load the CoralNet provider label -> MERMAID benthic-attribute mapping from local config.
 
-    Returns a dict keyed by stringified CoralNet provider label with values equal to the MERMAID
-    benthic-attribute name (or ``None`` if the CoralNet label is not yet mapped).
+    Returns a dict keyed by stringified CoralNet provider label; values are the mapped MERMAID
+    benthic-attribute name(s) (or ``None`` if the CoralNet label is not yet mapped).
     """
     coralnet_to_mermaid_mapping_temporary_path = (
         Path(__file__).resolve().parents[2]
@@ -50,28 +48,14 @@ def fetch_coralnet_to_mermaid(
 
     with open(coralnet_to_mermaid_mapping_temporary_path) as f:
         return json.load(f)
-    # response = requests.get(mapping_endpoint, timeout=30)
-    # response.raise_for_status()
-    # data = response.json()
-    # labelset = list(data["results"])
-    # while data.get("next"):
-    #     response = requests.get(data["next"], timeout=30)
-    #     response.raise_for_status()
-    #     data = response.json()
-    #     labelset.extend(data["results"])
-    # return {str(label["provider_label"]): label["benthic_attribute_name"] for label in labelset}
 
 
-def fetch_catlin_seaview_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
-) -> dict[str, str]:
-    """Fetch the Catlin Seaview label-name -> MERMAID benthic-attribute name mapping.
+def fetch_catlin_seaview_to_mermaid() -> dict[str, str]:
+    """Return the static Catlin Seaview label-name -> MERMAID benthic-attribute mapping.
 
-    Mirrors :func:`fetch_coralnet_to_mermaid`: pages through the MERMAID API label-mappings endpoint
-    filtered to ``provider=Catlin Seaview`` and returns a dict keyed by the Catlin Seaview
-    ``provider_id`` (which holds the original Catlin label name) with values equal to the MERMAID
-    benthic-attribute name (or ``None`` if the Catlin label is not yet mapped, in which case it
-    collapses to background at training time).
+    Keyed by the original Catlin label name; values are the mapped MERMAID benthic-attribute
+    name(s). Labels absent from this map collapse to background at training time via
+    :class:`SourceLabelRegistry`.
     """
     return {
         "aarcheri": ["aplysina archeri"],
@@ -225,35 +209,14 @@ def fetch_catlin_seaview_to_mermaid(
         "xmuta": ["xestospongia muta"],
         "zoanthid": ["zoanthid"],
     }
-    response = requests.get(mapping_endpoint, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    labelset = list(data["results"])
-    while data.get("next"):
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        labelset.extend(data["results"])
-    return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
 
 
-def fetch_moorea_labeled_corals_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
-) -> dict[str, str]:
-    """Fetch the Moorea Labeled Corals label-name -> MERMAID benthic-attribute name mapping.
+def fetch_moorea_labeled_corals_to_mermaid() -> dict[str, str]:
+    """Return the static Moorea Labeled Corals label-name -> MERMAID benthic-attribute mapping.
 
-    Mirrors :func:`fetch_catlin_seaview_to_mermaid`: pages through the MERMAID
-    API label-mappings endpoint filtered to ``provider=Moorea Labeled
-    Corals`` and returns a dict keyed by the Moorea ``provider_id`` (which
-    holds the original Moorea label name, e.g. ``"Acropora"`` or ``"Turf"``)
-    with values equal to the MERMAID benthic-attribute name (or ``None`` if
-    the Moorea label is not yet mapped, in which case it collapses to
-    background at training time).
-
-    Note: the Moorea Labeled Corals provider mapping has not yet been
-    populated on the MERMAID side at the time of writing -- this fetcher will
-    return an empty dict in that case, which causes every Moorea source label
-    to fall back to background through :class:`SourceLabelRegistry`.
+    Keyed by the original Moorea label name (e.g. ``"acrop"`` or ``"turf"``); values are the mapped
+    MERMAID benthic-attribute name(s). Labels absent from this map collapse to background at
+    training time via :class:`SourceLabelRegistry`.
     """
     return {
         "acan": ["acanthastrea"],
@@ -283,37 +246,14 @@ def fetch_moorea_labeled_corals_to_mermaid(
         "tuba": ["tubastraea"],
         "turf": ["turf algae"],
     }
-    response = requests.get(mapping_endpoint, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    labelset = list(data["results"])
-    while data.get("next"):
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        labelset.extend(data["results"])
-    return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
 
 
-def fetch_pacific_labeled_corals_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
-) -> dict[str, str]:
-    """Fetch the Pacific Labeled Corals label-name -> MERMAID benthic-attribute name mapping.
+def fetch_pacific_labeled_corals_to_mermaid() -> dict[str, str]:
+    """Return the static Pacific Labeled Corals label-name -> MERMAID benthic-attribute mapping.
 
-    Mirrors :func:`fetch_moorea_labeled_corals_to_mermaid`: pages through the
-    MERMAID API label-mappings endpoint filtered to ``provider=Pacific
-    Labeled Corals`` and returns a dict keyed by the Pacific Labeled Corals
-    ``provider_id`` (which holds the original Pacific label name from the
-    per-site ``labelmap.txt``, e.g. ``"Acropora"`` or ``"CCA"``) with values
-    equal to the MERMAID benthic-attribute name (or ``None`` if the Pacific
-    label is not yet mapped, in which case it collapses to background at
-    training time).
-
-    Note: the Pacific Labeled Corals provider mapping has not yet been
-    populated on the MERMAID side at the time of writing -- this fetcher
-    will return an empty dict in that case, which causes every Pacific
-    Labeled Corals source label to fall back to background through
-    :class:`SourceLabelRegistry`.
+    Keyed by the original Pacific label name from the per-site ``labelmap.txt`` (e.g. ``"acropora"``
+    or ``"cca"``); values are the mapped MERMAID benthic-attribute name(s). Labels absent from this
+    map collapse to background at training time via :class:`SourceLabelRegistry`.
     """
     return {
         "acropora": ["Acropora"],
@@ -333,16 +273,6 @@ def fetch_pacific_labeled_corals_to_mermaid(
         "turf": ["turf algae"],
         "unclear": ["Unknown", "Obscured"],
     }
-    response = requests.get(mapping_endpoint, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    labelset = list(data["results"])
-    while data.get("next"):
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        labelset.extend(data["results"])
-    return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
 
 
 def fetch_ucsd_mosaics_to_mermaid(
@@ -375,36 +305,14 @@ def fetch_ucsd_mosaics_to_mermaid(
     return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
 
 
-def fetch_benthos_yuval_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet",
-) -> dict[str, str]:
-    """Fetch the Benthos Yuval label-name -> MERMAID benthic-attribute name mapping.
+def fetch_benthos_yuval_to_mermaid() -> dict[str, str]:
+    """Return the static Benthos Yuval label-name -> MERMAID benthic-attribute mapping.
 
-    Mirrors :func:`fetch_moorea_labeled_corals_to_mermaid`: pages through the
-    MERMAID API label-mappings endpoint filtered to ``provider=Benthos
-    Yuval`` and returns a dict keyed by the Benthos Yuval ``provider_id``
-    (which holds the original Benthos label name from
-    ``dictionary_labels.txt`` / ``dictionary_labelsDW.txt``, e.g.
-    ``"Acropora"`` or ``"Sand"``) with values equal to the MERMAID
-    benthic-attribute name (or ``None`` if the Benthos label is not yet
-    mapped, in which case it collapses to background at training time).
-
-    Note: the Benthos Yuval provider mapping has not yet been populated on
-    the MERMAID side at the time of writing -- this fetcher will return an
-    empty dict in that case, which causes every Benthos Yuval source label
-    to fall back to background through :class:`SourceLabelRegistry`.
+    Keyed by the original Benthos label name (e.g. ``"algae"`` or ``"sand"``); values are the mapped
+    MERMAID benthic-attribute name(s). Labels absent from this map collapse to background at
+    training time via :class:`SourceLabelRegistry`.
     """
     return {"algae": ["Turf algae"], "other": ["other"], "sand": ["Sand"], "sponge": ["Sponge"]}
-    response = requests.get(mapping_endpoint, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    labelset = list(data["results"])
-    while data.get("next"):
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        labelset.extend(data["results"])
-    return {str(label["provider_id"]): label["benthic_attribute_name"] for label in labelset}
 
 
 def coralscapes_to_mermaid() -> dict[str, list[str]]:
