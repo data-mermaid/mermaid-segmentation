@@ -23,6 +23,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from mermaidseg.dataset_reconciliation.concept_schema import (
+    ConceptSchema,
+    build_source_to_concepts,
+)
 from mermaidseg.dataset_reconciliation.concepts import (
     initialize_benthic_concepts,
     initialize_benthic_hierarchy,
@@ -52,6 +56,18 @@ _BUILTIN_DEFAULT_FETCHERS = {
     "mermaid": _identity_source_to_target,
     "coralscapes": _coralscapes_source_to_target,
 }
+
+
+def roll_up_label(label: str, benthic_hierarchy: dict[str, str], subset: set[str]) -> str | None:
+    if label in subset:
+        return label
+    if label in benthic_hierarchy:
+        parent = benthic_hierarchy[label]
+        while parent is not None:
+            if parent in subset:
+                return parent
+            parent = benthic_hierarchy[parent]
+    return None
 
 
 class SourceLabelRegistry:
@@ -92,16 +108,20 @@ class SourceLabelRegistry:
     source_to_concepts: torch.Tensor | None
     global_id2source: dict[int, tuple[str, str]]
     dataset_offsets: dict[str, int]
+    concept_value2id: dict[str, int] | None
 
     def __init__(
         self,
         datasets: list[Any],
         target_labels: list[str] | None = None,
         source_to_target_name_maps: dict[str, dict[str, str]] | None = None,
-        concept_hierarchy: dict[str, str] | None = None,
+        benthic_hierarchy: dict[str, str] | None = None,
         compute_concepts: bool = False,
+        label_roll_up: bool = False,
         target_label_subset: list[str] | set[str] | None = None,
         fetch_remote: bool = True,
+        concept_mapping_path: str | None = None,
+        concept_schema: ConceptSchema | None = None,
     ):
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
@@ -163,14 +183,27 @@ class SourceLabelRegistry:
         self.target_label2id = {v: k for k, v in self.target_id2label.items()}
         self.num_target_classes = len(self.target_id2label) + 1  # +1 for background
 
+        if label_roll_up:
+            if benthic_hierarchy is None:
+                if not fetch_remote:
+                    raise ValueError(
+                        "label_roll_up=True requires benthic_hierarchy or fetch_remote=True"
+                    )
+                benthic_hierarchy = initialize_benthic_hierarchy()
+            if subset is None:
+                raise ValueError("label_roll_up=True requires target_label_subset to be set")
+
         # Dense lookup `global_source_id -> target_class_id`; index 0 stays
         # background, and any source name without a target (or filtered out by
-        # `subset`) is left as 0 so it collapses to background at train time.
+        # `subset`) either has an attempted roll up to a parent class or
+        # is left as 0 so it collapses to background at train time.
         source_to_target_np = np.zeros(num_global_source + 1, dtype=np.int64)
         for ds in self.datasets:
             offset = self.dataset_offsets[ds.SOURCE_NAME]
             for local_id, source_name in sorted(ds.source_id2name.items()):
                 target_name = resolved_maps[ds.SOURCE_NAME].get(source_name)
+                if label_roll_up:
+                    target_name = roll_up_label(target_name, benthic_hierarchy, subset)
                 if target_name is None:
                     continue
                 if subset is not None and target_name not in subset:
@@ -178,21 +211,18 @@ class SourceLabelRegistry:
                 target_id = self.target_label2id.get(target_name, 0)
                 source_to_target_np[local_id + offset] = target_id
         self.source_to_target = torch.from_numpy(source_to_target_np).long()
-
+        self.global_idmask: dict[int, bool] = {
+            global_id: source_to_target_np[global_id] != 0 for global_id in self.global_id2source
+        }
         self.source_to_concepts = None
         self._concept_matrix = None
         self.concept_id2name: dict[int, str] | None = None
         self.concept_name2id: dict[str, int] | None = None
+        self.concept_value2id: dict[str, dict[str, int]] | None = None
         if compute_concepts:
-            if concept_hierarchy is None:
-                if not fetch_remote:
-                    raise ValueError(
-                        "compute_concepts=True requires concept_hierarchy or fetch_remote=True"
-                    )
-                concept_hierarchy = initialize_benthic_hierarchy()
             self._build_concepts(
-                source_to_target_np=source_to_target_np,
-                concept_hierarchy=concept_hierarchy,
+                concept_mapping_path=concept_mapping_path,
+                concept_schema=concept_schema,
             )
 
         for ds in self.datasets:
@@ -299,28 +329,29 @@ class SourceLabelRegistry:
 
     def _build_concepts(
         self,
-        source_to_target_np: np.ndarray,
-        concept_hierarchy: dict[str, str],
-    ) -> None:
-        """Build the ``source_to_concepts`` lookup tensor and concept metadata."""
-        target_label_names = [self.target_id2label[i] for i in sorted(self.target_id2label)]
-        concept_set, concept_matrix = initialize_benthic_concepts(
-            target_label_names, concept_hierarchy
+        concept_mapping_path: str | None = None,
+        concept_schema: ConceptSchema | None = None,
+    ):
+        if concept_schema is not None:
+            self._concept_matrix = None
+            self.concept_value2id = concept_schema.concept_value2id
+            self.concept_id2name = concept_schema.channel_id2name()
+            self.concept_name2id = {v: k for k, v in self.concept_id2name.items()}
+            self.source_to_concepts = build_source_to_concepts(
+                self.global_id2source, concept_schema
+            )
+            return
+
+        concept_matrix, source_to_concepts, concept_value2id = initialize_benthic_concepts(
+            mapping_location=concept_mapping_path,
+            global_id2source=self.global_id2source,
+            global_idmask=self.global_idmask,
         )
         self._concept_matrix = concept_matrix
-        self.concept_id2name = dict(enumerate(concept_set, start=1))
+        self.concept_id2name = dict(enumerate(concept_value2id.keys(), start=1))
         self.concept_name2id = {v: k for k, v in self.concept_id2name.items()}
-
-        num_concepts = len(concept_set)
-        num_global = source_to_target_np.shape[0]
-        source_to_concepts_np = np.zeros((num_global, num_concepts), dtype=np.float32)
-        target_to_concepts = concept_matrix.to_numpy().astype(np.float32)
-        for global_id in range(1, num_global):
-            target_id = int(source_to_target_np[global_id])
-            if target_id == 0:
-                continue
-            source_to_concepts_np[global_id] = target_to_concepts[target_id - 1]
-        self.source_to_concepts = torch.from_numpy(source_to_concepts_np).float()
+        self.concept_value2id = concept_value2id
+        self.source_to_concepts = source_to_concepts
 
     @property
     def concept_matrix(self):
@@ -348,16 +379,16 @@ class SourceLabelRegistry:
     def conceptid2labelid(self) -> dict[int, int] | None:
         """Backward-compat helper used by ``postprocess_predicted_concepts``.
 
-        Returns a dict mapping per-concept-column index (``benthic_concept_matrix``
-        column ordering, 0-indexed) to the corresponding target label ID
-        (1-indexed, 0 if not a leaf class).
+        Returns a dict mapping per-concept-column index (``benthic_concept_matrix`` column ordering,
+        0-indexed) to the corresponding target label ID (1-indexed, 0 if not a leaf class).
         """
-        if self._concept_matrix is None:
-            return None
-        column_concepts = self._concept_matrix.columns.get_level_values("concept").tolist()
-        result: dict[int, int] = {}
-        for col_ind, concept_name in enumerate(column_concepts):
-            target_id = self.target_label2id.get(concept_name)
-            if target_id is not None:
-                result[col_ind] = target_id
-        return result
+        return None
+        # if self._concept_matrix is None:
+        #     return None
+        # column_concepts = self._concept_matrix.columns.get_level_values("concept").tolist()
+        # result: dict[int, int] = {}
+        # for col_ind, concept_name in enumerate(column_concepts):
+        #     target_id = self.target_label2id.get(concept_name)
+        #     if target_id is not None:
+        #         result[col_ind] = target_id
+        # return result
