@@ -148,6 +148,12 @@ def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> Con
 
 
 def preprocess_data_config(data_cfg_orig):
+    """Normalize the split data config (configs/data_config.yaml).
+
+    Expands the per-dataset ``default`` block into every dataset that does not override it, then
+    compiles each split's ``augmentation``/``transform`` spec into an ``albumentations.Compose``
+    object.
+    """
     data_cfg = data_cfg_orig.copy()
     if "default" in data_cfg.data:
         default = data_cfg.data.pop("default", None)
@@ -172,7 +178,20 @@ def preprocess_data_config(data_cfg_orig):
 
 
 def setup_config(config_path_dict: dict[str, str | None]) -> ConfigDict:
-    """Load the base config, optionally merge overrides, and normalize data inputs."""
+    """Load and merge the split config files into a single ConfigDict.
+
+    Takes a mapping of section name -> YAML path, e.g.::
+
+        {"data": "configs/data_config.yaml",
+         "model": "configs/model_config_cbm.yaml",
+         "training": "configs/training_config_cbm.yaml",
+         "logger": "configs/logger_config.yaml"}
+
+    Each file is loaded under its section key (a file may already wrap its
+    contents in that key, or not — both are accepted). The data config is
+    additionally normalized via ``preprocess_data_config`` (per-dataset default
+    expansion + albumentations transform compilation).
+    """
     cfg = ConfigDict()
     if "data" in config_path_dict:
         data_cfg = load_config(config_path_dict["data"])

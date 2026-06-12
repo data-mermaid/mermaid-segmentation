@@ -288,7 +288,7 @@ def test_cli_metric_of_interest_argument_is_supported() -> None:
     args = parser.parse_args(
         [
             "--config",
-            "configs/linear-dinov3-base.yaml",
+            "configs/data_config.yaml",
             "--metric-of-interest",
             "miou",
         ]
@@ -299,7 +299,7 @@ def test_cli_metric_of_interest_argument_is_supported() -> None:
         parser.parse_args(
             [
                 "--config",
-                "configs/linear-dinov3-base.yaml",
+                "configs/data_config.yaml",
                 "--metric-of-interest",
                 "precision",
             ]

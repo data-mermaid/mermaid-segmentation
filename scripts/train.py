@@ -5,14 +5,24 @@ it uses the locked project venv. Cell outputs freeze when the browser
 disconnects — this script writes structured logs to a file so progress is
 always captured.
 
+The run is configured by four split configs, each with a sensible default:
+``--config-data`` (configs/data_config.yaml), ``--config-model``
+(configs/model_config_cbm.yaml), ``--config-training``
+(configs/training_config_cbm.yaml), and ``--config-logger``
+(configs/logger_config.yaml). Override any one independently.
+
 Usage::
 
-    # Foreground (debug)
-    uv run python scripts/train.py --config configs/linear-dinov3-base.yaml
+    # Foreground (debug) — uses the default split configs
+    uv run python scripts/train.py
+
+    # Override an individual split (e.g. standard, non-CBM training)
+    uv run python scripts/train.py \\
+        --config-model configs/model_config.yaml \\
+        --config-training configs/training_config.yaml
 
     # Background — safe to close the browser window
     nohup uv run python scripts/train.py \\
-        --config configs/linear-dinov3-base.yaml \\
         --auto-shutdown \\
         > logs/train_$(date +%Y%m%d_%H%M%S).log 2>&1 &
     echo $! > logs/train.pid
@@ -21,7 +31,7 @@ Usage::
     tail -f logs/train_*.log
 
     # Dry run (1 batch, smoke test)
-    uv run python scripts/train.py --config configs/linear-dinov3-base.yaml --dry-run
+    uv run python scripts/train.py --dry-run
 """
 
 import argparse
