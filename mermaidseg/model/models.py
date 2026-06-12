@@ -1,11 +1,16 @@
 import os
+from collections.abc import Sequence
 from typing import Any
 
 import torch
-from transformers import AutoModel
+from peft import LoraConfig, get_peft_model
+from transformers import AutoModel, DPTConfig
 from transformers.modeling_outputs import SemanticSegmenterOutput
+from transformers.models.dpt.modeling_dpt import DPTNeck
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+
+DEFAULT_LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
 
 class LinearClassifier(torch.nn.Module):
@@ -310,3 +315,425 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
 
         activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...]))
         return torch.cat(activated_parts, dim=1)
+
+
+def _wrap_encoder_with_lora(
+    encoder: torch.nn.Module,
+    lora_r: int,
+    lora_alpha: int,
+    lora_dropout: float,
+    lora_target_modules: Sequence[str],
+    lora_bias: str,
+) -> torch.nn.Module:
+    """Wrap a DINOv3 encoder with PEFT LoRA adapters.
+
+    The pretrained backbone weights are frozen and only the injected low-rank adapter matrices
+    remain trainable, which keeps the parameter/optimizer footprint small while still adapting the
+    attention projections.
+    """
+    lora_config = LoraConfig(
+        r=lora_r,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        target_modules=list(lora_target_modules),
+        bias=lora_bias,
+    )
+    return get_peft_model(encoder, lora_config)
+
+
+class DPTHead(torch.nn.Module):
+    """Dense Prediction Transformer head over selected ViT hidden states.
+
+    Reassembles a handful of intermediate transformer feature maps into a
+    multi-scale image-like pyramid (DPT "reassemble" + RefineNet fusion) and
+    applies a small conv head, producing dense ``out_channels`` features at a
+    fraction of the input resolution.
+
+    Args:
+        hidden_size: Channel dimension of the backbone token embeddings.
+        out_channels: Number of output channels produced by the head.
+        token_width: Width of the patch-token grid.
+        token_height: Height of the patch-token grid.
+        neck_hidden_sizes: Per-stage channel sizes for the reassemble stage.
+        fusion_hidden_size: Channel width of the RefineNet fusion blocks.
+        reassemble_factors: Spatial resampling factor per stage.
+        dropout: Dropout applied inside the conv head.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        out_channels: int,
+        token_width: int,
+        token_height: int,
+        neck_hidden_sizes: Sequence[int] = (256, 512, 1024, 1024),
+        fusion_hidden_size: int = 256,
+        reassemble_factors: Sequence[float] = (4, 2, 1, 0.5),
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.token_width = token_width
+        self.token_height = token_height
+        self.num_stages = len(neck_hidden_sizes)
+
+        dpt_config = DPTConfig(
+            hidden_size=hidden_size,
+            neck_hidden_sizes=list(neck_hidden_sizes),
+            reassemble_factors=list(reassemble_factors),
+            fusion_hidden_size=fusion_hidden_size,
+            readout_type="project",
+            is_hybrid=False,
+            neck_ignore_stages=[],
+        )
+        self.neck = DPTNeck(dpt_config)
+        self.head = torch.nn.Sequential(
+            torch.nn.Conv2d(
+                fusion_hidden_size, fusion_hidden_size, kernel_size=3, padding=1, bias=False
+            ),
+            torch.nn.BatchNorm2d(fusion_hidden_size),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Dropout(dropout),
+            torch.nn.Conv2d(fusion_hidden_size, out_channels, kernel_size=1),
+        )
+
+    def forward(self, hidden_states: Sequence[torch.Tensor]) -> torch.Tensor:
+        """Run the DPT neck + conv head.
+
+        Args:
+            hidden_states: Sequence of ``num_stages`` token tensors, each of
+                shape ``(B, 1 + token_height * token_width, hidden_size)`` with
+                the CLS token at index 0 (register tokens already stripped).
+        Returns:
+            torch.Tensor: Dense features of shape ``(B, out_channels, H_f, W_f)``.
+        """
+        if len(hidden_states) != self.num_stages:
+            raise ValueError(
+                f"DPTHead expects {self.num_stages} hidden states, got {len(hidden_states)}."
+            )
+        features = self.neck(hidden_states, self.token_height, self.token_width)
+        return self.head(features[-1])
+
+
+class _DPTDINOv3Base(torch.nn.Module):
+    """Shared backbone/head wiring for the DPT DINOv3 models.
+
+    The encoder can either be adapted with PEFT LoRA (``use_lora=True``) or used as a plain frozen
+    backbone (``use_lora=False``), in which case only the DPT head (and any downstream concept
+    layers) is trained.
+    """
+
+    def __init__(
+        self,
+        *,
+        encoder_name: str,
+        input_size: tuple[int, int],
+        out_indices: Sequence[int] | None,
+        neck_hidden_sizes: Sequence[int],
+        fusion_hidden_size: int,
+        reassemble_factors: Sequence[float],
+        head_out_channels: int,
+        use_lora: bool = True,
+        lora_r: int = 16,
+        lora_alpha: int = 32,
+        lora_dropout: float = 0.05,
+        lora_target_modules: Sequence[str] = DEFAULT_LORA_TARGET_MODULES,
+        lora_bias: str = "none",
+        **kwargs: Any,
+    ):
+        super().__init__()
+        token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
+        base_encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
+
+        config = base_encoder.config
+        hidden_size = config.hidden_size
+        patch_size = config.patch_size
+        num_register_tokens = getattr(config, "num_register_tokens", 4)
+        self.num_prefix_tokens = 1 + num_register_tokens  # CLS + register tokens
+        num_hidden_layers = config.num_hidden_layers
+
+        if out_indices is None:
+            # 4 evenly spaced blocks across the transformer depth.
+            out_indices = [
+                round((i + 1) * num_hidden_layers / len(neck_hidden_sizes))
+                for i in range(len(neck_hidden_sizes))
+            ]
+        if len(out_indices) != len(neck_hidden_sizes):
+            raise ValueError(
+                "out_indices and neck_hidden_sizes must have the same length "
+                f"({len(out_indices)} vs {len(neck_hidden_sizes)})."
+            )
+        # hidden_states has length num_hidden_layers + 1 (index 0 == embeddings).
+        self.out_indices = list(out_indices)
+
+        self.use_lora = use_lora
+        if use_lora:
+            self.encoder = _wrap_encoder_with_lora(
+                base_encoder,
+                lora_r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                lora_target_modules=lora_target_modules,
+                lora_bias=lora_bias,
+            )
+        else:
+            self.encoder = base_encoder
+        # Only meaningful for the non-LoRA path: gates the no-grad encoder pass.
+        self._encoder_frozen = False
+
+        self.patch_size = patch_size
+        self.token_width = input_size[1] // patch_size
+        self.token_height = input_size[0] // patch_size
+
+        self.dpt_head = DPTHead(
+            hidden_size=hidden_size,
+            out_channels=head_out_channels,
+            token_width=self.token_width,
+            token_height=self.token_height,
+            neck_hidden_sizes=neck_hidden_sizes,
+            fusion_hidden_size=fusion_hidden_size,
+            reassemble_factors=reassemble_factors,
+        )
+
+        # No-LoRA models default to a frozen backbone (head-only training).
+        if not use_lora:
+            self.freeze_encoder()
+
+    def _encode(self, x: torch.Tensor, **kwargs: Any) -> list[torch.Tensor]:
+        """Run the encoder and return the selected hidden states (CLS + patches).
+
+        When the (non-LoRA) backbone is frozen the encoder pass runs under ``torch.no_grad`` to save
+        memory; the LoRA path always keeps gradients so the adapters can learn.
+        """
+        if self._encoder_frozen:
+            with torch.no_grad():
+                outputs = self.encoder(x, output_hidden_states=True, **kwargs)
+        else:
+            outputs = self.encoder(x, output_hidden_states=True, **kwargs)
+
+        hidden_states = outputs.hidden_states
+        selected = []
+        for idx in self.out_indices:
+            hs = hidden_states[idx]
+            # Keep CLS (index 0), drop register tokens, keep patch tokens.
+            selected.append(torch.cat([hs[:, :1], hs[:, self.num_prefix_tokens :]], dim=1))
+        return selected
+
+    def freeze_encoder(self) -> None:
+        """Freeze the backbone.
+
+        With LoRA the pretrained weights are frozen but the low-rank adapters
+        stay trainable (so gradients still flow through the encoder). Without
+        LoRA the whole encoder is frozen and its forward pass runs under
+        ``torch.no_grad``.
+        """
+        if self.use_lora:
+            for name, param in self.encoder.named_parameters():
+                param.requires_grad = "lora_" in name
+        else:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            self._encoder_frozen = True
+
+    def unfreeze_encoder(self) -> None:
+        """Unfreeze the full encoder (base weights + LoRA adapters, if any)."""
+        for param in self.encoder.parameters():
+            param.requires_grad = True
+        self._encoder_frozen = False
+
+
+class _LinearDPTDINOv3(_DPTDINOv3Base):
+    """DINOv3 + DPT head producing class logits directly."""
+
+    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
+        """Run encoder + DPT head and upsample logits to input resolution."""
+        hidden_states = self._encode(x, **kwargs)
+        logits = self.dpt_head(hidden_states)
+        logits = torch.nn.functional.interpolate(
+            logits, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
+        return SemanticSegmenterOutput(loss=None, logits=logits)
+
+
+class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
+    """DINOv3 + DPT head feeding a concept bottleneck before classification."""
+
+    def __init__(
+        self,
+        *,
+        num_classes: int,
+        num_concepts: int,
+        concept_value2id: dict[str, dict[str, int]] | None,
+        concept_feature_dim: int,
+        **kwargs: Any,
+    ):
+        super().__init__(head_out_channels=concept_feature_dim, **kwargs)
+        self.concept_value2id = concept_value2id
+        self.concept_proj = torch.nn.Conv2d(concept_feature_dim, num_concepts, kernel_size=1)
+        self.concept_classifier = torch.nn.Conv2d(num_concepts, num_classes, kernel_size=1)
+
+    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
+        """Run encoder + DPT head, the concept bottleneck, and the class classifier."""
+        hidden_states = self._encode(x, **kwargs)
+        concept_features = self.dpt_head(hidden_states)
+        concept_features = torch.nn.functional.interpolate(
+            concept_features, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
+        concept_logits = self.concept_proj(concept_features)
+        concept_outputs = self.concept_outputs_activation(concept_logits)
+
+        logits = self.concept_classifier(concept_outputs)
+        return SemanticSegmenterOutput(loss=None, logits=logits, hidden_states=concept_outputs)
+
+    def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
+        offset = 0
+        activated_parts = []
+
+        for concept in TAXONOMIC_CONCEPTS:
+            concept_values = self.concept_value2id[concept]
+            order_concept_length = len(list(concept_values.values())[0])
+            chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
+            activated_parts.append(torch.softmax(chunk, dim=1))
+            offset += order_concept_length
+
+        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...]))
+        return torch.cat(activated_parts, dim=1)
+
+
+class LinearDPTLoRADINOv3(_LinearDPTDINOv3):
+    """DINOv3 encoder (LoRA-adapted) with a DPT segmentation head."""
+
+    def __init__(
+        self,
+        encoder_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m",
+        num_classes: int = 2,
+        input_size: tuple[int, int] = (512, 512),
+        out_indices: Sequence[int] | None = None,
+        neck_hidden_sizes: Sequence[int] = (256, 512, 1024, 1024),
+        fusion_hidden_size: int = 256,
+        reassemble_factors: Sequence[float] = (4, 2, 1, 0.5),
+        lora_r: int = 16,
+        lora_alpha: int = 32,
+        lora_dropout: float = 0.05,
+        lora_target_modules: Sequence[str] = DEFAULT_LORA_TARGET_MODULES,
+        lora_bias: str = "none",
+        **kwargs: Any,
+    ):
+        super().__init__(
+            encoder_name=encoder_name,
+            input_size=input_size,
+            out_indices=out_indices,
+            neck_hidden_sizes=neck_hidden_sizes,
+            fusion_hidden_size=fusion_hidden_size,
+            reassemble_factors=reassemble_factors,
+            head_out_channels=num_classes,
+            use_lora=True,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_target_modules=lora_target_modules,
+            lora_bias=lora_bias,
+            **kwargs,
+        )
+
+
+class LinearDPTDINOv3(_LinearDPTDINOv3):
+    """DINOv3 encoder (frozen, no LoRA) with a DPT segmentation head."""
+
+    def __init__(
+        self,
+        encoder_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m",
+        num_classes: int = 2,
+        input_size: tuple[int, int] = (512, 512),
+        out_indices: Sequence[int] | None = None,
+        neck_hidden_sizes: Sequence[int] = (256, 512, 1024, 1024),
+        fusion_hidden_size: int = 256,
+        reassemble_factors: Sequence[float] = (4, 2, 1, 0.5),
+        **kwargs: Any,
+    ):
+        super().__init__(
+            encoder_name=encoder_name,
+            input_size=input_size,
+            out_indices=out_indices,
+            neck_hidden_sizes=neck_hidden_sizes,
+            fusion_hidden_size=fusion_hidden_size,
+            reassemble_factors=reassemble_factors,
+            head_out_channels=num_classes,
+            use_lora=False,
+            **kwargs,
+        )
+
+
+class ConceptBottleneckDPTLoRADINOv3(_ConceptBottleneckDPTDINOv3):
+    """DINOv3 encoder (LoRA-adapted) with a DPT head feeding a concept bottleneck."""
+
+    def __init__(
+        self,
+        encoder_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m",
+        num_classes: int = 2,
+        num_concepts: int = 2,
+        input_size: tuple[int, int] = (512, 512),
+        concept_value2id: dict[str, dict[str, int]] | None = None,
+        concept_feature_dim: int = 256,
+        out_indices: Sequence[int] | None = None,
+        neck_hidden_sizes: Sequence[int] = (256, 512, 1024, 1024),
+        fusion_hidden_size: int = 256,
+        reassemble_factors: Sequence[float] = (4, 2, 1, 0.5),
+        lora_r: int = 16,
+        lora_alpha: int = 32,
+        lora_dropout: float = 0.05,
+        lora_target_modules: Sequence[str] = DEFAULT_LORA_TARGET_MODULES,
+        lora_bias: str = "none",
+        **kwargs: Any,
+    ):
+        super().__init__(
+            num_classes=num_classes,
+            num_concepts=num_concepts,
+            concept_value2id=concept_value2id,
+            concept_feature_dim=concept_feature_dim,
+            encoder_name=encoder_name,
+            input_size=input_size,
+            out_indices=out_indices,
+            neck_hidden_sizes=neck_hidden_sizes,
+            fusion_hidden_size=fusion_hidden_size,
+            reassemble_factors=reassemble_factors,
+            use_lora=True,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_target_modules=lora_target_modules,
+            lora_bias=lora_bias,
+            **kwargs,
+        )
+
+
+class ConceptBottleneckDPTDINOv3(_ConceptBottleneckDPTDINOv3):
+    """DINOv3 encoder (frozen, no LoRA) with a DPT head feeding a concept bottleneck."""
+
+    def __init__(
+        self,
+        encoder_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m",
+        num_classes: int = 2,
+        num_concepts: int = 2,
+        input_size: tuple[int, int] = (512, 512),
+        concept_value2id: dict[str, dict[str, int]] | None = None,
+        concept_feature_dim: int = 256,
+        out_indices: Sequence[int] | None = None,
+        neck_hidden_sizes: Sequence[int] = (256, 512, 1024, 1024),
+        fusion_hidden_size: int = 256,
+        reassemble_factors: Sequence[float] = (4, 2, 1, 0.5),
+        **kwargs: Any,
+    ):
+        super().__init__(
+            num_classes=num_classes,
+            num_concepts=num_concepts,
+            concept_value2id=concept_value2id,
+            concept_feature_dim=concept_feature_dim,
+            encoder_name=encoder_name,
+            input_size=input_size,
+            out_indices=out_indices,
+            neck_hidden_sizes=neck_hidden_sizes,
+            fusion_hidden_size=fusion_hidden_size,
+            reassemble_factors=reassemble_factors,
+            use_lora=False,
+            **kwargs,
+        )

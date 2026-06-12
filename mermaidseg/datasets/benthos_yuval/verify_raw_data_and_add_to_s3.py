@@ -129,7 +129,7 @@ def build_classes_and_colors(
 def _build_raw_to_global_lut(
     variant_dict: dict[str, int], classes_global: dict[str, int]
 ) -> np.ndarray:
-    """uint8 LUT mapping the per-site raw mask IDs into the global classes.json IDs."""
+    """Uint8 LUT mapping the per-site raw mask IDs into the global classes.json IDs."""
     lut = np.zeros(256, dtype=np.uint8)
     for name, raw_id in variant_dict.items():
         lut[int(raw_id)] = np.uint8(classes_global.get(name, 0))
@@ -144,9 +144,9 @@ def tile_mosaics(
 ) -> tuple[list[tuple[str, str, Path, Path]], pd.DataFrame]:
     """Tile each mosaic into 2048x2048 PNG image/label pairs on local disk.
 
-    Returns ``(tiles, df_annotations)`` where ``tiles`` is one
-    ``(site, image_id, image_path, label_path)`` per saved tile (used for
-    upload) and ``df_annotations`` is one row per (tile, present-class).
+    Returns ``(tiles, df_annotations)`` where ``tiles`` is one ``(site, image_id, image_path,
+    label_path)`` per saved tile (used for upload) and ``df_annotations`` is one row per (tile,
+    present-class).
     """
     tiles_root = workdir / "tiles"
     tiles_root.mkdir(parents=True, exist_ok=True)
@@ -230,7 +230,10 @@ def upload_tiles(
     skip_existing: bool,
     dry_run: bool,
 ) -> int:
-    """Upload tile PNGs to S3 in parallel. Returns the number of objects uploaded."""
+    """Upload tile PNGs to S3 in parallel.
+
+    Returns the number of objects uploaded.
+    """
     s3 = boto3.client("s3")
 
     tasks: list[tuple[Path, str]] = []

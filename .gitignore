@@ -227,3 +227,6 @@ __marimo__/
 .cursor/
 
 .worktrees/
+
+# Gradio runtime artifacts (local TLS cert, etc.)
+.gradio/

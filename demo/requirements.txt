@@ -1,0 +1,2 @@
+gradio>=5.0
+mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@main
