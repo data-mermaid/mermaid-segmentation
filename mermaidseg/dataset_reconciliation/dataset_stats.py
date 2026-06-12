@@ -1,11 +1,13 @@
 """Pure helpers that compute per-run dataset statistics in target space.
 
-These helpers operate on already-resolved annotation frames and a ``SourceLabelRegistry``. They
-never touch MLflow or perform any I/O — the ``Logger.log_dataset_statistics`` orchestrator calls
-them and uploads the resulting frames/dicts.
+These helpers operate on already-resolved annotation frames and a
+``SourceLabelRegistry``. They never touch MLflow or perform any I/O — the
+``Logger.log_dataset_statistics`` orchestrator calls them and uploads the
+resulting frames/dicts.
 
-Class identity ("target" space) comes from the registry; per-source rows preserve dataset-level keys
-(``region_*`` for mermaid, ``source_id`` for coralnet).
+Class identity ("target" space) comes from the registry; per-source rows
+preserve dataset-level keys (``region_*`` for mermaid, ``source_id`` for
+coralnet).
 """
 
 from __future__ import annotations
@@ -38,7 +40,8 @@ def classify_kind(target_id: int, target_name: str) -> str:
 def _source_name_to_target(dataset: Any, registry: Any) -> dict[str, int]:
     """Build ``source_label_name -> target_id`` for one dataset.
 
-    ``target_id`` is 0 if the registry maps the corresponding global source id to background.
+    ``target_id`` is 0 if the registry maps the corresponding global source id
+    to background.
     """
     s2t = registry.source_to_target
     mapping: dict[str, int] = {}
@@ -97,9 +100,9 @@ def resolve_split_annotations(split: Any, registry: Any):
 def compute_class_counts(resolved_splits: dict, registry: Any) -> pd.DataFrame:
     """Target-space per-class × split counts and fractions.
 
-    ``resolved_splits`` maps split-name to the tuple returned by ``resolve_split_annotations``. The
-    function reads ``target_id`` from each resolved annotation frame — no source-name lookups happen
-    here.
+    ``resolved_splits`` maps split-name to the tuple returned by
+    ``resolve_split_annotations``. The function reads ``target_id`` from each
+    resolved annotation frame — no source-name lookups happen here.
     """
     all_classes: list[tuple[int, str]] = [(0, "background")]
     all_classes.extend(sorted(registry.target_id2label.items()))
@@ -154,9 +157,10 @@ def _source_columns(df_annotations: pd.DataFrame) -> tuple[str, str] | None:
 def compute_class_by_source(resolved_splits: dict, registry: Any) -> pd.DataFrame:
     """Long-format source × class × split frame in target space.
 
-    Zero-count rows are omitted. Background (``target_id == 0``) is excluded — annotation rows never
-    carry the background class. Rows whose ``target_id`` is 0 after registry mapping (e.g. unmapped
-    source labels) are also dropped.
+    Zero-count rows are omitted. Background (``target_id == 0``) is excluded
+    — annotation rows never carry the background class. Rows whose
+    ``target_id`` is 0 after registry mapping (e.g. unmapped source labels)
+    are also dropped.
     """
     target_id2label = registry.target_id2label
     cols = [
@@ -202,8 +206,9 @@ def compute_class_by_source(resolved_splits: dict, registry: Any) -> pd.DataFram
 def compute_train_summary(resolved_splits: dict, registry: Any) -> dict:
     """Top-level summary dict serialized to ``train_summary.yaml``.
 
-    Class-balance metrics (``top1/3/5_share``, ``effective_num_classes``) are computed over the
-    training split only, eligible classes only (i.e. excluding background and unclassified).
+    Class-balance metrics (``top1/3/5_share``, ``effective_num_classes``) are
+    computed over the training split only, eligible classes only (i.e.
+    excluding background and unclassified).
     """
     target_id2label = registry.target_id2label
     eligible_ids = [
@@ -284,8 +289,9 @@ def compute_train_summary(resolved_splits: dict, registry: Any) -> dict:
 def compute_source_stats(resolved_splits: dict) -> pd.DataFrame:
     """Per-region/source x split image and annotation counts.
 
-    Mermaid (``region_*``) and CoralNet (``source_id``) rows coexist in the same frame,
-    distinguished by ``source_type``. ``source_key`` is always a string.
+    Mermaid (``region_*``) and CoralNet (``source_id``) rows coexist in the
+    same frame, distinguished by ``source_type``. ``source_key`` is always a
+    string.
     """
     split_names = list(resolved_splits.keys())
     rows_by_key: dict[tuple[str, str], dict] = {}

@@ -132,8 +132,8 @@ def make_registry_stub(
 ) -> StubRegistry:
     """Build a StubRegistry.
 
-    ``source_to_target_pairs`` is a list of ``(global_source_id, target_id)``. Missing entries
-    default to 0 (background).
+    ``source_to_target_pairs`` is a list of ``(global_source_id, target_id)``.
+    Missing entries default to 0 (background).
     """
     if num_global_source is None:
         num_global_source = max((g for g, _ in source_to_target_pairs), default=0) + 1

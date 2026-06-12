@@ -1,13 +1,15 @@
 """UCSD Mosaics PyTorch dataset.
 
-Wraps the HuggingFace mirror at ``josauder/UCSD-mosaics-mirror`` (the GT-Clean variant of the UCSD
-Mosaics dense semantic segmentation dataset; Edwards et al. 2017 + Alonso et al. 2019 + Raine et al.
-2024) and emits ``(image, source_labels)`` tuples where ``source_labels`` is in the **native UCSD
-Mosaics 1..34 label space** taken straight from the HF ``classes.json``. Pixel value ``0`` in the
-source mask is the unlabeled / unidentified ignore label and is mapped to background.
+Wraps the HuggingFace mirror at ``josauder/UCSD-mosaics-mirror`` (the GT-Clean
+variant of the UCSD Mosaics dense semantic segmentation dataset; Edwards et al.
+2017 + Alonso et al. 2019 + Raine et al. 2024) and emits
+``(image, source_labels)`` tuples where ``source_labels`` is in the **native
+UCSD Mosaics 1..34 label space** taken straight from the HF ``classes.json``.
+Pixel value ``0`` in the source mask is the unlabeled / unidentified ignore
+label and is mapped to background.
 
-See ``README.md`` for dataset history and ``nbs/ucsd_mosaics_EDA.ipynb`` for a hands-on tour of the
-HuggingFace mirror.
+See ``README.md`` for dataset history and ``nbs/ucsd_mosaics_EDA.ipynb`` for
+a hands-on tour of the HuggingFace mirror.
 """
 
 from __future__ import annotations
@@ -178,8 +180,8 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _build_native_to_local(self) -> np.ndarray:
         """Build a vectorized lookup from native UCSD IDs (0..34) to local source IDs.
 
-        Native ID ``0`` (ignore) and any class not present in ``class_subset`` map to ``0``
-        (background).
+        Native ID ``0`` (ignore) and any class not present in ``class_subset``
+        map to ``0`` (background).
         """
         max_native = max(int(entry["id"]) for entry in self.class_table) + 1
         lookup = np.zeros(max_native, dtype=np.int64)
@@ -228,7 +230,9 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             native_mask = np.asarray(row["label"], dtype=np.int64)
             mask = self._native_to_local[native_mask]
         except Exception as e:
-            logger.warning("UCSDMosaicsDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e)
+            logger.warning(
+                "UCSDMosaicsDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e
+            )
             return None, None
 
         if self._global_offset:

@@ -153,8 +153,9 @@ def _download_and_extract(
 def download_raw(workdir: Path, *, force: bool) -> Path:
     """Download all source zips and extract into ``workdir``.
 
-    Returns the directory where the per-region image folders + ``tabular-data/`` live (i.e.
-    ``workdir`` itself; this matches the layout assumed by ``catlin_seaview.ipynb``).
+    Returns the directory where the per-region image folders + ``tabular-data/``
+    live (i.e. ``workdir`` itself; this matches the layout assumed by
+    ``catlin_seaview.ipynb``).
     """
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -244,9 +245,10 @@ def build_annotations(data_root: Path) -> tuple[pd.DataFrame, dict[str, list[str
 def is_valid_image(path: Path) -> bool:
     """Return True iff the local jpg exists and can be fully decoded by PIL.
 
-    Catches the ``OSError: image file is truncated`` / ``UnidentifiedImageError`` family of
-    exceptions emitted by PIL when a JPG is corrupt or partially written. Forces a full decode via
-    ``img.load()`` rather than ``verify()`` so truncated bodies are also caught.
+    Catches the ``OSError: image file is truncated`` / ``UnidentifiedImageError``
+    family of exceptions emitted by PIL when a JPG is corrupt or partially
+    written. Forces a full decode via ``img.load()`` rather than ``verify()``
+    so truncated bodies are also caught.
     """
     if not path.exists() or path.stat().st_size == 0:
         return False
@@ -328,9 +330,9 @@ def upload_images(
 ) -> dict[str, int]:
     """Upload per-region jpgs to S3, parallelised across regions/images.
 
-    Returns a dict ``{region: num_uploaded}`` (excludes already-present keys when
-    ``cfg.skip_existing_s3`` is True, and counts intended uploads under ``--dry-run`` without
-    actually transferring bytes).
+    Returns a dict ``{region: num_uploaded}`` (excludes already-present keys
+    when ``cfg.skip_existing_s3`` is True, and counts intended uploads under
+    ``--dry-run`` without actually transferring bytes).
     """
     s3 = boto3.client("s3")
 
