@@ -41,18 +41,6 @@ from mermaidseg.model.meta import MetaModel
 logger = logging.getLogger(__name__)
 
 
-def is_training_metric(key: str) -> bool:
-    """Return True when ``key`` is an allowed train/validation loss or accuracy metric."""
-    for split in ("train", "validation"):
-        prefix = f"{split}/"
-        if not key.startswith(prefix):
-            continue
-        suffix = key[len(prefix) :]
-        if suffix.startswith("loss/") or suffix.startswith("accuracy/"):
-            return True
-    return False
-
-
 try:
     import wandb
 
@@ -106,9 +94,8 @@ def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
 def mlflow_connect(uri: str | None = None) -> timedelta:
     """Set the MLflow tracking URI and verify connectivity.
 
-    Returns the time taken to establish the connection. The connection test
-    may take a long time to fail unless ``MLFLOW_HTTP_REQUEST_MAX_RETRIES``
-    is set to a low number.
+    Returns the time taken to establish the connection. The connection test may take a long time to
+    fail unless ``MLFLOW_HTTP_REQUEST_MAX_RETRIES`` is set to a low number.
     """
     if uri is None:
         uri = get_mlflow_tracking_uri()
@@ -180,8 +167,8 @@ def resume_run(run_id: str) -> mlflow.ActiveRun:
 class Logger:
     """MLflow-focused logger for experiment tracking during training and evaluation.
 
-    wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy
-    ``WandbLogger`` delegate during the deprecation period.
+    wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy ``WandbLogger``
+    delegate during the deprecation period.
     """
 
     def __init__(
@@ -459,9 +446,8 @@ class Logger:
     def log_reconciliation(self, registry) -> None:
         """Log the joint :class:`SourceLabelRegistry` artifacts to MLflow.
 
-        Saves ``global_id2source``, ``target_id2label``, ``source_to_target``
-        and (when present) ``concept_id2name`` so MLflow runs are
-        self-describing.
+        Saves ``global_id2source``, ``target_id2label``, ``source_to_target`` and (when present)
+        ``concept_id2name`` so MLflow runs are self-describing.
         """
         if not self._ensure_active_run():
             return
@@ -662,22 +648,6 @@ class Logger:
             logger.warning("Failed to ensure active MLflow run: %s", e)
             return False
 
-    def log_training_metrics(self, metrics: dict[str, float], step: int) -> None:
-        """Log only train/validation loss and accuracy metrics to MLflow."""
-        metrics_to_log = {
-            key: float(value)
-            for key, value in (metrics or {}).items()
-            if is_training_metric(key) and np.isscalar(value)
-        }
-        if self._ensure_active_run() and metrics_to_log:
-            try:
-                mlflow.log_metrics(metrics_to_log, step=step)
-            except Exception as e:
-                logger.warning("Failed to log training metrics to MLflow: %s", e)
-
-        if self._wandb_logger is not None and metrics_to_log:
-            self._wandb_logger.log(metrics_to_log, step=step)
-
     def log(self, log_dict, step):
         if self._ensure_active_run():
             try:
@@ -699,17 +669,15 @@ class Logger:
     ):
         """Save a model checkpoint locally and/or to MLflow.
 
-        Local persistence is controlled by ``save_local_checkpoints``.
-        MLflow logging is independent of local persistence.
+        Local persistence is controlled by ``save_local_checkpoints``. MLflow logging is independent
+        of local persistence.
 
-        When ``is_best`` is True (the default), the checkpoint is also written
-        to the ``best-model`` artifact path and tagged accordingly.  Pass
-        ``is_best=False`` to save a checkpoint without overwriting the current
-        best model.
+        When ``is_best`` is True (the default), the checkpoint is also written to the ``best-model``
+        artifact path and tagged accordingly.  Pass ``is_best=False`` to save a checkpoint without
+        overwriting the current best model.
 
-        Checkpoint files are named ``model_epoch{epoch}`` — resuming from a
-        previous epoch will overwrite the file unless ``checkpoint_dir`` or
-        ``run_name`` differs.
+        Checkpoint files are named ``model_epoch{epoch}`` — resuming from a previous epoch will
+        overwrite the file unless ``checkpoint_dir`` or ``run_name`` differs.
         """
         timestamp = time.strftime("%Y%m%d%H%M%S")
 
@@ -756,6 +724,9 @@ class Logger:
                         torch.save(checkpoint, tmp_path)  # type: ignore
                         mlflow.log_artifact(tmp_path, artifact_path="checkpoints")
 
+                checkpoint_metrics = self._unpack_metrics(metrics_dict, key_prefix="checkpoint")
+                mlflow.log_metrics(checkpoint_metrics, step=epoch)
+
                 if is_best:
                     # Log best model as a plain artifact instead of
                     # mlflow.pytorch.log_model() which triggers an internal
@@ -794,6 +765,10 @@ class Logger:
                         mlflow.log_artifact(metadata_path, artifact_path="best-model")
                     mlflow.set_tag("best_model_logged", "true")
                     mlflow.set_tag("best_model_epoch", str(epoch))
+                    mlflow.log_metrics(
+                        {f"best_model/{k}": v for k, v in scalar_metrics.items()},
+                        step=epoch,
+                    )
 
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
             except Exception as e:
@@ -820,7 +795,6 @@ class Logger:
         artifact_path: str = "publish",
     ):
         """Export model weights as SafeTensors for secure, pickle-free sharing."""
-
         if not self._ensure_active_run():
             logger.warning("Cannot save safetensors: no active MLflow run")
             return

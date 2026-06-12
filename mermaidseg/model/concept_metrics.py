@@ -34,8 +34,8 @@ def taxonomic_target_and_mask(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Target class index and valid mask for one taxonomic rank slice.
 
-    Taxonomic channels use 0=not_given, 1=inactive, 2=active (concrete class).
-    Only pixels with at least one active (==2) channel contribute to loss/metrics.
+    Taxonomic channels use 0=not_given, 1=inactive, 2=active (concrete class). Only pixels with at
+    least one active (==2) channel contribute to loss/metrics.
     """
     active = concept_labels.eq(2)
     valid_mask = active.any(dim=1)

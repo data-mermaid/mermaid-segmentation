@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Any
 
@@ -22,6 +23,8 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     source_labels_to_target_labels,
 )
 from mermaidseg.io import ConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class MetaModel:
@@ -196,9 +199,8 @@ class MetaModel:
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
 
-        When ``source_to_target_lookup`` is ``None``, source labels are assumed
-        to already be in target space (identity passthrough — useful for
-        single-source or synthetic pipelines).
+        When ``source_to_target_lookup`` is ``None``, source labels are assumed to already be in
+        target space (identity passthrough — useful for single-source or synthetic pipelines).
         """
         if self.source_to_target_lookup is None:
             return source_labels
@@ -268,7 +270,6 @@ class MetaModel:
         Returns:
             A 4-tuple of ``(loss, outputs, concept_outputs, loss_components)``.
         """
-
         loss = None
         outputs = None
         concept_outputs = None
@@ -366,6 +367,9 @@ class MetaModel:
             data_time_total += time.perf_counter() - batch_end
 
             images, source_labels = data
+            if images.numel() == 0:
+                logger.warning("train_epoch: skipping an empty batch (all items failed to load).")
+                continue
             images = images.to(self.device).float()
             source_labels = source_labels.long().to(self.device)
             target_labels = self._to_target_labels(source_labels)
@@ -461,7 +465,6 @@ class MetaModel:
         | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch."""
-
         iterations_per_val_epoch = self.iterations_per_val_epoch
         if iterations_per_val_epoch is None:
             iterations_per_val_epoch = len(val_loader)
@@ -485,6 +488,11 @@ class MetaModel:
                 self._val_loader = val_loader
                 data = next(self._val_loader_iter)
             images, source_labels = data
+            if images.numel() == 0:
+                logger.warning(
+                    "validation_epoch: skipping an empty batch (all items failed to load)."
+                )
+                continue
             images = images.to(self.device).float()
             source_labels = source_labels.long().to(self.device)
             target_labels = self._to_target_labels(source_labels)

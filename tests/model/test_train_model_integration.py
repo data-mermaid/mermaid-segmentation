@@ -12,7 +12,11 @@ import pytest
 import torch
 
 import mermaidseg.model.train as train_module
-from mermaidseg.model.train import train_model
+from mermaidseg.model.train import (
+    _enforce_load_failure_rate,
+    _loader_load_failure_count,
+    train_model,
+)
 from scripts.train import (
     _build_parser,
     _configure_third_party_loggers,
@@ -284,7 +288,7 @@ def test_cli_metric_of_interest_argument_is_supported() -> None:
     args = parser.parse_args(
         [
             "--config",
-            "configs/linear-dinov3-base.yaml",
+            "configs/data_config.yaml",
             "--metric-of-interest",
             "miou",
         ]
@@ -295,7 +299,7 @@ def test_cli_metric_of_interest_argument_is_supported() -> None:
         parser.parse_args(
             [
                 "--config",
-                "configs/linear-dinov3-base.yaml",
+                "configs/data_config.yaml",
                 "--metric-of-interest",
                 "precision",
             ]
@@ -358,3 +362,106 @@ def test_save_failure_report_if_available_writes_parquet(tmp_path: Path) -> None
     assert report_path is not None
     assert report_path.exists()
     assert report_path.suffix == ".parquet"
+
+
+class _FakeFailDataset:
+    """Dataset stub exposing the load-failure tracking API used by the rate guard."""
+
+    def __init__(self, size: int, failures: int) -> None:
+        self._size = size
+        self._failures = failures
+
+    def __len__(self) -> int:
+        return self._size
+
+    def num_load_failures(self) -> int:
+        return self._failures
+
+
+class _FakeLoader:
+    def __init__(self, dataset: object) -> None:
+        self.dataset = dataset
+
+
+def test_loader_load_failure_count_returns_none_for_untracked_dataset() -> None:
+    assert _loader_load_failure_count(_FakeLoader(object())) is None
+    assert _loader_load_failure_count(_FakeLoader(_FakeFailDataset(100, 7))) == 7
+
+
+def test_enforce_load_failure_rate_raises_above_threshold() -> None:
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=10))
+    with pytest.raises(RuntimeError, match="load-failure rate"):
+        _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
+
+
+def test_enforce_load_failure_rate_uses_per_epoch_delta() -> None:
+    # 100 cumulative failures but only 2 new this epoch on a 100-item set -> 2% < 5%, no raise.
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=100))
+    _enforce_load_failure_rate(loader, failures_before=98, max_rate=0.05, epoch=3)
+
+
+def test_enforce_load_failure_rate_allows_below_threshold() -> None:
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=3))
+    _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
+
+
+def test_enforce_load_failure_rate_disabled_when_none() -> None:
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=99))
+    _enforce_load_failure_rate(loader, failures_before=0, max_rate=None, epoch=0)
+
+
+def test_enforce_load_failure_rate_noop_for_untracked_dataset() -> None:
+    # Untracked dataset -> failures_before is None -> guard is a no-op (does not raise).
+    _enforce_load_failure_rate(_FakeLoader(object()), failures_before=None, max_rate=0.05, epoch=0)
+
+
+def test_train_model_logs_main_metric_set_to_logger() -> None:
+    """Regression guard: train/val metrics AND per-epoch timing/loss reach the logger.
+
+    The branch had replaced unfiltered logging with a filter that dropped timing/gpu/raw-loss
+    metrics; this asserts main's metric set is tracked again.
+    """
+    meta = FakeMetaModel(epochs=1, val_losses=[0.8], val_metrics_seq=[{"accuracy": 0.7}])
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    logged_keys = {key for payload, _ in logger.logged for key in payload}
+    for key in (
+        "train/accuracy",
+        "validation/accuracy",
+        "train/loss",
+        "validation/loss",
+        "train/time_taken",
+        "train/samples_per_sec",
+    ):
+        assert key in logged_keys, f"{key!r} was not logged (logged: {sorted(logged_keys)})"
+
+
+def test_train_model_logs_test_time_taken_to_logger(monkeypatch) -> None:
+    """Regression guard (#PR2 review): test/time_taken must reach the logger.
+
+    epoch_loss_dict is logged before the test split is evaluated, so test/time_taken is added after
+    that log and must be logged separately — otherwise it silently never reaches MLflow.
+    """
+    monkeypatch.setattr(train_module, "evaluate_and_log", lambda *a, **k: {"accuracy": 0.5})
+    meta = FakeMetaModel(epochs=1, val_losses=[0.8], val_metrics_seq=[{"accuracy": 0.7}])
+    logger = StubLogger(log_epochs=1)
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        test_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    logged_keys = {key for payload, _ in logger.logged for key in payload}
+    assert "test/time_taken" in logged_keys, (
+        f"test/time_taken not logged (got {sorted(logged_keys)})"
+    )

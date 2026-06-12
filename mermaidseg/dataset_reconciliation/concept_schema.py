@@ -20,8 +20,8 @@ from mermaidseg.dataset_reconciliation.concepts import (
 class ConceptSchema:
     """Run-scoped frozen concept channel layout.
 
-    Channel widths are derived from all CSV rows for the requested sources,
-    independent of which labels appear in train vs val splits.
+    Channel widths are derived from all CSV rows for the requested sources, independent of which
+    labels appear in train vs val splits.
     """
 
     channel_names: tuple[str, ...]

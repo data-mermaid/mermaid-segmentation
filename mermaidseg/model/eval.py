@@ -52,7 +52,7 @@ class Evaluator:
             self.metric_dict = metric_dict
         elif include_classification:
             self.metric_dict = {
-                "accuracy/classification": Accuracy(
+                "accuracy": Accuracy(
                     task="multiclass" if num_classes > 2 else "binary",
                     num_classes=num_classes,
                     ignore_index=ignore_index,
@@ -185,7 +185,6 @@ class Evaluator:
         NDArray[np.int_] | int,
     ]:
         """Return one image, its ground-truth target label, and the model prediction."""
-
         meta_model.model.eval()
         with torch.no_grad():
             data = next(iter(dataloader))

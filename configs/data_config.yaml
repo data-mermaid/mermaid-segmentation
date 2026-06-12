@@ -1,5 +1,5 @@
 data:
-  default: 
+  default:
     train:
       transform:
         SmallestMaxSize:
@@ -25,17 +25,18 @@ data:
             std: [0.229, 0.224, 0.225]
 
   coralnet:
-      whitelist_sources: [1645, 1783, 1968, 2055, 3058, 3064, 3363, 3401, 3411, 
-                          3425, 3460, 3478, 3681, 4342, 4559, 4721, 4882, 5155, 
-                          5181, 5847, 6053, 6537, 6687, 6698, 6716, 6721, 6722, 
+    train:
+      whitelist_sources: [1645, 1783, 1968, 2055, 3058, 3064, 3363, 3401, 3411,
+                          3425, 3460, 3478, 3681, 4342, 4559, 4721, 4882, 5155,
+                          5181, 5847, 6053, 6537, 6687, 6698, 6716, 6721, 6722,
                           6733, 6839, 6855, 6868, 6920, 6924, 6929, 6931, 6932]
 
-    val:  
-      whitelist_sources: [1776, 2297, 2759, 2978, 3573, 4353, 4596, 4710, 5086, 
-                          5444, 6521, 6699, 6700, 6717, 6834, 6838, 6923, 6930, 
+    val:
+      whitelist_sources: [1776, 2297, 2759, 2978, 3573, 4353, 4596, 4710, 5086,
+                          5444, 6521, 6699, 6700, 6717, 6834, 6838, 6923, 6930,
                           6968, 7116]
 
-  mermaid: 
+  mermaid:
     val: None # We currently have no validation data for the mermaid dataset, so we set this to None to avoid speculation.
 
   coralscapes:
@@ -62,7 +63,7 @@ data:
           std: [0.229, 0.224, 0.225]
 
   benthos_yuval:
-    train: None 
+    train: None
     val:
       whitelist_sites: ["RS24", "CR_DoubleWreck"]
 

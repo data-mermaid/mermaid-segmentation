@@ -1,9 +1,8 @@
 """Benthic-attribute concept hierarchy and source-label-to-concept mapping.
 
-Exposes the helpers that fetch the MERMAID benthic-attribute hierarchy, build
-a label/concept matrix from a list of label names, and a GPU-friendly
-``source_labels_to_concepts`` lookup driven by a precomputed ``(N+1, C)``
-float tensor (with row 0 as the all-zeros background row).
+Exposes the helpers that fetch the MERMAID benthic-attribute hierarchy, build a label/concept matrix
+from a list of label names, and a GPU-friendly ``source_labels_to_concepts`` lookup driven by a
+precomputed ``(N+1, C)`` float tensor (with row 0 as the all-zeros background row).
 """
 
 from __future__ import annotations
@@ -79,8 +78,8 @@ def initialize_benthic_hierarchy(
 ) -> dict[str, str | None]:
     """Fetch and build a benthic-attribute name -> parent-name hierarchy.
 
-    See the original implementation in ``mermaidseg.datasets.concepts`` (now
-    moved here) for full docstring.
+    See the original implementation in ``mermaidseg.datasets.concepts`` (now moved here) for full
+    docstring.
     """
     response = requests.get(hierarchy_json_url, timeout=30)
     response.raise_for_status()
@@ -161,9 +160,8 @@ def generate_taxonomic_binary_id_mapping(
 ) -> dict[str, list[int]] | None:
     """Generate binary-style encodings for a taxonomic rank.
 
-    The concrete values for a rank become one column each. ``not_given`` maps
-    to all zeros, ``none`` maps to all ones, and each concrete value maps to 2
-    in its own column and 1 in the others.
+    The concrete values for a rank become one column each. ``not_given`` maps to all zeros, ``none``
+    maps to all ones, and each concrete value maps to 2 in its own column and 1 in the others.
     """
     concrete_values = sorted(
         value for value in df[taxonomic_col].dropna().unique() if value not in ["not_given"]
@@ -207,7 +205,6 @@ def initialize_taxonomic_concept_mapping(
 ) -> tuple[torch.Tensor, dict[str, dict]]:
     """Initialize taxonomic concept mapping by generating a mapping from source labels to taxonomic
     concepts and a dictionary of names to ID mappings for each taxonomic rank."""
-
     df_mapping_taxonomic = df_mapping[
         ["global_id", "source_label_class_name", "source_dataset_source"]
     ].copy()
@@ -326,9 +323,9 @@ def initialize_taxonomic_binary_concept_mapping(
 ) -> tuple[torch.Tensor, dict[str, dict[str, list[int]]]]:
     """Initialize a binary-style taxonomic concept mapping.
 
-    Each concrete value within a taxonomic rank gets its own output column.
-    ``not_given`` is encoded as all zeros and ``none`` is encoded as all ones.
-    Concrete values are encoded as 2 at their own column and 1 everywhere else.
+    Each concrete value within a taxonomic rank gets its own output column. ``not_given`` is encoded
+    as all zeros and ``none`` is encoded as all ones. Concrete values are encoded as 2 at their own
+    column and 1 everywhere else.
     """
     encoded_df, channel_names, concept_value2id = encode_concept_channels_from_df(
         df_mapping, binary_taxonomy_encoding=True

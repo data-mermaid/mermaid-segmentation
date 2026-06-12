@@ -6,11 +6,18 @@ Reads CoralNet point annotations from a Parquet file on S3 and emits
 own label catalogue. Mapping into the MERMAID benthic attribute target space
 is performed externally via
 :mod:`mermaidseg.dataset_reconciliation.label_mapping`.
+
+The Parquet file referenced by ``annotations_path`` is produced by the
+reproducible ETL at :mod:`mermaidseg.datasets.coralnet.etl` (see
+``wiki/CoralNet-ETL.md``). Default-path resolution falls back to the legacy
+filename for backward compatibility; pin a specific build via
+``MERMAID_CORALNET_ANNOTATIONS_PATH`` or ``MERMAID_CORALNET_ANNOTATIONS_VERSION``.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import boto3
@@ -21,6 +28,28 @@ from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from mermaidseg.datasets.utils import get_image_s3
+
+_LEGACY_ANNOTATIONS_PATH = "coralnet_annotations_30112025.parquet"
+
+
+def _resolve_default_annotations_path() -> str:
+    """Resolve the default ``annotations_path`` from env vars, falling back to the legacy file.
+
+    Precedence:
+        1. ``MERMAID_CORALNET_ANNOTATIONS_PATH`` — full S3 key as published by the ETL.
+        2. ``MERMAID_CORALNET_ANNOTATIONS_VERSION`` — version tag from
+            :func:`mermaidseg.datasets.coralnet.etl.compute_version_tag`;
+            builds ``coralnet_annotations_<version>.parquet``.
+        3. Legacy literal ``coralnet_annotations_30112025.parquet`` so existing
+            training runs keep working until the next default is published.
+    """
+    explicit = os.getenv("MERMAID_CORALNET_ANNOTATIONS_PATH")
+    if explicit:
+        return explicit
+    version = os.getenv("MERMAID_CORALNET_ANNOTATIONS_VERSION")
+    if version:
+        return f"coralnet_annotations_{version}.parquet"
+    return _LEGACY_ANNOTATIONS_PATH
 
 
 class CoralNetDataset(BaseCoralDataset):
@@ -33,14 +62,15 @@ class CoralNetDataset(BaseCoralDataset):
     with a :class:`SourceLabelRegistry`).
 
     Attributes:
-        annotations_path (str): Path to the Parquet file containing image annotations.
-            This is created by merging all annotations of CoralNet sources in a separate
-            notebook ``mermaidseg/datasets/coralnet/nbs/CoralNet_Annotations.ipynb``.
+        annotations_path (str): Path to the Parquet file containing image annotations,
+            produced by the ETL at :mod:`mermaidseg.datasets.coralnet.etl`.
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-source CoralNet image folders live.
         s3 (boto3.client): Boto3 S3 client for accessing images.
     Args:
-        annotations_path (str, optional): Key (relative to ``source_bucket``) of the parquet file with annotations.
+        annotations_path (str, optional): Key (relative to ``source_bucket``) of the parquet file
+            with annotations. If ``None`` (default), resolved from ``MERMAID_CORALNET_ANNOTATIONS_PATH``
+            or ``MERMAID_CORALNET_ANNOTATIONS_VERSION``; falls back to the legacy literal.
         source_bucket (str, optional): S3 bucket name containing the dataset files.
         source_s3_prefix (str, optional): S3 prefix containing per-source CoralNet image folders.
         whitelist_sources / blacklist_sources: Optional CoralNet source-id allowlist/denylist.
@@ -59,14 +89,14 @@ class CoralNetDataset(BaseCoralDataset):
 
     def __init__(
         self,
-        annotations_path: str = "etl-outputs/coralnet/20260526_807b611/coralnet_training_resized_20260526_807b611.parquet",
+        annotations_path: str | None = None,
         source_bucket: str = "dev-datamermaid-sm-sources",
         source_s3_prefix: str = "coralnet-public-images",
         whitelist_sources: list[int | str] | None = None,
         blacklist_sources: list[int | str] | None = None,
         **base_kwargs: Any,
     ):
-        self.annotations_path = annotations_path
+        self.annotations_path = annotations_path or _resolve_default_annotations_path()
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
         self.s3 = boto3.client("s3")

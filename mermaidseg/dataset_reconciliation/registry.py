@@ -38,6 +38,7 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     fetch_coralnet_to_mermaid,
     fetch_moorea_labeled_corals_to_mermaid,
     fetch_pacific_labeled_corals_to_mermaid,
+    fetch_ucsd_mosaics_to_mermaid,
 )
 
 
@@ -304,6 +305,19 @@ class SourceLabelRegistry:
                     if tgt is not None and src in ds.source_name2id
                 }
                 continue
+            if name == "ucsd_mosaics":
+                if not fetch_remote:
+                    raise ValueError(
+                        "ucsd_mosaics source-to-target mapping requires "
+                        "fetch_remote=True or an explicit entry in source_to_target_name_maps"
+                    )
+                ucsd_to_target = fetch_ucsd_mosaics_to_mermaid()
+                resolved[name] = {
+                    src: tgt
+                    for src, tgt in ucsd_to_target.items()
+                    if tgt is not None and src in ds.source_name2id
+                }
+                continue
             if name in _BUILTIN_DEFAULT_FETCHERS:
                 resolved[name] = _BUILTIN_DEFAULT_FETCHERS[name](ds)
                 continue
@@ -365,9 +379,8 @@ class SourceLabelRegistry:
     def conceptid2labelid(self) -> dict[int, int] | None:
         """Backward-compat helper used by ``postprocess_predicted_concepts``.
 
-        Returns a dict mapping per-concept-column index (``benthic_concept_matrix``
-        column ordering, 0-indexed) to the corresponding target label ID
-        (1-indexed, 0 if not a leaf class).
+        Returns a dict mapping per-concept-column index (``benthic_concept_matrix`` column ordering,
+        0-indexed) to the corresponding target label ID (1-indexed, 0 if not a leaf class).
         """
         return None
         # if self._concept_matrix is None:

@@ -17,11 +17,10 @@ logger = logging.getLogger(__name__)
 def emit_dataset_warning(message: str) -> None:
     """Emit a dataset-load warning via the logger AND raw stdout/stderr.
 
-    PyTorch DataLoader worker processes often have their ``logging`` handlers
-    unconfigured, which means ``logger.warning`` is silently dropped. To make
-    sure the user sees skip-and-recover messages no matter where they're
-    triggered (main process, worker, notebook, terminal), we additionally
-    ``print`` to both ``sys.stdout`` and ``sys.stderr`` with ``flush=True``.
+    PyTorch DataLoader worker processes often have their ``logging`` handlers unconfigured, which
+    means ``logger.warning`` is silently dropped. To make sure the user sees skip-and-recover
+    messages no matter where they're triggered (main process, worker, notebook, terminal), we
+    additionally ``print`` to both ``sys.stdout`` and ``sys.stderr`` with ``flush=True``.
     """
     logger.warning(message)
     full = f"WARNING: {message}"
@@ -49,7 +48,6 @@ def get_image_s3(
     Returns:
         PIL.Image.Image: The image loaded from S3 as a PIL Image object.
     """
-
     if thumbnail:
         key = key.replace(".png", "_thumbnail.png")
 
@@ -150,7 +148,6 @@ def calculate_weights(dataset: Dataset, const: int = 2000000) -> torch.Tensor:
     Returns:
         torch.Tensor: A tensor of weights for each class, normalized by the mean weight.
     """
-
     label_counts = dict.fromkeys(range(dataset.N_classes), 0)
     for i in tqdm(range(len(dataset))):
         _, label, _ = dataset[i]
@@ -183,7 +180,6 @@ def get_coralnet_sources():
         whitelist: A list of all valid CoralNet source folder names that contain both
               'annotations.csv' and 'image_list.csv' files.
     """
-
     s3 = boto3.client("s3")
     bucket_name = "dev-datamermaid-sm-sources"
 

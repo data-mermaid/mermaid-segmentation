@@ -1,8 +1,7 @@
 """Benthos Yuval PyTorch dataset (dense segmentation tiles).
 
-Reads tiles produced by ``verify_raw_data_and_add_to_s3.py`` and emits
-``(image, source_labels)`` pairs in the Benthos Yuval source-label space.
-See ``README.md`` for dataset details.
+Reads tiles produced by ``verify_raw_data_and_add_to_s3.py`` and emits ``(image, source_labels)``
+pairs in the Benthos Yuval source-label space. See ``README.md`` for dataset details.
 """
 
 from __future__ import annotations
@@ -129,8 +128,8 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
     def _build_classes_global_to_local(self) -> np.ndarray:
         """Lookup table from classes.json IDs to local source IDs.
 
-        Background, classes filtered out by ``class_subset``, and any unknown
-        class fall through to local ID 0.
+        Background, classes filtered out by ``class_subset``, and any unknown class fall through to
+        local ID 0.
         """
         max_global = max(self._classes_global.values()) + 1
         lookup = np.zeros(max_global, dtype=np.int64)

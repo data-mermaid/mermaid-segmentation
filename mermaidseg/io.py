@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 import albumentations as A
-import pandas as pd
 import yaml
 
 
@@ -87,22 +86,8 @@ def _set_config_value(config: ConfigDict, path: tuple[str, ...], value: Any) -> 
     section[path[-1]] = value
 
 
-def _load_csv_value(value: Any, header: int | None = 0) -> Any:
-    """Load CSV paths recursively while keeping non-path values unchanged."""
-    if isinstance(value, Mapping):
-        return ConfigDict(
-            {key: _load_csv_value(subvalue, header=header) for key, subvalue in value.items()}
-        )
-    if isinstance(value, (str, Path)):
-        path = Path(value).expanduser()
-        if path.is_file() and path.suffix == ".csv":
-            return pd.read_csv(path, header=header).to_numpy().flatten().tolist()
-    return value
-
-
 def load_config(config_path: str | Path) -> ConfigDict:
     """Load configuration from a YAML file."""
-
     with Path(config_path).open(encoding="utf-8") as file:
         loaded = yaml.safe_load(file) or {}
     if not isinstance(loaded, Mapping):
@@ -142,7 +127,6 @@ def get_parser() -> argparse.ArgumentParser:
 
 def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> ConfigDict:
     """Update configuration with command-line overrides."""
-
     _set_config_value(config, ("run_name",), getattr(args, "run_name", None))
     _set_config_value(config, ("model", "name"), getattr(args, "model", None))
     _set_config_value(config, ("model", "checkpoint"), getattr(args, "model_checkpoint", None))
@@ -164,6 +148,12 @@ def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> Con
 
 
 def preprocess_data_config(data_cfg_orig):
+    """Normalize the split data config (configs/data_config.yaml).
+
+    Expands the per-dataset ``default`` block into every dataset that does not override it, then
+    compiles each split's ``augmentation``/``transform`` spec into an ``albumentations.Compose``
+    object.
+    """
     data_cfg = data_cfg_orig.copy()
     if "default" in data_cfg.data:
         default = data_cfg.data.pop("default", None)
@@ -188,8 +178,20 @@ def preprocess_data_config(data_cfg_orig):
 
 
 def setup_config(config_path_dict: dict[str, str | None]) -> ConfigDict:
-    """Load the base config, optionally merge overrides, and normalize data inputs."""
+    """Load and merge the split config files into a single ConfigDict.
 
+    Takes a mapping of section name -> YAML path, e.g.::
+
+        {"data": "configs/data_config.yaml",
+         "model": "configs/model_config_cbm.yaml",
+         "training": "configs/training_config_cbm.yaml",
+         "logger": "configs/logger_config.yaml"}
+
+    Each file is loaded under its section key (a file may already wrap its
+    contents in that key, or not — both are accepted). The data config is
+    additionally normalized via ``preprocess_data_config`` (per-dataset default
+    expansion + albumentations transform compilation).
+    """
     cfg = ConfigDict()
     if "data" in config_path_dict:
         data_cfg = load_config(config_path_dict["data"])

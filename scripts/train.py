@@ -5,14 +5,24 @@ it uses the locked project venv. Cell outputs freeze when the browser
 disconnects — this script writes structured logs to a file so progress is
 always captured.
 
+The run is configured by four split configs, each with a sensible default:
+``--config-data`` (configs/data_config.yaml), ``--config-model``
+(configs/model_config_cbm.yaml), ``--config-training``
+(configs/training_config_cbm.yaml), and ``--config-logger``
+(configs/logger_config.yaml). Override any one independently.
+
 Usage::
 
-    # Foreground (debug)
-    uv run python scripts/train.py --config configs/linear-dinov3-base.yaml
+    # Foreground (debug) — uses the default split configs
+    uv run python scripts/train.py
+
+    # Override an individual split (e.g. standard, non-CBM training)
+    uv run python scripts/train.py \\
+        --config-model configs/model_config.yaml \\
+        --config-training configs/training_config.yaml
 
     # Background — safe to close the browser window
     nohup uv run python scripts/train.py \\
-        --config configs/linear-dinov3-base.yaml \\
         --auto-shutdown \\
         > logs/train_$(date +%Y%m%d_%H%M%S).log 2>&1 &
     echo $! > logs/train.pid
@@ -21,7 +31,7 @@ Usage::
     tail -f logs/train_*.log
 
     # Dry run (1 batch, smoke test)
-    uv run python scripts/train.py --config configs/linear-dinov3-base.yaml --dry-run
+    uv run python scripts/train.py --dry-run
 """
 
 import argparse
@@ -97,9 +107,9 @@ def _write_pid(pid_file: Path) -> None:
 def _stop_current_space() -> None:
     """Stop the SageMaker JupyterLab app via delete_app.
 
-    SageMaker has no ``stop_space`` API.  The documented way to stop a
-    running JupyterLab app is ``delete_app`` — this terminates the
-    instance while keeping EFS data intact.  No-op outside SageMaker.
+    SageMaker has no ``stop_space`` API.  The documented way to stop a running JupyterLab app is
+    ``delete_app`` — this terminates the instance while keeping EFS data intact.  No-op outside
+    SageMaker.
     """
     if not _METADATA.exists():
         logging.info("Not running on SageMaker — skipping auto-shutdown")
@@ -447,11 +457,14 @@ def _run_training(args: argparse.Namespace) -> None:
 
         logger.log_dataloader_params(train_loader, prefix="train_loader")
         logger.log_dataloader_params(val_loader, prefix="val_loader")
-        # logger.log_dataloader_params(test_loader, prefix="test_loader")
         logger.log_reconciliation(registry)
-        # logger.log_dataset_statistics({"train": train_ds, "val": val_ds, "test": test_ds}, registry)
+        # TODO(#139): re-enable per-run dataset-statistics logging once
+        # Logger.log_dataset_statistics is adapted to the multi-dataset (per-split lists)
+        # structure; it currently expects single train/val/test datasets.
 
         try:
+            # test_loader is None: the multi-dataset config does not define test splits yet,
+            # so there is no test data to evaluate (see data_config.yaml).
             train_model(
                 meta_model=meta_model,
                 evaluator=evaluator,

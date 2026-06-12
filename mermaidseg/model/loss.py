@@ -60,9 +60,8 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
 class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
     """BCE loss for concept prediction that masks background pixels before averaging.
 
-    Wraps `torch.nn.BCEWithLogitsLoss` with `reduction="none"` and applies a
-    foreground mask derived from `labels` so background pixels (label == 0) do
-    not contribute to the mean.
+    Wraps `torch.nn.BCEWithLogitsLoss` with `reduction="none"` and applies a foreground mask derived
+    from `labels` so background pixels (label == 0) do not contribute to the mean.
     """
 
     def __init__(
@@ -196,7 +195,6 @@ class ConceptBottleneckLoss(torch.nn.Module):
             scalar tensor for backprop and loss_components is a dict of detached
             component values for logging.
         """
-
         class_loss_value = self.class_loss(outputs, target_labels)
         if (target_labels > 0).sum() == 0:
             class_loss_value = torch.tensor(0.0, device=outputs.device, dtype=outputs.dtype)

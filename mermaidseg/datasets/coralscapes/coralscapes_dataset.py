@@ -135,8 +135,7 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _build_native_to_local(self) -> np.ndarray:
         """Build a vectorized lookup from native Coralscapes IDs to local source IDs.
 
-        Native ID ``0`` and any class not present in ``class_subset`` map to
-        ``0`` (background).
+        Native ID ``0`` and any class not present in ``class_subset`` map to ``0`` (background).
         """
         native_id2name = CORALSCAPES_ID2NAME
         max_native = max(native_id2name) + 1
@@ -181,28 +180,15 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
-        On any internal load/transform error we emit a warning to logger +
-        stdout + stderr and recurse on the *next* index (wrapping around),
-        instead of returning ``(None, None)`` placeholders that would break
-        ``default_collate``. If every item fails, a ``RuntimeError`` is raised.
+        On any internal load/transform error we emit a warning to logger + stdout + stderr and
+        return ``(None, None)``. :meth:`collate_fn` filters out these placeholders, so a failed item
+        drops out of the batch instead of crashing the loader.
         """
-        return self._safe_getitem(idx, attempts=0)
-
-    def _safe_getitem(self, idx: int, attempts: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
-        n = len(self)
-        if n == 0:
-            raise RuntimeError("CoralscapesDataset: dataset is empty")
-
         try:
             return self._load_item(idx)
         except Exception as e:
             emit_dataset_warning(f"CoralscapesDataset: skipping idx={idx}: {type(e).__name__}: {e}")
-            if attempts + 1 >= n:
-                raise RuntimeError(
-                    f"CoralscapesDataset: all {n} items failed to load; "
-                    f"last error: {type(e).__name__}: {e}"
-                ) from e
-            return self._safe_getitem((idx + 1) % n, attempts=attempts + 1)
+            return None, None
 
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         image = np.array(self.dataset[idx]["image"])
@@ -222,11 +208,10 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return image, mask
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Defensively filter out ``(None, None)`` items and stack into batched tensors.
+        """Filter out ``(None, None)`` items (failed loads) and stack into batched tensors.
 
-        :meth:`__getitem__` now recurses on the next index when a load fails,
-        so ``(None, None)`` should not appear in normal operation. This
-        defensive filter remains for hand-built batches and custom overrides.
+        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this filter drops
+        them so a failed item simply leaves the batch instead of crashing the loader.
         """
         batch_size = len(batch)
         filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
