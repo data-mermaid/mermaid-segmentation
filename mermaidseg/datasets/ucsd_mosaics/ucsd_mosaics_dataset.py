@@ -1,15 +1,13 @@
 """UCSD Mosaics PyTorch dataset.
 
-Wraps the HuggingFace mirror at ``josauder/UCSD-mosaics-mirror`` (the GT-Clean
-variant of the UCSD Mosaics dense semantic segmentation dataset; Edwards et al.
-2017 + Alonso et al. 2019 + Raine et al. 2024) and emits
-``(image, source_labels)`` tuples where ``source_labels`` is in the **native
-UCSD Mosaics 1..34 label space** taken straight from the HF ``classes.json``.
-Pixel value ``0`` in the source mask is the unlabeled / unidentified ignore
-label and is mapped to background.
+Wraps the HuggingFace mirror at ``josauder/UCSD-mosaics-mirror`` (the GT-Clean variant of the UCSD
+Mosaics dense semantic segmentation dataset; Edwards et al. 2017 + Alonso et al. 2019 + Raine et al.
+2024) and emits ``(image, source_labels)`` tuples where ``source_labels`` is in the **native UCSD
+Mosaics 1..34 label space** taken straight from the HF ``classes.json``. Pixel value ``0`` in the
+source mask is the unlabeled / unidentified ignore label and is mapped to background.
 
-See ``README.md`` for dataset history and ``nbs/ucsd_mosaics_EDA.ipynb`` for
-a hands-on tour of the HuggingFace mirror.
+See ``README.md`` for dataset history and ``nbs/ucsd_mosaics_EDA.ipynb`` for a hands-on tour of the
+HuggingFace mirror.
 """
 
 from __future__ import annotations
@@ -180,8 +178,8 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _build_native_to_local(self) -> np.ndarray:
         """Build a vectorized lookup from native UCSD IDs (0..34) to local source IDs.
 
-        Native ID ``0`` (ignore) and any class not present in ``class_subset``
-        map to ``0`` (background).
+        Native ID ``0`` (ignore) and any class not present in ``class_subset`` map to ``0``
+        (background).
         """
         max_native = max(int(entry["id"]) for entry in self.class_table) + 1
         lookup = np.zeros(max_native, dtype=np.int64)
@@ -191,11 +189,30 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             lookup[native_id] = local_id
         return lookup
 
+    def set_source_vocabulary(
+        self,
+        source_id2name: dict[int, str],
+        source_name2id: dict[str, int],
+        num_source_classes: int,
+    ) -> None:
+        """Replace local source maps and rebuild the native-to-local lookup.
+
+        Called by :func:`mermaidseg.dataset_reconciliation.split_wiring.apply_vocabularies`
+        when the registry canonicalizes vocabulary across splits. Rebuilding
+        ``_native_to_local`` keeps emitted mask IDs aligned with registry lookup
+        tables.
+        """
+        self.source_id2name = dict(source_id2name)
+        self.source_name2id = dict(source_name2id)
+        self.num_source_classes = int(num_source_classes)
+        self._native_to_local = self._build_native_to_local()
+
     def set_global_offset(self, offset: int) -> None:
         """Set the global source-label offset assigned by the registry."""
         if offset < 0:
             raise ValueError(f"global offset must be non-negative, got {offset}")
         self._global_offset = int(offset)
+        self._native_to_local = self._build_native_to_local()
 
     @property
     def global_offset(self) -> int:
@@ -211,9 +228,7 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             native_mask = np.asarray(row["label"], dtype=np.int64)
             mask = self._native_to_local[native_mask]
         except Exception as e:
-            logger.warning(
-                "UCSDMosaicsDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e
-            )
+            logger.warning("UCSDMosaicsDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e)
             return None, None
 
         if self._global_offset:

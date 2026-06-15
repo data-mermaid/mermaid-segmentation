@@ -19,6 +19,7 @@ from mermaidseg.datasets.coralscapes.coralscapes_dataset import (
     CORALSCAPES_ID2NAME,
     CoralscapesDataset,
 )
+from mermaidseg.datasets.ucsd_mosaics.ucsd_mosaics_dataset import UCSDMosaicsDataset
 
 
 def _make_coralscapes_stub(*, source_id2name: dict[int, str]) -> CoralscapesDataset:
@@ -119,3 +120,25 @@ def test_benthos_yuval_global_lookup_rebuilds_on_vocab_change() -> None:
 
     assert int(ds._classes_global_to_local[1]) == ds.source_name2id["sand"]
     assert int(ds._classes_global_to_local[2]) == ds.source_name2id["coral"]
+
+
+def test_ucsd_mosaics_native_lookup_rebuilds_on_vocab_change() -> None:
+    """Native-to-local lookup must track registry vocabulary reassignment."""
+    ds = UCSDMosaicsDataset.__new__(UCSDMosaicsDataset)
+    ds.class_table = [
+        {"id": 1, "name": "sand"},
+        {"id": 2, "name": "coral"},
+    ]
+    ds.source_id2name = {1: "sand", 2: "coral"}
+    ds.source_name2id = {"sand": 1, "coral": 2}
+    ds.num_source_classes = 3
+    ds._native_to_local = ds._build_native_to_local()
+
+    ds.set_source_vocabulary(
+        {1: "coral", 2: "sand"},
+        {"coral": 1, "sand": 2},
+        3,
+    )
+
+    assert int(ds._native_to_local[1]) == ds.source_name2id["sand"]
+    assert int(ds._native_to_local[2]) == ds.source_name2id["coral"]

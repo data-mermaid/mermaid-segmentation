@@ -35,6 +35,7 @@ dependencies = [
     "requests-auth-aws-sigv4>=0.7",
     "safetensors>=0.4.0",
     "ibis-framework[duckdb]>=9.0",
+    "peft>=0.19.1",
 ]
 
 [project.scripts]
@@ -55,6 +56,9 @@ scraping = [
 ]
 test-live = [
     "playwright>=1.50",
+]
+demo = [
+    "gradio>=5.0",
 ]
 
 [dependency-groups]
