@@ -18,7 +18,7 @@ dependencies = [
     "torch>=2.4,<2.8",
     "transformers",
     "datasets>=3.0",
-    "s3fs>=2024.2.0",
+    "s3fs",
     "segmentation-models-pytorch",
     "mlflow",
     "pyyaml",
@@ -49,9 +49,6 @@ notebooks = [
     "wandb>=0.25.0",
     "hvplot>=0.12.2",
     "great-tables>=0.21.0",
-]
-sagemaker = [
-    "sagemaker>=2.0,<3.0",
 ]
 scraping = [
     "selenium",
