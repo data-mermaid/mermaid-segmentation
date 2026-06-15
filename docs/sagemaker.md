@@ -15,6 +15,26 @@ This doc is the seg-specific runbook on top of that.
 - An MLflow App is provisioned at
   `arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-EJVJ6AVFDWW2`.
 
+### Preflight
+
+Account-specific values (`SM_ROLE_ARN`, `MLFLOW_TRACKING_URI`, etc.) go in
+**`.env`** (gitignored), loaded by direnv — see `.env.example`. The Makefile
+does not embed ARNs.
+
+Run before your first job (or after credential changes):
+
+```bash
+uv sync --extra sagemaker
+aws sso login --profile wcs-sso
+export MERMAID_AWS_MODE=launcher && direnv reload
+
+make sm-check
+```
+
+The check validates SDK version, region, credentials, execution role
+trust (`sagemaker.amazonaws.com`), and warns about staging-bucket IAM and
+`HF_TOKEN`.
+
 ## One-time: build and push the image
 
 ```bash
