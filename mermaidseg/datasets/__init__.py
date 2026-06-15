@@ -9,6 +9,7 @@ from mermaidseg.datasets.benthos_yuval import BenthosYuvalCoralsDataset
 from mermaidseg.datasets.catlin_seaview import CatlinSeaviewDataset
 from mermaidseg.datasets.coralnet import CoralNetDataset
 from mermaidseg.datasets.coralscapes import CoralscapesDataset
+from mermaidseg.datasets.coralscapes_v2 import CoralscapesV2Dataset
 from mermaidseg.datasets.mermaid import MermaidDataset
 from mermaidseg.datasets.moorea_labeled_corals import MooreaLabeledCoralsDataset
 from mermaidseg.datasets.pacific_labeled_corals import PacificLabeledCoralsDataset
@@ -20,6 +21,7 @@ __all__ = [
     "CatlinSeaviewDataset",
     "CoralNetDataset",
     "CoralscapesDataset",
+    "CoralscapesV2Dataset",
     "MermaidDataset",
     "MooreaLabeledCoralsDataset",
     "PacificLabeledCoralsDataset",

@@ -33,6 +33,7 @@ from mermaidseg.dataset_reconciliation.concepts import (
 )
 from mermaidseg.dataset_reconciliation.label_mapping import (
     coralscapes_to_mermaid,
+    coralscapes_v2_to_mermaid,
     fetch_benthos_yuval_to_mermaid,
     fetch_catlin_seaview_to_mermaid,
     fetch_coralnet_to_mermaid,
@@ -47,14 +48,15 @@ def _identity_source_to_target(dataset: Any) -> dict[str, str]:
     return {name: name for name in dataset.source_name2id}
 
 
-def _coralscapes_source_to_target(dataset: Any) -> dict[str, str]:
-    static = coralscapes_to_mermaid()
-    return {name: targets[0] for name, targets in static.items() if name in dataset.source_name2id}
+def _static_source_to_target(static: dict[str, str], dataset: Any) -> dict[str, str]:
+    """Filter a static ``source_name -> target_name`` dict to the dataset's source space."""
+    return {name: target for name, target in static.items() if name in dataset.source_name2id}
 
 
 _BUILTIN_DEFAULT_FETCHERS = {
     "mermaid": _identity_source_to_target,
-    "coralscapes": _coralscapes_source_to_target,
+    "coralscapes": lambda ds: _static_source_to_target(coralscapes_to_mermaid(), ds),
+    "coralscapes_v2": lambda ds: _static_source_to_target(coralscapes_v2_to_mermaid(), ds),
 }
 
 
