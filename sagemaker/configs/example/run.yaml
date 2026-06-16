@@ -7,10 +7,13 @@ job:
   max_runtime_hours: 4
 
 # Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher).
+# Example: smoke test with CBM data (1 epoch, small batch).
 config:
-  config_path: configs/linear-dinov3-base.yaml
+  config_model: configs/model_config_cbm.yaml
+  config_training: configs/training_config_cbm.yaml
+  config_data: configs/data_config.yaml
+  config_logger: configs/logger_config.yaml
   overrides:
     run-name: mermaidseg-sagemaker-smoke
     epochs: 1
     batch-size: 4
-    lr: 0.00005

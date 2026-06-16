@@ -1,16 +1,14 @@
 """In-container entrypoint for a mermaid-segmentation TrainingJob.
 
-Reads the run YAML from /opt/ml/input/data/config/, applies any
-top-level `env:` keys, then invokes the existing training pipeline
-(scripts/train.py) with the seg-specific `config:` block translated
+Reads the run YAML from /opt/ml/input/data/config/, applies any top-level `env:` keys, then invokes
+the existing training pipeline (scripts/train.py) with the seg-specific `config:` block translated
 into CLI flags.
 
-This is the **launcher-facing entrypoint** — the surface the launcher
-script names via CONTAINER_ENTRYPOINT_SCRIPT. The training pipeline
-itself stays in mermaidseg/ and scripts/train.py; this file is a
-thin adapter that bridges the run-YAML world to the existing
-CLI-driven entrypoint.
+This is the **launcher-facing entrypoint** — the surface the launcher script names via
+CONTAINER_ENTRYPOINT_SCRIPT. The training pipeline itself stays in mermaidseg/ and scripts/train.py;
+this file is a thin adapter that bridges the run-YAML world to the existing CLI-driven entrypoint.
 """
+
 from __future__ import annotations
 
 import logging
@@ -55,21 +53,27 @@ def main():
     for k, v in (data.get("job", {}).get("env") or {}).items():
         os.environ.setdefault(k, str(v))
 
-    # The seg-specific `config:` block is a path to an existing
-    # mermaidseg YAML (e.g. configs/linear-dinov3-base.yaml) plus any
-    # CLI overrides as a flat dict.
+    # The seg-specific `config:` block names split-config paths (same as
+    # scripts/train.py) plus optional CLI overrides as a flat dict.
     seg = data.get("config")
     if seg is None:
         raise SystemExit("Run YAML missing top-level `config:` block.")
-    config_path = seg.get("config_path")
-    if not config_path:
-        raise SystemExit("`config:` block must include `config_path` "
-                          "(path to a mermaidseg config under configs/).")
+
+    config_flags = {
+        "config_data": seg.get("config_data", "configs/data_config.yaml"),
+        "config_model": seg.get("config_model", "configs/model_config_cbm.yaml"),
+        "config_training": seg.get("config_training", "configs/training_config_cbm.yaml"),
+        "config_logger": seg.get("config_logger", "configs/logger_config.yaml"),
+    }
     overrides = seg.get("overrides", {})
 
-    # Build the existing scripts/train.py invocation.
-    cmd = [sys.executable, "-u", "scripts/train.py",
-           "--config", config_path]
+    if os.getenv("SMOKE_TEST"):
+        log.info("Smoke test OK — skipping train.py invocation")
+        return
+
+    cmd = [sys.executable, "-u", "scripts/train.py"]
+    for flag, path in config_flags.items():
+        cmd += [f"--{flag.replace('_', '-')}", path]
     for k, v in overrides.items():
         cmd += [f"--{k}", str(v)]
 
