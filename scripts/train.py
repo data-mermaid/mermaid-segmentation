@@ -367,10 +367,13 @@ def _run_training(args: argparse.Namespace) -> None:
     _, registry_datasets = prepare_splits_for_registry(dataset_dict)
 
     run_sources = {ds.SOURCE_NAME for ds in registry_datasets}
-    if concept_mapping_path:
-        schema = ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
+    if cfg.training.training_mode != "standard":
+        if concept_mapping_path:
+            schema = ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
+        else:
+            schema = ConceptSchema.from_csv(sources=run_sources)
     else:
-        schema = ConceptSchema.from_csv(sources=run_sources)
+        schema = None
 
     registry = SourceLabelRegistry(
         registry_datasets,

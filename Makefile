@@ -1,5 +1,5 @@
 .PHONY: sync logs lcc-log check kernel \
-	train-dry-run sm-sync sm-check sm-dry-run sm-launch sm-smoke \
+	train-dry-run smoke-standard sm-sync sm-check sm-dry-run sm-launch sm-smoke \
 	sm-issue-129-dry-run sm-issue-129-launch
 
 # Re-sync the uv environment and Jupyter kernel from the current branch.
@@ -44,6 +44,9 @@ train-dry-run:
 		--run-name dry-run-local \
 		--config-model $(MODEL_$(PROFILE)) \
 		--config-training $(TRAINING_$(PROFILE))
+
+smoke-standard:  ## Run standard-mode pipeline smoke test (no S3 required)
+	uv run pytest tests/test_standard_pipeline_smoke.py -v -m smoke
 
 # --- SageMaker TrainingJob (see docs/sagemaker.md) ---
 # Account ARNs in .env (gitignored), loaded by direnv. Login: aws sso login --profile wcs-sso
