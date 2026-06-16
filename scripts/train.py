@@ -108,9 +108,9 @@ def _write_pid(pid_file: Path) -> None:
 def _stop_current_space() -> None:
     """Stop the SageMaker JupyterLab app via delete_app.
 
-    SageMaker has no ``stop_space`` API.  The documented way to stop a running JupyterLab app is
-    ``delete_app`` — this terminates the instance while keeping EFS data intact.  No-op outside
-    SageMaker.
+    SageMaker has no ``stop_space`` API.  The documented way to stop a running
+    JupyterLab app is ``delete_app`` — this terminates the instance while keeping EFS
+    data intact.  No-op outside SageMaker.
     """
     if not _METADATA.exists():
         logging.info("Not running on SageMaker — skipping auto-shutdown")
@@ -387,7 +387,8 @@ def _run_training(args: argparse.Namespace) -> None:
     val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
 
     print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
-    assert registry.num_concepts == schema.num_channels
+    if cfg.training.training_mode != "standard":
+        assert registry.num_concepts == schema.num_channels
 
     logging.info(
         "Dataset: %s (%d samples)",
