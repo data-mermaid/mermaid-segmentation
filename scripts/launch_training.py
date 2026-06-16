@@ -20,12 +20,13 @@ Example
         --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-EJVJ6AVFDWW2 \\
         --no-wait
 """
+
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import boto3
@@ -52,17 +53,22 @@ def expand_image_uri(image: str) -> str:
         raise ValueError(f"Image {image!r} must be `<repo>:<tag>` or a full ECR URI.")
     repo, _ = image.split(":", 1)
     if repo not in KNOWN_SHORT_REPOS:
-        raise ValueError(
-            f"Unknown short-form repo {repo!r}. Known: {sorted(KNOWN_SHORT_REPOS)}.")
+        raise ValueError(f"Unknown short-form repo {repo!r}. Known: {sorted(KNOWN_SHORT_REPOS)}.")
     return f"{ECR_HOST}/{image}"
 
 
 def make_run_id(prefix: str) -> str:
-    return f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    return f"{prefix}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
 
 
 def build_estimator_kwargs(
-    *, cfg: RunConfig, run_id: str, staging_bucket: str, mlflow_uri: str, sm_session,
+    *,
+    cfg: RunConfig,
+    run_id: str,
+    staging_bucket: str,
+    mlflow_uri: str,
+    sm_session,
+    role: str,
 ) -> dict:
     job = cfg.job
     env = {
@@ -71,19 +77,19 @@ def build_estimator_kwargs(
         "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
         **job.env,
     }
-    kwargs = dict(
-        image_uri=expand_image_uri(job.image),
-        role=EXEC_ROLE,
-        instance_count=job.instance_count,
-        instance_type=job.instance_type,
-        volume_size=job.volume_gb,
-        max_run=job.max_runtime_hours * 3600,
-        output_path=f"s3://{staging_bucket}/runs/{run_id}/output/",
-        environment=env,
-        sagemaker_session=sm_session,
-        base_job_name=job.name_prefix,
-        tags=[{"Key": k, "Value": v} for k, v in job.tags.items()],
-    )
+    kwargs = {
+        "image_uri": expand_image_uri(job.image),
+        "role": role,
+        "instance_count": job.instance_count,
+        "instance_type": job.instance_type,
+        "volume_size": job.volume_gb,
+        "max_run": job.max_runtime_hours * 3600,
+        "output_path": f"s3://{staging_bucket}/runs/{run_id}/output/",
+        "environment": env,
+        "sagemaker_session": sm_session,
+        "base_job_name": job.name_prefix,
+        "tags": [{"Key": k, "Value": v} for k, v in job.tags.items()],
+    }
     if job.use_spot:
         kwargs["use_spot_instances"] = True
         kwargs["max_wait"] = job.max_runtime_hours * 3600 + 3600
@@ -103,7 +109,8 @@ def _cloudwatch_url(run_id: str) -> str:
         f"https://{REGION}.console.aws.amazon.com/cloudwatch/home"
         f"?region={REGION}#logsV2:log-groups/log-group/"
         f"$252Faws$252Fsagemaker$252FTrainingJobs"
-        f"/log-events/{run_id}")
+        f"/log-events/{run_id}"
+    )
 
 
 def main(argv=None):
@@ -112,12 +119,12 @@ def main(argv=None):
     parser.add_argument("--run-config", required=True, type=Path)
     parser.add_argument("--config-dir", required=True, type=Path)
     parser.add_argument("--mlflow-tracking-uri", required=True)
+    parser.add_argument("--role-arn", default=EXEC_ROLE)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-wait", action="store_true")
     args = parser.parse_args(argv)
 
-    cfg = parse_run_config(
-        args.run_config.read_text(), kind="training", strict=False)
+    cfg = parse_run_config(args.run_config.read_text(), kind="training", strict=False)
     if not args.config_dir.is_dir():
         log.error("Config dir does not exist: %s", args.config_dir)
         sys.exit(2)
@@ -130,6 +137,7 @@ def main(argv=None):
         print("DRY RUN -- not submitting")
         print("=" * 60)
         print(f"run_id:        {run_id}")
+        print(f"role:          {args.role_arn}")
         print(f"image:         {expand_image_uri(cfg.job.image)}")
         print(f"entrypoint:    {cfg.job.entrypoint}")
         print(f"instance:      {cfg.job.instance_type} (x{cfg.job.instance_count})")
@@ -143,12 +151,17 @@ def main(argv=None):
     sm_session = Session(boto_session=boto_session)
     key_prefix = f"runs/{run_id}/config"
     sm_session.upload_data(
-        path=str(args.config_dir.resolve()),
-        bucket=STAGING_BUCKET, key_prefix=key_prefix)
+        path=str(args.config_dir.resolve()), bucket=STAGING_BUCKET, key_prefix=key_prefix
+    )
 
     kwargs = build_estimator_kwargs(
-        cfg=cfg, run_id=run_id, staging_bucket=STAGING_BUCKET,
-        mlflow_uri=args.mlflow_tracking_uri, sm_session=sm_session)
+        cfg=cfg,
+        run_id=run_id,
+        staging_bucket=STAGING_BUCKET,
+        mlflow_uri=args.mlflow_tracking_uri,
+        sm_session=sm_session,
+        role=args.role_arn,
+    )
 
     log.info("Run ID:       %s", run_id)
     log.info("CloudWatch:   %s", cw_url)
@@ -156,8 +169,7 @@ def main(argv=None):
 
     estimator = Estimator(**kwargs)
     inputs = {
-        "config": TrainingInput(
-            s3_data=f"s3://{STAGING_BUCKET}/{key_prefix}/", input_mode="File"),
+        "config": TrainingInput(s3_data=f"s3://{STAGING_BUCKET}/{key_prefix}/", input_mode="File"),
     }
     if cfg.training:
         for name, ch in cfg.training.channels.items():

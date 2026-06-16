@@ -18,7 +18,7 @@ dependencies = [
     "torch>=2.4,<2.8",
     "transformers",
     "datasets>=3.0",
-    "s3fs",
+    "s3fs>=2024.2.0",
     "segmentation-models-pytorch",
     "mlflow",
     "pyyaml",
