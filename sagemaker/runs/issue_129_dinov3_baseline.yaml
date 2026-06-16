@@ -11,7 +11,7 @@ job:
 config:
   config_model: configs/model_config_dinov3_base.yaml
   config_training: configs/training_config_dinov3_base.yaml
-  config_data: sagemaker/configs/baseline/data_config.yaml
+  config_data: configs/data_config_dinov3_base.yaml
   config_logger: configs/logger_config.yaml
   overrides:
     run-name: issue-129-dinov3-baseline-mermaid-coralnet
