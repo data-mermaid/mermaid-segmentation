@@ -289,6 +289,10 @@ def _run_training(args: argparse.Namespace) -> None:
     )
 
     cfg = update_config_with_args(cfg, args)
+
+    if not hasattr(cfg, "run_name") or cfg.run_name is None:
+        cfg.run_name = f"baseline-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     cfg_logger = copy.deepcopy(cfg)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -350,12 +354,14 @@ def _run_training(args: argparse.Namespace) -> None:
     )
 
     if args.dry_run:
-        max_dry_epochs = 3
+        max_dry_epochs = 1
         actual_epochs = cfg.training.epochs
         if actual_epochs > max_dry_epochs:
             cfg.training.epochs = max_dry_epochs
             logging.info("Dry run: capping epochs %d → %d", actual_epochs, max_dry_epochs)
         logging.info("Dry run: limiting to 1 batch per epoch")
+        cfg.training.iterations_per_train_epoch = 1
+        cfg.training.iterations_per_val_epoch = 1
         try:
             train_loader = [_take_first_non_empty_batch(train_loader, "train")]
             val_loader = [_take_first_non_empty_batch(val_loader, "val")]
