@@ -1,6 +1,7 @@
 .PHONY: sync logs lcc-log check kernel \
 	train-dry-run smoke-standard sm-sync sm-check sm-dry-run sm-launch sm-smoke \
-	sm-issue-129-dry-run sm-issue-129-launch
+	sm-issue-129-dry-run sm-issue-129-launch \
+	sm-baseline-dry-run sm-baseline-launch sm-baseline-logs sm-baseline-status
 
 # Re-sync the uv environment and Jupyter kernel from the current branch.
 # Equivalent to re-running the LCC without restarting the space.
@@ -108,3 +109,35 @@ sm-issue-129-launch: sm-require-env
 		--mlflow-tracking-uri $(MLFLOW_TRACKING_URI) \
 		--role-arn $(SM_ROLE_ARN) \
 		$(if $(HF_TOKEN_SECRET_ARN),--hf-token-secret-arn $(HF_TOKEN_SECRET_ARN),)
+
+# --- Baseline submission shortcuts (issue #129) ---
+# Shorter aliases for common baseline tasks.
+
+sm-baseline-dry-run: sm-issue-129-dry-run
+	@echo "✓ Dry-run completed. Run 'make sm-baseline-launch' to submit."
+
+sm-baseline-launch: sm-issue-129-launch
+	@echo "✓ Job submitted. Run 'make sm-baseline-logs' to watch."
+
+sm-baseline-logs: sm-require-env
+	@echo "Tailing CloudWatch logs. Press Ctrl+C to stop."
+	@sleep 1
+	$(SM_AWS_ENV) aws logs tail /aws/sagemaker/TrainingJobs \
+		--log-stream-name-prefix mermaidseg-issue-129-baseline \
+		--follow --format short 2>/dev/null || \
+	$(SM_AWS_ENV) aws logs describe-log-streams \
+		--log-group-name /aws/sagemaker/TrainingJobs \
+		--log-stream-name-prefix mermaidseg-issue-129-baseline \
+		--query 'logStreams[0].logStreamName' --output text | \
+	xargs -I {} $(SM_AWS_ENV) aws logs tail /aws/sagemaker/TrainingJobs \
+		--log-stream-name {} --follow --format short
+
+sm-baseline-status: sm-require-env
+	@echo "Recent baseline training jobs:"
+	@$(SM_AWS_ENV) aws sagemaker list-training-jobs \
+		--name-contains "mermaidseg-issue-129-baseline" \
+		--sort-order Descending \
+		--sort-by CreationTime \
+		--max-results 5 \
+		--query 'TrainingJobSummaries[*].[TrainingJobName,TrainingJobStatus,CreationTime]' \
+		--output table

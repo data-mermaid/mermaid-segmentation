@@ -64,6 +64,15 @@ bash docker/jobs/local_smoke.sh processing
 
 ## Run a training job
 
+### Quick Start: LinearDINOv3 Baseline (Issue #129)
+
+For the mermaid + coralnet baseline (no CBM), see **[BASELINE_SUBMISSION.md](./BASELINE_SUBMISSION.md)** for:
+- Pre-configured data/model/training configs
+- One-command submission: `make sm-baseline-launch`
+- Detailed troubleshooting
+
+### Custom Training Job
+
 ```bash
 export AWS_PROFILE=wcs-launcher
 uv run --extra sagemaker python scripts/launch_training.py \
