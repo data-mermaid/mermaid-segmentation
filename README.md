@@ -47,6 +47,19 @@ uv sync --extra smp         # segmentation-models-pytorch (optional model backen
 uv sync --group dev --group notebooks
 ```
 
+### Running on SageMaker (cloud training)
+
+For training at scale on AWS SageMaker, see [docs/sagemaker.md](docs/sagemaker.md).
+
+**Quick start:** Run the issue #129 baseline (LinearDINOv3 on Mermaid + CoralNet):
+
+```bash
+make sm-check                    # Validate AWS credentials and environment
+make sm-issue-129-dry-run        # Smoke test the configuration
+make sm-issue-129-launch         # Submit the training job
+```
+
+The launcher submits a TrainingJob, streams logs, and saves the model to S3. Monitor progress in MLflow (see docs/sagemaker.md for the link).
 
 ### Hugging Face Setup
 
