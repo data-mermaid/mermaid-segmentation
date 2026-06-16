@@ -8,7 +8,7 @@ job:
 
 # Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher).
 config:
-  config_path: configs/linear-dinov3-base.yaml
+  config_path: configs/model_config_dinov3_base.yaml
   overrides:
     run-name: mermaidseg-sagemaker-smoke
     epochs: 1

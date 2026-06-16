@@ -1,0 +1,5 @@
+# LinearDINOv3 baseline model for issue #129 evaluation
+model:
+  name: "LinearDINOv3"
+  encoder_name: "facebook/dinov3-vitb16-pretrain-lvd1689m"
+  input_size: [512, 512]
