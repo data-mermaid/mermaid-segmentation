@@ -1,0 +1,424 @@
+"""Simplified training entry point for LinearDINOv3 baseline (mermaid + coralnet, no
+CBM).
+
+This is a streamlined version of scripts/train.py that:
+- Only imports MermaidDataset and CoralNetDataset (faster startup)
+- Disables all other datasets
+- Uses standard (non-CBM) training defaults
+- Ideal for issue #129 baseline and SageMaker launcher
+
+Usage::
+
+    # Local dry-run (smoke test)
+    uv run python scripts/train_baseline.py --dry-run
+
+    # Full training with custom config
+    uv run python scripts/train_baseline.py \\
+        --config-data configs/data_config_dinov3_base.yaml \\
+        --config-model configs/model_config_dinov3_base.yaml \\
+        --config-training configs/training_config_dinov3_base.yaml
+
+    # Background (safe to close browser)
+    nohup uv run python scripts/train_baseline.py \\
+        --auto-shutdown \\
+        > logs/train_baseline_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+"""
+
+import argparse
+import copy
+import json
+import logging
+import os
+import signal
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import torch
+from torch.utils.data import ConcatDataset, DataLoader
+
+from mermaidseg.dataset_reconciliation import (
+    SourceLabelRegistry,
+    attach_registry,
+    prepare_splits_for_registry,
+)
+from mermaidseg.datasets import CoralNetDataset, MermaidDataset, worker_init_fn
+from mermaidseg.io import get_parser, setup_config, update_config_with_args
+from mermaidseg.logger import Logger
+from mermaidseg.model.eval import Evaluator
+from mermaidseg.model.meta import MetaModel
+from mermaidseg.model.metric_policy import SUPPORTED_METRIC_NAMES
+from mermaidseg.model.train import train_model
+
+_METADATA = Path("/opt/ml/metadata/resource-metadata.json")
+
+
+def _configure_third_party_loggers() -> None:
+    """Reduce verbosity from chatty third-party libraries."""
+    logging.getLogger("botocore.tokens").setLevel(logging.WARNING)
+
+
+def _setup_logging(log_dir: Path) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"train_{timestamp}.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stderr),
+            logging.FileHandler(log_file),
+        ],
+    )
+    _configure_third_party_loggers()
+    logging.info("Logging to %s", log_file)
+
+
+def _cleanup_pid(pid_file: Path) -> None:
+    pid_file.unlink(missing_ok=True)
+
+
+def _write_pid(pid_file: Path) -> None:
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
+
+
+def _stop_current_space() -> None:
+    """Stop the SageMaker JupyterLab app via delete_app."""
+    if not _METADATA.exists():
+        logging.info("Not running on SageMaker — skipping auto-shutdown")
+        return
+    import boto3
+    import botocore.exceptions
+
+    info = json.loads(_METADATA.read_text())
+    try:
+        boto3.client("sagemaker").delete_app(
+            DomainId=info["DomainId"],
+            SpaceName=info["SpaceName"],
+            AppType="JupyterLab",
+            AppName=info.get("AppName", "default"),
+        )
+        logging.info(
+            "Space shutdown initiated (DomainId=%s, SpaceName=%s)",
+            info["DomainId"],
+            info["SpaceName"],
+        )
+    except botocore.exceptions.ClientError as e:
+        logging.warning("Auto-shutdown failed (check sagemaker:DeleteApp permission): %s", e)
+
+
+def _batch_is_non_empty(batch: object) -> bool:
+    if not isinstance(batch, tuple | list) or len(batch) < 2:
+        return True
+    images, labels = batch[0], batch[1]
+    if isinstance(images, torch.Tensor) and images.numel() == 0:
+        return False
+    return not (isinstance(labels, torch.Tensor) and labels.numel() == 0)
+
+
+def _take_first_non_empty_batch(loader: object, split: str) -> tuple[torch.Tensor, torch.Tensor]:
+    for batch in loader:
+        if _batch_is_non_empty(batch):
+            return batch
+    raise RuntimeError(
+        f"Dry run could not find a non-empty batch for split '{split}'. Check data access credentials and dataset availability."
+    )
+
+
+def _save_failure_report_if_available(
+    dataset: object,
+    log_dir: Path,
+    explicit_output_path: str | None = None,
+) -> Path | None:
+    num_failures = getattr(dataset, "num_load_failures", None)
+    save_failures = getattr(dataset, "save_load_failures", None)
+    if not callable(num_failures) or not callable(save_failures):
+        return None
+    n_failures = int(num_failures())
+    if n_failures == 0:
+        return None
+
+    report_path = (
+        Path(explicit_output_path)
+        if explicit_output_path
+        else (log_dir / f"data_load_failures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet")
+    )
+    saved_path = Path(save_failures(report_path))
+    logging.warning("Saved %d data-load failure records to %s", n_failures, saved_path)
+    return saved_path
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    base = get_parser()
+    base.add_argument(
+        "--config-data",
+        type=str,
+        default="configs/data_config_dinov3_base.yaml",
+        help="path to data config file (baseline: dinov3_base)",
+    )
+    base.add_argument(
+        "--config-model",
+        type=str,
+        default="configs/model_config_dinov3_base.yaml",
+        help="path to model config file (baseline: dinov3_base)",
+    )
+    base.add_argument(
+        "--config-training",
+        type=str,
+        default="configs/training_config_dinov3_base.yaml",
+        help="path to training config file (baseline: dinov3_base)",
+    )
+    base.add_argument(
+        "--config-logger",
+        type=str,
+        default="configs/logger_config.yaml",
+        help="path to logger config file",
+    )
+    base.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run one batch only (smoke test)",
+    )
+    base.add_argument(
+        "--auto-shutdown",
+        action="store_true",
+        help="stop the SageMaker space after a clean training finish",
+    )
+    base.add_argument(
+        "--log-dir",
+        type=str,
+        default="logs",
+        help="directory for log files and PID file",
+    )
+    base.add_argument(
+        "--failure-report-path",
+        type=str,
+        default=None,
+        help="optional parquet path for data-load failure report",
+    )
+    base.add_argument(
+        "--early-stopping",
+        action="store_true",
+        help="enable early stopping on validation metric_of_interest",
+    )
+    base.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=10,
+        help="epochs without improvement before early stopping",
+    )
+    base.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.0,
+        help="minimum improvement required to reset early stopping patience",
+    )
+    base.add_argument(
+        "--metric-of-interest",
+        type=str,
+        default="accuracy",
+        choices=sorted(SUPPORTED_METRIC_NAMES),
+        help="metric used for checkpointing and early stopping",
+    )
+    base.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="random seed for reproducibility",
+    )
+    base.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader num_workers (default: 0)",
+    )
+    return base
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    log_dir = Path(args.log_dir)
+    _setup_logging(log_dir)
+    pid_file = log_dir / "train.pid"
+    _write_pid(pid_file)
+
+    def _handle_sigterm(_sig: int, _frame: object) -> None:
+        logging.warning("SIGTERM received — exiting")
+        _cleanup_pid(pid_file)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    try:
+        _run_training(args)
+    except Exception:
+        logging.exception("Training failed")
+        sys.exit(1)
+    finally:
+        _cleanup_pid(pid_file)
+
+    if args.auto_shutdown:
+        _SHUTDOWN_GRACE_SEC = 5
+        logging.info("Waiting %ds for MLflow flush before shutdown...", _SHUTDOWN_GRACE_SEC)
+        time.sleep(_SHUTDOWN_GRACE_SEC)
+        _stop_current_space()
+
+
+def _run_training(args: argparse.Namespace) -> None:
+    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
+    if not os.getenv("MLFLOW_TRACKING_URI"):
+        logging.warning(
+            "MLFLOW_TRACKING_URI is not set — MLflow will log to a local filesystem store. "
+            "Set MLFLOW_TRACKING_URI to the SageMaker MLflow App ARN for remote tracking:\n"
+            '    export MLFLOW_TRACKING_URI="arn:aws:sagemaker:us-east-1:ACCOUNT:mlflow-app/APP-ID"'
+        )
+
+    cfg = setup_config(
+        {
+            "data": args.config_data,
+            "training": args.config_training,
+            "model": args.config_model,
+            "logger": args.config_logger,
+        }
+    )
+
+    cfg = update_config_with_args(cfg, args)
+    cfg_logger = copy.deepcopy(cfg)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logging.info("Device: %s", device)
+
+    seed = args.seed
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    logging.info("Seed: %d", seed)
+
+    loader_kwargs = {
+        "batch_size": cfg.training.batch_size,
+        "num_workers": args.num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "drop_last": True,
+    }
+    if args.num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["worker_init_fn"] = worker_init_fn
+
+    dataset_dict: dict[tuple[str, str], object] = {}
+    for name in ["mermaid", "coralnet"]:
+        for split, split_cfg in cfg.data[name].items():
+            if split_cfg is None or split_cfg == "None":
+                continue
+            if name == "mermaid":
+                ds = MermaidDataset(**split_cfg, padding=cfg.training.padding)
+            else:  # coralnet
+                ds = CoralNetDataset(**split_cfg, padding=cfg.training.padding)
+            dataset_dict[(name, split)] = ds
+            print(f"{name:>24s} - {split:<5s}: {len(ds):>7d} samples")
+
+    _, registry_datasets = prepare_splits_for_registry(dataset_dict)
+
+    registry = SourceLabelRegistry(
+        registry_datasets,
+        target_label_subset=cfg.training.class_subset,
+        compute_concepts=False,
+        concept_mapping_path=None,
+        concept_schema=None,
+        label_roll_up=cfg.training.get("label_roll_up", False),
+    ).to(device)
+
+    attach_registry(registry, dataset_dict.values())
+
+    train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"]
+    val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
+
+    train_loader = DataLoader(ConcatDataset(train_datasets), shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
+
+    print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
+
+    logging.info(
+        "Dataset: %s (%d samples)",
+        "mermaid+coralnet",
+        (len(train_loader) + len(val_loader)) * cfg.training.batch_size,
+    )
+
+    if args.dry_run:
+        max_dry_epochs = 3
+        actual_epochs = cfg.training.epochs
+        if actual_epochs > max_dry_epochs:
+            cfg.training.epochs = max_dry_epochs
+            logging.info("Dry run: capping epochs %d → %d", actual_epochs, max_dry_epochs)
+        logging.info("Dry run: limiting to 1 batch per epoch")
+        try:
+            train_loader = [_take_first_non_empty_batch(train_loader, "train")]
+            val_loader = [_take_first_non_empty_batch(val_loader, "val")]
+        except RuntimeError:
+            raise
+
+    meta_model = MetaModel(
+        run_name=cfg.run_name,
+        num_classes=registry.num_target_classes,
+        num_concepts=None,
+        device=device,
+        model_kwargs=cfg.model.copy(),
+        training_kwargs=cfg.training.copy(),
+        source_to_target_lookup=registry.source_to_target,
+        source_to_concepts_lookup=None,
+        concept_matrix=None,
+        conceptid2labelid=None,
+        concept_value2id=None,
+    )
+
+    evaluator = Evaluator(
+        num_classes=registry.num_target_classes,
+        device=device,
+        calculate_concept_metrics=False,
+        concept_value2id=None,
+    )
+
+    cfg.logger.experiment_name = "mermaid"
+    cfg_logger.logger.experiment_name = "mermaid"
+
+    with Logger(
+        config=cfg_logger,
+        meta_model=meta_model,
+        log_epochs=cfg.logger.get("log_epochs", 1),
+        log_checkpoint=cfg_logger.logger.get("log_checkpoint", 50),
+        checkpoint_dir=".",
+        enable_mlflow=True,
+        id2label={0: "background", **registry.target_id2label},
+    ) as logger:
+        if logger.mlflow_run_id is not None:
+            logging.info("MLflow run_id: %s", logger.mlflow_run_id)
+
+        logger.log_dataloader_params(train_loader, prefix="train_loader")
+        logger.log_dataloader_params(val_loader, prefix="val_loader")
+        logger.log_reconciliation(registry)
+
+        try:
+            train_model(
+                meta_model=meta_model,
+                evaluator=evaluator,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                test_loader=None,
+                logger=logger,
+                metric_of_interest=args.metric_of_interest,
+                early_stopping=args.early_stopping,
+                early_stopping_patience=args.early_stopping_patience,
+                early_stopping_min_delta=args.early_stopping_min_delta,
+            )
+        finally:
+            pass
+        logging.info("Training complete")
+
+
+if __name__ == "__main__":
+    main()
