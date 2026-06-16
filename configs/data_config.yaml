@@ -40,6 +40,10 @@ data:
     val: None # We currently have no validation data for the mermaid dataset, so we set this to None to avoid speculation.
 
   coralscapes:
+    train: None
+    val: None
+
+  coralscapes_v2:
     train:
       split: train
       transform:

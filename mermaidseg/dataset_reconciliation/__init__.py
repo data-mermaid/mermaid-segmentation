@@ -13,6 +13,7 @@ from mermaidseg.dataset_reconciliation.concepts import (
 )
 from mermaidseg.dataset_reconciliation.label_mapping import (
     coralscapes_to_mermaid,
+    coralscapes_v2_to_mermaid,
     fetch_coralnet_to_mermaid,
     fetch_mermaid_target_labels,
     source_labels_to_target_labels,
@@ -38,6 +39,7 @@ __all__ = [
     "build_source_to_concepts",
     "build_source_vocabularies",
     "coralscapes_to_mermaid",
+    "coralscapes_v2_to_mermaid",
     "fetch_coralnet_to_mermaid",
     "fetch_mermaid_target_labels",
     "group_splits",
