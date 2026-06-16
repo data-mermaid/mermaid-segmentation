@@ -37,6 +37,7 @@ data:
                           6968, 7116]
 
   mermaid:
+    train: {}
     val: None
 
   coralscapes:
