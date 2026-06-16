@@ -13,6 +13,7 @@ Example
         --run-config sagemaker/runs/my-eval.yaml \\
         --config-dir sagemaker/configs/my-eval/
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,7 +21,7 @@ import csv
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import boto3
@@ -46,13 +47,12 @@ def expand_image_uri(image: str) -> str:
         raise ValueError(f"Image {image!r} must be `<repo>:<tag>` or a full ECR URI.")
     repo, _ = image.split(":", 1)
     if repo not in KNOWN_SHORT_REPOS:
-        raise ValueError(
-            f"Unknown short-form repo {repo!r}. Known: {sorted(KNOWN_SHORT_REPOS)}.")
+        raise ValueError(f"Unknown short-form repo {repo!r}. Known: {sorted(KNOWN_SHORT_REPOS)}.")
     return f"{ECR_HOST}/{image}"
 
 
 def make_run_id(prefix: str) -> str:
-    return f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    return f"{prefix}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
 
 
 def chunk_items(items: list[str], n_workers: int) -> list[list[str]]:
@@ -75,7 +75,11 @@ def load_items(csv_path: Path, column: str | None) -> list[str]:
 
 
 def build_processing_request(
-    *, cfg: RunConfig, run_id: str, worker_idx: int, worker_items: list[str] | None,
+    *,
+    cfg: RunConfig,
+    run_id: str,
+    worker_idx: int,
+    worker_items: list[str] | None,
 ) -> dict:
     job = cfg.job
     proc = cfg.processing
@@ -104,9 +108,11 @@ def build_processing_request(
             **job.env,
         },
         "Tags": (
-            [{"Key": "Project", "Value": "mermaid-segmentation"},
-             {"Key": "RunId", "Value": run_id},
-             {"Key": "WorkerIdx", "Value": str(worker_idx)}]
+            [
+                {"Key": "Project", "Value": "mermaid-segmentation"},
+                {"Key": "RunId", "Value": run_id},
+                {"Key": "WorkerIdx", "Value": str(worker_idx)},
+            ]
             + [{"Key": k, "Value": v} for k, v in job.tags.items()]
         ),
     }
@@ -122,6 +128,7 @@ def _configure_logging():
 
 def _make_sagemaker_client():
     from botocore.config import Config
+
     return boto3.client(
         "sagemaker",
         config=Config(region_name=REGION, retries={"mode": "adaptive", "max_attempts": 10}),
@@ -129,7 +136,7 @@ def _make_sagemaker_client():
 
 
 def _wait_for_completion(client, job_names, poll_interval_s=DEFAULT_POLL_INTERVAL_S):
-    status = {n: "Pending" for n in job_names}
+    status = dict.fromkeys(job_names, "Pending")
     while True:
         for name in job_names:
             if status[name] in TERMINAL_STATES:
@@ -139,8 +146,12 @@ def _wait_for_completion(client, job_names, poll_interval_s=DEFAULT_POLL_INTERVA
         unfinished = [n for n, s in status.items() if s not in TERMINAL_STATES]
         if not unfinished:
             return status
-        log.info("Polling: %d/%d still running; sleeping %ds",
-                 len(unfinished), len(job_names), poll_interval_s)
+        log.info(
+            "Polling: %d/%d still running; sleeping %ds",
+            len(unfinished),
+            len(job_names),
+            poll_interval_s,
+        )
         time.sleep(poll_interval_s)
 
 
@@ -174,16 +185,17 @@ def main(argv=None):
     run_id = make_run_id(cfg.job.name_prefix)
     if cfg.processing.shard:
         items = load_items(
-            args.config_dir / cfg.processing.shard.items_from,
-            cfg.processing.shard.items_column)
+            args.config_dir / cfg.processing.shard.items_from, cfg.processing.shard.items_column
+        )
         chunks = chunk_items(items, cfg.processing.shard.workers)
         requests = [
             build_processing_request(cfg=cfg, run_id=run_id, worker_idx=i, worker_items=c)
             for i, c in enumerate(chunks)
         ]
     else:
-        requests = [build_processing_request(
-            cfg=cfg, run_id=run_id, worker_idx=0, worker_items=None)]
+        requests = [
+            build_processing_request(cfg=cfg, run_id=run_id, worker_idx=0, worker_items=None)
+        ]
 
     if args.dry_run:
         print("=" * 60)
@@ -208,7 +220,8 @@ def main(argv=None):
     cw_url = (
         f"https://{REGION}.console.aws.amazon.com/cloudwatch/home"
         f"?region={REGION}#logsV2:log-groups/log-group/"
-        f"$252Faws$252Fsagemaker$252FProcessingJobs")
+        f"$252Faws$252Fsagemaker$252FProcessingJobs"
+    )
     log.info("CloudWatch: %s", cw_url)
 
     if args.no_wait:

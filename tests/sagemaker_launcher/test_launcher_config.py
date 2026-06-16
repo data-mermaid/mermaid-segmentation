@@ -1,4 +1,5 @@
 """Tests for mermaidseg.sagemaker.launcher_config."""
+
 from __future__ import annotations
 
 import unittest
@@ -7,7 +8,8 @@ import yaml
 from pydantic import ValidationError
 
 from mermaidseg.sagemaker.launcher_config import (
-    JobConfig, ProcessingConfig, ShardConfig, TrainingConfig,
+    JobConfig,
+    ShardConfig,
     parse_run_config,
 )
 
@@ -30,8 +32,8 @@ class JobConfigTest(unittest.TestCase):
     def test_missing_required_field_raises(self):
         with self.assertRaises(ValidationError) as ctx:
             JobConfig(
-                name_prefix="x", entrypoint="x", instance_type="x",
-                volume_gb=1, max_runtime_hours=1)
+                name_prefix="x", entrypoint="x", instance_type="x", volume_gb=1, max_runtime_hours=1
+            )
         self.assertIn("image", str(ctx.exception))
 
 
@@ -43,38 +45,55 @@ class ShardConfigTest(unittest.TestCase):
 
 class ParseRunConfigTest(unittest.TestCase):
     def test_training_only(self):
-        y = yaml.safe_dump({
-            "job": {
-                "name_prefix": "x", "image": "y", "entrypoint": "z",
-                "instance_type": "ml.g5.2xlarge",
-                "volume_gb": 200, "max_runtime_hours": 24,
-            },
-            "training": {"hyperparameters": {"k": "v"}},
-        })
+        y = yaml.safe_dump(
+            {
+                "job": {
+                    "name_prefix": "x",
+                    "image": "y",
+                    "entrypoint": "z",
+                    "instance_type": "ml.g5.2xlarge",
+                    "volume_gb": 200,
+                    "max_runtime_hours": 24,
+                },
+                "training": {"hyperparameters": {"k": "v"}},
+            }
+        )
         cfg = parse_run_config(y, kind="training")
         self.assertIsNotNone(cfg.training)
         self.assertIsNone(cfg.processing)
 
     def test_unknown_top_level_key_raises_in_strict(self):
-        y = yaml.safe_dump({
-            "job": {
-                "name_prefix": "x", "image": "y", "entrypoint": "z",
-                "instance_type": "a", "volume_gb": 1, "max_runtime_hours": 1,
-            },
-            "garbage": {"foo": "bar"},
-        })
+        y = yaml.safe_dump(
+            {
+                "job": {
+                    "name_prefix": "x",
+                    "image": "y",
+                    "entrypoint": "z",
+                    "instance_type": "a",
+                    "volume_gb": 1,
+                    "max_runtime_hours": 1,
+                },
+                "garbage": {"foo": "bar"},
+            }
+        )
         with self.assertRaises(ValidationError):
             parse_run_config(y, kind="training", strict=True)
 
     def test_unknown_top_level_key_ignored_in_loose(self):
-        y = yaml.safe_dump({
-            "job": {
-                "name_prefix": "x", "image": "y", "entrypoint": "z",
-                "instance_type": "a", "volume_gb": 1, "max_runtime_hours": 1,
-            },
-            "config": {"model_name": "LinearDINOv3"},   # seg-specific block,
-                                                         # consumed by the entrypoint
-                                                         # not the launcher.
-        })
+        y = yaml.safe_dump(
+            {
+                "job": {
+                    "name_prefix": "x",
+                    "image": "y",
+                    "entrypoint": "z",
+                    "instance_type": "a",
+                    "volume_gb": 1,
+                    "max_runtime_hours": 1,
+                },
+                "config": {"model_name": "LinearDINOv3"},  # seg-specific block,
+                # consumed by the entrypoint
+                # not the launcher.
+            }
+        )
         cfg = parse_run_config(y, kind="training", strict=False)
         self.assertIsNotNone(cfg.job)
