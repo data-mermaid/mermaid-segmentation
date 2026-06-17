@@ -13,6 +13,8 @@
 
 ARG BASE_IMAGE=pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
 FROM ${BASE_IMAGE}
+ARG HF_TOKEN
+ENV HF_TOKEN=$HF_TOKEN
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

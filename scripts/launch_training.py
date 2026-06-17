@@ -69,14 +69,17 @@ def build_estimator_kwargs(
     mlflow_uri: str,
     sm_session,
     role: str,
+    hf_token: str | None = None,
 ) -> dict:
     job = cfg.job
     env = {
-        "MLFLOW_TRACKING_SERVER": mlflow_uri,
+        "MLFLOW_TRACKING_URI": mlflow_uri,
         "AWS_DEFAULT_REGION": REGION,
         "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
         **job.env,
     }
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
     kwargs = {
         "image_uri": expand_image_uri(job.image),
         "role": role,
@@ -122,6 +125,11 @@ def main(argv=None):
     parser.add_argument("--role-arn", default=EXEC_ROLE)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-wait", action="store_true")
+    parser.add_argument(
+        "--hf-token",
+        default=None,
+        help="HuggingFace token to pass as HF_TOKEN env var to the container (for gated models).",
+    )
     args = parser.parse_args(argv)
 
     cfg = parse_run_config(args.run_config.read_text(), kind="training", strict=False)
@@ -161,6 +169,7 @@ def main(argv=None):
         mlflow_uri=args.mlflow_tracking_uri,
         sm_session=sm_session,
         role=args.role_arn,
+        hf_token=args.hf_token,
     )
 
     log.info("Run ID:       %s", run_id)

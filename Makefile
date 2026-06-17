@@ -84,7 +84,7 @@ sm-launch: sm-require-env
 		--config-dir $(SM_CONFIG_DIR)/ \
 		--mlflow-tracking-uri $(MLFLOW_TRACKING_URI) \
 		--role-arn $(SM_ROLE_ARN) \
-		$(if $(HF_TOKEN_SECRET_ARN),--hf-token-secret-arn $(HF_TOKEN_SECRET_ARN),)
+		$(if $(HF_TOKEN),--hf-token $(HF_TOKEN),)
 
 sm-smoke:
 	bash docker/jobs/local_smoke.sh training
@@ -108,7 +108,7 @@ sm-issue-129-launch: sm-require-env
 		--config-dir sagemaker/configs/baseline/ \
 		--mlflow-tracking-uri $(MLFLOW_TRACKING_URI) \
 		--role-arn $(SM_ROLE_ARN) \
-		$(if $(HF_TOKEN_SECRET_ARN),--hf-token-secret-arn $(HF_TOKEN_SECRET_ARN),)
+		$(if $(HF_TOKEN),--hf-token $(HF_TOKEN),)
 
 # --- Baseline submission shortcuts (issue #129) ---
 # Shorter aliases for common baseline tasks.
