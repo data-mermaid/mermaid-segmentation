@@ -1,6 +1,7 @@
 training:
     training_mode: "concept-bottleneck"
     freeze_encoder: true
+    detach_concepts: true
     concept_mapping_path: "../configs/class_to_concepts.csv"
     loss:
         type: ConceptBottleneckLoss
@@ -15,6 +16,9 @@ training:
         type: PolynomialLR
         power: 1
         total_iters: 200
+        warmup_iters: 2000
+        warmup_start_factor: 0.01
+    mixed_precision: true
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
     batch_size: 10
