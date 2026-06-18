@@ -22,7 +22,7 @@ training:
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
                     'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
-                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human-made structure', 'Hydnophora',
+                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human', 'Human-made structure', 'Hydnophora',
                     'Isopora', 'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis',
                     'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium',
                     'Orbicella annularis', 'Orbicella faveolata', 'Pachyseris', 'Padina', 'Pavona', 'Pectinia', 'Platygyra',

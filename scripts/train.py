@@ -59,6 +59,7 @@ from mermaidseg.datasets import (
     CatlinSeaviewDataset,
     CoralNetDataset,
     CoralscapesDataset,
+    CoralscapesV2Dataset,
     MermaidDataset,
     MooreaLabeledCoralsDataset,
     PacificLabeledCoralsDataset,
@@ -332,13 +333,14 @@ def _run_training(args: argparse.Namespace) -> None:
         "mermaid": MermaidDataset,
         "coralnet": CoralNetDataset,
         "coralscapes": CoralscapesDataset,
+        "coralscapes_v2": CoralscapesV2Dataset,
         "benthos_yuval": BenthosYuvalCoralsDataset,
     }
 
     # coralscapes uses a different signature (no `padding`)
     def _build(name, split_cfg):
         cls = DATASET_CLASSES[name]
-        if name == "coralscapes" or name == "benthos_yuval":
+        if name in ("coralscapes", "coralscapes_v2", "benthos_yuval"):
             return cls(**split_cfg)
         return cls(**split_cfg, padding=cfg.training.padding)
 
