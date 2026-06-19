@@ -27,6 +27,7 @@ def classify_remediation_action(
     annotations_csv_read_failed: bool,
     annotations_empty: bool,
     image_count_match: bool,
+    image_list_covers_annotations: bool = True,
 ) -> RemediationAction:
     if not probe.accessible:
         return RemediationAction.SKIP_NOT_ACCESSIBLE
@@ -63,6 +64,9 @@ def classify_remediation_action(
     if csv_broken_or_empty and tw > 0:
         return RemediationAction.REDOWNLOAD_CSV
 
+    if csvs_ok_core and not image_list_covers_annotations:
+        return RemediationAction.REDOWNLOAD_CSV
+
     if csvs_ok_core and not image_count_match and gap > 0:
         return RemediationAction.REDOWNLOAD_IMAGES
 
@@ -84,4 +88,5 @@ def classify_from_audit_series(
         annotations_csv_read_failed=_row_bool(audit_row, "annotations_csv_read_failed"),
         annotations_empty=_row_bool(audit_row, "annotations_empty"),
         image_count_match=_row_bool(audit_row, "image_count_match"),
+        image_list_covers_annotations=_row_bool(audit_row, "image_list_covers_annotations"),
     )

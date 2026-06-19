@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -234,9 +235,27 @@ def _get_thread_context() -> tuple[BaseClient, CsvReader]:
     return _thread_local.s3, _thread_local.csv_reader
 
 
+_CRED_REFRESH_INTERVAL_SECONDS = 3000  # refresh every ~50 min; SageMaker rotates at 60 min
+
+
+def _refresh_thread_credentials_if_due() -> None:
+    """Refresh per-thread ibis credentials based on wall time, not call count.
+
+    Called inside each worker invocation so the refresh happens on the worker thread that owns the
+    ibis connection. A time-based check avoids threading credential_refresh_every into the worker
+    args and handles variable per-source latency correctly.
+    """
+    now = time.monotonic()
+    last = getattr(_thread_local, "last_cred_refresh", 0.0)
+    if now - last >= _CRED_REFRESH_INTERVAL_SECONDS:
+        refresh_thread_ibis_credentials_if_present(_thread_local)
+        _thread_local.last_cred_refresh = now
+
+
 def _audit_worker(args: tuple[int, str, str, datetime]) -> dict[str, Any]:
     source_id, bucket, prefix, audit_ts = args
     client, reader = _get_thread_context()
+    _refresh_thread_credentials_if_due()
     return _audit_one_source(client, reader, bucket, prefix, source_id, audit_ts)
 
 
@@ -255,7 +274,6 @@ def audit_sources(
     source_ids: list[int] | None = None,
     s3_client: BaseClient | None = None,
     csv_reader: CsvReader | None = None,
-    credential_refresh_every: int = 100,
 ) -> pd.DataFrame:
     """Audit every CoralNet source folder under ``s3://<bucket>/<prefix>/``.
 
@@ -271,9 +289,6 @@ def audit_sources(
         csv_reader: ``CsvReader`` callable. When None and ``s3_client`` is
             also None, the production ibis path is used; when ``s3_client``
             is given, falls back to a boto3-backed reader against it.
-        credential_refresh_every: Re-run the DuckDB ``CREATE OR REPLACE SECRET``
-            on every worker's ibis connection after this many completed
-            sources, to survive SageMaker IAM rotation.
     """
     bucket = bucket or get_bucket()
     prefix = prefix or get_prefix()
@@ -316,8 +331,6 @@ def audit_sources(
                     record = _empty_record(source_id, audit_ts)
                     record["errors"].append(f"Worker exception: {type(e).__name__}: {e}")
                 results.append(record)
-                if len(results) % credential_refresh_every == 0:
-                    refresh_thread_ibis_credentials_if_present(_thread_local)
     else:
         for source_id in tqdm(source_ids, desc="Auditing sources"):
             try:

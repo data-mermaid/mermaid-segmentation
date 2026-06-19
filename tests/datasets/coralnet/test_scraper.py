@@ -268,6 +268,26 @@ def test_classify_redownload_images_when_csvs_ok_but_gap():
     assert act == RemediationAction.REDOWNLOAD_IMAGES
 
 
+def test_classify_redownload_csv_when_image_list_truncated():
+    # Regression: sources where image_list.csv is shorter than annotated images were
+    # previously falling through to MANUAL_REVIEW (issue #130).
+    probe = SourceProbe(295, "url", True, None, total_images_website=79_064)
+    act = classify_remediation_action(
+        probe=probe,
+        has_images_folder=True,
+        has_annotations_csv=True,
+        has_image_list_csv=True,
+        n_images_s3=79_062,
+        n_images_csv=1_064,
+        n_annotations=79_064,
+        annotations_csv_read_failed=False,
+        annotations_empty=False,
+        image_count_match=False,
+        image_list_covers_annotations=False,
+    )
+    assert act == RemediationAction.REDOWNLOAD_CSV
+
+
 def test_download_source_skips_zero_confirmed_on_website():
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
