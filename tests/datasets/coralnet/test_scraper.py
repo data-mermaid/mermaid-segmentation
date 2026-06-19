@@ -268,6 +268,26 @@ def test_classify_redownload_images_when_csvs_ok_but_gap():
     assert act == RemediationAction.REDOWNLOAD_IMAGES
 
 
+def test_classify_redownload_csv_when_image_list_truncated():
+    # Regression: sources where image_list.csv is shorter than annotated images were
+    # previously falling through to MANUAL_REVIEW (issue #130).
+    probe = SourceProbe(295, "url", True, None, total_images_website=79_064)
+    act = classify_remediation_action(
+        probe=probe,
+        has_images_folder=True,
+        has_annotations_csv=True,
+        has_image_list_csv=True,
+        n_images_s3=79_062,
+        n_images_csv=1_064,
+        n_annotations=79_064,
+        annotations_csv_read_failed=False,
+        annotations_empty=False,
+        image_count_match=False,
+        image_list_covers_annotations=False,
+    )
+    assert act == RemediationAction.REDOWNLOAD_CSV
+
+
 def test_download_source_skips_zero_confirmed_on_website():
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
@@ -357,7 +377,8 @@ def _thumb(image_id: int) -> str:
 def _browse_page(
     csrf: str, n_thumbs: int = 1, next_href: str | None = None, start_id: int = 1
 ) -> str:
-    """Build a fake browse page with ``n_thumbs`` thumbs whose image IDs start at ``start_id``.
+    """Build a fake browse page with ``n_thumbs`` thumbs whose image IDs start at
+    ``start_id``.
 
     Each page in a multi-page test should use a disjoint ``start_id`` range so
     ``_extract_page_image_ids`` produces distinct ID tuples across pages.
@@ -450,9 +471,9 @@ def _mock_paginated_session(
 ) -> Iterator[MagicMock]:
     """Patch ``dl.session.get``/``post`` and ``time.sleep`` for a paginated-export test.
 
-    Yields the ``post`` mock so tests can introspect ``call_args_list`` to assert the export_prep
-    POST body. ``get`` and ``post`` accept either a list (consumed in order as ``side_effect``) or a
-    callable (for URL-based dispatch in the parallel test).
+    Yields the ``post`` mock so tests can introspect ``call_args_list`` to assert the
+    export_prep POST body. ``get`` and ``post`` accept either a list (consumed in order
+    as ``side_effect``) or a callable (for URL-based dispatch in the parallel test).
     """
     with (
         patch.object(dl.session, "get", side_effect=get),
@@ -504,7 +525,8 @@ def test_download_annotations_bulk_for_small_source():
 def test_paginated_export_skips_when_existing_annotations_are_complete(
     paginated_downloader, fake_s3
 ):
-    """No pages are fetched when existing annotations.csv already covers all website images."""
+    """No pages are fetched when existing annotations.csv already covers all website
+    images."""
     dl = paginated_downloader
 
     existing_csv = _ann_csv([("img1.jpg", 1, 1, 10), ("img2.jpg", 2, 2, 20)])
@@ -578,7 +600,8 @@ def test_paginated_export_three_pages_concatenated(paginated_downloader, fake_s3
 
 
 def test_paginated_export_merges_with_existing_annotations(paginated_downloader, fake_s3):
-    """When annotations.csv already exists on S3, new rows are merged and deduplicated."""
+    """When annotations.csv already exists on S3, new rows are merged and
+    deduplicated."""
     dl = paginated_downloader
 
     existing_csv = _ann_csv(
@@ -624,8 +647,8 @@ def test_get_images_multi_page_uses_urljoin():
     """Second-page URL must be resolved via urljoin, not f-string concatenation.
 
     Regression test for the bug where ``f"{base_url}/{next_page}"`` produced paths like
-    ``.../images/?page=2`` instead of ``.../images?page=2``. Also pins the resulting DataFrame shape
-    (``Name`` and ``Image Page`` columns).
+    ``.../images/?page=2`` instead of ``.../images?page=2``. Also pins the resulting
+    DataFrame shape (``Name`` and ``Image Page`` columns).
     """
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
@@ -682,8 +705,8 @@ def test_get_images_with_annotation_status_preserves_filter():
 def test_paginated_export_retries_on_page_timeout(paginated_downloader, fake_s3):
     """A ReadTimeout on attempt 1 of page 2's export_prep is retried and succeeds.
 
-    Phase 2 ``do_round_trip`` re-fetches the browse page for a fresh CSRF before each attempt, so
-    the retry triggers a second browse GET for page 2.
+    Phase 2 ``do_round_trip`` re-fetches the browse page for a fresh CSRF before each
+    attempt, so the retry triggers a second browse GET for page 2.
     """
     dl = paginated_downloader
 
@@ -719,8 +742,8 @@ def test_paginated_export_retries_on_page_timeout(paginated_downloader, fake_s3)
 def test_paginated_export_checkpoint_uploads_partial(paginated_downloader, fake_s3):
     """With ``checkpoint_every_pages=2`` and 3 pages, the CSV is uploaded twice.
 
-    Once at the checkpoint after page 2, and again as the final upload after page 3. The final CSV
-    must contain rows from all three pages.
+    Once at the checkpoint after page 2, and again as the final upload after page 3. The
+    final CSV must contain rows from all three pages.
     """
     dl = paginated_downloader
 
@@ -766,7 +789,8 @@ def test_paginated_export_checkpoint_uploads_partial(paginated_downloader, fake_
 def test_paginated_export_parallel_produces_correct_output(paginated_downloader, fake_s3):
     """``page_workers > 1`` produces the same final CSV regardless of completion order.
 
-    Uses URL-based mock dispatch so the test is not dependent on call order across worker threads.
+    Uses URL-based mock dispatch so the test is not dependent on call order across
+    worker threads.
     """
     dl = paginated_downloader
 

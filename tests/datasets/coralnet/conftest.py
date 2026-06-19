@@ -1,8 +1,8 @@
 """Shared fixtures for CoralNet ETL tests.
 
-Provides a hand-rolled in-memory ``FakeS3`` that implements the boto3 client surface the ETL touches
-(``head_object``, ``get_object`` with ``Range``, ``list_objects_v2``, ``get_paginator``). Keeps the
-test suite free of network and AWS deps.
+Provides a hand-rolled in-memory ``FakeS3`` that implements the boto3 client surface the
+ETL touches (``head_object``, ``get_object`` with ``Range``, ``list_objects_v2``,
+``get_paginator``). Keeps the test suite free of network and AWS deps.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 
 import pytest
 from botocore.exceptions import ClientError
-from PIL import Image
 
 from mermaidseg.datasets.coralnet.scraper.downloader import CoralNetDownloader
 
@@ -22,11 +21,11 @@ from mermaidseg.datasets.coralnet.scraper.downloader import CoralNetDownloader
 def _make_jpeg_bytes(width: int, height: int, *, sof_marker: int = 0xC0, padding: int = 0) -> bytes:
     """Synthesise a minimal JPEG byte sequence with a valid SOF marker.
 
-    The bytes are not a fully decodable JPEG but the parser only looks at the SOF marker, which
-    carries (height, width). ``padding`` inserts junk APP0 segments before the SOF so we can
-    exercise the extended-read path. JPEG segments are capped at 65,533 bytes of payload (2-byte
-    length field includes the 2 length bytes), so larger paddings are split across multiple
-    segments.
+    The bytes are not a fully decodable JPEG but the parser only looks at the SOF
+    marker, which carries (height, width). ``padding`` inserts junk APP0 segments before
+    the SOF so we can exercise the extended-read path. JPEG segments are capped at
+    65,533 bytes of payload (2-byte length field includes the 2 length bytes), so larger
+    paddings are split across multiple segments.
     """
     out = bytearray(b"\xff\xd8")  # SOI
     remaining = padding
@@ -90,12 +89,12 @@ class _FakeS3ExceptionsShim:
 class FakeS3:
     """In-memory S3 client surface used by the ETL.
 
-    Populate ``objects`` with ``{(bucket, key): bytes}`` to control what gets returned. ``Range``
-    semantics follow ``bytes=start-end`` (inclusive).
+    Populate ``objects`` with ``{(bucket, key): bytes}`` to control what gets returned.
+    ``Range`` semantics follow ``bytes=start-end`` (inclusive).
 
     Implements a small subset of boto3 used by CoralNet scraping (``put_object``,
-    ``upload_fileobj``, ``delete_object``, ``exceptions.ClientError``) in addition to the ETL read
-    paths.
+    ``upload_fileobj``, ``delete_object``, ``exceptions.ClientError``) in addition to
+    the ETL read paths.
     """
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
@@ -205,8 +204,9 @@ def fake_s3() -> FakeS3:
 def pandas_csv_reader():
     """Build a :data:`CsvReader` over a FakeS3 fixture.
 
-    Tests inject this in place of the production ibis-on-DuckDB reader so the code-path matches what
-    the ETL uses end-to-end without depending on a real DuckDB connection or AWS.
+    Tests inject this in place of the production ibis-on-DuckDB reader so the code-path
+    matches what the ETL uses end-to-end without depending on a real DuckDB connection
+    or AWS.
     """
     from mermaidseg.datasets.coralnet.etl.io import make_csv_reader_s3
 
@@ -246,7 +246,8 @@ def make_jpeg():
 
 @pytest.fixture
 def sample_csv_factory():
-    """Returns a callable that builds (annotations, image_list) CSV bytes for a fake source."""
+    """Returns a callable that builds (annotations, image_list) CSV bytes for a fake
+    source."""
 
     def _factory(
         source_id: int = 1,
@@ -296,66 +297,6 @@ def populate_source(
 @pytest.fixture
 def populate():
     return populate_source
-
-
-# ============================================================================
-# Image corruption and format fixtures for preprocessing robustness tests
-# ============================================================================
-
-
-@pytest.fixture
-def valid_rgb_jpeg_bytes() -> bytes:
-    """Valid RGB JPEG (3 channels, 2048x1536)."""
-    img = Image.new("RGB", (2048, 1536), color=(255, 0, 0))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
-    return buf.getvalue()
-
-
-@pytest.fixture
-def rgba_png_bytes() -> bytes:
-    """RGBA PNG (4 channels, 1024x768) — recoverable; resize converts it to RGB."""
-    img = Image.new("RGBA", (1024, 768), color=(255, 0, 0, 255))
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-@pytest.fixture
-def grayscale_jpeg_bytes() -> bytes:
-    """Grayscale JPEG (1 channel, L mode) — recoverable; resize encodes L directly."""
-    img = Image.new("L", (1024, 768), color=128)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
-    return buf.getvalue()
-
-
-@pytest.fixture
-def truncated_jpeg_bytes() -> bytes:
-    """Truncated JPEG (valid header but missing end marker and data)."""
-    img = Image.new("RGB", (2048, 1536), color=(255, 0, 0))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
-    jpeg_data = buf.getvalue()
-    # Keep only first 50% of data, truncating mid-stream
-    return jpeg_data[: len(jpeg_data) // 2]
-
-
-@pytest.fixture
-def corrupted_header_jpeg_bytes() -> bytes:
-    """JPEG with corrupted header markers."""
-    # Start with valid JPEG but corrupt the SOI marker and data
-    jpeg_data = _make_jpeg_bytes(2048, 1536)
-    corrupted = bytearray(jpeg_data)
-    # Corrupt header bytes (not SOI/EOI, but SOF area)
-    corrupted[10:20] = b"\x00" * 10
-    return bytes(corrupted)
-
-
-@pytest.fixture
-def empty_bytes() -> bytes:
-    """Empty file (0 bytes)."""
-    return b""
 
 
 @pytest.fixture
