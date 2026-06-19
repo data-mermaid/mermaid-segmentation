@@ -29,7 +29,7 @@ def main():
     parser.add_argument(
         "--task",
         required=True,
-        choices=["eval", "inference", "coralnet-etl"],
+        choices=["eval", "inference", "coralnet-etl", "coralnet-refresh"],
         help="Which processing routine to run.",
     )
     # Pass-through args specific to each task.
@@ -47,6 +47,10 @@ def main():
         from mermaidseg.datasets.coralnet.etl.__main__ import main as etl_main
 
         etl_main(extra)
+    elif args.task == "coralnet-refresh":
+        from mermaidseg.datasets.coralnet.scraper.refresh_image_lists import main as refresh_main
+
+        sys.exit(refresh_main(extra))
     else:
         raise SystemExit(f"Unknown task: {args.task}")
 

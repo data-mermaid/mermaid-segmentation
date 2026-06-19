@@ -1,0 +1,24 @@
+job:
+  name_prefix: mermaidseg-coralnet-refresh
+  image: mermaid-segmentation-jobs:processing-etl-2026-06-19
+  entrypoint: scripts/sagemaker_processing_entrypoint.py
+  instance_type: ml.m5.xlarge
+  volume_gb: 20
+  max_runtime_hours: 3
+  env:
+    MERMAID_CORALNET_BUCKET: dev-datamermaid-sm-sources
+    MERMAID_CORALNET_PREFIX: coralnet-public-images
+    # Set CORALNET_USERNAME and CORALNET_PASSWORD before launching:
+    #   edit this file locally (do not commit credentials) or pass via env override
+    CORALNET_USERNAME: ""
+    CORALNET_PASSWORD: ""
+
+processing:
+  container_args:
+    - --task=coralnet-refresh
+    - --verbose
+  shard:
+    items_from: coralnet_refresh_sources.csv
+    items_column: source_id
+    workers: 5
+    per_worker_arg: --source-ids
