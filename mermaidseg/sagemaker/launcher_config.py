@@ -1,18 +1,18 @@
 """Pydantic schema for the SageMaker launcher YAML.
 
-This module is intentionally a near-duplicate of mermaid-classifier's
-launcher schema (same shape, separate copy — no shared Python code per
-the cross-repo design). The launcher cares about the `job:` block plus
-an optional `processing:` or `training:` block. The container
-entrypoint consumes whatever other top-level blocks the seg workflow
-needs (typically a `config:` block matching the existing
+This module is intentionally a near-duplicate of mermaid-classifier's launcher schema
+(same shape, separate copy — no shared Python code per the cross-repo design). The
+launcher cares about the `job:` block plus an optional `processing:` or `training:`
+block. The container entrypoint consumes whatever other top-level blocks the seg
+workflow needs (typically a `config:` block matching the existing
 `mermaidseg.io.ConfigDict` shape).
 
-See `mermaid-api/iac/sagemaker-launcher-convention.md` for the
-authoritative schema.
+See `mermaid-api/iac/sagemaker-launcher-convention.md` for the authoritative schema.
 """
+
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 import yaml
@@ -86,10 +86,12 @@ def parse_run_config(
     kind: Literal["training", "processing"],
     strict: bool = True,
 ) -> RunConfig | _LooseRunConfig:
-    data = yaml.safe_load(yaml_text)
+    data = yaml.safe_load(os.path.expandvars(yaml_text))
     if not isinstance(data, dict):
         from pydantic import ValidationError
+
         raise ValidationError.from_exception_data(
-            "RunConfig", [{"type": "model_type", "loc": (), "input": data}])
+            "RunConfig", [{"type": "model_type", "loc": (), "input": data}]
+        )
     model = RunConfig if strict else _LooseRunConfig
     return model.model_validate(data)

@@ -8,10 +8,8 @@ job:
   env:
     MERMAID_CORALNET_BUCKET: dev-datamermaid-sm-sources
     MERMAID_CORALNET_PREFIX: coralnet-public-images
-    # Set CORALNET_USERNAME and CORALNET_PASSWORD before launching:
-    #   edit this file locally (do not commit credentials) or pass via env override
-    CORALNET_USERNAME: ""
-    CORALNET_PASSWORD: ""
+    CORALNET_USERNAME: ${CORALNET_USERNAME}
+    CORALNET_PASSWORD: ${CORALNET_PASSWORD}
 
 processing:
   container_args:
