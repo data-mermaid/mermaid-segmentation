@@ -71,12 +71,17 @@ def refresh_one(
     source_id: int,
     *,
     min_coverage: float = 0.9,
+    browse_workers: int = 1,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Re-scrape and (unless guarded/dry-run) overwrite one source's ``image_list.csv``.
 
     Guards against shipping another truncated list: the new scrape must list at least as many images
     as the existing file AND at least ``min_coverage`` of the actual S3 image files.
+
+    ``browse_workers`` is forwarded to :meth:`CoralNetDownloader.get_images` to enable
+    parallel page fetching. Use ``n_s3`` as the ``total_images_hint`` so the fan-out
+    covers the full source even when the existing image_list.csv is truncated.
     """
     existing = existing_image_list_rows(client, bucket, prefix, source_id)
     n_s3 = count_s3_images(client, bucket, prefix, source_id)
@@ -89,7 +94,11 @@ def refresh_one(
         "skipped_reason": None,
     }
 
-    df, ok = downloader.get_images(source_id)  # no status filter: all images, Name keeps suffix
+    df, ok = downloader.get_images(
+        source_id,
+        total_images_hint=n_s3 or None,
+        browse_workers=browse_workers,
+    )
     if not ok or df is None or len(df) == 0:
         result["skipped_reason"] = "scrape_failed_or_empty"
         return result
@@ -146,6 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Connection-pool size for the downloader (sources processed sequentially)",
     )
+    p.add_argument(
+        "--browse-workers",
+        type=int,
+        default=10,
+        help="Parallel browse-page workers per source (uses ?page=N fan-out; default 10)",
+    )
     p.add_argument("--dry-run", action="store_true", help="Report new vs old counts, do not upload")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -177,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.prefix,
                 sid,
                 min_coverage=args.min_coverage,
+                browse_workers=args.browse_workers,
                 dry_run=args.dry_run,
             )
         except Exception as e:  # noqa: BLE001 - never abort the batch on one source

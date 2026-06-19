@@ -1,17 +1,10 @@
-"""Tests for scripts/refresh_coralnet_image_lists.py (image_list.csv refresh + truncation guard)."""
+"""Tests for mermaidseg.datasets.coralnet.scraper.refresh_image_lists."""
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 import pandas as pd
 
-# Load the script module by path (scripts/ is not an importable package).
-_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "refresh_coralnet_image_lists.py"
-_spec = importlib.util.spec_from_file_location("refresh_coralnet_image_lists", _SCRIPT)
-refresh = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(refresh)  # type: ignore[union-attr]
+import mermaidseg.datasets.coralnet.scraper.refresh_image_lists as refresh
 
 BUCKET, PREFIX = "b", "coralnet-public-images"
 
@@ -23,7 +16,7 @@ class _StubDownloader:
         self._n = n_rows
         self._ok = ok
 
-    def get_images(self, source_id):  # noqa: ARG002 - signature parity
+    def get_images(self, source_id, **_kwargs):  # noqa: ARG002
         if not self._ok:
             return None, False
         df = pd.DataFrame(

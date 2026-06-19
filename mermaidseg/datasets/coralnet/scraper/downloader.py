@@ -63,9 +63,9 @@ _IMAGE_HREF_PK = re.compile(r"/image/(\d+)(?:/|$)")
 def _extract_page_image_ids(soup: BeautifulSoup) -> tuple[int, ...]:
     """Return the CoralNet image PKs (in DOM order) for the browse page in ``soup``.
 
-    Image IDs are taken from each thumb_wrapper's ``<a href="/image/NNN/view/">``. Duplicates are
-    removed while preserving first-seen order so callers can safely join with ``"_".join`` for
-    CoralNet's ``image_id_list`` POST field.
+    Image IDs are taken from each thumb_wrapper's ``<a href="/image/NNN/view/">``.
+    Duplicates are removed while preserving first-seen order so callers can safely join
+    with ``"_".join`` for CoralNet's ``image_id_list`` POST field.
     """
     seen: dict[int, None] = {}
     for wrapper in soup.find_all("span", class_="thumb_wrapper"):
@@ -82,10 +82,10 @@ def _extract_page_image_ids(soup: BeautifulSoup) -> tuple[int, ...]:
 class _PageWorkItem:
     """One browse-page worth of export work discovered during phase 1.
 
-    ``image_ids`` is the underscore-formatted CoralNet image PKs for the page (e.g. ``(5713071,
-    5713072, ...)``). The phase-2 POST sends these as ``image_id_list=N1_N2_...`` along with
-    ``image_select_type=selected`` so CoralNet exports only those images rather than the entire
-    source.
+    ``image_ids`` is the underscore-formatted CoralNet image PKs for the page (e.g.
+    ``(5713071, 5713072, ...)``). The phase-2 POST sends these as
+    ``image_id_list=N1_N2_...`` along with ``image_select_type=selected`` so CoralNet
+    exports only those images rather than the entire source.
     """
 
     page_num: int
@@ -96,7 +96,8 @@ class _PageWorkItem:
 
 
 def _merge_with_existing(new_df: pd.DataFrame, existing_df: pd.DataFrame | None) -> pd.DataFrame:
-    """Concat ``existing_df`` (if any) with ``new_df`` and dedup on (Name, Row, Column)."""
+    """Concat ``existing_df`` (if any) with ``new_df`` and dedup on (Name, Row,
+    Column)."""
     if existing_df is None:
         return new_df
     combined = pd.concat([existing_df, new_df], ignore_index=True)
@@ -209,7 +210,8 @@ class CoralNetDownloader:
         return response.text
 
     def probe_source(self, source_id: int) -> SourceProbe:
-        """HTTP GET overview page; extract accessibility + total images (no S3 writes)."""
+        """HTTP GET overview page; extract accessibility + total images (no S3
+        writes)."""
         url = self._source_main_url(source_id)
         try:
             html = self._get_source_overview_html(source_id)
@@ -612,10 +614,10 @@ class CoralNetDownloader:
     ) -> tuple[pd.DataFrame | None, bool]:
         """Load an existing ``annotations.csv`` from S3 if present.
 
-        Returns ``(df, is_complete)``. ``df`` is ``None`` when the object does not exist;
-        ``is_complete`` is ``True`` only when the existing CSV's unique-image count already meets
-        ``total_images_website``, signalling the caller can skip re-export. Non-404 ``ClientError``s
-        propagate.
+        Returns ``(df, is_complete)``. ``df`` is ``None`` when the object does not
+        exist; ``is_complete`` is ``True`` only when the existing CSV's unique-image
+        count already meets ``total_images_website``, signalling the caller can skip re-
+        export. Non-404 ``ClientError``s propagate.
         """
         existing_df = read_csv_s3(self.s3, bucket_name, annotations_key)
         if existing_df is None:
@@ -639,9 +641,10 @@ class CoralNetDownloader:
     def _walk_browse_pages(self, source_id: int) -> list[_PageWorkItem]:
         """Phase 1: sequentially walk browse pages, collecting CSRF + URL per page.
 
-        Has to be sequential because each page's "Next page" link and CSRF token are only known
-        after parsing the previous page. Logs progress every :data:`_BROWSE_PROGRESS_EVERY` pages so
-        long walks (50+ pages) are observable rather than appearing hung.
+        Has to be sequential because each page's "Next page" link and CSRF token are
+        only known after parsing the previous page. Logs progress every
+        :data:`_BROWSE_PROGRESS_EVERY` pages so long walks (50+ pages) are observable
+        rather than appearing hung.
         """
         base_url = f"{self.CORALNET_URL}/source/{source_id}/browse/images/"
         logger.info("source %s: phase 1 starting browse-page walk", source_id)
@@ -703,19 +706,21 @@ class CoralNetDownloader:
     def _export_one_page(self, source_id: int, item: _PageWorkItem) -> pd.DataFrame:
         """Phase 2 worker: export_prep POST + serve GET for one page, with retries.
 
-        Uses a worker-local, independently-logged-in session (:meth:`_get_export_session`) so
-        concurrent workers don't trample each other's server-side Django session state.
+        Uses a worker-local, independently-logged-in session
+        (:meth:`_get_export_session`) so concurrent workers don't trample each other's
+        server-side Django session state.
 
-        The phase-1 CSRF token on ``item`` was captured from the *main* session and is therefore not
-        valid for the worker's separate session; instead the worker GETs the browse page once on its
-        own session to capture a fresh CSRF before POSTing.
+        The phase-1 CSRF token on ``item`` was captured from the *main* session and is
+        therefore not valid for the worker's separate session; instead the worker GETs
+        the browse page once on its own session to capture a fresh CSRF before POSTing.
 
-        Sends ``image_select_type=selected`` plus ``image_id_list`` (underscore- separated PKs) so
-        CoralNet's ``image_search_kwargs_to_queryset`` filters to just this page's images, rather
-        than exporting the entire source. ``image_form_type=search`` is the hidden,
-        ``required=True`` discriminator on CoralNet's ``ImageSearchForm`` -- omitting it makes the
-        form invalid and the serve response returns HTML instead of CSV. CoralNet caps
-        ``image_id_list`` at 100 entries; browse pages have 20.
+        Sends ``image_select_type=selected`` plus ``image_id_list`` (underscore-
+        separated PKs) so CoralNet's ``image_search_kwargs_to_queryset`` filters to just
+        this page's images, rather than exporting the entire source.
+        ``image_form_type=search`` is the hidden, ``required=True`` discriminator on
+        CoralNet's ``ImageSearchForm`` -- omitting it makes the form invalid and the
+        serve response returns HTML instead of CSV. CoralNet caps ``image_id_list`` at
+        100 entries; browse pages have 20.
         """
         session = self._get_export_session()
         export_url = f"{self.CORALNET_URL}/source/{source_id}/annotation/export_prep/"
@@ -779,8 +784,8 @@ class CoralNetDownloader:
     ) -> dict[int, pd.DataFrame]:
         """Phase 2: parallel export_prep + serve, with periodic S3 checkpoints.
 
-        Checkpoint partials are concatenated incrementally (O(N) per checkpoint, not O(N²)) and use
-        completion order rather than page order; the final upload in
+        Checkpoint partials are concatenated incrementally (O(N) per checkpoint, not
+        O(N²)) and use completion order rather than page order; the final upload in
         :meth:`download_annotations_paginated` rewrites the object in page order.
         """
         chunks_by_page: dict[int, pd.DataFrame] = {}
@@ -847,21 +852,78 @@ class CoralNetDownloader:
         return images, next_rel
 
     def get_images(
-        self, source_id: int, *, annotation_status: str | None = None
+        self,
+        source_id: int,
+        *,
+        annotation_status: str | None = None,
+        total_images_hint: int | None = None,
+        browse_workers: int = 1,
     ) -> tuple[pd.DataFrame | None, bool]:
+        """Walk CoralNet browse pages and return a DataFrame of all images.
+
+        When ``total_images_hint`` is provided and ``browse_workers > 1``, pages
+        2..N are fetched in parallel via ``?page=N`` URLs rather than sequentially
+        following next-link cursors. Page 1 is always fetched first to establish
+        the actual page size; subsequent pages are constructed as
+        ``base_url?page=N`` (or ``base_url&page=N`` when annotation_status is set).
+
+        Falls back to sequential cursor-following when ``total_images_hint`` is
+        absent or ``browse_workers == 1``.
+        """
         base_url = f"{self.CORALNET_URL}/source/{source_id}/browse/images"
         if annotation_status:
             base_url = f"{base_url}/?annotation_status={annotation_status}"
-        all_images: dict[str, str] = {}
-        current_url: str | None = base_url
+
         p_bar = tqdm(desc="Fetching images", unit="page")
         try:
-            while current_url is not None:
-                imgs, next_rel = self.get_images_on_page(current_url)
-                all_images.update(imgs)
-                p_bar.update(1)
-                current_url = urllib.parse.urljoin(current_url, next_rel) if next_rel else None
-            df = pd.DataFrame(list(all_images.items()), columns=["Name", "Image Page"])
+            page1_imgs, next_rel = self.get_images_on_page(base_url)
+            p_bar.update(1)
+
+            # Ordered list of per-page dicts; page 1 is always first.
+            ordered_pages: list[dict[str, str]] = [page1_imgs]
+
+            can_parallel = browse_workers > 1 and total_images_hint is not None
+            page1_size = len(page1_imgs)
+
+            if can_parallel and page1_size > 0 and total_images_hint > page1_size:
+                import math
+
+                n_pages = math.ceil(total_images_hint / page1_size)
+                sep = "&" if "?" in base_url else "?"
+
+                def _fetch_page(n: int) -> tuple[int, dict[str, str]]:
+                    url = f"{base_url}{sep}page={n}"
+                    imgs, _ = self.get_images_on_page(url)
+                    p_bar.update(1)
+                    return n, imgs
+
+                workers = min(browse_workers, n_pages - 1)
+                page_results: dict[int, dict[str, str]] = {}
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                    futs = {ex.submit(_fetch_page, n): n for n in range(2, n_pages + 1)}
+                    for fut in concurrent.futures.as_completed(futs):
+                        n, imgs = fut.result()
+                        page_results[n] = imgs
+
+                for n in range(2, n_pages + 1):
+                    ordered_pages.append(page_results.get(n, {}))
+            else:
+                current_url: str | None = (
+                    urllib.parse.urljoin(base_url, next_rel) if next_rel else None
+                )
+                while current_url is not None:
+                    imgs, next_rel = self.get_images_on_page(current_url)
+                    ordered_pages.append(imgs)
+                    p_bar.update(1)
+                    current_url = urllib.parse.urljoin(current_url, next_rel) if next_rel else None
+
+            # Merge in page order; first-seen wins for any duplicate name.
+            merged: dict[str, str] = {}
+            for page_imgs in ordered_pages:
+                for name, href in page_imgs.items():
+                    merged.setdefault(name, href)
+
+            df = pd.DataFrame(list(merged.items()), columns=["Name", "Image Page"])
             return df, True
         except Exception:
             logger.exception("get_images failed source %s", source_id)
@@ -875,9 +937,10 @@ class CoralNetDownloader:
     def _get_thread_session(self) -> requests.Session:
         """Per-thread session with cookies copied from the main session.
 
-        Safe for read-only requests (e.g. image URL resolution) where threads only consume server
-        state. NOT safe for ``export_prep``-style endpoints that write to the Django server-side
-        session keyed on ``sessionid`` -- use :meth:`_get_export_session` for those.
+        Safe for read-only requests (e.g. image URL resolution) where threads only
+        consume server state. NOT safe for ``export_prep``-style endpoints that write to
+        the Django server-side session keyed on ``sessionid`` -- use
+        :meth:`_get_export_session` for those.
         """
         s = getattr(self._thread_local, "session", None)
         if s is None:
@@ -890,10 +953,11 @@ class CoralNetDownloader:
     def _new_logged_in_session(self) -> requests.Session:
         """Create a fresh ``requests.Session`` and log it in independently.
 
-        Each call produces an isolated cookie jar (own ``sessionid``), so the returned session
-        corresponds to its own server-side Django session. Used by :meth:`_get_export_session` to
-        give each phase-2 worker its own session and avoid the ``export_prep`` / ``serve`` race that
-        happens when multiple threads share one Django sessionid.
+        Each call produces an isolated cookie jar (own ``sessionid``), so the returned
+        session corresponds to its own server-side Django session. Used by
+        :meth:`_get_export_session` to give each phase-2 worker its own session and
+        avoid the ``export_prep`` / ``serve`` race that happens when multiple threads
+        share one Django sessionid.
         """
         session = requests.Session()
         session.headers.update(dict(self.session.headers))
