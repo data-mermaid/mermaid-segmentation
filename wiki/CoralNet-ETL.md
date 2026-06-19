@@ -94,6 +94,30 @@ latency. Checkpoint part files are written every `--checkpoint-every` rows
 (default `50_000`) so an interrupted run resumes by reading the existing
 checkpoint parts.
 
+## Running on SageMaker
+
+Use SageMaker for full rebuilds and overnight runs — IAM credentials rotate every
+~60 minutes, which would require manual intervention for long local runs.
+
+**Full ETL rebuild:**
+
+```bash
+export AWS_PROFILE=wcs-launcher
+uv run --extra sagemaker python scripts/launch_processing.py \
+    --run-config sagemaker/runs/issue_130_coralnet_etl_audit.yaml \
+    --config-dir sagemaker/runs/
+```
+
+This runs `coralnet-etl all --upload-to-s3` inside a ProcessingJob and writes
+versioned parquets to the canonical S3 output prefix.
+
+**Targeted image-list refresh** (after audit reveals truncated `image_list.csv`
+files): use the `coralnet-refresh` task, which fans out across N parallel shards.
+
+See [`docs/sagemaker.md` — Processing Jobs](../docs/sagemaker.md#run-a-processing-job)
+for full launch instructions, credential setup, sharding configuration, and log
+monitoring commands.
+
 ## Determinism
 
 All three writers route through `write_parquet_deterministic` in
