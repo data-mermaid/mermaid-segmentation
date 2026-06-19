@@ -1,0 +1,19 @@
+job:
+  name_prefix: mermaidseg-coralnet-etl-audit
+  image: mermaid-segmentation-jobs:processing-etl-2026-06-19
+  entrypoint: scripts/sagemaker_processing_entrypoint.py
+  instance_type: ml.m5.4xlarge
+  volume_gb: 50
+  max_runtime_hours: 4
+  env:
+    MERMAID_CORALNET_BUCKET: dev-datamermaid-sm-sources
+    MERMAID_CORALNET_PREFIX: coralnet-public-images
+    MERMAID_CORALNET_OUTPUT_PREFIX: etl-outputs/coralnet
+    MERMAID_CORALNET_ETL_WORKERS: "32"
+
+processing:
+  container_args:
+    - --task=coralnet-etl
+    - all
+    - --upload-to-s3
+    - --verbose

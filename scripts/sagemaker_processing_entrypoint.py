@@ -1,9 +1,9 @@
 """In-container entrypoint for a mermaid-segmentation ProcessingJob.
 
-ProcessingJobs are diverse (eval, inference, batch transform, mask generation, etc.). This
-entrypoint reads the run YAML, dispatches on the `processing:` block's `--task=<name>`
-container_arg, and routes to the matching subroutine in mermaidseg/. Add new tasks as the team needs
-them.
+ProcessingJobs are diverse (eval, inference, batch transform, mask generation, etc.).
+This entrypoint reads the run YAML, dispatches on the `processing:` block's
+`--task=<name>` container_arg, and routes to the matching subroutine in mermaidseg/. Add
+new tasks as the team needs them.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def main():
     parser.add_argument(
         "--task",
         required=True,
-        choices=["eval", "inference"],
+        choices=["eval", "inference", "coralnet-etl"],
         help="Which processing routine to run.",
     )
     # Pass-through args specific to each task.
@@ -43,6 +43,10 @@ def main():
         from mermaidseg.inference import run_inference
 
         run_inference(extra)
+    elif args.task == "coralnet-etl":
+        from mermaidseg.datasets.coralnet.etl.__main__ import main as etl_main
+
+        etl_main(extra)
     else:
         raise SystemExit(f"Unknown task: {args.task}")
 
