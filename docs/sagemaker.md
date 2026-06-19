@@ -90,16 +90,26 @@ Outputs:
 
 ## Run a processing job
 
-Processing jobs share the same Docker image as training but dispatch on `--task`.
-The entrypoint is `scripts/sagemaker_processing_entrypoint.py`.
+Processing jobs share the same Docker image as training but route to different code
+via `--task`. The entrypoint is `scripts/sagemaker_processing_entrypoint.py`.
 
-### CoralNet ETL audit (`--task=coralnet-etl`)
+```bash
+export AWS_PROFILE=wcs-launcher
+uv run --extra sagemaker python scripts/launch_processing.py \
+    --run-config sagemaker/runs/<your-run>.yaml \
+    --config-dir sagemaker/configs/<your-config-dir>/
+```
 
-Runs the full ETL pipeline (`audit` → `build-annotations` → `build-images`) and
-uploads versioned parquets to `s3://${MERMAID_CORALNET_BUCKET}/${MERMAID_CORALNET_OUTPUT_PREFIX}/<date>_<git-sha>/`.
+### Available tasks
 
-Run YAML: [`sagemaker/runs/issue_130_coralnet_etl_audit.yaml`](../sagemaker/runs/issue_130_coralnet_etl_audit.yaml)
-(ml.m5.4xlarge · 32 workers · 4-hour ceiling)
+| Task | What it does |
+|---|---|
+| `coralnet-etl` | Full ETL pipeline: audit → build-annotations → build-images, uploads versioned parquets to S3 |
+| `coralnet-refresh` | Re-downloads image_list CSVs for a list of source IDs (supports sharding across N workers) |
+| `eval` | Model evaluation |
+| `inference` | Batch inference |
+
+### Example: CoralNet ETL audit
 
 ```bash
 export AWS_PROFILE=wcs-launcher
@@ -108,65 +118,42 @@ uv run --extra sagemaker python scripts/launch_processing.py \
     --config-dir sagemaker/runs/
 ```
 
-After the job completes, the audit parquet is at:
+See [`sagemaker/runs/issue_130_coralnet_etl_audit.yaml`](../sagemaker/runs/issue_130_coralnet_etl_audit.yaml)
+for the full job spec (ml.m5.4xlarge · 32 workers · 4-hour ceiling).
 
-```
-s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/<version>/coralnet_audit_<version>.parquet
-```
+### Credentials in run YAMLs
 
-Download and inspect `is_complete` and `image_list_covers_annotations` counts to
-decide whether a refresh run is needed.
+Any `${VAR}` in a run YAML `env:` block is expanded from the shell environment at
+launch time via `os.path.expandvars()`. Set sensitive values in `.env` (gitignored,
+loaded by direnv) and reference them as `${MY_VAR}` — credentials are never committed.
 
-### CoralNet image-list refresh (`--task=coralnet-refresh`)
+### Sharding
 
-Re-downloads truncated `image_list.csv` files for sources where
-`image_list_covers_annotations=False` in the audit parquet (fix for
-[#130](https://github.com/data-mermaid/mermaid-segmentation/issues/130)).
+For tasks that fan out over a list of items, set a `shard:` block in the run YAML:
 
-**Before launching:**
-
-1. Extract the flagged source IDs from the audit parquet and write them (one per
-   line, column header `source_id`) to
-   `sagemaker/configs/coralnet-refresh/coralnet_refresh_sources.csv`.
-2. Ensure `CORALNET_USERNAME` and `CORALNET_PASSWORD` are set in `.env` (loaded by
-   direnv). The YAML references `${CORALNET_USERNAME}` / `${CORALNET_PASSWORD}`;
-   `launcher_config.py` expands these via `os.path.expandvars()` at launch time —
-   credentials are never committed.
-
-Run YAML: [`sagemaker/runs/issue_130_coralnet_refresh.yaml`](../sagemaker/runs/issue_130_coralnet_refresh.yaml)
-(ml.m5.xlarge · 5 parallel shards · 3-hour ceiling per shard)
-
-```bash
-export AWS_PROFILE=wcs-launcher
-uv run --extra sagemaker python scripts/launch_processing.py \
-    --run-config sagemaker/runs/issue_130_coralnet_refresh.yaml \
-    --config-dir sagemaker/configs/coralnet-refresh/
+```yaml
+processing:
+  container_args:
+    - --task=coralnet-refresh
+  shard:
+    items_from: sources.csv   # CSV in --config-dir; must have a header row
+    items_column: source_id   # which column to read
+    workers: 5                # number of parallel ProcessingJobs
+    per_worker_arg: --source-ids  # CLI arg each worker receives its slice as
 ```
 
-The launcher reads `coralnet_refresh_sources.csv`, splits the source IDs across 5
-workers, and submits 5 parallel ProcessingJobs. Each job receives a
-`--source-ids=id1,id2,...` slice and logs independently.
-
-**Monitoring:** CloudWatch log group `/aws/sagemaker/ProcessingJobs`, one stream per
-shard — `<job-name>-N/algo-1` (where N is the zero-based shard index).
-
-```bash
-# Tail all 5 streams (replace <prefix> with the job name prefix printed at launch):
-for i in 0 1 2 3 4; do
-  aws logs tail /aws/sagemaker/ProcessingJobs \
-      --log-stream-name-prefix "<prefix>-${i}/" --follow &
-done
-wait
-```
+The launcher splits `items_from` across `workers` jobs and submits them in parallel.
+Each job's logs land in `/aws/sagemaker/ProcessingJobs` under a stream named
+`<job-name>-N/algo-1`.
 
 ### Adding new processing tasks
 
 1. Add the task name to `choices=` in `scripts/sagemaker_processing_entrypoint.py`.
 2. Add an `elif args.task == "<name>":` block that imports from `mermaidseg/` and
    calls `main(extra)`.
-3. If the implementation currently lives under `scripts/` rather than `mermaidseg/`:
-   move it to a package path under `mermaidseg/`, then register it as a console
-   script in `pyproject.toml` so the in-container import resolves correctly.
+3. If the implementation lives under `scripts/` rather than `mermaidseg/`: move it
+   to a package path under `mermaidseg/` and register a console script in
+   `pyproject.toml` so the in-container import resolves correctly.
 
 ## Tuning
 

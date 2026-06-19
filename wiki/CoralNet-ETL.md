@@ -97,9 +97,8 @@ checkpoint parts.
 ## Running on SageMaker
 
 Use SageMaker for full rebuilds and overnight runs — IAM credentials rotate every
-~60 minutes, which would require manual intervention for long local runs.
-
-**Full ETL rebuild:**
+~60 minutes, which would require manual intervention for long local runs. The
+`coralnet-etl` processing task wraps the same CLI as the local quickstart:
 
 ```bash
 export AWS_PROFILE=wcs-launcher
@@ -108,15 +107,8 @@ uv run --extra sagemaker python scripts/launch_processing.py \
     --config-dir sagemaker/runs/
 ```
 
-This runs `coralnet-etl all --upload-to-s3` inside a ProcessingJob and writes
-versioned parquets to the canonical S3 output prefix.
-
-**Targeted image-list refresh** (after audit reveals truncated `image_list.csv`
-files): use the `coralnet-refresh` task, which fans out across N parallel shards.
-
 See [`docs/sagemaker.md` — Processing Jobs](../docs/sagemaker.md#run-a-processing-job)
-for full launch instructions, credential setup, sharding configuration, and log
-monitoring commands.
+for the full task list, run YAML reference, credential handling, and sharding.
 
 ## Determinism
 
