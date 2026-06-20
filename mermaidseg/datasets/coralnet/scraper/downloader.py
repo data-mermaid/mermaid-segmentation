@@ -110,6 +110,25 @@ def _upload_csv(s3_client: Any, bucket: str, key: str, df: pd.DataFrame) -> None
     s3_io.upload_csv_body(s3_client, bucket=bucket, key=key, csv_text=buf.getvalue())
 
 
+# Transient network failures worth retrying on a long (multi-hour) scrape.
+# ``requests.Timeout`` is the base of both ConnectTimeout and ReadTimeout;
+# ChunkedEncodingError is a mid-body connection drop. 5xx responses are handled
+# separately in ``_is_transient`` (4xx won't fix itself on retry).
+_TRANSIENT_ERRORS = (
+    requests.Timeout,
+    requests.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def _is_transient(exc: requests.RequestException) -> bool:
+    """True for errors worth retrying: timeouts, dropped connections, and 5xx."""
+    if isinstance(exc, requests.HTTPError):
+        resp = exc.response
+        return resp is not None and resp.status_code >= 500
+    return isinstance(exc, _TRANSIENT_ERRORS)
+
+
 def _with_retry(
     operation: Callable[[], _T],
     *,
@@ -119,12 +138,15 @@ def _with_retry(
 ) -> _T:
     """Retry ``operation`` on transient HTTP errors with exponential backoff.
 
-    Raises the final exception after :data:`_PAGE_RETRIES` attempts.
+    Non-transient errors (e.g. a 4xx) propagate immediately. Transient errors raise
+    after :data:`_PAGE_RETRIES` attempts.
     """
     for attempt in range(1, _PAGE_RETRIES + 1):
         try:
             return operation()
-        except (requests.ReadTimeout, requests.ConnectionError) as e:
+        except requests.RequestException as e:
+            if not _is_transient(e):
+                raise
             if attempt >= _PAGE_RETRIES:
                 logger.error(
                     "source %s page=%s %s: %s after %s attempts; giving up",
@@ -874,14 +896,17 @@ class CoralNetDownloader:
         if annotation_status:
             base_url = f"{base_url}/?annotation_status={annotation_status}"
 
-        p_bar = tqdm(desc="Fetching images", unit="page")
-        try:
-            page1_imgs, next_rel = _with_retry(
-                lambda: self.get_images_on_page(base_url),
+        def fetch(url: str, page_num: int) -> tuple[dict[str, str], str | None]:
+            return _with_retry(
+                lambda: self.get_images_on_page(url),
                 source_id=source_id,
-                page_num=1,
+                page_num=page_num,
                 kind="browse",
             )
+
+        p_bar = tqdm(desc="Fetching images", unit="page")
+        try:
+            page1_imgs, next_rel = fetch(base_url, 1)
             p_bar.update(1)
 
             # Ordered list of per-page dicts; page 1 is always first.
@@ -891,30 +916,36 @@ class CoralNetDownloader:
             page1_size = len(page1_imgs)
 
             if can_parallel and page1_size > 0 and total_images_hint > page1_size:
-                import math
-
-                n_pages = math.ceil(total_images_hint / page1_size)
+                # Ceil-divide without importing math.
+                n_pages = -(-total_images_hint // page1_size)
                 sep = "&" if "?" in base_url else "?"
-
-                def _fetch_page(n: int) -> tuple[int, dict[str, str]]:
-                    url = f"{base_url}{sep}page={n}"
-                    imgs, _ = _with_retry(
-                        lambda: self.get_images_on_page(url),
-                        source_id=source_id,
-                        page_num=n,
-                        kind="browse",
-                    )
-                    p_bar.update(1)
-                    return n, imgs
 
                 workers = min(browse_workers, n_pages - 1)
                 page_results: dict[int, dict[str, str]] = {}
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                    futs = {ex.submit(_fetch_page, n): n for n in range(2, n_pages + 1)}
+                    futs = {
+                        ex.submit(fetch, f"{base_url}{sep}page={n}", n): n
+                        for n in range(2, n_pages + 1)
+                    }
                     for fut in concurrent.futures.as_completed(futs):
-                        n, imgs = fut.result()
-                        page_results[n] = imgs
-
+                        n = futs[fut]
+                        try:
+                            page_results[n], _ = fut.result()
+                        except requests.RequestException:
+                            # One dead page must not abort the whole source; leave it
+                            # out and let the caller's coverage guard reject a short list.
+                            logger.warning(
+                                "source %s page=%s failed after retries; skipping", source_id, n
+                            )
+                        p_bar.update(1)
+                missing = (n_pages - 1) - len(page_results)
+                if missing:
+                    logger.warning(
+                        "source %s: %d/%d browse pages failed; result is partial",
+                        source_id,
+                        missing,
+                        n_pages - 1,
+                    )
                 for n in range(2, n_pages + 1):
                     ordered_pages.append(page_results.get(n, {}))
             else:
@@ -923,12 +954,7 @@ class CoralNetDownloader:
                 )
                 seq_page = 2
                 while current_url is not None:
-                    imgs, next_rel = _with_retry(
-                        lambda _u=current_url: self.get_images_on_page(_u),
-                        source_id=source_id,
-                        page_num=seq_page,
-                        kind="browse",
-                    )
+                    imgs, next_rel = fetch(current_url, seq_page)
                     ordered_pages.append(imgs)
                     p_bar.update(1)
                     seq_page += 1

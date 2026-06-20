@@ -22,6 +22,7 @@ from mermaidseg.datasets.coralnet.scraper.downloader import (
     _PAGINATED_EXPORT_THRESHOLD,
     CoralNetDownloader,
     _extract_page_image_ids,
+    _is_transient,
     export_prep_timeout_seconds,
     export_serve_timeout_seconds,
     half_open_batches,
@@ -1105,6 +1106,95 @@ def test_get_images_parallel_retries_on_inner_page_timeout():
 
     assert ok is True
     assert df is not None and len(df) == 6  # all 3 pages present
+
+
+def _http_error(status: int) -> requests.HTTPError:
+    resp = requests.Response()
+    resp.status_code = status
+    return requests.HTTPError(response=resp)
+
+
+def test_is_transient_covers_timeouts_drops_and_5xx():
+    """Transient set spans connect/read timeouts, dropped connections, and 5xx."""
+    assert _is_transient(requests.ReadTimeout()) is True
+    assert _is_transient(requests.ConnectTimeout()) is True  # sibling of ReadTimeout
+    assert _is_transient(requests.ConnectionError()) is True
+    assert _is_transient(requests.exceptions.ChunkedEncodingError()) is True
+    assert _is_transient(_http_error(503)) is True
+    # 4xx won't fix itself on retry.
+    assert _is_transient(_http_error(404)) is False
+
+
+def test_get_images_retries_on_5xx_then_succeeds():
+    """A 503 on a browse page is retried, not fatal."""
+    dl = CoralNetDownloader("u", "p")
+    dl.logged_in = True
+    call_count = [0]
+
+    def flaky(url: str):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise _http_error(503)
+        return {"img1.jpg": "/image/1/view/"}, None
+
+    with (
+        patch.object(dl, "get_images_on_page", side_effect=flaky),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        df, ok = dl.get_images(1)
+
+    assert ok is True
+    assert call_count[0] == 2
+    assert df is not None and len(df) == 1
+
+
+def test_get_images_4xx_is_not_retried():
+    """A 404 propagates immediately (no retry) and fails the source."""
+    dl = CoralNetDownloader("u", "p")
+    dl.logged_in = True
+    call_count = [0]
+
+    def always_404(url: str):
+        call_count[0] += 1
+        raise _http_error(404)
+
+    with (
+        patch.object(dl, "get_images_on_page", side_effect=always_404),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        df, ok = dl.get_images(1)
+
+    assert ok is False
+    assert df is None
+    assert call_count[0] == 1  # not retried
+
+
+def test_get_images_parallel_skips_dead_page_after_retries():
+    """A page that exhausts retries is dropped; other pages still return (partial).
+
+    The original bug was one timeout killing a whole 79k-image source; the parallel path
+    must degrade per-page instead of aborting.
+    """
+    dl = CoralNetDownloader("u", "p")
+    dl.logged_in = True
+    pages = _build_browse_pages(n_pages=3, thumbs_per_page=2)
+    page3_url = "https://coralnet.ucsd.edu/source/1/browse/images?page=3"
+
+    def dispatch(url: str, timeout=None, **_) -> MagicMock:
+        if url == page3_url:
+            raise requests.ReadTimeout("page 3 always times out")
+        if url not in pages:
+            raise AssertionError(f"unexpected GET {url!r}")
+        return _mock_response(text=pages[url])
+
+    with (
+        patch.object(dl.session, "get", side_effect=dispatch),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        df, ok = dl.get_images(1, total_images_hint=6, browse_workers=3)
+
+    assert ok is True  # did not abort
+    assert df is not None and len(df) == 4  # pages 1 + 2 only; page 3 dropped
 
 
 def test_get_images_sequential_retries_on_inner_page_timeout():
