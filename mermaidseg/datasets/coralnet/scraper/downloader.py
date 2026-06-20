@@ -876,7 +876,12 @@ class CoralNetDownloader:
 
         p_bar = tqdm(desc="Fetching images", unit="page")
         try:
-            page1_imgs, next_rel = self.get_images_on_page(base_url)
+            page1_imgs, next_rel = _with_retry(
+                lambda: self.get_images_on_page(base_url),
+                source_id=source_id,
+                page_num=1,
+                kind="browse",
+            )
             p_bar.update(1)
 
             # Ordered list of per-page dicts; page 1 is always first.
@@ -893,7 +898,12 @@ class CoralNetDownloader:
 
                 def _fetch_page(n: int) -> tuple[int, dict[str, str]]:
                     url = f"{base_url}{sep}page={n}"
-                    imgs, _ = self.get_images_on_page(url)
+                    imgs, _ = _with_retry(
+                        lambda: self.get_images_on_page(url),
+                        source_id=source_id,
+                        page_num=n,
+                        kind="browse",
+                    )
                     p_bar.update(1)
                     return n, imgs
 
@@ -911,10 +921,17 @@ class CoralNetDownloader:
                 current_url: str | None = (
                     urllib.parse.urljoin(base_url, next_rel) if next_rel else None
                 )
+                seq_page = 2
                 while current_url is not None:
-                    imgs, next_rel = self.get_images_on_page(current_url)
+                    imgs, next_rel = _with_retry(
+                        lambda _u=current_url: self.get_images_on_page(_u),
+                        source_id=source_id,
+                        page_num=seq_page,
+                        kind="browse",
+                    )
                     ordered_pages.append(imgs)
                     p_bar.update(1)
+                    seq_page += 1
                     current_url = urllib.parse.urljoin(current_url, next_rel) if next_rel else None
 
             # Merge in page order; first-seen wins for any duplicate name.

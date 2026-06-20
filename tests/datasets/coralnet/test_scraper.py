@@ -1028,3 +1028,107 @@ def test_get_images_parallel_falls_back_without_hint():
     assert df is not None and len(df) == 2
     # Page 2 was reached by following the next-link, not by constructing ?page=2
     assert call_urls[1] == "https://coralnet.ucsd.edu/source/1/browse/images?page=2"
+
+
+# ---------------------------------------------------------------------------
+# Retry tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_images_retries_on_page1_timeout():
+    """A ReadTimeout on page 1 is retried; scrape succeeds after the retry."""
+    dl = CoralNetDownloader("u", "p")
+    dl.logged_in = True
+
+    call_count = [0]
+
+    def flaky_get_images_on_page(url: str):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise requests.ReadTimeout("simulated timeout")
+        return {"img1.jpg": "/image/1/view/", "img2.jpg": "/image/2/view/"}, None
+
+    with (
+        patch.object(dl, "get_images_on_page", side_effect=flaky_get_images_on_page),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        df, ok = dl.get_images(1)
+
+    assert ok is True
+    assert call_count[0] == 2  # timed out once, then succeeded
+    assert df is not None and len(df) == 2
+
+
+def test_get_images_page1_gives_up_after_max_retries():
+    """After _PAGE_RETRIES failed attempts on page 1, get_images returns (None,
+    False)."""
+    dl = CoralNetDownloader("u", "p")
+    dl.logged_in = True
+
+    def always_timeout(url: str):
+        raise requests.ReadTimeout("always")
+
+    with (
+        patch.object(dl, "get_images_on_page", side_effect=always_timeout),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        df, ok = dl.get_images(1)
+
+    assert ok is False
+    assert df is None
+
+
+def test_get_images_parallel_retries_on_inner_page_timeout():
+    """A ReadTimeout on a parallel page is retried; final result includes that page's
+    images."""
+    dl = CoralNetDownloader("u", "p")
+    dl.logged_in = True
+
+    pages = _build_browse_pages(n_pages=3, thumbs_per_page=2)
+    call_counts: dict[str, int] = {}
+
+    def flaky_dispatch(url: str, timeout=None, **_) -> MagicMock:
+        call_counts[url] = call_counts.get(url, 0) + 1
+        # Fail page 3 on the first attempt only
+        page3_url = "https://coralnet.ucsd.edu/source/1/browse/images?page=3"
+        if url == page3_url and call_counts[url] == 1:
+            raise requests.ReadTimeout("page 3 timeout")
+        if url not in pages:
+            raise AssertionError(f"unexpected GET {url!r}")
+        return _mock_response(text=pages[url])
+
+    with (
+        patch.object(dl.session, "get", side_effect=flaky_dispatch),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        df, ok = dl.get_images(1, total_images_hint=6, browse_workers=3)
+
+    assert ok is True
+    assert df is not None and len(df) == 6  # all 3 pages present
+
+
+def test_get_images_sequential_retries_on_inner_page_timeout():
+    """A ReadTimeout on page 2 (sequential mode) is retried transparently."""
+    dl = CoralNetDownloader("u", "p")
+    dl.logged_in = True
+
+    call_count = [0]
+
+    def flaky_get_images_on_page(url: str):
+        call_count[0] += 1
+        if call_count[0] == 2:
+            raise requests.ReadTimeout("page 2 timeout")
+        if call_count[0] in (1, 3):
+            return {f"img{call_count[0]}.jpg": f"/image/{call_count[0]}/view/"}, (
+                "?page=2" if call_count[0] == 1 else None
+            )
+        return {f"img{call_count[0]}.jpg": f"/image/{call_count[0]}/view/"}, None
+
+    with (
+        patch.object(dl, "get_images_on_page", side_effect=flaky_get_images_on_page),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        df, ok = dl.get_images(1)  # no hint → sequential
+
+    assert ok is True
+    assert df is not None and len(df) == 2  # page 1 + page 2 (after retry)
