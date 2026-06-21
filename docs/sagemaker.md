@@ -121,6 +121,63 @@ uv run --extra sagemaker python scripts/launch_processing.py \
 See [`sagemaker/runs/issue_130_coralnet_etl_audit.yaml`](../sagemaker/runs/issue_130_coralnet_etl_audit.yaml)
 for the full job spec (ml.m5.4xlarge · 32 workers · 4-hour ceiling).
 
+### CoralNet website behavior: image size & load (read before tuning `coralnet-refresh`)
+
+The `coralnet-refresh` task scrapes the browse listing at
+`/source/<id>/browse/images`. CoralNet renders this **server-side**, and its
+responsiveness is the dominant constraint on refresh jobs. Hard-won observations
+from the issue #130 remediation runs:
+
+- **First, check CoralNet is even up — its availability dominates everything
+  else.** CoralNet periodically becomes unresponsive site-wide: TCP connects in
+  milliseconds but no HTTP response ever returns. When that happens every job
+  dies at login (which is *not* retry-wrapped), regardless of worker count. A
+  low-concurrency (2-shard) test during #130 failed at login for exactly this
+  reason — confirmed by a local `curl` that also hung. Probe before launching:
+
+  ```bash
+  curl -s -o /dev/null \
+    -w "http=%{http_code} ttfb=%{time_starttransfer}s total=%{time_total}s\n" \
+    --max-time 100 https://coralnet.ucsd.edu/accounts/login/
+  ```
+
+  `ttfb=0.000 … total=100s … http=000` means CoralNet is down — wait, don't launch.
+
+- **Page 1 is the bottleneck, and it's load-dependent — not a clean size cutoff.**
+  `get_images` must fetch page 1 first (to learn the page size) before it can fan
+  out the remaining `?page=N` requests in parallel. If that first GET exceeds the
+  client read timeout (`_PAGE_GET_TIMEOUT`, 90 s), the **entire source fails**
+  before the fan-out even starts. Empirically a 30 k-image source succeeded while
+  a 29 k one failed, and a 9 k failed while a 16 k succeeded — page-1 render time
+  varies with CoralNet's current load, not just the source's image count.
+- **Many parallel shards trigger a thundering herd.** With 7 shards, ~7 heavy
+  browse requests hit CoralNet simultaneously at startup. Failures fail fast
+  (~6 min/source) in lockstep, so the shards stay synchronized and keep colliding
+  on each subsequent source. A refresh batch composed only of previously-failed
+  (i.e. already timeout-prone) sources can fail close to 100 % this way.
+- **Retries alone don't rescue a slow page 1.** The `_with_retry` wrapper
+  (3 attempts; 30 s / 60 s backoff; covers `Timeout`, `ConnectionError`,
+  `ChunkedEncodingError`, 5xx) handles *transient* blips, but when page-1 latency
+  consistently exceeds 90 s all three attempts hit the same wall — and fixed
+  backoff means concurrent shards retry in lockstep and re-collide.
+
+**Guidance for `coralnet-refresh`:**
+
+- Prefer **low concurrency: 2–3 `workers`**, not 7+. Fewer simultaneous browse
+  requests is the single biggest lever against page-1 timeouts.
+- Budget runtime by source size: per-source ≈ `pages × ~5 s` (20 images/page,
+  `--browse-workers=10`), so ~79 k images ≈ 5.5 h. Set `max_runtime_hours`
+  accordingly (12 h is a safe ceiling for the largest sources) and keep each huge
+  source on its own shard.
+- Sources **> ~20 k images** are the most timeout-prone; expect to iterate.
+- **Shipped robustness:** login is retry-wrapped; retry backoff is jittered;
+  `--startup-jitter-seconds` (default 30) desyncs shards; and `main()` runs a
+  pre-flight `is_coralnet_reachable()` probe that **exits 2 without scraping when
+  CoralNet is down** (exit 2 = "site was down, retry later", not a code bug).
+- **Still pending:** a **size-aware page-1 timeout** (scale with
+  `total_images_hint`, mirroring `export_prep_timeout_seconds`) for when CoralNet
+  is merely slow rather than down.
+
 ### Credentials in run YAMLs
 
 Any `${VAR}` in a run YAML `env:` block is expanded from the shell environment at
