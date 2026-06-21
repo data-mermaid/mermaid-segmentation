@@ -1222,3 +1222,105 @@ def test_get_images_sequential_retries_on_inner_page_timeout():
 
     assert ok is True
     assert df is not None and len(df) == 2  # page 1 + page 2 (after retry)
+
+
+# ---------------------------------------------------------------------------
+# Login retry + jittered backoff
+# ---------------------------------------------------------------------------
+
+
+def _login_get_html() -> str:
+    return '<input type="hidden" name="csrfmiddlewaretoken" value="logintok"/>'
+
+
+def test_login_retries_transient_timeout_then_succeeds():
+    """A ReadTimeout on the login GET is retried; login then succeeds.
+
+    The original bug: a single login timeout killed the whole job before any
+    source was touched, because _perform_login's GET was not retry-wrapped.
+    """
+    dl = CoralNetDownloader("u", "p")
+    get_calls = [0]
+
+    def flaky_get(url, timeout=None, **_):
+        get_calls[0] += 1
+        if get_calls[0] == 1:
+            raise requests.ReadTimeout("login page slow")
+        return _mock_response(text=_login_get_html())
+
+    post_resp = _mock_response(text="<html>Sign out</html>")
+
+    with (
+        patch.object(dl.session, "get", side_effect=flaky_get),
+        patch.object(dl.session, "post", return_value=post_resp),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        ok = dl.login()
+
+    assert ok is True
+    assert dl.logged_in is True
+    assert get_calls[0] == 2  # timed out once, retried, then succeeded
+
+
+def test_login_gives_up_after_repeated_timeouts():
+    """If the login GET keeps timing out, login() returns False after retries (so the
+    shard exits cleanly instead of hammering CoralNet per-source)."""
+    dl = CoralNetDownloader("u", "p")
+    get_calls = [0]
+
+    def always_timeout(url, timeout=None, **_):
+        get_calls[0] += 1
+        raise requests.ReadTimeout("coralnet down")
+
+    with (
+        patch.object(dl.session, "get", side_effect=always_timeout),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        ok = dl.login()
+
+    assert ok is False
+    assert dl.logged_in is False
+    assert get_calls[0] == 3  # exhausted the retry budget
+
+
+def test_login_does_not_retry_invalid_credentials():
+    """A genuine auth failure (not a transient error) fails fast — no retry."""
+    dl = CoralNetDownloader("u", "p")
+    post_calls = [0]
+    bad_post = _mock_response(text="<html>Please enter a correct username and password</html>")
+    bad_post.url = dl.LOGIN_URL  # stayed on the login page => failed auth
+
+    def fake_post(*_a, **_k):
+        post_calls[0] += 1
+        return bad_post
+
+    with (
+        patch.object(dl.session, "get", return_value=_mock_response(text=_login_get_html())),
+        patch.object(dl.session, "post", side_effect=fake_post),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        ok = dl.login()
+
+    assert ok is False
+    assert post_calls[0] == 1  # not retried — invalid creds won't fix themselves
+
+
+def test_with_retry_backoff_is_jittered():
+    """Backoff is randomized within [0.5x, 1.5x] of the exponential base so that
+    concurrent shards desync instead of retrying in lockstep (thundering herd)."""
+    slept: list[float] = []
+
+    def always_timeout():
+        raise requests.ReadTimeout("x")
+
+    with (
+        patch.object(downloader_mod.time, "sleep", side_effect=lambda s: slept.append(s)),
+        patch.object(downloader_mod.random, "uniform", side_effect=lambda lo, _hi: lo) as uni,
+        pytest.raises(requests.ReadTimeout),
+    ):
+        downloader_mod._with_retry(always_timeout, source_id=1, page_num=1, kind="test")
+
+    # 3 attempts => 2 backoff sleeps; exponential bases are 30 and 60, jittered
+    # over [0.5*base, 1.5*base].
+    assert [c.args for c in uni.call_args_list] == [(0.5 * 30, 1.5 * 30), (0.5 * 60, 1.5 * 60)]
+    assert slept == [0.5 * 30, 0.5 * 60]  # stub returns the low bound

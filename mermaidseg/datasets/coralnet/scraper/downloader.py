@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent
 import io
 import logging
+import random
 import re
 import threading
 import time
@@ -157,7 +158,10 @@ def _with_retry(
                     _PAGE_RETRIES,
                 )
                 raise
-            backoff = _PAGE_RETRY_BACKOFF_S * (2 ** (attempt - 1))
+            # Jitter the exponential backoff so concurrent shards retrying the
+            # same failing site desync instead of stampeding in lockstep.
+            base = _PAGE_RETRY_BACKOFF_S * (2 ** (attempt - 1))
+            backoff = random.uniform(0.5 * base, 1.5 * base)
             logger.warning(
                 "source %s page=%s %s: %s (attempt %s/%s); retrying in %ss",
                 source_id,
@@ -276,21 +280,35 @@ class CoralNetDownloader:
         :meth:`login` (the main session) and :meth:`_new_logged_in_session`
         (per-worker independent sessions used by parallel export).
         """
-        response = session.get(self.LOGIN_URL, timeout=_PAGE_GET_TIMEOUT)
-        response.raise_for_status()
+
+        def _get_login_page() -> requests.Response:
+            r = session.get(self.LOGIN_URL, timeout=_PAGE_GET_TIMEOUT)
+            r.raise_for_status()
+            return r
+
+        # Retry the login round-trip on transient errors: CoralNet has brief
+        # availability dips, and a single login timeout otherwise kills the whole
+        # job before any source is scraped. Invalid-credential failures raise a
+        # RuntimeError (below), which _with_retry does not retry.
+        response = _with_retry(_get_login_page, source_id=0, page_num=0, kind="login")
         csrf_token = extract_csrf_token(response.text)
         if not csrf_token:
             raise RuntimeError("Could not find CSRF token")
-        login_response = session.post(
-            self.LOGIN_URL,
-            data={
-                "username": self.username,
-                "password": self.password,
-                "csrfmiddlewaretoken": csrf_token,
-            },
-            headers={"Referer": self.LOGIN_URL},
-            timeout=_PAGE_GET_TIMEOUT,
-            allow_redirects=True,
+        login_response = _with_retry(
+            lambda: session.post(
+                self.LOGIN_URL,
+                data={
+                    "username": self.username,
+                    "password": self.password,
+                    "csrfmiddlewaretoken": csrf_token,
+                },
+                headers={"Referer": self.LOGIN_URL},
+                timeout=_PAGE_GET_TIMEOUT,
+                allow_redirects=True,
+            ),
+            source_id=0,
+            page_num=0,
+            kind="login",
         )
         if "Sign out" not in login_response.text and login_response.url == self.LOGIN_URL:
             raise RuntimeError("Login failed - invalid credentials or other error")
