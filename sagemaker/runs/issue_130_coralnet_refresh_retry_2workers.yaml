@@ -1,6 +1,10 @@
 job:
-  name_prefix: mermaidseg-coralnet-refresh
-  image: mermaid-segmentation-jobs:processing-etl-2026-06-20
+  # Hypothesis test (issue #130): does LOW concurrency avoid the page-1 browse
+  # timeouts? Same image + source list as issue_130_coralnet_refresh_retry.yaml,
+  # but only 2 parallel shards instead of 7 to reduce simultaneous load on
+  # coralnet.ucsd.edu. See docs/sagemaker.md "CoralNet load & image-size behavior".
+  name_prefix: mermaidseg-coralnet-refresh-2w
+  image: mermaid-segmentation-jobs:processing-etl-2026-06-20-retry
   entrypoint: scripts/sagemaker_processing_entrypoint.py
   instance_type: ml.m5.xlarge
   volume_gb: 20
@@ -15,12 +19,9 @@ processing:
   container_args:
     - --task=coralnet-refresh
     - --browse-workers=10
-    - --startup-jitter-seconds=30   # desync shards' first CoralNet hit
     - --verbose
   shard:
-    items_from: coralnet_refresh_sources.csv
+    items_from: coralnet_refresh_retry_sources.csv
     items_column: source_id
-    # Keep concurrency low (2-3): many simultaneous shards overload CoralNet's
-    # browse endpoint and cause page-1 timeouts. See docs/sagemaker.md.
-    workers: 3
+    workers: 2
     per_worker_arg: --source-ids

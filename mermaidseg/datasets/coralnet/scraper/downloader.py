@@ -50,6 +50,7 @@ _PAGINATED_EXPORT_THRESHOLD = 5000  # sources above this use per-page export
 _PAGE_EXPORT_TIMEOUT = 180  # CoralNet session setup can take >60s even for 20 images
 _PAGE_RETRIES = 3
 _PAGE_RETRY_BACKOFF_S = 30  # sleep between retries, doubles each attempt
+_REACHABILITY_TIMEOUT = 30  # pre-flight "is CoralNet up?" probe; fail fast if not
 _PAGE_DELAY_SECONDS = 2.0  # politeness delay between page export requests
 _PAGE_PARALLEL_WORKERS = 3  # concurrent export_prep/serve requests in paginated export
 _CHECKPOINT_EVERY_PAGES = 50  # upload partial annotations.csv every N completed pages
@@ -322,6 +323,21 @@ class CoralNetDownloader:
             return True
         except Exception:
             logger.exception("CoralNet login failed for %s", self.username)
+            return False
+
+    def is_coralnet_reachable(self, *, timeout: float = _REACHABILITY_TIMEOUT) -> bool:
+        """Cheap pre-flight check that CoralNet is actually serving HTTP.
+
+        CoralNet has site-wide dips where it accepts TCP connections but never returns a
+        response. A single short GET distinguishes "down/degraded" (timeout or 5xx) from
+        "up" so a job can bail early instead of burning the full login-retry budget —
+        and, more importantly, so we don't pile load onto a site that's already
+        struggling.
+        """
+        try:
+            r = self.session.get(self.LOGIN_URL, timeout=timeout)
+            return r.status_code < 500
+        except requests.RequestException:
             return False
 
     def check_permissions(self, source_id: int) -> bool:

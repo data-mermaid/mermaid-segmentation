@@ -1,6 +1,6 @@
 job:
-  name_prefix: mermaidseg-coralnet-refresh
-  image: mermaid-segmentation-jobs:processing-etl-2026-06-20
+  name_prefix: mermaidseg-coralnet-refresh-retry
+  image: mermaid-segmentation-jobs:processing-etl-2026-06-20-retry
   entrypoint: scripts/sagemaker_processing_entrypoint.py
   instance_type: ml.m5.xlarge
   volume_gb: 20
@@ -18,9 +18,10 @@ processing:
     - --startup-jitter-seconds=30   # desync shards' first CoralNet hit
     - --verbose
   shard:
-    items_from: coralnet_refresh_sources.csv
+    items_from: coralnet_refresh_retry_sources.csv
     items_column: source_id
-    # Keep concurrency low (2-3): many simultaneous shards overload CoralNet's
-    # browse endpoint and cause page-1 timeouts. See docs/sagemaker.md.
+    # Low concurrency on purpose: too many simultaneous shards overload CoralNet's
+    # browse endpoint and cause page-1 timeouts. 3 keeps the heaviest shard under
+    # the 12h ceiling while limiting load. See docs/sagemaker.md "CoralNet behavior".
     workers: 3
     per_worker_arg: --source-ids

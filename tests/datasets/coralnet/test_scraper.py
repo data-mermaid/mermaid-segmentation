@@ -1324,3 +1324,28 @@ def test_with_retry_backoff_is_jittered():
     # over [0.5*base, 1.5*base].
     assert [c.args for c in uni.call_args_list] == [(0.5 * 30, 1.5 * 30), (0.5 * 60, 1.5 * 60)]
     assert slept == [0.5 * 30, 0.5 * 60]  # stub returns the low bound
+
+
+def _status_response(status: int) -> MagicMock:
+    r = MagicMock()
+    r.status_code = status
+    return r
+
+
+def test_is_coralnet_reachable_true_on_200():
+    dl = CoralNetDownloader("u", "p")
+    with patch.object(dl.session, "get", return_value=_status_response(200)):
+        assert dl.is_coralnet_reachable() is True
+
+
+def test_is_coralnet_reachable_false_on_5xx():
+    """A 5xx means CoralNet is up but degraded — treat as unreachable for pre-flight."""
+    dl = CoralNetDownloader("u", "p")
+    with patch.object(dl.session, "get", return_value=_status_response(503)):
+        assert dl.is_coralnet_reachable() is False
+
+
+def test_is_coralnet_reachable_false_on_timeout():
+    dl = CoralNetDownloader("u", "p")
+    with patch.object(dl.session, "get", side_effect=requests.ReadTimeout("down")):
+        assert dl.is_coralnet_reachable() is False

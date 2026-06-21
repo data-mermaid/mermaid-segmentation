@@ -24,6 +24,8 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +163,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Parallel browse-page workers per source (uses ?page=N fan-out; default 10)",
     )
+    p.add_argument(
+        "--startup-jitter-seconds",
+        type=float,
+        default=30.0,
+        help=(
+            "Sleep a random 0..N seconds before the first CoralNet request. Shards launch "
+            "simultaneously; jitter desyncs their first hit so they don't stampede the site "
+            "(set 0 to disable)."
+        ),
+    )
     p.add_argument("--dry-run", action="store_true", help="Report new vs old counts, do not upload")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -177,6 +189,23 @@ def main(argv: list[str] | None = None) -> int:
 
     username, password = load_coralnet_credentials()
     downloader = CoralNetDownloader(username, password, max_workers=args.max_workers)
+
+    # Per-shard startup jitter: shards launch together, so without this they all
+    # hit CoralNet at the same instant (thundering herd). A random short delay
+    # spreads the first request out across shards.
+    if args.startup_jitter_seconds > 0:
+        delay = random.uniform(0, args.startup_jitter_seconds)
+        logger.info("Startup jitter: sleeping %.1fs before first CoralNet request", delay)
+        time.sleep(delay)
+
+    # Pre-flight reachability gate: bail early (without hammering) if CoralNet is
+    # down/degraded site-wide, instead of burning the login-retry budget per shard.
+    if not downloader.is_coralnet_reachable():
+        logger.error(
+            "CoralNet is unreachable (no HTTP response within the probe window); "
+            "aborting without scraping. Retry once the site recovers."
+        )
+        return 2
     if not downloader.login():
         logger.error("CoralNet login failed")
         return 1

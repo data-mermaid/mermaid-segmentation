@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pandas as pd
 
 import mermaidseg.datasets.coralnet.scraper.refresh_image_lists as refresh
@@ -87,3 +89,53 @@ def test_refresh_handles_failed_scrape(fake_s3):
     r = refresh.refresh_one(_StubDownloader(0, ok=False), fake_s3, BUCKET, PREFIX, 5)
     assert r["uploaded"] is False
     assert r["skipped_reason"] == "scrape_failed_or_empty"
+
+
+def test_main_aborts_early_when_coralnet_unreachable(monkeypatch):
+    """Pre-flight gate: if CoralNet is down, main() exits 2 without logging in or
+    scraping — so we don't pile load onto a struggling site."""
+    monkeypatch.setattr(refresh, "load_coralnet_credentials", lambda: ("u", "p"))
+    fake_dl = MagicMock()
+    fake_dl.is_coralnet_reachable.return_value = False
+    monkeypatch.setattr(refresh, "CoralNetDownloader", lambda *a, **k: fake_dl)
+
+    rc = refresh.main(
+        [
+            "--source-ids",
+            "1,2",
+            "--bucket",
+            BUCKET,
+            "--prefix",
+            PREFIX,
+            "--startup-jitter-seconds",
+            "0",
+        ]
+    )
+
+    assert rc == 2
+    fake_dl.login.assert_not_called()  # never attempted login on a down site
+
+
+def test_main_proceeds_when_reachable(monkeypatch):
+    """When reachable but login fails, main() returns 1 (gate passed, login tried)."""
+    monkeypatch.setattr(refresh, "load_coralnet_credentials", lambda: ("u", "p"))
+    fake_dl = MagicMock()
+    fake_dl.is_coralnet_reachable.return_value = True
+    fake_dl.login.return_value = False
+    monkeypatch.setattr(refresh, "CoralNetDownloader", lambda *a, **k: fake_dl)
+
+    rc = refresh.main(
+        [
+            "--source-ids",
+            "1",
+            "--bucket",
+            BUCKET,
+            "--prefix",
+            PREFIX,
+            "--startup-jitter-seconds",
+            "0",
+        ]
+    )
+
+    assert rc == 1
+    fake_dl.login.assert_called_once()
