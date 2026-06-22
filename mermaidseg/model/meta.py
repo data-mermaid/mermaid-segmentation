@@ -319,9 +319,10 @@ class MetaModel:
                 "target_concepts must be provided in 'concept-bottleneck' mode"
             )
             concept_outputs = segmentation_outputs.hidden_states.float()
+            concept_logits = segmentation_outputs.concept_logits.float()
             outputs = segmentation_outputs.logits.float()
             loss, loss_components = self.loss(
-                outputs, target_labels, concept_outputs, target_concepts
+                outputs, target_labels, concept_logits, target_concepts
             )
 
         elif self.training_mode == "concept":

@@ -452,7 +452,7 @@ def _run_training(args: argparse.Namespace) -> None:
         log_checkpoint=cfg_logger.logger.get("log_checkpoint", 50),
         checkpoint_dir=".",
         enable_mlflow=True,
-        id2label={0: "background", **registry.target_id2label},
+        id2label={0: "ignore", **registry.target_id2label},
     ) as logger:
         if logger.mlflow_run_id is not None:
             logging.info("MLflow run_id: %s", logger.mlflow_run_id)

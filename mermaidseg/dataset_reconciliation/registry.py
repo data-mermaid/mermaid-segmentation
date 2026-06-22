@@ -50,7 +50,8 @@ def _identity_source_to_target(dataset: Any) -> dict[str, str]:
 
 def _static_source_to_target(static: dict[str, str], dataset: Any) -> dict[str, str]:
     """Filter a static ``source_name -> target_name`` dict to the dataset's source space."""
-    return {name: target for name, target in static.items() if name in dataset.source_name2id}
+    ds_names_lower = {n.lower() for n in dataset.source_name2id}
+    return {name: target for name, target in static.items() if name.lower() in ds_names_lower}
 
 
 _BUILTIN_DEFAULT_FETCHERS = {
@@ -86,8 +87,9 @@ class SourceLabelRegistry:
         source_to_target_name_maps: Optional mapping
             ``{SOURCE_NAME: {source_label_name: target_label_name}}``. Defaults
             are looked up per ``SOURCE_NAME``: ``mermaid`` is identity,
-            ``coralscapes`` uses the static dict, ``coralnet`` and
-            ``catlin_seaview`` are fetched from the MERMAID API.
+            ``coralscapes``, ``coralscapes_v2`` ``catlin_seaview``, ``moorea_labeled_corals``, ``ucsd_mosaics``, ``benthos_yuval`` use the static dict,
+            ``coralnet`` and
+             are fetched from the MERMAID API.
         concept_hierarchy: Optional benthic-attribute name->parent-name dict.
             If supplied (or if ``compute_concepts=True`` and not supplied), it
             is fetched from the MERMAID API.
@@ -157,7 +159,7 @@ class SourceLabelRegistry:
             for local_id, source_name in sorted(ds.source_id2name.items()):
                 global_id = local_id + running_offset
                 self.global_id2source[global_id] = (ds.SOURCE_NAME, source_name)
-                ds_target_for_source.append(resolved_maps[ds.SOURCE_NAME].get(source_name))
+                ds_target_for_source.append(resolved_maps[ds.SOURCE_NAME].get(source_name.lower()))
             per_dataset_target_lists.append(ds_target_for_source)
             running_offset += len(ds.source_id2name)
         self.dataset_offsets = offsets
@@ -173,10 +175,12 @@ class SourceLabelRegistry:
                         target_label_set.add(tgt)
             target_labels = sorted(target_label_set)
 
+        target_labels = list(dict.fromkeys(t.lower() for t in target_labels))
+
         # Optional caller-provided whitelist; targets outside `subset` collapse
         # to background in `source_to_target` below.
         if target_label_subset is not None:
-            subset = set(target_label_subset)
+            subset = {t.lower() for t in target_label_subset}
             target_labels = [t for t in target_labels if t in subset]
         else:
             subset = None
@@ -192,6 +196,10 @@ class SourceLabelRegistry:
                         "label_roll_up=True requires benthic_hierarchy or fetch_remote=True"
                     )
                 benthic_hierarchy = initialize_benthic_hierarchy()
+            benthic_hierarchy = {
+                k.lower(): (v.lower() if v is not None else None)
+                for k, v in benthic_hierarchy.items()
+            }
             if subset is None:
                 raise ValueError("label_roll_up=True requires target_label_subset to be set")
 
@@ -203,7 +211,7 @@ class SourceLabelRegistry:
         for ds in self.datasets:
             offset = self.dataset_offsets[ds.SOURCE_NAME]
             for local_id, source_name in sorted(ds.source_id2name.items()):
-                target_name = resolved_maps[ds.SOURCE_NAME].get(source_name)
+                target_name = resolved_maps[ds.SOURCE_NAME].get(source_name.lower())
                 if label_roll_up:
                     target_name = roll_up_label(target_name, benthic_hierarchy, subset)
                 if target_name is None:
@@ -239,6 +247,7 @@ class SourceLabelRegistry:
         resolved: dict[str, dict[str, str]] = {}
         for ds in self.datasets:
             name = ds.SOURCE_NAME
+            ds_names_lower = {n.lower() for n in ds.source_name2id}
             if name in provided:
                 resolved[name] = provided[name]
                 continue
@@ -252,7 +261,7 @@ class SourceLabelRegistry:
                 resolved[name] = {
                     src: tgt
                     for src, tgt in coralnet_id_to_target.items()
-                    if tgt is not None and src in ds.source_name2id
+                    if tgt is not None and src.lower() in ds_names_lower
                 }
                 continue
             if name == "catlin_seaview":
@@ -265,7 +274,7 @@ class SourceLabelRegistry:
                 resolved[name] = {
                     src: tgt
                     for src, tgt in catlin_to_target.items()
-                    if tgt is not None and src in ds.source_name2id
+                    if tgt is not None and src.lower() in ds_names_lower
                 }
                 continue
             if name == "moorea_labeled_corals":
@@ -278,7 +287,7 @@ class SourceLabelRegistry:
                 resolved[name] = {
                     src: tgt
                     for src, tgt in moorea_to_target.items()
-                    if tgt is not None and src in ds.source_name2id
+                    if tgt is not None and src.lower() in ds_names_lower
                 }
                 continue
             if name == "pacific_labeled_corals":
@@ -291,7 +300,7 @@ class SourceLabelRegistry:
                 resolved[name] = {
                     src: tgt
                     for src, tgt in pacific_to_target.items()
-                    if tgt is not None and src in ds.source_name2id
+                    if tgt is not None and src.lower() in ds_names_lower
                 }
                 continue
             if name == "benthos_yuval":
@@ -304,7 +313,7 @@ class SourceLabelRegistry:
                 resolved[name] = {
                     src: tgt
                     for src, tgt in benthos_to_target.items()
-                    if tgt is not None and src in ds.source_name2id
+                    if tgt is not None and src.lower() in ds_names_lower
                 }
                 continue
             if name == "ucsd_mosaics":
@@ -317,7 +326,7 @@ class SourceLabelRegistry:
                 resolved[name] = {
                     src: tgt
                     for src, tgt in ucsd_to_target.items()
-                    if tgt is not None and src in ds.source_name2id
+                    if tgt is not None and src.lower() in ds_names_lower
                 }
                 continue
             if name in _BUILTIN_DEFAULT_FETCHERS:
@@ -327,7 +336,10 @@ class SourceLabelRegistry:
                 f"No default source-to-target mapping for SOURCE_NAME='{name}'. "
                 "Pass an explicit entry in source_to_target_name_maps."
             )
-        return resolved
+        return {
+            src_name: {k.lower(): v.lower() for k, v in m.items()}
+            for src_name, m in resolved.items()
+        }
 
     def _build_concepts(
         self,

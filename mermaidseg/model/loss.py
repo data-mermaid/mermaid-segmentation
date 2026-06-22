@@ -142,34 +142,29 @@ class ConceptBottleneckLoss(torch.nn.Module):
     """ConceptBottleneckLoss combines a classification loss with a concept prediction loss.
 
     It computes the total loss as the sum of the classification loss and a weighted concept loss.
-    The concept loss operates on the model's concept *activations* (in ``[0, 1]``), not raw
-    logits — taxonomic groups are softmaxed and the binary tail is sigmoided inside the model
-    (see :class:`GroupedConceptActivation`). The default ``concept_loss`` is
-    :class:`torch.nn.BCELoss`, which expects probabilities.
+    The concept loss operates on the model's raw concept *logits* (pre-activation): taxonomic
+    groups use cross-entropy and the binary tail uses ``binary_cross_entropy_with_logits``. This
+    is numerically stable under mixed precision, unlike running BCE on post-sigmoid activations.
 
     Attributes:
         class_loss (torch.nn.Module): The loss function used for classification. Defaults to
             `torch.nn.CrossEntropyLoss`.
-        concept_loss (torch.nn.Module): The loss function used for concept prediction.
-            Receives concept activations in ``[0, 1]``. Defaults to `torch.nn.BCELoss`.
         ignore_index (int): Specifies a target value that is ignored and does not contribute to the input gradient
             for the classification loss. Defaults to -1.
         lambda_weight (float): The weight applied to the concept loss when computing the total loss. Defaults to 1.0.
-        kwargs: Additional keyword arguments that are passed to the loss functions.
+        kwargs: Additional keyword arguments that are passed to the classification loss.
     """
 
     def __init__(
         self,
         concept_value2id: dict[str, dict[str, int]],
         class_loss: torch.nn.Module = torch.nn.CrossEntropyLoss,
-        concept_loss: torch.nn.Module = torch.nn.BCELoss,
         ignore_index: int = 0,
         lambda_weight: float = 1.0,
         **kwargs: Any,
     ) -> None:
         super().__init__()
         self.class_loss = class_loss(ignore_index=ignore_index, **kwargs)
-        self.concept_loss = concept_loss(reduction="none", **kwargs)
         self.lambda_weight = lambda_weight
         self.concept_value2id = concept_value2id
 
@@ -177,7 +172,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
         self,
         outputs: torch.Tensor,
         target_labels: torch.Tensor,
-        concept_outputs: torch.Tensor,
+        concept_logits: torch.Tensor,
         concept_labels: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Computes the total loss as the sum of the classification loss and a weighted concept
@@ -186,9 +181,9 @@ class ConceptBottleneckLoss(torch.nn.Module):
         Args:
             outputs (torch.Tensor): The model's output logits for classification.
             target_labels (torch.Tensor): The target-space ground truth labels for classification.
-            concept_outputs (torch.Tensor): The model's concept activations in ``[0, 1]``
-                (per-group softmax for taxonomic ranks, sigmoid for the binary tail).
-                These are the same activations consumed by the model's class head.
+            concept_logits (torch.Tensor): The model's raw concept logits (pre-activation).
+                Taxonomic ranks are scored with cross-entropy and the binary tail with
+                ``binary_cross_entropy_with_logits`` for numerical stability.
             concept_labels (torch.Tensor): The ground truth labels for concept prediction.
         Returns:
             A 2-tuple of (total_loss, loss_components) where total_loss is the
@@ -201,18 +196,20 @@ class ConceptBottleneckLoss(torch.nn.Module):
 
         loss_components: dict[str, float] = {"classification": class_loss_value.item()}
         concept_loss_value = torch.tensor(
-            0.0, device=concept_outputs.device, dtype=concept_outputs.dtype
+            0.0, device=concept_logits.device, dtype=concept_logits.dtype
         )
 
         for name, labels_slice, outputs_slice in iter_concept_slices(
-            self.concept_value2id, concept_labels, concept_outputs
+            self.concept_value2id, concept_labels, concept_logits
         ):
             if name == "multi_hot":
                 slice_loss = calculate_multi_hot_concept_loss(
-                    outputs_slice, labels_slice, self.concept_loss
+                    outputs_slice, labels_slice, from_logits=True
                 )
             else:
-                slice_loss = calculate_taxonomic_rank_loss(outputs_slice, labels_slice)
+                slice_loss = calculate_taxonomic_rank_loss(
+                    outputs_slice, labels_slice, from_logits=True
+                ) / len(TAXONOMIC_CONCEPTS)
             loss_components[name] = slice_loss.item()
             concept_loss_value = concept_loss_value + slice_loss
 

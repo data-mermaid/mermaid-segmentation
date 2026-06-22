@@ -91,12 +91,18 @@ def calculate_taxonomic_rank_loss(
 def calculate_multi_hot_concept_loss(
     concept_outputs: torch.Tensor,
     concept_labels: torch.Tensor,
-    concept_loss: torch.nn.Module,
+    concept_loss: torch.nn.Module | None = None,
     *,
     from_logits: bool = False,
     foreground_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """BCE loss for multi-hot concepts with 0=invalid, 1=False, 2=True encoding."""
+    """BCE loss for multi-hot concepts with 0=invalid, 1=False, 2=True encoding.
+
+    When ``from_logits`` is True, ``concept_outputs`` are raw logits scored with
+    ``binary_cross_entropy_with_logits`` and ``concept_loss`` is unused. Otherwise
+    ``concept_outputs`` are probabilities in ``[0, 1]`` and ``concept_loss`` (e.g. ``BCELoss``)
+    is required.
+    """
     concept_mask = concept_labels.gt(0)
     if foreground_mask is not None:
         concept_mask = concept_mask & foreground_mask.unsqueeze(1)
@@ -110,6 +116,8 @@ def calculate_multi_hot_concept_loss(
             concept_outputs, targets, reduction="none"
         )
     else:
+        if concept_loss is None:
+            raise ValueError("concept_loss is required when from_logits is False")
         outputs = concept_outputs.clamp(1e-6, 1.0 - 1e-6)
         per_element_loss = concept_loss(outputs, targets)
     denom = concept_mask.sum().clamp(min=1).float()
