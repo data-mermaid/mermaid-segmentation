@@ -268,9 +268,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
             concept_logits, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
         concept_outputs = self.concept_outputs_activation(concept_logits)
-        classifier_input = (
-            concept_outputs.detach() if self.detach_concepts else concept_outputs
-        )
+        classifier_input = concept_outputs.detach() if self.detach_concepts else concept_outputs
         logits = self.concept_classifier(classifier_input)
 
         logits = torch.nn.functional.interpolate(
@@ -586,9 +584,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         )
         concept_logits = self.concept_proj(concept_features)
         concept_outputs = self.concept_outputs_activation(concept_logits)
-        classifier_input = (
-            concept_outputs.detach() if self.detach_concepts else concept_outputs
-        )
+        classifier_input = concept_outputs.detach() if self.detach_concepts else concept_outputs
         logits = self.concept_classifier(classifier_input)
         return SemanticSegmenterOutput(loss=None, logits=logits, hidden_states=concept_outputs)
 

@@ -204,9 +204,7 @@ class MetaModel:
             scheduler_cfg = dict(training_kwargs.scheduler)
             warmup_iters = int(scheduler_cfg.pop("warmup_iters", 2000))
             warmup_start_factor = float(scheduler_cfg.pop("warmup_start_factor", 0.01))
-            scheduler_cls = getattr(
-                torch.optim.lr_scheduler, scheduler_cfg.pop("type", None)
-            )
+            scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_cfg.pop("type", None))
             self.scheduler = scheduler_cls(self.optimizer, **scheduler_cfg)
             self.warmup_iters = warmup_iters
             self._warmup_iters_completed = 0
