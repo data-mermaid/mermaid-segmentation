@@ -196,7 +196,11 @@ def train_model(
                 )
                 should_stop_early = True
 
-        if scheduler is not None:
+        warmup_complete = (
+            getattr(meta_model, "warmup_iters", 0) == 0
+            or meta_model._warmup_iters_completed >= meta_model.warmup_iters
+        )
+        if scheduler is not None and warmup_complete:
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 if metric_value is not None:
                     scheduler.step(metric_value)
@@ -208,9 +212,9 @@ def train_model(
             else:
                 scheduler.step()
 
-            if logger is not None:
-                current_lr = meta_model.optimizer.param_groups[0]["lr"]
-                logger.log({"train/lr": current_lr}, step=epoch)
+        if scheduler is not None and logger is not None:
+            current_lr = meta_model.optimizer.param_groups[0]["lr"]
+            logger.log({"train/lr": current_lr}, step=epoch)
 
         epoch_wall = time.time() - epoch_start_time
         epoch_loss_dict["train/time_taken"] = epoch_wall

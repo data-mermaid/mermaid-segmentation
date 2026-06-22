@@ -219,6 +219,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         num_concepts: int = 2,
         input_size: tuple[int, int] = (512, 512),
         concept_value2id: dict[str, dict[str, int]] | None = None,
+        detach_concepts: bool = False,
         **kwargs: Any,
     ):
         """Initialize encoder, concept head, and segmentation classifier.
@@ -237,6 +238,7 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
         self.encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
         self.concept_value2id = concept_value2id
+        self.detach_concepts = detach_concepts
         hidden_size = self.encoder.config.hidden_size
         patch_size = self.encoder.config.patch_size
         self.token_width = input_size[1] // patch_size
@@ -266,8 +268,8 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
             concept_logits, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
         concept_outputs = self.concept_outputs_activation(concept_logits)
-
-        logits = self.concept_classifier(concept_outputs)
+        classifier_input = concept_outputs.detach() if self.detach_concepts else concept_outputs
+        logits = self.concept_classifier(classifier_input)
 
         logits = torch.nn.functional.interpolate(
             logits, size=x.shape[-2:], mode="bilinear", align_corners=False
@@ -564,10 +566,12 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         num_concepts: int,
         concept_value2id: dict[str, dict[str, int]] | None,
         concept_feature_dim: int,
+        detach_concepts: bool = False,
         **kwargs: Any,
     ):
         super().__init__(head_out_channels=concept_feature_dim, **kwargs)
         self.concept_value2id = concept_value2id
+        self.detach_concepts = detach_concepts
         self.concept_proj = torch.nn.Conv2d(concept_feature_dim, num_concepts, kernel_size=1)
         self.concept_classifier = torch.nn.Conv2d(num_concepts, num_classes, kernel_size=1)
 
@@ -580,8 +584,8 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         )
         concept_logits = self.concept_proj(concept_features)
         concept_outputs = self.concept_outputs_activation(concept_logits)
-
-        logits = self.concept_classifier(concept_outputs)
+        classifier_input = concept_outputs.detach() if self.detach_concepts else concept_outputs
+        logits = self.concept_classifier(classifier_input)
         return SemanticSegmenterOutput(loss=None, logits=logits, hidden_states=concept_outputs)
 
     def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:

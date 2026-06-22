@@ -131,8 +131,15 @@ class MetaModel:
             "freeze_encoder",
             self.training_mode == "concept-bottleneck",
         )
+        detach_concepts = training_kwargs.pop(
+            "detach_concepts",
+            self.training_mode == "concept-bottleneck",
+        )
 
         self.training_kwargs = training_kwargs
+        mixed_precision = training_kwargs.pop("mixed_precision", False)
+        self.use_amp = bool(mixed_precision) and torch.cuda.is_available()
+        self.scaler = torch.amp.GradScaler(enabled=self.use_amp)
         self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
         self._train_loader_iter = None
         self._train_loader = None
@@ -158,6 +165,8 @@ class MetaModel:
         if self.training_mode == "concept-bottleneck":
             model_kwargs.setdefault("num_concepts", self.num_concepts)
             model_kwargs.setdefault("concept_value2id", self.concept_value2id)
+            model_kwargs.pop("detach_concepts", None)
+            model_kwargs["detach_concepts"] = detach_concepts
         elif self.training_mode == "concept":
             model_kwargs.setdefault(
                 "num_classes", self.num_concepts
@@ -173,6 +182,7 @@ class MetaModel:
 
         self.model = self.model.to(device)
         self.freeze_encoder = freeze_encoder
+        self.detach_concepts = detach_concepts
         if freeze_encoder and hasattr(self.model, "freeze_encoder"):
             self.model.freeze_encoder()
 
@@ -191,10 +201,33 @@ class MetaModel:
         self.optimizer = optimizer_cls(params=trainable_params, **training_kwargs.optimizer)
 
         if "scheduler" in training_kwargs:
-            scheduler_cls = getattr(
-                torch.optim.lr_scheduler, training_kwargs.scheduler.pop("type", None)
-            )
-            self.scheduler = scheduler_cls(self.optimizer, **training_kwargs.scheduler)
+            scheduler_cfg = dict(training_kwargs.scheduler)
+            warmup_iters = int(scheduler_cfg.pop("warmup_iters", 2000))
+            warmup_start_factor = float(scheduler_cfg.pop("warmup_start_factor", 0.01))
+            scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_cfg.pop("type", None))
+            self.scheduler = scheduler_cls(self.optimizer, **scheduler_cfg)
+            self.warmup_iters = warmup_iters
+            self._warmup_iters_completed = 0
+            if warmup_iters > 0:
+                self.warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                    self.optimizer,
+                    start_factor=warmup_start_factor,
+                    total_iters=warmup_iters,
+                )
+            else:
+                self.warmup_scheduler = None
+        else:
+            self.scheduler = None
+            self.warmup_iters = 0
+            self.warmup_scheduler = None
+            self._warmup_iters_completed = 0
+
+    def _step_warmup_scheduler(self) -> None:
+        """Step the linear LR warmup once per training iteration."""
+        if self.warmup_scheduler is None or self._warmup_iters_completed >= self.warmup_iters:
+            return
+        self.warmup_scheduler.step()
+        self._warmup_iters_completed += 1
 
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
@@ -278,21 +311,22 @@ class MetaModel:
         if target_dim is None:
             target_dim = (images.size(-2), images.size(-1))
 
-        segmentation_outputs = self.model(images)
+        with torch.autocast(device_type="cuda", enabled=self.use_amp):
+            segmentation_outputs = self.model(images)
 
         if self.training_mode == "concept-bottleneck":
             assert target_concepts is not None, (
                 "target_concepts must be provided in 'concept-bottleneck' mode"
             )
-            concept_outputs = segmentation_outputs.hidden_states
-            outputs = segmentation_outputs.logits
+            concept_outputs = segmentation_outputs.hidden_states.float()
+            outputs = segmentation_outputs.logits.float()
             loss, loss_components = self.loss(
                 outputs, target_labels, concept_outputs, target_concepts
             )
 
         elif self.training_mode == "concept":
             assert target_concepts is not None, "target_concepts must be provided in 'concept' mode"
-            concept_outputs = segmentation_outputs.logits
+            concept_outputs = segmentation_outputs.logits.float()
             loss, loss_components = self.loss(concept_outputs, target_concepts, target_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
             outputs = postprocess_predicted_concepts(
@@ -302,7 +336,7 @@ class MetaModel:
             ).to(self.device)
 
         else:
-            outputs = segmentation_outputs.logits
+            outputs = segmentation_outputs.logits.float()
             concept_outputs = None
             loss, loss_components = self.loss(outputs, target_labels)
 
@@ -397,9 +431,11 @@ class MetaModel:
                 torch.cuda.synchronize()
             backward_start = time.perf_counter()
 
-            loss.backward()
-            self.optimizer.step()
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             self.optimizer.zero_grad()
+            self._step_warmup_scheduler()
 
             if use_cuda:
                 torch.cuda.synchronize()
