@@ -21,6 +21,8 @@ from mermaidseg.datasets.coralnet.preprocessing.manifest import (
 )
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
     _resized_s3_key_for,
+    _resolve_checkpoint_s3_keys,
+    _summarise_checkpoint,
     get_pending_items,
     read_checkpoint,
     resize_and_upload_all_images,
@@ -83,7 +85,8 @@ def test_resize_image_square():
 
 
 def test_resize_converts_rgba_to_rgb_jpeg():
-    """RGBA images are converted to RGB so they can be JPEG-encoded (not RGBA-as-JPEG error)."""
+    """RGBA images are converted to RGB so they can be JPEG-encoded (not RGBA-as-JPEG
+    error)."""
     img = Image.new("RGBA", (3000, 2000), color=(255, 0, 0, 128))
     img_bytes = BytesIO()
     img.save(img_bytes, format="PNG")
@@ -100,7 +103,8 @@ def test_resize_converts_rgba_to_rgb_jpeg():
 
 
 def test_resize_converts_rgba_below_threshold():
-    """A small RGBA image is still re-encoded to RGB JPEG, not passed through as raw bytes."""
+    """A small RGBA image is still re-encoded to RGB JPEG, not passed through as raw
+    bytes."""
     img = Image.new("RGBA", (800, 400), color=(0, 255, 0, 64))
     img_bytes = BytesIO()
     img.save(img_bytes, format="PNG")
@@ -117,7 +121,8 @@ def test_resize_converts_rgba_below_threshold():
 
 
 def test_scan_for_missing_resized_images_builds_todo_list():
-    """Scan lists the resized prefix once and diffs in memory — no per-image head_object."""
+    """Scan lists the resized prefix once and diffs in memory — no per-image
+    head_object."""
     df_images = pd.DataFrame(
         {
             "source_id": [1, 1, 2],
@@ -212,7 +217,8 @@ def test_checkpoint_pending_items_extracted():
 
 
 def test_resize_and_upload_image_returns_completed_result():
-    """Worker downloads/resizes/uploads and RETURNS a checkpoint row; it does no checkpoint I/O."""
+    """Worker downloads/resizes/uploads and RETURNS a checkpoint row; it does no
+    checkpoint I/O."""
     # Create mock S3 client
     mock_s3 = Mock()
 
@@ -264,7 +270,8 @@ def test_resize_and_upload_image_returns_completed_result():
 
 
 def _checkpoint_table(df: pd.DataFrame) -> ibis.Table:
-    """Memtable with the dtypes the checkpoint parquet schema guarantees in production."""
+    """Memtable with the dtypes the checkpoint parquet schema guarantees in
+    production."""
     return ibis.memtable(
         df.astype(
             {
@@ -312,7 +319,8 @@ def test_combine_checkpoints_later_run_wins():
 
 
 def test_combine_checkpoints_most_recent_timestamp_wins_regardless_of_order():
-    """The freshest resize_timestamp wins even when checkpoints are passed out of order."""
+    """The freshest resize_timestamp wins even when checkpoints are passed out of
+    order."""
     ckpt_newer = pd.DataFrame(
         {
             "source_id": [1],
@@ -354,7 +362,8 @@ def test_combine_checkpoints_empty_raises():
 
 
 def test_combine_checkpoints_single_input_dedups():
-    """A single checkpoint passes through, still deduped by latest timestamp per image."""
+    """A single checkpoint passes through, still deduped by latest timestamp per
+    image."""
     ckpt = pd.DataFrame(
         {
             "source_id": [1, 1],
@@ -424,8 +433,8 @@ def test_manifest_schema_is_correct():
 
 
 def test_manifest_dimensions_and_keys_match_resize():
-    """Below threshold keeps original dims; above threshold floors like the resize worker, and
-    output_s3_key matches _resized_s3_key_for."""
+    """Below threshold keeps original dims; above threshold floors like the resize
+    worker, and output_s3_key matches _resized_s3_key_for."""
     threshold = 2048
     df_images = pd.DataFrame(
         {
@@ -490,7 +499,8 @@ def test_inspect_image_valid_rgb(valid_rgb_jpeg_bytes):
 
 
 def test_inspect_image_rgba_png(rgba_png_bytes):
-    """Inspection passes for RGBA PNG; the resize step converts it to RGB before JPEG encoding."""
+    """Inspection passes for RGBA PNG; the resize step converts it to RGB before JPEG
+    encoding."""
     image_bytes = BytesIO(rgba_png_bytes)
     inspection = inspect_image(image_bytes)
 
@@ -501,7 +511,8 @@ def test_inspect_image_rgba_png(rgba_png_bytes):
 
 
 def test_inspect_image_grayscale(grayscale_jpeg_bytes):
-    """Inspection passes for grayscale JPEG; the resize step encodes single-channel L directly."""
+    """Inspection passes for grayscale JPEG; the resize step encodes single-channel L
+    directly."""
     image_bytes = BytesIO(grayscale_jpeg_bytes)
     inspection = inspect_image(image_bytes)
 
@@ -553,7 +564,8 @@ def test_inspect_image_none():
 
 
 def test_resize_converts_and_uploads_rgba_png(rgba_png_bytes):
-    """Worker converts an RGBA PNG to RGB JPEG, uploads it, and returns a completed result."""
+    """Worker converts an RGBA PNG to RGB JPEG, uploads it, and returns a completed
+    result."""
     mock_s3 = MagicMock()
 
     # Mock GET to return RGBA PNG bytes
@@ -650,8 +662,8 @@ def test_resize_mixed_batch(valid_rgb_jpeg_bytes, truncated_jpeg_bytes, tmp_path
 
 
 def test_resize_resumes_only_pending_items(valid_rgb_jpeg_bytes, tmp_path):
-    """An existing checkpoint with completed rows is resumed: completed images are not re-
-    downloaded."""
+    """An existing checkpoint with completed rows is resumed: completed images are not
+    re- downloaded."""
     mock_s3 = MagicMock()
     mock_s3.get_object.return_value = {"Body": BytesIO(valid_rgb_jpeg_bytes)}
     mock_s3.put_object = MagicMock()
@@ -711,8 +723,8 @@ def test_resize_resumes_only_pending_items(valid_rgb_jpeg_bytes, tmp_path):
 
 
 def test_resume_summary_counts_never_negative(valid_rgb_jpeg_bytes, tmp_path):
-    """Resuming with a todo smaller than the checkpoint reports counts from the checkpoint
-    itself."""
+    """Resuming with a todo smaller than the checkpoint reports counts from the
+    checkpoint itself."""
     mock_s3 = MagicMock()
     mock_s3.get_object.return_value = {"Body": BytesIO(valid_rgb_jpeg_bytes)}
 
@@ -761,10 +773,126 @@ def test_resume_summary_counts_never_negative(valid_rgb_jpeg_bytes, tmp_path):
     assert num_corrupted == 1  # 'c'
 
 
+def test_summarise_checkpoint_handles_old_schema_without_skip_reason():
+    """A pre-schema checkpoint (no skip_reason column) summarizes without KeyError.
+
+    Reproduces the May-checkpoint crash: that file predates the skip_reason column, and
+    summarizing it raised KeyError. The summary must treat absent skip_reason as "no corrupted
+    skips".
+    """
+    old_checkpoint = pd.DataFrame(
+        {
+            "source_id": [1, 1, 1, 1],
+            "image_id": ["a", "b", "c", "d"],
+            "status": ["completed", "completed", "skipped", "failed"],
+            "resize_timestamp": [datetime.now(), datetime.now(), None, None],
+            "error_message": [None, None, None, "boom"],
+        }
+    )
+    assert "skip_reason" not in old_checkpoint.columns
+
+    num_resized, num_skipped, num_failed, num_corrupted = _summarise_checkpoint(old_checkpoint)
+
+    assert num_resized == 2
+    assert num_skipped == 1  # the lone skip is counted as a plain skip, not corrupted
+    assert num_failed == 1
+    assert num_corrupted == 0
+
+
+def test_checkpoint_keys_default_pull_and_push_to_same_run_path():
+    """With no overrides, pull and push both derive from the run version."""
+    pull_key, push_key = _resolve_checkpoint_s3_keys(
+        run="20260623_nogit", checkpoint_s3_key=None, pull_checkpoint_s3_key=None
+    )
+    assert pull_key == push_key
+    assert "20260623_nogit" in push_key
+
+
+def test_checkpoint_keys_pull_from_old_run_push_to_new_run():
+    """Pulling a prior run's checkpoint must NOT redirect the push to that prior path.
+
+    Reproduces the wrong-path bug: one --checkpoint-s3-key served both pull and push, so a job
+    that seeded from May's checkpoint wrote its results back over May's path. Pull and push are
+    now independent.
+    """
+    pull_key, push_key = _resolve_checkpoint_s3_keys(
+        run="20260623_nogit",
+        checkpoint_s3_key=None,
+        pull_checkpoint_s3_key="etl-outputs/coralnet/20260526_807b611/resize_checkpoint_20260526_807b611.parquet",
+    )
+    assert "20260526_807b611" in pull_key  # pulls the old run
+    assert "20260623_nogit" in push_key  # but pushes under the new run
+    assert pull_key != push_key
+
+
+def test_checkpoint_keys_pull_falls_back_to_push_override():
+    """When only the push key is overridden, pull reuses it (single-key behavior
+    preserved)."""
+    pull_key, push_key = _resolve_checkpoint_s3_keys(
+        run="20260623_nogit",
+        checkpoint_s3_key="custom/path/checkpoint.parquet",
+        pull_checkpoint_s3_key=None,
+    )
+    assert pull_key == "custom/path/checkpoint.parquet"
+    assert push_key == "custom/path/checkpoint.parquet"
+
+
+def test_resize_raises_when_checkpoint_does_not_intersect_todo(tmp_path):
+    """A pre-existing checkpoint whose pending IDs don't match the todo must fail
+    loudly.
+
+    Reproduces the cross-version bug: a checkpoint from an earlier ETL run is on disk, but the new
+    run's todo has different image IDs. The pending/todo merge collapses to zero rows. The old code
+    silently processed nothing and reported success; it must now raise.
+    """
+    mock_s3 = MagicMock()
+
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+
+    # Old run's checkpoint: pending images from a different ETL version.
+    write_checkpoint(
+        checkpoint_path,
+        pd.DataFrame(
+            {
+                "source_id": [1, 1],
+                "image_id": ["old_a", "old_b"],
+                "status": ["pending", "pending"],
+                "resize_timestamp": [None, None],
+                "error_message": [None, None],
+                "skip_reason": [None, None],
+            }
+        ),
+    )
+
+    # This run's todo: entirely different image IDs — zero overlap with the checkpoint.
+    todo_df = pd.DataFrame(
+        [
+            {
+                "source_id": 2,
+                "image_id": "new_c",
+                "original_s3_key": "coralnet-public-images/s2/images/new_c.jpg",
+                "output_s3_key": "etl-outputs/coralnet/resized/s2/images/new_c.jpg",
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="intersect"):
+        resize_and_upload_all_images(
+            df_todo=todo_df,
+            bucket="test-bucket",
+            output_prefix="etl-outputs/coralnet",
+            checkpoint_path=checkpoint_path,
+            threshold=2048,
+            workers=2,
+            s3_client=mock_s3,
+        )
+
+
 def test_resize_all_images_builds_one_pool_sized_client(
     monkeypatch, valid_rgb_jpeg_bytes, tmp_path
 ):
-    """With no client injected, the orchestrator builds ONE shared client with pool >= workers."""
+    """With no client injected, the orchestrator builds ONE shared client with pool >=
+    workers."""
     from mermaidseg.datasets.coralnet.preprocessing import resize as resize_module
 
     created_pools: list[int] = []
