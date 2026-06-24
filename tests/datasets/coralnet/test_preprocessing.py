@@ -17,6 +17,7 @@ from mermaidseg.datasets.coralnet.preprocessing.inspect import (
 )
 from mermaidseg.datasets.coralnet.preprocessing.manifest import (
     build_manifest,
+    build_training_manifest,
     combine_checkpoints,
 )
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
@@ -478,6 +479,161 @@ def test_manifest_dimensions_and_keys_match_resize():
     assert manifest.loc["above", "output_s3_key"] == _resized_s3_key_for(
         "etl-outputs/coralnet", 2, "above", threshold
     )
+
+
+def test_training_manifest_scales_coords_and_excludes():
+    """Sub-threshold coords unchanged + original key; resized coords floored to load
+    dims + resized key; needs_resize-but-not-completed images (failed / absent from
+    checkpoint) excluded."""
+    images = pd.DataFrame(
+        {
+            "source_id": [1, 1, 1, 1, 1],
+            "image_id": ["sub", "big", "fail", "missing", "nodims"],
+            "s3_key": [
+                "coralnet-public-images/s1/images/sub.jpg",
+                "coralnet-public-images/s1/images/big.jpg",
+                "coralnet-public-images/s1/images/fail.jpg",
+                "coralnet-public-images/s1/images/missing.jpg",
+                "coralnet-public-images/s1/images/nodims.jpg",
+            ],
+            # "nodims" has unknown dimensions (e.g. header_status="not_found").
+            "width": [1000, 4000, 5000, 6000, None],
+            "height": [800, 2000, 3000, 3000, None],
+            "needs_resize": [False, True, True, True, False],
+        }
+    )
+    # "missing" needs_resize but has no checkpoint row at all -> must be excluded.
+    checkpoint = pd.DataFrame(
+        {
+            "source_id": [1, 1],
+            "image_id": ["big", "fail"],
+            "status": ["completed", "failed"],
+            "resize_timestamp": [datetime.now(), None],
+            "error_message": [None, "decode failed"],
+        }
+    )
+    annotations = pd.DataFrame(
+        {
+            "source_id": [1, 1, 1, 1, 1, 1],
+            "image_id": ["sub", "big", "big", "fail", "missing", "nodims"],
+            "row": [400, 1000, 1999, 10, 10, 10],
+            "col": [500, 2000, 3999, 10, 10, 10],
+            "coralnet_id": [82, 91, 91, 7, 7, 7],
+        }
+    )
+
+    out = build_training_manifest(
+        annotations=ibis.memtable(annotations),
+        images=ibis.memtable(images),
+        checkpoint=ibis.memtable(checkpoint),
+        output_prefix="dev/images",
+        threshold=2048,
+    ).to_pandas()
+
+    # Only sub-threshold + completed-resize images with known dims survive
+    # ("fail"/"missing" excluded for incomplete resize, "nodims" for null dimensions).
+    assert set(out["image_id"]) == {"sub", "big"}
+
+    # Every surviving point is in bounds (no nulls, no out-of-range from null-dim collapse).
+    assert out["load_width"].notna().all() and out["load_height"].notna().all()
+    assert (out["row"] >= 0).all() and (out["row"] < out["load_height"]).all()
+    assert (out["col"] >= 0).all() and (out["col"] < out["load_width"]).all()
+
+    # Coords/dims are stored as int16 (bounded by the 2048 resize threshold) to keep the file small.
+    for c in ("row", "col", "load_width", "load_height"):
+        assert out[c].dtype == "int16", (c, out[c].dtype)
+
+    # Sub-threshold image: original key, coords unchanged, source_label_name = str(coralnet_id).
+    sub = out[out["image_id"] == "sub"].iloc[0]
+    assert sub["image_s3_key"] == "coralnet-public-images/s1/images/sub.jpg"
+    assert (int(sub["row"]), int(sub["col"])) == (400, 500)
+    assert bool(sub["uses_resized_image"]) is False
+    assert sub["source_label_name"] == "82"
+
+    # Resized image: resized key, dims floored to threshold (4000 -> 2048, 2000 -> 1024).
+    big = out[out["image_id"] == "big"]
+    assert (big["image_s3_key"] == "dev/images/resized/s1/images/big.jpg").all()
+    assert big["uses_resized_image"].all()
+    assert (big["load_width"] == 2048).all() and (big["load_height"] == 1024).all()
+    coords = set(zip(big["row"].astype(int), big["col"].astype(int), strict=True))
+    # (1000,2000) -> (floor(1000*1024/2000), floor(2000*2048/4000)) = (512, 1024)
+    assert (512, 1024) in coords
+    # (1999,3999) -> (floor(1999*1024/2000), floor(3999*2048/4000)) = (1023, 2047), within bounds
+    assert (1023, 2047) in coords
+
+
+def _build_one_image_manifest(orig_w, orig_h, row, col, *, threshold=2048):
+    """Run build_training_manifest for a single image+point; return (out_df,
+    needs_resize)."""
+    needs = max(orig_w, orig_h) > threshold
+    images = pd.DataFrame(
+        {
+            "source_id": [1],
+            "image_id": ["x"],
+            "s3_key": ["coralnet-public-images/s1/images/x.jpg"],
+            "width": [orig_w],
+            "height": [orig_h],
+            "needs_resize": [needs],
+        }
+    )
+    checkpoint = pd.DataFrame(
+        {
+            "source_id": [1],
+            "image_id": ["x"],
+            "status": ["completed"],
+            "resize_timestamp": [datetime.now()],
+            "error_message": [None],
+        }
+    )
+    annotations = pd.DataFrame(
+        {"source_id": [1], "image_id": ["x"], "row": [row], "col": [col], "coralnet_id": [82]}
+    )
+    out = build_training_manifest(
+        annotations=ibis.memtable(annotations),
+        images=ibis.memtable(images),
+        checkpoint=ibis.memtable(checkpoint),
+        output_prefix="dev/images",
+        threshold=threshold,
+    ).to_pandas()
+    return out, needs
+
+
+@pytest.mark.parametrize(
+    "orig_w,orig_h",
+    [
+        (4000, 2000),  # landscape, resized
+        (2000, 4000),  # portrait, resized
+        (3000, 3000),  # square, resized (non-power-of-2 ratio)
+        (2049, 2049),  # just over threshold
+        (800, 600),  # sub-threshold, not resized
+        (2048, 1000),  # longest == threshold, not resized
+    ],
+)
+def test_training_manifest_load_dims_and_coords_match_real_resize(orig_w, orig_h):
+    """Builder load dims + scaled coords agree with the actual PIL resize (oracle), and
+    a far-corner point stays in bounds after the floor+clip."""
+    threshold = 2048
+    r, c = orig_h - 1, orig_w - 1  # far corner stresses the clip
+    out, needs = _build_one_image_manifest(orig_w, orig_h, r, c, threshold=threshold)
+    assert len(out) == 1
+    rowd = out.iloc[0]
+
+    buf = BytesIO()
+    Image.new("RGB", (orig_w, orig_h)).save(buf, format="JPEG")
+    buf.seek(0)
+    resized = Image.open(resize_image_to_threshold(buf, threshold=threshold))
+    resized.load()
+
+    # Oracle: recorded load dims == dimensions the real resize produced.
+    assert int(rowd["load_width"]) == resized.width
+    assert int(rowd["load_height"]) == resized.height
+    assert bool(rowd["uses_resized_image"]) == needs
+
+    # Coords scale by load/orig (same factor the builder uses) and stay in bounds.
+    assert int(rowd["col"]) == min(int(c * resized.width / orig_w), resized.width - 1)
+    assert int(rowd["row"]) == min(int(r * resized.height / orig_h), resized.height - 1)
+    assert 0 <= int(rowd["row"]) < resized.height
+    assert 0 <= int(rowd["col"]) < resized.width
 
 
 # ============================================================================
