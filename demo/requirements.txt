@@ -1,2 +1,6 @@
 gradio>=5.0
-mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@main
+# Pinned to feat/concept-loss-label-norm-coralscapes (SHA c36f1ff): this checkpoint
+# was trained with that branch's model code (activated [0,1] concept hidden_states +
+# token-grid inference). main returns raw concept logits and would break the overlays.
+# TODO: repin to a main tag once that branch is merged.
+mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@c36f1ffb98144f8043da30cece14912b7bbc441c
