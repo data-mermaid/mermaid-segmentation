@@ -19,19 +19,21 @@ artifact lives in the MERMAID API project.
 
 ## Quickstart
 
-Assumes `uv` is set up and AWS SSO is signed in.
+Assumes `uv` is set up and AWS SSO is signed in. The ETL uses ibis/duckdb, which
+live in the `notebooks` extra — install it once (`uv sync --extra notebooks`) and
+pass `--extra notebooks` to `uv run`.
 
 ```sh
 export AWS_PROFILE=mermaid-core
 
 # Dev smoke test (5 sources, low worker count) — finishes in a minute or two.
-uv run coralnet-etl all \
+uv run --extra notebooks coralnet-etl all \
   --limit-sources 5 \
   --output-dir ./outputs/coralnet-etl-dev \
   --workers 4
 
 # Full run + upload to the canonical ETL output prefix.
-uv run coralnet-etl all \
+uv run --extra notebooks coralnet-etl all \
   --workers 32 \
   --upload-to-s3
 ```

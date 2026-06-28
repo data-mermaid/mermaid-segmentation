@@ -35,13 +35,13 @@ uv sync --extra demo
 export DEMO_CHECKPOINT=/path/to/model_checkpoint
 export DEMO_MODEL_CONFIG=configs/model_config_cbm_dpt_lora_vitl.yaml
 # optional: export DEMO_TAXONOMY_CSV=configs/class_to_concepts.csv
-uv run python demo/app.py --port 7860
+uv run --extra demo python demo/app.py --port 7860
 ```
 
 Or pass paths explicitly:
 
 ```bash
-uv run python demo/app.py \
+uv run --extra demo python demo/app.py \
   --checkpoint /path/to/checkpoint \
   --model-config configs/model_config_cbm_dpt_lora_vitl.yaml \
   --taxonomy-csv configs/class_to_concepts.csv

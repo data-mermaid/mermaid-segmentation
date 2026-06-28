@@ -17,14 +17,34 @@ Jupyter notebooks are the primary way to run training and evaluation experiments
 
 ## Kernel setup
 
-Always use the project's virtual environment as your Jupyter kernel. After running `uv sync`, the kernel should appear in JupyterLab as something like **"Python (mermaid-segmentation)"** or the name of the project directory.
+Training notebooks need both the `notebooks` extra (Jupyter, plotting) and the
+`training` extra (MLflow). On SageMaker, `make sync` installs everything via
+`--all-extras`.
+
+```bash
+uv sync --extra notebooks --extra training   # local training setup
+# or
+uv sync --all-extras                         # everything
+```
+
+After sync, the kernel appears in JupyterLab as **Python (mermaid-seg)**.
 
 If the kernel isn't available:
+
 ```bash
-uv run python -m ipykernel install --user --name mermaid-segmentation
+make kernel
+# or manually:
+uv run --all-extras python -m ipykernel install --user --name mermaid-seg \
+  --display-name "Python (mermaid-seg)"
 ```
 
 Then restart JupyterLab and select it from the kernel menu.
+
+Validate the environment (env vars, AWS, MLflow):
+
+```bash
+make check
+```
 
 ---
 

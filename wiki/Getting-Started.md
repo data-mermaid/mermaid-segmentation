@@ -81,22 +81,54 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## 3. Install dependencies
 
+The core install is the inference + data-loading runtime only. Everything else
+lives in **optional extras** — install the ones for your workflow:
+
 ```bash
-uv sync --group tests --group lint --group notebooks
+uv sync                              # core only (run the model / inference)
+uv sync --group dev --all-extras     # contributors: tests + lint + every extra
 ```
+
+| What you're doing | Command |
+|-------------------|---------|
+| Run the model / inference | `uv sync` |
+| Train + experiment tracking (mlflow, sagemaker-mlflow, torchmetrics, wandb) | `uv sync --extra training` |
+| Notebooks / plotting / ibis-duckdb ETL / CoralNet scraper | `uv sync --extra notebooks` |
+| Gradio demo (`demo/`) | `uv sync --extra demo` |
+| Contributor checkout (tests + lint + docformatter) | `uv sync --group dev` |
+| Everything | `uv sync --group dev --all-extras` |
+
+> `--group` selects PEP-735 dependency groups (`dev`, `tests`, `lint`); `--extra`
+> selects optional features. `uv run` only keeps what the *last* sync requested, so
+> pass the same `--extra`/`--all-extras` flags to `uv run` when a command needs them
+> (e.g. `uv run --extra notebooks coralnet-etl …`).
+
+## 3b. SageMaker JupyterLab shortcuts
+
+On SageMaker spaces, use the Makefile after pulling or when dependencies change:
+
+```bash
+make sync      # git pull + uv sync --all-extras + register kernel
+make check     # verify MLFLOW_TRACKING_URI, AWS session, MLflow version
+make kernel    # re-register kernel only (no git pull)
+make lcc-log   # tail background LCC setup log
+```
+
+Run `make help` for the full list. After `make sync`, restart the Jupyter kernel
+(**Kernel → Restart Kernel**) so new packages are picked up.
 
 ## 4. Install pre-commit hooks
 
 Pre-commit runs Ruff (linting and formatting) automatically on each commit. Install it once:
 
 ```bash
-uv run pre-commit install
+uv run --group dev pre-commit install
 ```
 
 Verify it is installed correctly :
 
 ```bash
-uv run pre-commit --version
+uv run --group dev pre-commit --version
 ```
 
 ## 5. Set up your environment file
@@ -164,7 +196,7 @@ Ask the team lead for the `MLFLOW_TRACKING_URI` value (it points to the SageMake
 ## 10. Confirm everything works
 
 ```bash
-uv run pytest -m "not slow and not integration"
+uv run --all-extras --group dev pytest -m "not slow and not integration"
 ```
 
 All tests should pass. If they do, you're set up correctly.

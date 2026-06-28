@@ -61,7 +61,7 @@ MLflow run logged automatically
 Once an idea has been validated in a notebook, graduate to `scripts/train.py` for the full experiment. Scripts produce clean, repeatable runs that aren't affected by notebook state, are straightforward to re-run identically, and produce the model checkpoints suitable for sharing or deployment via MLflow.
 
 ```bash
-uv run python scripts/train.py --config configs/my_experiment.yaml
+uv run --extra training python scripts/train.py --config configs/my_experiment.yaml
 ```
 
 If you're preparing a model to share with the team or register in MLflow for model registration, it should ideally been trained through `train.py`, not a notebook.

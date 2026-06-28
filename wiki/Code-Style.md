@@ -11,8 +11,8 @@ Pre-commit runs [Ruff](https://docs.astral.sh/ruff/) on every commit, handling f
 If a commit fails because of a Ruff error, fix the flagged issue and commit again. You can also run Ruff manually:
 
 ```bash
-uv run ruff check .       # show linting errors
-uv run ruff format .      # auto-format code
+uv run --group dev ruff check .       # show linting errors
+uv run --group dev ruff format .      # auto-format code
 ```
 
 Ruff handles: import order, unused imports, unused variables, formatting consistency, and a broad set of common Python mistakes. You don't need to think about most of this — just let the hook run.
@@ -47,7 +47,7 @@ A focused change is easier to review, easier to revert if something goes wrong, 
 
 ## Before opening a PR
 
-- Run `uv run pytest` — all tests should pass
-- Run `uv run ruff check .` — no errors
-- Run `uv run pre-commit .` - to ensure local hooks are run before pushing (expensive in Github Actions)
+- Run `uv run --all-extras --group dev pytest -m "not slow and not integration"` — all tests should pass
+- Run `uv run --group dev ruff check .` — no errors
+- Run `uv run --group dev pre-commit run --all-files` — ensure local hooks pass before pushing (expensive in GitHub Actions)
 - Read through your own diff before assigning a reviewer — catch the obvious things yourself first

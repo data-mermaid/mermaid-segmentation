@@ -27,17 +27,17 @@ if [ "$NO_PULL" = false ]; then
     git pull --ff-only
 fi
 
-echo "Syncing uv environment (--group notebooks --locked)..."
-uv sync --group notebooks --locked
+echo "Syncing uv environment (--all-extras --locked)..."
+uv sync --all-extras --locked
 
 echo "Registering Jupyter kernel..."
-uv run python -m ipykernel install \
+uv run --all-extras python -m ipykernel install \
     --user \
     --name=mermaid-seg \
     --display-name "Python (mermaid-seg)"
 
 echo "Sanity check..."
-uv run python -c "
+uv run --all-extras python -c "
 import mermaidseg, mlflow
 v = getattr(mermaidseg, '__version__', 'dev')
 print(f'OK: mermaidseg={v}, mlflow={mlflow.__version__}')

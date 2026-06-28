@@ -32,20 +32,38 @@ export MLFLOW_TRACKING_URI=arn:aws:sagemaker:{region}:{account-id}:mlflow-app/{a
 hf auth login
 # Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
 
-# Install core dependencies
+# Install core dependencies (inference + data-loading runtime only)
 uv sync
 ```
 
 **Install optional extras / groups** as needed:
-```bash
-uv sync --group dev          # tests + lint (contributor setup)
-uv sync --extra training     # mlflow, sagemaker-mlflow, torchmetrics, wandb
-uv sync --extra notebooks    # Jupyter + plotting + ibis/duckdb ETL + CoralNet scraper
-uv sync --extra demo         # gradio demo app
-uv sync --all-extras         # everything (equivalent to the `all` extra)
 
-# Combine
-uv sync --group dev --extra notebooks
+| What you're doing | Command |
+|-------------------|---------|
+| Run the model / inference | `uv sync` |
+| Train + experiment tracking (mlflow, sagemaker-mlflow, torchmetrics, wandb) | `uv sync --extra training` |
+| Notebooks / plotting / ibis-duckdb ETL / CoralNet scraper | `uv sync --extra notebooks` |
+| Gradio demo (`demo/`) | `uv sync --extra demo` |
+| Contributor checkout (tests + lint + docformatter) | `uv sync --group dev` |
+| Everything | `uv sync --group dev --all-extras` |
+
+```bash
+# Examples
+uv sync --extra training --extra notebooks   # train from Jupyter
+uv sync --group dev --all-extras             # full contributor setup
+```
+
+> `--group` selects PEP-735 dependency groups (`dev`, `tests`, `lint`); `--extra`
+> selects optional features. Pass the same flags to `uv run` when a command needs
+> them (e.g. `uv run --extra notebooks coralnet-etl …`).
+
+**SageMaker JupyterLab** — after `git pull` or when `pyproject.toml` changes:
+
+```bash
+make sync      # pull, uv sync --all-extras, register kernel
+make check     # verify AWS / MLflow / env vars
+make kernel    # re-register kernel only
+make lcc-log   # tail background LCC setup log
 ```
 
 
@@ -115,23 +133,25 @@ To evaluate any trained segmentation model, you can use the notebook `nbs/Model_
 
 ### Running Tests
 
+Install test dependencies first (CI uses `--all-extras` because tests import mlflow, ibis, etc.):
+
 ```bash
-uv sync --group tests
+uv sync --group dev --all-extras
 ```
 
-**Run all tests:**
+**Run all unit tests:**
 ```bash
-uv run pytest
+uv run --all-extras --group dev pytest -m "not slow and not integration"
 ```
 
 **Run only unit tests (skip integration tests):**
 ```bash
-uv run pytest -m "not integration"
+uv run --all-extras --group dev pytest -m "not integration"
 ```
 
 **Run specific test file:**
 ```bash
-uv run pytest tests/test_logger.py -v
+uv run --all-extras --group dev pytest tests/test_logger.py -v
 ```
 
 

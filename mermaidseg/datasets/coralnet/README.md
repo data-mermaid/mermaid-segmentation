@@ -44,17 +44,17 @@ training runs keep working until you publish a new default. See
 When the audit parquet shows `not is_complete` for some `source_id` values,
 export them (for example via `incomplete_df.parquet` in the EDA notebook), then:
 
-1. `uv run coralnet-remediate probe --audit-parquet … --incomplete-parquet …`
+1. `uv run --extra notebooks coralnet-remediate probe --audit-parquet … --incomplete-parquet …`
    merges audit columns with a live CoralNet probe and writes
    `reconciliation_report.parquet`.
-2. `uv run coralnet-remediate redownload --report reconciliation_report.parquet`
+2. `uv run --extra notebooks coralnet-remediate redownload --report reconciliation_report.parquet`
    applies categorized fixes (omit `--dry-run` for real uploads). Sources whose
    overview shows **Confirmed: 0** (parsed from the Image Status table) get
    `skip_no_confirmed_annotations` and are not redownloaded. Optionally use
    `--clean-prefix` plus `CORALNET_*` credentials in the environment
    (`CORALNET_USERNAME` / `CORALNET_PASSWORD`).
 3. Re-audit only touched IDs:
-   `uv run coralnet-etl audit --source-ids-file incomplete_df.parquet …`.
+   `uv run --extra notebooks coralnet-etl audit --source-ids-file incomplete_df.parquet …`.
 
 Bulk rescrape of newly listed public sources:
 Sources with **Confirmed: 0** on the overview page are skipped at download time (same rule as remediation).
@@ -76,17 +76,18 @@ print(n_ok, n_total, img_dir)
 `python -m mermaidseg.datasets.coralnet.scraper.scrape_coralnet_s3`
 (supports `--audit-parquet`, `--force`, `--no-legacy-skip-annotations`; see `-h`).
 
-**Offline tests** (CI default):
+**Offline tests** (CI default; needs `--all-extras` because tests import ibis/mlflow helpers):
 
 ```sh
-uv run pytest tests/datasets/coralnet/ -q
+uv sync --group dev --all-extras
+uv run --all-extras --group dev pytest tests/datasets/coralnet/ -q
 ```
 
 **Live validation** (Playwright against coralnet.ucsd.edu; not run in CI):
 
 ```sh
-uv run sync --extra test-live
-uv run playwright install chromium
+uv sync --extra test-live
+uv run --extra test-live playwright install chromium
 uv run --extra test-live pytest tests/datasets/coralnet/test_live_smoke.py -m live -v
 ```
 

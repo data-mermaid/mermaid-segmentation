@@ -71,14 +71,14 @@ nohup bash -c "
   export PATH=\"$HOME/.local/bin:\$PATH\"
   cd '$PROJECT_DIR'
   echo \"[LCC bg] Starting uv sync \$(date)\"
-  uv sync --group notebooks --locked
+  uv sync --all-extras --locked
   echo \"[LCC bg] uv sync complete \$(date)\"
-  uv run python -m ipykernel install \
+  uv run --all-extras python -m ipykernel install \
       --user \
       --name=mermaid-seg \
       --display-name 'Python (mermaid-seg)'
   echo '[LCC bg] Kernel registered: mermaid-seg'
-  uv run python -c \"
+  uv run --all-extras python -c \"
 import mermaidseg, mlflow
 v = getattr(mermaidseg, '__version__', 'dev')
 print(f'[LCC bg] OK: mermaidseg={v}, mlflow={mlflow.__version__}')

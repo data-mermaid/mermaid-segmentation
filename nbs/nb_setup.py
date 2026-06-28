@@ -79,14 +79,14 @@ def check_mlflow_version() -> None:
 
     The Serverless MLflow App runs 3.2.0+; mismatched versions break the
     'Models (Experimental)' tab and produce different S3 artifact paths.
-    Fix: run ``uv sync --group notebooks`` from the project directory.
+    Fix: run ``uv sync --extra training`` (or ``uv sync --all-extras``) from the project directory.
     """
     version = mlflow.__version__
     if tuple(int(x) for x in version.split(".")[:2]) < (3, 0):
         warnings.warn(
             f"MLflow {version} is older than 3.x. The Serverless App runs 3.x; "
             "artifact paths and the 'Models (Experimental)' tab may behave differently.\n"
-            "Fix: uv sync --group notebooks",
+            "Fix: uv sync --extra training  (or: uv sync --all-extras)",
             stacklevel=2,
         )
     else:
