@@ -202,19 +202,31 @@ def predict(
 
 
 def default_taxonomy_csv() -> str:
-    """Default path to class-to-concepts CSV (repo ``configs/class_to_concepts.csv``)."""
+    """Default path to class-to-concepts CSV.
+
+    Prefers the copy bundled next to this file (used on HF Spaces, where only ``demo/`` is uploaded)
+    and falls back to the repo ``configs/`` copy.
+    """
     demo_dir = Path(__file__).resolve().parent
+    bundled = demo_dir / "class_to_concepts.csv"
+    if bundled.is_file():
+        return str(bundled)
     return str(demo_dir.parent / "configs" / "class_to_concepts.csv")
+
+
+def default_model_config() -> str:
+    """Default path to the model config YAML (bundled demo copy, else repo configs)."""
+    demo_dir = Path(__file__).resolve().parent
+    bundled = demo_dir / "model_config_cbm_dpt_lora_vitl.yaml"
+    if bundled.is_file():
+        return str(bundled)
+    return str(demo_dir.parent / "configs" / "model_config_cbm_dpt_lora_vitl.yaml")
 
 
 def resolve_paths() -> tuple[str, str, str]:
     """Resolve checkpoint, model config, and taxonomy CSV from env vars or defaults."""
-    demo_dir = Path(__file__).resolve().parent
     checkpoint = os.environ.get("DEMO_CHECKPOINT", "")
-    model_config = os.environ.get(
-        "DEMO_MODEL_CONFIG",
-        str(demo_dir.parent / "configs" / "model_config_cbm_dpt_lora_vitl.yaml"),
-    )
+    model_config = os.environ.get("DEMO_MODEL_CONFIG", default_model_config())
     taxonomy_csv = os.environ.get("DEMO_TAXONOMY_CSV", default_taxonomy_csv())
     if not checkpoint:
         raise ValueError(
