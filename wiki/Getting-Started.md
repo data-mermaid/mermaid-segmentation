@@ -196,7 +196,7 @@ Ask the team lead for the `MLFLOW_TRACKING_URI` value (it points to the SageMake
 ## 10. Confirm everything works
 
 ```bash
-uv run --all-extras --group dev pytest -m "not slow and not integration"
+uv run --all-extras --group dev pytest -m "not slow and not integration and not live"
 ```
 
 All tests should pass. If they do, you're set up correctly.

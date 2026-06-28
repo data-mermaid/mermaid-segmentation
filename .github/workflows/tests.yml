@@ -17,4 +17,4 @@ jobs:
       - name: Run unit tests
         # --all-extras: heavy deps (mlflow, torchmetrics, ibis, matplotlib, ...) moved out of
         # core into optional extras; tests import those modules, so install everything.
-        run: uv run --all-extras --group tests pytest -m "not slow and not integration" --cov=mermaidseg --cov-report=term-missing
+        run: uv run --all-extras --group tests pytest -m "not slow and not integration and not live" --cov=mermaidseg --cov-report=term-missing

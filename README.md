@@ -141,12 +141,12 @@ uv sync --group dev --all-extras
 
 **Run all unit tests:**
 ```bash
-uv run --all-extras --group dev pytest -m "not slow and not integration"
+uv run --all-extras --group dev pytest -m "not slow and not integration and not live"
 ```
 
 **Run only unit tests (skip integration tests):**
 ```bash
-uv run --all-extras --group dev pytest -m "not integration"
+uv run --all-extras --group dev pytest -m "not integration and not live"
 ```
 
 **Run specific test file:**

@@ -47,7 +47,7 @@ A focused change is easier to review, easier to revert if something goes wrong, 
 
 ## Before opening a PR
 
-- Run `uv run --all-extras --group dev pytest -m "not slow and not integration"` — all tests should pass
+- Run `uv run --all-extras --group dev pytest -m "not slow and not integration and not live"` — all tests should pass
 - Run `uv run --group dev ruff check .` — no errors
 - Run `uv run --group dev pre-commit run --all-files` — ensure local hooks pass before pushing (expensive in GitHub Actions)
 - Read through your own diff before assigning a reviewer — catch the obvious things yourself first
