@@ -1,4 +1,6 @@
-gradio>=5.0
+# gradio 6.x: 5.0.0 imports HfFolder, removed in huggingface_hub 1.x (pulled in by mermaidseg).
+# Keep in sync with sdk_version in README.md frontmatter.
+gradio>=6.0
 # Pinned to feat/concept-loss-label-norm-coralscapes (SHA c36f1ff): this checkpoint
 # was trained with that branch's model code (activated [0,1] concept hidden_states +
 # token-grid inference). main returns raw concept logits and would break the overlays.
