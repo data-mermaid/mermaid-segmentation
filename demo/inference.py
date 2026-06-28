@@ -223,13 +223,30 @@ def default_model_config() -> str:
     return str(demo_dir.parent / "configs" / "model_config_cbm_dpt_lora_vitl.yaml")
 
 
+DEFAULT_CHECKPOINT_REPO = "datamermaid/mermaid-segmentation-cbm"
+DEFAULT_CHECKPOINT_FILE = "checkpoint.pt"
+
+
+def resolve_checkpoint(explicit: str | None = None) -> str:
+    """Resolve the checkpoint to a local file path.
+
+    Uses ``explicit`` / ``DEMO_CHECKPOINT`` when it points at an existing local file (local
+    development). Otherwise downloads the checkpoint from the HF model repo
+    (``DEMO_CHECKPOINT_REPO`` / ``DEMO_CHECKPOINT_FILE``), which is how the demo gets its weights on
+    HF Spaces where they are not bundled.
+    """
+    candidate = explicit or os.environ.get("DEMO_CHECKPOINT")
+    if candidate and Path(candidate).is_file():
+        return candidate
+    repo_id = os.environ.get("DEMO_CHECKPOINT_REPO", DEFAULT_CHECKPOINT_REPO)
+    filename = os.environ.get("DEMO_CHECKPOINT_FILE", DEFAULT_CHECKPOINT_FILE)
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(repo_id=repo_id, filename=filename, token=os.environ.get("HF_TOKEN"))
+
+
 def resolve_paths() -> tuple[str, str, str]:
     """Resolve checkpoint, model config, and taxonomy CSV from env vars or defaults."""
-    checkpoint = os.environ.get("DEMO_CHECKPOINT", "")
     model_config = os.environ.get("DEMO_MODEL_CONFIG", default_model_config())
     taxonomy_csv = os.environ.get("DEMO_TAXONOMY_CSV", default_taxonomy_csv())
-    if not checkpoint:
-        raise ValueError(
-            "Set DEMO_CHECKPOINT to a local checkpoint path, or pass --checkpoint on the CLI."
-        )
-    return checkpoint, model_config, taxonomy_csv
+    return resolve_checkpoint(), model_config, taxonomy_csv

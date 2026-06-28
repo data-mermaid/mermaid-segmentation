@@ -16,11 +16,12 @@ from inference import (
     DemoArtifacts,
     build_model,
     build_transforms,
+    default_model_config,
     default_taxonomy_csv,
     load_artifacts,
     predict,
     preprocess,
-    resolve_paths,
+    resolve_checkpoint,
 )
 from rendering import (
     DISPLAY_SIZE,
@@ -111,19 +112,12 @@ def _resolve_taxonomy_csv(args: argparse.Namespace) -> str:
 
 
 def _load(args: argparse.Namespace) -> DemoArtifacts:
-    checkpoint = args.checkpoint or os.environ.get("DEMO_CHECKPOINT")
-    model_config = args.model_config or os.environ.get("DEMO_MODEL_CONFIG")
-    if not checkpoint or not model_config:
-        try:
-            resolved_ckpt, resolved_cfg, _ = resolve_paths()
-            checkpoint = checkpoint or resolved_ckpt
-            model_config = model_config or resolved_cfg
-        except ValueError:
-            pass
-    if not checkpoint:
-        raise SystemExit("Provide --checkpoint or set DEMO_CHECKPOINT.")
-    if not model_config:
-        raise SystemExit("Provide --model-config or set DEMO_MODEL_CONFIG.")
+    # Checkpoint: explicit/local path if present, else downloaded from the HF model repo.
+    checkpoint = resolve_checkpoint(args.checkpoint)
+    # Model config: explicit, else env, else the bundled demo copy.
+    model_config = (
+        args.model_config or os.environ.get("DEMO_MODEL_CONFIG") or default_model_config()
+    )
     return load_artifacts(
         checkpoint=checkpoint,
         model_config=model_config,
