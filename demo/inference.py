@@ -120,11 +120,24 @@ def _normalize_checkpoint_state_dict(sd: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _load_state_dict_flexible(model: torch.nn.Module, sd: Mapping[str, Any]) -> None:
+    """Load ``sd`` into ``model``, tolerant of LoRA encoder key-nesting differences.
+
+    Different mermaidseg revisions wrap the LoRA encoder with a different number of
+    ``.model.`` levels (``encoder.base_model.model.model.layer`` vs collapsed
+    ``encoder.base_model.model.layer``). Pick whichever of the raw / normalized key
+    forms overlaps the instantiated model's keys best, then load it strictly.
+    """
+    model_keys = set(model.state_dict().keys())
+    candidates = {"raw": dict(sd), "normalized": _normalize_checkpoint_state_dict(sd)}
+    best = max(candidates.values(), key=lambda c: len(model_keys & c.keys()))
+    model.load_state_dict(best)
+
+
 def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMModel:
     num_classes = max(artifacts.id2label.keys()) + 1
     ckpt = torch.load(artifacts.checkpoint_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-    state_dict = _normalize_checkpoint_state_dict(state_dict)
 
     num_concepts = _num_concepts_from_state_dict(state_dict) or len(artifacts.concept_id2name)
     if num_concepts <= 0:
@@ -148,7 +161,7 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
 
     model_cls = getattr(mm_models, model_name)
     model = model_cls(num_classes=num_classes, num_concepts=num_concepts, **model_kwargs)
-    model.load_state_dict(state_dict)
+    _load_state_dict_flexible(model, state_dict)
     return model.to(device).eval()
 
 
@@ -202,22 +215,51 @@ def predict(
 
 
 def default_taxonomy_csv() -> str:
-    """Default path to class-to-concepts CSV (repo ``configs/class_to_concepts.csv``)."""
+    """Default path to class-to-concepts CSV.
+
+    Prefers the copy bundled next to this file (used on HF Spaces, where only ``demo/`` is uploaded)
+    and falls back to the repo ``configs/`` copy.
+    """
     demo_dir = Path(__file__).resolve().parent
+    bundled = demo_dir / "class_to_concepts.csv"
+    if bundled.is_file():
+        return str(bundled)
     return str(demo_dir.parent / "configs" / "class_to_concepts.csv")
+
+
+def default_model_config() -> str:
+    """Default path to the model config YAML (bundled demo copy, else repo configs)."""
+    demo_dir = Path(__file__).resolve().parent
+    bundled = demo_dir / "model_config_cbm_dpt_lora_vitl.yaml"
+    if bundled.is_file():
+        return str(bundled)
+    return str(demo_dir.parent / "configs" / "model_config_cbm_dpt_lora_vitl.yaml")
+
+
+DEFAULT_CHECKPOINT_REPO = "datamermaid/mermaid-segmentation-cbm"
+DEFAULT_CHECKPOINT_FILE = "checkpoint.pt"
+
+
+def resolve_checkpoint(explicit: str | None = None) -> str:
+    """Resolve the checkpoint to a local file path.
+
+    Uses ``explicit`` / ``DEMO_CHECKPOINT`` when it points at an existing local file (local
+    development). Otherwise downloads the checkpoint from the HF model repo
+    (``DEMO_CHECKPOINT_REPO`` / ``DEMO_CHECKPOINT_FILE``), which is how the demo gets its weights on
+    HF Spaces where they are not bundled.
+    """
+    candidate = explicit or os.environ.get("DEMO_CHECKPOINT")
+    if candidate and Path(candidate).is_file():
+        return candidate
+    repo_id = os.environ.get("DEMO_CHECKPOINT_REPO", DEFAULT_CHECKPOINT_REPO)
+    filename = os.environ.get("DEMO_CHECKPOINT_FILE", DEFAULT_CHECKPOINT_FILE)
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(repo_id=repo_id, filename=filename, token=os.environ.get("HF_TOKEN"))
 
 
 def resolve_paths() -> tuple[str, str, str]:
     """Resolve checkpoint, model config, and taxonomy CSV from env vars or defaults."""
-    demo_dir = Path(__file__).resolve().parent
-    checkpoint = os.environ.get("DEMO_CHECKPOINT", "")
-    model_config = os.environ.get(
-        "DEMO_MODEL_CONFIG",
-        str(demo_dir.parent / "configs" / "model_config_cbm_dpt_lora_vitl.yaml"),
-    )
+    model_config = os.environ.get("DEMO_MODEL_CONFIG", default_model_config())
     taxonomy_csv = os.environ.get("DEMO_TAXONOMY_CSV", default_taxonomy_csv())
-    if not checkpoint:
-        raise ValueError(
-            "Set DEMO_CHECKPOINT to a local checkpoint path, or pass --checkpoint on the CLI."
-        )
-    return checkpoint, model_config, taxonomy_csv
+    return resolve_checkpoint(), model_config, taxonomy_csv
