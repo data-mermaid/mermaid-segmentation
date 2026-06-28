@@ -120,11 +120,24 @@ def _normalize_checkpoint_state_dict(sd: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _load_state_dict_flexible(model: torch.nn.Module, sd: Mapping[str, Any]) -> None:
+    """Load ``sd`` into ``model``, tolerant of LoRA encoder key-nesting differences.
+
+    Different mermaidseg revisions wrap the LoRA encoder with a different number of
+    ``.model.`` levels (``encoder.base_model.model.model.layer`` vs collapsed
+    ``encoder.base_model.model.layer``). Pick whichever of the raw / normalized key
+    forms overlaps the instantiated model's keys best, then load it strictly.
+    """
+    model_keys = set(model.state_dict().keys())
+    candidates = {"raw": dict(sd), "normalized": _normalize_checkpoint_state_dict(sd)}
+    best = max(candidates.values(), key=lambda c: len(model_keys & c.keys()))
+    model.load_state_dict(best)
+
+
 def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMModel:
     num_classes = max(artifacts.id2label.keys()) + 1
     ckpt = torch.load(artifacts.checkpoint_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-    state_dict = _normalize_checkpoint_state_dict(state_dict)
 
     num_concepts = _num_concepts_from_state_dict(state_dict) or len(artifacts.concept_id2name)
     if num_concepts <= 0:
@@ -148,7 +161,7 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
 
     model_cls = getattr(mm_models, model_name)
     model = model_cls(num_classes=num_classes, num_concepts=num_concepts, **model_kwargs)
-    model.load_state_dict(state_dict)
+    _load_state_dict_flexible(model, state_dict)
     return model.to(device).eval()
 
 
