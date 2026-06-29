@@ -54,6 +54,7 @@ def calculate_taxonomic_rank_loss(
     *,
     from_logits: bool = False,
     foreground_mask: torch.Tensor | None = None,
+    damping_denominator: float = 0.0,
 ) -> torch.Tensor:
     """Cross-entropy / NLL on the active taxonomic class; masked where not_given or none."""
     num_channels = concept_outputs.size(1)
@@ -85,7 +86,8 @@ def calculate_taxonomic_rank_loss(
         flat_log_probs = log_probs.permute(0, 2, 3, 1).reshape(-1, num_channels)
         per_pixel = F.nll_loss(flat_log_probs, flat_target, reduction="none")
 
-    return per_pixel[flat_valid].mean()
+    valid = per_pixel[flat_valid]
+    return valid.sum() / (valid.numel() + damping_denominator)
 
 
 def calculate_multi_hot_concept_loss(
@@ -95,13 +97,13 @@ def calculate_multi_hot_concept_loss(
     *,
     from_logits: bool = False,
     foreground_mask: torch.Tensor | None = None,
+    damping_denominator: float = 0.0,
 ) -> torch.Tensor:
     """BCE loss for multi-hot concepts with 0=invalid, 1=False, 2=True encoding.
 
     When ``from_logits`` is True, ``concept_outputs`` are raw logits scored with
-    ``binary_cross_entropy_with_logits`` and ``concept_loss`` is unused. Otherwise
-    ``concept_outputs`` are probabilities in ``[0, 1]`` and ``concept_loss`` (e.g. ``BCELoss``)
-    is required.
+    ``BCEWithLogitsLoss``; otherwise they are probabilities in ``[0, 1]`` and
+    ``concept_loss`` (e.g. ``BCELoss``) is required.
     """
     concept_mask = concept_labels.gt(0)
     if foreground_mask is not None:
@@ -112,13 +114,13 @@ def calculate_multi_hot_concept_loss(
 
     targets = torch.clamp(concept_labels - 1, 0.01, 0.99)
     if from_logits:
-        per_element_loss = F.binary_cross_entropy_with_logits(
-            concept_outputs, targets, reduction="none"
-        )
+        if concept_loss is None:
+            concept_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
+        inputs = concept_outputs
     else:
         if concept_loss is None:
             raise ValueError("concept_loss is required when from_logits is False")
-        outputs = concept_outputs.clamp(1e-6, 1.0 - 1e-6)
-        per_element_loss = concept_loss(outputs, targets)
-    denom = concept_mask.sum().clamp(min=1).float()
+        inputs = concept_outputs.clamp(1e-6, 1.0 - 1e-6)
+    per_element_loss = concept_loss(inputs, targets)
+    denom = concept_mask.sum().float() + damping_denominator
     return (per_element_loss * concept_mask.detach()).sum() / denom

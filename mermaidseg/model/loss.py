@@ -2,6 +2,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 from mermaidseg.model.concept_metrics import (
@@ -35,6 +36,31 @@ def iter_concept_slices(
     )
 
 
+def _masked_cross_entropy(
+    outputs: torch.Tensor,
+    target_labels: torch.Tensor,
+    *,
+    weight: torch.Tensor | None,
+    ignore_index: int,
+    label_smoothing: float,
+    damping_denominator: float,
+) -> torch.Tensor:
+    valid_mask = target_labels != ignore_index
+    if not valid_mask.any():
+        return outputs.sum() * 0.0
+
+    per_pixel = F.cross_entropy(
+        outputs,
+        target_labels,
+        weight=weight,
+        ignore_index=ignore_index,
+        reduction="none",
+        label_smoothing=label_smoothing,
+    )
+    valid = per_pixel[valid_mask]
+    return valid.sum() / (valid.numel() + damping_denominator)
+
+
 class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
     """CrossEntropyLoss is a wrapper of `torch.nn.CrossEntropyLoss` that allows for additional
     customization.
@@ -45,15 +71,25 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
         kwargs: Additional keyword arguments that are passed to the base `torch.nn.CrossEntropyLoss` class.
     """
 
-    def __init__(self, ignore_index: int = 0, **kwargs: Any) -> None:
+    def __init__(
+        self, ignore_index: int = 0, damping_denominator: float = 0.0, **kwargs: Any
+    ) -> None:
         super().__init__(ignore_index=ignore_index, **kwargs)
+        self.damping_denominator = damping_denominator
 
     def forward(
         self,
         outputs: torch.Tensor,
         target_labels: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        loss = super().forward(outputs, target_labels)
+        loss = _masked_cross_entropy(
+            outputs,
+            target_labels,
+            weight=self.weight,
+            ignore_index=self.ignore_index,
+            label_smoothing=self.label_smoothing,
+            damping_denominator=self.damping_denominator,
+        )
         return loss, {"classification": loss.item()}
 
 
@@ -68,10 +104,12 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
         self,
         reduction: str = "none",
         concept_value2id: dict[str, dict[str, int]] | None = None,
+        damping_denominator: float = 0.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(reduction=reduction, **kwargs)
         self.concept_value2id = concept_value2id
+        self.damping_denominator = damping_denominator
 
     def _slice_loss(
         self,
@@ -88,12 +126,14 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
                 self,
                 from_logits=True,
                 foreground_mask=foreground_mask,
+                damping_denominator=self.damping_denominator,
             )
         return calculate_taxonomic_rank_loss(
             concept_outputs,
             concept_labels,
             from_logits=True,
             foreground_mask=foreground_mask,
+            damping_denominator=self.damping_denominator,
         )
 
     def forward(
@@ -120,6 +160,7 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
                 self,
                 from_logits=True,
                 foreground_mask=foreground_mask,
+                damping_denominator=self.damping_denominator,
             )
             return total_loss, {"concepts": total_loss.item()}
 
@@ -161,12 +202,16 @@ class ConceptBottleneckLoss(torch.nn.Module):
         class_loss: torch.nn.Module = torch.nn.CrossEntropyLoss,
         ignore_index: int = 0,
         lambda_weight: float = 1.0,
+        damping_denominator: float = 0.0,
         **kwargs: Any,
     ) -> None:
         super().__init__()
         self.class_loss = class_loss(ignore_index=ignore_index, **kwargs)
+        self.concept_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
+        self.ignore_index = ignore_index
         self.lambda_weight = lambda_weight
         self.concept_value2id = concept_value2id
+        self.damping_denominator = damping_denominator
 
     def forward(
         self,
@@ -190,7 +235,14 @@ class ConceptBottleneckLoss(torch.nn.Module):
             scalar tensor for backprop and loss_components is a dict of detached
             component values for logging.
         """
-        class_loss_value = self.class_loss(outputs, target_labels)
+        class_loss_value = _masked_cross_entropy(
+            outputs,
+            target_labels,
+            weight=getattr(self.class_loss, "weight", None),
+            ignore_index=self.ignore_index,
+            label_smoothing=getattr(self.class_loss, "label_smoothing", 0.0),
+            damping_denominator=self.damping_denominator,
+        )
         if (target_labels > 0).sum() == 0:
             class_loss_value = torch.tensor(0.0, device=outputs.device, dtype=outputs.dtype)
 
@@ -204,11 +256,18 @@ class ConceptBottleneckLoss(torch.nn.Module):
         ):
             if name == "multi_hot":
                 slice_loss = calculate_multi_hot_concept_loss(
-                    outputs_slice, labels_slice, from_logits=True
+                    outputs_slice,
+                    labels_slice,
+                    self.concept_loss,
+                    from_logits=True,
+                    damping_denominator=self.damping_denominator,
                 )
             else:
                 slice_loss = calculate_taxonomic_rank_loss(
-                    outputs_slice, labels_slice, from_logits=True
+                    outputs_slice,
+                    labels_slice,
+                    from_logits=True,
+                    damping_denominator=self.damping_denominator,
                 ) / len(TAXONOMIC_CONCEPTS)
             loss_components[name] = slice_loss.item()
             concept_loss_value = concept_loss_value + slice_loss

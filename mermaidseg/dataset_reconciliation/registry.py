@@ -30,6 +30,7 @@ from mermaidseg.dataset_reconciliation.concept_schema import (
 from mermaidseg.dataset_reconciliation.concepts import (
     initialize_benthic_concepts,
     initialize_benthic_hierarchy,
+    normalize_benthic_hierarchy,
 )
 from mermaidseg.dataset_reconciliation.label_mapping import (
     coralscapes_to_mermaid,
@@ -86,10 +87,10 @@ class SourceLabelRegistry:
             datasets (sorted alphabetically).
         source_to_target_name_maps: Optional mapping
             ``{SOURCE_NAME: {source_label_name: target_label_name}}``. Defaults
-            are looked up per ``SOURCE_NAME``: ``mermaid`` is identity,
-            ``coralscapes``, ``coralscapes_v2`` ``catlin_seaview``, ``moorea_labeled_corals``, ``ucsd_mosaics``, ``benthos_yuval`` use the static dict,
-            ``coralnet`` and
-             are fetched from the MERMAID API.
+            are looked up per ``SOURCE_NAME``: ``mermaid`` is identity;
+            ``coralscapes``, ``coralscapes_v2``, ``catlin_seaview``,
+            ``moorea_labeled_corals``, ``ucsd_mosaics``, and ``benthos_yuval`` use the static dict;
+            ``coralnet`` is fetched from the MERMAID API.
         concept_hierarchy: Optional benthic-attribute name->parent-name dict.
             If supplied (or if ``compute_concepts=True`` and not supplied), it
             is fetched from the MERMAID API.
@@ -196,10 +197,8 @@ class SourceLabelRegistry:
                         "label_roll_up=True requires benthic_hierarchy or fetch_remote=True"
                     )
                 benthic_hierarchy = initialize_benthic_hierarchy()
-            benthic_hierarchy = {
-                k.lower(): (v.lower() if v is not None else None)
-                for k, v in benthic_hierarchy.items()
-            }
+            else:
+                benthic_hierarchy = normalize_benthic_hierarchy(benthic_hierarchy)
             if subset is None:
                 raise ValueError("label_roll_up=True requires target_label_subset to be set")
 

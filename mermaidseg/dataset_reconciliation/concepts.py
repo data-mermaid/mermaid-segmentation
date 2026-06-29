@@ -86,6 +86,17 @@ def parse_concept_rank(name: str) -> tuple[str | None, str]:
     return rank, value
 
 
+def normalize_benthic_hierarchy(
+    hierarchy: dict[str, str | None],
+) -> dict[str, str | None]:
+    """Return a lowercase copy of a benthic-attribute name -> parent-name hierarchy."""
+    return {
+        k.lower(): (v.lower() if v is not None else None)
+        for k, v in hierarchy.items()
+        if k is not None
+    }
+
+
 def initialize_benthic_hierarchy(
     hierarchy_json_url: str = "https://api.datamermaid.org/v1/benthicattributes/",
 ) -> dict[str, str | None]:
@@ -112,10 +123,12 @@ def initialize_benthic_hierarchy(
         parent_id = attr["parent"]
         hierarchy_id_dict[node_id] = parent_id
         id2name_dict[node_id] = attr["name"]
-    return {
-        id2name_dict.get(node_id): id2name_dict.get(parent_id)
-        for node_id, parent_id in hierarchy_id_dict.items()
-    }
+    return normalize_benthic_hierarchy(
+        {
+            id2name_dict.get(node_id): id2name_dict.get(parent_id)
+            for node_id, parent_id in hierarchy_id_dict.items()
+        }
+    )
 
 
 def get_hierarchy_level(
