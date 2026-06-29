@@ -109,22 +109,10 @@ def _derive_concept_value2id(
     return concept_value2id
 
 
-def _normalize_checkpoint_state_dict(sd: Mapping[str, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    for key, value in sd.items():
-        if key.startswith("encoder.model."):
-            key = key.replace("encoder.model.", "encoder.", 1)
-        if ".base_model.model.model." in key:
-            key = key.replace(".base_model.model.model.", ".base_model.model.", 1)
-        normalized[key] = value
-    return normalized
-
-
 def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMModel:
     num_classes = max(artifacts.id2label.keys()) + 1
     ckpt = torch.load(artifacts.checkpoint_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-    state_dict = _normalize_checkpoint_state_dict(state_dict)
 
     num_concepts = _num_concepts_from_state_dict(state_dict) or len(artifacts.concept_id2name)
     if num_concepts <= 0:
@@ -148,6 +136,7 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
 
     model_cls = getattr(mm_models, model_name)
     model = model_cls(num_classes=num_classes, num_concepts=num_concepts, **model_kwargs)
+    state_dict = mm_models.align_peft_checkpoint_state_dict(state_dict, model)
     model.load_state_dict(state_dict)
     return model.to(device).eval()
 

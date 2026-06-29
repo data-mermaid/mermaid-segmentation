@@ -66,7 +66,7 @@ def log_checkpoint_summary(checkpoint_path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bucket", default="dev-datamermaid-sm-sources")
-    parser.add_argument("--run", default="20260526_807b611")
+    parser.add_argument("--run", default="20260623_nogit")
     parser.add_argument(
         "--images-uri",
         default=None,
@@ -89,7 +89,8 @@ def main() -> int:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("outputs/resize_full_20260526_807b611.parquet"),
+        default=None,
+        help="Local checkpoint parquet (default: outputs/resize_full_{run}.parquet)",
     )
     parser.add_argument(
         "--checkpoint-s3-key",
@@ -118,6 +119,9 @@ def main() -> int:
         help="Rows between checkpoint flushes (default: %(default)s)",
     )
     args = parser.parse_args()
+
+    if args.checkpoint is None:
+        args.checkpoint = Path(f"outputs/resize_full_{args.run}.parquet")
 
     workers_default = default_worker_count()
     workers_scan = args.workers_scan or workers_default

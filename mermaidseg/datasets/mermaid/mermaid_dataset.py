@@ -15,6 +15,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
+from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.datasets.utils import get_image_s3
 
 
@@ -64,7 +65,7 @@ class MermaidDataset(BaseCoralDataset):
         unified ``source_label_name`` convention used by
         :class:`BaseCoralDataset`.
         """
-        df_annotations = pd.read_parquet(annotations_path)
+        df_annotations = LocalS3Cache.get().read_parquet_ref(annotations_path, self.source_bucket)
         df_annotations = df_annotations.rename(
             columns={"benthic_attribute_name": "source_label_name"}
         )
@@ -80,4 +81,4 @@ class MermaidDataset(BaseCoralDataset):
 
     def read_image(self, image_id: str, **row_kwargs: Any) -> NDArray[Any]:
         key = f"mermaid/{image_id}.png"
-        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))

@@ -412,7 +412,8 @@ class Logger:
             global_offset = getattr(dataset, "global_offset", "")
             source = CodeDatasetSource(
                 tags={
-                    "annotations_path": getattr(dataset, "annotations_path", ""),
+                    "annotations_path": getattr(dataset, "annotations_path", "")
+                    or getattr(dataset, "manifest_path", ""),
                     "source_bucket": getattr(dataset, "source_bucket", ""),
                     "num_images": str(len(getattr(dataset, "df_images", []))),
                     "num_source_classes": str(num_source_classes),

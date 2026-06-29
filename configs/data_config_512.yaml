@@ -7,26 +7,27 @@ data:
         SmallestMaxSize:
           max_size: 1024
         RandomResizedCrop:
-          size: [256, 256]
+          size: [512, 512]
           scale: [0.2, 1]
           ratio: [0.75, 1.33]
-        HorizontalFlip:
-          p: 0.5
-        VerticalFlip:
-          p: 0.5
         ColorJitter:
           brightness: 0.1
           contrast: 0.1
           saturation: 0.1
           hue: 0.03
+
+        HorizontalFlip:
+          p: 0.5
+        VerticalFlip:
+          p: 0.5
         Normalize:
           mean: [0.485, 0.456, 0.406]
           std: [0.229, 0.224, 0.225]
     val:
       transform:
           Resize:
-            width: 256
-            height: 256
+            width: 512
+            height: 512
           Normalize:
             mean: [0.485, 0.456, 0.406]
             std: [0.229, 0.224, 0.225]
@@ -55,7 +56,7 @@ data:
       split: [train, validation]
       transform:
         RandomResizedCrop:
-          size: [256, 256]
+          size: [512, 512]
           scale: [0.2, 1]
           ratio: [0.75, 1.33]
         HorizontalFlip:
@@ -74,8 +75,8 @@ data:
       split: test
       transform:
         Resize:
-          width: 256
-          height: 256
+          width: 512
+          height: 512
         Normalize:
           mean: [0.485, 0.456, 0.406]
           std: [0.229, 0.224, 0.225]

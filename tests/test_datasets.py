@@ -194,7 +194,9 @@ def test_collate_fn_all_none_returns_empty_tensors(minimal_dataset, caplog):
 # --- BaseCoralDataset.__getitem__ ---
 
 
-def test_base_dataset_getitem_skips_and_logs_on_read_failure(single_image_annotations, caplog):
+def test_base_dataset_getitem_raises_and_logs_when_all_items_fail(
+    single_image_annotations, caplog
+):
     df_annotations, df_images = single_image_annotations
     ds = _AlwaysFailDataset(
         df_annotations=df_annotations,
@@ -202,10 +204,14 @@ def test_base_dataset_getitem_skips_and_logs_on_read_failure(single_image_annota
         class_subset=["Coral"],
     )
 
-    with caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"):
-        result = ds[0]
+    # With a single-image dataset, recurse-on-failure exhausts every index and
+    # raises rather than returning a ``(None, None)`` placeholder.
+    with (
+        caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"),
+        pytest.raises(RuntimeError),
+    ):
+        _ = ds[0]
 
-    assert result == (None, None)
     assert "img1" in caplog.text
     assert "RuntimeError" in caplog.text
 
@@ -219,7 +225,8 @@ def test_base_dataset_records_failure_context(single_image_annotations):
         split="train",
     )
 
-    _ = ds[0]
+    with pytest.raises(RuntimeError):
+        _ = ds[0]
     failures = ds.load_failures_df()
     assert len(failures) == 1
 
@@ -243,7 +250,8 @@ def test_base_dataset_saves_failure_report_as_parquet(single_image_annotations, 
         class_subset=["Coral"],
     )
 
-    _ = ds[0]
+    with pytest.raises(RuntimeError):
+        _ = ds[0]
     output_path = tmp_path / "load_failures.parquet"
     saved_path = ds.save_load_failures(output_path)
 

@@ -1,14 +1,18 @@
 training:
-    training_mode: "standard"
+    training_mode: "concept-bottleneck"
+    freeze_encoder: true
+    detach_concepts: true
+    concept_mapping_path: "../configs/class_to_concepts.csv"
     loss:
-        type: CrossEntropyLoss
+        type: ConceptBottleneckLoss
+        lambda_weight: 1
         ignore_index: 0
         damping_denominator: 100
-    max_grad_norm: 1.0
+    max_grad_norm: 0.5
     epochs: 200
     optimizer:
         type: AdamW
-        lr: 0.00005
+        lr: 0.000005
         weight_decay: 0.01
     scheduler:
         type: PolynomialLR
@@ -17,6 +21,7 @@ training:
         warmup_iters: 2000
         warmup_start_factor: 0.01
     mixed_precision: true
+    mixed_precision_dtype: bfloat16
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
     batch_size: 10

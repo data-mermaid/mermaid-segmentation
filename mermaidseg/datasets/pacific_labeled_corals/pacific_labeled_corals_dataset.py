@@ -25,6 +25,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
+from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.datasets.utils import get_image_s3
 
 VALID_ANNOTATOR_COLUMNS: tuple[str, ...] = (
@@ -127,7 +128,7 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
     def load_annotations(self) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Load annotations from S3, apply site/subset filters, pick the active annotator."""
         annotations_uri = f"s3://{self.source_bucket}/{self.annotations_path}"
-        df = pd.read_parquet(annotations_uri)
+        df = LocalS3Cache.get().read_parquet(self.source_bucket, self.annotations_path)
 
         missing = set(self.REQUIRED_COLUMNS) - set(df.columns)
         if missing:
@@ -180,4 +181,4 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
         **row_kwargs: Any,
     ) -> NDArray[Any]:
         key = f"{self.source_s3_prefix}/images/{site}/{subset}/{image_id}{image_ext}"
-        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))

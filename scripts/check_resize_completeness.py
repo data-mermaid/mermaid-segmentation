@@ -47,7 +47,7 @@ def sample_invalid_channel_modes(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bucket", default="dev-datamermaid-sm-sources")
-    parser.add_argument("--run", default="20260526_807b611")
+    parser.add_argument("--run", default="20260623_nogit")
     parser.add_argument("--output-prefix", default="dev/images")
     parser.add_argument("--threshold", type=int, default=2048)
     parser.add_argument(

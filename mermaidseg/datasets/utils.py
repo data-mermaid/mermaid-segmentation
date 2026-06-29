@@ -1,4 +1,3 @@
-import io
 import logging
 import sys
 
@@ -7,11 +6,20 @@ import numpy as np
 import pandas as pd
 import torch
 from botocore.exceptions import ClientError
-from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset, default_collate
 from tqdm import tqdm
 
+from mermaidseg.datasets.local_cache import LocalS3Cache
+
 logger = logging.getLogger(__name__)
+
+
+def emit_cache_stats(message: str) -> None:
+    """Emit per-epoch cache statistics to logger, stdout, and stderr."""
+    logger.info(message)
+    full = f"CACHE: {message}"
+    print(full, file=sys.stderr, flush=True)
+    print(full, file=sys.stdout, flush=True)
 
 
 def emit_dataset_warning(message: str) -> None:
@@ -28,46 +36,26 @@ def emit_dataset_warning(message: str) -> None:
     print(full, file=sys.stdout, flush=True)
 
 
-class DataLoadError(Exception):
-    """Raised when an image cannot be loaded from S3 or decoded."""
-
-
 def get_image_s3(
     s3: boto3.client,
     bucket: str,
     key: str,
     thumbnail: bool = False,
 ):
-    """Fetches an image from an S3 bucket and returns it as a PIL Image object.
+    """Fetches an image from local cache or S3 and returns it as a PIL Image.
 
     Args:
-        s3 (boto3.client): The Boto3 S3 client used to interact with S3.
+        s3 (boto3.client): Optional Boto3 S3 client (injected into the cache when provided).
         bucket (str): The name of the S3 bucket.
         key (str): The key (path) of the image in the S3 bucket.
         thumbnail (bool, optional): If True, fetches the thumbnail version of the image by modifying the key. Defaults to False.
     Returns:
-        PIL.Image.Image: The image loaded from S3 as a PIL Image object.
+        PIL.Image.Image: The image loaded from cache or S3 as a PIL Image object.
     """
-    if thumbnail:
-        key = key.replace(".png", "_thumbnail.png")
-
-    try:
-        response = s3.get_object(Bucket=bucket, Key=key)
-        image_data = response["Body"].read()
-    except ClientError as e:
-        error_code = e.response["Error"]["Code"]
-        logger.warning(
-            "S3 error loading image (bucket=%s, key=%s): %s %s", bucket, key, error_code, e
-        )
-        raise DataLoadError(f"S3 ClientError for s3://{bucket}/{key}: {error_code}") from e
-
-    try:
-        image = Image.open(io.BytesIO(image_data))
-    except (UnidentifiedImageError, OSError) as e:
-        logger.warning("Corrupted image (bucket=%s, key=%s): %s", bucket, key, e)
-        raise DataLoadError(f"PIL cannot open image at s3://{bucket}/{key}") from e
-
-    return image
+    cache = LocalS3Cache.get()
+    if s3 is not None:
+        cache.set_s3_client(s3)
+    return cache.read_pil_image(bucket, key, thumbnail=thumbnail)
 
 
 def create_annotation_mask(

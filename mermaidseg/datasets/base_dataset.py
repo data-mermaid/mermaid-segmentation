@@ -10,6 +10,7 @@ externally by [`mermaidseg.dataset_reconciliation`](../dataset_reconciliation/).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
+from mermaidseg.datasets.local_cache import CacheStatsHandles, LocalS3Cache
 from mermaidseg.datasets.utils import create_annotation_mask, emit_dataset_warning
 
 logger = logging.getLogger(__name__)
@@ -28,13 +30,24 @@ logger = logging.getLogger(__name__)
 def worker_init_fn(worker_id: int) -> None:
     """Configure logging in DataLoader worker processes.
 
-    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so that warnings emitted
-    in worker subprocesses are visible.
+    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so
+    that warnings emitted in worker subprocesses are visible.
     """
     logging.basicConfig(
         level=logging.WARNING,
         format=f"[worker-{worker_id}] %(levelname)s %(name)s: %(message)s",
     )
+
+
+def make_worker_init_fn(stats: CacheStatsHandles) -> Callable[[int], None]:
+    """Return a DataLoader worker init that configures logging and cache stats."""
+
+    def init_fn(worker_id: int) -> None:
+        worker_init_fn(worker_id)
+        LocalS3Cache.configure_from_env()
+        LocalS3Cache.get().attach_stats(stats)
+
+    return init_fn
 
 
 class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
@@ -183,10 +196,24 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
-        On any internal load/transform error we record the failure, emit a warning to logger +
-        stdout + stderr, and return ``(None, None)``. The dataset's :meth:`collate_fn` filters out
-        these placeholders, so a failed item drops out of the batch instead of crashing the loader.
+        On any internal load/transform error we record the failure, emit a
+        warning to logger + stdout + stderr, and recurse on a *different,
+        randomly chosen* index. This avoids returning ``(None, None)``
+        placeholders that break ``default_collate`` (and any downstream code
+        expecting a valid tensor), and spreads recovery across the dataset
+        instead of marching into a contiguous block of broken images. If every
+        item in the dataset fails, a ``RuntimeError`` is raised so the caller
+        knows the dataset is unusable.
         """
+        return self._safe_getitem(idx, attempts=0)
+
+    def _safe_getitem(
+        self, idx: int, attempts: int
+    ) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        n = len(self)
+        if n == 0:
+            raise RuntimeError(f"{self.__class__.__name__}: dataset is empty")
+
         try:
             return self._load_item(idx)
         except Exception as e:
@@ -203,13 +230,28 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
                 f"{self.__class__.__name__}: skipping idx={idx} image_id={image_id} "
                 f"(source={source_info}): {type(e).__name__}: {e}"
             )
-            return None, None
+
+            if attempts + 1 >= n:
+                raise RuntimeError(
+                    f"{self.__class__.__name__}: all {n} items failed to load; "
+                    f"last error: {type(e).__name__}: {e}"
+                ) from e
+
+            # Recover with a *different* random image so a contiguous run of broken
+            # items (e.g. a whole bad source) doesn't get walked one-by-one.
+            if n > 1:
+                next_idx = int(np.random.randint(0, n - 1))
+                if next_idx >= idx:
+                    next_idx += 1  # skip idx itself, keeping a uniform draw over the other indices
+            else:
+                next_idx = idx
+            return self._safe_getitem(next_idx, attempts=attempts + 1)
 
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Perform a single load (no error handling).
 
-        Subclasses should override this rather than :meth:`__getitem__` so they inherit the
-        recursive-on-failure behaviour for free.
+        Subclasses should override this rather than :meth:`__getitem__` so they
+        inherit the recursive-on-failure behaviour for free.
         """
         image_id = self.df_images.loc[idx, "image_id"]
         row_kwargs = self.df_images.loc[idx].to_dict()
@@ -253,7 +295,8 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             "missing_annotations": image_id not in self._annotation_count_by_image,
             "error_type": type(error).__name__,
             "error_message": str(error),
-            "annotations_path": getattr(self, "annotations_path", None),
+            "annotations_path": getattr(self, "annotations_path", None)
+            or getattr(self, "manifest_path", None),
             "source_bucket": getattr(self, "source_bucket", None),
         }
         self._load_failures.append(record)
@@ -274,12 +317,12 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return path
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Collate function that filters out ``(None, None)`` items (failed loads).
+        """Collate function that defensively filters out ``(None, None)`` items.
 
-        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load (after
-        recording the failure and emitting a warning); this filter drops them so a failed
-        item simply leaves the batch instead of crashing the loader. If every item in the
-        batch failed, empty tensors are returned and the training loop skips the step.
+        In normal operation :meth:`__getitem__` recovers from load failures by
+        recursing on the next index, so the batch should not contain ``None``
+        placeholders. This filter remains as a safety net for callers that
+        construct batches by hand or override ``__getitem__``.
 
         Args:
             batch: List of ``(image, source_labels)`` tuples possibly containing

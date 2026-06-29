@@ -58,8 +58,8 @@ All commands accept `--bucket`, `--prefix`, `--output-dir`, `--upload-to-s3`,
 | `MERMAID_CORALNET_OUTPUT_PREFIX` | `etl-outputs/coralnet` | S3 prefix for `--upload-to-s3`. |
 | `MERMAID_CORALNET_ETL_WORKERS` | `16` | Default `--workers` value. |
 | `MERMAID_CORALNET_VERSION_OVERRIDE` | (unset) | Force a specific version tag. |
-| `MERMAID_CORALNET_ANNOTATIONS_PATH` | (unset) | Override CoralNetDataset default with an exact S3 key. |
-| `MERMAID_CORALNET_ANNOTATIONS_VERSION` | (unset) | Override CoralNetDataset default with `coralnet_annotations_<version>.parquet`. |
+| `MERMAID_CORALNET_MANIFEST_PATH` | (unset) | Override CoralNetDataset default with an exact S3 key. |
+| `MERMAID_CORALNET_MANIFEST_VERSION` | (unset) | Override CoralNetDataset default with `etl-outputs/coralnet/<version>/coralnet_training_manifest_<version>.parquet`. |
 
 ## Output layout
 
@@ -154,17 +154,16 @@ go through boto3 with adaptive retries.
 
 ## Pointing CoralNetDataset at a new build
 
-After uploading a new parquet:
+After uploading a new training manifest:
 
 ```sh
-export MERMAID_CORALNET_ANNOTATIONS_VERSION=20260515_a1b2c3d
+export MERMAID_CORALNET_MANIFEST_VERSION=20260623_nogit
 ```
 
 `CoralNetDataset()` will read
-`s3://${MERMAID_CORALNET_BUCKET}/coralnet_annotations_20260515_a1b2c3d.parquet`.
-Without that variable set, it falls back to the legacy
-`coralnet_annotations_30112025.parquet` so existing training runs continue to
-work until a new default is published as the canonical S3 key.
+`s3://${MERMAID_CORALNET_BUCKET}/etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet`.
+Without that variable set, it falls back to the default published manifest
+under ``etl-outputs/coralnet/``.
 
 ## See also
 
