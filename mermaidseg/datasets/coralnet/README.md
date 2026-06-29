@@ -65,7 +65,7 @@ Local image smoke test for a single source (writes JPEGs under `outputs/`; publi
 such as 7238 do not require CoralNet credentials):
 
 ```sh
-uv run python -c "
+uv run --extra notebooks python -c "
 from pathlib import Path
 from mermaidseg.datasets.coralnet.scraper.downloader import CoralNetDownloader
 dest = Path('outputs/coralnet-source-7238-test/s7238')
@@ -105,7 +105,7 @@ export CORALNET_USERNAME='you@example.com'
 export CORALNET_PASSWORD='your-password'
 
 # Quick login check (requests, same path as the scraper)
-uv run python -c "
+uv run --extra notebooks python -c "
 import os, sys
 from mermaidseg.datasets.coralnet.scraper.downloader import CoralNetDownloader
 u, p = os.environ.get('CORALNET_USERNAME'), os.environ.get('CORALNET_PASSWORD')
