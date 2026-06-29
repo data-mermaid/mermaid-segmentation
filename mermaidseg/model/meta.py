@@ -163,9 +163,7 @@ class MetaModel:
         if self.use_amp and self.amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
             logger.warning("CUDA bf16 autocast is not supported on this GPU; disabling AMP.")
             self.use_amp = False
-        self.scaler = torch.amp.GradScaler(
-            enabled=self.use_amp and self.amp_dtype == torch.float16
-        )
+        self.scaler = torch.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == torch.float16)
         self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
         self._train_loader_iter = None
         self._train_loader = None
@@ -269,13 +267,10 @@ class MetaModel:
         scale_before = self.scaler.get_scale()
         if self.max_grad_norm is not None and self.max_grad_norm > 0:
             self.scaler.unscale_(self.optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self._trainable_params, self.max_grad_norm
-            )
+            grad_norm = torch.nn.utils.clip_grad_norm_(self._trainable_params, self.max_grad_norm)
             if not torch.isfinite(grad_norm):
                 logger.warning(
-                    "train_epoch: skipping optimizer step due to non-finite grad norm "
-                    "(value=%s)",
+                    "train_epoch: skipping optimizer step due to non-finite grad norm (value=%s)",
                     grad_norm.item(),
                 )
                 if self.scaler.is_enabled():
