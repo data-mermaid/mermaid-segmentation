@@ -29,8 +29,11 @@ COPY mermaidseg ./mermaidseg
 COPY scripts ./scripts
 COPY configs ./configs
 
+# Image carries the training stack only (mlflow/torchmetrics → training extra). The CoralNet
+# ETL/processing tasks (coralnet-etl/-refresh/-resize) need the `coralnet` extra (ibis/duckdb,
+# bs4) — add `,coralnet` here and rebuild when those jobs next need to run.
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir -e ".[training]"
 
 COPY docker/jobs/entrypoint.sh /opt/ml/code/entrypoint.sh
 RUN chmod +x /opt/ml/code/entrypoint.sh

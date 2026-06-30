@@ -36,15 +36,18 @@ hf auth login
 uv sync
 ```
 
-**Install optional dependency groups** as needed:
+**Install optional features** (extras) or contributor tooling (groups) as needed:
 ```bash
-uv sync --group dev         # tests + lint (contributor setup)
-uv sync --group notebooks   # Jupyter, hvplot, ibis, great-tables
-uv sync --extra scraping    # selenium, webdriver-manager
-uv sync --extra smp         # segmentation-models-pytorch (optional model backend)
+uv sync --extra all          # everything: training + sagemaker + coralnet + notebooks + demo
+uv sync --extra training     # mlflow, torchmetrics, wandb (training + eval)
+uv sync --extra coralnet     # ibis/duckdb + bs4/selenium (CoralNet ETL + scraper)
+uv sync --extra sagemaker    # SageMaker job launcher (scripts/launch_*.py)
+uv sync --extra notebooks    # Jupyter, matplotlib, seaborn, hvplot, great-tables
+uv sync --extra demo         # Gradio demo
+uv sync --group dev          # tests + lint (contributor setup)
 
-# Combine
-uv sync --group dev --group notebooks
+# Combine extras and groups
+uv sync --extra all --group dev
 ```
 
 

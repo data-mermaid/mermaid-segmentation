@@ -85,7 +85,7 @@ uv run pytest tests/datasets/coralnet/ -q
 **Live validation** (Playwright against coralnet.ucsd.edu; not run in CI):
 
 ```sh
-uv run sync --extra test-live
+uv sync --extra test-live
 uv run playwright install chromium
 uv run --extra test-live pytest tests/datasets/coralnet/test_live_smoke.py -m live -v
 ```

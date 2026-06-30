@@ -7,35 +7,26 @@ name = "mermaidseg"
 version = "0.1.0"
 description = "A package for the segmentation of MERMAID coral data."
 requires-python = ">=3.11"
+# Core = inference + data-loading only. Training, CoralNet ETL/scraper, notebooks/viz,
+# and the demo live in extras (see [project.optional-dependencies]). s3fs stays here
+# because the datasets read their annotation parquets from s3:// via pandas.
 dependencies = [
     "albumentations",
-    "beautifulsoup4",
     "boto3",
-    "numpy>=1.24,<2",
-    "pandas",
-    "pillow",
-    "requests",
-    "torch>=2.4,<2.8",
-    "transformers",
     "datasets>=3.0",
-    "s3fs>=2024.2.0",
-    "segmentation-models-pytorch",
-    "mlflow",
-    "pyyaml",
-    "tqdm",
-    "torchmetrics",
-    "anytree",
-    "openpyxl",
-    "ipykernel>=7.2.0",
-    "matplotlib>=3.10.8",
     "huggingface-hub>=0.36.2",
-    "seaborn>=0.13.2",
+    "numpy>=1.24,<2",
     "opencv-python-headless>=4.11.0.86",
-    "sagemaker-mlflow>=0.2.0",
-    "requests-auth-aws-sigv4>=0.7",
-    "safetensors>=0.4.0",
-    "ibis-framework[duckdb]>=9.0",
+    "pandas",
     "peft>=0.19.1",
+    "pillow",
+    "pyyaml",
+    "requests",
+    "s3fs>=2024.2.0",
+    "safetensors>=0.4.0",
+    "torch>=2.4,<2.8",
+    "tqdm",
+    "transformers",
 ]
 
 [project.scripts]
@@ -45,25 +36,44 @@ coralnet-refresh = "mermaidseg.datasets.coralnet.scraper.refresh_image_lists:mai
 coralnet-resize = "mermaidseg.datasets.coralnet.preprocessing.resize:main"
 
 [project.optional-dependencies]
-notebooks = [
-    "jupyter",
-    "ipywidgets",
+# Training + experiment tracking (mermaidseg/logger.py, mermaidseg/model/eval.py).
+training = [
+    "mlflow",
+    "sagemaker-mlflow>=0.2.0",
+    "torchmetrics",
     "wandb>=0.25.0",
-    "hvplot>=0.12.2",
-    "great-tables>=0.21.0",
 ]
+# Host-side SageMaker job submission (scripts/launch_*.py); imported lazily.
 sagemaker = [
     "sagemaker>=2.0,<3.0",
 ]
-scraping = [
+# CoralNet ETL + scraper console scripts (coralnet-etl/-refresh/-resize): ibis/duckdb
+# for the ETL/manifest, bs4/selenium for scraping.
+coralnet = [
+    "ibis-framework[duckdb]>=9.0",
+    "beautifulsoup4",
     "selenium",
     "webdriver-manager",
+]
+# Interactive exploration + plotting.
+notebooks = [
+    "jupyter",
+    "ipywidgets",
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
+    "seaborn>=0.13.2",
+    "hvplot>=0.12.2",
+    "great-tables>=0.21.0",
 ]
 test-live = [
     "playwright>=1.50",
 ]
 demo = [
     "gradio>=5.0",
+]
+# Everything (used by CI and `uv sync --extra all` / `uv sync --all-extras`).
+all = [
+    "mermaidseg[training,sagemaker,coralnet,notebooks,demo]",
 ]
 
 [dependency-groups]
