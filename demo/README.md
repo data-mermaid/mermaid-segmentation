@@ -19,7 +19,7 @@ The demo needs a checkpoint plus label/concept metadata. Most of this is **not g
 
 | File | MLflow artifact path | How it is produced |
 |------|---------------------|-------------------|
-| `id2label.json` | `metadata/id2label.json` | Built in `scripts/train.py` as `{0: "background", **registry.target_id2label}` and logged by `Logger` |
+| `id2label.json` | `metadata/id2label.json` | Built in `scripts/train.py` as `{0: "ignore", **registry.target_id2label}` and logged by `Logger` |
 | `concept_id2name.json` | `metadata/concept_id2name.json` | Built by `SourceLabelRegistry._build_concepts()` and logged via `Logger.log_reconciliation()` |
 
 Download both from an MLflow run (under `metadata/`) and place them in `demo/`, or pass paths with `--id2label` / `--concept-id2name`.

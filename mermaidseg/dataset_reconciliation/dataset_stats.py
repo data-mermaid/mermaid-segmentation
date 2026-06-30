@@ -104,7 +104,7 @@ def compute_class_counts(resolved_splits: dict, registry: Any) -> pd.DataFrame:
     ``resolve_split_annotations``. The function reads ``target_id`` from each
     resolved annotation frame — no source-name lookups happen here.
     """
-    all_classes: list[tuple[int, str]] = [(0, "background")]
+    all_classes: list[tuple[int, str]] = [(0, "ignore")]
     all_classes.extend(sorted(registry.target_id2label.items()))
     split_names = list(resolved_splits.keys())
 

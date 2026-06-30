@@ -178,7 +178,7 @@ def preprocess(
 @torch.no_grad()
 def predict_concepts(model: CBMModel, image_tensor: torch.Tensor) -> torch.Tensor:
     outputs = model(image_tensor)
-    return outputs.hidden_states
+    return outputs.concept_outputs
 
 
 @torch.no_grad()

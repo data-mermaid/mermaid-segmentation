@@ -27,6 +27,23 @@ from mermaidseg.io import ConfigDict
 logger = logging.getLogger(__name__)
 
 
+def _resolve_amp_dtype(dtype_config: Any | None) -> torch.dtype:
+    """Map config strings to torch autocast dtypes."""
+    if dtype_config is None:
+        return torch.float16
+    if isinstance(dtype_config, torch.dtype):
+        return dtype_config
+
+    dtype_name = str(dtype_config).lower().replace("-", "").replace("_", "")
+    if dtype_name in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if dtype_name in {"fp16", "float16", "half"}:
+        return torch.float16
+    raise ValueError(
+        f"Unsupported mixed_precision_dtype={dtype_config!r}; expected 'bfloat16' or 'float16'."
+    )
+
+
 class MetaModel:
     """Wrapper for training and inference of segmentation models.
 
@@ -138,8 +155,15 @@ class MetaModel:
 
         self.training_kwargs = training_kwargs
         mixed_precision = training_kwargs.pop("mixed_precision", False)
+        mixed_precision_dtype = training_kwargs.pop("mixed_precision_dtype", None)
+        max_grad_norm = training_kwargs.pop("max_grad_norm", 1.0)
+        self.max_grad_norm = float(max_grad_norm) if max_grad_norm is not None else None
+        self.amp_dtype = _resolve_amp_dtype(mixed_precision_dtype)
         self.use_amp = bool(mixed_precision) and torch.cuda.is_available()
-        self.scaler = torch.amp.GradScaler(enabled=self.use_amp)
+        if self.use_amp and self.amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+            logger.warning("CUDA bf16 autocast is not supported on this GPU; disabling AMP.")
+            self.use_amp = False
+        self.scaler = torch.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == torch.float16)
         self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
         self._train_loader_iter = None
         self._train_loader = None
@@ -197,8 +221,8 @@ class MetaModel:
             self.loss = loss_cls(**loss_kwargs)
 
         optimizer_cls = getattr(torch.optim, training_kwargs.optimizer.pop("type", None))
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = optimizer_cls(params=trainable_params, **training_kwargs.optimizer)
+        self._trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = optimizer_cls(params=self._trainable_params, **training_kwargs.optimizer)
 
         if "scheduler" in training_kwargs:
             scheduler_cfg = dict(training_kwargs.scheduler)
@@ -228,6 +252,35 @@ class MetaModel:
             return
         self.warmup_scheduler.step()
         self._warmup_iters_completed += 1
+
+    def _optimizer_step(self, loss: torch.Tensor) -> bool:
+        """Run backward + AMP optimizer step with optional gradient clipping.
+
+        Returns True when the optimizer step was applied (not skipped by the scaler).
+        """
+        if not torch.isfinite(loss):
+            logger.warning("train_epoch: skipping non-finite loss (value=%s)", loss.item())
+            self.optimizer.zero_grad(set_to_none=True)
+            return False
+
+        self.scaler.scale(loss).backward()
+        scale_before = self.scaler.get_scale()
+        if self.max_grad_norm is not None and self.max_grad_norm > 0:
+            self.scaler.unscale_(self.optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self._trainable_params, self.max_grad_norm)
+            if not torch.isfinite(grad_norm):
+                logger.warning(
+                    "train_epoch: skipping optimizer step due to non-finite grad norm (value=%s)",
+                    grad_norm.item(),
+                )
+                if self.scaler.is_enabled():
+                    self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+                return False
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+        return self.scaler.get_scale() >= scale_before
 
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
@@ -264,10 +317,11 @@ class MetaModel:
         if target_dim is None:
             target_dim = (inputs.size(-2), inputs.size(-1))
 
-        segmentation_outputs = self.model(inputs)
+        with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+            segmentation_outputs = self.model(inputs)
 
         if self.training_mode == "concept-bottleneck":
-            concept_outputs = segmentation_outputs.hidden_states
+            concept_outputs = segmentation_outputs.concept_outputs
             outputs = segmentation_outputs.logits
         elif self.training_mode == "concept":
             concept_outputs = segmentation_outputs.logits
@@ -311,17 +365,18 @@ class MetaModel:
         if target_dim is None:
             target_dim = (images.size(-2), images.size(-1))
 
-        with torch.autocast(device_type="cuda", enabled=self.use_amp):
+        with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
             segmentation_outputs = self.model(images)
 
         if self.training_mode == "concept-bottleneck":
             assert target_concepts is not None, (
                 "target_concepts must be provided in 'concept-bottleneck' mode"
             )
-            concept_outputs = segmentation_outputs.hidden_states.float()
+            concept_outputs = segmentation_outputs.concept_outputs.detach()
+            concept_logits = segmentation_outputs.concept_logits.float()
             outputs = segmentation_outputs.logits.float()
             loss, loss_components = self.loss(
-                outputs, target_labels, concept_outputs, target_concepts
+                outputs, target_labels, concept_logits, target_concepts
             )
 
         elif self.training_mode == "concept":
@@ -431,15 +486,19 @@ class MetaModel:
                 torch.cuda.synchronize()
             backward_start = time.perf_counter()
 
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad()
-            self._step_warmup_scheduler()
+            step_applied = self._optimizer_step(loss)
+            if step_applied:
+                self._step_warmup_scheduler()
 
             if use_cuda:
                 torch.cuda.synchronize()
             backward_time_total += time.perf_counter() - backward_start
+
+            if not torch.isfinite(loss):
+                if use_cuda:
+                    torch.cuda.synchronize()
+                batch_end = time.perf_counter()
+                continue
 
             running_loss += loss.item()
             for k, v in loss_components.items():
@@ -459,10 +518,10 @@ class MetaModel:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
                     for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, target_labels)
+                        metric.update(outputs.detach(), target_labels)
 
             if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
-                evaluator.evaluate_concepts(concept_outputs, target_concepts)
+                evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
             if use_cuda:
                 torch.cuda.synchronize()
             batch_end = time.perf_counter()
@@ -559,10 +618,10 @@ class MetaModel:
                     if outputs.ndim > 3:
                         outputs = outputs.argmax(dim=1)
                     for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, target_labels)
+                        metric.update(outputs.detach(), target_labels)
 
             if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
-                evaluator.evaluate_concepts(concept_outputs, target_concepts)
+                evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
 
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
