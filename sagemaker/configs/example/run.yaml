@@ -1,0 +1,19 @@
+job:
+  name_prefix: mermaidseg-example
+  image: mermaid-segmentation-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.g5.2xlarge
+  volume_gb: 200
+  max_runtime_hours: 4
+
+# Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher).
+# Example: smoke test with CBM data (1 epoch, small batch).
+config:
+  config_model: configs/model_config_cbm.yaml
+  config_training: configs/training_config_cbm.yaml
+  config_data: configs/data_config.yaml
+  config_logger: configs/logger_config.yaml
+  overrides:
+    run-name: mermaidseg-sagemaker-smoke
+    epochs: 1
+    batch-size: 4

@@ -50,6 +50,9 @@ notebooks = [
     "hvplot>=0.12.2",
     "great-tables>=0.21.0",
 ]
+sagemaker = [
+    "sagemaker>=2.0,<3.0",
+]
 scraping = [
     "selenium",
     "webdriver-manager",
