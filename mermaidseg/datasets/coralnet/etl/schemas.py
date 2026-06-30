@@ -1,8 +1,9 @@
 """PyArrow schemas for the three CoralNet ETL output parquets.
 
 Single source of truth for column names, dtypes, and primary keys. The writer in
-:mod:`mermaidseg.datasets.coralnet.etl.io` casts every DataFrame to the declared schema before
-writing so byte output is deterministic and downstream readers can rely on the column types.
+:mod:`mermaidseg.datasets.coralnet.etl.io` casts every DataFrame to the declared schema
+before writing so byte output is deterministic and downstream readers can rely on the
+column types.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ AUDIT_SCHEMA: pa.Schema = pa.schema(
         pa.field("metadata_csv_read_failed", pa.bool_(), nullable=False),
         pa.field("is_complete", pa.bool_(), nullable=False),
         pa.field("image_count_match", pa.bool_(), nullable=False),
+        pa.field("image_list_covers_annotations", pa.bool_(), nullable=False),
         pa.field("errors", pa.list_(pa.string()), nullable=True),
     ]
 )
@@ -82,9 +84,9 @@ class SchemaValidationError(ValueError):
 def validate(df, schema: pa.Schema) -> None:
     """Verify that ``df`` has every column the schema declares.
 
-    We don't check dtypes here — the writer in ``io.write_parquet_deterministic`` casts everything
-    to the declared types. This function exists to catch the common case where a column is silently
-    dropped or renamed in upstream code.
+    We don't check dtypes here — the writer in ``io.write_parquet_deterministic`` casts
+    everything to the declared types. This function exists to catch the common case
+    where a column is silently dropped or renamed in upstream code.
     """
     declared = {field.name for field in schema}
     actual = set(df.columns)
