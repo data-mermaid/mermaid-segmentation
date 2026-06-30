@@ -18,7 +18,7 @@ dependencies = [
     "torch>=2.4,<2.8",
     "transformers",
     "datasets>=3.0",
-    "s3fs",
+    "s3fs>=2024.2.0",
     "segmentation-models-pytorch",
     "mlflow",
     "pyyaml",
@@ -121,6 +121,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "live: marks tests as live integration tests requiring S3 and/or CoralNet access (deselect with '-m \"not live\"')",
+    "smoke: marks tests as smoke tests for full pipeline validation",
 ]
 
 [tool.coverage.run]

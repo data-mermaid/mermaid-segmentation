@@ -1,37 +1,27 @@
-"""Background-safe training entry point.
+"""Simplified training entry point for LinearDINOv3 baseline (mermaid + coralnet, no
+CBM).
 
-Mirrors the logic in nbs/Base_Pipeline.ipynb as a CLI script. Run via uv so
-it uses the locked project venv. Cell outputs freeze when the browser
-disconnects — this script writes structured logs to a file so progress is
-always captured.
-
-The run is configured by four split configs, each with a sensible default:
-``--config-data`` (configs/data_config.yaml), ``--config-model``
-(configs/model_config_cbm.yaml), ``--config-training``
-(configs/training_config_cbm.yaml), and ``--config-logger``
-(configs/logger_config.yaml). Override any one independently.
+This is a streamlined version of scripts/train.py that:
+- Only imports MermaidDataset and CoralNetDataset (faster startup)
+- Disables all other datasets
+- Uses standard (non-CBM) training defaults
+- Ideal for issue #129 baseline and SageMaker launcher
 
 Usage::
 
-    # Foreground (debug) — uses the default split configs
-    uv run python scripts/train.py
+    # Local dry-run (smoke test)
+    uv run python scripts/train_baseline.py --dry-run
 
-    # Override an individual split (e.g. standard, non-CBM training)
-    uv run python scripts/train.py \\
-        --config-model configs/model_config.yaml \\
-        --config-training configs/training_config.yaml
+    # Full training with custom config
+    uv run python scripts/train_baseline.py \\
+        --config-data configs/data_config_dinov3_base.yaml \\
+        --config-model configs/model_config_dinov3_base.yaml \\
+        --config-training configs/training_config_dinov3_base.yaml
 
-    # Background — safe to close the browser window
-    nohup uv run python scripts/train.py \\
+    # Background (safe to close browser)
+    nohup uv run python scripts/train_baseline.py \\
         --auto-shutdown \\
-        > logs/train_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-    echo $! > logs/train.pid
-
-    # Follow progress from any terminal tab
-    tail -f logs/train_*.log
-
-    # Dry run (1 batch, smoke test)
-    uv run python scripts/train.py --dry-run
+        > logs/train_baseline_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 """
 
 import argparse
@@ -49,22 +39,11 @@ import torch
 from torch.utils.data import ConcatDataset, DataLoader
 
 from mermaidseg.dataset_reconciliation import (
-    ConceptSchema,
     SourceLabelRegistry,
     attach_registry,
     prepare_splits_for_registry,
 )
-from mermaidseg.datasets import (
-    BenthosYuvalCoralsDataset,
-    CatlinSeaviewDataset,
-    CoralNetDataset,
-    CoralscapesDataset,
-    CoralscapesV2Dataset,
-    MermaidDataset,
-    MooreaLabeledCoralsDataset,
-    PacificLabeledCoralsDataset,
-    worker_init_fn,
-)
+from mermaidseg.datasets import CoralNetDataset, MermaidDataset, worker_init_fn
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import Evaluator
@@ -106,12 +85,7 @@ def _write_pid(pid_file: Path) -> None:
 
 
 def _stop_current_space() -> None:
-    """Stop the SageMaker JupyterLab app via delete_app.
-
-    SageMaker has no ``stop_space`` API.  The documented way to stop a running
-    JupyterLab app is ``delete_app`` — this terminates the instance while keeping EFS
-    data intact.  No-op outside SageMaker.
-    """
+    """Stop the SageMaker JupyterLab app via delete_app."""
     if not _METADATA.exists():
         logging.info("Not running on SageMaker — skipping auto-shutdown")
         return
@@ -181,32 +155,26 @@ def _build_parser() -> argparse.ArgumentParser:
     base.add_argument(
         "--config-data",
         type=str,
-        default="configs/data_config.yaml",
-        help="path to data config file",
+        default="configs/data_config_dinov3_base.yaml",
+        help="path to data config file (baseline: dinov3_base)",
     )
     base.add_argument(
         "--config-model",
         type=str,
-        default="configs/model_config_cbm.yaml",
-        help="path to model config file",
+        default="configs/model_config_dinov3_base.yaml",
+        help="path to model config file (baseline: dinov3_base)",
     )
     base.add_argument(
         "--config-training",
         type=str,
-        default="configs/training_config_cbm.yaml",
-        help="path to training config file",
+        default="configs/training_config_dinov3_base.yaml",
+        help="path to training config file (baseline: dinov3_base)",
     )
     base.add_argument(
         "--config-logger",
         type=str,
         default="configs/logger_config.yaml",
         help="path to logger config file",
-    )
-    base.add_argument(
-        "--experiment-name",
-        type=str,
-        default=None,
-        help="MLflow experiment name; overrides the logger config (e.g. 'baselines')",
     )
     base.add_argument(
         "--dry-run",
@@ -228,7 +196,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--failure-report-path",
         type=str,
         default=None,
-        help="optional parquet path for data-load failure report (default: logs/data_load_failures_<timestamp>.parquet)",
+        help="optional parquet path for data-load failure report",
     )
     base.add_argument(
         "--early-stopping",
@@ -321,6 +289,10 @@ def _run_training(args: argparse.Namespace) -> None:
     )
 
     cfg = update_config_with_args(cfg, args)
+
+    if not hasattr(cfg, "run_name") or cfg.run_name is None:
+        cfg.run_name = f"baseline-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     cfg_logger = copy.deepcopy(cfg)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -332,32 +304,6 @@ def _run_training(args: argparse.Namespace) -> None:
         torch.cuda.manual_seed_all(seed)
     logging.info("Seed: %d", seed)
 
-    DATASET_CLASSES = {
-        "pacific_labeled_corals": PacificLabeledCoralsDataset,
-        "moorea_labeled_corals": MooreaLabeledCoralsDataset,
-        "catlin_seaview": CatlinSeaviewDataset,
-        "mermaid": MermaidDataset,
-        "coralnet": CoralNetDataset,
-        "coralscapes": CoralscapesDataset,
-        "coralscapes_v2": CoralscapesV2Dataset,
-        "benthos_yuval": BenthosYuvalCoralsDataset,
-    }
-
-    # coralscapes uses a different signature (no `padding`)
-    def _build(name, split_cfg):
-        cls = DATASET_CLASSES[name]
-        if name in ("coralscapes", "coralscapes_v2", "benthos_yuval"):
-            return cls(**split_cfg)
-        return cls(**split_cfg, padding=cfg.training.padding)
-
-    dataset_dict: dict[tuple[str, str], object] = {}
-    for name in DATASET_CLASSES:
-        for split, split_cfg in cfg.data[name].items():
-            if split_cfg is None or split_cfg == "None":
-                continue
-            dataset_dict[(name, split)] = _build(name, split_cfg)
-            print(f"{name:>24s} - {split:<5s}: {len(dataset_dict[(name, split)]):>7d} samples")
-
     loader_kwargs = {
         "batch_size": cfg.training.batch_size,
         "num_workers": args.num_workers,
@@ -368,25 +314,26 @@ def _run_training(args: argparse.Namespace) -> None:
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["worker_init_fn"] = worker_init_fn
 
-    concept_mapping_path = cfg.training.get("concept_mapping_path")
+    dataset_dict: dict[tuple[str, str], object] = {}
+    for name in ["mermaid", "coralnet"]:
+        for split, split_cfg in cfg.data[name].items():
+            if split_cfg is None or split_cfg == "None":
+                continue
+            if name == "mermaid":
+                ds = MermaidDataset(**split_cfg, padding=cfg.training.padding)
+            else:  # coralnet
+                ds = CoralNetDataset(**split_cfg, padding=cfg.training.padding)
+            dataset_dict[(name, split)] = ds
+            print(f"{name:>24s} - {split:<5s}: {len(ds):>7d} samples")
 
     _, registry_datasets = prepare_splits_for_registry(dataset_dict)
-
-    run_sources = {ds.SOURCE_NAME for ds in registry_datasets}
-    if cfg.training.training_mode != "standard":
-        if concept_mapping_path:
-            schema = ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
-        else:
-            schema = ConceptSchema.from_csv(sources=run_sources)
-    else:
-        schema = None
 
     registry = SourceLabelRegistry(
         registry_datasets,
         target_label_subset=cfg.training.class_subset,
-        compute_concepts=cfg.training.training_mode != "standard",
-        concept_mapping_path=concept_mapping_path,
-        concept_schema=schema,
+        compute_concepts=False,
+        concept_mapping_path=None,
+        concept_schema=None,
         label_roll_up=cfg.training.get("label_roll_up", False),
     ).to(device)
 
@@ -399,67 +346,52 @@ def _run_training(args: argparse.Namespace) -> None:
     val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
 
     print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
-    if cfg.training.training_mode != "standard":
-        assert registry.num_concepts == schema.num_channels
 
     logging.info(
         "Dataset: %s (%d samples)",
-        "Combined",
+        "mermaid+coralnet",
         (len(train_loader) + len(val_loader)) * cfg.training.batch_size,
     )
 
-    # def _write_failure_report_once() -> None:
-    #     nonlocal report_written
-    #     if report_written:
-    #         return
-    #     path = _save_failure_report_if_available(
-    #         dataset=dataset, # TODO: Has to be updated to work with multiple datasets
-    #         log_dir=Path(args.log_dir),
-    #         explicit_output_path=args.failure_report_path,
-    #     )
-    #     report_written = path is not None
-
     if args.dry_run:
-        max_dry_epochs = 3
+        max_dry_epochs = 1
         actual_epochs = cfg.training.epochs
         if actual_epochs > max_dry_epochs:
             cfg.training.epochs = max_dry_epochs
             logging.info("Dry run: capping epochs %d → %d", actual_epochs, max_dry_epochs)
         logging.info("Dry run: limiting to 1 batch per epoch")
+        cfg.training.iterations_per_train_epoch = 1
+        cfg.training.iterations_per_val_epoch = 1
         try:
             train_loader = [_take_first_non_empty_batch(train_loader, "train")]
             val_loader = [_take_first_non_empty_batch(val_loader, "val")]
         except RuntimeError:
-            print("TODO:Update")
-            # _write_failure_report_once()
             raise
 
     meta_model = MetaModel(
         run_name=cfg.run_name,
         num_classes=registry.num_target_classes,
-        num_concepts=registry.num_concepts or None,
+        num_concepts=None,
         device=device,
         model_kwargs=cfg.model.copy(),
         training_kwargs=cfg.training.copy(),
         source_to_target_lookup=registry.source_to_target,
-        source_to_concepts_lookup=registry.source_to_concepts,
-        concept_matrix=registry.concept_matrix,
-        conceptid2labelid=registry.conceptid2labelid(),
-        concept_value2id=registry.concept_value2id,
+        source_to_concepts_lookup=None,
+        concept_matrix=None,
+        conceptid2labelid=None,
+        concept_value2id=None,
     )
 
     evaluator = Evaluator(
         num_classes=registry.num_target_classes,
         device=device,
-        calculate_concept_metrics=cfg.training.training_mode != "standard",
-        concept_value2id=registry.concept_value2id,
+        calculate_concept_metrics=False,
+        concept_value2id=None,
     )
 
-    # Route the run to an MLflow experiment. --experiment-name (or the run YAML override)
-    # wins; otherwise fall back to whatever the logger config declares.
-    if args.experiment_name:
-        cfg.logger.experiment_name = args.experiment_name
-        cfg_logger.logger.experiment_name = args.experiment_name
+    # Baseline runs log to the dedicated "baselines" MLflow experiment.
+    cfg.logger.experiment_name = "baselines"
+    cfg_logger.logger.experiment_name = "baselines"
 
     with Logger(
         config=cfg_logger,
@@ -476,13 +408,8 @@ def _run_training(args: argparse.Namespace) -> None:
         logger.log_dataloader_params(train_loader, prefix="train_loader")
         logger.log_dataloader_params(val_loader, prefix="val_loader")
         logger.log_reconciliation(registry)
-        # TODO(#139): re-enable per-run dataset-statistics logging once
-        # Logger.log_dataset_statistics is adapted to the multi-dataset (per-split lists)
-        # structure; it currently expects single train/val/test datasets.
 
         try:
-            # test_loader is None: the multi-dataset config does not define test splits yet,
-            # so there is no test data to evaluate (see data_config.yaml).
             train_model(
                 meta_model=meta_model,
                 evaluator=evaluator,
@@ -496,8 +423,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 early_stopping_min_delta=args.early_stopping_min_delta,
             )
         finally:
-            print("TODO:Update")
-            # _write_failure_report_once()
+            pass
         logging.info("Training complete")
 
 

@@ -1,5 +1,8 @@
 .PHONY: sync logs lcc-log check kernel \
-	sm-sync sm-check sm-dry-run sm-launch sm-smoke sm-require-env
+	sm-sync sm-check sm-dry-run sm-launch sm-smoke sm-require-env \
+	smoke-standard \
+	sm-issue-129-dry-run sm-issue-129-launch \
+	sm-baseline-dry-run sm-baseline-launch sm-baseline-logs sm-baseline-status
 
 # Re-sync the uv environment and Jupyter kernel from the current branch.
 # Equivalent to re-running the LCC without restarting the space.
@@ -70,3 +73,36 @@ sm-launch: sm-require-env
 
 sm-smoke:
 	bash docker/jobs/local_smoke.sh training
+
+smoke-standard:  ## Run standard-mode pipeline smoke test (no S3 required)
+	uv run pytest tests/test_standard_pipeline_smoke.py -v -m smoke
+
+# --- Issue #129: LinearDINOv3 baseline (Mermaid + CoralNet, frozen linear probe, no CBM) ---
+sm-issue-129-dry-run: sm-require-env
+	$(SM_AWS_ENV) uv run --extra sagemaker python scripts/launch_training.py \
+		--run-config sagemaker/runs/issue_129_dinov3_baseline.yaml \
+		--config-dir sagemaker/configs/baseline/ \
+		--mlflow-tracking-uri $(MLFLOW_TRACKING_URI) \
+		--role-arn $(SM_ROLE_ARN) \
+		--dry-run
+
+sm-issue-129-launch: sm-require-env
+	$(SM_AWS_ENV) uv run --extra sagemaker python scripts/launch_training.py \
+		--run-config sagemaker/runs/issue_129_dinov3_baseline.yaml \
+		--config-dir sagemaker/configs/baseline/ \
+		--mlflow-tracking-uri $(MLFLOW_TRACKING_URI) \
+		--role-arn $(SM_ROLE_ARN) \
+		$(if $(HF_TOKEN),--hf-token $(HF_TOKEN),)
+
+# Baseline submission aliases (issue #129).
+sm-baseline-dry-run: sm-issue-129-dry-run
+	@echo "✓ Dry-run completed. Run 'make sm-baseline-launch' to submit."
+
+sm-baseline-launch: sm-issue-129-launch
+
+sm-baseline-logs: sm-require-env
+	$(SM_AWS_ENV) aws logs tail /aws/sagemaker/TrainingJobs --follow
+
+sm-baseline-status: sm-require-env
+	$(SM_AWS_ENV) aws sagemaker list-training-jobs --max-results 5 \
+		--sort-by CreationTime --sort-order Descending
