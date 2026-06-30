@@ -42,6 +42,7 @@ dependencies = [
 coralnet-etl = "mermaidseg.datasets.coralnet.etl.__main__:main"
 coralnet-remediate = "mermaidseg.datasets.coralnet.scraper.remediate_incomplete:main"
 coralnet-refresh = "mermaidseg.datasets.coralnet.scraper.refresh_image_lists:main"
+coralnet-resize = "mermaidseg.datasets.coralnet.preprocessing.resize:main"
 
 [project.optional-dependencies]
 notebooks = [

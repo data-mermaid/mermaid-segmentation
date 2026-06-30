@@ -1,5 +1,5 @@
-"""Image resizing preprocessing pipeline: scan for missing resized images, then resize and
-upload."""
+"""Image resizing preprocessing pipeline: scan for missing resized images, then resize
+and upload."""
 
 from __future__ import annotations
 
@@ -35,8 +35,8 @@ DEFAULT_CHECKPOINT_EVERY = 1000
 def make_resize_s3_client(*, max_pool_connections: int = 10) -> Any:
     """Build an S3 client sized for concurrent resize/scan workers.
 
-    boto3 clients are thread-safe, so the orchestrator builds one client with ``max_pool_connections
-    >= workers`` and shares it across all worker threads.
+    boto3 clients are thread-safe, so the orchestrator builds one client with
+    ``max_pool_connections >= workers`` and shares it across all worker threads.
     """
     config = Config(
         retries={"max_attempts": 10, "mode": "adaptive"},
@@ -120,8 +120,8 @@ def _resized_s3_key_for(prefix: str, source_id: int, image_id: str, threshold: i
 def _list_existing_resized_keys(s3_client: Any, bucket: str, output_prefix: str) -> set[str]:
     """Return every object key under ``<output_prefix>/resized/`` via paginated LIST.
 
-    One LIST request covers 1000 objects, so this replaces hundreds of thousands of per-image
-    ``head_object`` calls with a few hundred sequential pages.
+    One LIST request covers 1000 objects, so this replaces hundreds of thousands of per-
+    image ``head_object`` calls with a few hundred sequential pages.
     """
     resized_prefix = f"{output_prefix}/resized/"
     paginator = s3_client.get_paginator("list_objects_v2")
@@ -444,13 +444,15 @@ def resize_and_upload_image(
 def _summarise_checkpoint(checkpoint_df: pd.DataFrame) -> tuple[int, int, int, int]:
     """Count (resized, skipped, failed, corrupted) from checkpoint statuses alone.
 
-    Counts come from the checkpoint, never from todo-list arithmetic — on a resume the todo can be
-    smaller than the checkpoint, which previously produced negative "skipped" counts.
+    Counts come from the checkpoint, never from todo-list arithmetic — on a resume the
+    todo can be smaller than the checkpoint, which previously produced negative
+    "skipped" counts.
     """
     num_resized = int((checkpoint_df["status"] == "completed").sum())
     num_failed = int((checkpoint_df["status"] == "failed").sum())
     is_skipped = checkpoint_df["status"] == "skipped"
-    is_corrupted = checkpoint_df["skip_reason"].str.startswith("corrupted_").fillna(False)
+    skip_reason = checkpoint_df.get("skip_reason", pd.Series("", index=checkpoint_df.index))
+    is_corrupted = skip_reason.str.startswith("corrupted_").fillna(False)
     num_corrupted = int((is_skipped & is_corrupted).sum())
     num_skipped = int((is_skipped & ~is_corrupted).sum())
     return num_resized, num_skipped, num_failed, num_corrupted
@@ -507,6 +509,18 @@ def resize_and_upload_all_images(
         df_todo[["source_id", "image_id", "original_s3_key", "output_s3_key"]],
         on=["source_id", "image_id"],
     )
+
+    # A non-empty checkpoint that shares zero (source_id, image_id) with the todo is never
+    # intentional — it means the checkpoint came from a different ETL run than the one that
+    # produced df_todo. Left unguarded this silently processes nothing and reports success
+    # (the "Resizing images: 0it" bug). Fail loudly so the stale checkpoint gets noticed.
+    if df_work.empty:
+        raise ValueError(
+            f"Checkpoint at {checkpoint_path} has {len(df_pending)} pending items but none "
+            f"intersect the {len(df_todo)} todo items — checkpoint is from a different ETL run. "
+            "Delete the stale checkpoint or pull the one matching this run."
+        )
+    logger.info("Merged %d pending checkpoint items → %d workable", len(df_pending), len(df_work))
 
     # Map (source_id, image_id) -> positional row index for O(1) in-memory status updates.
     row_index: dict[tuple[int, str], int] = {
@@ -566,3 +580,198 @@ def resize_and_upload_all_images(
     )
 
     return num_resized, num_skipped, num_failed, num_corrupted
+
+
+def _default_worker_count() -> int:
+    env = os.environ.get("MERMAID_CORALNET_RESIZE_WORKERS")
+    if env:
+        return max(1, int(env))
+    cpu = os.cpu_count() or 4
+    return min(64, max(32, cpu * 4))
+
+
+def _sync_checkpoint_to_s3(local_path: Path, bucket: str, s3_key: str) -> None:
+    import boto3
+
+    boto3.client("s3").upload_file(str(local_path), bucket, s3_key)
+    logger.info("Checkpoint synced to s3://%s/%s", bucket, s3_key)
+
+
+def _sync_checkpoint_from_s3(local_path: Path, bucket: str, s3_key: str) -> bool:
+    import boto3
+
+    s3 = boto3.client("s3")
+    try:
+        s3.head_object(Bucket=bucket, Key=s3_key)
+    except Exception:  # noqa: BLE001
+        return False
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    s3.download_file(bucket, s3_key, str(local_path))
+    logger.info("Checkpoint downloaded from s3://%s/%s", bucket, s3_key)
+    return True
+
+
+_DEFAULT_CHECKPOINT_S3_KEY = "etl-outputs/coralnet/{run}/resize_checkpoint_{run}.parquet"
+
+
+def _resolve_checkpoint_s3_keys(
+    run: str,
+    checkpoint_s3_key: str | None,
+    pull_checkpoint_s3_key: str | None,
+) -> tuple[str, str]:
+    """Resolve the (pull, push) checkpoint S3 keys.
+
+    Pull and push are deliberately independent: a job may seed from a prior run's checkpoint
+    (``pull_checkpoint_s3_key``) while writing its own results under the current run's path. When
+    only the push key is overridden, pull falls back to it; when neither is given, both derive from
+    the run version. Conflating the two is the wrong-path bug — a May-seeded job overwriting May's
+    checkpoint — so this returns them as a pair.
+
+    Returns:
+        (pull_key, push_key)
+    """
+    push_key = checkpoint_s3_key or _DEFAULT_CHECKPOINT_S3_KEY.format(run=run)
+    pull_key = pull_checkpoint_s3_key or push_key
+    return pull_key, push_key
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the CoralNet resize pipeline (SageMaker processing task)."""
+    import argparse
+
+    import pandas as pd
+
+    parser = argparse.ArgumentParser(description="Resize CoralNet images flagged needs_resize.")
+    parser.add_argument("--bucket", default="dev-datamermaid-sm-sources")
+    parser.add_argument("--run", default=None, help="ETL version tag (e.g. 20260624_nogit)")
+    parser.add_argument("--images-uri", default=None, help="Override S3/local images parquet URI")
+    parser.add_argument("--output-prefix", default="dev/images")
+    parser.add_argument("--threshold", type=int, default=2048)
+    parser.add_argument("--workers-scan", type=int, default=None)
+    parser.add_argument("--workers-resize", type=int, default=None)
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=Path("outputs/resize_checkpoint.parquet"),
+    )
+    parser.add_argument(
+        "--checkpoint-s3-key", default=None, help="S3 key for push (default: derived from --run)"
+    )
+    parser.add_argument(
+        "--pull-checkpoint-s3-key",
+        default=None,
+        help="S3 key to pull from (default: same as --checkpoint-s3-key)",
+    )
+    parser.add_argument("--pull-checkpoint", action="store_true")
+    parser.add_argument("--push-checkpoint", action="store_true")
+    parser.add_argument("--skip-scan", action="store_true")
+    parser.add_argument("--checkpoint-every", type=int, default=DEFAULT_CHECKPOINT_EVERY)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    workers_default = _default_worker_count()
+    workers_scan = args.workers_scan or workers_default
+    workers_resize = args.workers_resize or workers_default
+    run = args.run or "unknown"
+    pull_s3_key, checkpoint_s3_key = _resolve_checkpoint_s3_keys(
+        run=run,
+        checkpoint_s3_key=args.checkpoint_s3_key,
+        pull_checkpoint_s3_key=args.pull_checkpoint_s3_key,
+    )
+
+    if args.pull_checkpoint:
+        _sync_checkpoint_from_s3(args.checkpoint, args.bucket, pull_s3_key)
+
+    if args.checkpoint.exists():
+        df_cp = read_checkpoint(args.checkpoint)
+        counts = df_cp["status"].value_counts().to_dict()
+        logger.info(
+            "Checkpoint: completed=%s pending=%s failed=%s",
+            counts.get("completed", 0),
+            counts.get("pending", 0),
+            counts.get("failed", 0),
+        )
+
+    if args.images_uri:
+        images_uri = args.images_uri
+    elif args.run:
+        images_uri = f"s3://{args.bucket}/etl-outputs/coralnet/{run}/coralnet_images_{run}.parquet"
+    else:
+        logger.error("Provide --images-uri or --run")
+        return 2
+
+    logger.info("Loading images parquet: %s", images_uri)
+    storage_options = None
+    if images_uri.startswith("s3://"):
+        storage_options = {
+            "config_kwargs": {"max_pool_connections": max(workers_scan, workers_resize) + 4}
+        }
+    df = pd.read_parquet(images_uri, storage_options=storage_options)
+    df_work = df.loc[df["needs_resize"]].copy()
+    logger.info(
+        "needs_resize=True: %s / %s total rows across %s sources",
+        f"{len(df_work):,}",
+        f"{len(df):,}",
+        df_work["source_id"].nunique(),
+    )
+
+    if args.skip_scan:
+        if not args.checkpoint.exists():
+            logger.error("--skip-scan requires an existing checkpoint at %s", args.checkpoint)
+            return 1
+        df_todo = build_todo_from_checkpoint(
+            df_images=df_work,
+            checkpoint_path=args.checkpoint,
+            output_prefix=args.output_prefix,
+            threshold=args.threshold,
+        )
+        logger.info("Skip-scan resume: %s pending images", f"{len(df_todo):,}")
+    else:
+        df_todo = scan_for_missing_resized_images(
+            df_images=df_work,
+            bucket=args.bucket,
+            output_prefix=args.output_prefix,
+            threshold=args.threshold,
+            workers=workers_scan,
+            s3_client=None,
+        )
+        logger.info("Scan complete: %s images to resize", f"{len(df_todo):,}")
+
+    if df_todo.empty:
+        logger.info("Nothing to do — all resized images already exist.")
+        if args.push_checkpoint and args.checkpoint.exists():
+            _sync_checkpoint_to_s3(args.checkpoint, args.bucket, checkpoint_s3_key)
+        return 0
+
+    args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    num_resized, num_skipped, num_failed, num_corrupted = resize_and_upload_all_images(
+        df_todo=df_todo,
+        bucket=args.bucket,
+        output_prefix=args.output_prefix,
+        checkpoint_path=args.checkpoint,
+        threshold=args.threshold,
+        workers=workers_resize,
+        s3_client=None,
+        checkpoint_every=args.checkpoint_every,
+    )
+    logger.info(
+        "Done: resized=%s skipped=%s corrupted=%s failed=%s",
+        num_resized,
+        num_skipped,
+        num_corrupted,
+        num_failed,
+    )
+
+    if args.push_checkpoint:
+        _sync_checkpoint_to_s3(args.checkpoint, args.bucket, checkpoint_s3_key)
+
+    return 1 if num_failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
