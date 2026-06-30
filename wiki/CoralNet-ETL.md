@@ -94,6 +94,41 @@ latency. Checkpoint part files are written every `--checkpoint-every` rows
 (default `50_000`) so an interrupted run resumes by reading the existing
 checkpoint parts.
 
+## Running on SageMaker
+
+Use SageMaker for full rebuilds and overnight runs — IAM credentials rotate every
+~60 minutes, which would require manual intervention for long local runs.
+
+### Full ETL rebuild (`coralnet-etl`)
+
+The `coralnet-etl` task runs `audit → build-annotations → build-images` in one
+ProcessingJob and uploads versioned parquets to the canonical S3 prefix:
+
+```bash
+export AWS_PROFILE=wcs-launcher
+uv run --extra sagemaker python scripts/launch_processing.py \
+    --run-config sagemaker/runs/<run>.yaml \
+    --config-dir sagemaker/configs/coralnet-refresh/
+```
+
+> The operational run specs (`issue_130_coralnet_*.yaml`) and refresh source CSVs live on the
+> local `sagemaker-jobs` branch, not in this repo — check that branch out to launch these jobs.
+
+### Image-list refresh (`coralnet-refresh`)
+
+After an audit, any source where `image_list_covers_annotations=False` has a
+truncated `image_list.csv` (fix for [#130](https://github.com/data-mermaid/mermaid-segmentation/issues/130)).
+The `coralnet-refresh` task re-downloads those CSVs by scraping the CoralNet browse
+listing. It has been run against the full set of affected sources; see
+[SageMaker Jobs — Run a processing job](SageMaker-Jobs#run-a-processing-job)
+for the full runbook including concurrency guidance, the pre-flight reachability
+probe, and CloudWatch monitoring.
+
+**Quick concurrency rule:** use 2–3 `workers`, not more. CoralNet's browse pages
+are server-side rendered; many simultaneous requests cause thundering-herd timeouts.
+The task ships with startup jitter and login retries, but low concurrency is the
+primary lever.
+
 ## Determinism
 
 All three writers route through `write_parquet_deterministic` in
@@ -145,7 +180,9 @@ go through boto3 with adaptive retries.
 - Corrupt JPEG → `header_status="corrupt"`, dimensions NULL — not a hard
   failure.
 - SageMaker IAM credentials rotate every ~60 min:
-  - Boto3 adaptive retries cover short-window expirations on non-CSV ops.
+  - Each audit worker thread refreshes its own boto3 session on a wall-clock
+    timer (`_CRED_REFRESH_INTERVAL_SECONDS = 3000`, i.e. every 50 min) so the
+    rotation never races against the 60-min SageMaker boundary.
   - DuckDB httpfs does NOT auto-refresh credentials. The audit loop re-runs
     `CREATE OR REPLACE SECRET s3 (TYPE S3, PROVIDER CREDENTIAL_CHAIN)` every
     `--checkpoint-every` sources on each worker's thread-local ibis connection.

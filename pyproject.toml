@@ -18,7 +18,7 @@ dependencies = [
     "torch>=2.4,<2.8",
     "transformers",
     "datasets>=3.0",
-    "s3fs",
+    "s3fs>=2024.2.0",
     "segmentation-models-pytorch",
     "mlflow",
     "pyyaml",
@@ -41,6 +41,8 @@ dependencies = [
 [project.scripts]
 coralnet-etl = "mermaidseg.datasets.coralnet.etl.__main__:main"
 coralnet-remediate = "mermaidseg.datasets.coralnet.scraper.remediate_incomplete:main"
+coralnet-refresh = "mermaidseg.datasets.coralnet.scraper.refresh_image_lists:main"
+coralnet-resize = "mermaidseg.datasets.coralnet.preprocessing.resize:main"
 
 [project.optional-dependencies]
 notebooks = [
