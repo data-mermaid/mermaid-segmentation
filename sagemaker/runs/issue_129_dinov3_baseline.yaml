@@ -25,3 +25,4 @@ config:
     experiment-name: baselines
     epochs: 200
     seed: 42
+    num-workers: 8
