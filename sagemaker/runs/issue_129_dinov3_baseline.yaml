@@ -12,9 +12,6 @@ job:
     # original path — ~40% less I/O per image. Full key (ANNOTATIONS_PATH, resolved as
     # s3://{source_bucket}/{path}) because the ETL publishes under etl-outputs/coralnet/<version>/.
     MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
-    # Silence PIL's per-image "malformed MPO file" UserWarning (CoralNet has many such JPEGs);
-    # targeted so other warnings still surface. Applied at launch (env), no image rebuild.
-    PYTHONWARNINGS: "ignore:Image appears to be a malformed MPO file:UserWarning"
 
 # Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher).
 # Uses mermaid + coralnet sources only (no cbm). Frozen linear probe (see training config).
