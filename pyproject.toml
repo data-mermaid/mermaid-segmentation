@@ -41,7 +41,6 @@ training = [
     "mlflow",
     "sagemaker-mlflow>=0.2.0",
     "torchmetrics",
-    "wandb>=0.25.0",
 ]
 # Host-side SageMaker job submission (scripts/launch_*.py); imported lazily.
 sagemaker = [
