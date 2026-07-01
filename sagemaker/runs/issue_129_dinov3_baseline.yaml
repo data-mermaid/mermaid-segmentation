@@ -6,11 +6,12 @@ job:
   volume_gb: 200
   max_runtime_hours: 8
   env:
-    # Point the CoralNet dataset at the rebuilt corpus (flat annotations parquet), not the
-    # legacy 30112025 fallback. Use the full key (ANNOTATIONS_PATH, resolved as
-    # s3://{source_bucket}/{path}) because the ETL publishes under etl-outputs/coralnet/<version>/,
-    # whereas the ANNOTATIONS_VERSION shortcut assumes a bucket-root key.
-    MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_annotations_20260623_nogit.parquet
+    # Point the CoralNet dataset at the rebuilt corpus's TRAINING MANIFEST, not the legacy
+    # 30112025 fallback. The manifest carries a per-row `image_s3_key` (resized copy when
+    # >threshold, original otherwise), which CoralNetDataset reads instead of templating the
+    # original path — ~40% less I/O per image. Full key (ANNOTATIONS_PATH, resolved as
+    # s3://{source_bucket}/{path}) because the ETL publishes under etl-outputs/coralnet/<version>/.
+    MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
 
 # Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher).
 # Uses mermaid + coralnet sources only (no cbm). Frozen linear probe (see training config).
