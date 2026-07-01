@@ -18,6 +18,9 @@ training:
         type: PolynomialLR
         power: 1
         total_iters: 200
+        # Frozen probe: no LR warmup (only the head trains on fixed features). Without this,
+        # meta.py defaults warmup_iters to 2000 (~2 epochs) — a fine-tune-oriented default.
+        warmup_iters: 0
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
     batch_size: 8
