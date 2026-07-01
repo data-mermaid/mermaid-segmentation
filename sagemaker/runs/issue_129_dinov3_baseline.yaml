@@ -21,5 +21,4 @@ config:
     run-name: issue-129-dinov3-baseline-mermaid-coralnet-tiela
     experiment-name: baselines
     epochs: 200
-    batch-size: 8
     seed: 42

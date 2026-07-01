@@ -20,7 +20,7 @@ training:
         total_iters: 200
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
-    batch_size: 10
+    batch_size: 8
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
