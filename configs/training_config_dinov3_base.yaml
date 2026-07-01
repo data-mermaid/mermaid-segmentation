@@ -21,6 +21,12 @@ training:
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
     batch_size: 8
+    # Target-class whitelist (SourceLabelRegistry target_label_subset). Ids 1..N are assigned
+    # alphabetically; id 0 is the unmapped/ignore slot (ignore_index: 0). 'Background' is a real
+    # trained class here: the coralnet->mermaid map (configs/coralnet_to_mermaid_mapping_temporary.json)
+    # sends water/unclear/etc. to the benthic target 'Background' (capitalized — match is
+    # case-sensitive). Names must match the produced targets (coralnet map values + MERMAID
+    # benthic-attribute hierarchy) exactly.
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
