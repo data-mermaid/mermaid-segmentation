@@ -33,7 +33,8 @@ _LEGACY_ANNOTATIONS_PATH = "coralnet_annotations_30112025.parquet"
 
 
 def _resolve_default_annotations_path() -> str:
-    """Resolve the default ``annotations_path`` from env vars, falling back to the legacy file.
+    """Resolve the default ``annotations_path`` from env vars, falling back to the
+    legacy file.
 
     Precedence:
         1. ``MERMAID_CORALNET_ANNOTATIONS_PATH`` — full S3 key as published by the ETL.
@@ -53,8 +54,8 @@ def _resolve_default_annotations_path() -> str:
 
 
 class CoralNetDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file stored
-    on S3.
+    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet
+    file stored on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in CoralNet's own provider-ID label
@@ -147,28 +148,49 @@ class CoralNetDataset(BaseCoralDataset):
             df_annotations["coralnet_name"].astype(str).str.lower()
         )
 
-        df_annotations = df_annotations[
-            [
-                "source_id",
-                "image_id",
-                "row",
-                "col",
-                "coralnet_id",
-                "coralnet_name",
-                "source_label_name",
-            ]
+        selected_columns = [
+            "source_id",
+            "image_id",
+            "row",
+            "col",
+            "coralnet_id",
+            "coralnet_name",
+            "source_label_name",
         ]
+        # Preserve a per-row resolved S3 key when the parquet carries one (e.g. the training
+        # manifest's `image_s3_key`, which points at the resized copy). read_image() then reads
+        # that key instead of templating the original-image path.
+        if "image_s3_key" in df_annotations.columns:
+            selected_columns.append("image_s3_key")
+        df_annotations = df_annotations[selected_columns]
 
         df_images = self._derive_df_images_from_annotations(df_annotations)
         return df_annotations, df_images
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
+        # `image_s3_key` is constant per (source_id, image_id), so it survives the drop_duplicates
+        # and reaches read_image via the df_images row.
+        image_columns = ["source_id", "image_id"]
+        if "image_s3_key" in df_annotations.columns:
+            image_columns.append("image_s3_key")
         return (
-            df_annotations[["source_id", "image_id"]]
+            df_annotations[image_columns]
             .drop_duplicates(subset=["source_id", "image_id"])
             .reset_index(drop=True)
         )
 
-    def read_image(self, image_id: str, source_id: str, **row_kwargs: Any) -> NDArray[Any]:
-        key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
+    def read_image(
+        self,
+        image_id: str,
+        source_id: str,
+        image_s3_key: str | None = None,
+        **row_kwargs: Any,
+    ) -> NDArray[Any]:
+        # Prefer an explicit key from the parquet (the training manifest's `image_s3_key`, which
+        # resolves to the resized copy); otherwise template the original-image key. The NaN-safe
+        # `isinstance` check falls back to templating when the column is absent or the value is null.
+        if isinstance(image_s3_key, str) and image_s3_key:
+            key = image_s3_key
+        else:
+            key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
         return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
