@@ -13,8 +13,10 @@
 
 ARG BASE_IMAGE=pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
 FROM ${BASE_IMAGE}
-ARG HF_TOKEN
-ENV HF_TOKEN=$HF_TOKEN
+
+# HF_TOKEN is injected at runtime by the launcher (scripts/launch_training.py sets it in the
+# SageMaker Estimator environment). Do NOT bake it via ARG/ENV — that persists the secret in
+# image layers (docker history/inspect). Gated-model downloads happen at run time, not build.
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
