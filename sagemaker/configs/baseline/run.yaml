@@ -4,7 +4,7 @@ job:
   entrypoint: scripts/sagemaker_train_entrypoint.py
   instance_type: ml.g5.2xlarge
   volume_gb: 200
-  max_runtime_hours: 8
+  max_runtime_hours: 48
 
 # Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher).
 # Uses mermaid + coralnet sources only (no cbm).
@@ -19,3 +19,10 @@ config:
     epochs: 200
     seed: 42
     num-workers: 8
+    # Select the best checkpoint / early-stop on mIoU, not accuracy — benthic classes are
+    # heavily imbalanced, so accuracy rewards the majority classes. Generous patience because
+    # val is randomly sampled (noisy epoch-to-epoch). 200 epochs is the ceiling; a frozen probe
+    # usually plateaus well before that.
+    metric-of-interest: miou
+    early-stopping: true
+    early-stopping-patience: 20

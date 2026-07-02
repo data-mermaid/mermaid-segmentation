@@ -26,3 +26,8 @@ config:
     epochs: 200
     seed: 42
     num-workers: 8
+    # Select best checkpoint / early-stop on mIoU (benthic classes are imbalanced; accuracy
+    # favors majority classes). Patience is generous because val is randomly sampled (noisy).
+    metric-of-interest: miou
+    early-stopping: true
+    early-stopping-patience: 20

@@ -76,7 +76,12 @@ def main():
     for flag, path in config_flags.items():
         cmd += [f"--{flag.replace('_', '-')}", path]
     for k, v in overrides.items():
-        cmd += [f"--{k}", str(v)]
+        if isinstance(v, bool):
+            # store_true flags (e.g. --early-stopping): emit the bare flag when true, omit when false.
+            if v:
+                cmd.append(f"--{k}")
+        else:
+            cmd += [f"--{k}", str(v)]
 
     log.info("Invoking: %s", " ".join(cmd))
     rc = subprocess.call(cmd)
