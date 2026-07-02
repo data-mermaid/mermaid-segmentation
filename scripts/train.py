@@ -55,6 +55,7 @@ from mermaidseg.dataset_reconciliation import (
     prepare_splits_for_registry,
 )
 from mermaidseg.datasets import (
+    BaseCoralDataset,
     BenthosYuvalCoralsDataset,
     CatlinSeaviewDataset,
     CoralNetDataset,
@@ -394,6 +395,11 @@ def _run_training(args: argparse.Namespace) -> None:
 
     train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"]
     val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
+
+    # Filter out the (None, None) placeholders BaseCoralDataset.__getitem__ returns on load
+    # failures (e.g. a missing/renamed S3 object) so one bad image drops from the batch instead
+    # of crashing default_collate — otherwise a single missing image kills the whole run.
+    loader_kwargs["collate_fn"] = BaseCoralDataset.collate_fn
 
     train_loader = DataLoader(ConcatDataset(train_datasets), shuffle=True, **loader_kwargs)
     val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
