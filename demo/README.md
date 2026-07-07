@@ -42,7 +42,7 @@ uv run python demo/app.py --port 7860
 
 Model definitions and concept helpers are imported from the `mermaidseg` package (not vendored). Supported `model.name` values: `ConceptBottleneckDINOv3`, `ConceptBottleneckDPTDINOv3`, `ConceptBottleneckDPTLoRADINOv3`.
 
-See [LOCAL.md](LOCAL.md) for the full local-hosting guide: token caveats for the private checkpoint repo, artifact-resolution env vars, failure signatures, and a no-checkpoint UI-only mode.
+See [LOCAL.md](LOCAL.md) for the full local-hosting guide: token caveats for the private checkpoint repo, artifact-resolution env vars, and failure signatures.
 
 ## Deploy (Hugging Face Space)
 

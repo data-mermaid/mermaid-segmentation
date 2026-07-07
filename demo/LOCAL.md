@@ -69,50 +69,6 @@ The bundled `id2label.json` / `concept_id2name.json` / model config correspond t
 | `--share` | public Gradio share link |
 | `--device cuda` | force device (default: cuda if available, else cpu) |
 
-## UI-only mode (no token, no checkpoint)
-
-For layout/UX work you can run the full UI with a stubbed model — real label/concept metadata, fake predictions. Save as `scratch_stub.py` **in the repo root** and run `uv run --extra demo python scratch_stub.py`:
-
-```python
-import sys
-from types import SimpleNamespace
-
-sys.path.insert(0, "demo")
-import numpy as np
-import torch
-
-import app
-import inference
-
-artifacts = inference.load_artifacts(
-    checkpoint="/dev/null",  # stored but never opened by build_ui
-    model_config=inference.default_model_config(),
-)
-model = SimpleNamespace(
-    concept_classifier=SimpleNamespace(in_channels=len(artifacts.concept_id2name))
-)
-
-
-def fake_predict(model, image_tensor):
-    # Grids must match the model input resolution: overlays blend probs 1:1
-    # against the display image.
-    h, w = int(image_tensor.shape[-2]), int(image_tensor.shape[-1])
-    rng = np.random.default_rng(0)
-    n_cls = max(artifacts.id2label) + 1
-    logits = rng.normal(size=(n_cls, h, w)).astype(np.float32)
-    e = np.exp(logits - logits.max(0, keepdims=True))
-    class_probs = (e / e.sum(0, keepdims=True)).astype(np.float32)
-    concept_probs = rng.random((len(artifacts.concept_id2name), h, w), dtype=np.float32)
-    return class_probs, concept_probs, class_probs.argmax(0).astype(np.int64)
-
-
-app.predict = fake_predict  # run_predict resolves `predict` from app's module globals
-
-app.build_ui(artifacts, model, torch.device("cpu"), inference.default_taxonomy_csv()).launch(
-    server_port=7861, css=app.CSS
-)
-```
-
 ## Version notes
 
 - Python **3.12** and Gradio **6.17.3** — the same pins as the deployed Space (`uv.lock` resolves gradio to exactly the Space's version, so local rendering matches production).
