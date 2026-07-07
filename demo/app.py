@@ -71,12 +71,36 @@ DEFAULT_MULTIHOT: tuple[str, ...] = (
     "dark",
 )
 
+PRIMARY_BTN_LABEL = "Run segmentation"
+
 CSS = """
-#mermaid-demo .gap, #mermaid-demo .form { gap: 8px !important; }
-#mermaid-demo .block { padding: 8px !important; }
-#mermaid-demo .section-title { font-size: 1.1rem; font-weight: 700; margin: 0 0 6px 0; }
-#mermaid-demo .hint { color: #888; font-style: italic; font-size: 12px; }
-#mermaid-demo .panel { padding: 2px; }
+/* Scoped to .gradio-container: Blocks(elem_id=...) does not reach the DOM in Gradio 6. */
+.gradio-container .gap, .gradio-container .form { gap: 8px !important; }
+.gradio-container .block { padding: 8px !important; }
+.gradio-container .section-title { font-size: 1.1rem; font-weight: 700; margin: 0 0 6px 0; }
+.gradio-container .hint { color: #888; font-style: italic; font-size: 12px; }
+.gradio-container .panel { padding: 2px; }
+/* Fixed dark header (not theme vars) so the white-filled logo reads in both themes. */
+#mermaid-header { padding: 0 !important; }
+#mermaid-header .mermaid-header-bar {
+    display: flex; align-items: center; gap: 16px;
+    background: #0d1117; color: #ffffff;
+    padding: 14px 20px; border-radius: 10px;
+}
+#mermaid-header .mermaid-header-logo svg { width: 46px; height: 48px; display: block; flex: 0 0 auto; }
+#mermaid-header .mermaid-header-title {
+    font-size: 1.4rem; font-weight: 700; line-height: 1.2; color: #ffffff;
+    /* Brand: MERMAID renders as plain all-caps, never small-caps. */
+    font-variant: normal; font-variant-caps: normal; text-transform: none; letter-spacing: normal;
+}
+#mermaid-header .mermaid-header-subtitle {
+    margin-top: 2px; color: rgba(255, 255, 255, 0.85); font-size: 0.95rem;
+}
+/* Gradio's base CSS colors <b> near-black; keep it readable on the dark bar. */
+#mermaid-header .mermaid-header-subtitle b { color: #ffffff; }
+#mermaid-segment-btn, #mermaid-segment-btn button {
+    width: 100%; max-width: 340px; margin-left: auto; margin-right: auto;
+}
 #mermaid-onehot-img img, #mermaid-multihot-img img {
     aspect-ratio: 1 / 1 !important;
     max-height: 70vh !important;
@@ -85,6 +109,22 @@ CSS = """
 """
 
 logger = logging.getLogger(__name__)
+
+_LOGO_SVG_PATH = Path(__file__).resolve().parent / "static" / "mermaid-logo.svg"
+
+
+def _header_html() -> str:
+    logo = _LOGO_SVG_PATH.read_text(encoding="utf-8") if _LOGO_SVG_PATH.is_file() else ""
+    return (
+        '<div class="mermaid-header-bar">'
+        f'<div class="mermaid-header-logo" aria-hidden="true">{logo}</div>'
+        "<div>"
+        '<div class="mermaid-header-title">MERMAID Concept Bottleneck Demo</div>'
+        '<div class="mermaid-header-subtitle">'
+        f"Upload an image or pick a sample, click <b>{PRIMARY_BTN_LABEL}</b>, "
+        "then click any overlay pixel to inspect classes and taxonomy.</div>"
+        "</div></div>"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -336,11 +376,8 @@ def build_ui(
             return np.array(Image.open(static_examples[idx]).convert("RGB"))
         return None
 
-    with gr.Blocks(title="MERMAID Concept Bottleneck Demo", elem_id="mermaid-demo") as ui:
-        gr.Markdown(
-            "# MERMAID Concept Bottleneck Demo\n"
-            "Upload an image, click **Predict**, then click any overlay pixel to inspect classes and taxonomy."
-        )
+    with gr.Blocks(title="MERMAID Concept Bottleneck Demo") as ui:
+        gr.HTML(_header_html(), elem_id="mermaid-header")
 
         display_state = gr.State(None)
         class_probs_state = gr.State(None)
@@ -348,29 +385,31 @@ def build_ui(
         pred_mask_state = gr.State(None)
         click_state = gr.State(None)
 
-        with gr.Row():
-            with gr.Column(scale=1):
+        # Top-down layout: per-row min_width sums stay under ~950px so rows never
+        # part-wrap in the 1024-1300px band; below that, columns stack vertically.
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1, min_width=260):
                 input_img = gr.Image(
-                    type="numpy", image_mode="RGB", label="Upload image", height=200
+                    type="numpy", image_mode="RGB", label="Upload image", height=300
                 )
-                predict_btn = gr.Button("Predict", variant="primary")
+            with gr.Column(scale=2, min_width=320):
                 if static_examples:
                     sample_gallery = gr.Gallery(
                         value=[(p, Path(p).name) for p in static_examples],
-                        label="Sample images",
-                        columns=3,
-                        height=180,
+                        label="Select sample image",
+                        columns=4,
+                        height=300,
                         allow_preview=False,
                     )
                 else:
                     sample_gallery = None
-                with gr.Accordion("Overlay legend", open=False):
-                    gr.Markdown(
-                        "**one-hot**: argmax class or taxonomic concept; alpha = softmax × opacity.\n\n"
-                        "**multi-hot**: sigmoid heatmap for one concept; viridis colormap."
-                    )
 
-            with gr.Column(scale=2):
+        predict_btn = gr.Button(
+            PRIMARY_BTN_LABEL, variant="primary", size="lg", elem_id="mermaid-segment-btn"
+        )
+
+        with gr.Row():
+            with gr.Column(scale=1, min_width=460):
                 onehot_mode = gr.Dropdown(
                     choices=onehot_choices, value=default_onehot, label="one-hot"
                 )
@@ -382,7 +421,7 @@ def build_ui(
                     elem_id="mermaid-onehot-img",
                 )
 
-            with gr.Column(scale=2):
+            with gr.Column(scale=1, min_width=460):
                 multihot_mode = gr.Dropdown(
                     choices=multihot_choices, value=multihot_choices[0], label="multi-hot"
                 )
@@ -394,14 +433,19 @@ def build_ui(
                     elem_id="mermaid-multihot-img",
                 )
 
-            with gr.Column(scale=2):
+        with gr.Row():
+            with gr.Column(scale=1, min_width=220), gr.Accordion("Overlay legend", open=True):
+                gr.Markdown(
+                    "**one-hot**: argmax class or taxonomic concept; alpha = softmax × opacity.\n\n"
+                    "**multi-hot**: sigmoid heatmap for one concept; viridis colormap."
+                )
+            with gr.Column(scale=3, min_width=480):
                 top_classes_html = gr.HTML(render_top_classes_html([]))
                 other_html = gr.HTML(_empty_other())
-
-        taxonomy_plot = gr.Plot(
-            render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE),
-            label="Predicted Concepts: Taxonomy",
-        )
+                taxonomy_plot = gr.Plot(
+                    render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE),
+                    label="Predicted concepts: taxonomy graph",
+                )
 
         predict_outputs = [
             onehot_img,

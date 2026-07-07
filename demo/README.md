@@ -12,7 +12,7 @@ pinned: false
 
 # 🪸 MERMAID Concept Bottleneck Demo
 
-Interactive demo for **concept-bottleneck coral reef benthic segmentation** (DINOv3 ViT-L + DPT head + LoRA). Upload a reef image, hit **Predict**, then click any pixel to inspect its top classes, taxonomy, and concept activations.
+Interactive demo for **concept-bottleneck coral reef benthic segmentation** (DINOv3 ViT-L + DPT head + LoRA). Upload a reef image, hit **Run segmentation**, then click any pixel to inspect its top classes, taxonomy, and concept activations.
 
 Live Space: **https://huggingface.co/spaces/datamermaid/mermaid-segmentation**
 
