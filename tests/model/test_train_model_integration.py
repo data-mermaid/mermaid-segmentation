@@ -21,6 +21,7 @@ from scripts.train import (
     _build_parser,
     _configure_third_party_loggers,
     _save_failure_report_if_available,
+    _save_failure_reports_if_available,
     _take_first_non_empty_batch,
 )
 
@@ -28,16 +29,21 @@ from scripts.train import (
 class StubLogger:
     """Minimal logger stub for train_model tests."""
 
-    def __init__(self, log_epochs: int = 1):
+    def __init__(self, log_epochs: int = 1, log_checkpoint: int | None = None):
         self.log_epochs = log_epochs
+        self.log_checkpoint = log_checkpoint
         self.logged: list[tuple[dict[str, float], int]] = []
         self.checkpoint_epochs: list[int] = []
+        self.checkpoint_is_best: list[bool] = []
 
     def log(self, payload: dict[str, float], step: int) -> None:
         self.logged.append((payload, step))
 
-    def save_model_checkpoint(self, _meta_model, epoch: int, _metrics: dict[str, float]) -> None:
+    def save_model_checkpoint(
+        self, _meta_model, epoch: int, _metrics: dict[str, float], is_best: bool = True
+    ) -> None:
         self.checkpoint_epochs.append(epoch)
+        self.checkpoint_is_best.append(is_best)
 
 
 class FakeMetaModel:
@@ -162,6 +168,69 @@ def test_metric_direction_accuracy_maximize_and_loss_minimize() -> None:
         metric_of_interest="loss",
     )
     assert logger_loss.checkpoint_epochs == [0, 1]
+
+
+def test_log_checkpoint_triggers_periodic_non_improvement_checkpoint() -> None:
+    """A flat validation metric never improves — log_checkpoint must still
+    checkpoint."""
+    meta = FakeMetaModel(
+        epochs=4,
+        val_losses=[0.9, 0.9, 0.9, 0.9],
+        val_metrics_seq=[{"accuracy": 0.5}] * 4,
+    )
+    logger = StubLogger(log_checkpoint=2)
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    # Epoch 0 improves (first result always beats -inf/inf); epochs 2 are periodic-only.
+    assert logger.checkpoint_epochs == [0, 2]
+    assert logger.checkpoint_is_best == [True, False]
+
+
+def test_log_checkpoint_does_not_duplicate_improvement_epoch() -> None:
+    """When improvement and the periodic interval land on the same epoch, save once."""
+    meta = FakeMetaModel(
+        epochs=3,
+        val_losses=[0.9, 0.8, 0.9],
+        val_metrics_seq=[{"accuracy": 0.5}, {"accuracy": 0.6}, {"accuracy": 0.5}],
+    )
+    logger = StubLogger(log_checkpoint=1)
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    assert logger.checkpoint_epochs == [0, 1, 2]
+    # Every epoch improves except epoch 2 — should stay best=True for 0,1 and
+    # fall back to periodic (best=False) only for the non-improving epoch 2.
+    assert logger.checkpoint_is_best == [True, True, False]
+
+
+def test_no_log_checkpoint_attribute_disables_periodic_checkpointing() -> None:
+    """Loggers without a log_checkpoint attribute must not trigger periodic saves."""
+    meta = FakeMetaModel(
+        epochs=3,
+        val_losses=[0.9, 0.9, 0.9],
+        val_metrics_seq=[{"accuracy": 0.5}] * 3,
+    )
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    assert logger.checkpoint_epochs == [0]
 
 
 def test_end_epoch_is_honored_when_start_epoch_default() -> None:
@@ -364,6 +433,54 @@ def test_save_failure_report_if_available_writes_parquet(tmp_path: Path) -> None
     assert report_path.suffix == ".parquet"
 
 
+class _FailingDataset:
+    def __init__(self, n_failures: int) -> None:
+        self._n_failures = n_failures
+
+    def num_load_failures(self) -> int:
+        return self._n_failures
+
+    def save_load_failures(self, path):
+        pd.DataFrame([{"image_id": "a"}] * self._n_failures).to_parquet(path, index=False)
+        return Path(path)
+
+
+def test_save_failure_reports_if_available_writes_one_report_per_failing_dataset(
+    tmp_path: Path,
+) -> None:
+    dataset_dict = {
+        ("mermaid", "train"): _FailingDataset(3),
+        ("mermaid", "val"): _FailingDataset(0),
+        ("coralnet", "train"): _FailingDataset(1),
+    }
+    paths = _save_failure_reports_if_available(dataset_dict, tmp_path)
+    assert len(paths) == 2
+    for path in paths:
+        assert path.exists()
+        assert path.suffix == ".parquet"
+
+
+def test_save_failure_reports_if_available_returns_empty_without_any_failures(
+    tmp_path: Path,
+) -> None:
+    dataset_dict = {
+        ("mermaid", "train"): _FailingDataset(0),
+        ("coralnet", "train"): _FailingDataset(0),
+    }
+    assert _save_failure_reports_if_available(dataset_dict, tmp_path) == []
+
+
+def test_save_failure_reports_if_available_suffixes_explicit_output_path(tmp_path: Path) -> None:
+    dataset_dict = {
+        ("mermaid", "train"): _FailingDataset(2),
+        ("coralnet", "train"): _FailingDataset(1),
+    }
+    explicit = tmp_path / "failures.parquet"
+    paths = _save_failure_reports_if_available(dataset_dict, tmp_path, str(explicit))
+    names = {p.name for p in paths}
+    assert names == {"failures_mermaid_train.parquet", "failures_coralnet_train.parquet"}
+
+
 class _FakeFailDataset:
     """Dataset stub exposing the load-failure tracking API used by the rate guard."""
 
@@ -418,8 +535,8 @@ def test_enforce_load_failure_rate_noop_for_untracked_dataset() -> None:
 def test_train_model_logs_main_metric_set_to_logger() -> None:
     """Regression guard: train/val metrics AND per-epoch timing/loss reach the logger.
 
-    The branch had replaced unfiltered logging with a filter that dropped timing/gpu/raw-loss
-    metrics; this asserts main's metric set is tracked again.
+    The branch had replaced unfiltered logging with a filter that dropped
+    timing/gpu/raw-loss metrics; this asserts main's metric set is tracked again.
     """
     meta = FakeMetaModel(epochs=1, val_losses=[0.8], val_metrics_seq=[{"accuracy": 0.7}])
     logger = StubLogger()
@@ -446,8 +563,9 @@ def test_train_model_logs_main_metric_set_to_logger() -> None:
 def test_train_model_logs_test_time_taken_to_logger(monkeypatch) -> None:
     """Regression guard (#PR2 review): test/time_taken must reach the logger.
 
-    epoch_loss_dict is logged before the test split is evaluated, so test/time_taken is added after
-    that log and must be logged separately — otherwise it silently never reaches MLflow.
+    epoch_loss_dict is logged before the test split is evaluated, so test/time_taken is
+    added after that log and must be logged separately — otherwise it silently never
+    reaches MLflow.
     """
     monkeypatch.setattr(train_module, "evaluate_and_log", lambda *a, **k: {"accuracy": 0.5})
     meta = FakeMetaModel(epochs=1, val_losses=[0.8], val_metrics_seq=[{"accuracy": 0.7}])

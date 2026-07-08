@@ -18,7 +18,8 @@ from mermaidseg.model.metric_policy import (
 
 
 def _loader_load_failure_count(loader: object) -> int | None:
-    """Return the cumulative load-failure count of a loader's dataset, or None if untracked."""
+    """Return the cumulative load-failure count of a loader's dataset, or None if
+    untracked."""
     dataset = getattr(loader, "dataset", None)
     if dataset is None or not hasattr(dataset, "num_load_failures"):
         return None
@@ -37,10 +38,10 @@ def _enforce_load_failure_rate(
 ) -> None:
     """Raise if this epoch's dataset load-failure rate exceeds ``max_rate``.
 
-    A high rate over a single pass signals a systemic data problem (bad credentials, missing files,
-    truncated image lists) rather than a few corrupt samples, so we fail fast instead of silently
-    training on a shrunken/biased dataset. No-op when disabled or when the dataset does not track
-    load failures.
+    A high rate over a single pass signals a systemic data problem (bad credentials,
+    missing files, truncated image lists) rather than a few corrupt samples, so we fail
+    fast instead of silently training on a shrunken/biased dataset. No-op when disabled
+    or when the dataset does not track load failures.
     """
     if max_rate is None or failures_before is None:
         return
@@ -71,7 +72,7 @@ def train_model(
     logger: Logger | None = None,
     start_epoch: int = -1,
     end_epoch: int = -1,
-    metric_of_interest: str = "accuracy",
+    metric_of_interest: str = "miou",
     early_stopping: bool = False,
     early_stopping_patience: int = 10,
     early_stopping_min_delta: float = 0.0,
@@ -93,14 +94,19 @@ def train_model(
             Defaults to None. If provided, the model is evaluated periodically according
             to ``logger.log_epochs`` (or every epoch when logger is None), plus the final epoch.
         logger (Optional[Logger], optional): Logger object for logging metrics and saving
-            model checkpoints. Defaults to None.
+            model checkpoints. Defaults to None. When ``logger.log_checkpoint`` is set, a
+            periodic (non-improvement) checkpoint is also saved every ``log_checkpoint``
+            epochs, so a resumable snapshot exists even if the validation metric never
+            improves. Periodic checkpoints are skipped on epochs already covered by an
+            improvement-triggered save.
         start_epoch (int, optional): The starting epoch for training. Defaults to -1, which
             will be set to 0 if not specified.
         end_epoch (int, optional): The ending epoch for training. Defaults to -1, which
             will be set based on the meta-model's training configuration if not specified.
         metric_of_interest (str, optional): Metric used for checkpointing and early
-            stopping. Must resolve to ``loss`` or ``accuracy`` (classification accuracy).
-            Defaults to "accuracy".
+            stopping. One of ``loss``, ``accuracy``, ``miou``, ``f1-score``. Defaults to
+            "miou" — mean IoU is a more reliable segmentation metric than pixel accuracy,
+            which is dominated by majority classes (e.g. background) in imbalanced data.
         early_stopping (bool, optional): Enables early stopping on validation
             `metric_of_interest`. Defaults to False.
         early_stopping_patience (int, optional): Number of consecutive epochs with no
@@ -138,6 +144,7 @@ def train_model(
 
     for epoch in range(start_epoch, end_epoch):
         should_stop_early = False
+        checkpoint_saved_this_epoch = False
         epoch_loss_dict: dict[str, float] = {}
         epoch_start_time = time.time()
         logging.info("EPOCH: %d", epoch)
@@ -185,6 +192,7 @@ def train_model(
                 epochs_without_improvement = 0
                 if logger is not None:
                     logger.save_model_checkpoint(meta_model, epoch, val_metric_results)
+                    checkpoint_saved_this_epoch = True
             else:
                 epochs_without_improvement += 1
 
@@ -195,6 +203,21 @@ def train_model(
                     early_stopping_patience,
                 )
                 should_stop_early = True
+
+        checkpoint_interval = (
+            getattr(logger, "log_checkpoint", None) if logger is not None else None
+        )
+        if (
+            logger is not None
+            and checkpoint_interval
+            and checkpoint_interval > 0
+            and not checkpoint_saved_this_epoch
+            and epoch % checkpoint_interval == 0
+        ):
+            periodic_metrics = (
+                val_metric_results if val_loader is not None else train_metric_results
+            )
+            logger.save_model_checkpoint(meta_model, epoch, periodic_metrics, is_best=False)
 
         warmup_complete = (
             getattr(meta_model, "warmup_iters", 0) == 0

@@ -256,6 +256,22 @@ class TestLoggerLog:
         assert metrics["dice/class_0"] == pytest.approx(0.1)
         assert metrics["dice/class_1"] == pytest.approx(0.2)
 
+    def test_ndarray_f1_per_class_uses_id2label_not_id2concept(self, tmp_mlflow_uri, make_config):
+        """'f1_per_class' has no 'concept' substring, so it must resolve via
+        id2label."""
+        meta = FakeMetaModel()
+        config = make_config()
+        lgr = Logger(
+            config=config,
+            meta_model=meta,
+            id2label={0: "coral", 1: "sand"},
+            id2concept={0: "hard", 1: "soft"},
+        )
+        lgr.log({"f1_per_class": np.array([0.9, 0.85])}, step=1)
+        metrics = mlflow.get_run(lgr.mlflow_run_id).data.metrics
+        assert metrics["f1_per_class/coral"] == pytest.approx(0.9)
+        assert metrics["f1_per_class/sand"] == pytest.approx(0.85)
+
     def test_ndarray_concept_metrics_use_id2concept(self, tmp_mlflow_uri, make_config):
         meta = FakeMetaModel()
         config = make_config()
@@ -444,6 +460,111 @@ class TestSaveModelCheckpoint:
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
         ckpt_file = list((tmp_path / "model_checkpoints" / "sched-check").iterdir())[0]
         assert "scheduler_state_dict" in torch.load(ckpt_file, weights_only=False)
+
+    def test_best_model_overwrites_fixed_filename_across_epochs(
+        self, tmp_mlflow_uri, tmp_path, make_config
+    ):
+        """Repeated is_best=True saves must not accumulate one file per epoch."""
+        meta = FakeMetaModel(run_name="best-overwrite")
+        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.5})
+        lgr.save_model_checkpoint(meta, epoch=2, metrics_dict={"loss": 0.3})
+        lgr.save_model_checkpoint(meta, epoch=3, metrics_dict={"loss": 0.1})
+
+        client = mlflow.tracking.MlflowClient()
+        artifacts = {a.path for a in client.list_artifacts(lgr.mlflow_run_id, path="best-model")}
+        assert artifacts == {"best-model/model.pt", "best-model/metadata.json"}
+        assert mlflow.get_run(lgr.mlflow_run_id).data.tags["best_model_epoch"] == "3"
+
+        # checkpoints/ intentionally keeps the full improving-epoch history.
+        checkpoint_artifacts = {
+            a.path for a in client.list_artifacts(lgr.mlflow_run_id, path="checkpoints")
+        }
+        assert len(checkpoint_artifacts) == 3
+
+    def test_best_model_excludes_optimizer_and_scheduler_state(
+        self, tmp_mlflow_uri, tmp_path, make_config
+    ):
+        meta = FakeMetaModel(run_name="best-lean")
+        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.5})
+
+        client = mlflow.tracking.MlflowClient()
+        local_dir = client.download_artifacts(
+            lgr.mlflow_run_id, "best-model/model.pt", str(tmp_path)
+        )
+        best_ckpt = torch.load(local_dir, weights_only=False)
+        assert "optimizer_state_dict" not in best_ckpt
+        assert "scheduler_state_dict" not in best_ckpt
+        assert "model_state_dict" in best_ckpt
+
+        # checkpoints/ still carries full resume state.
+        local_checkpoint = list((tmp_path / "model_checkpoints" / "best-lean").iterdir())[0]
+        full_ckpt = torch.load(local_checkpoint, weights_only=False)
+        assert "optimizer_state_dict" in full_ckpt
+        assert "scheduler_state_dict" in full_ckpt
+
+    def test_local_checkpoints_rotated_beyond_retention(
+        self, tmp_mlflow_uri, tmp_path, make_config
+    ):
+        meta = FakeMetaModel(run_name="rotate-me")
+        lgr = Logger(
+            config=make_config(logger={"keep_last_n_checkpoints": 2}),
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+        )
+        for epoch in (1, 2, 3, 4):
+            lgr.save_model_checkpoint(meta, epoch=epoch, metrics_dict={"loss": 1.0 / epoch})
+
+        files = sorted((tmp_path / "model_checkpoints" / "rotate-me").iterdir())
+        assert len(files) == 2, f"Expected rotation to keep 2 files, found: {files}"
+        names = {f.name for f in files}
+        assert names == {"model_epoch3", "model_epoch4"}
+
+    def test_rotation_disabled_keeps_all_checkpoints(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="keep-all")
+        lgr = Logger(
+            config=make_config(logger={"keep_last_n_checkpoints": 0}),
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+        )
+        for epoch in (1, 2, 3):
+            lgr.save_model_checkpoint(meta, epoch=epoch, metrics_dict={"loss": 1.0 / epoch})
+
+        files = list((tmp_path / "model_checkpoints" / "keep-all").iterdir())
+        assert len(files) == 3
+
+    def test_frozen_backbone_excluded_from_checkpoint_by_default(
+        self, tmp_mlflow_uri, tmp_path, make_config
+    ):
+        meta = FakeMetaModel(run_name="frozen-slim", freeze_backbone=True)
+        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.4})
+
+        ckpt_file = list((tmp_path / "model_checkpoints" / "frozen-slim").iterdir())[0]
+        ckpt = torch.load(ckpt_file, weights_only=False)
+        assert ckpt["excludes_frozen_params"] is True
+        frozen_keys = {name for name, p in meta.model.named_parameters() if not p.requires_grad}
+        assert frozen_keys, "Test setup bug: expected at least one frozen parameter"
+        for key in frozen_keys:
+            assert key not in ckpt["model_state_dict"]
+        trainable_keys = {name for name, p in meta.model.named_parameters() if p.requires_grad}
+        for key in trainable_keys:
+            assert key in ckpt["model_state_dict"]
+
+    def test_save_full_state_dict_opts_out_of_slimming(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="frozen-full", freeze_backbone=True)
+        lgr = Logger(
+            config=make_config(logger={"save_full_state_dict": True}),
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+        )
+        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.4})
+
+        ckpt_file = list((tmp_path / "model_checkpoints" / "frozen-full").iterdir())[0]
+        ckpt = torch.load(ckpt_file, weights_only=False)
+        assert ckpt["excludes_frozen_params"] is False
+        assert set(ckpt["model_state_dict"].keys()) == set(meta.model.state_dict().keys())
 
 
 # ===================================================================
