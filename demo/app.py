@@ -256,7 +256,9 @@ def build_ui(
     def _empty_other():
         return render_top_bottom_other_html([], [], title="Predicted Concepts: Other")
 
-    @spaces.GPU(duration=120)
+    # Sized from measured calls on the Space: ~11s in-context + cold weight
+    # streaming; smaller reservations rank higher in the ZeroGPU queue.
+    @spaces.GPU(duration=30)
     def run_predict(image, onehot_mode, onehot_opacity, multihot_name, multihot_opacity):
         empty_tree = render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
         if image is None:
