@@ -71,6 +71,62 @@ class _AlwaysFailDataset(BaseCoralDataset):
         raise RuntimeError("simulated read failure")
 
 
+class _SyntheticDataset(BaseCoralDataset):
+    """Minimal subclass that returns a constant RGB image."""
+
+    def read_image(self, **row_kwargs) -> np.ndarray:
+        return np.zeros((20, 20, 3), dtype=np.uint8)
+
+
+def _make_two_image_annotations(
+    *,
+    img0_labels: list[str | None],
+    img1_labels: list[str | None],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rows: list[int] = []
+    cols: list[int] = []
+    labels: list[str | None] = []
+    image_ids: list[str] = []
+
+    for image_id, label_list in [("img0", img0_labels), ("img1", img1_labels)]:
+        for row, col, label in zip([5, 10], [5, 10], label_list, strict=False):
+            if label is None:
+                continue
+            image_ids.append(image_id)
+            rows.append(row)
+            cols.append(col)
+            labels.append(label)
+
+    df_annotations = pd.DataFrame(
+        {
+            "image_id": image_ids,
+            "region_id": [1 if iid == "img0" else 2 for iid in image_ids],
+            "region_name": ["r0" if iid == "img0" else "r1" for iid in image_ids],
+            "source_label_name": labels,
+            "row": rows,
+            "col": cols,
+        }
+    )
+    df_images = pd.DataFrame(
+        {
+            "image_id": ["img0", "img1"],
+            "region_id": [1, 2],
+            "region_name": ["r0", "r1"],
+        }
+    )
+    return df_annotations, df_images
+
+
+class _CropOutDataset(_SyntheticDataset):
+    """Simulates RandomResizedCrop wiping labels on idx 0 only."""
+
+    def _load_item(self, idx: int) -> tuple[Any, Any]:
+        image, mask = super()._load_item(idx)
+        if idx == 0:
+            mask = np.zeros_like(mask)
+        return image, mask
+
+
 # --- create_annotation_mask ---
 
 
@@ -260,3 +316,75 @@ def test_base_dataset_saves_failure_report_as_parquet(single_image_annotations, 
     saved_df = pd.read_parquet(output_path)
     assert len(saved_df) == 1
     assert saved_df.iloc[0]["image_id"] == "img1"
+
+
+# --- BaseCoralDataset empty-mask skip (train split only) ---
+
+
+def test_train_skips_image_with_no_annotations(monkeypatch):
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=[],
+        img1_labels=["Coral"],
+    )
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+        split="train",
+    )
+    monkeypatch.setattr(np.random, "randint", lambda low, high: 0)
+
+    _, mask = ds[0]
+
+    assert np.any(mask > 0)
+
+
+def test_train_skips_crop_that_removed_all_labels(monkeypatch):
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=["Coral"],
+        img1_labels=["Coral"],
+    )
+    ds = _CropOutDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+        split="train",
+    )
+    monkeypatch.setattr(np.random, "randint", lambda low, high: 0)
+
+    _, mask = ds[0]
+
+    assert np.any(mask > 0)
+
+
+def test_val_returns_empty_mask_without_recursion():
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=[],
+        img1_labels=["Coral"],
+    )
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+        split="val",
+    )
+
+    _, mask = ds[0]
+
+    assert np.all(mask == 0)
+
+
+def test_train_raises_when_all_items_are_empty():
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=[],
+        img1_labels=[],
+    )
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+        split="train",
+    )
+
+    with pytest.raises(RuntimeError, match="empty \\(no labels\\)"):
+        _ = ds[0]

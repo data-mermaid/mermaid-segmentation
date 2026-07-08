@@ -207,6 +207,16 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """
         return self._safe_getitem(idx, attempts=0)
 
+    @staticmethod
+    def _next_random_idx(idx: int, n: int) -> int:
+        """Return a uniform random index in ``[0, n)`` that is not ``idx``."""
+        if n > 1:
+            next_idx = int(np.random.randint(0, n - 1))
+            if next_idx >= idx:
+                next_idx += 1  # skip idx itself, keeping a uniform draw over the other indices
+            return next_idx
+        return idx
+
     def _safe_getitem(
         self, idx: int, attempts: int
     ) -> tuple[torch.Tensor | NDArray[Any], Any]:
@@ -215,7 +225,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             raise RuntimeError(f"{self.__class__.__name__}: dataset is empty")
 
         try:
-            return self._load_item(idx)
+            image, mask = self._load_item(idx)
         except Exception as e:
             try:
                 image_id = self.df_images.loc[idx, "image_id"]
@@ -237,15 +247,19 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
                     f"last error: {type(e).__name__}: {e}"
                 ) from e
 
-            # Recover with a *different* random image so a contiguous run of broken
-            # items (e.g. a whole bad source) doesn't get walked one-by-one.
-            if n > 1:
-                next_idx = int(np.random.randint(0, n - 1))
-                if next_idx >= idx:
-                    next_idx += 1  # skip idx itself, keeping a uniform draw over the other indices
-            else:
-                next_idx = idx
-            return self._safe_getitem(next_idx, attempts=attempts + 1)
+            return self._safe_getitem(self._next_random_idx(idx, n), attempts=attempts + 1)
+
+        # During training, a sample with no labels is useless: either the image has
+        # no annotations, or RandomResizedCrop cropped them all out. Recurse to a
+        # different random image (same recovery path as a load failure).
+        if self.split == "train" and not np.any(mask > 0):
+            if attempts + 1 >= n:
+                raise RuntimeError(
+                    f"{self.__class__.__name__}: all {n} items were empty (no labels)"
+                )
+            return self._safe_getitem(self._next_random_idx(idx, n), attempts=attempts + 1)
+
+        return image, mask
 
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Perform a single load (no error handling).

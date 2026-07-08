@@ -36,7 +36,7 @@ from mermaidseg.model.train import train_model
 
 # ViT-L encoder adapted with LoRA + a DPT segmentation head (concept-bottleneck variant).
 VITL_ENCODER_NAME = "facebook/dinov3-vitl16-pretrain-lvd1689m"
-CHECKPOINT = "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch40"
+CHECKPOINT = "model_checkpoints/mermaid_base_run_dinov3_lora_dpt_all/model_epoch18" # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch13"
 
 
 def load_training_checkpoint(
@@ -74,24 +74,24 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 for i in range(torch.cuda.device_count()):
     print(f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
 
-SEED = 1
+SEED = 4
 torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
 
-NUM_WORKERS = 10
+NUM_WORKERS = 50
 PERSISTENT_WORKERS = NUM_WORKERS > 0
 
 # -- 1. Config -------------------------------------------------------------
 cfg = setup_config(
     {
-        "data": "../configs/data_config_512.yaml",
-        "training": "../configs/training_config_cbm_512.yaml",
+        "data": "../configs/data_config_all.yaml",
+        "training": "../configs/training_config_cbm.yaml",
         "model": "../configs/model_config_cbm_dpt_lora_vitl.yaml",
         "logger": "../configs/logger_config.yaml",
     }
 )
-args = get_parser().parse_args(["--run-name=mermaid_base_run_dinov3_lora_dpt_512"])
+args = get_parser().parse_args(["--run-name=mermaid_base_run_dinov3_lora_dpt_all"])
 cfg = update_config_with_args(cfg, args)
 
 # The LoRA/DPT model config already targets the ViT-L encoder; set it explicitly
@@ -100,8 +100,8 @@ cfg.model.encoder_name = VITL_ENCODER_NAME
 
 # Hyperparameters for this run
 cfg.training.iterations_per_train_epoch = 4000
-cfg.training.iterations_per_val_epoch = 1000  # None => use full val set (len(val_loader))
-cfg.training.batch_size = 10
+cfg.training.iterations_per_val_epoch = 400  # None => use full val set (len(val_loader))
+cfg.training.batch_size = 25
 
 # Set experiment on the config the Logger actually reads.
 cfg_logger = copy.deepcopy(cfg)
@@ -144,6 +144,7 @@ loader_kwargs = {
     "pin_memory": True,
     "persistent_workers": PERSISTENT_WORKERS,
     "drop_last": True,
+    "prefetch_factor": 3,
 }
 if NUM_WORKERS > 0:
     loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
@@ -177,6 +178,7 @@ train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "tra
 val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
 
 train_loader = DataLoader(ConcatDataset(train_datasets), shuffle=True, **loader_kwargs)
+loader_kwargs["prefetch_factor"] = 2
 val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
 
 print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")

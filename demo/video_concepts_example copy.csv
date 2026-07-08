@@ -1,0 +1,12 @@
+timestamp,display_title,display_subtitle,expression
+0,Live Coral,"live × (hexacorallia + octocorallia)",live * (class:hexacorallia + class:octocorallia)
+2,Live Hard Coral,"live × hexacorallia",live * class:hexacorallia
+6,Bleached Hard Coral,"bleached × hexacorallia",bleached * class:hexacorallia
+11,Acropora,genus:acropora,genus:acropora
+14,Table Acropora,"genus:acropora × tabular",genus:acropora * tabular
+16,Branching Coral,branching,branching
+19,Non-Acropora Branching Coral,"branching × (1 − acropora)",branching * (1 - genus:acropora)
+21,Background,background,background
+25,Dark,dark,dark
+27,Transect,transect,transect
+31,MERMAID Classes,MERMAID class segmentation,@classes

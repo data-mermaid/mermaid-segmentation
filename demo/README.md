@@ -75,3 +75,67 @@ Pin the `mermaidseg` git ref in `requirements.txt` (`@main` or a release tag) so
 - Dual **one-hot** (MERMAID class or taxonomic rank) and **multi-hot** (morphologic/non-coral concept) overlay panels
 - Click a pixel to inspect top classes, taxonomy tree, and other concept activations
 - Sample image gallery from `static/`
+
+## Static video demo
+
+Render an offline four-panel video (2x2 grid) driven by a CSV schedule that switches the highlighted concept expression at specified timestamps (hard cut):
+
+| Panel | Visualization |
+|-------|----------------|
+| Top-left | Original RGB |
+| Top-right | `0.3 * RGB + 0.7 * viridis(composite)` |
+| Bottom-left | `0.2 * RGB + 0.8 * lerp(gray, RGB, composite)` — unselected pixels grayed out |
+| Bottom-right | RGB with pink/purple overlay where composite > 0.5 (50% opacity) |
+
+```bash
+uv run python demo/video_demo.py INPUT.mp4 \
+  --output demo/output.mp4 \
+  --concepts-csv demo/video_concepts_example.csv \
+  --checkpoint /path/to/model_checkpoint \
+  --model-config configs/model_config_cbm_dpt_lora_vitl.yaml \
+  --fps 10
+```
+
+Optional flags: `--id2label`, `--concept-id2name`, `--device`, `--rgb-weight 0.3`, `--heat-weight 0.7`.
+
+### Concepts CSV
+
+Columns: `timestamp,display_title,display_subtitle,expression`
+
+- `timestamp`: seconds into the source video when this row becomes active (piecewise-constant; last row with `timestamp <= t` wins).
+- `display_title` / `display_subtitle`: text burned into the output frame banner.
+- `expression`: per-pixel concept expression (see below).
+
+See [video_concepts_example.csv](video_concepts_example.csv) for a full walkthrough.
+
+### Expression DSL
+
+Each atom resolves to a `(H, W)` map in `[0, 1]` from the model's concept activations (`concept_probs`).
+
+| Atom form | Example | Resolves to channel |
+|-----------|---------|---------------------|
+| Taxonomic | `class:hexacorallia`, `genus:acropora` | `class__hexacorallia`, `genus__acropora` |
+| Bare | `live`, `bleached`, `branching`, `tabular`, `background`, `dark`, `transect` | same name |
+| Numeric | `1`, `0.5` | constant map |
+
+Operators (per-pixel, result clamped to `[0, 1]`):
+
+- `*` — intersection / AND ("times")
+- `+` — union / OR (for mutually exclusive ranks)
+- `-` — subtract (e.g. `1 - genus:acropora`)
+
+Parentheses group sub-expressions. Sentinel `@classes` renders MERMAID class segmentation (argmax class colored via the demo palette) instead of a viridis heatmap.
+
+Example expressions from the sample CSV:
+
+```
+live * (class:hexacorallia + class:octocorallia)
+bleached * class:hexacorallia
+genus:acropora * tabular
+branching * (1 - genus:acropora)
+@classes
+```
+
+Right panel (top-right) blend: `rgb_weight * rgb + heat_weight * viridis(v)` (defaults 0.3 / 0.7). For `@classes`, the top-right panel uses the class-colored segmentation with the same weights. The bottom two panels always use the scalar composite concept value (for `@classes`, the winning class softmax probability).
+
+Implementation: [concept_expr.py](concept_expr.py) (parser/evaluator), [video_demo.py](video_demo.py) (CLI/renderer).

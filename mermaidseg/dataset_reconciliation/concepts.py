@@ -57,7 +57,7 @@ MORPHOLOGIC_CONCEPTS = [
     "cup_coral",
 ]
 
-HEALTH_CONCEPTS = ["dead", "bleached"]
+HEALTH_CONCEPTS = ["live", "bleached"]
 
 NONCORAL_CONCEPTS = [
     "algae",
@@ -65,6 +65,7 @@ NONCORAL_CONCEPTS = [
     "anthropogenic",
     "trash",
     "transect",
+    "transect_line",
     "macroalgae",
     "dark",
     "human",
@@ -380,6 +381,11 @@ def initialize_benthic_concepts(
     dictionaries for taxonomic and one-hot concept ID mappings.
     """
     df_mapping = pd.read_csv(mapping_location)
+    df_mapping = df_mapping.copy()
+    df_mapping["source_label_class_name"] = (
+        df_mapping["source_label_class_name"].astype(str).str.lower()
+    )
+    df_mapping["source_dataset_source"] = df_mapping["source_dataset_source"].astype(str).str.lower()
     num_global_source = len(global_id2source) if global_id2source is not None else len(df_mapping)
 
     if global_id2source is not None:
@@ -402,8 +408,28 @@ def initialize_benthic_concepts(
         )
 
         df_mapping = df_mapping.merge(
-            df_id2source, on=["source_label_class_name", "source_dataset_source"], how="right"
+            df_id2source,
+            on=["source_label_class_name", "source_dataset_source"],
+            how="right",
+            indicator=True,
         )
+        unmapped = df_mapping.loc[df_mapping["_merge"] == "right_only"]
+        warned: set[tuple[str, str]] = set()
+        for source_dataset, label_name in zip(
+            unmapped["source_dataset_source"],
+            unmapped["source_label_class_name"],
+            strict=False,
+        ):
+            key = (source_dataset, label_name)
+            if key in warned:
+                continue
+            warned.add(key)
+            print(
+                f"DEBUG WARNING: unmapped source label (concept mapping): "
+                f"source_dataset={source_dataset!r} label={label_name!r}",
+                flush=True,
+            )
+        df_mapping = df_mapping.drop(columns=["_merge"])
 
         ### TODO: FIX BUG - This will be resolved once the class_to_concepts.csv file is fully updated
         # if df_mapping.shape[0] != df_id2source.shape[0]:

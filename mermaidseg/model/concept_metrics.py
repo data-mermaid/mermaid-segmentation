@@ -55,6 +55,7 @@ def calculate_taxonomic_rank_loss(
     from_logits: bool = False,
     foreground_mask: torch.Tensor | None = None,
     damping_denominator: float = 0.0,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     """Cross-entropy / NLL on the active taxonomic class; masked where not_given or none."""
     num_channels = concept_outputs.size(1)
@@ -80,7 +81,9 @@ def calculate_taxonomic_rank_loss(
 
     if from_logits:
         flat_logits = concept_outputs.permute(0, 2, 3, 1).reshape(-1, num_channels)
-        per_pixel = F.cross_entropy(flat_logits, flat_target, reduction="none")
+        per_pixel = F.cross_entropy(
+            flat_logits, flat_target, reduction="none", label_smoothing=label_smoothing
+        )
     else:
         log_probs = torch.log(concept_outputs.clamp(min=1e-6))
         flat_log_probs = log_probs.permute(0, 2, 3, 1).reshape(-1, num_channels)

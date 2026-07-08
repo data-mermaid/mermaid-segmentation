@@ -338,18 +338,18 @@ def _run_training(args: argparse.Namespace) -> None:
     }
 
     # coralscapes uses a different signature (no `padding`)
-    def _build(name, split_cfg):
+    def _build(name, split, split_cfg):
         cls = DATASET_CLASSES[name]
         if name in ("coralscapes", "coralscapes_v2", "benthos_yuval"):
             return cls(**split_cfg)
-        return cls(**split_cfg, padding=cfg.training.padding)
+        return cls(**split_cfg, padding=cfg.training.padding, split=split)
 
     dataset_dict: dict[tuple[str, str], object] = {}
     for name in DATASET_CLASSES:
         for split, split_cfg in cfg.data[name].items():
             if split_cfg is None or split_cfg == "None":
                 continue
-            dataset_dict[(name, split)] = _build(name, split_cfg)
+            dataset_dict[(name, split)] = _build(name, split, split_cfg)
             print(f"{name:>24s} - {split:<5s}: {len(dataset_dict[(name, split)]):>7d} samples")
 
     loader_kwargs = {

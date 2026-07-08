@@ -105,11 +105,13 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
         reduction: str = "none",
         concept_value2id: dict[str, dict[str, int]] | None = None,
         damping_denominator: float = 0.0,
+        taxonomic_label_smoothing: float = 0.01,
         **kwargs: Any,
     ) -> None:
         super().__init__(reduction=reduction, **kwargs)
         self.concept_value2id = concept_value2id
         self.damping_denominator = damping_denominator
+        self.taxonomic_label_smoothing = taxonomic_label_smoothing
 
     def _slice_loss(
         self,
@@ -134,6 +136,7 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
             from_logits=True,
             foreground_mask=foreground_mask,
             damping_denominator=self.damping_denominator,
+            label_smoothing=self.taxonomic_label_smoothing,
         )
 
     def forward(
@@ -203,6 +206,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
         ignore_index: int = 0,
         lambda_weight: float = 1.0,
         damping_denominator: float = 0.0,
+        taxonomic_label_smoothing: float = 0.01,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -211,6 +215,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
         self.lambda_weight = lambda_weight
         self.concept_value2id = concept_value2id
         self.damping_denominator = damping_denominator
+        self.taxonomic_label_smoothing = taxonomic_label_smoothing
 
     def forward(
         self,
@@ -264,6 +269,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
                     labels_slice,
                     from_logits=True,
                     damping_denominator=self.damping_denominator,
+                    label_smoothing=self.taxonomic_label_smoothing,
                 ) / len(TAXONOMIC_CONCEPTS)
             loss_components[name] = slice_loss.item()
             concept_loss_value = concept_loss_value + slice_loss

@@ -1,0 +1,12 @@
+timestamp,display_title,display_subtitle,expression
+2,Live Hard Coral,"live × hexacorallia",live * class:hexacorallia
+4,Bleached Hard Coral,"bleached × hexacorallia",bleached * class:hexacorallia
+6,Massive Coral,massive,massive
+9,Porites,genus:porites,genus:porites
+11,Giant Clam,genus:tridacna,genus:tridacna
+14,Dead Pocillopora,"(1 - live) * genus:pocillopora",(1 - live) * genus:pocillopora
+15,Bleached Pocillopora,"(bleached) * genus:pocillopora",bleached * genus:pocillopora
+16,Live Pocillopora,"(live) * genus:pocillopora",live * genus:pocillopora
+18,Background,background,background
+21,Dark,dark,dark
+22,Chordata,Phylum: Chordata,phylum:chordata

@@ -12,13 +12,13 @@ training:
     epochs: 200
     optimizer:
         type: AdamW
-        lr: 0.00001
+        lr: 0.00002
         weight_decay: 0.01
     scheduler:
         type: PolynomialLR
         power: 1
         total_iters: 200
-        warmup_iters: 2000
+        warmup_iters: 4000
         warmup_start_factor: 0.01
     mixed_precision: true
     mixed_precision_dtype: bfloat16
@@ -28,7 +28,7 @@ training:
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
-                    'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
+                    'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fish', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
                     'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human', 'Human-made structure', 'Hydnophora',
                     'Isopora', 'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis',
                     'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium',

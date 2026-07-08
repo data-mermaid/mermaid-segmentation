@@ -212,6 +212,7 @@ class SourceLabelRegistry:
         # `subset`) either has an attempted roll up to a parent class or
         # is left as 0 so it collapses to background at train time.
         source_to_target_np = np.zeros(num_global_source + 1, dtype=np.int64)
+        warned_unmapped: set[tuple[str, str]] = set()
         for ds in self.datasets:
             offset = self.dataset_offsets[ds.SOURCE_NAME]
             for local_id, source_name in sorted(ds.source_id2name.items()):
@@ -219,6 +220,14 @@ class SourceLabelRegistry:
                 if label_roll_up:
                     target_name = roll_up_label(target_name, benthic_hierarchy, subset)
                 if target_name is None:
+                    key = (ds.SOURCE_NAME, source_name.lower())
+                    if key not in warned_unmapped:
+                        warned_unmapped.add(key)
+                        print(
+                            f"DEBUG WARNING: unmapped source label (target mapping): "
+                            f"source_dataset={ds.SOURCE_NAME!r} label={source_name.lower()!r}",
+                            flush=True,
+                        )
                     continue
                 if subset is not None and target_name not in subset:
                     continue
