@@ -346,6 +346,36 @@ def overlay_legend_items(
     return items[:top_n]
 
 
+def render_multihot_legend(
+    concept_name: str | None,
+    title: str = "Overlay color key",
+    cmap: str = "viridis",
+    stops: int = 12,
+) -> str:
+    """Colorbar key for the multi-hot heatmap: low→high sigmoid activation.
+
+    The bar samples the actual colormap so it matches the overlay; only the concept name changes
+    between concepts (the 0→1 scale is constant).
+    """
+    import matplotlib
+
+    colormap = matplotlib.colormaps[cmap]
+    ramp = ", ".join(
+        "rgb({},{},{})".format(*(int(c * 255) for c in colormap(i / (stops - 1))[:3]))
+        for i in range(stops)
+    )
+    title_html = f'<div class="section-title">{title}</div>' if title else ""
+    name = concept_name or "concept"
+    return (
+        f'<div class="panel">{title_html}'
+        f'<div class="hint" style="margin-bottom:4px">sigmoid activation for <b>{name}</b></div>'
+        f'<div style="height:14px;border-radius:3px;border:1px solid rgba(128,128,128,0.4);'
+        f'background:linear-gradient(to right, {ramp})"></div>'
+        '<div style="display:flex;justify-content:space-between;font-size:11px;opacity:0.7;margin-top:2px">'
+        "<span>0.0 (low)</span><span>1.0 (high)</span></div></div>"
+    )
+
+
 def render_overlay_legend(
     items: list[tuple[str, tuple[int, int, int], float]],
     title: str = "Overlay color key",

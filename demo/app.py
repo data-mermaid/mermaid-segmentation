@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import os
 import sys
@@ -38,6 +39,7 @@ from rendering import (
     make_color_palette,
     make_rank_palette,
     overlay_legend_items,
+    render_multihot_legend,
     render_overlay_legend,
     render_taxonomy_tree,
     render_top_bottom_other_html,
@@ -110,6 +112,23 @@ CSS = """
     max-height: 70vh !important;
     object-fit: contain !important;
 }
+/* Footer logo strip on a light card so the dark-ink logos read in both themes. */
+#mermaid-footer { padding: 0 !important; }
+#mermaid-footer .mermaid-footer {
+    margin-top: 8px; padding: 16px 20px; border-radius: 10px;
+    background: #ffffff; border: 1px solid rgba(128, 128, 128, 0.2); text-align: center;
+}
+#mermaid-footer .mermaid-footer-label {
+    font-size: 0.8rem; letter-spacing: 0.08em; text-transform: uppercase;
+    color: #667085; margin-bottom: 12px;
+}
+#mermaid-footer .mermaid-footer-logos {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+    gap: 28px 40px;
+}
+#mermaid-footer .mermaid-footer-logo {
+    height: 42px; width: auto; object-fit: contain; opacity: 0.85;
+}
 """
 
 logger = logging.getLogger(__name__)
@@ -128,6 +147,45 @@ def _header_html() -> str:
         f"Upload an image or pick a sample, click <b>{PRIMARY_BTN_LABEL}</b>, "
         "then click any overlay pixel to inspect classes and taxonomy.</div>"
         "</div></div>"
+    )
+
+
+# Partner/collaborator logos shown in the footer strip (file, alt text).
+_FOOTER_LOGOS: tuple[tuple[str, str], ...] = (
+    ("logo_wcs.png", "Wildlife Conservation Society"),
+    ("logo_exeter.png", "University of Exeter"),
+    ("logo_queensland.png", "University of Queensland"),
+    ("logo_mit.png", "Massachusetts Institute of Technology"),
+    ("logo_epfl.png", "EPFL"),
+    ("logo_icrs.png", "International Coral Reef Symposium 2026"),
+)
+
+
+def _footer_html() -> str:
+    """Centered strip of collaborator logos, base64-embedded so it is self-contained.
+
+    Sits on a light card (see CSS) so the dark-ink logos stay legible in both the light and dark
+    Gradio themes.
+    """
+    # In static/logos/ (a subdir) so the non-recursive sample-image glob in build_ui
+    # does not pick these up as selectable sample images.
+    logos_dir = Path(__file__).resolve().parent / "static" / "logos"
+    imgs: list[str] = []
+    for filename, alt in _FOOTER_LOGOS:
+        path = logos_dir / filename
+        if not path.is_file():
+            continue
+        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        imgs.append(
+            f'<img class="mermaid-footer-logo" src="data:image/png;base64,{b64}" alt="{alt}" title="{alt}">'
+        )
+    if not imgs:
+        return ""
+    return (
+        '<div class="mermaid-footer">'
+        '<div class="mermaid-footer-label">In collaboration with</div>'
+        f'<div class="mermaid-footer-logos">{"".join(imgs)}</div>'
+        "</div>"
     )
 
 
@@ -294,6 +352,7 @@ def build_ui(
                 None,
                 None,
                 render_overlay_legend([]),
+                render_multihot_legend(multihot_name),
             )
         start = time.perf_counter()
         image_tensor, display_image = preprocess(image, model_transform, display_transform)
@@ -320,6 +379,7 @@ def build_ui(
             onehot_base,  # onehot_base_state (cached pre-marker composite)
             multihot_base,  # multihot_base_state
             onehot_legend_html,
+            render_multihot_legend(multihot_name),
         )
 
     def on_click(
@@ -400,10 +460,11 @@ def build_ui(
         return draw_click_marker(base, click_xy), base, legend
 
     def recompose_multihot(display_image, concept_probs, multihot_name, opacity, click_xy):
+        legend = render_multihot_legend(multihot_name)
         if display_image is None:
-            return None, None
+            return None, None, legend
         base = _compose_multihot_base(display_image, concept_probs, multihot_name, opacity)
-        return draw_click_marker(base, click_xy), base
+        return draw_click_marker(base, click_xy), base, legend
 
     def pick_sample(evt: gr.SelectData):
         if not static_examples:
@@ -475,6 +536,7 @@ def build_ui(
                     interactive=False,
                     elem_id="mermaid-multihot-img",
                 )
+                multihot_legend = gr.HTML(render_multihot_legend(multihot_choices[0]))
 
         with gr.Row():
             with gr.Column(scale=1, min_width=220), gr.Accordion("Overlay legend", open=True):
@@ -490,6 +552,8 @@ def build_ui(
                     label="Predicted concepts: taxonomy graph",
                 )
 
+        gr.HTML(_footer_html(), elem_id="mermaid-footer")
+
         predict_outputs = [
             onehot_img,
             multihot_img,
@@ -504,6 +568,7 @@ def build_ui(
             onehot_base_state,
             multihot_base_state,
             onehot_legend,
+            multihot_legend,
         ]
         predict_btn.click(
             run_predict,
@@ -527,7 +592,7 @@ def build_ui(
             multihot_opacity,
             click_state,
         ]
-        recompose_multihot_outputs = [multihot_img, multihot_base_state]
+        recompose_multihot_outputs = [multihot_img, multihot_base_state, multihot_legend]
         # Dropdowns fire on discrete selection; opacity sliders fire on release (not
         # every drag tick) to avoid a burst of full recompositions while dragging.
         onehot_mode.change(recompose_onehot, recompose_onehot_inputs, recompose_onehot_outputs)
