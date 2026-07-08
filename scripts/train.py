@@ -55,6 +55,7 @@ from mermaidseg.dataset_reconciliation import (
     prepare_splits_for_registry,
 )
 from mermaidseg.datasets import (
+    BaseCoralDataset,
     BenthosYuvalCoralsDataset,
     CatlinSeaviewDataset,
     CoralNetDataset,
@@ -108,9 +109,9 @@ def _write_pid(pid_file: Path) -> None:
 def _stop_current_space() -> None:
     """Stop the SageMaker JupyterLab app via delete_app.
 
-    SageMaker has no ``stop_space`` API.  The documented way to stop a running JupyterLab app is
-    ``delete_app`` — this terminates the instance while keeping EFS data intact.  No-op outside
-    SageMaker.
+    SageMaker has no ``stop_space`` API.  The documented way to stop a running
+    JupyterLab app is ``delete_app`` — this terminates the instance while keeping EFS
+    data intact.  No-op outside SageMaker.
     """
     if not _METADATA.exists():
         logging.info("Not running on SageMaker — skipping auto-shutdown")
@@ -201,6 +202,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default="configs/logger_config.yaml",
         help="path to logger config file",
+    )
+    base.add_argument(
+        "--experiment-name",
+        type=str,
+        default=None,
+        help="MLflow experiment name; overrides the logger config (e.g. 'baselines')",
     )
     base.add_argument(
         "--dry-run",
@@ -357,6 +364,10 @@ def _run_training(args: argparse.Namespace) -> None:
         "num_workers": args.num_workers,
         "pin_memory": torch.cuda.is_available(),
         "drop_last": True,
+        # Drop the (None, None) placeholders BaseCoralDataset.__getitem__ returns on load
+        # failures (e.g. a missing/renamed S3 object) so one bad image leaves the batch instead
+        # of crashing default_collate — otherwise a single unreadable image kills the whole run.
+        "collate_fn": BaseCoralDataset.collate_fn,
     }
     if args.num_workers > 0:
         loader_kwargs["persistent_workers"] = True
@@ -367,12 +378,22 @@ def _run_training(args: argparse.Namespace) -> None:
     _, registry_datasets = prepare_splits_for_registry(dataset_dict)
 
     run_sources = {ds.SOURCE_NAME for ds in registry_datasets}
-    schema = ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
+
+    # Standard (non-CBM) mode trains only the segmentation head — no concept bottleneck — so it
+    # needs neither a ConceptSchema nor a concept_mapping_path. Building the schema here would call
+    # ConceptSchema.from_csv(None, ...) and crash, and the num_concepts assertion below is only
+    # meaningful when concepts are computed. Guard both on training_mode.
+    compute_concepts = cfg.training.training_mode != "standard"
+    schema = (
+        ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
+        if compute_concepts
+        else None
+    )
 
     registry = SourceLabelRegistry(
         registry_datasets,
         target_label_subset=cfg.training.class_subset,
-        compute_concepts=cfg.training.training_mode != "standard",
+        compute_concepts=compute_concepts,
         concept_mapping_path=concept_mapping_path,
         concept_schema=schema,
         label_roll_up=cfg.training.get("label_roll_up", False),
@@ -387,7 +408,8 @@ def _run_training(args: argparse.Namespace) -> None:
     val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
 
     print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
-    assert registry.num_concepts == schema.num_channels
+    if compute_concepts:
+        assert registry.num_concepts == schema.num_channels
 
     logging.info(
         "Dataset: %s (%d samples)",
@@ -442,8 +464,11 @@ def _run_training(args: argparse.Namespace) -> None:
         concept_value2id=registry.concept_value2id,
     )
 
-    cfg.logger.experiment_name = "mermaid"
-    cfg_logger.logger.experiment_name = "mermaid"
+    # Route the run to an MLflow experiment. --experiment-name (or the run YAML override)
+    # wins; otherwise fall back to whatever the logger config declares.
+    if args.experiment_name:
+        cfg.logger.experiment_name = args.experiment_name
+        cfg_logger.logger.experiment_name = args.experiment_name
 
     with Logger(
         config=cfg_logger,
