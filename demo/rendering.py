@@ -286,11 +286,11 @@ def compose_multihot_overlay(
 ) -> NDArray[np.uint8]:
     if concept_probs is None:
         return display_rgb
-    import matplotlib.pyplot as plt
+    import matplotlib
 
     opacity = float(np.clip(opacity, 0.0, 1.0))
     prob = np.clip(concept_probs[channel_idx], 0.0, 1.0)
-    rgba = plt.colormaps[cmap](prob)
+    rgba = matplotlib.colormaps[cmap](prob)
     color_per_pixel = (rgba[..., :3] * 255.0).astype(np.uint8)
     return _blend(display_rgb, color_per_pixel, prob * opacity)
 
@@ -298,6 +298,73 @@ def compose_multihot_overlay(
 def build_morph_concept_choices(concept_names: list[str]) -> list[str]:
     name_set = set(concept_names)
     return [name for name in (*MORPHOLOGIC_CONCEPTS, *NONCORAL_CONCEPTS) if name in name_set]
+
+
+def overlay_legend_items(
+    class_probs: NDArray[np.float32] | None,
+    concept_probs: NDArray[np.float32] | None,
+    mode: str,
+    rank_index: dict[str, list[tuple[int, str]]],
+    rank_palettes: dict[str, dict[str, NDArray[np.uint8]]],
+    class_palette: NDArray[np.uint8],
+    id2label: dict[int, str],
+    top_n: int = 12,
+) -> list[tuple[str, tuple[int, int, int], float]]:
+    """Categories present in the one-hot overlay's argmax, sorted by pixel cover.
+
+    Mirrors the argmax that ``compose_onehot_overlay`` draws so the legend matches the overlay
+    exactly. Returns ``(label, (r, g, b), coverage_fraction)`` triples.
+    """
+    items: list[tuple[str, tuple[int, int, int], float]] = []
+    if mode == "classes":
+        if class_probs is None:
+            return []
+        argmax = class_probs.argmax(axis=0)
+        total = argmax.size
+        ids, counts = np.unique(argmax, return_counts=True)
+        for cid, cnt in zip(ids.tolist(), counts.tolist(), strict=True):
+            r, g, b = class_palette[cid]
+            label = id2label.get(int(cid), f"class_{cid}")
+            items.append((label, (int(r), int(g), int(b)), cnt / total))
+    else:
+        entries = rank_index.get(mode, [])
+        palette = rank_palettes.get(mode, {})
+        if concept_probs is None or not entries or not palette:
+            return []
+        channel_idxs = np.asarray([idx for idx, _ in entries], dtype=np.int64)
+        values = [val for _, val in entries]
+        argmax = concept_probs[channel_idxs].argmax(axis=0)
+        total = argmax.size
+        ids, counts = np.unique(argmax, return_counts=True)
+        for i, cnt in zip(ids.tolist(), counts.tolist(), strict=True):
+            value = values[int(i)]
+            if value == "none" or value not in palette:
+                continue
+            r, g, b = palette[value]
+            items.append((value, (int(r), int(g), int(b)), cnt / total))
+    items.sort(key=lambda t: t[2], reverse=True)
+    return items[:top_n]
+
+
+def render_overlay_legend(
+    items: list[tuple[str, tuple[int, int, int], float]],
+    title: str = "Overlay color key",
+) -> str:
+    title_html = f'<div class="section-title">{title}</div>' if title else ""
+    if not items:
+        return (
+            f'<div class="panel">{title_html}'
+            '<div class="hint">Run segmentation to see the color key.</div></div>'
+        )
+    chips: list[str] = []
+    for label, (r, g, b), cover in items:
+        chips.append(
+            '<span style="display:inline-flex;align-items:center;margin:0 12px 6px 0">'
+            f'<span style="width:14px;height:14px;border-radius:3px;background:rgb({r},{g},{b});'
+            'display:inline-block;margin-right:6px;border:1px solid rgba(128,128,128,0.4)"></span>'
+            f'{label} <small style="opacity:0.6;margin-left:4px">{cover * 100:.0f}%</small></span>'
+        )
+    return f'<div class="panel">{title_html}<div>{"".join(chips)}</div></div>'
 
 
 def render_top_classes_html(
@@ -371,9 +438,13 @@ def render_taxonomy_tree(
     parents: dict[str, str],
     top_k: int = 3,
 ):
-    import matplotlib.pyplot as plt
+    from matplotlib.figure import Figure
 
-    fig, ax = plt.subplots(figsize=(12, 3.0))
+    # OO Figure, not pyplot: no global Gcf registry entry (this runs in the
+    # long-lived main process on every click) and thread-safe. gradio attaches
+    # an Agg canvas when it calls fig.savefig() at postprocess time.
+    fig = Figure(figsize=(12, 3.0))
+    ax = fig.subplots()
     fig.subplots_adjust(left=0.005, right=0.995, top=0.99, bottom=0.02)
     ax.set_axis_off()
     ax.set_xlim(-0.5, len(RANK_ORDER) - 0.5)
@@ -469,5 +540,4 @@ def render_taxonomy_tree(
                 },
                 zorder=2,
             )
-    fig.tight_layout()
     return fig

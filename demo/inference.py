@@ -204,15 +204,22 @@ def classes_from_concepts(model: CBMModel, concept_activations: torch.Tensor) ->
 @torch.no_grad()
 def predict(
     model: CBMModel, image_tensor: torch.Tensor
-) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.int64]]:
+) -> tuple[NDArray[np.float16], NDArray[np.float16], NDArray[np.int16]]:
+    """Run the model and return (class_probs, concept_probs, pred_mask).
+
+    Softmax/argmax run in float32 on-device; the returned prob maps are cast to float16 *before*
+    ``.cpu()`` so the device→host copy (and the downstream ZeroGPU fork-boundary pickle) is halved.
+    These outputs are visualization-only, so float16 precision is sufficient. pred_mask is int16
+    (num_classes << 32767).
+    """
     concept_probs = predict_concepts(model, image_tensor)
     class_logits = classes_from_concepts(model, concept_probs)
     class_probs = torch.softmax(class_logits, dim=1)
     pred_mask = class_probs.argmax(dim=1)
     return (
-        class_probs[0].cpu().numpy().astype(np.float32),
-        concept_probs[0].cpu().numpy().astype(np.float32),
-        pred_mask[0].cpu().numpy().astype(np.int64),
+        class_probs[0].half().cpu().numpy(),
+        concept_probs[0].half().cpu().numpy(),
+        pred_mask[0].to(torch.int16).cpu().numpy(),
     )
 
 

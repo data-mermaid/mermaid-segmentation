@@ -37,6 +37,8 @@ from rendering import (
     load_taxonomy_parents,
     make_color_palette,
     make_rank_palette,
+    overlay_legend_items,
+    render_overlay_legend,
     render_taxonomy_tree,
     render_top_bottom_other_html,
     render_top_classes_html,
@@ -231,7 +233,12 @@ def build_ui(
     ]
     default_onehot = "genus" if "genus" in ONEHOT_MODE_LABELS else onehot_choices[0][1]
 
-    def _render_onehot(display_image, class_probs, concept_probs, mode, opacity, click_xy=None):
+    def _compose_onehot_base(display_image, class_probs, concept_probs, mode, opacity):
+        """Composite the one-hot overlay (no click marker) + its color-key legend.
+
+        Split from marker drawing so a pixel click only redraws the marker on the cached base
+        instead of recomposing the full argmax+blend over the big arrays.
+        """
         composite = compose_onehot_overlay(
             display_image,
             class_probs,
@@ -242,16 +249,27 @@ def build_ui(
             rank_palettes,
             opacity,
         )
-        return draw_click_marker(resize_for_display(composite), click_xy)
+        legend = render_overlay_legend(
+            overlay_legend_items(
+                class_probs,
+                concept_probs,
+                mode,
+                rank_index,
+                rank_palettes,
+                class_palette,
+                artifacts.id2label,
+            )
+        )
+        return resize_for_display(composite), legend
 
-    def _render_multihot(display_image, concept_probs, multihot_name, opacity, click_xy=None):
+    def _compose_multihot_base(display_image, concept_probs, multihot_name, opacity):
         channel_idx = multihot_channel_by_name.get(multihot_name)
         composite = (
             compose_multihot_overlay(display_image, concept_probs, channel_idx, opacity)
             if channel_idx is not None and concept_probs is not None
             else display_image
         )
-        return draw_click_marker(resize_for_display(composite), click_xy)
+        return resize_for_display(composite)
 
     def _empty_other():
         return render_top_bottom_other_html([], [], title="Predicted Concepts: Other")
@@ -273,18 +291,24 @@ def build_ui(
                 empty_tree,
                 _empty_other(),
                 None,
+                None,
+                None,
+                render_overlay_legend([]),
             )
         start = time.perf_counter()
         image_tensor, display_image = preprocess(image, model_transform, display_transform)
+        # predict() returns float16 prob maps already (cast on-device before .cpu()).
         class_probs, concept_probs, pred_mask = predict(model, image_tensor.to(device))
-        # float16 halves the ZeroGPU fork-boundary pickle (~760MB -> ~380MB) and the
-        # per-session gr.State footprint; precision is visualization-only downstream.
-        class_probs = class_probs.astype(np.float16)
-        concept_probs = concept_probs.astype(np.float16)
         logger.info("predict wall time: %.1fs", time.perf_counter() - start)
+        onehot_base, onehot_legend_html = _compose_onehot_base(
+            display_image, class_probs, concept_probs, onehot_mode, onehot_opacity
+        )
+        multihot_base = _compose_multihot_base(
+            display_image, concept_probs, multihot_name, multihot_opacity
+        )
         return (
-            _render_onehot(display_image, class_probs, concept_probs, onehot_mode, onehot_opacity),
-            _render_multihot(display_image, concept_probs, multihot_name, multihot_opacity),
+            onehot_base,  # onehot_img — no marker until a pixel is clicked
+            multihot_base,  # multihot_img
             display_image,
             class_probs,
             concept_probs,
@@ -293,18 +317,21 @@ def build_ui(
             empty_tree,
             _empty_other(),
             None,
+            onehot_base,  # onehot_base_state (cached pre-marker composite)
+            multihot_base,  # multihot_base_state
+            onehot_legend_html,
         )
 
     def on_click(
         display_image,
         class_probs,
         concept_probs,
-        onehot_mode,
-        onehot_opacity,
-        multihot_name,
-        multihot_opacity,
+        onehot_base,
+        multihot_base,
         evt: gr.SelectData,
     ):
+        # Reads the cached pre-marker composites and only redraws the marker — the
+        # overlays don't change on click, so nothing is recomposed here.
         if display_image is None or class_probs is None or concept_probs is None:
             return (
                 None,
@@ -356,12 +383,8 @@ def build_ui(
             click_xy = (x_disp, y_disp)
 
         return (
-            _render_onehot(
-                display_image, class_probs, concept_probs, onehot_mode, onehot_opacity, click_xy
-            ),
-            _render_multihot(
-                display_image, concept_probs, multihot_name, multihot_opacity, click_xy
-            ),
+            draw_click_marker(onehot_base, click_xy) if onehot_base is not None else None,
+            draw_click_marker(multihot_base, click_xy) if multihot_base is not None else None,
             top_html,
             tree_fig,
             other_html,
@@ -370,13 +393,17 @@ def build_ui(
 
     def recompose_onehot(display_image, class_probs, concept_probs, mode, opacity, click_xy):
         if display_image is None:
-            return None
-        return _render_onehot(display_image, class_probs, concept_probs, mode, opacity, click_xy)
+            return None, None, render_overlay_legend([])
+        base, legend = _compose_onehot_base(
+            display_image, class_probs, concept_probs, mode, opacity
+        )
+        return draw_click_marker(base, click_xy), base, legend
 
     def recompose_multihot(display_image, concept_probs, multihot_name, opacity, click_xy):
         if display_image is None:
-            return None
-        return _render_multihot(display_image, concept_probs, multihot_name, opacity, click_xy)
+            return None, None
+        base = _compose_multihot_base(display_image, concept_probs, multihot_name, opacity)
+        return draw_click_marker(base, click_xy), base
 
     def pick_sample(evt: gr.SelectData):
         if not static_examples:
@@ -396,6 +423,9 @@ def build_ui(
         concept_probs_state = gr.State(None)
         pred_mask_state = gr.State(None)
         click_state = gr.State(None)
+        # Cached pre-marker composites (720² uint8) so a click only redraws the marker.
+        onehot_base_state = gr.State(None)
+        multihot_base_state = gr.State(None)
 
         # Top-down layout: per-row min_width sums stay under ~950px so rows never
         # part-wrap in the 1024-1300px band; below that, columns stack vertically.
@@ -432,6 +462,7 @@ def build_ui(
                     interactive=False,
                     elem_id="mermaid-onehot-img",
                 )
+                onehot_legend = gr.HTML(render_overlay_legend([]))
 
             with gr.Column(scale=1, min_width=460):
                 multihot_mode = gr.Dropdown(
@@ -470,6 +501,9 @@ def build_ui(
             taxonomy_plot,
             other_html,
             click_state,
+            onehot_base_state,
+            multihot_base_state,
+            onehot_legend,
         ]
         predict_btn.click(
             run_predict,
@@ -485,6 +519,7 @@ def build_ui(
             onehot_opacity,
             click_state,
         ]
+        recompose_onehot_outputs = [onehot_img, onehot_base_state, onehot_legend]
         recompose_multihot_inputs = [
             display_state,
             concept_probs_state,
@@ -492,19 +527,24 @@ def build_ui(
             multihot_opacity,
             click_state,
         ]
-        onehot_mode.change(recompose_onehot, recompose_onehot_inputs, onehot_img)
-        onehot_opacity.change(recompose_onehot, recompose_onehot_inputs, onehot_img)
-        multihot_mode.change(recompose_multihot, recompose_multihot_inputs, multihot_img)
-        multihot_opacity.change(recompose_multihot, recompose_multihot_inputs, multihot_img)
+        recompose_multihot_outputs = [multihot_img, multihot_base_state]
+        # Dropdowns fire on discrete selection; opacity sliders fire on release (not
+        # every drag tick) to avoid a burst of full recompositions while dragging.
+        onehot_mode.change(recompose_onehot, recompose_onehot_inputs, recompose_onehot_outputs)
+        onehot_opacity.release(recompose_onehot, recompose_onehot_inputs, recompose_onehot_outputs)
+        multihot_mode.change(
+            recompose_multihot, recompose_multihot_inputs, recompose_multihot_outputs
+        )
+        multihot_opacity.release(
+            recompose_multihot, recompose_multihot_inputs, recompose_multihot_outputs
+        )
 
         click_inputs = [
             display_state,
             class_probs_state,
             concept_probs_state,
-            onehot_mode,
-            onehot_opacity,
-            multihot_mode,
-            multihot_opacity,
+            onehot_base_state,
+            multihot_base_state,
         ]
         click_outputs = [
             onehot_img,
