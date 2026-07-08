@@ -6,11 +6,13 @@ import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import gradio as gr
 import numpy as np
+import spaces  # ZeroGPU: must be imported before torch initializes CUDA; no-op elsewhere
 import torch
 from inference import (
     DemoArtifacts,
@@ -254,6 +256,7 @@ def build_ui(
     def _empty_other():
         return render_top_bottom_other_html([], [], title="Predicted Concepts: Other")
 
+    @spaces.GPU(duration=120)
     def run_predict(image, onehot_mode, onehot_opacity, multihot_name, multihot_opacity):
         empty_tree = render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
         if image is None:
@@ -269,8 +272,14 @@ def build_ui(
                 _empty_other(),
                 None,
             )
+        start = time.perf_counter()
         image_tensor, display_image = preprocess(image, model_transform, display_transform)
         class_probs, concept_probs, pred_mask = predict(model, image_tensor.to(device))
+        # float16 halves the ZeroGPU fork-boundary pickle (~760MB -> ~380MB) and the
+        # per-session gr.State footprint; precision is visualization-only downstream.
+        class_probs = class_probs.astype(np.float16)
+        concept_probs = concept_probs.astype(np.float16)
+        logger.info("predict wall time: %.1fs", time.perf_counter() - start)
         return (
             _render_onehot(display_image, class_probs, concept_probs, onehot_mode, onehot_opacity),
             _render_multihot(display_image, concept_probs, multihot_name, multihot_opacity),
@@ -303,7 +312,8 @@ def build_ui(
                 _empty_other(),
                 None,
             )
-        x_disp, y_disp = int(evt.index[0]), int(evt.index[1])
+        index = evt.index if evt.index and None not in evt.index[:2] else (-1, -1)
+        x_disp, y_disp = int(index[0]), int(index[1])
         if not (0 <= x_disp < DISPLAY_SIZE and 0 <= y_disp < DISPLAY_SIZE):
             click_xy = None
             top_html = render_top_classes_html([])

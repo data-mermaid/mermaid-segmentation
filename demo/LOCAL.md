@@ -72,4 +72,5 @@ The bundled `id2label.json` / `concept_id2name.json` / model config correspond t
 ## Version notes
 
 - Python **3.12** and Gradio **6.17.3** — the same pins as the deployed Space (`uv.lock` resolves gradio to exactly the Space's version, so local rendering matches production).
+- The deployed Space runs on ZeroGPU; the `spaces` package (installed by the `demo` extra) and its `@spaces.GPU` decorator are complete no-ops off-Spaces, so local runs behave as plain CPU/CUDA torch.
 - Gradio 6 quirk to keep in mind when editing the UI: `css=` is passed to `launch()`, not `Blocks()`, and page-level CSS is scoped to `.gradio-container` (a `Blocks(elem_id=...)` never reaches the DOM).

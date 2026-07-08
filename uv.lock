@@ -2758,6 +2758,7 @@ dependencies = [
 [package.optional-dependencies]
 demo = [
     { name = "gradio" },
+    { name = "spaces" },
 ]
 notebooks = [
     { name = "great-tables" },
@@ -2824,6 +2825,7 @@ requires-dist = [
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "segmentation-models-pytorch" },
     { name = "selenium", marker = "extra == 'scraping'" },
+    { name = "spaces", marker = "extra == 'demo'", specifier = ">=0.30" },
     { name = "torch", specifier = ">=2.4,<2.8" },
     { name = "torchmetrics" },
     { name = "tqdm" },
@@ -5315,6 +5317,23 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/7b/ae/2d9c981590ed9999a0d91755b47fc74f74de286b0f5cee14c9269041e6c4/soupsieve-2.8.3.tar.gz", hash = "sha256:3267f1eeea4251fb42728b6dfb746edc9acaffc4a45b27e19450b676586e8349", size = 118627, upload-time = "2026-01-20T04:27:02.457Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/2c/1462b1d0a634697ae9e55b3cecdcb64788e8b7d63f54d923fcd0bb140aed/soupsieve-2.8.3-py3-none-any.whl", hash = "sha256:ed64f2ba4eebeab06cc4962affce381647455978ffc1e36bb79a545b91f45a95", size = 37016, upload-time = "2026-01-20T04:27:01.012Z" },
+]
+
+[[package]]
+name = "spaces"
+version = "0.50.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "gradio" },
+    { name = "httpx" },
+    { name = "packaging" },
+    { name = "pydantic" },
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7f/9d/9a06c91f01ed57ac4749e00f8eaf591ed5e3c6ec7c4499ce5c6f59fbc1dc/spaces-0.50.4.tar.gz", hash = "sha256:0aaed1d041d21c35c14b5a5cee5be677ad0ea26a26a5f09c488264ab1c031753", size = 88304, upload-time = "2026-06-04T15:41:13.17Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c5/01/e02d0352836c68bd9e307c369c62800c9437d6243e64e1d8660543e50617/spaces-0.50.4-py3-none-any.whl", hash = "sha256:ad4383748b7a4219940d9ba786bb3eebbbd9cc946d21334bee1557bb20469355", size = 111340, upload-time = "2026-06-04T15:41:11.732Z" },
 ]
 
 [[package]]

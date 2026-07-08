@@ -59,6 +59,8 @@ test-live = [
 ]
 demo = [
     "gradio>=5.0",
+    # No-op off-Spaces; provides `import spaces` + @spaces.GPU for local runs.
+    "spaces>=0.30",
 ]
 
 [dependency-groups]

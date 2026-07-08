@@ -136,7 +136,9 @@ def _load_state_dict_flexible(model: torch.nn.Module, sd: Mapping[str, Any]) -> 
 
 def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMModel:
     num_classes = max(artifacts.id2label.keys()) + 1
-    ckpt = torch.load(artifacts.checkpoint_path, map_location=device, weights_only=False)
+    # Always deserialize to CPU: on ZeroGPU only the final .to(device) is intercepted;
+    # a cuda map_location would bypass the weight-packing hijack.
+    ckpt = torch.load(artifacts.checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
 
     num_concepts = _num_concepts_from_state_dict(state_dict) or len(artifacts.concept_id2name)

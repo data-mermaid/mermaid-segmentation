@@ -53,3 +53,5 @@ hf upload datamermaid/mermaid-segmentation ./demo . --repo-type=space
 ```
 
 Set the Space secret **`HF_TOKEN`** (DINOv3 + checkpoint-repo read). The Space is pinned to Python 3.12 + Gradio 6.x via the frontmatter above. Keep the `mermaidseg` ref in `requirements.txt` aligned with the checkpoint's training code.
+
+The Space runs on **ZeroGPU**: `import spaces` precedes torch in `app.py`, the click-bound `run_predict` carries `@spaces.GPU`, and the model is moved to `cuda` at startup so ZeroGPU can pack and stream the weights per request. Do not add `gradio`/`spaces`/`torch` pins to `requirements.txt` — the platform manages them (torch must stay on the ZeroGPU-supported build).
