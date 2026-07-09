@@ -387,12 +387,12 @@ def render_overlay_legend(
             '<div class="hint">Run segmentation to see the color key.</div></div>'
         )
     chips: list[str] = []
-    for label, (r, g, b), cover in items:
+    for label, (r, g, b), _cover in items:
         chips.append(
             '<span style="display:inline-flex;align-items:center;margin:0 12px 6px 0">'
             f'<span style="width:14px;height:14px;border-radius:3px;background:rgb({r},{g},{b});'
             'display:inline-block;margin-right:6px;border:1px solid rgba(128,128,128,0.4)"></span>'
-            f'{label} <small style="opacity:0.6;margin-left:4px">{cover * 100:.0f}%</small></span>'
+            f"{label}</span>"
         )
     return f'<div class="panel">{title_html}<div>{"".join(chips)}</div></div>'
 
@@ -462,112 +462,74 @@ def render_top_bottom_other_html(
     return f'<div class="panel">{title_html}{"".join(rows)}</div>'
 
 
+def _rank_candidates(
+    concept_probs_at_pixel: NDArray[np.float32],
+    rank_index: dict[str, list[tuple[int, str]]],
+    rank: str,
+    top_k: int,
+) -> list[tuple[str, float]]:
+    entries = rank_index.get(rank, [])
+    if not entries:
+        return []
+    idxs = np.asarray([idx for idx, _ in entries], dtype=np.int64)
+    values = [val for _, val in entries]
+    probs = concept_probs_at_pixel[idxs]
+    order = np.argsort(probs)[::-1][:top_k]
+    return [(values[int(j)], float(probs[int(j)])) for j in order if values[int(j)] != "none"]
+
+
 def render_taxonomy_tree(
     concept_probs_at_pixel: NDArray[np.float32] | None,
     rank_index: dict[str, list[tuple[int, str]]],
-    parents: dict[str, str],
+    _parents: dict[str, str],
     top_k: int = 3,
-):
-    from matplotlib.figure import Figure
-
-    # OO Figure, not pyplot: no global Gcf registry entry (this runs in the
-    # long-lived main process on every click) and thread-safe. gradio attaches
-    # an Agg canvas when it calls fig.savefig() at postprocess time.
-    fig = Figure(figsize=(12, 3.0))
-    ax = fig.subplots()
-    fig.subplots_adjust(left=0.005, right=0.995, top=0.99, bottom=0.02)
-    ax.set_axis_off()
-    ax.set_xlim(-0.5, len(RANK_ORDER) - 0.5)
-    ax.set_ylim(-0.55, top_k + 0.05)
-
+    title: str = "Taxonomy at clicked pixel",
+) -> str:
+    """Vertical HTML readout: one row per rank, top candidates as fixed-size chips."""
+    title_html = f'<div class="section-title">{title}</div>' if title else ""
     if concept_probs_at_pixel is None or concept_probs_at_pixel.size == 0:
-        ax.text(
-            0.5,
-            0.5,
-            "Click a pixel to see the taxonomy.",
-            ha="center",
-            va="center",
-            fontsize=12,
-            color="#666",
-        )
-        return fig
-
-    selected: dict[str, list[tuple[str, float, int]]] = {}
-    selected_lookup: dict[str, dict[str, int]] = {}
-    for rank in RANK_ORDER:
-        entries = rank_index.get(rank, [])
-        if not entries:
-            selected[rank] = []
-            selected_lookup[rank] = {}
-            continue
-        idxs = np.asarray([idx for idx, _ in entries], dtype=np.int64)
-        values = [val for _, val in entries]
-        probs = concept_probs_at_pixel[idxs]
-        order = np.argsort(probs)[::-1][:top_k]
-        chosen: list[tuple[str, float, int]] = []
-        lookup: dict[str, int] = {}
-        for rank_pos, j in enumerate(order):
-            j_int = int(j)
-            value = values[j_int]
-            p = float(probs[j_int])
-            y = top_k - 1 - rank_pos
-            chosen.append((value, p, y))
-            lookup[value] = y
-        selected[rank] = chosen
-        selected_lookup[rank] = lookup
-
-    for x, rank in enumerate(RANK_ORDER):
-        ax.text(
-            x,
-            top_k - 0.25,
-            rank,
-            ha="center",
-            va="bottom",
-            fontsize=10,
-            fontweight="bold",
-            color="#444",
+        return (
+            f'<div class="panel taxonomy-panel">{title_html}'
+            '<div class="hint">Click a pixel to see the taxonomy.</div></div>'
         )
 
-    for x_child, child_rank in enumerate(RANK_ORDER):
-        if x_child == 0:
+    rows: list[str] = []
+    for i, rank in enumerate(RANK_ORDER):
+        candidates = _rank_candidates(concept_probs_at_pixel, rank_index, rank, top_k)
+        if not candidates:
             continue
-        parent_rank = RANK_ORDER[x_child - 1]
-        parent_lookup = selected_lookup.get(parent_rank, {})
-        for value, p_child, y_child in selected[child_rank]:
-            full_child = f"{child_rank}__{value}"
-            full_parent = parents.get(full_child)
-            if full_parent is None:
-                continue
-            parent_value = full_parent.split("__", 1)[1] if "__" in full_parent else full_parent
-            if parent_value not in parent_lookup:
-                continue
-            y_parent = parent_lookup[parent_value]
-            ax.plot(
-                [x_child - 1, x_child],
-                [y_parent, y_child],
-                color="#444",
-                alpha=max(0.15, min(1.0, p_child)),
-                linewidth=0.5 + 3.5 * max(0.0, min(1.0, p_child)),
-                zorder=1,
-            )
+        primary, primary_p = candidates[0]
+        primary_p = float(np.clip(primary_p, 0.0, 1.0))
+        alt_html = ""
+        if len(candidates) > 1:
+            alt_chips = []
+            for name, p in candidates[1:]:
+                p_clamped = float(np.clip(p, 0.0, 1.0))
+                alt_chips.append(
+                    f'<span class="taxonomy-alt" style="opacity:{0.45 + 0.55 * p_clamped:.2f}">'
+                    f"{name}</span>"
+                )
+            alt_html = f'<div class="taxonomy-alts">{"".join(alt_chips)}</div>'
 
-    for x, rank in enumerate(RANK_ORDER):
-        for value, p, y in selected[rank]:
-            p_clamped = float(np.clip(p, 0.0, 1.0))
-            ax.text(
-                x,
-                y,
-                f"{value}\n({p_clamped:.2f})",
-                ha="center",
-                va="center",
-                fontsize=8.0 + 16.0 * p_clamped,
-                alpha=0.35 + 0.65 * p_clamped,
-                bbox={
-                    "boxstyle": "round,pad=0.25",
-                    "facecolor": "white",
-                    "edgecolor": "#ccc",
-                    "alpha": 0.9,
-                },
-                zorder=2,
-            )
-    return fig
+        connector = ""
+        if i > 0:
+            connector = '<div class="taxonomy-connector" aria-hidden="true"></div>'
+
+        rows.append(
+            f"{connector}"
+            '<div class="taxonomy-row">'
+            f'<div class="taxonomy-rank">{rank}</div>'
+            '<div class="taxonomy-candidates">'
+            f'<div class="taxonomy-primary">{primary}</div>'
+            f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%"></div>'
+            f"{alt_html}"
+            "</div></div>"
+        )
+
+    if not rows:
+        return (
+            f'<div class="panel taxonomy-panel">{title_html}'
+            '<div class="hint">No taxonomy concepts available for this pixel.</div></div>'
+        )
+
+    return f'<div class="panel taxonomy-panel">{title_html}<div class="taxonomy-tree">{"".join(rows)}</div></div>'

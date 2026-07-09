@@ -101,9 +101,17 @@ CSS = """
 }
 #mermaid-header .mermaid-header-logo svg { width: 46px; height: 48px; display: block; flex: 0 0 auto; }
 #mermaid-header .mermaid-header-title {
-    font-size: 1.4rem; font-weight: 700; line-height: 1.2; color: #ffffff;
-    /* Brand: MERMAID renders as plain all-caps, never small-caps. */
-    font-variant: normal; font-variant-caps: normal; text-transform: none; letter-spacing: normal;
+    font-size: 1.35rem; font-weight: 700; line-height: 1.25; color: #ffffff;
+    font-variant: normal; font-variant-caps: normal; text-transform: none;
+    letter-spacing: normal;
+}
+/* Gradio themes can apply small-caps to headings; keep MERMAID as uniform caps. */
+#mermaid-header .mermaid-brand {
+    font-variant: normal !important;
+    font-variant-caps: normal !important;
+    font-feature-settings: "smcp" 0, "c2sc" 0 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em;
 }
 #mermaid-header .mermaid-header-subtitle {
     margin-top: 2px; color: rgba(255, 255, 255, 0.85); font-size: 0.95rem;
@@ -137,6 +145,39 @@ CSS = """
 #mermaid-footer .mermaid-footer-logo {
     width: 150px; height: 52px; object-fit: contain; opacity: 0.85;
 }
+#mermaid-footer .mermaid-footer-logo.logo-exeter {
+    width: 185px; height: 64px;
+}
+#mermaid-footer .mermaid-footer-logo.logo-epfl {
+    width: 105px; height: 38px;
+}
+/* Taxonomy readout: vertical ladder with fixed typography (replaces matplotlib Plot). */
+.gradio-container .taxonomy-panel { min-height: 220px; }
+.gradio-container .taxonomy-tree { margin-top: 4px; }
+.gradio-container .taxonomy-row {
+    display: flex; align-items: flex-start; gap: 14px; padding: 6px 0;
+}
+.gradio-container .taxonomy-rank {
+    flex: 0 0 76px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; color: #667085; padding-top: 3px;
+}
+.gradio-container .taxonomy-candidates { flex: 1; min-width: 0; }
+.gradio-container .taxonomy-primary {
+    font-size: 15px; font-weight: 600; line-height: 1.25; color: inherit;
+    word-break: break-word;
+}
+.gradio-container .taxonomy-bar {
+    height: 5px; border-radius: 3px; background: #3b82f6; margin: 5px 0 6px 0;
+    max-width: 100%;
+}
+.gradio-container .taxonomy-alts { display: flex; flex-wrap: wrap; gap: 6px; }
+.gradio-container .taxonomy-alt {
+    font-size: 12px; line-height: 1.3; padding: 3px 9px; border-radius: 999px;
+    background: rgba(128, 128, 128, 0.14); color: inherit;
+}
+.gradio-container .taxonomy-connector {
+    width: 2px; height: 10px; margin-left: 37px; background: rgba(128, 128, 128, 0.35);
+}
 """
 
 logger = logging.getLogger(__name__)
@@ -150,7 +191,8 @@ def _header_html() -> str:
         '<div class="mermaid-header-bar">'
         f'<div class="mermaid-header-logo" aria-hidden="true">{logo}</div>'
         "<div>"
-        '<div class="mermaid-header-title">MERMAID Concept Bottleneck Demo</div>'
+        '<div class="mermaid-header-title">'
+        '<span class="mermaid-brand">MERMAID</span> Concept Bottleneck Demo</div>'
         '<div class="mermaid-header-subtitle">'
         f"Upload an image or pick a sample, click <b>{PRIMARY_BTN_LABEL}</b>, "
         "then click any overlay pixel to inspect classes, taxonomy, and concepts.</div>"
@@ -158,14 +200,14 @@ def _header_html() -> str:
     )
 
 
-# Partner/collaborator logos shown in the footer strip (file, alt text).
-_FOOTER_LOGOS: tuple[tuple[str, str], ...] = (
-    ("logo_wcs.png", "Wildlife Conservation Society"),
-    ("logo_exeter.png", "University of Exeter"),
-    ("logo_queensland.png", "University of Queensland"),
-    ("logo_mit.png", "Massachusetts Institute of Technology"),
-    ("logo_epfl.png", "EPFL"),
-    ("logo_sparkgeo.png", "Sparkgeo"),
+# Partner/collaborator logos shown in the footer strip (file, alt text, optional CSS class).
+_FOOTER_LOGOS: tuple[tuple[str, str, str], ...] = (
+    ("logo_wcs.png", "Wildlife Conservation Society", ""),
+    ("logo_exeter.png", "University of Exeter", "logo-exeter"),
+    ("logo_queensland.png", "University of Queensland", ""),
+    ("logo_mit.png", "Massachusetts Institute of Technology", ""),
+    ("logo_epfl.png", "EPFL", "logo-epfl"),
+    ("logo_sparkgeo.png", "Sparkgeo", ""),
 )
 
 
@@ -179,13 +221,18 @@ def _footer_html() -> str:
     # never surfaces these as selectable sample images.
     logos_dir = Path(__file__).resolve().parent / "logos"
     imgs: list[str] = []
-    for filename, alt in _FOOTER_LOGOS:
+    for filename, alt, css_class in _FOOTER_LOGOS:
         path = logos_dir / filename
         if not path.is_file():
             continue
         b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        class_attr = (
+            f' class="mermaid-footer-logo {css_class}"'
+            if css_class
+            else ' class="mermaid-footer-logo"'
+        )
         imgs.append(
-            f'<img class="mermaid-footer-logo" src="data:image/png;base64,{b64}" alt="{alt}" title="{alt}">'
+            f'<img{class_attr} src="data:image/png;base64,{b64}" alt="{alt}" title="{alt}">'
         )
     if not imgs:
         return ""
@@ -349,6 +396,14 @@ def build_ui(
         )
         return resize_for_display(composite)
 
+    def _empty_taxonomy():
+        return render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
+
+    def _taxonomy_at(concept_probs, x_src, y_src):
+        return render_taxonomy_tree(
+            concept_probs[:, y_src, x_src], rank_index, parents, top_k=TOP_K_TREE
+        )
+
     def _empty_other():
         return render_top_bottom_other_html(
             [],
@@ -398,18 +453,20 @@ def build_ui(
     @spaces.GPU(duration=30)
     def run_predict(image, tax_rank, growth_form, other_group, cls_op, tax_op, growth_op):
         trait = growth_form or other_group or default_trait
-        empty_tree = render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
+        empty_tree = _empty_taxonomy()
         if image is None:
             return (
                 None,
                 render_overlay_legend([]),
                 render_top_classes_html([]),
+                empty_tree,
                 None,
                 render_overlay_legend([]),
                 empty_tree,
                 None,
                 render_multihot_legend(trait),
                 _empty_other(),
+                empty_tree,
                 None,
                 None,
                 None,
@@ -434,12 +491,14 @@ def build_ui(
             cls_base,
             cls_legend,
             render_top_classes_html([]),
+            empty_tree,
             tax_base,
             tax_legend,
             empty_tree,
             growth_base,
             render_multihot_legend(trait),
             _empty_other(),
+            empty_tree,
             display_image,
             class_probs,
             concept_probs,
@@ -449,42 +508,47 @@ def build_ui(
             growth_base,
         )
 
-    def cls_click(display_image, class_probs, cls_base, evt: gr.SelectData):
+    def cls_click(display_image, class_probs, concept_probs, cls_base, evt: gr.SelectData):
+        empty_tree = _empty_taxonomy()
         if display_image is None or class_probs is None or cls_base is None:
-            return None, render_top_classes_html([]), None
+            return None, render_top_classes_html([]), empty_tree, None
         hit = _coords(evt, class_probs)
         if hit is None:
-            return cls_base, render_top_classes_html([]), None
+            return cls_base, render_top_classes_html([]), empty_tree, None
         click_xy, x_src, y_src = hit
+        tree = (
+            _taxonomy_at(concept_probs, x_src, y_src) if concept_probs is not None else empty_tree
+        )
         return (
             draw_click_marker(cls_base, click_xy),
             _top_classes_at(class_probs, x_src, y_src),
+            tree,
             click_xy,
         )
 
     def tax_click(display_image, concept_probs, tax_base, evt: gr.SelectData):
-        empty_tree = render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
+        empty_tree = _empty_taxonomy()
         if display_image is None or concept_probs is None or tax_base is None:
             return None, empty_tree, None
         hit = _coords(evt, concept_probs)
         if hit is None:
             return tax_base, empty_tree, None
         click_xy, x_src, y_src = hit
-        tree = render_taxonomy_tree(
-            concept_probs[:, y_src, x_src], rank_index, parents, top_k=TOP_K_TREE
-        )
+        tree = _taxonomy_at(concept_probs, x_src, y_src)
         return draw_click_marker(tax_base, click_xy), tree, click_xy
 
     def growth_click(display_image, concept_probs, growth_base, evt: gr.SelectData):
+        empty_tree = _empty_taxonomy()
         if display_image is None or concept_probs is None or growth_base is None:
-            return None, _empty_other(), None
+            return None, _empty_other(), empty_tree, None
         hit = _coords(evt, concept_probs)
         if hit is None:
-            return growth_base, _empty_other(), None
+            return growth_base, _empty_other(), empty_tree, None
         click_xy, x_src, y_src = hit
         return (
             draw_click_marker(growth_base, click_xy),
             _other_at(concept_probs, x_src, y_src),
+            _taxonomy_at(concept_probs, x_src, y_src),
             click_xy,
         )
 
@@ -581,6 +645,7 @@ def build_ui(
                     cls_legend = gr.HTML(render_overlay_legend([]))
                 with gr.Column(scale=1, min_width=240):
                     cls_top = gr.HTML(render_top_classes_html([]))
+                    cls_tree = gr.HTML(_empty_taxonomy())
 
             with gr.Tab("Taxonomy"), gr.Row():
                 with gr.Column(scale=2, min_width=340):
@@ -596,10 +661,7 @@ def build_ui(
                     )
                     tax_legend = gr.HTML(render_overlay_legend([]))
                 with gr.Column(scale=1, min_width=240):
-                    tax_tree = gr.Plot(
-                        render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE),
-                        label="Taxonomy at clicked pixel",
-                    )
+                    tax_tree = gr.HTML(_empty_taxonomy(), label="Taxonomy at clicked pixel")
 
             with gr.Tab("Concept Bottleneck"), gr.Row():
                 with gr.Column(scale=2, min_width=340):
@@ -623,6 +685,7 @@ def build_ui(
                     growth_legend = gr.HTML(render_multihot_legend(default_trait))
                 with gr.Column(scale=1, min_width=240):
                     growth_other = gr.HTML(_empty_other())
+                    growth_tree = gr.HTML(_empty_taxonomy())
 
         gr.HTML(_footer_html(), elem_id="mermaid-footer")
 
@@ -641,12 +704,14 @@ def build_ui(
                 cls_img,
                 cls_legend,
                 cls_top,
+                cls_tree,
                 tax_img,
                 tax_legend,
                 tax_tree,
                 growth_img,
                 growth_legend,
                 growth_other,
+                growth_tree,
                 display_state,
                 class_probs_state,
                 concept_probs_state,
@@ -696,8 +761,8 @@ def build_ui(
 
         cls_img.select(
             cls_click,
-            [display_state, class_probs_state, cls_base_state],
-            [cls_img, cls_top, click_state],
+            [display_state, class_probs_state, concept_probs_state, cls_base_state],
+            [cls_img, cls_top, cls_tree, click_state],
         )
         tax_img.select(
             tax_click,
@@ -707,7 +772,7 @@ def build_ui(
         growth_img.select(
             growth_click,
             [display_state, concept_probs_state, growth_base_state],
-            [growth_img, growth_other, click_state],
+            [growth_img, growth_other, growth_tree, click_state],
         )
         if sample_gallery is not None:
             sample_gallery.select(pick_sample, inputs=None, outputs=input_img)
