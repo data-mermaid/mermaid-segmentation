@@ -50,7 +50,8 @@ def _identity_source_to_target(dataset: Any) -> dict[str, str]:
 
 
 def _static_source_to_target(static: dict[str, str], dataset: Any) -> dict[str, str]:
-    """Filter a static ``source_name -> target_name`` dict to the dataset's source space."""
+    """Filter a static ``source_name -> target_name`` dict to the dataset's source
+    space."""
     ds_names_lower = {n.lower() for n in dataset.source_name2id}
     return {name: target for name, target in static.items() if name.lower() in ds_names_lower}
 
@@ -70,7 +71,10 @@ def roll_up_label(label: str, benthic_hierarchy: dict[str, str], subset: set[str
         while parent is not None:
             if parent in subset:
                 return parent
-            parent = benthic_hierarchy[parent]
+            # ``.get`` (not ``[]``): a live/paginated hierarchy can have an ancestor whose own
+            # parent isn't itself a key; treat that as "no further parent" (roll up fails ->
+            # background) instead of raising KeyError at registry-build time (container startup).
+            parent = benthic_hierarchy.get(parent)
     return None
 
 
@@ -242,7 +246,8 @@ class SourceLabelRegistry:
         provided: dict[str, dict[str, str]],
         fetch_remote: bool,
     ) -> dict[str, dict[str, str]]:
-        """Resolve a ``SOURCE_NAME -> {source_name: target_name}`` map for every dataset."""
+        """Resolve a ``SOURCE_NAME -> {source_name: target_name}`` map for every
+        dataset."""
         resolved: dict[str, dict[str, str]] = {}
         for ds in self.datasets:
             name = ds.SOURCE_NAME
@@ -392,8 +397,9 @@ class SourceLabelRegistry:
     def conceptid2labelid(self) -> dict[int, int] | None:
         """Backward-compat helper used by ``postprocess_predicted_concepts``.
 
-        Returns a dict mapping per-concept-column index (``benthic_concept_matrix`` column ordering,
-        0-indexed) to the corresponding target label ID (1-indexed, 0 if not a leaf class).
+        Returns a dict mapping per-concept-column index (``benthic_concept_matrix``
+        column ordering, 0-indexed) to the corresponding target label ID (1-indexed, 0
+        if not a leaf class).
         """
         return None
         # if self._concept_matrix is None:

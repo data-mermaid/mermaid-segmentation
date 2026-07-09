@@ -14,6 +14,20 @@ import requests
 
 from mermaidseg.dataset_reconciliation import SourceLabelRegistry, label_mapping
 from mermaidseg.dataset_reconciliation import registry as registry_mod
+from mermaidseg.dataset_reconciliation.registry import roll_up_label
+
+
+def test_roll_up_label_tolerates_open_hierarchy():
+    """A hierarchy whose ancestor chain hits a non-key must not raise (roll-up runs at
+    startup).
+
+    ``coral`` -> ``hard coral`` (not itself a key) previously raised KeyError via ``[]``
+    indexing.
+    """
+    hierarchy = {"coral": "hard coral"}  # "hard coral" is not a key -> open chain
+    subset = {"acropora"}
+    assert roll_up_label("coral", hierarchy, subset) is None  # returns None, does not raise
+    assert roll_up_label("acropora", hierarchy, subset) == "acropora"
 
 
 class _FakeResponse:
