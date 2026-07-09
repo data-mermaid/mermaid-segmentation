@@ -1,8 +1,8 @@
 """Post-run completeness check for the CoralNet resize pipeline.
 
-Tallies the resize checkpoint, lists what is actually on S3, reports the gap between the two, and
-samples the images marked corrupted_invalid_channels to show what they really are (grayscale / RGBA
-files are usually recoverable without redownload).
+Tallies the resize checkpoint, lists what is actually on S3, reports the gap between the
+two, and samples the images marked corrupted_invalid_channels to show what they really
+are (grayscale / RGBA files are usually recoverable without redownload).
 
 Usage (SageMaker):     uv run python scripts/check_resize_completeness.py
 """
@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 def sample_invalid_channel_modes(
     df_bad: pd.DataFrame, bucket: str, sample_size: int
 ) -> Counter[str]:
-    """GET a sample of invalid_channels images and tally their actual PIL format/mode."""
+    """GET a sample of invalid_channels images and tally their actual PIL
+    format/mode."""
     s3 = boto3.client("s3")
     modes: Counter[str] = Counter()
     sample = df_bad.sample(min(sample_size, len(df_bad)), random_state=0)
