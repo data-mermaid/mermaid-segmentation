@@ -182,7 +182,8 @@ def resize_for_display(image_rgb: NDArray[np.uint8]) -> NDArray[np.uint8]:
 
 
 def draw_click_marker(
-    image_rgb: NDArray[np.uint8], xy: tuple[int, int] | None
+    image_rgb: NDArray[np.uint8],
+    xy: tuple[int, int] | None,
 ) -> NDArray[np.uint8]:
     if xy is None:
         return image_rgb
@@ -190,13 +191,13 @@ def draw_click_marker(
     pil = Image.fromarray(image_rgb, mode="RGB").convert("RGBA")
     overlay = Image.new("RGBA", pil.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    radius = 8
-    draw.ellipse(
-        (x - radius, y - radius, x + radius, y + radius), outline=(255, 255, 255, 240), width=2
-    )
-    draw.ellipse(
-        (x - 3, y - 3, x + 3, y + 3), fill=(255, 60, 60, 255), outline=(255, 255, 255, 240), width=1
-    )
+    for radius, width in ((11, 2), (6, 2), (2, 1)):
+        draw.ellipse(
+            (x - radius, y - radius, x + radius, y + radius),
+            outline=(255, 255, 255, 235),
+            width=width,
+        )
+    draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(255, 60, 60, 255))
     return np.asarray(Image.alpha_composite(pil, overlay).convert("RGB"), dtype=np.uint8)
 
 
@@ -499,6 +500,25 @@ def _rank_candidates(
     return [(values[int(j)], float(probs[int(j)])) for j in order if values[int(j)] != "none"]
 
 
+def rank_highlight_rgb(
+    highlight_rank: str | None,
+    concept_probs_at_pixel: NDArray[np.float32],
+    rank_index: dict[str, list[tuple[int, str]]],
+    rank_palettes: dict[str, dict[str, NDArray[np.uint8]]],
+) -> tuple[int, int, int] | None:
+    """RGB for the top taxon at ``highlight_rank``, matching the overlay color key."""
+    if not highlight_rank:
+        return None
+    candidates = _rank_candidates(concept_probs_at_pixel, rank_index, highlight_rank, top_k=1)
+    if not candidates:
+        return None
+    primary, _ = candidates[0]
+    color = rank_palettes.get(highlight_rank, {}).get(primary)
+    if color is None:
+        return None
+    return int(color[0]), int(color[1]), int(color[2])
+
+
 def top_class_skips_taxonomy(
     class_probs_at_pixel: NDArray[np.float32],
     id2label: dict[int, str],
@@ -525,6 +545,8 @@ def render_taxonomy_tree(
     _parents: dict[str, str],
     top_k: int = 3,
     title: str = "Taxonomy at clicked pixel",
+    highlight_rank: str | None = None,
+    highlight_rgb: tuple[int, int, int] | None = None,
 ) -> str:
     """Vertical HTML readout: one row per rank, top candidates as fixed-size chips."""
     title_html = f'<div class="section-title">{title}</div>' if title else ""
@@ -560,13 +582,41 @@ def render_taxonomy_tree(
         if i > 0:
             connector = '<div class="taxonomy-connector" aria-hidden="true"></div>'
 
+        active = rank == highlight_rank
+        if active and highlight_rgb is not None:
+            r, g, b = highlight_rgb
+            swatch = (
+                f'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;'
+                f"background:rgb({r},{g},{b});margin-right:6px;vertical-align:middle;"
+                f'border:1px solid rgba(128,128,128,0.35)"></span>'
+            )
+            row_open = (
+                f'<div class="taxonomy-row" style="background:rgba({r},{g},{b},0.14);'
+                f"border-radius:8px;margin:0 -8px;padding:6px 8px;"
+                f'box-shadow:inset 0 0 0 1px rgba({r},{g},{b},0.5)">'
+            )
+            rank_cell = (
+                f'<div class="taxonomy-rank" style="color:rgb({r},{g},{b})">{swatch}{rank}</div>'
+            )
+            bar = (
+                f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%;'
+                f'background:rgb({r},{g},{b})"></div>'
+            )
+        elif active:
+            row_open = '<div class="taxonomy-row taxonomy-row-active">'
+            rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
+            bar = f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%"></div>'
+        else:
+            row_open = '<div class="taxonomy-row">'
+            rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
+            bar = f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%"></div>'
+
         rows.append(
-            f"{connector}"
-            '<div class="taxonomy-row">'
-            f'<div class="taxonomy-rank">{rank}</div>'
+            f"{connector}{row_open}"
+            f"{rank_cell}"
             '<div class="taxonomy-candidates">'
             f'<div class="taxonomy-primary">{primary} <small>({primary_p:.2f})</small></div>'
-            f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%"></div>'
+            f"{bar}"
             f"{alt_html}"
             "</div></div>"
         )

@@ -40,6 +40,7 @@ from rendering import (
     make_color_palette,
     make_rank_palette,
     overlay_legend_items,
+    rank_highlight_rgb,
     render_multihot_legend,
     render_overlay_legend,
     render_taxonomy_skipped,
@@ -150,6 +151,13 @@ CSS = """
 .gradio-container .taxonomy-row {
     display: flex; align-items: flex-start; gap: 14px; padding: 6px 0;
 }
+.gradio-container .taxonomy-row-active {
+    background: rgba(59, 130, 246, 0.12); border-radius: 8px;
+    margin: 0 -8px; padding: 6px 8px;
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.35);
+}
+.gradio-container .taxonomy-row-active .taxonomy-rank { color: #2563eb; }
+.gradio-container .taxonomy-row-active .taxonomy-bar { background: #2563eb; }
 .gradio-container .taxonomy-rank {
     flex: 0 0 76px; font-size: 11px; font-weight: 700; text-transform: uppercase;
     letter-spacing: 0.04em; color: #667085; padding-top: 3px;
@@ -392,13 +400,20 @@ def build_ui(
     def _empty_taxonomy():
         return render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
 
-    def _taxonomy_at(class_probs, concept_probs, x_src, y_src):
+    def _taxonomy_at(class_probs, concept_probs, x_src, y_src, highlight_rank=None):
         if class_probs is not None:
             skip, label = top_class_skips_taxonomy(class_probs[:, y_src, x_src], artifacts.id2label)
             if skip:
                 return render_taxonomy_skipped(label)
+        at_pixel = concept_probs[:, y_src, x_src]
+        highlight_rgb = rank_highlight_rgb(highlight_rank, at_pixel, rank_index, rank_palettes)
         return render_taxonomy_tree(
-            concept_probs[:, y_src, x_src], rank_index, parents, top_k=TOP_K_TREE
+            at_pixel,
+            rank_index,
+            parents,
+            top_k=TOP_K_TREE,
+            highlight_rank=highlight_rank,
+            highlight_rgb=highlight_rgb,
         )
 
     def _multihot_legend(trait, concept_probs=None, pixel_prob=None):
@@ -515,10 +530,10 @@ def build_ui(
         click_xy, x_src, y_src = click_state
         return click_xy, x_src, y_src
 
-    def _readouts_at(class_probs, concept_probs, x_src, y_src, trait):
+    def _readouts_at(class_probs, concept_probs, x_src, y_src, trait, highlight_rank=None):
         empty_tree = _empty_taxonomy()
         tree = (
-            _taxonomy_at(class_probs, concept_probs, x_src, y_src)
+            _taxonomy_at(class_probs, concept_probs, x_src, y_src, highlight_rank)
             if concept_probs is not None
             else empty_tree
         )
@@ -552,6 +567,7 @@ def build_ui(
         growth_form,
         other_group,
         click_state,
+        tax_rank,
         evt: gr.SelectData,
     ):
         trait = growth_form or other_group or default_trait
@@ -592,7 +608,7 @@ def build_ui(
                     None,
                 )
             cls_top, tree, growth_other, growth_legend = _readouts_at(
-                class_probs, concept_probs, x_src, y_src, trait
+                class_probs, concept_probs, x_src, y_src, trait, tax_rank
             )
             cls_img, tax_img, growth_img = _marked_overlays(
                 cls_base, tax_base, growth_base, click_xy
@@ -612,7 +628,7 @@ def build_ui(
 
         click_xy, x_src, y_src = hit
         cls_top, tree, growth_other, growth_legend = _readouts_at(
-            class_probs, concept_probs, x_src, y_src, trait
+            class_probs, concept_probs, x_src, y_src, trait, tax_rank
         )
         cls_img, tax_img, growth_img = _marked_overlays(cls_base, tax_base, growth_base, click_xy)
         return (
@@ -665,6 +681,14 @@ def build_ui(
             base,
             _multihot_legend(trait, concept_probs, pixel_prob),
         )
+
+    def refresh_taxonomy_highlight(class_probs, concept_probs, click_state, tax_rank):
+        _, x_src, y_src = _unpack_click(click_state)
+        if x_src is None or concept_probs is None:
+            empty = _empty_taxonomy()
+            return empty, empty, empty
+        tree = _taxonomy_at(class_probs, concept_probs, x_src, y_src, tax_rank)
+        return tree, tree, tree
 
     def select_growth_form(display_image, concept_probs, trait, opacity, click_state):
         # Picking a growth form clears the "other groups" selection (single active trait).
@@ -835,7 +859,11 @@ def build_ui(
             click_state,
         ]
         tax_outputs = [tax_img, tax_base_state, tax_legend]
-        tax_rank.input(recompose_tax, tax_inputs, tax_outputs)
+        tax_rank.input(recompose_tax, tax_inputs, tax_outputs).then(
+            refresh_taxonomy_highlight,
+            [class_probs_state, concept_probs_state, click_state, tax_rank],
+            [cls_tree, tax_tree, growth_tree],
+        )
         tax_opacity.release(recompose_tax, tax_inputs, tax_outputs)
 
         gf_sel.input(
@@ -864,6 +892,7 @@ def build_ui(
             gf_sel,
             other_sel,
             click_state,
+            tax_rank,
         ]
         click_outputs = [
             cls_img,
