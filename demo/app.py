@@ -57,6 +57,9 @@ TOP_K_TREE = 3
 TOP_K_OTHER = 5
 BOTTOM_K_OTHER = 5
 
+# Readout title for the Concept Bottleneck tab (top/bottom concept activations at a pixel).
+CONCEPT_READOUT_TITLE = "Concept activations at clicked pixel"
+
 ONEHOT_DROPDOWN_MODES: tuple[str, ...] = (
     "kingdom",
     "phylum",
@@ -150,7 +153,7 @@ def _header_html() -> str:
         '<div class="mermaid-header-title">MERMAID Concept Bottleneck Demo</div>'
         '<div class="mermaid-header-subtitle">'
         f"Upload an image or pick a sample, click <b>{PRIMARY_BTN_LABEL}</b>, "
-        "then click any overlay pixel to inspect classes and taxonomy.</div>"
+        "then click any overlay pixel to inspect classes, taxonomy, and concepts.</div>"
         "</div></div>"
     )
 
@@ -270,7 +273,7 @@ def build_ui(
         if name != "(none)"
     }
 
-    # Split the multi-hot traits into the two groups the "Growth forms & other" tab shows.
+    # Split the multi-hot concepts into the two groups the Concept Bottleneck tab shows.
     morph_set = set(MORPHOLOGIC_CONCEPTS)
     growth_form_choices = [n for n in multihot_choices if n in morph_set and n != "(none)"]
     other_group_choices = [n for n in multihot_choices if n not in morph_set and n != "(none)"]
@@ -347,7 +350,12 @@ def build_ui(
         return resize_for_display(composite)
 
     def _empty_other():
-        return render_top_bottom_other_html([], [], title="Predicted Concepts: Other")
+        return render_top_bottom_other_html(
+            [],
+            [],
+            title=CONCEPT_READOUT_TITLE,
+            empty_hint="Click a pixel to see concept activations.",
+        )
 
     def _coords(evt: gr.SelectData, probs):
         index = evt.index if evt.index and None not in evt.index[:2] else (-1, -1)
@@ -382,6 +390,7 @@ def build_ui(
         return render_top_bottom_other_html(
             [(names[int(j)], float(probs[int(j)])) for j in order[::-1][:top_k]],
             [(names[int(j)], float(probs[int(j)])) for j in order[:bot_k]],
+            title=CONCEPT_READOUT_TITLE,
         )
 
     # Sized from measured calls on the Space: ~11s in-context + cold weight
@@ -558,7 +567,7 @@ def build_ui(
             PRIMARY_BTN_LABEL, variant="primary", size="lg", elem_id="mermaid-segment-btn"
         )
 
-        # One tab per view: MERMAID classes · Taxonomy · Growth forms & other.
+        # One tab per view: MERMAID classes · Taxonomy · Concept Bottleneck.
         with gr.Tabs():
             with gr.Tab("MERMAID classes"), gr.Row():
                 with gr.Column(scale=2, min_width=340):
@@ -592,7 +601,7 @@ def build_ui(
                         label="Taxonomy at clicked pixel",
                     )
 
-            with gr.Tab("Growth forms & other"), gr.Row():
+            with gr.Tab("Concept Bottleneck"), gr.Row():
                 with gr.Column(scale=2, min_width=340):
                     gf_sel = gr.Radio(
                         choices=growth_form_choices,
@@ -607,7 +616,7 @@ def build_ui(
                     growth_opacity = gr.Slider(0, 1, value=0.5, step=0.05, label="Heatmap opacity")
                     growth_img = gr.Image(
                         type="numpy",
-                        label="Trait heatmap — click a pixel",
+                        label="Concept heatmap — click a pixel",
                         interactive=False,
                         elem_id="mermaid-growth-img",
                     )
