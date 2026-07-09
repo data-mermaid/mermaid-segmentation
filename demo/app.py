@@ -124,10 +124,12 @@ CSS = """
 }
 #mermaid-footer .mermaid-footer-logos {
     display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
-    gap: 28px 40px;
+    gap: 20px 32px;
 }
+/* Uniform bounding box + contain so every logo occupies ~the same footprint
+   regardless of its native aspect ratio. */
 #mermaid-footer .mermaid-footer-logo {
-    height: 42px; width: auto; object-fit: contain; opacity: 0.85;
+    width: 150px; height: 52px; object-fit: contain; opacity: 0.85;
 }
 """
 
@@ -157,7 +159,7 @@ _FOOTER_LOGOS: tuple[tuple[str, str], ...] = (
     ("logo_queensland.png", "University of Queensland"),
     ("logo_mit.png", "Massachusetts Institute of Technology"),
     ("logo_epfl.png", "EPFL"),
-    ("logo_icrs.png", "International Coral Reef Symposium 2026"),
+    ("logo_sparkgeo.png", "Sparkgeo"),
 )
 
 
@@ -167,9 +169,9 @@ def _footer_html() -> str:
     Sits on a light card (see CSS) so the dark-ink logos stay legible in both the light and dark
     Gradio themes.
     """
-    # In static/logos/ (a subdir) so the non-recursive sample-image glob in build_ui
-    # does not pick these up as selectable sample images.
-    logos_dir = Path(__file__).resolve().parent / "static" / "logos"
+    # In demo/logos/ (outside static/) so the sample-image glob, which scans static/,
+    # never surfaces these as selectable sample images.
+    logos_dir = Path(__file__).resolve().parent / "logos"
     imgs: list[str] = []
     for filename, alt in _FOOTER_LOGOS:
         path = logos_dir / filename
