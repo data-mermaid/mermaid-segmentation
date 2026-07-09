@@ -171,6 +171,7 @@ CSS = """
 .gradio-container .taxonomy-connector {
     width: 2px; height: 10px; margin-left: 37px; background: rgba(128, 128, 128, 0.35);
 }
+.gradio-container .taxonomy-caption { margin-bottom: 8px; }
 """
 
 logger = logging.getLogger(__name__)
@@ -400,6 +401,10 @@ def build_ui(
             concept_probs[:, y_src, x_src], rank_index, parents, top_k=TOP_K_TREE
         )
 
+    def _multihot_legend(trait, concept_probs=None, pixel_prob=None):
+        channel_idx = multihot_channel_by_name.get(trait) if trait else None
+        return render_multihot_legend(trait, concept_probs, channel_idx, pixel_prob)
+
     def _empty_other():
         return render_top_bottom_other_html(
             [],
@@ -460,7 +465,7 @@ def build_ui(
                 render_overlay_legend([]),
                 empty_tree,
                 None,
-                render_multihot_legend(trait),
+                _multihot_legend(trait),
                 _empty_other(),
                 empty_tree,
                 None,
@@ -492,7 +497,7 @@ def build_ui(
             tax_legend,
             empty_tree,
             growth_base,
-            render_multihot_legend(trait),
+            _multihot_legend(trait, concept_probs),
             _empty_other(),
             empty_tree,
             display_image,
@@ -504,86 +509,181 @@ def build_ui(
             growth_base,
         )
 
-    def cls_click(display_image, class_probs, concept_probs, cls_base, evt: gr.SelectData):
+    def _unpack_click(click_state):
+        if click_state is None:
+            return None, None, None
+        click_xy, x_src, y_src = click_state
+        return click_xy, x_src, y_src
+
+    def _readouts_at(class_probs, concept_probs, x_src, y_src, trait):
         empty_tree = _empty_taxonomy()
-        if display_image is None or class_probs is None or cls_base is None:
-            return None, render_top_classes_html([]), empty_tree, None
-        hit = _coords(evt, class_probs)
-        if hit is None:
-            return cls_base, render_top_classes_html([]), empty_tree, None
-        click_xy, x_src, y_src = hit
         tree = (
             _taxonomy_at(class_probs, concept_probs, x_src, y_src)
             if concept_probs is not None
             else empty_tree
         )
+        channel_idx = multihot_channel_by_name.get(trait) if trait else None
+        pixel_prob = (
+            float(concept_probs[channel_idx, y_src, x_src])
+            if concept_probs is not None and channel_idx is not None
+            else None
+        )
         return (
-            draw_click_marker(cls_base, click_xy),
             _top_classes_at(class_probs, x_src, y_src),
             tree,
-            click_xy,
+            _other_at(concept_probs, x_src, y_src) if concept_probs is not None else _empty_other(),
+            _multihot_legend(trait, concept_probs, pixel_prob),
         )
 
-    def tax_click(display_image, class_probs, concept_probs, tax_base, evt: gr.SelectData):
-        empty_tree = _empty_taxonomy()
-        if display_image is None or concept_probs is None or tax_base is None:
-            return None, empty_tree, None
-        hit = _coords(evt, concept_probs)
-        if hit is None:
-            return tax_base, empty_tree, None
-        click_xy, x_src, y_src = hit
-        tree = _taxonomy_at(class_probs, concept_probs, x_src, y_src)
-        return draw_click_marker(tax_base, click_xy), tree, click_xy
-
-    def growth_click(display_image, class_probs, concept_probs, growth_base, evt: gr.SelectData):
-        empty_tree = _empty_taxonomy()
-        if display_image is None or concept_probs is None or growth_base is None:
-            return None, _empty_other(), empty_tree, None
-        hit = _coords(evt, concept_probs)
-        if hit is None:
-            return growth_base, _empty_other(), empty_tree, None
-        click_xy, x_src, y_src = hit
+    def _marked_overlays(cls_base, tax_base, growth_base, click_xy):
         return (
-            draw_click_marker(growth_base, click_xy),
-            _other_at(concept_probs, x_src, y_src),
-            _taxonomy_at(class_probs, concept_probs, x_src, y_src),
-            click_xy,
+            draw_click_marker(cls_base, click_xy) if cls_base is not None else None,
+            draw_click_marker(tax_base, click_xy) if tax_base is not None else None,
+            draw_click_marker(growth_base, click_xy) if growth_base is not None else None,
         )
 
-    def recompose_cls(display_image, class_probs, concept_probs, opacity, click_xy):
+    def pixel_click(
+        display_image,
+        class_probs,
+        concept_probs,
+        cls_base,
+        tax_base,
+        growth_base,
+        growth_form,
+        other_group,
+        click_state,
+        evt: gr.SelectData,
+    ):
+        trait = growth_form or other_group or default_trait
+        empty_tree = _empty_taxonomy()
+        empty_readouts = (
+            render_top_classes_html([]),
+            empty_tree,
+            _empty_other(),
+            _multihot_legend(trait, concept_probs),
+        )
+
+        if display_image is None or class_probs is None or cls_base is None:
+            return (
+                cls_base,
+                *empty_readouts,
+                tax_base,
+                empty_tree,
+                growth_base,
+                empty_readouts[2],
+                empty_tree,
+                empty_readouts[3],
+                None,
+            )
+
+        hit = _coords(evt, class_probs)
+        if hit is None:
+            click_xy, x_src, y_src = _unpack_click(click_state)
+            if click_xy is None:
+                return (
+                    cls_base,
+                    *empty_readouts,
+                    tax_base,
+                    empty_tree,
+                    growth_base,
+                    empty_readouts[2],
+                    empty_tree,
+                    empty_readouts[3],
+                    None,
+                )
+            cls_top, tree, growth_other, growth_legend = _readouts_at(
+                class_probs, concept_probs, x_src, y_src, trait
+            )
+            cls_img, tax_img, growth_img = _marked_overlays(
+                cls_base, tax_base, growth_base, click_xy
+            )
+            return (
+                cls_img,
+                cls_top,
+                tree,
+                tax_img,
+                tree,
+                growth_img,
+                growth_other,
+                tree,
+                growth_legend,
+                click_state,
+            )
+
+        click_xy, x_src, y_src = hit
+        cls_top, tree, growth_other, growth_legend = _readouts_at(
+            class_probs, concept_probs, x_src, y_src, trait
+        )
+        cls_img, tax_img, growth_img = _marked_overlays(cls_base, tax_base, growth_base, click_xy)
+        return (
+            cls_img,
+            cls_top,
+            tree,
+            tax_img,
+            tree,
+            growth_img,
+            growth_other,
+            tree,
+            growth_legend,
+            (click_xy, x_src, y_src),
+        )
+
+    def recompose_cls(display_image, class_probs, concept_probs, opacity, click_state):
         if display_image is None:
             return None, None, render_overlay_legend([])
         base, legend = _compose_onehot_base(
             display_image, class_probs, concept_probs, "classes", opacity
         )
+        click_xy, _, _ = _unpack_click(click_state)
         return draw_click_marker(base, click_xy), base, legend
 
-    def recompose_tax(display_image, class_probs, concept_probs, rank, opacity, click_xy):
+    def recompose_tax(display_image, class_probs, concept_probs, rank, opacity, click_state):
         if display_image is None:
             return None, None, render_overlay_legend([])
         base, legend = _compose_onehot_base(
             display_image, class_probs, concept_probs, rank, opacity
         )
+        click_xy, _, _ = _unpack_click(click_state)
         return draw_click_marker(base, click_xy), base, legend
 
-    def _growth_update(display_image, concept_probs, trait, opacity, click_xy):
+    def _growth_update(display_image, concept_probs, trait, opacity, click_state):
         if display_image is None or trait is None:
-            return None, None, render_multihot_legend(trait)
+            return None, None, _multihot_legend(trait)
         base = _compose_multihot_base(display_image, concept_probs, trait, opacity)
-        return draw_click_marker(base, click_xy), base, render_multihot_legend(trait)
+        click_xy, x_src, y_src = _unpack_click(click_state)
+        channel_idx = multihot_channel_by_name.get(trait) if trait else None
+        pixel_prob = (
+            float(concept_probs[channel_idx, y_src, x_src])
+            if concept_probs is not None
+            and channel_idx is not None
+            and x_src is not None
+            and y_src is not None
+            else None
+        )
+        return (
+            draw_click_marker(base, click_xy),
+            base,
+            _multihot_legend(trait, concept_probs, pixel_prob),
+        )
 
-    def select_growth_form(display_image, concept_probs, trait, opacity, click_xy):
+    def select_growth_form(display_image, concept_probs, trait, opacity, click_state):
         # Picking a growth form clears the "other groups" selection (single active trait).
-        img, base, legend = _growth_update(display_image, concept_probs, trait, opacity, click_xy)
+        img, base, legend = _growth_update(
+            display_image, concept_probs, trait, opacity, click_state
+        )
         return img, base, legend, gr.update(value=None)
 
-    def select_other_group(display_image, concept_probs, trait, opacity, click_xy):
-        img, base, legend = _growth_update(display_image, concept_probs, trait, opacity, click_xy)
+    def select_other_group(display_image, concept_probs, trait, opacity, click_state):
+        img, base, legend = _growth_update(
+            display_image, concept_probs, trait, opacity, click_state
+        )
         return img, base, legend, gr.update(value=None)
 
-    def recompose_growth(display_image, concept_probs, growth_form, other_group, opacity, click_xy):
+    def recompose_growth(
+        display_image, concept_probs, growth_form, other_group, opacity, click_state
+    ):
         return _growth_update(
-            display_image, concept_probs, growth_form or other_group, opacity, click_xy
+            display_image, concept_probs, growth_form or other_group, opacity, click_state
         )
 
     def pick_sample(evt: gr.SelectData):
@@ -678,7 +778,7 @@ def build_ui(
                         interactive=False,
                         elem_id="mermaid-growth-img",
                     )
-                    growth_legend = gr.HTML(render_multihot_legend(default_trait))
+                    growth_legend = gr.HTML(_multihot_legend(default_trait))
                 with gr.Column(scale=1, min_width=240):
                     growth_other = gr.HTML(_empty_other())
                     growth_tree = gr.HTML(_empty_taxonomy())
@@ -754,21 +854,32 @@ def build_ui(
             [growth_img, growth_base_state, growth_legend],
         )
 
-        cls_img.select(
-            cls_click,
-            [display_state, class_probs_state, concept_probs_state, cls_base_state],
-            [cls_img, cls_top, cls_tree, click_state],
-        )
-        tax_img.select(
-            tax_click,
-            [display_state, class_probs_state, concept_probs_state, tax_base_state],
-            [tax_img, tax_tree, click_state],
-        )
-        growth_img.select(
-            growth_click,
-            [display_state, class_probs_state, concept_probs_state, growth_base_state],
-            [growth_img, growth_other, growth_tree, click_state],
-        )
+        click_inputs = [
+            display_state,
+            class_probs_state,
+            concept_probs_state,
+            cls_base_state,
+            tax_base_state,
+            growth_base_state,
+            gf_sel,
+            other_sel,
+            click_state,
+        ]
+        click_outputs = [
+            cls_img,
+            cls_top,
+            cls_tree,
+            tax_img,
+            tax_tree,
+            growth_img,
+            growth_other,
+            growth_tree,
+            growth_legend,
+            click_state,
+        ]
+        cls_img.select(pixel_click, click_inputs, click_outputs)
+        tax_img.select(pixel_click, click_inputs, click_outputs)
+        growth_img.select(pixel_click, click_inputs, click_outputs)
         if sample_gallery is not None:
             sample_gallery.select(pick_sample, inputs=None, outputs=input_img).then(
                 run_predict,

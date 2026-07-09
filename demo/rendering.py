@@ -360,15 +360,14 @@ def overlay_legend_items(
 
 def render_multihot_legend(
     concept_name: str | None,
+    concept_probs: NDArray[np.float32] | None = None,
+    _channel_idx: int | None = None,
+    pixel_prob: float | None = None,
     title: str = "Overlay color key",
     cmap: str = "viridis",
     stops: int = 12,
 ) -> str:
-    """Colorbar key for the multi-hot heatmap: low→high sigmoid activation.
-
-    The bar samples the actual colormap so it matches the overlay; only the concept name changes
-    between concepts (the 0→1 scale is constant).
-    """
+    """Color ramp for the selected multi-hot concept, with optional clicked-pixel readout."""
     import matplotlib
 
     colormap = matplotlib.colormaps[cmap]
@@ -378,13 +377,23 @@ def render_multihot_legend(
     )
     title_html = f'<div class="section-title">{title}</div>' if title else ""
     name = concept_name or "concept"
+
+    if concept_probs is None:
+        extra_html = '<div class="hint">Run segmentation to see the overlay key.</div>'
+    elif pixel_prob is not None:
+        p = float(np.clip(pixel_prob, 0.0, 1.0))
+        extra_html = f'<div class="hint">Clicked Pixel: <strong>{p:.2f}</strong></div>'
+    else:
+        extra_html = '<div class="hint">Click a pixel to read activation at that point.</div>'
+
     return (
         f'<div class="panel">{title_html}'
         f'<div class="hint" style="margin-bottom:4px"><b>{name}</b></div>'
+        f"{extra_html}"
         f'<div style="height:14px;border-radius:3px;border:1px solid rgba(128,128,128,0.4);'
-        f'background:linear-gradient(to right, {ramp})"></div>'
+        f'background:linear-gradient(to right, {ramp});margin-top:6px"></div>'
         '<div style="display:flex;justify-content:space-between;font-size:11px;opacity:0.7;margin-top:2px">'
-        "<span>0.0 (low)</span><span>1.0 (high)</span></div></div>"
+        "<span>unlikely</span><span>likely</span></div></div>"
     )
 
 
@@ -525,6 +534,10 @@ def render_taxonomy_tree(
             '<div class="hint">Click a pixel to see the taxonomy.</div></div>'
         )
 
+    caption = (
+        '<div class="hint taxonomy-caption">'
+        "Bar length = model confidence (0–1) for the top taxon at each rank.</div>"
+    )
     rows: list[str] = []
     for i, rank in enumerate(RANK_ORDER):
         candidates = _rank_candidates(concept_probs_at_pixel, rank_index, rank, top_k)
@@ -552,7 +565,7 @@ def render_taxonomy_tree(
             '<div class="taxonomy-row">'
             f'<div class="taxonomy-rank">{rank}</div>'
             '<div class="taxonomy-candidates">'
-            f'<div class="taxonomy-primary">{primary}</div>'
+            f'<div class="taxonomy-primary">{primary} <small>({primary_p:.2f})</small></div>'
             f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%"></div>'
             f"{alt_html}"
             "</div></div>"
@@ -564,4 +577,7 @@ def render_taxonomy_tree(
             '<div class="hint">No taxonomy concepts available for this pixel.</div></div>'
         )
 
-    return f'<div class="panel taxonomy-panel">{title_html}<div class="taxonomy-tree">{"".join(rows)}</div></div>'
+    return (
+        f'<div class="panel taxonomy-panel">{title_html}{caption}'
+        f'<div class="taxonomy-tree">{"".join(rows)}</div></div>'
+    )
