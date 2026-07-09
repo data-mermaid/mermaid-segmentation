@@ -26,6 +26,7 @@ from inference import (
     preprocess,
     resolve_checkpoint,
 )
+from PIL import Image
 from rendering import (
     DISPLAY_SIZE,
     ONEHOT_MODE_LABELS,
@@ -41,10 +42,12 @@ from rendering import (
     overlay_legend_items,
     render_multihot_legend,
     render_overlay_legend,
+    render_taxonomy_skipped,
     render_taxonomy_tree,
     render_top_bottom_other_html,
     render_top_classes_html,
     resize_for_display,
+    top_class_skips_taxonomy,
 )
 
 from mermaidseg.dataset_reconciliation.concepts import (
@@ -102,16 +105,6 @@ CSS = """
 #mermaid-header .mermaid-header-logo svg { width: 46px; height: 48px; display: block; flex: 0 0 auto; }
 #mermaid-header .mermaid-header-title {
     font-size: 1.35rem; font-weight: 700; line-height: 1.25; color: #ffffff;
-    font-variant: normal; font-variant-caps: normal; text-transform: none;
-    letter-spacing: normal;
-}
-/* Gradio themes can apply small-caps to headings; keep MERMAID as uniform caps. */
-#mermaid-header .mermaid-brand {
-    font-variant: normal !important;
-    font-variant-caps: normal !important;
-    font-feature-settings: "smcp" 0, "c2sc" 0 !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.05em;
 }
 #mermaid-header .mermaid-header-subtitle {
     margin-top: 2px; color: rgba(255, 255, 255, 0.85); font-size: 0.95rem;
@@ -191,8 +184,7 @@ def _header_html() -> str:
         '<div class="mermaid-header-bar">'
         f'<div class="mermaid-header-logo" aria-hidden="true">{logo}</div>'
         "<div>"
-        '<div class="mermaid-header-title">'
-        '<span class="mermaid-brand">MERMAID</span> Concept Bottleneck Demo</div>'
+        '<div class="mermaid-header-title">Concept Bottleneck Demo</div>'
         '<div class="mermaid-header-subtitle">'
         f"Upload an image or pick a sample, click <b>{PRIMARY_BTN_LABEL}</b>, "
         "then click any overlay pixel to inspect classes, taxonomy, and concepts.</div>"
@@ -399,7 +391,11 @@ def build_ui(
     def _empty_taxonomy():
         return render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
 
-    def _taxonomy_at(concept_probs, x_src, y_src):
+    def _taxonomy_at(class_probs, concept_probs, x_src, y_src):
+        if class_probs is not None:
+            skip, label = top_class_skips_taxonomy(class_probs[:, y_src, x_src], artifacts.id2label)
+            if skip:
+                return render_taxonomy_skipped(label)
         return render_taxonomy_tree(
             concept_probs[:, y_src, x_src], rank_index, parents, top_k=TOP_K_TREE
         )
@@ -517,7 +513,9 @@ def build_ui(
             return cls_base, render_top_classes_html([]), empty_tree, None
         click_xy, x_src, y_src = hit
         tree = (
-            _taxonomy_at(concept_probs, x_src, y_src) if concept_probs is not None else empty_tree
+            _taxonomy_at(class_probs, concept_probs, x_src, y_src)
+            if concept_probs is not None
+            else empty_tree
         )
         return (
             draw_click_marker(cls_base, click_xy),
@@ -526,7 +524,7 @@ def build_ui(
             click_xy,
         )
 
-    def tax_click(display_image, concept_probs, tax_base, evt: gr.SelectData):
+    def tax_click(display_image, class_probs, concept_probs, tax_base, evt: gr.SelectData):
         empty_tree = _empty_taxonomy()
         if display_image is None or concept_probs is None or tax_base is None:
             return None, empty_tree, None
@@ -534,10 +532,10 @@ def build_ui(
         if hit is None:
             return tax_base, empty_tree, None
         click_xy, x_src, y_src = hit
-        tree = _taxonomy_at(concept_probs, x_src, y_src)
+        tree = _taxonomy_at(class_probs, concept_probs, x_src, y_src)
         return draw_click_marker(tax_base, click_xy), tree, click_xy
 
-    def growth_click(display_image, concept_probs, growth_base, evt: gr.SelectData):
+    def growth_click(display_image, class_probs, concept_probs, growth_base, evt: gr.SelectData):
         empty_tree = _empty_taxonomy()
         if display_image is None or concept_probs is None or growth_base is None:
             return None, _empty_other(), empty_tree, None
@@ -548,7 +546,7 @@ def build_ui(
         return (
             draw_click_marker(growth_base, click_xy),
             _other_at(concept_probs, x_src, y_src),
-            _taxonomy_at(concept_probs, x_src, y_src),
+            _taxonomy_at(class_probs, concept_probs, x_src, y_src),
             click_xy,
         )
 
@@ -593,12 +591,10 @@ def build_ui(
             return None
         idx = int(evt.index) if evt.index is not None else 0
         if 0 <= idx < len(static_examples):
-            from PIL import Image
-
             return np.array(Image.open(static_examples[idx]).convert("RGB"))
         return None
 
-    with gr.Blocks(title="MERMAID Concept Bottleneck Demo") as ui:
+    with gr.Blocks(title="Concept Bottleneck Demo") as ui:
         gr.HTML(_header_html(), elem_id="mermaid-header")
 
         display_state = gr.State(None)
@@ -689,38 +685,37 @@ def build_ui(
 
         gr.HTML(_footer_html(), elem_id="mermaid-footer")
 
-        predict_btn.click(
-            run_predict,
-            inputs=[
-                input_img,
-                tax_rank,
-                gf_sel,
-                other_sel,
-                cls_opacity,
-                tax_opacity,
-                growth_opacity,
-            ],
-            outputs=[
-                cls_img,
-                cls_legend,
-                cls_top,
-                cls_tree,
-                tax_img,
-                tax_legend,
-                tax_tree,
-                growth_img,
-                growth_legend,
-                growth_other,
-                growth_tree,
-                display_state,
-                class_probs_state,
-                concept_probs_state,
-                click_state,
-                cls_base_state,
-                tax_base_state,
-                growth_base_state,
-            ],
-        )
+        predict_inputs = [
+            input_img,
+            tax_rank,
+            gf_sel,
+            other_sel,
+            cls_opacity,
+            tax_opacity,
+            growth_opacity,
+        ]
+        predict_outputs = [
+            cls_img,
+            cls_legend,
+            cls_top,
+            cls_tree,
+            tax_img,
+            tax_legend,
+            tax_tree,
+            growth_img,
+            growth_legend,
+            growth_other,
+            growth_tree,
+            display_state,
+            class_probs_state,
+            concept_probs_state,
+            click_state,
+            cls_base_state,
+            tax_base_state,
+            growth_base_state,
+        ]
+
+        predict_btn.click(run_predict, inputs=predict_inputs, outputs=predict_outputs)
 
         # Opacity sliders fire on release (not every drag tick); the rank/trait radios
         # fire on user input only, so programmatically clearing the sibling radio does
@@ -766,16 +761,20 @@ def build_ui(
         )
         tax_img.select(
             tax_click,
-            [display_state, concept_probs_state, tax_base_state],
+            [display_state, class_probs_state, concept_probs_state, tax_base_state],
             [tax_img, tax_tree, click_state],
         )
         growth_img.select(
             growth_click,
-            [display_state, concept_probs_state, growth_base_state],
+            [display_state, class_probs_state, concept_probs_state, growth_base_state],
             [growth_img, growth_other, growth_tree, click_state],
         )
         if sample_gallery is not None:
-            sample_gallery.select(pick_sample, inputs=None, outputs=input_img)
+            sample_gallery.select(pick_sample, inputs=None, outputs=input_img).then(
+                run_predict,
+                inputs=predict_inputs,
+                outputs=predict_outputs,
+            )
 
     return ui
 

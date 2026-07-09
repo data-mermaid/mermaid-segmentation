@@ -22,6 +22,18 @@ RANK_ORDER: tuple[str, ...] = tuple(TAXONOMIC_CONCEPTS)
 
 DISPLAY_SIZE = 720
 
+# MERMAID classes for which the taxonomy ladder is hidden (non-biological / non-target).
+TAXONOMY_SKIP_CLASS_LABELS: frozenset[str] = frozenset(
+    {
+        "background",
+        "sand",
+        "bare substrate",
+        "anthropogenic",
+        "human",
+        "dark",
+    }
+)
+
 ONEHOT_MODE_LABELS: dict[str, str] = {
     "classes": "MERMAID Classification",
     **{rank: rank.capitalize() for rank in RANK_ORDER},
@@ -368,7 +380,7 @@ def render_multihot_legend(
     name = concept_name or "concept"
     return (
         f'<div class="panel">{title_html}'
-        f'<div class="hint" style="margin-bottom:4px">sigmoid activation for <b>{name}</b></div>'
+        f'<div class="hint" style="margin-bottom:4px"><b>{name}</b></div>'
         f'<div style="height:14px;border-radius:3px;border:1px solid rgba(128,128,128,0.4);'
         f'background:linear-gradient(to right, {ramp})"></div>'
         '<div style="display:flex;justify-content:space-between;font-size:11px;opacity:0.7;margin-top:2px">'
@@ -476,6 +488,26 @@ def _rank_candidates(
     probs = concept_probs_at_pixel[idxs]
     order = np.argsort(probs)[::-1][:top_k]
     return [(values[int(j)], float(probs[int(j)])) for j in order if values[int(j)] != "none"]
+
+
+def top_class_skips_taxonomy(
+    class_probs_at_pixel: NDArray[np.float32],
+    id2label: dict[int, str],
+) -> tuple[bool, str]:
+    idx = int(class_probs_at_pixel.argmax())
+    label = id2label.get(idx, f"class_{idx}")
+    return label.strip().lower() in TAXONOMY_SKIP_CLASS_LABELS, label
+
+
+def render_taxonomy_skipped(
+    class_label: str,
+    title: str = "Taxonomy at clicked pixel",
+) -> str:
+    title_html = f'<div class="section-title">{title}</div>' if title else ""
+    return (
+        f'<div class="panel taxonomy-panel">{title_html}'
+        f'<div class="hint">No taxonomy for <b>{class_label}</b>.</div></div>'
+    )
 
 
 def render_taxonomy_tree(
