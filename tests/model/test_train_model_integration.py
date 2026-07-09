@@ -500,36 +500,76 @@ class _FakeLoader:
         self.dataset = dataset
 
 
+class _FakeConcat:
+    """Mimics torch ConcatDataset: no num_load_failures of its own, exposes
+    .datasets."""
+
+    def __init__(self, datasets: list) -> None:
+        self.datasets = list(datasets)
+
+    def __len__(self) -> int:
+        return sum(len(d) for d in self.datasets)
+
+
 def test_loader_load_failure_count_returns_none_for_untracked_dataset() -> None:
     assert _loader_load_failure_count(_FakeLoader(object())) is None
     assert _loader_load_failure_count(_FakeLoader(_FakeFailDataset(100, 7))) == 7
 
 
+def test_loader_load_failure_count_sums_concat_dataset_children() -> None:
+    # The real training path wraps per-source datasets in a ConcatDataset, which has no
+    # num_load_failures of its own; the count must sum the tracked children (else the guard
+    # silently no-ops on every real run).
+    concat = _FakeConcat([_FakeFailDataset(50, 3), _FakeFailDataset(50, 4)])
+    assert _loader_load_failure_count(_FakeLoader(concat)) == 7
+
+
 def test_enforce_load_failure_rate_raises_above_threshold() -> None:
-    loader = _FakeLoader(_FakeFailDataset(size=100, failures=10))
+    # 10 new failures out of 100 attempts (90 processed + 10 failed) = 10% > 5% -> raise.
+    loader = _FakeLoader(_FakeFailDataset(size=1000, failures=10))
     with pytest.raises(RuntimeError, match="load-failure rate"):
-        _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
+        _enforce_load_failure_rate(
+            loader, failures_before=0, max_rate=0.05, epoch=0, samples_processed=90
+        )
 
 
 def test_enforce_load_failure_rate_uses_per_epoch_delta() -> None:
-    # 100 cumulative failures but only 2 new this epoch on a 100-item set -> 2% < 5%, no raise.
-    loader = _FakeLoader(_FakeFailDataset(size=100, failures=100))
-    _enforce_load_failure_rate(loader, failures_before=98, max_rate=0.05, epoch=3)
+    # 100 cumulative failures but only 2 new this epoch; 2/(98+2)=2% < 5% -> no raise.
+    loader = _FakeLoader(_FakeFailDataset(size=1000, failures=100))
+    _enforce_load_failure_rate(
+        loader, failures_before=98, max_rate=0.05, epoch=3, samples_processed=98
+    )
+
+
+def test_enforce_load_failure_rate_rate_is_over_epoch_attempts_not_dataset_size() -> None:
+    # Regression: denominator is per-epoch attempts, NOT len(dataset). 10 failures over a
+    # huge 1e6-item dataset but only 90 processed this epoch -> 10% -> must still raise.
+    loader = _FakeLoader(_FakeFailDataset(size=1_000_000, failures=10))
+    with pytest.raises(RuntimeError, match="load-failure rate"):
+        _enforce_load_failure_rate(
+            loader, failures_before=0, max_rate=0.05, epoch=0, samples_processed=90
+        )
 
 
 def test_enforce_load_failure_rate_allows_below_threshold() -> None:
-    loader = _FakeLoader(_FakeFailDataset(size=100, failures=3))
-    _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
+    loader = _FakeLoader(_FakeFailDataset(size=1000, failures=3))
+    _enforce_load_failure_rate(
+        loader, failures_before=0, max_rate=0.05, epoch=0, samples_processed=97
+    )
 
 
 def test_enforce_load_failure_rate_disabled_when_none() -> None:
-    loader = _FakeLoader(_FakeFailDataset(size=100, failures=99))
-    _enforce_load_failure_rate(loader, failures_before=0, max_rate=None, epoch=0)
+    loader = _FakeLoader(_FakeFailDataset(size=1000, failures=99))
+    _enforce_load_failure_rate(
+        loader, failures_before=0, max_rate=None, epoch=0, samples_processed=1
+    )
 
 
 def test_enforce_load_failure_rate_noop_for_untracked_dataset() -> None:
     # Untracked dataset -> failures_before is None -> guard is a no-op (does not raise).
-    _enforce_load_failure_rate(_FakeLoader(object()), failures_before=None, max_rate=0.05, epoch=0)
+    _enforce_load_failure_rate(
+        _FakeLoader(object()), failures_before=None, max_rate=0.05, epoch=0, samples_processed=100
+    )
 
 
 def test_train_model_logs_main_metric_set_to_logger() -> None:

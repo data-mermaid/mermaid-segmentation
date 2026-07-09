@@ -17,16 +17,33 @@ from mermaidseg.model.metric_policy import (
 )
 
 
+def _dataset_load_failures(dataset: object) -> int | None:
+    """Cumulative load-failure count for ``dataset``, or ``None`` if untracked.
+
+    Unwraps ``torch.utils.data.ConcatDataset`` (and anything exposing ``.datasets``) by
+    summing the tracked children — the real training path wraps per-source
+    ``BaseCoralDataset`` instances in a ``ConcatDataset``, which itself has no
+    ``num_load_failures``.
+    """
+    if dataset is None:
+        return None
+    if hasattr(dataset, "num_load_failures"):
+        try:
+            return int(dataset.num_load_failures())
+        except Exception:
+            return None
+    children = getattr(dataset, "datasets", None)
+    if children:
+        counts = [_dataset_load_failures(child) for child in children]
+        tracked = [c for c in counts if c is not None]
+        return sum(tracked) if tracked else None
+    return None
+
+
 def _loader_load_failure_count(loader: object) -> int | None:
     """Return the cumulative load-failure count of a loader's dataset, or None if
     untracked."""
-    dataset = getattr(loader, "dataset", None)
-    if dataset is None or not hasattr(dataset, "num_load_failures"):
-        return None
-    try:
-        return int(dataset.num_load_failures())
-    except Exception:
-        return None
+    return _dataset_load_failures(getattr(loader, "dataset", None))
 
 
 def _enforce_load_failure_rate(
@@ -34,26 +51,34 @@ def _enforce_load_failure_rate(
     failures_before: int | None,
     max_rate: float | None,
     epoch: int,
+    samples_processed: int,
     split: str = "train",
 ) -> None:
-    """Raise if this epoch's dataset load-failure rate exceeds ``max_rate``.
+    """Raise if this epoch's load-failure rate exceeds ``max_rate``.
 
-    A high rate over a single pass signals a systemic data problem (bad credentials,
-    missing files, truncated image lists) rather than a few corrupt samples, so we fail
-    fast instead of silently training on a shrunken/biased dataset. No-op when disabled
-    or when the dataset does not track load failures.
+    Rate = ``failures_this_epoch / attempts_this_epoch`` where ``attempts`` is
+    ``samples_processed`` (items that collated through successfully this epoch) plus the
+    failures this epoch. The denominator is per-epoch attempts, NOT ``len(dataset)``:
+    ``iterations_per_*_epoch`` samples only a fraction of a large dataset each epoch, so
+    dividing by the full dataset size would make the rate ~100x too small to ever trip.
+
+    A high rate signals a systemic data problem (bad credentials, missing files, truncated
+    image lists) rather than a few corrupt samples, so we fail fast instead of silently
+    training on a shrunken/biased dataset. No-op when disabled or when failures are untracked.
     """
     if max_rate is None or failures_before is None:
         return
-    dataset = getattr(loader, "dataset", None)
-    size = len(dataset) if dataset is not None else 0
-    if size <= 0:
+    after = _loader_load_failure_count(loader)
+    if after is None:
         return
-    epoch_failures = _loader_load_failure_count(loader) - failures_before
-    rate = epoch_failures / size
+    epoch_failures = max(after - failures_before, 0)
+    attempts = samples_processed + epoch_failures
+    if attempts <= 0:
+        return
+    rate = epoch_failures / attempts
     if rate > max_rate:
         raise RuntimeError(
-            f"Epoch {epoch}: {split} load-failure rate {rate:.1%} ({epoch_failures}/{size}) "
+            f"Epoch {epoch}: {split} load-failure rate {rate:.1%} ({epoch_failures}/{attempts}) "
             f"exceeds max_load_failure_rate={max_rate:.1%}. This usually indicates a systemic "
             f"data problem (credentials, missing files, truncated image lists) rather than a few "
             f"corrupt samples. Inspect the dataset load-failure report; pass "
@@ -155,7 +180,13 @@ def train_model(
         train_loss, train_metric_results, train_timing = meta_model.train_epoch(
             train_loader, evaluator
         )
-        _enforce_load_failure_rate(train_loader, failures_before, max_load_failure_rate, epoch)
+        _enforce_load_failure_rate(
+            train_loader,
+            failures_before,
+            max_load_failure_rate,
+            epoch,
+            train_timing["num_samples"],
+        )
         logging.info("LOSS train %s", train_loss)
         logging.info("TRAIN METRICS: %s", train_metric_results)
         epoch_loss_dict["train/loss"] = train_loss
