@@ -107,6 +107,11 @@ CSS = """
 #mermaid-header .mermaid-header-title {
     font-size: 1.35rem; font-weight: 700; line-height: 1.25; color: #ffffff;
 }
+#mermaid-header .mermaid-header-title-short { display: none; }
+@media (max-width: 640px) {
+    #mermaid-header .mermaid-header-title-full { display: none; }
+    #mermaid-header .mermaid-header-title-short { display: inline; }
+}
 #mermaid-header .mermaid-header-subtitle {
     margin-top: 2px; color: rgba(255, 255, 255, 0.85); font-size: 0.95rem;
 }
@@ -140,11 +145,19 @@ CSS = """
     width: 150px; height: 52px; object-fit: contain; opacity: 0.85;
 }
 #mermaid-footer .mermaid-footer-logo.logo-exeter {
-    width: 185px; height: 64px;
+    /* PNG content is left-heavy (562px wide, ~325px ink); pin visual center in the slot. */
+    width: 185px; height: 64px; object-position: 29.3% center;
 }
 #mermaid-footer .mermaid-footer-logo.logo-epfl {
     width: 105px; height: 38px;
 }
+@media (max-width: 640px) {
+    #mermaid-footer .mermaid-footer-logos { gap: 16px 24px; }
+    #mermaid-footer .mermaid-footer-logo { width: 120px; height: 42px; }
+    #mermaid-footer .mermaid-footer-logo.logo-exeter { width: 148px; height: 50px; }
+    #mermaid-footer .mermaid-footer-logo.logo-epfl { width: 88px; height: 32px; }
+}
+/* Third tab label is shortened to "CBM" via RESPONSIVE_JS on narrow viewports. */
 /* Taxonomy readout: vertical ladder with fixed typography (replaces matplotlib Plot). */
 .gradio-container .taxonomy-panel { min-height: 220px; }
 .gradio-container .taxonomy-tree { margin-top: 4px; }
@@ -182,6 +195,38 @@ CSS = """
 .gradio-container .taxonomy-caption { margin-bottom: 8px; }
 """
 
+RESPONSIVE_JS = """
+(() => {
+  const FULL = "Concept Bottleneck";
+  const SHORT = "CBM";
+  const mq = window.matchMedia("(max-width: 640px)");
+  let pending = false;
+  function relabelTabs() {
+    pending = false;
+    const narrow = mq.matches;
+    document.querySelectorAll(".gradio-container button[role='tab']").forEach((btn) => {
+      const current = btn.textContent.trim();
+      if (!btn.dataset.cbmFull) {
+        btn.dataset.cbmFull = current === SHORT ? FULL : current;
+      }
+      if (btn.dataset.cbmFull !== FULL) return;
+      const next = narrow ? SHORT : FULL;
+      if (current !== next) btn.textContent = next;
+    });
+  }
+  function scheduleRelabel() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(relabelTabs);
+  }
+  relabelTabs();
+  mq.addEventListener("change", relabelTabs);
+  const root = document.querySelector(".gradio-container") || document.body;
+  new MutationObserver(scheduleRelabel).observe(root, { childList: true, subtree: true });
+  window.addEventListener("load", () => setTimeout(relabelTabs, 250));
+})();
+"""
+
 logger = logging.getLogger(__name__)
 
 _LOGO_SVG_PATH = Path(__file__).resolve().parent / "static" / "mermaid-logo.svg"
@@ -193,7 +238,10 @@ def _header_html() -> str:
         '<div class="mermaid-header-bar">'
         f'<div class="mermaid-header-logo" aria-hidden="true">{logo}</div>'
         "<div>"
-        '<div class="mermaid-header-title">Concept Bottleneck Demo</div>'
+        '<div class="mermaid-header-title">'
+        '<span class="mermaid-header-title-full">Concept Bottleneck Demo</span>'
+        '<span class="mermaid-header-title-short">CBM Demo</span>'
+        "</div>"
         '<div class="mermaid-header-subtitle">'
         f"Upload an image or pick a sample, click <b>{PRIMARY_BTN_LABEL}</b>, "
         "then click any overlay pixel to inspect classes, taxonomy, and concepts.</div>"
@@ -936,7 +984,7 @@ def main(argv: list[str] | None = None) -> None:
         model.concept_classifier.in_channels,
     )
     build_ui(artifacts, model, device, taxonomy_csv).launch(
-        server_port=args.port, share=args.share, css=CSS
+        server_port=args.port, share=args.share, css=CSS, js=RESPONSIVE_JS
     )
 
 
