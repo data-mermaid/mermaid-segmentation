@@ -141,6 +141,7 @@ def train_model(
         end_epoch = start_epoch + meta_model.training_kwargs.epochs
     metrics_epoch = {}
     training_start = time.perf_counter()
+    checkpoint_interval = getattr(logger, "log_checkpoint", None) if logger is not None else None
 
     for epoch in range(start_epoch, end_epoch):
         should_stop_early = False
@@ -204,9 +205,6 @@ def train_model(
                 )
                 should_stop_early = True
 
-        checkpoint_interval = (
-            getattr(logger, "log_checkpoint", None) if logger is not None else None
-        )
         if (
             logger is not None
             and checkpoint_interval

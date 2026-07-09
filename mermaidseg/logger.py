@@ -244,6 +244,9 @@ class Logger:
         # fine-tuning runs where nothing is frozen, or when full-state resume fidelity
         # (all buffers/params, however static) matters more than checkpoint size.
         self.save_full_state_dict = getattr(logger_cfg, "save_full_state_dict", False)
+        # Most recent is_best=True local checkpoint path per run_name, protected from
+        # rotation so a run of periodic (is_best=False) saves can't evict the local best.
+        self._best_local_checkpoint_paths: dict[str, str] = {}
 
         if enable_mlflow:
             self.enabled = experiment_name is not None
@@ -654,18 +657,26 @@ class Logger:
         No-op when rotation is disabled (``keep_last_n_checkpoints`` is ``None`` or <=
         0). Only prunes local disk — MLflow artifacts already uploaded to
         ``checkpoints/`` are untouched, so run history remains browsable in MLflow even
-        after local pruning.
+        after local pruning. The most recent ``is_best=True`` checkpoint for this run is
+        never pruned, even if it is the oldest file on disk — otherwise a run of
+        subsequent periodic (``is_best=False``) saves would silently evict the local
+        best checkpoint despite that being the file most worth keeping around.
         """
         if not self.keep_last_n_checkpoints or self.keep_last_n_checkpoints <= 0:
             return
         run_dir = os.path.join(self.checkpoint_dir, "model_checkpoints", run_name)
         if not os.path.isdir(run_dir):
             return
+        protected = self._best_local_checkpoint_paths.get(run_name)
         files = [os.path.join(run_dir, f) for f in os.listdir(run_dir)]
         files = [f for f in files if os.path.isfile(f)]
         files.sort(key=os.path.getmtime)
-        excess = len(files) - self.keep_last_n_checkpoints
-        for old_file in files[:excess]:
+        kept = set(files[-self.keep_last_n_checkpoints :])
+        if protected in files:
+            kept.add(protected)
+        for old_file in files:
+            if old_file in kept:
+                continue
             try:
                 os.remove(old_file)
                 logger.info("Pruned old local checkpoint: %s", old_file)
@@ -711,11 +722,7 @@ class Logger:
             set() if self.save_full_state_dict else _frozen_param_names(meta_model_run.model)
         )
         excludes_frozen_params = bool(frozen_keys)
-        model_state_dict = (
-            {k: v for k, v in full_state_dict.items() if k not in frozen_keys}
-            if excludes_frozen_params
-            else full_state_dict
-        )
+        model_state_dict = {k: v for k, v in full_state_dict.items() if k not in frozen_keys}
 
         checkpoint: dict[str, Any] = {
             "config": self.config,
@@ -748,6 +755,8 @@ class Logger:
             torch.save(checkpoint, model_path)  # type: ignore
             local_checkpoint_saved = True
             logger.info("Checkpoint saved locally: %s", model_path)
+            if is_best:
+                self._best_local_checkpoint_paths[meta_model_run.run_name] = model_path
             self._prune_local_checkpoints(meta_model_run.run_name)
         else:
             logger.info("Local checkpoint saving disabled, skipping disk write")
@@ -778,13 +787,12 @@ class Logger:
                         for k, v in metrics_dict.items()
                         if not isinstance(v, np.ndarray)
                     }
-                    best_checkpoint: dict[str, Any] = {
-                        "config": self.config,
-                        "model_state_dict": model_state_dict,
-                        "epoch": epoch,
-                        "timestamp": timestamp,
-                        "metrics": metrics_dict,
-                        "excludes_frozen_params": excludes_frozen_params,
+                    # Lean snapshot: everything in `checkpoint` except resume-only state
+                    # (optimizer/scheduler), which already lives in checkpoints/.
+                    best_checkpoint = {
+                        k: v
+                        for k, v in checkpoint.items()
+                        if k not in ("optimizer_state_dict", "scheduler_state_dict")
                     }
                     with tempfile.TemporaryDirectory() as tmpdir:
                         best_pt = os.path.join(tmpdir, "model.pt")
@@ -792,13 +800,15 @@ class Logger:
                         mlflow.log_artifact(best_pt, artifact_path="best-model")
 
                         metadata_path = os.path.join(tmpdir, "metadata.json")
-                        load_with = (
-                            "ckpt = torch.load('model.pt'); model.load_state_dict("
-                            "ckpt['model_state_dict'], strict=False)  # frozen backbone "
-                            "excluded — reload it separately per ckpt['config']['model']"
+                        strict_clause = (
+                            ", strict=False)  # frozen backbone excluded — reload it "
+                            "separately per ckpt['config']['model']"
                             if excludes_frozen_params
-                            else "ckpt = torch.load('model.pt'); "
-                            "model.load_state_dict(ckpt['model_state_dict'])"
+                            else ")"
+                        )
+                        load_with = (
+                            "ckpt = torch.load('model.pt'); "
+                            f"model.load_state_dict(ckpt['model_state_dict']{strict_clause}"
                         )
                         with open(metadata_path, "w") as f:
                             json.dump(

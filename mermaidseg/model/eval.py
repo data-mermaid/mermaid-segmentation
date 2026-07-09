@@ -61,37 +61,27 @@ class Evaluator:
             self.metric_dict = metric_dict
         elif include_classification:
             task = "multiclass" if num_classes > 2 else "binary"
+            shared_kwargs = {
+                "task": task,
+                "num_classes": num_classes,
+                "ignore_index": ignore_index,
+            }
             self.metric_dict = {
-                "accuracy": Accuracy(
-                    task=task,
-                    num_classes=num_classes,
-                    ignore_index=ignore_index,
-                ).to(device),
+                "accuracy": Accuracy(**shared_kwargs).to(device),
                 # Mean IoU (macro-averaged over classes, excluding ignore_index) — a more
                 # informative segmentation metric than pixel accuracy, which is dominated by
                 # majority classes (e.g. background) in class-imbalanced coral reef data.
-                "miou": JaccardIndex(
-                    task=task,
-                    num_classes=num_classes,
-                    ignore_index=ignore_index,
-                    average="macro",
-                ).to(device),
+                "miou": JaccardIndex(**shared_kwargs, average="macro").to(device),
             }
             if per_class_metrics:
                 # average="none" returns a per-class vector instead of a scalar; Logger
                 # unpacks these into named metrics (e.g. "f1_per_class/acropora") via
                 # id2label, so class-level regressions are visible without re-running eval.
-                self.metric_dict["f1_per_class"] = F1Score(
-                    task=task,
-                    num_classes=num_classes,
-                    ignore_index=ignore_index,
-                    average="none",
-                ).to(device)
+                self.metric_dict["f1_per_class"] = F1Score(**shared_kwargs, average="none").to(
+                    device
+                )
                 self.metric_dict["iou_per_class"] = JaccardIndex(
-                    task=task,
-                    num_classes=num_classes,
-                    ignore_index=ignore_index,
-                    average="none",
+                    **shared_kwargs, average="none"
                 ).to(device)
         else:
             self.metric_dict = {}

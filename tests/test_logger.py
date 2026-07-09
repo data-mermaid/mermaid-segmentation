@@ -521,6 +521,23 @@ class TestSaveModelCheckpoint:
         names = {f.name for f in files}
         assert names == {"model_epoch3", "model_epoch4"}
 
+    def test_rotation_never_evicts_the_local_best_checkpoint(
+        self, tmp_mlflow_uri, tmp_path, make_config
+    ):
+        """An early best epoch must survive later periodic (is_best=False) saves."""
+        meta = FakeMetaModel(run_name="protect-best")
+        lgr = Logger(
+            config=make_config(logger={"keep_last_n_checkpoints": 2}),
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+        )
+        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.5})  # is_best=True
+        for epoch in (2, 3, 4):
+            lgr.save_model_checkpoint(meta, epoch=epoch, metrics_dict={"loss": 0.9}, is_best=False)
+
+        names = {f.name for f in (tmp_path / "model_checkpoints" / "protect-best").iterdir()}
+        assert "model_epoch1" in names, f"Local best checkpoint was pruned: {names}"
+
     def test_rotation_disabled_keeps_all_checkpoints(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="keep-all")
         lgr = Logger(

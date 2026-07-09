@@ -28,7 +28,7 @@ class _StubMetaModel:
         return preds, None
 
 
-def _make_dataloader(preds: torch.Tensor, targets: torch.Tensor):
+def _make_dataloader(targets: torch.Tensor):
     """Single-batch dataloader stand-in; inputs are unused by _StubMetaModel."""
     return [(torch.zeros(1), targets)]
 
@@ -65,7 +65,7 @@ class TestPerClassMetricsComputation:
         targets = torch.tensor([[0, 1], [2, 3]])
         preds = targets.clone()  # perfect predictions
         meta_model = _StubMetaModel([preds])
-        dataloader = _make_dataloader(preds, targets)
+        dataloader = _make_dataloader(targets)
 
         results = evaluator.evaluate_model(dataloader, meta_model)
 
@@ -84,7 +84,7 @@ class TestPerClassMetricsComputation:
         targets = torch.tensor([[0, 1, 2, 3]])
         preds = targets.clone()
         meta_model = _StubMetaModel([preds])
-        dataloader = _make_dataloader(preds, targets)
+        dataloader = _make_dataloader(targets)
 
         results = evaluator.evaluate_model(dataloader, meta_model)
 
