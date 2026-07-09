@@ -132,6 +132,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "live: marks tests as live integration tests requiring S3 and/or CoralNet access (deselect with '-m \"not live\"')",
+    "smoke: marks fast offline smoke tests of the training pipeline wiring",
 ]
 
 [tool.coverage.run]

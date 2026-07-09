@@ -1,0 +1,74 @@
+# Data config for the issue #12 LinearDINOv3 baseline: CoralNet + MERMAID only.
+#
+# Unlike configs/data_config.yaml (which trains on a hand-picked 36-source CoralNet
+# whitelist), this baseline uses the FULL CoralNet corpus. Every source is used; the
+# only partitioning is a source-disjoint validation holdout so there is no image/source
+# leakage between train and val:
+#   - train: all CoralNet sources EXCEPT the val holdout (blacklist_sources)
+#   - val:   the holdout sources (whitelist_sources)
+# The 20 val sources are the vetted holdout carried over from configs/data_config.yaml.
+# MERMAID contributes train only (no confirmed MERMAID validation data yet), consistent
+# with configs/data_config.yaml. All other datasets are disabled for this baseline.
+data:
+  default:
+    train:
+      transform:
+        SmallestMaxSize:
+          max_size: 1024
+        RandomResizedCrop:
+          size: [512, 512]
+          scale: [0.2, 1]
+          ratio: [0.75, 1.33]
+        HorizontalFlip:
+          p: 0.5
+        VerticalFlip:
+          p: 0.5
+        Normalize:
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+    val:
+      transform:
+          Resize:
+            width: 512
+            height: 512
+          Normalize:
+            mean: [0.485, 0.456, 0.406]
+            std: [0.229, 0.224, 0.225]
+
+  coralnet:
+    train:
+      # All CoralNet sources except the val holdout below (no pre-selected train whitelist).
+      blacklist_sources: [1776, 2297, 2759, 2978, 3573, 4353, 4596, 4710, 5086,
+                          5444, 6521, 6699, 6700, 6717, 6834, 6838, 6923, 6930,
+                          6968, 7116]
+    val:
+      whitelist_sources: [1776, 2297, 2759, 2978, 3573, 4353, 4596, 4710, 5086,
+                          5444, 6521, 6699, 6700, 6717, 6834, 6838, 6923, 6930,
+                          6968, 7116]
+
+  mermaid:
+    val: None # No confirmed MERMAID validation data; MERMAID contributes train only.
+
+  coralscapes:
+    train: None
+    val: None
+
+  coralscapes_v2:
+    train: None
+    val: None
+
+  benthos_yuval:
+    train: None
+    val: None
+
+  catlin_seaview:
+    train: None
+    val: None
+
+  moorea_labeled_corals:
+    train: None
+    val: None
+
+  pacific_labeled_corals:
+    train: None
+    val: None

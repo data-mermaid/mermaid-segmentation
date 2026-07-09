@@ -1,0 +1,30 @@
+job:
+  name_prefix: mermaidseg-issue-12-baseline
+  image: mermaid-segmentation-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.g5.2xlarge
+  volume_gb: 200
+  max_runtime_hours: 48
+  env:
+    # Point CoralNetDataset at the rebuilt corpus's TRAINING MANIFEST (per-row image_s3_key:
+    # resized copy when >threshold, original otherwise) so S3 download/decode isn't the
+    # bottleneck — CoralNetDataset reads image_s3_key instead of templating the original path
+    # (~40% less I/O). Resolved as s3://{source_bucket}/{path}; the ETL publishes under
+    # etl-outputs/coralnet/<version>/. 20260623_nogit is the latest run with a training manifest
+    # built (scripts/build_coralnet_training_manifest.py) and supersedes the May 20260526_807b611
+    # resized parquet. Note the filename is coralnet_training_manifest_<V>, not the old *_resized_<V>.
+    MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
+
+# Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher).
+# LinearDINOv3 frozen linear-probe baseline (issue #12): CoralNet (all sources) + MERMAID only.
+config:
+  config_data: configs/data_config_coralnet_mermaid.yaml
+  config_model: configs/model_config.yaml
+  config_training: configs/training_config_dinov3_linear.yaml
+  config_logger: configs/logger_config.yaml
+  overrides:
+    run-name: issue-12-dinov3-linear-baseline-coralnet-all-mermaid
+    experiment-name: baselines
+    epochs: 200
+    seed: 42
+    num-workers: 8

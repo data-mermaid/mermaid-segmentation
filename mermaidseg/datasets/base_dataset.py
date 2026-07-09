@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 def worker_init_fn(worker_id: int) -> None:
     """Configure logging in DataLoader worker processes.
 
-    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so that warnings emitted
-    in worker subprocesses are visible.
+    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so that
+    warnings emitted in worker subprocesses are visible.
     """
     logging.basicConfig(
         level=logging.WARNING,
@@ -132,8 +132,9 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
         """Re-derive ``df_images`` after filtering ``df_annotations``.
 
-        The default implementation auto-detects column structure for the bundled MERMAID and
-        CoralNet shapes. Subclasses are encouraged to override this when they have a fixed schema.
+        The default implementation auto-detects column structure for the bundled MERMAID
+        and CoralNet shapes. Subclasses are encouraged to override this when they have a
+        fixed schema.
         """
         if "region_id" in df_annotations.columns:
             return (
@@ -183,9 +184,10 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
-        On any internal load/transform error we record the failure, emit a warning to logger +
-        stdout + stderr, and return ``(None, None)``. The dataset's :meth:`collate_fn` filters out
-        these placeholders, so a failed item drops out of the batch instead of crashing the loader.
+        On any internal load/transform error we record the failure, emit a warning to
+        logger + stdout + stderr, and return ``(None, None)``. The dataset's
+        :meth:`collate_fn` filters out these placeholders, so a failed item drops out of
+        the batch instead of crashing the loader.
         """
         try:
             return self._load_item(idx)
@@ -208,8 +210,8 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Perform a single load (no error handling).
 
-        Subclasses should override this rather than :meth:`__getitem__` so they inherit the
-        recursive-on-failure behaviour for free.
+        Subclasses should override this rather than :meth:`__getitem__` so they inherit
+        the recursive-on-failure behaviour for free.
         """
         image_id = self.df_images.loc[idx, "image_id"]
         row_kwargs = self.df_images.loc[idx].to_dict()
@@ -273,7 +275,8 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.load_failures_df().to_parquet(path, index=False)
         return path
 
-    def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
+    @staticmethod
+    def collate_fn(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
         """Collate function that filters out ``(None, None)`` items (failed loads).
 
         :meth:`__getitem__` returns ``(None, None)`` for items it fails to load (after

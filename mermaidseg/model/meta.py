@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import Any
 
@@ -25,6 +26,12 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
 from mermaidseg.io import ConfigDict
 
 logger = logging.getLogger(__name__)
+
+# tqdm in SageMaker/CloudWatch (non-TTY) writes a line per refresh, flooding the logs with
+# thousands of progress lines per epoch. Throttle to one refresh per this many seconds. Tune via
+# MERMAID_TQDM_MININTERVAL (no image rebuild needed); set very high to effectively silence
+# per-iteration progress — per-epoch loss/metrics still emit via `logging`.
+_TQDM_MININTERVAL = float(os.getenv("MERMAID_TQDM_MININTERVAL", "60"))
 
 
 def _load_checkpoint_into_model(model: torch.nn.Module, checkpoint: Any) -> None:
@@ -456,7 +463,7 @@ class MetaModel:
             self._train_loader_iter = iter(train_loader)
             self._train_loader = train_loader
 
-        for _ in tqdm(range(iterations_per_train_epoch)):
+        for _ in tqdm(range(iterations_per_train_epoch), mininterval=_TQDM_MININTERVAL):
             assert self._train_loader_iter is not None
             try:
                 data = next(self._train_loader_iter)
@@ -588,7 +595,7 @@ class MetaModel:
             self._val_loader_iter = iter(val_loader)
             self._val_loader = val_loader
 
-        for _ in tqdm(range(iterations_per_val_epoch)):
+        for _ in tqdm(range(iterations_per_val_epoch), mininterval=_TQDM_MININTERVAL):
             assert self._val_loader_iter is not None
             try:
                 data = next(self._val_loader_iter)
