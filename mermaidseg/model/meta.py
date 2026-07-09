@@ -27,6 +27,22 @@ from mermaidseg.io import ConfigDict
 logger = logging.getLogger(__name__)
 
 
+def _load_checkpoint_into_model(model: torch.nn.Module, checkpoint: Any) -> None:
+    """Load a saved checkpoint's weights into a freshly-constructed ``model``.
+
+    Checkpoints saved with ``excludes_frozen_params=True`` (the ``Logger`` default) omit
+    frozen-backbone keys, since the caller's freshly-constructed model already re-
+    initializes the same frozen backbone; those are loaded with ``strict=False``. Legacy
+    checkpoints (no ``excludes_frozen_params`` metadata, or a bare state dict) always
+    carry every key and are loaded with ``strict=True`` to still catch real mismatches.
+    """
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        strict = not checkpoint.get("excludes_frozen_params", False)
+        model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
+    else:
+        model.load_state_dict(checkpoint)
+
+
 def _resolve_amp_dtype(dtype_config: Any | None) -> torch.dtype:
     """Map config strings to torch autocast dtypes."""
     if dtype_config is None:
@@ -199,10 +215,7 @@ class MetaModel:
 
         if model_checkpoint:
             checkpoint = torch.load(model_checkpoint)
-            if "model_state_dict" in checkpoint:
-                self.model.load_state_dict(checkpoint["model_state_dict"])
-            else:
-                self.model.load_state_dict(checkpoint)
+            _load_checkpoint_into_model(self.model, checkpoint)
 
         self.model = self.model.to(device)
         self.freeze_encoder = freeze_encoder
@@ -285,8 +298,9 @@ class MetaModel:
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
 
-        When ``source_to_target_lookup`` is ``None``, source labels are assumed to already be in
-        target space (identity passthrough — useful for single-source or synthetic pipelines).
+        When ``source_to_target_lookup`` is ``None``, source labels are assumed to
+        already be in target space (identity passthrough — useful for single-source or
+        synthetic pipelines).
         """
         if self.source_to_target_lookup is None:
             return source_labels

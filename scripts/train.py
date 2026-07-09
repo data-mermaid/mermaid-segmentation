@@ -108,9 +108,9 @@ def _write_pid(pid_file: Path) -> None:
 def _stop_current_space() -> None:
     """Stop the SageMaker JupyterLab app via delete_app.
 
-    SageMaker has no ``stop_space`` API.  The documented way to stop a running JupyterLab app is
-    ``delete_app`` — this terminates the instance while keeping EFS data intact.  No-op outside
-    SageMaker.
+    SageMaker has no ``stop_space`` API.  The documented way to stop a running
+    JupyterLab app is ``delete_app`` — this terminates the instance while keeping EFS
+    data intact.  No-op outside SageMaker.
     """
     if not _METADATA.exists():
         logging.info("Not running on SageMaker — skipping auto-shutdown")
@@ -174,6 +174,30 @@ def _save_failure_report_if_available(
     saved_path = Path(save_failures(report_path))
     logging.warning("Saved %d data-load failure records to %s", n_failures, saved_path)
     return saved_path
+
+
+def _save_failure_reports_if_available(
+    dataset_dict: dict[tuple[str, str], object],
+    log_dir: Path,
+    explicit_output_path: str | None = None,
+) -> list[Path]:
+    """Save a data-load-failure parquet report per ``(name, split)`` dataset that
+    tracked failures.
+
+    Multi-dataset equivalent of ``_save_failure_report_if_available``: the multi-dataset
+    training path builds one dataset instance per ``(name, split)`` pair rather than a
+    single dataset, so each is checked and reported independently.
+    """
+    saved_paths: list[Path] = []
+    for (name, split), dataset in dataset_dict.items():
+        output_path: str | None = None
+        if explicit_output_path:
+            base = Path(explicit_output_path)
+            output_path = str(base.with_name(f"{base.stem}_{name}_{split}{base.suffix}"))
+        saved = _save_failure_report_if_available(dataset, log_dir, output_path)
+        if saved is not None:
+            saved_paths.append(saved)
+    return saved_paths
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -244,9 +268,19 @@ def _build_parser() -> argparse.ArgumentParser:
     base.add_argument(
         "--metric-of-interest",
         type=str,
-        default="accuracy",
+        default="miou",
         choices=sorted(SUPPORTED_METRIC_NAMES),
         help="metric used for checkpointing and early stopping",
+    )
+    base.add_argument(
+        "--per-class-metrics",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "log per-class f1/iou in addition to macro accuracy/miou. "
+            "Default: on for training_mode=standard, off for concept/concept-bottleneck "
+            "(taxonomic rank cardinality, e.g. genus, makes per-class series numerous)."
+        ),
     )
     base.add_argument(
         "--seed",
@@ -383,8 +417,10 @@ def _run_training(args: argparse.Namespace) -> None:
     train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"]
     val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
 
-    train_loader = DataLoader(ConcatDataset(train_datasets), shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
+    train_dataset_combined = ConcatDataset(train_datasets)
+    val_dataset_combined = ConcatDataset(val_datasets)
+    train_loader = DataLoader(train_dataset_combined, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_dataset_combined, shuffle=True, **loader_kwargs)
 
     print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
     assert registry.num_concepts == schema.num_channels
@@ -395,16 +431,18 @@ def _run_training(args: argparse.Namespace) -> None:
         (len(train_loader) + len(val_loader)) * cfg.training.batch_size,
     )
 
-    # def _write_failure_report_once() -> None:
-    #     nonlocal report_written
-    #     if report_written:
-    #         return
-    #     path = _save_failure_report_if_available(
-    #         dataset=dataset, # TODO: Has to be updated to work with multiple datasets
-    #         log_dir=Path(args.log_dir),
-    #         explicit_output_path=args.failure_report_path,
-    #     )
-    #     report_written = path is not None
+    report_written = False
+
+    def _write_failure_reports_once() -> None:
+        nonlocal report_written
+        if report_written:
+            return
+        paths = _save_failure_reports_if_available(
+            dataset_dict=dataset_dict,
+            log_dir=Path(args.log_dir),
+            explicit_output_path=args.failure_report_path,
+        )
+        report_written = bool(paths)
 
     if args.dry_run:
         max_dry_epochs = 3
@@ -417,8 +455,7 @@ def _run_training(args: argparse.Namespace) -> None:
             train_loader = [_take_first_non_empty_batch(train_loader, "train")]
             val_loader = [_take_first_non_empty_batch(val_loader, "val")]
         except RuntimeError:
-            print("TODO:Update")
-            # _write_failure_report_once()
+            _write_failure_reports_once()
             raise
 
     meta_model = MetaModel(
@@ -435,11 +472,19 @@ def _run_training(args: argparse.Namespace) -> None:
         concept_value2id=registry.concept_value2id,
     )
 
+    per_class_metrics = args.per_class_metrics
+    if per_class_metrics is None:
+        # Default on for standard segmentation (modest class cardinality); off for
+        # concept/concept-bottleneck, where taxonomic ranks (e.g. genus) can carry
+        # far more distinct values and would flood MLflow's metric list by default.
+        per_class_metrics = cfg.training.training_mode == "standard"
+
     evaluator = Evaluator(
         num_classes=registry.num_target_classes,
         device=device,
         calculate_concept_metrics=cfg.training.training_mode != "standard",
         concept_value2id=registry.concept_value2id,
+        per_class_metrics=per_class_metrics,
     )
 
     cfg.logger.experiment_name = "mermaid"
@@ -457,12 +502,16 @@ def _run_training(args: argparse.Namespace) -> None:
         if logger.mlflow_run_id is not None:
             logging.info("MLflow run_id: %s", logger.mlflow_run_id)
 
+        logger.log_benchmark_context(label=cfg.run_name)
         logger.log_dataloader_params(train_loader, prefix="train_loader")
         logger.log_dataloader_params(val_loader, prefix="val_loader")
         logger.log_reconciliation(registry)
-        # TODO(#139): re-enable per-run dataset-statistics logging once
-        # Logger.log_dataset_statistics is adapted to the multi-dataset (per-split lists)
-        # structure; it currently expects single train/val/test datasets.
+        # ConcatDataset exposes `.datasets`, which resolve_split_annotations already
+        # recurses into per-source, so this works directly against the multi-dataset
+        # train/val splits built above (closes #139).
+        logger.log_dataset_statistics(
+            {"train": train_dataset_combined, "val": val_dataset_combined}, registry
+        )
 
         try:
             # test_loader is None: the multi-dataset config does not define test splits yet,
@@ -480,8 +529,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 early_stopping_min_delta=args.early_stopping_min_delta,
             )
         finally:
-            print("TODO:Update")
-            # _write_failure_report_once()
+            _write_failure_reports_once()
         logging.info("Training complete")
 
 

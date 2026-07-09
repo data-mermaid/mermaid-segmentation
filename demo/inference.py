@@ -148,7 +148,11 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
 
     model_cls = getattr(mm_models, model_name)
     model = model_cls(num_classes=num_classes, num_concepts=num_concepts, **model_kwargs)
-    model.load_state_dict(state_dict)
+    # Checkpoints saved with excludes_frozen_params=True (the Logger default) omit
+    # frozen-backbone keys since model_cls(...) above already re-initializes the same
+    # frozen backbone; strict=True would otherwise raise on every load of such a checkpoint.
+    strict = not (isinstance(ckpt, dict) and ckpt.get("excludes_frozen_params", False))
+    model.load_state_dict(state_dict, strict=strict)
     return model.to(device).eval()
 
 
@@ -202,7 +206,8 @@ def predict(
 
 
 def default_taxonomy_csv() -> str:
-    """Default path to class-to-concepts CSV (repo ``configs/class_to_concepts.csv``)."""
+    """Default path to class-to-concepts CSV (repo
+    ``configs/class_to_concepts.csv``)."""
     demo_dir = Path(__file__).resolve().parent
     return str(demo_dir.parent / "configs" / "class_to_concepts.csv")
 

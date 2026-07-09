@@ -3,7 +3,7 @@ import torch
 import tqdm
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
-from torchmetrics.classification import Accuracy
+from torchmetrics.classification import Accuracy, F1Score, JaccardIndex
 from torchmetrics.metric import Metric
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
@@ -27,6 +27,14 @@ class Evaluator:
         epoch (int): Current epoch counter (incremented after each `evaluate_model` call).
         device (str | torch.device): Device metrics tensors are moved to.
         num_classes (int): Number of output (target) classes.
+
+    Args:
+        per_class_metrics: When True (and no explicit ``metric_dict`` is given), also
+            accumulates ``f1_per_class`` and ``iou_per_class`` (macro components,
+            per-class vectors) alongside scalar ``accuracy``/``miou``. Off by default
+            since class cardinality (especially for concept ranks like genus) can make
+            per-class series numerous; callers should default this based on model type
+            (e.g. on for standard segmentation, off for concept/concept-bottleneck).
     """
 
     metric_dict: dict[str, Metric]
@@ -41,6 +49,7 @@ class Evaluator:
         concept_value2id: dict[str, dict[str, int]] | None = None,
         ignore_index: int = 0,
         include_classification: bool = True,
+        per_class_metrics: bool = False,
     ):
         self.epoch = 0
         self.device = device
@@ -51,13 +60,29 @@ class Evaluator:
         if metric_dict:
             self.metric_dict = metric_dict
         elif include_classification:
-            self.metric_dict = {
-                "accuracy": Accuracy(
-                    task="multiclass" if num_classes > 2 else "binary",
-                    num_classes=num_classes,
-                    ignore_index=ignore_index,
-                ).to(device),
+            task = "multiclass" if num_classes > 2 else "binary"
+            shared_kwargs = {
+                "task": task,
+                "num_classes": num_classes,
+                "ignore_index": ignore_index,
             }
+            self.metric_dict = {
+                "accuracy": Accuracy(**shared_kwargs).to(device),
+                # Mean IoU (macro-averaged over classes, excluding ignore_index) — a more
+                # informative segmentation metric than pixel accuracy, which is dominated by
+                # majority classes (e.g. background) in class-imbalanced coral reef data.
+                "miou": JaccardIndex(**shared_kwargs, average="macro").to(device),
+            }
+            if per_class_metrics:
+                # average="none" returns a per-class vector instead of a scalar; Logger
+                # unpacks these into named metrics (e.g. "f1_per_class/acropora") via
+                # id2label, so class-level regressions are visible without re-running eval.
+                self.metric_dict["f1_per_class"] = F1Score(**shared_kwargs, average="none").to(
+                    device
+                )
+                self.metric_dict["iou_per_class"] = JaccardIndex(
+                    **shared_kwargs, average="none"
+                ).to(device)
         else:
             self.metric_dict = {}
 
