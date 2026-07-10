@@ -25,6 +25,8 @@ import warnings
 from datetime import datetime, timedelta
 from typing import Any
 
+import boto3.exceptions
+import botocore.exceptions
 import mlflow
 import numpy as np
 import torch
@@ -58,6 +60,18 @@ _MLFLOW_LOG_ERRORS = (mlflow.exceptions.MlflowException, OSError)
 # unreachable-tracking-server failure as RuntimeError (see below), and init degrades gracefully
 # (disable MLflow, keep training) on that expected infra failure.
 _MLFLOW_CONNECT_ERRORS = (*_MLFLOW_LOG_ERRORS, RuntimeError)
+# Artifact uploads (log_artifact) additionally tolerate transient S3 failures. On the SageMaker
+# managed backend, artifacts go to S3 and mlflow's S3ArtifactRepository calls boto3 upload_file
+# with no wrapping, so a throttle/timeout/connection blip surfaces as a boto exception — NOT an
+# MlflowException or OSError. Catching these keeps a transient artifact-store hiccup from killing
+# a long training run at checkpoint time (its prior behavior), while a programming bug in the
+# upload path still propagates. Note: an auth/permission ClientError raised directly (not wrapped
+# in S3UploadFailedError) still surfaces — a misconfigured artifact store should fail loudly.
+_MLFLOW_ARTIFACT_ERRORS = (
+    *_MLFLOW_LOG_ERRORS,
+    botocore.exceptions.BotoCoreError,
+    boto3.exceptions.S3UploadFailedError,
+)
 
 
 def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
@@ -372,7 +386,7 @@ class Logger:
                 concept_matrix.to_csv(csv_path)
                 mlflow.log_artifact(csv_path, artifact_path="metadata")
                 logger.info("Logged concept matrix to MLflow")
-        except _MLFLOW_LOG_ERRORS as e:
+        except _MLFLOW_ARTIFACT_ERRORS as e:
             logger.warning("Failed to log concept matrix to MLflow: %s", e)
 
     def _unpack_metrics(self, metrics_dict: dict, key_prefix: str = "") -> dict[str, float]:
@@ -845,7 +859,7 @@ class Logger:
                     )
 
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
-            except _MLFLOW_LOG_ERRORS as e:
+            except _MLFLOW_ARTIFACT_ERRORS as e:
                 logger.warning("Failed to log checkpoint/model to MLflow: %s", e)
                 if is_best:
                     with contextlib.suppress(Exception):
