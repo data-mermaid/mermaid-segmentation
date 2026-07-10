@@ -108,9 +108,9 @@ def _write_pid(pid_file: Path) -> None:
 def _stop_current_space() -> None:
     """Stop the SageMaker JupyterLab app via delete_app.
 
-    SageMaker has no ``stop_space`` API.  The documented way to stop a running JupyterLab app is
-    ``delete_app`` — this terminates the instance while keeping EFS data intact.  No-op outside
-    SageMaker.
+    SageMaker has no ``stop_space`` API.  The documented way to stop a running
+    JupyterLab app is ``delete_app`` — this terminates the instance while keeping EFS
+    data intact.  No-op outside SageMaker.
     """
     if not _METADATA.exists():
         logging.info("Not running on SageMaker — skipping auto-shutdown")
@@ -244,7 +244,7 @@ def _build_parser() -> argparse.ArgumentParser:
     base.add_argument(
         "--metric-of-interest",
         type=str,
-        default="accuracy",
+        default="miou",
         choices=sorted(SUPPORTED_METRIC_NAMES),
         help="metric used for checkpointing and early stopping",
     )
@@ -440,6 +440,7 @@ def _run_training(args: argparse.Namespace) -> None:
         device=device,
         calculate_concept_metrics=cfg.training.training_mode != "standard",
         concept_value2id=registry.concept_value2id,
+        per_class_metrics=cfg.training.training_mode == "standard",
     )
 
     cfg.logger.experiment_name = "mermaid"

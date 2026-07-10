@@ -1,0 +1,22 @@
+job:
+  name_prefix: mermaidseg-dinov3-lora-r8
+  image: mermaid-segmentation-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.g5.2xlarge
+  volume_gb: 200
+  max_runtime_hours: 48
+
+config:
+  config_model: configs/model_config_dinov3_lora_qv_r8.yaml
+  config_training: configs/training_config_dinov3_lora.yaml
+  config_data: configs/data_config_dinov3_base.yaml
+  config_logger: configs/logger_config.yaml
+  overrides:
+    run-name: dinov3-lora-qv-r8
+    experiment-name: post-baseline
+    epochs: 200
+    seed: 42
+    num-workers: 8
+    metric-of-interest: miou
+    early-stopping: true
+    early-stopping-patience: 20

@@ -18,7 +18,8 @@ from mermaidseg.model.metric_policy import (
 
 
 def _loader_load_failure_count(loader: object) -> int | None:
-    """Return the cumulative load-failure count of a loader's dataset, or None if untracked."""
+    """Return the cumulative load-failure count of a loader's dataset, or None if
+    untracked."""
     dataset = getattr(loader, "dataset", None)
     if dataset is None or not hasattr(dataset, "num_load_failures"):
         return None
@@ -37,10 +38,10 @@ def _enforce_load_failure_rate(
 ) -> None:
     """Raise if this epoch's dataset load-failure rate exceeds ``max_rate``.
 
-    A high rate over a single pass signals a systemic data problem (bad credentials, missing files,
-    truncated image lists) rather than a few corrupt samples, so we fail fast instead of silently
-    training on a shrunken/biased dataset. No-op when disabled or when the dataset does not track
-    load failures.
+    A high rate over a single pass signals a systemic data problem (bad credentials,
+    missing files, truncated image lists) rather than a few corrupt samples, so we fail
+    fast instead of silently training on a shrunken/biased dataset. No-op when disabled
+    or when the dataset does not track load failures.
     """
     if max_rate is None or failures_before is None:
         return
@@ -71,7 +72,7 @@ def train_model(
     logger: Logger | None = None,
     start_epoch: int = -1,
     end_epoch: int = -1,
-    metric_of_interest: str = "accuracy",
+    metric_of_interest: str = "miou",
     early_stopping: bool = False,
     early_stopping_patience: int = 10,
     early_stopping_min_delta: float = 0.0,

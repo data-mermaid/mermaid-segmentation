@@ -221,8 +221,27 @@ class MetaModel:
             self.loss = loss_cls(**loss_kwargs)
 
         optimizer_cls = getattr(torch.optim, training_kwargs.optimizer.pop("type", None))
+        optimizer_kwargs = dict(training_kwargs.optimizer)
+        lora_lr = optimizer_kwargs.pop("lora_lr", None)
         self._trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = optimizer_cls(params=self._trainable_params, **training_kwargs.optimizer)
+        if lora_lr is not None and getattr(self.model, "use_lora", False):
+            head_params = [
+                p for n, p in self.model.named_parameters() if p.requires_grad and "lora_" not in n
+            ]
+            lora_params = [
+                p for n, p in self.model.named_parameters() if p.requires_grad and "lora_" in n
+            ]
+            base_lr = float(optimizer_kwargs.pop("lr"))
+            param_groups = []
+            if head_params:
+                param_groups.append({"params": head_params, "lr": base_lr})
+            if lora_params:
+                param_groups.append({"params": lora_params, "lr": float(lora_lr)})
+            if not param_groups:
+                param_groups = [{"params": self._trainable_params, "lr": base_lr}]
+            self.optimizer = optimizer_cls(param_groups, **optimizer_kwargs)
+        else:
+            self.optimizer = optimizer_cls(params=self._trainable_params, **optimizer_kwargs)
 
         if "scheduler" in training_kwargs:
             scheduler_cfg = dict(training_kwargs.scheduler)
@@ -285,8 +304,9 @@ class MetaModel:
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
 
-        When ``source_to_target_lookup`` is ``None``, source labels are assumed to already be in
-        target space (identity passthrough — useful for single-source or synthetic pipelines).
+        When ``source_to_target_lookup`` is ``None``, source labels are assumed to
+        already be in target space (identity passthrough — useful for single-source or
+        synthetic pipelines).
         """
         if self.source_to_target_lookup is None:
             return source_labels
