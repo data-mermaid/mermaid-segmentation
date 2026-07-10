@@ -151,6 +151,42 @@ class Evaluator:
 
         return metric_results
 
+    def accumulate(self, preds: torch.Tensor, targets: torch.Tensor) -> None:
+        """Update the classification metric bank with one batch.
+
+        ``preds`` may be raw logits (``(B, C, H, W)`` — argmaxed to class ids) or
+        already class-id maps (``(B, H, W)`` — used as- is). Callers pass the mode-
+        appropriate ``(preds, targets)`` pair (e.g. ``(logits, target_labels)`` for
+        standard/CBM, or ``(concept_class_preds, target_concept_preds)`` for concept
+        mode). No-op when the classification bank is empty. This is the single owner of
+        the metric-update lifecycle, shared by the train/val loops and
+        :meth:`evaluate_model`.
+        """
+        if not self.metric_dict:
+            return
+        if preds.ndim > 3:
+            preds = preds.argmax(dim=1)
+        for metric in self.metric_dict.values():
+            metric.update(preds.detach(), targets)
+
+    def compute_and_reset(
+        self, include_concepts: bool = False
+    ) -> dict[str, float | NDArray[np.float64]]:
+        """Compute every accumulated metric, reset the bank(s), and return the results.
+
+        Scalars are returned as Python floats; per-class metrics stay as arrays. When
+        ``include_concepts`` is True, concept metrics are computed + reset and merged
+        in.
+        """
+        metric_results: dict[str, float | NDArray[np.float64]] = {}
+        for metric_name in self.metric_dict:
+            value = self.metric_dict[metric_name].compute().cpu().numpy()
+            metric_results[metric_name] = value.item() if value.ndim == 0 else value
+            self.metric_dict[metric_name].reset()
+        if include_concepts:
+            metric_results.update(self._compute_concept_metric_results())
+        return metric_results
+
     @torch.no_grad()
     def evaluate_model(
         self,
@@ -167,32 +203,19 @@ class Evaluator:
             Dict of metric_name -> scalar/array result.
         """
         meta_model.model.eval()
-        metric_results: dict[str, float | NDArray[np.float64]] = {}
+        is_concept = meta_model.training_mode in ("concept-bottleneck", "concept")
         for data in tqdm.tqdm(dataloader):
             inputs, source_labels = data
             source_labels = source_labels.long().to(self.device)
             target_labels = meta_model._to_target_labels(source_labels)
             outputs, concept_outputs = meta_model.batch_predict(inputs)
 
-            if self.metric_dict:
-                if outputs.ndim > 3:
-                    outputs = outputs.argmax(dim=1)
-                for metric in self.metric_dict.values():
-                    metric.update(outputs, target_labels)
-
-            if meta_model.training_mode in ("concept-bottleneck", "concept"):
+            self.accumulate(outputs, target_labels)
+            if is_concept:
                 concept_labels = meta_model._to_concept_labels(source_labels)
                 self.evaluate_concepts(concept_outputs, concept_labels)
 
-        for metric_name in self.metric_dict:
-            metric_results[metric_name] = self.metric_dict[metric_name].compute().cpu().numpy()
-            if metric_results[metric_name].ndim == 0:
-                metric_results[metric_name] = metric_results[metric_name].item()
-            self.metric_dict[metric_name].reset()
-
-        if meta_model.training_mode in ("concept-bottleneck", "concept"):
-            metric_results.update(self._compute_concept_metric_results())
-
+        metric_results = self.compute_and_reset(include_concepts=is_concept)
         self.epoch += 1
         return metric_results
 
