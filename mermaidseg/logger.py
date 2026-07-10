@@ -48,6 +48,17 @@ logger = logging.getLogger(__name__)
 
 LOCAL_DEFAULT_URI = "./segmentation"
 
+# Expected, non-fatal failures for MLflow-logging calls: a tracking-backend/connection error
+# (MlflowException) or local artifact IO (OSError). These are caught + warned so a transient
+# logging failure never crashes training. Everything else — AttributeError/KeyError/TypeError,
+# i.e. the "dropped/misnamed metric" class of bug — is intentionally NOT caught so it surfaces
+# loudly instead of silently degrading observability (the failure mode /ml-training-review targets).
+_MLFLOW_LOG_ERRORS = (mlflow.exceptions.MlflowException, OSError)
+# Init/connect additionally tolerates RuntimeError: `mlflow_connect` deliberately re-raises an
+# unreachable-tracking-server failure as RuntimeError (see below), and init degrades gracefully
+# (disable MLflow, keep training) on that expected infra failure.
+_MLFLOW_CONNECT_ERRORS = (*_MLFLOW_LOG_ERRORS, RuntimeError)
+
 
 def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
     """Resolve MLflow tracking URI using a simple priority chain.
@@ -322,7 +333,7 @@ class Logger:
                         # Log concept metadata
                         self._log_concept_metadata(meta_model)
 
-                except Exception as e:
+                except _MLFLOW_CONNECT_ERRORS as e:
                     logger.warning("Failed to initialize MLflow logging: %s", e)
                     if self.mlflow_run_id is not None:
                         with contextlib.suppress(Exception):
@@ -361,7 +372,7 @@ class Logger:
                 concept_matrix.to_csv(csv_path)
                 mlflow.log_artifact(csv_path, artifact_path="metadata")
                 logger.info("Logged concept matrix to MLflow")
-        except Exception as e:
+        except _MLFLOW_LOG_ERRORS as e:
             logger.warning("Failed to log concept matrix to MLflow: %s", e)
 
     def _unpack_metrics(self, metrics_dict: dict, key_prefix: str = "") -> dict[str, float]:
@@ -423,7 +434,7 @@ class Logger:
                 name=dataset.__class__.__name__,
             )
             mlflow.log_input(meta, context=context)
-        except Exception as e:
+        except _MLFLOW_LOG_ERRORS as e:
             logger.warning("Failed to log dataset to MLflow: %s", e)
 
     def log_datasets(self, dataset, context: str = "training") -> None:
@@ -474,7 +485,7 @@ class Logger:
                 )
             mlflow.log_param("num_target_classes", int(registry.num_target_classes))
             mlflow.log_param("num_global_source_classes", int(registry.num_global_source_classes))
-        except Exception as e:
+        except _MLFLOW_LOG_ERRORS as e:
             logger.warning("Failed to log SourceLabelRegistry to MLflow: %s", e)
 
     def log_dataset_statistics(
@@ -582,7 +593,7 @@ class Logger:
             if dataset_variant is not None:
                 tags["benchmark.dataset_variant"] = dataset_variant
             mlflow.set_tags(tags)
-        except Exception as e:
+        except _MLFLOW_LOG_ERRORS as e:
             logger.warning("Failed to log benchmark context: %s", e)
 
     def log_dataloader_params(self, loader: DataLoader, prefix: str = "dataloader") -> None:
@@ -599,7 +610,7 @@ class Logger:
                     f"{prefix}_prefetch_factor": getattr(loader, "prefetch_factor", None),
                 }
             )
-        except Exception as e:
+        except _MLFLOW_LOG_ERRORS as e:
             logger.warning("Failed to log dataloader params: %s", e)
 
     def _ensure_active_run(self) -> bool:
@@ -638,7 +649,7 @@ class Logger:
                 "Started new MLflow run %s (was %s)", self.mlflow_run_id, original_run_id
             )
             return True
-        except Exception as e:
+        except _MLFLOW_LOG_ERRORS as e:
             logger.warning("Failed to ensure active MLflow run: %s", e)
             return False
 
@@ -648,7 +659,7 @@ class Logger:
                 metrics_to_log = self._unpack_metrics(log_dict)
                 if metrics_to_log:
                     mlflow.log_metrics(metrics_to_log, step=step)
-            except Exception as e:
+            except _MLFLOW_LOG_ERRORS as e:
                 logger.warning("Failed to log metrics to MLflow: %s", e)
 
     def _prune_local_checkpoints(self, run_name: str) -> None:
@@ -834,7 +845,7 @@ class Logger:
                     )
 
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
-            except Exception as e:
+            except _MLFLOW_LOG_ERRORS as e:
                 logger.warning("Failed to log checkpoint/model to MLflow: %s", e)
                 if is_best:
                     with contextlib.suppress(Exception):
