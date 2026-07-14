@@ -2870,7 +2870,7 @@ requires-dist = [
     { name = "seaborn", marker = "extra == 'notebooks'", specifier = ">=0.13.2" },
     { name = "selenium", marker = "extra == 'coralnet'" },
     { name = "spaces", marker = "extra == 'demo'", specifier = ">=0.30" },
-    { name = "torch", specifier = ">=2.4,<2.8" },
+    { name = "torch", specifier = ">=2.4,<2.12" },
     { name = "torchmetrics", marker = "extra == 'training'" },
     { name = "tqdm" },
     { name = "transformers" },

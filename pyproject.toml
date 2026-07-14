@@ -24,7 +24,9 @@ dependencies = [
     "requests",
     "s3fs>=2024.2.0",
     "safetensors>=0.4.0",
-    "torch>=2.4,<2.8",
+    # Upper bound tracks the newest torch validated on ZeroGPU (Space preinstalls 2.11);
+    # local/CI envs stay on the locked version regardless.
+    "torch>=2.4,<2.12",
     "tqdm",
     "transformers",
 ]
