@@ -1,5 +1,7 @@
+import math
 import os
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -11,6 +13,19 @@ from transformers.models.dpt.modeling_dpt import DPTNeck
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 
 DEFAULT_LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
+
+
+@dataclass
+class ConceptBottleneckOutput(SemanticSegmenterOutput):
+    """Segmenter output for concept-bottleneck models.
+
+    Both ``concept_outputs`` and ``concept_logits`` are retained intentionally:
+    logits feed the training loss; activations feed the class head and inference.
+    ``hidden_states`` is unused (left ``None``) so activations are not overloaded.
+    """
+
+    concept_outputs: torch.Tensor | None = None
+    concept_logits: torch.Tensor | None = None
 
 
 class LinearClassifier(torch.nn.Module):
@@ -200,8 +215,10 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
     """DINOv3 encoder with a concept bottleneck for segmentation.
 
     Adds an intermediate concept prediction head between the DINOv3 backbone and the
-    final segmentation classifier. The concept logits are supervised jointly with the
-    segmentation task and are returned via `SemanticSegmenterOutput.hidden_states`.
+    final segmentation classifier. The concept predictions are supervised jointly with the
+    segmentation task; activated concept outputs are returned via
+    `ConceptBottleneckOutput.concept_outputs` and raw concept logits via
+    `ConceptBottleneckOutput.concept_logits`.
 
     Attributes:
         encoder: DINOv3 backbone loaded via `AutoModel.from_pretrained`.
@@ -248,15 +265,17 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         )
         self.concept_classifier = torch.nn.Conv2d(num_concepts, num_classes, kernel_size=1)
 
-    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
+    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> ConceptBottleneckOutput:
         """Run encoder → concept head → segmentation classifier.
 
         Args:
             x (torch.Tensor): Input image tensor with shape (B, C, H, W).
             labels: Unused; accepted for API compatibility.
         Returns:
-            SemanticSegmenterOutput: `.logits` has shape (B, num_classes, H, W);
-                `.hidden_states` contains concept logits with shape (B, num_concepts, H, W).
+            ConceptBottleneckOutput: `.logits` has shape (B, num_classes, H, W);
+                `.concept_outputs` holds the activated concept outputs in ``[0, 1]`` and
+                `.concept_logits` holds the raw pre-activation logits, both with shape
+                (B, num_concepts, H, W).
         """
         outputs = self.encoder(x, **kwargs)
         # Skip the 5 DINOv3 prefix tokens (CLS + 4 register tokens)
@@ -283,7 +302,12 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         #     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=0)
         #     loss = loss_fct(logits.squeeze(), labels.squeeze())
 
-        return SemanticSegmenterOutput(loss=loss, logits=logits, hidden_states=concept_outputs)
+        return ConceptBottleneckOutput(
+            loss=loss,
+            logits=logits,
+            concept_outputs=concept_outputs,
+            concept_logits=concept_logits,
+        )
 
     def freeze_encoder(self) -> None:
         """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
@@ -388,11 +412,14 @@ class DPTHead(torch.nn.Module):
             neck_ignore_stages=[],
         )
         self.neck = DPTNeck(dpt_config)
+        norm_groups = min(32, fusion_hidden_size)
+        while fusion_hidden_size % norm_groups != 0:
+            norm_groups -= 1
         self.head = torch.nn.Sequential(
             torch.nn.Conv2d(
                 fusion_hidden_size, fusion_hidden_size, kernel_size=3, padding=1, bias=False
             ),
-            torch.nn.BatchNorm2d(fusion_hidden_size),
+            torch.nn.GroupNorm(norm_groups, fusion_hidden_size),
             torch.nn.ReLU(inplace=True),
             torch.nn.Dropout(dropout),
             torch.nn.Conv2d(fusion_hidden_size, out_channels, kernel_size=1),
@@ -412,8 +439,33 @@ class DPTHead(torch.nn.Module):
             raise ValueError(
                 f"DPTHead expects {self.num_stages} hidden states, got {len(hidden_states)}."
             )
-        features = self.neck(hidden_states, self.token_height, self.token_width)
+        # Derive the patch-token grid from the actual sequence length (minus the
+        # CLS token) so the head works for any input resolution, not just the one
+        # baked in at construction from ``input_size``.
+        token_height, token_width = self._infer_token_grid(hidden_states[0].shape[1] - 1)
+        features = self.neck(hidden_states, token_height, token_width)
         return self.head(features[-1])
+
+    def _infer_token_grid(self, num_patch_tokens: int) -> tuple[int, int]:
+        """Resolve the (height, width) patch grid for ``num_patch_tokens``.
+
+        Uses the configured token grid when it matches; otherwise reshapes
+        ``num_patch_tokens`` while preserving the configured aspect ratio (which
+        handles square and non-square inputs at arbitrary resolutions).
+        """
+        if num_patch_tokens == self.token_height * self.token_width:
+            return self.token_height, self.token_width
+
+        aspect = self.token_width / self.token_height
+        token_height = int(round(math.sqrt(num_patch_tokens / aspect)))
+        token_width = num_patch_tokens // token_height if token_height else 0
+        if token_height * token_width != num_patch_tokens:
+            raise ValueError(
+                f"Cannot reshape {num_patch_tokens} patch tokens into a grid with "
+                f"aspect ratio {aspect:.4f} (configured grid "
+                f"{self.token_height}x{self.token_width})."
+            )
+        return token_height, token_width
 
 
 class _DPTDINOv3Base(torch.nn.Module):
@@ -575,18 +627,36 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         self.concept_proj = torch.nn.Conv2d(concept_feature_dim, num_concepts, kernel_size=1)
         self.concept_classifier = torch.nn.Conv2d(num_concepts, num_classes, kernel_size=1)
 
-    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
+    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> ConceptBottleneckOutput:
         """Run encoder + DPT head, the concept bottleneck, and the class classifier."""
         hidden_states = self._encode(x, **kwargs)
         concept_features = self.dpt_head(hidden_states)
         concept_features = torch.nn.functional.interpolate(
             concept_features, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
-        concept_logits = self.concept_proj(concept_features)
+        if concept_features.device.type == "cuda":
+            with torch.autocast(device_type="cuda", enabled=False):
+                logits, concept_outputs, concept_logits = self._forward_concept_tail(
+                    concept_features
+                )
+        else:
+            logits, concept_outputs, concept_logits = self._forward_concept_tail(concept_features)
+        return ConceptBottleneckOutput(
+            loss=None,
+            logits=logits,
+            concept_outputs=concept_outputs,
+            concept_logits=concept_logits,
+        )
+
+    def _forward_concept_tail(
+        self, concept_features: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run concept projection, activation, and class projection in fp32."""
+        concept_logits = self.concept_proj(concept_features.float())
         concept_outputs = self.concept_outputs_activation(concept_logits)
         classifier_input = concept_outputs.detach() if self.detach_concepts else concept_outputs
-        logits = self.concept_classifier(classifier_input)
-        return SemanticSegmenterOutput(loss=None, logits=logits, hidden_states=concept_outputs)
+        logits = self.concept_classifier(classifier_input.float())
+        return logits, concept_outputs, concept_logits
 
     def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
         offset = 0
@@ -596,10 +666,10 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
             concept_values = self.concept_value2id[concept]
             order_concept_length = len(list(concept_values.values())[0])
             chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
-            activated_parts.append(torch.softmax(chunk, dim=1))
+            activated_parts.append(torch.softmax(chunk.float(), dim=1))
             offset += order_concept_length
 
-        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...]))
+        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...].float()))
         return torch.cat(activated_parts, dim=1)
 
 

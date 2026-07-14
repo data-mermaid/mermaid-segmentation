@@ -1,4 +1,5 @@
-"""Live Playwright smoke tests against coralnet.ucsd.edu (excluded from default pytest)."""
+"""Live Playwright smoke tests against coralnet.ucsd.edu (excluded from default
+pytest)."""
 
 # ruff: noqa: E402
 
@@ -164,8 +165,8 @@ def test_pagination_links_well_formed(page, public_source_id):
     """Walk to page 2 and verify the resolved URL is well-formed.
 
     Exercises the same ``urljoin`` flow used by ``download_annotations_paginated`` and
-    ``get_images``. Regression test for the bug where path/query concatenation produced URLs like
-    ``.../images/?...?page=2``.
+    ``get_images``. Regression test for the bug where path/query concatenation produced
+    URLs like ``.../images/?...?page=2``.
     """
     browse_url = f"{CORALNET_BASE}/source/{public_source_id}/browse/images/"
     response = page.goto(browse_url, wait_until="domcontentloaded")
@@ -189,6 +190,116 @@ def test_pagination_links_well_formed(page, public_source_id):
     response = page.goto(page_two_url, wait_until="domcontentloaded")
     assert response is not None and response.status < 400
     assert page.locator("span.thumb_wrapper").count() >= 1
+
+
+def _page_image_ids(page) -> tuple[int, ...]:
+    """CoralNet image PKs (DOM order) for the browse page currently loaded in
+    ``page``."""
+    return _extract_page_image_ids(BeautifulSoup(page.content(), "html.parser"))
+
+
+def test_get_images_parallel_live_end_to_end(public_source_id, coralnet_credentials):
+    """Run the real ``CoralNetDownloader.get_images`` parallel fan-out against the site.
+
+    Unlike the Playwright tests above (which drive a browser), this exercises the
+    production ``requests``-based code path — parallel ``?page=N`` fetching, the
+    ``_with_retry`` wrapper, and per-page graceful degradation — end to end on the live
+    site. Bounded with a small ``total_images_hint`` so only ~3 pages are fetched
+    regardless of how large the source is.
+    """
+    from mermaidseg.datasets.coralnet.scraper.downloader import CoralNetDownloader
+
+    dl = CoralNetDownloader("anon", "anon")
+    if coralnet_credentials is not None:
+        # Log in when creds are available (mirrors the refresh job); public browse
+        # works without it, so a failed login is non-fatal.
+        dl.username, dl.password = coralnet_credentials
+        dl.login()
+
+    probe = dl.probe_source(public_source_id)
+    if not probe.accessible:
+        pytest.skip(f"source {public_source_id} not accessible: {probe.error}")
+    total = probe.total_images_website or 0
+
+    page_size = 20  # CoralNet browse pages hold 20 thumbnails
+    if total <= page_size:
+        pytest.skip(f"source {public_source_id} has a single browse page ({total} images)")
+
+    # Cap the fan-out to ~3 pages so the test stays bounded on huge sources.
+    hint = min(total, 3 * page_size)
+    df, ok = dl.get_images(public_source_id, total_images_hint=hint, browse_workers=3)
+
+    assert ok is True
+    assert df is not None and not df.empty
+    # Fan-out actually fetched more than page 1.
+    assert len(df) > page_size, f"expected multi-page result, got {len(df)} rows"
+    # Bounded by the hint and never more than the source's true total.
+    assert len(df) <= hint <= total
+    # No duplicate image names across merged pages.
+    assert df["Name"].is_unique, "merged parallel pages contain duplicate Names"
+    assert list(df.columns) == ["Name", "Image Page"]
+
+
+def test_browse_page_param_direct_pagination(page, public_source_id):
+    """Verify ``?page=N`` URLs can be constructed directly (no cursor-following).
+
+    This is the live contract the parallel browse fan-out in ``get_images`` depends
+    on: rather than walking ``a[title="Next page"]`` links one page at a time, it
+    computes ``n_pages = ceil(total / page_size)`` and fetches ``?page=2..N`` in
+    parallel. This test confirms against the real site that:
+
+      * a directly-constructed ``?page=2`` returns images disjoint from page 1, and
+      * the directly-constructed last page ``?page=n_pages`` returns exactly the
+        expected remainder — proving the page-count math is right.
+
+    Browse pages are slow under load (the reason ``get_images`` now retries), so a
+    generous 90s navigation timeout is used to mirror ``_PAGE_GET_TIMEOUT``.
+    """
+    nav_timeout = 90_000
+
+    # Total image count comes from the source overview page.
+    overview = page.goto(
+        f"{CORALNET_BASE}/source/{public_source_id}/",
+        wait_until="domcontentloaded",
+        timeout=nav_timeout,
+    )
+    if reason := skip_reason_for_source_response(overview, public_source_id):
+        pytest.skip(reason)
+    total = parse_total_images_from_source_html(page.content())
+    assert total and total > 0
+
+    base = f"{CORALNET_BASE}/source/{public_source_id}/browse/images"
+    p1 = page.goto(base, wait_until="domcontentloaded", timeout=nav_timeout)
+    if reason := skip_reason_for_source_response(p1, public_source_id):
+        pytest.skip(reason)
+    page1_ids = _page_image_ids(page)
+    page_size = len(page1_ids)
+    if page_size == 0 or total <= page_size:
+        pytest.skip(f"source {public_source_id} has a single browse page ({total} images)")
+
+    # ceil-divide — identical to the formula get_images uses.
+    n_pages = -(-total // page_size)
+
+    # Directly construct ?page=2 (NOT via the Next-page link) and confirm it
+    # returns a distinct set of images.
+    p2 = page.goto(f"{base}?page=2", wait_until="domcontentloaded", timeout=nav_timeout)
+    assert p2 is not None and p2.status < 400
+    page2_ids = _page_image_ids(page)
+    assert page2_ids, "?page=2 returned no thumbnails"
+    assert set(page1_ids).isdisjoint(page2_ids), (
+        "?page=2 returned the same images as page 1 — direct page-param pagination is broken"
+    )
+
+    # Directly construct the LAST page and confirm the remainder count matches the
+    # page math (last page holds total - (n_pages-1)*page_size images).
+    last = page.goto(f"{base}?page={n_pages}", wait_until="domcontentloaded", timeout=nav_timeout)
+    assert last is not None and last.status < 400
+    last_ids = _page_image_ids(page)
+    expected_last = total - (n_pages - 1) * page_size
+    assert len(last_ids) == expected_last, (
+        f"last page ?page={n_pages} returned {len(last_ids)} images, "
+        f"expected remainder {expected_last} (total={total}, page_size={page_size})"
+    )
 
 
 def test_paginated_annotation_export_produces_csv(page, public_source_id, coralnet_credentials):
@@ -277,12 +388,12 @@ def _parse_post_body(body: str, content_type: str | None) -> dict[str, str]:
     """Parse a Playwright-captured POST body into ``{field_name: value}``.
 
     Handles both ``application/x-www-form-urlencoded`` (what our scraper sends) and
-    ``multipart/form-data`` (what CoralNet's UI sends). The multipart path uses a hand-rolled
-    boundary split rather than the ``email`` module so it doesn't choke on body-only content (no
-    headers).
+    ``multipart/form-data`` (what CoralNet's UI sends). The multipart path uses a hand-
+    rolled boundary split rather than the ``email`` module so it doesn't choke on body-
+    only content (no headers).
 
-    Fails the calling test if the multipart boundary can't be located; a silent empty dict would
-    masquerade as a body-shape mismatch and hide a parser regression.
+    Fails the calling test if the multipart boundary can't be located; a silent empty
+    dict would masquerade as a body-shape mismatch and hide a parser regression.
     """
     ct = content_type or ""
     looks_multipart = "multipart/form-data" in ct.lower() or body.lstrip().startswith("--")

@@ -45,7 +45,7 @@ data:
 
   coralscapes_v2:
     train:
-      split: train
+      split: [train, validation]
       transform:
         RandomResizedCrop:
           size: [512, 512]
@@ -57,7 +57,7 @@ data:
           mean: [0.485, 0.456, 0.406]
           std: [0.229, 0.224, 0.225]
     val:
-      split: validation
+      split: test
       transform:
         Resize:
           width: 512

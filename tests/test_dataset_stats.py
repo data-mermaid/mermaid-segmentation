@@ -149,7 +149,7 @@ class TestComputeClassCounts:
             "test_fraction",
         ]
         assert counts["target_id"].tolist() == [0, 1, 2, 3]
-        assert counts["target_name"].tolist() == ["background", "Acropora", "Porites", "Other"]
+        assert counts["target_name"].tolist() == ["ignore", "Acropora", "Porites", "Other"]
         assert counts["class_kind"].tolist() == [
             "background",
             "target",
@@ -256,7 +256,7 @@ class TestComputeTrainSummary:
         assert summary["total_annotations"] == 5
         assert summary["splits"]["train"] == {"images": 2, "annotations": 4}
         assert summary["splits"]["test"] == {"images": 1, "annotations": 0}
-        assert summary["num_target_classes"] == 4  # 3 targets + background
+        assert summary["num_target_classes"] == 4  # 3 targets + ignore (id 0)
         assert summary["eligible_num_classes"] == 3
 
         assert abs(summary["top1_share"] - 0.75) < 1e-9

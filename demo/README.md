@@ -29,6 +29,13 @@ Live Space: **https://huggingface.co/spaces/datamermaid/mermaid-segmentation**
 - **Bundled here:** `id2label.json`, `concept_id2name.json`, `model_config_cbm_dpt_lora_vitl.yaml`, `class_to_concepts.csv` (taxonomy). The label/concept JSONs come from the training run's MLflow `metadata/` artifacts and must match the checkpoint.
 - **DINOv3 backbone is gated.** The runtime `HF_TOKEN` must have accepted the [DINOv3 license](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m) and (for the private checkpoint repo) read access to it.
 
+Provenance of the bundled metadata (pull from the training run's MLflow `metadata/` artifacts when swapping checkpoints):
+
+| File | MLflow artifact path | How it is produced |
+|------|---------------------|-------------------|
+| `id2label.json` | `metadata/id2label.json` | Built in `scripts/train.py` as `{0: "ignore", **registry.target_id2label}` and logged by `Logger` |
+| `concept_id2name.json` | `metadata/concept_id2name.json` | Built by `SourceLabelRegistry._build_concepts()` and logged via `Logger.log_reconciliation()` |
+
 ## Run locally
 
 From the repo root:

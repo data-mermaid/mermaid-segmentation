@@ -27,8 +27,8 @@ if [ "$NO_PULL" = false ]; then
     git pull --ff-only
 fi
 
-echo "Syncing uv environment (--group notebooks --locked)..."
-uv sync --group notebooks --locked
+echo "Syncing uv environment (--extra notebooks --extra coralnet --locked)..."
+uv sync --extra notebooks --extra coralnet --locked
 
 echo "Registering Jupyter kernel..."
 uv run python -m ipykernel install \

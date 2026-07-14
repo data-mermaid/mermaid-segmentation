@@ -16,12 +16,10 @@ filename for backward compatibility; pin a specific build via
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
 import boto3
-import fsspec
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -33,7 +31,8 @@ _LEGACY_ANNOTATIONS_PATH = "coralnet_annotations_30112025.parquet"
 
 
 def _resolve_default_annotations_path() -> str:
-    """Resolve the default ``annotations_path`` from env vars, falling back to the legacy file.
+    """Resolve the default ``annotations_path`` from env vars, falling back to the
+    legacy file.
 
     Precedence:
         1. ``MERMAID_CORALNET_ANNOTATIONS_PATH`` — full S3 key as published by the ETL.
@@ -53,8 +52,8 @@ def _resolve_default_annotations_path() -> str:
 
 
 class CoralNetDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file stored
-    on S3.
+    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet
+    file stored on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in CoralNet's own provider-ID label
@@ -78,6 +77,10 @@ class CoralNetDataset(BaseCoralDataset):
     """
 
     SOURCE_NAME = "coralnet"
+
+    # Columns every CoralNet annotations parquet must provide. ``source_label_name`` is derived
+    # from ``coralnet_id``; ``image_s3_key`` is optional (present only in the resized parquet).
+    REQUIRED_COLUMNS: tuple[str, ...] = ("source_id", "image_id", "row", "col", "coralnet_id")
 
     annotations_path: str
     source_ids: list[int | str]
@@ -133,42 +136,40 @@ class CoralNetDataset(BaseCoralDataset):
         """
         annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         df_annotations = pd.read_parquet(annotations_path)
-        id2name_path = (
-            "s3://dev-datamermaid-sm-sources/coralnet-public-images/temporary/coralnet_id2name.json"
-        )
-
-        with fsspec.open(id2name_path, "r") as f:
-            coralnet_id2name = json.load(f)
-
-        df_annotations["coralnet_name"] = df_annotations["coralnet_id"].map(
-            lambda x: coralnet_id2name.get(str(x))
-        )
-        df_annotations["source_label_name"] = (
-            df_annotations["coralnet_name"].astype(str).str.lower()
-        )
-
-        df_annotations = df_annotations[
-            [
-                "source_id",
-                "image_id",
-                "row",
-                "col",
-                "coralnet_id",
-                "coralnet_name",
-                "source_label_name",
-            ]
-        ]
+        missing = set(self.REQUIRED_COLUMNS) - set(df_annotations.columns)
+        if missing:
+            raise ValueError(
+                f"CoralNet annotations parquet at {annotations_path} is missing required "
+                f"columns: {sorted(missing)}"
+            )
+        df_annotations["source_label_name"] = df_annotations["coralnet_id"].astype(str)
+        columns = ["source_id", "image_id", "row", "col", "coralnet_id", "source_label_name"]
+        # The resized training parquet carries a per-image resolved S3 key (resized or original)
+        # with row/col already scaled to that image. The legacy parquet omits it, in which case
+        # read_image falls back to constructing the original key.
+        if "image_s3_key" in df_annotations.columns:
+            columns.append("image_s3_key")
+        df_annotations = df_annotations[columns]
 
         df_images = self._derive_df_images_from_annotations(df_annotations)
         return df_annotations, df_images
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
+        columns = ["source_id", "image_id"]
+        if "image_s3_key" in df_annotations.columns:
+            columns.append("image_s3_key")
         return (
-            df_annotations[["source_id", "image_id"]]
+            df_annotations[columns]
             .drop_duplicates(subset=["source_id", "image_id"])
             .reset_index(drop=True)
         )
 
-    def read_image(self, image_id: str, source_id: str, **row_kwargs: Any) -> NDArray[Any]:
-        key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
+    def read_image(
+        self,
+        image_id: str,
+        source_id: str,
+        image_s3_key: str | None = None,
+        **row_kwargs: Any,
+    ) -> NDArray[Any]:
+        key = image_s3_key or f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
         return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))

@@ -71,7 +71,7 @@ nohup bash -c "
   export PATH=\"$HOME/.local/bin:\$PATH\"
   cd '$PROJECT_DIR'
   echo \"[LCC bg] Starting uv sync \$(date)\"
-  uv sync --group notebooks --locked
+  uv sync --extra notebooks --extra coralnet --locked
   echo \"[LCC bg] uv sync complete \$(date)\"
   uv run python -m ipykernel install \
       --user \

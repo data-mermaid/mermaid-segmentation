@@ -3,6 +3,8 @@ training:
     loss:
         type: CrossEntropyLoss
         ignore_index: 0
+        damping_denominator: 100
+    max_grad_norm: 1.0
     epochs: 200
     optimizer:
         type: AdamW

@@ -193,6 +193,9 @@ def preprocess(
 @torch.no_grad()
 def predict_concepts(model: CBMModel, image_tensor: torch.Tensor) -> torch.Tensor:
     outputs = model(image_tensor)
+    # The Space installs mermaidseg from the SHA pinned in requirements.txt, whose
+    # ConceptBottleneckOutput carries activated concepts in `hidden_states` (main
+    # renamed it to `concept_outputs`). Flip this when repinning to main.
     return outputs.hidden_states
 
 
@@ -207,10 +210,10 @@ def predict(
 ) -> tuple[NDArray[np.float16], NDArray[np.float16], NDArray[np.int16]]:
     """Run the model and return (class_probs, concept_probs, pred_mask).
 
-    Softmax/argmax run in float32 on-device; the returned prob maps are cast to float16 *before*
-    ``.cpu()`` so the device→host copy (and the downstream ZeroGPU fork-boundary pickle) is halved.
-    These outputs are visualization-only, so float16 precision is sufficient. pred_mask is int16
-    (num_classes << 32767).
+    Softmax/argmax run in float32 on-device; the returned prob maps are cast to float16
+    *before* ``.cpu()`` so the device→host copy (and the downstream ZeroGPU fork-
+    boundary pickle) is halved. These outputs are visualization-only, so float16
+    precision is sufficient. pred_mask is int16 (num_classes << 32767).
     """
     concept_probs = predict_concepts(model, image_tensor)
     class_logits = classes_from_concepts(model, concept_probs)
@@ -226,8 +229,8 @@ def predict(
 def default_taxonomy_csv() -> str:
     """Default path to class-to-concepts CSV.
 
-    Prefers the copy bundled next to this file (used on HF Spaces, where only ``demo/`` is uploaded)
-    and falls back to the repo ``configs/`` copy.
+    Prefers the copy bundled next to this file (used on HF Spaces, where only ``demo/``
+    is uploaded) and falls back to the repo ``configs/`` copy.
     """
     demo_dir = Path(__file__).resolve().parent
     bundled = demo_dir / "class_to_concepts.csv"
@@ -252,10 +255,10 @@ DEFAULT_CHECKPOINT_FILE = "checkpoint.pt"
 def resolve_checkpoint(explicit: str | None = None) -> str:
     """Resolve the checkpoint to a local file path.
 
-    Uses ``explicit`` / ``DEMO_CHECKPOINT`` when it points at an existing local file (local
-    development). Otherwise downloads the checkpoint from the HF model repo
-    (``DEMO_CHECKPOINT_REPO`` / ``DEMO_CHECKPOINT_FILE``), which is how the demo gets its weights on
-    HF Spaces where they are not bundled.
+    Uses ``explicit`` / ``DEMO_CHECKPOINT`` when it points at an existing local file
+    (local development). Otherwise downloads the checkpoint from the HF model repo
+    (``DEMO_CHECKPOINT_REPO`` / ``DEMO_CHECKPOINT_FILE``), which is how the demo gets
+    its weights on HF Spaces where they are not bundled.
     """
     candidate = explicit or os.environ.get("DEMO_CHECKPOINT")
     if candidate and Path(candidate).is_file():

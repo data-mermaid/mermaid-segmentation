@@ -58,3 +58,8 @@ def test_images_schema_has_needs_resize_flag():
 def test_audit_schema_carries_is_complete_and_image_count_match():
     names = [f.name for f in AUDIT_SCHEMA]
     assert {"is_complete", "image_count_match"}.issubset(names)
+
+
+def test_audit_schema_has_image_list_coverage_flag():
+    names = {field.name for field in AUDIT_SCHEMA}
+    assert "image_list_covers_annotations" in names

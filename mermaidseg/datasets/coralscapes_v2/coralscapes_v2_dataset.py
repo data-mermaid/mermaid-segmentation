@@ -136,7 +136,9 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     Attributes:
         SOURCE_NAME: ``"coralscapes_v2"``.
-        split: Optional dataset split identifier (``"train"`` / ``"validation"`` / ``"test"``).
+        split: Optional HuggingFace split(s). A single name (``"train"`` /
+            ``"validation"`` / ``"test"``), a list of names to concatenate, or
+            ``None`` for all three splits.
         transform: Optional Albumentations transform applied to image and mask.
         class_subset: Optional list of source-space (Coralscapes V2) class names to retain.
         source_id2name: Mapping from local source IDs (1..N) to Coralscapes V2 class names.
@@ -146,7 +148,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     SOURCE_NAME = "coralscapes_v2"
 
-    split: str | None
+    split: str | list[str] | None
     transform: A.BasicTransform | None
     class_subset: list[str] | None
     source_id2name: dict[int, str]
@@ -156,7 +158,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     def __init__(
         self,
-        split: str | None = None,
+        split: str | list[str] | None = None,
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
     ):
@@ -167,17 +169,19 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.class_subset = class_subset
         self._global_offset = 0
 
-        self.dataset = load_dataset(CORALSCAPES_V2_HF_REPO)
-        if self.split is not None:
-            self.dataset = self.dataset[self.split]
-        else:
+        hf_dataset = load_dataset(CORALSCAPES_V2_HF_REPO)
+        if self.split is None:
             self.dataset = concatenate_datasets(
                 [
-                    self.dataset["train"],
-                    self.dataset["validation"],
-                    self.dataset["test"],
+                    hf_dataset["train"],
+                    hf_dataset["validation"],
+                    hf_dataset["test"],
                 ]
             )
+        elif isinstance(self.split, str):
+            self.dataset = hf_dataset[self.split]
+        else:
+            self.dataset = concatenate_datasets([hf_dataset[s] for s in self.split])
 
         if self.class_subset is not None:
             ordered = list(self.class_subset)
