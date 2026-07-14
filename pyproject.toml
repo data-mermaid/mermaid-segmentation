@@ -69,6 +69,8 @@ test-live = [
 ]
 demo = [
     "gradio>=5.0",
+    # No-op off-Spaces; provides `import spaces` + @spaces.GPU for local runs.
+    "spaces>=0.30",
 ]
 # Everything (used by CI and `uv sync --extra all` / `uv sync --all-extras`).
 all = [

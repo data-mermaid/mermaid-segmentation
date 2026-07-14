@@ -3,24 +3,28 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import gradio as gr
 import numpy as np
+import spaces  # ZeroGPU: must be imported before torch initializes CUDA; no-op elsewhere
 import torch
 from inference import (
     DemoArtifacts,
     build_model,
     build_transforms,
+    default_model_config,
     default_taxonomy_csv,
     load_artifacts,
     predict,
     preprocess,
-    resolve_paths,
+    resolve_checkpoint,
 )
 from rendering import (
     DISPLAY_SIZE,
@@ -34,6 +38,9 @@ from rendering import (
     load_taxonomy_parents,
     make_color_palette,
     make_rank_palette,
+    overlay_legend_items,
+    render_multihot_legend,
+    render_overlay_legend,
     render_taxonomy_tree,
     render_top_bottom_other_html,
     render_top_classes_html,
@@ -70,20 +77,118 @@ DEFAULT_MULTIHOT: tuple[str, ...] = (
     "dark",
 )
 
+PRIMARY_BTN_LABEL = "Run segmentation"
+
 CSS = """
-#mermaid-demo .gap, #mermaid-demo .form { gap: 8px !important; }
-#mermaid-demo .block { padding: 8px !important; }
-#mermaid-demo .section-title { font-size: 1.1rem; font-weight: 700; margin: 0 0 6px 0; }
-#mermaid-demo .hint { color: #888; font-style: italic; font-size: 12px; }
-#mermaid-demo .panel { padding: 2px; }
+/* Scoped to .gradio-container: Blocks(elem_id=...) does not reach the DOM in Gradio 6. */
+.gradio-container .gap, .gradio-container .form { gap: 8px !important; }
+.gradio-container .block { padding: 8px !important; }
+.gradio-container .section-title { font-size: 1.1rem; font-weight: 700; margin: 0 0 6px 0; }
+.gradio-container .hint { color: #888; font-style: italic; font-size: 12px; }
+.gradio-container .panel { padding: 2px; }
+/* Fixed dark header (not theme vars) so the white-filled logo reads in both themes. */
+#mermaid-header { padding: 0 !important; }
+#mermaid-header .mermaid-header-bar {
+    display: flex; align-items: center; gap: 16px;
+    background: #0d1117; color: #ffffff;
+    padding: 14px 20px; border-radius: 10px;
+}
+#mermaid-header .mermaid-header-logo svg { width: 46px; height: 48px; display: block; flex: 0 0 auto; }
+#mermaid-header .mermaid-header-title {
+    font-size: 1.4rem; font-weight: 700; line-height: 1.2; color: #ffffff;
+    /* Brand: MERMAID renders as plain all-caps, never small-caps. */
+    font-variant: normal; font-variant-caps: normal; text-transform: none; letter-spacing: normal;
+}
+#mermaid-header .mermaid-header-subtitle {
+    margin-top: 2px; color: rgba(255, 255, 255, 0.85); font-size: 0.95rem;
+}
+/* Gradio's base CSS colors <b> near-black; keep it readable on the dark bar. */
+#mermaid-header .mermaid-header-subtitle b { color: #ffffff; }
+#mermaid-segment-btn, #mermaid-segment-btn button {
+    width: 100%; max-width: 340px; margin-left: auto; margin-right: auto;
+}
 #mermaid-onehot-img img, #mermaid-multihot-img img {
     aspect-ratio: 1 / 1 !important;
     max-height: 70vh !important;
     object-fit: contain !important;
 }
+/* Footer logo strip on a light card so the dark-ink logos read in both themes. */
+#mermaid-footer { padding: 0 !important; }
+#mermaid-footer .mermaid-footer {
+    margin-top: 8px; padding: 16px 20px; border-radius: 10px;
+    background: #ffffff; border: 1px solid rgba(128, 128, 128, 0.2); text-align: center;
+}
+#mermaid-footer .mermaid-footer-label {
+    font-size: 0.8rem; letter-spacing: 0.08em; text-transform: uppercase;
+    color: #667085; margin-bottom: 12px;
+}
+#mermaid-footer .mermaid-footer-logos {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+    gap: 20px 32px;
+}
+/* Uniform bounding box + contain so every logo occupies ~the same footprint
+   regardless of its native aspect ratio. */
+#mermaid-footer .mermaid-footer-logo {
+    width: 150px; height: 52px; object-fit: contain; opacity: 0.85;
+}
 """
 
 logger = logging.getLogger(__name__)
+
+_LOGO_SVG_PATH = Path(__file__).resolve().parent / "static" / "mermaid-logo.svg"
+
+
+def _header_html() -> str:
+    logo = _LOGO_SVG_PATH.read_text(encoding="utf-8") if _LOGO_SVG_PATH.is_file() else ""
+    return (
+        '<div class="mermaid-header-bar">'
+        f'<div class="mermaid-header-logo" aria-hidden="true">{logo}</div>'
+        "<div>"
+        '<div class="mermaid-header-title">MERMAID Concept Bottleneck Demo</div>'
+        '<div class="mermaid-header-subtitle">'
+        f"Upload an image or pick a sample, click <b>{PRIMARY_BTN_LABEL}</b>, "
+        "then click any overlay pixel to inspect classes and taxonomy.</div>"
+        "</div></div>"
+    )
+
+
+# Partner/collaborator logos shown in the footer strip (file, alt text).
+_FOOTER_LOGOS: tuple[tuple[str, str], ...] = (
+    ("logo_wcs.png", "Wildlife Conservation Society"),
+    ("logo_exeter.png", "University of Exeter"),
+    ("logo_queensland.png", "University of Queensland"),
+    ("logo_mit.png", "Massachusetts Institute of Technology"),
+    ("logo_epfl.png", "EPFL"),
+    ("logo_sparkgeo.png", "Sparkgeo"),
+)
+
+
+def _footer_html() -> str:
+    """Centered strip of collaborator logos, base64-embedded so it is self-contained.
+
+    Sits on a light card (see CSS) so the dark-ink logos stay legible in both the light and dark
+    Gradio themes.
+    """
+    # In demo/logos/ (outside static/) so the sample-image glob, which scans static/,
+    # never surfaces these as selectable sample images.
+    logos_dir = Path(__file__).resolve().parent / "logos"
+    imgs: list[str] = []
+    for filename, alt in _FOOTER_LOGOS:
+        path = logos_dir / filename
+        if not path.is_file():
+            continue
+        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        imgs.append(
+            f'<img class="mermaid-footer-logo" src="data:image/png;base64,{b64}" alt="{alt}" title="{alt}">'
+        )
+    if not imgs:
+        return ""
+    return (
+        '<div class="mermaid-footer">'
+        '<div class="mermaid-footer-label">In collaboration with</div>'
+        f'<div class="mermaid-footer-logos">{"".join(imgs)}</div>'
+        "</div>"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -111,19 +216,12 @@ def _resolve_taxonomy_csv(args: argparse.Namespace) -> str:
 
 
 def _load(args: argparse.Namespace) -> DemoArtifacts:
-    checkpoint = args.checkpoint or os.environ.get("DEMO_CHECKPOINT")
-    model_config = args.model_config or os.environ.get("DEMO_MODEL_CONFIG")
-    if not checkpoint or not model_config:
-        try:
-            resolved_ckpt, resolved_cfg, _ = resolve_paths()
-            checkpoint = checkpoint or resolved_ckpt
-            model_config = model_config or resolved_cfg
-        except ValueError:
-            pass
-    if not checkpoint:
-        raise SystemExit("Provide --checkpoint or set DEMO_CHECKPOINT.")
-    if not model_config:
-        raise SystemExit("Provide --model-config or set DEMO_MODEL_CONFIG.")
+    # Checkpoint: explicit/local path if present, else downloaded from the HF model repo.
+    checkpoint = resolve_checkpoint(args.checkpoint)
+    # Model config: explicit, else env, else the bundled demo copy.
+    model_config = (
+        args.model_config or os.environ.get("DEMO_MODEL_CONFIG") or default_model_config()
+    )
     return load_artifacts(
         checkpoint=checkpoint,
         model_config=model_config,
@@ -195,7 +293,12 @@ def build_ui(
     ]
     default_onehot = "genus" if "genus" in ONEHOT_MODE_LABELS else onehot_choices[0][1]
 
-    def _render_onehot(display_image, class_probs, concept_probs, mode, opacity, click_xy=None):
+    def _compose_onehot_base(display_image, class_probs, concept_probs, mode, opacity):
+        """Composite the one-hot overlay (no click marker) + its color-key legend.
+
+        Split from marker drawing so a pixel click only redraws the marker on the cached base
+        instead of recomposing the full argmax+blend over the big arrays.
+        """
         composite = compose_onehot_overlay(
             display_image,
             class_probs,
@@ -206,20 +309,34 @@ def build_ui(
             rank_palettes,
             opacity,
         )
-        return draw_click_marker(resize_for_display(composite), click_xy)
+        legend = render_overlay_legend(
+            overlay_legend_items(
+                class_probs,
+                concept_probs,
+                mode,
+                rank_index,
+                rank_palettes,
+                class_palette,
+                artifacts.id2label,
+            )
+        )
+        return resize_for_display(composite), legend
 
-    def _render_multihot(display_image, concept_probs, multihot_name, opacity, click_xy=None):
+    def _compose_multihot_base(display_image, concept_probs, multihot_name, opacity):
         channel_idx = multihot_channel_by_name.get(multihot_name)
         composite = (
             compose_multihot_overlay(display_image, concept_probs, channel_idx, opacity)
             if channel_idx is not None and concept_probs is not None
             else display_image
         )
-        return draw_click_marker(resize_for_display(composite), click_xy)
+        return resize_for_display(composite)
 
     def _empty_other():
         return render_top_bottom_other_html([], [], title="Predicted Concepts: Other")
 
+    # Sized from measured calls on the Space: ~11s in-context + cold weight
+    # streaming; smaller reservations rank higher in the ZeroGPU queue.
+    @spaces.GPU(duration=30)
     def run_predict(image, onehot_mode, onehot_opacity, multihot_name, multihot_opacity):
         empty_tree = render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
         if image is None:
@@ -234,12 +351,25 @@ def build_ui(
                 empty_tree,
                 _empty_other(),
                 None,
+                None,
+                None,
+                render_overlay_legend([]),
+                render_multihot_legend(multihot_name),
             )
+        start = time.perf_counter()
         image_tensor, display_image = preprocess(image, model_transform, display_transform)
+        # predict() returns float16 prob maps already (cast on-device before .cpu()).
         class_probs, concept_probs, pred_mask = predict(model, image_tensor.to(device))
+        logger.info("predict wall time: %.1fs", time.perf_counter() - start)
+        onehot_base, onehot_legend_html = _compose_onehot_base(
+            display_image, class_probs, concept_probs, onehot_mode, onehot_opacity
+        )
+        multihot_base = _compose_multihot_base(
+            display_image, concept_probs, multihot_name, multihot_opacity
+        )
         return (
-            _render_onehot(display_image, class_probs, concept_probs, onehot_mode, onehot_opacity),
-            _render_multihot(display_image, concept_probs, multihot_name, multihot_opacity),
+            onehot_base,  # onehot_img — no marker until a pixel is clicked
+            multihot_base,  # multihot_img
             display_image,
             class_probs,
             concept_probs,
@@ -248,18 +378,22 @@ def build_ui(
             empty_tree,
             _empty_other(),
             None,
+            onehot_base,  # onehot_base_state (cached pre-marker composite)
+            multihot_base,  # multihot_base_state
+            onehot_legend_html,
+            render_multihot_legend(multihot_name),
         )
 
     def on_click(
         display_image,
         class_probs,
         concept_probs,
-        onehot_mode,
-        onehot_opacity,
-        multihot_name,
-        multihot_opacity,
+        onehot_base,
+        multihot_base,
         evt: gr.SelectData,
     ):
+        # Reads the cached pre-marker composites and only redraws the marker — the
+        # overlays don't change on click, so nothing is recomposed here.
         if display_image is None or class_probs is None or concept_probs is None:
             return (
                 None,
@@ -269,7 +403,8 @@ def build_ui(
                 _empty_other(),
                 None,
             )
-        x_disp, y_disp = int(evt.index[0]), int(evt.index[1])
+        index = evt.index if evt.index and None not in evt.index[:2] else (-1, -1)
+        x_disp, y_disp = int(index[0]), int(index[1])
         if not (0 <= x_disp < DISPLAY_SIZE and 0 <= y_disp < DISPLAY_SIZE):
             click_xy = None
             top_html = render_top_classes_html([])
@@ -310,12 +445,8 @@ def build_ui(
             click_xy = (x_disp, y_disp)
 
         return (
-            _render_onehot(
-                display_image, class_probs, concept_probs, onehot_mode, onehot_opacity, click_xy
-            ),
-            _render_multihot(
-                display_image, concept_probs, multihot_name, multihot_opacity, click_xy
-            ),
+            draw_click_marker(onehot_base, click_xy) if onehot_base is not None else None,
+            draw_click_marker(multihot_base, click_xy) if multihot_base is not None else None,
             top_html,
             tree_fig,
             other_html,
@@ -324,13 +455,18 @@ def build_ui(
 
     def recompose_onehot(display_image, class_probs, concept_probs, mode, opacity, click_xy):
         if display_image is None:
-            return None
-        return _render_onehot(display_image, class_probs, concept_probs, mode, opacity, click_xy)
+            return None, None, render_overlay_legend([])
+        base, legend = _compose_onehot_base(
+            display_image, class_probs, concept_probs, mode, opacity
+        )
+        return draw_click_marker(base, click_xy), base, legend
 
     def recompose_multihot(display_image, concept_probs, multihot_name, opacity, click_xy):
+        legend = render_multihot_legend(multihot_name)
         if display_image is None:
-            return None
-        return _render_multihot(display_image, concept_probs, multihot_name, opacity, click_xy)
+            return None, None, legend
+        base = _compose_multihot_base(display_image, concept_probs, multihot_name, opacity)
+        return draw_click_marker(base, click_xy), base, legend
 
     def pick_sample(evt: gr.SelectData):
         if not static_examples:
@@ -342,41 +478,43 @@ def build_ui(
             return np.array(Image.open(static_examples[idx]).convert("RGB"))
         return None
 
-    with gr.Blocks(title="MERMAID Concept Bottleneck Demo", elem_id="mermaid-demo") as ui:
-        gr.Markdown(
-            "# MERMAID Concept Bottleneck Demo\n"
-            "Upload an image, click **Predict**, then click any overlay pixel to inspect classes and taxonomy."
-        )
+    with gr.Blocks(title="MERMAID Concept Bottleneck Demo") as ui:
+        gr.HTML(_header_html(), elem_id="mermaid-header")
 
         display_state = gr.State(None)
         class_probs_state = gr.State(None)
         concept_probs_state = gr.State(None)
         pred_mask_state = gr.State(None)
         click_state = gr.State(None)
+        # Cached pre-marker composites (720² uint8) so a click only redraws the marker.
+        onehot_base_state = gr.State(None)
+        multihot_base_state = gr.State(None)
 
-        with gr.Row():
-            with gr.Column(scale=1):
+        # Top-down layout: per-row min_width sums stay under ~950px so rows never
+        # part-wrap in the 1024-1300px band; below that, columns stack vertically.
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1, min_width=260):
                 input_img = gr.Image(
-                    type="numpy", image_mode="RGB", label="Upload image", height=200
+                    type="numpy", image_mode="RGB", label="Upload image", height=300
                 )
-                predict_btn = gr.Button("Predict", variant="primary")
+            with gr.Column(scale=2, min_width=320):
                 if static_examples:
                     sample_gallery = gr.Gallery(
                         value=[(p, Path(p).name) for p in static_examples],
-                        label="Sample images",
-                        columns=3,
-                        height=180,
+                        label="Select sample image",
+                        columns=4,
+                        height=300,
                         allow_preview=False,
                     )
                 else:
                     sample_gallery = None
-                with gr.Accordion("Overlay legend", open=False):
-                    gr.Markdown(
-                        "**one-hot**: argmax class or taxonomic concept; alpha = softmax × opacity.\n\n"
-                        "**multi-hot**: sigmoid heatmap for one concept; viridis colormap."
-                    )
 
-            with gr.Column(scale=2):
+        predict_btn = gr.Button(
+            PRIMARY_BTN_LABEL, variant="primary", size="lg", elem_id="mermaid-segment-btn"
+        )
+
+        with gr.Row():
+            with gr.Column(scale=1, min_width=460):
                 onehot_mode = gr.Dropdown(
                     choices=onehot_choices, value=default_onehot, label="one-hot"
                 )
@@ -387,8 +525,9 @@ def build_ui(
                     interactive=False,
                     elem_id="mermaid-onehot-img",
                 )
+                onehot_legend = gr.HTML(render_overlay_legend([]))
 
-            with gr.Column(scale=2):
+            with gr.Column(scale=1, min_width=460):
                 multihot_mode = gr.Dropdown(
                     choices=multihot_choices, value=multihot_choices[0], label="multi-hot"
                 )
@@ -399,15 +538,23 @@ def build_ui(
                     interactive=False,
                     elem_id="mermaid-multihot-img",
                 )
+                multihot_legend = gr.HTML(render_multihot_legend(multihot_choices[0]))
 
-            with gr.Column(scale=2):
+        with gr.Row():
+            with gr.Column(scale=1, min_width=220), gr.Accordion("Overlay legend", open=True):
+                gr.Markdown(
+                    "**one-hot**: argmax class or taxonomic concept; alpha = softmax × opacity.\n\n"
+                    "**multi-hot**: sigmoid heatmap for one concept; viridis colormap."
+                )
+            with gr.Column(scale=3, min_width=480):
                 top_classes_html = gr.HTML(render_top_classes_html([]))
                 other_html = gr.HTML(_empty_other())
+                taxonomy_plot = gr.Plot(
+                    render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE),
+                    label="Predicted concepts: taxonomy graph",
+                )
 
-        taxonomy_plot = gr.Plot(
-            render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE),
-            label="Predicted Concepts: Taxonomy",
-        )
+        gr.HTML(_footer_html(), elem_id="mermaid-footer")
 
         predict_outputs = [
             onehot_img,
@@ -420,6 +567,10 @@ def build_ui(
             taxonomy_plot,
             other_html,
             click_state,
+            onehot_base_state,
+            multihot_base_state,
+            onehot_legend,
+            multihot_legend,
         ]
         predict_btn.click(
             run_predict,
@@ -435,6 +586,7 @@ def build_ui(
             onehot_opacity,
             click_state,
         ]
+        recompose_onehot_outputs = [onehot_img, onehot_base_state, onehot_legend]
         recompose_multihot_inputs = [
             display_state,
             concept_probs_state,
@@ -442,19 +594,24 @@ def build_ui(
             multihot_opacity,
             click_state,
         ]
-        onehot_mode.change(recompose_onehot, recompose_onehot_inputs, onehot_img)
-        onehot_opacity.change(recompose_onehot, recompose_onehot_inputs, onehot_img)
-        multihot_mode.change(recompose_multihot, recompose_multihot_inputs, multihot_img)
-        multihot_opacity.change(recompose_multihot, recompose_multihot_inputs, multihot_img)
+        recompose_multihot_outputs = [multihot_img, multihot_base_state, multihot_legend]
+        # Dropdowns fire on discrete selection; opacity sliders fire on release (not
+        # every drag tick) to avoid a burst of full recompositions while dragging.
+        onehot_mode.change(recompose_onehot, recompose_onehot_inputs, recompose_onehot_outputs)
+        onehot_opacity.release(recompose_onehot, recompose_onehot_inputs, recompose_onehot_outputs)
+        multihot_mode.change(
+            recompose_multihot, recompose_multihot_inputs, recompose_multihot_outputs
+        )
+        multihot_opacity.release(
+            recompose_multihot, recompose_multihot_inputs, recompose_multihot_outputs
+        )
 
         click_inputs = [
             display_state,
             class_probs_state,
             concept_probs_state,
-            onehot_mode,
-            onehot_opacity,
-            multihot_mode,
-            multihot_opacity,
+            onehot_base_state,
+            multihot_base_state,
         ]
         click_outputs = [
             onehot_img,
