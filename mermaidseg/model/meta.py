@@ -320,6 +320,22 @@ class MetaModel:
             )
         return source_labels_to_concepts(source_labels, self.source_to_concepts_lookup)
 
+    def _concepts_to_label_map(self, concept_scores: torch.Tensor) -> torch.Tensor:
+        """Reduce per-pixel concept scores to a target-label map on-device.
+
+        Wraps :func:`postprocess_predicted_concepts` (hierarchical argmax over the
+        concept matrix). Shared by ``batch_predict``, ``batch_predict_loss``, and the
+        concept-mode metric accumulation. NOTE: callers currently pass different score
+        spaces — ``batch_predict`` passes raw concept logits, ``batch_predict_loss``
+        passes sigmoid probabilities — which ``postprocess_predicted_concepts``
+        thresholds identically at 0.5; this helper preserves whatever the caller passes.
+        """
+        return postprocess_predicted_concepts(
+            concept_scores.detach().cpu().numpy(),
+            self.concept_matrix,
+            self.conceptid2labelid,
+        ).to(self.device)
+
     def batch_predict(
         self,
         inputs: torch.Tensor,
@@ -346,11 +362,7 @@ class MetaModel:
             outputs = segmentation_outputs.logits
         elif self.training_mode == "concept":
             concept_outputs = segmentation_outputs.logits
-            outputs = postprocess_predicted_concepts(
-                concept_outputs.detach().cpu().numpy(),
-                self.concept_matrix,
-                self.conceptid2labelid,
-            ).to(self.device)
+            outputs = self._concepts_to_label_map(concept_outputs)
             concept_outputs = torch.sigmoid(concept_outputs)
         else:
             outputs = segmentation_outputs.logits
@@ -405,11 +417,7 @@ class MetaModel:
             concept_outputs = segmentation_outputs.logits.float()
             loss, loss_components = self.loss(concept_outputs, target_concepts, target_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
-            outputs = postprocess_predicted_concepts(
-                concept_outputs.detach().cpu().numpy(),
-                self.concept_matrix,
-                self.conceptid2labelid,
-            ).to(self.device)
+            outputs = self._concepts_to_label_map(concept_outputs)
 
         else:
             outputs = segmentation_outputs.logits.float()
@@ -548,11 +556,7 @@ class MetaModel:
 
             if evaluator is not None:
                 if self.training_mode == "concept":
-                    target_concept_preds = postprocess_predicted_concepts(
-                        target_concepts.detach().cpu().numpy(),
-                        self.concept_matrix,
-                        self.conceptid2labelid,
-                    ).to(self.device)
+                    target_concept_preds = self._concepts_to_label_map(target_concepts)
                     evaluator.accumulate(outputs, target_concept_preds)
                 else:
                     evaluator.accumulate(outputs, target_labels)
