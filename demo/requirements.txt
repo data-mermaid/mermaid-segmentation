@@ -3,9 +3,7 @@
 # spaces in requirements breaks the ZeroGPU runtime). torch stays unpinned so the
 # ZeroGPU-preinstalled build (2.11) is kept.
 #
-# Pinned to demo/label-norm-torch-relax (SHA 7e8e0a0) = training SHA c36f1ff + a
-# torch<2.12 bound relax so pip doesn't downgrade the ZeroGPU torch. The checkpoint
-# was trained with c36f1ff's model code (activated [0,1] concept hidden_states +
-# token-grid inference); main's GroupNorm DPT head + concept_outputs contract would
-# break it. Repin to main once a head_norm option lands there.
-mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@7e8e0a06ef06048a8727c5b3612c80ee3c26a20e
+# Pinned to demo/demo-update-images (SHA 8756d54): GroupNorm DPT head + demo shims
+# that match the current ViT-L LoRA CBM checkpoint (79 classes / 704 concepts).
+# torch stays unpinned above so ZeroGPU keeps its preinstalled build.
+mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@8756d5411c38c3ef4b6fde2a7abbc7a329aca59e
