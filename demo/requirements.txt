@@ -3,7 +3,7 @@
 # spaces in requirements breaks the ZeroGPU runtime). torch stays unpinned so the
 # ZeroGPU-preinstalled build (2.11) is kept.
 #
-# Pinned to demo/demo-update-images (SHA 8756d54): GroupNorm DPT head + demo shims
-# that match the current ViT-L LoRA CBM checkpoint (79 classes / 704 concepts).
-# torch stays unpinned above so ZeroGPU keeps its preinstalled build.
-mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@8756d5411c38c3ef4b6fde2a7abbc7a329aca59e
+# mermaidseg pin must use torch>=2.4,<2.12 (not <2.8) so pip does not replace
+# ZeroGPU torch 2.11 with PyPI 2.7.x. matplotlib is required by rendering.py.
+matplotlib>=3.10.9
+mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@207fe43ce031b320803304e131158a332dfedfb9

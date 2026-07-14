@@ -25,7 +25,7 @@ Live Space: **https://huggingface.co/spaces/datamermaid/mermaid-segmentation**
 
 ## Model & artifacts
 
-- **Checkpoint** (ViT-L LoRA DPT concept-bottleneck, 78 classes / 650 concepts) is pulled at startup from the HF model repo [`datamermaid/mermaid-segmentation-cbm`](https://huggingface.co/datamermaid/mermaid-segmentation-cbm) — override with `DEMO_CHECKPOINT_REPO` / `DEMO_CHECKPOINT_FILE`, or point `DEMO_CHECKPOINT` at a local file.
+- **Checkpoint** (ViT-L LoRA DPT concept-bottleneck, 79 classes / 704 concepts) is pulled at startup from the private HF model repo [`datamermaid/mermaid-segmentation-cbm`](https://huggingface.co/datamermaid/mermaid-segmentation-cbm) — override with `DEMO_CHECKPOINT_REPO` / `DEMO_CHECKPOINT_FILE`, or point `DEMO_CHECKPOINT` at a local file.
 - **Bundled here:** `id2label.json`, `concept_id2name.json`, `model_config_cbm_dpt_lora_vitl.yaml`, `class_to_concepts.csv` (taxonomy). The label/concept JSONs come from the training run's MLflow `metadata/` artifacts and must match the checkpoint.
 - **DINOv3 backbone is gated.** The runtime `HF_TOKEN` must have accepted the [DINOv3 license](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m) and (for the private checkpoint repo) read access to it.
 

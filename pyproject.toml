@@ -24,7 +24,9 @@ dependencies = [
     "requests",
     "s3fs>=2024.2.0",
     "safetensors>=0.4.0",
-    "torch>=2.4,<2.8",
+    # Keep upper bound open through 2.11 so HF Spaces ZeroGPU can retain its
+    # preinstalled torch==2.11.0 (a <2.8 pin forces pip to replace it with 2.7.x).
+    "torch>=2.4,<2.12",
     "tqdm",
     "transformers",
 ]
