@@ -11,7 +11,7 @@ job:
     # bottleneck — CoralNetDataset reads image_s3_key instead of templating the original path
     # (~40% less I/O). Resolved as s3://{source_bucket}/{path}; the ETL publishes under
     # etl-outputs/coralnet/<version>/. 20260623_nogit is the latest run with a training manifest
-    # built (scripts/build_coralnet_training_manifest.py) and supersedes the May 20260526_807b611
+    # built (scripts/coralnet/build_coralnet_training_manifest.py) and supersedes the May 20260526_807b611
     # resized parquet. Note the filename is coralnet_training_manifest_<V>, not the old *_resized_<V>.
     MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
 

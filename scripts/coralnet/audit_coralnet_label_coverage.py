@@ -14,7 +14,7 @@ quantifies exactly what CoralNet contributes and what is dropped under the curre
 
 Usage::
 
-    AWS_PROFILE=mermaid-core uv run python scripts/audit_coralnet_label_coverage.py \
+    AWS_PROFILE=mermaid-core uv run python scripts/coralnet/audit_coralnet_label_coverage.py \
         --manifest s3://dev-datamermaid-sm-sources/etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
 
 Outputs (default ``reports/``): a per-``coralnet_id`` parquet and a markdown summary.
