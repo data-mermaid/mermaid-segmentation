@@ -533,31 +533,21 @@ class MetaModel:
                         self.concept_matrix,
                         self.conceptid2labelid,
                     ).to(self.device)
-                    for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, target_concept_preds)
+                    evaluator.accumulate(outputs, target_concept_preds)
                 else:
-                    if outputs.ndim > 3:
-                        outputs = outputs.argmax(dim=1)
-                    for metric in evaluator.metric_dict.values():
-                        metric.update(outputs.detach(), target_labels)
-
-            if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
-                evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
+                    evaluator.accumulate(outputs, target_labels)
+                if self.training_mode in ("concept-bottleneck", "concept"):
+                    evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
             if use_cuda:
                 torch.cuda.synchronize()
             batch_end = time.perf_counter()
 
         if evaluator is not None:
-            for metric_name in evaluator.metric_dict:
-                metric_results[metric_name] = (
-                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
+            metric_results.update(
+                evaluator.compute_and_reset(
+                    include_concepts=self.training_mode in ("concept-bottleneck", "concept")
                 )
-                if metric_results[metric_name].ndim == 0:
-                    metric_results[metric_name] = metric_results[metric_name].item()
-                evaluator.metric_dict[metric_name].reset()
-
-            if self.training_mode in ("concept-bottleneck", "concept"):
-                metric_results.update(evaluator.compute_concept_metric_results())
+            )
 
         last_loss = running_loss / iterations_per_train_epoch
         avg_loss_components = {
@@ -633,28 +623,18 @@ class MetaModel:
                         self.concept_matrix,
                         self.conceptid2labelid,
                     ).to(self.device)
-                    for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, target_concept_preds)
+                    evaluator.accumulate(outputs, target_concept_preds)
                 else:
-                    if outputs.ndim > 3:
-                        outputs = outputs.argmax(dim=1)
-                    for metric in evaluator.metric_dict.values():
-                        metric.update(outputs.detach(), target_labels)
-
-            if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
-                evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
+                    evaluator.accumulate(outputs, target_labels)
+                if self.training_mode in ("concept-bottleneck", "concept"):
+                    evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
 
         if evaluator is not None:
-            for metric_name in evaluator.metric_dict:
-                metric_results[metric_name] = (
-                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
+            metric_results.update(
+                evaluator.compute_and_reset(
+                    include_concepts=self.training_mode in ("concept-bottleneck", "concept")
                 )
-                if metric_results[metric_name].ndim == 0:
-                    metric_results[metric_name] = metric_results[metric_name].item()
-                evaluator.metric_dict[metric_name].reset()
-
-            if self.training_mode in ("concept-bottleneck", "concept"):
-                metric_results.update(evaluator.compute_concept_metric_results())
+            )
 
         last_loss = running_loss / iterations_per_val_epoch
         avg_loss_components = {
