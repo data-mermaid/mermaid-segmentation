@@ -421,56 +421,76 @@ class MetaModel:
 
         return loss, outputs, concept_outputs, loss_components
 
-    def train_epoch(
-        self,
-        train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-        evaluator: Any
-        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
-    ) -> tuple[float, dict[str, float | NDArray[np.float64]], dict[str, float | int]]:
-        """Trains the model for one epoch using the provided data loader.
+    @property
+    def has_concepts(self) -> bool:
+        """True for the concept / concept-bottleneck modes (which carry concept
+        targets)."""
+        return self.training_mode in ("concept", "concept-bottleneck")
 
-        Args:
-            train_loader: DataLoader yielding ``(inputs, source_labels)`` batches.
-            evaluator: Optional evaluator for computing per-epoch metrics.
+    def _next_batch(
+        self, loader: DataLoader, role: str
+    ) -> tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]:
+        """Pull the next batch from a per-role persistent iterator, re-iterating on
+        exhaustion.
 
-        Returns:
-            A 3-tuple of ``(average_loss, metric_results, timing)``.
+        ``role`` is ``"train"`` or ``"val"``; each keeps its own iterator
+        (``_train_loader_iter`` / ``_val_loader_iter``) so the train and validation
+        positions never interfere — preserving the pre-unification behavior.
         """
-        if self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
+        iter_attr, loader_attr = f"_{role}_loader_iter", f"_{role}_loader"
+        if getattr(self, loader_attr) is not loader:
+            setattr(self, iter_attr, iter(loader))
+            setattr(self, loader_attr, loader)
+        iterator = getattr(self, iter_attr)
+        assert iterator is not None
+        try:
+            return next(iterator)
+        except StopIteration:
+            iterator = iter(loader)
+            setattr(self, iter_attr, iterator)
+            setattr(self, loader_attr, loader)
+            return next(iterator)
+
+    def _run_epoch(
+        self,
+        loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
+        evaluator: Any | None,
+        *,
+        role: str,
+    ) -> tuple[float, dict[str, float | NDArray[np.float64]], dict[str, float | int]]:
+        """Shared train/validation epoch body — the single owner of the per-epoch loop.
+
+        ``role="train"`` runs the optimizer step + warmup, records timing, and counts
+        ``num_samples``; ``role="val"`` (invoked under ``@torch.no_grad()`` by
+        :meth:`validation_epoch`) does none of those. Everything else — loader iteration,
+        empty-batch skip, per-mode prediction/loss, metric accumulation, and loss
+        averaging — is identical for both, so train and validation can no longer drift
+        apart (the structural cause of the historical ``val = 0.0`` bug).
+        """
+        train = role == "train"
+        if train and self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
             self.model.freeze_encoder()
 
-        iterations_per_train_epoch = self.iterations_per_train_epoch
-        if iterations_per_train_epoch is None:
-            iterations_per_train_epoch = len(train_loader)
-        if iterations_per_train_epoch <= 0:
-            raise ValueError("iterations_per_train_epoch must be > 0.")
+        iterations = self.iterations_per_train_epoch if train else self.iterations_per_val_epoch
+        if iterations is None:
+            iterations = len(loader)
+        if iterations <= 0:
+            raise ValueError(f"iterations_per_{role}_epoch must be > 0.")
 
         running_loss = 0.0
         running_loss_components: dict[str, float] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
-        use_cuda = self.device != "cpu" and torch.cuda.is_available()
-
-        data_time_total = 0.0
-        forward_time_total = 0.0
-        backward_time_total = 0.0
+        # Timing (and its cuda syncs) is train-only; validation returns no timing.
+        use_cuda = train and self.device != "cpu" and torch.cuda.is_available()
+        data_time_total = forward_time_total = backward_time_total = 0.0
         num_samples = 0
 
         if use_cuda:
             torch.cuda.synchronize()
         batch_end = time.perf_counter()
 
-        if self._train_loader is not train_loader:
-            self._train_loader_iter = iter(train_loader)
-            self._train_loader = train_loader
-
-        for _ in tqdm(range(iterations_per_train_epoch), mininterval=_TQDM_MININTERVAL):
-            assert self._train_loader_iter is not None
-            try:
-                data = next(self._train_loader_iter)
-            except StopIteration:
-                self._train_loader_iter = iter(train_loader)
-                self._train_loader = train_loader
-                data = next(self._train_loader_iter)
+        for _ in tqdm(range(iterations), mininterval=_TQDM_MININTERVAL):
+            data = self._next_batch(loader, role)
 
             if use_cuda:
                 torch.cuda.synchronize()
@@ -478,16 +498,15 @@ class MetaModel:
 
             images, source_labels = data
             if images.numel() == 0:
-                logger.warning("train_epoch: skipping an empty batch (all items failed to load).")
+                logger.warning(
+                    "%s: skipping an empty batch (all items failed to load).",
+                    "train_epoch" if train else "validation_epoch",
+                )
                 continue
             images = images.to(self.device).float()
             source_labels = source_labels.long().to(self.device)
             target_labels = self._to_target_labels(source_labels)
-            target_concepts = (
-                self._to_concept_labels(source_labels)
-                if self.training_mode in ("concept", "concept-bottleneck")
-                else None
-            )
+            target_concepts = self._to_concept_labels(source_labels) if self.has_concepts else None
 
             if use_cuda:
                 torch.cuda.synchronize()
@@ -503,28 +522,29 @@ class MetaModel:
 
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
 
-            if use_cuda:
-                torch.cuda.synchronize()
-            backward_start = time.perf_counter()
-
-            step_applied = self._optimizer_step(loss)
-            if step_applied:
-                self._step_warmup_scheduler()
-
-            if use_cuda:
-                torch.cuda.synchronize()
-            backward_time_total += time.perf_counter() - backward_start
-
-            if not torch.isfinite(loss):
+            if train:
                 if use_cuda:
                     torch.cuda.synchronize()
-                batch_end = time.perf_counter()
-                continue
+                backward_start = time.perf_counter()
+
+                if self._optimizer_step(loss):
+                    self._step_warmup_scheduler()
+
+                if use_cuda:
+                    torch.cuda.synchronize()
+                backward_time_total += time.perf_counter() - backward_start
+
+                if not torch.isfinite(loss):
+                    if use_cuda:
+                        torch.cuda.synchronize()
+                    batch_end = time.perf_counter()
+                    continue
 
             running_loss += loss.item()
             for k, v in loss_components.items():
                 running_loss_components[k] = running_loss_components.get(k, 0.0) + v
-            num_samples += target_labels.size(0)
+            if train:
+                num_samples += target_labels.size(0)
 
             if evaluator is not None:
                 if self.training_mode == "concept":
@@ -536,23 +556,18 @@ class MetaModel:
                     evaluator.accumulate(outputs, target_concept_preds)
                 else:
                     evaluator.accumulate(outputs, target_labels)
-                if self.training_mode in ("concept-bottleneck", "concept"):
+                if self.has_concepts:
                     evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
+
             if use_cuda:
                 torch.cuda.synchronize()
             batch_end = time.perf_counter()
 
         if evaluator is not None:
-            metric_results.update(
-                evaluator.compute_and_reset(
-                    include_concepts=self.training_mode in ("concept-bottleneck", "concept")
-                )
-            )
+            metric_results.update(evaluator.compute_and_reset(include_concepts=self.has_concepts))
 
-        last_loss = running_loss / iterations_per_train_epoch
-        avg_loss_components = {
-            k: v / iterations_per_train_epoch for k, v in running_loss_components.items()
-        }
+        last_loss = running_loss / iterations
+        avg_loss_components = {k: v / iterations for k, v in running_loss_components.items()}
         for k, v in avg_loss_components.items():
             metric_results[f"loss/{k}"] = v
         timing = {
@@ -563,6 +578,23 @@ class MetaModel:
         }
         return last_loss, metric_results, timing
 
+    def train_epoch(
+        self,
+        train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
+        evaluator: Any
+        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+    ) -> tuple[float, dict[str, float | NDArray[np.float64]], dict[str, float | int]]:
+        """Trains the model for one epoch using the provided data loader.
+
+        Args:
+            train_loader: DataLoader yielding ``(inputs, source_labels)`` batches.
+            evaluator: Optional evaluator for computing per-epoch metrics.
+
+        Returns:
+            A 3-tuple of ``(average_loss, metric_results, timing)``.
+        """
+        return self._run_epoch(train_loader, evaluator, role="train")
+
     @torch.no_grad()
     def validation_epoch(
         self,
@@ -571,77 +603,7 @@ class MetaModel:
         | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch."""
-        iterations_per_val_epoch = self.iterations_per_val_epoch
-        if iterations_per_val_epoch is None:
-            iterations_per_val_epoch = len(val_loader)
-        if iterations_per_val_epoch <= 0:
-            raise ValueError("iterations_per_val_epoch must be > 0.")
-
-        running_loss = 0.0
-        running_loss_components: dict[str, float] = {}
-        metric_results: dict[str, float | NDArray[np.float64]] = {}
-
-        if self._val_loader is not val_loader:
-            self._val_loader_iter = iter(val_loader)
-            self._val_loader = val_loader
-
-        for _ in tqdm(range(iterations_per_val_epoch), mininterval=_TQDM_MININTERVAL):
-            assert self._val_loader_iter is not None
-            try:
-                data = next(self._val_loader_iter)
-            except StopIteration:
-                self._val_loader_iter = iter(val_loader)
-                self._val_loader = val_loader
-                data = next(self._val_loader_iter)
-            images, source_labels = data
-            if images.numel() == 0:
-                logger.warning(
-                    "validation_epoch: skipping an empty batch (all items failed to load)."
-                )
-                continue
-            images = images.to(self.device).float()
-            source_labels = source_labels.long().to(self.device)
-            target_labels = self._to_target_labels(source_labels)
-            target_concepts = (
-                self._to_concept_labels(source_labels)
-                if self.training_mode in ("concept", "concept-bottleneck")
-                else None
-            )
-
-            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
-                images, target_labels, target_concepts
-            )
-            assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
-            running_loss += loss.item()
-            for k, v in loss_components.items():
-                running_loss_components[k] = running_loss_components.get(k, 0.0) + v
-
-            if evaluator is not None:
-                if self.training_mode == "concept":
-                    target_concept_preds = postprocess_predicted_concepts(
-                        target_concepts.detach().cpu().numpy(),
-                        self.concept_matrix,
-                        self.conceptid2labelid,
-                    ).to(self.device)
-                    evaluator.accumulate(outputs, target_concept_preds)
-                else:
-                    evaluator.accumulate(outputs, target_labels)
-                if self.training_mode in ("concept-bottleneck", "concept"):
-                    evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
-
-        if evaluator is not None:
-            metric_results.update(
-                evaluator.compute_and_reset(
-                    include_concepts=self.training_mode in ("concept-bottleneck", "concept")
-                )
-            )
-
-        last_loss = running_loss / iterations_per_val_epoch
-        avg_loss_components = {
-            k: v / iterations_per_val_epoch for k, v in running_loss_components.items()
-        }
-        for k, v in avg_loss_components.items():
-            metric_results[f"loss/{k}"] = v
+        last_loss, metric_results, _timing = self._run_epoch(val_loader, evaluator, role="val")
         return last_loss, metric_results
 
     @torch.no_grad()  # type:ignore
