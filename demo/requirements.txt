@@ -6,4 +6,4 @@
 # mermaidseg pin must use torch>=2.4,<2.12 (not <2.8) so pip does not replace
 # ZeroGPU torch 2.11 with PyPI 2.7.x. matplotlib is required by rendering.py.
 matplotlib>=3.10.9
-mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@207fe43ce031b320803304e131158a332dfedfb9
+mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@037fe5cfe1f2b693ce9c412b11095278ac39c3b1
