@@ -325,8 +325,8 @@ def overlay_legend_items(
 ) -> list[tuple[str, tuple[int, int, int], float]]:
     """Categories present in the one-hot overlay's argmax, sorted by pixel cover.
 
-    Mirrors the argmax that ``compose_onehot_overlay`` draws so the legend matches the overlay
-    exactly. Returns ``(label, (r, g, b), coverage_fraction)`` triples.
+    Mirrors the argmax that ``compose_onehot_overlay`` draws so the legend matches the
+    overlay exactly. Returns ``(label, (r, g, b), coverage_fraction)`` triples.
     """
     items: list[tuple[str, tuple[int, int, int], float]] = []
     if mode == "classes":
@@ -368,7 +368,8 @@ def render_multihot_legend(
     cmap: str = "viridis",
     stops: int = 12,
 ) -> str:
-    """Color ramp for the selected multi-hot concept, with optional clicked-pixel readout."""
+    """Color ramp for the selected multi-hot concept, with optional clicked-pixel
+    readout."""
     import matplotlib
 
     colormap = matplotlib.colormaps[cmap]
@@ -506,7 +507,8 @@ def rank_highlight_rgb(
     rank_index: dict[str, list[tuple[int, str]]],
     rank_palettes: dict[str, dict[str, NDArray[np.uint8]]],
 ) -> tuple[int, int, int] | None:
-    """RGB for the top taxon at ``highlight_rank``, matching the overlay color key."""
+    """RGB for the top taxon at ``highlight_rank``, matching the taxonomy overlay
+    key."""
     if not highlight_rank:
         return None
     candidates = _rank_candidates(concept_probs_at_pixel, rank_index, highlight_rank, top_k=1)
@@ -517,6 +519,18 @@ def rank_highlight_rgb(
     if color is None:
         return None
     return int(color[0]), int(color[1]), int(color[2])
+
+
+def class_accent_rgb(
+    class_probs_at_pixel: NDArray[np.float32],
+    class_palette: NDArray[np.uint8],
+    id2label: dict[int, str],
+) -> tuple[tuple[int, int, int], str]:
+    """Top MERMAID-class color + label at a pixel (matches the MERMAID overlay key)."""
+    idx = int(class_probs_at_pixel.argmax())
+    color = class_palette[idx]
+    label = id2label.get(idx, f"class_{idx}")
+    return (int(color[0]), int(color[1]), int(color[2])), label
 
 
 def top_class_skips_taxonomy(
@@ -539,6 +553,14 @@ def render_taxonomy_skipped(
     )
 
 
+def _swatch_html(r: int, g: int, b: int) -> str:
+    return (
+        f'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;'
+        f"background:rgb({r},{g},{b});margin-right:6px;vertical-align:middle;"
+        f'border:1px solid rgba(128,128,128,0.35)"></span>'
+    )
+
+
 def render_taxonomy_tree(
     concept_probs_at_pixel: NDArray[np.float32] | None,
     rank_index: dict[str, list[tuple[int, str]]],
@@ -547,8 +569,15 @@ def render_taxonomy_tree(
     title: str = "Taxonomy at clicked pixel",
     highlight_rank: str | None = None,
     highlight_rgb: tuple[int, int, int] | None = None,
+    accent_rgb: tuple[int, int, int] | None = None,
+    accent_label: str | None = None,
 ) -> str:
-    """Vertical HTML readout: one row per rank, top candidates as fixed-size chips."""
+    """Vertical HTML readout: one row per rank, top candidates as fixed-size chips.
+
+    ``highlight_rank`` / ``highlight_rgb`` mark the Taxonomy-tab overlay rank (same
+    palette as that overlay). ``accent_rgb`` / ``accent_label`` tint the panel to the
+    MERMAID-class mask color without implying a taxonomic rank is selected.
+    """
     title_html = f'<div class="section-title">{title}</div>' if title else ""
     if concept_probs_at_pixel is None or concept_probs_at_pixel.size == 0:
         return (
@@ -560,6 +589,21 @@ def render_taxonomy_tree(
         '<div class="hint taxonomy-caption">'
         "Bar length = model confidence (0–1) for the top taxon at each rank.</div>"
     )
+    if accent_rgb is not None and accent_label and highlight_rank is None:
+        ar, ag, ab = accent_rgb
+        caption = (
+            f'<div class="hint taxonomy-caption">{_swatch_html(ar, ag, ab)}'
+            f"Accent color matches MERMAID class <b>{accent_label}</b> "
+            f"(not a taxonomic overlay).</div>"
+        )
+
+    panel_style = ""
+    if accent_rgb is not None and highlight_rank is None:
+        ar, ag, ab = accent_rgb
+        panel_style = (
+            f' style="border-left:4px solid rgb({ar},{ag},{ab});padding-left:10px;margin-left:-2px"'
+        )
+
     rows: list[str] = []
     for i, rank in enumerate(RANK_ORDER):
         candidates = _rank_candidates(concept_probs_at_pixel, rank_index, rank, top_k)
@@ -585,11 +629,7 @@ def render_taxonomy_tree(
         active = rank == highlight_rank
         if active and highlight_rgb is not None:
             r, g, b = highlight_rgb
-            swatch = (
-                f'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;'
-                f"background:rgb({r},{g},{b});margin-right:6px;vertical-align:middle;"
-                f'border:1px solid rgba(128,128,128,0.35)"></span>'
-            )
+            swatch = _swatch_html(r, g, b)
             row_open = (
                 f'<div class="taxonomy-row" style="background:rgba({r},{g},{b},0.14);'
                 f"border-radius:8px;margin:0 -8px;padding:6px 8px;"
@@ -606,6 +646,14 @@ def render_taxonomy_tree(
             row_open = '<div class="taxonomy-row taxonomy-row-active">'
             rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
             bar = f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%"></div>'
+        elif accent_rgb is not None and highlight_rank is None:
+            r, g, b = accent_rgb
+            row_open = '<div class="taxonomy-row">'
+            rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
+            bar = (
+                f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%;'
+                f'background:rgb({r},{g},{b})"></div>'
+            )
         else:
             row_open = '<div class="taxonomy-row">'
             rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
@@ -623,11 +671,11 @@ def render_taxonomy_tree(
 
     if not rows:
         return (
-            f'<div class="panel taxonomy-panel">{title_html}'
+            f'<div class="panel taxonomy-panel"{panel_style}>{title_html}'
             '<div class="hint">No taxonomy concepts available for this pixel.</div></div>'
         )
 
     return (
-        f'<div class="panel taxonomy-panel">{title_html}{caption}'
+        f'<div class="panel taxonomy-panel"{panel_style}>{title_html}{caption}'
         f'<div class="taxonomy-tree">{"".join(rows)}</div></div>'
     )

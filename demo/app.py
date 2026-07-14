@@ -32,6 +32,7 @@ from rendering import (
     ONEHOT_MODE_LABELS,
     build_morph_concept_choices,
     build_rank_index,
+    class_accent_rgb,
     compose_multihot_overlay,
     compose_onehot_overlay,
     draw_click_marker,
@@ -123,6 +124,11 @@ CSS = """
 #mermaid-cls-img img, #mermaid-tax-img img, #mermaid-growth-img img {
     aspect-ratio: 1 / 1 !important;
     max-height: 70vh !important;
+    object-fit: contain !important;
+}
+/* Keep sample thumbs from stretching non-square reef photos. */
+.gradio-container .gallery-item img,
+.gradio-container .thumbnail-item img {
     object-fit: contain !important;
 }
 /* Footer logo strip on a light card so the dark-ink logos read in both themes. */
@@ -263,8 +269,8 @@ _FOOTER_LOGOS: tuple[tuple[str, str, str], ...] = (
 def _footer_html() -> str:
     """Centered strip of collaborator logos, base64-embedded so it is self-contained.
 
-    Sits on a light card (see CSS) so the dark-ink logos stay legible in both the light and dark
-    Gradio themes.
+    Sits on a light card (see CSS) so the dark-ink logos stay legible in both the light
+    and dark Gradio themes.
     """
     # In demo/logos/ (outside static/) so the sample-image glob, which scans static/,
     # never surfaces these as selectable sample images.
@@ -410,8 +416,8 @@ def build_ui(
     def _compose_onehot_base(display_image, class_probs, concept_probs, mode, opacity):
         """Composite the one-hot overlay (no click marker) + its color-key legend.
 
-        Split from marker drawing so a pixel click only redraws the marker on the cached base
-        instead of recomposing the full argmax+blend over the big arrays.
+        Split from marker drawing so a pixel click only redraws the marker on the cached
+        base instead of recomposing the full argmax+blend over the big arrays.
         """
         composite = compose_onehot_overlay(
             display_image,
@@ -448,13 +454,33 @@ def build_ui(
     def _empty_taxonomy():
         return render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
 
-    def _taxonomy_at(class_probs, concept_probs, x_src, y_src, highlight_rank=None):
+    def _taxonomy_at(
+        class_probs,
+        concept_probs,
+        x_src,
+        y_src,
+        *,
+        highlight_rank: str | None = None,
+        accent_from_class: bool = False,
+    ):
         if class_probs is not None:
             skip, label = top_class_skips_taxonomy(class_probs[:, y_src, x_src], artifacts.id2label)
             if skip:
                 return render_taxonomy_skipped(label)
         at_pixel = concept_probs[:, y_src, x_src]
-        highlight_rgb = rank_highlight_rgb(highlight_rank, at_pixel, rank_index, rank_palettes)
+        # Taxonomy tab: highlight the selected rank with that rank's overlay palette.
+        # MERMAID / Concept tabs: accent with the MERMAID-class mask color (separate
+        # palette from taxonomic ranks — do not mark a rank row as "selected").
+        highlight_rgb = (
+            rank_highlight_rgb(highlight_rank, at_pixel, rank_index, rank_palettes)
+            if highlight_rank
+            else None
+        )
+        accent_rgb = accent_label = None
+        if accent_from_class and class_probs is not None:
+            accent_rgb, accent_label = class_accent_rgb(
+                class_probs[:, y_src, x_src], class_palette, artifacts.id2label
+            )
         return render_taxonomy_tree(
             at_pixel,
             rank_index,
@@ -462,6 +488,8 @@ def build_ui(
             top_k=TOP_K_TREE,
             highlight_rank=highlight_rank,
             highlight_rgb=highlight_rgb,
+            accent_rgb=accent_rgb,
+            accent_label=accent_label,
         )
 
     def _multihot_legend(trait, concept_probs=None, pixel_prob=None):
@@ -578,13 +606,19 @@ def build_ui(
         click_xy, x_src, y_src = click_state
         return click_xy, x_src, y_src
 
-    def _readouts_at(class_probs, concept_probs, x_src, y_src, trait, highlight_rank=None):
+    def _readouts_at(class_probs, concept_probs, x_src, y_src, trait, tax_rank=None):
         empty_tree = _empty_taxonomy()
-        tree = (
-            _taxonomy_at(class_probs, concept_probs, x_src, y_src, highlight_rank)
-            if concept_probs is not None
-            else empty_tree
-        )
+        if concept_probs is None:
+            cls_tree = tax_tree = growth_tree = empty_tree
+        else:
+            # Shared ladders, different accents: MERMAID-class color vs rank overlay color.
+            cls_tree = _taxonomy_at(
+                class_probs, concept_probs, x_src, y_src, accent_from_class=True
+            )
+            tax_tree = _taxonomy_at(
+                class_probs, concept_probs, x_src, y_src, highlight_rank=tax_rank
+            )
+            growth_tree = cls_tree
         channel_idx = multihot_channel_by_name.get(trait) if trait else None
         pixel_prob = (
             float(concept_probs[channel_idx, y_src, x_src])
@@ -593,7 +627,9 @@ def build_ui(
         )
         return (
             _top_classes_at(class_probs, x_src, y_src),
-            tree,
+            cls_tree,
+            tax_tree,
+            growth_tree,
             _other_at(concept_probs, x_src, y_src) if concept_probs is not None else _empty_other(),
             _multihot_legend(trait, concept_probs, pixel_prob),
         )
@@ -623,20 +659,38 @@ def build_ui(
         empty_readouts = (
             render_top_classes_html([]),
             empty_tree,
+            empty_tree,
+            empty_tree,
             _empty_other(),
             _multihot_legend(trait, concept_probs),
         )
 
-        if display_image is None or class_probs is None or cls_base is None:
+        def _pack(
+            cls_top, cls_tree, tax_tree, growth_tree, growth_other, growth_legend, overlays, state
+        ):
+            cls_img, tax_img, growth_img = overlays
             return (
-                cls_base,
-                *empty_readouts,
-                tax_base,
-                empty_tree,
-                growth_base,
+                cls_img,
+                cls_top,
+                cls_tree,
+                tax_img,
+                tax_tree,
+                growth_img,
+                growth_other,
+                growth_tree,
+                growth_legend,
+                state,
+            )
+
+        if display_image is None or class_probs is None or cls_base is None:
+            return _pack(
+                empty_readouts[0],
+                empty_readouts[1],
                 empty_readouts[2],
-                empty_tree,
                 empty_readouts[3],
+                empty_readouts[4],
+                empty_readouts[5],
+                (cls_base, tax_base, growth_base),
                 None,
             )
 
@@ -644,51 +698,42 @@ def build_ui(
         if hit is None:
             click_xy, x_src, y_src = _unpack_click(click_state)
             if click_xy is None:
-                return (
-                    cls_base,
-                    *empty_readouts,
-                    tax_base,
-                    empty_tree,
-                    growth_base,
+                return _pack(
+                    empty_readouts[0],
+                    empty_readouts[1],
                     empty_readouts[2],
-                    empty_tree,
                     empty_readouts[3],
+                    empty_readouts[4],
+                    empty_readouts[5],
+                    (cls_base, tax_base, growth_base),
                     None,
                 )
-            cls_top, tree, growth_other, growth_legend = _readouts_at(
+            cls_top, cls_tree, tax_tree, growth_tree, growth_other, growth_legend = _readouts_at(
                 class_probs, concept_probs, x_src, y_src, trait, tax_rank
             )
-            cls_img, tax_img, growth_img = _marked_overlays(
-                cls_base, tax_base, growth_base, click_xy
-            )
-            return (
-                cls_img,
+            return _pack(
                 cls_top,
-                tree,
-                tax_img,
-                tree,
-                growth_img,
+                cls_tree,
+                tax_tree,
+                growth_tree,
                 growth_other,
-                tree,
                 growth_legend,
+                _marked_overlays(cls_base, tax_base, growth_base, click_xy),
                 click_state,
             )
 
         click_xy, x_src, y_src = hit
-        cls_top, tree, growth_other, growth_legend = _readouts_at(
+        cls_top, cls_tree, tax_tree, growth_tree, growth_other, growth_legend = _readouts_at(
             class_probs, concept_probs, x_src, y_src, trait, tax_rank
         )
-        cls_img, tax_img, growth_img = _marked_overlays(cls_base, tax_base, growth_base, click_xy)
-        return (
-            cls_img,
+        return _pack(
             cls_top,
-            tree,
-            tax_img,
-            tree,
-            growth_img,
+            cls_tree,
+            tax_tree,
+            growth_tree,
             growth_other,
-            tree,
             growth_legend,
+            _marked_overlays(cls_base, tax_base, growth_base, click_xy),
             (click_xy, x_src, y_src),
         )
 
@@ -731,12 +776,11 @@ def build_ui(
         )
 
     def refresh_taxonomy_highlight(class_probs, concept_probs, click_state, tax_rank):
+        """Re-accent only the Taxonomy-tab tree when the overlay rank changes."""
         _, x_src, y_src = _unpack_click(click_state)
         if x_src is None or concept_probs is None:
-            empty = _empty_taxonomy()
-            return empty, empty, empty
-        tree = _taxonomy_at(class_probs, concept_probs, x_src, y_src, tax_rank)
-        return tree, tree, tree
+            return _empty_taxonomy()
+        return _taxonomy_at(class_probs, concept_probs, x_src, y_src, highlight_rank=tax_rank)
 
     def select_growth_form(display_image, concept_probs, trait, opacity, click_state):
         # Picking a growth form clears the "other groups" selection (single active trait).
@@ -910,7 +954,7 @@ def build_ui(
         tax_rank.input(recompose_tax, tax_inputs, tax_outputs).then(
             refresh_taxonomy_highlight,
             [class_probs_state, concept_probs_state, click_state, tax_rank],
-            [cls_tree, tax_tree, growth_tree],
+            [tax_tree],
         )
         tax_opacity.release(recompose_tax, tax_inputs, tax_outputs)
 
