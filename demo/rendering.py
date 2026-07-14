@@ -79,6 +79,19 @@ _ANTHRO_LABELS: frozenset[str] = frozenset(
 )
 _BG_LABELS: frozenset[str] = frozenset({"ignore", "background", "dark"})
 _SAND_LABELS: frozenset[str] = frozenset({"sand"})
+# Non-coral biota (new ``fish`` class must not share the scleractinian magenta ramp).
+_FAUNA_LABELS: frozenset[str] = frozenset({"fish", "sea urchin", "tridacna giant clam"})
+# Broad MERMAID groups kept out of the per-genus coral ramp.
+_COARSE_LABELS: frozenset[str] = frozenset({"hard coral", "soft coral", "gorgonian", "zoanthid"})
+# Optional taxonomy-rank values that should reuse a MERMAID class color (name ≠ class).
+_TAXONOMY_COLOR_ALIASES: dict[str, tuple[str, ...]] = {
+    "fish": ("chordata",),
+    "sponge": ("porifera",),
+    "sea urchin": ("echinodermata",),
+    "hard coral": ("scleractinia", "hexacorallia"),
+    "soft coral": ("octocorallia",),
+    "zoanthid": ("zoantharia",),
+}
 
 
 def _normalize_label(name: str) -> str:
@@ -99,6 +112,10 @@ def _semantic_bucket(label: str) -> str:
         return "sponge"
     if n in _ANTHRO_LABELS:
         return "anthro"
+    if n in _FAUNA_LABELS:
+        return "fauna"
+    if n in _COARSE_LABELS:
+        return "coarse"
     return "coral"
 
 
@@ -138,6 +155,9 @@ def build_shared_name_colors(id2label: dict[int, str]) -> dict[str, NDArray[np.u
     Exact name matches (``acropora`` class ↔ ``acropora`` genus) reuse the same RGB.
     Binomial MERMAID labels without a same-named genus-level class also register their
     first token (``agaricia agaricites`` → ``agaricia``) so the genus overlay matches.
+    Multi-species owners of the same token (``orbicella annularis`` / ``orbicella
+    faveolata``) still seed the genus when they share a semantic bucket; mixed buckets
+    (``turbinaria-algae`` / ``turbinaria-coral``) do not.
     """
     by_bucket: dict[str, list[tuple[int, str]]] = {
         "bg": [],
@@ -146,6 +166,8 @@ def build_shared_name_colors(id2label: dict[int, str]) -> dict[str, NDArray[np.u
         "algae": [],
         "sponge": [],
         "anthro": [],
+        "fauna": [],
+        "coarse": [],
         "coral": [],
     }
     for cid, name in sorted(id2label.items()):
@@ -177,6 +199,24 @@ def build_shared_name_colors(id2label: dict[int, str]) -> dict[str, NDArray[np.u
         ),
     )
     _paint("sponge", _hsv_ramp(len(by_bucket["sponge"]), hue_deg_range=(180, 215)))
+    _paint(
+        "fauna",
+        _hsv_ramp(
+            len(by_bucket["fauna"]),
+            hue_deg_range=(195, 250),
+            s_range=(0.7, 0.95),
+            v_range=(0.65, 0.95),
+        ),
+    )
+    _paint(
+        "coarse",
+        _hsv_ramp(
+            len(by_bucket["coarse"]),
+            hue_deg_range=(15, 55),
+            s_range=(0.55, 0.85),
+            v_range=(0.55, 0.9),
+        ),
+    )
     _paint("coral", _hsv_ramp(len(by_bucket["coral"]), hue_deg_range=(285, 390)))
 
     name_colors: dict[str, NDArray[np.uint8]] = {}
@@ -190,16 +230,19 @@ def build_shared_name_colors(id2label: dict[int, str]) -> dict[str, NDArray[np.u
         if len(parts) >= 2 and parts[0] not in exact_keys:
             token_owners.setdefault(parts[0], []).append(key)
 
-    for cid, name in id2label.items():
+    for cid, name in sorted(id2label.items()):
         color = id_colors.get(cid, np.asarray(OTHER_FALLBACK_RGB, dtype=np.uint8))
         key = _normalize_label(name)
         name_colors[key] = color
         parts = key.replace("-", " ").split()
         if len(parts) >= 2 and parts[0] not in exact_keys:
             owners = token_owners.get(parts[0], [])
-            # Only seed genus token when a single MERMAID class owns it.
-            if len(owners) == 1:
+            owner_buckets = {_semantic_bucket(owner) for owner in owners}
+            # Seed when owners agree on bucket (orbicella spp.); skip mixed (turbinaria-*).
+            if len(owner_buckets) == 1:
                 name_colors.setdefault(parts[0], color)
+        for alias in _TAXONOMY_COLOR_ALIASES.get(key, ()):
+            name_colors.setdefault(alias, color)
     return name_colors
 
 

@@ -231,6 +231,9 @@ __marimo__/
 # Gradio runtime artifacts (local TLS cert, etc.)
 .gradio/
 
+# Local demo checkpoint downloads (multi-GB; use HF model repo)
+demo/artifacts/
+
 demo/.DS_Store
 
 .DS_Store
