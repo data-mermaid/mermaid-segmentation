@@ -20,7 +20,7 @@ Live Space: **https://huggingface.co/spaces/datamermaid/mermaid-segmentation**
 
 - **one-hot panel** — argmax class or taxonomic rank (kingdom → genus); overlay alpha = softmax × opacity slider.
 - **multi-hot panel** — sigmoid heatmap for a single morphologic / non-coral concept (viridis).
-- **click a pixel** — top-3 classes, taxonomy tree, and the top/bottom "other" concept activations at that point.
+- **click a pixel** — top-3 classes, taxonomy ladder (on every tab), and the top/bottom "other" concept activations at that point.
 - Sample reef images are in the gallery.
 
 ## Model & artifacts

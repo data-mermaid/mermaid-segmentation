@@ -22,6 +22,18 @@ RANK_ORDER: tuple[str, ...] = tuple(TAXONOMIC_CONCEPTS)
 
 DISPLAY_SIZE = 720
 
+# MERMAID classes for which the taxonomy ladder is hidden (non-biological / non-target).
+TAXONOMY_SKIP_CLASS_LABELS: frozenset[str] = frozenset(
+    {
+        "background",
+        "sand",
+        "bare substrate",
+        "anthropogenic",
+        "human",
+        "dark",
+    }
+)
+
 ONEHOT_MODE_LABELS: dict[str, str] = {
     "classes": "MERMAID Classification",
     **{rank: rank.capitalize() for rank in RANK_ORDER},
@@ -170,7 +182,8 @@ def resize_for_display(image_rgb: NDArray[np.uint8]) -> NDArray[np.uint8]:
 
 
 def draw_click_marker(
-    image_rgb: NDArray[np.uint8], xy: tuple[int, int] | None
+    image_rgb: NDArray[np.uint8],
+    xy: tuple[int, int] | None,
 ) -> NDArray[np.uint8]:
     if xy is None:
         return image_rgb
@@ -178,13 +191,13 @@ def draw_click_marker(
     pil = Image.fromarray(image_rgb, mode="RGB").convert("RGBA")
     overlay = Image.new("RGBA", pil.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    radius = 8
-    draw.ellipse(
-        (x - radius, y - radius, x + radius, y + radius), outline=(255, 255, 255, 240), width=2
-    )
-    draw.ellipse(
-        (x - 3, y - 3, x + 3, y + 3), fill=(255, 60, 60, 255), outline=(255, 255, 255, 240), width=1
-    )
+    for radius, width in ((11, 2), (6, 2), (2, 1)):
+        draw.ellipse(
+            (x - radius, y - radius, x + radius, y + radius),
+            outline=(255, 255, 255, 235),
+            width=width,
+        )
+    draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(255, 60, 60, 255))
     return np.asarray(Image.alpha_composite(pil, overlay).convert("RGB"), dtype=np.uint8)
 
 
@@ -348,15 +361,14 @@ def overlay_legend_items(
 
 def render_multihot_legend(
     concept_name: str | None,
+    concept_probs: NDArray[np.float32] | None = None,
+    _channel_idx: int | None = None,
+    pixel_prob: float | None = None,
     title: str = "Overlay color key",
     cmap: str = "viridis",
     stops: int = 12,
 ) -> str:
-    """Colorbar key for the multi-hot heatmap: low→high sigmoid activation.
-
-    The bar samples the actual colormap so it matches the overlay; only the concept name changes
-    between concepts (the 0→1 scale is constant).
-    """
+    """Color ramp for the selected multi-hot concept, with optional clicked-pixel readout."""
     import matplotlib
 
     colormap = matplotlib.colormaps[cmap]
@@ -366,13 +378,23 @@ def render_multihot_legend(
     )
     title_html = f'<div class="section-title">{title}</div>' if title else ""
     name = concept_name or "concept"
+
+    if concept_probs is None:
+        extra_html = '<div class="hint">Run segmentation to see the overlay key.</div>'
+    elif pixel_prob is not None:
+        p = float(np.clip(pixel_prob, 0.0, 1.0))
+        extra_html = f'<div class="hint">Clicked Pixel: <strong>{p:.2f}</strong></div>'
+    else:
+        extra_html = '<div class="hint">Click a pixel to read activation at that point.</div>'
+
     return (
         f'<div class="panel">{title_html}'
-        f'<div class="hint" style="margin-bottom:4px">sigmoid activation for <b>{name}</b></div>'
+        f'<div class="hint" style="margin-bottom:4px"><b>{name}</b></div>'
+        f"{extra_html}"
         f'<div style="height:14px;border-radius:3px;border:1px solid rgba(128,128,128,0.4);'
-        f'background:linear-gradient(to right, {ramp})"></div>'
+        f'background:linear-gradient(to right, {ramp});margin-top:6px"></div>'
         '<div style="display:flex;justify-content:space-between;font-size:11px;opacity:0.7;margin-top:2px">'
-        "<span>0.0 (low)</span><span>1.0 (high)</span></div></div>"
+        "<span>unlikely</span><span>likely</span></div></div>"
     )
 
 
@@ -387,12 +409,12 @@ def render_overlay_legend(
             '<div class="hint">Run segmentation to see the color key.</div></div>'
         )
     chips: list[str] = []
-    for label, (r, g, b), cover in items:
+    for label, (r, g, b), _cover in items:
         chips.append(
             '<span style="display:inline-flex;align-items:center;margin:0 12px 6px 0">'
             f'<span style="width:14px;height:14px;border-radius:3px;background:rgb({r},{g},{b});'
             'display:inline-block;margin-right:6px;border:1px solid rgba(128,128,128,0.4)"></span>'
-            f'{label} <small style="opacity:0.6;margin-left:4px">{cover * 100:.0f}%</small></span>'
+            f"{label}</span>"
         )
     return f'<div class="panel">{title_html}<div>{"".join(chips)}</div></div>'
 
@@ -462,112 +484,150 @@ def render_top_bottom_other_html(
     return f'<div class="panel">{title_html}{"".join(rows)}</div>'
 
 
+def _rank_candidates(
+    concept_probs_at_pixel: NDArray[np.float32],
+    rank_index: dict[str, list[tuple[int, str]]],
+    rank: str,
+    top_k: int,
+) -> list[tuple[str, float]]:
+    entries = rank_index.get(rank, [])
+    if not entries:
+        return []
+    idxs = np.asarray([idx for idx, _ in entries], dtype=np.int64)
+    values = [val for _, val in entries]
+    probs = concept_probs_at_pixel[idxs]
+    order = np.argsort(probs)[::-1][:top_k]
+    return [(values[int(j)], float(probs[int(j)])) for j in order if values[int(j)] != "none"]
+
+
+def rank_highlight_rgb(
+    highlight_rank: str | None,
+    concept_probs_at_pixel: NDArray[np.float32],
+    rank_index: dict[str, list[tuple[int, str]]],
+    rank_palettes: dict[str, dict[str, NDArray[np.uint8]]],
+) -> tuple[int, int, int] | None:
+    """RGB for the top taxon at ``highlight_rank``, matching the overlay color key."""
+    if not highlight_rank:
+        return None
+    candidates = _rank_candidates(concept_probs_at_pixel, rank_index, highlight_rank, top_k=1)
+    if not candidates:
+        return None
+    primary, _ = candidates[0]
+    color = rank_palettes.get(highlight_rank, {}).get(primary)
+    if color is None:
+        return None
+    return int(color[0]), int(color[1]), int(color[2])
+
+
+def top_class_skips_taxonomy(
+    class_probs_at_pixel: NDArray[np.float32],
+    id2label: dict[int, str],
+) -> tuple[bool, str]:
+    idx = int(class_probs_at_pixel.argmax())
+    label = id2label.get(idx, f"class_{idx}")
+    return label.strip().lower() in TAXONOMY_SKIP_CLASS_LABELS, label
+
+
+def render_taxonomy_skipped(
+    class_label: str,
+    title: str = "Taxonomy at clicked pixel",
+) -> str:
+    title_html = f'<div class="section-title">{title}</div>' if title else ""
+    return (
+        f'<div class="panel taxonomy-panel">{title_html}'
+        f'<div class="hint">No taxonomy for <b>{class_label}</b>.</div></div>'
+    )
+
+
 def render_taxonomy_tree(
     concept_probs_at_pixel: NDArray[np.float32] | None,
     rank_index: dict[str, list[tuple[int, str]]],
-    parents: dict[str, str],
+    _parents: dict[str, str],
     top_k: int = 3,
-):
-    from matplotlib.figure import Figure
-
-    # OO Figure, not pyplot: no global Gcf registry entry (this runs in the
-    # long-lived main process on every click) and thread-safe. gradio attaches
-    # an Agg canvas when it calls fig.savefig() at postprocess time.
-    fig = Figure(figsize=(12, 3.0))
-    ax = fig.subplots()
-    fig.subplots_adjust(left=0.005, right=0.995, top=0.99, bottom=0.02)
-    ax.set_axis_off()
-    ax.set_xlim(-0.5, len(RANK_ORDER) - 0.5)
-    ax.set_ylim(-0.55, top_k + 0.05)
-
+    title: str = "Taxonomy at clicked pixel",
+    highlight_rank: str | None = None,
+    highlight_rgb: tuple[int, int, int] | None = None,
+) -> str:
+    """Vertical HTML readout: one row per rank, top candidates as fixed-size chips."""
+    title_html = f'<div class="section-title">{title}</div>' if title else ""
     if concept_probs_at_pixel is None or concept_probs_at_pixel.size == 0:
-        ax.text(
-            0.5,
-            0.5,
-            "Click a pixel to see the taxonomy.",
-            ha="center",
-            va="center",
-            fontsize=12,
-            color="#666",
-        )
-        return fig
-
-    selected: dict[str, list[tuple[str, float, int]]] = {}
-    selected_lookup: dict[str, dict[str, int]] = {}
-    for rank in RANK_ORDER:
-        entries = rank_index.get(rank, [])
-        if not entries:
-            selected[rank] = []
-            selected_lookup[rank] = {}
-            continue
-        idxs = np.asarray([idx for idx, _ in entries], dtype=np.int64)
-        values = [val for _, val in entries]
-        probs = concept_probs_at_pixel[idxs]
-        order = np.argsort(probs)[::-1][:top_k]
-        chosen: list[tuple[str, float, int]] = []
-        lookup: dict[str, int] = {}
-        for rank_pos, j in enumerate(order):
-            j_int = int(j)
-            value = values[j_int]
-            p = float(probs[j_int])
-            y = top_k - 1 - rank_pos
-            chosen.append((value, p, y))
-            lookup[value] = y
-        selected[rank] = chosen
-        selected_lookup[rank] = lookup
-
-    for x, rank in enumerate(RANK_ORDER):
-        ax.text(
-            x,
-            top_k - 0.25,
-            rank,
-            ha="center",
-            va="bottom",
-            fontsize=10,
-            fontweight="bold",
-            color="#444",
+        return (
+            f'<div class="panel taxonomy-panel">{title_html}'
+            '<div class="hint">Click a pixel to see the taxonomy.</div></div>'
         )
 
-    for x_child, child_rank in enumerate(RANK_ORDER):
-        if x_child == 0:
+    caption = (
+        '<div class="hint taxonomy-caption">'
+        "Bar length = model confidence (0–1) for the top taxon at each rank.</div>"
+    )
+    rows: list[str] = []
+    for i, rank in enumerate(RANK_ORDER):
+        candidates = _rank_candidates(concept_probs_at_pixel, rank_index, rank, top_k)
+        if not candidates:
             continue
-        parent_rank = RANK_ORDER[x_child - 1]
-        parent_lookup = selected_lookup.get(parent_rank, {})
-        for value, p_child, y_child in selected[child_rank]:
-            full_child = f"{child_rank}__{value}"
-            full_parent = parents.get(full_child)
-            if full_parent is None:
-                continue
-            parent_value = full_parent.split("__", 1)[1] if "__" in full_parent else full_parent
-            if parent_value not in parent_lookup:
-                continue
-            y_parent = parent_lookup[parent_value]
-            ax.plot(
-                [x_child - 1, x_child],
-                [y_parent, y_child],
-                color="#444",
-                alpha=max(0.15, min(1.0, p_child)),
-                linewidth=0.5 + 3.5 * max(0.0, min(1.0, p_child)),
-                zorder=1,
-            )
+        primary, primary_p = candidates[0]
+        primary_p = float(np.clip(primary_p, 0.0, 1.0))
+        alt_html = ""
+        if len(candidates) > 1:
+            alt_chips = []
+            for name, p in candidates[1:]:
+                p_clamped = float(np.clip(p, 0.0, 1.0))
+                alt_chips.append(
+                    f'<span class="taxonomy-alt" style="opacity:{0.45 + 0.55 * p_clamped:.2f}">'
+                    f"{name}</span>"
+                )
+            alt_html = f'<div class="taxonomy-alts">{"".join(alt_chips)}</div>'
 
-    for x, rank in enumerate(RANK_ORDER):
-        for value, p, y in selected[rank]:
-            p_clamped = float(np.clip(p, 0.0, 1.0))
-            ax.text(
-                x,
-                y,
-                f"{value}\n({p_clamped:.2f})",
-                ha="center",
-                va="center",
-                fontsize=8.0 + 16.0 * p_clamped,
-                alpha=0.35 + 0.65 * p_clamped,
-                bbox={
-                    "boxstyle": "round,pad=0.25",
-                    "facecolor": "white",
-                    "edgecolor": "#ccc",
-                    "alpha": 0.9,
-                },
-                zorder=2,
+        connector = ""
+        if i > 0:
+            connector = '<div class="taxonomy-connector" aria-hidden="true"></div>'
+
+        active = rank == highlight_rank
+        if active and highlight_rgb is not None:
+            r, g, b = highlight_rgb
+            swatch = (
+                f'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;'
+                f"background:rgb({r},{g},{b});margin-right:6px;vertical-align:middle;"
+                f'border:1px solid rgba(128,128,128,0.35)"></span>'
             )
-    return fig
+            row_open = (
+                f'<div class="taxonomy-row" style="background:rgba({r},{g},{b},0.14);'
+                f"border-radius:8px;margin:0 -8px;padding:6px 8px;"
+                f'box-shadow:inset 0 0 0 1px rgba({r},{g},{b},0.5)">'
+            )
+            rank_cell = (
+                f'<div class="taxonomy-rank" style="color:rgb({r},{g},{b})">{swatch}{rank}</div>'
+            )
+            bar = (
+                f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%;'
+                f'background:rgb({r},{g},{b})"></div>'
+            )
+        elif active:
+            row_open = '<div class="taxonomy-row taxonomy-row-active">'
+            rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
+            bar = f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%"></div>'
+        else:
+            row_open = '<div class="taxonomy-row">'
+            rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
+            bar = f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%"></div>'
+
+        rows.append(
+            f"{connector}{row_open}"
+            f"{rank_cell}"
+            '<div class="taxonomy-candidates">'
+            f'<div class="taxonomy-primary">{primary} <small>({primary_p:.2f})</small></div>'
+            f"{bar}"
+            f"{alt_html}"
+            "</div></div>"
+        )
+
+    if not rows:
+        return (
+            f'<div class="panel taxonomy-panel">{title_html}'
+            '<div class="hint">No taxonomy concepts available for this pixel.</div></div>'
+        )
+
+    return (
+        f'<div class="panel taxonomy-panel">{title_html}{caption}'
+        f'<div class="taxonomy-tree">{"".join(rows)}</div></div>'
+    )

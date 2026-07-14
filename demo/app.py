@@ -26,6 +26,7 @@ from inference import (
     preprocess,
     resolve_checkpoint,
 )
+from PIL import Image
 from rendering import (
     DISPLAY_SIZE,
     ONEHOT_MODE_LABELS,
@@ -39,20 +40,29 @@ from rendering import (
     make_color_palette,
     make_rank_palette,
     overlay_legend_items,
+    rank_highlight_rgb,
     render_multihot_legend,
     render_overlay_legend,
+    render_taxonomy_skipped,
     render_taxonomy_tree,
     render_top_bottom_other_html,
     render_top_classes_html,
     resize_for_display,
+    top_class_skips_taxonomy,
 )
 
-from mermaidseg.dataset_reconciliation.concepts import parse_concept_rank
+from mermaidseg.dataset_reconciliation.concepts import (
+    MORPHOLOGIC_CONCEPTS,
+    parse_concept_rank,
+)
 
 TOP_K_CLASSES = 3
 TOP_K_TREE = 3
 TOP_K_OTHER = 5
 BOTTOM_K_OTHER = 5
+
+# Readout title for the Concept Bottleneck tab (top/bottom concept activations at a pixel).
+CONCEPT_READOUT_TITLE = "Concept activations at clicked pixel"
 
 ONEHOT_DROPDOWN_MODES: tuple[str, ...] = (
     "kingdom",
@@ -95,9 +105,12 @@ CSS = """
 }
 #mermaid-header .mermaid-header-logo svg { width: 46px; height: 48px; display: block; flex: 0 0 auto; }
 #mermaid-header .mermaid-header-title {
-    font-size: 1.4rem; font-weight: 700; line-height: 1.2; color: #ffffff;
-    /* Brand: MERMAID renders as plain all-caps, never small-caps. */
-    font-variant: normal; font-variant-caps: normal; text-transform: none; letter-spacing: normal;
+    font-size: 1.35rem; font-weight: 700; line-height: 1.25; color: #ffffff;
+}
+#mermaid-header .mermaid-header-title-short { display: none; }
+@media (max-width: 640px) {
+    #mermaid-header .mermaid-header-title-full { display: none; }
+    #mermaid-header .mermaid-header-title-short { display: inline; }
 }
 #mermaid-header .mermaid-header-subtitle {
     margin-top: 2px; color: rgba(255, 255, 255, 0.85); font-size: 0.95rem;
@@ -107,7 +120,7 @@ CSS = """
 #mermaid-segment-btn, #mermaid-segment-btn button {
     width: 100%; max-width: 340px; margin-left: auto; margin-right: auto;
 }
-#mermaid-onehot-img img, #mermaid-multihot-img img {
+#mermaid-cls-img img, #mermaid-tax-img img, #mermaid-growth-img img {
     aspect-ratio: 1 / 1 !important;
     max-height: 70vh !important;
     object-fit: contain !important;
@@ -131,6 +144,87 @@ CSS = """
 #mermaid-footer .mermaid-footer-logo {
     width: 150px; height: 52px; object-fit: contain; opacity: 0.85;
 }
+#mermaid-footer .mermaid-footer-logo.logo-exeter {
+    /* PNG content is left-heavy (562px wide, ~325px ink); pin visual center in the slot. */
+    width: 185px; height: 64px; object-position: 29.3% center;
+}
+#mermaid-footer .mermaid-footer-logo.logo-epfl {
+    width: 105px; height: 38px;
+}
+@media (max-width: 640px) {
+    #mermaid-footer .mermaid-footer-logos { gap: 16px 24px; }
+    #mermaid-footer .mermaid-footer-logo { width: 120px; height: 42px; }
+    #mermaid-footer .mermaid-footer-logo.logo-exeter { width: 148px; height: 50px; }
+    #mermaid-footer .mermaid-footer-logo.logo-epfl { width: 88px; height: 32px; }
+}
+/* Third tab label is shortened to "CBM" via RESPONSIVE_JS on narrow viewports. */
+/* Taxonomy readout: vertical ladder with fixed typography (replaces matplotlib Plot). */
+.gradio-container .taxonomy-panel { min-height: 220px; }
+.gradio-container .taxonomy-tree { margin-top: 4px; }
+.gradio-container .taxonomy-row {
+    display: flex; align-items: flex-start; gap: 14px; padding: 6px 0;
+}
+.gradio-container .taxonomy-row-active {
+    background: rgba(59, 130, 246, 0.12); border-radius: 8px;
+    margin: 0 -8px; padding: 6px 8px;
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.35);
+}
+.gradio-container .taxonomy-row-active .taxonomy-rank { color: #2563eb; }
+.gradio-container .taxonomy-row-active .taxonomy-bar { background: #2563eb; }
+.gradio-container .taxonomy-rank {
+    flex: 0 0 76px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; color: #667085; padding-top: 3px;
+}
+.gradio-container .taxonomy-candidates { flex: 1; min-width: 0; }
+.gradio-container .taxonomy-primary {
+    font-size: 15px; font-weight: 600; line-height: 1.25; color: inherit;
+    word-break: break-word;
+}
+.gradio-container .taxonomy-bar {
+    height: 5px; border-radius: 3px; background: #3b82f6; margin: 5px 0 6px 0;
+    max-width: 100%;
+}
+.gradio-container .taxonomy-alts { display: flex; flex-wrap: wrap; gap: 6px; }
+.gradio-container .taxonomy-alt {
+    font-size: 12px; line-height: 1.3; padding: 3px 9px; border-radius: 999px;
+    background: rgba(128, 128, 128, 0.14); color: inherit;
+}
+.gradio-container .taxonomy-connector {
+    width: 2px; height: 10px; margin-left: 37px; background: rgba(128, 128, 128, 0.35);
+}
+.gradio-container .taxonomy-caption { margin-bottom: 8px; }
+"""
+
+RESPONSIVE_JS = """
+(() => {
+  const FULL = "Concept Bottleneck";
+  const SHORT = "CBM";
+  const mq = window.matchMedia("(max-width: 640px)");
+  let pending = false;
+  function relabelTabs() {
+    pending = false;
+    const narrow = mq.matches;
+    document.querySelectorAll(".gradio-container button[role='tab']").forEach((btn) => {
+      const current = btn.textContent.trim();
+      if (!btn.dataset.cbmFull) {
+        btn.dataset.cbmFull = current === SHORT ? FULL : current;
+      }
+      if (btn.dataset.cbmFull !== FULL) return;
+      const next = narrow ? SHORT : FULL;
+      if (current !== next) btn.textContent = next;
+    });
+  }
+  function scheduleRelabel() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(relabelTabs);
+  }
+  relabelTabs();
+  mq.addEventListener("change", relabelTabs);
+  const root = document.querySelector(".gradio-container") || document.body;
+  new MutationObserver(scheduleRelabel).observe(root, { childList: true, subtree: true });
+  window.addEventListener("load", () => setTimeout(relabelTabs, 250));
+})();
 """
 
 logger = logging.getLogger(__name__)
@@ -144,22 +238,25 @@ def _header_html() -> str:
         '<div class="mermaid-header-bar">'
         f'<div class="mermaid-header-logo" aria-hidden="true">{logo}</div>'
         "<div>"
-        '<div class="mermaid-header-title">MERMAID Concept Bottleneck Demo</div>'
+        '<div class="mermaid-header-title">'
+        '<span class="mermaid-header-title-full">Concept Bottleneck Demo</span>'
+        '<span class="mermaid-header-title-short">CBM Demo</span>'
+        "</div>"
         '<div class="mermaid-header-subtitle">'
         f"Upload an image or pick a sample, click <b>{PRIMARY_BTN_LABEL}</b>, "
-        "then click any overlay pixel to inspect classes and taxonomy.</div>"
+        "then click any overlay pixel to inspect classes, taxonomy, and concepts.</div>"
         "</div></div>"
     )
 
 
-# Partner/collaborator logos shown in the footer strip (file, alt text).
-_FOOTER_LOGOS: tuple[tuple[str, str], ...] = (
-    ("logo_wcs.png", "Wildlife Conservation Society"),
-    ("logo_exeter.png", "University of Exeter"),
-    ("logo_queensland.png", "University of Queensland"),
-    ("logo_mit.png", "Massachusetts Institute of Technology"),
-    ("logo_epfl.png", "EPFL"),
-    ("logo_sparkgeo.png", "Sparkgeo"),
+# Partner/collaborator logos shown in the footer strip (file, alt text, optional CSS class).
+_FOOTER_LOGOS: tuple[tuple[str, str, str], ...] = (
+    ("logo_wcs.png", "Wildlife Conservation Society", ""),
+    ("logo_exeter.png", "University of Exeter", "logo-exeter"),
+    ("logo_queensland.png", "University of Queensland", ""),
+    ("logo_mit.png", "Massachusetts Institute of Technology", ""),
+    ("logo_epfl.png", "EPFL", "logo-epfl"),
+    ("logo_sparkgeo.png", "Sparkgeo", ""),
 )
 
 
@@ -173,13 +270,18 @@ def _footer_html() -> str:
     # never surfaces these as selectable sample images.
     logos_dir = Path(__file__).resolve().parent / "logos"
     imgs: list[str] = []
-    for filename, alt in _FOOTER_LOGOS:
+    for filename, alt, css_class in _FOOTER_LOGOS:
         path = logos_dir / filename
         if not path.is_file():
             continue
         b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        class_attr = (
+            f' class="mermaid-footer-logo {css_class}"'
+            if css_class
+            else ' class="mermaid-footer-logo"'
+        )
         imgs.append(
-            f'<img class="mermaid-footer-logo" src="data:image/png;base64,{b64}" alt="{alt}" title="{alt}">'
+            f'<img{class_attr} src="data:image/png;base64,{b64}" alt="{alt}" title="{alt}">'
         )
     if not imgs:
         return ""
@@ -267,6 +369,12 @@ def build_ui(
         if name != "(none)"
     }
 
+    # Split the multi-hot concepts into the two groups the Concept Bottleneck tab shows.
+    morph_set = set(MORPHOLOGIC_CONCEPTS)
+    growth_form_choices = [n for n in multihot_choices if n in morph_set and n != "(none)"]
+    other_group_choices = [n for n in multihot_choices if n not in morph_set and n != "(none)"]
+    default_trait = (growth_form_choices or other_group_choices or ["(none)"])[0]
+
     other_concept_channels = [
         (idx, name) for idx, name in enumerate(concept_names) if parse_concept_rank(name)[0] is None
     ]
@@ -288,10 +396,16 @@ def build_ui(
         else []
     )
 
-    onehot_choices = [
-        (ONEHOT_MODE_LABELS[m], m) for m in ONEHOT_DROPDOWN_MODES if m in ONEHOT_MODE_LABELS
+    # Taxonomy-tab "stepper": the taxonomic ranks only (the final class is its own tab).
+    rank_choices = [
+        (ONEHOT_MODE_LABELS[m], m)
+        for m in ONEHOT_DROPDOWN_MODES
+        if m in ONEHOT_MODE_LABELS and m != "classes"
     ]
-    default_onehot = "genus" if "genus" in ONEHOT_MODE_LABELS else onehot_choices[0][1]
+    rank_values = [v for _, v in rank_choices]
+    default_rank = (
+        "genus" if "genus" in rank_values else (rank_values[-1] if rank_values else "genus")
+    )
 
     def _compose_onehot_base(display_image, class_probs, concept_probs, mode, opacity):
         """Composite the one-hot overlay (no click marker) + its color-key legend.
@@ -331,167 +445,339 @@ def build_ui(
         )
         return resize_for_display(composite)
 
+    def _empty_taxonomy():
+        return render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
+
+    def _taxonomy_at(class_probs, concept_probs, x_src, y_src, highlight_rank=None):
+        if class_probs is not None:
+            skip, label = top_class_skips_taxonomy(class_probs[:, y_src, x_src], artifacts.id2label)
+            if skip:
+                return render_taxonomy_skipped(label)
+        at_pixel = concept_probs[:, y_src, x_src]
+        highlight_rgb = rank_highlight_rgb(highlight_rank, at_pixel, rank_index, rank_palettes)
+        return render_taxonomy_tree(
+            at_pixel,
+            rank_index,
+            parents,
+            top_k=TOP_K_TREE,
+            highlight_rank=highlight_rank,
+            highlight_rgb=highlight_rgb,
+        )
+
+    def _multihot_legend(trait, concept_probs=None, pixel_prob=None):
+        channel_idx = multihot_channel_by_name.get(trait) if trait else None
+        return render_multihot_legend(trait, concept_probs, channel_idx, pixel_prob)
+
     def _empty_other():
-        return render_top_bottom_other_html([], [], title="Predicted Concepts: Other")
+        return render_top_bottom_other_html(
+            [],
+            [],
+            title=CONCEPT_READOUT_TITLE,
+            empty_hint="Click a pixel to see concept activations.",
+        )
+
+    def _coords(evt: gr.SelectData, probs):
+        index = evt.index if evt.index and None not in evt.index[:2] else (-1, -1)
+        x_disp, y_disp = int(index[0]), int(index[1])
+        if not (0 <= x_disp < DISPLAY_SIZE and 0 <= y_disp < DISPLAY_SIZE):
+            return None
+        src_h, src_w = probs.shape[1], probs.shape[2]
+        x_src = min(src_w - 1, max(0, x_disp * src_w // DISPLAY_SIZE))
+        y_src = min(src_h - 1, max(0, y_disp * src_h // DISPLAY_SIZE))
+        return (x_disp, y_disp), x_src, y_src
+
+    def _top_classes_at(class_probs, x_src, y_src):
+        at = class_probs[:, y_src, x_src]
+        items, colors = [], []
+        for i in np.argsort(at)[::-1][:TOP_K_CLASSES]:
+            idx = int(i)
+            items.append((artifacts.id2label.get(idx, f"class_{idx}"), float(at[idx])))
+            r, g, b = class_palette[idx]
+            colors.append((int(r), int(g), int(b)))
+        return render_top_classes_html(items, colors=colors)
+
+    def _other_at(concept_probs, x_src, y_src):
+        if not other_concept_channels:
+            return _empty_other()
+        at = concept_probs[:, y_src, x_src]
+        idxs = np.asarray([idx for idx, _ in other_concept_channels], dtype=np.int64)
+        names = [name for _, name in other_concept_channels]
+        probs = at[idxs]
+        order = np.argsort(probs)
+        top_k = min(TOP_K_OTHER, len(order))
+        bot_k = min(BOTTOM_K_OTHER, len(order) - top_k)
+        return render_top_bottom_other_html(
+            [(names[int(j)], float(probs[int(j)])) for j in order[::-1][:top_k]],
+            [(names[int(j)], float(probs[int(j)])) for j in order[:bot_k]],
+            title=CONCEPT_READOUT_TITLE,
+        )
 
     # Sized from measured calls on the Space: ~11s in-context + cold weight
     # streaming; smaller reservations rank higher in the ZeroGPU queue.
     @spaces.GPU(duration=30)
-    def run_predict(image, onehot_mode, onehot_opacity, multihot_name, multihot_opacity):
-        empty_tree = render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
+    def run_predict(image, tax_rank, growth_form, other_group, cls_op, tax_op, growth_op):
+        trait = growth_form or other_group or default_trait
+        empty_tree = _empty_taxonomy()
         if image is None:
             return (
                 None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                render_overlay_legend([]),
                 render_top_classes_html([]),
                 empty_tree,
-                _empty_other(),
-                None,
-                None,
                 None,
                 render_overlay_legend([]),
-                render_multihot_legend(multihot_name),
+                empty_tree,
+                None,
+                _multihot_legend(trait),
+                _empty_other(),
+                empty_tree,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
         start = time.perf_counter()
         image_tensor, display_image = preprocess(image, model_transform, display_transform)
         # predict() returns float16 prob maps already (cast on-device before .cpu()).
-        class_probs, concept_probs, pred_mask = predict(model, image_tensor.to(device))
+        class_probs, concept_probs, _ = predict(model, image_tensor.to(device))
         logger.info("predict wall time: %.1fs", time.perf_counter() - start)
-        onehot_base, onehot_legend_html = _compose_onehot_base(
-            display_image, class_probs, concept_probs, onehot_mode, onehot_opacity
+        cls_base, cls_legend = _compose_onehot_base(
+            display_image, class_probs, concept_probs, "classes", cls_op
         )
-        multihot_base = _compose_multihot_base(
-            display_image, concept_probs, multihot_name, multihot_opacity
+        tax_base, tax_legend = _compose_onehot_base(
+            display_image, class_probs, concept_probs, tax_rank, tax_op
         )
+        growth_base = _compose_multihot_base(display_image, concept_probs, trait, growth_op)
         return (
-            onehot_base,  # onehot_img — no marker until a pixel is clicked
-            multihot_base,  # multihot_img
+            cls_base,
+            cls_legend,
+            render_top_classes_html([]),
+            empty_tree,
+            tax_base,
+            tax_legend,
+            empty_tree,
+            growth_base,
+            _multihot_legend(trait, concept_probs),
+            _empty_other(),
+            empty_tree,
             display_image,
             class_probs,
             concept_probs,
-            pred_mask,
-            render_top_classes_html([]),
-            empty_tree,
-            _empty_other(),
             None,
-            onehot_base,  # onehot_base_state (cached pre-marker composite)
-            multihot_base,  # multihot_base_state
-            onehot_legend_html,
-            render_multihot_legend(multihot_name),
+            cls_base,
+            tax_base,
+            growth_base,
         )
 
-    def on_click(
+    def _unpack_click(click_state):
+        if click_state is None:
+            return None, None, None
+        click_xy, x_src, y_src = click_state
+        return click_xy, x_src, y_src
+
+    def _readouts_at(class_probs, concept_probs, x_src, y_src, trait, highlight_rank=None):
+        empty_tree = _empty_taxonomy()
+        tree = (
+            _taxonomy_at(class_probs, concept_probs, x_src, y_src, highlight_rank)
+            if concept_probs is not None
+            else empty_tree
+        )
+        channel_idx = multihot_channel_by_name.get(trait) if trait else None
+        pixel_prob = (
+            float(concept_probs[channel_idx, y_src, x_src])
+            if concept_probs is not None and channel_idx is not None
+            else None
+        )
+        return (
+            _top_classes_at(class_probs, x_src, y_src),
+            tree,
+            _other_at(concept_probs, x_src, y_src) if concept_probs is not None else _empty_other(),
+            _multihot_legend(trait, concept_probs, pixel_prob),
+        )
+
+    def _marked_overlays(cls_base, tax_base, growth_base, click_xy):
+        return (
+            draw_click_marker(cls_base, click_xy) if cls_base is not None else None,
+            draw_click_marker(tax_base, click_xy) if tax_base is not None else None,
+            draw_click_marker(growth_base, click_xy) if growth_base is not None else None,
+        )
+
+    def pixel_click(
         display_image,
         class_probs,
         concept_probs,
-        onehot_base,
-        multihot_base,
+        cls_base,
+        tax_base,
+        growth_base,
+        growth_form,
+        other_group,
+        click_state,
+        tax_rank,
         evt: gr.SelectData,
     ):
-        # Reads the cached pre-marker composites and only redraws the marker — the
-        # overlays don't change on click, so nothing is recomposed here.
-        if display_image is None or class_probs is None or concept_probs is None:
-            return (
-                None,
-                None,
-                render_top_classes_html([]),
-                render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE),
-                _empty_other(),
-                None,
-            )
-        index = evt.index if evt.index and None not in evt.index[:2] else (-1, -1)
-        x_disp, y_disp = int(index[0]), int(index[1])
-        if not (0 <= x_disp < DISPLAY_SIZE and 0 <= y_disp < DISPLAY_SIZE):
-            click_xy = None
-            top_html = render_top_classes_html([])
-            tree_fig = render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE)
-            other_html = _empty_other()
-        else:
-            src_h, src_w = class_probs.shape[1], class_probs.shape[2]
-            x_src = min(src_w - 1, max(0, x_disp * src_w // DISPLAY_SIZE))
-            y_src = min(src_h - 1, max(0, y_disp * src_h // DISPLAY_SIZE))
-            class_at_pixel = class_probs[:, y_src, x_src]
-            top_indices = np.argsort(class_at_pixel)[::-1][:TOP_K_CLASSES]
-            top_items, top_colors = [], []
-            for i in top_indices:
-                idx = int(i)
-                top_items.append(
-                    (artifacts.id2label.get(idx, f"class_{idx}"), float(class_at_pixel[idx]))
-                )
-                r, g, b = class_palette[idx]
-                top_colors.append((int(r), int(g), int(b)))
-            concept_at_pixel = concept_probs[:, y_src, x_src]
-            tree_fig = render_taxonomy_tree(concept_at_pixel, rank_index, parents, top_k=TOP_K_TREE)
-            if other_concept_channels:
-                idxs = np.asarray([idx for idx, _ in other_concept_channels], dtype=np.int64)
-                names = [name for _, name in other_concept_channels]
-                probs = concept_at_pixel[idxs]
-                order = np.argsort(probs)
-                top_k = min(TOP_K_OTHER, len(order))
-                bot_k = min(BOTTOM_K_OTHER, len(order) - top_k)
-                top_idx = order[::-1][:top_k]
-                bot_idx = order[:bot_k]
-                other_html = render_top_bottom_other_html(
-                    [(names[int(j)], float(probs[int(j)])) for j in top_idx],
-                    [(names[int(j)], float(probs[int(j)])) for j in bot_idx],
-                )
-            else:
-                other_html = _empty_other()
-            top_html = render_top_classes_html(top_items, colors=top_colors)
-            click_xy = (x_disp, y_disp)
-
-        return (
-            draw_click_marker(onehot_base, click_xy) if onehot_base is not None else None,
-            draw_click_marker(multihot_base, click_xy) if multihot_base is not None else None,
-            top_html,
-            tree_fig,
-            other_html,
-            click_xy,
+        trait = growth_form or other_group or default_trait
+        empty_tree = _empty_taxonomy()
+        empty_readouts = (
+            render_top_classes_html([]),
+            empty_tree,
+            _empty_other(),
+            _multihot_legend(trait, concept_probs),
         )
 
-    def recompose_onehot(display_image, class_probs, concept_probs, mode, opacity, click_xy):
+        if display_image is None or class_probs is None or cls_base is None:
+            return (
+                cls_base,
+                *empty_readouts,
+                tax_base,
+                empty_tree,
+                growth_base,
+                empty_readouts[2],
+                empty_tree,
+                empty_readouts[3],
+                None,
+            )
+
+        hit = _coords(evt, class_probs)
+        if hit is None:
+            click_xy, x_src, y_src = _unpack_click(click_state)
+            if click_xy is None:
+                return (
+                    cls_base,
+                    *empty_readouts,
+                    tax_base,
+                    empty_tree,
+                    growth_base,
+                    empty_readouts[2],
+                    empty_tree,
+                    empty_readouts[3],
+                    None,
+                )
+            cls_top, tree, growth_other, growth_legend = _readouts_at(
+                class_probs, concept_probs, x_src, y_src, trait, tax_rank
+            )
+            cls_img, tax_img, growth_img = _marked_overlays(
+                cls_base, tax_base, growth_base, click_xy
+            )
+            return (
+                cls_img,
+                cls_top,
+                tree,
+                tax_img,
+                tree,
+                growth_img,
+                growth_other,
+                tree,
+                growth_legend,
+                click_state,
+            )
+
+        click_xy, x_src, y_src = hit
+        cls_top, tree, growth_other, growth_legend = _readouts_at(
+            class_probs, concept_probs, x_src, y_src, trait, tax_rank
+        )
+        cls_img, tax_img, growth_img = _marked_overlays(cls_base, tax_base, growth_base, click_xy)
+        return (
+            cls_img,
+            cls_top,
+            tree,
+            tax_img,
+            tree,
+            growth_img,
+            growth_other,
+            tree,
+            growth_legend,
+            (click_xy, x_src, y_src),
+        )
+
+    def recompose_cls(display_image, class_probs, concept_probs, opacity, click_state):
         if display_image is None:
             return None, None, render_overlay_legend([])
         base, legend = _compose_onehot_base(
-            display_image, class_probs, concept_probs, mode, opacity
+            display_image, class_probs, concept_probs, "classes", opacity
         )
+        click_xy, _, _ = _unpack_click(click_state)
         return draw_click_marker(base, click_xy), base, legend
 
-    def recompose_multihot(display_image, concept_probs, multihot_name, opacity, click_xy):
-        legend = render_multihot_legend(multihot_name)
+    def recompose_tax(display_image, class_probs, concept_probs, rank, opacity, click_state):
         if display_image is None:
-            return None, None, legend
-        base = _compose_multihot_base(display_image, concept_probs, multihot_name, opacity)
+            return None, None, render_overlay_legend([])
+        base, legend = _compose_onehot_base(
+            display_image, class_probs, concept_probs, rank, opacity
+        )
+        click_xy, _, _ = _unpack_click(click_state)
         return draw_click_marker(base, click_xy), base, legend
+
+    def _growth_update(display_image, concept_probs, trait, opacity, click_state):
+        if display_image is None or trait is None:
+            return None, None, _multihot_legend(trait)
+        base = _compose_multihot_base(display_image, concept_probs, trait, opacity)
+        click_xy, x_src, y_src = _unpack_click(click_state)
+        channel_idx = multihot_channel_by_name.get(trait) if trait else None
+        pixel_prob = (
+            float(concept_probs[channel_idx, y_src, x_src])
+            if concept_probs is not None
+            and channel_idx is not None
+            and x_src is not None
+            and y_src is not None
+            else None
+        )
+        return (
+            draw_click_marker(base, click_xy),
+            base,
+            _multihot_legend(trait, concept_probs, pixel_prob),
+        )
+
+    def refresh_taxonomy_highlight(class_probs, concept_probs, click_state, tax_rank):
+        _, x_src, y_src = _unpack_click(click_state)
+        if x_src is None or concept_probs is None:
+            empty = _empty_taxonomy()
+            return empty, empty, empty
+        tree = _taxonomy_at(class_probs, concept_probs, x_src, y_src, tax_rank)
+        return tree, tree, tree
+
+    def select_growth_form(display_image, concept_probs, trait, opacity, click_state):
+        # Picking a growth form clears the "other groups" selection (single active trait).
+        img, base, legend = _growth_update(
+            display_image, concept_probs, trait, opacity, click_state
+        )
+        return img, base, legend, gr.update(value=None)
+
+    def select_other_group(display_image, concept_probs, trait, opacity, click_state):
+        img, base, legend = _growth_update(
+            display_image, concept_probs, trait, opacity, click_state
+        )
+        return img, base, legend, gr.update(value=None)
+
+    def recompose_growth(
+        display_image, concept_probs, growth_form, other_group, opacity, click_state
+    ):
+        return _growth_update(
+            display_image, concept_probs, growth_form or other_group, opacity, click_state
+        )
 
     def pick_sample(evt: gr.SelectData):
         if not static_examples:
             return None
         idx = int(evt.index) if evt.index is not None else 0
         if 0 <= idx < len(static_examples):
-            from PIL import Image
-
             return np.array(Image.open(static_examples[idx]).convert("RGB"))
         return None
 
-    with gr.Blocks(title="MERMAID Concept Bottleneck Demo") as ui:
+    with gr.Blocks(title="Concept Bottleneck Demo") as ui:
         gr.HTML(_header_html(), elem_id="mermaid-header")
 
         display_state = gr.State(None)
         class_probs_state = gr.State(None)
         concept_probs_state = gr.State(None)
-        pred_mask_state = gr.State(None)
         click_state = gr.State(None)
         # Cached pre-marker composites (720² uint8) so a click only redraws the marker.
-        onehot_base_state = gr.State(None)
-        multihot_base_state = gr.State(None)
+        cls_base_state = gr.State(None)
+        tax_base_state = gr.State(None)
+        growth_base_state = gr.State(None)
 
-        # Top-down layout: per-row min_width sums stay under ~950px so rows never
-        # part-wrap in the 1024-1300px band; below that, columns stack vertically.
         with gr.Row(equal_height=True):
             with gr.Column(scale=1, min_width=260):
                 input_img = gr.Image(
@@ -513,118 +799,170 @@ def build_ui(
             PRIMARY_BTN_LABEL, variant="primary", size="lg", elem_id="mermaid-segment-btn"
         )
 
-        with gr.Row():
-            with gr.Column(scale=1, min_width=460):
-                onehot_mode = gr.Dropdown(
-                    choices=onehot_choices, value=default_onehot, label="one-hot"
-                )
-                onehot_opacity = gr.Slider(0, 1, value=0.5, step=0.05, label="One-hot opacity")
-                onehot_img = gr.Image(
-                    type="numpy",
-                    label="one-hot (click a pixel)",
-                    interactive=False,
-                    elem_id="mermaid-onehot-img",
-                )
-                onehot_legend = gr.HTML(render_overlay_legend([]))
+        # One tab per view: MERMAID classes · Taxonomy · Concept Bottleneck.
+        with gr.Tabs():
+            with gr.Tab("MERMAID classes"), gr.Row():
+                with gr.Column(scale=2, min_width=340):
+                    cls_opacity = gr.Slider(0, 1, value=0.5, step=0.05, label="Overlay opacity")
+                    cls_img = gr.Image(
+                        type="numpy",
+                        label="Predicted class — click a pixel",
+                        interactive=False,
+                        elem_id="mermaid-cls-img",
+                    )
+                    cls_legend = gr.HTML(render_overlay_legend([]))
+                with gr.Column(scale=1, min_width=240):
+                    cls_top = gr.HTML(render_top_classes_html([]))
+                    cls_tree = gr.HTML(_empty_taxonomy())
 
-            with gr.Column(scale=1, min_width=460):
-                multihot_mode = gr.Dropdown(
-                    choices=multihot_choices, value=multihot_choices[0], label="multi-hot"
-                )
-                multihot_opacity = gr.Slider(0, 1, value=0.5, step=0.05, label="Multi-hot opacity")
-                multihot_img = gr.Image(
-                    type="numpy",
-                    label="multi-hot (click a pixel)",
-                    interactive=False,
-                    elem_id="mermaid-multihot-img",
-                )
-                multihot_legend = gr.HTML(render_multihot_legend(multihot_choices[0]))
+            with gr.Tab("Taxonomy"), gr.Row():
+                with gr.Column(scale=2, min_width=340):
+                    tax_rank = gr.Radio(
+                        choices=rank_choices, value=default_rank, label="Color by rank"
+                    )
+                    tax_opacity = gr.Slider(0, 1, value=0.5, step=0.05, label="Overlay opacity")
+                    tax_img = gr.Image(
+                        type="numpy",
+                        label="Taxonomic rank — click a pixel",
+                        interactive=False,
+                        elem_id="mermaid-tax-img",
+                    )
+                    tax_legend = gr.HTML(render_overlay_legend([]))
+                with gr.Column(scale=1, min_width=240):
+                    tax_tree = gr.HTML(_empty_taxonomy(), label="Taxonomy at clicked pixel")
 
-        with gr.Row():
-            with gr.Column(scale=1, min_width=220), gr.Accordion("Overlay legend", open=True):
-                gr.Markdown(
-                    "**one-hot**: argmax class or taxonomic concept; alpha = softmax × opacity.\n\n"
-                    "**multi-hot**: sigmoid heatmap for one concept; viridis colormap."
-                )
-            with gr.Column(scale=3, min_width=480):
-                top_classes_html = gr.HTML(render_top_classes_html([]))
-                other_html = gr.HTML(_empty_other())
-                taxonomy_plot = gr.Plot(
-                    render_taxonomy_tree(None, rank_index, parents, top_k=TOP_K_TREE),
-                    label="Predicted concepts: taxonomy graph",
-                )
+            with gr.Tab("Concept Bottleneck"), gr.Row():
+                with gr.Column(scale=2, min_width=340):
+                    gf_sel = gr.Radio(
+                        choices=growth_form_choices,
+                        value=default_trait if default_trait in growth_form_choices else None,
+                        label="Growth forms",
+                    )
+                    other_sel = gr.Radio(
+                        choices=other_group_choices,
+                        value=default_trait if default_trait in other_group_choices else None,
+                        label="Other groups",
+                    )
+                    growth_opacity = gr.Slider(0, 1, value=0.5, step=0.05, label="Heatmap opacity")
+                    growth_img = gr.Image(
+                        type="numpy",
+                        label="Concept heatmap — click a pixel",
+                        interactive=False,
+                        elem_id="mermaid-growth-img",
+                    )
+                    growth_legend = gr.HTML(_multihot_legend(default_trait))
+                with gr.Column(scale=1, min_width=240):
+                    growth_other = gr.HTML(_empty_other())
+                    growth_tree = gr.HTML(_empty_taxonomy())
 
         gr.HTML(_footer_html(), elem_id="mermaid-footer")
 
+        predict_inputs = [
+            input_img,
+            tax_rank,
+            gf_sel,
+            other_sel,
+            cls_opacity,
+            tax_opacity,
+            growth_opacity,
+        ]
         predict_outputs = [
-            onehot_img,
-            multihot_img,
+            cls_img,
+            cls_legend,
+            cls_top,
+            cls_tree,
+            tax_img,
+            tax_legend,
+            tax_tree,
+            growth_img,
+            growth_legend,
+            growth_other,
+            growth_tree,
             display_state,
             class_probs_state,
             concept_probs_state,
-            pred_mask_state,
-            top_classes_html,
-            taxonomy_plot,
-            other_html,
             click_state,
-            onehot_base_state,
-            multihot_base_state,
-            onehot_legend,
-            multihot_legend,
+            cls_base_state,
+            tax_base_state,
+            growth_base_state,
         ]
-        predict_btn.click(
-            run_predict,
-            inputs=[input_img, onehot_mode, onehot_opacity, multihot_mode, multihot_opacity],
-            outputs=predict_outputs,
+
+        predict_btn.click(run_predict, inputs=predict_inputs, outputs=predict_outputs)
+
+        # Opacity sliders fire on release (not every drag tick); the rank/trait radios
+        # fire on user input only, so programmatically clearing the sibling radio does
+        # not re-trigger and loop.
+        cls_opacity.release(
+            recompose_cls,
+            [display_state, class_probs_state, concept_probs_state, cls_opacity, click_state],
+            [cls_img, cls_base_state, cls_legend],
         )
 
-        recompose_onehot_inputs = [
+        tax_inputs = [
             display_state,
             class_probs_state,
             concept_probs_state,
-            onehot_mode,
-            onehot_opacity,
+            tax_rank,
+            tax_opacity,
             click_state,
         ]
-        recompose_onehot_outputs = [onehot_img, onehot_base_state, onehot_legend]
-        recompose_multihot_inputs = [
-            display_state,
-            concept_probs_state,
-            multihot_mode,
-            multihot_opacity,
-            click_state,
-        ]
-        recompose_multihot_outputs = [multihot_img, multihot_base_state, multihot_legend]
-        # Dropdowns fire on discrete selection; opacity sliders fire on release (not
-        # every drag tick) to avoid a burst of full recompositions while dragging.
-        onehot_mode.change(recompose_onehot, recompose_onehot_inputs, recompose_onehot_outputs)
-        onehot_opacity.release(recompose_onehot, recompose_onehot_inputs, recompose_onehot_outputs)
-        multihot_mode.change(
-            recompose_multihot, recompose_multihot_inputs, recompose_multihot_outputs
+        tax_outputs = [tax_img, tax_base_state, tax_legend]
+        tax_rank.input(recompose_tax, tax_inputs, tax_outputs).then(
+            refresh_taxonomy_highlight,
+            [class_probs_state, concept_probs_state, click_state, tax_rank],
+            [cls_tree, tax_tree, growth_tree],
         )
-        multihot_opacity.release(
-            recompose_multihot, recompose_multihot_inputs, recompose_multihot_outputs
+        tax_opacity.release(recompose_tax, tax_inputs, tax_outputs)
+
+        gf_sel.input(
+            select_growth_form,
+            [display_state, concept_probs_state, gf_sel, growth_opacity, click_state],
+            [growth_img, growth_base_state, growth_legend, other_sel],
+        )
+        other_sel.input(
+            select_other_group,
+            [display_state, concept_probs_state, other_sel, growth_opacity, click_state],
+            [growth_img, growth_base_state, growth_legend, gf_sel],
+        )
+        growth_opacity.release(
+            recompose_growth,
+            [display_state, concept_probs_state, gf_sel, other_sel, growth_opacity, click_state],
+            [growth_img, growth_base_state, growth_legend],
         )
 
         click_inputs = [
             display_state,
             class_probs_state,
             concept_probs_state,
-            onehot_base_state,
-            multihot_base_state,
+            cls_base_state,
+            tax_base_state,
+            growth_base_state,
+            gf_sel,
+            other_sel,
+            click_state,
+            tax_rank,
         ]
         click_outputs = [
-            onehot_img,
-            multihot_img,
-            top_classes_html,
-            taxonomy_plot,
-            other_html,
+            cls_img,
+            cls_top,
+            cls_tree,
+            tax_img,
+            tax_tree,
+            growth_img,
+            growth_other,
+            growth_tree,
+            growth_legend,
             click_state,
         ]
-        onehot_img.select(on_click, click_inputs, click_outputs)
-        multihot_img.select(on_click, click_inputs, click_outputs)
+        cls_img.select(pixel_click, click_inputs, click_outputs)
+        tax_img.select(pixel_click, click_inputs, click_outputs)
+        growth_img.select(pixel_click, click_inputs, click_outputs)
         if sample_gallery is not None:
-            sample_gallery.select(pick_sample, inputs=None, outputs=input_img)
+            sample_gallery.select(pick_sample, inputs=None, outputs=input_img).then(
+                run_predict,
+                inputs=predict_inputs,
+                outputs=predict_outputs,
+            )
 
     return ui
 
@@ -646,7 +984,7 @@ def main(argv: list[str] | None = None) -> None:
         model.concept_classifier.in_channels,
     )
     build_ui(artifacts, model, device, taxonomy_csv).launch(
-        server_port=args.port, share=args.share, css=CSS
+        server_port=args.port, share=args.share, css=CSS, js=RESPONSIVE_JS
     )
 
 
