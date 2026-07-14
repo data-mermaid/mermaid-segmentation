@@ -230,3 +230,7 @@ __marimo__/
 
 # Gradio runtime artifacts (local TLS cert, etc.)
 .gradio/
+
+demo/.DS_Store
+
+.DS_Store
