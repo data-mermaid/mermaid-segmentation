@@ -32,6 +32,7 @@ from rendering import (
     ONEHOT_MODE_LABELS,
     build_morph_concept_choices,
     build_rank_index,
+    build_shared_name_colors,
     class_accent_rgb,
     compose_multihot_overlay,
     compose_onehot_overlay,
@@ -351,7 +352,10 @@ def build_ui(
 ) -> gr.Blocks:
     model_transform, display_transform = build_transforms(_input_size(artifacts))
     num_classes = max(artifacts.id2label.keys()) + 1
-    class_palette = make_color_palette(num_classes)
+    shared_name_colors = build_shared_name_colors(artifacts.id2label)
+    class_palette = make_color_palette(
+        num_classes, id2label=artifacts.id2label, shared_name_colors=shared_name_colors
+    )
 
     num_concepts = model.concept_classifier.in_channels
     concept_names = [
@@ -362,7 +366,9 @@ def build_ui(
 
     rank_index = build_rank_index(concept_names)
     rank_palettes = {
-        rank: make_rank_palette([value for _, value in entries], rank)
+        rank: make_rank_palette(
+            [value for _, value in entries], rank, shared_name_colors=shared_name_colors
+        )
         for rank, entries in rank_index.items()
     }
 
