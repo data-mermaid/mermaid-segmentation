@@ -10,6 +10,7 @@ model:
   neck_hidden_sizes: [256, 512, 1024, 1024]
   fusion_hidden_size: 256
   reassemble_factors: [4, 2, 1, 0.5]
+  # head_norm: batch   # only to load checkpoints trained before PR #152; new runs keep the GroupNorm default
   # LoRA adapters on the frozen DINOv3 attention projections.
   lora_r: 16
   lora_alpha: 32

@@ -10,5 +10,6 @@ model:
   neck_hidden_sizes: [256, 512, 1024, 1024]
   fusion_hidden_size: 256
   reassemble_factors: [4, 2, 1, 0.5]
+  # head_norm: batch   # only to load checkpoints trained before PR #152; new runs keep the GroupNorm default
   # No LoRA: the DINOv3 backbone is frozen and only the DPT head + concept
   # bottleneck layers are trained.

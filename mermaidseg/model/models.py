@@ -19,8 +19,8 @@ DEFAULT_LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 class ConceptBottleneckOutput(SemanticSegmenterOutput):
     """Segmenter output for concept-bottleneck models.
 
-    Both ``concept_outputs`` and ``concept_logits`` are retained intentionally:
-    logits feed the training loss; activations feed the class head and inference.
+    Both ``concept_outputs`` and ``concept_logits`` are retained intentionally: logits
+    feed the training loss; activations feed the class head and inference.
     ``hidden_states`` is unused (left ``None``) so activations are not overloaded.
     """
 
@@ -29,7 +29,8 @@ class ConceptBottleneckOutput(SemanticSegmenterOutput):
 
 
 class LinearClassifier(torch.nn.Module):
-    """A linear classifier module that performs pixel-wise classification on reshaped embeddings.
+    """A linear classifier module that performs pixel-wise classification on reshaped
+    embeddings.
 
     This module takes input embeddings, reshapes them to a 2D spatial format, and applies
     a 1x1 convolution to perform classification. It's commonly used as a classification
@@ -81,8 +82,8 @@ class LinearClassifier(torch.nn.Module):
 
 
 class ConceptHead(torch.nn.Module):
-    """A concept classification head module that performs pixel-wise classification on reshaped
-    embeddings.
+    """A concept classification head module that performs pixel-wise classification on
+    reshaped embeddings.
 
     This module takes input embeddings, reshapes them to a 2D spatial format, and
     applies a 1x1 convolution to perform classification. It's commonly used as a classification
@@ -192,18 +193,18 @@ class LinearDINOv3(torch.nn.Module):
         return SemanticSegmenterOutput(loss=loss, logits=logits)
 
     def freeze_encoder(self) -> None:
-        """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
-        parameters to `False`.
+        """Freezes the encoder layers of the model by setting the `requires_grad`
+        attribute of their parameters to `False`.
 
-        This prevents the encoder layers from being updated during training, effectively making them
-        static while allowing other parts of the model to be trained.
+        This prevents the encoder layers from being updated during training, effectively
+        making them static while allowing other parts of the model to be trained.
         """
         for param in self.encoder.parameters():
             param.requires_grad = False
 
     def unfreeze_encoder(self) -> None:
-        """Unfreezes the encoder layers of the model by setting the `requires_grad` attribute of all
-        parameters in the encoder to True.
+        """Unfreezes the encoder layers of the model by setting the `requires_grad`
+        attribute of all parameters in the encoder to True.
 
         This allows these layers to be trainable during the training process.
         """
@@ -310,18 +311,18 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         )
 
     def freeze_encoder(self) -> None:
-        """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
-        parameters to `False`.
+        """Freezes the encoder layers of the model by setting the `requires_grad`
+        attribute of their parameters to `False`.
 
-        This prevents the encoder layers from being updated during training, effectively making them
-        static while allowing other parts of the model to be trained.
+        This prevents the encoder layers from being updated during training, effectively
+        making them static while allowing other parts of the model to be trained.
         """
         for param in self.encoder.parameters():
             param.requires_grad = False
 
     def unfreeze_encoder(self) -> None:
-        """Unfreezes the encoder layers of the model by setting the `requires_grad` attribute of all
-        parameters in the encoder to True.
+        """Unfreezes the encoder layers of the model by setting the `requires_grad`
+        attribute of all parameters in the encoder to True.
 
         This allows these layers to be trainable during the training process.
         """
@@ -353,9 +354,9 @@ def _wrap_encoder_with_lora(
 ) -> torch.nn.Module:
     """Wrap a DINOv3 encoder with PEFT LoRA adapters.
 
-    The pretrained backbone weights are frozen and only the injected low-rank adapter matrices
-    remain trainable, which keeps the parameter/optimizer footprint small while still adapting the
-    attention projections.
+    The pretrained backbone weights are frozen and only the injected low-rank adapter
+    matrices remain trainable, which keeps the parameter/optimizer footprint small while
+    still adapting the attention projections.
     """
     lora_config = LoraConfig(
         r=lora_r,
@@ -384,6 +385,11 @@ class DPTHead(torch.nn.Module):
         fusion_hidden_size: Channel width of the RefineNet fusion blocks.
         reassemble_factors: Spatial resampling factor per stage.
         dropout: Dropout applied inside the conv head.
+        head_norm: Normalization after the head's 3x3 conv: "group" (default;
+            batch-independent, AMP-safe) or "batch" (legacy; reconstructs the
+            pre-#152 head so checkpoints trained with BatchNorm strict-load).
+            Use "batch" only to load such checkpoints — training new models
+            with BatchNorm reintroduces the running-stat instability #152 fixed.
     """
 
     def __init__(
@@ -396,6 +402,7 @@ class DPTHead(torch.nn.Module):
         fusion_hidden_size: int = 256,
         reassemble_factors: Sequence[float] = (4, 2, 1, 0.5),
         dropout: float = 0.1,
+        head_norm: str = "group",
     ):
         super().__init__()
         self.token_width = token_width
@@ -412,14 +419,21 @@ class DPTHead(torch.nn.Module):
             neck_ignore_stages=[],
         )
         self.neck = DPTNeck(dpt_config)
-        norm_groups = min(32, fusion_hidden_size)
-        while fusion_hidden_size % norm_groups != 0:
-            norm_groups -= 1
+        if head_norm == "group":
+            norm_groups = min(32, fusion_hidden_size)
+            while fusion_hidden_size % norm_groups != 0:
+                norm_groups -= 1
+            norm: torch.nn.Module = torch.nn.GroupNorm(norm_groups, fusion_hidden_size)
+        elif head_norm == "batch":
+            # Reconstructs the pre-GroupNorm head (PR #152) so legacy checkpoints strict-load.
+            norm = torch.nn.BatchNorm2d(fusion_hidden_size)
+        else:
+            raise ValueError(f"head_norm must be 'group' or 'batch', got {head_norm!r}.")
         self.head = torch.nn.Sequential(
             torch.nn.Conv2d(
                 fusion_hidden_size, fusion_hidden_size, kernel_size=3, padding=1, bias=False
             ),
-            torch.nn.GroupNorm(norm_groups, fusion_hidden_size),
+            norm,
             torch.nn.ReLU(inplace=True),
             torch.nn.Dropout(dropout),
             torch.nn.Conv2d(fusion_hidden_size, out_channels, kernel_size=1),
@@ -450,8 +464,8 @@ class DPTHead(torch.nn.Module):
         """Resolve the (height, width) patch grid for ``num_patch_tokens``.
 
         Uses the configured token grid when it matches; otherwise reshapes
-        ``num_patch_tokens`` while preserving the configured aspect ratio (which
-        handles square and non-square inputs at arbitrary resolutions).
+        ``num_patch_tokens`` while preserving the configured aspect ratio (which handles
+        square and non-square inputs at arbitrary resolutions).
         """
         if num_patch_tokens == self.token_height * self.token_width:
             return self.token_height, self.token_width
@@ -471,9 +485,9 @@ class DPTHead(torch.nn.Module):
 class _DPTDINOv3Base(torch.nn.Module):
     """Shared backbone/head wiring for the DPT DINOv3 models.
 
-    The encoder can either be adapted with PEFT LoRA (``use_lora=True``) or used as a plain frozen
-    backbone (``use_lora=False``), in which case only the DPT head (and any downstream concept
-    layers) is trained.
+    The encoder can either be adapted with PEFT LoRA (``use_lora=True``) or used as a
+    plain frozen backbone (``use_lora=False``), in which case only the DPT head (and any
+    downstream concept layers) is trained.
     """
 
     def __init__(
@@ -486,6 +500,7 @@ class _DPTDINOv3Base(torch.nn.Module):
         fusion_hidden_size: int,
         reassemble_factors: Sequence[float],
         head_out_channels: int,
+        head_norm: str = "group",
         use_lora: bool = True,
         lora_r: int = 16,
         lora_alpha: int = 32,
@@ -546,6 +561,7 @@ class _DPTDINOv3Base(torch.nn.Module):
             neck_hidden_sizes=neck_hidden_sizes,
             fusion_hidden_size=fusion_hidden_size,
             reassemble_factors=reassemble_factors,
+            head_norm=head_norm,
         )
 
         # No-LoRA models default to a frozen backbone (head-only training).
@@ -555,8 +571,9 @@ class _DPTDINOv3Base(torch.nn.Module):
     def _encode(self, x: torch.Tensor, **kwargs: Any) -> list[torch.Tensor]:
         """Run the encoder and return the selected hidden states (CLS + patches).
 
-        When the (non-LoRA) backbone is frozen the encoder pass runs under ``torch.no_grad`` to save
-        memory; the LoRA path always keeps gradients so the adapters can learn.
+        When the (non-LoRA) backbone is frozen the encoder pass runs under
+        ``torch.no_grad`` to save memory; the LoRA path always keeps gradients so the
+        adapters can learn.
         """
         if self._encoder_frozen:
             with torch.no_grad():
