@@ -55,15 +55,8 @@ from mermaidseg.dataset_reconciliation import (
     prepare_splits_for_registry,
 )
 from mermaidseg.datasets import (
+    DATASET_REGISTRY,
     BaseCoralDataset,
-    BenthosYuvalCoralsDataset,
-    CatlinSeaviewDataset,
-    CoralNetDataset,
-    CoralscapesDataset,
-    CoralscapesV2Dataset,
-    MermaidDataset,
-    MooreaLabeledCoralsDataset,
-    PacificLabeledCoralsDataset,
     worker_init_fn,
 )
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
@@ -367,30 +360,16 @@ def _run_training(args: argparse.Namespace) -> None:
         torch.cuda.manual_seed_all(seed)
     logging.info("Seed: %d", seed)
 
-    DATASET_CLASSES = {
-        "pacific_labeled_corals": PacificLabeledCoralsDataset,
-        "moorea_labeled_corals": MooreaLabeledCoralsDataset,
-        "catlin_seaview": CatlinSeaviewDataset,
-        "mermaid": MermaidDataset,
-        "coralnet": CoralNetDataset,
-        "coralscapes": CoralscapesDataset,
-        "coralscapes_v2": CoralscapesV2Dataset,
-        "benthos_yuval": BenthosYuvalCoralsDataset,
-    }
-
-    # coralscapes uses a different signature (no `padding`)
-    def _build(name, split_cfg):
-        cls = DATASET_CLASSES[name]
-        if name in ("coralscapes", "coralscapes_v2", "benthos_yuval"):
-            return cls(**split_cfg)
-        return cls(**split_cfg, padding=cfg.training.padding)
-
+    # Every dataset constructor accepts ``padding`` (point-annotation datasets use it;
+    # dense/HF datasets accept and ignore it), so instantiation is uniform.
     dataset_dict: dict[tuple[str, str], object] = {}
-    for name in DATASET_CLASSES:
+    for name in DATASET_REGISTRY:
         for split, split_cfg in cfg.data[name].items():
             if split_cfg is None or split_cfg == "None":
                 continue
-            dataset_dict[(name, split)] = _build(name, split_cfg)
+            dataset_dict[(name, split)] = DATASET_REGISTRY[name](
+                **split_cfg, padding=cfg.training.padding
+            )
             print(f"{name:>24s} - {split:<5s}: {len(dataset_dict[(name, split)]):>7d} samples")
 
     loader_kwargs = {
