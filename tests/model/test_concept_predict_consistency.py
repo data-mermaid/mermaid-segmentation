@@ -101,3 +101,50 @@ def test_batch_predict_postprocesses_sigmoid_not_raw_logits(monkeypatch):
     assert not torch.equal(from_sigmoid, from_raw), (
         "sigmoid vs raw must differ, else test is vacuous"
     )
+
+
+def test_batch_predict_matches_batch_predict_loss(monkeypatch):
+    """The two paths must derive the same concept->label map from the same logits — the
+    actual eval-vs-train consistency claim.
+
+    Both now do sigmoid(logits.float()) -> postprocess. The loss itself is irrelevant
+    here, so it is stubbed out.
+    """
+    meta = _make_concept_meta(monkeypatch)
+    meta.loss = lambda *_a, **_k: (torch.tensor(0.0), {})  # only outputs derivation matters
+    inputs = torch.randn(1, 3, 8, 8)
+    target_labels = torch.ones(1, 8, 8, dtype=torch.long)
+    target_concepts = torch.zeros(1, NUM_CONCEPTS, 8, 8)
+
+    infer_outputs, _ = meta.batch_predict(inputs)
+    _, loss_outputs, _, _ = meta.batch_predict_loss(inputs, target_labels, target_concepts)
+
+    assert torch.equal(infer_outputs.cpu(), loss_outputs.cpu()), (
+        "batch_predict and batch_predict_loss must produce identical concept->label maps"
+    )
+
+
+def test_batch_predict_handles_low_precision_logits(monkeypatch):
+    """Under AMP, model logits can be bf16.
+
+    The `.float()` cast is required: bf16 cannot pass through postprocess's
+    .cpu().numpy() (raises TypeError), and a low-precision sigmoid near the boundary can
+    flip the >0.5 assignment. Differential guard: a bf16 model must not crash and must
+    produce the same label map as the fp32 model. Without the `.float()` cast the bf16
+    call raises.
+    """
+    meta = _make_concept_meta(monkeypatch)
+    inputs = torch.randn(1, 3, 8, 8)
+    ref_outputs, _ = meta.batch_predict(inputs)  # fp32 stub reference
+
+    class _Bf16Model(nn.Module):
+        def forward(self, x: torch.Tensor):
+            b, _c, h, w = x.shape
+            logits = torch.full((b, NUM_CONCEPTS, h, w), -5.0, dtype=torch.bfloat16)
+            logits[:, _WIN_CONCEPT] = _WIN_LOGIT
+            return types.SimpleNamespace(logits=logits)
+
+    meta.model = _Bf16Model()
+    outputs, _ = meta.batch_predict(inputs)  # must not raise; bf16 .numpy() would without .float()
+
+    assert torch.equal(outputs.cpu(), ref_outputs.cpu()), "bf16 path must match fp32 after .float()"

@@ -359,11 +359,14 @@ class MetaModel:
             concept_outputs = segmentation_outputs.concept_outputs
             outputs = segmentation_outputs.logits
         elif self.training_mode == "concept":
-            # Sigmoid BEFORE postprocess: postprocess_predicted_concepts thresholds at 0.5
-            # as a probability, so raw logits must be squashed first. This matches
-            # batch_predict_loss; feeding raw logits here previously made eval/inference
+            # Cast to fp32 then sigmoid BEFORE postprocess, exactly as batch_predict_loss does.
+            # `.float()` matters under AMP: the autocast logits can be fp16/bf16, and (a) a
+            # low-precision sigmoid near the boundary can round to exactly 0.5 and flip the
+            # strict >0.5 assignment, (b) bf16 cannot pass through postprocess's .cpu().numpy().
+            # postprocess_predicted_concepts thresholds at 0.5 as a probability, so raw logits
+            # must be squashed first — feeding raw logits here previously made eval/inference
             # disagree with the training loop's concept->label maps.
-            concept_outputs = torch.sigmoid(segmentation_outputs.logits)
+            concept_outputs = torch.sigmoid(segmentation_outputs.logits.float())
             outputs = self._concepts_to_label_map(concept_outputs)
         else:
             outputs = segmentation_outputs.logits
