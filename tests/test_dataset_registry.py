@@ -9,20 +9,30 @@ import inspect
 from mermaidseg import datasets as ds_pkg
 from mermaidseg.datasets import DATASET_REGISTRY
 
-_EXPECTED = {
-    "coralnet": "CoralNetDataset",
-    "mermaid": "MermaidDataset",
-    "catlin_seaview": "CatlinSeaviewDataset",
-    "moorea_labeled_corals": "MooreaLabeledCoralsDataset",
-    "pacific_labeled_corals": "PacificLabeledCoralsDataset",
-    "benthos_yuval": "BenthosYuvalCoralsDataset",
-    "coralscapes": "CoralscapesDataset",
-    "coralscapes_v2": "CoralscapesV2Dataset",
-}
+# The canonical order — must match the pre-registry hardcoded DATASET_CLASSES order in
+# scripts/train.py, because iteration order flows into ConcatDataset member order and thus
+# the seeded DataLoader's shuffled sample sequence. Reordering silently changes what a given
+# seed trains on, breaking baseline reproducibility — so it is asserted, not just the mapping.
+_EXPECTED_ORDER = [
+    ("pacific_labeled_corals", "PacificLabeledCoralsDataset"),
+    ("moorea_labeled_corals", "MooreaLabeledCoralsDataset"),
+    ("catlin_seaview", "CatlinSeaviewDataset"),
+    ("mermaid", "MermaidDataset"),
+    ("coralnet", "CoralNetDataset"),
+    ("coralscapes", "CoralscapesDataset"),
+    ("coralscapes_v2", "CoralscapesV2Dataset"),
+    ("benthos_yuval", "BenthosYuvalCoralsDataset"),
+]
 
 
 def test_registry_maps_expected_names_to_classes():
-    assert {name: cls.__name__ for name, cls in DATASET_REGISTRY.items()} == _EXPECTED
+    assert {name: cls.__name__ for name, cls in DATASET_REGISTRY.items()} == dict(_EXPECTED_ORDER)
+
+
+def test_registry_preserves_canonical_order():
+    """Order is behavior-affecting (ConcatDataset order → seeded shuffle sequence), so
+    it must match the pre-registry DATASET_CLASSES order for seed-reproducible runs."""
+    assert [(name, cls.__name__) for name, cls in DATASET_REGISTRY.items()] == _EXPECTED_ORDER
 
 
 def test_registry_excludes_unwired_ucsd_mosaics():

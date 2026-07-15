@@ -21,15 +21,18 @@ from mermaidseg.datasets.ucsd_mosaics import UCSDMosaicsDataset
 # wired into training.
 # NOTE: not annotated as ``type[BaseCoralDataset]`` because Coralscapes(_v2) currently
 # subclasses ``torch.utils.data.Dataset`` directly rather than ``BaseCoralDataset``.
+# Order matters: it flows through dataset_dict → ConcatDataset member order → the
+# index-to-sample mapping the seeded DataLoader shuffles over, so it must match the prior
+# hardcoded DATASET_CLASSES order to keep the same seed reproducing the same run.
 DATASET_REGISTRY: dict[str, type] = {
-    "coralnet": CoralNetDataset,
-    "mermaid": MermaidDataset,
-    "catlin_seaview": CatlinSeaviewDataset,
-    "moorea_labeled_corals": MooreaLabeledCoralsDataset,
     "pacific_labeled_corals": PacificLabeledCoralsDataset,
-    "benthos_yuval": BenthosYuvalCoralsDataset,
+    "moorea_labeled_corals": MooreaLabeledCoralsDataset,
+    "catlin_seaview": CatlinSeaviewDataset,
+    "mermaid": MermaidDataset,
+    "coralnet": CoralNetDataset,
     "coralscapes": CoralscapesDataset,
     "coralscapes_v2": CoralscapesV2Dataset,
+    "benthos_yuval": BenthosYuvalCoralsDataset,
 }
 
 __all__ = [
