@@ -321,14 +321,12 @@ class MetaModel:
         return source_labels_to_concepts(source_labels, self.source_to_concepts_lookup)
 
     def _concepts_to_label_map(self, concept_scores: torch.Tensor) -> torch.Tensor:
-        """Reduce per-pixel concept scores to a target-label map on-device.
+        """Reduce per-pixel concept probabilities to a target-label map on-device.
 
         Wraps :func:`postprocess_predicted_concepts` (hierarchical argmax over the
         concept matrix). Shared by ``batch_predict``, ``batch_predict_loss``, and the
-        concept-mode metric accumulation. NOTE: callers currently pass different score
-        spaces — ``batch_predict`` passes raw concept logits, ``batch_predict_loss``
-        passes sigmoid probabilities — which ``postprocess_predicted_concepts``
-        thresholds identically at 0.5; this helper preserves whatever the caller passes.
+        concept-mode metric accumulation. All callers pass sigmoid probabilities (in
+        ``[0, 1]``), which ``postprocess_predicted_concepts`` thresholds at 0.5.
         """
         return postprocess_predicted_concepts(
             concept_scores.detach().cpu().numpy(),
@@ -361,9 +359,12 @@ class MetaModel:
             concept_outputs = segmentation_outputs.concept_outputs
             outputs = segmentation_outputs.logits
         elif self.training_mode == "concept":
-            concept_outputs = segmentation_outputs.logits
+            # Sigmoid BEFORE postprocess: postprocess_predicted_concepts thresholds at 0.5
+            # as a probability, so raw logits must be squashed first. This matches
+            # batch_predict_loss; feeding raw logits here previously made eval/inference
+            # disagree with the training loop's concept->label maps.
+            concept_outputs = torch.sigmoid(segmentation_outputs.logits)
             outputs = self._concepts_to_label_map(concept_outputs)
-            concept_outputs = torch.sigmoid(concept_outputs)
         else:
             outputs = segmentation_outputs.logits
             concept_outputs = None
