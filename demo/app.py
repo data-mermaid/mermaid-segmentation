@@ -107,7 +107,7 @@ CSS = """
 }
 #mermaid-header .mermaid-header-logo svg { width: 46px; height: 48px; display: block; flex: 0 0 auto; }
 #mermaid-header .mermaid-header-title {
-    font-size: 1.35rem; font-weight: 700; line-height: 1.25; color: #ffffff;
+    font-size: 1.35rem; font-weight: 700; line-height: 1.25; color: #ffffff !important;
 }
 #mermaid-header .mermaid-header-title-short { display: none; }
 @media (max-width: 640px) {
@@ -115,7 +115,7 @@ CSS = """
     #mermaid-header .mermaid-header-title-short { display: inline; }
 }
 #mermaid-header .mermaid-header-subtitle {
-    margin-top: 2px; color: rgba(255, 255, 255, 0.85); font-size: 0.95rem;
+    margin-top: 2px; color: rgba(255, 255, 255, 0.85) !important; font-size: 0.95rem;
 }
 /* Gradio's base CSS colors <b> near-black; keep it readable on the dark bar. */
 #mermaid-header .mermaid-header-subtitle b { color: #ffffff; }
