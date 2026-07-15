@@ -3,9 +3,7 @@
 # spaces in requirements breaks the ZeroGPU runtime). torch stays unpinned so the
 # ZeroGPU-preinstalled build (2.11) is kept.
 #
-# Pinned to demo/label-norm-torch-relax (SHA 7e8e0a0) = training SHA c36f1ff + a
-# torch<2.12 bound relax so pip doesn't downgrade the ZeroGPU torch. The checkpoint
-# was trained with c36f1ff's model code (activated [0,1] concept hidden_states +
-# token-grid inference); main's GroupNorm DPT head + concept_outputs contract would
-# break it. Repin to main once a head_norm option lands there.
-mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@7e8e0a06ef06048a8727c5b3612c80ee3c26a20e
+# mermaidseg pin must use torch>=2.4,<2.12 (not <2.8) so pip does not replace
+# ZeroGPU torch 2.11 with PyPI 2.7.x. matplotlib is required by rendering.py.
+matplotlib>=3.10.9
+mermaidseg @ git+https://github.com/data-mermaid/mermaid-segmentation.git@037fe5cfe1f2b693ce9c412b11095278ac39c3b1

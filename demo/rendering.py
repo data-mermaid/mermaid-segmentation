@@ -40,69 +40,10 @@ ONEHOT_MODE_LABELS: dict[str, str] = {
 }
 
 BACKGROUND_IDS: frozenset[int] = frozenset({0})
-SAND_IDS: frozenset[int] = frozenset({58})
-HARD_SUBSTRATE_IDS: frozenset[int] = frozenset({7, 55, 56, 57})
-ALGAE_IDS: frozenset[int] = frozenset({9, 10, 12, 26, 34, 36, 47, 60, 67, 70})
-SPONGE_IDS: frozenset[int] = frozenset({64})
-CORAL_IDS: frozenset[int] = frozenset(
-    {
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        8,
-        11,
-        13,
-        14,
-        15,
-        16,
-        17,
-        18,
-        19,
-        20,
-        21,
-        22,
-        23,
-        24,
-        25,
-        27,
-        28,
-        29,
-        30,
-        31,
-        32,
-        33,
-        35,
-        37,
-        38,
-        39,
-        40,
-        41,
-        42,
-        43,
-        44,
-        45,
-        46,
-        48,
-        49,
-        50,
-        51,
-        52,
-        53,
-        54,
-        61,
-        62,
-        63,
-        65,
-        66,
-        68,
-        69,
-    }
-)
 SAND_RGB: tuple[int, int, int] = (237, 201, 145)
 OTHER_FALLBACK_RGB: tuple[int, int, int] = (80, 60, 100)
+ANTHRO_RGB: tuple[int, int, int] = (140, 140, 150)
+BG_RGB: tuple[int, int, int] = (0, 0, 0)
 
 _RANK_HUE_RANGES: dict[str, tuple[float, float]] = {
     "kingdom": (0, 360),
@@ -112,6 +53,70 @@ _RANK_HUE_RANGES: dict[str, tuple[float, float]] = {
     "family": (0, 720),
     "genus": (0, 1080),
 }
+
+# Name-based semantic groups for MERMAID classes (ids in this file went stale vs id2label).
+_SUBSTRATE_LABELS: frozenset[str] = frozenset(
+    {"bare substrate", "rock", "rubble", "algae covered substrate"}
+)
+_ALGAE_LABELS: frozenset[str] = frozenset(
+    {
+        "crustose coralline algae",
+        "cyanobacteria",
+        "dictyota",
+        "halimeda",
+        "lobophora",
+        "macroalgae",
+        "padina",
+        "sargassum",
+        "seagrass",
+        "turbinaria-algae",
+        "turf algae",
+    }
+)
+_SPONGE_LABELS: frozenset[str] = frozenset({"sponge"})
+_ANTHRO_LABELS: frozenset[str] = frozenset(
+    {"human", "human-made structure", "transect tools", "anthropogenic"}
+)
+_BG_LABELS: frozenset[str] = frozenset({"ignore", "background", "dark"})
+_SAND_LABELS: frozenset[str] = frozenset({"sand"})
+# Non-coral biota (new ``fish`` class must not share the scleractinian magenta ramp).
+_FAUNA_LABELS: frozenset[str] = frozenset({"fish", "sea urchin", "tridacna giant clam"})
+# Broad MERMAID groups kept out of the per-genus coral ramp.
+_COARSE_LABELS: frozenset[str] = frozenset({"hard coral", "soft coral", "gorgonian", "zoanthid"})
+# Optional taxonomy-rank values that should reuse a MERMAID class color (name ≠ class).
+_TAXONOMY_COLOR_ALIASES: dict[str, tuple[str, ...]] = {
+    "fish": ("chordata",),
+    "sponge": ("porifera",),
+    "sea urchin": ("echinodermata",),
+    "hard coral": ("scleractinia", "hexacorallia"),
+    "soft coral": ("octocorallia",),
+    "zoanthid": ("zoantharia",),
+}
+
+
+def _normalize_label(name: str) -> str:
+    return name.strip().lower()
+
+
+def _semantic_bucket(label: str) -> str:
+    n = _normalize_label(label)
+    if n in _BG_LABELS:
+        return "bg"
+    if n in _SAND_LABELS:
+        return "sand"
+    if n in _SUBSTRATE_LABELS:
+        return "substrate"
+    if n in _ALGAE_LABELS:
+        return "algae"
+    if n in _SPONGE_LABELS:
+        return "sponge"
+    if n in _ANTHRO_LABELS:
+        return "anthro"
+    if n in _FAUNA_LABELS:
+        return "fauna"
+    if n in _COARSE_LABELS:
+        return "coarse"
+    return "coral"
 
 
 def _hsv_ramp(
@@ -144,35 +149,130 @@ def _gray_ramp(n: int, v_range: tuple[int, int] = (80, 180)) -> NDArray[np.uint8
     return np.stack([values, values, values], axis=1).astype(np.uint8)
 
 
-def make_color_palette(num_classes: int) -> NDArray[np.uint8]:
-    palette = np.zeros((num_classes, 3), dtype=np.uint8)
+def build_shared_name_colors(id2label: dict[int, str]) -> dict[str, NDArray[np.uint8]]:
+    """Assign RGB colors keyed by normalized label name for MERMAID ↔ taxonomy sharing.
 
-    def _assign(ids: frozenset[int], colors: NDArray[np.uint8]) -> None:
-        present = sorted(i for i in ids if 0 <= i < num_classes)
-        for idx, cid in enumerate(present):
-            palette[cid] = colors[idx]
+    Exact name matches (``acropora`` class ↔ ``acropora`` genus) reuse the same RGB.
+    Binomial MERMAID labels without a same-named genus-level class also register their
+    first token (``agaricia agaricites`` → ``agaricia``) so the genus overlay matches.
+    Multi-species owners of the same token (``orbicella annularis`` / ``orbicella
+    faveolata``) still seed the genus when they share a semantic bucket; mixed buckets
+    (``turbinaria-algae`` / ``turbinaria-coral``) do not.
+    """
+    by_bucket: dict[str, list[tuple[int, str]]] = {
+        "bg": [],
+        "sand": [],
+        "substrate": [],
+        "algae": [],
+        "sponge": [],
+        "anthro": [],
+        "fauna": [],
+        "coarse": [],
+        "coral": [],
+    }
+    for cid, name in sorted(id2label.items()):
+        by_bucket[_semantic_bucket(name)].append((cid, name))
 
-    _assign(HARD_SUBSTRATE_IDS, _gray_ramp(len(HARD_SUBSTRATE_IDS)))
-    _assign(
-        ALGAE_IDS,
+    id_colors: dict[int, NDArray[np.uint8]] = {}
+    for cid, _ in by_bucket["bg"]:
+        id_colors[cid] = np.asarray(BG_RGB, dtype=np.uint8)
+    for cid, _ in by_bucket["sand"]:
+        id_colors[cid] = np.asarray(SAND_RGB, dtype=np.uint8)
+    for cid, _ in by_bucket["anthro"]:
+        id_colors[cid] = np.asarray(ANTHRO_RGB, dtype=np.uint8)
+
+    def _paint(bucket: str, colors: NDArray[np.uint8]) -> None:
+        entries = by_bucket[bucket]
+        for i, (cid, _) in enumerate(entries):
+            id_colors[cid] = (
+                colors[i] if i < len(colors) else np.asarray(OTHER_FALLBACK_RGB, dtype=np.uint8)
+            )
+
+    _paint("substrate", _gray_ramp(len(by_bucket["substrate"])))
+    _paint(
+        "algae",
         _hsv_ramp(
-            len(ALGAE_IDS), hue_deg_range=(90, 135), s_range=(0.75, 0.95), v_range=(0.55, 0.9)
+            len(by_bucket["algae"]),
+            hue_deg_range=(90, 135),
+            s_range=(0.75, 0.95),
+            v_range=(0.55, 0.9),
         ),
     )
-    _assign(SPONGE_IDS, _hsv_ramp(len(SPONGE_IDS), hue_deg_range=(180, 215)))
-    _assign(CORAL_IDS, _hsv_ramp(len(CORAL_IDS), hue_deg_range=(285, 390)))
+    _paint("sponge", _hsv_ramp(len(by_bucket["sponge"]), hue_deg_range=(180, 215)))
+    _paint(
+        "fauna",
+        _hsv_ramp(
+            len(by_bucket["fauna"]),
+            hue_deg_range=(195, 250),
+            s_range=(0.7, 0.95),
+            v_range=(0.65, 0.95),
+        ),
+    )
+    _paint(
+        "coarse",
+        _hsv_ramp(
+            len(by_bucket["coarse"]),
+            hue_deg_range=(15, 55),
+            s_range=(0.55, 0.85),
+            v_range=(0.55, 0.9),
+        ),
+    )
+    _paint("coral", _hsv_ramp(len(by_bucket["coral"]), hue_deg_range=(285, 390)))
 
-    for sid in SAND_IDS:
-        if 0 <= sid < num_classes:
-            palette[sid] = SAND_RGB
+    name_colors: dict[str, NDArray[np.uint8]] = {}
+    exact_keys = {_normalize_label(name) for name in id2label.values()}
+    # Count first-token candidates so we don't map conflicting splits
+    # (e.g. turbinaria-algae + turbinaria-coral) onto one genus color.
+    token_owners: dict[str, list[str]] = {}
+    for name in id2label.values():
+        key = _normalize_label(name)
+        parts = key.replace("-", " ").split()
+        if len(parts) >= 2 and parts[0] not in exact_keys:
+            token_owners.setdefault(parts[0], []).append(key)
 
-    assigned = BACKGROUND_IDS | SAND_IDS | HARD_SUBSTRATE_IDS | ALGAE_IDS | SPONGE_IDS | CORAL_IDS
+    for cid, name in sorted(id2label.items()):
+        color = id_colors.get(cid, np.asarray(OTHER_FALLBACK_RGB, dtype=np.uint8))
+        key = _normalize_label(name)
+        name_colors[key] = color
+        parts = key.replace("-", " ").split()
+        if len(parts) >= 2 and parts[0] not in exact_keys:
+            owners = token_owners.get(parts[0], [])
+            owner_buckets = {_semantic_bucket(owner) for owner in owners}
+            # Seed when owners agree on bucket (orbicella spp.); skip mixed (turbinaria-*).
+            if len(owner_buckets) == 1:
+                name_colors.setdefault(parts[0], color)
+        for alias in _TAXONOMY_COLOR_ALIASES.get(key, ()):
+            name_colors.setdefault(alias, color)
+    return name_colors
+
+
+def make_color_palette(
+    num_classes: int,
+    id2label: dict[int, str] | None = None,
+    shared_name_colors: dict[str, NDArray[np.uint8]] | None = None,
+) -> NDArray[np.uint8]:
+    """Build the MERMAID-class RGB LUT.
+
+    Prefer ``shared_name_colors`` (from ``build_shared_name_colors``) so class overlays
+    stay aligned with taxonomy overlays for matching names. Falls back to a name-based
+    rebuild when ``id2label`` is given; legacy ID-group assignment is no longer used.
+    """
+    palette = np.zeros((num_classes, 3), dtype=np.uint8)
+    if shared_name_colors is None and id2label is not None:
+        shared_name_colors = build_shared_name_colors(id2label)
+    if shared_name_colors is not None and id2label is not None:
+        for cid in range(num_classes):
+            name = id2label.get(cid)
+            if name is None:
+                palette[cid] = OTHER_FALLBACK_RGB
+                continue
+            color = shared_name_colors.get(_normalize_label(name))
+            palette[cid] = color if color is not None else OTHER_FALLBACK_RGB
+        return palette
+
+    # Minimal fallback if called without labels (tests / legacy).
     for cid in range(num_classes):
-        if cid not in assigned and cid not in BACKGROUND_IDS:
-            palette[cid] = OTHER_FALLBACK_RGB
-    for bid in BACKGROUND_IDS:
-        if 0 <= bid < num_classes:
-            palette[bid] = (0, 0, 0)
+        palette[cid] = BG_RGB if cid == 0 else OTHER_FALLBACK_RGB
     return palette
 
 
@@ -233,11 +333,34 @@ def load_taxonomy_parents(csv_path: str | Path) -> dict[str, str]:
     return parents
 
 
-def make_rank_palette(values: list[str], rank: str) -> dict[str, NDArray[np.uint8]]:
-    sorted_values = sorted(values)
+def make_rank_palette(
+    values: list[str],
+    rank: str,
+    shared_name_colors: dict[str, NDArray[np.uint8]] | None = None,
+) -> dict[str, NDArray[np.uint8]]:
+    """Build a per-taxon RGB map for one taxonomic rank.
+
+    Values whose normalized name appear in ``shared_name_colors`` (MERMAID class names,
+    plus first-token seeds for species-only classes) reuse that RGB so the Taxonomy
+    overlay matches the MERMAID-class overlay. Remaining taxa keep the rank HSV ramp.
+    Higher ranks (family/order/…) almost never share names with MERMAID classes, so they
+    stay mostly independent by design.
+    """
+    sorted_values = sorted(set(values))
     hue_range = _RANK_HUE_RANGES.get(rank, (0, 360))
-    colors = _hsv_ramp(len(sorted_values), hue_deg_range=hue_range)
-    return {value: colors[i] for i, value in enumerate(sorted_values)}
+    shared = shared_name_colors or {}
+    unmatched = [v for v in sorted_values if _normalize_label(v) not in shared]
+    ramp = _hsv_ramp(len(unmatched), hue_deg_range=hue_range)
+    ramp_by_value = {v: ramp[i] for i, v in enumerate(unmatched)}
+
+    palette: dict[str, NDArray[np.uint8]] = {}
+    for value in sorted_values:
+        key = _normalize_label(value)
+        if key in shared:
+            palette[value] = shared[key]
+        else:
+            palette[value] = ramp_by_value[value]
+    return palette
 
 
 def _blend(
@@ -325,8 +448,8 @@ def overlay_legend_items(
 ) -> list[tuple[str, tuple[int, int, int], float]]:
     """Categories present in the one-hot overlay's argmax, sorted by pixel cover.
 
-    Mirrors the argmax that ``compose_onehot_overlay`` draws so the legend matches the overlay
-    exactly. Returns ``(label, (r, g, b), coverage_fraction)`` triples.
+    Mirrors the argmax that ``compose_onehot_overlay`` draws so the legend matches the
+    overlay exactly. Returns ``(label, (r, g, b), coverage_fraction)`` triples.
     """
     items: list[tuple[str, tuple[int, int, int], float]] = []
     if mode == "classes":
@@ -368,7 +491,8 @@ def render_multihot_legend(
     cmap: str = "viridis",
     stops: int = 12,
 ) -> str:
-    """Color ramp for the selected multi-hot concept, with optional clicked-pixel readout."""
+    """Color ramp for the selected multi-hot concept, with optional clicked-pixel
+    readout."""
     import matplotlib
 
     colormap = matplotlib.colormaps[cmap]
@@ -506,7 +630,8 @@ def rank_highlight_rgb(
     rank_index: dict[str, list[tuple[int, str]]],
     rank_palettes: dict[str, dict[str, NDArray[np.uint8]]],
 ) -> tuple[int, int, int] | None:
-    """RGB for the top taxon at ``highlight_rank``, matching the overlay color key."""
+    """RGB for the top taxon at ``highlight_rank``, matching the taxonomy overlay
+    key."""
     if not highlight_rank:
         return None
     candidates = _rank_candidates(concept_probs_at_pixel, rank_index, highlight_rank, top_k=1)
@@ -517,6 +642,18 @@ def rank_highlight_rgb(
     if color is None:
         return None
     return int(color[0]), int(color[1]), int(color[2])
+
+
+def class_accent_rgb(
+    class_probs_at_pixel: NDArray[np.float32],
+    class_palette: NDArray[np.uint8],
+    id2label: dict[int, str],
+) -> tuple[tuple[int, int, int], str]:
+    """Top MERMAID-class color + label at a pixel (matches the MERMAID overlay key)."""
+    idx = int(class_probs_at_pixel.argmax())
+    color = class_palette[idx]
+    label = id2label.get(idx, f"class_{idx}")
+    return (int(color[0]), int(color[1]), int(color[2])), label
 
 
 def top_class_skips_taxonomy(
@@ -539,6 +676,14 @@ def render_taxonomy_skipped(
     )
 
 
+def _swatch_html(r: int, g: int, b: int) -> str:
+    return (
+        f'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;'
+        f"background:rgb({r},{g},{b});margin-right:6px;vertical-align:middle;"
+        f'border:1px solid rgba(128,128,128,0.35)"></span>'
+    )
+
+
 def render_taxonomy_tree(
     concept_probs_at_pixel: NDArray[np.float32] | None,
     rank_index: dict[str, list[tuple[int, str]]],
@@ -547,8 +692,15 @@ def render_taxonomy_tree(
     title: str = "Taxonomy at clicked pixel",
     highlight_rank: str | None = None,
     highlight_rgb: tuple[int, int, int] | None = None,
+    accent_rgb: tuple[int, int, int] | None = None,
+    accent_label: str | None = None,
 ) -> str:
-    """Vertical HTML readout: one row per rank, top candidates as fixed-size chips."""
+    """Vertical HTML readout: one row per rank, top candidates as fixed-size chips.
+
+    ``highlight_rank`` / ``highlight_rgb`` mark the Taxonomy-tab overlay rank (same
+    palette as that overlay). ``accent_rgb`` / ``accent_label`` tint the panel to the
+    MERMAID-class mask color without implying a taxonomic rank is selected.
+    """
     title_html = f'<div class="section-title">{title}</div>' if title else ""
     if concept_probs_at_pixel is None or concept_probs_at_pixel.size == 0:
         return (
@@ -560,6 +712,21 @@ def render_taxonomy_tree(
         '<div class="hint taxonomy-caption">'
         "Bar length = model confidence (0–1) for the top taxon at each rank.</div>"
     )
+    if accent_rgb is not None and accent_label and highlight_rank is None:
+        ar, ag, ab = accent_rgb
+        caption = (
+            f'<div class="hint taxonomy-caption">{_swatch_html(ar, ag, ab)}'
+            f"Accent color matches MERMAID class <b>{accent_label}</b> "
+            f"(not a taxonomic overlay).</div>"
+        )
+
+    panel_style = ""
+    if accent_rgb is not None and highlight_rank is None:
+        ar, ag, ab = accent_rgb
+        panel_style = (
+            f' style="border-left:4px solid rgb({ar},{ag},{ab});padding-left:10px;margin-left:-2px"'
+        )
+
     rows: list[str] = []
     for i, rank in enumerate(RANK_ORDER):
         candidates = _rank_candidates(concept_probs_at_pixel, rank_index, rank, top_k)
@@ -585,11 +752,7 @@ def render_taxonomy_tree(
         active = rank == highlight_rank
         if active and highlight_rgb is not None:
             r, g, b = highlight_rgb
-            swatch = (
-                f'<span style="display:inline-block;width:10px;height:10px;border-radius:2px;'
-                f"background:rgb({r},{g},{b});margin-right:6px;vertical-align:middle;"
-                f'border:1px solid rgba(128,128,128,0.35)"></span>'
-            )
+            swatch = _swatch_html(r, g, b)
             row_open = (
                 f'<div class="taxonomy-row" style="background:rgba({r},{g},{b},0.14);'
                 f"border-radius:8px;margin:0 -8px;padding:6px 8px;"
@@ -606,6 +769,14 @@ def render_taxonomy_tree(
             row_open = '<div class="taxonomy-row taxonomy-row-active">'
             rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
             bar = f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%"></div>'
+        elif accent_rgb is not None and highlight_rank is None:
+            r, g, b = accent_rgb
+            row_open = '<div class="taxonomy-row">'
+            rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
+            bar = (
+                f'<div class="taxonomy-bar" style="width:{primary_p * 100:.0f}%;'
+                f'background:rgb({r},{g},{b})"></div>'
+            )
         else:
             row_open = '<div class="taxonomy-row">'
             rank_cell = f'<div class="taxonomy-rank">{rank}</div>'
@@ -623,11 +794,11 @@ def render_taxonomy_tree(
 
     if not rows:
         return (
-            f'<div class="panel taxonomy-panel">{title_html}'
+            f'<div class="panel taxonomy-panel"{panel_style}>{title_html}'
             '<div class="hint">No taxonomy concepts available for this pixel.</div></div>'
         )
 
     return (
-        f'<div class="panel taxonomy-panel">{title_html}{caption}'
+        f'<div class="panel taxonomy-panel"{panel_style}>{title_html}{caption}'
         f'<div class="taxonomy-tree">{"".join(rows)}</div></div>'
     )
