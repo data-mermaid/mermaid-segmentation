@@ -96,18 +96,25 @@ CSS = """
 .gradio-container .gap, .gradio-container .form { gap: 8px !important; }
 .gradio-container .block { padding: 8px !important; }
 .gradio-container .section-title { font-size: 1.1rem; font-weight: 700; margin: 0 0 6px 0; }
-.gradio-container .hint { color: #888; font-style: italic; font-size: 12px; }
+.gradio-container .hint {
+    color: var(--body-text-color-subdued); font-style: italic; font-size: 12px;
+}
 .gradio-container .panel { padding: 2px; }
-/* Fixed dark header (not theme vars) so the white-filled logo reads in both themes. */
 #mermaid-header { padding: 0 !important; }
 #mermaid-header .mermaid-header-bar {
     display: flex; align-items: center; gap: 16px;
-    background: #0d1117; color: #ffffff;
+    background: var(--background-fill-secondary); color: var(--body-text-color);
+    border: 1px solid var(--border-color-primary);
+    box-shadow: var(--block-shadow);
     padding: 14px 20px; border-radius: 10px;
 }
-#mermaid-header .mermaid-header-logo svg { width: 46px; height: 48px; display: block; flex: 0 0 auto; }
+#mermaid-header .mermaid-header-logo {
+    color: var(--body-text-color); flex: 0 0 auto;
+}
+#mermaid-header .mermaid-header-logo svg { width: 46px; height: 48px; display: block; }
+#mermaid-header .mermaid-header-logo svg path { fill: currentColor; }
 #mermaid-header .mermaid-header-title {
-    font-size: 1.35rem; font-weight: 700; line-height: 1.25; color: #ffffff !important;
+    font-size: 1.35rem; font-weight: 700; line-height: 1.25; color: inherit;
 }
 #mermaid-header .mermaid-header-title-short { display: none; }
 @media (max-width: 640px) {
@@ -115,10 +122,9 @@ CSS = """
     #mermaid-header .mermaid-header-title-short { display: inline; }
 }
 #mermaid-header .mermaid-header-subtitle {
-    margin-top: 2px; color: rgba(255, 255, 255, 0.85) !important; font-size: 0.95rem;
+    margin-top: 2px; color: var(--body-text-color-subdued); font-size: 0.95rem;
 }
-/* Gradio's base CSS colors <b> near-black; keep it readable on the dark bar. */
-#mermaid-header .mermaid-header-subtitle b { color: #ffffff; }
+#mermaid-header .mermaid-header-subtitle b { color: var(--body-text-color); }
 #mermaid-segment-btn, #mermaid-segment-btn button {
     width: 100%; max-width: 340px; margin-left: auto; margin-right: auto;
 }
@@ -176,11 +182,11 @@ CSS = """
     margin: 0 -8px; padding: 6px 8px;
     box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.35);
 }
-.gradio-container .taxonomy-row-active .taxonomy-rank { color: #2563eb; }
-.gradio-container .taxonomy-row-active .taxonomy-bar { background: #2563eb; }
+.gradio-container .taxonomy-row-active .taxonomy-rank { color: var(--primary-600); }
+.gradio-container .taxonomy-row-active .taxonomy-bar { background: var(--primary-600); }
 .gradio-container .taxonomy-rank {
     flex: 0 0 76px; font-size: 11px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.04em; color: #667085; padding-top: 3px;
+    letter-spacing: 0.04em; color: var(--body-text-color-subdued); padding-top: 3px;
 }
 .gradio-container .taxonomy-candidates { flex: 1; min-width: 0; }
 .gradio-container .taxonomy-primary {
@@ -236,7 +242,7 @@ RESPONSIVE_JS = """
 
 logger = logging.getLogger(__name__)
 
-_LOGO_SVG_PATH = Path(__file__).resolve().parent / "static" / "mermaid-logo.svg"
+_LOGO_SVG_PATH = Path(__file__).resolve().parent / "logos" / "mermaid-logo.svg"
 
 
 def _header_html() -> str:
