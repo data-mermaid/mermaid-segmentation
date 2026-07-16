@@ -62,6 +62,18 @@ _BUILTIN_DEFAULT_FETCHERS = {
     "coralscapes_v2": lambda ds: _static_source_to_target(coralscapes_v2_to_mermaid(), ds),
 }
 
+# Sources whose source->target map is fetched remotely (CoralNet API / published label
+# files); these require ``fetch_remote=True`` (or an explicit ``source_to_target_name_maps``
+# entry). Add a new remote source here.
+_REMOTE_FETCHERS = {
+    "coralnet": fetch_coralnet_to_mermaid,
+    "catlin_seaview": fetch_catlin_seaview_to_mermaid,
+    "moorea_labeled_corals": fetch_moorea_labeled_corals_to_mermaid,
+    "pacific_labeled_corals": fetch_pacific_labeled_corals_to_mermaid,
+    "benthos_yuval": fetch_benthos_yuval_to_mermaid,
+    "ucsd_mosaics": fetch_ucsd_mosaics_to_mermaid,
+}
+
 
 def roll_up_label(label: str, benthic_hierarchy: dict[str, str], subset: set[str]) -> str | None:
     if label in subset:
@@ -254,92 +266,25 @@ class SourceLabelRegistry:
             ds_names_lower = {n.lower() for n in ds.source_name2id}
             if name in provided:
                 resolved[name] = provided[name]
-                continue
-            if name == "coralnet":
+            elif name in _REMOTE_FETCHERS:
                 if not fetch_remote:
                     raise ValueError(
-                        "coralnet source-to-target mapping requires fetch_remote=True or "
+                        f"{name} source-to-target mapping requires fetch_remote=True or "
                         "an explicit entry in source_to_target_name_maps"
                     )
-                coralnet_id_to_target = fetch_coralnet_to_mermaid()
+                fetched = _REMOTE_FETCHERS[name]()
                 resolved[name] = {
                     src: tgt
-                    for src, tgt in coralnet_id_to_target.items()
+                    for src, tgt in fetched.items()
                     if tgt is not None and src.lower() in ds_names_lower
                 }
-                continue
-            if name == "catlin_seaview":
-                if not fetch_remote:
-                    raise ValueError(
-                        "catlin_seaview source-to-target mapping requires fetch_remote=True or "
-                        "an explicit entry in source_to_target_name_maps"
-                    )
-                catlin_to_target = fetch_catlin_seaview_to_mermaid()
-                resolved[name] = {
-                    src: tgt
-                    for src, tgt in catlin_to_target.items()
-                    if tgt is not None and src.lower() in ds_names_lower
-                }
-                continue
-            if name == "moorea_labeled_corals":
-                if not fetch_remote:
-                    raise ValueError(
-                        "moorea_labeled_corals source-to-target mapping requires "
-                        "fetch_remote=True or an explicit entry in source_to_target_name_maps"
-                    )
-                moorea_to_target = fetch_moorea_labeled_corals_to_mermaid()
-                resolved[name] = {
-                    src: tgt
-                    for src, tgt in moorea_to_target.items()
-                    if tgt is not None and src.lower() in ds_names_lower
-                }
-                continue
-            if name == "pacific_labeled_corals":
-                if not fetch_remote:
-                    raise ValueError(
-                        "pacific_labeled_corals source-to-target mapping requires "
-                        "fetch_remote=True or an explicit entry in source_to_target_name_maps"
-                    )
-                pacific_to_target = fetch_pacific_labeled_corals_to_mermaid()
-                resolved[name] = {
-                    src: tgt
-                    for src, tgt in pacific_to_target.items()
-                    if tgt is not None and src.lower() in ds_names_lower
-                }
-                continue
-            if name == "benthos_yuval":
-                if not fetch_remote:
-                    raise ValueError(
-                        "benthos_yuval source-to-target mapping requires "
-                        "fetch_remote=True or an explicit entry in source_to_target_name_maps"
-                    )
-                benthos_to_target = fetch_benthos_yuval_to_mermaid()
-                resolved[name] = {
-                    src: tgt
-                    for src, tgt in benthos_to_target.items()
-                    if tgt is not None and src.lower() in ds_names_lower
-                }
-                continue
-            if name == "ucsd_mosaics":
-                if not fetch_remote:
-                    raise ValueError(
-                        "ucsd_mosaics source-to-target mapping requires "
-                        "fetch_remote=True or an explicit entry in source_to_target_name_maps"
-                    )
-                ucsd_to_target = fetch_ucsd_mosaics_to_mermaid()
-                resolved[name] = {
-                    src: tgt
-                    for src, tgt in ucsd_to_target.items()
-                    if tgt is not None and src.lower() in ds_names_lower
-                }
-                continue
-            if name in _BUILTIN_DEFAULT_FETCHERS:
+            elif name in _BUILTIN_DEFAULT_FETCHERS:
                 resolved[name] = _BUILTIN_DEFAULT_FETCHERS[name](ds)
-                continue
-            raise ValueError(
-                f"No default source-to-target mapping for SOURCE_NAME='{name}'. "
-                "Pass an explicit entry in source_to_target_name_maps."
-            )
+            else:
+                raise ValueError(
+                    f"No default source-to-target mapping for SOURCE_NAME='{name}'. "
+                    "Pass an explicit entry in source_to_target_name_maps."
+                )
         return {
             src_name: {k.lower(): v.lower() for k, v in m.items()}
             for src_name, m in resolved.items()
