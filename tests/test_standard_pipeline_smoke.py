@@ -77,42 +77,34 @@ def test_standard_mode_training_pipeline_smoke(tmp_path, monkeypatch):
         concept_schema_calls.append((args, kwargs))
         return original_from_csv(*args, **kwargs)
 
+    # Datasets are built via scripts.train.DATASET_REGISTRY[name](...); override its entries.
+    # The standard baseline uses only coralnet + mermaid — every other source has None splits
+    # in the config and must never be instantiated (side_effect guards that).
+    registry_override = {
+        "mermaid": MagicMock(return_value=synthetic_mermaid),
+        "coralnet": MagicMock(return_value=synthetic_coralnet),
+        **{
+            name: MagicMock(side_effect=ValueError("Should not be called in standard baseline"))
+            for name in (
+                "benthos_yuval",
+                "catlin_seaview",
+                "coralscapes",
+                "coralscapes_v2",
+                "moorea_labeled_corals",
+                "pacific_labeled_corals",
+            )
+        },
+    }
+
     patches = [
-        patch("scripts.train.MermaidDataset", return_value=synthetic_mermaid),
-        patch("scripts.train.CoralNetDataset", return_value=synthetic_coralnet),
-        patch("scripts.train.BenthosYuvalCoralsDataset"),
-        patch("scripts.train.CatlinSeaviewDataset"),
-        patch("scripts.train.CoralscapesDataset"),
-        patch("scripts.train.CoralscapesV2Dataset"),
-        patch("scripts.train.MooreaLabeledCoralsDataset"),
-        patch("scripts.train.PacificLabeledCoralsDataset"),
+        patch.dict("scripts.train.DATASET_REGISTRY", registry_override),
         patch("scripts.train.ConceptSchema.from_csv", side_effect=tracked_from_csv),
         patch("scripts.train.MetaModel"),
     ]
 
     with contextlib.ExitStack() as stack:
         mocks = [stack.enter_context(p) for p in patches]
-        (
-            mock_benthos,
-            mock_catlin,
-            mock_coralscapes,
-            mock_coralscapes_v2,
-            mock_moorea,
-            mock_pacific,
-            _,
-            mock_meta_model,
-        ) = mocks[2:10]
-
-        for mock in [
-            mock_benthos,
-            mock_catlin,
-            mock_coralscapes,
-            mock_coralscapes_v2,
-            mock_moorea,
-            mock_pacific,
-        ]:
-            mock.side_effect = ValueError("Should not be called in standard baseline")
-
+        mock_meta_model = mocks[2]
         mock_meta_model.return_value = MagicMock(
             model=MagicMock(),
             optimizer=MagicMock(),
