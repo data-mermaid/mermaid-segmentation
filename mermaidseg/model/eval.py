@@ -72,6 +72,14 @@ class Evaluator:
                 # informative segmentation metric than pixel accuracy, which is dominated by
                 # majority classes (e.g. background) in class-imbalanced coral reef data.
                 "miou": JaccardIndex(**shared_kwargs, average="macro").to(device),
+                # `miou` (macro) weights every *present* class equally — a rare class counts as
+                # much as a common one (torchmetrics macro already excludes classes absent from
+                # the target). `miou_weighted` weights each class's IoU by its support, so comparing
+                # the two shows whether a change helps rare vs common classes. It is a scalar (like
+                # accuracy/miou) and MUST always be produced when classification metrics are on:
+                # metric_policy advertises it as a selectable metric_of_interest, so gating it (e.g.
+                # behind per_class_metrics) would crash checkpoint/early-stopping when it's selected.
+                "miou_weighted": JaccardIndex(**shared_kwargs, average="weighted").to(device),
             }
             if per_class_metrics:
                 # average="none" returns a per-class vector instead of a scalar; Logger
@@ -166,8 +174,9 @@ class Evaluator:
             return
         if preds.ndim > 3:
             preds = preds.argmax(dim=1)
+        preds = preds.detach()
         for metric in self.metric_dict.values():
-            metric.update(preds.detach(), targets)
+            metric.update(preds, targets)
 
     def compute_and_reset(
         self, include_concepts: bool = False
