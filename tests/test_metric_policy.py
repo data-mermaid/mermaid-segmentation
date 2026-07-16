@@ -29,7 +29,7 @@ class TestCanonicalMetricName:
             canonical_metric_name("precision")
 
     def test_supported_names_are_canonical_only(self):
-        assert SUPPORTED_METRIC_NAMES == ("accuracy", "f1-score", "loss", "miou")
+        assert SUPPORTED_METRIC_NAMES == ("accuracy", "f1-score", "loss", "miou", "miou_weighted")
 
 
 class TestMetricDirection:

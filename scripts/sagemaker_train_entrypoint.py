@@ -76,7 +76,16 @@ def main():
     for flag, path in config_flags.items():
         cmd += [f"--{flag.replace('_', '-')}", path]
     for k, v in overrides.items():
-        cmd += [f"--{k}", str(v)]
+        # Boolean overrides map to a bare flag, not `--flag value` (which breaks store_true /
+        # BooleanOptionalAction args like --early-stopping / --per-class-metrics). true -> `--flag`;
+        # false -> omit (store_true flags have no `--no-` form and already default to false; a
+        # BooleanOptionalAction left off falls back to its own default). Emitting `--no-<flag>`
+        # would crash the plain store_true flags, so we never do.
+        if isinstance(v, bool):
+            if v:
+                cmd += [f"--{k}"]
+        else:
+            cmd += [f"--{k}", str(v)]
 
     log.info("Invoking: %s", " ".join(cmd))
     rc = subprocess.call(cmd)

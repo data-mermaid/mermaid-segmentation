@@ -55,14 +55,8 @@ from mermaidseg.dataset_reconciliation import (
     prepare_splits_for_registry,
 )
 from mermaidseg.datasets import (
-    BenthosYuvalCoralsDataset,
-    CatlinSeaviewDataset,
-    CoralNetDataset,
-    CoralscapesDataset,
-    CoralscapesV2Dataset,
-    MermaidDataset,
-    MooreaLabeledCoralsDataset,
-    PacificLabeledCoralsDataset,
+    DATASET_REGISTRY,
+    BaseCoralDataset,
     worker_init_fn,
 )
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
@@ -176,6 +170,30 @@ def _save_failure_report_if_available(
     return saved_path
 
 
+def _save_failure_reports_if_available(
+    dataset_dict: dict[tuple[str, str], object],
+    log_dir: Path,
+    explicit_output_path: str | None = None,
+) -> list[Path]:
+    """Save a data-load-failure parquet report per ``(name, split)`` dataset that
+    tracked failures.
+
+    Multi-dataset equivalent of ``_save_failure_report_if_available``: the multi-dataset
+    training path builds one dataset instance per ``(name, split)`` pair rather than a
+    single dataset, so each is checked and reported independently.
+    """
+    saved_paths: list[Path] = []
+    for (name, split), dataset in dataset_dict.items():
+        output_path: str | None = None
+        if explicit_output_path:
+            base = Path(explicit_output_path)
+            output_path = str(base.with_name(f"{base.stem}_{name}_{split}{base.suffix}"))
+        saved = _save_failure_report_if_available(dataset, log_dir, output_path)
+        if saved is not None:
+            saved_paths.append(saved)
+    return saved_paths
+
+
 def _build_parser() -> argparse.ArgumentParser:
     base = get_parser()
     base.add_argument(
@@ -201,6 +219,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default="configs/logger_config.yaml",
         help="path to logger config file",
+    )
+    base.add_argument(
+        "--experiment-name",
+        type=str,
+        default=None,
+        help="MLflow experiment name; overrides the logger config (e.g. 'baselines')",
     )
     base.add_argument(
         "--dry-run",
@@ -247,6 +271,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default="miou",
         choices=sorted(SUPPORTED_METRIC_NAMES),
         help="metric used for checkpointing and early stopping",
+    )
+    base.add_argument(
+        "--per-class-metrics",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "log per-class f1/iou in addition to macro accuracy/miou. "
+            "Default: on for training_mode=standard, off for concept/concept-bottleneck "
+            "(taxonomic rank cardinality, e.g. genus, makes per-class series numerous)."
+        ),
     )
     base.add_argument(
         "--seed",
@@ -326,30 +360,16 @@ def _run_training(args: argparse.Namespace) -> None:
         torch.cuda.manual_seed_all(seed)
     logging.info("Seed: %d", seed)
 
-    DATASET_CLASSES = {
-        "pacific_labeled_corals": PacificLabeledCoralsDataset,
-        "moorea_labeled_corals": MooreaLabeledCoralsDataset,
-        "catlin_seaview": CatlinSeaviewDataset,
-        "mermaid": MermaidDataset,
-        "coralnet": CoralNetDataset,
-        "coralscapes": CoralscapesDataset,
-        "coralscapes_v2": CoralscapesV2Dataset,
-        "benthos_yuval": BenthosYuvalCoralsDataset,
-    }
-
-    # coralscapes uses a different signature (no `padding`)
-    def _build(name, split_cfg):
-        cls = DATASET_CLASSES[name]
-        if name in ("coralscapes", "coralscapes_v2", "benthos_yuval"):
-            return cls(**split_cfg)
-        return cls(**split_cfg, padding=cfg.training.padding)
-
+    # Every dataset constructor accepts ``padding`` (point-annotation datasets use it;
+    # dense/HF datasets accept and ignore it), so instantiation is uniform.
     dataset_dict: dict[tuple[str, str], object] = {}
-    for name in DATASET_CLASSES:
+    for name in DATASET_REGISTRY:
         for split, split_cfg in cfg.data[name].items():
             if split_cfg is None or split_cfg == "None":
                 continue
-            dataset_dict[(name, split)] = _build(name, split_cfg)
+            dataset_dict[(name, split)] = DATASET_REGISTRY[name](
+                **split_cfg, padding=cfg.training.padding
+            )
             print(f"{name:>24s} - {split:<5s}: {len(dataset_dict[(name, split)]):>7d} samples")
 
     loader_kwargs = {
@@ -357,6 +377,10 @@ def _run_training(args: argparse.Namespace) -> None:
         "num_workers": args.num_workers,
         "pin_memory": torch.cuda.is_available(),
         "drop_last": True,
+        # Drop the (None, None) placeholders BaseCoralDataset.__getitem__ returns on load
+        # failures (e.g. a missing/renamed S3 object) so one bad image leaves the batch instead
+        # of crashing default_collate — otherwise a single unreadable image kills the whole run.
+        "collate_fn": BaseCoralDataset.collate_fn,
     }
     if args.num_workers > 0:
         loader_kwargs["persistent_workers"] = True
@@ -367,12 +391,22 @@ def _run_training(args: argparse.Namespace) -> None:
     _, registry_datasets = prepare_splits_for_registry(dataset_dict)
 
     run_sources = {ds.SOURCE_NAME for ds in registry_datasets}
-    schema = ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
+
+    # Standard (non-CBM) mode trains only the segmentation head — no concept bottleneck — so it
+    # needs neither a ConceptSchema nor a concept_mapping_path. Building the schema here would call
+    # ConceptSchema.from_csv(None, ...) and crash, and the num_concepts assertion below is only
+    # meaningful when concepts are computed. Guard both on training_mode.
+    compute_concepts = cfg.training.training_mode != "standard"
+    schema = (
+        ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
+        if compute_concepts
+        else None
+    )
 
     registry = SourceLabelRegistry(
         registry_datasets,
         target_label_subset=cfg.training.class_subset,
-        compute_concepts=cfg.training.training_mode != "standard",
+        compute_concepts=compute_concepts,
         concept_mapping_path=concept_mapping_path,
         concept_schema=schema,
         label_roll_up=cfg.training.get("label_roll_up", False),
@@ -383,11 +417,14 @@ def _run_training(args: argparse.Namespace) -> None:
     train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"]
     val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
 
-    train_loader = DataLoader(ConcatDataset(train_datasets), shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
+    train_dataset_combined = ConcatDataset(train_datasets)
+    val_dataset_combined = ConcatDataset(val_datasets)
+    train_loader = DataLoader(train_dataset_combined, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_dataset_combined, shuffle=True, **loader_kwargs)
 
     print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
-    assert registry.num_concepts == schema.num_channels
+    if compute_concepts:
+        assert registry.num_concepts == schema.num_channels
 
     logging.info(
         "Dataset: %s (%d samples)",
@@ -395,16 +432,18 @@ def _run_training(args: argparse.Namespace) -> None:
         (len(train_loader) + len(val_loader)) * cfg.training.batch_size,
     )
 
-    # def _write_failure_report_once() -> None:
-    #     nonlocal report_written
-    #     if report_written:
-    #         return
-    #     path = _save_failure_report_if_available(
-    #         dataset=dataset, # TODO: Has to be updated to work with multiple datasets
-    #         log_dir=Path(args.log_dir),
-    #         explicit_output_path=args.failure_report_path,
-    #     )
-    #     report_written = path is not None
+    report_written = False
+
+    def _write_failure_reports_once() -> None:
+        nonlocal report_written
+        if report_written:
+            return
+        paths = _save_failure_reports_if_available(
+            dataset_dict=dataset_dict,
+            log_dir=Path(args.log_dir),
+            explicit_output_path=args.failure_report_path,
+        )
+        report_written = bool(paths)
 
     if args.dry_run:
         max_dry_epochs = 3
@@ -417,8 +456,7 @@ def _run_training(args: argparse.Namespace) -> None:
             train_loader = [_take_first_non_empty_batch(train_loader, "train")]
             val_loader = [_take_first_non_empty_batch(val_loader, "val")]
         except RuntimeError:
-            print("TODO:Update")
-            # _write_failure_report_once()
+            _write_failure_reports_once()
             raise
 
     meta_model = MetaModel(
@@ -435,16 +473,26 @@ def _run_training(args: argparse.Namespace) -> None:
         concept_value2id=registry.concept_value2id,
     )
 
+    per_class_metrics = args.per_class_metrics
+    if per_class_metrics is None:
+        # Default on for standard segmentation (modest class cardinality); off for
+        # concept/concept-bottleneck, where taxonomic ranks (e.g. genus) can carry
+        # far more distinct values and would flood MLflow's metric list by default.
+        per_class_metrics = cfg.training.training_mode == "standard"
+
     evaluator = Evaluator(
         num_classes=registry.num_target_classes,
         device=device,
         calculate_concept_metrics=cfg.training.training_mode != "standard",
         concept_value2id=registry.concept_value2id,
-        per_class_metrics=cfg.training.training_mode == "standard",
+        per_class_metrics=per_class_metrics,
     )
 
-    cfg.logger.experiment_name = "mermaid"
-    cfg_logger.logger.experiment_name = "mermaid"
+    # Route the run to an MLflow experiment. --experiment-name (or the run YAML override)
+    # wins; otherwise fall back to whatever the logger config declares.
+    if args.experiment_name:
+        cfg.logger.experiment_name = args.experiment_name
+        cfg_logger.logger.experiment_name = args.experiment_name
 
     with Logger(
         config=cfg_logger,
@@ -458,12 +506,16 @@ def _run_training(args: argparse.Namespace) -> None:
         if logger.mlflow_run_id is not None:
             logging.info("MLflow run_id: %s", logger.mlflow_run_id)
 
+        logger.log_benchmark_context(label=cfg.run_name)
         logger.log_dataloader_params(train_loader, prefix="train_loader")
         logger.log_dataloader_params(val_loader, prefix="val_loader")
         logger.log_reconciliation(registry)
-        # TODO(#139): re-enable per-run dataset-statistics logging once
-        # Logger.log_dataset_statistics is adapted to the multi-dataset (per-split lists)
-        # structure; it currently expects single train/val/test datasets.
+        # ConcatDataset exposes `.datasets`, which resolve_split_annotations already
+        # recurses into per-source, so this works directly against the multi-dataset
+        # train/val splits built above (closes #139).
+        logger.log_dataset_statistics(
+            {"train": train_dataset_combined, "val": val_dataset_combined}, registry
+        )
 
         try:
             # test_loader is None: the multi-dataset config does not define test splits yet,
@@ -481,8 +533,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 early_stopping_min_delta=args.early_stopping_min_delta,
             )
         finally:
-            print("TODO:Update")
-            # _write_failure_report_once()
+            _write_failure_reports_once()
         logging.info("Training complete")
 
 

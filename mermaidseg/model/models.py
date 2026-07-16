@@ -177,6 +177,11 @@ class LinearDINOv3(torch.nn.Module):
         self.token_width = input_size[1] // patch_size
         self.token_height = input_size[0] // patch_size
         self.head = LinearClassifier(hidden_size, self.token_width, self.token_height, num_classes)
+        # Gates the encoder forward under no_grad when the backbone is frozen (set by
+        # freeze_encoder). Mirrors _DPTDINOv3Base so a frozen probe doesn't build the autograd
+        # graph over the backbone or hold its activations. LoRA keeps this False so adapters
+        # still receive gradients through the encoder forward.
+        self._encoder_frozen = False
         if use_lora:
             self.freeze_encoder()
 
@@ -189,7 +194,13 @@ class LinearDINOv3(torch.nn.Module):
         Returns:
             SemanticSegmenterOutput: `.logits` has shape (B, num_classes, H, W).
         """
-        outputs = self.encoder(x, **kwargs)
+        if self._encoder_frozen:
+            # Frozen probe: skip building the autograd graph over the backbone (saves activation
+            # memory and backward compute; only the head trains).
+            with torch.no_grad():
+                outputs = self.encoder(x, **kwargs)
+        else:
+            outputs = self.encoder(x, **kwargs)
         # Skip the 5 DINOv3 prefix tokens (CLS + 4 register tokens)
         patch_embeddings = outputs.last_hidden_state[:, 5:, :]
 
@@ -201,18 +212,25 @@ class LinearDINOv3(torch.nn.Module):
         return SemanticSegmenterOutput(loss=None, logits=logits)
 
     def freeze_encoder(self) -> None:
-        """Freeze encoder base weights; keep LoRA adapters trainable when present."""
+        """Freeze encoder base weights; keep LoRA adapters trainable when present.
+
+        Without LoRA, also run the encoder under ``torch.no_grad`` (frozen probe). With
+        LoRA, adapters stay trainable so the encoder forward must keep gradients.
+        """
         if self.use_lora:
             for name, param in self.encoder.named_parameters():
                 param.requires_grad = "lora_" in name
+            self._encoder_frozen = False
             return
         for param in self.encoder.parameters():
             param.requires_grad = False
+        self._encoder_frozen = True
 
     def unfreeze_encoder(self) -> None:
         """Unfreeze the full encoder (base weights + LoRA adapters, if any)."""
         for param in self.encoder.parameters():
             param.requires_grad = True
+        self._encoder_frozen = False
 
 
 class LinearLoRADINOv3(LinearDINOv3):

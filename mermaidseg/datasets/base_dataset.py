@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 def worker_init_fn(worker_id: int) -> None:
     """Configure logging in DataLoader worker processes.
 
-    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so that warnings emitted
-    in worker subprocesses are visible.
+    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so that
+    warnings emitted in worker subprocesses are visible.
     """
     logging.basicConfig(
         level=logging.WARNING,
@@ -85,6 +85,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     _load_failures: list[dict[str, Any]]
     _annotation_count_by_image: dict[str, int]
     _annotation_labels_by_image: dict[str, str]
+    _annotation_positions_by_image: dict[Any, np.ndarray]
 
     def __init__(
         self,
@@ -122,18 +123,25 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.num_source_classes = len(self.source_id2name) + 1  # +1 for background
 
         self._annotation_count_by_image = self.df_annotations["image_id"].value_counts().to_dict()
+        grouped_by_image = self.df_annotations.groupby("image_id")
         self._annotation_labels_by_image = (
-            self.df_annotations.groupby("image_id")["source_label_name"]
+            grouped_by_image["source_label_name"]
             .apply(lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)})))
             .to_dict()
         )
+        # Positional indices of each image's annotation rows, computed once, so __getitem__
+        # slices annotations in O(1) instead of scanning the whole (multi-million row)
+        # annotations frame with a boolean mask on every sample. Values are numpy position
+        # arrays suitable for DataFrame.iloc.
+        self._annotation_positions_by_image = grouped_by_image.indices
         self._load_failures = []
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
         """Re-derive ``df_images`` after filtering ``df_annotations``.
 
-        The default implementation auto-detects column structure for the bundled MERMAID and
-        CoralNet shapes. Subclasses are encouraged to override this when they have a fixed schema.
+        The default implementation auto-detects column structure for the bundled MERMAID
+        and CoralNet shapes. Subclasses are encouraged to override this when they have a
+        fixed schema.
         """
         if "region_id" in df_annotations.columns:
             return (
@@ -183,9 +191,10 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
-        On any internal load/transform error we record the failure, emit a warning to logger +
-        stdout + stderr, and return ``(None, None)``. The dataset's :meth:`collate_fn` filters out
-        these placeholders, so a failed item drops out of the batch instead of crashing the loader.
+        On any internal load/transform error we record the failure, emit a warning to
+        logger + stdout + stderr, and return ``(None, None)``. The dataset's
+        :meth:`collate_fn` filters out these placeholders, so a failed item drops out of
+        the batch instead of crashing the loader.
         """
         try:
             return self._load_item(idx)
@@ -208,18 +217,19 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Perform a single load (no error handling).
 
-        Subclasses should override this rather than :meth:`__getitem__` so they inherit the
-        recursive-on-failure behaviour for free.
+        Subclasses should override this rather than :meth:`__getitem__` so they inherit
+        the recursive-on-failure behaviour for free.
         """
         image_id = self.df_images.loc[idx, "image_id"]
         row_kwargs = self.df_images.loc[idx].to_dict()
 
         image = self.read_image(**row_kwargs)
 
-        annotations = self.df_annotations.loc[
-            self.df_annotations["image_id"] == image_id,
-            ["row", "col", "source_label_name"],
-        ]
+        positions = self._annotation_positions_by_image.get(image_id)
+        if positions is None:
+            annotations = self.df_annotations.iloc[:0][["row", "col", "source_label_name"]]
+        else:
+            annotations = self.df_annotations.iloc[positions][["row", "col", "source_label_name"]]
 
         local_mask = create_annotation_mask(
             annotations, image.shape, self.source_name2id, padding=self.padding
@@ -273,7 +283,8 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.load_failures_df().to_parquet(path, index=False)
         return path
 
-    def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
+    @staticmethod
+    def collate_fn(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
         """Collate function that filters out ``(None, None)`` items (failed loads).
 
         :meth:`__getitem__` returns ``(None, None)`` for items it fails to load (after
