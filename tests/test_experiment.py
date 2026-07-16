@@ -1,9 +1,13 @@
-"""Tests for offline experiment-config validation (``mermaidseg.experiment``)."""
+"""Tests for the experiment module (``mermaidseg.experiment``): offline validation, the
+config-loading equivalence with the legacy CLI merge, and offline dry-run assembly."""
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
+from unittest.mock import patch
 
+import torch
 import yaml
 
 from mermaidseg.experiment import (
@@ -11,6 +15,7 @@ from mermaidseg.experiment import (
     ExperimentSpec,
     offline_target_universe,
 )
+from mermaidseg.io import setup_config, update_config_with_args
 
 REPO = Path(__file__).resolve().parents[1]
 CONFIGS = REPO / "configs"
@@ -186,3 +191,141 @@ def test_offline_universe_is_nonempty_and_has_snapshot_names():
     universe = offline_target_universe()
     assert "acropora" in universe  # from the committed CoralNet snapshot
     assert all(name == name.lower() for name in universe)
+
+
+# --------------------------------------------------------------------------------------
+# Loader: config-merge equivalence, YAML loading, and offline dry-run assembly.
+# --------------------------------------------------------------------------------------
+
+
+def test_from_args_config_matches_legacy_merge(monkeypatch):
+    """Experiment.from_args must produce the same merged config as the legacy CLI path
+    (setup_config + update_config_with_args) — the behavior-preservation guarantee for
+    PR 2."""
+    monkeypatch.chdir(REPO)
+    args = argparse.Namespace(
+        config_data="configs/data_config_coralnet_mermaid.yaml",
+        config_model="configs/model_config.yaml",
+        config_training="configs/training_config_dinov3_linear.yaml",
+        config_logger="configs/logger_config.yaml",
+        run_name="rn",
+        experiment_name="baselines",
+        epochs=7,
+        batch_size=16,
+        lr=0.002,
+        seed=123,
+        num_workers=4,
+        metric_of_interest="miou_weighted",
+        early_stopping=True,
+        early_stopping_patience=5,
+        early_stopping_min_delta=0.01,
+        per_class_metrics=None,
+        dry_run=False,
+        auto_shutdown=False,
+        log_dir="logs",
+        failure_report_path=None,
+        model=None,
+        model_checkpoint=None,
+        iterations_per_train_epoch=None,
+        iterations_per_val_epoch=None,
+        log_epochs=None,
+    )
+    exp = Experiment.from_args(args)
+    legacy = update_config_with_args(
+        setup_config(
+            {
+                "data": args.config_data,
+                "training": args.config_training,
+                "model": args.config_model,
+                "logger": args.config_logger,
+            }
+        ),
+        args,
+    )
+    # Every override-affected field matches the legacy merge.
+    assert exp.config.run_name == legacy.run_name == "rn"
+    assert exp.config.training.epochs == legacy.training.epochs == 7
+    assert exp.config.training.batch_size == legacy.training.batch_size == 16
+    assert exp.config.training.optimizer.lr == legacy.training.optimizer.lr == 0.002
+    # Run-params (not in cfg today) are surfaced on the unified override object.
+    assert exp.overrides.seed == 123
+    assert exp.overrides.metric_of_interest == "miou_weighted"
+    assert exp.overrides.early_stopping is True
+
+
+def test_from_run_yaml_loads_spec_and_applies_overrides(monkeypatch):
+    monkeypatch.chdir(REPO)
+    exp = Experiment.from_run_yaml("sagemaker/runs/issue_12_dinov3_baseline.yaml")
+    assert exp.spec.overrides.metric_of_interest == "miou"
+    assert exp.spec.overrides.early_stopping is True
+    assert exp.config.training.epochs == 200  # override merged into the config
+    assert exp.config.training.training_mode == "standard"
+
+
+class _SyntheticDataset:
+    """Minimal dataset matching the SourceLabelRegistry / DataLoader interface (no
+    S3)."""
+
+    def __init__(self, name: str, num_samples: int = 8, **_ignored):
+        self.SOURCE_NAME = name
+        self._num_samples = num_samples
+        self.source_id2name = {0: "background", 1: "coral"}
+        self.source_name2id = {"background": 0, "coral": 1}
+        self.num_source_classes = 2
+        self._global_offset = 0
+
+    def __len__(self) -> int:
+        return self._num_samples
+
+    def __getitem__(self, _idx: int):
+        return torch.zeros(3, 512, 512), torch.zeros(512, 512, dtype=torch.long)
+
+    def set_global_offset(self, offset: int) -> None:
+        self._global_offset = offset
+
+    def num_load_failures(self) -> int:
+        return 0
+
+
+def test_dry_run_assembles_offline(tmp_path, monkeypatch):
+    """dry_run() assembles datasets -> registry -> (mocked) model -> evaluator and pulls
+    one batch, offline: only MERMAID is active (identity mapping, no live API),
+    label_roll_up off."""
+    monkeypatch.chdir(REPO)
+    data_doc = {"data": {name: {"train": "None", "val": "None"} for name in _ALL_REGISTRY_DATASETS}}
+    data_doc["data"]["mermaid"] = {
+        "train": {},
+        "val": {},
+    }  # both splits active (ConcatDataset needs val)
+    data_cfg = _write(tmp_path, data_doc, name="data.yaml")
+    training_cfg = _write(
+        tmp_path,
+        {
+            "training": {
+                "training_mode": "standard",
+                "padding": 3,
+                "batch_size": 4,
+                "label_roll_up": False,
+                "class_subset": ["coral"],  # MERMAID's identity map emits "coral"
+            }
+        },
+        name="training.yaml",
+    )
+    spec = ExperimentSpec(
+        config_data=str(data_cfg),
+        config_model=str(MODEL),
+        config_training=str(training_cfg),
+        config_logger=str(LOGGER),
+        overrides={"run_name": "dry-run-test"},  # meta_model() reads cfg.run_name
+    )
+    override = {"mermaid": lambda **kw: _SyntheticDataset("mermaid")}
+    with (
+        patch.dict("mermaidseg.experiment.DATASET_REGISTRY", override),
+        patch("mermaidseg.experiment.MetaModel"),
+    ):
+        experiment = Experiment.from_spec(spec, device=torch.device("cpu"))
+        summary = experiment.dry_run()
+
+    assert summary["datasets"] == ["mermaid"]
+    assert summary["train_batches"] == 2  # 8 synthetic samples / batch 4, drop_last
+    assert summary["train_batch_image_shape"] == (4, 3, 512, 512)

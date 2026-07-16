@@ -77,9 +77,9 @@ def test_standard_mode_training_pipeline_smoke(tmp_path, monkeypatch):
         concept_schema_calls.append((args, kwargs))
         return original_from_csv(*args, **kwargs)
 
-    # Datasets are built via scripts.train.DATASET_REGISTRY[name](...); override its entries.
-    # The standard baseline uses only coralnet + mermaid — every other source has None splits
-    # in the config and must never be instantiated (side_effect guards that).
+    # Datasets are built via mermaidseg.experiment.DATASET_REGISTRY[name](...); override its
+    # entries. The standard baseline uses only coralnet + mermaid — every other source has None
+    # splits in the config and must never be instantiated (side_effect guards that).
     registry_override = {
         "mermaid": MagicMock(return_value=synthetic_mermaid),
         "coralnet": MagicMock(return_value=synthetic_coralnet),
@@ -97,9 +97,9 @@ def test_standard_mode_training_pipeline_smoke(tmp_path, monkeypatch):
     }
 
     patches = [
-        patch.dict("scripts.train.DATASET_REGISTRY", registry_override),
-        patch("scripts.train.ConceptSchema.from_csv", side_effect=tracked_from_csv),
-        patch("scripts.train.MetaModel"),
+        patch.dict("mermaidseg.experiment.DATASET_REGISTRY", registry_override),
+        patch("mermaidseg.experiment.ConceptSchema.from_csv", side_effect=tracked_from_csv),
+        patch("mermaidseg.experiment.MetaModel"),
     ]
 
     with contextlib.ExitStack() as stack:
