@@ -19,8 +19,8 @@ DEFAULT_LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 class ConceptBottleneckOutput(SemanticSegmenterOutput):
     """Segmenter output for concept-bottleneck models.
 
-    Both ``concept_outputs`` and ``concept_logits`` are retained intentionally:
-    logits feed the training loss; activations feed the class head and inference.
+    Both ``concept_outputs`` and ``concept_logits`` are retained intentionally: logits
+    feed the training loss; activations feed the class head and inference.
     ``hidden_states`` is unused (left ``None``) so activations are not overloaded.
     """
 
@@ -29,7 +29,8 @@ class ConceptBottleneckOutput(SemanticSegmenterOutput):
 
 
 class LinearClassifier(torch.nn.Module):
-    """A linear classifier module that performs pixel-wise classification on reshaped embeddings.
+    """A linear classifier module that performs pixel-wise classification on reshaped
+    embeddings.
 
     This module takes input embeddings, reshapes them to a 2D spatial format, and applies
     a 1x1 convolution to perform classification. It's commonly used as a classification
@@ -81,8 +82,8 @@ class LinearClassifier(torch.nn.Module):
 
 
 class ConceptHead(torch.nn.Module):
-    """A concept classification head module that performs pixel-wise classification on reshaped
-    embeddings.
+    """A concept classification head module that performs pixel-wise classification on
+    reshaped embeddings.
 
     This module takes input embeddings, reshapes them to a 2D spatial format, and
     applies a 1x1 convolution to perform classification. It's commonly used as a classification
@@ -161,6 +162,10 @@ class LinearDINOv3(torch.nn.Module):
         self.token_width = input_size[1] // patch_size
         self.token_height = input_size[0] // patch_size
         self.head = LinearClassifier(hidden_size, self.token_width, self.token_height, num_classes)
+        # Gates the encoder forward under no_grad when the backbone is frozen (set by
+        # freeze_encoder). Mirrors _DPTDINOv3Base so a frozen probe doesn't build the autograd
+        # graph over the backbone or hold its activations.
+        self._encoder_frozen = False
 
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
         """Run encoder + linear head and upsample to input resolution.
@@ -171,7 +176,13 @@ class LinearDINOv3(torch.nn.Module):
         Returns:
             SemanticSegmenterOutput: `.logits` has shape (B, num_classes, H, W).
         """
-        outputs = self.encoder(x, **kwargs)
+        if self._encoder_frozen:
+            # Frozen probe: skip building the autograd graph over the backbone (saves activation
+            # memory and backward compute; only the head trains).
+            with torch.no_grad():
+                outputs = self.encoder(x, **kwargs)
+        else:
+            outputs = self.encoder(x, **kwargs)
         # Skip the 5 DINOv3 prefix tokens (CLS + 4 register tokens)
         patch_embeddings = outputs.last_hidden_state[:, 5:, :]
 
@@ -192,23 +203,22 @@ class LinearDINOv3(torch.nn.Module):
         return SemanticSegmenterOutput(loss=loss, logits=logits)
 
     def freeze_encoder(self) -> None:
-        """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
-        parameters to `False`.
+        """Freeze the backbone: set encoder ``requires_grad`` to ``False`` and run its
+        forward under ``torch.no_grad`` so a frozen probe never builds the autograd
+        graph over it.
 
-        This prevents the encoder layers from being updated during training, effectively making them
-        static while allowing other parts of the model to be trained.
+        Only the head keeps training.
         """
         for param in self.encoder.parameters():
             param.requires_grad = False
+        self._encoder_frozen = True
 
     def unfreeze_encoder(self) -> None:
-        """Unfreezes the encoder layers of the model by setting the `requires_grad` attribute of all
-        parameters in the encoder to True.
-
-        This allows these layers to be trainable during the training process.
-        """
+        """Unfreeze the backbone: restore encoder ``requires_grad`` to ``True`` and run
+        its forward with gradients again (full fine-tune)."""
         for param in self.encoder.parameters():
             param.requires_grad = True
+        self._encoder_frozen = False
 
 
 class ConceptBottleneckDINOv3(torch.nn.Module):
@@ -310,18 +320,18 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         )
 
     def freeze_encoder(self) -> None:
-        """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
-        parameters to `False`.
+        """Freezes the encoder layers of the model by setting the `requires_grad`
+        attribute of their parameters to `False`.
 
-        This prevents the encoder layers from being updated during training, effectively making them
-        static while allowing other parts of the model to be trained.
+        This prevents the encoder layers from being updated during training, effectively
+        making them static while allowing other parts of the model to be trained.
         """
         for param in self.encoder.parameters():
             param.requires_grad = False
 
     def unfreeze_encoder(self) -> None:
-        """Unfreezes the encoder layers of the model by setting the `requires_grad` attribute of all
-        parameters in the encoder to True.
+        """Unfreezes the encoder layers of the model by setting the `requires_grad`
+        attribute of all parameters in the encoder to True.
 
         This allows these layers to be trainable during the training process.
         """
@@ -353,9 +363,9 @@ def _wrap_encoder_with_lora(
 ) -> torch.nn.Module:
     """Wrap a DINOv3 encoder with PEFT LoRA adapters.
 
-    The pretrained backbone weights are frozen and only the injected low-rank adapter matrices
-    remain trainable, which keeps the parameter/optimizer footprint small while still adapting the
-    attention projections.
+    The pretrained backbone weights are frozen and only the injected low-rank adapter
+    matrices remain trainable, which keeps the parameter/optimizer footprint small while
+    still adapting the attention projections.
     """
     lora_config = LoraConfig(
         r=lora_r,
@@ -450,8 +460,8 @@ class DPTHead(torch.nn.Module):
         """Resolve the (height, width) patch grid for ``num_patch_tokens``.
 
         Uses the configured token grid when it matches; otherwise reshapes
-        ``num_patch_tokens`` while preserving the configured aspect ratio (which
-        handles square and non-square inputs at arbitrary resolutions).
+        ``num_patch_tokens`` while preserving the configured aspect ratio (which handles
+        square and non-square inputs at arbitrary resolutions).
         """
         if num_patch_tokens == self.token_height * self.token_width:
             return self.token_height, self.token_width
@@ -471,9 +481,9 @@ class DPTHead(torch.nn.Module):
 class _DPTDINOv3Base(torch.nn.Module):
     """Shared backbone/head wiring for the DPT DINOv3 models.
 
-    The encoder can either be adapted with PEFT LoRA (``use_lora=True``) or used as a plain frozen
-    backbone (``use_lora=False``), in which case only the DPT head (and any downstream concept
-    layers) is trained.
+    The encoder can either be adapted with PEFT LoRA (``use_lora=True``) or used as a
+    plain frozen backbone (``use_lora=False``), in which case only the DPT head (and any
+    downstream concept layers) is trained.
     """
 
     def __init__(
@@ -555,8 +565,9 @@ class _DPTDINOv3Base(torch.nn.Module):
     def _encode(self, x: torch.Tensor, **kwargs: Any) -> list[torch.Tensor]:
         """Run the encoder and return the selected hidden states (CLS + patches).
 
-        When the (non-LoRA) backbone is frozen the encoder pass runs under ``torch.no_grad`` to save
-        memory; the LoRA path always keeps gradients so the adapters can learn.
+        When the (non-LoRA) backbone is frozen the encoder pass runs under
+        ``torch.no_grad`` to save memory; the LoRA path always keeps gradients so the
+        adapters can learn.
         """
         if self._encoder_frozen:
             with torch.no_grad():

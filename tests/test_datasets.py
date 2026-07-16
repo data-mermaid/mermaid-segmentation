@@ -95,7 +95,8 @@ def test_create_annotation_mask_with_padding():
 
 
 def test_create_annotation_mask_padding_bounds_clamped():
-    """Large padding at image corners must clamp to bounds without raising IndexError."""
+    """Large padding at image corners must clamp to bounds without raising
+    IndexError."""
     annotations = _make_annotations([0, 19], [0, 19], ["Coral", "Coral"])
     mask = create_annotation_mask(annotations, (20, 20), {"Coral": 1}, padding=5)
 
@@ -156,7 +157,8 @@ def test_base_dataset_set_global_offset_validates_negative(minimal_dataset):
 
 
 def test_base_dataset_set_global_offset_shifts_mask_via_helper():
-    """Verify offset arithmetic on the helper directly: offset=10 → values become 11/12."""
+    """Verify offset arithmetic on the helper directly: offset=10 → values become
+    11/12."""
     minimal_mask = np.array([[0, 1, 2], [2, 0, 1]], dtype=np.int64)
     offset = 10
     shifted = np.where(minimal_mask > 0, minimal_mask + offset, minimal_mask)
@@ -252,3 +254,69 @@ def test_base_dataset_saves_failure_report_as_parquet(single_image_annotations, 
     saved_df = pd.read_parquet(output_path)
     assert len(saved_df) == 1
     assert saved_df.iloc[0]["image_id"] == "img1"
+
+
+# --- BaseCoralDataset O(1) annotation lookup (Ticket 1b) ---
+
+
+class _StubImageDataset(BaseCoralDataset):
+    """Minimal subclass returning a fixed blank image so _load_item runs offline."""
+
+    def read_image(self, **row_kwargs: Any) -> np.ndarray:
+        return np.zeros((32, 32, 3), dtype=np.uint8)
+
+
+@pytest.fixture
+def multi_annotation_dataset() -> _StubImageDataset:
+    """Dataset with a multi-annotation image, a single-annotation image, and an image
+    that has no annotations at all (present only in df_images)."""
+    df_annotations = pd.DataFrame(
+        {
+            "image_id": ["img1", "img1", "img2"],
+            "source_label_name": ["Coral", "Sand", "Coral"],
+            "row": [1, 5, 9],
+            "col": [2, 6, 10],
+        }
+    )
+    df_images = pd.DataFrame({"image_id": ["img1", "img2", "img3_empty"]})
+    return _StubImageDataset(df_annotations=df_annotations, df_images=df_images)
+
+
+def test_annotation_positions_match_boolean_scan(multi_annotation_dataset):
+    """The O(1) positional index reproduces the old O(N) boolean-scan selection
+    exactly."""
+    ds = multi_annotation_dataset
+    cols = ["row", "col", "source_label_name"]
+    for image_id in ("img1", "img2"):
+        expected = ds.df_annotations.loc[ds.df_annotations["image_id"] == image_id, cols]
+        positions = ds._annotation_positions_by_image[image_id]
+        got = ds.df_annotations.iloc[positions][cols]
+        pd.testing.assert_frame_equal(got.reset_index(drop=True), expected.reset_index(drop=True))
+
+
+def test_annotation_positions_absent_for_unannotated_image(multi_annotation_dataset):
+    """Images with no annotations are simply absent from the lookup (→ empty mask)."""
+    assert multi_annotation_dataset._annotation_positions_by_image.get("img3_empty") is None
+
+
+def test_load_item_paints_all_annotations_of_target_image(multi_annotation_dataset):
+    """_load_item builds a mask from every annotation of the looked-up image, and
+    nothing else."""
+    ds = multi_annotation_dataset
+    idx = int(ds.df_images.index[ds.df_images["image_id"] == "img1"][0])
+    _image, mask = ds._load_item(idx)
+    assert mask.shape == (32, 32)
+    assert mask[1, 2] == ds.source_name2id["Coral"]
+    assert mask[5, 6] == ds.source_name2id["Sand"]
+    # img2's annotation must not leak into img1's mask; unannotated pixels stay background.
+    assert mask[9, 10] == 0
+    assert mask[0, 0] == 0
+
+
+def test_load_item_empty_image_yields_zero_mask(multi_annotation_dataset):
+    """An image with no annotations produces an all-background mask, not a crash."""
+    ds = multi_annotation_dataset
+    idx = int(ds.df_images.index[ds.df_images["image_id"] == "img3_empty"][0])
+    _image, mask = ds._load_item(idx)
+    assert mask.shape == (32, 32)
+    assert int(mask.sum()) == 0
