@@ -85,6 +85,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     _load_failures: list[dict[str, Any]]
     _annotation_count_by_image: dict[str, int]
     _annotation_labels_by_image: dict[str, str]
+    _annotation_positions_by_image: dict[Any, np.ndarray]
 
     def __init__(
         self,
@@ -122,11 +123,17 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.num_source_classes = len(self.source_id2name) + 1  # +1 for background
 
         self._annotation_count_by_image = self.df_annotations["image_id"].value_counts().to_dict()
+        grouped_by_image = self.df_annotations.groupby("image_id")
         self._annotation_labels_by_image = (
-            self.df_annotations.groupby("image_id")["source_label_name"]
+            grouped_by_image["source_label_name"]
             .apply(lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)})))
             .to_dict()
         )
+        # Positional indices of each image's annotation rows, computed once, so __getitem__
+        # slices annotations in O(1) instead of scanning the whole (multi-million row)
+        # annotations frame with a boolean mask on every sample. Values are numpy position
+        # arrays suitable for DataFrame.iloc.
+        self._annotation_positions_by_image = grouped_by_image.indices
         self._load_failures = []
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
@@ -218,10 +225,11 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
         image = self.read_image(**row_kwargs)
 
-        annotations = self.df_annotations.loc[
-            self.df_annotations["image_id"] == image_id,
-            ["row", "col", "source_label_name"],
-        ]
+        positions = self._annotation_positions_by_image.get(image_id)
+        if positions is None:
+            annotations = self.df_annotations.iloc[:0][["row", "col", "source_label_name"]]
+        else:
+            annotations = self.df_annotations.iloc[positions][["row", "col", "source_label_name"]]
 
         local_mask = create_annotation_mask(
             annotations, image.shape, self.source_name2id, padding=self.padding
