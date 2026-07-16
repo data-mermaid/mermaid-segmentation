@@ -162,6 +162,10 @@ class LinearDINOv3(torch.nn.Module):
         self.token_width = input_size[1] // patch_size
         self.token_height = input_size[0] // patch_size
         self.head = LinearClassifier(hidden_size, self.token_width, self.token_height, num_classes)
+        # Gates the encoder forward under no_grad when the backbone is frozen (set by
+        # freeze_encoder). Mirrors _DPTDINOv3Base so a frozen probe doesn't build the autograd
+        # graph over the backbone or hold its activations.
+        self._encoder_frozen = False
 
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
         """Run encoder + linear head and upsample to input resolution.
@@ -172,7 +176,13 @@ class LinearDINOv3(torch.nn.Module):
         Returns:
             SemanticSegmenterOutput: `.logits` has shape (B, num_classes, H, W).
         """
-        outputs = self.encoder(x, **kwargs)
+        if self._encoder_frozen:
+            # Frozen probe: skip building the autograd graph over the backbone (saves activation
+            # memory and backward compute; only the head trains).
+            with torch.no_grad():
+                outputs = self.encoder(x, **kwargs)
+        else:
+            outputs = self.encoder(x, **kwargs)
         # Skip the 5 DINOv3 prefix tokens (CLS + 4 register tokens)
         patch_embeddings = outputs.last_hidden_state[:, 5:, :]
 
@@ -193,23 +203,22 @@ class LinearDINOv3(torch.nn.Module):
         return SemanticSegmenterOutput(loss=loss, logits=logits)
 
     def freeze_encoder(self) -> None:
-        """Freezes the encoder layers of the model by setting the `requires_grad`
-        attribute of their parameters to `False`.
+        """Freeze the backbone: set encoder ``requires_grad`` to ``False`` and run its
+        forward under ``torch.no_grad`` so a frozen probe never builds the autograd
+        graph over it.
 
-        This prevents the encoder layers from being updated during training, effectively
-        making them static while allowing other parts of the model to be trained.
+        Only the head keeps training.
         """
         for param in self.encoder.parameters():
             param.requires_grad = False
+        self._encoder_frozen = True
 
     def unfreeze_encoder(self) -> None:
-        """Unfreezes the encoder layers of the model by setting the `requires_grad`
-        attribute of all parameters in the encoder to True.
-
-        This allows these layers to be trainable during the training process.
-        """
+        """Unfreeze the backbone: restore encoder ``requires_grad`` to ``True`` and run
+        its forward with gradients again (full fine-tune)."""
         for param in self.encoder.parameters():
             param.requires_grad = True
+        self._encoder_frozen = False
 
 
 class ConceptBottleneckDINOv3(torch.nn.Module):

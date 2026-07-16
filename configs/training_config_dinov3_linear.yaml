@@ -30,8 +30,8 @@ training:
     # Bumped 8 -> 32: the issue-12 baseline run (MLflow f1cf7811) used only 2.85 GB of the 24 GB
     # GPU at batch 8, so there is large headroom (32 ~= 11 GB est.). NOTE: lr (1e-3) may want
     # scaling for the larger batch (~sqrt rule -> ~2e-3) — leave as an explicit experiment choice.
-    # Going higher (64+) is gated on running the frozen LinearDINOv3 encoder under torch.no_grad
-    # (it currently builds the autograd graph over the frozen backbone, wasting activation memory).
+    # The frozen LinearDINOv3 encoder now runs under torch.no_grad (frees activation memory), so 64
+    # is worth trying once verified on the target GPU.
     batch_size: 32
     # Target-class whitelist (SourceLabelRegistry target_label_subset). Ids 1..N are assigned
     # alphabetically; id 0 is the unmapped/ignore slot (ignore_index: 0). Names must match the
