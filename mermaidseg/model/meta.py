@@ -24,6 +24,7 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     source_labels_to_target_labels,
 )
 from mermaidseg.io import ConfigDict
+from mermaidseg.model import checkpoint as checkpoint_io
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +38,11 @@ _TQDM_MININTERVAL = float(os.getenv("MERMAID_TQDM_MININTERVAL", "60"))
 def _load_checkpoint_into_model(model: torch.nn.Module, checkpoint: Any) -> None:
     """Load a saved checkpoint's weights into a freshly-constructed ``model``.
 
-    Checkpoints saved with ``excludes_frozen_params=True`` (the ``Logger`` default) omit
-    frozen-backbone keys, since the caller's freshly-constructed model already re-
-    initializes the same frozen backbone; those are loaded with ``strict=False``. Legacy
-    checkpoints (no ``excludes_frozen_params`` metadata, or a bare state dict) always
-    carry every key and are loaded with ``strict=True`` to still catch real mismatches.
+    Delegates to :func:`mermaidseg.model.checkpoint.load_into`, which owns the checkpoint
+    format: it normalises PEFT-nested (LoRA) keys and picks ``strict`` based on whether the
+    checkpoint excluded frozen params (the frozen backbone is re-initialised by construction).
     """
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        strict = not checkpoint.get("excludes_frozen_params", False)
-        model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
-    else:
-        model.load_state_dict(checkpoint)
+    checkpoint_io.load_into(model, checkpoint)
 
 
 def _resolve_amp_dtype(dtype_config: Any | None) -> torch.dtype:
