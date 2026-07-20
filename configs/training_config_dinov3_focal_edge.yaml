@@ -1,4 +1,5 @@
-# Training config: Focal + Edge-Aware loss (Ticket 2b). Run only if 2a shows signal.
+# Training config: Focal + Edge-Aware loss (Ticket 2b / #171). Run only if 2a shows signal.
+# Same freeze/batch/class_subset as training_config_dinov3_linear.yaml (issue #12).
 training:
     training_mode: "standard"
     freeze_encoder: true
@@ -22,12 +23,13 @@ training:
         warmup_iters: 0
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
-    batch_size: 8
+    # Matches issue-12 frozen probe batch (see training_config_dinov3_linear.yaml).
+    batch_size: 32
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
                     'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
-                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human-made structure', 'Hydnophora',
+                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human', 'Human-made structure', 'Hydnophora',
                     'Isopora', 'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis',
                     'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium',
                     'Orbicella annularis', 'Orbicella faveolata', 'Pachyseris', 'Padina', 'Pavona', 'Pectinia', 'Platygyra',

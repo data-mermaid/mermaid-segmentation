@@ -111,6 +111,29 @@ def test_metric_of_interest_allowlist_rejects_unknown_metric() -> None:
         )
 
 
+def test_train_model_logs_per_dataset_validation_metrics() -> None:
+    meta = FakeMetaModel(
+        epochs=1,
+        val_losses=[0.5, 0.4, 0.6],
+        val_metrics_seq=[{"miou": 0.5}, {"miou": 0.4}, {"miou": 0.6}],
+    )
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        dataset_val_loaders={"coralnet": _tiny_loader(), "mermaid": _tiny_loader()},
+        logger=logger,
+        metric_of_interest="miou",
+    )
+    logged_keys = {k for payload, _ in logger.logged for k in payload}
+    assert "validation/mermaid/miou" in logged_keys
+    assert "validation/coralnet/miou" in logged_keys
+    assert "validation/mermaid/loss" in logged_keys
+    assert "validation/coralnet/loss" in logged_keys
+
+
 @pytest.mark.parametrize("metric_name", ["accuracy", "miou", "f1-score", "loss"])
 def test_metric_of_interest_allowlist_accepts_known_metrics(metric_name: str) -> None:
     val_metrics = {

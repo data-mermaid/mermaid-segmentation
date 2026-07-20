@@ -64,8 +64,10 @@ def test_standard_mode_training_pipeline_smoke(tmp_path, monkeypatch):
 
     from scripts.train import _run_training
 
-    synthetic_mermaid = SyntheticCoralDataset("mermaid", num_samples=20)
-    synthetic_coralnet = SyntheticCoralDataset("coralnet", num_samples=20)
+    synthetic_mermaid_train = SyntheticCoralDataset("mermaid", num_samples=18)
+    synthetic_mermaid_val = SyntheticCoralDataset("mermaid", num_samples=2)
+    synthetic_coralnet_train = SyntheticCoralDataset("coralnet", num_samples=20)
+    synthetic_coralnet_val = SyntheticCoralDataset("coralnet", num_samples=20)
 
     concept_schema_calls = []
 
@@ -77,12 +79,22 @@ def test_standard_mode_training_pipeline_smoke(tmp_path, monkeypatch):
         concept_schema_calls.append((args, kwargs))
         return original_from_csv(*args, **kwargs)
 
+    def mermaid_factory(**kwargs):
+        if kwargs.get("holdout_role") == "val":
+            return synthetic_mermaid_val
+        return synthetic_mermaid_train
+
+    def coralnet_factory(**kwargs):
+        if "whitelist_sources" in kwargs:
+            return synthetic_coralnet_val
+        return synthetic_coralnet_train
+
     # Datasets are built via scripts.train.DATASET_REGISTRY[name](...); override its entries.
     # The standard baseline uses only coralnet + mermaid — every other source has None splits
     # in the config and must never be instantiated (side_effect guards that).
     registry_override = {
-        "mermaid": MagicMock(return_value=synthetic_mermaid),
-        "coralnet": MagicMock(return_value=synthetic_coralnet),
+        "mermaid": MagicMock(side_effect=mermaid_factory),
+        "coralnet": MagicMock(side_effect=coralnet_factory),
         **{
             name: MagicMock(side_effect=ValueError("Should not be called in standard baseline"))
             for name in (

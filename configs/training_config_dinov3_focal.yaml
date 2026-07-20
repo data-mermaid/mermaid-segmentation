@@ -1,5 +1,6 @@
-# Training config: Domain-Weighted Focal Loss on frozen LinearDINOv3 (Ticket 2a).
-# Fork of training_config_dinov3_base.yaml — do not resume a CE checkpoint into this run.
+# Training config: Domain-Weighted Focal Loss on frozen LinearDINOv3 (Ticket 2a / #170).
+# Fork of training_config_dinov3_linear.yaml — same freeze/batch/class_subset as issue #12
+# baseline; only the loss block changes. Do not resume a CE checkpoint into this run.
 # Build weights first:
 #   uv run python scripts/build_class_weight_artifact.py ... --output artifacts/class_weights_dinov3_base.json
 training:
@@ -20,15 +21,19 @@ training:
         type: PolynomialLR
         power: 1
         total_iters: 200
+        # Frozen probe: no LR warmup (matches issue-12 linear baseline).
         warmup_iters: 0
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
-    batch_size: 8
+    # Matches training_config_dinov3_linear.yaml (issue #12): batch 8 -> 32 after MLflow
+    # showed ~2.85 GB / 24 GB at batch 8. Frozen encoder runs under torch.no_grad.
+    batch_size: 32
+    # Same class_subset as training_config_dinov3_linear.yaml (issue #12).
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
                     'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
-                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human-made structure', 'Hydnophora',
+                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human', 'Human-made structure', 'Hydnophora',
                     'Isopora', 'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis',
                     'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium',
                     'Orbicella annularis', 'Orbicella faveolata', 'Pachyseris', 'Padina', 'Pavona', 'Pectinia', 'Platygyra',

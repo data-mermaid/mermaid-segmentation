@@ -37,8 +37,14 @@ data:
                           6968, 7116]
 
   mermaid:
-    train: {}
-    val: None
+    train:
+      holdout_fraction: 0.1
+      holdout_seed: 42
+      holdout_role: train
+    val:
+      holdout_fraction: 0.1
+      holdout_seed: 42
+      holdout_role: val
 
   coralscapes:
     train: None

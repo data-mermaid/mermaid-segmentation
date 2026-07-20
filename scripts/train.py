@@ -417,12 +417,32 @@ def _run_training(args: argparse.Namespace) -> None:
     train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"]
     val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
 
+    if not train_datasets:
+        raise ValueError("No training datasets enabled in data config.")
+    if not val_datasets:
+        raise ValueError(
+            "No validation datasets enabled. MERMAID and/or CoralNet val must be configured "
+            "(see configs/data_config_coralnet_mermaid.yaml)."
+        )
+
     train_dataset_combined = ConcatDataset(train_datasets)
     val_dataset_combined = ConcatDataset(val_datasets)
     train_loader = DataLoader(train_dataset_combined, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_dataset_combined, shuffle=True, **loader_kwargs)
 
+    # Per-source val loaders for MLflow keys like validation/mermaid/miou (checkpointing
+    # still uses the combined val_loader above).
+    dataset_val_loaders = {
+        name: DataLoader(ds, shuffle=False, **{**loader_kwargs, "drop_last": False})
+        for (name, split), ds in dataset_dict.items()
+        if split == "val"
+    }
+
     print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
+    for name, ds in ((n, d) for (n, s), d in dataset_dict.items() if s == "train"):
+        logging.info("Train dataset %-20s: %d samples", name, len(ds))
+    for name, ds in ((n, d) for (n, s), d in dataset_dict.items() if s == "val"):
+        logging.info("Val dataset   %-20s: %d samples", name, len(ds))
     if compute_concepts:
         assert registry.num_concepts == schema.num_channels
 
@@ -509,6 +529,8 @@ def _run_training(args: argparse.Namespace) -> None:
         logger.log_benchmark_context(label=cfg.run_name)
         logger.log_dataloader_params(train_loader, prefix="train_loader")
         logger.log_dataloader_params(val_loader, prefix="val_loader")
+        logger.log_datasets(train_dataset_combined, context="training")
+        logger.log_datasets(val_dataset_combined, context="validation")
         logger.log_reconciliation(registry)
         # ConcatDataset exposes `.datasets`, which resolve_split_annotations already
         # recurses into per-source, so this works directly against the multi-dataset
@@ -518,14 +540,13 @@ def _run_training(args: argparse.Namespace) -> None:
         )
 
         try:
-            # test_loader is None: the multi-dataset config does not define test splits yet,
-            # so there is no test data to evaluate (see data_config.yaml).
             train_model(
                 meta_model=meta_model,
                 evaluator=evaluator,
                 train_loader=train_loader,
                 val_loader=val_loader,
                 test_loader=None,
+                dataset_val_loaders=dataset_val_loaders,
                 logger=logger,
                 metric_of_interest=args.metric_of_interest,
                 early_stopping=args.early_stopping,

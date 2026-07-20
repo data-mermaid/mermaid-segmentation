@@ -2801,6 +2801,7 @@ demo = [
 notebooks = [
     { name = "great-tables" },
     { name = "hvplot" },
+    { name = "ibis-framework", extra = ["duckdb"] },
     { name = "ipykernel" },
     { name = "ipywidgets" },
     { name = "jupyter" },
@@ -2847,6 +2848,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.36.2" },
     { name = "hvplot", marker = "extra == 'notebooks'", specifier = ">=0.12.2" },
     { name = "ibis-framework", extras = ["duckdb"], marker = "extra == 'coralnet'", specifier = ">=9.0" },
+    { name = "ibis-framework", extras = ["duckdb"], marker = "extra == 'notebooks'", specifier = ">=9.0" },
     { name = "ipykernel", marker = "extra == 'notebooks'", specifier = ">=7.2.0" },
     { name = "ipywidgets", marker = "extra == 'notebooks'" },
     { name = "jupyter", marker = "extra == 'notebooks'" },

@@ -63,6 +63,7 @@ notebooks = [
     "seaborn>=0.13.2",
     "hvplot>=0.12.2",
     "great-tables>=0.21.0",
+    "ibis-framework[duckdb]>=9.0",
 ]
 test-live = [
     "playwright>=1.50",
