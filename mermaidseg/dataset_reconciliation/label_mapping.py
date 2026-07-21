@@ -25,6 +25,19 @@ _CORALNET_SNAPSHOT_PATH = (
 )
 
 
+def load_coralnet_snapshot() -> dict[str, str | None]:
+    """Load the committed CoralNet ``provider_id`` -> target snapshot with no network
+    call.
+
+    The snapshot (``configs/coralnet_to_mermaid_mapping.json``) is the offline fallback
+    for :func:`fetch_coralnet_to_mermaid`. Exposing it lets offline tooling (e.g.
+    experiment-config validation) enumerate known target names without hitting the
+    MERMAID API.
+    """
+    with open(_CORALNET_SNAPSHOT_PATH) as f:
+        return json.load(f)
+
+
 def fetch_mermaid_target_labels(
     benthicattributes_url: str = "https://api.datamermaid.org/v1/benthicattributes/",
 ) -> list[str]:
@@ -88,8 +101,7 @@ def fetch_coralnet_to_mermaid(
             exc,
             _CORALNET_SNAPSHOT_PATH.name,
         )
-        with open(_CORALNET_SNAPSHOT_PATH) as f:
-            return json.load(f)
+        return load_coralnet_snapshot()
 
 
 def fetch_catlin_seaview_to_mermaid() -> dict[str, str]:

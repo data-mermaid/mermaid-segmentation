@@ -46,23 +46,10 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from torch.utils.data import ConcatDataset, DataLoader
 
-from mermaidseg.dataset_reconciliation import (
-    ConceptSchema,
-    SourceLabelRegistry,
-    attach_registry,
-    prepare_splits_for_registry,
-)
-from mermaidseg.datasets import (
-    DATASET_REGISTRY,
-    BaseCoralDataset,
-    worker_init_fn,
-)
-from mermaidseg.io import get_parser, setup_config, update_config_with_args
+from mermaidseg.experiment import Experiment
+from mermaidseg.io import get_parser
 from mermaidseg.logger import Logger
-from mermaidseg.model.eval import Evaluator
-from mermaidseg.model.meta import MetaModel
 from mermaidseg.model.metric_policy import SUPPORTED_METRIC_NAMES
 from mermaidseg.model.train import train_model
 
@@ -339,92 +326,28 @@ def _run_training(args: argparse.Namespace) -> None:
             '    export MLFLOW_TRACKING_URI="arn:aws:sagemaker:us-east-1:ACCOUNT:mlflow-app/APP-ID"'
         )
 
-    cfg = setup_config(
-        {
-            "data": args.config_data,
-            "training": args.config_training,
-            "model": args.config_model,
-            "logger": args.config_logger,
-        }
-    )
-
-    cfg = update_config_with_args(cfg, args)
+    # The Experiment owns config loading, the override merge, and the dataset -> registry -> model
+    # -> evaluator assembly that used to be inlined here (so notebooks and `dry-run` build the same
+    # objects the same way). Process concerns — seeding, dry-run truncation, failure reports, the
+    # Logger/provenance context, and the training loop — stay in this CLI adapter.
+    experiment = Experiment.from_args(args)
+    cfg = experiment.config
     cfg_logger = copy.deepcopy(cfg)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = experiment.device
     logging.info("Device: %s", device)
 
-    seed = args.seed
+    seed = experiment.overrides.seed
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     logging.info("Seed: %d", seed)
 
-    # Every dataset constructor accepts ``padding`` (point-annotation datasets use it;
-    # dense/HF datasets accept and ignore it), so instantiation is uniform.
-    dataset_dict: dict[tuple[str, str], object] = {}
-    for name in DATASET_REGISTRY:
-        for split, split_cfg in cfg.data[name].items():
-            if split_cfg is None or split_cfg == "None":
-                continue
-            dataset_dict[(name, split)] = DATASET_REGISTRY[name](
-                **split_cfg, padding=cfg.training.padding
-            )
-            print(f"{name:>24s} - {split:<5s}: {len(dataset_dict[(name, split)]):>7d} samples")
-
-    loader_kwargs = {
-        "batch_size": cfg.training.batch_size,
-        "num_workers": args.num_workers,
-        "pin_memory": torch.cuda.is_available(),
-        "drop_last": True,
-        # Drop the (None, None) placeholders BaseCoralDataset.__getitem__ returns on load
-        # failures (e.g. a missing/renamed S3 object) so one bad image leaves the batch instead
-        # of crashing default_collate — otherwise a single unreadable image kills the whole run.
-        "collate_fn": BaseCoralDataset.collate_fn,
-    }
-    if args.num_workers > 0:
-        loader_kwargs["persistent_workers"] = True
-        loader_kwargs["worker_init_fn"] = worker_init_fn
-
-    concept_mapping_path = cfg.training.get("concept_mapping_path")
-
-    _, registry_datasets = prepare_splits_for_registry(dataset_dict)
-
-    run_sources = {ds.SOURCE_NAME for ds in registry_datasets}
-
-    # Standard (non-CBM) mode trains only the segmentation head — no concept bottleneck — so it
-    # needs neither a ConceptSchema nor a concept_mapping_path. Building the schema here would call
-    # ConceptSchema.from_csv(None, ...) and crash, and the num_concepts assertion below is only
-    # meaningful when concepts are computed. Guard both on training_mode.
-    compute_concepts = cfg.training.training_mode != "standard"
-    schema = (
-        ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
-        if compute_concepts
-        else None
-    )
-
-    registry = SourceLabelRegistry(
-        registry_datasets,
-        target_label_subset=cfg.training.class_subset,
-        compute_concepts=compute_concepts,
-        concept_mapping_path=concept_mapping_path,
-        concept_schema=schema,
-        label_roll_up=cfg.training.get("label_roll_up", False),
-    ).to(device)
-
-    attach_registry(registry, dataset_dict.values())
-
-    train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"]
-    val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
-
-    train_dataset_combined = ConcatDataset(train_datasets)
-    val_dataset_combined = ConcatDataset(val_datasets)
-    train_loader = DataLoader(train_dataset_combined, shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(val_dataset_combined, shuffle=True, **loader_kwargs)
-
-    print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
-    if compute_concepts:
-        assert registry.num_concepts == schema.num_channels
+    train_loader, val_loader = experiment.dataloaders()
+    dataset_dict = experiment.datasets()
+    registry = experiment.registry
+    train_dataset_combined = experiment.train_dataset
+    val_dataset_combined = experiment.val_dataset
 
     logging.info(
         "Dataset: %s (%d samples)",
@@ -440,12 +363,12 @@ def _run_training(args: argparse.Namespace) -> None:
             return
         paths = _save_failure_reports_if_available(
             dataset_dict=dataset_dict,
-            log_dir=Path(args.log_dir),
-            explicit_output_path=args.failure_report_path,
+            log_dir=Path(experiment.overrides.log_dir),
+            explicit_output_path=experiment.overrides.failure_report_path,
         )
         report_written = bool(paths)
 
-    if args.dry_run:
+    if experiment.overrides.dry_run:
         max_dry_epochs = 3
         actual_epochs = cfg.training.epochs
         if actual_epochs > max_dry_epochs:
@@ -459,40 +382,14 @@ def _run_training(args: argparse.Namespace) -> None:
             _write_failure_reports_once()
             raise
 
-    meta_model = MetaModel(
-        run_name=cfg.run_name,
-        num_classes=registry.num_target_classes,
-        num_concepts=registry.num_concepts or None,
-        device=device,
-        model_kwargs=cfg.model.copy(),
-        training_kwargs=cfg.training.copy(),
-        source_to_target_lookup=registry.source_to_target,
-        source_to_concepts_lookup=registry.source_to_concepts,
-        concept_matrix=registry.concept_matrix,
-        conceptid2labelid=registry.conceptid2labelid(),
-        concept_value2id=registry.concept_value2id,
-    )
-
-    per_class_metrics = args.per_class_metrics
-    if per_class_metrics is None:
-        # Default on for standard segmentation (modest class cardinality); off for
-        # concept/concept-bottleneck, where taxonomic ranks (e.g. genus) can carry
-        # far more distinct values and would flood MLflow's metric list by default.
-        per_class_metrics = cfg.training.training_mode == "standard"
-
-    evaluator = Evaluator(
-        num_classes=registry.num_target_classes,
-        device=device,
-        calculate_concept_metrics=cfg.training.training_mode != "standard",
-        concept_value2id=registry.concept_value2id,
-        per_class_metrics=per_class_metrics,
-    )
+    meta_model = experiment.meta_model()
+    evaluator = experiment.evaluator()
 
     # Route the run to an MLflow experiment. --experiment-name (or the run YAML override)
     # wins; otherwise fall back to whatever the logger config declares.
-    if args.experiment_name:
-        cfg.logger.experiment_name = args.experiment_name
-        cfg_logger.logger.experiment_name = args.experiment_name
+    if experiment.overrides.experiment_name:
+        cfg.logger.experiment_name = experiment.overrides.experiment_name
+        cfg_logger.logger.experiment_name = experiment.overrides.experiment_name
 
     with Logger(
         config=cfg_logger,
@@ -527,10 +424,10 @@ def _run_training(args: argparse.Namespace) -> None:
                 val_loader=val_loader,
                 test_loader=None,
                 logger=logger,
-                metric_of_interest=args.metric_of_interest,
-                early_stopping=args.early_stopping,
-                early_stopping_patience=args.early_stopping_patience,
-                early_stopping_min_delta=args.early_stopping_min_delta,
+                metric_of_interest=experiment.overrides.metric_of_interest,
+                early_stopping=experiment.overrides.early_stopping,
+                early_stopping_patience=experiment.overrides.early_stopping_patience,
+                early_stopping_min_delta=experiment.overrides.early_stopping_min_delta,
             )
         finally:
             _write_failure_reports_once()
