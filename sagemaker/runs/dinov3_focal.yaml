@@ -1,0 +1,25 @@
+job:
+  name_prefix: mermaidseg-dinov3-focal
+  image: mermaid-segmentation-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.g5.2xlarge
+  volume_gb: 200
+  max_runtime_hours: 48
+  env:
+    MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
+
+# Same data/model stack as issue #12 baseline; only training config swaps CE → Focal.
+config:
+  config_data: configs/data_config_coralnet_mermaid.yaml
+  config_model: configs/model_config.yaml
+  config_training: configs/training_config_dinov3_focal.yaml
+  config_logger: configs/logger_config.yaml
+  overrides:
+    run-name: dinov3-focal-coralnet-all-mermaid
+    experiment-name: post-baseline
+    epochs: 200
+    seed: 42
+    num-workers: 8
+    metric-of-interest: miou
+    early-stopping: true
+    early-stopping-patience: 20
