@@ -125,15 +125,11 @@ class ConceptHead(torch.nn.Module):
 class LinearDINOv3(torch.nn.Module):
     """DINOv3 encoder with a linear segmentation head.
 
-    Encodes input images with a frozen-or-trainable DINOv3 backbone and
-    classifies each spatial token with a 1×1 conv, then bilinearly upsamples
-    back to input resolution.
+    Encodes input images with a frozen-or-trainable DINOv3 backbone and classifies each
+    spatial token with a 1×1 conv, then bilinearly upsamples back to input resolution.
 
-    Attributes:
-        encoder: DINOv3 model loaded via `AutoModel.from_pretrained`.
-        head (LinearClassifier): Per-token classification head.
-        token_width (int): Width of the patch-token grid.
-        token_height (int): Height of the patch-token grid.
+    When ``use_lora=True``, PEFT LoRA adapters are injected into the encoder attention
+    projections; base weights stay frozen and only adapters + head train.
     """
 
     def __init__(
@@ -141,22 +137,41 @@ class LinearDINOv3(torch.nn.Module):
         encoder_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
         num_classes: int = 2,
         input_size: tuple[int, int] = (512, 512),
+        use_lora: bool = False,
+        lora_r: int = 16,
+        lora_alpha: int = 32,
+        lora_dropout: float = 0.05,
+        lora_target_modules: Sequence[str] = ("q_proj", "v_proj"),
+        lora_bias: str = "none",
         **kwargs: Any,
     ):
         """Initialize encoder and linear segmentation head.
 
         Args:
             encoder_name (str): HuggingFace model ID for the DINOv3 encoder.
-                Defaults to "facebook/dinov3-vitb16-pretrain-lvd1689m".
-            num_classes (int): Number of segmentation output classes. Defaults to 2.
+            num_classes (int): Number of segmentation output classes.
             input_size (tuple[int, int]): Expected (height, width) of input images.
-                Determines the token grid size. Defaults to (512, 512).
+            use_lora (bool): If True, wrap the encoder with PEFT LoRA adapters.
+            lora_r / lora_alpha / lora_dropout / lora_target_modules / lora_bias:
+                PEFT LoRA hyperparameters (ignored when ``use_lora`` is False).
             **kwargs: Forwarded to `AutoModel.from_pretrained` (e.g., `token`).
         """
         super().__init__()
 
         token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
-        self.encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
+        base_encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
+        self.use_lora = use_lora
+        if use_lora:
+            self.encoder = _wrap_encoder_with_lora(
+                base_encoder,
+                lora_r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                lora_target_modules=lora_target_modules,
+                lora_bias=lora_bias,
+            )
+        else:
+            self.encoder = base_encoder
         hidden_size = self.encoder.config.hidden_size
         patch_size = self.encoder.config.patch_size
         self.token_width = input_size[1] // patch_size
@@ -164,8 +179,11 @@ class LinearDINOv3(torch.nn.Module):
         self.head = LinearClassifier(hidden_size, self.token_width, self.token_height, num_classes)
         # Gates the encoder forward under no_grad when the backbone is frozen (set by
         # freeze_encoder). Mirrors _DPTDINOv3Base so a frozen probe doesn't build the autograd
-        # graph over the backbone or hold its activations.
+        # graph over the backbone or hold its activations. LoRA keeps this False so adapters
+        # still receive gradients through the encoder forward.
         self._encoder_frozen = False
+        if use_lora:
+            self.freeze_encoder()
 
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
         """Run encoder + linear head and upsample to input resolution.
@@ -186,39 +204,42 @@ class LinearDINOv3(torch.nn.Module):
         # Skip the 5 DINOv3 prefix tokens (CLS + 4 register tokens)
         patch_embeddings = outputs.last_hidden_state[:, 5:, :]
 
-        # convert to logits and upsample to the size of the pixel values
         logits = self.head(patch_embeddings)
         logits = torch.nn.functional.interpolate(
             logits, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
 
-        loss = None
-        # if labels is not None:
-        #     logits = torch.nn.functional.interpolate(
-        #         logits, size=labels.shape[-2:], mode="bilinear", align_corners=False
-        #     )
-        #     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=0)
-        #     loss = loss_fct(logits.squeeze(), labels.squeeze())
-
-        return SemanticSegmenterOutput(loss=loss, logits=logits)
+        return SemanticSegmenterOutput(loss=None, logits=logits)
 
     def freeze_encoder(self) -> None:
-        """Freeze the backbone: set encoder ``requires_grad`` to ``False`` and run its
-        forward under ``torch.no_grad`` so a frozen probe never builds the autograd
-        graph over it.
+        """Freeze encoder base weights; keep LoRA adapters trainable when present.
 
-        Only the head keeps training.
+        Without LoRA, also run the encoder under ``torch.no_grad`` (frozen probe). With
+        LoRA, adapters stay trainable so the encoder forward must keep gradients.
         """
+        if self.use_lora:
+            for name, param in self.encoder.named_parameters():
+                param.requires_grad = "lora_" in name
+            self._encoder_frozen = False
+            return
         for param in self.encoder.parameters():
             param.requires_grad = False
         self._encoder_frozen = True
 
     def unfreeze_encoder(self) -> None:
-        """Unfreeze the backbone: restore encoder ``requires_grad`` to ``True`` and run
-        its forward with gradients again (full fine-tune)."""
+        """Unfreeze the full encoder (base weights + LoRA adapters, if any)."""
         for param in self.encoder.parameters():
             param.requires_grad = True
         self._encoder_frozen = False
+
+
+class LinearLoRADINOv3(LinearDINOv3):
+    """LinearDINOv3 with LoRA enabled by default (Q/V adapters unless overridden)."""
+
+    def __init__(self, **kwargs: Any):
+        kwargs.setdefault("use_lora", True)
+        kwargs.setdefault("lora_target_modules", ("q_proj", "v_proj"))
+        super().__init__(**kwargs)
 
 
 class ConceptBottleneckDINOv3(torch.nn.Module):
