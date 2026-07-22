@@ -344,6 +344,7 @@ def _run_training(args: argparse.Namespace) -> None:
     logging.info("Seed: %d", seed)
 
     train_loader, val_loader = experiment.dataloaders()
+    dataset_val_loaders = experiment.dataset_val_loaders()
     dataset_dict = experiment.datasets()
     registry = experiment.registry
     train_dataset_combined = experiment.train_dataset
@@ -378,6 +379,10 @@ def _run_training(args: argparse.Namespace) -> None:
         try:
             train_loader = [_take_first_non_empty_batch(train_loader, "train")]
             val_loader = [_take_first_non_empty_batch(val_loader, "val")]
+            dataset_val_loaders = {
+                name: [_take_first_non_empty_batch(loader, f"val/{name}")]
+                for name, loader in dataset_val_loaders.items()
+            }
         except RuntimeError:
             _write_failure_reports_once()
             raise
@@ -423,6 +428,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 train_loader=train_loader,
                 val_loader=val_loader,
                 test_loader=None,
+                dataset_val_loaders=dataset_val_loaders,
                 logger=logger,
                 metric_of_interest=experiment.overrides.metric_of_interest,
                 early_stopping=experiment.overrides.early_stopping,

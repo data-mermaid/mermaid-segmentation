@@ -64,7 +64,8 @@ def test_standard_mode_training_pipeline_smoke(tmp_path, monkeypatch):
 
     from scripts.train import _run_training
 
-    synthetic_mermaid = SyntheticCoralDataset("mermaid", num_samples=20)
+    synthetic_mermaid_train = SyntheticCoralDataset("mermaid", num_samples=18)
+    synthetic_mermaid_val = SyntheticCoralDataset("mermaid", num_samples=2)
     synthetic_coralnet = SyntheticCoralDataset("coralnet", num_samples=20)
 
     concept_schema_calls = []
@@ -77,11 +78,18 @@ def test_standard_mode_training_pipeline_smoke(tmp_path, monkeypatch):
         concept_schema_calls.append((args, kwargs))
         return original_from_csv(*args, **kwargs)
 
+    def mermaid_factory(**kwargs):
+        # MERMAID now has a real (holdout-derived) val split — see configs/data_config_
+        # coralnet_mermaid.yaml — so DATASET_REGISTRY["mermaid"] is invoked once per role.
+        if kwargs.get("holdout_role") == "val":
+            return synthetic_mermaid_val
+        return synthetic_mermaid_train
+
     # Datasets are built via mermaidseg.experiment.DATASET_REGISTRY[name](...); override its
     # entries. The standard baseline uses only coralnet + mermaid — every other source has None
     # splits in the config and must never be instantiated (side_effect guards that).
     registry_override = {
-        "mermaid": MagicMock(return_value=synthetic_mermaid),
+        "mermaid": MagicMock(side_effect=mermaid_factory),
         "coralnet": MagicMock(return_value=synthetic_coralnet),
         **{
             name: MagicMock(side_effect=ValueError("Should not be called in standard baseline"))

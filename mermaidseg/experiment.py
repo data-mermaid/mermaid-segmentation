@@ -333,12 +333,8 @@ class Experiment:
             self._registry = registry
         return self._registry
 
-    def dataloaders(self) -> tuple[DataLoader, DataLoader]:
-        """Build the ``(train, val)`` loaders (ConcatDataset over the active splits)."""
+    def _base_loader_kwargs(self) -> dict[str, Any]:
         cfg = self.config
-        dataset_dict = self.datasets()
-        registry = self.registry  # ensure attach_registry ran before any __getitem__
-
         loader_kwargs: dict[str, Any] = {
             "batch_size": cfg.training.batch_size,
             "num_workers": self.overrides.num_workers,
@@ -351,9 +347,20 @@ class Experiment:
         if self.overrides.num_workers > 0:
             loader_kwargs["persistent_workers"] = True
             loader_kwargs["worker_init_fn"] = worker_init_fn
+        return loader_kwargs
+
+    def dataloaders(self) -> tuple[DataLoader, DataLoader]:
+        """Build the ``(train, val)`` loaders (ConcatDataset over the active splits)."""
+        dataset_dict = self.datasets()
+        registry = self.registry  # ensure attach_registry ran before any __getitem__
+        loader_kwargs = self._base_loader_kwargs()
 
         train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"]
         val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
+        if not train_datasets:
+            raise ValueError("No training datasets enabled in data config.")
+        if not val_datasets:
+            raise ValueError("No validation datasets enabled in data config.")
         self.train_dataset = ConcatDataset(train_datasets)
         self.val_dataset = ConcatDataset(val_datasets)
         train_loader = DataLoader(self.train_dataset, shuffle=True, **loader_kwargs)
@@ -363,6 +370,22 @@ class Experiment:
         if self._compute_concepts:
             assert registry.num_concepts == self._schema.num_channels
         return train_loader, val_loader
+
+    def dataset_val_loaders(self) -> dict[str, DataLoader]:
+        """Per-dataset validation loaders (e.g. ``{"mermaid": ..., "coralnet": ...}``),
+        for MLflow keys like ``validation/mermaid/miou``.
+
+        Checkpoint selection and early stopping still use the combined loader from
+        :meth:`dataloaders`.
+        """
+        dataset_dict = self.datasets()
+        _ = self.registry  # ensure attach_registry ran before any __getitem__
+        loader_kwargs = {**self._base_loader_kwargs(), "drop_last": False}
+        return {
+            name: DataLoader(ds, shuffle=False, **loader_kwargs)
+            for (name, split), ds in dataset_dict.items()
+            if split == "val"
+        }
 
     def meta_model(self) -> MetaModel:
         """Construct the :class:`MetaModel` from the registry's derived lookups."""

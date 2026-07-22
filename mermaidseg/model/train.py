@@ -94,6 +94,9 @@ def train_model(
     | None = None,
     test_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
     | None = None,
+    dataset_val_loaders: (
+        dict[str, DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]] | None
+    ) = None,
     logger: Logger | None = None,
     start_epoch: int = -1,
     end_epoch: int = -1,
@@ -118,6 +121,9 @@ def train_model(
         test_loader (Optional[DataLoader], optional): DataLoader for the test dataset.
             Defaults to None. If provided, the model is evaluated periodically according
             to ``logger.log_epochs`` (or every epoch when logger is None), plus the final epoch.
+        dataset_val_loaders (dict[str, DataLoader] | None): Optional per-dataset validation
+            loaders (e.g. ``{"mermaid": ..., "coralnet": ...}``). Logged as
+            ``validation/{name}/*`` without affecting checkpoint selection.
         logger (Optional[Logger], optional): Logger object for logging metrics and saving
             model checkpoints. Defaults to None. When ``logger.log_checkpoint`` is set, a
             periodic (non-improvement) checkpoint is also saved every ``log_checkpoint``
@@ -210,6 +216,17 @@ def train_model(
             epoch_loss_dict["validation/loss"] = val_loss
             metrics_epoch[epoch]["validation_metrics"] = val_metric_results
             _log_metric_dict(logger, "validation", val_metric_results, epoch)
+
+            if dataset_val_loaders:
+                per_dataset_metrics: dict[str, object] = {}
+                for dataset_name, ds_loader in sorted(dataset_val_loaders.items()):
+                    ds_loss, ds_metrics = meta_model.validation_epoch(ds_loader, evaluator)
+                    prefix = f"validation/{dataset_name}"
+                    logging.info("VALID [%s] loss=%s metrics=%s", dataset_name, ds_loss, ds_metrics)
+                    epoch_loss_dict[f"{prefix}/loss"] = ds_loss
+                    _log_metric_dict(logger, prefix, ds_metrics, epoch)
+                    per_dataset_metrics[dataset_name] = {"loss": ds_loss, "metrics": ds_metrics}
+                metrics_epoch[epoch]["validation_per_dataset"] = per_dataset_metrics
 
             metric_value = extract_metric_value(metric_of_interest, val_loss, val_metric_results)
             if direction == "min":
