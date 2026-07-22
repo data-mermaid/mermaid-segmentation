@@ -1,14 +1,12 @@
-# Data config for the issue #12 LinearDINOv3 baseline: CoralNet + MERMAID only.
+# Data config for the issue #12 LinearDINOv3 baseline: CoralNet + MERMAID.
 #
-# Unlike configs/data_config.yaml (which trains on a hand-picked 36-source CoralNet
-# whitelist), this baseline uses the FULL CoralNet corpus. Every source is used; the
-# only partitioning is a source-disjoint validation holdout so there is no image/source
-# leakage between train and val:
+# CoralNet uses the FULL corpus with a source-disjoint validation holdout:
 #   - train: all CoralNet sources EXCEPT the val holdout (blacklist_sources)
 #   - val:   the holdout sources (whitelist_sources)
-# The 20 val sources are the vetted holdout carried over from configs/data_config.yaml.
-# MERMAID contributes train only (no confirmed MERMAID validation data yet), consistent
-# with configs/data_config.yaml. All other datasets are disabled for this baseline.
+# MERMAID uses a deterministic 10% image-level holdout (same fraction+seed on
+# train/val so the splits are complements). Checkpointing uses the *combined*
+# CoralNet+MERMAID val loader; MLflow also logs validation/mermaid/* and
+# validation/coralnet/* separately.
 data:
   default:
     train:
@@ -47,7 +45,14 @@ data:
                           6968, 7116]
 
   mermaid:
-    val: None # No confirmed MERMAID validation data; MERMAID contributes train only.
+    train:
+      holdout_fraction: 0.1
+      holdout_seed: 42
+      holdout_role: train
+    val:
+      holdout_fraction: 0.1
+      holdout_seed: 42
+      holdout_role: val
 
   coralscapes:
     train: None

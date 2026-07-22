@@ -71,7 +71,7 @@ def test_issue12_run_yaml_validates(monkeypatch):
     assert report.ok, report.errors
     assert report.summary["metric_of_interest"] == "miou"
     assert report.summary["datasets_enabled"].get("coralnet") == ["train", "val"]
-    assert report.summary["datasets_enabled"].get("mermaid") == ["train"]
+    assert report.summary["datasets_enabled"].get("mermaid") == ["train", "val"]
 
 
 def test_example_run_yaml_validates(monkeypatch):
