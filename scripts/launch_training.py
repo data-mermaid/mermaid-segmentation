@@ -1,8 +1,11 @@
 """Launch a mermaid-segmentation training run as a SageMaker TrainingJob.
 
 Reads a per-run YAML and submits CreateTrainingJob via the SageMaker
-SDK's Estimator. The script is script-agnostic: it doesn't know what
-the named `job.entrypoint` does. See
+SDK's Estimator. The run YAML is the single source of truth: the same
+file the launcher parses locally for the `job:` block is uploaded as
+the container's `config` channel, so there is no second copy to drift
+out of sync with it. The script is script-agnostic: it doesn't know
+what the named `job.entrypoint` does. See
 `mermaid-api/iac/sagemaker-launcher-convention.md` for the schema and
 canonical ARNs.
 
@@ -10,15 +13,20 @@ Example
 -------
     uv run python scripts/launch_training.py \\
         --run-config sagemaker/runs/my-run.yaml \\
-        --config-dir sagemaker/configs/my-run/ \\
         --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-EJVJ6AVFDWW2
 
     # Submit and return immediately (no streaming logs):
     uv run python scripts/launch_training.py \\
         --run-config sagemaker/runs/my-run.yaml \\
-        --config-dir sagemaker/configs/my-run/ \\
         --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-EJVJ6AVFDWW2 \\
         --no-wait
+
+    # Validate the run YAML (mermaidseg.experiment) and print the would-be job
+    # parameters without submitting anything:
+    uv run python scripts/launch_training.py \\
+        --run-config sagemaker/runs/my-run.yaml \\
+        --mlflow-tracking-uri arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-EJVJ6AVFDWW2 \\
+        --dry-run
 """
 
 from __future__ import annotations
@@ -117,7 +125,6 @@ def main(argv=None):
     _configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-config", required=True, type=Path)
-    parser.add_argument("--config-dir", required=True, type=Path)
     parser.add_argument("--mlflow-tracking-uri", required=True)
     parser.add_argument("--role-arn", default=EXEC_ROLE)
     parser.add_argument("--dry-run", action="store_true")
@@ -130,14 +137,16 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     cfg = parse_run_config(args.run_config.read_text(), kind="training", strict=False)
-    if not args.config_dir.is_dir():
-        log.error("Config dir does not exist: %s", args.config_dir)
-        sys.exit(2)
 
     run_id = make_run_id(cfg.job.name_prefix)
     cw_url = _cloudwatch_url(run_id)
 
     if args.dry_run:
+        # Imported lazily (mermaidseg.experiment pulls in torch at module level) so
+        # --run-config parsing and CLI arg handling stay import-light otherwise.
+        from mermaidseg.experiment import Experiment
+
+        report = Experiment.validate(args.run_config)
         print("=" * 60)
         print("DRY RUN -- not submitting")
         print("=" * 60)
@@ -150,6 +159,14 @@ def main(argv=None):
         print(f"max_runtime:   {cfg.job.max_runtime_hours}h")
         print(f"output:        s3://{STAGING_BUCKET}/runs/{run_id}/output/")
         print(f"CloudWatch:    {cw_url}")
+        print("-" * 60)
+        print(f"experiment validate: {'OK' if report.ok else 'INVALID'}")
+        for error in report.errors:
+            print(f"  ERROR: {error}")
+        for warning in report.warnings:
+            print(f"  warning: {warning}")
+        if not report.ok:
+            sys.exit(1)
         return
 
     # Imported lazily so the module and its pure-logic helpers (build_estimator_kwargs,
@@ -163,7 +180,7 @@ def main(argv=None):
     sm_session = Session(boto_session=boto_session)
     key_prefix = f"runs/{run_id}/config"
     sm_session.upload_data(
-        path=str(args.config_dir.resolve()), bucket=STAGING_BUCKET, key_prefix=key_prefix
+        path=str(args.run_config.resolve()), bucket=STAGING_BUCKET, key_prefix=key_prefix
     )
 
     kwargs = build_estimator_kwargs(

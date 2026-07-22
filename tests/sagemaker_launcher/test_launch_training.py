@@ -82,7 +82,6 @@ class CliArgsTest(unittest.TestCase):
 
         parser = argparse.ArgumentParser()
         parser.add_argument("--run-config", required=True, type=Path)
-        parser.add_argument("--config-dir", required=True, type=Path)
         parser.add_argument("--mlflow-tracking-uri", required=True)
         parser.add_argument("--dry-run", action="store_true")
         parser.add_argument("--no-wait", action="store_true")
@@ -90,8 +89,6 @@ class CliArgsTest(unittest.TestCase):
             [
                 "--run-config",
                 "sagemaker/runs/example-training.yaml",
-                "--config-dir",
-                "sagemaker/configs/example/",
                 "--mlflow-tracking-uri",
                 "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-X",
                 "--no-wait",
