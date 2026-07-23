@@ -76,7 +76,7 @@ def test_issue12_run_yaml_validates(monkeypatch):
 
 def test_example_run_yaml_validates(monkeypatch):
     monkeypatch.chdir(REPO)
-    report = Experiment.validate(REPO / "sagemaker/configs/example/run.yaml")
+    report = Experiment.validate(REPO / "sagemaker/runs/example-training.yaml")
     assert report.ok, report.errors
 
 

@@ -64,9 +64,13 @@ bash docker/jobs/local_smoke.sh processing
 export AWS_PROFILE=wcs-launcher
 uv run --extra sagemaker python scripts/launch_training.py \
     --run-config sagemaker/runs/example-training.yaml \
-    --config-dir sagemaker/configs/example/ \
     --mlflow-tracking-uri $MLFLOW_TRACKING_URI   # from .env
 ```
+
+The run YAML is the single source of truth: the launcher reads its `job:` block locally and
+uploads the same file as the container's `config` channel, so there's no separate config-dir copy
+to keep in sync. Validate a run YAML offline before submitting with `--dry-run`, or directly via
+`uv run python -m mermaidseg.experiment validate sagemaker/runs/<your-run>.yaml`.
 
 Outputs:
 - Run ID and CloudWatch URL printed at submission.
@@ -74,7 +78,8 @@ Outputs:
 - Final model artifact at `s3://dev-datamermaid-sm-data/runs/<run-id>/output/`.
 
 A run YAML's `config:` block names the model/training/data/logger configs and any `overrides:`
-(forwarded to `scripts/train.py` as CLI flags). See `sagemaker/configs/example/` for the shape.
+(forwarded to `scripts/train.py` as CLI flags). See `sagemaker/runs/example-training.yaml` for the
+shape.
 
 ## Run a processing job
 
@@ -148,7 +153,10 @@ Or reproduce locally:
 
 ```bash
 docker run --rm -it \
-    -v $(pwd)/sagemaker/configs/example:/opt/ml/input/data/config:ro \
+    -v $(pwd)/sagemaker/runs/example-training.yaml:/opt/ml/input/data/config/run.yaml:ro \
     -e CONTAINER_ENTRYPOINT_SCRIPT=scripts/sagemaker_train_entrypoint.py \
     mermaid-segmentation-jobs:training-smoke-local
 ```
+
+(Mount the one run YAML you want to test, not the whole `sagemaker/runs/` directory — the
+entrypoint expects exactly one file with a `job:` block under `config/` and errors on more than one.)
