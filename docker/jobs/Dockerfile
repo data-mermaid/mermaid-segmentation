@@ -30,6 +30,7 @@ COPY pyproject.toml README.md ./
 COPY mermaidseg ./mermaidseg
 COPY scripts ./scripts
 COPY configs ./configs
+COPY artifacts ./artifacts
 
 # Image carries the training stack only (mlflow/torchmetrics → training extra). The CoralNet
 # ETL/processing tasks (coralnet-etl/-refresh/-resize) need the `coralnet` extra (ibis/duckdb,
