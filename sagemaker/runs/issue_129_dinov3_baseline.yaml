@@ -1,0 +1,33 @@
+job:
+  name_prefix: mermaidseg-issue-129-baseline
+  image: mermaid-segmentation-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.g5.2xlarge
+  volume_gb: 200
+  max_runtime_hours: 48
+  env:
+    # Point the CoralNet dataset at the rebuilt corpus's TRAINING MANIFEST, not the legacy
+    # 30112025 fallback. The manifest carries a per-row `image_s3_key` (resized copy when
+    # >threshold, original otherwise), which CoralNetDataset reads instead of templating the
+    # original path — ~40% less I/O per image. Full key (ANNOTATIONS_PATH, resolved as
+    # s3://{source_bucket}/{path}) because the ETL publishes under etl-outputs/coralnet/<version>/.
+    MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
+
+# Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher).
+# Uses mermaid + coralnet sources only (no cbm). Frozen linear probe (see training config).
+config:
+  config_model: configs/model_config_dinov3_base.yaml
+  config_training: configs/training_config_dinov3_base.yaml
+  config_data: configs/data_config_dinov3_base.yaml
+  config_logger: configs/logger_config.yaml
+  overrides:
+    run-name: issue-129-dinov3-baseline-mermaid-coralnet-tiela
+    experiment-name: baselines
+    epochs: 200
+    seed: 42
+    num-workers: 8
+    # Select best checkpoint / early-stop on mIoU (benthic classes are imbalanced; accuracy
+    # favors majority classes). Patience is generous because val is randomly sampled (noisy).
+    metric-of-interest: miou
+    early-stopping: true
+    early-stopping-patience: 20
