@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,8 +132,9 @@ def main(argv=None):
     parser.add_argument("--no-wait", action="store_true")
     parser.add_argument(
         "--hf-token",
-        default=None,
-        help="HuggingFace token to pass as HF_TOKEN env var to the container (for gated models).",
+        default=os.environ.get("HF_TOKEN"),
+        help="HuggingFace token to pass as HF_TOKEN env var to the container (for gated models). "
+        "Defaults to the HF_TOKEN environment variable.",
     )
     args = parser.parse_args(argv)
 
