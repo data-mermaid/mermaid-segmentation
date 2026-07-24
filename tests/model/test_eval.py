@@ -21,6 +21,10 @@ class _StubMetaModel:
         self._batches = batches
         self._call = 0
 
+    @property
+    def has_concepts(self) -> bool:
+        return self.training_mode in ("concept", "concept-bottleneck")
+
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         return source_labels
 

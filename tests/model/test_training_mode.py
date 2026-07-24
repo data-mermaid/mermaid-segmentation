@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import torch
 
-from mermaidseg.model.training_mode import TrainingMode
+from mermaidseg.model.training_mode import StandardMode, TrainingMode
 
 
 class _StandardModeStub:
@@ -51,4 +51,31 @@ def test_stub_matches_current_standard_mode_behavior():
         SimpleNamespace(logits=logits), loss_fn, targets, None
     )
     assert concept_out is None
+    assert components == {"classification": 0.0}
+
+
+def test_standard_mode_satisfies_the_seam():
+    assert isinstance(StandardMode(), TrainingMode)
+
+
+def test_standard_mode_matches_stub_behavior():
+    """The real StandardMode (wired into MetaModel) behaves like the stub above, plus
+    the AMP-correctness .float() cast batch_predict_loss relies on."""
+    logits = torch.zeros(1, 3, 2, 2, dtype=torch.float16)
+    targets = torch.zeros(1, 2, 2, dtype=torch.long)
+
+    def loss_fn(outputs, target_labels):
+        assert outputs.dtype == torch.float32, "loss must see fp32 logits, not fp16/bf16"
+        return outputs.sum(), {"classification": 0.0}
+
+    mode = StandardMode()
+    outputs, concept_outputs = mode.predict(SimpleNamespace(logits=logits))
+    assert concept_outputs is None
+    assert torch.equal(outputs, logits)
+
+    loss, out, concept_out, components = mode.predict_and_loss(
+        SimpleNamespace(logits=logits), loss_fn, targets, None
+    )
+    assert concept_out is None
+    assert out.dtype == torch.float32
     assert components == {"classification": 0.0}

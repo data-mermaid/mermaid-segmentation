@@ -212,7 +212,7 @@ class Evaluator:
             Dict of metric_name -> scalar/array result.
         """
         meta_model.model.eval()
-        is_concept = meta_model.training_mode in ("concept-bottleneck", "concept")
+        is_concept = meta_model.has_concepts
         for data in tqdm.tqdm(dataloader):
             inputs, source_labels = data
             source_labels = source_labels.long().to(self.device)

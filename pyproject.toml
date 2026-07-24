@@ -37,8 +37,11 @@ coralnet-resize = "mermaidseg.datasets.coralnet.preprocessing.resize:main"
 
 [project.optional-dependencies]
 # Training + experiment tracking (mermaidseg/logger.py, mermaidseg/model/eval.py).
+# pydantic backs mermaidseg/experiment.py's ExperimentSpec/Overrides (and MetaModel's
+# training-config validation) — declared directly since it was previously only a transitive dep.
 training = [
     "mlflow",
+    "pydantic>=2",
     "sagemaker-mlflow>=0.2.0",
     "torchmetrics",
 ]
