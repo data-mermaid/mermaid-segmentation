@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import boto3
@@ -71,7 +72,9 @@ def get_image_s3(
     cached = _cache_path(bucket, key)
     if cached is not None and cached.exists():
         try:
-            return Image.open(cached)
+            image = Image.open(cached)
+            image.load()
+            return image
         except (UnidentifiedImageError, OSError):
             cached.unlink(missing_ok=True)
 
@@ -109,13 +112,49 @@ def get_image_s3(
 
     try:
         image = Image.open(io.BytesIO(image_data))
+        image.load()
     except (UnidentifiedImageError, OSError) as e:
         logger.warning("Corrupted image (bucket=%s, key=%s): %s", bucket, key, e)
         if cached is not None:
             cached.unlink(missing_ok=True)
-        raise DataLoadError(f"PIL cannot open image at s3://{bucket}/{key}") from e
+        raise DataLoadError(f"PIL cannot decode image at s3://{bucket}/{key}") from e
 
     return image
+
+
+def get_image_s3_candidates(
+    s3: boto3.client,
+    bucket: str,
+    keys: Sequence[str],
+    thumbnail: bool = False,
+):
+    """Load the first existing S3 image key, falling back only when a key is missing.
+
+    Image decoding remains content-based through :func:`get_image_s3`; candidate keys
+    handle datasets whose object extension is absent or incorrect. Authorization,
+    networking, and decode failures propagate immediately.
+    """
+    if not keys:
+        raise ValueError("keys must contain at least one candidate.")
+
+    for key in keys:
+        try:
+            return get_image_s3(
+                s3=s3,
+                bucket=bucket,
+                key=key,
+                thumbnail=thumbnail,
+            )
+        except DataLoadError as e:
+            cause = e.__cause__
+            if not isinstance(cause, ClientError):
+                raise
+            error_code = cause.response["Error"]["Code"]
+            if error_code not in {"404", "NoSuchKey", "NotFound"}:
+                raise
+
+    attempted = ", ".join(f"s3://{bucket}/{key}" for key in keys)
+    raise DataLoadError(f"Image not found at any candidate key: {attempted}")
 
 
 def create_annotation_mask(

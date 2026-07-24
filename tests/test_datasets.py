@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import io
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
+from botocore.exceptions import ClientError
+from PIL import Image
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
-from mermaidseg.datasets.utils import create_annotation_mask
+from mermaidseg.datasets.utils import (
+    DataLoadError,
+    create_annotation_mask,
+    get_image_s3,
+    get_image_s3_candidates,
+)
 
 
 def _make_annotations(rows: list, cols: list, labels: list) -> pd.DataFrame:
@@ -69,6 +77,121 @@ class _AlwaysFailDataset(BaseCoralDataset):
 
     def read_image(self, **row_kwargs) -> Any:
         raise RuntimeError("simulated read failure")
+
+
+class _FakeS3:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def get_object(self, **_kwargs):
+        return {"Body": io.BytesIO(self.payload)}
+
+
+class _S3ImageDataset(BaseCoralDataset):
+    def __init__(self, payload: bytes, **kwargs):
+        self.s3 = _FakeS3(payload)
+        super().__init__(**kwargs)
+
+    def read_image(self, **_row_kwargs):
+        image = get_image_s3(self.s3, "bucket", "image.png")
+        return np.array(image.convert("RGB"))
+
+
+class _RoutingS3:
+    def __init__(self, responses):
+        self.responses = responses
+        self.requested_keys = []
+
+    def get_object(self, **kwargs):
+        key = kwargs["Key"]
+        self.requested_keys.append(key)
+        response = self.responses[key]
+        if isinstance(response, Exception):
+            raise response
+        return {"Body": io.BytesIO(response)}
+
+
+def _jpeg_bytes() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 24), color=(20, 40, 60)).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def _s3_error(code: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": code}}, "GetObject")
+
+
+def test_get_image_s3_detects_jpeg_content_behind_png_key():
+    image = get_image_s3(_FakeS3(_jpeg_bytes()), "bucket", "misnamed.png")
+
+    assert image.format == "JPEG"
+    assert image.size == (32, 24)
+
+
+def test_get_image_s3_rejects_truncated_image_during_read():
+    payload = _jpeg_bytes()
+
+    with pytest.raises(DataLoadError, match="decode image"):
+        get_image_s3(_FakeS3(payload[:-2]), "bucket", "truncated.png")
+
+
+def test_base_dataset_skips_truncated_image(single_image_annotations):
+    df_annotations, df_images = single_image_annotations
+    payload = _jpeg_bytes()
+    dataset = _S3ImageDataset(
+        payload=payload[:-2],
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+    )
+
+    assert dataset[0] == (None, None)
+    assert dataset.num_load_failures() == 1
+    assert dataset.load_failures_df().loc[0, "error_type"] == "DataLoadError"
+
+
+def test_get_image_s3_candidates_falls_back_when_extension_key_is_missing():
+    s3 = _RoutingS3(
+        {
+            "mermaid/image.png": _s3_error("NoSuchKey"),
+            "mermaid/image.jpg": _jpeg_bytes(),
+        }
+    )
+
+    image = get_image_s3_candidates(
+        s3,
+        "bucket",
+        ["mermaid/image.png", "mermaid/image.jpg"],
+    )
+
+    assert image.format == "JPEG"
+    assert s3.requested_keys == ["mermaid/image.png", "mermaid/image.jpg"]
+
+
+def test_get_image_s3_candidates_does_not_hide_non_missing_errors():
+    s3 = _RoutingS3(
+        {
+            "mermaid/image.png": _s3_error("AccessDenied"),
+            "mermaid/image.jpg": _jpeg_bytes(),
+        }
+    )
+
+    with pytest.raises(DataLoadError, match="AccessDenied"):
+        get_image_s3_candidates(
+            s3,
+            "bucket",
+            ["mermaid/image.png", "mermaid/image.jpg"],
+        )
+
+    assert s3.requested_keys == ["mermaid/image.png"]
+
+
+def test_get_image_s3_candidates_reports_all_missing_keys():
+    keys = ["mermaid/image.png", "mermaid/image.jpg", "mermaid/image.jpeg"]
+    s3 = _RoutingS3({key: _s3_error("NoSuchKey") for key in keys})
+
+    with pytest.raises(DataLoadError, match=r"image\.png.*image\.jpg.*image\.jpeg"):
+        get_image_s3_candidates(s3, "bucket", keys)
 
 
 # --- create_annotation_mask ---

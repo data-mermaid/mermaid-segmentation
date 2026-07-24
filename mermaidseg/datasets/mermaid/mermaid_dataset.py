@@ -16,7 +16,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
-from mermaidseg.datasets.utils import get_image_s3, s3_training_config
+from mermaidseg.datasets.utils import get_image_s3_candidates, s3_training_config
 
 RARE_IMAGE_THRESHOLD = 10
 DEFAULT_HOLDOUT_FRACTION = 0.1
@@ -401,6 +401,10 @@ class MermaidDataset(BaseCoralDataset):
     space (or in the joint global space, if the dataset has been registered
     with a :class:`SourceLabelRegistry`).
 
+    Image object keys are resolved across ``.png``, ``.jpg``, and ``.jpeg``.
+    Pillow detects the encoded format from the object bytes, so the loader also
+    supports the current upstream objects whose ``.png`` keys contain JPEG data.
+
     Split controls:
         - ``holdout_fraction`` + ``holdout_role``: rare-aware region-blocked holdout
           (default 10% val, seed 42, train role). Pass ``holdout_fraction=None`` and
@@ -480,5 +484,10 @@ class MermaidDataset(BaseCoralDataset):
         return df_annotations[cols].drop_duplicates(subset=["image_id"]).reset_index(drop=True)
 
     def read_image(self, image_id: str, **row_kwargs: Any) -> NDArray[Any]:
-        key = f"mermaid/{image_id}.png"
-        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
+        keys = [f"mermaid/{image_id}{extension}" for extension in (".png", ".jpg", ".jpeg")]
+        image = get_image_s3_candidates(
+            s3=self.s3,
+            bucket=self.source_bucket,
+            keys=keys,
+        )
+        return np.array(image.convert("RGB"))
