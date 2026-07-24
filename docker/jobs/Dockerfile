@@ -6,12 +6,12 @@
 # Same image runs both Training and Processing — the launcher selects
 # which entrypoint script to invoke via CONTAINER_ENTRYPOINT_SCRIPT.
 #
-# Base: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime (Python 3.11, torch 2.4.1)
+# Base: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime (Python 3.11, torch 2.5.1)
 # Matches pyproject.toml requires-python>=3.11, torch>=2.4,<2.8.
 #
 # See docker/jobs/CLAUDE.md for build/push recipe and tagging conventions.
 
-ARG BASE_IMAGE=pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+ARG BASE_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 FROM ${BASE_IMAGE}
 
 # HF_TOKEN is injected at runtime by the launcher (scripts/launch_training.py sets it in the
