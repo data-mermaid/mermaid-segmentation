@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -260,6 +261,17 @@ def test_from_run_yaml_loads_spec_and_applies_overrides(monkeypatch):
     assert exp.spec.overrides.early_stopping is True
     assert exp.config.training.epochs == 200  # override merged into the config
     assert exp.config.training.training_mode == "standard"
+
+
+def test_dataloader_timeout_can_be_configured_for_slow_s3_batches(monkeypatch):
+    monkeypatch.setenv("MERMAIDSEG_DATALOADER_TIMEOUT_SECONDS", "600")
+    experiment = Experiment(
+        ExperimentSpec(overrides={"num_workers": 8}),
+        SimpleNamespace(training=SimpleNamespace(batch_size=32)),
+        device=torch.device("cpu"),
+    )
+
+    assert experiment._base_loader_kwargs()["timeout"] == 600
 
 
 class _SyntheticDataset:
