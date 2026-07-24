@@ -54,6 +54,8 @@ def main():
     for k, v in (data.get("job", {}).get("env") or {}).items():
         os.environ.setdefault(k, str(v))
 
+    os.environ.setdefault("MERMAIDSEG_IMAGE_CACHE_DIR", "/opt/ml/tmp/image_cache")
+
     # The seg-specific `config:` block names split-config paths (same as
     # scripts/train.py) plus optional CLI overrides as a flat dict.
     seg = data.get("config")

@@ -347,6 +347,7 @@ class Experiment:
         if self.overrides.num_workers > 0:
             loader_kwargs["persistent_workers"] = True
             loader_kwargs["worker_init_fn"] = worker_init_fn
+            loader_kwargs["timeout"] = 120
         return loader_kwargs
 
     def dataloaders(self) -> tuple[DataLoader, DataLoader]:

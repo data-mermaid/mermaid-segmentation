@@ -21,12 +21,12 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
-from mermaidseg.datasets.utils import get_image_s3
+from mermaidseg.datasets.utils import get_image_s3, s3_training_config
 
 
 class MooreaLabeledCoralsDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading Moorea Labeled Corals annotated coral reef images from a
-    Parquet file stored on S3.
+    """A PyTorch Dataset for loading Moorea Labeled Corals annotated coral reef images
+    from a Parquet file stored on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in the Moorea Labeled Corals source
@@ -88,7 +88,7 @@ class MooreaLabeledCoralsDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
-        self.s3 = boto3.client("s3")
+        self.s3 = boto3.client("s3", config=s3_training_config())
         self.whitelist_years = (
             [str(y) for y in whitelist_years] if whitelist_years is not None else None
         )

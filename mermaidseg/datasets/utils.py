@@ -1,11 +1,16 @@
+import contextlib
 import io
 import logging
+import os
 import sys
+import tempfile
+from pathlib import Path
 
 import boto3
 import numpy as np
 import pandas as pd
 import torch
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset, default_collate
@@ -17,10 +22,11 @@ logger = logging.getLogger(__name__)
 def emit_dataset_warning(message: str) -> None:
     """Emit a dataset-load warning via the logger AND raw stdout/stderr.
 
-    PyTorch DataLoader worker processes often have their ``logging`` handlers unconfigured, which
-    means ``logger.warning`` is silently dropped. To make sure the user sees skip-and-recover
-    messages no matter where they're triggered (main process, worker, notebook, terminal), we
-    additionally ``print`` to both ``sys.stdout`` and ``sys.stderr`` with ``flush=True``.
+    PyTorch DataLoader worker processes often have their ``logging`` handlers
+    unconfigured, which means ``logger.warning`` is silently dropped. To make sure the
+    user sees skip-and-recover messages no matter where they're triggered (main process,
+    worker, notebook, terminal), we additionally ``print`` to both ``sys.stdout`` and
+    ``sys.stderr`` with ``flush=True``.
     """
     logger.warning(message)
     full = f"WARNING: {message}"
@@ -32,28 +38,49 @@ class DataLoadError(Exception):
     """Raised when an image cannot be loaded from S3 or decoded."""
 
 
+_IMAGE_CACHE_DIR: str | None = os.environ.get("MERMAIDSEG_IMAGE_CACHE_DIR")
+
+
+def s3_training_config(max_pool_connections: int = 20) -> BotoConfig:
+    """Botocore config for training-path S3 clients: adaptive retries + timeouts."""
+    return BotoConfig(
+        retries={"max_attempts": 10, "mode": "adaptive"},
+        connect_timeout=10,
+        read_timeout=30,
+        max_pool_connections=max_pool_connections,
+    )
+
+
+def _cache_path(bucket: str, key: str) -> Path | None:
+    if _IMAGE_CACHE_DIR is None:
+        return None
+    return Path(_IMAGE_CACHE_DIR) / bucket / key
+
+
 def get_image_s3(
     s3: boto3.client,
     bucket: str,
     key: str,
     thumbnail: bool = False,
 ):
-    """Fetches an image from an S3 bucket and returns it as a PIL Image object.
-
-    Args:
-        s3 (boto3.client): The Boto3 S3 client used to interact with S3.
-        bucket (str): The name of the S3 bucket.
-        key (str): The key (path) of the image in the S3 bucket.
-        thumbnail (bool, optional): If True, fetches the thumbnail version of the image by modifying the key. Defaults to False.
-    Returns:
-        PIL.Image.Image: The image loaded from S3 as a PIL Image object.
-    """
+    """Fetch an image from S3, serving from disk cache when
+    ``MERMAIDSEG_IMAGE_CACHE_DIR`` is set."""
     if thumbnail:
         key = key.replace(".png", "_thumbnail.png")
 
+    cached = _cache_path(bucket, key)
+    if cached is not None and cached.exists():
+        try:
+            return Image.open(cached)
+        except (UnidentifiedImageError, OSError):
+            cached.unlink(missing_ok=True)
+
     try:
         response = s3.get_object(Bucket=bucket, Key=key)
-        image_data = response["Body"].read()
+        try:
+            image_data = response["Body"].read()
+        finally:
+            response["Body"].close()
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
         logger.warning(
@@ -61,10 +88,31 @@ def get_image_s3(
         )
         raise DataLoadError(f"S3 ClientError for s3://{bucket}/{key}: {error_code}") from e
 
+    if cached is not None:
+        try:
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=cached.parent)
+            closed = False
+            try:
+                os.write(fd, image_data)
+                os.close(fd)
+                closed = True
+                os.rename(tmp, cached)
+            except BaseException:
+                if not closed:
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+                Path(tmp).unlink(missing_ok=True)
+                raise
+        except OSError:
+            pass
+
     try:
         image = Image.open(io.BytesIO(image_data))
     except (UnidentifiedImageError, OSError) as e:
         logger.warning("Corrupted image (bucket=%s, key=%s): %s", bucket, key, e)
+        if cached is not None:
+            cached.unlink(missing_ok=True)
         raise DataLoadError(f"PIL cannot open image at s3://{bucket}/{key}") from e
 
     return image
@@ -173,8 +221,8 @@ def _joint_collate(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def get_coralnet_sources():
-    """Discover and validate CoralNet source folders stored in the S3 bucket "dev-datamermaid-sm-
-    sources".
+    """Discover and validate CoralNet source folders stored in the S3 bucket "dev-
+    datamermaid-sm- sources".
 
     Returns:
         whitelist: A list of all valid CoralNet source folder names that contain both

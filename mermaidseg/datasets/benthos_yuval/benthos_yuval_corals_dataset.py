@@ -1,7 +1,8 @@
 """Benthos Yuval PyTorch dataset (dense segmentation tiles).
 
-Reads tiles produced by ``verify_raw_data_and_add_to_s3.py`` and emits ``(image, source_labels)``
-pairs in the Benthos Yuval source-label space. See ``README.md`` for dataset details.
+Reads tiles produced by ``verify_raw_data_and_add_to_s3.py`` and emits ``(image,
+source_labels)`` pairs in the Benthos Yuval source-label space. See ``README.md`` for
+dataset details.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
-from mermaidseg.datasets.utils import get_image_s3
+from mermaidseg.datasets.utils import get_image_s3, s3_training_config
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
-        self.s3 = boto3.client("s3")
+        self.s3 = boto3.client("s3", config=s3_training_config())
         self.whitelist_sites = whitelist_sites
         self.blacklist_sites = blacklist_sites
 
@@ -122,14 +123,18 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
     def _load_classes_json(self) -> dict[str, int]:
         """Fetch ``classes.json`` from S3 (used to interpret the dense mask PNGs)."""
         key = f"{self.source_s3_prefix}/classes.json"
-        body = self.s3.get_object(Bucket=self.source_bucket, Key=key)["Body"].read()
+        response = self.s3.get_object(Bucket=self.source_bucket, Key=key)
+        try:
+            body = response["Body"].read()
+        finally:
+            response["Body"].close()
         return {str(name): int(idx) for name, idx in json.loads(body).items()}
 
     def _build_classes_global_to_local(self) -> np.ndarray:
         """Lookup table from classes.json IDs to local source IDs.
 
-        Background, classes filtered out by ``class_subset``, and any unknown class fall through to
-        local ID 0.
+        Background, classes filtered out by ``class_subset``, and any unknown class fall
+        through to local ID 0.
         """
         max_global = max(self._classes_global.values()) + 1
         lookup = np.zeros(max_global, dtype=np.int64)

@@ -14,27 +14,42 @@ from pathlib import Path
 from typing import Any
 
 import albumentations as A
+import boto3
 import numpy as np
 import pandas as pd
 import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
-from mermaidseg.datasets.utils import create_annotation_mask, emit_dataset_warning
+from mermaidseg.datasets.utils import (
+    create_annotation_mask,
+    emit_dataset_warning,
+    s3_training_config,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def worker_init_fn(worker_id: int) -> None:
-    """Configure logging in DataLoader worker processes.
+def _reinit_s3_clients(dataset: object) -> None:
+    """Create fresh boto3 S3 clients for dataset(s) inside a forked worker.
 
-    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so that
-    warnings emitted in worker subprocesses are visible.
+    Walks ConcatDataset wrappers to reach each underlying BaseCoralDataset.
     """
+    if hasattr(dataset, "s3"):
+        dataset.s3 = boto3.client("s3", config=s3_training_config())
+    for child in getattr(dataset, "datasets", []):
+        _reinit_s3_clients(child)
+
+
+def worker_init_fn(worker_id: int) -> None:
+    """Configure logging and reinitialize S3 clients in forked DataLoader workers."""
     logging.basicConfig(
         level=logging.WARNING,
         format=f"[worker-{worker_id}] %(levelname)s %(name)s: %(message)s",
     )
+    worker_info = torch.utils.data.get_worker_info()
+    if worker_info is not None:
+        _reinit_s3_clients(worker_info.dataset)
 
 
 class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):

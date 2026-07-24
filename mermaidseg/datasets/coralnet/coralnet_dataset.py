@@ -25,7 +25,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
-from mermaidseg.datasets.utils import get_image_s3
+from mermaidseg.datasets.utils import get_image_s3, s3_training_config
 
 _LEGACY_ANNOTATIONS_PATH = "coralnet_annotations_30112025.parquet"
 
@@ -102,7 +102,7 @@ class CoralNetDataset(BaseCoralDataset):
         self.annotations_path = annotations_path or _resolve_default_annotations_path()
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
-        self.s3 = boto3.client("s3")
+        self.s3 = boto3.client("s3", config=s3_training_config())
         self.whitelist_sources = whitelist_sources
         self.blacklist_sources = blacklist_sources
         if self.whitelist_sources is not None and self.blacklist_sources is not None:
