@@ -142,12 +142,64 @@ CPU-only processing jobs (ETL, resize) typically use `ml.m5.*` — size by the t
 
 ## Debug a failed job
 
-CloudWatch log group: `/aws/sagemaker/TrainingJobs` (or `/ProcessingJobs`).
+The Makefile wraps the common CloudWatch/SageMaker queries. All are read-only and take
+`JOB=<run-id>` (the training-job name printed at launch). They use `SM_AWS_PROFILE` when set
+(as the launch targets do), otherwise they inherit your ambient AWS credentials.
 
 ```bash
-export AWS_PROFILE=wcs-launcher
+make sm-jobs                    # 10 most recent jobs + status
+make sm-status  JOB=<run-id>    # status + FailureReason (the container exit code)
+make sm-errors  JOB=<run-id>    # grep logs for tracebacks / OOM / disk-full / signal kills
+make sm-logs    JOB=<run-id>    # tail -f the CloudWatch stream
+make sm-metrics JOB=<run-id>    # disk / RAM / GPU-mem / CPU over the job's lifetime
+```
+
+CloudWatch log group: `/aws/sagemaker/TrainingJobs` (or `/ProcessingJobs`). The raw equivalents:
+
+```bash
 aws logs tail /aws/sagemaker/TrainingJobs --log-stream-name-prefix <run-id>/ --follow
 ```
+
+### Diagnosing a *silent* death
+
+A job whose logs just **stop** (no Python traceback) and whose `FailureReason` is a bare
+`AlgorithmError: exit code 1` was almost always killed *outside* Python — an OS OOM-kill, a
+full disk, or a native (C-extension) crash — so the traceback never flushed to CloudWatch.
+`make sm-metrics` is the fastest triage; the `Host` dimension is `<run-id>/algo-1`:
+
+| Metric | Reads ~100% before death → | Notes |
+|---|---|---|
+| `MemoryUtilization` | **system-RAM OOM** — a worker was OOM-killed | % of instance RAM. A spike between the 1-min samples can be missed — narrow `--period` to 60. |
+| `DiskUtilization` | **volume full** — checkpoints/cache filled `volume_gb` | % of the EBS ML volume. Steady ~0 means nothing is writing there (e.g. an image cache that never populated). |
+| `GPUMemoryUtilization` | **CUDA OOM** — but this usually *does* raise a Python traceback | |
+| all flat, GPU-mem pinned | **hang/deadlock** (DataLoader worker, CUDA sync) killed later | GPU memory staying allocated with zero log progress is the tell. |
+
+For finer resolution than the Makefile's 5-min buckets, query one metric directly with
+`--period 60`:
+
+```bash
+aws cloudwatch get-metric-statistics --namespace /aws/sagemaker/TrainingJobs \
+    --metric-name MemoryUtilization --dimensions Name=Host,Value=<run-id>/algo-1 \
+    --start-time <ISO8601> --end-time <ISO8601> --period 60 --statistics Maximum \
+    --query 'Datapoints|sort_by(@,&Timestamp)[].[Timestamp,Maximum]' --output text
+```
+
+> Do not `describe-training-job` without a narrow `--query`: the full response includes the
+> job's `Environment`, which carries `HF_TOKEN`. The `make sm-*` targets already scope their
+> queries to avoid printing it.
+
+### Known gotchas (data-loading path)
+
+- **A silent `exit code 1` with no traceback is usually a native crash** (segfault in
+  libjpeg/PIL/boto3/CUDA), which Python can't print by default. The container sets
+  `PYTHONUNBUFFERED=1` but **not** `PYTHONFAULTHANDLER` — enabling faulthandler is the way to get
+  a C-level stack into CloudWatch for the next occurrence. Until then, silent deaths can only be
+  triaged by `make sm-metrics` (see the table above), not by reading logs.
+- **Dataset S3 clients are fork/pickle-unsafe.** Each dataset holds `self.s3 = boto3.client(...)`
+  created before the DataLoader forks its workers. On Linux (SageMaker) `fork` tolerates this;
+  running the same code locally on macOS (default `spawn`) with `num_workers>0` fails immediately
+  with `PicklingError: Can't pickle botocore.client.S3`. Keep local runs at `num_workers=0` unless
+  the client is made per-process (lazy property + dropped in `__getstate__`).
 
 Or reproduce locally:
 

@@ -78,6 +78,35 @@ Both entry points read the same config file and log to the same MLflow experimen
 
 Before starting a new experiment, check MLflow to see if something similar has already been tried.
 
+### Querying MLflow from the CLI
+
+The tracking backend is a SageMaker-managed MLflow app, so the client authenticates with your
+AWS credentials (SigV4) — there is no separate MLflow login. Point the client at the ARN in
+`MLFLOW_TRACKING_URI`:
+
+```python
+import mlflow
+from mlflow.tracking import MlflowClient
+
+mlflow.set_tracking_uri("<MLFLOW_TRACKING_URI from .env>")
+client = MlflowClient()
+exp = client.get_experiment_by_name("post-baseline")
+for r in client.search_runs([exp.experiment_id], order_by=["attributes.start_time DESC"], max_results=10):
+    print(r.data.tags.get("mlflow.runName"), r.info.status, r.data.metrics.get("validation/miou"))
+```
+
+**Gotcha — expired SSO token.** If the client raises
+`botocore.exceptions.TokenRetrievalError: Token has expired and refresh failed`, your AWS SSO
+session lapsed. Re-authenticate and retry:
+
+```bash
+aws sso login --profile <your-sso-profile>
+```
+
+If MLflow is unreachable, the same per-epoch metrics (loss, mIoU, accuracy, per-class IoU) are
+also emitted to the job's CloudWatch logs as `TRAIN METRICS` / `VALID METRICS` lines — see
+`make sm-logs` in [SageMaker-Jobs](SageMaker-Jobs.md).
+
 ---
 
 ## Why this matters
