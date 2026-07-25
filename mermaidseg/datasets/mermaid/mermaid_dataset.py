@@ -16,7 +16,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
-from mermaidseg.datasets.utils import get_image_s3_candidates, s3_training_config
+from mermaidseg.datasets.utils import get_image_s3_candidates
 
 RARE_IMAGE_THRESHOLD = 10
 DEFAULT_HOLDOUT_FRACTION = 0.1
@@ -436,7 +436,6 @@ class MermaidDataset(BaseCoralDataset):
 
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
-        self.s3 = boto3.client("s3", config=s3_training_config())
         self.holdout_fraction = holdout_fraction
         self.holdout_seed = holdout_seed
         self.holdout_role = holdout_role

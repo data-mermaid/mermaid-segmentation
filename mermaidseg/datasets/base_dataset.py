@@ -10,6 +10,7 @@ externally by [`mermaidseg.dataset_reconciliation`](../dataset_reconciliation/).
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -27,16 +28,62 @@ from mermaidseg.datasets.utils import (
     s3_training_config,
 )
 
+try:  # resource is Unix-only; the RSS diagnostic is optional and silently skipped without it
+    import resource
+except ImportError:  # pragma: no cover - non-Unix platforms
+    resource = None
+
 logger = logging.getLogger(__name__)
+
+# Optional per-worker RSS logging for OOM investigations. Off unless MERMAIDSEG_LOG_WORKER_RSS
+# is truthy. Read at import (each worker process re-evaluates it), consistent with the cache-dir
+# env handling in utils.py.
+_LOG_WORKER_RSS = os.environ.get("MERMAIDSEG_LOG_WORKER_RSS", "").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_RSS_LOG_INTERVAL = 500
+_rss_getitem_count = 0
+
+
+def _maybe_log_worker_rss() -> None:
+    """Periodically log this process's peak RSS when ``MERMAIDSEG_LOG_WORKER_RSS`` is
+    set.
+
+    Diagnostic for OOM investigations: SageMaker samples instance memory only once a minute, so
+    a sub-minute spike (many large images decoded across workers at once) is invisible there.
+    This surfaces per-worker memory from inside the load loop, every ``_RSS_LOG_INTERVAL`` items.
+    """
+    global _rss_getitem_count
+    if not _LOG_WORKER_RSS or resource is None:
+        return
+    _rss_getitem_count += 1
+    if _rss_getitem_count % _RSS_LOG_INTERVAL:
+        return
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    worker = torch.utils.data.get_worker_info()
+    wid = worker.id if worker is not None else "main"
+    # ru_maxrss is bytes on macOS, kilobytes on Linux — report both readings.
+    emit_dataset_warning(
+        f"[rss] worker={wid} items={_rss_getitem_count} ru_maxrss={ru} "
+        f"(~{ru / 1024:.0f}MB-if-KB / ~{ru / 1048576:.0f}MB-if-bytes)"
+    )
 
 
 def _reinit_s3_clients(dataset: object) -> None:
-    """Create fresh boto3 S3 clients for dataset(s) inside a forked worker.
+    """Drop any fork-inherited S3 client so each worker builds its own lazily.
 
-    Walks ConcatDataset wrappers to reach each underlying BaseCoralDataset.
+    Walks ConcatDataset wrappers to reach each underlying BaseCoralDataset. Resetting to
+    ``None`` (rather than eagerly constructing a client here) keeps creation lazy and
+    per-process — the fresh client is built on first ``.s3`` access inside the worker.
+    We gate on ``isinstance`` rather than ``hasattr(dataset, "s3")`` because ``s3`` is
+    now a property: ``hasattr`` would invoke its getter and create a client in the wrong
+    place.
     """
-    if hasattr(dataset, "s3"):
-        dataset.s3 = boto3.client("s3", config=s3_training_config())
+    if isinstance(dataset, BaseCoralDataset):
+        dataset._s3 = None
     for child in getattr(dataset, "datasets", []):
         _reinit_s3_clients(child)
 
@@ -118,6 +165,11 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.padding = padding
         self.class_subset = class_subset
         self._global_offset = 0
+        # Lazily-created, per-process S3 client (see the ``s3`` property). Never construct it
+        # here: a boto3 client is unpicklable and not fork-safe, so it must not be carried across
+        # a DataLoader worker boundary. ``setdefault`` avoids clobbering a client a subclass or
+        # test injected via ``self.s3 = ...`` before calling ``super().__init__()``.
+        self.__dict__.setdefault("_s3", None)
 
         if "source_label_name" not in self.df_annotations.columns:
             raise ValueError(
@@ -193,6 +245,36 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """Current global offset assigned by the registry (default 0)."""
         return self._global_offset
 
+    @property
+    def s3(self) -> boto3.client:
+        """Lazily-created, per-process boto3 S3 client.
+
+        A boto3 client is neither picklable nor fork-safe, so it must never be created
+        at construction time and carried across a process boundary. Building it on first
+        access means each process — the main process, or a spawned/forked DataLoader
+        worker — gets its own. :meth:`__getstate__` drops it before pickling (``spawn``
+        workers) and :func:`_reinit_s3_clients` resets it in ``worker_init_fn``
+        (``fork`` workers), so a client is never shared across the boundary.
+        """
+        if getattr(self, "_s3", None) is None:
+            self._s3 = boto3.client("s3", config=s3_training_config())
+        return self._s3
+
+    @s3.setter
+    def s3(self, client: Any) -> None:
+        # Retained so tests/helpers can inject a fake client via ``dataset.s3 = ...``.
+        self._s3 = client
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Drop the unpicklable S3 client so the dataset can be sent to a ``spawn``
+        worker.
+
+        The worker recreates it lazily on first :attr:`s3` access.
+        """
+        state = self.__dict__.copy()
+        state["_s3"] = None
+        return state
+
     def __len__(self) -> int:
         return self.df_images.shape[0]
 
@@ -211,6 +293,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         :meth:`collate_fn` filters out these placeholders, so a failed item drops out of
         the batch instead of crashing the loader.
         """
+        _maybe_log_worker_rss()
         try:
             return self._load_item(idx)
         except Exception as e:

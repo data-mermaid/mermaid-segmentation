@@ -43,6 +43,7 @@ RUN chmod +x /opt/ml/code/entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONFAULTHANDLER=1 \
     AWS_DEFAULT_REGION=us-east-1
 
 ENTRYPOINT ["/opt/ml/code/entrypoint.sh"]

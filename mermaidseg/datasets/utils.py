@@ -58,6 +58,33 @@ def _cache_path(bucket: str, key: str) -> Path | None:
     return Path(_IMAGE_CACHE_DIR) / bucket / key
 
 
+# Cache observability: log the active cache dir once, and surface a cache-write failure once
+# (rather than silently swallowing every OSError). Each DataLoader worker is a separate process
+# with its own module state, so these fire at most once per worker. Without this, a cache that
+# silently fails to write is indistinguishable from a working one — the exact ambiguity behind
+# "DiskUtilization stayed ~0%": is nothing being written, or is it written somewhere untracked?
+_cache_dir_logged = False
+_cache_write_warned = False
+
+
+def _log_cache_dir_once() -> None:
+    global _cache_dir_logged
+    if not _cache_dir_logged:
+        _cache_dir_logged = True
+        logger.info("Image disk cache enabled: dir=%s", _IMAGE_CACHE_DIR)
+
+
+def _warn_cache_write_failure_once(cached: Path, error: OSError) -> None:
+    global _cache_write_warned
+    if not _cache_write_warned:
+        _cache_write_warned = True
+        emit_dataset_warning(
+            "Image disk cache write failed — caching is a no-op for this process "
+            "(further write failures suppressed). "
+            f"dir={_IMAGE_CACHE_DIR} path={cached} errno={getattr(error, 'errno', None)}: {error}"
+        )
+
+
 def get_image_s3(
     s3: boto3.client,
     bucket: str,
@@ -70,6 +97,8 @@ def get_image_s3(
         key = key.replace(".png", "_thumbnail.png")
 
     cached = _cache_path(bucket, key)
+    if cached is not None:
+        _log_cache_dir_once()
     if cached is not None and cached.exists():
         try:
             image = Image.open(cached)
@@ -107,8 +136,8 @@ def get_image_s3(
                         os.close(fd)
                 Path(tmp).unlink(missing_ok=True)
                 raise
-        except OSError:
-            pass
+        except OSError as e:
+            _warn_cache_write_failure_once(cached, e)
 
     try:
         image = Image.open(io.BytesIO(image_data))

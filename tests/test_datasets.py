@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import pickle
 from typing import Any
 
 import numpy as np
@@ -443,3 +444,104 @@ def test_load_item_empty_image_yields_zero_mask(multi_annotation_dataset):
     _image, mask = ds._load_item(idx)
     assert mask.shape == (32, 32)
     assert int(mask.sum()) == 0
+
+
+# --- Disk image cache (MERMAIDSEG_IMAGE_CACHE_DIR) ---------------------------------
+
+
+def _png_bytes(size: tuple[int, int] = (16, 12)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color=(10, 20, 30)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class _CountingS3:
+    """Fake S3 that counts get_object calls, to prove cache hits avoid re-fetching."""
+
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.calls = 0
+
+    def get_object(self, **_kwargs):
+        self.calls += 1
+        return {"Body": io.BytesIO(self.payload)}
+
+
+def test_get_image_s3_writes_to_disk_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr("mermaidseg.datasets.utils._IMAGE_CACHE_DIR", str(tmp_path))
+    s3 = _CountingS3(_png_bytes())
+
+    get_image_s3(s3, "mybucket", "a/b/img.png")
+
+    cached = tmp_path / "mybucket" / "a" / "b" / "img.png"
+    assert cached.exists()
+    assert cached.read_bytes()  # non-empty
+
+
+def test_get_image_s3_serves_second_read_from_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr("mermaidseg.datasets.utils._IMAGE_CACHE_DIR", str(tmp_path))
+    s3 = _CountingS3(_png_bytes())
+
+    get_image_s3(s3, "mybucket", "img.png")
+    get_image_s3(s3, "mybucket", "img.png")
+
+    assert s3.calls == 1  # second read served from disk, no extra S3 GET
+
+
+def test_get_image_s3_refetches_when_cache_file_is_corrupt(monkeypatch, tmp_path):
+    monkeypatch.setattr("mermaidseg.datasets.utils._IMAGE_CACHE_DIR", str(tmp_path))
+    s3 = _CountingS3(_png_bytes())
+
+    cached = tmp_path / "mybucket" / "img.png"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"not an image")  # poison the cache
+
+    image = get_image_s3(s3, "mybucket", "img.png")
+
+    assert np.array(image.convert("RGB")).shape == (12, 16, 3)
+    assert s3.calls == 1  # corrupt cache discarded and refetched
+
+
+# --- Fork/pickle-safe S3 client ----------------------------------------------------
+# The end-to-end "DataLoader(num_workers>0, spawn) does not raise PicklingError" scenario is not
+# tested here: driving a spawn-context DataLoader from inside pytest deadlocks (spawned workers
+# re-import the test session). The defect it guarded against — a live boto3 client making the
+# dataset unpicklable — is covered deterministically by test_dataset_with_live_client_is_picklable.
+
+
+def test_dataset_lazily_creates_s3_client(minimal_dataset):
+    assert minimal_dataset._s3 is None  # nothing created at construction
+    client = minimal_dataset.s3
+    assert client is not None
+    assert minimal_dataset.s3 is client  # cached — same instance on re-access
+
+
+def test_dataset_getstate_drops_s3_client(minimal_dataset):
+    _ = minimal_dataset.s3  # create it
+    assert minimal_dataset.__getstate__()["_s3"] is None
+
+
+def test_dataset_with_live_client_is_picklable(minimal_dataset):
+    _ = minimal_dataset.s3  # a live boto3 client now exists (the PicklingError trigger)
+    restored = pickle.loads(pickle.dumps(minimal_dataset))
+    assert restored._s3 is None  # dropped on pickle; recreated lazily per process
+
+
+def test_injected_fake_client_survives_super_init():
+    """The base __init__ must not clobber a client a subclass injected before
+    super().__init__."""
+    ds = _S3ImageDataset(
+        _png_bytes(),
+        df_annotations=pd.DataFrame(
+            {
+                "image_id": ["img1"],
+                "region_id": [1],
+                "region_name": ["r1"],
+                "source_label_name": ["Coral"],
+                "row": [1],
+                "col": [1],
+            }
+        ),
+        df_images=pd.DataFrame({"image_id": ["img1"], "region_id": [1], "region_name": ["r1"]}),
+    )
+    assert isinstance(ds.s3, _FakeS3)  # not clobbered into a real boto3 client

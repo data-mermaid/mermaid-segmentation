@@ -36,6 +36,7 @@ Usage::
 
 import argparse
 import copy
+import faulthandler
 import json
 import logging
 import os
@@ -285,6 +286,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # Dump a native (C-level) traceback to stderr on a fatal signal (segfault, SIGABRT) or
+    # Python-fatal error. Images are decoded in forked DataLoader workers via libjpeg/PIL and
+    # boto3; a crash there otherwise exits with no traceback and the job dies silently. In the
+    # SageMaker container PYTHONFAULTHANDLER=1 already enables this at interpreter startup; this
+    # call covers local runs where that env var is not set. Enabling twice is harmless.
+    faulthandler.enable()
+
     parser = _build_parser()
     args = parser.parse_args()
 

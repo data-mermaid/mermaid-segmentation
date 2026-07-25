@@ -19,7 +19,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
-from mermaidseg.datasets.utils import get_image_s3, s3_training_config
+from mermaidseg.datasets.utils import get_image_s3
 
 
 class CatlinSeaviewDataset(BaseCoralDataset):
@@ -84,7 +84,6 @@ class CatlinSeaviewDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
-        self.s3 = boto3.client("s3", config=s3_training_config())
         self.whitelist_regions = whitelist_regions
         self.blacklist_regions = blacklist_regions
 
