@@ -54,7 +54,12 @@ def main():
     for k, v in (data.get("job", {}).get("env") or {}).items():
         os.environ.setdefault(k, str(v))
 
-    os.environ.setdefault("MERMAIDSEG_IMAGE_CACHE_DIR", "/opt/ml/tmp/image_cache")
+    # NOTE: we intentionally do NOT auto-enable the disk image cache here. The full image corpus
+    # (~741K CoralNet images, often multi-MB, plus MERMAID) exceeds the training volume, and the
+    # cache has no eviction bound — so it filled /opt/ml/tmp within ~3 epochs and crashed the job
+    # when torch.save (checkpoint) hit `[Errno 28] No space left on device`. The cache remains
+    # opt-in via MERMAIDSEG_IMAGE_CACHE_DIR (e.g. local dev with ample disk); it is just not
+    # switched on by default for SageMaker runs. See mermaidseg/datasets/utils.py get_image_s3.
 
     # The seg-specific `config:` block names split-config paths (same as
     # scripts/train.py) plus optional CLI overrides as a flat dict.
