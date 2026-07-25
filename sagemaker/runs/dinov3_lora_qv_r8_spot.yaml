@@ -1,0 +1,31 @@
+job:
+  name_prefix: mermaidseg-dinov3-lora-r8-spot
+  image: mermaid-segmentation-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.g6.2xlarge
+  volume_gb: 200
+  max_runtime_hours: 48
+  # Managed Spot: ~50-70% cheaper than on-demand. On a 2-min-warning reclaim SageMaker restarts
+  # the job; the training container resumes from its latest MLflow checkpoint (see
+  # MERMAIDSEG_RUN_ID wiring in scripts/launch_training.py + Logger resume). The launcher sets
+  # max_wait = max_runtime + 1h to allow for capacity waits (billed for compute only).
+  use_spot: true
+  env:
+    MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
+
+# Same stack as dinov3_lora_qv_r8.yaml; swaps the logger config for the spot one (per-epoch
+# checkpoints) so a reclaim loses at most one epoch.
+config:
+  config_data: configs/data_config_coralnet_mermaid.yaml
+  config_model: configs/model_config_dinov3_lora_qv_r8.yaml
+  config_training: configs/training_config_dinov3_lora.yaml
+  config_logger: configs/logger_config_spot.yaml
+  overrides:
+    run-name: dinov3-lora-qv-r8-coralnet-all-mermaid-spot
+    experiment-name: post-baseline
+    epochs: 200
+    seed: 42
+    num-workers: 8
+    metric-of-interest: miou
+    early-stopping: true
+    early-stopping-patience: 20

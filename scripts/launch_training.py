@@ -82,6 +82,10 @@ def build_estimator_kwargs(
         "MLFLOW_TRACKING_URI": mlflow_uri,
         "AWS_DEFAULT_REGION": REGION,
         "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
+        # Stable per-job id, preserved across a Managed-Spot restart, so the training container can
+        # find and resume its prior MLflow run (see Logger._find_run_by_resume_key). Harmless on
+        # on-demand runs (it just tags the run).
+        "MERMAIDSEG_RUN_ID": run_id,
         **job.env,
     }
     if hf_token:

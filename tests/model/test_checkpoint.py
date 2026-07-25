@@ -1,13 +1,16 @@
-"""Round-trip tests for the checkpoint format module (slim / normalize / load)."""
+"""Round-trip tests for the checkpoint format module (slim / normalize / load /
+resume)."""
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from mermaidseg.model.checkpoint import (
     frozen_param_names,
     load_into,
     normalize_state_dict_keys,
+    restore_training_state,
     slim_state_dict,
 )
 
@@ -80,3 +83,87 @@ def test_load_into_roundtrip_slim_restores_head_and_flags_no_unexpected():
 def test_load_into_bare_state_dict_is_strict():
     result = load_into(_Tiny(), _Tiny().state_dict())
     assert result.missing_keys == [] and result.unexpected_keys == []
+
+
+# --- restore_training_state (Managed-Spot resume) ---
+
+
+def _trained_source() -> tuple[_Tiny, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+    """A _Tiny plus optimizer+scheduler taken a few steps, so their state is non-
+    trivial."""
+    model = _Tiny()
+    optimizer = torch.optim.SGD(
+        [p for p in model.parameters() if p.requires_grad], lr=0.1, momentum=0.9
+    )
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)
+    for _ in range(3):
+        optimizer.zero_grad()
+        model.head(torch.ones(1, 4)).sum().backward()
+        optimizer.step()
+        scheduler.step()
+    return model, optimizer, scheduler
+
+
+def _full_checkpoint(model, optimizer, scheduler, epoch: int) -> dict:
+    sd, excludes = slim_state_dict(model)
+    ckpt = {
+        "model_state_dict": sd,
+        "excludes_frozen_params": excludes,
+        "optimizer_state_dict": optimizer.state_dict(),
+        "epoch": epoch,
+    }
+    if scheduler is not None:
+        ckpt["scheduler_state_dict"] = scheduler.state_dict()
+    return ckpt
+
+
+def test_restore_training_state_restores_weights_optimizer_scheduler_and_epoch():
+    src_model, src_opt, src_sched = _trained_source()
+    checkpoint = _full_checkpoint(src_model, src_opt, src_sched, epoch=7)
+
+    dst_model = _Tiny()
+    dst_opt = torch.optim.SGD(
+        [p for p in dst_model.parameters() if p.requires_grad], lr=0.1, momentum=0.9
+    )
+    dst_sched = torch.optim.lr_scheduler.StepLR(dst_opt, step_size=1, gamma=0.5)
+
+    start_epoch = restore_training_state(dst_model, dst_opt, checkpoint, scheduler=dst_sched)
+
+    assert start_epoch == 8  # resume FROM the epoch after the last completed one
+    assert torch.equal(dst_model.head.weight, src_model.head.weight)  # weights restored
+    # Scheduler position restored → same last_epoch and same current LR as the source.
+    assert dst_sched.state_dict()["last_epoch"] == src_sched.state_dict()["last_epoch"] == 3
+    assert dst_opt.param_groups[0]["lr"] == src_opt.param_groups[0]["lr"]
+    # Optimizer momentum buffers restored (proves optimizer state, not just LR, was loaded).
+    src_state = src_opt.state_dict()["state"]
+    dst_state = dst_opt.state_dict()["state"]
+    assert dst_state.keys() == src_state.keys() and src_state
+    for key in src_state:
+        assert torch.equal(dst_state[key]["momentum_buffer"], src_state[key]["momentum_buffer"])
+
+
+def test_restore_training_state_without_scheduler_is_fine():
+    src_model, src_opt, _ = _trained_source()
+    checkpoint = _full_checkpoint(src_model, src_opt, scheduler=None, epoch=0)
+
+    dst_model = _Tiny()
+    dst_opt = torch.optim.SGD(
+        [p for p in dst_model.parameters() if p.requires_grad], lr=0.1, momentum=0.9
+    )
+
+    start_epoch = restore_training_state(dst_model, dst_opt, checkpoint)  # scheduler defaults None
+
+    assert start_epoch == 1
+    assert torch.equal(dst_model.head.weight, src_model.head.weight)
+
+
+def test_restore_training_state_requires_optimizer_state():
+    """The lean best-model snapshot (no optimizer_state_dict) cannot resume — must fail
+    loud."""
+    model = _Tiny()
+    sd, excludes = slim_state_dict(model)
+    lean = {"model_state_dict": sd, "excludes_frozen_params": excludes, "epoch": 5}  # no optimizer
+    opt = torch.optim.SGD([p for p in model.parameters() if p.requires_grad], lr=0.1)
+
+    with pytest.raises(KeyError):
+        restore_training_state(_Tiny(), opt, lean)

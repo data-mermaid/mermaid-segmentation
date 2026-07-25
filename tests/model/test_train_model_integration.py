@@ -136,6 +136,29 @@ def test_metric_of_interest_allowlist_accepts_known_metrics(metric_name: str) ->
     assert logger.checkpoint_epochs == [0]
 
 
+def test_resume_start_epoch_ends_at_total_not_start_plus_epochs() -> None:
+    """Resuming at epoch k with a configured total of N trains epochs [k, N), not [k,
+    k+N).
+
+    Guards the Managed-Spot resume path: without the end_epoch fix, resuming at 3 with epochs=5
+    would have trained 3..8 (five more epochs) instead of finishing at the configured total.
+    """
+    meta = FakeMetaModel(epochs=5)
+    logger = StubLogger()
+
+    metrics = train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        start_epoch=3,
+        metric_of_interest="accuracy",
+    )
+
+    assert sorted(metrics) == [3, 4]  # only epochs 3 and 4 run (total = 5)
+
+
 def test_metric_direction_accuracy_maximize_and_loss_minimize() -> None:
     logger_accuracy = StubLogger()
     meta_accuracy = FakeMetaModel(

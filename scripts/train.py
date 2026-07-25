@@ -51,6 +51,7 @@ import torch
 from mermaidseg.experiment import Experiment
 from mermaidseg.io import get_parser
 from mermaidseg.logger import Logger
+from mermaidseg.model.checkpoint import restore_training_state
 from mermaidseg.model.metric_policy import SUPPORTED_METRIC_NAMES
 from mermaidseg.model.train import train_model
 
@@ -427,6 +428,27 @@ def _run_training(args: argparse.Namespace) -> None:
             {"train": train_dataset_combined, "val": val_dataset_combined}, registry
         )
 
+        # Managed-Spot resume: if the Logger reattached to a prior run for this job (via the
+        # MERMAIDSEG_RUN_ID the launcher injects), restore model/optimizer/scheduler/epoch from
+        # that run's latest checkpoint and continue where it left off. On a first launch (no prior
+        # run, or no checkpoint yet) start_epoch stays -1 and training begins at epoch 0.
+        start_epoch = -1
+        if logger.resumed:
+            checkpoint_path = logger.download_latest_checkpoint()
+            if checkpoint_path is not None:
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                start_epoch = restore_training_state(
+                    meta_model.model,
+                    meta_model.optimizer,
+                    checkpoint,
+                    scheduler=getattr(meta_model, "scheduler", None),
+                )
+                logging.info("Resuming training from epoch %d (spot restart)", start_epoch)
+            else:
+                logging.warning(
+                    "Logger resumed a run but found no checkpoint artifact; starting from epoch 0"
+                )
+
         try:
             # test_loader is None: the multi-dataset config does not define test splits yet,
             # so there is no test data to evaluate (see data_config.yaml).
@@ -438,6 +460,7 @@ def _run_training(args: argparse.Namespace) -> None:
                 test_loader=None,
                 dataset_val_loaders=dataset_val_loaders,
                 logger=logger,
+                start_epoch=start_epoch,
                 metric_of_interest=experiment.overrides.metric_of_interest,
                 early_stopping=experiment.overrides.early_stopping,
                 early_stopping_patience=experiment.overrides.early_stopping_patience,
