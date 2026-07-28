@@ -47,10 +47,14 @@ jobs:
         if: steps.changed-files.outputs.any_changed == 'true'
         env:
           CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
-        # Unquoted on purpose: word-splitting turns the space-separated list into argv.
-        run: uv run --group lint ruff check $CHANGED_FILES
+        run: |
+          # Unquoted on purpose: word-splitting turns the space-separated list into argv.
+          # shellcheck disable=SC2086
+          uv run --group lint ruff check $CHANGED_FILES
       - name: Ruff format check (changed files only)
         if: steps.changed-files.outputs.any_changed == 'true'
         env:
           CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
-        run: uv run --group lint ruff format --check $CHANGED_FILES
+        run: |
+          # shellcheck disable=SC2086
+          uv run --group lint ruff format --check $CHANGED_FILES
