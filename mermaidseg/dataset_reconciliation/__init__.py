@@ -12,8 +12,10 @@ from mermaidseg.dataset_reconciliation.concepts import (
     source_labels_to_concepts,
 )
 from mermaidseg.dataset_reconciliation.label_mapping import (
+    CoralNetLabelMapping,
     coralscapes_to_mermaid,
     coralscapes_v2_to_mermaid,
+    fetch_coralnet_label_mappings,
     fetch_coralnet_to_mermaid,
     fetch_mermaid_target_labels,
     source_labels_to_target_labels,
@@ -32,6 +34,7 @@ from mermaidseg.dataset_reconciliation.split_wiring import (
 __all__ = [
     "CombinedCoralDataset",
     "ConceptSchema",
+    "CoralNetLabelMapping",
     "SourceLabelRegistry",
     "SourceVocabulary",
     "apply_vocabularies",
@@ -40,6 +43,7 @@ __all__ = [
     "build_source_vocabularies",
     "coralscapes_to_mermaid",
     "coralscapes_v2_to_mermaid",
+    "fetch_coralnet_label_mappings",
     "fetch_coralnet_to_mermaid",
     "fetch_mermaid_target_labels",
     "group_splits",
