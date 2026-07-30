@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import TypedDict
 
 import requests
 import torch
@@ -23,6 +24,66 @@ _CORALNET_LABELMAPPINGS_URL = (
 _CORALNET_SNAPSHOT_PATH = (
     Path(__file__).resolve().parents[2] / "configs" / "coralnet_to_mermaid_mapping.json"
 )
+
+
+class CoralNetLabelMapping(TypedDict):
+    """One CoralNet row from the MERMAID ``labelmappings`` API."""
+
+    id: str | None
+    benthic_attribute_id: str | None
+    benthic_attribute_name: str | None
+    growth_form_id: str | None
+    growth_form_name: str | None
+    provider: str | None
+    provider_id: str
+    provider_label: str | None
+
+
+def _fetch_paginated_results(url: str, *, timeout: int = 30) -> list[dict]:
+    """Page through a MERMAID list endpoint until ``next`` is exhausted."""
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    records = list(data["results"])
+    while data.get("next"):
+        response = requests.get(data["next"], timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        records.extend(data["results"])
+    return records
+
+
+def _parse_coralnet_label_mapping(record: dict) -> CoralNetLabelMapping | None:
+    provider_id = record.get("provider_id")
+    if provider_id is None:
+        return None
+    return CoralNetLabelMapping(
+        id=record.get("id"),
+        benthic_attribute_id=record.get("benthic_attribute_id"),
+        benthic_attribute_name=record.get("benthic_attribute_name"),
+        growth_form_id=record.get("growth_form_id"),
+        growth_form_name=record.get("growth_form_name"),
+        provider=record.get("provider"),
+        provider_id=str(provider_id),
+        provider_label=record.get("provider_label"),
+    )
+
+
+def _coralnet_snapshot_as_label_mappings() -> dict[str, CoralNetLabelMapping]:
+    """Upgrade the committed benthic-name snapshot into full mapping records."""
+    return {
+        provider_id: CoralNetLabelMapping(
+            id=None,
+            benthic_attribute_id=None,
+            benthic_attribute_name=benthic_name,
+            growth_form_id=None,
+            growth_form_name=None,
+            provider="CoralNet",
+            provider_id=provider_id,
+            provider_label=None,
+        )
+        for provider_id, benthic_name in load_coralnet_snapshot().items()
+    }
 
 
 def load_coralnet_snapshot() -> dict[str, str | None]:
@@ -46,16 +107,46 @@ def fetch_mermaid_target_labels(
     Returns:
         Alphabetically sorted list of unique benthic-attribute names.
     """
-    response = requests.get(benthicattributes_url, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    records = list(data["results"])
-    while data.get("next"):
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        records.extend(data["results"])
+    records = _fetch_paginated_results(benthicattributes_url)
     return sorted({rec["name"] for rec in records if rec.get("name") is not None})
+
+
+def fetch_coralnet_label_mappings(
+    labelmappings_url: str = _CORALNET_LABELMAPPINGS_URL,
+) -> dict[str, CoralNetLabelMapping]:
+    """Fetch full CoralNet label-mapping records from the MERMAID API.
+
+    Keyed by the **numeric CoralNet ``provider_id`` (as a string)** — the same value
+    :class:`~mermaidseg.datasets.coralnet.coralnet_dataset.CoralNetDataset` emits as
+    ``source_label_name``. Each value is the complete API record (benthic attribute,
+    growth form, provider label, etc.).
+
+    API-first: pages the MERMAID LabelMapping endpoint filtered to ``provider=CoralNet``.
+    On any network/HTTP failure it falls back to the committed snapshot
+    ``configs/coralnet_to_mermaid_mapping.json``, synthesizing records with
+    ``benthic_attribute_name`` only (other fields are ``None``) so training never
+    hard-fails on a transient API outage. The chosen source is logged.
+    """
+    try:
+        records = _fetch_paginated_results(labelmappings_url)
+        mapping: dict[str, CoralNetLabelMapping] = {}
+        for record in records:
+            parsed = _parse_coralnet_label_mapping(record)
+            if parsed is not None:
+                mapping[parsed["provider_id"]] = parsed
+        logger.info(
+            "fetch_coralnet_label_mappings: loaded %d CoralNet label mappings from the MERMAID API",
+            len(mapping),
+        )
+        return mapping
+    except requests.RequestException as exc:
+        logger.warning(
+            "fetch_coralnet_label_mappings: API fetch failed (%s); falling back to committed "
+            "snapshot %s",
+            exc,
+            _CORALNET_SNAPSHOT_PATH.name,
+        )
+        return _coralnet_snapshot_as_label_mappings()
 
 
 def fetch_coralnet_to_mermaid(
@@ -63,45 +154,15 @@ def fetch_coralnet_to_mermaid(
 ) -> dict[str, str | None]:
     """Fetch the CoralNet ``provider_id`` -> MERMAID benthic-attribute mapping.
 
-    Keyed by the **numeric CoralNet ``provider_id`` (as a string)** — the same value
-    :class:`~mermaidseg.datasets.coralnet.coralnet_dataset.CoralNetDataset` emits as
-    ``source_label_name`` — with values the mapped MERMAID benthic-attribute name (or ``None``
-    when a CoralNet label is not yet mapped, in which case it collapses to background in
-    :class:`~mermaidseg.dataset_reconciliation.registry.SourceLabelRegistry`).
-
-    API-first: pages the MERMAID LabelMapping endpoint filtered to ``provider=CoralNet``
-    (mirroring :func:`fetch_mermaid_target_labels`). On any network/HTTP failure it falls back to
-    the committed numeric-keyed snapshot ``configs/coralnet_to_mermaid_mapping.json`` so training
-    never hard-fails on a transient API outage. The chosen source is logged.
+    Convenience wrapper around :func:`fetch_coralnet_label_mappings` that keeps only
+    ``benthic_attribute_name`` per ``provider_id``. Unmapped CoralNet labels (``None``)
+    collapse to background in
+    :class:`~mermaidseg.dataset_reconciliation.registry.SourceLabelRegistry`.
     """
-    try:
-        response = requests.get(labelmappings_url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        records = list(data["results"])
-        while data.get("next"):
-            response = requests.get(data["next"], timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            records.extend(data["results"])
-        mapping = {
-            str(rec["provider_id"]): rec.get("benthic_attribute_name")
-            for rec in records
-            if rec.get("provider_id") is not None
-        }
-        logger.info(
-            "fetch_coralnet_to_mermaid: loaded %d CoralNet label mappings from the MERMAID API",
-            len(mapping),
-        )
-        return mapping
-    except requests.RequestException as exc:
-        logger.warning(
-            "fetch_coralnet_to_mermaid: API fetch failed (%s); falling back to committed "
-            "snapshot %s",
-            exc,
-            _CORALNET_SNAPSHOT_PATH.name,
-        )
-        return load_coralnet_snapshot()
+    return {
+        provider_id: record["benthic_attribute_name"]
+        for provider_id, record in fetch_coralnet_label_mappings(labelmappings_url).items()
+    }
 
 
 def fetch_catlin_seaview_to_mermaid() -> dict[str, str]:
