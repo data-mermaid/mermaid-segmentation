@@ -207,7 +207,6 @@ def create_annotation_mask(
         np.ndarray: Integer annotation mask with shape (height, width). Values
         are 0 (background) or local source-class IDs (1..N).
     """
-    # TODO: Make padding percentage-based so it scales with image resolution
     mask = np.zeros(shape[:2], dtype=np.int64)
 
     if annotations.empty:
@@ -230,6 +229,39 @@ def create_annotation_mask(
     rows = valid["row"].to_numpy(dtype=np.intp)
     cols = valid["col"].to_numpy(dtype=np.intp)
     label_ids = valid["source_label_name"].map(source_name2id).to_numpy(dtype=np.int64)
+    return create_annotation_mask_from_arrays(rows, cols, label_ids, shape, padding=padding)
+
+
+def create_annotation_mask_from_arrays(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    label_ids: np.ndarray,
+    shape: tuple[int, int],
+    padding: int | None = None,
+) -> np.ndarray:
+    """Scatter integer point annotations into a source-space mask (array-native core).
+
+    This is the hot-path core of :func:`create_annotation_mask`: it takes already-extracted numpy
+    arrays instead of a DataFrame so the per-sample dataset path (see
+    :meth:`BaseCoralDataset._load_item`) never touches pandas object columns — that access is what
+    drives the copy-on-write RSS growth in forked DataLoader workers
+    (``scripts/diagnostics/dataloader_rss_findings.md``).
+
+    Args:
+        rows: Row (y) pixel coordinates, ``intp``.
+        cols: Column (x) pixel coordinates, ``intp``.
+        label_ids: Source-class ids (``int64``, 1..N) aligned to ``rows``/``cols``.
+        shape: Output mask shape ``(height, width)``.
+        padding: Half-size of a square pad region around each point. When > 0, out-of-range
+            coordinates are clipped to the image; with None/0 the coordinates must be in-bounds.
+
+    Returns:
+        Integer mask of shape ``(height, width)``: 0 (background) or local source-class ids.
+    """
+    # TODO: Make padding percentage-based so it scales with image resolution
+    mask = np.zeros(shape[:2], dtype=np.int64)
+    if rows.size == 0:
+        return mask
 
     if padding is not None and padding > 0:
         h, w = shape[:2]

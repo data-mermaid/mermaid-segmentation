@@ -17,6 +17,7 @@ from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from mermaidseg.datasets.utils import (
     DataLoadError,
     create_annotation_mask,
+    create_annotation_mask_from_arrays,
     get_image_s3,
     get_image_s3_candidates,
 )
@@ -235,9 +236,40 @@ def test_create_annotation_mask_overlapping_padding():
 
     assert mask[10, 12] == 2
     assert mask[10, 13] == 2
-
     assert mask[10, 9] == 1
     assert mask[10, 16] == 2
+
+
+@pytest.mark.parametrize("padding", [None, 0, 2, 5])
+def test_mask_from_arrays_equals_dataframe_path(padding):
+    """The array-native core (used by _load_item) is byte-identical to the DataFrame
+    path."""
+    rows = [10, 20, 0, 19]
+    cols = [5, 15, 0, 19]
+    labels = ["Coral", "Sand", "Rubble", "Coral"]
+    source_name2id = {"Coral": 1, "Sand": 2, "Rubble": 3}
+    shape = (25, 25)
+
+    df_mask = create_annotation_mask(
+        _make_annotations(rows, cols, labels), shape, source_name2id, padding=padding
+    )
+    arr_mask = create_annotation_mask_from_arrays(
+        np.asarray(rows, dtype=np.intp),
+        np.asarray(cols, dtype=np.intp),
+        np.asarray([source_name2id[label] for label in labels], dtype=np.int64),
+        shape,
+        padding=padding,
+    )
+    np.testing.assert_array_equal(df_mask, arr_mask)
+
+
+def test_mask_from_arrays_empty_returns_background():
+    empty = np.empty(0, dtype=np.intp)
+    mask = create_annotation_mask_from_arrays(
+        empty, empty, np.empty(0, dtype=np.int64), (8, 8), padding=3
+    )
+    assert mask.shape == (8, 8)
+    assert not mask.any()
 
 
 def test_create_annotation_mask_unknown_label_skipped(caplog):
@@ -380,6 +412,36 @@ def test_base_dataset_saves_failure_report_as_parquet(single_image_annotations, 
     assert saved_df.iloc[0]["image_id"] == "img1"
 
 
+def test_load_failures_count_is_exact_but_records_are_capped(monkeypatch):
+    """num_load_failures() stays exact past the record cap; stored records are
+    bounded."""
+    from mermaidseg.datasets import base_dataset as bd
+
+    monkeypatch.setattr(bd, "_LOAD_FAILURE_RECORD_CAP", 3)
+
+    n = 10
+    df_annotations = pd.DataFrame(
+        {
+            "image_id": [f"img{i}" for i in range(n)],
+            "region_id": list(range(n)),
+            "region_name": [f"r{i}" for i in range(n)],
+            "row": [1] * n,
+            "col": [1] * n,
+            "source_label_name": ["Coral"] * n,
+        }
+    )
+    df_images = df_annotations[["image_id", "region_id", "region_name"]].copy()
+    ds = _AlwaysFailDataset(
+        df_annotations=df_annotations, df_images=df_images, class_subset=["Coral"]
+    )
+
+    for i in range(n):
+        assert ds[i] == (None, None)
+
+    assert ds.num_load_failures() == n  # exact count, past the cap
+    assert len(ds.load_failures_df()) == 3  # records bounded at the cap
+
+
 # --- BaseCoralDataset O(1) annotation lookup (Ticket 1b) ---
 
 
@@ -406,21 +468,34 @@ def multi_annotation_dataset() -> _StubImageDataset:
     return _StubImageDataset(df_annotations=df_annotations, df_images=df_images)
 
 
-def test_annotation_positions_match_boolean_scan(multi_annotation_dataset):
-    """The O(1) positional index reproduces the old O(N) boolean-scan selection
+def test_annotation_index_matches_boolean_scan(multi_annotation_dataset):
+    """The precomputed numpy annotation index reproduces the boolean-scan selection
     exactly."""
     ds = multi_annotation_dataset
-    cols = ["row", "col", "source_label_name"]
     for image_id in ("img1", "img2"):
-        expected = ds.df_annotations.loc[ds.df_annotations["image_id"] == image_id, cols]
-        positions = ds._annotation_positions_by_image[image_id]
-        got = ds.df_annotations.iloc[positions][cols]
-        pd.testing.assert_frame_equal(got.reset_index(drop=True), expected.reset_index(drop=True))
+        pos = int(ds.df_images.index[ds.df_images["image_id"] == image_id][0])
+        start, end = int(ds._ann_offsets[pos]), int(ds._ann_offsets[pos + 1])
+        got = set(
+            zip(
+                ds._ann_row[start:end].tolist(),
+                ds._ann_col[start:end].tolist(),
+                ds._ann_label_id[start:end].tolist(),
+                strict=True,
+            )
+        )
+        rows = ds.df_annotations[ds.df_annotations["image_id"] == image_id]
+        expected = {
+            (int(r.row), int(r.col), ds.source_name2id[r.source_label_name])
+            for r in rows.itertuples()
+        }
+        assert got == expected
 
 
-def test_annotation_positions_absent_for_unannotated_image(multi_annotation_dataset):
-    """Images with no annotations are simply absent from the lookup (→ empty mask)."""
-    assert multi_annotation_dataset._annotation_positions_by_image.get("img3_empty") is None
+def test_annotation_index_empty_for_unannotated_image(multi_annotation_dataset):
+    """Images with no annotations get an empty slice (→ empty mask)."""
+    ds = multi_annotation_dataset
+    pos = int(ds.df_images.index[ds.df_images["image_id"] == "img3_empty"][0])
+    assert int(ds._ann_offsets[pos]) == int(ds._ann_offsets[pos + 1])
 
 
 def test_load_item_paints_all_annotations_of_target_image(multi_annotation_dataset):
