@@ -8,9 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 import yaml
 
+from mermaidseg.config_schema import LoggerConfig, ModelConfig, TrainingConfig
 from mermaidseg.experiment import (
     Experiment,
     ExperimentSpec,
@@ -215,6 +217,8 @@ def test_bad_class_subset_name_is_warning_not_error(tmp_path):
             "training": {
                 "training_mode": "standard",
                 "padding": 3,
+                "batch_size": 4,
+                "optimizer": {"type": "AdamW", "lr": 5e-5},
                 "class_subset": ["Acropora", "ZZZ_NOT_A_REAL_LABEL"],
             }
         },
@@ -224,6 +228,173 @@ def test_bad_class_subset_name_is_warning_not_error(tmp_path):
     report = Experiment.validate(run)
     assert report.ok, report.errors  # an unknown class name is advisory, not fatal
     assert any("ZZZ_NOT_A_REAL_LABEL" in warn for warn in report.warnings)
+
+
+# --------------------------------------------------------------------------------------
+# Split-config schema + value validation (via Experiment.validate).
+# --------------------------------------------------------------------------------------
+
+MODEL_CBM = CONFIGS / "model_config_cbm.yaml"
+
+
+def _broken_training(tmp_path: Path, **over) -> Path:
+    """A valid standard training block written to a tmp file, with fields overridden."""
+    block = {
+        "training_mode": "standard",
+        "optimizer": {"type": "AdamW", "lr": 5e-5},
+        "class_subset": ["Acropora"],
+        "padding": 3,
+        "batch_size": 4,
+    }
+    block.update(over)
+    return _write(tmp_path, {"training": block}, name="training.yaml")
+
+
+def test_bad_optimizer_type_is_error(tmp_path):
+    training = _broken_training(tmp_path, optimizer={"type": "Adamw", "lr": 5e-5})
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("optimizer.type 'Adamw'" in e for e in report.errors)
+
+
+def test_bad_scheduler_type_is_error(tmp_path):
+    training = _broken_training(tmp_path, scheduler={"type": "PolynomialLr"})
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("scheduler.type 'PolynomialLr'" in e for e in report.errors)
+
+
+def test_bad_loss_type_is_error(tmp_path):
+    training = _broken_training(tmp_path, loss={"type": "FocalLoss"})
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("loss.type 'FocalLoss'" in e for e in report.errors)
+
+
+def test_bad_model_name_is_error(tmp_path):
+    model = _write(
+        tmp_path,
+        {"model": {"name": "LinearDinov3", "encoder_name": "x", "input_size": [512, 512]}},
+        name="model.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_model=str(model))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("model.name 'LinearDinov3'" in e for e in report.errors)
+
+
+def test_missing_required_training_field_is_error(tmp_path):
+    # A training block with no optimizer — MetaModel reads training_kwargs.optimizer unconditionally.
+    training = _write(
+        tmp_path,
+        {
+            "training": {
+                "training_mode": "standard",
+                "class_subset": ["Acropora"],
+                "padding": 3,
+                "batch_size": 4,
+            }
+        },
+        name="training.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("training: config is invalid" in e and "optimizer" in e for e in report.errors)
+
+
+def test_cbm_missing_concept_mapping_is_error(tmp_path):
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept-bottleneck",
+        loss={"type": "ConceptBottleneckLoss"},
+    )
+    run = _write(
+        tmp_path,
+        {"config": _config_block(config_training=str(training), config_model=str(MODEL_CBM))},
+    )
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("concept_mapping_path is required" in e for e in report.errors)
+
+
+def test_concept_mode_with_plain_model_is_error(tmp_path):
+    # concept-bottleneck mode with the default standard LinearDINOv3 model → AttributeError at runtime.
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept-bottleneck",
+        concept_mapping_path="configs/class_to_concepts.csv",
+        loss={"type": "ConceptBottleneckLoss"},
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("requires a concept model" in e for e in report.errors)
+
+
+def test_cbm_wrong_loss_is_error(tmp_path):
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept-bottleneck",
+        concept_mapping_path="configs/class_to_concepts.csv",
+        loss={"type": "CrossEntropyLoss"},
+    )
+    run = _write(
+        tmp_path,
+        {"config": _config_block(config_training=str(training), config_model=str(MODEL_CBM))},
+    )
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("ConceptBottleneckLoss" in e for e in report.errors)
+
+
+def test_typo_logger_key_is_error(tmp_path):
+    logger = _write(
+        tmp_path,
+        {
+            "logger": {
+                "uri": "seg",
+                "experiment_name": "m",
+                "system_metrics": True,
+                "system_metrics_sampling_interval": 10,
+                "keep_last_n_checkpoints": 3,
+                "save_full_state_dict": False,
+                "sytem_metrics": True,  # typo of an existing key → forbid rejects
+            }
+        },
+        name="logger.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_logger=str(logger))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("logger: config is invalid" in e for e in report.errors)
+
+
+# Forbid safety-net: every committed split config must pass its schema, or strict `extra="forbid"`
+# would silently start rejecting a real config the moment a new field is added.
+
+
+@pytest.mark.parametrize(
+    "path", sorted(CONFIGS.glob("training_config*.yaml")), ids=lambda p: p.name
+)
+def test_committed_training_configs_pass_schema(path):
+    doc = yaml.safe_load(path.read_text())
+    TrainingConfig.model_validate(doc.get("training", doc))
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS.glob("model_config*.yaml")), ids=lambda p: p.name)
+def test_committed_model_configs_pass_schema(path):
+    doc = yaml.safe_load(path.read_text())
+    ModelConfig.model_validate(doc.get("model", doc))
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS.glob("logger_config*.yaml")), ids=lambda p: p.name)
+def test_committed_logger_configs_pass_schema(path):
+    doc = yaml.safe_load(path.read_text())
+    LoggerConfig.model_validate(doc.get("logger", doc))
 
 
 # --------------------------------------------------------------------------------------

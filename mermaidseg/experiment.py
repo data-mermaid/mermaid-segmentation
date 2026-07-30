@@ -37,6 +37,17 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from torch.utils.data import ConcatDataset, DataLoader
 
+from mermaidseg.config_schema import (
+    DatasetSplits,
+    LoggerConfig,
+    ModelConfig,
+    TrainingConfig,
+    resolve_loss_type,
+    resolve_model_name,
+    resolve_optimizer_type,
+    resolve_scheduler_type,
+    valid_model_names,
+)
 from mermaidseg.dataset_reconciliation import (
     ConceptSchema,
     SourceLabelRegistry,
@@ -526,6 +537,8 @@ class Experiment:
             report.errors.append(f"failed to load/merge config files: {exc}")
             return report
 
+        _check_split_config_schemas(cfg, report)
+        _check_mode_model_coupling(cfg, report)
         _check_datasets(cfg, report)
         _check_class_subset(cfg, report)
         if job_cfg is not None:
@@ -618,6 +631,131 @@ def _build_summary(spec: ExperimentSpec, cfg: Mapping[str, Any]) -> dict[str, An
         "annotations_path": spec.annotations_path,
         "coralnet_cohort": _coralnet_cohort(data_block.get("coralnet")),
     }
+
+
+def _check_split_config_schemas(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    """Schema- and value-check the four merged split blocks
+    (data/model/training/logger).
+
+    Structural/type problems come from the pydantic models in
+    ``mermaidseg.config_schema``; the value-existence checks
+    (``optimizer``/``scheduler``/``loss`` ``type`` and ``model.name``) mirror the
+    ``getattr`` resolutions in ``MetaModel.__init__``, so a bad string is caught here
+    instead of crashing after a Docker push. All problems are appended as errors;
+    nothing raises.
+    """
+    _check_training_schema(cfg, report)
+    _check_model_schema(cfg, report)
+    _check_logger_schema(cfg, report)
+    _check_data_schema(cfg, report)
+
+
+def _check_training_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    raw = cfg.get("training")
+    if not isinstance(raw, Mapping):
+        report.errors.append("training: config block is missing or not a mapping")
+        return
+    try:
+        tc = TrainingConfig.model_validate(dict(raw))
+    except ValidationError as exc:
+        report.errors.append("training: config is invalid:\n" + _format_validation_error(exc))
+        return
+    # Value existence: each component's `type` must resolve to a real class (mirrors MetaModel).
+    for component, resolve in (
+        (tc.optimizer, resolve_optimizer_type),
+        (tc.scheduler, resolve_scheduler_type),
+        (tc.loss, resolve_loss_type),
+    ):
+        if component is None:
+            continue
+        hint = resolve(component.type)
+        if hint:
+            report.errors.append(f"training config: {hint}")
+
+
+def _check_model_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    raw = cfg.get("model")
+    if not isinstance(raw, Mapping):
+        report.errors.append("model: config block is missing or not a mapping")
+        return
+    try:
+        mc = ModelConfig.model_validate(dict(raw))
+    except ValidationError as exc:
+        report.errors.append("model: config is invalid:\n" + _format_validation_error(exc))
+        return
+    hint = resolve_model_name(mc.name)
+    if hint:
+        report.errors.append(f"model config: {hint}")
+
+
+def _check_logger_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    raw = cfg.get("logger")
+    if not isinstance(raw, Mapping):
+        report.errors.append("logger: config block is missing or not a mapping")
+        return
+    try:
+        LoggerConfig.model_validate(dict(raw))
+    except ValidationError as exc:
+        report.errors.append("logger: config is invalid:\n" + _format_validation_error(exc))
+
+
+def _check_data_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    """Each dataset's splits must be ``train``/``val`` only (catches a mis-keyed split).
+
+    Shallow by design: split *values* are dataset-specific constructor kwargs (``transform`` already
+    compiled to ``albumentations.Compose`` by ``preprocess_data_config``) and are left to ``dry_run``.
+    Registry-exact section membership is owned by :func:`_check_datasets`. A bare ``None``/``"None"``
+    dataset value (whole dataset disabled) is skipped here, mirroring the other data helpers.
+    """
+    data_block = cfg.get("data") or {}
+    for name, splits in data_block.items():
+        if not isinstance(splits, Mapping):
+            continue
+        try:
+            DatasetSplits.model_validate(dict(splits))
+        except ValidationError as exc:
+            report.errors.append(f"data.{name}: invalid splits:\n" + _format_validation_error(exc))
+
+
+def _check_mode_model_coupling(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    """Cross-block rules that need ``model`` and ``training`` together.
+
+    - concept / concept-bottleneck mode needs a model that emits concept outputs (a
+      ``ConceptBottleneck*`` class); a plain model → ``AttributeError`` at ``batch_predict`` (error).
+    - standard mode with a ``ConceptBottleneck*`` model is an unusual pairing (warning).
+    - concept-bottleneck mode needs ``ConceptBottleneckLoss`` — only it has the 4-arg ``forward`` the
+      CBM branch calls (error). Loss may be omitted (checked only when present).
+    """
+    training = cfg.get("training") or {}
+    model = cfg.get("model") or {}
+    mode = training.get("training_mode")
+    name = model.get("name")
+    if not isinstance(name, str) or name not in valid_model_names():
+        return  # unknown/typo'd name already errored by _check_model_schema; nothing to couple to
+    is_concept_model = "ConceptBottleneck" in name
+
+    if mode in ("concept", "concept-bottleneck") and not is_concept_model:
+        report.errors.append(
+            f"training_mode={mode!r} requires a concept model (a 'ConceptBottleneck*' name), "
+            f"but model.name={name!r} does not emit concept outputs (AttributeError at run time)."
+        )
+    elif mode == "standard" and is_concept_model:
+        report.warnings.append(
+            f"model.name={name!r} is a concept model but training_mode='standard'; "
+            "its concept outputs will be unused — is the mode correct?"
+        )
+
+    loss = training.get("loss")
+    loss_type = loss.get("type") if isinstance(loss, Mapping) else None
+    if (
+        mode == "concept-bottleneck"
+        and loss_type is not None
+        and loss_type != "ConceptBottleneckLoss"
+    ):
+        report.errors.append(
+            f"training_mode='concept-bottleneck' requires loss.type='ConceptBottleneckLoss' "
+            f"(its 4-arg forward), but got loss.type={loss_type!r}."
+        )
 
 
 def _check_datasets(cfg: Mapping[str, Any], report: ValidationReport) -> None:
