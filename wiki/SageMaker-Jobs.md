@@ -69,8 +69,21 @@ uv run --extra sagemaker python scripts/launch_training.py \
 
 The run YAML is the single source of truth: the launcher reads its `job:` block locally and
 uploads the same file as the container's `config` channel, so there's no separate config-dir copy
-to keep in sync. Validate a run YAML offline before submitting with `--dry-run`, or directly via
-`uv run python -m mermaidseg.experiment validate sagemaker/runs/<your-run>.yaml`.
+to keep in sync.
+
+**Validate offline before submitting** (no AWS creds needed):
+
+```bash
+make sm-validate SM_RUN_CONFIG=sagemaker/runs/<your-run>.yaml
+# or: uv run --extra training python -m mermaidseg.experiment validate sagemaker/runs/<your-run>.yaml
+```
+
+This schema- and value-checks the whole run — the `job:`/`config:`/`overrides:` blocks **and** the
+four referenced split configs (`data`/`model`/`training`/`logger`). It catches a misspelled key, a
+missing required field, a bad `optimizer`/`scheduler`/`loss.type` or `model.name`, an invalid
+`training_mode`, and mode↔model / mode↔loss mismatches — the failures that otherwise surface only
+after a Docker push, inside `MetaModel.__init__`. `--dry-run` runs the same validation as part of
+assembling (but un-submitting) a job.
 
 Outputs:
 - Run ID and CloudWatch URL printed at submission.

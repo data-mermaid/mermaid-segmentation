@@ -1,5 +1,5 @@
 .PHONY: sync logs lcc-log check kernel \
-	sm-sync sm-check sm-dry-run sm-launch sm-smoke sm-require-env \
+	sm-sync sm-check sm-validate sm-dry-run sm-launch sm-smoke sm-require-env \
 	sm-jobs sm-status sm-logs sm-errors sm-metrics sm-require-job
 
 # Re-sync the uv environment and Jupyter kernel from the current branch.
@@ -34,7 +34,6 @@ check_mlflow_version()"
 
 # --- SageMaker TrainingJob (see wiki/SageMaker-Jobs.md) ---
 # Account ARNs in .env (gitignored), loaded by direnv. Login: aws sso login --profile wcs-sso
-SM_CONFIG_DIR ?= sagemaker/configs/example
 SM_RUN_CONFIG ?= sagemaker/runs/example-training.yaml
 
 # Read from environment (.env + direnv). Profile name is not a secret.
@@ -53,10 +52,14 @@ sm-check: sm-require-env
 		--role-arn $(SM_ROLE_ARN) \
 		--check-hf-token
 
+# Offline schema + value validation of a run YAML (and its referenced split configs).
+# No AWS creds needed — pure local check. Pass SM_RUN_CONFIG=<path> to target another run.
+sm-validate:
+	uv run --extra training python -m mermaidseg.experiment validate $(SM_RUN_CONFIG)
+
 sm-dry-run: sm-require-env
 	$(SM_AWS_ENV) uv run --extra sagemaker python scripts/launch_training.py \
 		--run-config $(SM_RUN_CONFIG) \
-		--config-dir $(SM_CONFIG_DIR)/ \
 		--mlflow-tracking-uri $(MLFLOW_TRACKING_URI) \
 		--role-arn $(SM_ROLE_ARN) \
 		--dry-run
@@ -64,7 +67,6 @@ sm-dry-run: sm-require-env
 sm-launch: sm-require-env
 	$(SM_AWS_ENV) uv run --extra sagemaker python scripts/launch_training.py \
 		--run-config $(SM_RUN_CONFIG) \
-		--config-dir $(SM_CONFIG_DIR)/ \
 		--mlflow-tracking-uri $(MLFLOW_TRACKING_URI) \
 		--role-arn $(SM_ROLE_ARN) \
 		$(if $(HF_TOKEN),--hf-token $(HF_TOKEN),)
