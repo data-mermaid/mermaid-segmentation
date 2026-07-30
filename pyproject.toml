@@ -40,6 +40,7 @@ coralnet-resize = "mermaidseg.datasets.coralnet.preprocessing.resize:main"
 # Training + experiment tracking (mermaidseg/logger.py, mermaidseg/model/eval.py).
 training = [
     "mlflow",
+    "psutil",  # scripts/diagnostics/dataloader_rss_repro.py (host-RAM / worker USS diagnostics)
     "sagemaker-mlflow>=0.2.0",
     "torchmetrics",
 ]

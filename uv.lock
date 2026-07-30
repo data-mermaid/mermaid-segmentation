@@ -2733,6 +2733,7 @@ all = [
     { name = "jupyter" },
     { name = "matplotlib" },
     { name = "mlflow" },
+    { name = "psutil" },
     { name = "sagemaker" },
     { name = "sagemaker-mlflow" },
     { name = "seaborn" },
@@ -2766,6 +2767,7 @@ test-live = [
 ]
 training = [
     { name = "mlflow" },
+    { name = "psutil" },
     { name = "sagemaker-mlflow" },
     { name = "torchmetrics" },
 ]
@@ -2810,6 +2812,7 @@ requires-dist = [
     { name = "peft", specifier = ">=0.19.1" },
     { name = "pillow" },
     { name = "playwright", marker = "extra == 'test-live'", specifier = ">=1.50" },
+    { name = "psutil", marker = "extra == 'training'" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyyaml" },
     { name = "requests" },
