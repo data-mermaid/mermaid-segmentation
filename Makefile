@@ -72,6 +72,19 @@ sm-launch: sm-require-env
 sm-smoke:
 	bash docker/jobs/local_smoke.sh training
 
+# Authoritative DataLoader host-RAM proof: runs the RSS/USS repro INSIDE the Linux training image
+# (real fork + /proc USS accounting — the macOS default `spawn` does not reproduce the CoW leak).
+# Mounts the working tree so it exercises the CURRENT code. --shm-size mirrors SageMaker (the tiny
+# 64MB default kills DataLoader workers). Override args via RSS_ARGS=... See
+# scripts/diagnostics/dataloader_rss_findings.md.
+RSS_IMAGE ?= 554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-segmentation-jobs:training-focal-2026-07-23
+RSS_ARGS ?= --rows 6000000 --images 100000 --epochs 5 --batches-per-epoch 150 --num-workers 4 --batch-size 16 --out /work/_rss.csv
+rss-repro-docker:
+	docker run --rm --platform linux/amd64 --shm-size=8g \
+		-v "$$(pwd):/work" -w /work -e PYTHONPATH=/work \
+		--entrypoint python $(RSS_IMAGE) \
+		scripts/diagnostics/dataloader_rss_repro.py $(RSS_ARGS)
+
 # --- SageMaker job debugging / monitoring (see wiki/SageMaker-Jobs.md) ---
 # Read-only. Pass JOB=<training-job-name> (the run-id printed at launch, or `make sm-jobs`).
 # Uses SM_AWS_PROFILE when set (as the launch targets do); otherwise inherits ambient AWS creds.
