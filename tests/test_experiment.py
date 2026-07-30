@@ -250,28 +250,20 @@ def _broken_training(tmp_path: Path, **over) -> Path:
     return _write(tmp_path, {"training": block}, name="training.yaml")
 
 
-def test_bad_optimizer_type_is_error(tmp_path):
-    training = _broken_training(tmp_path, optimizer={"type": "Adamw", "lr": 5e-5})
+@pytest.mark.parametrize(
+    "override, expect",
+    [
+        ({"optimizer": {"type": "Adamw", "lr": 5e-5}}, "optimizer.type 'Adamw'"),
+        ({"scheduler": {"type": "PolynomialLr"}}, "scheduler.type 'PolynomialLr'"),
+        ({"loss": {"type": "FocalLoss"}}, "loss.type 'FocalLoss'"),
+    ],
+)
+def test_bad_component_type_is_error(tmp_path, override, expect):
+    training = _broken_training(tmp_path, **override)
     run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
     report = Experiment.validate(run)
     assert not report.ok
-    assert any("optimizer.type 'Adamw'" in e for e in report.errors)
-
-
-def test_bad_scheduler_type_is_error(tmp_path):
-    training = _broken_training(tmp_path, scheduler={"type": "PolynomialLr"})
-    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
-    report = Experiment.validate(run)
-    assert not report.ok
-    assert any("scheduler.type 'PolynomialLr'" in e for e in report.errors)
-
-
-def test_bad_loss_type_is_error(tmp_path):
-    training = _broken_training(tmp_path, loss={"type": "FocalLoss"})
-    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
-    report = Experiment.validate(run)
-    assert not report.ok
-    assert any("loss.type 'FocalLoss'" in e for e in report.errors)
+    assert any(expect in e for e in report.errors)
 
 
 def test_bad_model_name_is_error(tmp_path):
@@ -284,6 +276,17 @@ def test_bad_model_name_is_error(tmp_path):
     report = Experiment.validate(run)
     assert not report.ok
     assert any("model.name 'LinearDinov3'" in e for e in report.errors)
+
+
+@pytest.mark.parametrize("building_block", ["DPTHead", "LinearClassifier", "ConceptHead"])
+def test_building_block_is_not_a_valid_model_name(building_block):
+    # Real nn.Module subclasses in models.py, but not user-selectable models — they'd crash at
+    # construction, so valid_model_names must exclude them (require freeze_encoder).
+    from mermaidseg.config_schema import resolve_model_name, valid_model_names
+
+    assert resolve_model_name(building_block) is not None
+    assert building_block not in valid_model_names()
+    assert resolve_model_name("LinearDINOv3") is None
 
 
 def test_missing_required_training_field_is_error(tmp_path):
@@ -321,7 +324,7 @@ def test_cbm_missing_concept_mapping_is_error(tmp_path):
     assert any("concept_mapping_path is required" in e for e in report.errors)
 
 
-def test_concept_mode_with_plain_model_is_error(tmp_path):
+def test_cbm_mode_with_plain_model_is_error(tmp_path):
     # concept-bottleneck mode with the default standard LinearDINOv3 model → AttributeError at runtime.
     training = _broken_training(
         tmp_path,
@@ -332,7 +335,21 @@ def test_concept_mode_with_plain_model_is_error(tmp_path):
     run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
     report = Experiment.validate(run)
     assert not report.ok
-    assert any("requires a concept model" in e for e in report.errors)
+    assert any("emits concept outputs" in e for e in report.errors)
+
+
+def test_concept_mode_with_plain_model_is_ok(tmp_path):
+    # Plain `concept` mode reads .logits (every model has it) — a Linear model is a valid pairing,
+    # so the mode<->model coupling must NOT flag it (regression guard for the string-heuristic fix).
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept",
+        concept_mapping_path="configs/class_to_concepts.csv",
+        loss={"type": "BCEWithLogitsLoss"},
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not any("concept" in e and "model" in e for e in report.errors), report.errors
 
 
 def test_cbm_wrong_loss_is_error(tmp_path):

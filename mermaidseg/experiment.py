@@ -42,6 +42,7 @@ from mermaidseg.config_schema import (
     LoggerConfig,
     ModelConfig,
     TrainingConfig,
+    is_concept_model,
     resolve_loss_type,
     resolve_model_name,
     resolve_optimizer_type,
@@ -650,15 +651,26 @@ def _check_split_config_schemas(cfg: Mapping[str, Any], report: ValidationReport
     _check_data_schema(cfg, report)
 
 
-def _check_training_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
-    raw = cfg.get("training")
+def _validate_block(
+    cfg: Mapping[str, Any], report: ValidationReport, section: str, model: type[BaseModel]
+) -> BaseModel | None:
+    """Parse one split block through its pydantic ``model``, appending a rendered error
+    and returning ``None`` on failure (missing block, non-mapping, or
+    ``ValidationError``)."""
+    raw = cfg.get(section)
     if not isinstance(raw, Mapping):
-        report.errors.append("training: config block is missing or not a mapping")
-        return
+        report.errors.append(f"{section}: config block is missing or not a mapping")
+        return None
     try:
-        tc = TrainingConfig.model_validate(dict(raw))
+        return model.model_validate(dict(raw))
     except ValidationError as exc:
-        report.errors.append("training: config is invalid:\n" + _format_validation_error(exc))
+        report.errors.append(f"{section}: config is invalid:\n" + _format_validation_error(exc))
+        return None
+
+
+def _check_training_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    tc = _validate_block(cfg, report, "training", TrainingConfig)
+    if tc is None:
         return
     # Value existence: each component's `type` must resolve to a real class (mirrors MetaModel).
     for component, resolve in (
@@ -674,14 +686,8 @@ def _check_training_schema(cfg: Mapping[str, Any], report: ValidationReport) -> 
 
 
 def _check_model_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
-    raw = cfg.get("model")
-    if not isinstance(raw, Mapping):
-        report.errors.append("model: config block is missing or not a mapping")
-        return
-    try:
-        mc = ModelConfig.model_validate(dict(raw))
-    except ValidationError as exc:
-        report.errors.append("model: config is invalid:\n" + _format_validation_error(exc))
+    mc = _validate_block(cfg, report, "model", ModelConfig)
+    if mc is None:
         return
     hint = resolve_model_name(mc.name)
     if hint:
@@ -689,14 +695,7 @@ def _check_model_schema(cfg: Mapping[str, Any], report: ValidationReport) -> Non
 
 
 def _check_logger_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
-    raw = cfg.get("logger")
-    if not isinstance(raw, Mapping):
-        report.errors.append("logger: config block is missing or not a mapping")
-        return
-    try:
-        LoggerConfig.model_validate(dict(raw))
-    except ValidationError as exc:
-        report.errors.append("logger: config is invalid:\n" + _format_validation_error(exc))
+    _validate_block(cfg, report, "logger", LoggerConfig)
 
 
 def _check_data_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
@@ -720,9 +719,12 @@ def _check_data_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None
 def _check_mode_model_coupling(cfg: Mapping[str, Any], report: ValidationReport) -> None:
     """Cross-block rules that need ``model`` and ``training`` together.
 
-    - concept / concept-bottleneck mode needs a model that emits concept outputs (a
-      ``ConceptBottleneck*`` class); a plain model → ``AttributeError`` at ``batch_predict`` (error).
-    - standard mode with a ``ConceptBottleneck*`` model is an unusual pairing (warning).
+    - concept-bottleneck mode reads ``segmentation_outputs.concept_outputs`` / ``.concept_logits``,
+      which only a concept model emits; a plain model → ``AttributeError`` at ``batch_predict``
+      (error). Plain ``concept`` mode reads ``.logits`` (every model has it), so it has no
+      architecture requirement.
+    - standard mode with a concept model is an unusual pairing — its concept outputs go unused
+      (warning).
     - concept-bottleneck mode needs ``ConceptBottleneckLoss`` — only it has the 4-arg ``forward`` the
       CBM branch calls (error). Loss may be omitted (checked only when present).
     """
@@ -732,14 +734,15 @@ def _check_mode_model_coupling(cfg: Mapping[str, Any], report: ValidationReport)
     name = model.get("name")
     if not isinstance(name, str) or name not in valid_model_names():
         return  # unknown/typo'd name already errored by _check_model_schema; nothing to couple to
-    is_concept_model = "ConceptBottleneck" in name
+    concept_model = is_concept_model(name)
 
-    if mode in ("concept", "concept-bottleneck") and not is_concept_model:
+    if mode == "concept-bottleneck" and not concept_model:
         report.errors.append(
-            f"training_mode={mode!r} requires a concept model (a 'ConceptBottleneck*' name), "
-            f"but model.name={name!r} does not emit concept outputs (AttributeError at run time)."
+            f"training_mode='concept-bottleneck' requires a model that emits concept outputs "
+            f"(a ConceptBottleneckOutput forward), but model.name={name!r} does not "
+            "(AttributeError at run time)."
         )
-    elif mode == "standard" and is_concept_model:
+    elif mode == "standard" and concept_model:
         report.warnings.append(
             f"model.name={name!r} is a concept model but training_mode='standard'; "
             "its concept outputs will be unused — is the mode correct?"

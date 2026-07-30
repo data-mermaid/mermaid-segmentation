@@ -30,6 +30,7 @@ Design notes:
 from __future__ import annotations
 
 import difflib
+from functools import lru_cache
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -192,91 +193,129 @@ class DatasetSplits(BaseModel):
 # --------------------------------------------------------------------------------------------------
 
 
-def _did_you_mean(name: str, candidates: list[str]) -> str:
+def _did_you_mean(name: str, candidates: tuple[str, ...]) -> str:
     match = difflib.get_close_matches(name, candidates, n=1)
     return f" (did you mean {match[0]!r}?)" if match else ""
 
 
+def _resolve_torch_subclass(
+    namespace: object, base: type, label: str, type_name: str
+) -> str | None:
+    """Resolve ``type_name`` against a torch ``namespace`` (``torch.optim`` /
+    ``lr_scheduler``).
+
+    Returns ``None`` when it names a concrete ``base`` subclass, else a "did you mean"
+    hint. The ``issubclass`` guard is stricter than ``MetaModel``'s bare ``getattr`` —
+    it rejects a resolvable but non-matching attribute (the abstract ``base`` itself, or
+    a submodule).
+    """
+
+    def _ok(obj: object) -> bool:
+        return isinstance(obj, type) and issubclass(obj, base) and obj is not base
+
+    if _ok(getattr(namespace, type_name, None)):
+        return None
+    valid = tuple(sorted(n for n in dir(namespace) if _ok(getattr(namespace, n))))
+    return f"unknown {label} {type_name!r}{_did_you_mean(type_name, valid)}"
+
+
 def resolve_optimizer_type(type_name: str) -> str | None:
     """``optimizer.type`` must name a concrete ``torch.optim.Optimizer`` subclass
-    (meta.py:238).
-
-    Stricter than ``MetaModel``'s bare ``getattr``: the ``issubclass`` guard rejects
-    resolvable but non-optimizer attributes (the abstract ``Optimizer``, or a submodule
-    like ``lr_scheduler``).
-    """
+    (``MetaModel.__init__``)."""
     import torch
 
-    def _is_optimizer(obj: object) -> bool:
-        return (
-            isinstance(obj, type)
-            and issubclass(obj, torch.optim.Optimizer)
-            and obj is not torch.optim.Optimizer
-        )
-
-    if _is_optimizer(getattr(torch.optim, type_name, None)):
-        return None
-    valid = sorted(n for n in dir(torch.optim) if _is_optimizer(getattr(torch.optim, n)))
-    return f"unknown optimizer.type {type_name!r}{_did_you_mean(type_name, valid)}"
+    return _resolve_torch_subclass(torch.optim, torch.optim.Optimizer, "optimizer.type", type_name)
 
 
 def resolve_scheduler_type(type_name: str) -> str | None:
     """``scheduler.type`` must name a ``torch.optim.lr_scheduler.LRScheduler`` subclass
-    (meta.py:265)."""
+    (``MetaModel.__init__``)."""
     import torch
 
-    base = torch.optim.lr_scheduler.LRScheduler
-
-    def _is_scheduler(obj: object) -> bool:
-        return isinstance(obj, type) and issubclass(obj, base) and obj is not base
-
-    if _is_scheduler(getattr(torch.optim.lr_scheduler, type_name, None)):
-        return None
-    valid = sorted(
-        n
-        for n in dir(torch.optim.lr_scheduler)
-        if _is_scheduler(getattr(torch.optim.lr_scheduler, n))
+    return _resolve_torch_subclass(
+        torch.optim.lr_scheduler,
+        torch.optim.lr_scheduler.LRScheduler,
+        "scheduler.type",
+        type_name,
     )
-    return f"unknown scheduler.type {type_name!r}{_did_you_mean(type_name, valid)}"
 
 
-def resolve_loss_type(type_name: str) -> str | None:
-    """``loss.type`` must name a class in ``mermaidseg.model.loss`` (meta.py:229)."""
+def _own_subclass_names(
+    module: object, base: type, require_attr: str | None = None
+) -> tuple[str, ...]:
+    """Public ``base`` subclasses **defined in** ``module`` (excludes imported symbols),
+    optionally requiring an attribute.
+
+    Introspective so it never drifts from the module.
+    """
+
+    def _ok(obj: object) -> bool:
+        return (
+            isinstance(obj, type)
+            and issubclass(obj, base)
+            and obj.__module__ == module.__name__
+            and (require_attr is None or hasattr(obj, require_attr))
+        )
+
+    return tuple(
+        sorted(n for n in dir(module) if not n.startswith("_") and _ok(getattr(module, n)))
+    )
+
+
+@lru_cache(maxsize=1)
+def valid_loss_types() -> tuple[str, ...]:
+    """Loss classes defined in ``mermaidseg.model.loss`` — the strings accepted for
+    ``loss.type`` (``MetaModel.__init__`` resolves via ``getattr(loss, type)``)."""
+    import torch
+
     from mermaidseg.model import loss as loss_mod
 
-    if isinstance(getattr(loss_mod, type_name, None), type):
-        return None
-    valid = [
-        "CrossEntropyLoss",
-        "BCEWithLogitsLoss",
-        "ConceptBottleneckLoss",
-        "ClassWeightedFocalLoss",
-    ]
-    return f"unknown loss.type {type_name!r} (expected one of {valid})"
+    return _own_subclass_names(loss_mod, torch.nn.Module)
 
 
-def valid_model_names() -> list[str]:
-    """Public ``torch.nn.Module`` subclasses exported by ``mermaidseg.model.models`` —
-    the strings accepted for ``model.name``.
+@lru_cache(maxsize=1)
+def valid_model_names() -> tuple[str, ...]:
+    """User-selectable model classes in ``mermaidseg.model.models`` — the strings
+    accepted for ``model.name`` (``MetaModel.__init__`` resolves via ``getattr(models,
+    name)``).
 
-    Derived by introspection so it never drifts from the module.
+    Requires ``freeze_encoder`` so building blocks
+    (``LinearClassifier``/``ConceptHead``/``DPTHead``) and imported necks are excluded —
+    the same attribute ``MetaModel`` keys on to freeze a backbone.
     """
     import torch
 
     from mermaidseg.model import models as models_mod
 
-    return sorted(
-        n
-        for n in dir(models_mod)
-        if not n.startswith("_")
-        and isinstance(getattr(models_mod, n), type)
-        and issubclass(getattr(models_mod, n), torch.nn.Module)
-    )
+    return _own_subclass_names(models_mod, torch.nn.Module, require_attr="freeze_encoder")
+
+
+def is_concept_model(name: str) -> bool:
+    """True when model ``name``'s ``forward`` returns a ``ConceptBottleneckOutput``
+    (emits concept outputs).
+
+    This is the contract ``MetaModel``'s concept-bottleneck branch reads
+    (``segmentation_outputs.concept_outputs`` / ``.concept_logits``), so it is the right
+    signal for a mode↔architecture check — not the model's class name.
+    """
+    from mermaidseg.model import models as models_mod
+    from mermaidseg.model.models import ConceptBottleneckOutput
+
+    cls = getattr(models_mod, name, None)
+    if not isinstance(cls, type):
+        return False
+    return_type = getattr(cls.forward, "__annotations__", {}).get("return")
+    return isinstance(return_type, type) and issubclass(return_type, ConceptBottleneckOutput)
+
+
+def resolve_loss_type(type_name: str) -> str | None:
+    valid = valid_loss_types()
+    if type_name in valid:
+        return None
+    return f"unknown loss.type {type_name!r}{_did_you_mean(type_name, valid)}"
 
 
 def resolve_model_name(name: str) -> str | None:
-    """``model.name`` must resolve to a public model class (meta.py:205
-    ``getattr(models, name)``)."""
     valid = valid_model_names()
     if name in valid:
         return None
