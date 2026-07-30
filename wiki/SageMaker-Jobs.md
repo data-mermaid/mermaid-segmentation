@@ -131,14 +131,22 @@ land in `/aws/sagemaker/ProcessingJobs` under stream `<job-name>-N/algo-1`.
 
 ## Instance sizing
 
-| Instance | GPU | $/hr | Use case |
-|---|---|---|---|
-| `ml.g5.xlarge` | A10G (24GB) | ~$1.41 | Eval / inference; small training runs |
-| `ml.g5.2xlarge` | A10G | ~$1.52 | Standard training run (DINOv3-base, batch 4-8) |
-| `ml.g5.4xlarge` | A10G | ~$2.03 | Larger batch, more CPU for data loading |
-| `ml.p3.2xlarge` | V100 (16GB) | ~$3.83 | When A10G's 24GB isn't enough |
+| Instance | GPU | vCPU | Host RAM | rec. `num_workers` | $/hr | Use case |
+|---|---|---|---|---|---|---|
+| `ml.g5.xlarge` | A10G (24GB) | 4 | 16 GiB | ≤3 | ~$1.41 | Eval / inference; small training runs |
+| `ml.g5.2xlarge` | A10G | 8 | 32 GiB | ≤7 | ~$1.52 | Standard training run (DINOv3-base, batch 4-8) |
+| `ml.g5.4xlarge` | A10G | 16 | 64 GiB | ≤15 | ~$2.03 | Larger batch, more CPU for data loading |
+| `ml.g6.2xlarge` | L4 (24GB) | 8 | 32 GiB | ≤7 | ~$1.20 | LoRA / frozen-encoder runs (cheaper L4) |
+| `ml.g6.4xlarge` | L4 (24GB) | 16 | 64 GiB | ≤15 | ~$1.74 | Same, more host RAM / CPU for data loading |
+| `ml.p3.2xlarge` | V100 (16GB) | 8 | 61 GiB | ≤7 | ~$3.83 | When A10G's 24GB isn't enough |
 
 CPU-only processing jobs (ETL, resize) typically use `ml.m5.*` — size by the task.
+
+**DataLoader worker sizing.** Keep `num_workers ≤ vCPU − 1` (leave a core for the main process).
+`persistent_workers` defaults **on** (a throughput win) and is safe with the numpy-native dataset
+hot path; `Experiment.validate` emits an advisory if you pair it with `num_workers ≥ vCPU` on a
+≤32 GiB instance. If host RAM is ever tight, set `persistent-workers: false` in the run YAML
+`overrides:` (reclaims worker RAM every epoch) or move to a `4xlarge`.
 
 ## Debug a failed job
 
@@ -200,6 +208,15 @@ aws cloudwatch get-metric-statistics --namespace /aws/sagemaker/TrainingJobs \
   running the same code locally on macOS (default `spawn`) with `num_workers>0` fails immediately
   with `PicklingError: Can't pickle botocore.client.S3`. Keep local runs at `num_workers=0` unless
   the client is made per-process (lazy property + dropped in `__getstate__`).
+- **Persistent DataLoader workers + host-RAM growth (the dinov3-lora-qv-r8 OOM).** Under Linux
+  `fork`, a persistent worker that touched pandas object columns / str-keyed dicts every sample
+  copy-on-write-privatized their pages and never reclaimed them — host RAM climbed ~4 GB/day to a
+  32 GiB OOM at epoch 76 while GPU stayed flat. The dataset hot path is now numpy-native
+  (`BaseCoralDataset._build_annotation_index`), which keeps forked workers CoW-clean, so
+  `persistent_workers=True` is safe. To diagnose any recurrence, launch with
+  `MERMAIDSEG_LOG_WORKER_RSS=1` (logs per-worker RSS) and reproduce/quantify with
+  `scripts/diagnostics/dataloader_rss_repro.py`. Full write-up: `docs/investigating-training-runs.md`
+  and `scripts/diagnostics/dataloader_rss_findings.md`.
 
 Or reproduce locally:
 

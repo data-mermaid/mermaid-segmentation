@@ -283,6 +283,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0,
         help="DataLoader num_workers (default: 0)",
     )
+    base.add_argument(
+        "--persistent-workers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep DataLoader workers alive across epochs (default: on). "
+        "--no-persistent-workers reclaims worker RAM every epoch (tightest-RAM instances).",
+    )
     return base
 
 

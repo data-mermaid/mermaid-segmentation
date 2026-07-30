@@ -23,6 +23,11 @@ import yaml
 log = logging.getLogger("seg_train_entrypoint")
 CONFIG_DIR = Path("/opt/ml/input/data/config")
 
+# BooleanOptionalAction flags in scripts/train.py that default to TRUE. For these, a YAML override
+# of ``false`` must be emitted as ``--no-<flag>``; omitting it would let the True default win.
+# Plain store_true flags (default false) are NOT listed — they have no ``--no-`` form.
+_NEGATABLE_BOOL_FLAGS = {"persistent-workers"}
+
 
 def _configure_logging():
     logging.basicConfig(
@@ -84,13 +89,15 @@ def main():
         cmd += [f"--{flag.replace('_', '-')}", path]
     for k, v in overrides.items():
         # Boolean overrides map to a bare flag, not `--flag value` (which breaks store_true /
-        # BooleanOptionalAction args like --early-stopping / --per-class-metrics). true -> `--flag`;
-        # false -> omit (store_true flags have no `--no-` form and already default to false; a
-        # BooleanOptionalAction left off falls back to its own default). Emitting `--no-<flag>`
-        # would crash the plain store_true flags, so we never do.
+        # BooleanOptionalAction args like --early-stopping / --per-class-metrics). true -> `--flag`.
+        # false -> omit for plain store_true flags (no `--no-` form; already default false), but for
+        # BooleanOptionalAction flags that default to TRUE (see _NEGATABLE_BOOL_FLAGS), false MUST be
+        # expressed as `--no-<flag>` or the default would silently win.
         if isinstance(v, bool):
             if v:
                 cmd += [f"--{k}"]
+            elif k in _NEGATABLE_BOOL_FLAGS:
+                cmd += [f"--no-{k}"]
         else:
             cmd += [f"--{k}", str(v)]
 

@@ -92,6 +92,12 @@ class Overrides(BaseModel):
     log_epochs: int | None = None
     seed: int = 42
     num_workers: int = 0
+    # Keep DataLoader workers alive across epochs (a throughput win). Default True preserves prior
+    # behaviour; it is now a knob because worker RAM growth is the OOM lever (the numpy-native
+    # hot path in base_dataset keeps persistent workers copy-on-write-clean — see
+    # scripts/diagnostics/dataloader_rss_findings.md). Set False to fully reclaim worker RAM each
+    # epoch on the tightest-RAM instances.
+    persistent_workers: bool = True
     metric_of_interest: str = "miou"
     early_stopping: bool = False
     early_stopping_patience: int = 10
@@ -184,6 +190,7 @@ def _spec_from_args(args: argparse.Namespace) -> ExperimentSpec:
         log_epochs=g("log_epochs"),
         seed=g("seed", 42),
         num_workers=g("num_workers", 0),
+        persistent_workers=g("persistent_workers", True),
         metric_of_interest=g("metric_of_interest", "miou"),
         early_stopping=g("early_stopping", False),
         early_stopping_patience=g("early_stopping_patience", 10),
@@ -345,7 +352,7 @@ class Experiment:
             "collate_fn": BaseCoralDataset.collate_fn,
         }
         if self.overrides.num_workers > 0:
-            loader_kwargs["persistent_workers"] = True
+            loader_kwargs["persistent_workers"] = self.overrides.persistent_workers
             loader_kwargs["worker_init_fn"] = worker_init_fn
             timeout = int(os.environ.get("MERMAIDSEG_DATALOADER_TIMEOUT_SECONDS", "300"))
             if timeout <= 0:
@@ -487,9 +494,10 @@ class Experiment:
             return report
 
         # Job block (optional): reuse the launcher's schema so `validate` covers the whole run YAML.
+        job_cfg = None
         if "job" in raw:
             try:
-                parse_run_config(text, kind="training", strict=False)
+                job_cfg = parse_run_config(text, kind="training", strict=False).job
             except ValidationError as exc:
                 report.errors.append("job: block is invalid:\n" + _format_validation_error(exc))
 
@@ -520,6 +528,8 @@ class Experiment:
 
         _check_datasets(cfg, report)
         _check_class_subset(cfg, report)
+        if job_cfg is not None:
+            _check_worker_sizing(job_cfg.instance_type, spec.overrides, report)
 
         report.summary = _build_summary(spec, cfg)
         return report
@@ -644,6 +654,47 @@ def _check_class_subset(cfg: Mapping[str, Any], report: ValidationReport) -> Non
             f"{len(unknown)} class_subset name(s) not found in the committed mapping universe "
             "(they may be produced via label roll-up — confirm with `dry-run`): "
             + ", ".join(map(str, unknown))
+        )
+
+
+def _check_worker_sizing(
+    instance_type: str, overrides: Overrides, report: ValidationReport
+) -> None:
+    """Advisory (never blocking) check of DataLoader worker sizing vs the chosen
+    instance.
+
+    Guards against the class of misconfiguration behind the dinov3-lora-qv-r8 host-RAM OOM:
+    ``num_workers`` oversubscribed to the vCPUs, and persistent workers on a small-RAM instance
+    for a large-annotation run.
+    """
+    from mermaidseg.sagemaker.instance_specs import (
+        INSTANCE_SPECS,
+        SMALL_RAM_GB,
+        recommended_num_workers,
+    )
+
+    spec = INSTANCE_SPECS.get(instance_type)
+    if spec is None:
+        report.warnings.append(
+            f"instance_type '{instance_type}' is not in the known-specs table "
+            "(mermaidseg/sagemaker/instance_specs.py); skipping DataLoader worker-sizing checks."
+        )
+        return
+
+    nw = overrides.num_workers
+    if nw > spec.vcpu:
+        report.warnings.append(
+            f"num_workers={nw} exceeds {instance_type}'s {spec.vcpu} vCPUs (oversubscribed); "
+            f"recommend num_workers <= {recommended_num_workers(instance_type)}."
+        )
+    if overrides.persistent_workers and nw >= spec.vcpu and spec.ram_gb <= SMALL_RAM_GB:
+        report.warnings.append(
+            f"persistent_workers=True with num_workers={nw} on {instance_type} "
+            f"({spec.ram_gb} GiB host RAM): the config that OOM'd dinov3-lora-qv-r8. The numpy "
+            "hot path keeps workers copy-on-write-clean so this is expected to be safe now — but "
+            "watch host RAM (MERMAIDSEG_LOG_WORKER_RSS=1), and if it climbs, set "
+            "`persistent-workers: false` or move to a larger-RAM instance. "
+            "See docs/investigating-training-runs.md."
         )
 
 

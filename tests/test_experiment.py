@@ -109,6 +109,70 @@ def test_missing_config_block_is_error(tmp_path):
 
 
 # --------------------------------------------------------------------------------------
+# Worker/instance sizing advisories (warnings, never blocking).
+# --------------------------------------------------------------------------------------
+
+
+def _job_block(instance_type: str) -> dict:
+    return {
+        "name_prefix": "sizing-test",
+        "image": "img:latest",
+        "entrypoint": "scripts/sagemaker_train_entrypoint.py",
+        "instance_type": instance_type,
+        "volume_gb": 200,
+        "max_runtime_hours": 4,
+    }
+
+
+def test_worker_sizing_flags_persistent_on_small_ram(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    # g6.2xlarge (8 vCPU / 32 GiB) + num_workers=8 + persistent (default) = the r8 OOM config.
+    run = _write(
+        tmp_path,
+        {"job": _job_block("ml.g6.2xlarge"), "config": _config_block(overrides={"num-workers": 8})},
+    )
+    report = Experiment.validate(run)
+    assert report.ok, report.errors
+    assert any("persistent_workers=True" in w for w in report.warnings)
+
+
+def test_worker_sizing_flags_oversubscription(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    run = _write(
+        tmp_path,
+        {
+            "job": _job_block("ml.g6.2xlarge"),
+            "config": _config_block(overrides={"num-workers": 32}),
+        },
+    )
+    report = Experiment.validate(run)
+    assert any("oversubscribed" in w for w in report.warnings)
+
+
+def test_worker_sizing_quiet_when_persistent_disabled(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    run = _write(
+        tmp_path,
+        {
+            "job": _job_block("ml.g6.2xlarge"),
+            "config": _config_block(overrides={"num-workers": 8, "persistent-workers": False}),
+        },
+    )
+    report = Experiment.validate(run)
+    assert not any("persistent_workers=True" in w for w in report.warnings)
+
+
+def test_worker_sizing_unknown_instance_warns(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    run = _write(
+        tmp_path,
+        {"job": _job_block("ml.zz.unknown"), "config": _config_block(overrides={"num-workers": 8})},
+    )
+    report = Experiment.validate(run)
+    assert any("not in the known-specs table" in w for w in report.warnings)
+
+
+# --------------------------------------------------------------------------------------
 # Static semantic errors (need the merged config).
 # --------------------------------------------------------------------------------------
 
