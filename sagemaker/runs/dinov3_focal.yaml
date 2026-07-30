@@ -20,7 +20,7 @@ config:
     experiment-name: post-baseline
     epochs: 200
     seed: 42
-    num-workers: 8
+    num-workers: 7
     metric-of-interest: miou
     early-stopping: true
     early-stopping-patience: 20
