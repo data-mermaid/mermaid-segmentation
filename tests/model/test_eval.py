@@ -39,6 +39,36 @@ def _make_dataloader(targets: torch.Tensor):
     return [(torch.zeros(1), targets)]
 
 
+class TestHierarchyMetrics:
+    def test_mean_tree_distance_and_ancestor_accuracy(self):
+        from mermaidseg.model.hierarchy_loss import build_distance_matrix, build_level_remap
+
+        id2label = {0: "ignore", 1: "Acropora", 2: "Montipora", 3: "Hard coral"}
+        hierarchy = {
+            "acropora": "acroporidae",
+            "montipora": "acroporidae",
+            "acroporidae": "hard coral",
+            "hard coral": None,
+        }
+        dist = build_distance_matrix(id2label, hierarchy, ignore_index=0, num_classes=4)
+        remap = build_level_remap(id2label, hierarchy, "Hard coral", ignore_index=0, num_classes=4)
+        evaluator = Evaluator(
+            num_classes=4,
+            device="cpu",
+            ignore_index=0,
+            hierarchy_metrics=True,
+            distance_matrix=dist,
+            level_remaps={"Hard coral": remap},
+        )
+        # GT Acropora, pred Montipora (sibling) — tree distance > 0, ancestor match
+        targets = torch.tensor([[1, 1]])
+        preds = torch.tensor([[2, 2]])
+        evaluator.accumulate(preds, targets)
+        results = evaluator.compute_and_reset()
+        assert results["mean_tree_distance"] > 0.0
+        assert results["ancestor_accuracy/Hard coral"] == 1.0
+
+
 class TestPerClassMetricsToggle:
     def test_disabled_by_default(self):
         evaluator = Evaluator(num_classes=NUM_CLASSES, device="cpu")

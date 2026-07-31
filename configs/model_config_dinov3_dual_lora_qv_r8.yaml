@@ -1,0 +1,12 @@
+# LinearDualLoRADINOv3: class head + morphology head, LoRA Q/V rank 8.
+model:
+  name: "LinearDualLoRADINOv3"
+  encoder_name: "facebook/dinov3-vitb16-pretrain-lvd1689m"
+  input_size: [512, 512]
+  use_lora: true
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "v_proj"]
+  lora_bias: "none"
+  morphology_names: ["plating", "branching", "massive", "encrusting", "tabular"]

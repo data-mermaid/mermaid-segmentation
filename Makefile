@@ -1,4 +1,5 @@
 .PHONY: sync logs lcc-log check kernel \
+	train-local train-local-taxonomical train-local-dual compare-local compare-local-coralnet \
 	sm-sync sm-check sm-dry-run sm-launch sm-smoke sm-require-env
 
 # Re-sync the uv environment and Jupyter kernel from the current branch.
@@ -30,6 +31,44 @@ from nbs.nb_setup import check_env, check_aws_session, check_mlflow_version; \
 check_env(); \
 check_aws_session(); \
 check_mlflow_version()"
+
+# --- Local loss smoke test (see docs/local-loss-testing.md) ---
+# Fully OFFLINE: builds the real model (cached DINOv3 backbone) + the real taxonomical/dual loss +
+# hierarchy eval over synthetic batches, and runs a few train steps. No S3, no creds, no network —
+# exercises exactly the wiring unit tests miss (model-output -> loss shapes, buffer/device
+# placement, the new loss components + hierarchy metrics). HF_HUB_OFFLINE avoids any hub lookup.
+LOCAL_MODEL_CONFIG    ?= configs/model_config_dinov3_lora_qv_r8.yaml
+LOCAL_TRAINING_CONFIG ?= configs/training_config_dinov3_lora_taxonomical.yaml
+
+# Generic: override LOCAL_MODEL_CONFIG / LOCAL_TRAINING_CONFIG to smoke any model + loss combo.
+train-local:
+	HF_HUB_OFFLINE=1 uv run python scripts/diagnostics/local_loss_smoke.py \
+		--model-config $(LOCAL_MODEL_CONFIG) \
+		--training-config $(LOCAL_TRAINING_CONFIG)
+
+# TaxonomicalLoss (CE + tree-distance + level CE) on the LoRA q/v model.
+train-local-taxonomical: LOCAL_MODEL_CONFIG    = configs/model_config_dinov3_lora_qv_r8.yaml
+train-local-taxonomical: LOCAL_TRAINING_CONFIG = configs/training_config_dinov3_lora_taxonomical.yaml
+train-local-taxonomical: train-local
+
+# DualTaxonomicalLoss (adds masked morphology BCE) on the dual head.
+train-local-dual: LOCAL_MODEL_CONFIG    = configs/model_config_dinov3_dual_lora_qv_r8.yaml
+train-local-dual: LOCAL_TRAINING_CONFIG = configs/training_config_dinov3_dual_taxonomical.yaml
+train-local-dual: train-local
+
+# Controlled offline comparison: CE baseline vs Taxonomical vs Dual on a structured synthetic task
+# where the hierarchy is real (siblings look alike). A mechanism demo, NOT a coral-quality verdict.
+COMPARE_ARGS ?= --steps 80 --noise 1.2
+compare-local:
+	HF_HUB_OFFLINE=1 uv run python scripts/diagnostics/local_loss_compare.py $(COMPARE_ARGS)
+
+# Same CE-vs-Taxonomical-vs-Dual comparison, but on the REAL downloaded CoralNet subset
+# (data/coralnet_local_subset) instead of synthetic patches: real reef photos, real benthic
+# hierarchy, real coral-genus confusion. Loss weights default to the taxonomical training config.
+# Needs the subset on disk; fetches + caches the public benthic hierarchy on first run (no creds).
+COMPARE_CORALNET_ARGS ?= --n-train 20 --n-val 10 --steps 60
+compare-local-coralnet:
+	HF_HUB_OFFLINE=1 uv run python scripts/diagnostics/local_loss_compare_coralnet.py $(COMPARE_CORALNET_ARGS)
 
 # --- SageMaker TrainingJob (see wiki/SageMaker-Jobs.md) ---
 # Account ARNs in .env (gitignored), loaded by direnv. Login: aws sso login --profile wcs-sso

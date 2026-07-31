@@ -23,8 +23,10 @@ from mermaidseg.dataset_reconciliation.concepts import (
 from mermaidseg.dataset_reconciliation.label_mapping import (
     source_labels_to_target_labels,
 )
+from mermaidseg.dataset_reconciliation.morphology import source_labels_to_morphology
 from mermaidseg.io import ConfigDict
 from mermaidseg.model import checkpoint as checkpoint_io
+from mermaidseg.model.loss import DualTaxonomicalLoss
 from mermaidseg.model.training_mode import StandardMode, StandardTrainingConfig, TrainingMode
 
 logger = logging.getLogger(__name__)
@@ -122,11 +124,21 @@ class MetaModel:
         concept_matrix: pd.DataFrame | None = None,
         conceptid2labelid: dict[int, int] | None = None,
         concept_value2id: dict[str, dict[str, int]] | None = None,
+        id2label: dict[int, str] | None = None,
+        benthic_hierarchy: dict[str, str | None] | None = None,
+        source_to_morphology_lookup: torch.Tensor | None = None,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
         self.num_concepts = num_concepts
         self.device = device
+        self.id2label = id2label
+        self.benthic_hierarchy = benthic_hierarchy
+        self.source_to_morphology_lookup = (
+            source_to_morphology_lookup.to(device).float()
+            if source_to_morphology_lookup is not None
+            else None
+        )
 
         if model_kwargs is None:
             model_kwargs = ConfigDict({})
@@ -230,7 +242,22 @@ class MetaModel:
                 "concept-bottleneck",
             ):
                 loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
+            loss_name = getattr(loss_cls, "__name__", "")
+            if loss_name in ("TaxonomicalLoss", "DualTaxonomicalLoss"):
+                if self.id2label is None:
+                    raise ValueError(
+                        f"{loss_name} requires id2label; pass it to MetaModel from the registry"
+                    )
+                loss_kwargs.setdefault("id2label", self.id2label)
+                if self.benthic_hierarchy is not None:
+                    loss_kwargs.setdefault("hierarchy", self.benthic_hierarchy)
             self.loss = loss_cls(**loss_kwargs)
+            # Move the loss onto the training device so any registered buffers (e.g.
+            # TaxonomicalLoss's distance matrix / level remaps) are co-located with the
+            # on-device targets they index — otherwise indexing a CPU buffer with a CUDA
+            # target raises on the first GPU batch.
+            if isinstance(self.loss, torch.nn.Module):
+                self.loss = self.loss.to(device)
 
         optimizer_cls = getattr(torch.optim, training_kwargs.optimizer.pop("type", None))
         optimizer_kwargs = dict(training_kwargs.optimizer)
@@ -388,6 +415,7 @@ class MetaModel:
         target_labels: torch.Tensor,
         target_concepts: torch.Tensor | None = None,
         target_dim: tuple[int, int] | None = None,
+        source_labels: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, float]]:
         """Perform batch prediction and compute the loss.
 
@@ -398,6 +426,8 @@ class MetaModel:
                 and ``"concept-bottleneck"`` modes; unused otherwise.
             target_dim: Target spatial dimensions for output resizing.
                 Defaults to the input spatial dimensions.
+            source_labels: Global source-label map; required for dual-head morphology
+                supervision when ``source_to_morphology_lookup`` is set.
         Returns:
             A 4-tuple of ``(loss, outputs, concept_outputs, loss_components)``.
         """
@@ -429,6 +459,22 @@ class MetaModel:
             loss, loss_components = self.loss(concept_outputs, target_concepts, target_labels)
             concept_outputs = torch.sigmoid(concept_outputs)
             outputs = self._concepts_to_label_map(concept_outputs)
+
+        elif (
+            isinstance(self.loss, DualTaxonomicalLoss)
+            and getattr(segmentation_outputs, "morphology_logits", None) is not None
+        ):
+            if source_labels is None or self.source_to_morphology_lookup is None:
+                raise ValueError(
+                    "DualTaxonomicalLoss requires source_labels and source_to_morphology_lookup"
+                )
+            outputs = segmentation_outputs.logits.float()
+            morph_logits = segmentation_outputs.morphology_logits.float()
+            morph_targets = source_labels_to_morphology(
+                source_labels, self.source_to_morphology_lookup
+            )
+            loss, loss_components = self.loss(outputs, target_labels, morph_logits, morph_targets)
+            concept_outputs = None
 
         else:
             loss, outputs, concept_outputs, loss_components = self._mode.predict_and_loss(
@@ -525,7 +571,10 @@ class MetaModel:
 
             forward_start = _now()
             loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
-                images, target_labels, target_concepts
+                images,
+                target_labels,
+                target_concepts,
+                source_labels=source_labels,
             )
             forward_time_total += _now() - forward_start
 

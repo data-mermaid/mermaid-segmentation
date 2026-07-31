@@ -217,6 +217,9 @@ class SourceLabelRegistry:
                 benthic_hierarchy = normalize_benthic_hierarchy(benthic_hierarchy)
             if subset is None:
                 raise ValueError("label_roll_up=True requires target_label_subset to be set")
+        elif benthic_hierarchy is not None:
+            benthic_hierarchy = normalize_benthic_hierarchy(benthic_hierarchy)
+        self.benthic_hierarchy = benthic_hierarchy
 
         # Dense lookup `global_source_id -> target_class_id`; index 0 stays
         # background, and any source name without a target (or filtered out by

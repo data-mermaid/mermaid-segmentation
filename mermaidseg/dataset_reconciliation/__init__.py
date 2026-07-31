@@ -20,6 +20,12 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     fetch_mermaid_target_labels,
     source_labels_to_target_labels,
 )
+from mermaidseg.dataset_reconciliation.morphology import (
+    DEFAULT_MORPHOLOGY_CHANNELS,
+    build_source_to_morphology_from_concept_csv,
+    growth_form_to_morphology_vector,
+    source_labels_to_morphology,
+)
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
 from mermaidseg.dataset_reconciliation.split_wiring import (
     SourceVocabulary,
@@ -35,11 +41,13 @@ __all__ = [
     "CombinedCoralDataset",
     "ConceptSchema",
     "CoralNetLabelMapping",
+    "DEFAULT_MORPHOLOGY_CHANNELS",
     "SourceLabelRegistry",
     "SourceVocabulary",
     "apply_vocabularies",
     "attach_registry",
     "build_source_to_concepts",
+    "build_source_to_morphology_from_concept_csv",
     "build_source_vocabularies",
     "coralscapes_to_mermaid",
     "coralscapes_v2_to_mermaid",
@@ -47,12 +55,14 @@ __all__ = [
     "fetch_coralnet_to_mermaid",
     "fetch_mermaid_target_labels",
     "group_splits",
+    "growth_form_to_morphology_vector",
     "initialize_benthic_concepts",
     "initialize_benthic_hierarchy",
     "postprocess_predicted_concepts",
     "prepare_splits_for_registry",
     "select_registry_representatives",
     "source_labels_to_concepts",
+    "source_labels_to_morphology",
     "source_labels_to_target_labels",
 ]
 

@@ -43,10 +43,16 @@ from mermaidseg.dataset_reconciliation import (
     attach_registry,
     prepare_splits_for_registry,
 )
+from mermaidseg.dataset_reconciliation.concepts import initialize_benthic_hierarchy
+from mermaidseg.dataset_reconciliation.morphology import (
+    DEFAULT_MORPHOLOGY_CHANNELS,
+    build_source_to_morphology_from_concept_csv,
+)
 from mermaidseg.datasets import DATASET_REGISTRY, BaseCoralDataset, worker_init_fn
 from mermaidseg.io import ConfigDict as RunConfigDict
 from mermaidseg.io import setup_config, update_config_with_args
 from mermaidseg.model.eval import Evaluator
+from mermaidseg.model.hierarchy_loss import build_distance_matrix, build_level_remaps
 from mermaidseg.model.meta import MetaModel
 from mermaidseg.model.metric_policy import canonical_metric_name
 from mermaidseg.sagemaker.launcher_config import parse_run_config
@@ -391,18 +397,32 @@ class Experiment:
         """Construct the :class:`MetaModel` from the registry's derived lookups."""
         cfg = self.config
         registry = self.registry
+        id2label = {0: "ignore", **registry.target_id2label}
+        benthic_hierarchy = getattr(registry, "benthic_hierarchy", None)
+        model_kwargs = cfg.model.copy()
+        source_to_morphology = None
+        if model_kwargs.get("name") in ("LinearDualDINOv3", "LinearDualLoRADINOv3"):
+            morph_names = list(model_kwargs.get("morphology_names") or DEFAULT_MORPHOLOGY_CHANNELS)
+            source_to_morphology, channel_names = build_source_to_morphology_from_concept_csv(
+                registry.global_id2source, channels=morph_names
+            )
+            model_kwargs.setdefault("morphology_names", channel_names)
+            model_kwargs.setdefault("num_morphology", len(channel_names))
         return MetaModel(
             run_name=cfg.run_name,
             num_classes=registry.num_target_classes,
             num_concepts=registry.num_concepts or None,
             device=self.device,
-            model_kwargs=cfg.model.copy(),
+            model_kwargs=model_kwargs,
             training_kwargs=cfg.training.copy(),
             source_to_target_lookup=registry.source_to_target,
             source_to_concepts_lookup=registry.source_to_concepts,
             concept_matrix=registry.concept_matrix,
             conceptid2labelid=registry.conceptid2labelid(),
             concept_value2id=registry.concept_value2id,
+            id2label=id2label,
+            benthic_hierarchy=benthic_hierarchy,
+            source_to_morphology_lookup=source_to_morphology,
         )
 
     def evaluator(self) -> Evaluator:
@@ -415,12 +435,35 @@ class Experiment:
             # On for standard segmentation; off for concept/concept-bottleneck, where taxonomic
             # ranks carry many values and would flood MLflow's metric list by default.
             per_class_metrics = cfg.training.training_mode == "standard"
+        loss_cfg = cfg.training.get("loss") or {}
+        loss_type = loss_cfg.get("type")
+        hierarchy_metrics = loss_type in ("TaxonomicalLoss", "DualTaxonomicalLoss")
+        distance_matrix = None
+        level_remaps = None
+        if hierarchy_metrics:
+            id2label = {0: "ignore", **registry.target_id2label}
+            hierarchy = (
+                getattr(registry, "benthic_hierarchy", None) or initialize_benthic_hierarchy()
+            )
+            distance_matrix = build_distance_matrix(
+                id2label, hierarchy, ignore_index=0, num_classes=registry.num_target_classes
+            )
+            level_remaps = build_level_remaps(
+                id2label,
+                hierarchy,
+                loss_cfg.get("level_names"),
+                ignore_index=0,
+                num_classes=registry.num_target_classes,
+            )
         return Evaluator(
             num_classes=registry.num_target_classes,
             device=self.device,
             calculate_concept_metrics=cfg.training.training_mode != "standard",
             concept_value2id=registry.concept_value2id,
             per_class_metrics=per_class_metrics,
+            hierarchy_metrics=hierarchy_metrics,
+            distance_matrix=distance_matrix,
+            level_remaps=level_remaps,
         )
 
     def dry_run(self) -> dict[str, Any]:

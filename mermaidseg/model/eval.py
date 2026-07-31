@@ -50,12 +50,25 @@ class Evaluator:
         ignore_index: int = 0,
         include_classification: bool = True,
         per_class_metrics: bool = False,
+        hierarchy_metrics: bool = False,
+        distance_matrix: torch.Tensor | None = None,
+        level_remaps: dict[str, torch.Tensor] | None = None,
     ):
         self.epoch = 0
         self.device = device
         self.num_classes = num_classes
         self.concept_value2id = concept_value2id
+        self.ignore_index = ignore_index
         self._binary_accuracy_metrics: dict[str, Metric] = {}
+        self.hierarchy_metrics = bool(hierarchy_metrics) and distance_matrix is not None
+        self._distance_matrix = distance_matrix.to(device) if distance_matrix is not None else None
+        self._level_remaps = (
+            {name: remap.to(device) for name, remap in level_remaps.items()} if level_remaps else {}
+        )
+        self._tree_dist_sum = 0.0
+        self._tree_dist_count = 0
+        self._ancestor_correct: dict[str, int] = dict.fromkeys(self._level_remaps, 0)
+        self._ancestor_total: dict[str, int] = dict.fromkeys(self._level_remaps, 0)
 
         if metric_dict:
             self.metric_dict = metric_dict
@@ -170,13 +183,52 @@ class Evaluator:
         the metric-update lifecycle, shared by the train/val loops and
         :meth:`evaluate_model`.
         """
-        if not self.metric_dict:
-            return
         if preds.ndim > 3:
             preds = preds.argmax(dim=1)
         preds = preds.detach()
-        for metric in self.metric_dict.values():
-            metric.update(preds, targets)
+        if self.metric_dict:
+            for metric in self.metric_dict.values():
+                metric.update(preds, targets)
+        if self.hierarchy_metrics:
+            self._accumulate_hierarchy(preds, targets)
+
+    def _accumulate_hierarchy(self, preds: torch.Tensor, targets: torch.Tensor) -> None:
+        assert self._distance_matrix is not None
+        valid = targets != self.ignore_index
+        if not valid.any():
+            return
+        pred_ids = preds[valid].long().clamp(0, self._distance_matrix.size(0) - 1)
+        tgt_ids = targets[valid].long().clamp(0, self._distance_matrix.size(0) - 1)
+        dists = self._distance_matrix[tgt_ids, pred_ids]
+        self._tree_dist_sum += float(dists.sum().item())
+        self._tree_dist_count += int(dists.numel())
+
+        for level_name, remap in self._level_remaps.items():
+            remapped_tgt = remap[tgt_ids]
+            remapped_pred = remap[pred_ids]
+            level_valid = remapped_tgt != self.ignore_index
+            if not level_valid.any():
+                continue
+            correct = (remapped_pred[level_valid] == remapped_tgt[level_valid]).sum()
+            self._ancestor_correct[level_name] += int(correct.item())
+            self._ancestor_total[level_name] += int(level_valid.sum().item())
+
+    def _compute_hierarchy_results(self) -> dict[str, float]:
+        if not self.hierarchy_metrics:
+            return {}
+        results: dict[str, float] = {}
+        if self._tree_dist_count > 0:
+            results["mean_tree_distance"] = self._tree_dist_sum / self._tree_dist_count
+        else:
+            results["mean_tree_distance"] = 0.0
+        for level_name, total in self._ancestor_total.items():
+            key = f"ancestor_accuracy/{level_name}"
+            results[key] = self._ancestor_correct[level_name] / total if total > 0 else 0.0
+        self._tree_dist_sum = 0.0
+        self._tree_dist_count = 0
+        self._ancestor_correct = dict.fromkeys(self._level_remaps, 0)
+        self._ancestor_total = dict.fromkeys(self._level_remaps, 0)
+        return results
 
     def compute_and_reset(
         self, include_concepts: bool = False
@@ -194,6 +246,7 @@ class Evaluator:
             self.metric_dict[metric_name].reset()
         if include_concepts:
             metric_results.update(self._compute_concept_metric_results())
+        metric_results.update(self._compute_hierarchy_results())
         return metric_results
 
     @torch.no_grad()
