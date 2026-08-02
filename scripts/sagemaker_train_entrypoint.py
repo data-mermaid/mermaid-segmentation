@@ -34,7 +34,14 @@ def _configure_logging():
 
 def _find_run_yaml() -> Path:
     yamls = sorted(CONFIG_DIR.rglob("*.yaml")) + sorted(CONFIG_DIR.rglob("*.yml"))
-    candidates = [p for p in yamls if "job:" in p.read_text()[:200]]
+    candidates = []
+    for p in yamls:
+        try:
+            parsed = yaml.safe_load(p.read_text())
+        except yaml.YAMLError:
+            continue
+        if isinstance(parsed, dict) and "job" in parsed:
+            candidates.append(p)
     if not candidates:
         raise SystemExit(f"No run YAML with a job: block under {CONFIG_DIR}")
     if len(candidates) > 1:
