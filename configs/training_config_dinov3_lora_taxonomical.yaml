@@ -25,8 +25,11 @@ training:
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
     # Below issue-12 frozen batch 32: LoRA keeps encoder grads on (no torch.no_grad path),
-    # so VRAM is higher. Start at 16 on ml.g5.2xlarge; drop to 8 if OOM.
-    batch_size: 16
+    # so VRAM is higher. batch_size=16 OOM'd on ml.g5.2xlarge 2026-08-02 (24GB, CE baseline
+    # fits fine at 16 -- the extra cost is TaxonomicalLoss's per-level terms: 6 discovered
+    # levels x ~1.2 GiB/level backward buffers at this class_subset/resolution, on top of
+    # the tree-distance term). Dropped to 8 per this file's own documented fallback plan.
+    batch_size: 8
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',

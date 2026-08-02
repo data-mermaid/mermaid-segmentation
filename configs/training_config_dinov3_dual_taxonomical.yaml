@@ -25,7 +25,10 @@ training:
         warmup_start_factor: 0.01
     iterations_per_train_epoch: 1000
     iterations_per_val_epoch: 200
-    batch_size: 16
+    # DualTaxonomicalLoss adds the same per-level overhead as TaxonomicalLoss plus a small
+    # morphology BCE term. batch_size=16 OOM'd on ml.g5.2xlarge 2026-08-02 for the same
+    # reason as the taxonomical arm (see training_config_dinov3_lora_taxonomical.yaml).
+    batch_size: 8
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
