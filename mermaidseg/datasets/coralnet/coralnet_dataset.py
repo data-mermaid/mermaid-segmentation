@@ -171,5 +171,7 @@ class CoralNetDataset(BaseCoralDataset):
         image_s3_key: str | None = None,
         **row_kwargs: Any,
     ) -> NDArray[Any]:
+        if not isinstance(image_s3_key, str) or not image_s3_key:
+            image_s3_key = None
         key = image_s3_key or f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
         return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
