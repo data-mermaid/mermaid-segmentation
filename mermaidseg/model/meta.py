@@ -164,6 +164,7 @@ class MetaModel:
             logger.warning("CUDA bf16 autocast is not supported on this GPU; disabling AMP.")
             self.use_amp = False
         self.scaler = torch.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == torch.float16)
+        self.grad_accum_steps = max(1, int(training_kwargs.get("grad_accum_steps", 1)))
         self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
         self._train_loader_iter = None
         self._train_loader = None
@@ -253,17 +254,26 @@ class MetaModel:
         self.warmup_scheduler.step()
         self._warmup_iters_completed += 1
 
-    def _optimizer_step(self, loss: torch.Tensor) -> bool:
+    def _optimizer_step(self, loss: torch.Tensor, apply_step: bool = True) -> bool:
         """Run backward + AMP optimizer step with optional gradient clipping.
+
+        Gradients are always accumulated via ``backward()``. The optimizer step,
+        gradient clipping, and ``zero_grad`` are only applied when ``apply_step`` is
+        True (the accumulation-window boundary), enabling gradient accumulation over
+        ``self.grad_accum_steps`` micro-batches.
 
         Returns True when the optimizer step was applied (not skipped by the scaler).
         """
         if not torch.isfinite(loss):
             logger.warning("train_epoch: skipping non-finite loss (value=%s)", loss.item())
-            self.optimizer.zero_grad(set_to_none=True)
+            if apply_step:
+                self.optimizer.zero_grad(set_to_none=True)
             return False
 
-        self.scaler.scale(loss).backward()
+        self.scaler.scale(loss / self.grad_accum_steps).backward()
+        if not apply_step:
+            return False
+
         scale_before = self.scaler.get_scale()
         if self.max_grad_norm is not None and self.max_grad_norm > 0:
             self.scaler.unscale_(self.optimizer)
@@ -444,7 +454,7 @@ class MetaModel:
             self._train_loader_iter = iter(train_loader)
             self._train_loader = train_loader
 
-        for _ in tqdm(range(iterations_per_train_epoch)):
+        for micro_step in tqdm(range(iterations_per_train_epoch)):
             assert self._train_loader_iter is not None
             try:
                 data = next(self._train_loader_iter)
@@ -488,7 +498,11 @@ class MetaModel:
                 torch.cuda.synchronize()
             backward_start = time.perf_counter()
 
-            step_applied = self._optimizer_step(loss)
+            apply_step = (
+                (micro_step + 1) % self.grad_accum_steps == 0
+                or micro_step == iterations_per_train_epoch - 1
+            )
+            step_applied = self._optimizer_step(loss, apply_step=apply_step)
             if step_applied:
                 self._step_warmup_scheduler()
 

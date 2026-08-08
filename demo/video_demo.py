@@ -1,4 +1,4 @@
-"""Offline four-panel CBM video demo with scheduled concept highlighting."""
+"""Offline CBM video demo with scheduled concept highlighting (inferno panel)."""
 
 from __future__ import annotations
 
@@ -28,23 +28,21 @@ from concept_expr import (  # noqa: E402
     is_classes_sentinel,
 )
 from inference import (  # noqa: E402
+    DEFAULT_TILE_OVERLAP,
     build_model,
     build_transforms,
     load_artifacts,
-    predict,
-    preprocess,
+    parse_processing_resolution,
+    predict_tiled,
+    tile_starts,
 )
-from rendering import make_color_palette  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = _DEMO_DIR.parent
 DEFAULT_MODEL_CONFIG = _REPO_ROOT / "configs" / "model_config_cbm_dpt_lora_vitl.yaml"
 
-GRAY_RGB = np.array([100.0, 100.0, 100.0], dtype=np.float32)
-PINK_PURPLE_RGB = np.array([200.0, 80.0, 200.0], dtype=np.float32)
-CONCEPT_THRESHOLD = 0.5
-THRESHOLD_OVERLAY_OPACITY = 0.5
+INFERNO_MASK_THRESHOLD = 0.4
 
 
 @dataclass(frozen=True)
@@ -91,53 +89,31 @@ def _input_size(model_cfg: dict) -> tuple[int, int]:
     return int(size[0]), int(size[1])
 
 
-def _viridis_rgb(values: NDArray[np.float32]) -> NDArray[np.uint8]:
-    cmap = plt.colormaps["viridis"]
+def _colormap_rgb(values: NDArray[np.float32], cmap_name: str) -> NDArray[np.float32]:
+    cmap = plt.colormaps[cmap_name]
     rgba = cmap(np.clip(values, 0.0, 1.0))
-    return (rgba[..., :3] * 255.0).astype(np.uint8)
+    return (rgba[..., :3] * 255.0).astype(np.float32)
 
 
-def blend_rgb_with_overlay(
-    rgb: NDArray[np.uint8],
-    overlay_rgb: NDArray[np.uint8],
-    *,
-    rgb_weight: float,
-    heat_weight: float,
-) -> NDArray[np.uint8]:
-    blended = (
-        rgb.astype(np.float32) * rgb_weight + overlay_rgb.astype(np.float32) * heat_weight
-    )
-    return np.clip(blended, 0, 255).astype(np.uint8)
-
-
-def render_heatmap_panel(
+def render_inferno_mask_panel(
     display_rgb: NDArray[np.uint8],
     values: NDArray[np.float32],
     *,
-    rgb_weight: float,
-    heat_weight: float,
+    threshold: float = INFERNO_MASK_THRESHOLD,
 ) -> NDArray[np.uint8]:
-    heat_rgb = _viridis_rgb(values)
-    return blend_rgb_with_overlay(display_rgb, heat_rgb, rgb_weight=rgb_weight, heat_weight=heat_weight)
+    """Highlight activated regions with inferno; below threshold stays RGB.
 
-
-def render_classes_panel(
-    display_rgb: NDArray[np.uint8],
-    class_probs: NDArray[np.float32],
-    class_palette: NDArray[np.uint8],
-    *,
-    rgb_weight: float,
-    heat_weight: float,
-) -> NDArray[np.uint8]:
-    argmax = class_probs.argmax(axis=0)
-    class_colors = class_palette[argmax]
-    alpha = np.take_along_axis(class_probs, argmax[None, ...], axis=0)[0]
-    alpha = np.clip(alpha, 0.0, 1.0)
-    overlay = (
-        display_rgb.astype(np.float32) * (1.0 - alpha[..., None])
-        + class_colors.astype(np.float32) * alpha[..., None]
-    ).astype(np.uint8)
-    return blend_rgb_with_overlay(display_rgb, overlay, rgb_weight=rgb_weight, heat_weight=heat_weight)
+    For pixels with composite activation v > threshold:
+        inner = v * inferno(v) + (1 - v) * RGB
+    Otherwise the pixel stays RGB.
+    """
+    v = np.clip(values, 0.0, 1.0)
+    mask = (v > threshold).astype(np.float32)
+    rgb_f = display_rgb.astype(np.float32)
+    inferno = _colormap_rgb(v, "inferno")
+    inner = v[..., None] * inferno + (1.0 - v[..., None]) * rgb_f
+    blended = (1.0 - mask[..., None]) * rgb_f + mask[..., None] * inner
+    return np.clip(blended, 0, 255).astype(np.uint8)
 
 
 def composite_values(
@@ -152,108 +128,15 @@ def composite_values(
     return evaluate(expression, concept_probs, resolver)
 
 
-def render_rgb_panel(display_rgb: NDArray[np.uint8]) -> NDArray[np.uint8]:
-    return display_rgb
-
-
-def render_viridis_panel(
-    display_rgb: NDArray[np.uint8],
-    values: NDArray[np.float32],
-    *,
-    rgb_weight: float,
-    heat_weight: float,
-) -> NDArray[np.uint8]:
-    return render_heatmap_panel(
-        display_rgb,
-        values,
-        rgb_weight=rgb_weight,
-        heat_weight=heat_weight,
-    )
-
-
-def render_classes_viridis_panel(
-    display_rgb: NDArray[np.uint8],
-    class_probs: NDArray[np.float32],
-    class_palette: NDArray[np.uint8],
-    *,
-    rgb_weight: float,
-    heat_weight: float,
-) -> NDArray[np.uint8]:
-    return render_classes_panel(
-        display_rgb,
-        class_probs,
-        class_palette,
-        rgb_weight=rgb_weight,
-        heat_weight=heat_weight,
-    )
-
-
-def render_gray_interpolation_panel(
-    display_rgb: NDArray[np.uint8],
-    values: NDArray[np.float32],
-    *,
-    rgb_weight: float = 0.15,
-    blend_weight: float = 0.85,
-) -> NDArray[np.uint8]:
-    """Blend RGB with a gray<->RGB mix; low concept activation is grayed out."""
-    v = np.clip(values, 0.0, 1.0)
-    rgb_f = display_rgb.astype(np.float32)
-    # Selected pixels (high v) keep RGB; unselected pixels (low v) move toward gray
-    inner = GRAY_RGB * (1.0 - v[..., None]) + rgb_f * v[..., None]
-    blended = rgb_weight * rgb_f + blend_weight * inner
-    return np.clip(blended, 0, 255).astype(np.uint8)
-
-
-def render_threshold_overlay_panel(
-    display_rgb: NDArray[np.uint8],
-    values: NDArray[np.float32],
-    *,
-    threshold: float = CONCEPT_THRESHOLD,
-    overlay_opacity: float = THRESHOLD_OVERLAY_OPACITY,
-) -> NDArray[np.uint8]:
-    """Keep RGB, overlay pink/purple where concept activation exceeds threshold."""
-    v = np.clip(values, 0.0, 1.0)
-    mask = (v > threshold).astype(np.float32)
-    alpha = overlay_opacity * mask
-    rgb_f = display_rgb.astype(np.float32)
-    blended = rgb_f * (1.0 - alpha[..., None]) + PINK_PURPLE_RGB * alpha[..., None]
-    return np.clip(blended, 0, 255).astype(np.uint8)
-
-
-def render_four_panels(
-    original_rgb: NDArray[np.uint8],
+def render_highlight_panel(
     display_rgb: NDArray[np.uint8],
     expression: str,
     concept_probs: NDArray[np.float32],
     class_probs: NDArray[np.float32],
     resolver: ConceptResolver,
-    class_palette: NDArray[np.uint8],
-    *,
-    rgb_weight: float,
-    heat_weight: float,
-) -> tuple[NDArray[np.uint8], NDArray[np.uint8], NDArray[np.uint8], NDArray[np.uint8]]:
+) -> NDArray[np.uint8]:
     values = composite_values(expression, concept_probs, class_probs, resolver)
-    panel_rgb = render_rgb_panel(original_rgb)
-
-    if is_classes_sentinel(expression):
-        panel_viridis = render_classes_viridis_panel(
-            display_rgb,
-            class_probs,
-            class_palette,
-            rgb_weight=rgb_weight,
-            heat_weight=heat_weight,
-        )
-    else:
-        panel_viridis = render_viridis_panel(
-            display_rgb,
-            values,
-            rgb_weight=rgb_weight,
-            heat_weight=heat_weight,
-        )
-
-    panel_gray = render_gray_interpolation_panel(display_rgb, values)
-    panel_overlay = render_threshold_overlay_panel(display_rgb, values)
-    return panel_rgb, panel_viridis, panel_gray, panel_overlay
+    return render_inferno_mask_panel(display_rgb, values)
 
 
 def _resize_rgb(image_rgb: NDArray[np.uint8], size: tuple[int, int]) -> NDArray[np.uint8]:
@@ -335,8 +218,8 @@ def render_video(
     concept_id2name: Path | None = None,
     device: torch.device,
     output_fps: float | None = None,
-    rgb_weight: float = 0.3,
-    heat_weight: float = 0.7,
+    processing_resolution: tuple[int, int] | None = None,
+    tile_overlap: float = DEFAULT_TILE_OVERLAP,
 ) -> None:
     artifacts = load_artifacts(
         checkpoint=checkpoint,
@@ -345,16 +228,33 @@ def render_video(
         concept_id2name=concept_id2name,
     )
     model = build_model(artifacts, device)
-    model_transform, display_transform = build_transforms(_input_size(artifacts.model_cfg))
+    input_size = _input_size(artifacts.model_cfg)
+    model_transform, display_transform = build_transforms(input_size)
+
+    if processing_resolution is not None:
+        proc_h, proc_w = processing_resolution
+        stride_h = max(1, int(input_size[0] * (1.0 - tile_overlap)))
+        stride_w = max(1, int(input_size[1] * (1.0 - tile_overlap)))
+        n_tiles = len(tile_starts(proc_h, input_size[0], tile_overlap)) * len(
+            tile_starts(proc_w, input_size[1], tile_overlap)
+        )
+        logger.info(
+            "Tiled inference at %dx%d (tile %dx%d, stride %dx%d, overlap %.0f%%, ~%d tiles/frame)",
+            proc_h,
+            proc_w,
+            input_size[0],
+            input_size[1],
+            stride_h,
+            stride_w,
+            tile_overlap * 100,
+            n_tiles,
+        )
 
     concept_names = concept_names_from_id2name(artifacts.concept_id2name)
     num_concepts = model.concept_classifier.in_channels
     if len(concept_names) < num_concepts:
         concept_names.extend(f"concept_{i}" for i in range(len(concept_names), num_concepts))
     resolver = ConceptResolver(concept_names)
-
-    num_classes = max(artifacts.id2label.keys()) + 1
-    class_palette = make_color_palette(num_classes)
 
     cap = cv2.VideoCapture(str(input_video))
     if not cap.isOpened():
@@ -377,7 +277,7 @@ def render_video(
         str(output_video),
         fourcc,
         effective_fps,
-        (source_width * 2, source_height * 2),
+        (source_width, source_height),
     )
     if not writer.isOpened():
         raise ValueError(f"Could not open output video writer: {output_video}")
@@ -399,28 +299,26 @@ def render_video(
             active = active_schedule_row(schedule, time_sec)
 
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            image_tensor, display_rgb = preprocess(frame_rgb, model_transform, display_transform)
-            class_probs, concept_probs, _ = predict(model, image_tensor.to(device))
+            class_probs, concept_probs, _, display_rgb = predict_tiled(
+                model,
+                frame_rgb,
+                model_transform,
+                display_transform,
+                input_size,
+                device,
+                processing_resolution=processing_resolution,
+                min_overlap=tile_overlap,
+            )
 
             panel_size = (source_width, source_height)
-            original_panel = _resize_rgb(frame_rgb, panel_size)
-            panel_rgb, panel_viridis, panel_gray, panel_overlay = render_four_panels(
-                original_panel,
+            highlight = render_highlight_panel(
                 display_rgb,
                 active.expression,
                 concept_probs,
                 class_probs,
                 resolver,
-                class_palette,
-                rgb_weight=rgb_weight,
-                heat_weight=heat_weight,
             )
-            panel_viridis = _resize_rgb(panel_viridis, panel_size)
-            panel_gray = _resize_rgb(panel_gray, panel_size)
-            panel_overlay = _resize_rgb(panel_overlay, panel_size)
-            top_row = np.concatenate([panel_rgb, panel_viridis], axis=1)
-            bottom_row = np.concatenate([panel_gray, panel_overlay], axis=1)
-            combined_rgb = np.concatenate([top_row, bottom_row], axis=0)
+            combined_rgb = _resize_rgb(highlight, panel_size)
             combined_bgr = cv2.cvtColor(combined_rgb, cv2.COLOR_RGB2BGR)
             combined_bgr = draw_text_banner(
                 combined_bgr,
@@ -474,12 +372,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output frame rate (subsamples source video when lower than source fps)",
     )
-    p.add_argument("--rgb-weight", type=float, default=0.3, help="Weight for original RGB in blend")
     p.add_argument(
-        "--heat-weight",
+        "--processing-resolution",
+        default=None,
+        help="Optional HEIGHTxWIDTH to resize frames before tiled inference (e.g. 1080x1920)",
+    )
+    p.add_argument(
+        "--tile-overlap",
         type=float,
-        default=0.7,
-        help="Weight for viridis/classes overlay in blend",
+        default=DEFAULT_TILE_OVERLAP,
+        help="Minimum tile overlap fraction (default 0.2 => 20%% overlap, stride = 0.8 * tile size)",
     )
     return p
 
@@ -491,6 +393,11 @@ def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     schedule = load_schedule(args.concepts_csv)
+    processing_resolution = (
+        parse_processing_resolution(args.processing_resolution)
+        if args.processing_resolution
+        else None
+    )
     logger.info("Using device %s", device)
     logger.info("Loaded %d schedule rows from %s", len(schedule), args.concepts_csv)
     render_video(
@@ -503,8 +410,8 @@ def main(argv: list[str] | None = None) -> None:
         concept_id2name=args.concept_id2name,
         device=device,
         output_fps=args.fps,
-        rgb_weight=args.rgb_weight,
-        heat_weight=args.heat_weight,
+        processing_resolution=processing_resolution,
+        tile_overlap=args.tile_overlap,
     )
 
 

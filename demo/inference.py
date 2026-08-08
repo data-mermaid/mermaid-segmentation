@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import yaml
 from numpy.typing import NDArray
+from PIL import Image
 
 import mermaidseg.model.models as mm_models
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS, parse_concept_rank
@@ -36,6 +37,7 @@ SUPPORTED_CBM_MODELS: frozenset[str] = frozenset(
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 DEFAULT_INPUT_SIZE: tuple[int, int] = (512, 512)
+DEFAULT_TILE_OVERLAP = 0.2
 
 
 @dataclass
@@ -173,6 +175,116 @@ def predict_concepts(model: CBMModel, image_tensor: torch.Tensor) -> torch.Tenso
 @torch.no_grad()
 def classes_from_concepts(model: CBMModel, concept_activations: torch.Tensor) -> torch.Tensor:
     return model.concept_classifier(concept_activations)
+
+
+def tile_starts(length: int, tile_size: int, min_overlap: float = DEFAULT_TILE_OVERLAP) -> list[int]:
+    """Return tile origin positions along one axis with at least ``min_overlap`` overlap."""
+    if length <= tile_size:
+        return [0]
+    stride = max(1, int(tile_size * (1.0 - min_overlap)))
+    last = length - tile_size
+    starts = list(range(0, last + 1, stride))
+    if starts[-1] != last:
+        starts.append(last)
+    return starts
+
+
+def parse_processing_resolution(value: str) -> tuple[int, int]:
+    """Parse ``HxW`` processing resolution (height, width)."""
+    normalized = value.lower().replace("x", ",").replace(" ", "")
+    parts = [p for p in normalized.split(",") if p]
+    if len(parts) != 2:
+        raise ValueError(
+            f"processing_resolution must be HEIGHTxWIDTH or HEIGHT,WIDTH; got {value!r}"
+        )
+    height, width = int(parts[0]), int(parts[1])
+    if height <= 0 or width <= 0:
+        raise ValueError(f"processing_resolution dimensions must be positive; got {value!r}")
+    return height, width
+
+
+def _extract_tile(
+    image_rgb: NDArray[np.uint8],
+    y0: int,
+    x0: int,
+    tile_height: int,
+    tile_width: int,
+) -> NDArray[np.uint8]:
+    h, w = image_rgb.shape[:2]
+    patch = image_rgb[y0 : min(y0 + tile_height, h), x0 : min(x0 + tile_width, w)]
+    if patch.shape[0] == tile_height and patch.shape[1] == tile_width:
+        return patch
+    padded = np.zeros((tile_height, tile_width, 3), dtype=np.uint8)
+    padded[: patch.shape[0], : patch.shape[1]] = patch
+    return padded
+
+
+def tile_blend_weights(height: int, width: int) -> NDArray[np.float32]:
+    """Separable linear distance-to-edge weights for feathering overlapping tiles.
+
+    Each axis weight grows linearly from the border toward the center
+    (``min(i + 1, size - i)``), so overlapping tiles blend by proximity to their
+    own border: two tiles sharing an overlap produce a single linear ramp that is
+    equal-weighted at the midpoint.
+    """
+    wy = np.minimum(np.arange(1, height + 1), np.arange(height, 0, -1)).astype(np.float32)
+    wx = np.minimum(np.arange(1, width + 1), np.arange(width, 0, -1)).astype(np.float32)
+    return wy[:, None] * wx[None, :]
+
+
+@torch.no_grad()
+def predict_tiled(
+    model: CBMModel,
+    image_rgb_uint8: NDArray[np.uint8],
+    model_transform: A.Compose,
+    display_transform: A.Compose,
+    tile_size: tuple[int, int],
+    device: torch.device | str,
+    *,
+    processing_resolution: tuple[int, int] | None = None,
+    min_overlap: float = DEFAULT_TILE_OVERLAP,
+) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.int64], NDArray[np.uint8]]:
+    """Run CBM inference, optionally using overlapping tiles at ``processing_resolution``."""
+    if processing_resolution is None:
+        image_tensor, display_rgb = preprocess(image_rgb_uint8, model_transform, display_transform)
+        class_probs, concept_probs, pred_mask = predict(model, image_tensor.to(device))
+        return class_probs, concept_probs, pred_mask, display_rgb
+
+    proc_height, proc_width = processing_resolution
+    tile_height, tile_width = tile_size
+    resized = np.asarray(
+        Image.fromarray(image_rgb_uint8).resize((proc_width, proc_height), Image.BILINEAR),
+        dtype=np.uint8,
+    )
+
+    num_classes = model.concept_classifier.out_channels
+    num_concepts = model.concept_classifier.in_channels
+    class_acc = np.zeros((num_classes, proc_height, proc_width), dtype=np.float32)
+    concept_acc = np.zeros((num_concepts, proc_height, proc_width), dtype=np.float32)
+    weight = np.zeros((proc_height, proc_width), dtype=np.float32)
+
+    y_starts = tile_starts(proc_height, tile_height, min_overlap)
+    x_starts = tile_starts(proc_width, tile_width, min_overlap)
+
+    blend = tile_blend_weights(tile_height, tile_width)
+
+    for y0 in y_starts:
+        for x0 in x_starts:
+            tile_rgb = _extract_tile(resized, y0, x0, tile_height, tile_width)
+            image_tensor, _ = preprocess(tile_rgb, model_transform, display_transform)
+            tile_class_probs, tile_concept_probs, _ = predict(model, image_tensor.to(device))
+
+            y1 = y0 + tile_height
+            x1 = x0 + tile_width
+            class_acc[:, y0:y1, x0:x1] += tile_class_probs * blend
+            concept_acc[:, y0:y1, x0:x1] += tile_concept_probs * blend
+            weight[y0:y1, x0:x1] += blend
+
+    weight = np.maximum(weight, 1e-6)
+    class_probs = class_acc / weight[None, ...]
+    concept_probs = concept_acc / weight[None, ...]
+    pred_mask = class_probs.argmax(axis=0).astype(np.int64)
+    return class_probs, concept_probs, pred_mask, resized
 
 
 @torch.no_grad()

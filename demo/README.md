@@ -78,14 +78,7 @@ Pin the `mermaidseg` git ref in `requirements.txt` (`@main` or a release tag) so
 
 ## Static video demo
 
-Render an offline four-panel video (2x2 grid) driven by a CSV schedule that switches the highlighted concept expression at specified timestamps (hard cut):
-
-| Panel | Visualization |
-|-------|----------------|
-| Top-left | Original RGB |
-| Top-right | `0.3 * RGB + 0.7 * viridis(composite)` |
-| Bottom-left | `0.2 * RGB + 0.8 * lerp(gray, RGB, composite)` — unselected pixels grayed out |
-| Bottom-right | RGB with pink/purple overlay where composite > 0.5 (50% opacity) |
+Render an offline video showing the inferno concept highlight panel, driven by a CSV schedule that switches the highlighted concept expression at specified timestamps (hard cut). Title/subtitle banner is burned in at the top.
 
 ```bash
 uv run python demo/video_demo.py INPUT.mp4 \
@@ -96,7 +89,18 @@ uv run python demo/video_demo.py INPUT.mp4 \
   --fps 10
 ```
 
-Optional flags: `--id2label`, `--concept-id2name`, `--device`, `--rgb-weight 0.3`, `--heat-weight 0.7`.
+Optional flags: `--id2label`, `--concept-id2name`, `--device`, `--fps`.
+
+Tiled inference for higher effective resolution (overlapping windows at the model's native tile size):
+
+```bash
+uv run python demo/video_demo.py INPUT.mp4 \
+  ... \
+  --processing-resolution 1080x1920 \
+  --tile-overlap 0.2
+```
+
+Frames are resized to `HEIGHTxWIDTH`, then inferred in tiles matching the model config `input_size` (e.g. 512×512). Stride per axis is `(1 - overlap) × tile_size` (default overlap 0.2 → stride 409), and overlapping predictions are blended with linear distance-to-edge weights (each tile contributes proportionally to its distance from its own border, so a two-tile overlap is a single linear ramp equal-weighted at the midpoint).
 
 ### Concepts CSV
 
@@ -136,6 +140,6 @@ branching * (1 - genus:acropora)
 @classes
 ```
 
-Right panel (top-right) blend: `rgb_weight * rgb + heat_weight * viridis(v)` (defaults 0.3 / 0.7). For `@classes`, the top-right panel uses the class-colored segmentation with the same weights. The bottom two panels always use the scalar composite concept value (for `@classes`, the winning class softmax probability).
+Highlight panel: inferno where composite > 0.4: `(1-mask)*RGB + mask*(v*inferno(v) + (1-v)*RGB)`.
 
 Implementation: [concept_expr.py](concept_expr.py) (parser/evaluator), [video_demo.py](video_demo.py) (CLI/renderer).

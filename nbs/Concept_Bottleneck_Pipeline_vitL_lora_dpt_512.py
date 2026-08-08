@@ -36,7 +36,7 @@ from mermaidseg.model.train import train_model
 
 # ViT-L encoder adapted with LoRA + a DPT segmentation head (concept-bottleneck variant).
 VITL_ENCODER_NAME = "facebook/dinov3-vitl16-pretrain-lvd1689m"
-CHECKPOINT = "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch40"
+CHECKPOINT = "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch84"
 
 
 def load_training_checkpoint(

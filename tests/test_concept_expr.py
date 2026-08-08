@@ -121,26 +121,76 @@ def test_mismatched_parentheses() -> None:
         parse("(live + branching")
 
 
-def test_render_gray_interpolation_panel() -> None:
-    from video_demo import render_gray_interpolation_panel
+def test_tile_starts_overlap() -> None:
+    from inference import tile_starts
+
+    starts = tile_starts(1000, 512, min_overlap=0.2)
+    assert starts[0] == 0
+    assert starts[-1] == 488
+    stride = starts[1] - starts[0]
+    overlap = (512 - stride) / 512
+    assert overlap >= 0.2 - 1e-6
+
+
+def test_tile_blend_weights_shape_and_center() -> None:
+    from inference import tile_blend_weights
+
+    w = tile_blend_weights(8, 6)
+    assert w.shape == (8, 6)
+    assert w.dtype == np.float32
+    assert np.all(w > 0)
+    center = w[3:5, 2:4].mean()
+    assert center >= w[0, 0]
+    assert center >= w[-1, -1]
+
+
+def test_tile_blend_weights_linear_ramp_in_overlap() -> None:
+    from inference import tile_blend_weights, tile_starts
+
+    tile = 8
+    length = 12
+    starts = tile_starts(length, tile, min_overlap=0.2)
+    assert len(starts) == 2
+
+    blend = tile_blend_weights(tile, tile)
+    row = blend[0]  # 1D weights along the width axis (single row is enough)
+
+    acc = np.zeros(length, dtype=np.float32)
+    weight = np.zeros(length, dtype=np.float32)
+    preds = [0.0, 1.0]
+    for start, value in zip(starts, preds):
+        acc[start : start + tile] += value * row
+        weight[start : start + tile] += row
+    blended = acc / np.maximum(weight, 1e-6)
+
+    overlap_lo = starts[1]
+    overlap_hi = starts[0] + tile
+    overlap = blended[overlap_lo:overlap_hi]
+    assert overlap[0] < 0.5 < overlap[-1]
+    assert np.all(np.diff(overlap) > 0)
+    mid = (overlap_lo + overlap_hi) / 2.0 - 0.5
+    lo_i = int(np.floor(mid))
+    interp = blended[lo_i] + (mid - lo_i) * (blended[lo_i + 1] - blended[lo_i])
+    assert abs(interp - 0.5) < 1e-6
+
+
+def test_parse_processing_resolution() -> None:
+    from inference import parse_processing_resolution
+
+    assert parse_processing_resolution("1080x1920") == (1080, 1920)
+    assert parse_processing_resolution("1080,1920") == (1080, 1920)
+
+
+def test_render_inferno_mask_panel() -> None:
+    from video_demo import render_inferno_mask_panel
 
     rgb = np.full((2, 2, 3), 200, dtype=np.uint8)
-    values = np.array([[0.0, 1.0], [0.5, 0.25]], dtype=np.float32)
-    out = render_gray_interpolation_panel(rgb, values)
-    assert out.shape == rgb.shape
-    # High concept value -> closer to original RGB
-    assert out[0, 1, 0] > out[0, 0, 0]
-
-
-def test_render_threshold_overlay_panel() -> None:
-    from video_demo import render_threshold_overlay_panel
-
-    rgb = np.full((2, 2, 3), 200, dtype=np.uint8)
-    values = np.array([[0.2, 0.8], [0.5, 0.49]], dtype=np.float32)
-    out = render_threshold_overlay_panel(rgb, values)
+    values = np.array([[0.2, 0.8], [0.39, 0.41]], dtype=np.float32)
+    out = render_inferno_mask_panel(rgb, values, threshold=0.4)
     assert out[0, 0, 1] == 200
-    assert out[0, 1, 1] < 200
-    assert out[1, 1, 1] == 200
+    assert out[0, 1, 1] != 200
+    assert out[1, 0, 1] == 200
+    assert out[1, 1, 1] != 200
 
 
 def test_banner_layout_scales_with_frame_height() -> None:
