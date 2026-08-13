@@ -1,5 +1,9 @@
 logger:
+  enable_mlflow: false
+  enable_wandb: true
   uri: "segmentation"
   experiment_name: "mermaid"
   system_metrics: true
   system_metrics_sampling_interval: 10
+  wandb_project: "mermaidseg"
+  wandb_entity: null
