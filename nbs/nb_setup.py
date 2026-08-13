@@ -26,7 +26,11 @@ import boto3
 import botocore.exceptions
 import mlflow
 
-from mermaidseg.logger import mlflow_connect, resume_run  # noqa: F401 — re-exported
+from mermaidseg.logger import (  # noqa: F401 — re-exported
+    mlflow_connect,
+    resume_run,
+    resume_wandb_run,
+)
 
 
 def check_env() -> None:
@@ -93,6 +97,28 @@ def check_mlflow_version() -> None:
         print(f"mlflow {version} OK")
 
 
+def check_wandb_auth() -> None:
+    """Confirm wandb is authenticated in this environment.
+
+    Checks for a resolved API key (via ``WANDB_API_KEY``, ``wandb login``, or
+    ``~/.netrc``) without starting a run. Call before
+    ``Logger(..., enable_wandb=True)`` so a missing login surfaces immediately
+    instead of mid-training.
+
+    Raises:
+        RuntimeError: If no wandb API key can be resolved.
+    """
+    import wandb
+
+    api_key = wandb.api.api_key
+    if not api_key:
+        raise RuntimeError(
+            "wandb is not authenticated. Run `wandb login` in a terminal, "
+            "set WANDB_API_KEY, or call wandb.login(key=...) in a notebook cell."
+        )
+    print(f"wandb authenticated (API key ...{api_key[-4:]})")
+
+
 def check_gpu() -> None:
     """Print available CUDA devices and memory.
 
@@ -156,3 +182,30 @@ def reconnect_mlflow(run_id: str | None = None) -> None:
     if run_id:
         resume_run(run_id)
         print(f"Resumed run: {mlflow.active_run().info.run_id}")
+
+
+def reconnect_wandb(
+    run_id: str | None = None, project: str | None = None, entity: str | None = None
+) -> None:
+    """Reconnect to wandb after a kernel restart.
+
+    Args:
+        run_id: wandb run ID to resume (``logger.wandb_run_id``, printed after
+                Logger init, or from the wandb UI). If None, just verifies
+                authentication.
+        project: wandb project the run belongs to, if not inferable from the
+                 environment (``WANDB_PROJECT``).
+        entity: wandb entity/team the run belongs to, if not inferable from
+                the environment (``WANDB_ENTITY``).
+
+    Example::
+
+        # After kernel restart, re-run setup cells then:
+        from nbs.nb_setup import reconnect_wandb
+
+        reconnect_wandb("paste-run-id")
+    """
+    check_wandb_auth()
+    if run_id:
+        run = resume_wandb_run(run_id, project=project, entity=entity)
+        print(f"Resumed wandb run: {run.id}")
