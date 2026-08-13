@@ -35,6 +35,10 @@ class MermaidDataset(BaseCoralDataset):
     Args:
         annotations_path (str, optional): S3 path to the Parquet file with annotations.
         source_bucket (str, optional): S3 bucket name containing the dataset files.
+        annotation_date_cutoff (pd.Timestamp, optional): Only annotations with
+            ``updated_on`` on or before this date are used. Defaults to
+            2026-08-12, the date MERMAID annotations were last audited for this
+            project.
         **base_kwargs: Forwarded to :class:`BaseCoralDataset`.
     """
 
@@ -42,16 +46,23 @@ class MermaidDataset(BaseCoralDataset):
 
     annotations_path: str
     source_bucket: str
+    annotation_date_cutoff: pd.Timestamp
     s3: boto3.client
 
     def __init__(
         self,
         annotations_path: str = "s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet",
         source_bucket: str = "coral-reef-training",
+        annotation_date_cutoff: str | None = None,
         **base_kwargs: Any,
     ):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
+        self.annotation_date_cutoff = (
+            pd.Timestamp(annotation_date_cutoff, tz="UTC")
+            if annotation_date_cutoff is not None
+            else None
+        )
         self.s3 = boto3.client("s3")
 
         df_annotations, df_images = self.load_annotations(self.annotations_path)
@@ -63,12 +74,16 @@ class MermaidDataset(BaseCoralDataset):
         For MERMAID, the source-space label name *is* the canonical
         ``benthic_attribute_name`` field. This helper renames the column to the
         unified ``source_label_name`` convention used by
-        :class:`BaseCoralDataset`.
+        :class:`BaseCoralDataset`, and drops annotations updated after
+        ``annotation_date_cutoff``.
         """
         df_annotations = LocalS3Cache.get().read_parquet_ref(annotations_path, self.source_bucket)
         df_annotations = df_annotations.rename(
             columns={"benthic_attribute_name": "source_label_name"}
         )
+        df_annotations = df_annotations[
+            df_annotations["updated_on"] <= self.annotation_date_cutoff
+        ].reset_index(drop=True)
         df_images = self._derive_df_images_from_annotations(df_annotations)
         return df_annotations, df_images
 
