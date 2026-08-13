@@ -13,6 +13,7 @@ import copy
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -164,11 +165,45 @@ def resume_run(run_id: str) -> mlflow.ActiveRun:
         ) from e
 
 
-class Logger:
-    """MLflow-focused logger for experiment tracking during training and evaluation.
+def resume_wandb_run(run_id: str, project: str | None = None, entity: str | None = None):
+    """Re-attach to an existing wandb run by run_id after a kernel restart.
 
-    wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy ``WandbLogger``
-    delegate during the deprecation period.
+    Args:
+        run_id: The wandb run ID to resume, as printed after ``Logger`` init
+                (``logger.wandb_run_id``) or visible in the wandb UI.
+        project: wandb project the run belongs to, if not inferable from the
+                 environment (``WANDB_PROJECT``).
+        entity: wandb entity/team the run belongs to, if not inferable from
+                the environment (``WANDB_ENTITY``).
+
+    Returns:
+        The resumed ``wandb.sdk.wandb_run.Run``. Use ``wandb.log(...)`` /
+        ``run.log(...)`` afterwards to append to it.
+
+    Raises:
+        RuntimeError: If the run cannot be found.
+    """
+    if WANDB_IMPORT_ERROR is not None:
+        raise ImportError(
+            "wandb is required to resume a wandb run but is not installed. Install with: pip install wandb"
+        ) from WANDB_IMPORT_ERROR
+    try:
+        return wandb.init(id=run_id, project=project, entity=entity, resume="must")
+    except Exception as e:
+        raise RuntimeError(f"Could not resume wandb run '{run_id}'.") from e
+
+
+def _safe_wandb_artifact_name(name: str) -> str:
+    """Sanitize a string into a valid wandb artifact name (alnum, ``_``, ``-``, ``.``)."""
+    return re.sub(r"[^a-zA-Z0-9_.\-]", "-", name)
+
+
+class Logger:
+    """Logger for experiment tracking during training and evaluation.
+
+    Supports MLflow and wandb side by side: pass ``enable_wandb=True`` to log
+    to wandb via the ``WandbLogger`` delegate (``self._wandb_logger``), in
+    addition to or instead of MLflow (``enable_mlflow``).
     """
 
     def __init__(
@@ -229,6 +264,49 @@ class Logger:
             self.save_local_checkpoints = cfg_local if cfg_local is not None else True
 
         self.save_local_models = self.save_local_checkpoints
+        self.wandb_run_id = None
+
+        # Precompute run metadata shared by both backends (config artifact, flattened
+        # params, tags) so it can be logged to MLflow and/or wandb independently of
+        # which backend(s) are enabled.
+        config_to_log = None
+        params = None
+        tags = None
+        if config is not None:
+            try:
+                config_to_log = copy.deepcopy(config)
+                config_to_log["num_classes"] = int(meta_model.num_classes)
+
+                params = {
+                    "num_classes": int(meta_model.num_classes),
+                    "run_name": self.run_name,
+                    "log_epochs": log_epochs,
+                    "log_checkpoint": log_checkpoint,
+                }
+                if hasattr(config, "model"):
+                    params.update(
+                        {
+                            f"model_{k}": v
+                            for k, v in dict(config.model).items()
+                            if isinstance(v, str | int | float | bool)
+                        }
+                    )
+                if hasattr(config, "training"):
+                    params.update(
+                        {
+                            f"training_{k}": v
+                            for k, v in dict(config.training).items()
+                            if isinstance(v, str | int | float | bool)
+                        }
+                    )
+
+                tags = {
+                    "model_type": meta_model.__class__.__name__,
+                    "framework": "pytorch",
+                }
+            except Exception as e:
+                logger.warning("Failed to prepare run metadata (config/params/tags): %s", e)
+                config_to_log = params = tags = None
 
         if enable_mlflow:
             self.enabled = experiment_name is not None
@@ -265,41 +343,10 @@ class Logger:
                         logger.info("MLflow run %s already active", self.run_name)
                         self.mlflow_run_id = mlflow.active_run().info.run_id
 
-                    if config is not None:
+                    if config_to_log is not None:
                         logger.info("Logging config to MLflow...")
-                        config_to_log = copy.deepcopy(config)
-                        config_to_log["num_classes"] = int(meta_model.num_classes)
                         mlflow.log_dict(config_to_log, "config/config.json")
-
-                        params = {
-                            "num_classes": int(meta_model.num_classes),
-                            "run_name": self.run_name,
-                            "log_epochs": log_epochs,
-                            "log_checkpoint": log_checkpoint,
-                        }
-                        if hasattr(config, "model"):
-                            params.update(
-                                {
-                                    f"model_{k}": v
-                                    for k, v in dict(config.model).items()
-                                    if isinstance(v, str | int | float | bool)
-                                }
-                            )
-                        if hasattr(config, "training"):
-                            params.update(
-                                {
-                                    f"training_{k}": v
-                                    for k, v in dict(config.training).items()
-                                    if isinstance(v, str | int | float | bool)
-                                }
-                            )
-
                         mlflow.log_params(params)
-
-                        tags = {
-                            "model_type": meta_model.__class__.__name__,
-                            "framework": "pytorch",
-                        }
                         mlflow.set_tags(tags)
                         # Log concept metadata
                         self._log_concept_metadata(meta_model)
@@ -313,22 +360,33 @@ class Logger:
                     self.enabled = False
 
         if enable_wandb:
-            warnings.warn(
-                "enable_wandb is deprecated and will be removed in a future release. Use the MLflow-based Logger workflow instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             if WANDB_IMPORT_ERROR is not None:
                 logger.warning("wandb is not installed. Wandb logging is disabled.")
             else:
                 try:
+                    wandb_project = getattr(logger_cfg, "wandb_project", None) or (
+                        experiment_name or "mermaidseg"
+                    )
+                    wandb_entity = getattr(logger_cfg, "wandb_entity", None)
                     self._wandb_logger = WandbLogger(
-                        project=experiment_name or "mermaidseg",
+                        project=wandb_project,
                         run_name=self.run_name,
                         config=config,
                         num_classes=int(meta_model.num_classes),
-                        _warn=False,
+                        entity=wandb_entity,
                     )
+                    self.wandb_run_id = self._wandb_logger.wandb_run_id
+                    if config_to_log is not None:
+                        logger.info("Logging config to wandb...")
+                        self._wandb_logger.log_config(config_to_log)
+                        self._wandb_logger.log_params(params)
+                        self._wandb_logger.set_tags(tags)
+                        self._wandb_logger.log_concept_metadata(
+                            id2label=self.id2label,
+                            id2concept=self.id2concept,
+                            num_concepts=getattr(meta_model, "num_concepts", None),
+                            conceptid2labelid=getattr(meta_model, "conceptid2labelid", None),
+                        )
                 except Exception as e:
                     logger.warning("Failed to initialize wandb logging: %s", e)
 
@@ -402,32 +460,34 @@ class Logger:
                 ``num_classes`` when present).
             context: MLflow input context (e.g. ``"training"``).
         """
-        if not self._ensure_active_run():
-            return
-        try:
-            num_source_classes = getattr(
-                dataset, "num_source_classes", getattr(dataset, "num_classes", "")
-            )
-            source_name = getattr(dataset, "SOURCE_NAME", "")
-            global_offset = getattr(dataset, "global_offset", "")
-            source = CodeDatasetSource(
-                tags={
-                    "annotations_path": getattr(dataset, "annotations_path", "")
-                    or getattr(dataset, "manifest_path", ""),
-                    "source_bucket": getattr(dataset, "source_bucket", ""),
-                    "num_images": str(len(getattr(dataset, "df_images", []))),
-                    "num_source_classes": str(num_source_classes),
-                    "source_name": str(source_name),
-                    "global_offset": str(global_offset),
-                }
-            )
-            meta = MetaDataset(
-                source=source,
-                name=dataset.__class__.__name__,
-            )
-            mlflow.log_input(meta, context=context)
-        except Exception as e:
-            logger.warning("Failed to log dataset to MLflow: %s", e)
+        if self._ensure_active_run():
+            try:
+                num_source_classes = getattr(
+                    dataset, "num_source_classes", getattr(dataset, "num_classes", "")
+                )
+                source_name = getattr(dataset, "SOURCE_NAME", "")
+                global_offset = getattr(dataset, "global_offset", "")
+                source = CodeDatasetSource(
+                    tags={
+                        "annotations_path": getattr(dataset, "annotations_path", "")
+                        or getattr(dataset, "manifest_path", ""),
+                        "source_bucket": getattr(dataset, "source_bucket", ""),
+                        "num_images": str(len(getattr(dataset, "df_images", []))),
+                        "num_source_classes": str(num_source_classes),
+                        "source_name": str(source_name),
+                        "global_offset": str(global_offset),
+                    }
+                )
+                meta = MetaDataset(
+                    source=source,
+                    name=dataset.__class__.__name__,
+                )
+                mlflow.log_input(meta, context=context)
+            except Exception as e:
+                logger.warning("Failed to log dataset to MLflow: %s", e)
+
+        if self._wandb_logger is not None:
+            self._wandb_logger.log_dataset(dataset, context=context)
 
     def log_datasets(self, dataset, context: str = "training") -> None:
         """Log one or more datasets: unwrap combined/concat wrappers or log as one.
@@ -499,7 +559,9 @@ class Logger:
         Strictly read-only against datasets. Per-split resolution failures and
         per-artifact write failures are isolated.
         """
-        if not self._ensure_active_run():
+        mlflow_active = self._ensure_active_run()
+        wandb_active = self._wandb_logger is not None
+        if not mlflow_active and not wandb_active:
             return
 
         resolved: dict = {}
@@ -534,19 +596,39 @@ class Logger:
             lambda: compute_train_summary(resolved, registry),
         )
 
-    @staticmethod
-    def _log_csv_artifact(path: str, build) -> None:
-        try:
-            mlflow.log_text(build().to_csv(index=False), path)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to log %s: %s", path, e)
+    def _log_csv_artifact(self, path: str, build) -> None:
+        csv_text = None
+        if self._ensure_active_run():
+            try:
+                csv_text = build().to_csv(index=False)
+                mlflow.log_text(csv_text, path)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to log %s: %s", path, e)
+        if self._wandb_logger is not None:
+            try:
+                if csv_text is None:
+                    csv_text = build().to_csv(index=False)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to build %s for wandb: %s", path, e)
+                return
+            self._wandb_logger.log_text_artifact(path, csv_text, artifact_type="dataset_stats")
 
-    @staticmethod
-    def _log_yaml_artifact(path: str, build) -> None:
-        try:
-            mlflow.log_text(yaml.safe_dump(build(), sort_keys=False), path)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to log %s: %s", path, e)
+    def _log_yaml_artifact(self, path: str, build) -> None:
+        yaml_text = None
+        if self._ensure_active_run():
+            try:
+                yaml_text = yaml.safe_dump(build(), sort_keys=False)
+                mlflow.log_text(yaml_text, path)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to log %s: %s", path, e)
+        if self._wandb_logger is not None:
+            try:
+                if yaml_text is None:
+                    yaml_text = yaml.safe_dump(build(), sort_keys=False)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to build %s for wandb: %s", path, e)
+                return
+            self._wandb_logger.log_text_artifact(path, yaml_text, artifact_type="dataset_stats")
 
     def log_benchmark_context(
         self,
@@ -589,25 +671,29 @@ class Logger:
             logger.warning("Failed to log benchmark context: %s", e)
 
     def log_dataloader_params(self, loader: DataLoader, prefix: str = "dataloader") -> None:
-        """Log DataLoader configuration as MLflow params."""
-        if not self._ensure_active_run():
-            return
-        try:
-            mlflow.log_params(
-                {
-                    f"{prefix}_num_workers": loader.num_workers,
-                    f"{prefix}_pin_memory": loader.pin_memory,
-                    f"{prefix}_batch_size": loader.batch_size,
-                    f"{prefix}_persistent_workers": getattr(loader, "persistent_workers", False),
-                    f"{prefix}_prefetch_factor": getattr(loader, "prefetch_factor", None),
-                }
-            )
-        except Exception as e:
-            logger.warning("Failed to log dataloader params: %s", e)
+        """Log DataLoader configuration as params, to MLflow and/or wandb."""
+        if self._ensure_active_run():
+            try:
+                mlflow.log_params(
+                    {
+                        f"{prefix}_num_workers": loader.num_workers,
+                        f"{prefix}_pin_memory": loader.pin_memory,
+                        f"{prefix}_batch_size": loader.batch_size,
+                        f"{prefix}_persistent_workers": getattr(
+                            loader, "persistent_workers", False
+                        ),
+                        f"{prefix}_prefetch_factor": getattr(loader, "prefetch_factor", None),
+                    }
+                )
+            except Exception as e:
+                logger.warning("Failed to log dataloader params: %s", e)
+
+        if self._wandb_logger is not None:
+            self._wandb_logger.log_dataloader_params(loader, prefix=prefix)
 
     @property
     def enable_wandb(self) -> bool:
-        """True when a ``WandbLogger`` delegate is active (deprecated)."""
+        """True when a ``WandbLogger`` delegate is active."""
         return self._wandb_logger is not None
 
     def _ensure_active_run(self) -> bool:
@@ -650,16 +736,19 @@ class Logger:
             return False
 
     def log(self, log_dict, step):
+        # Unpack once and share between backends: array-valued per-class/per-concept
+        # metrics must be expanded into named scalars for both MLflow and wandb.
+        metrics_to_log = self._unpack_metrics(log_dict)
+
         if self._ensure_active_run():
             try:
-                metrics_to_log = self._unpack_metrics(log_dict)
                 if metrics_to_log:
                     mlflow.log_metrics(metrics_to_log, step=step)
             except Exception as e:
                 logger.warning("Failed to log metrics to MLflow: %s", e)
 
         if self._wandb_logger is not None:
-            self._wandb_logger.log(log_dict, step=step)
+            self._wandb_logger.log(metrics_to_log, step=step)
 
     def save_model_checkpoint(
         self,
@@ -715,6 +804,9 @@ class Logger:
         else:
             logger.info("Local checkpoint saving disabled, skipping disk write")
 
+        # Unpack once and share between backends (see log()).
+        checkpoint_metrics = self._unpack_metrics(metrics_dict, key_prefix="checkpoint")
+
         if self._ensure_active_run():
             try:
                 if local_checkpoint_saved:
@@ -725,7 +817,6 @@ class Logger:
                         torch.save(checkpoint, tmp_path)  # type: ignore
                         mlflow.log_artifact(tmp_path, artifact_path="checkpoints")
 
-                checkpoint_metrics = self._unpack_metrics(metrics_dict, key_prefix="checkpoint")
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
 
                 if is_best:
@@ -783,7 +874,7 @@ class Logger:
             self._wandb_logger.save_checkpoint(
                 model_path=model_path,
                 epoch=epoch,
-                metrics_dict=metrics_dict,
+                metrics_dict=checkpoint_metrics,
                 checkpoint=checkpoint,
                 local_checkpoint_saved=local_checkpoint_saved,
             )
@@ -853,12 +944,7 @@ class Logger:
 
 
 class WandbLogger:
-    """Deprecated standalone wandb logger.
-
-    .. deprecated::
-        ``WandbLogger`` will be removed in a future release.
-        Migrate to the MLflow-based :class:`Logger` workflow.
-    """
+    """Standalone wandb logger, used as the ``Logger`` delegate for wandb-backed runs."""
 
     def __init__(
         self,
@@ -867,14 +953,10 @@ class WandbLogger:
         config,
         num_classes: int,
         *,
-        _warn: bool = True,
+        entity: str | None = None,
+        run_id: str | None = None,
+        resume: str = "allow",
     ):
-        if _warn:
-            warnings.warn(
-                "WandbLogger is deprecated and will be removed in a future release. Use the MLflow-based Logger instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         if WANDB_IMPORT_ERROR is not None:
             raise ImportError(
                 "wandb is required for WandbLogger but is not installed. Install with: pip install wandb"
@@ -882,10 +964,154 @@ class WandbLogger:
 
         self.wandb_run = wandb.init(
             project=project,
+            entity=entity,
             name=run_name,
             config=config,
+            id=run_id,
+            resume=resume if run_id is not None else None,
         )
-        self.wandb_run.config.update({"num_classes": num_classes})
+        self.wandb_run.config.update({"num_classes": num_classes}, allow_val_change=True)
+        self.wandb_run_id = self.wandb_run.id if self.wandb_run is not None else None
+
+    def _log_json_artifact(self, name: str, data: dict, artifact_type: str = "metadata") -> None:
+        """Log a dict as a JSON-file wandb artifact (mirrors mlflow.log_dict)."""
+        if self.wandb_run is None:
+            return
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                filename = f"{name}.json"
+                local_path = os.path.join(tmpdir, filename)
+                with open(local_path, "w") as f:
+                    json.dump(data, f, indent=2, default=str)
+                artifact = wandb.Artifact(_safe_wandb_artifact_name(name), type=artifact_type)
+                artifact.add_file(local_path, name=filename)
+                self.wandb_run.log_artifact(artifact)
+        except Exception as e:
+            logger.warning("Failed to log %s to wandb: %s", name, e)
+
+    def log_text_artifact(self, path: str, text: str, artifact_type: str = "metadata") -> None:
+        """Log a text blob (CSV/YAML) as a wandb artifact (mirrors mlflow.log_text)."""
+        if self.wandb_run is None:
+            return
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                filename = os.path.basename(path)
+                local_path = os.path.join(tmpdir, filename)
+                with open(local_path, "w") as f:
+                    f.write(text)
+                artifact = wandb.Artifact(_safe_wandb_artifact_name(path), type=artifact_type)
+                artifact.add_file(local_path, name=filename)
+                self.wandb_run.log_artifact(artifact)
+        except Exception as e:
+            logger.warning("Failed to log %s to wandb: %s", path, e)
+
+    def log_config(self, config_to_log: dict) -> None:
+        """Log the full training config as a JSON artifact (mirrors config/config.json)."""
+        self._log_json_artifact("config", config_to_log, artifact_type="config")
+
+    def log_params(self, params: dict) -> None:
+        """Log flattened scalar params (run_name, log_epochs, model_*, training_*, ...)."""
+        if self.wandb_run is None:
+            return
+        try:
+            self.wandb_run.config.update(params, allow_val_change=True)
+        except Exception as e:
+            logger.warning("Failed to log params to wandb: %s", e)
+
+    def set_tags(self, tags: dict[str, str]) -> None:
+        """Set run tags (model_type/framework, ...) as both config keys and wandb tags."""
+        if self.wandb_run is None:
+            return
+        try:
+            self.wandb_run.config.update(tags, allow_val_change=True)
+            existing = list(self.wandb_run.tags or [])
+            new_tags = [f"{k}:{v}" for k, v in tags.items() if f"{k}:{v}" not in existing]
+            if new_tags:
+                self.wandb_run.tags = existing + new_tags
+        except Exception as e:
+            logger.warning("Failed to set tags on wandb: %s", e)
+
+    def log_concept_metadata(
+        self,
+        id2label: dict | None = None,
+        id2concept: dict | None = None,
+        num_concepts: int | None = None,
+        conceptid2labelid: dict | None = None,
+    ) -> None:
+        """Log concept-related metadata artifacts when available."""
+        if self.wandb_run is None:
+            return
+        if id2label:
+            self._log_json_artifact("id2label", id2label, artifact_type="metadata")
+        if id2concept:
+            self._log_json_artifact("id2concept", id2concept, artifact_type="metadata")
+        if num_concepts is not None:
+            try:
+                self.wandb_run.config.update(
+                    {"num_concepts": int(num_concepts)}, allow_val_change=True
+                )
+            except Exception as e:
+                logger.warning("Failed to log num_concepts to wandb: %s", e)
+        if conceptid2labelid is not None:
+            self._log_json_artifact(
+                "conceptid2labelid", conceptid2labelid, artifact_type="metadata"
+            )
+
+    def log_dataset(self, dataset, context: str = "training") -> None:
+        """Log a dataset as a metadata-only wandb artifact (mirrors mlflow's dataset input)."""
+        if self.wandb_run is None:
+            return
+        try:
+            num_source_classes = getattr(
+                dataset, "num_source_classes", getattr(dataset, "num_classes", "")
+            )
+            source_name = getattr(dataset, "SOURCE_NAME", "")
+            global_offset = getattr(dataset, "global_offset", "")
+            metadata = {
+                "annotations_path": getattr(dataset, "annotations_path", "")
+                or getattr(dataset, "manifest_path", ""),
+                "source_bucket": getattr(dataset, "source_bucket", ""),
+                "num_images": len(getattr(dataset, "df_images", [])),
+                "num_source_classes": str(num_source_classes),
+                "source_name": str(source_name),
+                "global_offset": str(global_offset),
+                "context": context,
+            }
+            artifact = wandb.Artifact(
+                _safe_wandb_artifact_name(dataset.__class__.__name__),
+                type="dataset",
+                metadata=metadata,
+            )
+            self.wandb_run.log_artifact(artifact)
+        except Exception as e:
+            logger.warning("Failed to log dataset to wandb: %s", e)
+
+    def log_datasets(self, dataset, context: str = "training") -> None:
+        """Log one or more datasets: unwrap combined/concat wrappers or log as one."""
+        sub = getattr(dataset, "_datasets", None) or getattr(dataset, "datasets", None)
+        if sub is not None:
+            for sub_dataset in sub:
+                self.log_dataset(sub_dataset, context=context)
+        else:
+            self.log_dataset(dataset, context=context)
+
+    def log_dataloader_params(self, loader, prefix: str = "dataloader") -> None:
+        """Log DataLoader configuration as wandb config keys."""
+        if self.wandb_run is None:
+            return
+        try:
+            self.wandb_run.config.update(
+                {
+                    f"{prefix}_num_workers": loader.num_workers,
+                    f"{prefix}_pin_memory": loader.pin_memory,
+                    f"{prefix}_batch_size": loader.batch_size,
+                    f"{prefix}_persistent_workers": getattr(loader, "persistent_workers", False),
+                    f"{prefix}_prefetch_factor": getattr(loader, "prefetch_factor", None),
+                },
+                allow_val_change=True,
+            )
+        except Exception as e:
+            logger.warning("Failed to log dataloader params to wandb: %s", e)
 
     def log(self, log_dict, step):
         """Log metrics to the active wandb run."""
