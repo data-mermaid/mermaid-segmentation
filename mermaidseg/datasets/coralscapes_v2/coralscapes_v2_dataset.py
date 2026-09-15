@@ -22,7 +22,7 @@ from mermaidseg.datasets.utils import emit_dataset_warning
 
 logger = logging.getLogger(__name__)
 
-CORALSCAPES_V2_HF_REPO = "josauder/314d3951853dad8855bd06248987f626"
+CORALSCAPES_V2_HF_REPO = "josauder/coralscapesV2"
 
 CORALSCAPES_V2_ID2NAME: dict[int, str] = {
     1: "acanthaster planci",
@@ -69,9 +69,9 @@ CORALSCAPES_V2_ID2NAME: dict[int, str] = {
     42: "lobophylliidae alive",
     43: "lobophylliidae bleached",
     44: "lobophylliidae dead",
-    45: "massive coral alive",
-    46: "massive coral bleached",
-    47: "massive coral dead",
+    45: "massive alive",
+    46: "massive bleached",
+    47: "massive dead",
     48: "meandering coral alive",
     49: "meandering coral bleached",
     50: "meandering coral dead",
@@ -125,7 +125,7 @@ CORALSCAPES_V2_ID2NAME: dict[int, str] = {
 
 class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     """A PyTorch Dataset wrapping the HuggingFace
-    `Coralscapes V2 <https://huggingface.co/datasets/josauder/314d3951853dad8855bd06248987f626>`_
+    `Coralscapes V2 <https://huggingface.co/datasets/josauder/coralscapesV2>`_
     dataset.
 
     Each item returned is a tuple ``(image, source_labels)`` where
