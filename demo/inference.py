@@ -120,6 +120,27 @@ def _normalize_checkpoint_state_dict(sd: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _align_dpt_head_norm_with_checkpoint(model: torch.nn.Module, sd: Mapping[str, Any]) -> None:
+    """Swap DPT head GroupNorm → BatchNorm2d when the checkpoint was trained with BN.
+
+    Current main trains with GroupNorm (AMP-friendly); the hosted demo checkpoint still
+    carries BatchNorm running stats. Match the head module to the checkpoint so a strict
+    load succeeds and eval uses the trained running mean/var.
+    """
+    dpt_head = getattr(model, "dpt_head", None)
+    if dpt_head is None or not hasattr(dpt_head, "head"):
+        return
+    head = dpt_head.head
+    if not isinstance(head, torch.nn.Sequential) or len(head) < 2:
+        return
+    if not isinstance(head[1], torch.nn.GroupNorm):
+        return
+    if "dpt_head.head.1.running_mean" not in sd:
+        return
+    channels = int(head[1].num_channels)
+    head[1] = torch.nn.BatchNorm2d(channels)
+
+
 def _load_state_dict_flexible(model: torch.nn.Module, sd: Mapping[str, Any]) -> None:
     """Load ``sd`` into ``model``, tolerant of LoRA encoder key-nesting differences.
 
@@ -128,6 +149,7 @@ def _load_state_dict_flexible(model: torch.nn.Module, sd: Mapping[str, Any]) -> 
     ``encoder.base_model.model.layer``). Pick whichever of the raw / normalized key
     forms overlaps the instantiated model's keys best, then load it strictly.
     """
+    _align_dpt_head_norm_with_checkpoint(model, sd)
     model_keys = set(model.state_dict().keys())
     candidates = {"raw": dict(sd), "normalized": _normalize_checkpoint_state_dict(sd)}
     best = max(candidates.values(), key=lambda c: len(model_keys & c.keys()))
@@ -170,12 +192,26 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
 def build_transforms(
     input_size: tuple[int, int] = DEFAULT_INPUT_SIZE,
 ) -> tuple[A.Compose, A.Compose]:
+    """Build model + display transforms that letterbox into a square (no stretching)."""
     height, width = int(input_size[0]), int(input_size[1])
+    side = max(height, width)
+    # ImageNet mean in 0–255 so padded borders ≈ 0 after normalization.
+    pad_fill = tuple(int(round(c * 255.0)) for c in IMAGENET_MEAN)
+    letterbox = [
+        A.LongestMaxSize(max_size=side),
+        A.PadIfNeeded(
+            min_height=side,
+            min_width=side,
+            position="center",
+            border_mode=0,
+            fill=pad_fill,
+        ),
+    ]
     model_transforms = [
-        A.Resize(height=height, width=width, p=1),
+        *letterbox,
         A.Normalize(mean=list(IMAGENET_MEAN), std=list(IMAGENET_STD)),
     ]
-    display_transforms = [A.Resize(height=height, width=width, p=1)]
+    display_transforms = [*letterbox]
     return A.Compose(model_transforms), A.Compose(display_transforms)
 
 
@@ -193,10 +229,14 @@ def preprocess(
 @torch.no_grad()
 def predict_concepts(model: CBMModel, image_tensor: torch.Tensor) -> torch.Tensor:
     outputs = model(image_tensor)
-    # The Space installs mermaidseg from the SHA pinned in requirements.txt, whose
-    # ConceptBottleneckOutput carries activated concepts in `hidden_states` (main
-    # renamed it to `concept_outputs`). Flip this when repinning to main.
-    return outputs.hidden_states
+    # Local/main: activated concepts live on `concept_outputs`. The Space pin still
+    # puts them on `hidden_states` — fall back for that revision.
+    concepts = getattr(outputs, "concept_outputs", None)
+    if concepts is None:
+        concepts = outputs.hidden_states
+    if concepts is None:
+        raise RuntimeError("Model output has neither concept_outputs nor hidden_states.")
+    return concepts
 
 
 @torch.no_grad()

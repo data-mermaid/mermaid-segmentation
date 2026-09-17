@@ -57,9 +57,9 @@ Either export the token (`export HF_TOKEN=hf_...`) or log in once with `hf auth 
 
 ## Matching artifacts matter
 
-The bundled `id2label.json` / `concept_id2name.json` / model config correspond to the hosted checkpoint (78 classes / 650 concepts) and come from the training run's MLflow metadata. If you point `DEMO_CHECKPOINT` at a different checkpoint, bring its matching label/concept JSONs (`--id2label`, `--concept-id2name`) — mismatched maps produce garbage class names or a shape error at load time.
+The bundled `id2label.json` / `concept_id2name.json` / model config correspond to the hosted checkpoint (79 classes / 704 concepts) and come from the training run's MLflow metadata. If you point `DEMO_CHECKPOINT` at a different checkpoint, bring its matching label/concept JSONs (`--id2label`, `--concept-id2name`) — mismatched maps produce garbage class names or a shape error at load time.
 
-`requirements.txt` pins `mermaidseg` to the training-code ref the checkpoint expects; local runs via `uv sync` use your checkout instead, which must be on a compatible branch (concept `hidden_states` activated to [0, 1]).
+`requirements.txt` pins `mermaidseg` to a GroupNorm-compatible training ref the checkpoint expects; local runs via `uv sync` use your checkout instead.
 
 ## Useful flags
 
