@@ -118,6 +118,7 @@ class MetaModel:
         self.num_classes = num_classes
         self.num_concepts = num_concepts
         self.device = device
+        self.global_step = 0
 
         if model_kwargs is None:
             model_kwargs = ConfigDict({})
@@ -221,9 +222,35 @@ class MetaModel:
                 loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
             self.loss = loss_cls(**loss_kwargs)
 
-        optimizer_cls = getattr(torch.optim, training_kwargs.optimizer.pop("type", None))
-        self._trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = optimizer_cls(params=self._trainable_params, **training_kwargs.optimizer)
+        optimizer_cfg = dict(training_kwargs.optimizer)
+        optimizer_cls = getattr(torch.optim, optimizer_cfg.pop("type", None))
+        # Optional differential learning rates: LoRA adapter params vs. everything else
+        # (DPT head + concept/class heads). Split by whether the param name contains
+        # "lora_" (matches how ``freeze_encoder`` partitions params in models.py).
+        lora_lr = optimizer_cfg.pop("lora_lr", None)
+        dpt_lr = optimizer_cfg.pop("dpt_lr", None)
+        default_lr = optimizer_cfg.get("lr")
+
+        named_trainable = [
+            (n, p) for n, p in self.model.named_parameters() if p.requires_grad
+        ]
+        self._trainable_params = [p for _, p in named_trainable]  # kept for grad clipping
+
+        if lora_lr is not None or dpt_lr is not None:
+            lora_params = [p for n, p in named_trainable if "lora_" in n]
+            other_params = [p for n, p in named_trainable if "lora_" not in n]
+            groups = []
+            if lora_params:
+                groups.append(
+                    {"params": lora_params, "lr": lora_lr if lora_lr is not None else default_lr}
+                )
+            if other_params:
+                groups.append(
+                    {"params": other_params, "lr": dpt_lr if dpt_lr is not None else default_lr}
+                )
+            self.optimizer = optimizer_cls(groups, **optimizer_cfg)
+        else:
+            self.optimizer = optimizer_cls(params=self._trainable_params, **optimizer_cfg)
 
         if "scheduler" in training_kwargs:
             scheduler_cfg = dict(training_kwargs.scheduler)
@@ -417,12 +444,22 @@ class MetaModel:
         train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
         evaluator: Any
         | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        run_logger: Any | None = None,
+        log_interval: int = 1,
+        epoch: int | None = None,
     ) -> tuple[float, dict[str, float | NDArray[np.float64]], dict[str, float | int]]:
         """Trains the model for one epoch using the provided data loader.
 
         Args:
             train_loader: DataLoader yielding ``(inputs, source_labels)`` batches.
             evaluator: Optional evaluator for computing per-epoch metrics.
+            run_logger: Optional experiment logger; when provided, per-batch train losses
+                are logged against the monotonic ``self.global_step`` iteration axis.
+                (Named ``run_logger`` to avoid shadowing the module-level ``logger``.)
+            log_interval: Log per-batch train losses every ``log_interval`` iterations.
+                Defaults to 1 (every batch).
+            epoch: Current epoch index, unused for computation but kept for parity with
+                the caller's logging context.
 
         Returns:
             A 3-tuple of ``(average_loss, metric_results, timing)``.
@@ -456,6 +493,9 @@ class MetaModel:
 
         for micro_step in tqdm(range(iterations_per_train_epoch)):
             assert self._train_loader_iter is not None
+            # Monotonic global iteration counter shared across train_epoch calls; drives
+            # the per-batch wandb x-axis and keeps step advancing every iteration.
+            self.global_step += 1
             try:
                 data = next(self._train_loader_iter)
             except StopIteration:
@@ -516,10 +556,20 @@ class MetaModel:
                 batch_end = time.perf_counter()
                 continue
 
-            running_loss += loss.item()
+            batch_loss = loss.item()
+            running_loss += batch_loss
             for k, v in loss_components.items():
                 running_loss_components[k] = running_loss_components.get(k, 0.0) + v
             num_samples += target_labels.size(0)
+
+            if run_logger is not None and self.global_step % max(log_interval, 1) == 0:
+                run_logger.log(
+                    {
+                        "train/batch_loss": batch_loss,
+                        **{f"train/batch_{k}": v for k, v in loss_components.items()},
+                    },
+                    step=self.global_step,
+                )
 
             if evaluator is not None:
                 if self.training_mode == "concept":

@@ -98,10 +98,7 @@ cfg = update_config_with_args(cfg, args)
 # so the value is unambiguous and gets logged below.
 cfg.model.encoder_name = VITL_ENCODER_NAME
 
-# Hyperparameters for this run
-cfg.training.iterations_per_train_epoch = 4000
-cfg.training.iterations_per_val_epoch = 1000  # None => use full val set (len(val_loader))
-cfg.training.batch_size = 10
+# Iterations / batch_size / epochs are set in configs/training_config_cbm_512.yaml.
 
 # Set experiment on the config the Logger actually reads.
 cfg_logger = copy.deepcopy(cfg)

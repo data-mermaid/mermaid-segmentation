@@ -8,6 +8,7 @@ from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 from mermaidseg.model.concept_metrics import (
     calculate_multi_hot_concept_loss,
     calculate_taxonomic_rank_loss,
+    reduce_masked_loss,
 )
 
 
@@ -43,7 +44,8 @@ def _masked_cross_entropy(
     weight: torch.Tensor | None,
     ignore_index: int,
     label_smoothing: float,
-    damping_denominator: float,
+    per_pixel_loss_weight: float,
+    per_image_loss_weight: float,
 ) -> torch.Tensor:
     valid_mask = target_labels != ignore_index
     if not valid_mask.any():
@@ -57,8 +59,12 @@ def _masked_cross_entropy(
         reduction="none",
         label_smoothing=label_smoothing,
     )
-    valid = per_pixel[valid_mask]
-    return valid.sum() / (valid.numel() + damping_denominator)
+    return reduce_masked_loss(
+        per_pixel,
+        valid_mask,
+        per_pixel_loss_weight=per_pixel_loss_weight,
+        per_image_loss_weight=per_image_loss_weight,
+    )
 
 
 class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
@@ -68,14 +74,24 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
     Attributes:
         ignore_index (int): Specifies a target value that is ignored and does not contribute to the input gradient.
             This is useful for masking certain values in the target tensor. Defaults to -1.
+        per_pixel_loss_weight (float): Weight on the batch-wide per-pixel mean of the loss, where all
+            valid pixels are averaged equally (densely annotated images dominate). Defaults to 0.0.
+        per_image_loss_weight (float): Weight on the per-image mean of the loss, where each image is
+            first averaged over its valid pixels and then images are averaged equally (sparsely
+            annotated images are not down-weighted). Defaults to 1.0.
         kwargs: Additional keyword arguments that are passed to the base `torch.nn.CrossEntropyLoss` class.
     """
 
     def __init__(
-        self, ignore_index: int = 0, damping_denominator: float = 0.0, **kwargs: Any
+        self,
+        ignore_index: int = 0,
+        per_pixel_loss_weight: float = 0.0,
+        per_image_loss_weight: float = 1.0,
+        **kwargs: Any,
     ) -> None:
         super().__init__(ignore_index=ignore_index, **kwargs)
-        self.damping_denominator = damping_denominator
+        self.per_pixel_loss_weight = per_pixel_loss_weight
+        self.per_image_loss_weight = per_image_loss_weight
 
     def forward(
         self,
@@ -88,7 +104,8 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
             weight=self.weight,
             ignore_index=self.ignore_index,
             label_smoothing=self.label_smoothing,
-            damping_denominator=self.damping_denominator,
+            per_pixel_loss_weight=self.per_pixel_loss_weight,
+            per_image_loss_weight=self.per_image_loss_weight,
         )
         return loss, {"classification": loss.item()}
 
@@ -98,19 +115,25 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
 
     Wraps `torch.nn.BCEWithLogitsLoss` with `reduction="none"` and applies a foreground mask derived
     from `labels` so background pixels (label == 0) do not contribute to the mean.
+
+    The masked loss is reduced by additively blending a batch-wide per-pixel mean (weighted by
+    ``per_pixel_loss_weight``, densely annotated images dominate) with a per-image mean (weighted by
+    ``per_image_loss_weight``, sparsely annotated images are not down-weighted).
     """
 
     def __init__(
         self,
         reduction: str = "none",
         concept_value2id: dict[str, dict[str, int]] | None = None,
-        damping_denominator: float = 0.0,
+        per_pixel_loss_weight: float = 0.0,
+        per_image_loss_weight: float = 1.0,
         taxonomic_label_smoothing: float = 0.01,
         **kwargs: Any,
     ) -> None:
         super().__init__(reduction=reduction, **kwargs)
         self.concept_value2id = concept_value2id
-        self.damping_denominator = damping_denominator
+        self.per_pixel_loss_weight = per_pixel_loss_weight
+        self.per_image_loss_weight = per_image_loss_weight
         self.taxonomic_label_smoothing = taxonomic_label_smoothing
 
     def _slice_loss(
@@ -128,14 +151,16 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
                 self,
                 from_logits=True,
                 foreground_mask=foreground_mask,
-                damping_denominator=self.damping_denominator,
+                per_pixel_loss_weight=self.per_pixel_loss_weight,
+                per_image_loss_weight=self.per_image_loss_weight,
             )
         return calculate_taxonomic_rank_loss(
             concept_outputs,
             concept_labels,
             from_logits=True,
             foreground_mask=foreground_mask,
-            damping_denominator=self.damping_denominator,
+            per_pixel_loss_weight=self.per_pixel_loss_weight,
+            per_image_loss_weight=self.per_image_loss_weight,
             label_smoothing=self.taxonomic_label_smoothing,
         )
 
@@ -163,7 +188,8 @@ class BCEWithLogitsLoss(torch.nn.BCEWithLogitsLoss):
                 self,
                 from_logits=True,
                 foreground_mask=foreground_mask,
-                damping_denominator=self.damping_denominator,
+                per_pixel_loss_weight=self.per_pixel_loss_weight,
+                per_image_loss_weight=self.per_image_loss_weight,
             )
             return total_loss, {"concepts": total_loss.item()}
 
@@ -196,6 +222,11 @@ class ConceptBottleneckLoss(torch.nn.Module):
         ignore_index (int): Specifies a target value that is ignored and does not contribute to the input gradient
             for the classification loss. Defaults to -1.
         lambda_weight (float): The weight applied to the concept loss when computing the total loss. Defaults to 1.0.
+        per_pixel_loss_weight (float): Weight on the batch-wide per-pixel mean of the loss, where all
+            valid pixels are averaged equally (densely annotated images dominate). Defaults to 0.0.
+        per_image_loss_weight (float): Weight on the per-image mean of the loss, where each image is
+            first averaged over its valid pixels and then images are averaged equally (sparsely
+            annotated images are not down-weighted). Defaults to 1.0.
         kwargs: Additional keyword arguments that are passed to the classification loss.
     """
 
@@ -205,7 +236,8 @@ class ConceptBottleneckLoss(torch.nn.Module):
         class_loss: torch.nn.Module = torch.nn.CrossEntropyLoss,
         ignore_index: int = 0,
         lambda_weight: float = 1.0,
-        damping_denominator: float = 0.0,
+        per_pixel_loss_weight: float = 0.0,
+        per_image_loss_weight: float = 1.0,
         taxonomic_label_smoothing: float = 0.01,
         **kwargs: Any,
     ) -> None:
@@ -214,7 +246,8 @@ class ConceptBottleneckLoss(torch.nn.Module):
         self.ignore_index = ignore_index
         self.lambda_weight = lambda_weight
         self.concept_value2id = concept_value2id
-        self.damping_denominator = damping_denominator
+        self.per_pixel_loss_weight = per_pixel_loss_weight
+        self.per_image_loss_weight = per_image_loss_weight
         self.taxonomic_label_smoothing = taxonomic_label_smoothing
 
     def forward(
@@ -245,7 +278,8 @@ class ConceptBottleneckLoss(torch.nn.Module):
             weight=getattr(self.class_loss, "weight", None),
             ignore_index=self.ignore_index,
             label_smoothing=getattr(self.class_loss, "label_smoothing", 0.0),
-            damping_denominator=self.damping_denominator,
+            per_pixel_loss_weight=self.per_pixel_loss_weight,
+            per_image_loss_weight=self.per_image_loss_weight,
         )
 
         loss_components: dict[str, float] = {"classification": class_loss_value.item()}
@@ -261,14 +295,16 @@ class ConceptBottleneckLoss(torch.nn.Module):
                     outputs_slice,
                     labels_slice,
                     from_logits=True,
-                    damping_denominator=self.damping_denominator,
+                    per_pixel_loss_weight=self.per_pixel_loss_weight,
+                    per_image_loss_weight=self.per_image_loss_weight,
                 )
             else:
                 slice_loss = calculate_taxonomic_rank_loss(
                     outputs_slice,
                     labels_slice,
                     from_logits=True,
-                    damping_denominator=self.damping_denominator,
+                    per_pixel_loss_weight=self.per_pixel_loss_weight,
+                    per_image_loss_weight=self.per_image_loss_weight,
                     label_smoothing=self.taxonomic_label_smoothing,
                 ) / len(TAXONOMIC_CONCEPTS)
             loss_components[name] = slice_loss.item()

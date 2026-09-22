@@ -206,6 +206,26 @@ class Logger:
     addition to or instead of MLflow (``enable_mlflow``).
     """
 
+    @staticmethod
+    def _resolve_backend_flag(name, explicit, logger_cfg, default):
+        """Resolve a backend enable flag from an explicit arg or config.
+
+        Priority: explicit constructor arg (deprecated) > config.logger.<name> >
+        ``default``.
+        """
+        if explicit is not None:
+            warnings.warn(
+                f"{name} is deprecated as a Logger argument; "
+                f"set config.logger.{name} instead.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            return bool(explicit)
+        cfg_val = getattr(logger_cfg, name, None) if logger_cfg is not None else None
+        if cfg_val is None:
+            return default
+        return bool(cfg_val)
+
     def __init__(
         self,
         config,
@@ -213,8 +233,8 @@ class Logger:
         log_epochs=5,
         log_checkpoint=50,
         checkpoint_dir=".",
-        enable_mlflow=True,
-        enable_wandb=False,
+        enable_mlflow=None,
+        enable_wandb=None,
         id2label=None,
         id2concept=None,
         save_local_checkpoints=None,
@@ -227,7 +247,6 @@ class Logger:
             raise ValueError("log_checkpoint must be > 0")
         self.checkpoint_dir = checkpoint_dir
         self.run_name = meta_model.run_name
-        self.enable_mlflow = enable_mlflow
         self.mlflow_run_id = None
         self.enabled = False
         self._wandb_logger = None
@@ -235,6 +254,18 @@ class Logger:
         self.id2concept = id2concept
         logger_cfg = getattr(config, "logger", None)
         experiment_name = getattr(logger_cfg, "experiment_name", None)
+
+        # Backend selection is config-driven (config.logger.enable_mlflow /
+        # enable_wandb). The constructor args are retained for backward
+        # compatibility but deprecated; when passed explicitly they win and
+        # emit a DeprecationWarning.
+        enable_mlflow = self._resolve_backend_flag(
+            "enable_mlflow", enable_mlflow, logger_cfg, default=True
+        )
+        enable_wandb = self._resolve_backend_flag(
+            "enable_wandb", enable_wandb, logger_cfg, default=False
+        )
+        self.enable_mlflow = enable_mlflow
         self._log_system_metrics = getattr(logger_cfg, "system_metrics", True)
         # Keep MLflow system metrics sampling explicit and stable across environments.
         self._system_metrics_interval = getattr(logger_cfg, "system_metrics_sampling_interval", 10)
@@ -508,37 +539,42 @@ class Logger:
         """Log the joint :class:`SourceLabelRegistry` artifacts to MLflow.
 
         Saves ``global_id2source``, ``target_id2label``, ``source_to_target`` and (when present)
-        ``concept_id2name`` so MLflow runs are self-describing.
+        ``concept_id2name`` so runs are self-describing. Dispatches to whichever
+        backend(s) are active (MLflow and/or wandb).
         """
-        if not self._ensure_active_run():
+        if not self._mlflow_active and self._wandb_logger is None:
             return
         try:
-            mlflow.log_dict(
+            self.log_dict(
                 {str(k): list(v) for k, v in registry.global_id2source.items()},
                 "metadata/global_id2source.json",
             )
-            mlflow.log_dict(
+            self.log_dict(
                 {str(k): v for k, v in registry.target_id2label.items()},
                 "metadata/target_id2label.json",
             )
-            mlflow.log_dict(
+            self.log_dict(
                 {str(k): v for k, v in registry.dataset_offsets.items()},
                 "metadata/dataset_offsets.json",
             )
             source_to_target = registry.source_to_target.detach().cpu().tolist()
-            mlflow.log_dict(
+            self.log_dict(
                 {str(i): int(v) for i, v in enumerate(source_to_target)},
                 "metadata/source_to_target.json",
             )
             if registry.concept_id2name:
-                mlflow.log_dict(
+                self.log_dict(
                     {str(k): v for k, v in registry.concept_id2name.items()},
                     "metadata/concept_id2name.json",
                 )
-            mlflow.log_param("num_target_classes", int(registry.num_target_classes))
-            mlflow.log_param("num_global_source_classes", int(registry.num_global_source_classes))
+            self.log_params(
+                {
+                    "num_target_classes": int(registry.num_target_classes),
+                    "num_global_source_classes": int(registry.num_global_source_classes),
+                }
+            )
         except Exception as e:
-            logger.warning("Failed to log SourceLabelRegistry to MLflow: %s", e)
+            logger.warning("Failed to log SourceLabelRegistry: %s", e)
 
     def log_dataset_statistics(
         self,
@@ -749,6 +785,58 @@ class Logger:
 
         if self._wandb_logger is not None:
             self._wandb_logger.log(metrics_to_log, step=step)
+
+    def log_params(self, params: dict) -> None:
+        """Log flat scalar params to whichever backend(s) are active."""
+        if not params:
+            return
+        if self._ensure_active_run():
+            try:
+                mlflow.log_params(params)
+            except Exception as e:
+                logger.warning("Failed to log params to MLflow: %s", e)
+        if self._wandb_logger is not None:
+            self._wandb_logger.log_params(params)
+
+    def log_param(self, key: str, value: Any) -> None:
+        """Log a single scalar param to whichever backend(s) are active."""
+        self.log_params({key: value})
+
+    def log_dict(self, data: dict, artifact_path: str) -> None:
+        """Log a JSON-serializable dict as an artifact to active backend(s).
+
+        ``artifact_path`` mirrors MLflow's ``mlflow.log_dict`` path (e.g.
+        ``"metadata/concept_id2name.json"``); for wandb the basename (without
+        the ``.json`` suffix) becomes the artifact name.
+        """
+        if self._ensure_active_run():
+            try:
+                mlflow.log_dict(data, artifact_path)
+            except Exception as e:
+                logger.warning("Failed to log dict %s to MLflow: %s", artifact_path, e)
+        if self._wandb_logger is not None:
+            name = os.path.splitext(os.path.basename(artifact_path))[0]
+            self._wandb_logger._log_json_artifact(name, data, artifact_type="metadata")
+
+    @property
+    def run_url(self) -> str | None:
+        """Best-effort clickable URL for the active run (wandb preferred)."""
+        if self._wandb_logger is not None and self._wandb_logger.wandb_run is not None:
+            try:
+                return self._wandb_logger.wandb_run.url
+            except Exception:
+                return None
+        if self._mlflow_active and self.mlflow_run_id is not None:
+            try:
+                uri = mlflow.get_tracking_uri()
+                run = mlflow.get_run(self.mlflow_run_id)
+                exp_id = run.info.experiment_id
+                if uri.startswith(("http://", "https://")):
+                    return f"{uri.rstrip('/')}/#/experiments/{exp_id}/runs/{self.mlflow_run_id}"
+                return uri
+            except Exception:
+                return None
+        return None
 
     def save_model_checkpoint(
         self,

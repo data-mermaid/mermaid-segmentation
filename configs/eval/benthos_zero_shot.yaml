@@ -1,0 +1,39 @@
+# Zero-shot benthic segmentation spec for the Benthos (Yuval et al.) orthomosaics.
+#
+# Each entry maps a set of concept channels (an expression over the model's
+# concept probabilities, in [0, 1]) to a final segmentation class and lists the
+# Benthos ground-truth class name(s) that correspond to it. When several concept
+# channels are combined the expression uses the concept DSL
+# (mermaidseg.model.concept_expr): "*" multiplies channel probabilities, "+"/"-"
+# add/subtract (clamped to [0, 1]), numeric literals are constants, and
+# "rank:value" is shorthand for the "rank__value" channel.
+#
+# GT class names are matched case-insensitively against the Benthos classes.json
+# names (Algae, Calcareous Algae, Coral, Other, Rock, Sand, Soft Coral, Sponge).
+# "unlabeled" and any GT name not listed here are ignored, as are nodata pixels
+# (RGB == 0, the transparent orthomosaic border).
+classes:
+  - name: Hard Coral
+    expr: "class__hexacorallia * live"
+    gt: [Coral]
+  - name: Soft Coral
+    expr: "class__octocorallia * live"
+    gt: [Soft Coral]
+  - name: Sand
+    expr: "sand"
+    gt: [Sand]
+  - name: Rock
+    expr: "hard_substrate"
+    gt: [Rock]
+  - name: Sponge
+    expr: "phylum__porifera"
+    gt: [Sponge]
+  - name: Other
+    expr: "anthropogenic"
+    gt: [Other]
+  - name: Algae
+    expr: "algae * (1 - calcifying)"
+    gt: [Algae]
+  - name: Calcareous Algae
+    expr: "calcifying * algae"
+    gt: [Calcareous Algae]

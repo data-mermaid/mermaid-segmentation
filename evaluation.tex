@@ -1,0 +1,311 @@
+% evaluation.tex -- methodology section fragment.
+% Intended to be \input into a paper that already loads amsmath (and, for the
+% one external URL, hyperref or url). No preamble, no result tables.
+
+\section{Evaluation}
+\label{sec:evaluation}
+
+We evaluate the concept-bottleneck model on four scenarios that probe
+complementary capabilities: sparse point-annotation agreement on two
+photo-quadrat benchmarks (CoralNet validation and Pacific Labeled Corals), dense
+zero-shot benthic segmentation of orthomosaics (Benthos), and the linear
+separability of the learned representation (CoralscapesV2 linear probe). All four
+are driven by a single reproducible entry point,
+\texttt{scripts/evaluate.py}, which loads one checkpoint and runs any subset of
+the evaluations at the source (native) resolution of each dataset. This section
+specifies the shared inference protocol, the ground-truth label mapping, the
+metric definitions, and each scenario precisely enough to reproduce the
+pipeline.
+
+\subsection{Shared inference protocol}
+\label{sec:eval-protocol}
+
+\paragraph{Model.}
+Unless stated otherwise the model is the concept-bottleneck segmenter
+\texttt{ConceptBottleneckDPTLoRADINOv3}
+(\texttt{configs/model\_config\_cbm\_dpt\_lora\_vitl.yaml}). A frozen DINOv3
+ViT-L/16 backbone with LoRA adapters ($r=16$, $\alpha=32$, dropout $0.05$, applied
+to the attention $q,k,v,o$ projections) feeds a DPT head that reassembles four
+intermediate token blocks into a multi-scale pyramid and produces a
+$256$-dimensional dense feature map. This feature map is bilinearly upsampled to
+the model input resolution and passed through a $1{\times}1$ convolution (the
+concept projection) that yields $K=704$ concept logits per pixel. The concept
+logits are activated group-wise: for each of the six taxonomic ranks
+(\texttt{kingdom}, \texttt{phylum}, \texttt{class}, \texttt{order},
+\texttt{family}, \texttt{genus}; $6,16,28,74,176,367$ channels respectively,
+$667$ channels in total) a softmax is taken over that rank's channel group, and a
+sigmoid is applied independently to the remaining $37$ binary channels ($24$
+morphology, $2$ health, $11$ non-coral).\footnote{%
+\texttt{mermaidseg/model/models.py}, method \texttt{concept\_outputs\_activation}.}
+The activated concept map (all values in $[0,1]$) is the model's bottleneck; a
+final $1{\times}1$ convolution (the class head) maps it to $C=79$ MERMAID class
+logits, where class id $0$ denotes \emph{ignore}/background ($78$ foreground
+classes). The evaluation reads two quantities from a forward pass: the
+per-pixel class probabilities $\mathrm{softmax}$ over the class logits, and the
+activated concept map.\footnote{%
+\texttt{mermaidseg/evaluation/predictor.py}, \texttt{CBMPredictor.forward\_probs}.}
+
+\paragraph{Preprocessing.}
+Each source image is resized (anisotropically) to the model input size
+$512\times512$ and normalised with ImageNet statistics
+($\mu=(0.485,0.456,0.406)$, $\sigma=(0.229,0.224,0.225)$); this reproduces the
+validation transform used during training. No test-time augmentation, cropping,
+or tiling of the network input is applied. The encoder optionally runs under
+\texttt{bfloat16} autocast; all reported quantities (probabilities, features)
+are cast to \texttt{float32} before scoring.\footnote{%
+\texttt{make\_eval\_transform} and \texttt{CBMPredictor} in
+\texttt{predictor.py}.}
+
+\paragraph{Source-resolution scoring.}
+All metrics are computed at each dataset's native resolution rather than at the
+$512\times512$ network resolution, so that resizing never discards or invents
+ground-truth structure. Concretely, a prediction map defined on the
+$512\times512$ grid is bilinearly upsampled (\texttt{align\_corners=False}) to the
+source resolution $H\times W$. For the point-annotation scenarios this upsample
+is evaluated \emph{exactly} at the annotated pixels via \texttt{grid\_sample},
+using the pixel-centre convention
+\begin{equation}
+x = \frac{c+0.5}{W}\cdot 2 - 1,
+\qquad
+y = \frac{r+0.5}{H}\cdot 2 - 1,
+\label{eq:gridsample}
+\end{equation}
+for an annotation at source row $r$ and column $c$; this is identical to
+bilinearly upsampling the full map to $H\times W$ and indexing $[\,r,c\,]$, but
+avoids materialising the full-resolution map.\footnote{%
+\texttt{CBMPredictor.sample\_at\_points} / \texttt{upsample\_scores}.} For the
+dense scenarios the per-class score maps are upsampled to $H\times W$ and then
+argmaxed.
+
+\paragraph{Data access.}
+CoralNet, Pacific Labeled Corals, and Benthos are read from an S3 mirror through
+a local cache configured from the data config
+(\texttt{setup\_local\_cache}); CoralscapesV2 is read either from the
+HuggingFace dataset \texttt{josauder/coralscapesV2} or from a local
+Cityscapes-style mirror.
+
+\subsection{Mapping source labels to model outputs}
+\label{sec:eval-mapping}
+
+The benchmarks use heterogeneous label vocabularies, so both the class ground
+truth and the concept ground truth are derived from each source label by
+deterministic lookups that reproduce the training-time semantics.\footnote{%
+\texttt{mermaidseg/evaluation/gt\_mapping.py}.}
+
+\paragraph{Class ground truth.}
+Each source label name is first mapped to a MERMAID benthic-attribute name via a
+per-source map (a static JSON file
+\texttt{configs/coralnet\_to\_mermaid\_mapping\_temporary.json} for CoralNet; a
+static in-code dictionary for Pacific Labeled Corals). The attribute name is then
+\emph{rolled up} through the MERMAID benthic-attribute parent hierarchy
+(fetched from \texttt{https://api.datamermaid.org/v1/benthicattributes/} and
+cached to \texttt{benthic\_hierarchy.json}) until it lands on a name present in
+the model's frozen class vocabulary \texttt{id2label}; if no ancestor is in the
+vocabulary the point maps to class $0$ and is ignored for class metrics. This
+matches training with \texttt{label\_roll\_up=True}
+(\texttt{registry.roll\_up\_label}).
+
+\paragraph{Concept ground truth.}
+Each source label is mapped to a length-$K$ concept row aligned to the model's
+concept channel order, read from \texttt{configs/class\_to\_concepts.csv} for the
+matching \texttt{(source\_dataset\_source, source\_label\_class\_name)} pair
+(first row wins on duplicates; labels absent from the CSV map to an all-zero row
+that is ignored everywhere). Each channel takes a value in
+$\{0,1,2\}$ with the interpretation
+\emph{$0$ = not given}, \emph{$1$ = inactive / False}, \emph{$2$ = active /
+True}. For a taxonomic rank, a \texttt{not\_given}/empty cell sets the whole rank
+to $0$; otherwise the channel matching the cell value is set to $2$ (active) and
+the sibling channels of that rank to $1$ (inactive). For a binary concept, cells
+\texttt{true}/\texttt{false} give $2$/$1$ and anything else gives $0$.\footnote{%
+\texttt{build\_class\_lookup}, \texttt{build\_concept\_lookup},
+\texttt{\_encode\_concept\_row} in \texttt{gt\_mapping.py}.}
+
+\subsection{Metrics}
+\label{sec:eval-metrics}
+
+All accumulators are additive integer count tensors, so a \emph{pooled} (micro)
+aggregate is the element-wise sum of the per-unit accumulators, while a
+\emph{macro} aggregate is the unweighted mean of the per-unit scalar metrics.\footnote{%
+\texttt{mermaidseg/evaluation/metrics.py}.}
+
+\paragraph{Class accuracy and mIoU.}
+From a confusion matrix $M$ (rows = ground truth, columns = prediction) built
+over the evaluated points/pixels, with ground-truth class $0$ excluded and
+predictions clipped into range,
+\begin{equation}
+\mathrm{acc} = \frac{\sum_c M_{cc}}{\sum_{c,c'} M_{cc'}},
+\qquad
+\mathrm{IoU}_c = \frac{M_{cc}}{\sum_{c'} M_{cc'} + \sum_{c'} M_{c'c} - M_{cc}} .
+\end{equation}
+The mean IoU is the average of $\mathrm{IoU}_c$ over the evaluated classes whose
+union is non-zero, excluding the ignore class.\footnote{\texttt{ClassConfusion}.}
+
+\paragraph{Taxonomic rank accuracy.}
+For a rank $\rho$ with concept channel set $S_\rho$, a point is \emph{given} at
+rank $\rho$ if some channel in $S_\rho$ has ground-truth value $2$; the
+ground-truth class is that channel, and the prediction is
+$\arg\max_{i\in S_\rho}$ of the model's activated concept probabilities. We
+report \texttt{acc\_all} over all given points and \texttt{acc\_living} over the
+subset whose ground-truth channel is not the rank's \texttt{$\rho$\_\_none}
+channel.\footnote{\texttt{TaxonomicRankAccuracy}.}
+
+\paragraph{Binary concept accuracy and F1.}
+A binary concept is scored only where its ground truth is given (value in
+$\{1,2\}$); the prediction is $p>0.5$ on the sigmoid-activated probability, and
+\texttt{True} ($=2$) is the positive class. Per concept,
+$\mathrm{acc}=(\mathrm{TP}+\mathrm{TN})/(\mathrm{TP}+\mathrm{FP}+\mathrm{FN}+\mathrm{TN})$
+and $\mathrm{F1}=2\,\mathrm{TP}/(2\,\mathrm{TP}+\mathrm{FP}+\mathrm{FN})$. The
+reported macro accuracy averages over concepts with at least one scored point,
+and the macro F1 averages over concepts with $2\,\mathrm{TP}+\mathrm{FP}+\mathrm{FN}>0$.\footnote{\texttt{BinaryConceptStats}.}
+
+\paragraph{Aggregation across units.}
+The two point-annotation scenarios partition their images into \emph{units}
+(defined per scenario below), compute the metrics above per unit, and report
+both the pooled (micro, summed counts) and macro (mean of per-unit scalars)
+aggregates.\footnote{\texttt{run\_point\_evaluation} in
+\texttt{point\_datasets.py}.}
+
+\subsection{Scenario 1: CoralNet validation}
+\label{sec:eval-coralnet}
+
+The validation split is a fixed whitelist of $21$ CoralNet sources
+(\texttt{data\_config\_512.yaml}: source ids
+\texttt{1645, 1776, 1783, 3058, 3466, 3573, 4614, 4721, 5155, 5181, 5444, 5847,
+6537, 6699, 6700, 6721, 6834, 6838, 6918, 6926, 6968}), disjoint from the $42$
+training sources; the entire annotated content of each whitelisted source is
+used (no additional per-image sub-sampling). Only \emph{Confirmed} point
+annotations are retained (filtered during data ingestion), and annotation
+coordinates are expressed in the stored image space (longest edge clamped to
+$2048$\,px), which the source-resolution sampling of
+Eq.~\eqref{eq:gridsample} respects. The evaluation unit is the CoralNet
+\texttt{source\_id}; we report per-source and pooled/macro class accuracy and
+mIoU, per-rank taxonomic accuracy, and binary-concept macro accuracy/F1.\footnote{%
+\texttt{mermaidseg/evaluation/coralnet\_eval.py}.}
+
+\subsection{Scenario 2: Pacific Labeled Corals}
+\label{sec:eval-pacific}
+
+The Pacific Labeled Corals benchmark comprises three sites --- \texttt{heron\_reef},
+\texttt{line\_islands}, and \texttt{nanwan\_bay} --- across the \texttt{reference} and
+\texttt{evaluation} subsets. This dataset is never used for training
+(\texttt{train: None}), so it is a fully held-out benchmark. Each point's source
+label is taken from the primary annotator column \texttt{host}, falling back to
+the \texttt{archived} annotation where \texttt{host} is missing, and points with
+no label after fallback are dropped. Annotation \texttt{row}/\texttt{col} are the
+native pixel coordinates supplied with the dataset. The evaluation unit is the
+site, and the reported metrics are identical to
+Scenario~1.\footnote{\texttt{mermaidseg/evaluation/pacific\_eval.py}.}
+
+\subsection{Scenario 3: Benthos zero-shot benthic segmentation}
+\label{sec:eval-benthos}
+
+The Benthos benchmark evaluates dense, zero-shot benthic segmentation on two
+orthomosaics: \texttt{RS24} (Red Sea, $11070\times11786$\,px) and
+\texttt{CR\_DoubleWreck} (Caribbean, $24192\times3982$\,px). Each mosaic is cut
+into non-overlapping $2048\times2048$ tiles in row-major order (edge tiles may be
+smaller; no padding); each tile is processed independently through the shared
+protocol of Section~\ref{sec:eval-protocol}.
+
+Because the model does not output the Benthos label taxonomy directly, the
+$8$ target classes are defined \emph{zero-shot} as per-pixel expressions over the
+activated concept probabilities, via an editable specification
+(\texttt{configs/eval/benthos\_zero\_shot.yaml}):
+\begin{itemize}
+\item Hard Coral $=$ \texttt{class\_\_hexacorallia * live};
+\item Soft Coral $=$ \texttt{class\_\_octocorallia * live};
+\item Sand $=$ \texttt{sand};
+\item Rock $=$ \texttt{hard\_substrate};
+\item Sponge $=$ \texttt{phylum\_\_porifera};
+\item Other $=$ \texttt{anthropogenic};
+\item Algae $=$ \texttt{algae * (1 - calcifying)};
+\item Calcareous Algae $=$ \texttt{calcifying * algae}.
+\end{itemize}
+Expressions are parsed by a small per-pixel DSL in which \texttt{*}, \texttt{+},
+and \texttt{-} multiply, add, and subtract concept probability maps with the
+result clamped to $[0,1]$, numeric literals are constant maps, and
+\texttt{rank:value} is shorthand for the \texttt{rank\_\_value} channel.\footnote{%
+\texttt{mermaidseg/model/concept\_expr.py}; the driver is
+\texttt{mermaidseg/evaluation/benthos\_eval.py}.} The specification is validated
+against the checkpoint at run time: every concept atom it references (here
+including \texttt{calcifying}, \texttt{algae}, \texttt{live},
+\texttt{class\_\_hexacorallia}, \texttt{class\_\_octocorallia},
+\texttt{phylum\_\_porifera}, \texttt{sand}, \texttt{hard\_substrate},
+\texttt{anthropogenic}) must be present in the model's concept vocabulary, so the
+spec must be matched to the checkpoint being evaluated.
+
+For each tile, the eight expression maps are evaluated on the concept
+probabilities, bilinearly upsampled to the tile's source resolution, and
+argmaxed to a dense prediction. Nodata pixels (the transparent orthomosaic
+border, RGB $=0$) and pixels whose ground-truth class is \texttt{unlabeled} or
+not listed in the spec are excluded. We report pixel accuracy, per-class IoU,
+and mIoU over the eight-way confusion matrix (which has no separate ignore
+class), per site and pooled across sites.
+
+\subsection{Scenario 4: CoralscapesV2 linear probe}
+\label{sec:eval-coralscapes}
+
+The final scenario measures the linear separability of the learned
+representation on CoralscapesV2, a dense benthic-segmentation dataset with $95$
+foreground classes (native label $0$ is background/ignore) at
+$1024\times2048$\,px.\footnote{%
+\texttt{mermaidseg/evaluation/coralscapes\_probe.py}; probe set built by
+\texttt{scripts/build\_coralscapes\_v2\_probe\_points.py}.}
+
+\paragraph{Fixed probe set.}
+To make the probe reproducible and comparable across models, the training pixels
+used to fit the probe are pinned in
+\texttt{configs/eval/coralscapes\_v2\_probe\_points.json}: $428$ points over $80$
+training images, targeting $5$ points per class for all $95$ classes. The probe
+images are chosen by a greedy set cover of class presence, topped up so each
+class appears in up to five chosen images; within each class, up to five probe
+pixels are taken from distinct $8$-connected components (minimum component size
+$4$\,px), each pixel placed at the interior point that maximises the component's
+Euclidean distance transform so it survives the model's roughly $4\times$ feature
+downsampling. Probe images are located either by file stem in a local mirror or
+by ground-truth label MD5 in the HuggingFace dataset.
+
+\paragraph{Probe fitting and dense evaluation.}
+For each requested feature kind, per-pixel features are sampled at the pinned
+source-resolution points via the exact \texttt{grid\_sample} of
+Eq.~\eqref{eq:gridsample}. The three feature kinds are \texttt{concepts} (the
+$704$-d activated bottleneck, default), \texttt{dpt} (the $256$-d DPT features
+before the concept projection), and \texttt{backbone} (the raw DINOv3 patch
+tokens, bilinearly upsampled). A linear probe is fit on these features with a
+standardiser followed by a linear SVM
+(\texttt{StandardScaler} then \texttt{LinearSVC}, $C=1$,
+\texttt{max\_iter}=$20000$). For dense inference the standardiser is folded into
+the SVM's linear layer, giving effective weights
+$W_\mathrm{eff}=W/\sigma$ and bias
+$b_\mathrm{eff}=b - (\mu/\sigma)\,W^{\!\top}$, applied as a $1{\times}1$ linear map
+over the dense feature grid; the resulting class scores are bilinearly upsampled
+to $1024\times2048$ and argmaxed. We report the probe train accuracy and, on the
+full CoralscapesV2 test split, accuracy and mIoU over classes $1$--$95$ (label
+$0$ ignored).
+
+\subsection{Reproducing the evaluation}
+\label{sec:eval-repro}
+
+All four scenarios are produced by a single command; for example
+\begin{quote}\ttfamily
+uv run python scripts/evaluate.py {-}{-}checkpoint <ckpt> \\
+\quad {-}{-}model-config configs/model\_config\_cbm\_dpt\_lora\_vitl.yaml \\
+\quad {-}{-}data-config configs/data\_config\_512.yaml \\
+\quad {-}{-}output-dir <out> {-}{-}evals all {-}{-}batch-size 8 {-}{-}num-workers 16 {-}{-}amp
+\end{quote}
+The required assets are the model checkpoint and its config, the class vocabulary
+\texttt{demo/id2label.json}, the concept vocabulary
+\texttt{demo/concept\_id2name.json} (which must match the checkpoint's concept
+channels), the concept table \texttt{configs/class\_to\_concepts.csv}, the
+Benthos spec \texttt{configs/eval/benthos\_zero\_shot.yaml}, the CoralscapesV2
+probe set \texttt{configs/eval/coralscapes\_v2\_probe\_points.json}, and the data
+config that selects the validation whitelists. The run writes a top-level
+\texttt{summary.json}/\texttt{summary.md} and, per scenario, a
+\texttt{metrics.json} (plus \texttt{per\_unit.csv} for the point scenarios) that
+are flushed incrementally; the benthic hierarchy is cached to
+\texttt{benthic\_hierarchy.json} on first use. Debug limiters
+(\texttt{{-}{-}max-images-per-unit}, \texttt{{-}{-}max-tiles-per-site},
+\texttt{{-}{-}max-test-images}) restrict the workload for smoke tests but are not
+used for reported numbers. Given a fixed checkpoint and the pinned assets above,
+the pipeline is deterministic: preprocessing, sampling, and the folded linear
+probe involve no stochastic augmentation, and the SVM is fit on the fixed probe
+point set.

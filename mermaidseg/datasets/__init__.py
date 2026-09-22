@@ -14,6 +14,7 @@ from mermaidseg.datasets.catlin_seaview import CatlinSeaviewDataset
 from mermaidseg.datasets.coralnet import CoralNetDataset
 from mermaidseg.datasets.coralscapes import CoralscapesDataset
 from mermaidseg.datasets.coralscapes_v2 import CoralscapesV2Dataset
+from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
 from mermaidseg.datasets.local_cache import setup_local_cache
 from mermaidseg.datasets.mermaid import MermaidDataset
 from mermaidseg.datasets.moorea_labeled_corals import MooreaLabeledCoralsDataset
@@ -21,6 +22,7 @@ from mermaidseg.datasets.pacific_labeled_corals import PacificLabeledCoralsDatas
 from mermaidseg.datasets.ucsd_mosaics import UCSDMosaicsDataset
 
 __all__ = [
+    "DATASET_CLASSES",
     "BaseCoralDataset",
     "BenthosYuvalCoralsDataset",
     "CatlinSeaviewDataset",
@@ -31,6 +33,7 @@ __all__ = [
     "MooreaLabeledCoralsDataset",
     "PacificLabeledCoralsDataset",
     "UCSDMosaicsDataset",
+    "build_datasets",
     "make_worker_init_fn",
     "setup_local_cache",
     "worker_init_fn",

@@ -26,6 +26,15 @@ from PIL import Image, UnidentifiedImageError
 logger = logging.getLogger(__name__)
 
 _ENV_CACHE_DIR = "MERMAIDSEG_LOCAL_CACHE_DIR"
+_ENV_OFFLINE = "MERMAIDSEG_S3_OFFLINE"
+
+
+def _env_flag(name: str) -> bool:
+    """Return True when an environment variable is set to a truthy value."""
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
 class DataLoadError(Exception):
@@ -107,6 +116,7 @@ class LocalS3Cache:
         self._root: Path | None = None
         self._write_through = True
         self._enabled = False
+        self._offline = _env_flag(_ENV_OFFLINE)
         self._stats: CacheStatsHandles | None = None
         self._s3_client: Any | None = None
 
@@ -128,6 +138,7 @@ class LocalS3Cache:
         *,
         write_through: bool = True,
         stats: CacheStatsHandles | None = None,
+        offline: bool | None = None,
     ) -> LocalS3Cache:
         cache = cls.get()
         if root is None or (isinstance(root, str) and root.strip() in ("", "null", "None")):
@@ -137,6 +148,7 @@ class LocalS3Cache:
             cache._root = Path(root).expanduser().resolve()
             cache._enabled = True
         cache._write_through = write_through
+        cache._offline = _env_flag(_ENV_OFFLINE) if offline is None else offline
         if stats is not None:
             cache._stats = stats
         return cache
@@ -153,6 +165,11 @@ class LocalS3Cache:
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def offline(self) -> bool:
+        """When True, cache misses raise instead of contacting S3."""
+        return self._offline
 
     def attach_stats(self, stats: CacheStatsHandles) -> None:
         self._stats = stats
@@ -193,6 +210,14 @@ class LocalS3Cache:
         self._s3_client = client
 
     def _fetch_from_s3(self, bucket: str, key: str) -> bytes:
+        if self._offline:
+            expected = self.local_path(bucket, key) if self._root is not None else None
+            location = f"; expected at {expected}" if expected is not None else ""
+            raise DataLoadError(
+                f"cache miss for s3://{bucket}/{key} in offline mode "
+                f"(MERMAIDSEG_S3_OFFLINE set){location}; run scripts/prefetch_cache.py "
+                "to warm the local cache before running offline."
+            )
         s3 = self._get_s3_client()
         try:
             response = s3.get_object(Bucket=bucket, Key=key)
@@ -240,6 +265,12 @@ class LocalS3Cache:
                 return pd.read_parquet(local)
             data = self.read_bytes(bucket, key)
             return pd.read_parquet(io.BytesIO(data))
+        if self._offline:
+            raise DataLoadError(
+                f"cache miss for s3://{bucket}/{key} in offline mode "
+                "(MERMAIDSEG_S3_OFFLINE set) and local cache is disabled; "
+                "run scripts/prefetch_cache.py to warm the local cache."
+            )
         return pd.read_parquet(f"s3://{bucket}/{key}")
 
     def read_parquet_ref(self, ref: str, default_bucket: str) -> pd.DataFrame:
@@ -291,9 +322,19 @@ def setup_local_cache(
     if isinstance(data_cfg, dict):
         write_through = data_cfg.get("local_cache_write_through", write_through)
 
-    LocalS3Cache.configure(root, write_through=write_through, stats=stats)
+    cache = LocalS3Cache.configure(root, write_through=write_through, stats=stats)
     if root:
         resolved = str(Path(str(root)).expanduser().resolve())
         os.environ[_ENV_CACHE_DIR] = resolved
-        logger.info("Local S3 cache enabled at %s (write_through=%s)", resolved, write_through)
+        logger.info(
+            "Local S3 cache enabled at %s (write_through=%s, offline=%s)",
+            resolved,
+            write_through,
+            cache.offline,
+        )
+    if cache.offline:
+        logger.info(
+            "MERMAIDSEG_S3_OFFLINE set: cache misses will raise instead of "
+            "contacting S3."
+        )
     return stats

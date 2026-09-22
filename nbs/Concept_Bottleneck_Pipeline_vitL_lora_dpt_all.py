@@ -1,12 +1,8 @@
 import copy
 import json
-import os
-import re
-import urllib.parse
 
-import mlflow
 import torch
-from nb_setup import check_aws_session, check_env, check_mlflow_version
+from nb_setup import check_env_wandb
 from torch.utils.data import ConcatDataset, DataLoader
 
 from mermaidseg.dataset_reconciliation import (
@@ -16,14 +12,7 @@ from mermaidseg.dataset_reconciliation import (
     prepare_splits_for_registry,
 )
 from mermaidseg.datasets import (
-    BenthosYuvalCoralsDataset,
-    CatlinSeaviewDataset,
-    CoralNetDataset,
-    CoralscapesV2Dataset,
-    MermaidDataset,
-    MooreaLabeledCoralsDataset,
-    PacificLabeledCoralsDataset,
-    UCSDMosaicsDataset,
+    build_datasets,
     make_worker_init_fn,
     setup_local_cache,
 )
@@ -36,7 +25,7 @@ from mermaidseg.model.train import train_model
 
 # ViT-L encoder adapted with LoRA + a DPT segmentation head (concept-bottleneck variant).
 VITL_ENCODER_NAME = "facebook/dinov3-vitl16-pretrain-lvd1689m"
-CHECKPOINT = "model_checkpoints/mermaid_base_run_dinov3_lora_dpt_all/model_epoch34" # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch13"
+CHECKPOINT = None#"model_checkpoints/mermaid_base_run_dinov3_lora_dpt_all/model_epoch34" # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch13"
 
 
 def load_training_checkpoint(
@@ -61,14 +50,11 @@ def load_training_checkpoint(
 
 
 # -- 0. Environment --------------------------------------------------------
-if not os.getenv("MLFLOW_TRACKING_URI"):
-    os.environ["MLFLOW_TRACKING_URI"] = (
-        "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-3546X3USYJNZ"
-    )
-
-check_env()
-check_aws_session()
-check_mlflow_version()
+# wandb-backed, AWS-free run: data is served from the pre-warmed local cache
+# (see scripts/prefetch_cache.py) and metrics go to wandb. No MLflow / SageMaker
+# / AWS SSO is required. Set MERMAIDSEG_S3_OFFLINE=1 to fail loudly on any cache
+# miss instead of silently falling back to S3.
+check_env_wandb()
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 for i in range(torch.cuda.device_count()):
@@ -98,10 +84,7 @@ cfg = update_config_with_args(cfg, args)
 # so the value is unambiguous and gets logged below.
 cfg.model.encoder_name = VITL_ENCODER_NAME
 
-# Hyperparameters for this run
-cfg.training.iterations_per_train_epoch = 4000
-cfg.training.iterations_per_val_epoch = 400  # None => use full val set (len(val_loader))
-cfg.training.batch_size = 25
+# Iterations / batch_size / epochs are set in configs/training_config_cbm.yaml.
 
 # Set experiment on the config the Logger actually reads.
 cfg_logger = copy.deepcopy(cfg)
@@ -110,33 +93,9 @@ cfg_logger.logger.experiment_name = "mermaid"
 # -- 2. Datasets -----------------------------------------------------------
 cache_stats = setup_local_cache(cfg.data)
 
-DATASET_CLASSES = {
-    "pacific_labeled_corals": PacificLabeledCoralsDataset,
-    "moorea_labeled_corals": MooreaLabeledCoralsDataset,
-    "catlin_seaview": CatlinSeaviewDataset,
-    "mermaid": MermaidDataset,
-    "coralnet": CoralNetDataset,
-    "coralscapes_v2": CoralscapesV2Dataset,
-    "benthos_yuval": BenthosYuvalCoralsDataset,
-    "ucsd_mosaics": UCSDMosaicsDataset,
-}
-
-# coralscapes_v2 / ucsd_mosaics use a different signature (no `padding`)
-def _build(name, split_cfg):
-    cls = DATASET_CLASSES[name]
-    if name in ("coralscapes_v2", "ucsd_mosaics"):
-        return cls(**split_cfg)
-    return cls(**split_cfg, padding=cfg.training.padding)
-
-dataset_dict: dict[tuple[str, str], object] = {}
-for name in DATASET_CLASSES:
-    for split, split_cfg in cfg.data[name].items():
-        # data_config.yaml uses literal `None` which PyYAML reads as the
-        # string "None"; treat both as "skip this split".
-        if split_cfg is None or split_cfg == "None":
-            continue
-        dataset_dict[(name, split)] = _build(name, split_cfg)
-        print(f"{name:>24s} - {split:<5s}: {len(dataset_dict[(name, split)]):>7d} samples")
+# Shared build loop (also used by scripts/prefetch_cache.py) so the training job
+# and the cache-prefetch job always agree on which source objects are needed.
+dataset_dict = build_datasets(cfg.data, padding=cfg.training.padding)
 
 loader_kwargs = {
     "batch_size": cfg.training.batch_size,
@@ -212,59 +171,39 @@ evaluator = Evaluator(
     calculate_concept_metrics=cfg.training.training_mode != "standard",
     concept_value2id=registry.concept_value2id,
 )
-# -- 4. Build a clickable URL ---------------------------------------------
-def mlflow_run_url(tracking_uri: str, experiment_id: str, run_id: str) -> str:
-    """Best-effort clickable link for a run.
-
-    - http(s) tracking server: real deep link into the MLflow UI.
-    - SageMaker MLflow App ARN: link to the SageMaker console page for the
-      app; the actual MLflow UI is opened from there inside Studio.
-    - local file store: just the file path.
-    """
-    if tracking_uri.startswith(("http://", "https://")):
-        return f"{tracking_uri.rstrip('/')}/#/experiments/{experiment_id}/runs/{run_id}"
-
-    m = re.match(r"arn:aws:sagemaker:([^:]+):\d+:mlflow-app/(.+)$", tracking_uri)
-    if m:
-        region, app_id = m.group(1), m.group(2)
-        return (
-            f"https://{region}.console.aws.amazon.com/sagemaker/home"
-            f"?region={region}#/mlflow/{app_id}"
-            f"  (then open run_id={run_id}, experiment_id={experiment_id})"
-        )
-    return f"file://{urllib.parse.quote(tracking_uri)}/#/experiments/{experiment_id}/runs/{run_id}"
-
 # -- 5. Train (run lifecycle managed by `with`) ---------------------------
+# Backend selection is config-driven (configs/logger_config.yaml sets
+# enable_mlflow: false, enable_wandb: true).
 with Logger(
     config=cfg_logger,
     meta_model=meta_model,
     log_epochs=cfg_logger.logger.get("log_epochs", 1),
     log_checkpoint=1,
     checkpoint_dir=".",
-    enable_mlflow=True,
     id2label={0: "ignore", **registry.target_id2label},
     save_local_checkpoints=True,
 ) as run_logger:
-    run = mlflow.active_run()
-    assert run is not None, "MLflow run was not started — check MLFLOW_TRACKING_URI and warnings above"
-    if mlflow.active_run() is not None:
-        mlflow.log_dict(
-            {str(k): v for k, v in concept_id2name.items()},
-            "metadata/concept_id2name.json",
+    assert run_logger.enable_wandb, (
+        "wandb logging was not started — check WANDB_API_KEY and "
+        "config.logger.enable_wandb (see warnings above)"
+    )
+    run_logger.log_dict(
+        {str(k): v for k, v in concept_id2name.items()},
+        "metadata/concept_id2name.json",
+    )
+    run_logger.log_params(
+        {
+            "model/encoder_name": VITL_ENCODER_NAME,
+            "model/head": "dpt",
+            "model/adapter": "lora",
+        }
+    )
+    if CHECKPOINT:
+        run_logger.log_params(
+            {"init/checkpoint": CHECKPOINT, "init/start_epoch": start_epoch}
         )
-        mlflow.log_param("model/encoder_name", VITL_ENCODER_NAME)
-        mlflow.log_param("model/head", "dpt")
-        mlflow.log_param("model/adapter", "lora")
-        if CHECKPOINT:
-            mlflow.log_param("init/checkpoint", CHECKPOINT)
-            mlflow.log_param("init/start_epoch", start_epoch)
-    run_id = run.info.run_id
-    exp_id = run.info.experiment_id
-    tracking_uri = mlflow.get_tracking_uri()
-    print(f"\nMLflow run_id        : {run_id}")
-    print(f"MLflow experiment_id : {exp_id}")
-    print(f"MLflow tracking URI  : {tracking_uri}")
-    print(f"MLflow run URL       : {mlflow_run_url(tracking_uri, exp_id, run_id)}\n")
+    print(f"\nwandb run_id : {run_logger.wandb_run_id}")
+    print(f"wandb run URL: {run_logger.run_url}\n")
 
     # Reuse the logger helpers instead of hand-rolling concept extraction.
     run_logger.log_dataloader_params(train_loader, prefix="train_loader")
@@ -273,7 +212,7 @@ with Logger(
 
     train_size = sum(len(d) for d in train_datasets)
     val_size = sum(len(d) for d in val_datasets)
-    mlflow.log_params(
+    run_logger.log_params(
         {
             "data/train_size": train_size,
             "data/val_size": val_size,
@@ -295,6 +234,7 @@ with Logger(
         start_epoch=epoch,
         end_epoch=epoch + 1,
         metric_of_interest="accuracy",
+        train_log_interval=cfg.logger.get("train_log_interval", 1),
         )
         metrics_all.update(metrics)
         if cfg.training.iterations_per_train_epoch>1000:
@@ -307,4 +247,4 @@ with Logger(
     final_epoch = max(metrics)
     print("Final train metrics     :", metrics[final_epoch].get("train_metrics"))
     print("Final validation metrics:", metrics[final_epoch].get("validation_metrics"))
-    print(f"MLflow run URL       : {mlflow_run_url(tracking_uri, exp_id, run_id)}")
+    print(f"wandb run URL: {run_logger.run_url}")

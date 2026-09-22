@@ -7,23 +7,26 @@ training:
         type: ConceptBottleneckLoss
         lambda_weight: 1
         ignore_index: 0
-        damping_denominator: 100
+        per_pixel_loss_weight: 0.0
+        per_image_loss_weight: 1.0
     max_grad_norm: 0.5
-    epochs: 200
+    epochs: 100
     optimizer:
         type: AdamW
-        lr: 0.000005
+        lr: 0.00005          # fallback / default; also the DPT + concept/class head LR
         weight_decay: 0.01
+        lora_lr: 0.00001     # backbone LoRA adapter params
+        dpt_lr: 0.00005      # DPT head + concept_proj + concept_classifier
     scheduler:
         type: PolynomialLR
         power: 1
-        total_iters: 200
-        warmup_iters: 2000
+        total_iters: 100     # in EPOCHS (PolynomialLR steps once per epoch) => == epochs
+        warmup_iters: 4000   # in ITERATIONS; keep <= iterations_per_train_epoch
         warmup_start_factor: 0.01
     mixed_precision: true
     mixed_precision_dtype: bfloat16
-    iterations_per_train_epoch: 1000
-    iterations_per_val_epoch: 200
+    iterations_per_train_epoch: 4000
+    iterations_per_val_epoch: 400
     batch_size: 10
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',

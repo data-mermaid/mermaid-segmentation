@@ -281,6 +281,77 @@ class TestLoggerLog:
         mock_wandb_logger.log.assert_called_once_with({"loss": 0.3}, step=5)
 
 
+class TestBackendFlags:
+    """Backend enable flags are config-driven; explicit args are deprecated."""
+
+    def test_flags_read_from_config(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        config = make_config(logger={"enable_mlflow": False, "enable_wandb": False})
+        lgr = Logger(config=config, meta_model=fake_meta_model)
+        assert lgr.enable_mlflow is False
+        assert lgr.enabled is False
+        assert lgr.enable_wandb is False
+
+    def test_default_when_config_omits_flag(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        # make_config default omits enable_mlflow -> defaults to True (enabled).
+        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+        assert lgr.enable_mlflow is True
+
+    def test_explicit_mlflow_arg_deprecated(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        with pytest.deprecated_call(match="enable_mlflow is deprecated"):
+            Logger(config=make_config(), meta_model=fake_meta_model, enable_mlflow=True)
+
+    def test_explicit_wandb_arg_deprecated(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        with pytest.deprecated_call(match="enable_wandb is deprecated"):
+            Logger(config=make_config(), meta_model=fake_meta_model, enable_wandb=False)
+
+
+class TestBackendDispatch:
+    """log_params/log_dict/log_reconciliation reach wandb when MLflow is off."""
+
+    def _wandb_only_logger(self, make_config, fake_meta_model, monkeypatch):
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        config = make_config(logger={"enable_mlflow": False, "enable_wandb": False})
+        lgr = Logger(config=config, meta_model=fake_meta_model)
+        assert lgr._mlflow_active is False
+        lgr._wandb_logger = MagicMock(spec=WandbLogger)
+        return lgr
+
+    def test_log_params_dispatches_to_wandb(self, make_config, fake_meta_model, monkeypatch):
+        lgr = self._wandb_only_logger(make_config, fake_meta_model, monkeypatch)
+        lgr.log_params({"lr": 0.1, "bs": 4})
+        lgr._wandb_logger.log_params.assert_called_once_with({"lr": 0.1, "bs": 4})
+
+    def test_log_dict_dispatches_to_wandb(self, make_config, fake_meta_model, monkeypatch):
+        lgr = self._wandb_only_logger(make_config, fake_meta_model, monkeypatch)
+        lgr.log_dict({"0": "coral"}, "metadata/concept_id2name.json")
+        lgr._wandb_logger._log_json_artifact.assert_called_once()
+        args, _ = lgr._wandb_logger._log_json_artifact.call_args
+        assert args[0] == "concept_id2name"
+        assert args[1] == {"0": "coral"}
+
+    def test_log_reconciliation_dispatches_to_wandb(
+        self, make_config, fake_meta_model, monkeypatch
+    ):
+        lgr = self._wandb_only_logger(make_config, fake_meta_model, monkeypatch)
+        registry = MagicMock()
+        registry.global_id2source = {0: ("mermaid", "coral")}
+        registry.target_id2label = {1: "coral"}
+        registry.dataset_offsets = {"mermaid": 0}
+        registry.source_to_target = torch.tensor([0, 1], dtype=torch.long)
+        registry.concept_id2name = {0: "hard"}
+        registry.num_target_classes = 2
+        registry.num_global_source_classes = 2
+
+        lgr.log_reconciliation(registry)
+
+        artifact_names = {
+            call.args[0] for call in lgr._wandb_logger._log_json_artifact.call_args_list
+        }
+        assert "target_id2label" in artifact_names
+        assert "concept_id2name" in artifact_names
+        lgr._wandb_logger.log_params.assert_called_once()
+
+
 class TestLogDataset:
     """Test MLflow dataset input logging: single, combined, and graceful fallback."""
 

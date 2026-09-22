@@ -7,3 +7,5 @@ logger:
   system_metrics_sampling_interval: 10
   wandb_project: "mermaidseg"
   wandb_entity: null
+  # Log per-batch train losses to wandb every N iterations (1 = every batch).
+  train_log_interval: 1

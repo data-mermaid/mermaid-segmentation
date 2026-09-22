@@ -1,0 +1,3494 @@
+{
+  "dataset": "josauder/coralscapesV2",
+  "split": "train",
+  "num_classes": 95,
+  "points_per_class_target": 5,
+  "min_component_size": 4,
+  "source": "local_mirror:/Users/jonathan/mit/coralscapes_v2",
+  "id2label": {
+    "1": "acanthaster planci",
+    "2": "acropora alive",
+    "3": "acropora bleached",
+    "4": "acropora dead",
+    "5": "algae covered brain coral",
+    "6": "algae covered branching coral",
+    "7": "algae covered lobophylliidae",
+    "8": "algae covered massive coral",
+    "9": "algae covered pocillopora",
+    "10": "algae covered porites",
+    "11": "algae covered substrate",
+    "12": "algae covered table acropora",
+    "13": "anemone",
+    "14": "background",
+    "15": "brain coral alive",
+    "16": "brain coral bleached",
+    "17": "brain coral dead",
+    "18": "branching coral alive",
+    "19": "branching coral bleached",
+    "20": "branching coral dead",
+    "21": "cirrhipathes",
+    "22": "dark",
+    "23": "dead giant clam",
+    "24": "feather worm",
+    "25": "fish",
+    "26": "fungiidae alive",
+    "27": "fungiidae bleached",
+    "28": "fungiidae dead",
+    "29": "galaxea alive",
+    "30": "galaxea bleached",
+    "31": "galaxea dead",
+    "32": "giant clam",
+    "33": "goniopora alive",
+    "34": "goniopora dead",
+    "35": "hard coral alive",
+    "36": "hard coral bleached",
+    "37": "hard coral dead",
+    "38": "hard substrate",
+    "39": "human",
+    "40": "human-made structure",
+    "41": "leather coral alive",
+    "42": "lobophylliidae alive",
+    "43": "lobophylliidae bleached",
+    "44": "lobophylliidae dead",
+    "45": "massive alive",
+    "46": "massive bleached",
+    "47": "massive dead",
+    "48": "meandering coral alive",
+    "49": "meandering coral bleached",
+    "50": "meandering coral dead",
+    "51": "millepora",
+    "52": "millepora bleached",
+    "53": "millepora dead",
+    "54": "nephtheidae alive",
+    "55": "other animal",
+    "56": "other coral alive",
+    "57": "other coral bleached",
+    "58": "other coral dead",
+    "59": "pavona alive",
+    "60": "pavona bleached",
+    "61": "pavona dead",
+    "62": "pocillopora alive",
+    "63": "pocillopora bleached",
+    "64": "pocillopora dead",
+    "65": "porites alive",
+    "66": "porites bleached",
+    "67": "porites dead",
+    "68": "rubble",
+    "69": "sand",
+    "70": "sea cucumber",
+    "71": "sea urchin",
+    "72": "seagrass",
+    "73": "seriatopora alive",
+    "74": "seriatopora bleached",
+    "75": "seriatopora dead",
+    "76": "soft coral (malacalcyonacea) alive",
+    "77": "soft coral (malacalcyonacea) bleached",
+    "78": "sponge",
+    "79": "stylophora alive",
+    "80": "stylophora bleached",
+    "81": "stylophora dead",
+    "82": "table acropora alive",
+    "83": "table acropora bleached",
+    "84": "table acropora dead",
+    "85": "thin plate/encrusting coral alive",
+    "86": "thin plate/encrusting coral bleached",
+    "87": "thin plate/encrusting coral dead",
+    "88": "transect line",
+    "89": "transect tools",
+    "90": "trash",
+    "91": "turbinaria",
+    "92": "turbinaria dead",
+    "93": "water column",
+    "94": "water surface",
+    "95": "xeniidae alive"
+  },
+  "points_per_class": {
+    "1": 5,
+    "2": 5,
+    "3": 5,
+    "4": 5,
+    "5": 5,
+    "6": 5,
+    "7": 5,
+    "8": 5,
+    "9": 5,
+    "10": 5,
+    "11": 5,
+    "12": 5,
+    "13": 5,
+    "14": 5,
+    "15": 5,
+    "16": 5,
+    "17": 5,
+    "18": 5,
+    "19": 5,
+    "20": 5,
+    "21": 5,
+    "22": 5,
+    "23": 5,
+    "24": 5,
+    "25": 5,
+    "26": 5,
+    "27": 4,
+    "28": 5,
+    "29": 5,
+    "30": 5,
+    "31": 5,
+    "32": 5,
+    "33": 5,
+    "34": 5,
+    "35": 5,
+    "36": 5,
+    "37": 5,
+    "38": 5,
+    "39": 5,
+    "40": 4,
+    "41": 5,
+    "42": 5,
+    "43": 1,
+    "44": 5,
+    "45": 5,
+    "46": 5,
+    "47": 5,
+    "48": 4,
+    "49": 1,
+    "50": 1,
+    "51": 4,
+    "52": 1,
+    "53": 2,
+    "54": 5,
+    "55": 4,
+    "56": 5,
+    "57": 5,
+    "58": 1,
+    "59": 5,
+    "60": 2,
+    "61": 3,
+    "62": 5,
+    "63": 5,
+    "64": 5,
+    "65": 5,
+    "66": 5,
+    "67": 5,
+    "68": 5,
+    "69": 5,
+    "70": 5,
+    "71": 5,
+    "72": 5,
+    "73": 5,
+    "74": 1,
+    "75": 3,
+    "76": 5,
+    "77": 5,
+    "78": 5,
+    "79": 5,
+    "80": 5,
+    "81": 4,
+    "82": 5,
+    "83": 5,
+    "84": 5,
+    "85": 5,
+    "86": 5,
+    "87": 5,
+    "88": 5,
+    "89": 5,
+    "90": 1,
+    "91": 5,
+    "92": 5,
+    "93": 5,
+    "94": 2,
+    "95": 5
+  },
+  "num_images": 80,
+  "total_points": 428,
+  "images": [
+    {
+      "site": "site10",
+      "stem": "site10_000001_012400",
+      "label_md5": "e0e1becf47bbc09d8a5f3fe7f08a77bd",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 11,
+          "row": 718,
+          "col": 1115,
+          "component_size": 681409
+        },
+        {
+          "class_id": 13,
+          "row": 713,
+          "col": 724,
+          "component_size": 161769
+        }
+      ]
+    },
+    {
+      "site": "site10",
+      "stem": "site10_000014_008091",
+      "label_md5": "5ef45b25b205b9b744089346a2165a89",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 8,
+          "row": 732,
+          "col": 1184,
+          "component_size": 157803
+        },
+        {
+          "class_id": 22,
+          "row": 660,
+          "col": 1614,
+          "component_size": 208020
+        },
+        {
+          "class_id": 89,
+          "row": 624,
+          "col": 217,
+          "component_size": 8661
+        }
+      ]
+    },
+    {
+      "site": "site10",
+      "stem": "site10_000017_003480",
+      "label_md5": "b5d36e7b5970bba7d03589bc3bf7e741",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 8,
+          "row": 0,
+          "col": 1377,
+          "component_size": 91886
+        },
+        {
+          "class_id": 11,
+          "row": 745,
+          "col": 1661,
+          "component_size": 673918
+        },
+        {
+          "class_id": 23,
+          "row": 256,
+          "col": 723,
+          "component_size": 3008
+        },
+        {
+          "class_id": 32,
+          "row": 375,
+          "col": 642,
+          "component_size": 37224
+        }
+      ]
+    },
+    {
+      "site": "site10",
+      "stem": "site10_000018_003546",
+      "label_md5": "6485fe187256b8c91fc9db62a44b024f",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 8,
+          "row": 771,
+          "col": 1486,
+          "component_size": 427138
+        },
+        {
+          "class_id": 23,
+          "row": 1023,
+          "col": 473,
+          "component_size": 9985
+        },
+        {
+          "class_id": 32,
+          "row": 280,
+          "col": 760,
+          "component_size": 19792
+        }
+      ]
+    },
+    {
+      "site": "site10",
+      "stem": "site10_000052_002697",
+      "label_md5": "844879534eacb1bf35114903b542697c",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 9,
+          "row": 764,
+          "col": 1854,
+          "component_size": 234547
+        },
+        {
+          "class_id": 57,
+          "row": 770,
+          "col": 903,
+          "component_size": 12277
+        }
+      ]
+    },
+    {
+      "site": "site11",
+      "stem": "site11_000127_000006",
+      "label_md5": "10613c761c96822dd15ac9467dca22f0",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 26,
+          "row": 412,
+          "col": 1330,
+          "component_size": 39720
+        },
+        {
+          "class_id": 27,
+          "row": 356,
+          "col": 1000,
+          "component_size": 22744
+        },
+        {
+          "class_id": 28,
+          "row": 355,
+          "col": 1245,
+          "component_size": 3790
+        },
+        {
+          "class_id": 37,
+          "row": 160,
+          "col": 2047,
+          "component_size": 42821
+        },
+        {
+          "class_id": 38,
+          "row": 1023,
+          "col": 2047,
+          "component_size": 1046617
+        }
+      ]
+    },
+    {
+      "site": "site11",
+      "stem": "site11_000129_000181",
+      "label_md5": "f552df59d9a40c0c97015c39915ec396",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 5,
+          "row": 124,
+          "col": 1367,
+          "component_size": 17166
+        },
+        {
+          "class_id": 17,
+          "row": 0,
+          "col": 1261,
+          "component_size": 304144
+        },
+        {
+          "class_id": 38,
+          "row": 262,
+          "col": 2047,
+          "component_size": 565133
+        },
+        {
+          "class_id": 56,
+          "row": 50,
+          "col": 222,
+          "component_size": 6125
+        },
+        {
+          "class_id": 68,
+          "row": 809,
+          "col": 404,
+          "component_size": 191872
+        },
+        {
+          "class_id": 70,
+          "row": 263,
+          "col": 298,
+          "component_size": 17605
+        },
+        {
+          "class_id": 70,
+          "row": 587,
+          "col": 706,
+          "component_size": 15115
+        }
+      ]
+    },
+    {
+      "site": "site13",
+      "stem": "site13_000002_000134",
+      "label_md5": "0c629c5383ac281d0c0bc104962c0de9",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 9,
+          "row": 680,
+          "col": 1736,
+          "component_size": 156580
+        },
+        {
+          "class_id": 16,
+          "row": 192,
+          "col": 1720,
+          "component_size": 16619
+        },
+        {
+          "class_id": 18,
+          "row": 261,
+          "col": 1930,
+          "component_size": 41401
+        },
+        {
+          "class_id": 67,
+          "row": 839,
+          "col": 1845,
+          "component_size": 44646
+        },
+        {
+          "class_id": 95,
+          "row": 608,
+          "col": 0,
+          "component_size": 132095
+        }
+      ]
+    },
+    {
+      "site": "site13",
+      "stem": "site13_000007_000854",
+      "label_md5": "7af2fc980aff9ebb387700cb5d83c123",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 9,
+          "row": 334,
+          "col": 0,
+          "component_size": 398130
+        },
+        {
+          "class_id": 25,
+          "row": 184,
+          "col": 1945,
+          "component_size": 17383
+        },
+        {
+          "class_id": 66,
+          "row": 598,
+          "col": 1383,
+          "component_size": 29341
+        },
+        {
+          "class_id": 67,
+          "row": 397,
+          "col": 1279,
+          "component_size": 115674
+        },
+        {
+          "class_id": 81,
+          "row": 710,
+          "col": 939,
+          "component_size": 144291
+        }
+      ]
+    },
+    {
+      "site": "site13",
+      "stem": "site13_000009_001033",
+      "label_md5": "35e82cc41ae8299c8006b076d88decbe",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 6,
+          "row": 287,
+          "col": 849,
+          "component_size": 19517
+        },
+        {
+          "class_id": 9,
+          "row": 194,
+          "col": 1204,
+          "component_size": 9139
+        },
+        {
+          "class_id": 10,
+          "row": 599,
+          "col": 0,
+          "component_size": 137421
+        },
+        {
+          "class_id": 67,
+          "row": 460,
+          "col": 783,
+          "component_size": 127916
+        },
+        {
+          "class_id": 76,
+          "row": 492,
+          "col": 2047,
+          "component_size": 161119
+        },
+        {
+          "class_id": 79,
+          "row": 413,
+          "col": 1290,
+          "component_size": 79250
+        },
+        {
+          "class_id": 89,
+          "row": 322,
+          "col": 160,
+          "component_size": 6892
+        }
+      ]
+    },
+    {
+      "site": "site13",
+      "stem": "site13_000011_001213",
+      "label_md5": "36e23534c51ff50a1aa8878508f3a1ff",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 8,
+          "row": 663,
+          "col": 2047,
+          "component_size": 306780
+        },
+        {
+          "class_id": 10,
+          "row": 202,
+          "col": 1745,
+          "component_size": 131584
+        },
+        {
+          "class_id": 29,
+          "row": 530,
+          "col": 1451,
+          "component_size": 9376
+        },
+        {
+          "class_id": 31,
+          "row": 583,
+          "col": 1443,
+          "component_size": 813
+        },
+        {
+          "class_id": 64,
+          "row": 1023,
+          "col": 294,
+          "component_size": 13646
+        },
+        {
+          "class_id": 76,
+          "row": 690,
+          "col": 212,
+          "component_size": 87164
+        }
+      ]
+    },
+    {
+      "site": "site13",
+      "stem": "site13_000013_001483",
+      "label_md5": "32cce6c07570a6ace45e1578167c7382",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 8,
+          "row": 758,
+          "col": 1402,
+          "component_size": 76296
+        },
+        {
+          "class_id": 9,
+          "row": 506,
+          "col": 772,
+          "component_size": 502364
+        },
+        {
+          "class_id": 20,
+          "row": 556,
+          "col": 1458,
+          "component_size": 88947
+        },
+        {
+          "class_id": 66,
+          "row": 447,
+          "col": 0,
+          "component_size": 1472
+        },
+        {
+          "class_id": 95,
+          "row": 1023,
+          "col": 1366,
+          "component_size": 74867
+        }
+      ]
+    },
+    {
+      "site": "site13",
+      "stem": "site13_000029_013805",
+      "label_md5": "a63414f07a343d5f66c2afc653dbf339",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 1,
+          "row": 253,
+          "col": 393,
+          "component_size": 135705
+        },
+        {
+          "class_id": 38,
+          "row": 347,
+          "col": 1731,
+          "component_size": 635352
+        },
+        {
+          "class_id": 88,
+          "row": 1023,
+          "col": 221,
+          "component_size": 40681
+        },
+        {
+          "class_id": 95,
+          "row": 916,
+          "col": 0,
+          "component_size": 240188
+        }
+      ]
+    },
+    {
+      "site": "site14",
+      "stem": "site14_000002_007800",
+      "label_md5": "4081f45aa45d798df68966a8266a37a0",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 13,
+          "row": 609,
+          "col": 1211,
+          "component_size": 172758
+        },
+        {
+          "class_id": 21,
+          "row": 76,
+          "col": 0,
+          "component_size": 2196
+        },
+        {
+          "class_id": 25,
+          "row": 173,
+          "col": 1973,
+          "component_size": 13732
+        },
+        {
+          "class_id": 47,
+          "row": 445,
+          "col": 594,
+          "component_size": 29580
+        }
+      ]
+    },
+    {
+      "site": "site14",
+      "stem": "site14_000004_000200",
+      "label_md5": "4b05d5bd2a62113dae6139bb899141af",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 15,
+          "row": 518,
+          "col": 1730,
+          "component_size": 93894
+        },
+        {
+          "class_id": 17,
+          "row": 959,
+          "col": 1381,
+          "component_size": 100772
+        },
+        {
+          "class_id": 24,
+          "row": 822,
+          "col": 765,
+          "component_size": 21404
+        },
+        {
+          "class_id": 29,
+          "row": 103,
+          "col": 1861,
+          "component_size": 106598
+        },
+        {
+          "class_id": 31,
+          "row": 628,
+          "col": 1272,
+          "component_size": 115269
+        },
+        {
+          "class_id": 39,
+          "row": 728,
+          "col": 2047,
+          "component_size": 36972
+        },
+        {
+          "class_id": 89,
+          "row": 744,
+          "col": 1561,
+          "component_size": 7155
+        }
+      ]
+    },
+    {
+      "site": "site14",
+      "stem": "site14_000030_000163",
+      "label_md5": "86ca20a7967b0d7086741de206a5da24",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 1,
+          "row": 604,
+          "col": 975,
+          "component_size": 381271
+        },
+        {
+          "class_id": 32,
+          "row": 376,
+          "col": 1451,
+          "component_size": 11716
+        },
+        {
+          "class_id": 35,
+          "row": 282,
+          "col": 2047,
+          "component_size": 201572
+        },
+        {
+          "class_id": 45,
+          "row": 41,
+          "col": 0,
+          "component_size": 136853
+        },
+        {
+          "class_id": 85,
+          "row": 522,
+          "col": 336,
+          "component_size": 153559
+        }
+      ]
+    },
+    {
+      "site": "site14",
+      "stem": "site14_000031_000609",
+      "label_md5": "32291b795248d425d7e4b7fca218f1b0",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 1,
+          "row": 633,
+          "col": 666,
+          "component_size": 249899
+        },
+        {
+          "class_id": 45,
+          "row": 541,
+          "col": 0,
+          "component_size": 220832
+        },
+        {
+          "class_id": 82,
+          "row": 629,
+          "col": 1576,
+          "component_size": 992537
+        },
+        {
+          "class_id": 83,
+          "row": 0,
+          "col": 1591,
+          "component_size": 66199
+        },
+        {
+          "class_id": 84,
+          "row": 123,
+          "col": 1141,
+          "component_size": 96167
+        }
+      ]
+    },
+    {
+      "site": "site14",
+      "stem": "site14_000138_000185",
+      "label_md5": "598a94fc8e5af7d9bad32aaa56776724",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 5,
+          "row": 323,
+          "col": 867,
+          "component_size": 19554
+        },
+        {
+          "class_id": 15,
+          "row": 572,
+          "col": 1975,
+          "component_size": 76427
+        },
+        {
+          "class_id": 17,
+          "row": 306,
+          "col": 1222,
+          "component_size": 29483
+        },
+        {
+          "class_id": 38,
+          "row": 1023,
+          "col": 0,
+          "component_size": 561317
+        },
+        {
+          "class_id": 44,
+          "row": 689,
+          "col": 1229,
+          "component_size": 305817
+        },
+        {
+          "class_id": 64,
+          "row": 271,
+          "col": 1465,
+          "component_size": 34492
+        }
+      ]
+    },
+    {
+      "site": "site14",
+      "stem": "site14_000140_000171",
+      "label_md5": "4f8b016f176b3474b6754fb5b87132ab",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 32,
+          "row": 410,
+          "col": 813,
+          "component_size": 289376
+        },
+        {
+          "class_id": 38,
+          "row": 0,
+          "col": 1074,
+          "component_size": 958615
+        },
+        {
+          "class_id": 67,
+          "row": 0,
+          "col": 1731,
+          "component_size": 48116
+        }
+      ]
+    },
+    {
+      "site": "site14",
+      "stem": "site14_000146_000190",
+      "label_md5": "ece29749012f03585d175849572a57a7",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 13,
+          "row": 320,
+          "col": 856,
+          "component_size": 146099
+        },
+        {
+          "class_id": 46,
+          "row": 440,
+          "col": 308,
+          "component_size": 1961
+        },
+        {
+          "class_id": 56,
+          "row": 760,
+          "col": 626,
+          "component_size": 7168
+        },
+        {
+          "class_id": 67,
+          "row": 0,
+          "col": 1649,
+          "component_size": 286899
+        }
+      ]
+    },
+    {
+      "site": "site14",
+      "stem": "site14_000151_004986",
+      "label_md5": "f457d310744ce610973a07f391325e06",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 10,
+          "row": 806,
+          "col": 393,
+          "component_size": 8110
+        },
+        {
+          "class_id": 18,
+          "row": 1023,
+          "col": 2047,
+          "component_size": 54189
+        },
+        {
+          "class_id": 22,
+          "row": 309,
+          "col": 2047,
+          "component_size": 173739
+        },
+        {
+          "class_id": 24,
+          "row": 600,
+          "col": 1473,
+          "component_size": 16739
+        },
+        {
+          "class_id": 35,
+          "row": 1023,
+          "col": 0,
+          "component_size": 81642
+        },
+        {
+          "class_id": 56,
+          "row": 888,
+          "col": 1305,
+          "component_size": 17569
+        },
+        {
+          "class_id": 65,
+          "row": 776,
+          "col": 1019,
+          "component_size": 384079
+        },
+        {
+          "class_id": 71,
+          "row": 719,
+          "col": 1446,
+          "component_size": 6056
+        },
+        {
+          "class_id": 93,
+          "row": 0,
+          "col": 829,
+          "component_size": 484754
+        }
+      ]
+    },
+    {
+      "site": "site15",
+      "stem": "site15_000007_000404",
+      "label_md5": "2a8b9294b0515721d33e620f5e74b77c",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 50,
+          "row": 417,
+          "col": 611,
+          "component_size": 73634
+        },
+        {
+          "class_id": 58,
+          "row": 366,
+          "col": 844,
+          "component_size": 15317
+        },
+        {
+          "class_id": 62,
+          "row": 237,
+          "col": 2047,
+          "component_size": 642997
+        },
+        {
+          "class_id": 77,
+          "row": 499,
+          "col": 1198,
+          "component_size": 18256
+        },
+        {
+          "class_id": 95,
+          "row": 317,
+          "col": 349,
+          "component_size": 168441
+        }
+      ]
+    },
+    {
+      "site": "site15",
+      "stem": "site15_000025_002472",
+      "label_md5": "1fcffd935053213da7302aee3854eb7e",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 25,
+          "row": 608,
+          "col": 1976,
+          "component_size": 13900
+        },
+        {
+          "class_id": 27,
+          "row": 390,
+          "col": 1865,
+          "component_size": 268
+        },
+        {
+          "class_id": 76,
+          "row": 624,
+          "col": 1634,
+          "component_size": 202979
+        },
+        {
+          "class_id": 77,
+          "row": 101,
+          "col": 524,
+          "component_size": 152804
+        },
+        {
+          "class_id": 77,
+          "row": 486,
+          "col": 573,
+          "component_size": 44774
+        },
+        {
+          "class_id": 86,
+          "row": 1023,
+          "col": 1234,
+          "component_size": 905
+        }
+      ]
+    },
+    {
+      "site": "site15",
+      "stem": "site15_000033_017667",
+      "label_md5": "9260d92bec57ea3a384fffd74de2342c",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 42,
+          "row": 512,
+          "col": 1032,
+          "component_size": 74845
+        },
+        {
+          "class_id": 52,
+          "row": 327,
+          "col": 1703,
+          "component_size": 42037
+        },
+        {
+          "class_id": 53,
+          "row": 354,
+          "col": 1606,
+          "component_size": 367
+        },
+        {
+          "class_id": 76,
+          "row": 623,
+          "col": 2047,
+          "component_size": 123419
+        },
+        {
+          "class_id": 77,
+          "row": 779,
+          "col": 1023,
+          "component_size": 104031
+        },
+        {
+          "class_id": 77,
+          "row": 14,
+          "col": 1596,
+          "component_size": 31374
+        },
+        {
+          "class_id": 89,
+          "row": 555,
+          "col": 0,
+          "component_size": 5607
+        }
+      ]
+    },
+    {
+      "site": "site15",
+      "stem": "site15_000044_012690",
+      "label_md5": "646ff996a58d3a38c19db7a7ca5ad1f6",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 39,
+          "row": 1023,
+          "col": 0,
+          "component_size": 1496830
+        }
+      ]
+    },
+    {
+      "site": "site16",
+      "stem": "site16_000002_001400",
+      "label_md5": "a2d9b20f7a99212e544a57b921f50768",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 1,
+          "row": 592,
+          "col": 1649,
+          "component_size": 18276
+        },
+        {
+          "class_id": 5,
+          "row": 471,
+          "col": 1842,
+          "component_size": 3958
+        },
+        {
+          "class_id": 16,
+          "row": 600,
+          "col": 1454,
+          "component_size": 11978
+        },
+        {
+          "class_id": 19,
+          "row": 76,
+          "col": 1557,
+          "component_size": 12987
+        },
+        {
+          "class_id": 22,
+          "row": 425,
+          "col": 743,
+          "component_size": 166579
+        },
+        {
+          "class_id": 42,
+          "row": 0,
+          "col": 795,
+          "component_size": 280185
+        },
+        {
+          "class_id": 46,
+          "row": 792,
+          "col": 1365,
+          "component_size": 10889
+        },
+        {
+          "class_id": 47,
+          "row": 120,
+          "col": 1855,
+          "component_size": 59303
+        },
+        {
+          "class_id": 55,
+          "row": 709,
+          "col": 1597,
+          "component_size": 1476
+        }
+      ]
+    },
+    {
+      "site": "site16",
+      "stem": "site16_000008_008013",
+      "label_md5": "a19e59bf201b8324fd10c03671ffd68e",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 1,
+          "row": 302,
+          "col": 1392,
+          "component_size": 111096
+        },
+        {
+          "class_id": 36,
+          "row": 214,
+          "col": 1124,
+          "component_size": 4952
+        },
+        {
+          "class_id": 48,
+          "row": 789,
+          "col": 56,
+          "component_size": 16513
+        },
+        {
+          "class_id": 68,
+          "row": 183,
+          "col": 1804,
+          "component_size": 203506
+        },
+        {
+          "class_id": 71,
+          "row": 510,
+          "col": 684,
+          "component_size": 11387
+        }
+      ]
+    },
+    {
+      "site": "site17",
+      "stem": "site17_000024_007035",
+      "label_md5": "53e3da8d2ea70facc0c74152309639c8",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 21,
+          "row": 801,
+          "col": 1522,
+          "component_size": 6664
+        },
+        {
+          "class_id": 22,
+          "row": 523,
+          "col": 0,
+          "component_size": 213375
+        },
+        {
+          "class_id": 78,
+          "row": 391,
+          "col": 1113,
+          "component_size": 59863
+        },
+        {
+          "class_id": 84,
+          "row": 64,
+          "col": 0,
+          "component_size": 157700
+        },
+        {
+          "class_id": 88,
+          "row": 1023,
+          "col": 0,
+          "component_size": 29574
+        }
+      ]
+    },
+    {
+      "site": "site17",
+      "stem": "site17_000035_003109",
+      "label_md5": "794b79a6e6d674dcddaeb019583fc5d7",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 20,
+          "row": 741,
+          "col": 649,
+          "component_size": 156982
+        },
+        {
+          "class_id": 24,
+          "row": 832,
+          "col": 1284,
+          "component_size": 20093
+        },
+        {
+          "class_id": 45,
+          "row": 367,
+          "col": 2047,
+          "component_size": 790327
+        },
+        {
+          "class_id": 71,
+          "row": 231,
+          "col": 1182,
+          "component_size": 4032
+        },
+        {
+          "class_id": 88,
+          "row": 1022,
+          "col": 0,
+          "component_size": 31560
+        }
+      ]
+    },
+    {
+      "site": "site17",
+      "stem": "site17_000044_004857",
+      "label_md5": "11d4fd8a9de82f999561eaf69522839e",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 22,
+          "row": 539,
+          "col": 325,
+          "component_size": 189805
+        },
+        {
+          "class_id": 26,
+          "row": 403,
+          "col": 1793,
+          "component_size": 49708
+        },
+        {
+          "class_id": 28,
+          "row": 585,
+          "col": 1577,
+          "component_size": 4642
+        },
+        {
+          "class_id": 45,
+          "row": 539,
+          "col": 1954,
+          "component_size": 134276
+        }
+      ]
+    },
+    {
+      "site": "site19",
+      "stem": "site19_000053_000000",
+      "label_md5": "9584f9208668b0bccb69ac848c8d9bbf",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 39,
+          "row": 0,
+          "col": 1416,
+          "component_size": 1809395
+        },
+        {
+          "class_id": 56,
+          "row": 917,
+          "col": 1347,
+          "component_size": 16652
+        }
+      ]
+    },
+    {
+      "site": "site19",
+      "stem": "site19_000071_004495",
+      "label_md5": "d262ec02d1dbc4bed7357ad85599a1e4",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 29,
+          "row": 1023,
+          "col": 1803,
+          "component_size": 41007
+        },
+        {
+          "class_id": 30,
+          "row": 931,
+          "col": 1799,
+          "component_size": 1341
+        },
+        {
+          "class_id": 45,
+          "row": 537,
+          "col": 1576,
+          "component_size": 185535
+        },
+        {
+          "class_id": 47,
+          "row": 373,
+          "col": 1926,
+          "component_size": 24449
+        },
+        {
+          "class_id": 48,
+          "row": 999,
+          "col": 2047,
+          "component_size": 5816
+        },
+        {
+          "class_id": 48,
+          "row": 582,
+          "col": 907,
+          "component_size": 1659
+        },
+        {
+          "class_id": 73,
+          "row": 778,
+          "col": 1456,
+          "component_size": 49567
+        },
+        {
+          "class_id": 84,
+          "row": 736,
+          "col": 464,
+          "component_size": 72220
+        }
+      ]
+    },
+    {
+      "site": "site19",
+      "stem": "site19_000173_010300",
+      "label_md5": "861866d1dd4f81f9ba6c5aeb018922fe",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 14,
+          "row": 0,
+          "col": 734,
+          "component_size": 803608
+        },
+        {
+          "class_id": 21,
+          "row": 341,
+          "col": 394,
+          "component_size": 4724
+        },
+        {
+          "class_id": 93,
+          "row": 0,
+          "col": 1228,
+          "component_size": 261346
+        }
+      ]
+    },
+    {
+      "site": "site2",
+      "stem": "site2_000033_005799",
+      "label_md5": "4373fd94476336b219cf4ded4ddfbab0",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 14,
+          "row": 431,
+          "col": 0,
+          "component_size": 783929
+        },
+        {
+          "class_id": 48,
+          "row": 748,
+          "col": 1143,
+          "component_size": 1070
+        },
+        {
+          "class_id": 51,
+          "row": 428,
+          "col": 698,
+          "component_size": 29759
+        },
+        {
+          "class_id": 51,
+          "row": 933,
+          "col": 0,
+          "component_size": 26490
+        },
+        {
+          "class_id": 51,
+          "row": 622,
+          "col": 1060,
+          "component_size": 4327
+        },
+        {
+          "class_id": 51,
+          "row": 722,
+          "col": 905,
+          "component_size": 2768
+        },
+        {
+          "class_id": 53,
+          "row": 745,
+          "col": 1045,
+          "component_size": 39732
+        },
+        {
+          "class_id": 57,
+          "row": 586,
+          "col": 594,
+          "component_size": 1033
+        },
+        {
+          "class_id": 63,
+          "row": 484,
+          "col": 1323,
+          "component_size": 5056
+        }
+      ]
+    },
+    {
+      "site": "site2",
+      "stem": "site2_000047_019105",
+      "label_md5": "f1ccfdf188290f998bb45628455ab321",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 3,
+          "row": 480,
+          "col": 1247,
+          "component_size": 47388
+        },
+        {
+          "class_id": 10,
+          "row": 159,
+          "col": 687,
+          "component_size": 50112
+        },
+        {
+          "class_id": 62,
+          "row": 873,
+          "col": 1783,
+          "component_size": 266032
+        },
+        {
+          "class_id": 63,
+          "row": 1023,
+          "col": 995,
+          "component_size": 218294
+        },
+        {
+          "class_id": 85,
+          "row": 616,
+          "col": 963,
+          "component_size": 123764
+        },
+        {
+          "class_id": 88,
+          "row": 1023,
+          "col": 2024,
+          "component_size": 38026
+        }
+      ]
+    },
+    {
+      "site": "site20",
+      "stem": "site20_000021_000854",
+      "label_md5": "d32648da43eb9bae0c7ef407fe6fdaae",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 4,
+          "row": 446,
+          "col": 686,
+          "component_size": 99114
+        },
+        {
+          "class_id": 20,
+          "row": 467,
+          "col": 1589,
+          "component_size": 77391
+        },
+        {
+          "class_id": 35,
+          "row": 762,
+          "col": 261,
+          "component_size": 132370
+        },
+        {
+          "class_id": 44,
+          "row": 520,
+          "col": 953,
+          "component_size": 10669
+        },
+        {
+          "class_id": 46,
+          "row": 980,
+          "col": 1520,
+          "component_size": 8271
+        },
+        {
+          "class_id": 49,
+          "row": 1023,
+          "col": 1418,
+          "component_size": 1208
+        },
+        {
+          "class_id": 59,
+          "row": 910,
+          "col": 1658,
+          "component_size": 30405
+        }
+      ]
+    },
+    {
+      "site": "site20",
+      "stem": "site20_000022_000944",
+      "label_md5": "d9c5a02c87a65975bb586c0e76518d18",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 5,
+          "row": 442,
+          "col": 622,
+          "component_size": 40823
+        },
+        {
+          "class_id": 6,
+          "row": 780,
+          "col": 1286,
+          "component_size": 23411
+        },
+        {
+          "class_id": 12,
+          "row": 445,
+          "col": 1095,
+          "component_size": 125958
+        },
+        {
+          "class_id": 15,
+          "row": 511,
+          "col": 340,
+          "component_size": 38955
+        },
+        {
+          "class_id": 18,
+          "row": 710,
+          "col": 609,
+          "component_size": 47424
+        },
+        {
+          "class_id": 59,
+          "row": 1023,
+          "col": 1289,
+          "component_size": 33055
+        }
+      ]
+    },
+    {
+      "site": "site20",
+      "stem": "site20_000024_001753",
+      "label_md5": "9366ef4c27cc883cdd5fe87f78c247c4",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 2,
+          "row": 928,
+          "col": 1944,
+          "component_size": 65413
+        },
+        {
+          "class_id": 15,
+          "row": 854,
+          "col": 284,
+          "component_size": 106269
+        },
+        {
+          "class_id": 35,
+          "row": 822,
+          "col": 1470,
+          "component_size": 39516
+        },
+        {
+          "class_id": 59,
+          "row": 1014,
+          "col": 956,
+          "component_size": 178975
+        },
+        {
+          "class_id": 60,
+          "row": 1023,
+          "col": 1336,
+          "component_size": 12918
+        },
+        {
+          "class_id": 60,
+          "row": 700,
+          "col": 1144,
+          "component_size": 2935
+        },
+        {
+          "class_id": 64,
+          "row": 434,
+          "col": 2047,
+          "component_size": 49395
+        }
+      ]
+    },
+    {
+      "site": "site20",
+      "stem": "site20_000062_006293",
+      "label_md5": "91b3275a4139238c203fa9b052bd4186",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 2,
+          "row": 269,
+          "col": 1272,
+          "component_size": 219196
+        },
+        {
+          "class_id": 6,
+          "row": 609,
+          "col": 162,
+          "component_size": 148990
+        },
+        {
+          "class_id": 18,
+          "row": 347,
+          "col": 395,
+          "component_size": 28724
+        },
+        {
+          "class_id": 19,
+          "row": 491,
+          "col": 608,
+          "component_size": 2857
+        },
+        {
+          "class_id": 26,
+          "row": 849,
+          "col": 1158,
+          "component_size": 5233
+        },
+        {
+          "class_id": 29,
+          "row": 929,
+          "col": 708,
+          "component_size": 29260
+        },
+        {
+          "class_id": 78,
+          "row": 701,
+          "col": 1002,
+          "component_size": 78200
+        },
+        {
+          "class_id": 87,
+          "row": 898,
+          "col": 1469,
+          "component_size": 791
+        }
+      ]
+    },
+    {
+      "site": "site20",
+      "stem": "site20_000096_000101",
+      "label_md5": "c1ac9f2f2e545b3dfb3dfee79e1d5dfa",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 6,
+          "row": 961,
+          "col": 586,
+          "component_size": 55783
+        },
+        {
+          "class_id": 20,
+          "row": 1023,
+          "col": 94,
+          "component_size": 272082
+        },
+        {
+          "class_id": 26,
+          "row": 1001,
+          "col": 2047,
+          "component_size": 33108
+        },
+        {
+          "class_id": 55,
+          "row": 585,
+          "col": 786,
+          "component_size": 38665
+        },
+        {
+          "class_id": 59,
+          "row": 359,
+          "col": 489,
+          "component_size": 156669
+        },
+        {
+          "class_id": 78,
+          "row": 669,
+          "col": 1170,
+          "component_size": 37240
+        },
+        {
+          "class_id": 85,
+          "row": 55,
+          "col": 642,
+          "component_size": 134595
+        },
+        {
+          "class_id": 87,
+          "row": 136,
+          "col": 1541,
+          "component_size": 457
+        }
+      ]
+    },
+    {
+      "site": "site20",
+      "stem": "site20_000105_004675",
+      "label_md5": "7ab7726aceda10cc1388a93c9f04a5c3",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 7,
+          "row": 1023,
+          "col": 1948,
+          "component_size": 138876
+        },
+        {
+          "class_id": 7,
+          "row": 160,
+          "col": 1069,
+          "component_size": 43179
+        },
+        {
+          "class_id": 42,
+          "row": 189,
+          "col": 562,
+          "component_size": 288075
+        }
+      ]
+    },
+    {
+      "site": "site20",
+      "stem": "site20_000106_004748",
+      "label_md5": "767cb2f663888d5a1bb06591be58f719",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 7,
+          "row": 940,
+          "col": 963,
+          "component_size": 297893
+        },
+        {
+          "class_id": 7,
+          "row": 338,
+          "col": 720,
+          "component_size": 159910
+        },
+        {
+          "class_id": 7,
+          "row": 418,
+          "col": 541,
+          "component_size": 18322
+        },
+        {
+          "class_id": 25,
+          "row": 210,
+          "col": 1950,
+          "component_size": 13661
+        },
+        {
+          "class_id": 42,
+          "row": 0,
+          "col": 0,
+          "component_size": 486111
+        }
+      ]
+    },
+    {
+      "site": "site28",
+      "stem": "site28_000035_020488",
+      "label_md5": "46c66a881d5895bbf5a75da6cce41f5f",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 40,
+          "row": 749,
+          "col": 1240,
+          "component_size": 27934
+        },
+        {
+          "class_id": 40,
+          "row": 623,
+          "col": 489,
+          "component_size": 23707
+        },
+        {
+          "class_id": 40,
+          "row": 390,
+          "col": 1870,
+          "component_size": 6837
+        },
+        {
+          "class_id": 40,
+          "row": 541,
+          "col": 1892,
+          "component_size": 5134
+        },
+        {
+          "class_id": 69,
+          "row": 781,
+          "col": 633,
+          "component_size": 210335
+        },
+        {
+          "class_id": 72,
+          "row": 380,
+          "col": 0,
+          "component_size": 851787
+        },
+        {
+          "class_id": 72,
+          "row": 1023,
+          "col": 1907,
+          "component_size": 67309
+        },
+        {
+          "class_id": 72,
+          "row": 922,
+          "col": 0,
+          "component_size": 40699
+        },
+        {
+          "class_id": 72,
+          "row": 1023,
+          "col": 1059,
+          "component_size": 28747
+        },
+        {
+          "class_id": 72,
+          "row": 765,
+          "col": 1531,
+          "component_size": 10200
+        },
+        {
+          "class_id": 79,
+          "row": 779,
+          "col": 1364,
+          "component_size": 13472
+        },
+        {
+          "class_id": 90,
+          "row": 856,
+          "col": 1439,
+          "component_size": 5093
+        }
+      ]
+    },
+    {
+      "site": "site3",
+      "stem": "site3_000022_012902",
+      "label_md5": "cee42b4dcfc62dff9f50a3c0a5b3c385",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 15,
+          "row": 1023,
+          "col": 1049,
+          "component_size": 48410
+        },
+        {
+          "class_id": 16,
+          "row": 912,
+          "col": 1489,
+          "component_size": 43408
+        },
+        {
+          "class_id": 17,
+          "row": 438,
+          "col": 1153,
+          "component_size": 56302
+        },
+        {
+          "class_id": 55,
+          "row": 112,
+          "col": 706,
+          "component_size": 1045
+        },
+        {
+          "class_id": 57,
+          "row": 875,
+          "col": 390,
+          "component_size": 13708
+        },
+        {
+          "class_id": 84,
+          "row": 640,
+          "col": 740,
+          "component_size": 225857
+        }
+      ]
+    },
+    {
+      "site": "site3",
+      "stem": "site3_000023_012992",
+      "label_md5": "6a389dd1b27db12680541db919ea6151",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 16,
+          "row": 677,
+          "col": 0,
+          "component_size": 84967
+        },
+        {
+          "class_id": 25,
+          "row": 60,
+          "col": 1791,
+          "component_size": 18067
+        },
+        {
+          "class_id": 36,
+          "row": 253,
+          "col": 557,
+          "component_size": 40566
+        },
+        {
+          "class_id": 55,
+          "row": 954,
+          "col": 785,
+          "component_size": 1869
+        },
+        {
+          "class_id": 57,
+          "row": 178,
+          "col": 249,
+          "component_size": 3506
+        },
+        {
+          "class_id": 66,
+          "row": 842,
+          "col": 451,
+          "component_size": 43549
+        },
+        {
+          "class_id": 85,
+          "row": 681,
+          "col": 835,
+          "component_size": 155628
+        }
+      ]
+    },
+    {
+      "site": "site3",
+      "stem": "site3_000026_016048",
+      "label_md5": "541d70a7a5c97b68f751b685d414d5f2",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 10,
+          "row": 155,
+          "col": 708,
+          "component_size": 4049
+        },
+        {
+          "class_id": 16,
+          "row": 604,
+          "col": 459,
+          "component_size": 45128
+        },
+        {
+          "class_id": 43,
+          "row": 1023,
+          "col": 434,
+          "component_size": 284214
+        },
+        {
+          "class_id": 44,
+          "row": 819,
+          "col": 788,
+          "component_size": 6852
+        },
+        {
+          "class_id": 54,
+          "row": 649,
+          "col": 1477,
+          "component_size": 45707
+        },
+        {
+          "class_id": 54,
+          "row": 139,
+          "col": 1132,
+          "component_size": 19824
+        },
+        {
+          "class_id": 66,
+          "row": 681,
+          "col": 1097,
+          "component_size": 8747
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000137_000344",
+      "label_md5": "7623dedc07e08753ae4bc237daa3df91",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 4,
+          "row": 880,
+          "col": 1538,
+          "component_size": 6032
+        },
+        {
+          "class_id": 28,
+          "row": 917,
+          "col": 638,
+          "component_size": 5390
+        },
+        {
+          "class_id": 31,
+          "row": 619,
+          "col": 1873,
+          "component_size": 8917
+        },
+        {
+          "class_id": 87,
+          "row": 855,
+          "col": 1305,
+          "component_size": 3784
+        },
+        {
+          "class_id": 93,
+          "row": 0,
+          "col": 0,
+          "component_size": 366845
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000144_000070",
+      "label_md5": "e90c4d4348f39768001adb5a29fab0b5",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 5,
+          "row": 363,
+          "col": 677,
+          "component_size": 53892
+        },
+        {
+          "class_id": 17,
+          "row": 553,
+          "col": 987,
+          "component_size": 50159
+        },
+        {
+          "class_id": 31,
+          "row": 530,
+          "col": 1078,
+          "component_size": 1051
+        },
+        {
+          "class_id": 37,
+          "row": 517,
+          "col": 1445,
+          "component_size": 12245
+        },
+        {
+          "class_id": 44,
+          "row": 517,
+          "col": 1780,
+          "component_size": 3664
+        },
+        {
+          "class_id": 69,
+          "row": 676,
+          "col": 2047,
+          "component_size": 679076
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000148_000236",
+      "label_md5": "a696b2b5e12216d6a5c4627426bf4e9a",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 54,
+          "row": 812,
+          "col": 1686,
+          "component_size": 33833
+        },
+        {
+          "class_id": 73,
+          "row": 247,
+          "col": 429,
+          "component_size": 6589
+        },
+        {
+          "class_id": 74,
+          "row": 621,
+          "col": 992,
+          "component_size": 4701
+        },
+        {
+          "class_id": 75,
+          "row": 672,
+          "col": 986,
+          "component_size": 5097
+        },
+        {
+          "class_id": 75,
+          "row": 266,
+          "col": 504,
+          "component_size": 251
+        },
+        {
+          "class_id": 75,
+          "row": 270,
+          "col": 480,
+          "component_size": 156
+        },
+        {
+          "class_id": 76,
+          "row": 1023,
+          "col": 875,
+          "component_size": 492961
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000151_000284",
+      "label_md5": "7122ce90305388a42f308d7a5f4b36bc",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 21,
+          "row": 447,
+          "col": 573,
+          "component_size": 7265
+        },
+        {
+          "class_id": 41,
+          "row": 966,
+          "col": 1421,
+          "component_size": 4173
+        },
+        {
+          "class_id": 93,
+          "row": 479,
+          "col": 2047,
+          "component_size": 294967
+        },
+        {
+          "class_id": 94,
+          "row": 0,
+          "col": 1356,
+          "component_size": 469669
+        },
+        {
+          "class_id": 95,
+          "row": 1023,
+          "col": 431,
+          "component_size": 160391
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000163_000896",
+      "label_md5": "89e51162a3c86bdd525f42a202cd4a8c",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 11,
+          "row": 596,
+          "col": 918,
+          "component_size": 893993
+        },
+        {
+          "class_id": 29,
+          "row": 935,
+          "col": 155,
+          "component_size": 20845
+        },
+        {
+          "class_id": 30,
+          "row": 242,
+          "col": 210,
+          "component_size": 1912
+        },
+        {
+          "class_id": 46,
+          "row": 863,
+          "col": 510,
+          "component_size": 5799
+        },
+        {
+          "class_id": 57,
+          "row": 930,
+          "col": 1109,
+          "component_size": 1484
+        },
+        {
+          "class_id": 79,
+          "row": 590,
+          "col": 651,
+          "component_size": 23318
+        },
+        {
+          "class_id": 93,
+          "row": 0,
+          "col": 2047,
+          "component_size": 585446
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000164_000194",
+      "label_md5": "db4956b3c6793f282e1e8f87966848a1",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 6,
+          "row": 430,
+          "col": 711,
+          "component_size": 50301
+        },
+        {
+          "class_id": 19,
+          "row": 332,
+          "col": 1530,
+          "component_size": 1989
+        },
+        {
+          "class_id": 30,
+          "row": 512,
+          "col": 1069,
+          "component_size": 2114
+        },
+        {
+          "class_id": 30,
+          "row": 678,
+          "col": 630,
+          "component_size": 325
+        },
+        {
+          "class_id": 62,
+          "row": 1023,
+          "col": 2047,
+          "component_size": 125187
+        },
+        {
+          "class_id": 73,
+          "row": 484,
+          "col": 1464,
+          "component_size": 18932
+        },
+        {
+          "class_id": 73,
+          "row": 747,
+          "col": 0,
+          "component_size": 17777
+        },
+        {
+          "class_id": 80,
+          "row": 290,
+          "col": 891,
+          "component_size": 9617
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000171_000428",
+      "label_md5": "736e84285a121e87086e4dd4e6806cd8",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 19,
+          "row": 568,
+          "col": 767,
+          "component_size": 141587
+        },
+        {
+          "class_id": 73,
+          "row": 656,
+          "col": 975,
+          "component_size": 5888
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000175_000234",
+      "label_md5": "6d4d63a6e513dc5177b7fc2e4326bca9",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 3,
+          "row": 249,
+          "col": 591,
+          "component_size": 39051
+        },
+        {
+          "class_id": 36,
+          "row": 472,
+          "col": 262,
+          "component_size": 1139
+        },
+        {
+          "class_id": 37,
+          "row": 564,
+          "col": 666,
+          "component_size": 12124
+        },
+        {
+          "class_id": 46,
+          "row": 349,
+          "col": 1294,
+          "component_size": 2605
+        },
+        {
+          "class_id": 62,
+          "row": 1023,
+          "col": 585,
+          "component_size": 201736
+        },
+        {
+          "class_id": 63,
+          "row": 502,
+          "col": 928,
+          "component_size": 29352
+        },
+        {
+          "class_id": 64,
+          "row": 817,
+          "col": 1237,
+          "component_size": 206902
+        },
+        {
+          "class_id": 65,
+          "row": 553,
+          "col": 1774,
+          "component_size": 228724
+        },
+        {
+          "class_id": 80,
+          "row": 400,
+          "col": 1445,
+          "component_size": 185
+        },
+        {
+          "class_id": 81,
+          "row": 392,
+          "col": 1409,
+          "component_size": 4751
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000182_001888",
+      "label_md5": "7bc5810714a483992ca25094e5038eab",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 14,
+          "row": 0,
+          "col": 1615,
+          "component_size": 1042675
+        },
+        {
+          "class_id": 28,
+          "row": 990,
+          "col": 1222,
+          "component_size": 741
+        },
+        {
+          "class_id": 28,
+          "row": 1023,
+          "col": 1201,
+          "component_size": 266
+        },
+        {
+          "class_id": 41,
+          "row": 517,
+          "col": 456,
+          "component_size": 1365
+        },
+        {
+          "class_id": 54,
+          "row": 864,
+          "col": 1036,
+          "component_size": 113134
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000184_002720",
+      "label_md5": "d26383e456abd3c47e3ec9eb2e536ec7",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 30,
+          "row": 515,
+          "col": 202,
+          "component_size": 1650
+        },
+        {
+          "class_id": 31,
+          "row": 923,
+          "col": 1137,
+          "component_size": 940
+        },
+        {
+          "class_id": 54,
+          "row": 566,
+          "col": 384,
+          "component_size": 900
+        },
+        {
+          "class_id": 87,
+          "row": 929,
+          "col": 974,
+          "component_size": 652
+        },
+        {
+          "class_id": 94,
+          "row": 0,
+          "col": 464,
+          "component_size": 4705
+        }
+      ]
+    },
+    {
+      "site": "site30",
+      "stem": "site30_000188_000588",
+      "label_md5": "d4f14950849c1f919812029ac8d3add4",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 3,
+          "row": 655,
+          "col": 1564,
+          "component_size": 3139
+        },
+        {
+          "class_id": 14,
+          "row": 0,
+          "col": 0,
+          "component_size": 1148923
+        },
+        {
+          "class_id": 19,
+          "row": 743,
+          "col": 1756,
+          "component_size": 2279
+        },
+        {
+          "class_id": 23,
+          "row": 747,
+          "col": 1016,
+          "component_size": 1215
+        },
+        {
+          "class_id": 32,
+          "row": 516,
+          "col": 749,
+          "component_size": 392
+        },
+        {
+          "class_id": 41,
+          "row": 931,
+          "col": 718,
+          "component_size": 1190
+        },
+        {
+          "class_id": 63,
+          "row": 679,
+          "col": 780,
+          "component_size": 21684
+        },
+        {
+          "class_id": 83,
+          "row": 592,
+          "col": 1579,
+          "component_size": 16955
+        }
+      ]
+    },
+    {
+      "site": "site31",
+      "stem": "site31_000033_000047",
+      "label_md5": "3382aa36819733e0b4fad7be56d817b8",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 23,
+          "row": 256,
+          "col": 932,
+          "component_size": 65190
+        },
+        {
+          "class_id": 69,
+          "row": 847,
+          "col": 852,
+          "component_size": 255407
+        }
+      ]
+    },
+    {
+      "site": "site32",
+      "stem": "site32_000002_017000",
+      "label_md5": "4be75dd843bc65d29585156415bdb030",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 13,
+          "row": 505,
+          "col": 184,
+          "component_size": 225003
+        },
+        {
+          "class_id": 26,
+          "row": 435,
+          "col": 981,
+          "component_size": 10846
+        },
+        {
+          "class_id": 42,
+          "row": 799,
+          "col": 1987,
+          "component_size": 112570
+        },
+        {
+          "class_id": 44,
+          "row": 820,
+          "col": 1000,
+          "component_size": 49052
+        },
+        {
+          "class_id": 65,
+          "row": 345,
+          "col": 1396,
+          "component_size": 257059
+        },
+        {
+          "class_id": 85,
+          "row": 854,
+          "col": 603,
+          "component_size": 157568
+        },
+        {
+          "class_id": 87,
+          "row": 680,
+          "col": 606,
+          "component_size": 3244
+        }
+      ]
+    },
+    {
+      "site": "site32",
+      "stem": "site32_000020_018996",
+      "label_md5": "a1a38a04a358d1ccd121360c98281241",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 27,
+          "row": 681,
+          "col": 1088,
+          "component_size": 41470
+        },
+        {
+          "class_id": 37,
+          "row": 726,
+          "col": 0,
+          "component_size": 41119
+        },
+        {
+          "class_id": 47,
+          "row": 820,
+          "col": 1717,
+          "component_size": 24115
+        }
+      ]
+    },
+    {
+      "site": "site33",
+      "stem": "site33_000058_033600",
+      "label_md5": "af4f48a5e6ed9be1f74dd032c9467576",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 41,
+          "row": 449,
+          "col": 989,
+          "component_size": 2560
+        },
+        {
+          "class_id": 69,
+          "row": 1023,
+          "col": 1150,
+          "component_size": 851158
+        },
+        {
+          "class_id": 70,
+          "row": 873,
+          "col": 907,
+          "component_size": 10927
+        },
+        {
+          "class_id": 91,
+          "row": 950,
+          "col": 0,
+          "component_size": 17618
+        },
+        {
+          "class_id": 91,
+          "row": 708,
+          "col": 368,
+          "component_size": 6025
+        },
+        {
+          "class_id": 91,
+          "row": 450,
+          "col": 419,
+          "component_size": 3195
+        },
+        {
+          "class_id": 91,
+          "row": 479,
+          "col": 588,
+          "component_size": 2771
+        },
+        {
+          "class_id": 91,
+          "row": 558,
+          "col": 631,
+          "component_size": 2725
+        },
+        {
+          "class_id": 92,
+          "row": 749,
+          "col": 130,
+          "component_size": 207975
+        },
+        {
+          "class_id": 92,
+          "row": 472,
+          "col": 571,
+          "component_size": 105
+        },
+        {
+          "class_id": 92,
+          "row": 578,
+          "col": 263,
+          "component_size": 65
+        },
+        {
+          "class_id": 92,
+          "row": 560,
+          "col": 653,
+          "component_size": 32
+        },
+        {
+          "class_id": 92,
+          "row": 933,
+          "col": 112,
+          "component_size": 23
+        }
+      ]
+    },
+    {
+      "site": "site33",
+      "stem": "site33_000063_002567",
+      "label_md5": "071f2576b6c34b5768a913f40e321a47",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 18,
+          "row": 246,
+          "col": 1026,
+          "component_size": 46605
+        },
+        {
+          "class_id": 33,
+          "row": 773,
+          "col": 2047,
+          "component_size": 95651
+        },
+        {
+          "class_id": 34,
+          "row": 826,
+          "col": 1703,
+          "component_size": 23436
+        },
+        {
+          "class_id": 37,
+          "row": 341,
+          "col": 107,
+          "component_size": 50865
+        },
+        {
+          "class_id": 56,
+          "row": 222,
+          "col": 1510,
+          "component_size": 3406
+        },
+        {
+          "class_id": 88,
+          "row": 1000,
+          "col": 1331,
+          "component_size": 47934
+        }
+      ]
+    },
+    {
+      "site": "site35",
+      "stem": "site35_000020_015284",
+      "label_md5": "a7a23bef7227279f80411a25214f0eb3",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 11,
+          "row": 613,
+          "col": 822,
+          "component_size": 681508
+        },
+        {
+          "class_id": 24,
+          "row": 756,
+          "col": 1155,
+          "component_size": 13423
+        },
+        {
+          "class_id": 35,
+          "row": 816,
+          "col": 1853,
+          "component_size": 66245
+        },
+        {
+          "class_id": 78,
+          "row": 154,
+          "col": 1945,
+          "component_size": 18739
+        }
+      ]
+    },
+    {
+      "site": "site36",
+      "stem": "site36_000001_000097",
+      "label_md5": "7f15a98e0726a75f6d5cd999750e6d4c",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 2,
+          "row": 949,
+          "col": 458,
+          "component_size": 52996
+        },
+        {
+          "class_id": 4,
+          "row": 215,
+          "col": 1315,
+          "component_size": 14720
+        },
+        {
+          "class_id": 20,
+          "row": 342,
+          "col": 1983,
+          "component_size": 172871
+        },
+        {
+          "class_id": 24,
+          "row": 438,
+          "col": 1147,
+          "component_size": 17651
+        },
+        {
+          "class_id": 65,
+          "row": 617,
+          "col": 1007,
+          "component_size": 199323
+        },
+        {
+          "class_id": 69,
+          "row": 906,
+          "col": 1015,
+          "component_size": 428855
+        },
+        {
+          "class_id": 71,
+          "row": 536,
+          "col": 355,
+          "component_size": 16277
+        }
+      ]
+    },
+    {
+      "site": "site4",
+      "stem": "site4_000001_000200",
+      "label_md5": "f64710db53d581cdfed39924bf4ab1c7",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 13,
+          "row": 799,
+          "col": 1757,
+          "component_size": 217953
+        },
+        {
+          "class_id": 39,
+          "row": 411,
+          "col": 238,
+          "component_size": 607544
+        },
+        {
+          "class_id": 82,
+          "row": 1023,
+          "col": 488,
+          "component_size": 111738
+        }
+      ]
+    },
+    {
+      "site": "site4",
+      "stem": "site4_000004_000299",
+      "label_md5": "17ef00aedec934e85eda61651492563e",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 47,
+          "row": 333,
+          "col": 1404,
+          "component_size": 62124
+        },
+        {
+          "class_id": 59,
+          "row": 952,
+          "col": 506,
+          "component_size": 276824
+        },
+        {
+          "class_id": 61,
+          "row": 881,
+          "col": 2047,
+          "component_size": 412622
+        },
+        {
+          "class_id": 61,
+          "row": 678,
+          "col": 435,
+          "component_size": 20953
+        },
+        {
+          "class_id": 61,
+          "row": 519,
+          "col": 284,
+          "component_size": 5985
+        }
+      ]
+    },
+    {
+      "site": "site5",
+      "stem": "site5_000027_014036",
+      "label_md5": "276b48b126c20958a0cce642eb872611",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 23,
+          "row": 356,
+          "col": 1696,
+          "component_size": 44121
+        },
+        {
+          "class_id": 41,
+          "row": 804,
+          "col": 430,
+          "component_size": 53148
+        },
+        {
+          "class_id": 68,
+          "row": 485,
+          "col": 296,
+          "component_size": 207886
+        },
+        {
+          "class_id": 71,
+          "row": 75,
+          "col": 538,
+          "component_size": 11565
+        },
+        {
+          "class_id": 78,
+          "row": 836,
+          "col": 1469,
+          "component_size": 26412
+        }
+      ]
+    },
+    {
+      "site": "site5",
+      "stem": "site5_000041_005600",
+      "label_md5": "badd1346d6f1a984c0f643755733f888",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 21,
+          "row": 307,
+          "col": 1459,
+          "component_size": 1306
+        },
+        {
+          "class_id": 36,
+          "row": 227,
+          "col": 623,
+          "component_size": 29662
+        },
+        {
+          "class_id": 63,
+          "row": 640,
+          "col": 1709,
+          "component_size": 5092
+        },
+        {
+          "class_id": 64,
+          "row": 599,
+          "col": 2047,
+          "component_size": 94034
+        },
+        {
+          "class_id": 68,
+          "row": 332,
+          "col": 2047,
+          "component_size": 229168
+        },
+        {
+          "class_id": 70,
+          "row": 726,
+          "col": 1601,
+          "component_size": 14415
+        },
+        {
+          "class_id": 86,
+          "row": 980,
+          "col": 1801,
+          "component_size": 27253
+        },
+        {
+          "class_id": 86,
+          "row": 420,
+          "col": 606,
+          "component_size": 26957
+        },
+        {
+          "class_id": 86,
+          "row": 726,
+          "col": 1881,
+          "component_size": 9471
+        },
+        {
+          "class_id": 86,
+          "row": 830,
+          "col": 1955,
+          "component_size": 8698
+        }
+      ]
+    },
+    {
+      "site": "site7",
+      "stem": "site7_000003_010600",
+      "label_md5": "37b7329d0834226af3a714f07dac51da",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 12,
+          "row": 918,
+          "col": 508,
+          "component_size": 62431
+        },
+        {
+          "class_id": 66,
+          "row": 194,
+          "col": 1153,
+          "component_size": 4582
+        },
+        {
+          "class_id": 68,
+          "row": 703,
+          "col": 0,
+          "component_size": 269028
+        },
+        {
+          "class_id": 79,
+          "row": 250,
+          "col": 1336,
+          "component_size": 16542
+        },
+        {
+          "class_id": 80,
+          "row": 518,
+          "col": 1437,
+          "component_size": 60274
+        },
+        {
+          "class_id": 80,
+          "row": 303,
+          "col": 1287,
+          "component_size": 267
+        },
+        {
+          "class_id": 81,
+          "row": 654,
+          "col": 1623,
+          "component_size": 1570
+        },
+        {
+          "class_id": 81,
+          "row": 489,
+          "col": 1351,
+          "component_size": 406
+        },
+        {
+          "class_id": 83,
+          "row": 673,
+          "col": 537,
+          "component_size": 7778
+        },
+        {
+          "class_id": 89,
+          "row": 742,
+          "col": 992,
+          "component_size": 6814
+        }
+      ]
+    },
+    {
+      "site": "site7",
+      "stem": "site7_000022_007792",
+      "label_md5": "a6e28deb1d34f42dc509d09e9086ea8a",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 4,
+          "row": 436,
+          "col": 837,
+          "component_size": 326814
+        },
+        {
+          "class_id": 12,
+          "row": 589,
+          "col": 2047,
+          "component_size": 74200
+        },
+        {
+          "class_id": 62,
+          "row": 847,
+          "col": 626,
+          "component_size": 144825
+        },
+        {
+          "class_id": 82,
+          "row": 0,
+          "col": 0,
+          "component_size": 145767
+        }
+      ]
+    },
+    {
+      "site": "site7",
+      "stem": "site7_000054_003911",
+      "label_md5": "ade55530c7253952c8bab3112575c00d",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 12,
+          "row": 524,
+          "col": 1065,
+          "component_size": 985797
+        },
+        {
+          "class_id": 82,
+          "row": 207,
+          "col": 1927,
+          "component_size": 125919
+        },
+        {
+          "class_id": 83,
+          "row": 1022,
+          "col": 715,
+          "component_size": 284504
+        }
+      ]
+    },
+    {
+      "site": "site7",
+      "stem": "site7_000057_005979",
+      "label_md5": "35d5eb8656e4b92080a2560cc87cd73c",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 3,
+          "row": 1023,
+          "col": 1254,
+          "component_size": 9732
+        },
+        {
+          "class_id": 65,
+          "row": 849,
+          "col": 1744,
+          "component_size": 327406
+        },
+        {
+          "class_id": 79,
+          "row": 964,
+          "col": 732,
+          "component_size": 23493
+        },
+        {
+          "class_id": 80,
+          "row": 689,
+          "col": 956,
+          "component_size": 10371
+        },
+        {
+          "class_id": 82,
+          "row": 513,
+          "col": 119,
+          "component_size": 608797
+        },
+        {
+          "class_id": 83,
+          "row": 398,
+          "col": 837,
+          "component_size": 1936
+        }
+      ]
+    },
+    {
+      "site": "site7",
+      "stem": "site7_000062_007957",
+      "label_md5": "23976258721416a536e09dc4b8ee4a7c",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 2,
+          "row": 652,
+          "col": 234,
+          "component_size": 908332
+        },
+        {
+          "class_id": 3,
+          "row": 245,
+          "col": 1577,
+          "component_size": 425606
+        },
+        {
+          "class_id": 4,
+          "row": 945,
+          "col": 232,
+          "component_size": 38691
+        },
+        {
+          "class_id": 36,
+          "row": 0,
+          "col": 2033,
+          "component_size": 7185
+        }
+      ]
+    },
+    {
+      "site": "site7",
+      "stem": "site7_000072_018581",
+      "label_md5": "5c3236a3a60f9de4f9fecbf6fcc2ea87",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 2,
+          "row": 264,
+          "col": 2000,
+          "component_size": 87996
+        },
+        {
+          "class_id": 11,
+          "row": 793,
+          "col": 657,
+          "component_size": 1339482
+        },
+        {
+          "class_id": 27,
+          "row": 474,
+          "col": 1007,
+          "component_size": 4419
+        },
+        {
+          "class_id": 84,
+          "row": 747,
+          "col": 2047,
+          "component_size": 81928
+        }
+      ]
+    },
+    {
+      "site": "site7",
+      "stem": "site7_000153_019780",
+      "label_md5": "8544313c09c356f025747a4a56e1b43e",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 12,
+          "row": 402,
+          "col": 2005,
+          "component_size": 1164704
+        }
+      ]
+    },
+    {
+      "site": "site8",
+      "stem": "site8_000012_019825",
+      "label_md5": "1b10d4a9128b27dc1b0bd9d58a457915",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 39,
+          "row": 512,
+          "col": 1278,
+          "component_size": 1330473
+        }
+      ]
+    },
+    {
+      "site": "site9",
+      "stem": "site9_000017_002997",
+      "label_md5": "8d2f620a631f68e68b1ee60fc560cffa",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 33,
+          "row": 658,
+          "col": 1074,
+          "component_size": 620026
+        },
+        {
+          "class_id": 34,
+          "row": 877,
+          "col": 992,
+          "component_size": 4968
+        },
+        {
+          "class_id": 70,
+          "row": 593,
+          "col": 292,
+          "component_size": 6421
+        }
+      ]
+    },
+    {
+      "site": "site9",
+      "stem": "site9_000024_004195",
+      "label_md5": "e41d1759233bced0900f8aba531354ec",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 33,
+          "row": 0,
+          "col": 0,
+          "component_size": 1827577
+        },
+        {
+          "class_id": 34,
+          "row": 105,
+          "col": 1478,
+          "component_size": 65934
+        }
+      ]
+    },
+    {
+      "site": "site9",
+      "stem": "site9_000113_010339",
+      "label_md5": "0ef0399085eccf3918c3ebaa393d004e",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 14,
+          "row": 0,
+          "col": 2047,
+          "component_size": 853899
+        },
+        {
+          "class_id": 33,
+          "row": 1023,
+          "col": 1698,
+          "component_size": 752366
+        },
+        {
+          "class_id": 34,
+          "row": 684,
+          "col": 1048,
+          "component_size": 7611
+        }
+      ]
+    },
+    {
+      "site": "site9",
+      "stem": "site9_000245_004195",
+      "label_md5": "6c0c554e523a292f49eab99945a39c92",
+      "height": 1024,
+      "width": 2048,
+      "points": [
+        {
+          "class_id": 33,
+          "row": 1023,
+          "col": 1282,
+          "component_size": 287015
+        },
+        {
+          "class_id": 34,
+          "row": 0,
+          "col": 1132,
+          "component_size": 192985
+        }
+      ]
+    }
+  ]
+}

@@ -11,6 +11,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from mermaidseg.datasets.local_cache import (
+    DataLoadError,
     LocalS3Cache,
     create_cache_stats,
     parse_storage_ref,
@@ -189,6 +190,49 @@ def test_disabled_cache_fetches_s3_without_writing(tmp_path):
 
     snapshot = cache.snapshot_stats()
     assert snapshot.s3_fetches == 1
+
+
+def test_offline_local_hit_skips_s3(tmp_path):
+    stats = create_cache_stats()
+    cache = LocalS3Cache.configure(tmp_path, stats=stats, offline=True)
+    local = cache.local_path("bucket", "img.png")
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"cached")
+
+    mock_s3 = _mock_s3()
+    cache.set_s3_client(mock_s3)
+
+    assert cache.read_bytes("bucket", "img.png") == b"cached"
+    mock_s3.get_object.assert_not_called()
+    assert cache.offline
+
+
+def test_offline_miss_raises_without_boto3(tmp_path):
+    stats = create_cache_stats()
+    cache = LocalS3Cache.configure(tmp_path, write_through=True, stats=stats, offline=True)
+
+    with pytest.raises(DataLoadError, match="offline mode"):
+        cache.read_bytes("bucket", "missing.png")
+
+    # No S3 client should ever be constructed in offline mode.
+    assert cache._s3_client is None
+    snapshot = cache.snapshot_stats()
+    assert snapshot.s3_fetches == 0
+
+
+def test_offline_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MERMAIDSEG_S3_OFFLINE", "1")
+    cache = LocalS3Cache.configure(tmp_path)
+    assert cache.offline is True
+
+    with pytest.raises(DataLoadError, match="offline mode"):
+        cache.read_bytes("bucket", "missing.png")
+
+
+def test_offline_explicit_flag_overrides_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MERMAIDSEG_S3_OFFLINE", "1")
+    cache = LocalS3Cache.configure(tmp_path, offline=False)
+    assert cache.offline is False
 
 
 def test_s3_error_propagates(tmp_path):

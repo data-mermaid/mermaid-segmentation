@@ -48,13 +48,60 @@ def taxonomic_valid_mask(concept_labels: torch.Tensor) -> torch.Tensor:
     return taxonomic_target_and_mask(concept_labels)[1]
 
 
+def reduce_masked_loss(
+    per_element: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    per_pixel_loss_weight: float,
+    per_image_loss_weight: float,
+) -> torch.Tensor:
+    """Blend a batch-wide per-pixel mean with a per-image mean of a masked loss.
+
+    Densely and sparsely annotated images are handled by two complementary reductions that
+    are combined additively:
+
+    - The per-pixel term averages every valid element across the whole batch equally, so
+      densely annotated images (with many valid pixels) dominate.
+    - The per-image term first averages the valid elements within each image, then averages
+      those per-image values across images that have at least one valid element, so every
+      image contributes equally regardless of how densely it is annotated. Images with no
+      valid elements are excluded rather than counted as zero loss.
+
+    Args:
+        per_element (torch.Tensor): Unreduced loss with shape ``(B, ...)``.
+        mask (torch.Tensor): Boolean/float mask with the same shape as ``per_element``.
+        per_pixel_loss_weight (float): Weight applied to the batch-wide per-pixel mean.
+        per_image_loss_weight (float): Weight applied to the per-image mean.
+
+    Returns:
+        A scalar tensor equal to
+        ``per_pixel_loss_weight * per_pixel_mean + per_image_loss_weight * per_image_mean``.
+        Callers must ensure ``mask`` has at least one valid element.
+    """
+    mask = mask.to(per_element.dtype)
+    masked = per_element * mask
+
+    total_valid = mask.sum()
+    per_pixel_mean = masked.sum() / total_valid
+
+    batch_size = per_element.shape[0]
+    per_image_sum = masked.reshape(batch_size, -1).sum(dim=1)
+    per_image_count = mask.reshape(batch_size, -1).sum(dim=1)
+    image_has_valid = per_image_count > 0
+    per_image_mean_values = per_image_sum / per_image_count.clamp(min=1)
+    per_image_mean = per_image_mean_values[image_has_valid].mean()
+
+    return per_pixel_loss_weight * per_pixel_mean + per_image_loss_weight * per_image_mean
+
+
 def calculate_taxonomic_rank_loss(
     concept_outputs: torch.Tensor,
     concept_labels: torch.Tensor,
     *,
     from_logits: bool = False,
     foreground_mask: torch.Tensor | None = None,
-    damping_denominator: float = 0.0,
+    per_pixel_loss_weight: float = 0.0,
+    per_image_loss_weight: float = 1.0,
     label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     """Cross-entropy / NLL on the active taxonomic class; masked where not_given or none."""
@@ -76,7 +123,6 @@ def calculate_taxonomic_rank_loss(
         return torch.tensor(0.0, device=concept_outputs.device, dtype=concept_outputs.dtype)
 
     target_idx = target_idx.clamp(0, num_channels - 1)
-    flat_valid = valid_mask.reshape(-1)
     flat_target = target_idx.reshape(-1)
 
     if from_logits:
@@ -89,8 +135,13 @@ def calculate_taxonomic_rank_loss(
         flat_log_probs = log_probs.permute(0, 2, 3, 1).reshape(-1, num_channels)
         per_pixel = F.nll_loss(flat_log_probs, flat_target, reduction="none")
 
-    valid = per_pixel[flat_valid]
-    return valid.sum() / (valid.numel() + damping_denominator)
+    per_pixel = per_pixel.reshape(valid_mask.shape)
+    return reduce_masked_loss(
+        per_pixel,
+        valid_mask,
+        per_pixel_loss_weight=per_pixel_loss_weight,
+        per_image_loss_weight=per_image_loss_weight,
+    )
 
 
 def calculate_multi_hot_concept_loss(
@@ -100,7 +151,8 @@ def calculate_multi_hot_concept_loss(
     *,
     from_logits: bool = False,
     foreground_mask: torch.Tensor | None = None,
-    damping_denominator: float = 0.0,
+    per_pixel_loss_weight: float = 0.0,
+    per_image_loss_weight: float = 1.0,
 ) -> torch.Tensor:
     """BCE loss for multi-hot concepts with 0=invalid, 1=False, 2=True encoding.
 
@@ -126,5 +178,9 @@ def calculate_multi_hot_concept_loss(
             raise ValueError("concept_loss is required when from_logits is False")
         outputs = concept_outputs.clamp(1e-6, 1.0 - 1e-6)
         per_element_loss = concept_loss(outputs, targets)
-    denom = concept_mask.sum().float() + damping_denominator
-    return (per_element_loss * concept_mask.detach()).sum() / denom
+    return reduce_masked_loss(
+        per_element_loss,
+        concept_mask.detach(),
+        per_pixel_loss_weight=per_pixel_loss_weight,
+        per_image_loss_weight=per_image_loss_weight,
+    )
