@@ -7,10 +7,14 @@ training:
         type: ConceptBottleneckLoss
         lambda_weight: 1
         ignore_index: 0
-        per_pixel_loss_weight: 1.0
-        per_image_loss_weight: 0.0
+        # per_pixel_loss_weight / per_image_loss_weight are overridden per-run
+        # by the sweep (see slurm/sweep_loss_weights_train.sbatch). The values
+        # below are only used if the CLI overrides are omitted.
+        per_pixel_loss_weight: 0.0
+        per_image_loss_weight: 1.0
     max_grad_norm: 0.5
-    epochs: 100
+    # 10 epochs x 15000 iterations = 150k total gradient steps, 10 checkpoints.
+    epochs: 10
     optimizer:
         type: AdamW
         lr: 0.00005          # fallback / default; also the DPT + concept/class head LR
@@ -20,12 +24,12 @@ training:
     scheduler:
         type: PolynomialLR
         power: 1
-        total_iters: 100     # in EPOCHS (PolynomialLR steps once per epoch) => == epochs
+        total_iters: 10      # in EPOCHS (PolynomialLR steps once per epoch) => == epochs
         warmup_iters: 4000   # in ITERATIONS; keep <= iterations_per_train_epoch
         warmup_start_factor: 0.01
     mixed_precision: true
     mixed_precision_dtype: bfloat16
-    iterations_per_train_epoch: 4000
+    iterations_per_train_epoch: 15000
     iterations_per_val_epoch: 400
     batch_size: 25
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',

@@ -71,6 +71,7 @@ NONCORAL_CONCEPTS = [
     "human",
     "sand",
     "hard_substrate",
+    "calcifying",
 ]
 
 

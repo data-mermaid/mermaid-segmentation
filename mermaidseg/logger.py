@@ -869,7 +869,7 @@ class Logger:
         }
 
         meta_model_run.model = meta_model_run.model.to(meta_model_run.device)
-        if hasattr(meta_model_run, "scheduler"):
+        if getattr(meta_model_run, "scheduler", None) is not None:
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
         model_path = (

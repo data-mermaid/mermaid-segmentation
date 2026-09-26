@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 
 import torch
 from nb_setup import check_env_wandb
@@ -40,12 +41,30 @@ def load_training_checkpoint(
         raise ValueError(f"Checkpoint at {checkpoint_path!r} has no model_state_dict")
     state_dict = align_peft_checkpoint_state_dict(state_dict, meta_model.model)
     meta_model.model.load_state_dict(state_dict)
-
-    #if "optimizer_state_dict" in checkpoint:
-    #    meta_model.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    #if hasattr(meta_model, "scheduler") and "scheduler_state_dict" in checkpoint:
-    #    meta_model.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
     del state_dict
+
+    # Restore optimizer state. torch.load(map_location=device) already placed the
+    # state tensors on `device`, and the model was loaded in place (same Parameter
+    # objects the optimizer references), so the param<->state mapping stays valid.
+    if "optimizer_state_dict" in checkpoint:
+        meta_model.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    # Restore the (per-epoch) LR scheduler so PolynomialLR continues from the
+    # correct step instead of restarting its decay. `scheduler` may be None when
+    # no scheduler was configured.
+    scheduler = getattr(meta_model, "scheduler", None)
+    if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+    # The iteration-based LinearLR warmup (warmup_iters < iterations_per_train_epoch)
+    # always completes within epoch 0, so any resumed checkpoint is already past
+    # warmup. `_warmup_iters_completed` is not persisted and resets to 0 in a fresh
+    # process; without this, train.py would re-run warmup and overwrite the restored
+    # learning rates with the initial (pre-decay) base LRs. Mark warmup complete so
+    # the restored optimizer/scheduler LRs are respected.
+    if getattr(meta_model, "warmup_iters", 0) > 0:
+        meta_model._warmup_iters_completed = meta_model.warmup_iters
+
     return int(checkpoint.get("epoch", -1)) + 1
 
 
@@ -65,20 +84,51 @@ torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
 
-NUM_WORKERS = 50
+# Match the SLURM CPU allocation when running under Slurm (falls back to 50 for
+# local runs). Keeps the dataloader worker count in sync with --cpus-per-task.
+NUM_WORKERS = int(os.environ.get("SLURM_CPUS_PER_TASK", 50))
 PERSISTENT_WORKERS = NUM_WORKERS > 0
 
 # -- 1. Config -------------------------------------------------------------
+# Optional CLI overrides so this script can be driven by a hyperparameter sweep
+# (see slurm/sweep_loss_weights_train.sbatch). With no extra args the behavior is
+# identical to the previous hardcoded run.
+parser = get_parser()
+parser.add_argument(
+    "--training-config",
+    default="../configs/training_config_cbm.yaml",
+    help="path to the training config YAML",
+)
+parser.add_argument("--per-pixel-loss-weight", type=float, default=None)
+parser.add_argument("--per-image-loss-weight", type=float, default=None)
+parser.add_argument(
+    "--checkpoint",
+    default=None,
+    help="path to a checkpoint to resume from (overrides the CHECKPOINT constant)",
+)
+parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
+args = parser.parse_args()
+
+# CLI --checkpoint (e.g. from the sweep's checkpoint auto-discovery) takes
+# precedence over the hardcoded CHECKPOINT constant so runs can resume.
+if args.checkpoint:
+    CHECKPOINT = args.checkpoint
+
 cfg = setup_config(
     {
         "data": "../configs/data_config_all.yaml",
-        "training": "../configs/training_config_cbm.yaml",
+        "training": args.training_config,
         "model": "../configs/model_config_cbm_dpt_lora_vitl.yaml",
         "logger": "../configs/logger_config.yaml",
     }
 )
-args = get_parser().parse_args(["--run-name=mermaid_base_run_dinov3_lora_dpt_all"])
 cfg = update_config_with_args(cfg, args)
+
+# Loss-weight sweep overrides (leave the config value untouched when not given).
+if args.per_pixel_loss_weight is not None:
+    cfg.training.loss.per_pixel_loss_weight = args.per_pixel_loss_weight
+if args.per_image_loss_weight is not None:
+    cfg.training.loss.per_image_loss_weight = args.per_image_loss_weight
 
 # The LoRA/DPT model config already targets the ViT-L encoder; set it explicitly
 # so the value is unambiguous and gets logged below.
@@ -164,6 +214,18 @@ start_epoch = 0
 if CHECKPOINT:
     start_epoch = load_training_checkpoint(meta_model, CHECKPOINT, device)
     print(f"Loaded checkpoint {CHECKPOINT!r}; resuming at epoch {start_epoch}")
+    # Offset the RNG by the number of already-trained epochs so the resumed run
+    # sees a different data-shuffling stream instead of replaying the epoch
+    # 0..N-1 orderings. The DataLoader's RandomSampler draws from the global
+    # torch generator (re-seeded to SEED at startup), and the training loop is
+    # iterated below, so re-seeding here changes the permutations for every
+    # resumed epoch. (Augmentations already vary per run via Albumentations'
+    # own entropy-seeded RNG.)
+    resume_seed = SEED + start_epoch
+    torch.manual_seed(resume_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(resume_seed)
+    print(f"Re-seeded RNG to {resume_seed} (SEED={SEED} + {start_epoch} trained epochs)")
 
 evaluator = Evaluator(
     num_classes=registry.num_target_classes,
@@ -196,6 +258,8 @@ with Logger(
             "model/encoder_name": VITL_ENCODER_NAME,
             "model/head": "dpt",
             "model/adapter": "lora",
+            "loss/per_pixel_loss_weight": cfg.training.loss.per_pixel_loss_weight,
+            "loss/per_image_loss_weight": cfg.training.loss.per_image_loss_weight,
         }
     )
     if CHECKPOINT:
