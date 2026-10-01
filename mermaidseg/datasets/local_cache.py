@@ -13,8 +13,9 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import stat
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -41,12 +42,22 @@ class DataLoadError(Exception):
     """Raised when an object cannot be loaded from storage or decoded."""
 
 
+# Per-sample data-loading stages timed in ``BaseCoralDataset._load_item`` for diagnostics.
+STAGE_NAMES: tuple[str, ...] = ("image_load", "annotation", "mask", "transform")
+
+
 @dataclass(frozen=True)
 class CacheStats:
-    """Snapshot of cache hit/miss counters for one training phase."""
+    """Snapshot of cache hit/miss counters (and optional load-stage timers) for one phase."""
 
     local_hits: int
     s3_fetches: int
+    # Cumulative seconds spent in each ``BaseCoralDataset._load_item`` stage, plus the number of
+    # samples and empty/failed-load retries seen since the last snapshot. Defaulted so callers that
+    # only care about cache hits keep working unchanged.
+    stage_sec: dict[str, float] = field(default_factory=dict)
+    samples: int = 0
+    retries: int = 0
 
 
 @dataclass
@@ -55,12 +66,18 @@ class CacheStatsHandles:
 
     local_hits: Any  # mp.Value
     s3_fetches: Any  # mp.Value
+    stage_sec: dict[str, Any]  # name -> mp.Value("d")
+    samples: Any  # mp.Value
+    retries: Any  # mp.Value
 
     @classmethod
     def create(cls) -> CacheStatsHandles:
         return cls(
             local_hits=mp.Value("Q", 0),
             s3_fetches=mp.Value("Q", 0),
+            stage_sec={name: mp.Value("d", 0.0) for name in STAGE_NAMES},
+            samples=mp.Value("Q", 0),
+            retries=mp.Value("Q", 0),
         )
 
 
@@ -87,6 +104,19 @@ def parse_storage_ref(ref: str, default_bucket: str) -> tuple[str, str] | None:
         return None
 
     return default_bucket, ref.lstrip("/")
+
+
+def _is_nonempty_file(path: Path) -> bool:
+    """Return True if ``path`` is a regular file with size > 0.
+
+    Uses a single ``os.stat`` call instead of ``Path.is_file()`` followed by ``Path.stat()`` (two
+    syscalls / NFS round trips). ``os.stat`` follows symlinks, matching ``Path.is_file``.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_size > 0
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -119,6 +149,13 @@ class LocalS3Cache:
         self._offline = _env_flag(_ENV_OFFLINE)
         self._stats: CacheStatsHandles | None = None
         self._s3_client: Any | None = None
+        # Process-local accumulators for load-stage diagnostics. To avoid taking a shared lock on
+        # every sample (which would itself throttle the dataloader), each worker accumulates locally
+        # and flushes into the shared counters every ``_flush_every`` samples.
+        self._stage_accum: dict[str, float] = {}
+        self._retry_accum = 0
+        self._sample_accum = 0
+        self._flush_every = 128
 
     @classmethod
     def get(cls) -> LocalS3Cache:
@@ -189,16 +226,77 @@ class LocalS3Cache:
             with self._stats.s3_fetches.get_lock():
                 self._stats.s3_fetches.value += 1
 
+    def record_stage(self, name: str, seconds: float) -> None:
+        """Accumulate seconds spent in a named load stage (process-local, no lock)."""
+        if self._stats is None:
+            return
+        self._stage_accum[name] = self._stage_accum.get(name, 0.0) + seconds
+
+    def record_retries(self, n: int) -> None:
+        """Accumulate the number of empty/failed-load retries (process-local, no lock)."""
+        if self._stats is None or n <= 0:
+            return
+        self._retry_accum += n
+
+    def record_sample(self) -> None:
+        """Count one produced sample and periodically flush accumulators to shared counters."""
+        if self._stats is None:
+            return
+        self._sample_accum += 1
+        if self._sample_accum >= self._flush_every:
+            self._flush_stage_stats()
+
+    def _flush_stage_stats(self) -> None:
+        """Flush process-local load-stage accumulators into the shared multiprocessing counters."""
+        if self._stats is None:
+            return
+        for name, value in self._stage_accum.items():
+            if not value:
+                continue
+            handle = self._stats.stage_sec.get(name)
+            if handle is not None:
+                with handle.get_lock():
+                    handle.value += value
+        self._stage_accum.clear()
+        if self._retry_accum:
+            with self._stats.retries.get_lock():
+                self._stats.retries.value += self._retry_accum
+            self._retry_accum = 0
+        if self._sample_accum:
+            with self._stats.samples.get_lock():
+                self._stats.samples.value += self._sample_accum
+            self._sample_accum = 0
+
     def snapshot_stats(self) -> CacheStats:
         if self._stats is None:
             return CacheStats(local_hits=0, s3_fetches=0)
+        # Flush this process's own accumulators first (covers the num_workers=0 path, where loading
+        # happens in the same process that snapshots).
+        self._flush_stage_stats()
         with self._stats.local_hits.get_lock():
             local_hits = int(self._stats.local_hits.value)
             self._stats.local_hits.value = 0
         with self._stats.s3_fetches.get_lock():
             s3_fetches = int(self._stats.s3_fetches.value)
             self._stats.s3_fetches.value = 0
-        return CacheStats(local_hits=local_hits, s3_fetches=s3_fetches)
+        stage_sec: dict[str, float] = {}
+        for name, handle in self._stats.stage_sec.items():
+            with handle.get_lock():
+                stage_sec[name] = float(handle.value)
+                handle.value = 0.0
+        with self._stats.samples.get_lock():
+            samples = int(self._stats.samples.value)
+            self._stats.samples.value = 0
+        with self._stats.retries.get_lock():
+            retries = int(self._stats.retries.value)
+            self._stats.retries.value = 0
+        return CacheStats(
+            local_hits=local_hits,
+            s3_fetches=s3_fetches,
+            stage_sec=stage_sec,
+            samples=samples,
+            retries=retries,
+        )
 
     def _get_s3_client(self) -> Any:
         if self._s3_client is None:
@@ -237,14 +335,14 @@ class LocalS3Cache:
         """Read object bytes, preferring the local cache when configured."""
         if self._enabled:
             local = self.local_path(bucket, key)
-            if local.is_file() and local.stat().st_size > 0:
+            if _is_nonempty_file(local):
                 self._record_local_hit()
                 return local.read_bytes()
 
             if self._write_through:
                 lock_path = local.with_suffix(local.suffix + ".lock")
                 with _file_lock(lock_path):
-                    if local.is_file() and local.stat().st_size > 0:
+                    if _is_nonempty_file(local):
                         self._record_local_hit()
                         return local.read_bytes()
                     data = self._fetch_from_s3(bucket, key)
@@ -260,7 +358,7 @@ class LocalS3Cache:
         """Read a Parquet file via the local-first cache."""
         if self._enabled:
             local = self.local_path(bucket, key)
-            if local.is_file() and local.stat().st_size > 0:
+            if _is_nonempty_file(local):
                 self._record_local_hit()
                 return pd.read_parquet(local)
             data = self.read_bytes(bucket, key)

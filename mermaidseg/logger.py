@@ -864,6 +864,7 @@ class Logger:
             "model_state_dict": meta_model_run.model.cpu().state_dict(),
             "optimizer_state_dict": meta_model_run.optimizer.state_dict(),
             "epoch": epoch,
+            "global_step": int(getattr(meta_model_run, "global_step", 0)),
             "timestamp": timestamp,
             "metrics": metrics_dict,
         }

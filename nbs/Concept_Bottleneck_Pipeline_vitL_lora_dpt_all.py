@@ -33,8 +33,16 @@ def load_training_checkpoint(
     meta_model: MetaModel,
     checkpoint_path: str,
     device: torch.device | str,
+    *,
+    load_scheduler: bool = True,
 ) -> int:
-    """Load model (+ optimizer/scheduler when present) and return the next epoch index."""
+    """Load model (+ optimizer, and scheduler when resuming) and return the next epoch.
+
+    When ``load_scheduler`` is False, optimizer state is restored but the epoch counter,
+    ``global_step``, and scheduler are left for the caller to restart (cooldown / a new
+    run initialized from this checkpoint). Call ``meta_model.rebuild_scheduler()`` after
+    this so the new schedule binds to the restored learning rates.
+    """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     if not isinstance(state_dict, dict):
@@ -49,9 +57,12 @@ def load_training_checkpoint(
     if "optimizer_state_dict" in checkpoint:
         meta_model.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    # Restore the (per-epoch) LR scheduler so PolynomialLR continues from the
-    # correct step instead of restarting its decay. `scheduler` may be None when
-    # no scheduler was configured.
+    if not load_scheduler:
+        return 0
+
+    # Restore the LR scheduler so an epoch schedule continues from the correct step
+    # instead of restarting its decay. `scheduler` may be None when no scheduler was
+    # configured.
     scheduler = getattr(meta_model, "scheduler", None)
     if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -64,6 +75,9 @@ def load_training_checkpoint(
     # the restored optimizer/scheduler LRs are respected.
     if getattr(meta_model, "warmup_iters", 0) > 0:
         meta_model._warmup_iters_completed = meta_model.warmup_iters
+
+    if "global_step" in checkpoint:
+        meta_model.global_step = int(checkpoint["global_step"])
 
     return int(checkpoint.get("epoch", -1)) + 1
 
@@ -79,14 +93,13 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 for i in range(torch.cuda.device_count()):
     print(f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
 
-SEED = 4
-torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-
 # Match the SLURM CPU allocation when running under Slurm (falls back to 50 for
-# local runs). Keeps the dataloader worker count in sync with --cpus-per-task.
-NUM_WORKERS = int(os.environ.get("SLURM_CPUS_PER_TASK", 50))
+# local runs). MERMAIDSEG_NUM_WORKERS / MERMAIDSEG_PREFETCH_FACTOR override both
+# (the 1M-step job uses 56 workers and prefetch 2 on 64 CPUs).
+NUM_WORKERS = int(
+    os.environ.get("MERMAIDSEG_NUM_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", "50"))
+)
+PREFETCH_FACTOR = int(os.environ.get("MERMAIDSEG_PREFETCH_FACTOR", "3"))
 PERSISTENT_WORKERS = NUM_WORKERS > 0
 
 # -- 1. Config -------------------------------------------------------------
@@ -106,8 +119,29 @@ parser.add_argument(
     default=None,
     help="path to a checkpoint to resume from (overrides the CHECKPOINT constant)",
 )
+parser.add_argument(
+    "--init-checkpoint",
+    default=None,
+    help=(
+        "path to a checkpoint whose model and optimizer initialize a new run "
+        "(epoch 0, fresh scheduler). Mutually exclusive with --checkpoint"
+    ),
+)
+parser.add_argument(
+    "--data-seed",
+    type=int,
+    default=None,
+    help="torch seed for data shuffling (default: 4). Cooldown jobs pass a different seed",
+)
 parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
 args = parser.parse_args()
+if args.checkpoint and args.init_checkpoint:
+    parser.error("pass only one of --checkpoint and --init-checkpoint")
+
+SEED = 4 if args.data_seed is None else args.data_seed
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
 
 # CLI --checkpoint (e.g. from the sweep's checkpoint auto-discovery) takes
 # precedence over the hardcoded CHECKPOINT constant so runs can resume.
@@ -153,7 +187,7 @@ loader_kwargs = {
     "pin_memory": True,
     "persistent_workers": PERSISTENT_WORKERS,
     "drop_last": True,
-    "prefetch_factor": 3,
+    "prefetch_factor": PREFETCH_FACTOR,
 }
 if NUM_WORKERS > 0:
     loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
@@ -211,7 +245,20 @@ meta_model = MetaModel(
 )
 
 start_epoch = 0
-if CHECKPOINT:
+init_checkpoint = args.init_checkpoint
+if init_checkpoint:
+    load_training_checkpoint(meta_model, init_checkpoint, device, load_scheduler=False)
+    # Bind a fresh schedule to the restored peak LRs (do not continue the
+    # source run's scheduler). Epoch and global_step stay at 0.
+    meta_model.rebuild_scheduler()
+    print(f"Loaded init checkpoint {init_checkpoint!r}; starting a new run at epoch 0")
+    # Re-seed after model init so the shuffle stream is exactly `SEED`, not that
+    # seed advanced by construction. Augmentations stay entropy-seeded.
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+    print(f"Re-seeded RNG to {SEED} for the new run's data order")
+elif CHECKPOINT:
     start_epoch = load_training_checkpoint(meta_model, CHECKPOINT, device)
     print(f"Loaded checkpoint {CHECKPOINT!r}; resuming at epoch {start_epoch}")
     # Offset the RNG by the number of already-trained epochs so the resumed run
@@ -262,10 +309,10 @@ with Logger(
             "loss/per_image_loss_weight": cfg.training.loss.per_image_loss_weight,
         }
     )
-    if CHECKPOINT:
-        run_logger.log_params(
-            {"init/checkpoint": CHECKPOINT, "init/start_epoch": start_epoch}
-        )
+    if init_checkpoint:
+        run_logger.log_params({"init/checkpoint": init_checkpoint, "init/start_epoch": 0})
+    elif CHECKPOINT:
+        run_logger.log_params({"init/checkpoint": CHECKPOINT, "init/start_epoch": start_epoch})
     print(f"\nwandb run_id : {run_logger.wandb_run_id}")
     print(f"wandb run URL: {run_logger.run_url}\n")
 

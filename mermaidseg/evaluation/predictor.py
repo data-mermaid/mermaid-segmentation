@@ -137,6 +137,53 @@ class CBMPredictor:
         )
         return feat
 
+    @torch.no_grad()
+    def forward_concept_logits(self, images: torch.Tensor) -> torch.Tensor:
+        """Return raw concept logits ``(B, K, h, w)`` at input resolution, fp32.
+
+        These are the pre-activation values (softmax has not been applied to
+        taxonomic groups, and sigmoid has not been applied to the binary tail).
+        """
+        images = images.to(self.device, non_blocking=True)
+        with self._autocast():
+            outputs = self.model(images)
+        logits = getattr(outputs, "concept_logits", None)
+        if logits is None:
+            raise RuntimeError(
+                "Model forward did not return concept_logits. "
+                "Strided Coralscapes eval averages those logits before activation."
+            )
+        return logits.float()
+
+    def activate_concept_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply the model's concept activation to ``(K, H, W)`` averaged logits.
+
+        Taxonomic groups are softmaxed and the binary tail is sigmoided, matching
+        ``concept_outputs_activation`` used at training time. The result stays on
+        the same device as ``logits``.
+        """
+        if logits.dim() != 3:
+            raise ValueError(f"logits must be (K, H, W); got {tuple(logits.shape)}")
+        activate = getattr(self.model, "concept_outputs_activation", None)
+        if activate is None:
+            raise RuntimeError(
+                "Model has no concept_outputs_activation, so averaged concept logits "
+                "cannot be turned into the features the linear probe expects."
+            )
+        activated = activate(logits.unsqueeze(0))
+        if activated.dim() != 4 or activated.shape[0] != 1:
+            raise RuntimeError(
+                "concept_outputs_activation must return (1, K, H, W); "
+                f"got {tuple(activated.shape)}"
+            )
+        activated = activated[0]
+        if activated.shape != logits.shape:
+            raise RuntimeError(
+                f"concept_outputs_activation changed shape from {tuple(logits.shape)} "
+                f"to {tuple(activated.shape)}"
+            )
+        return activated
+
     # -- source-resolution point sampling -------------------------------------
     @staticmethod
     def sample_at_points(

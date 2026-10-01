@@ -129,14 +129,17 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         """Lookup table from classes.json IDs to local source IDs.
 
         Background, classes filtered out by ``class_subset``, and any unknown class fall through to
-        local ID 0.
+        local ID 0. The global offset is folded directly into the foreground entries so
+        ``_load_item`` does not need a separate ``np.where`` shift pass. ``int32`` keeps the emitted
+        mask small.
         """
         max_global = max(self._classes_global.values()) + 1
-        lookup = np.zeros(max_global, dtype=np.int64)
+        lookup = np.zeros(max_global, dtype=np.int32)
+        offset = self._global_offset
         for name, global_id in self._classes_global.items():
             local_id = self.source_name2id.get(name)
             if local_id is not None:
-                lookup[int(global_id)] = int(local_id)
+                lookup[int(global_id)] = int(local_id) + offset
         return lookup
 
     def set_source_vocabulary(
@@ -174,12 +177,8 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         image = self.read_image(image_id=image_id, site=site)
         raw_mask = self.read_label(image_id=image_id, site=site)
 
+        # The offset is folded into the (int32) lookup table, so no separate np.where shift pass.
         local_mask = self._classes_global_to_local[raw_mask]
-
-        if self._global_offset:
-            local_mask = np.where(
-                local_mask > 0, local_mask + self._global_offset, local_mask
-            ).astype(local_mask.dtype, copy=False)
 
         if self.transform:
             transformed = self.transform(image=image, mask=local_mask)

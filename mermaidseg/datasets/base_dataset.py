@@ -10,6 +10,7 @@ externally by [`mermaidseg.dataset_reconciliation`](../dataset_reconciliation/).
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,16 @@ def make_worker_init_fn(stats: CacheStatsHandles) -> Callable[[int], None]:
 
     def init_fn(worker_id: int) -> None:
         worker_init_fn(worker_id)
+        # Each DataLoader worker is a single-sample producer, so OpenCV's internal thread pool (used
+        # by the albumentations cv2 backend) only oversubscribes the CPUs shared across all workers.
+        # Pinning it to 0 (single-threaded) avoids that contention; the transformed output is
+        # unchanged.
+        try:
+            import cv2
+
+            cv2.setNumThreads(0)
+        except Exception:  # pragma: no cover - cv2 always present in training env
+            pass
         LocalS3Cache.configure_from_env()
         LocalS3Cache.get().attach_stats(stats)
 
@@ -98,6 +109,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     _load_failures: list[dict[str, Any]]
     _annotation_count_by_image: dict[str, int]
     _annotation_labels_by_image: dict[str, str]
+    _ann_positions: dict[Any, NDArray[np.intp]]
 
     def __init__(
         self,
@@ -140,6 +152,11 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             .apply(lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)})))
             .to_dict()
         )
+        # Positional (iloc) index of annotation rows per image_id so __getitem__ can look up an
+        # image's annotations in O(1) instead of scanning the whole annotations table each call.
+        # ``groupby(...).indices`` returns ascending positional indices per group, so the selected
+        # rows and their order match the previous boolean-mask selection exactly.
+        self._ann_positions = self.df_annotations.groupby("image_id", sort=False).indices
         self._load_failures = []
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
@@ -259,6 +276,11 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
                 )
             return self._safe_getitem(self._next_random_idx(idx, n), attempts=attempts + 1)
 
+        # Diagnostics: record one produced sample plus how many extra loads (failed or empty-crop
+        # retries) it took to get here. No-op unless load-stats are attached (see setup_local_cache).
+        cache = LocalS3Cache.get()
+        cache.record_retries(attempts)
+        cache.record_sample()
         return image, mask
 
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
@@ -267,29 +289,46 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         Subclasses should override this rather than :meth:`__getitem__` so they
         inherit the recursive-on-failure behaviour for free.
         """
+        cache = LocalS3Cache.get()
         image_id = self.df_images.loc[idx, "image_id"]
         row_kwargs = self.df_images.loc[idx].to_dict()
 
+        t0 = time.perf_counter()
         image = self.read_image(**row_kwargs)
+        t1 = time.perf_counter()
 
-        annotations = self.df_annotations.loc[
-            self.df_annotations["image_id"] == image_id,
-            ["row", "col", "source_label_name"],
-        ]
+        positions = self._ann_positions.get(image_id)
+        if positions is None:
+            annotations = self.df_annotations.iloc[:0]
+        else:
+            annotations = self.df_annotations.iloc[positions]
+        annotations = annotations[["row", "col", "source_label_name"]]
+        t2 = time.perf_counter()
 
+        # ``offset`` is folded into the label ids inside ``create_annotation_mask`` (background
+        # stays 0), which is equivalent to the previous post-hoc ``np.where(mask > 0, mask + offset,
+        # mask)`` pass but avoids allocating/scanning the full-resolution mask again.
         local_mask = create_annotation_mask(
-            annotations, image.shape, self.source_name2id, padding=self.padding
+            annotations,
+            image.shape,
+            self.source_name2id,
+            padding=self.padding,
+            offset=self._global_offset,
         )
-
-        if self._global_offset:
-            local_mask = np.where(
-                local_mask > 0, local_mask + self._global_offset, local_mask
-            ).astype(local_mask.dtype, copy=False)
+        t3 = time.perf_counter()
 
         if self.transform:
             transformed = self.transform(image=image, mask=local_mask)
             image = transformed["image"].transpose(2, 0, 1)
             local_mask = transformed["mask"]
+        t4 = time.perf_counter()
+
+        # Per-stage timers (process-local accumulation; flushed in batches) to diagnose where the
+        # loader spends time. No-op unless load-stats are attached (see setup_local_cache).
+        cache.record_stage("image_load", t1 - t0)
+        cache.record_stage("annotation", t2 - t1)
+        cache.record_stage("mask", t3 - t2)
+        cache.record_stage("transform", t4 - t3)
 
         return image, local_mask
 

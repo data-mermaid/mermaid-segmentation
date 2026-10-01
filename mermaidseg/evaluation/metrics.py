@@ -199,11 +199,12 @@ class TaxonomicRankAccuracy:
 
 
 class BinaryConceptStats:
-    """Per-concept accuracy / F1 for multi-hot binary concepts.
+    """Per-concept accuracy, precision, recall, and F1 for multi-hot binary concepts.
 
     Concept channels use ``0=not_given, 1=False, 2=True``. Only pixels with GT in
-    ``{1, 2}`` (given) are scored. Prediction is ``prob > threshold``. F1 treats
-    ``True`` as the positive class.
+    ``{1, 2}`` (given) are scored. Code 0 is counted in ``n_not_given`` and is not
+    a true negative. Prediction is ``prob > threshold`` (exactly 0.5 is negative).
+    ``True`` (code 2) is the positive class.
     """
 
     def __init__(self, names: list[str], channel_indices: list[int], threshold: float = 0.5):
@@ -217,11 +218,20 @@ class BinaryConceptStats:
         self.fp = np.zeros(n, dtype=np.int64)
         self.fn = np.zeros(n, dtype=np.int64)
         self.tn = np.zeros(n, dtype=np.int64)
+        # Code 0 (not_given, or a label missing from the concept table) is excluded
+        # from the four counts above and tracked here so it is not mistaken for False.
+        self.n_not_given = np.zeros(n, dtype=np.int64)
 
     def update(self, gt_rows: NDArray[np.integer], pred_probs: NDArray[np.floating]) -> None:
         if not self.channel_indices:
             return
         g = np.asarray(gt_rows)[:, self.channel_indices]
+        if np.any((g < 0) | (g > 2)):
+            bad = np.unique(g[(g < 0) | (g > 2)])
+            raise ValueError(
+                f"binary concept ground truth must be 0 (not_given), 1 (False), or 2 (True); "
+                f"found {bad.tolist()}"
+            )
         p = np.asarray(pred_probs)[:, self.channel_indices] > self.threshold
         valid = g > 0
         gt_true = g == 2
@@ -230,6 +240,7 @@ class BinaryConceptStats:
         self.fp += (valid & gt_false & p).sum(axis=0).astype(np.int64)
         self.fn += (valid & gt_true & ~p).sum(axis=0).astype(np.int64)
         self.tn += (valid & gt_false & ~p).sum(axis=0).astype(np.int64)
+        self.n_not_given += (g == 0).sum(axis=0).astype(np.int64)
 
     def merge(self, other: "BinaryConceptStats") -> None:
         if other.names != self.names:
@@ -238,6 +249,7 @@ class BinaryConceptStats:
         self.fp += other.fp
         self.fn += other.fn
         self.tn += other.tn
+        self.n_not_given += other.n_not_given
 
     def clone(self) -> "BinaryConceptStats":
         out = BinaryConceptStats(self.names, self.channel_indices, self.threshold)
@@ -245,21 +257,29 @@ class BinaryConceptStats:
         out.fp = self.fp.copy()
         out.fn = self.fn.copy()
         out.tn = self.tn.copy()
+        out.n_not_given = self.n_not_given.copy()
         return out
 
     def per_concept(self) -> dict[str, dict]:
         out: dict[str, dict] = {}
         for i, name in enumerate(self.names):
             tp, fp, fn, tn = (int(self.tp[i]), int(self.fp[i]), int(self.fn[i]), int(self.tn[i]))
-            n_valid = tp + fp + fn + tn
+            n_true = tp + fn
+            n_false = fp + tn
+            n_valid = n_true + n_false
             acc = _safe_div(tp + tn, n_valid)
-            f1_den = 2 * tp + fp + fn
-            f1 = _safe_div(2 * tp, f1_den)
+            precision = _safe_div(tp, tp + fp)
+            recall = _safe_div(tp, tp + fn)
+            f1 = _safe_div(2 * tp, 2 * tp + fp + fn)
             out[name] = {
                 "accuracy": acc,
+                "precision": precision,
+                "recall": recall,
                 "f1": f1,
                 "n_valid": n_valid,
-                "n_true": tp + fn,
+                "n_true": n_true,
+                "n_false": n_false,
+                "n_not_given": int(self.n_not_given[i]),
                 "tp": tp,
                 "fp": fp,
                 "fn": fn,
@@ -276,6 +296,120 @@ class BinaryConceptStats:
             "macro_f1": float(np.mean(f1s)) if f1s else float("nan"),
             "n_concepts_scored": len(accs),
             "per_concept": per,
+        }
+
+
+def bleached_block_from_binary(binary: dict, threshold: float = 0.5) -> dict:
+    """Copy the ``bleached`` entry out of a ``BinaryConceptStats.to_dict()`` payload.
+
+    Raises if the channel is missing. ``not_given`` points are already excluded
+    from the four confusion counts and are reported as ``n_not_given``.
+    """
+    per = binary.get("per_concept") if isinstance(binary, dict) else None
+    if not isinstance(per, dict) or "bleached" not in per:
+        raise RuntimeError(
+            "Binary concept metrics have no 'bleached' channel. "
+            "The model concept list must include a channel named exactly 'bleached'."
+        )
+    stats = per["bleached"]
+    required = (
+        "accuracy",
+        "precision",
+        "recall",
+        "f1",
+        "tp",
+        "fp",
+        "fn",
+        "tn",
+        "n_true",
+        "n_false",
+        "n_not_given",
+    )
+    missing = [key for key in required if key not in stats]
+    if missing:
+        raise RuntimeError(f"bleached stats are missing fields: {missing}")
+    block = {key: stats[key] for key in required}
+    block["threshold"] = float(threshold)
+    return block
+
+
+class BleachedScore:
+    """Confusion counts for the binary concept ``bleached``.
+
+    Ground-truth codes are ``2=TRUE`` (positive), ``1=FALSE`` (negative), and
+    ``0=not_given`` (excluded). Unannotated Coralscapes pixels (mask id 0) are
+    passed separately via ``unannotated`` and are not counted as ``not_given``
+    or as ``FALSE``. A prediction is positive only when ``probability > threshold``
+    (exactly 0.5 is negative).
+    """
+
+    def __init__(self, threshold: float = 0.5):
+        self.threshold = float(threshold)
+        self.tp = 0
+        self.fp = 0
+        self.fn = 0
+        self.tn = 0
+        self.n_not_given = 0
+        self.n_unannotated = 0
+
+    def update(
+        self,
+        codes: NDArray[np.integer],
+        probabilities: NDArray[np.floating],
+        unannotated: NDArray[np.bool_] | None = None,
+    ) -> None:
+        gt = np.asarray(codes).reshape(-1)
+        prob = np.asarray(probabilities).reshape(-1)
+        if gt.shape != prob.shape:
+            raise ValueError(f"codes/probabilities shape mismatch: {gt.shape} vs {prob.shape}")
+        bad = ~np.isin(gt, (0, 1, 2))
+        if np.any(bad):
+            found = np.unique(gt[bad]).tolist()
+            raise ValueError(
+                f"bleached codes must be 0 (not_given), 1 (False), or 2 (True); found {found}"
+            )
+        if unannotated is None:
+            unlabeled = np.zeros(gt.shape, dtype=bool)
+        else:
+            unlabeled = np.asarray(unannotated).reshape(-1).astype(bool)
+            if unlabeled.shape != gt.shape:
+                raise ValueError(
+                    f"unannotated shape {unlabeled.shape} does not match codes {gt.shape}"
+                )
+        if np.any(unlabeled & (gt != 0)):
+            raise ValueError("unannotated pixels must have bleached code 0, not TRUE or FALSE")
+
+        predicted_positive = prob > self.threshold
+        annotated = ~unlabeled
+        gt_true = annotated & (gt == 2)
+        gt_false = annotated & (gt == 1)
+        self.tp += int((gt_true & predicted_positive).sum())
+        self.fn += int((gt_true & ~predicted_positive).sum())
+        self.fp += int((gt_false & predicted_positive).sum())
+        self.tn += int((gt_false & ~predicted_positive).sum())
+        self.n_not_given += int((annotated & (gt == 0)).sum())
+        self.n_unannotated += int(unlabeled.sum())
+
+    def to_dict(self) -> dict:
+        tp, fp, fn, tn = self.tp, self.fp, self.fn, self.tn
+        n_true = tp + fn
+        n_false = fp + tn
+        n_valid = n_true + n_false
+        return {
+            "accuracy": _safe_div(tp + tn, n_valid),
+            "precision": _safe_div(tp, tp + fp),
+            "recall": _safe_div(tp, n_true),
+            "f1": _safe_div(2 * tp, 2 * tp + fp + fn),
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "tn": tn,
+            "n_true": n_true,
+            "n_false": n_false,
+            "n_not_given": self.n_not_given,
+            "n_unannotated": self.n_unannotated,
+            "n_valid": n_valid,
+            "threshold": self.threshold,
         }
 
 

@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup
-from mermaidseg.evaluation.metrics import ConceptLayout, MetricBundle
+from mermaidseg.evaluation.metrics import ConceptLayout, MetricBundle, bleached_block_from_binary
 from mermaidseg.evaluation.predictor import CBMPredictor, make_eval_transform
 from mermaidseg.evaluation.reporting import fmt, write_csv, write_json
 
@@ -200,6 +200,11 @@ def run_point_evaluation(
     progress_cb: Callable[[int, int], None] | None = None,
 ) -> dict:
     """Run a point-annotation evaluation with per-unit streaming reports."""
+    if eval_name == "coralnet" and "bleached" not in concept_names:
+        raise RuntimeError(
+            "CoralNet eval requires a concept channel named exactly 'bleached'. "
+            f"concept_names has {len(concept_names)} entries and no 'bleached'."
+        )
     out_dir = Path(output_dir) / eval_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -304,8 +309,14 @@ def run_point_evaluation(
             k: (float(np.nanmean(v)) if len(v) else float("nan")) for k, v in macro.items()
         }
 
-    def _flush(final: bool) -> None:
+    def _pooled_dict() -> dict:
         pooled_d = pooled.to_dict(class_id2name=id2label, include_class_detail=True)
+        if eval_name == "coralnet":
+            pooled_d["bleached"] = bleached_block_from_binary(pooled_d.get("binary") or {})
+        return pooled_d
+
+    def _flush(final: bool) -> None:
+        pooled_d = _pooled_dict()
         payload = {
             "eval": eval_name,
             "num_units_done": len(unit_results),
@@ -363,7 +374,7 @@ def run_point_evaluation(
 
     _flush(final=True)
     dt = time.time() - t0
-    pooled_d = pooled.to_dict(class_id2name=id2label, include_class_detail=True)
+    pooled_d = _pooled_dict()
     logger.info(
         "[%s] DONE in %.1fs: %d images (%d failed), %d units. POOLED class_acc=%s miou=%s "
         "binary macro acc=%s f1=%s",
@@ -386,6 +397,19 @@ def run_point_evaluation(
             rd["n_all"],
             fmt(rd["acc_living"]),
             rd["n_living"],
+        )
+    if eval_name == "coralnet":
+        bleached = pooled_d["bleached"]
+        logger.info(
+            "[coralnet/bleached] acc=%s precision=%s recall=%s f1=%s "
+            "(n_true=%s n_false=%s n_not_given=%s)",
+            fmt(bleached["accuracy"]),
+            fmt(bleached["precision"]),
+            fmt(bleached["recall"]),
+            fmt(bleached["f1"]),
+            bleached["n_true"],
+            bleached["n_false"],
+            bleached["n_not_given"],
         )
 
     return {

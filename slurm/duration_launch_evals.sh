@@ -1,14 +1,14 @@
 #!/bin/bash
-# One-shot, idempotent eval launcher for the loss-weight sweep.
+# One-shot, idempotent eval launcher for cooled duration-ablation checkpoints.
 #
-# Scans for training checkpoints and submits an eval sbatch for every
+# Scans for cooldown checkpoints and submits an eval sbatch for every
 # (checkpoint, resolution) pair that has not been evaluated yet. Safe to run
-# repeatedly / sporadically: it skips evals that are already done or currently
-# queued, and re-submits ones that failed (no .done marker, not in the queue).
+# repeatedly: it skips evals that are already done or currently queued, and
+# re-submits ones that failed (no .done marker, not in the queue).
 # Pass --force to ignore existing .done markers and re-run every checkpoint.
 #
 # Usage:
-#   slurm/sweep_loss_weights_launch_evals.sh [--dry-run] [--force]
+#   slurm/duration_launch_evals.sh [--dry-run] [--force]
 #
 # --force resubmits evals that already have a .done marker, so a protocol
 # change can overwrite summary.json / metrics.json in place. Jobs that are
@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
         --force) FORCE=1 ;;
         *)
             echo "unknown argument: $1" >&2
-            echo "usage: slurm/sweep_loss_weights_launch_evals.sh [--dry-run] [--force]" >&2
+            echo "usage: slurm/duration_launch_evals.sh [--dry-run] [--force]" >&2
             exit 2
             ;;
     esac
@@ -39,9 +39,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-CKPT_GLOB="nbs/model_checkpoints/cbm_lossw_*/model_epoch*"
+CKPT_GLOB="nbs/model_checkpoints/cbm_duration_pix0.5_img0.5_cd*/model_epoch0"
 EVAL_SBATCH="slurm/sweep_loss_weights_eval.sbatch"
-OUT_BASE="eval_out/sweep_loss_weights"
+OUT_BASE="eval_out/duration_cooldown"
 RESOLUTIONS=(256 512)
 # Skip checkpoints touched within this many seconds (still being written).
 MIN_AGE_SEC=180
@@ -65,16 +65,16 @@ shopt -u nullglob
 
 if [[ ${#checkpoints[@]} -eq 0 ]]; then
     echo "No checkpoints found matching: $CKPT_GLOB"
-    echo "(training may not have produced any checkpoints yet)"
+    echo "(cooldown jobs may not have finished yet)"
     exit 0
 fi
 
 for ckpt in "${checkpoints[@]}"; do
     [[ -f "$ckpt" ]] || { n_missing_ckpt=$((n_missing_ckpt + 1)); continue; }
 
-    run="$(basename "$(dirname "$ckpt")")"          # e.g. cbm_lossw_pix0.75_img0.25
-    epoch_file="$(basename "$ckpt")"                 # e.g. model_epoch3
-    epoch="${epoch_file#model_epoch}"               # e.g. 3
+    run="$(basename "$(dirname "$ckpt")")"          # e.g. cbm_duration_pix0.5_img0.5_cd75000
+    epoch_file="$(basename "$ckpt")"                 # model_epoch0
+    epoch="${epoch_file#model_epoch}"
 
     # Skip freshly written checkpoints (torch.save may still be in progress).
     mtime=$(stat -c %Y "$ckpt" 2>/dev/null || stat -f %m "$ckpt")

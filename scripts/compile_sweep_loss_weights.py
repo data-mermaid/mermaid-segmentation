@@ -120,11 +120,22 @@ def _coralscapes_columns() -> list[str]:
     return cols
 
 
+def _bleached_columns(prefix: str) -> list[str]:
+    return [
+        f"{prefix}_bleached_accuracy",
+        f"{prefix}_bleached_precision",
+        f"{prefix}_bleached_recall",
+        f"{prefix}_bleached_f1",
+    ]
+
+
 METRIC_COLUMNS = (
     _point_eval_columns("coralnet")
+    + _bleached_columns("coralnet")
     + _point_eval_columns("pacific")
     + _benthos_columns()
     + _coralscapes_columns()
+    + _bleached_columns("coralscapes")
 )
 ALL_COLUMNS = ID_COLUMNS + METRIC_COLUMNS
 
@@ -194,6 +205,19 @@ def _extract_benthos(section: object) -> dict[str, float]:
     return out
 
 
+def _extract_bleached(prefix: str, block: object) -> dict[str, float]:
+    """Read a top-level bleached block. Missing keys stay NaN."""
+    cols = _bleached_columns(prefix)
+    out = {column: NAN for column in cols}
+    if not isinstance(block, dict) or "error" in block:
+        return out
+    out[f"{prefix}_bleached_accuracy"] = _num(block.get("accuracy"))
+    out[f"{prefix}_bleached_precision"] = _num(block.get("precision"))
+    out[f"{prefix}_bleached_recall"] = _num(block.get("recall"))
+    out[f"{prefix}_bleached_f1"] = _num(block.get("f1"))
+    return out
+
+
 def _extract_coralscapes(section: object) -> dict[str, float]:
     cols = _coralscapes_columns()
     out = {c: NAN for c in cols}
@@ -222,9 +246,12 @@ def _empty_metrics() -> dict[str, float]:
 def _metrics_from_summary(summary: dict) -> dict[str, float]:
     metrics = _empty_metrics()
     metrics.update(_extract_point_eval("coralnet", summary.get("coralnet")))
+    coralnet_pooled = _as_dict(_as_dict(summary.get("coralnet")).get("pooled"))
+    metrics.update(_extract_bleached("coralnet", coralnet_pooled.get("bleached")))
     metrics.update(_extract_point_eval("pacific", summary.get("pacific")))
     metrics.update(_extract_benthos(summary.get("benthos")))
     metrics.update(_extract_coralscapes(summary.get("coralscapes")))
+    metrics.update(_extract_bleached("coralscapes", _as_dict(summary.get("coralscapes")).get("bleached")))
     return metrics
 
 

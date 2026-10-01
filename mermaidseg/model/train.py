@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 from torch.utils.data import DataLoader
 
 from mermaidseg.datasets.local_cache import LocalS3Cache
-from mermaidseg.datasets.utils import emit_cache_stats
+from mermaidseg.datasets.utils import emit_cache_stats, emit_load_stage_stats
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel
@@ -167,6 +167,7 @@ def train_model(
             f"EPOCH {epoch} train cache: {train_cache_stats.s3_fetches} fetched from S3, "
             f"{train_cache_stats.local_hits} served from local"
         )
+        emit_load_stage_stats(f"EPOCH {epoch} train", train_cache_stats)
         epoch_loss_dict["train/loss"] = train_loss
         epoch_loss_dict["train/data_loading_sec"] = train_timing["data_loading_sec"]
         epoch_loss_dict["train/forward_sec"] = train_timing["forward_sec"]
@@ -189,6 +190,7 @@ def train_model(
                 f"EPOCH {epoch} val cache: {val_cache_stats.s3_fetches} fetched from S3, "
                 f"{val_cache_stats.local_hits} served from local"
             )
+            emit_load_stage_stats(f"EPOCH {epoch} val", val_cache_stats)
 
             epoch_loss_dict["validation/loss"] = val_loss
             metrics_epoch[epoch]["validation_metrics"] = val_metric_results
@@ -222,7 +224,10 @@ def train_model(
             getattr(meta_model, "warmup_iters", 0) == 0
             or meta_model._warmup_iters_completed >= meta_model.warmup_iters
         )
-        if scheduler is not None and warmup_complete:
+        # Iteration schedules are stepped inside train_epoch. Stepping them again here would
+        # add an extra decay step after the epoch's last iteration.
+        step_every = getattr(meta_model, "scheduler_step_every", "epoch")
+        if scheduler is not None and warmup_complete and step_every != "iteration":
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 if metric_value is not None:
                     scheduler.step(metric_value)

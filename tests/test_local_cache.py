@@ -146,6 +146,27 @@ def test_snapshot_stats_resets_counters(tmp_path):
     assert third.s3_fetches == 0
 
 
+def test_load_stage_stats_flush_and_snapshot(tmp_path):
+    stats = create_cache_stats()
+    cache = LocalS3Cache.configure(tmp_path, stats=stats)
+    cache.record_stage("image_load", 0.25)
+    cache.record_stage("mask", 0.05)
+    cache.record_retries(2)
+    cache._flush_every = 1
+    cache.record_sample()
+
+    snapshot = cache.snapshot_stats()
+    assert snapshot.samples == 1
+    assert snapshot.retries == 2
+    assert snapshot.stage_sec["image_load"] == pytest.approx(0.25)
+    assert snapshot.stage_sec["mask"] == pytest.approx(0.05)
+
+    reset = cache.snapshot_stats()
+    assert reset.samples == 0
+    assert reset.retries == 0
+    assert reset.stage_sec["image_load"] == 0.0
+
+
 def test_read_parquet_round_trip(tmp_path):
     stats = create_cache_stats()
     cache = LocalS3Cache.configure(tmp_path, write_through=True, stats=stats)

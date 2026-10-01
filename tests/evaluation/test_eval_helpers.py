@@ -83,6 +83,8 @@ def test_benthos_spec_load_and_validate():
         "anthropogenic",
         "algae",
         "calcifying",
+        "phylum__chordata",
+        "dark",
     ]
     _validate_spec(classes, ConceptResolver(names))  # should not raise
     gt = _build_gt_name_to_spec(classes)
@@ -109,6 +111,8 @@ def test_benthos_scoring_and_nodata():
         "anthropogenic",
         "algae",
         "calcifying",
+        "phylum__chordata",
+        "dark",
     ]
     resolver = ConceptResolver(names)
     k, hh = len(names), 4

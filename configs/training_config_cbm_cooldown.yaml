@@ -7,14 +7,12 @@ training:
         type: ConceptBottleneckLoss
         lambda_weight: 1
         ignore_index: 0
-        # per_pixel_loss_weight / per_image_loss_weight are overridden per-run
-        # by the sweep (see slurm/sweep_loss_weights_train.sbatch). The values
-        # below are only used if the CLI overrides are omitted.
-        per_pixel_loss_weight: 0.0
-        per_image_loss_weight: 1.0
+        per_pixel_loss_weight: 0.5
+        per_image_loss_weight: 0.5
     max_grad_norm: 0.5
-    # 10 epochs x 15000 iterations = 150k total gradient steps, 10 checkpoints.
-    epochs: 10
+    # One epoch. LinearLR is stepped every iteration from the loaded peak LR down to 0.
+    # An epoch-level scheduler would hold the peak LR for all 25000 steps.
+    epochs: 1
     optimizer:
         type: AdamW
         lr: 0.00005          # fallback / default; also the DPT + concept/class head LR
@@ -22,14 +20,15 @@ training:
         lora_lr: 0.00001     # backbone LoRA adapter params
         dpt_lr: 0.00005      # DPT head + concept_proj + concept_classifier
     scheduler:
-        type: PolynomialLR
-        power: 1
-        total_iters: 10      # in EPOCHS (PolynomialLR steps once per epoch) => == epochs
-        warmup_iters: 4000   # in ITERATIONS; keep <= iterations_per_train_epoch
-        warmup_start_factor: 0.01
+        type: LinearLR
+        start_factor: 1.0
+        end_factor: 0.0
+        total_iters: 25000   # in ITERATIONS (step_every: iteration)
+        step_every: iteration
+        warmup_iters: 0
     mixed_precision: true
     mixed_precision_dtype: bfloat16
-    iterations_per_train_epoch: 15000
+    iterations_per_train_epoch: 25000
     iterations_per_val_epoch: 400
     batch_size: 32
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',

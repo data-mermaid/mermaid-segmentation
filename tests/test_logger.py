@@ -560,9 +560,12 @@ class TestSaveModelCheckpoint:
             checkpoint_dir=str(tmp_path),
             log_checkpoint=50,
         )
+        meta.global_step = 25000
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
         ckpt_file = list((tmp_path / "model_checkpoints" / "sched-check").iterdir())[0]
-        assert "scheduler_state_dict" in torch.load(ckpt_file, weights_only=False)
+        checkpoint = torch.load(ckpt_file, weights_only=False)
+        assert "scheduler_state_dict" in checkpoint
+        assert checkpoint["global_step"] == 25000
 
 
 # ===================================================================

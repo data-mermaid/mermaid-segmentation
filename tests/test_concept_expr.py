@@ -91,6 +91,30 @@ def test_evaluate_multiply_and_add(concept_probs, resolver) -> None:
     np.testing.assert_allclose(out, expected)
 
 
+def test_parse_max_call() -> None:
+    rpn = parse("max(dark, live, branching)")
+    assert [t.value for t in rpn] == ["dark", "live", "branching", "max"]
+    assert rpn[-1].arity == 3
+
+
+def test_evaluate_max(concept_probs, resolver) -> None:
+    out = evaluate("max(dark, live, branching)", concept_probs, resolver)
+    expected = np.maximum.reduce([concept_probs[8], concept_probs[3], concept_probs[5]])
+    np.testing.assert_allclose(out, np.clip(expected, 0.0, 1.0))
+
+
+def test_evaluate_max_of_product(concept_probs, resolver) -> None:
+    out = evaluate("max(live, branching * dark)", concept_probs, resolver)
+    product = np.clip(concept_probs[5] * concept_probs[8], 0.0, 1.0)
+    expected = np.maximum(concept_probs[3], product)
+    np.testing.assert_allclose(out, np.clip(expected, 0.0, 1.0))
+
+
+def test_unknown_function_raises() -> None:
+    with pytest.raises(ConceptExpressionError, match="Unknown function"):
+        parse("foo(live)")
+
+
 def test_evaluate_subtract(concept_probs, resolver) -> None:
     out = evaluate("branching * (1 - genus:acropora)", concept_probs, resolver)
     one = np.ones(concept_probs.shape[1:], dtype=np.float32)

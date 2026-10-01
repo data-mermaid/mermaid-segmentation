@@ -179,14 +179,17 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """Build a vectorized lookup from native UCSD IDs (0..34) to local source IDs.
 
         Native ID ``0`` (ignore) and any class not present in ``class_subset`` map to ``0``
-        (background).
+        (background). The global offset is folded directly into the foreground entries so
+        ``__getitem__`` does not need a separate ``np.where`` shift pass. ``int32`` keeps the emitted
+        mask small.
         """
         max_native = max(int(entry["id"]) for entry in self.class_table) + 1
-        lookup = np.zeros(max_native, dtype=np.int64)
+        lookup = np.zeros(max_native, dtype=np.int32)
+        offset = self._global_offset
         for entry in self.class_table:
             native_id = int(entry["id"])
             local_id = self.source_name2id.get(entry["name"], 0)
-            lookup[native_id] = local_id
+            lookup[native_id] = local_id + offset if local_id else 0
         return lookup
 
     def set_source_vocabulary(
@@ -225,16 +228,12 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         try:
             row = self.dataset[idx]
             image = np.array(row["image"])
-            native_mask = np.asarray(row["label"], dtype=np.int64)
+            # The native label is uint8; index the (offset-folded, int32) lookup directly.
+            native_mask = np.asarray(row["label"])
             mask = self._native_to_local[native_mask]
         except Exception as e:
             logger.warning("UCSDMosaicsDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e)
             return None, None
-
-        if self._global_offset:
-            mask = np.where(mask > 0, mask + self._global_offset, mask).astype(
-                mask.dtype, copy=False
-            )
 
         if self.transform:
             try:

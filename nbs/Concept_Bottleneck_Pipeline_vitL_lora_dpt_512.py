@@ -167,10 +167,7 @@ registry = SourceLabelRegistry(
 
 attach_registry(registry, dataset_dict.values())
 
-# repeat coralscapes_v2 train dataset 5 times
-train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"] + [
-    ds for (name, split), ds in dataset_dict.items() if name == "coralscapes_v2" and split == "train"
-] * 5
+train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"] 
 val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
 
 train_loader = DataLoader(ConcatDataset(train_datasets), shuffle=True, **loader_kwargs)

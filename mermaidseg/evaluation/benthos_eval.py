@@ -44,12 +44,17 @@ def load_spec(spec_path: str | Path) -> list[dict]:
 def _validate_spec(classes: list[dict], resolver: ConceptResolver) -> None:
     missing: set[str] = set()
     for entry in classes:
-        for tok in tokenize(entry["expr"]):
-            if tok.kind.name == "IDENT":
-                try:
-                    resolver.resolve(tok.value)
-                except Exception:  # noqa: BLE001
-                    missing.add(tok.value)
+        tokens = tokenize(entry["expr"])
+        for i, tok in enumerate(tokens):
+            if tok.kind.name != "IDENT":
+                continue
+            # Function names (``max(...)``) are not concept channels.
+            if i + 1 < len(tokens) and tokens[i + 1].value == "(":
+                continue
+            try:
+                resolver.resolve(tok.value)
+            except Exception:  # noqa: BLE001
+                missing.add(tok.value)
     if missing:
         raise ValueError(
             "Benthos spec references concept channels not present in this model: "

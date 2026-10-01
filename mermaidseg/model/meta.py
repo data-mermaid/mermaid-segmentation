@@ -252,27 +252,57 @@ class MetaModel:
         else:
             self.optimizer = optimizer_cls(params=self._trainable_params, **optimizer_cfg)
 
-        if "scheduler" in training_kwargs:
-            scheduler_cfg = dict(training_kwargs.scheduler)
-            warmup_iters = int(scheduler_cfg.pop("warmup_iters", 2000))
-            warmup_start_factor = float(scheduler_cfg.pop("warmup_start_factor", 0.01))
-            scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_cfg.pop("type", None))
-            self.scheduler = scheduler_cls(self.optimizer, **scheduler_cfg)
-            self.warmup_iters = warmup_iters
-            self._warmup_iters_completed = 0
-            if warmup_iters > 0:
-                self.warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-                    self.optimizer,
-                    start_factor=warmup_start_factor,
-                    total_iters=warmup_iters,
-                )
-            else:
-                self.warmup_scheduler = None
-        else:
+        self._configure_schedulers()
+
+    def _configure_schedulers(self) -> None:
+        """Build the epoch/iteration scheduler and the optional per-iteration warmup.
+
+        ``scheduler.step_every`` is ``epoch`` (default; stepped once in ``train_model``) or
+        ``iteration`` (stepped after every optimizer step). Warmup keys are not forwarded to
+        the PyTorch scheduler constructor.
+        """
+        training_kwargs = self.training_kwargs
+        if "scheduler" not in training_kwargs:
             self.scheduler = None
+            self.scheduler_step_every = "epoch"
             self.warmup_iters = 0
             self.warmup_scheduler = None
             self._warmup_iters_completed = 0
+            return
+
+        scheduler_cfg = dict(training_kwargs.scheduler)
+        warmup_iters = int(scheduler_cfg.pop("warmup_iters", 2000))
+        warmup_start_factor = float(scheduler_cfg.pop("warmup_start_factor", 0.01))
+        step_every = str(scheduler_cfg.pop("step_every", "epoch"))
+        if step_every not in {"epoch", "iteration"}:
+            raise ValueError(
+                f"scheduler.step_every must be 'epoch' or 'iteration', got {step_every!r}"
+            )
+        scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_cfg.pop("type", None))
+        self.scheduler = scheduler_cls(self.optimizer, **scheduler_cfg)
+        self.scheduler_step_every = step_every
+        self.warmup_iters = warmup_iters
+        self._warmup_iters_completed = 0
+        if warmup_iters > 0:
+            self.warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer,
+                start_factor=warmup_start_factor,
+                total_iters=warmup_iters,
+            )
+        else:
+            self.warmup_scheduler = None
+
+    def rebuild_scheduler(self) -> None:
+        """Drop scheduler state and rebuild it from the current optimizer learning rates.
+
+        Used when a new run is initialized from a checkpoint (cooldown): the loaded optimizer
+        already holds the peak learning rates and Adam moments, and the previous schedule must
+        not be restored. ``initial_lr`` left by the old scheduler is cleared so the new
+        schedule's base rates are the restored group learning rates.
+        """
+        for group in self.optimizer.param_groups:
+            group.pop("initial_lr", None)
+        self._configure_schedulers()
 
     def _step_warmup_scheduler(self) -> None:
         """Step the linear LR warmup once per training iteration."""
@@ -280,6 +310,14 @@ class MetaModel:
             return
         self.warmup_scheduler.step()
         self._warmup_iters_completed += 1
+
+    def _step_iteration_scheduler(self) -> None:
+        """Step an iteration-level schedule once per optimizer step, after warmup."""
+        if self.scheduler is None or self.scheduler_step_every != "iteration":
+            return
+        if self.warmup_iters > 0 and self._warmup_iters_completed < self.warmup_iters:
+            return
+        self.scheduler.step()
 
     def _optimizer_step(self, loss: torch.Tensor, apply_step: bool = True) -> bool:
         """Run backward + AMP optimizer step with optional gradient clipping.
@@ -545,6 +583,7 @@ class MetaModel:
             step_applied = self._optimizer_step(loss, apply_step=apply_step)
             if step_applied:
                 self._step_warmup_scheduler()
+                self._step_iteration_scheduler()
 
             if use_cuda:
                 torch.cuda.synchronize()

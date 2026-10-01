@@ -64,6 +64,9 @@ aws sts get-caller-identity \
 
 cd $SCRATCH/mermaid-segmentation
 uv sync --locked
+# Drop the previous success marker before python overwrites summary.json.
+# It is recreated only after a clean exit, so a failed re-run is not "done".
+rm -f "$OUT/.done"
 srun uv run python scripts/evaluate.py \
     --checkpoint "$CKPT" \
     --model-config "$MODEL_CONFIG" \

@@ -254,33 +254,78 @@ $1024\times2048$\,px.\footnote{%
 \paragraph{Fixed probe set.}
 To make the probe reproducible and comparable across models, the training pixels
 used to fit the probe are pinned in
-\texttt{configs/eval/coralscapes\_v2\_probe\_points.json}: $428$ points over $80$
-training images, targeting $5$ points per class for all $95$ classes. The probe
-images are chosen by a greedy set cover of class presence, topped up so each
-class appears in up to five chosen images; within each class, up to five probe
-pixels are taken from distinct $8$-connected components (minimum component size
-$4$\,px), each pixel placed at the interior point that maximises the component's
-Euclidean distance transform so it survives the model's roughly $4\times$ feature
-downsampling. Probe images are located either by file stem in a local mirror or
-by ground-truth label MD5 in the HuggingFace dataset.
+\texttt{configs/eval/coralscapes\_v2\_probe\_points.json}. The builder
+(\texttt{scripts/build\_coralscapes\_v2\_probe\_points.py}) targets $10$ points
+per class and is deterministic (sorted paths, \texttt{ndimage.label}, and
+\texttt{numpy.argmax} on the distance transform; there is no random seed). It
+censuses $8$-connected components of at least $4$\,px on the full training
+split. When a class has at least $10$ such components, $10$ are chosen by
+round-robin across images ordered by their largest component, one interior pixel
+each. When it has $N<10$, every component is used and the $10$ points are split
+evenly, the largest components receiving the remainder (four components yield
+quotas $3,3,2,2$). A quota of one is the distance-transform maximum. A larger
+quota repeats that maximum and then removes every pixel with
+$dy^{2}+dx^{2}\le 16^{2}$. If that disk empties a component before the quota is
+met, the pixels already placed are kept and the unused quota is not moved onto
+another component, so the class is stored with fewer than $10$ points. The
+shortfall is recorded in the JSON. A class with no component of at least
+$4$\,px, a component with fewer pixels than its quota, or a component that
+yields no pixel still aborts the write.
+The image list is exactly the images that own a probe pixel, each required to be
+$1024\times2048$. Probe images are located either by file stem in a local mirror
+or by ground-truth label MD5 in the HuggingFace dataset. The JSON header records
+\texttt{num\_images}, \texttt{total\_points}, \texttt{points\_per\_class\_target},
+and \texttt{placement\_shortfalls}.
+On the local mirror of $1790$ training masks, three components can hold only one
+probe pixel before the radius-$16$ disk removes the rest: \texttt{seriatopora dead}
+components of $251$\,px and $156$\,px in \texttt{site30/site30\_000148\_000236}
+(each quota $3$, one pixel kept) and a \texttt{turbinaria dead} component of
+$65$\,px in \texttt{site33/site33\_000058\_033600} (quota $2$, one pixel kept).
+Those two classes therefore have $6$ and $9$ probe pixels. Every other class has
+$10$. The pinned set has $663$ images and $945$ points.
+
+\paragraph{Strided prediction.}
+Each $1024\times2048$ image is scored with three windows, stacked as one batch
+and resized to the model input size ($256$ or $512$): the left half (columns
+$0$:$1024$), the center square (columns $512$:$1536$), and the right half
+(columns $1024$:$2048$). Raw concept logits are bilinearly upsampled back onto
+those rectangles on the GPU and averaged with equal weight where the windows
+overlap (columns $0$:$512$ see the left window only, $512$:$1024$ the left and
+center, $1024$:$1536$ the center and right, $1536$:$2048$ the right only). The
+model's concept activation --- softmax within each taxonomic rank, sigmoid on
+the binary tail --- is applied to the averaged logits. An image that is not
+$1024\times2048$ raises. Only the \texttt{concepts} feature kind is accepted;
+\texttt{dpt} and \texttt{backbone} raise.
 
 \paragraph{Probe fitting and dense evaluation.}
-For each requested feature kind, per-pixel features are sampled at the pinned
-source-resolution points via the exact \texttt{grid\_sample} of
-Eq.~\eqref{eq:gridsample}. The three feature kinds are \texttt{concepts} (the
-$704$-d activated bottleneck, default), \texttt{dpt} (the $256$-d DPT features
-before the concept projection), and \texttt{backbone} (the raw DINOv3 patch
-tokens, bilinearly upsampled). A linear probe is fit on these features with a
-standardiser followed by a linear SVM
+Probe pixels are read from that activated map at the stored source-resolution
+coordinates, so the SVM sees the same features as the dense test. A linear probe
+is fit with a standardiser followed by a linear SVM
 (\texttt{StandardScaler} then \texttt{LinearSVC}, $C=1$,
 \texttt{max\_iter}=$20000$). For dense inference the standardiser is folded into
 the SVM's linear layer, giving effective weights
 $W_\mathrm{eff}=W/\sigma$ and bias
-$b_\mathrm{eff}=b - (\mu/\sigma)\,W^{\!\top}$, applied as a $1{\times}1$ linear map
-over the dense feature grid; the resulting class scores are bilinearly upsampled
-to $1024\times2048$ and argmaxed. We report the probe train accuracy and, on the
-full CoralscapesV2 test split, accuracy and mIoU over classes $1$--$95$ (label
-$0$ ignored).
+$b_\mathrm{eff}=b - (\mu/\sigma)\,W^{\!\top}$, applied in row strips on the GPU
+to the $1024\times2048$ activated concept map and argmaxed. We report the probe
+train accuracy and, on the CoralscapesV2 test split, accuracy and mIoU over
+classes $1$--$95$ (label $0$ ignored).
+
+\paragraph{Bleached.}
+Separately from the SVM, the sigmoid of the averaged \texttt{bleached} logit is
+thresholded at $0.5$ (exactly $0.5$ counts as negative). Ground truth comes from
+\texttt{configs/class\_to\_concepts.csv}: \texttt{TRUE} (code $2$) is the
+positive class, \texttt{FALSE} (code $1$) is the negative class, and
+\texttt{not\_given} (code $0$) is excluded. Mask id $0$ is unannotated and is
+excluded as well; it is not the class named \texttt{background}, which is an
+explicit \texttt{FALSE}. Alive, dead, and algae-covered corals are \texttt{FALSE}
+when the table says so, so predicting bleached there is a false positive. A
+native class missing from the table, or a cell other than \texttt{TRUE},
+\texttt{FALSE}, or \texttt{not\_given}, raises. We report accuracy, precision,
+recall, F1, and the TP/FP/FN/TN counts, plus how many pixels were
+\texttt{not\_given} or unannotated. The same four scores are reported for
+CoralNet points, where code $0$ (including the $23$ CoralNet labels whose
+bleached cell is \texttt{not\_given}) is excluded rather than treated as
+\texttt{FALSE}.
 
 \subsection{Reproducing the evaluation}
 \label{sec:eval-repro}

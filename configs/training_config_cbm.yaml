@@ -7,8 +7,8 @@ training:
         type: ConceptBottleneckLoss
         lambda_weight: 1
         ignore_index: 0
-        per_pixel_loss_weight: 1.0
-        per_image_loss_weight: 0.0
+        per_pixel_loss_weight: 0.0
+        per_image_loss_weight: 1.0
     max_grad_norm: 0.5
     epochs: 100
     optimizer:
@@ -27,7 +27,7 @@ training:
     mixed_precision_dtype: bfloat16
     iterations_per_train_epoch: 4000
     iterations_per_val_epoch: 400
-    batch_size: 25
+    batch_size: 32
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',

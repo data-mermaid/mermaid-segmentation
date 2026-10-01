@@ -88,14 +88,12 @@ def test_coralscapes_native_lookup_matches_sorted_registry_vocab() -> None:
         native_id for native_id, name in CORALSCAPES_ID2NAME.items() if name == "background"
     )
 
-    human_local = int(train._native_to_local[human_native_id])
-    background_local = int(train._native_to_local[background_native_id])
-    assert train.source_id2name[human_local] == "human"
-    assert train.source_id2name[background_local] == "background"
-
+    # After attach_registry, the lookup already emits global ids (offset folded in).
     offset = registry.dataset_offsets["coralscapes"]
-    human_gid = human_local + offset
-    background_gid = background_local + offset
+    human_gid = int(train._native_to_local[human_native_id])
+    background_gid = int(train._native_to_local[background_native_id])
+    assert train.source_id2name[human_gid - offset] == "human"
+    assert train.source_id2name[background_gid - offset] == "background"
 
     schema = ConceptSchema.from_csv(sources={"coralscapes"})
     channel_names = list(schema.channel_names)
@@ -135,6 +133,7 @@ def test_coralscapes_native_lookup_matches_sorted_registry_vocab() -> None:
 def test_benthos_yuval_global_lookup_rebuilds_on_vocab_change() -> None:
     """classes.json lookup must track registry vocabulary reassignment."""
     ds = BenthosYuvalCoralsDataset.__new__(BenthosYuvalCoralsDataset)
+    ds._global_offset = 0
     ds._classes_global = {"sand": 1, "coral": 2}
     ds.source_id2name = {1: "sand", 2: "coral"}
     ds.source_name2id = {"sand": 1, "coral": 2}
@@ -154,6 +153,7 @@ def test_benthos_yuval_global_lookup_rebuilds_on_vocab_change() -> None:
 def test_ucsd_mosaics_native_lookup_rebuilds_on_vocab_change() -> None:
     """Native-to-local lookup must track registry vocabulary reassignment."""
     ds = UCSDMosaicsDataset.__new__(UCSDMosaicsDataset)
+    ds._global_offset = 0
     ds.class_table = [
         {"id": 1, "name": "sand"},
         {"id": 2, "name": "coral"},

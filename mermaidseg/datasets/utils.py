@@ -22,6 +22,35 @@ def emit_cache_stats(message: str) -> None:
     print(full, file=sys.stdout, flush=True)
 
 
+def emit_load_stage_stats(prefix: str, stats: object) -> None:
+    """Emit per-epoch data-loading stage timings (from ``LocalS3Cache.snapshot_stats``).
+
+    Reports the cumulative seconds spent in each ``BaseCoralDataset._load_item`` stage (with each
+    stage's share of the total point-load time), the mean point-load time per sample, and the
+    empty/failed-load retry count and rate. No-op when no stage timing was recorded (e.g. a run of
+    only dense HuggingFace datasets, or stats disabled).
+    """
+    stage_sec: dict[str, float] = dict(getattr(stats, "stage_sec", {}) or {})
+    samples = int(getattr(stats, "samples", 0) or 0)
+    retries = int(getattr(stats, "retries", 0) or 0)
+    total = sum(stage_sec.values())
+
+    if total <= 0 and samples == 0:
+        return
+
+    parts = [
+        f"{name}={sec:.1f}s ({(sec / total * 100) if total else 0:.0f}%)"
+        for name, sec in stage_sec.items()
+    ]
+    per_sample_ms = (total / samples * 1000.0) if samples else 0.0
+    retry_rate = (retries / samples) if samples else 0.0
+    emit_cache_stats(
+        f"{prefix} load stages: [{', '.join(parts)}]; "
+        f"{samples} samples, {per_sample_ms:.1f} ms/sample point-load, "
+        f"{retries} retries ({retry_rate:.2f}/sample)"
+    )
+
+
 def emit_dataset_warning(message: str) -> None:
     """Emit a dataset-load warning via the logger AND raw stdout/stderr.
 
@@ -63,6 +92,7 @@ def create_annotation_mask(
     shape: tuple[int, int],
     source_name2id: dict[str, int],
     padding: int | None = None,
+    offset: int = 0,
 ) -> np.ndarray:
     """Creates a source-space annotation mask for a given image.
 
@@ -75,33 +105,47 @@ def create_annotation_mask(
             to integer class IDs (1..N; 0 is reserved for background).
         padding (int | None, optional): Half-size of a square pad region around each point annotation.
             If None or 0, only the exact annotation pixel is set. Defaults to None.
+        offset (int, optional): Global source-label offset added to every foreground
+            label id (background stays 0). Folding it in here is equivalent to a
+            ``np.where(mask > 0, mask + offset, mask)`` pass but avoids a second full-resolution
+            scan. Defaults to 0.
     Returns:
         np.ndarray: Integer annotation mask with shape (height, width). Values
-        are 0 (background) or local source-class IDs (1..N).
+        are 0 (background) or (offset-shifted) local source-class IDs (1..N).
     """
     # TODO: Make padding percentage-based so it scales with image resolution
-    mask = np.zeros(shape[:2], dtype=np.int64)
+    # int32 keeps the emitted mask small (albumentations casts masks to int32 for cv2 anyway, and
+    # the training loop calls ``.long()`` downstream); global ids are far below the int32 range.
+    mask = np.zeros(shape[:2], dtype=np.int32)
 
     if annotations.empty:
         return mask
 
-    valid = annotations[annotations["source_label_name"].notna()].copy()
+    valid = annotations[annotations["source_label_name"].notna()]
 
-    unknown = set(valid["source_label_name"]) - set(source_name2id.keys())
-    if unknown:
+    # Map to ids once; unknown labels become NaN. Only materialise the unknown-label set (and warn)
+    # when something actually failed to map, instead of building a set every call.
+    mapped = valid["source_label_name"].map(source_name2id)
+    if mapped.isna().any():
+        unmapped = mapped.isna()
+        unknown = sorted(set(valid["source_label_name"][unmapped]))
         logger.warning(
             "create_annotation_mask: skipping %d unknown label(s): %s",
             len(unknown),
-            sorted(unknown),
+            unknown,
         )
-        valid = valid[valid["source_label_name"].isin(source_name2id)]
+        keep = ~unmapped
+        valid = valid[keep]
+        mapped = mapped[keep]
 
     if valid.empty:
         return mask
 
     rows = valid["row"].to_numpy(dtype=np.intp)
     cols = valid["col"].to_numpy(dtype=np.intp)
-    label_ids = valid["source_label_name"].map(source_name2id).to_numpy(dtype=np.int64)
+    label_ids = mapped.to_numpy(dtype=np.int32)
+    if offset:
+        label_ids = label_ids + np.int32(offset)
 
     if padding is not None and padding > 0:
         h, w = shape[:2]

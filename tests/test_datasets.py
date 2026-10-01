@@ -171,6 +171,24 @@ def test_create_annotation_mask_overlapping_padding():
     assert mask[10, 16] == 2
 
 
+def test_create_annotation_mask_offset_matches_where_pass():
+    """Folded offset must equal the previous ``np.where(mask > 0, mask + offset, mask)`` pass."""
+    annotations = _make_annotations([10, 20], [5, 15], ["Coral", "Sand"])
+    source_name2id = {"Coral": 1, "Sand": 2}
+    offset = 10
+    baseline = create_annotation_mask(annotations, (50, 50), source_name2id)
+    shifted = np.where(baseline > 0, baseline + offset, baseline)
+    folded = create_annotation_mask(annotations, (50, 50), source_name2id, offset=offset)
+    np.testing.assert_array_equal(folded, shifted)
+    assert folded.dtype == np.int32
+
+
+def test_create_annotation_mask_dtype_is_int32():
+    annotations = _make_annotations([1], [1], ["Coral"])
+    mask = create_annotation_mask(annotations, (8, 8), {"Coral": 1})
+    assert mask.dtype == np.int32
+
+
 def test_create_annotation_mask_unknown_label_skipped(caplog):
     annotations = _make_annotations([5, 10], [5, 10], ["Coral", "UnknownLabel"])
 
@@ -211,15 +229,37 @@ def test_base_dataset_set_global_offset_validates_negative(minimal_dataset):
         minimal_dataset.set_global_offset(-1)
 
 
-def test_base_dataset_set_global_offset_shifts_mask_via_helper():
-    """Verify offset arithmetic on the helper directly: offset=10 → values become 11/12."""
-    minimal_mask = np.array([[0, 1, 2], [2, 0, 1]], dtype=np.int64)
-    offset = 10
-    shifted = np.where(minimal_mask > 0, minimal_mask + offset, minimal_mask)
-    assert shifted[0, 0] == 0
-    assert shifted[0, 1] == 11
-    assert shifted[0, 2] == 12
-    assert shifted[1, 1] == 0
+def test_base_dataset_set_global_offset_shifts_emitted_mask():
+    """Folded offset in ``_load_item`` must match the previous ``np.where`` post-pass."""
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=["Coral"],
+        img1_labels=["Coral"],
+    )
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+        split="val",
+    )
+    _, local_mask = ds[0]
+    ds.set_global_offset(10)
+    _, global_mask = ds[0]
+    expected = np.where(local_mask > 0, local_mask + 10, local_mask)
+    np.testing.assert_array_equal(global_mask, expected)
+
+
+def test_base_dataset_ann_positions_match_boolean_scan(minimal_dataset):
+    """Precomputed groupby indices must select the same rows (and order) as a boolean scan."""
+    for image_id in minimal_dataset.df_images["image_id"]:
+        positions = minimal_dataset._ann_positions[image_id]
+        indexed = minimal_dataset.df_annotations.iloc[positions][
+            ["row", "col", "source_label_name"]
+        ]
+        scanned = minimal_dataset.df_annotations.loc[
+            minimal_dataset.df_annotations["image_id"] == image_id,
+            ["row", "col", "source_label_name"],
+        ]
+        pd.testing.assert_frame_equal(indexed.reset_index(drop=True), scanned.reset_index(drop=True))
 
 
 # --- BaseCoralDataset.collate_fn ---
@@ -329,7 +369,6 @@ def test_train_skips_image_with_no_annotations(monkeypatch):
     ds = _SyntheticDataset(
         df_annotations=df_annotations,
         df_images=df_images,
-        class_subset=["Coral"],
         split="train",
     )
     monkeypatch.setattr(np.random, "randint", lambda low, high: 0)
@@ -362,10 +401,11 @@ def test_val_returns_empty_mask_without_recursion():
         img0_labels=[],
         img1_labels=["Coral"],
     )
+    # Do not pass class_subset: that filter re-derives df_images from remaining
+    # annotations and would drop the unlabeled image we want to probe.
     ds = _SyntheticDataset(
         df_annotations=df_annotations,
         df_images=df_images,
-        class_subset=["Coral"],
         split="val",
     )
 
@@ -382,7 +422,6 @@ def test_train_raises_when_all_items_are_empty():
     ds = _SyntheticDataset(
         df_annotations=df_annotations,
         df_images=df_images,
-        class_subset=["Coral"],
         split="train",
     )
 

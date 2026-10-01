@@ -7,11 +7,13 @@ mirror for CoralscapesV2):
 1. CoralNet validation           (per source id + aggregate)
 2. Pacific Labeled Corals         (per region + aggregate)
 3. Benthos zero-shot segmentation (per orthomosaic + aggregate)
-4. CoralscapesV2 linear probe     (dense test accuracy / mIoU)
+4. CoralscapesV2 linear probe     (dense test accuracy / mIoU, plus bleached)
 
 The model is specified exactly like in the demo (checkpoint + model config +
 id2label + concept_id2name); the model ``input_size`` from the model config
-determines the prediction resolution.
+determines the prediction resolution. CoralscapesV2 images (1024x2048) are
+predicted as three 1024x1024 windows (left, center, right), averaged in concept
+logit space, then scored at the original resolution.
 
 Example (cluster):
     uv run python scripts/evaluate.py \
@@ -153,6 +155,14 @@ def _write_summary(output_dir: Path, summary: dict) -> None:
         )
         b = pooled.get("binary") or {}
         lines.append(f"- binary macro acc/F1: {fmt(b.get('macro_accuracy'))}/{fmt(b.get('macro_f1'))}")
+        bleached = pooled.get("bleached") or {}
+        lines.append(
+            "- bleached acc/precision/recall/F1: "
+            f"{fmt(bleached.get('accuracy'))}/{fmt(bleached.get('precision'))}/"
+            f"{fmt(bleached.get('recall'))}/{fmt(bleached.get('f1'))} "
+            f"(n_true={bleached.get('n_true')} n_false={bleached.get('n_false')} "
+            f"n_not_given={bleached.get('n_not_given')})"
+        )
         lines.append("")
     pc = _ok("pacific")
     if pc:
@@ -183,6 +193,15 @@ def _write_summary(output_dir: Path, summary: dict) -> None:
                 f"- {kind}: test accuracy {fmt(t.get('accuracy'))}, mIoU {fmt(t.get('miou'))} "
                 f"(probe train acc {fmt(kd['probe']['train_accuracy'])})"
             )
+        bleached = cs.get("bleached") or {}
+        lines.append(
+            "- bleached acc/precision/recall/F1: "
+            f"{fmt(bleached.get('accuracy'))}/{fmt(bleached.get('precision'))}/"
+            f"{fmt(bleached.get('recall'))}/{fmt(bleached.get('f1'))} "
+            f"(n_true={bleached.get('n_true')} n_false={bleached.get('n_false')} "
+            f"n_not_given={bleached.get('n_not_given')} "
+            f"n_unannotated={bleached.get('n_unannotated')})"
+        )
         lines.append("")
     (output_dir / "summary.md").write_text("\n".join(lines))
 
@@ -228,6 +247,11 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError(
             f"concept_id2name has {len(concept_names)} entries but the model has "
             f"{predictor.num_concepts} concept channels. Provide a matching --concept-id2name."
+        )
+    if ("coralnet" in evals or "coralscapes" in evals) and "bleached" not in concept_names:
+        raise RuntimeError(
+            "coralnet and coralscapes evals require a concept channel named exactly 'bleached'. "
+            f"concept_id2name has {len(concept_names)} entries and no 'bleached'."
         )
 
     # Benthic hierarchy for CoralNet/Pacific class roll-up.
@@ -321,6 +345,8 @@ def main(argv: list[str] | None = None) -> None:
                 feature_kinds=args.probe_features,
                 coralscapes_root=args.coralscapes_root,
                 output_dir=output_dir,
+                concept_names=concept_names,
+                taxonomy_csv=args.taxonomy_csv,
                 svm_c=args.svm_c,
                 max_test_images=args.max_test_images,
             ),

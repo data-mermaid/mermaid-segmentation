@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mermaidseg.evaluation.metrics import (
     BinaryConceptStats,
+    BleachedScore,
     ClassConfusion,
     ConceptLayout,
     MetricBundle,
@@ -87,7 +89,7 @@ def test_taxonomic_living_excludes_none_error():
 
 
 def test_binary_concept_stats_matches_sklearn():
-    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
     rng = np.random.default_rng(0)
     n = 200
@@ -104,8 +106,20 @@ def test_binary_concept_stats_matches_sklearn():
     y_pred = (probs[valid] > 0.5).astype(int)
     per = stats.per_concept()["c"]
     assert abs(per["accuracy"] - accuracy_score(y_true, y_pred)) < 1e-9
+    assert abs(per["precision"] - precision_score(y_true, y_pred, zero_division=0)) < 1e-9
+    assert abs(per["recall"] - recall_score(y_true, y_pred, zero_division=0)) < 1e-9
     assert abs(per["f1"] - f1_score(y_true, y_pred, zero_division=0)) < 1e-9
     assert per["n_valid"] == int(valid.sum())
+    assert per["n_not_given"] == int((gt_vals == 0).sum())
+    assert per["n_true"] == int((gt_vals == 2).sum())
+    assert per["n_false"] == int((gt_vals == 1).sum())
+
+    # Extra not_given rows must not move TP/FP/FN/TN.
+    before = (per["tp"], per["fp"], per["fn"], per["tn"])
+    stats.update(np.zeros((5, 1), dtype=np.int8), np.ones((5, 1), dtype=np.float32))
+    after = stats.per_concept()["c"]
+    assert (after["tp"], after["fp"], after["fn"], after["tn"]) == before
+    assert after["n_not_given"] == per["n_not_given"] + 5
 
 
 def test_concept_layout_and_bundle():
@@ -133,6 +147,32 @@ def test_concept_layout_and_bundle():
     assert d["num_points"] == 2
     assert abs(d["class_accuracy"] - 0.5) < 1e-9
     assert "kingdom" in d["taxonomic"]
+
+
+def test_bleached_score_separates_true_false_not_given_and_unannotated():
+    score = BleachedScore(threshold=0.5)
+    # code 2 / 0.9 -> TP; code 2 / 0.5 -> FN (exactly 0.5 is negative)
+    # code 1 / 0.9 -> FP; code 1 / 0.1 -> TN
+    # code 0, annotated -> not_given; code 0, unannotated -> not a negative
+    codes = np.array([2, 2, 1, 1, 0, 0])
+    probs = np.array([0.9, 0.5, 0.9, 0.1, 0.99, 0.01])
+    unannotated = np.array([False, False, False, False, False, True])
+    score.update(codes, probs, unannotated)
+    got = score.to_dict()
+    assert (got["tp"], got["fn"], got["fp"], got["tn"]) == (1, 1, 1, 1)
+    assert got["n_true"] == 2
+    assert got["n_false"] == 2
+    assert got["n_not_given"] == 1
+    assert got["n_unannotated"] == 1
+    assert got["precision"] == 0.5
+    assert got["recall"] == 0.5
+    assert abs(got["accuracy"] - 0.5) < 1e-9
+
+
+def test_bleached_score_rejects_unannotated_marked_true():
+    score = BleachedScore()
+    with pytest.raises(ValueError, match="unannotated"):
+        score.update(np.array([2]), np.array([0.9]), np.array([True]))
 
 
 def test_bundle_merge_pooling():

@@ -136,13 +136,16 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """Build a vectorized lookup from native Coralscapes IDs to local source IDs.
 
         Native ID ``0`` and any class not present in ``class_subset`` map to ``0`` (background).
+        The global offset is folded directly into the foreground entries so ``_load_item`` does not
+        need a separate ``np.where`` shift pass. ``int32`` keeps the emitted mask small.
         """
         native_id2name = CORALSCAPES_ID2NAME
         max_native = max(native_id2name) + 1
-        lookup = np.zeros(max_native, dtype=np.int64)
+        lookup = np.zeros(max_native, dtype=np.int32)
+        offset = self._global_offset
         for native_id, name in native_id2name.items():
             local_id = self.source_name2id.get(name, 0)
-            lookup[native_id] = local_id
+            lookup[native_id] = local_id + offset if local_id else 0
         return lookup
 
     def set_source_vocabulary(
@@ -191,14 +194,13 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             return None, None
 
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
-        image = np.array(self.dataset[idx]["image"])
-        native_mask = np.asarray(self.dataset[idx]["label"], dtype=np.int64)
+        # Fetch the HF row once: ``datasets`` eagerly decodes every Image column on each row access,
+        # so indexing twice would decode both the image and the label PNG twice.
+        row = self.dataset[idx]
+        image = np.array(row["image"])
+        # The native label is uint8; index the (offset-folded, int32) lookup directly.
+        native_mask = np.asarray(row["label"])
         mask = self._native_to_local[native_mask]
-
-        if self._global_offset:
-            mask = np.where(mask > 0, mask + self._global_offset, mask).astype(
-                mask.dtype, copy=False
-            )
 
         if self.transform:
             transformed = self.transform(image=image, mask=mask)
