@@ -1,6 +1,7 @@
 import logging
 import time
 import warnings
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -79,6 +80,8 @@ def train_model(
     early_stopping_min_delta: float = 0.0,
     max_load_failure_rate: float | None = 0.05,
     train_log_interval: int = 1,
+    on_optimizer_step: Callable[[MetaModel], None] | None = None,
+    save_best_checkpoint: bool = True,
 ):
     """Train a model, logging losses and metrics per epoch.
 
@@ -117,6 +120,9 @@ def train_model(
             Defaults to 0.05.
         train_log_interval (int, optional): Log per-batch train losses to the logger every
             ``train_log_interval`` iterations (1 = every batch). Defaults to 1.
+        on_optimizer_step: Called from ``train_epoch`` after each successful optimizer update.
+        save_best_checkpoint: When True, write ``model_epoch{N}`` whenever the validation
+            metric improves. Step-checkpointed runs pass False so only ``model_step*`` is saved.
     Returns:
         dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
             ``train_metrics``, ``validation_metrics`` (if ``val_loader`` is provided), and
@@ -155,6 +161,7 @@ def train_model(
             run_logger=logger,
             log_interval=train_log_interval,
             epoch=epoch,
+            on_optimizer_step=on_optimizer_step,
         )
         _enforce_load_failure_rate(train_loader, failures_before, max_load_failure_rate, epoch)
         # Monotonic global-step (iteration) axis for wandb; falls back to epoch when the
@@ -207,7 +214,7 @@ def train_model(
                 best_results[metric_name] = metric_value
                 best_results["epoch"] = epoch
                 epochs_without_improvement = 0
-                if logger is not None:
+                if logger is not None and save_best_checkpoint:
                     logger.save_model_checkpoint(meta_model, epoch, val_metric_results)
             else:
                 epochs_without_improvement += 1

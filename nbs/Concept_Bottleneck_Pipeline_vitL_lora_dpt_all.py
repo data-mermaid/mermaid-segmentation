@@ -20,13 +20,13 @@ from mermaidseg.datasets import (
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import Evaluator
-from mermaidseg.model.meta import MetaModel
+from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
 from mermaidseg.model.models import align_peft_checkpoint_state_dict
 from mermaidseg.model.train import train_model
 
-# ViT-L encoder adapted with LoRA + a DPT segmentation head (concept-bottleneck variant).
-VITL_ENCODER_NAME = "facebook/dinov3-vitl16-pretrain-lvd1689m"
-CHECKPOINT = None#"model_checkpoints/mermaid_base_run_dinov3_lora_dpt_all/model_epoch34" # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch13"
+# LoRA + DPT concept-bottleneck entrypoint. The encoder comes from the model config
+# (ViT-L by default; the ViT-size sweep passes S/B/L/H+ configs).
+CHECKPOINT = None  # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt_all/model_epoch34" # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch13"
 
 
 def load_training_checkpoint(
@@ -67,19 +67,17 @@ def load_training_checkpoint(
     if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
-    # The iteration-based LinearLR warmup (warmup_iters < iterations_per_train_epoch)
-    # always completes within epoch 0, so any resumed checkpoint is already past
-    # warmup. `_warmup_iters_completed` is not persisted and resets to 0 in a fresh
-    # process; without this, train.py would re-run warmup and overwrite the restored
-    # learning rates with the initial (pre-decay) base LRs. Mark warmup complete so
-    # the restored optimizer/scheduler LRs are respected.
-    if getattr(meta_model, "warmup_iters", 0) > 0:
-        meta_model._warmup_iters_completed = meta_model.warmup_iters
+    # Step checkpoints store how far warmup got. Older epoch checkpoints omit it;
+    # those are past warmup (it finishes inside epoch 0), so the helper marks it done.
+    restore_warmup_progress(meta_model, checkpoint)
 
     if "global_step" in checkpoint:
         meta_model.global_step = int(checkpoint["global_step"])
 
-    return int(checkpoint.get("epoch", -1)) + 1
+    # Missing epoch_complete means an older epoch-boundary checkpoint: start the next epoch.
+    # A mid-epoch model_step* file sets epoch_complete false and continues this epoch.
+    meta_model.resuming_within_epoch = not bool(checkpoint.get("epoch_complete", True))
+    return next_epoch_from_checkpoint(checkpoint)
 
 
 # -- 0. Environment --------------------------------------------------------
@@ -112,8 +110,19 @@ parser.add_argument(
     default="../configs/training_config_cbm.yaml",
     help="path to the training config YAML",
 )
+parser.add_argument(
+    "--model-config",
+    default="../configs/model_config_cbm_dpt_lora_vitl.yaml",
+    help="path to the model config YAML (default: rank-16 ViT-L LoRA)",
+)
 parser.add_argument("--per-pixel-loss-weight", type=float, default=None)
 parser.add_argument("--per-image-loss-weight", type=float, default=None)
+parser.add_argument(
+    "--grad-accum-steps",
+    type=int,
+    default=None,
+    help="microbatches per optimizer step (default: training config, usually 1)",
+)
 parser.add_argument(
     "--checkpoint",
     default=None,
@@ -152,7 +161,7 @@ cfg = setup_config(
     {
         "data": "../configs/data_config_all.yaml",
         "training": args.training_config,
-        "model": "../configs/model_config_cbm_dpt_lora_vitl.yaml",
+        "model": args.model_config,
         "logger": "../configs/logger_config.yaml",
     }
 )
@@ -163,12 +172,10 @@ if args.per_pixel_loss_weight is not None:
     cfg.training.loss.per_pixel_loss_weight = args.per_pixel_loss_weight
 if args.per_image_loss_weight is not None:
     cfg.training.loss.per_image_loss_weight = args.per_image_loss_weight
+if args.grad_accum_steps is not None:
+    cfg.training.grad_accum_steps = args.grad_accum_steps
 
-# The LoRA/DPT model config already targets the ViT-L encoder; set it explicitly
-# so the value is unambiguous and gets logged below.
-cfg.model.encoder_name = VITL_ENCODER_NAME
-
-# Iterations / batch_size / epochs are set in configs/training_config_cbm.yaml.
+# Encoder, iterations, batch size, and epochs come from the model and training configs.
 
 # Set experiment on the config the Logger actually reads.
 cfg_logger = copy.deepcopy(cfg)
@@ -216,7 +223,9 @@ attach_registry(registry, dataset_dict.values())
 
 # repeat coralscapes_v2 train dataset 5 times
 train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"] + [
-    ds for (name, split), ds in dataset_dict.items() if name == "coralscapes_v2" and split == "train"
+    ds
+    for (name, split), ds in dataset_dict.items()
+    if name == "coralscapes_v2" and split == "train"
 ] * 5
 val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
 
@@ -261,6 +270,12 @@ if init_checkpoint:
 elif CHECKPOINT:
     start_epoch = load_training_checkpoint(meta_model, CHECKPOINT, device)
     print(f"Loaded checkpoint {CHECKPOINT!r}; resuming at epoch {start_epoch}")
+    if start_epoch >= int(cfg.training.epochs):
+        print(
+            f"Checkpoint already covers all {int(cfg.training.epochs)} epoch(s). "
+            "Exiting without further training."
+        )
+        raise SystemExit(0)
     # Offset the RNG by the number of already-trained epochs so the resumed run
     # sees a different data-shuffling stream instead of replaying the epoch
     # 0..N-1 orderings. The DataLoader's RandomSampler draws from the global
@@ -268,11 +283,16 @@ elif CHECKPOINT:
     # iterated below, so re-seeding here changes the permutations for every
     # resumed epoch. (Augmentations already vary per run via Albumentations'
     # own entropy-seeded RNG.)
-    resume_seed = SEED + start_epoch
+    if getattr(meta_model, "resuming_within_epoch", False):
+        resume_seed = SEED + int(meta_model.global_step)
+        seed_note = f"{meta_model.global_step} completed updates"
+    else:
+        resume_seed = SEED + start_epoch
+        seed_note = f"{start_epoch} trained epochs"
     torch.manual_seed(resume_seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(resume_seed)
-    print(f"Re-seeded RNG to {resume_seed} (SEED={SEED} + {start_epoch} trained epochs)")
+    print(f"Re-seeded RNG to {resume_seed} (SEED={SEED} + {seed_note})")
 
 evaluator = Evaluator(
     num_classes=registry.num_target_classes,
@@ -302,11 +322,15 @@ with Logger(
     )
     run_logger.log_params(
         {
-            "model/encoder_name": VITL_ENCODER_NAME,
+            "model/encoder_name": cfg.model.encoder_name,
             "model/head": "dpt",
             "model/adapter": "lora",
+            "model/lora_r": cfg.model.lora_r,
+            "model/lora_alpha": cfg.model.lora_alpha,
             "loss/per_pixel_loss_weight": cfg.training.loss.per_pixel_loss_weight,
             "loss/per_image_loss_weight": cfg.training.loss.per_image_loss_weight,
+            "train/batch_size": cfg.training.batch_size,
+            "train/grad_accum_steps": int(cfg.training.get("grad_accum_steps", 1)),
         }
     )
     if init_checkpoint:
@@ -334,28 +358,50 @@ with Logger(
     )
 
     metrics_all: dict[int, dict] = {}
+    checkpoint_every = int(cfg.training.get("checkpoint_every_steps", 0) or 0)
+    total_updates = int(cfg.training.epochs) * int(cfg.training.iterations_per_train_epoch)
 
     for epoch in range(start_epoch, cfg.training.epochs):
+
+        def _save_step_checkpoint(meta, epoch=epoch):
+            if checkpoint_every <= 0 or meta.global_step % checkpoint_every != 0:
+                return
+            run_logger.save_model_checkpoint(
+                meta,
+                epoch,
+                {},
+                is_best=False,
+                checkpoint_name=f"model_step{meta.global_step}",
+                epoch_complete=meta.global_step >= total_updates,
+            )
+
         metrics = train_model(
-        meta_model=meta_model,
-        evaluator=evaluator,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        logger=run_logger,
-        start_epoch=epoch,
-        end_epoch=epoch + 1,
-        metric_of_interest="accuracy",
-        train_log_interval=cfg.logger.get("train_log_interval", 1),
+            meta_model=meta_model,
+            evaluator=evaluator,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            logger=run_logger,
+            start_epoch=epoch,
+            end_epoch=epoch + 1,
+            metric_of_interest="accuracy",
+            train_log_interval=cfg.logger.get("train_log_interval", 1),
+            on_optimizer_step=_save_step_checkpoint,
+            save_best_checkpoint=checkpoint_every <= 0,
         )
         metrics_all.update(metrics)
-        if cfg.training.iterations_per_train_epoch>1000:
+        # Step-checkpointed runs (the ViT-size sweep) already saved model_step*.
+        # Other runs still write model_epoch{N} at the end of each epoch.
+        if checkpoint_every <= 0 and cfg.training.iterations_per_train_epoch > 1000:
             run_logger.save_model_checkpoint(
-            meta_model,
-            epoch,
-            metrics[epoch].get("validation_metrics", {}),
-            is_best=False,
-        )
-    final_epoch = max(metrics)
-    print("Final train metrics     :", metrics[final_epoch].get("train_metrics"))
-    print("Final validation metrics:", metrics[final_epoch].get("validation_metrics"))
+                meta_model,
+                epoch,
+                metrics[epoch].get("validation_metrics", {}),
+                is_best=False,
+            )
+    if not metrics_all:
+        print("No training epochs ran.")
+    else:
+        final_epoch = max(metrics_all)
+        print("Final train metrics     :", metrics_all[final_epoch].get("train_metrics"))
+        print("Final validation metrics:", metrics_all[final_epoch].get("validation_metrics"))
     print(f"wandb run URL: {run_logger.run_url}")

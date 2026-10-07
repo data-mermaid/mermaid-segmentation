@@ -117,6 +117,57 @@ def test_rebuild_scheduler_binds_to_restored_lr(minimal_config, make_meta_model)
     assert meta.scheduler_step_every == "iteration"
 
 
+def test_warmup_then_iteration_decay_reaches_zero_at_the_last_step(
+    minimal_config, tiny_loader, make_meta_model
+):
+    """4 warmup updates return to the base LR; the next 6 decay updates end at 0.
+
+    Decay must not step on the update that finishes warmup, or that boundary
+    update would both restore the peak and immediately leave it.
+    """
+    base_lr = 0.02
+    warmup = 4
+    decay = 6
+    total = warmup + decay
+    cfg = copy.deepcopy(minimal_config)
+    cfg.training.training_mode = "standard"
+    cfg.training.epochs = 1
+    cfg.training.iterations_per_train_epoch = total
+    cfg.training.optimizer.lr = base_lr
+    cfg.training.scheduler = {
+        "type": "LinearLR",
+        "start_factor": 1.0,
+        "end_factor": 0.0,
+        "total_iters": decay,
+        "step_every": "iteration",
+        "warmup_iters": warmup,
+        "warmup_start_factor": 0.01,
+    }
+    meta = make_meta_model(cfg, run_name="warmup-decay")
+    assert meta.optimizer.param_groups[0]["lr"] == pytest.approx(base_lr * 0.01)
+    lrs: list[float] = []
+
+    def _record(model) -> None:
+        lrs.append(model.optimizer.param_groups[0]["lr"])
+
+    train_model(
+        meta,
+        evaluator=None,
+        train_loader=tiny_loader,
+        start_epoch=0,
+        end_epoch=1,
+        max_load_failure_rate=None,
+        on_optimizer_step=_record,
+    )
+
+    assert len(lrs) == total
+    assert lrs[warmup - 1] == pytest.approx(base_lr)
+    assert lrs[warmup] < base_lr
+    assert lrs[-1] == pytest.approx(0.0, abs=1e-12)
+    assert meta.scheduler.last_epoch == decay
+    assert meta._warmup_iters_completed == warmup
+
+
 @pytest.mark.integration
 def test_step_every_rejects_unknown_value(minimal_config, make_meta_model):
     cfg = _with_scheduler(

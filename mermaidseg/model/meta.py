@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 import albumentations as A
@@ -42,6 +43,33 @@ def _resolve_amp_dtype(dtype_config: Any | None) -> torch.dtype:
     raise ValueError(
         f"Unsupported mixed_precision_dtype={dtype_config!r}; expected 'bfloat16' or 'float16'."
     )
+
+
+def next_epoch_from_checkpoint(checkpoint: dict[str, Any]) -> int:
+    """Return the epoch index a resumed run should start at.
+
+    Epoch-boundary checkpoints, including every checkpoint written before step
+    checkpoints existed, omit ``epoch_complete`` or set it true. Those resume at
+    ``epoch + 1``. A mid-epoch ``model_step*`` checkpoint sets ``epoch_complete``
+    false and continues the saved epoch.
+    """
+    saved = int(checkpoint.get("epoch", -1))
+    if bool(checkpoint.get("epoch_complete", True)):
+        return saved + 1
+    return max(saved, 0)
+
+
+def restore_warmup_progress(meta_model: Any, checkpoint: dict[str, Any]) -> None:
+    """Restore how many warmup steps have already run.
+
+    New checkpoints store ``warmup_iters_completed``. Older ones do not; any of
+    those is an epoch boundary, and warmup finishes inside epoch 0, so mark it done.
+    """
+    if "warmup_iters_completed" in checkpoint:
+        meta_model._warmup_iters_completed = int(checkpoint["warmup_iters_completed"])
+        return
+    if getattr(meta_model, "warmup_iters", 0) > 0:
+        meta_model._warmup_iters_completed = meta_model.warmup_iters
 
 
 class MetaModel:
@@ -231,9 +259,7 @@ class MetaModel:
         dpt_lr = optimizer_cfg.pop("dpt_lr", None)
         default_lr = optimizer_cfg.get("lr")
 
-        named_trainable = [
-            (n, p) for n, p in self.model.named_parameters() if p.requires_grad
-        ]
+        named_trainable = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
         self._trainable_params = [p for _, p in named_trainable]  # kept for grad clipping
 
         if lora_lr is not None or dpt_lr is not None:
@@ -319,36 +345,40 @@ class MetaModel:
             return
         self.scheduler.step()
 
-    def _optimizer_step(self, loss: torch.Tensor, apply_step: bool = True) -> bool:
-        """Run backward + AMP optimizer step with optional gradient clipping.
+    def _accumulate_loss(self, loss: torch.Tensor) -> None:
+        """Backward one microbatch, averaged in fp32 across the accumulation window.
 
-        Gradients are always accumulated via ``backward()``. The optimizer step,
-        gradient clipping, and ``zero_grad`` are only applied when ``apply_step`` is
-        True (the accumulation-window boundary), enabling gradient accumulation over
-        ``self.grad_accum_steps`` micro-batches.
-
-        Returns True when the optimizer step was applied (not skipped by the scaler).
+        ``GradScaler`` is enabled only for fp16. bf16 autocast leaves it disabled, so
+        this division is the only scale applied to the loss. Callers must pass a
+        finite loss; a non-finite window is discarded before this runs.
         """
-        if not torch.isfinite(loss):
-            logger.warning("train_epoch: skipping non-finite loss (value=%s)", loss.item())
-            if apply_step:
-                self.optimizer.zero_grad(set_to_none=True)
-            return False
-
+        if loss.dtype != torch.float32:
+            loss = loss.float()
         self.scaler.scale(loss / self.grad_accum_steps).backward()
-        if not apply_step:
-            return False
 
+    def _abort_accumulation(self, did_backward: bool) -> None:
+        """Drop a partial window so it cannot become a short optimizer step.
+
+        When fp16 scaling already ran, ``update()`` resets the scaler so the next
+        window may call ``scale().backward()`` again. Disabled scalers (bf16) no-op.
+        """
+        if did_backward and self.scaler.is_enabled():
+            self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+
+    def _apply_accumulated_step(self) -> bool:
+        """Clip once, then step Adam/SGD on the averaged gradient.
+
+        Returns True when the optimizer step was applied (not skipped by the scaler
+        or a non-finite grad norm).
+        """
         scale_before = self.scaler.get_scale()
         if self.max_grad_norm is not None and self.max_grad_norm > 0:
             self.scaler.unscale_(self.optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self._trainable_params, self.max_grad_norm
-            )
+            grad_norm = torch.nn.utils.clip_grad_norm_(self._trainable_params, self.max_grad_norm)
             if not torch.isfinite(grad_norm):
                 logger.warning(
-                    "train_epoch: skipping optimizer step due to non-finite grad norm "
-                    "(value=%s)",
+                    "train_epoch: skipping optimizer step due to non-finite grad norm (value=%s)",
                     grad_norm.item(),
                 )
                 if self.scaler.is_enabled():
@@ -485,19 +515,31 @@ class MetaModel:
         run_logger: Any | None = None,
         log_interval: int = 1,
         epoch: int | None = None,
+        on_optimizer_step: Callable[[Any], None] | None = None,
     ) -> tuple[float, dict[str, float | NDArray[np.float64]], dict[str, float | int]]:
         """Trains the model for one epoch using the provided data loader.
 
+        One iteration is one optimizer update. ``grad_accum_steps`` microbatches are
+        forwarded and averaged in fp32 before that update. ``global_step`` advances
+        once per successful update, which is once per batch when accumulation is 1.
+
+        A resumed epoch continues at ``global_step - epoch * iterations``. Epoch 0 of
+        a fresh run starts at 0. The next epoch in the same process starts at 0 as
+        well, because ``global_step`` already counts the updates of earlier epochs.
+
         Args:
             train_loader: DataLoader yielding ``(inputs, source_labels)`` batches.
+                Each batch is one microbatch.
             evaluator: Optional evaluator for computing per-epoch metrics.
-            run_logger: Optional experiment logger; when provided, per-batch train losses
-                are logged against the monotonic ``self.global_step`` iteration axis.
+            run_logger: Optional experiment logger; when provided, per-update train
+                losses are logged against the monotonic ``self.global_step`` axis.
                 (Named ``run_logger`` to avoid shadowing the module-level ``logger``.)
-            log_interval: Log per-batch train losses every ``log_interval`` iterations.
-                Defaults to 1 (every batch).
-            epoch: Current epoch index, unused for computation but kept for parity with
-                the caller's logging context.
+            log_interval: Log per-update train losses every ``log_interval`` optimizer
+                steps. Defaults to 1 (every update).
+            epoch: Current epoch index. Used to place a mid-epoch resume inside this
+                epoch's iteration range.
+            on_optimizer_step: Called after each successful optimizer update, once
+                ``global_step`` and the LR schedule have advanced.
 
         Returns:
             A 3-tuple of ``(average_loss, metric_results, timing)``.
@@ -529,106 +571,159 @@ class MetaModel:
             self._train_loader_iter = iter(train_loader)
             self._train_loader = train_loader
 
-        for micro_step in tqdm(range(iterations_per_train_epoch)):
-            assert self._train_loader_iter is not None
-            # Monotonic global iteration counter shared across train_epoch calls; drives
-            # the per-batch wandb x-axis and keeps step advancing every iteration.
-            self.global_step += 1
-            try:
-                data = next(self._train_loader_iter)
-            except StopIteration:
-                self._train_loader_iter = iter(train_loader)
-                self._train_loader = train_loader
-                data = next(self._train_loader_iter)
-
-            if use_cuda:
-                torch.cuda.synchronize()
-            data_time_total += time.perf_counter() - batch_end
-
-            images, source_labels = data
-            if images.numel() == 0:
-                logger.warning("train_epoch: skipping an empty batch (all items failed to load).")
-                continue
-            images = images.to(self.device).float()
-            source_labels = source_labels.long().to(self.device)
-            target_labels = self._to_target_labels(source_labels)
-            target_concepts = (
-                self._to_concept_labels(source_labels)
-                if self.training_mode in ("concept", "concept-bottleneck")
-                else None
+        epoch_index = 0 if epoch is None else int(epoch)
+        start_update = int(self.global_step) - epoch_index * int(iterations_per_train_epoch)
+        if start_update < 0 or start_update > iterations_per_train_epoch:
+            logger.warning(
+                "train_epoch: resume offset %s is outside 0..%s; starting this epoch at 0.",
+                start_update,
+                iterations_per_train_epoch,
             )
+            start_update = 0
+        n_updates = iterations_per_train_epoch - start_update
 
-            if use_cuda:
-                torch.cuda.synchronize()
-            forward_start = time.perf_counter()
+        for _update_idx in tqdm(range(start_update, iterations_per_train_epoch)):
+            self.optimizer.zero_grad(set_to_none=True)
+            micro_losses: list[float] = []
+            micro_components: list[dict[str, float]] = []
+            window_failed = False
+            did_backward = False
 
-            loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
-                images, target_labels, target_concepts
-            )
+            for _micro in range(self.grad_accum_steps):
+                assert self._train_loader_iter is not None
+                try:
+                    data = next(self._train_loader_iter)
+                except StopIteration:
+                    self._train_loader_iter = iter(train_loader)
+                    self._train_loader = train_loader
+                    data = next(self._train_loader_iter)
 
-            if use_cuda:
-                torch.cuda.synchronize()
-            forward_time_total += time.perf_counter() - forward_start
+                if use_cuda:
+                    torch.cuda.synchronize()
+                data_time_total += time.perf_counter() - batch_end
 
-            assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
+                images, source_labels = data
+                if images.numel() == 0:
+                    logger.warning(
+                        "train_epoch: skipping an empty batch (all items failed to load)."
+                    )
+                    window_failed = True
+                    batch_end = time.perf_counter()
+                    break
+                images = images.to(self.device).float()
+                source_labels = source_labels.long().to(self.device)
+                target_labels = self._to_target_labels(source_labels)
+                target_concepts = (
+                    self._to_concept_labels(source_labels)
+                    if self.training_mode in ("concept", "concept-bottleneck")
+                    else None
+                )
 
-            if use_cuda:
-                torch.cuda.synchronize()
-            backward_start = time.perf_counter()
+                if use_cuda:
+                    torch.cuda.synchronize()
+                forward_start = time.perf_counter()
+                loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
+                    images, target_labels, target_concepts
+                )
+                if use_cuda:
+                    torch.cuda.synchronize()
+                forward_time_total += time.perf_counter() - forward_start
+                assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
 
-            apply_step = (
-                (micro_step + 1) % self.grad_accum_steps == 0
-                or micro_step == iterations_per_train_epoch - 1
-            )
-            step_applied = self._optimizer_step(loss, apply_step=apply_step)
-            if step_applied:
-                self._step_warmup_scheduler()
-                self._step_iteration_scheduler()
+                if not torch.isfinite(loss):
+                    logger.warning("train_epoch: skipping non-finite loss (value=%s)", loss.item())
+                    window_failed = True
+                    batch_end = time.perf_counter()
+                    break
 
-            if use_cuda:
-                torch.cuda.synchronize()
-            backward_time_total += time.perf_counter() - backward_start
+                if use_cuda:
+                    torch.cuda.synchronize()
+                backward_start = time.perf_counter()
+                self._accumulate_loss(loss)
+                did_backward = True
+                if use_cuda:
+                    torch.cuda.synchronize()
+                backward_time_total += time.perf_counter() - backward_start
 
-            if not torch.isfinite(loss):
+                micro_losses.append(float(loss.detach()))
+                micro_components.append(loss_components)
+                num_samples += int(target_labels.size(0))
+                outputs = outputs.detach()
+                if concept_outputs is not None:
+                    concept_outputs = concept_outputs.detach()
+                del loss
+
+                if evaluator is not None:
+                    if self.training_mode == "concept":
+                        target_concept_preds = postprocess_predicted_concepts(
+                            target_concepts.detach().cpu().numpy(),
+                            self.concept_matrix,
+                            self.conceptid2labelid,
+                        ).to(self.device)
+                        for metric in evaluator.metric_dict.values():
+                            metric.update(outputs, target_concept_preds)
+                    else:
+                        preds = outputs.argmax(dim=1) if outputs.ndim > 3 else outputs
+                        for metric in evaluator.metric_dict.values():
+                            metric.update(preds, target_labels)
+                    if self.training_mode in ("concept-bottleneck", "concept"):
+                        evaluator.evaluate_concepts(concept_outputs, target_concepts)
+
+                if use_cuda:
+                    torch.cuda.synchronize()
+                batch_end = time.perf_counter()
+
+            if window_failed or not micro_losses:
+                self._abort_accumulation(did_backward)
                 if use_cuda:
                     torch.cuda.synchronize()
                 batch_end = time.perf_counter()
                 continue
 
-            batch_loss = loss.item()
+            n_micro = len(micro_losses)
+            batch_loss = sum(micro_losses) / n_micro
+            mean_components: dict[str, float] = {}
+            for comps in micro_components:
+                for key, value in comps.items():
+                    mean_components[key] = mean_components.get(key, 0.0) + value
+            mean_components = {key: value / n_micro for key, value in mean_components.items()}
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            backward_start = time.perf_counter()
+            # Decay starts on the update after warmup finishes. Stepping both on the
+            # warmup boundary would consume a decay step while the LR is still rising.
+            warmup_done = (
+                self.warmup_scheduler is None or self._warmup_iters_completed >= self.warmup_iters
+            )
+            step_applied = self._apply_accumulated_step()
+            if step_applied:
+                self.global_step += 1
+                self._step_warmup_scheduler()
+                if warmup_done:
+                    self._step_iteration_scheduler()
+            if use_cuda:
+                torch.cuda.synchronize()
+            backward_time_total += time.perf_counter() - backward_start
+
+            if not step_applied:
+                batch_end = time.perf_counter()
+                continue
+
             running_loss += batch_loss
-            for k, v in loss_components.items():
-                running_loss_components[k] = running_loss_components.get(k, 0.0) + v
-            num_samples += target_labels.size(0)
+            for key, value in mean_components.items():
+                running_loss_components[key] = running_loss_components.get(key, 0.0) + value
 
             if run_logger is not None and self.global_step % max(log_interval, 1) == 0:
                 run_logger.log(
                     {
                         "train/batch_loss": batch_loss,
-                        **{f"train/batch_{k}": v for k, v in loss_components.items()},
+                        **{f"train/batch_{key}": value for key, value in mean_components.items()},
                     },
                     step=self.global_step,
                 )
-
-            if evaluator is not None:
-                if self.training_mode == "concept":
-                    target_concept_preds = postprocess_predicted_concepts(
-                        target_concepts.detach().cpu().numpy(),
-                        self.concept_matrix,
-                        self.conceptid2labelid,
-                    ).to(self.device)
-                    for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, target_concept_preds)
-                else:
-                    if outputs.ndim > 3:
-                        outputs = outputs.argmax(dim=1)
-                    for metric in evaluator.metric_dict.values():
-                        metric.update(outputs.detach(), target_labels)
-
-            if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
-                evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
-            if use_cuda:
-                torch.cuda.synchronize()
+            if on_optimizer_step is not None:
+                on_optimizer_step(self)
             batch_end = time.perf_counter()
 
         if evaluator is not None:
@@ -643,10 +738,9 @@ class MetaModel:
             if self.training_mode in ("concept-bottleneck", "concept"):
                 metric_results.update(evaluator.compute_concept_metric_results())
 
-        last_loss = running_loss / iterations_per_train_epoch
-        avg_loss_components = {
-            k: v / iterations_per_train_epoch for k, v in running_loss_components.items()
-        }
+        denom = n_updates if n_updates > 0 else 1
+        last_loss = running_loss / denom
+        avg_loss_components = {k: v / denom for k, v in running_loss_components.items()}
         for k, v in avg_loss_components.items():
             metric_results[f"loss/{k}"] = v
         timing = {

@@ -62,7 +62,15 @@ class FakeMetaModel:
         self._val_idx = 0
         self.global_step = 0
 
-    def train_epoch(self, _loader, _evaluator, run_logger=None, log_interval=1, epoch=None):
+    def train_epoch(
+        self,
+        _loader,
+        _evaluator,
+        run_logger=None,
+        log_interval=1,
+        epoch=None,
+        on_optimizer_step=None,
+    ):
         # Advance the global step like the real MetaModel so train_model logs against it.
         self.global_step += 1
         timing = {
@@ -131,6 +139,20 @@ def test_metric_of_interest_allowlist_accepts_known_metrics(metric_name: str) ->
 
     assert len(metrics) == 1
     assert logger.checkpoint_epochs == [0]
+
+
+def test_save_best_checkpoint_can_be_disabled() -> None:
+    meta = FakeMetaModel(epochs=1, val_metrics_seq=[{"accuracy": 0.9}])
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        save_best_checkpoint=False,
+    )
+    assert logger.checkpoint_epochs == []
 
 
 def test_metric_direction_accuracy_maximize_and_loss_minimize() -> None:

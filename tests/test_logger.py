@@ -425,7 +425,11 @@ class TestLogDataset:
 # Logger.save_model_checkpoint
 # ===================================================================
 class TestSaveModelCheckpoint:
-    """Test checkpoint saving: local files, MLflow artifacts, wandb artifacts."""
+    """Test checkpoint saving: local files and MLflow artifacts.
+
+    Checkpoints stay on local disk (and MLflow when that backend is on). They are
+    not uploaded to wandb.
+    """
 
     def test_local_checkpoint_written(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="ckpt-run")
@@ -467,7 +471,7 @@ class TestSaveModelCheckpoint:
         assert run.data.metrics["checkpoint/loss"] == pytest.approx(0.3)
         assert run.data.metrics["checkpoint/acc"] == pytest.approx(0.9)
 
-    def test_wandb_artifact_logged(self, tmp_mlflow_uri, tmp_path, make_config):
+    def test_wandb_artifact_not_logged(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="wb-art")
         config = make_config()
         lgr = Logger(
@@ -478,7 +482,29 @@ class TestSaveModelCheckpoint:
 
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
 
-        mock_wandb_logger.save_checkpoint.assert_called_once()
+        mock_wandb_logger.save_checkpoint.assert_not_called()
+
+    def test_step_checkpoint_name_and_resume_flags(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="step-ckpt")
+        meta.global_step = 25000
+        meta._warmup_iters_completed = 4000
+        config = make_config()
+        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1)
+        lgr.save_model_checkpoint(
+            meta,
+            epoch=0,
+            metrics_dict={"loss": 0.1},
+            is_best=False,
+            checkpoint_name="model_step25000",
+            epoch_complete=False,
+        )
+        path = tmp_path / "model_checkpoints" / "step-ckpt" / "model_step25000"
+        assert path.is_file()
+        ckpt = torch.load(path, weights_only=False)
+        assert ckpt["global_step"] == 25000
+        assert ckpt["warmup_iters_completed"] == 4000
+        assert ckpt["epoch_complete"] is False
+        assert ckpt["epoch"] == 0
 
     def test_mlflow_model_logged_when_local_disabled(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="mlflow-no-local")

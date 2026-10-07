@@ -215,8 +215,7 @@ class Logger:
         """
         if explicit is not None:
             warnings.warn(
-                f"{name} is deprecated as a Logger argument; "
-                f"set config.logger.{name} instead.",
+                f"{name} is deprecated as a Logger argument; set config.logger.{name} instead.",
                 DeprecationWarning,
                 stacklevel=3,
             )
@@ -844,27 +843,33 @@ class Logger:
         epoch: int,
         metrics_dict: dict[str, float | np.ndarray],
         is_best: bool = True,
+        checkpoint_name: str | None = None,
+        epoch_complete: bool = True,
     ):
         """Save a model checkpoint locally and/or to MLflow.
 
         Local persistence is controlled by ``save_local_checkpoints``. MLflow logging is independent
-        of local persistence.
+        of local persistence. Checkpoints are not uploaded to wandb; scalar metrics still are.
 
         When ``is_best`` is True (the default), the checkpoint is also written to the ``best-model``
         artifact path and tagged accordingly.  Pass ``is_best=False`` to save a checkpoint without
         overwriting the current best model.
 
-        Checkpoint files are named ``model_epoch{epoch}`` — resuming from a previous epoch will
-        overwrite the file unless ``checkpoint_dir`` or ``run_name`` differs.
+        Checkpoint files are named ``model_epoch{epoch}`` unless ``checkpoint_name`` is set
+        (for example ``model_step25000``). ``epoch_complete`` is false for a mid-epoch step
+        checkpoint so a resume continues that epoch instead of skipping it.
         """
         timestamp = time.strftime("%Y%m%d%H%M%S")
+        filename = checkpoint_name or f"model_epoch{epoch}"
 
         checkpoint: dict[str, Any] = {
             "config": self.config,
             "model_state_dict": meta_model_run.model.cpu().state_dict(),
             "optimizer_state_dict": meta_model_run.optimizer.state_dict(),
             "epoch": epoch,
+            "epoch_complete": bool(epoch_complete),
             "global_step": int(getattr(meta_model_run, "global_step", 0)),
+            "warmup_iters_completed": int(getattr(meta_model_run, "_warmup_iters_completed", 0)),
             "timestamp": timestamp,
             "metrics": metrics_dict,
         }
@@ -873,9 +878,7 @@ class Logger:
         if getattr(meta_model_run, "scheduler", None) is not None:
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
-        model_path = (
-            f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/model_epoch{epoch}"
-        )
+        model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/{filename}"
 
         local_checkpoint_saved = False
         if self.save_local_checkpoints:
@@ -958,15 +961,6 @@ class Logger:
                     with contextlib.suppress(Exception):
                         mlflow.set_tag("best_model_logged", "false")
                         mlflow.set_tag("best_model_log_error", str(e)[:500])
-
-        if self._wandb_logger is not None:
-            self._wandb_logger.save_checkpoint(
-                model_path=model_path,
-                epoch=epoch,
-                metrics_dict=checkpoint_metrics,
-                checkpoint=checkpoint,
-                local_checkpoint_saved=local_checkpoint_saved,
-            )
 
     def save_safetensors_for_publish(
         self,

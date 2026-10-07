@@ -73,9 +73,12 @@ uv sync --locked                                 # cheap no-op if cache is warm
 # Checkpoints are written to ./model_checkpoints/<run>/model_epochN. Pick the
 # highest-epoch checkpoint so a restarted job continues instead of starting over.
 CKPT_DIR="model_checkpoints/${RUN}"
-LATEST_CKPT=$(ls -1v "${CKPT_DIR}/model_epoch"* 2>/dev/null | tail -1)
+shopt -s nullglob
+ckpts=("${CKPT_DIR}"/model_epoch*)
+shopt -u nullglob
 CKPT_ARGS=""
-if [ -n "$LATEST_CKPT" ]; then
+if ((${#ckpts[@]})); then
+    LATEST_CKPT=$(printf '%s\n' "${ckpts[@]}" | sort -V | tail -1)
     echo "[batch] resuming ${RUN} from ${LATEST_CKPT}"
     CKPT_ARGS="--checkpoint ${LATEST_CKPT}"
 else
