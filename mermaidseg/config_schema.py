@@ -146,6 +146,9 @@ class ModelConfig(BaseModel):
     lora_dropout: float | None = None
     lora_target_modules: list[str] | None = None
     lora_bias: str | None = None
+    # Dual-head models (LinearDualDINOv3 / LinearDualLoRADINOv3): morphology channels.
+    morphology_names: list[str] | None = None
+    num_morphology: int | None = None
 
     @field_validator("input_size")
     @classmethod
