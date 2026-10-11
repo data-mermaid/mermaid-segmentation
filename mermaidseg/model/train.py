@@ -132,8 +132,10 @@ def train_model(
             improvement-triggered save.
         start_epoch (int, optional): The starting epoch for training. Defaults to -1, which
             will be set to 0 if not specified.
-        end_epoch (int, optional): The ending epoch for training. Defaults to -1, which
-            will be set based on the meta-model's training configuration if not specified.
+        end_epoch (int, optional): Exclusive upper epoch bound. Defaults to -1, which resolves to
+            the meta-model's total configured epoch count (``training_kwargs.epochs``) — so a
+            resumed run (``start_epoch > 0``) still ends at the configured total rather than
+            training an extra full ``epochs`` beyond the checkpoint.
         metric_of_interest (str, optional): Metric used for checkpointing and early
             stopping. One of ``loss``, ``accuracy``, ``miou``, ``f1-score``. Defaults to
             "miou" — mean IoU is a more reliable segmentation metric than pixel accuracy,
@@ -169,7 +171,10 @@ def train_model(
     if start_epoch == -1:
         start_epoch = 0
     if end_epoch == -1:
-        end_epoch = start_epoch + meta_model.training_kwargs.epochs
+        # Total target epoch count, NOT start_epoch + epochs: on resume (start_epoch > 0) the run
+        # must still end at the configured total, training epochs [start_epoch, epochs), not an
+        # extra full `epochs` beyond the checkpoint. Identical to the old formula when start_epoch=0.
+        end_epoch = meta_model.training_kwargs.epochs
     metrics_epoch = {}
     training_start = time.perf_counter()
     checkpoint_interval = getattr(logger, "log_checkpoint", None) if logger is not None else None

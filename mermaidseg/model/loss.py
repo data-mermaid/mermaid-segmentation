@@ -8,6 +8,7 @@ from mermaidseg.dataset_reconciliation.concepts import (
     TAXONOMIC_CONCEPTS,
     initialize_benthic_hierarchy,
 )
+from mermaidseg.model.class_weights import load_class_weight_tensor
 from mermaidseg.model.concept_metrics import (
     calculate_multi_hot_concept_loss,
     calculate_taxonomic_rank_loss,
@@ -79,6 +80,9 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
     def __init__(
         self, ignore_index: int = 0, damping_denominator: float = 0.0, **kwargs: Any
     ) -> None:
+        weight_path = kwargs.pop("weight_path", None)
+        if weight_path is not None and "weight" not in kwargs:
+            kwargs["weight"] = load_class_weight_tensor(weight_path)
         super().__init__(ignore_index=ignore_index, **kwargs)
         self.damping_denominator = damping_denominator
 
@@ -282,6 +286,86 @@ class ConceptBottleneckLoss(torch.nn.Module):
         loss_components["concepts"] = concept_loss_value.item()
         total_loss = class_loss_value + self.lambda_weight * concept_loss_value
         return total_loss, loss_components
+
+
+def _resolve_class_weight(
+    weight: torch.Tensor | list[float] | None,
+    weight_path: str | None,
+) -> torch.Tensor | None:
+    if weight_path is not None:
+        return load_class_weight_tensor(weight_path)
+    if weight is None:
+        return None
+    if isinstance(weight, torch.Tensor):
+        return weight.float()
+    return torch.tensor(weight, dtype=torch.float32)
+
+
+class ClassWeightedFocalLoss(torch.nn.Module):
+    """Masked focal loss with optional per-class frequency weights.
+
+    Operates on logits ``[B, C, H, W]`` and target labels ``[B, H, W]``. Class weights
+    typically come from a parquet-derived artifact (``weight_path``, built via
+    ``scripts/build_class_weight_artifact.py`` — inverse-frequency, mean-normalized,
+    clipped to a max ratio). The ignore slot (default 0) does not contribute.
+    """
+
+    def __init__(
+        self,
+        ignore_index: int = 0,
+        gamma: float = 2.0,
+        damping_denominator: float = 100.0,
+        weight: torch.Tensor | list[float] | None = None,
+        weight_path: str | None = None,
+        label_smoothing: float = 0.0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        if kwargs:
+            # Allow unused YAML keys (e.g. legacy CE kwargs) without failing MetaModel.
+            pass
+        self.ignore_index = ignore_index
+        self.gamma = gamma
+        self.damping_denominator = damping_denominator
+        self.label_smoothing = label_smoothing
+        resolved = _resolve_class_weight(weight, weight_path)
+        if resolved is not None:
+            self.register_buffer("weight", resolved)
+        else:
+            self.weight = None
+
+    def forward(
+        self,
+        outputs: torch.Tensor,
+        target_labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        valid_mask = target_labels != self.ignore_index
+        if not valid_mask.any():
+            zero = outputs.sum() * 0.0
+            return zero, {"classification": 0.0, "focal": 0.0}
+
+        # Per-pixel CE without class weights so focal modulating factor uses true p_t.
+        per_pixel_ce = F.cross_entropy(
+            outputs,
+            target_labels,
+            weight=None,
+            ignore_index=self.ignore_index,
+            reduction="none",
+            label_smoothing=self.label_smoothing,
+        )
+        pt = torch.exp(-per_pixel_ce.detach())
+        focal = ((1.0 - pt) ** self.gamma) * per_pixel_ce
+
+        if self.weight is not None:
+            # Gather class weight per pixel; ignore pixels already masked out.
+            w = self.weight.to(device=outputs.device, dtype=outputs.dtype)
+            class_w = w[target_labels.clamp(min=0, max=w.numel() - 1)]
+            focal = focal * class_w
+
+        valid = focal[valid_mask]
+        loss = valid.sum() / (valid.numel() + self.damping_denominator)
+        value = float(loss.item())
+        return loss, {"classification": value, "focal": value}
 
 
 def _tree_distance_loss(

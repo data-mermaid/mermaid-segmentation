@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 import yaml
 
+from mermaidseg.config_schema import LoggerConfig, ModelConfig, TrainingConfig
 from mermaidseg.experiment import (
     Experiment,
     ExperimentSpec,
@@ -76,7 +79,7 @@ def test_issue12_run_yaml_validates(monkeypatch):
 
 def test_example_run_yaml_validates(monkeypatch):
     monkeypatch.chdir(REPO)
-    report = Experiment.validate(REPO / "sagemaker/configs/example/run.yaml")
+    report = Experiment.validate(REPO / "sagemaker/runs/example-training.yaml")
     assert report.ok, report.errors
 
 
@@ -105,6 +108,70 @@ def test_missing_config_block_is_error(tmp_path):
     report = Experiment.validate(run)
     assert not report.ok
     assert any("config:" in err for err in report.errors)
+
+
+# --------------------------------------------------------------------------------------
+# Worker/instance sizing advisories (warnings, never blocking).
+# --------------------------------------------------------------------------------------
+
+
+def _job_block(instance_type: str) -> dict:
+    return {
+        "name_prefix": "sizing-test",
+        "image": "img:latest",
+        "entrypoint": "scripts/sagemaker_train_entrypoint.py",
+        "instance_type": instance_type,
+        "volume_gb": 200,
+        "max_runtime_hours": 4,
+    }
+
+
+def test_worker_sizing_flags_persistent_on_small_ram(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    # g6.2xlarge (8 vCPU / 32 GiB) + num_workers=8 + persistent (default) = the r8 OOM config.
+    run = _write(
+        tmp_path,
+        {"job": _job_block("ml.g6.2xlarge"), "config": _config_block(overrides={"num-workers": 8})},
+    )
+    report = Experiment.validate(run)
+    assert report.ok, report.errors
+    assert any("persistent_workers=True" in w for w in report.warnings)
+
+
+def test_worker_sizing_flags_oversubscription(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    run = _write(
+        tmp_path,
+        {
+            "job": _job_block("ml.g6.2xlarge"),
+            "config": _config_block(overrides={"num-workers": 32}),
+        },
+    )
+    report = Experiment.validate(run)
+    assert any("oversubscribed" in w for w in report.warnings)
+
+
+def test_worker_sizing_quiet_when_persistent_disabled(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    run = _write(
+        tmp_path,
+        {
+            "job": _job_block("ml.g6.2xlarge"),
+            "config": _config_block(overrides={"num-workers": 8, "persistent-workers": False}),
+        },
+    )
+    report = Experiment.validate(run)
+    assert not any("persistent_workers=True" in w for w in report.warnings)
+
+
+def test_worker_sizing_unknown_instance_warns(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    run = _write(
+        tmp_path,
+        {"job": _job_block("ml.zz.unknown"), "config": _config_block(overrides={"num-workers": 8})},
+    )
+    report = Experiment.validate(run)
+    assert any("not in the known-specs table" in w for w in report.warnings)
 
 
 # --------------------------------------------------------------------------------------
@@ -150,6 +217,8 @@ def test_bad_class_subset_name_is_warning_not_error(tmp_path):
             "training": {
                 "training_mode": "standard",
                 "padding": 3,
+                "batch_size": 4,
+                "optimizer": {"type": "AdamW", "lr": 5e-5},
                 "class_subset": ["Acropora", "ZZZ_NOT_A_REAL_LABEL"],
             }
         },
@@ -159,6 +228,190 @@ def test_bad_class_subset_name_is_warning_not_error(tmp_path):
     report = Experiment.validate(run)
     assert report.ok, report.errors  # an unknown class name is advisory, not fatal
     assert any("ZZZ_NOT_A_REAL_LABEL" in warn for warn in report.warnings)
+
+
+# --------------------------------------------------------------------------------------
+# Split-config schema + value validation (via Experiment.validate).
+# --------------------------------------------------------------------------------------
+
+MODEL_CBM = CONFIGS / "model_config_cbm.yaml"
+
+
+def _broken_training(tmp_path: Path, **over) -> Path:
+    """A valid standard training block written to a tmp file, with fields overridden."""
+    block = {
+        "training_mode": "standard",
+        "optimizer": {"type": "AdamW", "lr": 5e-5},
+        "class_subset": ["Acropora"],
+        "padding": 3,
+        "batch_size": 4,
+    }
+    block.update(over)
+    return _write(tmp_path, {"training": block}, name="training.yaml")
+
+
+@pytest.mark.parametrize(
+    "override, expect",
+    [
+        ({"optimizer": {"type": "Adamw", "lr": 5e-5}}, "optimizer.type 'Adamw'"),
+        ({"scheduler": {"type": "PolynomialLr"}}, "scheduler.type 'PolynomialLr'"),
+        ({"loss": {"type": "FocalLoss"}}, "loss.type 'FocalLoss'"),
+    ],
+)
+def test_bad_component_type_is_error(tmp_path, override, expect):
+    training = _broken_training(tmp_path, **override)
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any(expect in e for e in report.errors)
+
+
+def test_bad_model_name_is_error(tmp_path):
+    model = _write(
+        tmp_path,
+        {"model": {"name": "LinearDinov3", "encoder_name": "x", "input_size": [512, 512]}},
+        name="model.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_model=str(model))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("model.name 'LinearDinov3'" in e for e in report.errors)
+
+
+@pytest.mark.parametrize("building_block", ["DPTHead", "LinearClassifier", "ConceptHead"])
+def test_building_block_is_not_a_valid_model_name(building_block):
+    # Real nn.Module subclasses in models.py, but not user-selectable models — they'd crash at
+    # construction, so valid_model_names must exclude them (require freeze_encoder).
+    from mermaidseg.config_schema import resolve_model_name, valid_model_names
+
+    assert resolve_model_name(building_block) is not None
+    assert building_block not in valid_model_names()
+    assert resolve_model_name("LinearDINOv3") is None
+
+
+def test_missing_required_training_field_is_error(tmp_path):
+    # A training block with no optimizer — MetaModel reads training_kwargs.optimizer unconditionally.
+    training = _write(
+        tmp_path,
+        {
+            "training": {
+                "training_mode": "standard",
+                "class_subset": ["Acropora"],
+                "padding": 3,
+                "batch_size": 4,
+            }
+        },
+        name="training.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("training: config is invalid" in e and "optimizer" in e for e in report.errors)
+
+
+def test_cbm_missing_concept_mapping_is_error(tmp_path):
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept-bottleneck",
+        loss={"type": "ConceptBottleneckLoss"},
+    )
+    run = _write(
+        tmp_path,
+        {"config": _config_block(config_training=str(training), config_model=str(MODEL_CBM))},
+    )
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("concept_mapping_path is required" in e for e in report.errors)
+
+
+def test_cbm_mode_with_plain_model_is_error(tmp_path):
+    # concept-bottleneck mode with the default standard LinearDINOv3 model → AttributeError at runtime.
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept-bottleneck",
+        concept_mapping_path="configs/class_to_concepts.csv",
+        loss={"type": "ConceptBottleneckLoss"},
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("emits concept outputs" in e for e in report.errors)
+
+
+def test_concept_mode_with_plain_model_is_ok(tmp_path):
+    # Plain `concept` mode reads .logits (every model has it) — a Linear model is a valid pairing,
+    # so the mode<->model coupling must NOT flag it (regression guard for the string-heuristic fix).
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept",
+        concept_mapping_path="configs/class_to_concepts.csv",
+        loss={"type": "BCEWithLogitsLoss"},
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not any("concept" in e and "model" in e for e in report.errors), report.errors
+
+
+def test_cbm_wrong_loss_is_error(tmp_path):
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept-bottleneck",
+        concept_mapping_path="configs/class_to_concepts.csv",
+        loss={"type": "CrossEntropyLoss"},
+    )
+    run = _write(
+        tmp_path,
+        {"config": _config_block(config_training=str(training), config_model=str(MODEL_CBM))},
+    )
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("ConceptBottleneckLoss" in e for e in report.errors)
+
+
+def test_typo_logger_key_is_error(tmp_path):
+    logger = _write(
+        tmp_path,
+        {
+            "logger": {
+                "uri": "seg",
+                "experiment_name": "m",
+                "system_metrics": True,
+                "system_metrics_sampling_interval": 10,
+                "keep_last_n_checkpoints": 3,
+                "save_full_state_dict": False,
+                "sytem_metrics": True,  # typo of an existing key → forbid rejects
+            }
+        },
+        name="logger.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_logger=str(logger))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("logger: config is invalid" in e for e in report.errors)
+
+
+# Forbid safety-net: every committed split config must pass its schema, or strict `extra="forbid"`
+# would silently start rejecting a real config the moment a new field is added.
+
+
+@pytest.mark.parametrize(
+    "path", sorted(CONFIGS.glob("training_config*.yaml")), ids=lambda p: p.name
+)
+def test_committed_training_configs_pass_schema(path):
+    doc = yaml.safe_load(path.read_text())
+    TrainingConfig.model_validate(doc.get("training", doc))
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS.glob("model_config*.yaml")), ids=lambda p: p.name)
+def test_committed_model_configs_pass_schema(path):
+    doc = yaml.safe_load(path.read_text())
+    ModelConfig.model_validate(doc.get("model", doc))
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS.glob("logger_config*.yaml")), ids=lambda p: p.name)
+def test_committed_logger_configs_pass_schema(path):
+    doc = yaml.safe_load(path.read_text())
+    LoggerConfig.model_validate(doc.get("logger", doc))
 
 
 # --------------------------------------------------------------------------------------
@@ -260,6 +513,17 @@ def test_from_run_yaml_loads_spec_and_applies_overrides(monkeypatch):
     assert exp.spec.overrides.early_stopping is True
     assert exp.config.training.epochs == 200  # override merged into the config
     assert exp.config.training.training_mode == "standard"
+
+
+def test_dataloader_timeout_can_be_configured_for_slow_s3_batches(monkeypatch):
+    monkeypatch.setenv("MERMAIDSEG_DATALOADER_TIMEOUT_SECONDS", "600")
+    experiment = Experiment(
+        ExperimentSpec(overrides={"num_workers": 8}),
+        SimpleNamespace(training=SimpleNamespace(batch_size=32)),
+        device=torch.device("cpu"),
+    )
+
+    assert experiment._base_loader_kwargs()["timeout"] == 600
 
 
 class _SyntheticDataset:

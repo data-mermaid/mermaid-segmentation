@@ -201,6 +201,46 @@ def _frozen_param_names(model: torch.nn.Module) -> set[str]:
     return {name for name, param in model.named_parameters() if not param.requires_grad}
 
 
+# Tag written on the MLflow run so a restarted SageMaker job (which keeps the same job name /
+# MERMAIDSEG_RUN_ID across a Managed-Spot interruption) can find and resume the SAME run instead
+# of starting a fresh one. See Logger.__init__ and download_latest_checkpoint.
+_RESUME_KEY_TAG = "mermaidseg.resume_key"
+
+
+def _epoch_from_checkpoint_path(path: str) -> int:
+    """Parse the epoch index out of a ``.../model_epoch{N}`` checkpoint artifact path.
+
+    Returns -1 for anything that doesn't match, so it sorts below real checkpoints.
+    """
+    name = path.rsplit("/", 1)[-1]
+    marker = "model_epoch"
+    if marker not in name:
+        return -1
+    suffix = name.split(marker, 1)[1]
+    digits = "".join(c for c in suffix if c.isdigit())
+    return int(digits) if digits else -1
+
+
+def _find_run_by_resume_key(experiment_name: str, resume_key: str) -> str | None:
+    """Return the run_id of a prior run tagged with ``resume_key`` in
+    ``experiment_name``.
+
+    Used to resume the same MLflow run after a Managed-Spot restart. Returns ``None`` if
+    the experiment or a matching run does not exist (i.e. this is the first attempt).
+    """
+    client = mlflow.tracking.MlflowClient()
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        return None
+    runs = client.search_runs(
+        [experiment.experiment_id],
+        filter_string=f"tags.`{_RESUME_KEY_TAG}` = '{resume_key}'",
+        order_by=["attributes.start_time DESC"],
+        max_results=1,
+    )
+    return runs[0].info.run_id if runs else None
+
+
 class Logger:
     """MLflow-focused logger for experiment tracking during training and evaluation."""
 
@@ -226,6 +266,9 @@ class Logger:
         self.run_name = meta_model.run_name
         self.enable_mlflow = enable_mlflow
         self.mlflow_run_id = None
+        # True when __init__ resumed a prior run (Managed-Spot restart) rather than creating a new
+        # one; train.py uses this to know whether to restore training state from a checkpoint.
+        self.resumed = False
         self.enabled = False
         self.id2label = id2label
         self.id2concept = id2concept
@@ -297,16 +340,38 @@ class Logger:
                     if self._log_system_metrics and self._system_metrics_interval is not None:
                         mlflow.set_system_metrics_sampling_interval(self._system_metrics_interval)
 
-                    if mlflow.active_run() is None:
+                    # Managed-Spot resume: if this SageMaker job (identified by the stable
+                    # MERMAIDSEG_RUN_ID env var the launcher injects) already has a run, reattach
+                    # to it so an interrupted run continues in-place. Absent the env var, behaviour
+                    # is unchanged (a fresh run per launch).
+                    resume_key = os.environ.get("MERMAIDSEG_RUN_ID")
+                    resumable_run_id = (
+                        _find_run_by_resume_key(experiment_name, resume_key) if resume_key else None
+                    )
+
+                    if mlflow.active_run() is not None:
+                        logger.info("MLflow run %s already active", self.run_name)
+                        self.mlflow_run_id = mlflow.active_run().info.run_id
+                    elif resumable_run_id is not None:
+                        logger.info(
+                            "Resuming MLflow run %s (resume_key=%s)", resumable_run_id, resume_key
+                        )
+                        run = mlflow.start_run(
+                            run_id=resumable_run_id,
+                            log_system_metrics=self._log_system_metrics,
+                        )
+                        self.mlflow_run_id = run.info.run_id
+                        self.resumed = True
+                    else:
                         logger.info("Starting MLflow RUN: %s", self.run_name)
                         run = mlflow.start_run(
                             run_name=self.run_name,
                             log_system_metrics=self._log_system_metrics,
                         )
                         self.mlflow_run_id = run.info.run_id
-                    else:
-                        logger.info("MLflow run %s already active", self.run_name)
-                        self.mlflow_run_id = mlflow.active_run().info.run_id
+                        if resume_key:
+                            # Tag so a later spot restart of this job can find and resume this run.
+                            mlflow.set_tag(_RESUME_KEY_TAG, resume_key)
 
                     if config is not None:
                         logger.info("Logging config to MLflow...")
@@ -675,6 +740,30 @@ class Logger:
                     mlflow.log_metrics(metrics_to_log, step=step)
             except _MLFLOW_LOG_ERRORS as e:
                 logger.warning("Failed to log metrics to MLflow: %s", e)
+
+    def download_latest_checkpoint(self) -> str | None:
+        """Download the highest-epoch full checkpoint of the active run; return its
+        local path.
+
+        Used on Managed-Spot resume to fetch the last saved training state (the
+        ``checkpoints/`` artifacts written by :meth:`save_model_checkpoint`). Returns
+        ``None`` when MLflow is disabled, there is no active run, or the run has no
+        checkpoint artifacts yet (first launch).
+        """
+        if not self._mlflow_active or self.mlflow_run_id is None:
+            return None
+        try:
+            client = mlflow.tracking.MlflowClient()
+            artifacts = client.list_artifacts(self.mlflow_run_id, "checkpoints")
+            if not artifacts:
+                return None
+            latest = max(artifacts, key=lambda a: _epoch_from_checkpoint_path(a.path))
+            return mlflow.artifacts.download_artifacts(
+                run_id=self.mlflow_run_id, artifact_path=latest.path
+            )
+        except _MLFLOW_LOG_ERRORS as e:
+            logger.warning("Failed to download latest checkpoint from MLflow: %s", e)
+            return None
 
     def _prune_local_checkpoints(self, run_name: str) -> None:
         """Delete older local checkpoint files beyond ``keep_last_n_checkpoints``.

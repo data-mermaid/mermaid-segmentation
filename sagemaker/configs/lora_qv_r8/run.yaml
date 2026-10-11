@@ -2,7 +2,7 @@ job:
   name_prefix: mermaidseg-dinov3-lora-r8
   image: mermaid-segmentation-jobs:training-latest
   entrypoint: scripts/sagemaker_train_entrypoint.py
-  instance_type: ml.g5.2xlarge
+  instance_type: ml.g6.2xlarge
   volume_gb: 200
   max_runtime_hours: 48
   env:

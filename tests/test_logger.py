@@ -115,6 +115,41 @@ class TestLoggerInit:
         assert lgr.mlflow_run_id is not None
         assert mlflow.active_run() is not None
 
+    def test_resume_reattaches_to_prior_run_by_run_id_tag(
+        self, tmp_mlflow_uri, make_config, fake_meta_model, monkeypatch
+    ):
+        """A second Logger with the same MERMAIDSEG_RUN_ID resumes the prior run (spot
+        restart)."""
+        monkeypatch.setenv("MERMAIDSEG_RUN_ID", "job-xyz")
+        config = make_config()
+
+        first = Logger(config=config, meta_model=fake_meta_model)
+        assert first.resumed is False
+        first_run_id = first.mlflow_run_id
+        assert mlflow.get_run(first_run_id).data.tags["mermaidseg.resume_key"] == "job-xyz"
+        mlflow.end_run()  # simulate the spot instance being reclaimed (fresh process next time)
+
+        second = Logger(config=config, meta_model=fake_meta_model)
+        assert second.resumed is True
+        assert second.mlflow_run_id == first_run_id  # reattached, not a fresh run
+
+    def test_no_resume_without_run_id_env(
+        self, tmp_mlflow_uri, make_config, fake_meta_model, monkeypatch
+    ):
+        """Absent MERMAIDSEG_RUN_ID, each Logger starts a fresh run (unchanged
+        behaviour)."""
+        monkeypatch.delenv("MERMAIDSEG_RUN_ID", raising=False)
+        config = make_config()
+
+        first = Logger(config=config, meta_model=fake_meta_model)
+        first_run_id = first.mlflow_run_id
+        assert first.resumed is False
+        mlflow.end_run()
+
+        second = Logger(config=config, meta_model=fake_meta_model)
+        assert second.resumed is False
+        assert second.mlflow_run_id != first_run_id  # distinct runs
+
     def test_params_and_tags_logged(self, tmp_mlflow_uri, make_config, fake_meta_model):
         config = make_config()
         lgr = Logger(config=config, meta_model=fake_meta_model)

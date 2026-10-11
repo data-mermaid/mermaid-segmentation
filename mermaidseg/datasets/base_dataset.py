@@ -10,31 +10,100 @@ externally by [`mermaidseg.dataset_reconciliation`](../dataset_reconciliation/).
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import albumentations as A
+import boto3
 import numpy as np
 import pandas as pd
 import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
-from mermaidseg.datasets.utils import create_annotation_mask, emit_dataset_warning
+from mermaidseg.datasets.utils import (
+    create_annotation_mask_from_arrays,
+    emit_dataset_warning,
+    s3_training_config,
+)
+
+try:  # resource is Unix-only; the RSS diagnostic is optional and silently skipped without it
+    import resource
+except ImportError:  # pragma: no cover - non-Unix platforms
+    resource = None
 
 logger = logging.getLogger(__name__)
 
+# Optional per-worker RSS logging for OOM investigations. Off unless MERMAIDSEG_LOG_WORKER_RSS
+# is truthy. Read at import (each worker process re-evaluates it), consistent with the cache-dir
+# env handling in utils.py.
+_LOG_WORKER_RSS = os.environ.get("MERMAIDSEG_LOG_WORKER_RSS", "").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_RSS_LOG_INTERVAL = 500
+_rss_getitem_count = 0
+
+# Cap on the number of full load-failure *records* retained per dataset. The failure *count*
+# (`num_load_failures`) is always exact; only the rich per-failure dicts are bounded, so a
+# systemic failure (which would otherwise append a dict every sample for the whole run) can't grow
+# `_load_failures` without bound in each forked worker. 1000 records is plenty to diagnose a
+# pattern; the count still drives the per-epoch failure-rate guard in model/train.py.
+_LOAD_FAILURE_RECORD_CAP = 1000
+
+
+def _maybe_log_worker_rss() -> None:
+    """Periodically log this process's peak RSS when ``MERMAIDSEG_LOG_WORKER_RSS`` is
+    set.
+
+    Diagnostic for OOM investigations: SageMaker samples instance memory only once a minute, so
+    a sub-minute spike (many large images decoded across workers at once) is invisible there.
+    This surfaces per-worker memory from inside the load loop, every ``_RSS_LOG_INTERVAL`` items.
+    """
+    global _rss_getitem_count
+    if not _LOG_WORKER_RSS or resource is None:
+        return
+    _rss_getitem_count += 1
+    if _rss_getitem_count % _RSS_LOG_INTERVAL:
+        return
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    worker = torch.utils.data.get_worker_info()
+    wid = worker.id if worker is not None else "main"
+    # ru_maxrss is bytes on macOS, kilobytes on Linux — report both readings.
+    emit_dataset_warning(
+        f"[rss] worker={wid} items={_rss_getitem_count} ru_maxrss={ru} "
+        f"(~{ru / 1024:.0f}MB-if-KB / ~{ru / 1048576:.0f}MB-if-bytes)"
+    )
+
+
+def _reinit_s3_clients(dataset: object) -> None:
+    """Drop any fork-inherited S3 client so each worker builds its own lazily.
+
+    Walks ConcatDataset wrappers to reach each underlying BaseCoralDataset. Resetting to
+    ``None`` (rather than eagerly constructing a client here) keeps creation lazy and
+    per-process — the fresh client is built on first ``.s3`` access inside the worker.
+    We gate on ``isinstance`` rather than ``hasattr(dataset, "s3")`` because ``s3`` is
+    now a property: ``hasattr`` would invoke its getter and create a client in the wrong
+    place.
+    """
+    if isinstance(dataset, BaseCoralDataset):
+        dataset._s3 = None
+    for child in getattr(dataset, "datasets", []):
+        _reinit_s3_clients(child)
+
 
 def worker_init_fn(worker_id: int) -> None:
-    """Configure logging in DataLoader worker processes.
-
-    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so that
-    warnings emitted in worker subprocesses are visible.
-    """
+    """Configure logging and reinitialize S3 clients in forked DataLoader workers."""
     logging.basicConfig(
         level=logging.WARNING,
         format=f"[worker-{worker_id}] %(levelname)s %(name)s: %(message)s",
     )
+    worker_info = torch.utils.data.get_worker_info()
+    if worker_info is not None:
+        _reinit_s3_clients(worker_info.dataset)
 
 
 class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
@@ -85,7 +154,13 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     _load_failures: list[dict[str, Any]]
     _annotation_count_by_image: dict[str, int]
     _annotation_labels_by_image: dict[str, str]
-    _annotation_positions_by_image: dict[Any, np.ndarray]
+    # Contiguous numpy annotation index (aligned to df_images positional idx), replacing the old
+    # str-keyed dict + per-sample DataFrame slice on the hot path. None for datasets without
+    # point-annotation row/col columns (e.g. dense-mask subclasses that override _load_item).
+    _ann_offsets: np.ndarray | None
+    _ann_row: np.ndarray | None
+    _ann_col: np.ndarray | None
+    _ann_label_id: np.ndarray | None
 
     def __init__(
         self,
@@ -103,6 +178,11 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.padding = padding
         self.class_subset = class_subset
         self._global_offset = 0
+        # Lazily-created, per-process S3 client (see the ``s3`` property). Never construct it
+        # here: a boto3 client is unpicklable and not fork-safe, so it must not be carried across
+        # a DataLoader worker boundary. ``setdefault`` avoids clobbering a client a subclass or
+        # test injected via ``self.s3 = ...`` before calling ``super().__init__()``.
+        self.__dict__.setdefault("_s3", None)
 
         if "source_label_name" not in self.df_annotations.columns:
             raise ValueError(
@@ -129,12 +209,23 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             .apply(lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)})))
             .to_dict()
         )
-        # Positional indices of each image's annotation rows, computed once, so __getitem__
-        # slices annotations in O(1) instead of scanning the whole (multi-million row)
-        # annotations frame with a boolean mask on every sample. Values are numpy position
-        # arrays suitable for DataFrame.iloc.
-        self._annotation_positions_by_image = grouped_by_image.indices
+
+        # Precompute a numpy-native, per-image annotation index so __getitem__ never touches the
+        # multi-million-row DataFrame or a str-keyed Python dict on the hot path. Under forked
+        # DataLoader workers, per-sample access to pandas object columns / str-keyed dicts writes
+        # CPython refcounts into their header pages, which copy-on-write into each worker's RSS and
+        # accumulate for the whole run under persistent_workers (the dinov3-lora-qv-r8 OOM; see
+        # scripts/diagnostics/dataloader_rss_findings.md). Contiguous numpy arrays carry no
+        # per-element Python objects, so slicing them dirties nothing shared.
+        self._ann_offsets = None
+        self._ann_row = None
+        self._ann_col = None
+        self._ann_label_id = None
+        if {"row", "col", "source_label_name"}.issubset(self.df_annotations.columns):
+            self._build_annotation_index()
+
         self._load_failures = []
+        self._load_failure_count = 0
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
         """Re-derive ``df_images`` after filtering ``df_annotations``.
@@ -161,6 +252,44 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             "subclass."
         )
 
+    def _build_annotation_index(self) -> None:
+        """Precompute the contiguous numpy annotation index used by :meth:`_load_item`.
+
+        Reorders all point annotations so image ``idx`` (positional in ``df_images``)
+        owns the contiguous slice ``[_ann_offsets[idx]:_ann_offsets[idx + 1]]`` of
+        ``_ann_row`` / ``_ann_col`` / ``_ann_label_id``. Built once in the main process;
+        the per-sample hot path then touches only these numpy arrays (no pandas object
+        columns, no str-keyed dict), keeping forked workers copy-on-write-clean. Images
+        with no annotations get an empty slice. Annotations whose label is unmapped/NaN
+        or whose image is absent from ``df_images`` are dropped (mirrors
+        :func:`create_annotation_mask`'s unknown-label handling).
+        """
+        num_images = len(self.df_images)
+        # image_id -> positional index in df_images. Built once here (main process); never touched
+        # per sample. Positional (df_images order) so it matches _load_item's ``.iloc[idx]``.
+        id_to_pos = {img_id: i for i, img_id in enumerate(self.df_images["image_id"].to_numpy())}
+
+        ann = self.df_annotations
+        label_id_raw = ann["source_label_name"].map(self.source_name2id).to_numpy()
+        img_pos_raw = ann["image_id"].map(id_to_pos).to_numpy()
+        keep = ~pd.isna(label_id_raw) & ~pd.isna(img_pos_raw)
+
+        img_pos = img_pos_raw[keep].astype(np.int64)
+        rows = ann["row"].to_numpy()[keep]
+        cols = ann["col"].to_numpy()[keep]
+        label_ids = label_id_raw[keep]
+
+        # Stable sort groups each image's annotations contiguously while preserving their order.
+        order = np.argsort(img_pos, kind="stable")
+        self._ann_row = np.ascontiguousarray(rows[order], dtype=np.intp)
+        self._ann_col = np.ascontiguousarray(cols[order], dtype=np.intp)
+        self._ann_label_id = np.ascontiguousarray(label_ids[order], dtype=np.int64)
+
+        counts = np.bincount(img_pos, minlength=num_images)
+        offsets = np.zeros(num_images + 1, dtype=np.int64)
+        np.cumsum(counts, out=offsets[1:])
+        self._ann_offsets = offsets
+
     def set_global_offset(self, offset: int) -> None:
         """Set the global source-label offset assigned by the registry.
 
@@ -177,6 +306,36 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def global_offset(self) -> int:
         """Current global offset assigned by the registry (default 0)."""
         return self._global_offset
+
+    @property
+    def s3(self) -> boto3.client:
+        """Lazily-created, per-process boto3 S3 client.
+
+        A boto3 client is neither picklable nor fork-safe, so it must never be created
+        at construction time and carried across a process boundary. Building it on first
+        access means each process — the main process, or a spawned/forked DataLoader
+        worker — gets its own. :meth:`__getstate__` drops it before pickling (``spawn``
+        workers) and :func:`_reinit_s3_clients` resets it in ``worker_init_fn``
+        (``fork`` workers), so a client is never shared across the boundary.
+        """
+        if getattr(self, "_s3", None) is None:
+            self._s3 = boto3.client("s3", config=s3_training_config())
+        return self._s3
+
+    @s3.setter
+    def s3(self, client: Any) -> None:
+        # Retained so tests/helpers can inject a fake client via ``dataset.s3 = ...``.
+        self._s3 = client
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Drop the unpicklable S3 client so the dataset can be sent to a ``spawn``
+        worker.
+
+        The worker recreates it lazily on first :attr:`s3` access.
+        """
+        state = self.__dict__.copy()
+        state["_s3"] = None
+        return state
 
     def __len__(self) -> int:
         return self.df_images.shape[0]
@@ -196,12 +355,13 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         :meth:`collate_fn` filters out these placeholders, so a failed item drops out of
         the batch instead of crashing the loader.
         """
+        _maybe_log_worker_rss()
         try:
             return self._load_item(idx)
         except Exception as e:
             try:
-                image_id = self.df_images.loc[idx, "image_id"]
-                row_kwargs = self.df_images.loc[idx].to_dict()
+                row_kwargs = self.df_images.iloc[idx].to_dict()
+                image_id = row_kwargs.get("image_id")
             except Exception:
                 image_id = None
                 row_kwargs = {}
@@ -220,19 +380,20 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         Subclasses should override this rather than :meth:`__getitem__` so they inherit
         the recursive-on-failure behaviour for free.
         """
-        image_id = self.df_images.loc[idx, "image_id"]
-        row_kwargs = self.df_images.loc[idx].to_dict()
+        row_kwargs = self.df_images.iloc[idx].to_dict()
 
         image = self.read_image(**row_kwargs)
 
-        positions = self._annotation_positions_by_image.get(image_id)
-        if positions is None:
-            annotations = self.df_annotations.iloc[:0][["row", "col", "source_label_name"]]
-        else:
-            annotations = self.df_annotations.iloc[positions][["row", "col", "source_label_name"]]
-
-        local_mask = create_annotation_mask(
-            annotations, image.shape, self.source_name2id, padding=self.padding
+        # Slice the precomputed contiguous numpy arrays for this image — no DataFrame / str-dict
+        # access on the hot path (keeps forked workers copy-on-write-clean; see __init__).
+        start = int(self._ann_offsets[idx])
+        end = int(self._ann_offsets[idx + 1])
+        local_mask = create_annotation_mask_from_arrays(
+            self._ann_row[start:end],
+            self._ann_col[start:end],
+            self._ann_label_id[start:end],
+            image.shape,
+            padding=self.padding,
         )
 
         if self._global_offset:
@@ -250,6 +411,12 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _record_load_failure(
         self, image_id: Any, row_kwargs: dict[str, Any], error: Exception
     ) -> None:
+        # Always count (the failure-rate guard in model/train.py reads num_load_failures()); only
+        # the rich record list is capped, so a systemic failure can't grow RSS without bound in
+        # each forked worker (see _LOAD_FAILURE_RECORD_CAP).
+        self._load_failure_count += 1
+        if len(self._load_failures) >= _LOAD_FAILURE_RECORD_CAP:
+            return
         record = {
             "timestamp_utc": pd.Timestamp.utcnow().isoformat(),
             "dataset_class": self.__class__.__name__,
@@ -269,11 +436,24 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self._load_failures.append(record)
 
     def num_load_failures(self) -> int:
-        """Return the number of recorded data-loading failures."""
-        return len(self._load_failures)
+        """Return the exact cumulative count of data-loading failures.
+
+        This is the count, not ``len(load_failures_df())`` — the stored records are capped at
+        ``_LOAD_FAILURE_RECORD_CAP`` but the count is always exact, so the per-epoch failure-rate
+        guard stays correct even past the cap.
+
+        Known limitation: failures recorded inside forked DataLoader workers do not propagate back
+        to the main-process dataset copy, so with ``num_workers>0`` this under-counts (a
+        pre-existing issue, tracked separately — see the plan's B3 note).
+        """
+        return self._load_failure_count
 
     def load_failures_df(self) -> pd.DataFrame:
-        """Return a DataFrame with all recorded data-loading failures."""
+        """Return a DataFrame of retained load-failure records.
+
+        A *sample* (the first ``_LOAD_FAILURE_RECORD_CAP`` records) when
+        :meth:`num_load_failures` exceeds the cap.
+        """
         return pd.DataFrame(self._load_failures)
 
     def save_load_failures(self, output_path: str | Path) -> Path:

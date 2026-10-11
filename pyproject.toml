@@ -20,6 +20,7 @@ dependencies = [
     "pandas",
     "peft>=0.19.1",
     "pillow",
+    "pydantic>=2",
     "pyyaml",
     "requests",
     "s3fs>=2024.2.0",
@@ -40,11 +41,10 @@ coralnet-resize = "mermaidseg.datasets.coralnet.preprocessing.resize:main"
 
 [project.optional-dependencies]
 # Training + experiment tracking (mermaidseg/logger.py, mermaidseg/model/eval.py).
-# pydantic backs mermaidseg/experiment.py's ExperimentSpec/Overrides (and MetaModel's
-# training-config validation) — declared directly since it was previously only a transitive dep.
+# (pydantic — used by experiment.py / config_schema.py / training_mode.py — is a core dep above.)
 training = [
     "mlflow",
-    "pydantic>=2",
+    "psutil",  # scripts/diagnostics/dataloader_rss_repro.py (host-RAM / worker USS diagnostics)
     "sagemaker-mlflow>=0.2.0",
     "torchmetrics",
 ]
@@ -75,6 +75,8 @@ test-live = [
 ]
 demo = [
     "gradio>=5.0",
+    # No-op off-Spaces; provides `import spaces` + @spaces.GPU for local runs.
+    "spaces>=0.30",
 ]
 # Everything (used by CI and `uv sync --extra all` / `uv sync --all-extras`).
 all = [

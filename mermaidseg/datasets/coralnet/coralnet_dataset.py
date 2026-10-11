@@ -102,7 +102,6 @@ class CoralNetDataset(BaseCoralDataset):
         self.annotations_path = annotations_path or _resolve_default_annotations_path()
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
-        self.s3 = boto3.client("s3")
         self.whitelist_sources = whitelist_sources
         self.blacklist_sources = blacklist_sources
         if self.whitelist_sources is not None and self.blacklist_sources is not None:

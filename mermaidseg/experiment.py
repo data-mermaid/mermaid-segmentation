@@ -37,6 +37,18 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from torch.utils.data import ConcatDataset, DataLoader
 
+from mermaidseg.config_schema import (
+    DatasetSplits,
+    LoggerConfig,
+    ModelConfig,
+    TrainingConfig,
+    is_concept_model,
+    resolve_loss_type,
+    resolve_model_name,
+    resolve_optimizer_type,
+    resolve_scheduler_type,
+    valid_model_names,
+)
 from mermaidseg.dataset_reconciliation import (
     ConceptSchema,
     SourceLabelRegistry,
@@ -98,6 +110,12 @@ class Overrides(BaseModel):
     log_epochs: int | None = None
     seed: int = 42
     num_workers: int = 0
+    # Keep DataLoader workers alive across epochs (a throughput win). Default True preserves prior
+    # behaviour; it is now a knob because worker RAM growth is the OOM lever (the numpy-native
+    # hot path in base_dataset keeps persistent workers copy-on-write-clean — see
+    # scripts/diagnostics/dataloader_rss_findings.md). Set False to fully reclaim worker RAM each
+    # epoch on the tightest-RAM instances.
+    persistent_workers: bool = True
     metric_of_interest: str = "miou"
     early_stopping: bool = False
     early_stopping_patience: int = 10
@@ -190,6 +208,7 @@ def _spec_from_args(args: argparse.Namespace) -> ExperimentSpec:
         log_epochs=g("log_epochs"),
         seed=g("seed", 42),
         num_workers=g("num_workers", 0),
+        persistent_workers=g("persistent_workers", True),
         metric_of_interest=g("metric_of_interest", "miou"),
         early_stopping=g("early_stopping", False),
         early_stopping_patience=g("early_stopping_patience", 10),
@@ -351,8 +370,12 @@ class Experiment:
             "collate_fn": BaseCoralDataset.collate_fn,
         }
         if self.overrides.num_workers > 0:
-            loader_kwargs["persistent_workers"] = True
+            loader_kwargs["persistent_workers"] = self.overrides.persistent_workers
             loader_kwargs["worker_init_fn"] = worker_init_fn
+            timeout = int(os.environ.get("MERMAIDSEG_DATALOADER_TIMEOUT_SECONDS", "300"))
+            if timeout <= 0:
+                raise ValueError("MERMAIDSEG_DATALOADER_TIMEOUT_SECONDS must be greater than zero.")
+            loader_kwargs["timeout"] = timeout
         return loader_kwargs
 
     def dataloaders(self) -> tuple[DataLoader, DataLoader]:
@@ -526,9 +549,10 @@ class Experiment:
             return report
 
         # Job block (optional): reuse the launcher's schema so `validate` covers the whole run YAML.
+        job_cfg = None
         if "job" in raw:
             try:
-                parse_run_config(text, kind="training", strict=False)
+                job_cfg = parse_run_config(text, kind="training", strict=False).job
             except ValidationError as exc:
                 report.errors.append("job: block is invalid:\n" + _format_validation_error(exc))
 
@@ -557,8 +581,12 @@ class Experiment:
             report.errors.append(f"failed to load/merge config files: {exc}")
             return report
 
+        _check_split_config_schemas(cfg, report)
+        _check_mode_model_coupling(cfg, report)
         _check_datasets(cfg, report)
         _check_class_subset(cfg, report)
+        if job_cfg is not None:
+            _check_worker_sizing(job_cfg.instance_type, spec.overrides, report)
 
         report.summary = _build_summary(spec, cfg)
         return report
@@ -649,6 +677,133 @@ def _build_summary(spec: ExperimentSpec, cfg: Mapping[str, Any]) -> dict[str, An
     }
 
 
+def _check_split_config_schemas(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    """Schema- and value-check the four merged split blocks
+    (data/model/training/logger).
+
+    Structural/type problems come from the pydantic models in
+    ``mermaidseg.config_schema``; the value-existence checks
+    (``optimizer``/``scheduler``/``loss`` ``type`` and ``model.name``) mirror the
+    ``getattr`` resolutions in ``MetaModel.__init__``, so a bad string is caught here
+    instead of crashing after a Docker push. All problems are appended as errors;
+    nothing raises.
+    """
+    _check_training_schema(cfg, report)
+    _check_model_schema(cfg, report)
+    _check_logger_schema(cfg, report)
+    _check_data_schema(cfg, report)
+
+
+def _validate_block(
+    cfg: Mapping[str, Any], report: ValidationReport, section: str, model: type[BaseModel]
+) -> BaseModel | None:
+    """Parse one split block through its pydantic ``model``, appending a rendered error
+    and returning ``None`` on failure (missing block, non-mapping, or
+    ``ValidationError``)."""
+    raw = cfg.get(section)
+    if not isinstance(raw, Mapping):
+        report.errors.append(f"{section}: config block is missing or not a mapping")
+        return None
+    try:
+        return model.model_validate(dict(raw))
+    except ValidationError as exc:
+        report.errors.append(f"{section}: config is invalid:\n" + _format_validation_error(exc))
+        return None
+
+
+def _check_training_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    tc = _validate_block(cfg, report, "training", TrainingConfig)
+    if tc is None:
+        return
+    # Value existence: each component's `type` must resolve to a real class (mirrors MetaModel).
+    for component, resolve in (
+        (tc.optimizer, resolve_optimizer_type),
+        (tc.scheduler, resolve_scheduler_type),
+        (tc.loss, resolve_loss_type),
+    ):
+        if component is None:
+            continue
+        hint = resolve(component.type)
+        if hint:
+            report.errors.append(f"training config: {hint}")
+
+
+def _check_model_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    mc = _validate_block(cfg, report, "model", ModelConfig)
+    if mc is None:
+        return
+    hint = resolve_model_name(mc.name)
+    if hint:
+        report.errors.append(f"model config: {hint}")
+
+
+def _check_logger_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    _validate_block(cfg, report, "logger", LoggerConfig)
+
+
+def _check_data_schema(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    """Each dataset's splits must be ``train``/``val`` only (catches a mis-keyed split).
+
+    Shallow by design: split *values* are dataset-specific constructor kwargs (``transform`` already
+    compiled to ``albumentations.Compose`` by ``preprocess_data_config``) and are left to ``dry_run``.
+    Registry-exact section membership is owned by :func:`_check_datasets`. A bare ``None``/``"None"``
+    dataset value (whole dataset disabled) is skipped here, mirroring the other data helpers.
+    """
+    data_block = cfg.get("data") or {}
+    for name, splits in data_block.items():
+        if not isinstance(splits, Mapping):
+            continue
+        try:
+            DatasetSplits.model_validate(dict(splits))
+        except ValidationError as exc:
+            report.errors.append(f"data.{name}: invalid splits:\n" + _format_validation_error(exc))
+
+
+def _check_mode_model_coupling(cfg: Mapping[str, Any], report: ValidationReport) -> None:
+    """Cross-block rules that need ``model`` and ``training`` together.
+
+    - concept-bottleneck mode reads ``segmentation_outputs.concept_outputs`` / ``.concept_logits``,
+      which only a concept model emits; a plain model → ``AttributeError`` at ``batch_predict``
+      (error). Plain ``concept`` mode reads ``.logits`` (every model has it), so it has no
+      architecture requirement.
+    - standard mode with a concept model is an unusual pairing — its concept outputs go unused
+      (warning).
+    - concept-bottleneck mode needs ``ConceptBottleneckLoss`` — only it has the 4-arg ``forward`` the
+      CBM branch calls (error). Loss may be omitted (checked only when present).
+    """
+    training = cfg.get("training") or {}
+    model = cfg.get("model") or {}
+    mode = training.get("training_mode")
+    name = model.get("name")
+    if not isinstance(name, str) or name not in valid_model_names():
+        return  # unknown/typo'd name already errored by _check_model_schema; nothing to couple to
+    concept_model = is_concept_model(name)
+
+    if mode == "concept-bottleneck" and not concept_model:
+        report.errors.append(
+            f"training_mode='concept-bottleneck' requires a model that emits concept outputs "
+            f"(a ConceptBottleneckOutput forward), but model.name={name!r} does not "
+            "(AttributeError at run time)."
+        )
+    elif mode == "standard" and concept_model:
+        report.warnings.append(
+            f"model.name={name!r} is a concept model but training_mode='standard'; "
+            "its concept outputs will be unused — is the mode correct?"
+        )
+
+    loss = training.get("loss")
+    loss_type = loss.get("type") if isinstance(loss, Mapping) else None
+    if (
+        mode == "concept-bottleneck"
+        and loss_type is not None
+        and loss_type != "ConceptBottleneckLoss"
+    ):
+        report.errors.append(
+            f"training_mode='concept-bottleneck' requires loss.type='ConceptBottleneckLoss' "
+            f"(its 4-arg forward), but got loss.type={loss_type!r}."
+        )
+
+
 def _check_datasets(cfg: Mapping[str, Any], report: ValidationReport) -> None:
     """Dataset sections must match ``DATASET_REGISTRY`` exactly.
 
@@ -683,6 +838,47 @@ def _check_class_subset(cfg: Mapping[str, Any], report: ValidationReport) -> Non
             f"{len(unknown)} class_subset name(s) not found in the committed mapping universe "
             "(they may be produced via label roll-up — confirm with `dry-run`): "
             + ", ".join(map(str, unknown))
+        )
+
+
+def _check_worker_sizing(
+    instance_type: str, overrides: Overrides, report: ValidationReport
+) -> None:
+    """Advisory (never blocking) check of DataLoader worker sizing vs the chosen
+    instance.
+
+    Guards against the class of misconfiguration behind the dinov3-lora-qv-r8 host-RAM OOM:
+    ``num_workers`` oversubscribed to the vCPUs, and persistent workers on a small-RAM instance
+    for a large-annotation run.
+    """
+    from mermaidseg.sagemaker.instance_specs import (
+        INSTANCE_SPECS,
+        SMALL_RAM_GB,
+        recommended_num_workers,
+    )
+
+    spec = INSTANCE_SPECS.get(instance_type)
+    if spec is None:
+        report.warnings.append(
+            f"instance_type '{instance_type}' is not in the known-specs table "
+            "(mermaidseg/sagemaker/instance_specs.py); skipping DataLoader worker-sizing checks."
+        )
+        return
+
+    nw = overrides.num_workers
+    if nw > spec.vcpu:
+        report.warnings.append(
+            f"num_workers={nw} exceeds {instance_type}'s {spec.vcpu} vCPUs (oversubscribed); "
+            f"recommend num_workers <= {recommended_num_workers(instance_type)}."
+        )
+    if overrides.persistent_workers and nw >= spec.vcpu and spec.ram_gb <= SMALL_RAM_GB:
+        report.warnings.append(
+            f"persistent_workers=True with num_workers={nw} on {instance_type} "
+            f"({spec.ram_gb} GiB host RAM): the config that OOM'd dinov3-lora-qv-r8. The numpy "
+            "hot path keeps workers copy-on-write-clean so this is expected to be safe now — but "
+            "watch host RAM (MERMAIDSEG_LOG_WORKER_RSS=1), and if it climbs, set "
+            "`persistent-workers: false` or move to a larger-RAM instance. "
+            "See docs/investigating-training-runs.md."
         )
 
 
