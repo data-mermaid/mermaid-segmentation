@@ -158,6 +158,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Locally installed CLI tools (e.g. uv, via `UV_INSTALL_DIR=./bin`)
+/bin/
+
 # Spyder project settings
 .spyderproject
 .spyproject
