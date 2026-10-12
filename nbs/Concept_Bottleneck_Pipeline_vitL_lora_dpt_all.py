@@ -34,14 +34,16 @@ def load_training_checkpoint(
     checkpoint_path: str,
     device: torch.device | str,
     *,
+    load_optimizer: bool = True,
     load_scheduler: bool = True,
 ) -> int:
-    """Load model (+ optimizer, and scheduler when resuming) and return the next epoch.
+    """Load model weights and, when resuming, optimizer and scheduler state.
 
-    When ``load_scheduler`` is False, optimizer state is restored but the epoch counter,
-    ``global_step``, and scheduler are left for the caller to restart (cooldown / a new
-    run initialized from this checkpoint). Call ``meta_model.rebuild_scheduler()`` after
-    this so the new schedule binds to the restored learning rates.
+    ``load_optimizer=False`` keeps the freshly constructed optimizer and schedule
+    (hi-res fine-tune from cooled weights). ``load_scheduler=False`` still restores
+    optimizer moments and leaves the epoch counter, ``global_step``, and scheduler
+    for the caller to restart (cooldown). Call ``meta_model.rebuild_scheduler()``
+    after that path so the new schedule binds to the restored learning rates.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
@@ -50,6 +52,9 @@ def load_training_checkpoint(
     state_dict = align_peft_checkpoint_state_dict(state_dict, meta_model.model)
     meta_model.model.load_state_dict(state_dict)
     del state_dict
+
+    if not load_optimizer:
+        return 0
 
     # Restore optimizer state. torch.load(map_location=device) already placed the
     # state tensors on `device`, and the model was loaded in place (same Parameter
@@ -115,6 +120,11 @@ parser.add_argument(
     default="../configs/model_config_cbm_dpt_lora_vitl.yaml",
     help="path to the model config YAML (default: rank-16 ViT-L LoRA)",
 )
+parser.add_argument(
+    "--data-config",
+    default="../configs/data_config_all.yaml",
+    help="path to the data config YAML (default: 256 crops, all sources)",
+)
 parser.add_argument("--per-pixel-loss-weight", type=float, default=None)
 parser.add_argument("--per-image-loss-weight", type=float, default=None)
 parser.add_argument(
@@ -133,7 +143,17 @@ parser.add_argument(
     default=None,
     help=(
         "path to a checkpoint whose model and optimizer initialize a new run "
-        "(epoch 0, fresh scheduler). Mutually exclusive with --checkpoint"
+        "(epoch 0, fresh scheduler). Mutually exclusive with --checkpoint "
+        "and --init-weights"
+    ),
+)
+parser.add_argument(
+    "--init-weights",
+    default=None,
+    help=(
+        "path to a checkpoint whose model weights initialize a new run. The "
+        "optimizer and warmup schedule stay as just constructed. Mutually "
+        "exclusive with --checkpoint and --init-checkpoint"
     ),
 )
 parser.add_argument(
@@ -144,8 +164,9 @@ parser.add_argument(
 )
 parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
 args = parser.parse_args()
-if args.checkpoint and args.init_checkpoint:
-    parser.error("pass only one of --checkpoint and --init-checkpoint")
+_init_flags = [args.checkpoint, args.init_checkpoint, args.init_weights]
+if sum(flag is not None for flag in _init_flags) > 1:
+    parser.error("pass only one of --checkpoint, --init-checkpoint, and --init-weights")
 
 SEED = 4 if args.data_seed is None else args.data_seed
 torch.manual_seed(SEED)
@@ -159,7 +180,7 @@ if args.checkpoint:
 
 cfg = setup_config(
     {
-        "data": "../configs/data_config_all.yaml",
+        "data": args.data_config,
         "training": args.training_config,
         "model": args.model_config,
         "logger": "../configs/logger_config.yaml",
@@ -255,7 +276,23 @@ meta_model = MetaModel(
 
 start_epoch = 0
 init_checkpoint = args.init_checkpoint
-if init_checkpoint:
+init_weights = args.init_weights
+if init_weights:
+    load_training_checkpoint(
+        meta_model, init_weights, device, load_optimizer=False, load_scheduler=False
+    )
+    # Optimizer and warmup were built with the training config before the load.
+    # Leave them alone: a cooled source has LR 0 and Adam moments we do not want.
+    fresh_lrs = [group["lr"] for group in meta_model.optimizer.param_groups]
+    print(
+        f"Loaded weights from {init_weights!r}; fresh optimizer lrs={fresh_lrs} "
+        "(epoch 0, global_step 0)"
+    )
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+    print(f"Re-seeded RNG to {SEED} for the new run's data order")
+elif init_checkpoint:
     load_training_checkpoint(meta_model, init_checkpoint, device, load_scheduler=False)
     # Bind a fresh schedule to the restored peak LRs (do not continue the
     # source run's scheduler). Epoch and global_step stay at 0.
@@ -333,7 +370,15 @@ with Logger(
             "train/grad_accum_steps": int(cfg.training.get("grad_accum_steps", 1)),
         }
     )
-    if init_checkpoint:
+    if init_weights:
+        run_logger.log_params(
+            {
+                "init/weights": init_weights,
+                "init/optimizer": "fresh",
+                "init/start_epoch": 0,
+            }
+        )
+    elif init_checkpoint:
         run_logger.log_params({"init/checkpoint": init_checkpoint, "init/start_epoch": 0})
     elif CHECKPOINT:
         run_logger.log_params({"init/checkpoint": CHECKPOINT, "init/start_epoch": start_epoch})
