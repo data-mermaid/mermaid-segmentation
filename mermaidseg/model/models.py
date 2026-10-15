@@ -11,6 +11,7 @@ from transformers.modeling_outputs import SemanticSegmenterOutput
 from transformers.models.dpt.modeling_dpt import DPTNeck
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.morphology import DEFAULT_MORPHOLOGY_CHANNELS
 
 DEFAULT_LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
@@ -26,6 +27,13 @@ class ConceptBottleneckOutput(SemanticSegmenterOutput):
 
     concept_outputs: torch.Tensor | None = None
     concept_logits: torch.Tensor | None = None
+
+
+@dataclass
+class DualSegmenterOutput(SemanticSegmenterOutput):
+    """Flat class logits plus optional morphology logits for the dual-head model."""
+
+    morphology_logits: torch.Tensor | None = None
 
 
 class LinearClassifier(torch.nn.Module):
@@ -235,6 +243,66 @@ class LinearDINOv3(torch.nn.Module):
 
 class LinearLoRADINOv3(LinearDINOv3):
     """LinearDINOv3 with LoRA enabled by default (Q/V adapters unless overridden)."""
+
+    def __init__(self, **kwargs: Any):
+        kwargs.setdefault("use_lora", True)
+        kwargs.setdefault("lora_target_modules", ("q_proj", "v_proj"))
+        super().__init__(**kwargs)
+
+
+class LinearDualDINOv3(LinearDINOv3):
+    """LinearDINOv3 with a parallel morphology head (taxonomy class + growth form).
+
+    Class logits stay on ``.logits`` for eval compatibility. Morphology logits are
+    multi-label channels (plating/branching/…) and are supervised only when targets
+    are known (see :class:`~mermaidseg.model.loss.DualTaxonomicalLoss`).
+    """
+
+    def __init__(
+        self,
+        num_morphology: int | None = None,
+        morphology_names: Sequence[str] | None = None,
+        **kwargs: Any,
+    ):
+        names = (
+            list(morphology_names)
+            if morphology_names is not None
+            else list(DEFAULT_MORPHOLOGY_CHANNELS)
+        )
+        n_morph = int(num_morphology) if num_morphology is not None else len(names)
+        if n_morph != len(names):
+            raise ValueError(
+                f"num_morphology ({n_morph}) must match len(morphology_names) ({len(names)})"
+            )
+        super().__init__(**kwargs)
+        self.morphology_names = names
+        self.num_morphology = n_morph
+        hidden_size = self.encoder.config.hidden_size
+        self.morph_head = LinearClassifier(
+            hidden_size, self.token_width, self.token_height, n_morph
+        )
+
+    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> DualSegmenterOutput:
+        if self._encoder_frozen:
+            with torch.no_grad():
+                outputs = self.encoder(x, **kwargs)
+        else:
+            outputs = self.encoder(x, **kwargs)
+        patch_embeddings = outputs.last_hidden_state[:, 5:, :]
+
+        logits = self.head(patch_embeddings)
+        logits = torch.nn.functional.interpolate(
+            logits, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
+        morph_logits = self.morph_head(patch_embeddings)
+        morph_logits = torch.nn.functional.interpolate(
+            morph_logits, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
+        return DualSegmenterOutput(loss=None, logits=logits, morphology_logits=morph_logits)
+
+
+class LinearDualLoRADINOv3(LinearDualDINOv3):
+    """Dual-head LinearDINOv3 with LoRA enabled by default."""
 
     def __init__(self, **kwargs: Any):
         kwargs.setdefault("use_lora", True)

@@ -1,0 +1,27 @@
+# Taxonomical-loss ablation — arm 1/3: CE baseline (LoRA q/v r8).
+# Identical to the other two arms except config_training (loss). Same data, image, instance,
+# seed, and epochs so the only variable is the loss. Grouped under one MLflow experiment.
+job:
+  name_prefix: mermaidseg-lora-tax-ce
+  image: mermaid-segmentation-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.g5.2xlarge
+  volume_gb: 200
+  max_runtime_hours: 48
+  env:
+    MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
+
+config:
+  config_data: configs/data_config_coralnet_mermaid.yaml
+  config_model: configs/model_config_dinov3_lora_qv_r8.yaml
+  config_training: configs/training_config_dinov3_lora.yaml
+  config_logger: configs/logger_config.yaml
+  overrides:
+    run-name: lora-r8-ce
+    experiment-name: taxonomical-loss-ablation
+    epochs: 200
+    seed: 42
+    num-workers: 8
+    metric-of-interest: miou
+    early-stopping: true
+    early-stopping-patience: 20

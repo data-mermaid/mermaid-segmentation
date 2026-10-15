@@ -25,9 +25,11 @@ Incremental path (each step stays green against the characterization tests):
 3. Delete the ``if self.training_mode == ...`` branches from ``batch_predict`` / ``batch_predict_loss``.
 """
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import torch
+from pydantic import BaseModel
+from pydantic import ConfigDict as PydanticConfigDict
 
 
 @runtime_checkable
@@ -58,3 +60,54 @@ class TrainingMode(Protocol):
         """Compute ``(loss, class_outputs, concept_outputs, loss_components)`` for one
         train step."""
         ...
+
+
+class StandardMode:
+    """Step 1 of the incremental path above: the ``"standard"`` adapter.
+
+    Lifts ``MetaModel.batch_predict``/``batch_predict_loss``'s ``"standard"`` branch
+    verbatim — no concept outputs, and the loss is called with the plain
+    ``(outputs, target_labels)`` arity.
+    """
+
+    def predict(self, seg_outputs: Any) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return seg_outputs.logits, None
+
+    def predict_and_loss(
+        self,
+        seg_outputs: Any,
+        loss_fn: torch.nn.Module,
+        target_labels: torch.Tensor,
+        target_concepts: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, float]]:
+        outputs = seg_outputs.logits.float()
+        loss, loss_components = loss_fn(outputs, target_labels)
+        return loss, outputs, None, loss_components
+
+
+class StandardTrainingConfig(BaseModel):
+    """Fail-fast validation for the ``training_kwargs`` fields ``MetaModel.__init__``
+    reads in ``"standard"`` mode.
+
+    Validates a snapshot of the raw dict *before* ``__init__``'s existing ``.pop()``
+    calls run — it does not replace those reads (which keep mutating
+    ``training_kwargs``/``self.training_kwargs`` exactly as before), it just turns a bad
+    type or typo into a clear ``ValidationError`` instead of a downstream
+    ``AttributeError``/``TypeError``. ``extra="allow"``: training-config YAML is
+    hand-edited and shared/copy-pasted across modes (e.g. a stray ``detach_concepts`` key
+    left over from a concept-bottleneck template), so unknown keys are tolerated rather
+    than rejected.
+    """
+
+    model_config = PydanticConfigDict(extra="allow")
+
+    training_mode: Literal["standard"]
+    freeze_encoder: bool = False
+    mixed_precision: bool = False
+    mixed_precision_dtype: str | None = None
+    max_grad_norm: float | None = 1.0
+    iterations_per_train_epoch: int | None = None
+    iterations_per_val_epoch: int | None = None
+    optimizer: dict[str, Any]
+    loss: dict[str, Any] | None = None
+    scheduler: dict[str, Any] | None = None

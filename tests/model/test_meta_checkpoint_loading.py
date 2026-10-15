@@ -11,7 +11,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from mermaidseg.model.meta import _load_checkpoint_into_model
+from mermaidseg.model.checkpoint import load_into as _load_checkpoint_into_model
 
 
 def _frozen_backbone_model() -> nn.Module:
