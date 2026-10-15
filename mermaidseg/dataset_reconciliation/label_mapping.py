@@ -1,17 +1,102 @@
 """Source-dataset to MERMAID benthic-attribute target-label mappings.
 
-Provides the HTTP fetchers + static dicts that translate a source-space label (CoralNet provider
-IDs, Coralscapes 1..39 names, MERMAID benthic-attribute names) into MERMAID benthic-attribute target
-names, plus the GPU helper ``source_labels_to_target_labels`` used at training time.
+Provides the HTTP fetchers + static dicts that translate a source-space label (CoralNet
+provider IDs, Coralscapes 1..39 names, MERMAID benthic- attribute names) into MERMAID
+benthic-attribute target names, plus the GPU helper ``source_labels_to_target_labels``
+used at training time.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+from typing import TypedDict
 
 import requests
 import torch
+
+logger = logging.getLogger(__name__)
+
+_CORALNET_LABELMAPPINGS_URL = (
+    "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet"
+)
+_CORALNET_SNAPSHOT_PATH = (
+    Path(__file__).resolve().parents[2] / "configs" / "coralnet_to_mermaid_mapping.json"
+)
+
+
+class CoralNetLabelMapping(TypedDict):
+    """One CoralNet row from the MERMAID ``labelmappings`` API."""
+
+    id: str | None
+    benthic_attribute_id: str | None
+    benthic_attribute_name: str | None
+    growth_form_id: str | None
+    growth_form_name: str | None
+    provider: str | None
+    provider_id: str
+    provider_label: str | None
+
+
+def _fetch_paginated_results(url: str, *, timeout: int = 30) -> list[dict]:
+    """Page through a MERMAID list endpoint until ``next`` is exhausted."""
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    records = list(data["results"])
+    while data.get("next"):
+        response = requests.get(data["next"], timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        records.extend(data["results"])
+    return records
+
+
+def _parse_coralnet_label_mapping(record: dict) -> CoralNetLabelMapping | None:
+    provider_id = record.get("provider_id")
+    if provider_id is None:
+        return None
+    return CoralNetLabelMapping(
+        id=record.get("id"),
+        benthic_attribute_id=record.get("benthic_attribute_id"),
+        benthic_attribute_name=record.get("benthic_attribute_name"),
+        growth_form_id=record.get("growth_form_id"),
+        growth_form_name=record.get("growth_form_name"),
+        provider=record.get("provider"),
+        provider_id=str(provider_id),
+        provider_label=record.get("provider_label"),
+    )
+
+
+def _coralnet_snapshot_as_label_mappings() -> dict[str, CoralNetLabelMapping]:
+    """Upgrade the committed benthic-name snapshot into full mapping records."""
+    return {
+        provider_id: CoralNetLabelMapping(
+            id=None,
+            benthic_attribute_id=None,
+            benthic_attribute_name=benthic_name,
+            growth_form_id=None,
+            growth_form_name=None,
+            provider="CoralNet",
+            provider_id=provider_id,
+            provider_label=None,
+        )
+        for provider_id, benthic_name in load_coralnet_snapshot().items()
+    }
+
+
+def load_coralnet_snapshot() -> dict[str, str | None]:
+    """Load the committed CoralNet ``provider_id`` -> target snapshot with no network
+    call.
+
+    The snapshot (``configs/coralnet_to_mermaid_mapping.json``) is the offline fallback
+    for :func:`fetch_coralnet_to_mermaid`. Exposing it lets offline tooling (e.g.
+    experiment-config validation) enumerate known target names without hitting the
+    MERMAID API.
+    """
+    with open(_CORALNET_SNAPSHOT_PATH) as f:
+        return json.load(f)
 
 
 def fetch_mermaid_target_labels(
@@ -22,39 +107,70 @@ def fetch_mermaid_target_labels(
     Returns:
         Alphabetically sorted list of unique benthic-attribute names.
     """
-    response = requests.get(benthicattributes_url, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    records = list(data["results"])
-    while data.get("next"):
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        records.extend(data["results"])
+    records = _fetch_paginated_results(benthicattributes_url)
     return sorted({rec["name"] for rec in records if rec.get("name") is not None})
 
 
-def fetch_coralnet_to_mermaid() -> dict[str, str | None]:
-    """Load the CoralNet provider label -> MERMAID benthic-attribute mapping from local config.
+def fetch_coralnet_label_mappings(
+    labelmappings_url: str = _CORALNET_LABELMAPPINGS_URL,
+) -> dict[str, CoralNetLabelMapping]:
+    """Fetch full CoralNet label-mapping records from the MERMAID API.
 
-    Returns a dict keyed by stringified CoralNet provider label; values are the mapped MERMAID
-    benthic-attribute name(s) (or ``None`` if the CoralNet label is not yet mapped).
+    Keyed by the **numeric CoralNet ``provider_id`` (as a string)** — the same value
+    :class:`~mermaidseg.datasets.coralnet.coralnet_dataset.CoralNetDataset` emits as
+    ``source_label_name``. Each value is the complete API record (benthic attribute,
+    growth form, provider label, etc.).
+
+    API-first: pages the MERMAID LabelMapping endpoint filtered to ``provider=CoralNet``.
+    On any network/HTTP failure it falls back to the committed snapshot
+    ``configs/coralnet_to_mermaid_mapping.json``, synthesizing records with
+    ``benthic_attribute_name`` only (other fields are ``None``) so training never
+    hard-fails on a transient API outage. The chosen source is logged.
     """
-    coralnet_to_mermaid_mapping_temporary_path = (
-        Path(__file__).resolve().parents[2]
-        / "configs"
-        / "coralnet_to_mermaid_mapping_temporary.json"
-    )
+    try:
+        records = _fetch_paginated_results(labelmappings_url)
+        mapping: dict[str, CoralNetLabelMapping] = {}
+        for record in records:
+            parsed = _parse_coralnet_label_mapping(record)
+            if parsed is not None:
+                mapping[parsed["provider_id"]] = parsed
+        logger.info(
+            "fetch_coralnet_label_mappings: loaded %d CoralNet label mappings from the MERMAID API",
+            len(mapping),
+        )
+        return mapping
+    except requests.RequestException as exc:
+        logger.warning(
+            "fetch_coralnet_label_mappings: API fetch failed (%s); falling back to committed "
+            "snapshot %s",
+            exc,
+            _CORALNET_SNAPSHOT_PATH.name,
+        )
+        return _coralnet_snapshot_as_label_mappings()
 
-    with open(coralnet_to_mermaid_mapping_temporary_path) as f:
-        return json.load(f)
+
+def fetch_coralnet_to_mermaid(
+    labelmappings_url: str = _CORALNET_LABELMAPPINGS_URL,
+) -> dict[str, str | None]:
+    """Fetch the CoralNet ``provider_id`` -> MERMAID benthic-attribute mapping.
+
+    Convenience wrapper around :func:`fetch_coralnet_label_mappings` that keeps only
+    ``benthic_attribute_name`` per ``provider_id``. Unmapped CoralNet labels (``None``)
+    collapse to background in
+    :class:`~mermaidseg.dataset_reconciliation.registry.SourceLabelRegistry`.
+    """
+    return {
+        provider_id: record["benthic_attribute_name"]
+        for provider_id, record in fetch_coralnet_label_mappings(labelmappings_url).items()
+    }
 
 
 def fetch_catlin_seaview_to_mermaid() -> dict[str, str]:
     """Return the static Catlin Seaview label-name -> MERMAID benthic-attribute mapping.
 
-    Keyed by the original Catlin label name; values are the mapped MERMAID benthic-attribute
-    name(s). Labels absent from this map collapse to background at training time via
+    Keyed by the original Catlin label name; values are the mapped
+    MERMAID benthic-attribute name(s). Labels absent from this map
+    collapse to background at training time via
     :class:`SourceLabelRegistry`.
     """
     return {
@@ -231,11 +347,12 @@ def fetch_catlin_seaview_to_mermaid() -> dict[str, str]:
 
 
 def fetch_moorea_labeled_corals_to_mermaid() -> dict[str, str]:
-    """Return the static Moorea Labeled Corals label-name -> MERMAID benthic-attribute mapping.
+    """Return the static Moorea Labeled Corals label-name -> MERMAID benthic- attribute
+    mapping.
 
-    Keyed by the original Moorea label name (e.g. ``"acrop"`` or ``"turf"``); values are the mapped
-    MERMAID benthic-attribute name(s). Labels absent from this map collapse to background at
-    training time via :class:`SourceLabelRegistry`.
+    Keyed by the original Moorea label name (e.g. ``"acrop"`` or ``"turf"``); values are
+    the mapped MERMAID benthic-attribute name(s). Labels absent from this map collapse
+    to background at training time via :class:`SourceLabelRegistry`.
     """
     return {
         "acan": "acanthastrea",
@@ -272,11 +389,14 @@ def fetch_moorea_labeled_corals_to_mermaid() -> dict[str, str]:
 
 
 def fetch_pacific_labeled_corals_to_mermaid() -> dict[str, str]:
-    """Return the static Pacific Labeled Corals label-name -> MERMAID benthic-attribute mapping.
+    """Return the static Pacific Labeled Corals label-name -> MERMAID benthic- attribute
+    mapping.
 
-    Keyed by the original Pacific label name from the per-site ``labelmap.txt`` (e.g. ``"acropora"``
-    or ``"cca"``); values are the mapped MERMAID benthic-attribute name(s). Labels absent from this
-    map collapse to background at training time via :class:`SourceLabelRegistry`.
+    Keyed by the original Pacific label name from the per-site
+    ``labelmap.txt`` (e.g. ``"acropora"`` or ``"cca"``); values are the
+    mapped MERMAID benthic-attribute name(s). Labels absent from this
+    map collapse to background at training time via
+    :class:`SourceLabelRegistry`.
     """
     return {
         "acropora": "acropora",
@@ -359,9 +479,9 @@ def fetch_ucsd_mosaics_to_mermaid(
 def fetch_benthos_yuval_to_mermaid() -> dict[str, str]:
     """Return the static Benthos Yuval label-name -> MERMAID benthic-attribute mapping.
 
-    Keyed by the original Benthos label name (e.g. ``"algae"`` or ``"sand"``); values are the mapped
-    MERMAID benthic-attribute name(s). Labels absent from this map collapse to background at
-    training time via :class:`SourceLabelRegistry`.
+    Keyed by the original Benthos label name (e.g. ``"algae"`` or ``"sand"``); values
+    are the mapped MERMAID benthic-attribute name(s). Labels absent from this map
+    collapse to background at training time via :class:`SourceLabelRegistry`.
     """
     return {
         "algae": "turf algae",
@@ -377,9 +497,9 @@ def fetch_benthos_yuval_to_mermaid() -> dict[str, str]:
 def coralscapes_v2_to_mermaid() -> dict[str, str]:
     """Static Coralscapes V2 95-class -> MERMAID benthic-attribute mapping.
 
-    Keyed by the native Coralscapes V2 class name (see ``id2label.json`` in the dataset repo);
-    values are the mapped MERMAID benthic-attribute name. Labels absent from this map collapse to
-    background at training time via :class:`SourceLabelRegistry`.
+    Keyed by the native Coralscapes V2 class name (see ``id2label.json`` in the dataset
+    repo); values are the mapped MERMAID benthic- attribute name. Labels absent from
+    this map collapse to background at training time via :class:`SourceLabelRegistry`.
     """
     return {
         "acanthaster planci": "acanthaster planci",
@@ -483,9 +603,10 @@ def coralscapes_v2_to_mermaid() -> dict[str, str]:
 def coralscapes_to_mermaid() -> dict[str, str]:
     """Static Coralscapes 39-class -> MERMAID benthic-attribute mapping.
 
-    Mapping was previously embedded inside ``CoralscapesDataset``. Keyed by the native Coralscapes
-    class name; values are the mapped MERMAID benthic-attribute name. Labels absent from this map
-    collapse to background at training time via :class:`SourceLabelRegistry`.
+    Mapping was previously embedded inside ``CoralscapesDataset``. Keyed by the native
+    Coralscapes class name; values are the mapped MERMAID benthic-attribute name. Labels
+    absent from this map collapse to background at training time via
+    :class:`SourceLabelRegistry`.
     """
     return {
         "human": "human",

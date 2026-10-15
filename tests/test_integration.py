@@ -57,7 +57,7 @@ def test_one_train_step_forward_backward(minimal_config, tiny_loader, make_meta_
     assert hasattr(outputs, "logits")
     assert outputs.logits.shape[-2:] == IMAGE_SIZE
 
-    loss = meta.loss(outputs.logits, masks)
+    loss, _ = meta.loss(outputs.logits, masks)
     assert torch.isfinite(loss), f"Loss is not finite: {loss}"
 
     loss.backward()
@@ -78,7 +78,7 @@ def test_one_train_step_updates_model_weights(minimal_config, tiny_loader, make_
         pre_weights[name] = param.clone()
 
     outputs = meta.model(images)
-    loss = meta.loss(outputs.logits, masks)
+    loss, _ = meta.loss(outputs.logits, masks)
     loss.backward()
     meta.optimizer.step()
     meta.optimizer.zero_grad()

@@ -1,0 +1,51 @@
+# Training config for LinearLoRADINOv3 with FOCAL loss (no class weights).
+# Fork of training_config_dinov3_lora.yaml — identical LoRA setup (param groups: head lr +
+# lora_lr, warmup, PolynomialLR); ONLY the loss block changes CE -> pure Focal.
+#
+# Why pure focal (no inverse-frequency weights): a controlled comparison at the frozen-linear
+# architecture showed ClassWeightedFocal (gamma=2 + inverse-freq weights up to a 10x clip)
+# collapsed — accuracy ~7% / mIoU ~0.01 vs the CE baseline's ~51% / ~0.066 at epoch 0 — because
+# focal's (1-pt)^gamma AND the class weights BOTH emphasize rare classes, so the model over-
+# predicts them and never learns the common ones. Focal loss is designed as an *alternative* to
+# class weighting (Lin et al.), so we drop the weights here and let (1-pt)^gamma carry the
+# imbalance handling. gamma stays at the standard 2.0; lower it (1.0) if the tail still dominates.
+training:
+    training_mode: "standard"
+    freeze_encoder: true
+    loss:
+        type: ClassWeightedFocalLoss
+        ignore_index: 0
+        gamma: 2.0
+        damping_denominator: 100
+        # NO weight_path -> self.weight is None -> pure focal, no per-class frequency weighting.
+    epochs: 200
+    optimizer:
+        type: AdamW
+        lr: 0.001
+        lora_lr: 0.0001
+        weight_decay: 0.01
+    scheduler:
+        type: PolynomialLR
+        power: 1
+        total_iters: 200
+        # Short warmup for LoRA adapters (unlike frozen head-only probe).
+        warmup_iters: 200
+        warmup_start_factor: 0.01
+    iterations_per_train_epoch: 1000
+    iterations_per_val_epoch: 200
+    # LoRA keeps encoder grads on (no torch.no_grad path), so VRAM is higher. 16 on ml.g6.2xlarge.
+    batch_size: 16
+    class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
+                    'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
+                    'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
+                    'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
+                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human', 'Human-made structure', 'Hydnophora',
+                    'Isopora', 'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis',
+                    'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium',
+                    'Orbicella annularis', 'Orbicella faveolata', 'Pachyseris', 'Padina', 'Pavona', 'Pectinia', 'Platygyra',
+                    'Pocillopora', 'Porites', 'Porites astreoides', 'Psammocora', 'Rock', 'Rubble', 'Sand', 'Sargassum',
+                    'Sea urchin', 'Seagrass', 'Seriatopora', 'Siderastrea siderea', 'Soft coral', 'Sponge', 'Stylophora',
+                    'Symphyllia', 'Transect tools', 'Tridacna giant clam', 'Turbinaria-algae', 'Turbinaria-coral',
+                    'Turf algae', 'Zoanthid']
+    padding: 3
+    label_roll_up: True

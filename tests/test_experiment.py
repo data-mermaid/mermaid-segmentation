@@ -1,0 +1,595 @@
+"""Tests for the experiment module (``mermaidseg.experiment``): offline validation, the
+config-loading equivalence with the legacy CLI merge, and offline dry-run assembly."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+import torch
+import yaml
+
+from mermaidseg.config_schema import LoggerConfig, ModelConfig, TrainingConfig
+from mermaidseg.experiment import (
+    Experiment,
+    ExperimentSpec,
+    offline_target_universe,
+)
+from mermaidseg.io import setup_config, update_config_with_args
+
+REPO = Path(__file__).resolve().parents[1]
+CONFIGS = REPO / "configs"
+
+# Real committed configs used as valid fixtures for the tmp-run-YAML tests.
+DATA = CONFIGS / "data_config_coralnet_mermaid.yaml"
+MODEL = CONFIGS / "model_config.yaml"
+TRAINING = CONFIGS / "training_config_dinov3_linear.yaml"
+LOGGER = CONFIGS / "logger_config.yaml"
+
+_ALL_REGISTRY_DATASETS = (
+    "pacific_labeled_corals",
+    "moorea_labeled_corals",
+    "catlin_seaview",
+    "mermaid",
+    "coralnet",
+    "coralscapes",
+    "coralscapes_v2",
+    "benthos_yuval",
+)
+
+
+def _write(tmp_path: Path, doc: dict, name: str = "run.yaml") -> Path:
+    path = tmp_path / name
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    return path
+
+
+def _config_block(**overrides_and_paths) -> dict:
+    """A `config:` block pointing at the real committed configs, with optional
+    path/override subs."""
+    overrides = overrides_and_paths.pop("overrides", {})
+    block = {
+        "config_data": overrides_and_paths.pop("config_data", str(DATA)),
+        "config_model": overrides_and_paths.pop("config_model", str(MODEL)),
+        "config_training": overrides_and_paths.pop("config_training", str(TRAINING)),
+        "config_logger": overrides_and_paths.pop("config_logger", str(LOGGER)),
+    }
+    if overrides:
+        block["overrides"] = overrides
+    assert not overrides_and_paths, f"unused kwargs: {overrides_and_paths}"
+    return block
+
+
+# --------------------------------------------------------------------------------------
+# Happy path — the committed run YAMLs validate (run from the repo root for relative paths).
+# --------------------------------------------------------------------------------------
+
+
+def test_issue12_run_yaml_validates(monkeypatch):
+    monkeypatch.chdir(REPO)
+    report = Experiment.validate(REPO / "sagemaker/runs/issue_12_dinov3_baseline.yaml")
+    assert report.ok, report.errors
+    assert report.summary["metric_of_interest"] == "miou"
+    assert report.summary["datasets_enabled"].get("coralnet") == ["train", "val"]
+    assert report.summary["datasets_enabled"].get("mermaid") == ["train", "val"]
+
+
+def test_example_run_yaml_validates(monkeypatch):
+    monkeypatch.chdir(REPO)
+    report = Experiment.validate(REPO / "sagemaker/runs/example-training.yaml")
+    assert report.ok, report.errors
+
+
+# --------------------------------------------------------------------------------------
+# Schema errors (caught before any config file is opened).
+# --------------------------------------------------------------------------------------
+
+
+def test_unknown_metric_is_error(tmp_path):
+    run = _write(tmp_path, {"config": _config_block(overrides={"metric-of-interest": "nope"})})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("metric_of_interest" in err for err in report.errors)
+
+
+def test_typo_override_key_is_error(tmp_path):
+    # `epoch` instead of `epochs` — extra="forbid" turns it into an error, not a silent no-op.
+    run = _write(tmp_path, {"config": _config_block(overrides={"epoch": 1})})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("epoch" in err for err in report.errors)
+
+
+def test_missing_config_block_is_error(tmp_path):
+    run = _write(tmp_path, {"job": {"name_prefix": "x"}})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("config:" in err for err in report.errors)
+
+
+# --------------------------------------------------------------------------------------
+# Worker/instance sizing advisories (warnings, never blocking).
+# --------------------------------------------------------------------------------------
+
+
+def _job_block(instance_type: str) -> dict:
+    return {
+        "name_prefix": "sizing-test",
+        "image": "img:latest",
+        "entrypoint": "scripts/sagemaker_train_entrypoint.py",
+        "instance_type": instance_type,
+        "volume_gb": 200,
+        "max_runtime_hours": 4,
+    }
+
+
+def test_worker_sizing_flags_persistent_on_small_ram(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    # g6.2xlarge (8 vCPU / 32 GiB) + num_workers=8 + persistent (default) = the r8 OOM config.
+    run = _write(
+        tmp_path,
+        {"job": _job_block("ml.g6.2xlarge"), "config": _config_block(overrides={"num-workers": 8})},
+    )
+    report = Experiment.validate(run)
+    assert report.ok, report.errors
+    assert any("persistent_workers=True" in w for w in report.warnings)
+
+
+def test_worker_sizing_flags_oversubscription(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    run = _write(
+        tmp_path,
+        {
+            "job": _job_block("ml.g6.2xlarge"),
+            "config": _config_block(overrides={"num-workers": 32}),
+        },
+    )
+    report = Experiment.validate(run)
+    assert any("oversubscribed" in w for w in report.warnings)
+
+
+def test_worker_sizing_quiet_when_persistent_disabled(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    run = _write(
+        tmp_path,
+        {
+            "job": _job_block("ml.g6.2xlarge"),
+            "config": _config_block(overrides={"num-workers": 8, "persistent-workers": False}),
+        },
+    )
+    report = Experiment.validate(run)
+    assert not any("persistent_workers=True" in w for w in report.warnings)
+
+
+def test_worker_sizing_unknown_instance_warns(monkeypatch, tmp_path):
+    monkeypatch.chdir(REPO)
+    run = _write(
+        tmp_path,
+        {"job": _job_block("ml.zz.unknown"), "config": _config_block(overrides={"num-workers": 8})},
+    )
+    report = Experiment.validate(run)
+    assert any("not in the known-specs table" in w for w in report.warnings)
+
+
+# --------------------------------------------------------------------------------------
+# Static semantic errors (need the merged config).
+# --------------------------------------------------------------------------------------
+
+
+def test_missing_config_file_is_error(tmp_path):
+    run = _write(
+        tmp_path,
+        {"config": _config_block(config_data=str(tmp_path / "does_not_exist.yaml"))},
+    )
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("data config file not found" in err for err in report.errors)
+
+
+def test_unknown_dataset_is_error(tmp_path):
+    data_cfg = _write(
+        tmp_path,
+        {"data": {name: {} for name in (*_ALL_REGISTRY_DATASETS, "bogus_ds")}},
+        name="data.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_data=str(data_cfg))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("unknown dataset 'bogus_ds'" in err for err in report.errors)
+
+
+def test_missing_dataset_is_error(tmp_path):
+    # Declare only two of the eight registry datasets — _run_training would KeyError on the rest.
+    data_cfg = _write(tmp_path, {"data": {"coralnet": {}, "mermaid": {}}}, name="data.yaml")
+    run = _write(tmp_path, {"config": _config_block(config_data=str(data_cfg))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("missing dataset 'benthos_yuval'" in err for err in report.errors)
+
+
+def test_bad_class_subset_name_is_warning_not_error(tmp_path):
+    training_cfg = _write(
+        tmp_path,
+        {
+            "training": {
+                "training_mode": "standard",
+                "padding": 3,
+                "batch_size": 4,
+                "optimizer": {"type": "AdamW", "lr": 5e-5},
+                "class_subset": ["Acropora", "ZZZ_NOT_A_REAL_LABEL"],
+            }
+        },
+        name="training.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training_cfg))})
+    report = Experiment.validate(run)
+    assert report.ok, report.errors  # an unknown class name is advisory, not fatal
+    assert any("ZZZ_NOT_A_REAL_LABEL" in warn for warn in report.warnings)
+
+
+# --------------------------------------------------------------------------------------
+# Split-config schema + value validation (via Experiment.validate).
+# --------------------------------------------------------------------------------------
+
+MODEL_CBM = CONFIGS / "model_config_cbm.yaml"
+
+
+def _broken_training(tmp_path: Path, **over) -> Path:
+    """A valid standard training block written to a tmp file, with fields overridden."""
+    block = {
+        "training_mode": "standard",
+        "optimizer": {"type": "AdamW", "lr": 5e-5},
+        "class_subset": ["Acropora"],
+        "padding": 3,
+        "batch_size": 4,
+    }
+    block.update(over)
+    return _write(tmp_path, {"training": block}, name="training.yaml")
+
+
+@pytest.mark.parametrize(
+    "override, expect",
+    [
+        ({"optimizer": {"type": "Adamw", "lr": 5e-5}}, "optimizer.type 'Adamw'"),
+        ({"scheduler": {"type": "PolynomialLr"}}, "scheduler.type 'PolynomialLr'"),
+        ({"loss": {"type": "FocalLoss"}}, "loss.type 'FocalLoss'"),
+    ],
+)
+def test_bad_component_type_is_error(tmp_path, override, expect):
+    training = _broken_training(tmp_path, **override)
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any(expect in e for e in report.errors)
+
+
+def test_bad_model_name_is_error(tmp_path):
+    model = _write(
+        tmp_path,
+        {"model": {"name": "LinearDinov3", "encoder_name": "x", "input_size": [512, 512]}},
+        name="model.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_model=str(model))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("model.name 'LinearDinov3'" in e for e in report.errors)
+
+
+@pytest.mark.parametrize("building_block", ["DPTHead", "LinearClassifier", "ConceptHead"])
+def test_building_block_is_not_a_valid_model_name(building_block):
+    # Real nn.Module subclasses in models.py, but not user-selectable models — they'd crash at
+    # construction, so valid_model_names must exclude them (require freeze_encoder).
+    from mermaidseg.config_schema import resolve_model_name, valid_model_names
+
+    assert resolve_model_name(building_block) is not None
+    assert building_block not in valid_model_names()
+    assert resolve_model_name("LinearDINOv3") is None
+
+
+def test_missing_required_training_field_is_error(tmp_path):
+    # A training block with no optimizer — MetaModel reads training_kwargs.optimizer unconditionally.
+    training = _write(
+        tmp_path,
+        {
+            "training": {
+                "training_mode": "standard",
+                "class_subset": ["Acropora"],
+                "padding": 3,
+                "batch_size": 4,
+            }
+        },
+        name="training.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("training: config is invalid" in e and "optimizer" in e for e in report.errors)
+
+
+def test_cbm_missing_concept_mapping_is_error(tmp_path):
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept-bottleneck",
+        loss={"type": "ConceptBottleneckLoss"},
+    )
+    run = _write(
+        tmp_path,
+        {"config": _config_block(config_training=str(training), config_model=str(MODEL_CBM))},
+    )
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("concept_mapping_path is required" in e for e in report.errors)
+
+
+def test_cbm_mode_with_plain_model_is_error(tmp_path):
+    # concept-bottleneck mode with the default standard LinearDINOv3 model → AttributeError at runtime.
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept-bottleneck",
+        concept_mapping_path="configs/class_to_concepts.csv",
+        loss={"type": "ConceptBottleneckLoss"},
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("emits concept outputs" in e for e in report.errors)
+
+
+def test_concept_mode_with_plain_model_is_ok(tmp_path):
+    # Plain `concept` mode reads .logits (every model has it) — a Linear model is a valid pairing,
+    # so the mode<->model coupling must NOT flag it (regression guard for the string-heuristic fix).
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept",
+        concept_mapping_path="configs/class_to_concepts.csv",
+        loss={"type": "BCEWithLogitsLoss"},
+    )
+    run = _write(tmp_path, {"config": _config_block(config_training=str(training))})
+    report = Experiment.validate(run)
+    assert not any("concept" in e and "model" in e for e in report.errors), report.errors
+
+
+def test_cbm_wrong_loss_is_error(tmp_path):
+    training = _broken_training(
+        tmp_path,
+        training_mode="concept-bottleneck",
+        concept_mapping_path="configs/class_to_concepts.csv",
+        loss={"type": "CrossEntropyLoss"},
+    )
+    run = _write(
+        tmp_path,
+        {"config": _config_block(config_training=str(training), config_model=str(MODEL_CBM))},
+    )
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("ConceptBottleneckLoss" in e for e in report.errors)
+
+
+def test_typo_logger_key_is_error(tmp_path):
+    logger = _write(
+        tmp_path,
+        {
+            "logger": {
+                "uri": "seg",
+                "experiment_name": "m",
+                "system_metrics": True,
+                "system_metrics_sampling_interval": 10,
+                "keep_last_n_checkpoints": 3,
+                "save_full_state_dict": False,
+                "sytem_metrics": True,  # typo of an existing key → forbid rejects
+            }
+        },
+        name="logger.yaml",
+    )
+    run = _write(tmp_path, {"config": _config_block(config_logger=str(logger))})
+    report = Experiment.validate(run)
+    assert not report.ok
+    assert any("logger: config is invalid" in e for e in report.errors)
+
+
+# Forbid safety-net: every committed split config must pass its schema, or strict `extra="forbid"`
+# would silently start rejecting a real config the moment a new field is added.
+
+
+@pytest.mark.parametrize(
+    "path", sorted(CONFIGS.glob("training_config*.yaml")), ids=lambda p: p.name
+)
+def test_committed_training_configs_pass_schema(path):
+    doc = yaml.safe_load(path.read_text())
+    TrainingConfig.model_validate(doc.get("training", doc))
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS.glob("model_config*.yaml")), ids=lambda p: p.name)
+def test_committed_model_configs_pass_schema(path):
+    doc = yaml.safe_load(path.read_text())
+    ModelConfig.model_validate(doc.get("model", doc))
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS.glob("logger_config*.yaml")), ids=lambda p: p.name)
+def test_committed_logger_configs_pass_schema(path):
+    doc = yaml.safe_load(path.read_text())
+    LoggerConfig.model_validate(doc.get("logger", doc))
+
+
+# --------------------------------------------------------------------------------------
+# Units.
+# --------------------------------------------------------------------------------------
+
+
+def test_spec_parses_hyphenated_override_aliases():
+    spec = ExperimentSpec.model_validate(
+        {
+            "config_data": "d",
+            "config_model": "m",
+            "config_training": "t",
+            "overrides": {
+                "metric-of-interest": "miou",
+                "early-stopping": True,
+                "early-stopping-patience": 20,
+                "num-workers": 8,
+            },
+        }
+    )
+    assert spec.overrides.metric_of_interest == "miou"
+    assert spec.overrides.early_stopping is True
+    assert spec.overrides.early_stopping_patience == 20
+    assert spec.overrides.num_workers == 8
+    assert spec.mapping_source == "remote"  # additive default
+
+
+def test_offline_universe_is_nonempty_and_has_snapshot_names():
+    universe = offline_target_universe()
+    assert "acropora" in universe  # from the committed CoralNet snapshot
+    assert all(name == name.lower() for name in universe)
+
+
+# --------------------------------------------------------------------------------------
+# Loader: config-merge equivalence, YAML loading, and offline dry-run assembly.
+# --------------------------------------------------------------------------------------
+
+
+def test_from_args_config_matches_legacy_merge(monkeypatch):
+    """Experiment.from_args must produce the same merged config as the legacy CLI path
+    (setup_config + update_config_with_args) — the behavior-preservation guarantee for
+    PR 2."""
+    monkeypatch.chdir(REPO)
+    args = argparse.Namespace(
+        config_data="configs/data_config_coralnet_mermaid.yaml",
+        config_model="configs/model_config.yaml",
+        config_training="configs/training_config_dinov3_linear.yaml",
+        config_logger="configs/logger_config.yaml",
+        run_name="rn",
+        experiment_name="baselines",
+        epochs=7,
+        batch_size=16,
+        lr=0.002,
+        seed=123,
+        num_workers=4,
+        metric_of_interest="miou_weighted",
+        early_stopping=True,
+        early_stopping_patience=5,
+        early_stopping_min_delta=0.01,
+        per_class_metrics=None,
+        dry_run=False,
+        auto_shutdown=False,
+        log_dir="logs",
+        failure_report_path=None,
+        model=None,
+        model_checkpoint=None,
+        iterations_per_train_epoch=None,
+        iterations_per_val_epoch=None,
+        log_epochs=None,
+    )
+    exp = Experiment.from_args(args)
+    legacy = update_config_with_args(
+        setup_config(
+            {
+                "data": args.config_data,
+                "training": args.config_training,
+                "model": args.config_model,
+                "logger": args.config_logger,
+            }
+        ),
+        args,
+    )
+    # Every override-affected field matches the legacy merge.
+    assert exp.config.run_name == legacy.run_name == "rn"
+    assert exp.config.training.epochs == legacy.training.epochs == 7
+    assert exp.config.training.batch_size == legacy.training.batch_size == 16
+    assert exp.config.training.optimizer.lr == legacy.training.optimizer.lr == 0.002
+    # Run-params (not in cfg today) are surfaced on the unified override object.
+    assert exp.overrides.seed == 123
+    assert exp.overrides.metric_of_interest == "miou_weighted"
+    assert exp.overrides.early_stopping is True
+
+
+def test_from_run_yaml_loads_spec_and_applies_overrides(monkeypatch):
+    monkeypatch.chdir(REPO)
+    exp = Experiment.from_run_yaml("sagemaker/runs/issue_12_dinov3_baseline.yaml")
+    assert exp.spec.overrides.metric_of_interest == "miou"
+    assert exp.spec.overrides.early_stopping is True
+    assert exp.config.training.epochs == 200  # override merged into the config
+    assert exp.config.training.training_mode == "standard"
+
+
+def test_dataloader_timeout_can_be_configured_for_slow_s3_batches(monkeypatch):
+    monkeypatch.setenv("MERMAIDSEG_DATALOADER_TIMEOUT_SECONDS", "600")
+    experiment = Experiment(
+        ExperimentSpec(overrides={"num_workers": 8}),
+        SimpleNamespace(training=SimpleNamespace(batch_size=32)),
+        device=torch.device("cpu"),
+    )
+
+    assert experiment._base_loader_kwargs()["timeout"] == 600
+
+
+class _SyntheticDataset:
+    """Minimal dataset matching the SourceLabelRegistry / DataLoader interface (no
+    S3)."""
+
+    def __init__(self, name: str, num_samples: int = 8, **_ignored):
+        self.SOURCE_NAME = name
+        self._num_samples = num_samples
+        self.source_id2name = {0: "background", 1: "coral"}
+        self.source_name2id = {"background": 0, "coral": 1}
+        self.num_source_classes = 2
+        self._global_offset = 0
+
+    def __len__(self) -> int:
+        return self._num_samples
+
+    def __getitem__(self, _idx: int):
+        return torch.zeros(3, 512, 512), torch.zeros(512, 512, dtype=torch.long)
+
+    def set_global_offset(self, offset: int) -> None:
+        self._global_offset = offset
+
+    def num_load_failures(self) -> int:
+        return 0
+
+
+def test_dry_run_assembles_offline(tmp_path, monkeypatch):
+    """dry_run() assembles datasets -> registry -> (mocked) model -> evaluator and pulls
+    one batch, offline: only MERMAID is active (identity mapping, no live API),
+    label_roll_up off."""
+    monkeypatch.chdir(REPO)
+    data_doc = {"data": {name: {"train": "None", "val": "None"} for name in _ALL_REGISTRY_DATASETS}}
+    data_doc["data"]["mermaid"] = {
+        "train": {},
+        "val": {},
+    }  # both splits active (ConcatDataset needs val)
+    data_cfg = _write(tmp_path, data_doc, name="data.yaml")
+    training_cfg = _write(
+        tmp_path,
+        {
+            "training": {
+                "training_mode": "standard",
+                "padding": 3,
+                "batch_size": 4,
+                "label_roll_up": False,
+                "class_subset": ["coral"],  # MERMAID's identity map emits "coral"
+            }
+        },
+        name="training.yaml",
+    )
+    spec = ExperimentSpec(
+        config_data=str(data_cfg),
+        config_model=str(MODEL),
+        config_training=str(training_cfg),
+        config_logger=str(LOGGER),
+        overrides={"run_name": "dry-run-test"},  # meta_model() reads cfg.run_name
+    )
+    override = {"mermaid": lambda **kw: _SyntheticDataset("mermaid")}
+    with (
+        patch.dict("mermaidseg.experiment.DATASET_REGISTRY", override),
+        patch("mermaidseg.experiment.MetaModel"),
+    ):
+        experiment = Experiment.from_spec(spec, device=torch.device("cpu"))
+        summary = experiment.dry_run()
+
+    assert summary["datasets"] == ["mermaid"]
+    assert summary["train_batches"] == 2  # 8 synthetic samples / batch 4, drop_last
+    assert summary["train_batch_image_shape"] == (4, 3, 512, 512)

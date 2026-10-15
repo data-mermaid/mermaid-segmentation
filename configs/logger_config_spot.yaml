@@ -1,0 +1,15 @@
+logger:
+  uri: "segmentation"
+  experiment_name: "mermaid"
+  system_metrics: true
+  system_metrics_sampling_interval: 10
+  # Keep only the N most recent local checkpoint files per run (MLflow's checkpoints/
+  # history is unaffected). <= 0 or null disables rotation (keep everything).
+  keep_last_n_checkpoints: 3
+  # Exclude frozen params (e.g. a frozen backbone) from saved state dicts by default,
+  # since they are byte-identical across every checkpoint. Set true for full fine-tuning
+  # runs with nothing frozen, or when full-state resume fidelity matters more than size.
+  save_full_state_dict: false
+  # Spot-specific: save a full (resumable) checkpoint EVERY epoch, so a Managed-Spot
+  # interruption loses at most one epoch of work when the run resumes from MLflow.
+  log_checkpoint: 1

@@ -102,7 +102,6 @@ class CoralNetDataset(BaseCoralDataset):
         self.annotations_path = annotations_path or _resolve_default_annotations_path()
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
-        self.s3 = boto3.client("s3")
         self.whitelist_sources = whitelist_sources
         self.blacklist_sources = blacklist_sources
         if self.whitelist_sources is not None and self.blacklist_sources is not None:
@@ -171,5 +170,7 @@ class CoralNetDataset(BaseCoralDataset):
         image_s3_key: str | None = None,
         **row_kwargs: Any,
     ) -> NDArray[Any]:
+        if not isinstance(image_s3_key, str) or not image_s3_key:
+            image_s3_key = None
         key = image_s3_key or f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
         return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))

@@ -6,15 +6,17 @@
 # Same image runs both Training and Processing — the launcher selects
 # which entrypoint script to invoke via CONTAINER_ENTRYPOINT_SCRIPT.
 #
-# Base: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime (Python 3.11, torch 2.4.1)
+# Base: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime (Python 3.11, torch 2.5.1)
 # Matches pyproject.toml requires-python>=3.11, torch>=2.4,<2.8.
 #
 # See docker/jobs/CLAUDE.md for build/push recipe and tagging conventions.
 
-ARG BASE_IMAGE=pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+ARG BASE_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 FROM ${BASE_IMAGE}
-ARG HF_TOKEN
-ENV HF_TOKEN=$HF_TOKEN
+
+# HF_TOKEN is injected at runtime by the launcher (scripts/launch_training.py sets it in the
+# SageMaker Estimator environment). Do NOT bake it via ARG/ENV — that persists the secret in
+# image layers (docker history/inspect). Gated-model downloads happen at run time, not build.
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -28,6 +30,7 @@ COPY pyproject.toml README.md ./
 COPY mermaidseg ./mermaidseg
 COPY scripts ./scripts
 COPY configs ./configs
+COPY artifacts ./artifacts
 
 # Image carries the training stack only (mlflow/torchmetrics → training extra). The CoralNet
 # ETL/processing tasks (coralnet-etl/-refresh/-resize) need the `coralnet` extra (ibis/duckdb,
@@ -40,6 +43,7 @@ RUN chmod +x /opt/ml/code/entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONFAULTHANDLER=1 \
     AWS_DEFAULT_REGION=us-east-1
 
 ENTRYPOINT ["/opt/ml/code/entrypoint.sh"]

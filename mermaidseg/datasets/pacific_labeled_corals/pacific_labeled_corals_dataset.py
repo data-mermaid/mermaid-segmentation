@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import boto3
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -113,7 +112,6 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
-        self.s3 = boto3.client("s3")
         self.whitelist_sites = whitelist_sites
         self.blacklist_sites = blacklist_sites
         self.whitelist_subsets = whitelist_subsets
@@ -125,7 +123,8 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
 
     def load_annotations(self) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Load annotations from S3, apply site/subset filters, pick the active annotator."""
+        """Load annotations from S3, apply site/subset filters, pick the active
+        annotator."""
         annotations_uri = f"s3://{self.source_bucket}/{self.annotations_path}"
         df = pd.read_parquet(annotations_uri)
 

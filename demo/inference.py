@@ -120,18 +120,21 @@ def _normalize_checkpoint_state_dict(sd: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _load_state_dict_flexible(model: torch.nn.Module, sd: Mapping[str, Any]) -> None:
+def _load_state_dict_flexible(
+    model: torch.nn.Module, sd: Mapping[str, Any], *, strict: bool = True
+) -> None:
     """Load ``sd`` into ``model``, tolerant of LoRA encoder key-nesting differences.
 
     Different mermaidseg revisions wrap the LoRA encoder with a different number of
     ``.model.`` levels (``encoder.base_model.model.model.layer`` vs collapsed
     ``encoder.base_model.model.layer``). Pick whichever of the raw / normalized key
-    forms overlaps the instantiated model's keys best, then load it strictly.
+    forms overlaps the instantiated model's keys best, then load it with ``strict``
+    (``False`` for checkpoints that omit frozen-backbone keys).
     """
     model_keys = set(model.state_dict().keys())
     candidates = {"raw": dict(sd), "normalized": _normalize_checkpoint_state_dict(sd)}
     best = max(candidates.values(), key=lambda c: len(model_keys & c.keys()))
-    model.load_state_dict(best)
+    model.load_state_dict(best, strict=strict)
 
 
 def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMModel:
@@ -163,7 +166,11 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
 
     model_cls = getattr(mm_models, model_name)
     model = model_cls(num_classes=num_classes, num_concepts=num_concepts, **model_kwargs)
-    _load_state_dict_flexible(model, state_dict)
+    # Checkpoints saved with excludes_frozen_params=True (the Logger default) omit
+    # frozen-backbone keys since model_cls(...) above already re-initializes the same
+    # frozen backbone; strict=True would otherwise raise on every load of such a checkpoint.
+    strict = not (isinstance(ckpt, dict) and ckpt.get("excludes_frozen_params", False))
+    _load_state_dict_flexible(model, state_dict, strict=strict)
     return model.to(device).eval()
 
 

@@ -28,6 +28,7 @@ class FakeMetaModel:
         num_concepts: int | None = None,
         conceptid2labelid: dict[int, int] | None = None,
         concept_matrix: Any | None = None,
+        freeze_backbone: bool = False,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
@@ -35,8 +36,17 @@ class FakeMetaModel:
         self.conceptid2labelid = conceptid2labelid
         self.concept_matrix = concept_matrix
         self.device = "cpu"
-        self.model = nn.Linear(4, num_classes)
-        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01)
+        if freeze_backbone:
+            # "backbone" (frozen) feeding into a trainable "head", mirroring the
+            # frozen-encoder + trainable-decoder pattern used in real models.
+            self.model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, num_classes))
+            for param in self.model[0].parameters():
+                param.requires_grad = False
+        else:
+            self.model = nn.Linear(4, num_classes)
+        self.optimizer = torch.optim.SGD(
+            (p for p in self.model.parameters() if p.requires_grad), lr=0.01
+        )
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1)
 
 
@@ -66,8 +76,8 @@ def fake_meta_model():
 def make_config():
     """Factory that builds a ConfigDict.
 
-    Override any nested value via keyword arguments, e.g. ``make_config(logger={"experiment_name":
-    "custom"})``.
+    Override any nested value via keyword arguments, e.g.
+    ``make_config(logger={"experiment_name": "custom"})``.
     """
 
     def _factory(**overrides: Any) -> ConfigDict:
@@ -109,6 +119,7 @@ def minimal_config():
                 "input_size": IMAGE_SIZE,
             },
             "training": {
+                "training_mode": "standard",
                 "epochs": 1,
                 "batch_size": 2,
                 "optimizer": {"type": "SGD", "lr": 0.01},
@@ -138,8 +149,8 @@ def tiny_loader(tiny_batch):
 def mock_dinov3_encoder(monkeypatch):
     """AutoModel.from_pretrained mock returning controlled hidden states.
 
-    Returns a factory that patches AutoModel on a target module. Uses hidden_size=64 (small for fast
-    CI), patch_size=14, n_prefix_tokens=5 (CLS + 4 registers).
+    Returns a factory that patches AutoModel on a target module. Uses hidden_size=64
+    (small for fast CI), patch_size=14, n_prefix_tokens=5 (CLS + 4 registers).
     """
     hidden_size = 64
     patch_size = 14

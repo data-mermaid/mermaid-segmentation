@@ -20,13 +20,14 @@ dependencies = [
     "pandas",
     "peft>=0.19.1",
     "pillow",
+    "pydantic>=2",
     "pyyaml",
     "requests",
     "s3fs>=2024.2.0",
     "safetensors>=0.4.0",
     "torch>=2.4,<2.8",
     "tqdm",
-    "transformers",
+    "transformers>=4.56,<5",
 ]
 
 [project.scripts]
@@ -39,6 +40,7 @@ coralnet-resize = "mermaidseg.datasets.coralnet.preprocessing.resize:main"
 # Training + experiment tracking (mermaidseg/logger.py, mermaidseg/model/eval.py).
 training = [
     "mlflow",
+    "psutil",  # scripts/diagnostics/dataloader_rss_repro.py (host-RAM / worker USS diagnostics)
     "sagemaker-mlflow>=0.2.0",
     "torchmetrics",
 ]
@@ -134,6 +136,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "live: marks tests as live integration tests requiring S3 and/or CoralNet access (deselect with '-m \"not live\"')",
+    "smoke: marks fast offline smoke tests of the training pipeline wiring",
 ]
 
 [tool.coverage.run]
