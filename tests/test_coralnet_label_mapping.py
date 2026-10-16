@@ -130,3 +130,24 @@ def test_registry_resolves_numeric_coralnet_ids_to_targets(monkeypatch):
     assert target_58 != target_59
     assert registry.target_id2label[target_58] == "acanthastrea"
     assert registry.target_id2label[target_59] == "acropora"
+
+
+def test_provider_ids_normalize_to_int_strings(monkeypatch, caplog):
+    """Int, float and "82.0" provider_ids key as "82"; non-numeric ids are skipped
+    loudly."""
+    page = {
+        "next": None,
+        "results": [
+            {"provider_id": 82, "benthic_attribute_name": "Porites"},
+            {"provider_id": 83.0, "benthic_attribute_name": "Sand"},
+            {"provider_id": "84.0", "benthic_attribute_name": "Turf"},
+            {"provider_id": "abc", "benthic_attribute_name": "Rubble"},
+        ],
+    }
+    monkeypatch.setattr(label_mapping.requests, "get", lambda url, timeout=30: _FakeResponse(page))
+
+    with caplog.at_level("WARNING", logger=label_mapping.__name__):
+        mapping = label_mapping.fetch_coralnet_to_mermaid()
+
+    assert mapping == {"82": "Porites", "83": "Sand", "84": "Turf"}
+    assert "abc" in caplog.text
