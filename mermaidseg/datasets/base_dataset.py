@@ -264,6 +264,16 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         or whose image is absent from ``df_images`` are dropped (mirrors
         :func:`create_annotation_mask`'s unknown-label handling).
         """
+        # The index is keyed by image_id; duplicates (e.g. a composite (source_id, image_id)
+        # key, or null ids) would silently merge different images' annotations.
+        duplicated = self.df_images["image_id"].duplicated()
+        if duplicated.any():
+            examples = self.df_images.loc[duplicated, "image_id"].unique()[:5].tolist()
+            raise ValueError(
+                f"{type(self).__name__}: df_images.image_id must be unique for point "
+                f"annotations; {int(duplicated.sum())} duplicate rows (e.g. {examples})."
+            )
+
         num_images = len(self.df_images)
         # image_id -> positional index in df_images. Built once here (main process); never touched
         # per sample. Positional (df_images order) so it matches _load_item's ``.iloc[idx]``.
@@ -289,6 +299,30 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         offsets = np.zeros(num_images + 1, dtype=np.int64)
         np.cumsum(counts, out=offsets[1:])
         self._ann_offsets = offsets
+
+    def set_source_vocabulary(
+        self,
+        source_id2name: dict[int, str],
+        source_name2id: dict[str, int],
+        num_source_classes: int,
+    ) -> None:
+        """Replace local source maps, remapping the baked annotation index to match.
+
+        ``_ann_label_id`` stores ids from the current ``source_name2id``, so swapping
+        the maps alone would permute every emitted label. Remap once here (main process)
+        via a numpy lookup so ``__getitem__`` stays numpy-only. Idempotent: re-applying
+        the same vocabulary is an identity remap. Raises ``KeyError`` if a current label
+        name is missing from the new vocabulary.
+        """
+        ann_label_id = getattr(self, "_ann_label_id", None)
+        if ann_label_id is not None and self.source_id2name:
+            lut = np.zeros(max(self.source_id2name) + 1, dtype=np.int64)
+            for old_id, name in self.source_id2name.items():
+                lut[old_id] = source_name2id[name]
+            self._ann_label_id = lut[ann_label_id]
+        self.source_id2name = dict(source_id2name)
+        self.source_name2id = dict(source_name2id)
+        self.num_source_classes = int(num_source_classes)
 
     def set_global_offset(self, offset: int) -> None:
         """Set the global source-label offset assigned by the registry.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
+import pytest
 import torch
 
 from mermaidseg.dataset_reconciliation import (
@@ -12,6 +14,7 @@ from mermaidseg.dataset_reconciliation import (
 )
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
+from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from mermaidseg.datasets.benthos_yuval.benthos_yuval_corals_dataset import (
     BenthosYuvalCoralsDataset,
 )
@@ -171,3 +174,126 @@ def test_ucsd_mosaics_native_lookup_rebuilds_on_vocab_change() -> None:
 
     assert int(ds._native_to_local[1]) == ds.source_name2id["sand"]
     assert int(ds._native_to_local[2]) == ds.source_name2id["coral"]
+
+
+class _PointStub(BaseCoralDataset):
+    """Minimal point-annotation dataset (CoralNet-shaped) with no I/O."""
+
+    SOURCE_NAME = "coralnet"
+
+    def read_image(self, **row_kwargs: object) -> np.ndarray:
+        return np.zeros((10, 10, 3), dtype=np.uint8)
+
+
+def _make_point_stub(labels: list[str]) -> _PointStub:
+    ann = pd.DataFrame(
+        {
+            "image_id": ["a"] * len(labels),
+            "source_id": [1] * len(labels),
+            "row": list(range(len(labels))),
+            "col": [0] * len(labels),
+            "source_label_name": labels,
+        }
+    )
+    images = ann[["source_id", "image_id"]].drop_duplicates().reset_index(drop=True)
+    return _PointStub(ann, images)
+
+
+def test_point_dataset_targets_survive_vocab_canonicalization() -> None:
+    """Canonical (sorted) vocab must remap baked point label ids, not just swap the
+    maps.
+
+    value_counts orders "9" before "10"; the sorted canonical vocab puts "10" first.
+    Train and val have different frequencies, so a stale index would permute them
+    differently.
+    """
+    train_labels = ["9", "9", "9", "10"]
+    val_labels = ["10", "10", "10", "9"]
+    train, val = _make_point_stub(train_labels), _make_point_stub(val_labels)
+    datasets = {("coralnet", "train"): train, ("coralnet", "val"): val}
+
+    _, reps = prepare_splits_for_registry(datasets)
+    registry = SourceLabelRegistry(
+        reps,
+        source_to_target_name_maps={"coralnet": {"9": "sand", "10": "porites"}},
+        fetch_remote=False,
+    )
+    attach_registry(registry, datasets.values())
+
+    expected = {"9": "sand", "10": "porites"}
+    for ds, labels in ((train, train_labels), (val, val_labels)):
+        _, mask = ds[0]
+        target_ids = registry.source_to_target[torch.as_tensor(mask[: len(labels), 0])]
+        got = [registry.target_id2label[int(t)] for t in target_ids]
+        assert got == [expected[name] for name in labels]
+
+
+def test_vocab_setter_rejects_dataset_with_annotation_index_but_no_setter() -> None:
+    """A point dataset must never silently get maps swapped without remapping its
+    index."""
+    from mermaidseg.dataset_reconciliation.split_wiring import _apply_source_vocabulary
+
+    class NoSetter:
+        SOURCE_NAME = "x"
+        _ann_label_id = np.array([1, 2])
+
+    with pytest.raises(TypeError):
+        _apply_source_vocabulary(NoSetter(), {1: "a"}, {"a": 1}, 2)
+
+
+def test_base_dataset_rejects_duplicate_image_ids() -> None:
+    ann = pd.DataFrame(
+        {
+            "image_id": ["a", "a"],
+            "source_id": [1, 2],
+            "row": [0, 1],
+            "col": [0, 0],
+            "source_label_name": ["9", "10"],
+        }
+    )
+    images = ann[["source_id", "image_id"]].reset_index(drop=True)
+    with pytest.raises(ValueError, match="image_id"):
+        _PointStub(ann, images)
+
+
+def test_dense_dataset_allows_image_ids_repeated_across_sites() -> None:
+    """Dense subclasses (no row/col) never build the image_id index, e.g. Benthos
+    tiles."""
+    ann = pd.DataFrame(
+        {
+            "image_id": ["0_0", "0_0"],
+            "source_id": [1, 2],
+            "source_label_name": ["sand", "coral"],
+        }
+    )
+    ds = _PointStub(ann, ann[["source_id", "image_id"]].reset_index(drop=True))
+    assert ds._ann_label_id is None
+
+
+def test_point_dataset_mixed_case_labels_resolve_through_registry() -> None:
+    """Capitalized source names, map keys and target subset must still hit the right
+    target.
+
+    Covers #148/#149 on the point path: train spells "Sand", val spells "sand", the map
+    is keyed in yet another casing, and the subset is capitalized.
+    """
+    train_labels = ["Porites", "Porites", "Sand"]
+    val_labels = ["sand", "Porites", "sand"]
+    train, val = _make_point_stub(train_labels), _make_point_stub(val_labels)
+    datasets = {("coralnet", "train"): train, ("coralnet", "val"): val}
+
+    _, reps = prepare_splits_for_registry(datasets)
+    registry = SourceLabelRegistry(
+        reps,
+        source_to_target_name_maps={"coralnet": {"PORITES": "Porites", "sand": "Sand"}},
+        target_label_subset=["Porites", "Sand"],
+        fetch_remote=False,
+    )
+    attach_registry(registry, datasets.values())
+
+    assert set(registry.target_label2id) == {"porites", "sand"}
+    for ds, labels in ((train, train_labels), (val, val_labels)):
+        _, mask = ds[0]
+        target_ids = registry.source_to_target[torch.as_tensor(mask[: len(labels), 0])]
+        got = [registry.target_id2label[int(t)] for t in target_ids]
+        assert got == [name.lower() for name in labels]

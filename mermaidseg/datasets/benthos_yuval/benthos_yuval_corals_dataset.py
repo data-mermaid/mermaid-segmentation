@@ -150,9 +150,7 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         num_source_classes: int,
     ) -> None:
         """Replace local source maps and rebuild the classes.json lookup."""
-        self.source_id2name = dict(source_id2name)
-        self.source_name2id = dict(source_name2id)
-        self.num_source_classes = int(num_source_classes)
+        super().set_source_vocabulary(source_id2name, source_name2id, num_source_classes)
         self._classes_global_to_local = self._build_classes_global_to_local()
 
     def set_global_offset(self, offset: int) -> None:
