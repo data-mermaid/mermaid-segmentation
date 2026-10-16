@@ -80,7 +80,7 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
 
         # Mask PNGs are in the global ``classes.json`` ID space; remap to the
-        # value-counts-ordered local space set up by ``BaseCoralDataset``.
+        # sorted local space set up by ``BaseCoralDataset``.
         self._classes_global = self._load_classes_json()
         self._classes_global_to_local = self._build_classes_global_to_local()
 

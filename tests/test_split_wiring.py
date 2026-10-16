@@ -185,10 +185,16 @@ class _PointStub(BaseCoralDataset):
         return np.zeros((10, 10, 3), dtype=np.uint8)
 
 
-def _make_point_stub(labels: list[str]) -> _PointStub:
+def _make_point_stub(
+    labels: list[str],
+    image_ids: list[str] | None = None,
+    cls: type[BaseCoralDataset] = _PointStub,
+) -> BaseCoralDataset:
+    """One point per label at (row=i, col=0); all on image "a" unless ``image_ids``
+    given."""
     ann = pd.DataFrame(
         {
-            "image_id": ["a"] * len(labels),
+            "image_id": image_ids or ["a"] * len(labels),
             "source_id": [1] * len(labels),
             "row": list(range(len(labels))),
             "col": [0] * len(labels),
@@ -196,31 +202,39 @@ def _make_point_stub(labels: list[str]) -> _PointStub:
         }
     )
     images = ann[["source_id", "image_id"]].drop_duplicates().reset_index(drop=True)
-    return _PointStub(ann, images)
+    return cls(ann, images)
+
+
+def _point_targets(registry: SourceLabelRegistry, ds: BaseCoralDataset, idx: int) -> list[str]:
+    """Target names of the annotated pixels (col 0, non-background) of item ``idx``."""
+    _, mask = ds[idx]
+    column = torch.as_tensor(mask[:, 0])
+    column = column[column > 0]
+    return [registry.target_id2label[int(t)] for t in registry.source_to_target[column]]
 
 
 def test_point_dataset_targets_survive_vocab_canonicalization() -> None:
     """Canonical (sorted) vocab must remap baked point label ids, not just swap the
     maps.
 
-    value_counts orders "9" before "10"; the sorted canonical vocab puts "10" first.
-    Train and val have different frequencies, so a stale index would permute them
-    differently.
+    Train ({"10", "9"}) and val ({"11", "9"}) have different label sets, so each split's
+    local ids differ from the canonical union ("10", "11", "9") and a stale index would
+    permute them.
     """
     train_labels = ["9", "9", "9", "10"]
-    val_labels = ["10", "10", "10", "9"]
+    val_labels = ["11", "11", "9"]
     train, val = _make_point_stub(train_labels), _make_point_stub(val_labels)
     datasets = {("coralnet", "train"): train, ("coralnet", "val"): val}
 
     _, reps = prepare_splits_for_registry(datasets)
     registry = SourceLabelRegistry(
         reps,
-        source_to_target_name_maps={"coralnet": {"9": "sand", "10": "porites"}},
+        source_to_target_name_maps={"coralnet": {"9": "sand", "10": "porites", "11": "rubble"}},
         fetch_remote=False,
     )
     attach_registry(registry, datasets.values())
 
-    expected = {"9": "sand", "10": "porites"}
+    expected = {"9": "sand", "10": "porites", "11": "rubble"}
     for ds, labels in ((train, train_labels), (val, val_labels)):
         _, mask = ds[0]
         target_ids = registry.source_to_target[torch.as_tensor(mask[: len(labels), 0])]
@@ -297,3 +311,79 @@ def test_point_dataset_mixed_case_labels_resolve_through_registry() -> None:
         target_ids = registry.source_to_target[torch.as_tensor(mask[: len(labels), 0])]
         got = [registry.target_id2label[int(t)] for t in target_ids]
         assert got == [name.lower() for name in labels]
+
+
+class _MermaidPointStub(_PointStub):
+    SOURCE_NAME = "mermaid"
+
+
+def test_point_targets_correct_across_images_and_nonzero_offset() -> None:
+    """Remap must keep per-image slices intact and compose with a nonzero global
+    offset."""
+    mermaid = _make_point_stub(["Sand", "Porites"], cls=_MermaidPointStub)
+    train_labels = ["9", "10", "9", "10", "10"]
+    train_images = ["a", "a", "b", "c", "c"]
+    train = _make_point_stub(train_labels, train_images)
+    val = _make_point_stub(["11", "9"], ["d", "e"])
+    datasets = {
+        ("mermaid", "train"): mermaid,
+        ("coralnet", "train"): train,
+        ("coralnet", "val"): val,
+    }
+
+    _, reps = prepare_splits_for_registry(datasets)
+    registry = SourceLabelRegistry(
+        reps,
+        source_to_target_name_maps={
+            "mermaid": {"Sand": "sand", "Porites": "porites"},
+            "coralnet": {"9": "sand", "10": "porites", "11": "rubble"},
+        },
+        fetch_remote=False,
+    )
+    attach_registry(registry, datasets.values())
+
+    assert train.global_offset > 0
+    # Images sorted by df_images order: a, b, c; points stay at their own row.
+    _, mask_c = train[2]
+    assert mask_c[0, 0] == 0  # row 0 belongs to image "a", not "c"
+    assert _point_targets(registry, train, 0) == ["sand", "porites"]
+    assert _point_targets(registry, train, 1) == ["sand"]
+    assert _point_targets(registry, train, 2) == ["porites", "porites"]
+    assert _point_targets(registry, val, 0) == ["rubble"]
+    assert _point_targets(registry, val, 1) == ["sand"]
+    assert _point_targets(registry, mermaid, 0) == ["sand", "porites"]
+
+
+def test_attach_without_prepare_raises_clear_error_and_keeps_state() -> None:
+    """A val-only label missing from the registered vocab must fail loudly, not
+    permute."""
+    train, val = _make_point_stub(["9", "10"]), _make_point_stub(["11", "9"])
+    registry = SourceLabelRegistry(
+        [train],
+        source_to_target_name_maps={"coralnet": {"9": "sand", "10": "porites"}},
+        fetch_remote=False,
+    )
+    before = (dict(val.source_id2name), val._ann_label_id.copy())
+
+    with pytest.raises(KeyError, match="'11' is missing from the new vocabulary"):
+        attach_registry(registry, [val])
+
+    assert val.source_id2name == before[0]
+    np.testing.assert_array_equal(val._ann_label_id, before[1])
+
+
+def test_base_dataset_rejects_null_image_id() -> None:
+    """A single null image_id passes the duplicate check but would still merge
+    annotations."""
+    ann = pd.DataFrame(
+        {
+            "image_id": ["a", None, None],
+            "source_id": [1, 1, 1],
+            "row": [0, 1, 2],
+            "col": [0, 0, 0],
+            "source_label_name": ["9", "10", "10"],
+        }
+    )
+    images = ann[["source_id", "image_id"]].drop_duplicates().reset_index(drop=True)
+    with pytest.raises(ValueError, match="must not be null"):
+        _PointStub(ann, images)

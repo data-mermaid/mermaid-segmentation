@@ -197,7 +197,9 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             ].reset_index(drop=True)
             self.df_images = self._derive_df_images_from_annotations(self.df_annotations)
 
-        ordered_names = self.df_annotations["source_label_name"].value_counts().index.tolist()
+        # Sorted (not frequency) order so splits with the same label set agree on ids even
+        # without the registry; split_wiring remaps any remaining differences.
+        ordered_names = sorted(self.df_annotations["source_label_name"].dropna().unique())
         self.source_id2name = dict(enumerate(ordered_names, start=1))
         self.source_name2id = {v: k for k, v in self.source_id2name.items()}
         self.num_source_classes = len(self.source_id2name) + 1  # +1 for background
@@ -264,8 +266,14 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         or whose image is absent from ``df_images`` are dropped (mirrors
         :func:`create_annotation_mask`'s unknown-label handling).
         """
-        # The index is keyed by image_id; duplicates (e.g. a composite (source_id, image_id)
-        # key, or null ids) would silently merge different images' annotations.
+        # The index is keyed by image_id; null or duplicate ids (e.g. a composite
+        # (source_id, image_id) key) would silently merge different images' annotations.
+        n_null = int(self.df_images["image_id"].isna().sum())
+        if n_null:
+            raise ValueError(
+                f"{type(self).__name__}: df_images.image_id must not be null for point "
+                f"annotations; {n_null} null rows."
+            )
         duplicated = self.df_images["image_id"].duplicated()
         if duplicated.any():
             examples = self.df_images.loc[duplicated, "image_id"].unique()[:5].tolist()
@@ -318,6 +326,12 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         if ann_label_id is not None and self.source_id2name:
             lut = np.zeros(max(self.source_id2name) + 1, dtype=np.int64)
             for old_id, name in self.source_id2name.items():
+                if name not in source_name2id:
+                    raise KeyError(
+                        f"{type(self).__name__} (split={self.split!r}): source label {name!r} "
+                        "is missing from the new vocabulary; build it with "
+                        "prepare_splits_for_registry so it covers every split."
+                    )
                 lut[old_id] = source_name2id[name]
             self._ann_label_id = lut[ann_label_id]
         self.source_id2name = dict(source_id2name)
