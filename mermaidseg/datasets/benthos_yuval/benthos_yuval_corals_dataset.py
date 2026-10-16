@@ -80,7 +80,7 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
 
         # Mask PNGs are in the global ``classes.json`` ID space; remap to the
-        # value-counts-ordered local space set up by ``BaseCoralDataset``.
+        # sorted local space set up by ``BaseCoralDataset``.
         self._classes_global = self._load_classes_json()
         self._classes_global_to_local = self._build_classes_global_to_local()
 
@@ -150,9 +150,7 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         num_source_classes: int,
     ) -> None:
         """Replace local source maps and rebuild the classes.json lookup."""
-        self.source_id2name = dict(source_id2name)
-        self.source_name2id = dict(source_name2id)
-        self.num_source_classes = int(num_source_classes)
+        super().set_source_vocabulary(source_id2name, source_name2id, num_source_classes)
         self._classes_global_to_local = self._build_classes_global_to_local()
 
     def set_global_offset(self, offset: int) -> None:
