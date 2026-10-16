@@ -290,7 +290,21 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         ann = self.df_annotations
         label_id_raw = ann["source_label_name"].map(self.source_name2id).to_numpy()
         img_pos_raw = ann["image_id"].map(id_to_pos).to_numpy()
-        keep = ~pd.isna(label_id_raw) & ~pd.isna(img_pos_raw)
+        no_label = pd.isna(label_id_raw)
+        no_image = pd.isna(img_pos_raw)
+        keep = ~no_label & ~no_image
+        n_dropped = int((~keep).sum())
+        if n_dropped:
+            logger.warning(
+                "%s(split=%r): dropped %d of %d annotations (%d with no label, "
+                "%d with no matching image in df_images).",
+                type(self).__name__,
+                self.split,
+                n_dropped,
+                len(ann),
+                int(no_label.sum()),
+                int((no_image & ~no_label).sum()),
+            )
 
         img_pos = img_pos_raw[keep].astype(np.int64)
         rows = ann["row"].to_numpy()[keep]

@@ -68,3 +68,37 @@ def test_multiple_sources_resolve_independently():
         [coralnet, mermaid], provided={"coralnet": {"1": "Coral"}}, fetch_remote=False
     )
     assert result == {"coralnet": {"1": "coral"}, "mermaid": {"coral": "coral"}}
+
+
+def test_registry_warns_when_no_source_label_resolves(caplog):
+    """A source whose ids all miss the map (e.g. "82.0" vs "82") must not fail
+    silently."""
+    ds = SimpleNamespace(
+        SOURCE_NAME="coralnet",
+        source_id2name={1: "82.0", 2: "83.0"},
+        source_name2id={"82.0": 1, "83.0": 2},
+        set_global_offset=lambda offset: None,
+    )
+    with caplog.at_level("WARNING", logger="mermaidseg.dataset_reconciliation.registry"):
+        SourceLabelRegistry(
+            [ds],
+            source_to_target_name_maps={"coralnet": {"82": "porites", "83": "sand"}},
+            fetch_remote=False,
+        )
+    assert "coralnet" in caplog.text and "0 of 2" in caplog.text
+
+
+def test_registry_does_not_warn_when_labels_resolve(caplog):
+    ds = SimpleNamespace(
+        SOURCE_NAME="coralnet",
+        source_id2name={1: "82", 2: "83"},
+        source_name2id={"82": 1, "83": 2},
+        set_global_offset=lambda offset: None,
+    )
+    with caplog.at_level("WARNING", logger="mermaidseg.dataset_reconciliation.registry"):
+        SourceLabelRegistry(
+            [ds],
+            source_to_target_name_maps={"coralnet": {"82": "porites"}},
+            fetch_remote=False,
+        )
+    assert caplog.text == ""

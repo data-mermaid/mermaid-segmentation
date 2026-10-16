@@ -18,6 +18,7 @@ After construction, each registered dataset has had
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
@@ -42,6 +43,8 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     fetch_pacific_labeled_corals_to_mermaid,
     fetch_ucsd_mosaics_to_mermaid,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _identity_source_to_target(dataset: Any) -> dict[str, str]:
@@ -239,6 +242,7 @@ class SourceLabelRegistry:
                 target_id = self.target_label2id.get(target_name, 0)
                 source_to_target_np[local_id + offset] = target_id
         self.source_to_target = torch.from_numpy(source_to_target_np).long()
+        self._log_target_coverage(source_to_target_np)
         self.global_idmask: dict[int, bool] = {
             global_id: source_to_target_np[global_id] != 0 for global_id in self.global_id2source
         }
@@ -255,6 +259,30 @@ class SourceLabelRegistry:
 
         for ds in self.datasets:
             ds.set_global_offset(self.dataset_offsets[ds.SOURCE_NAME])
+
+    def _log_target_coverage(self, source_to_target_np: np.ndarray) -> None:
+        """Log, per source, how many source labels (and annotations) reach a target.
+
+        Warns when none do: a key mismatch (e.g. ``"82.0"`` vs ``"82"``) otherwise sends
+        every pixel of that source to background with no error.
+        """
+        for ds in self.datasets:
+            offset = self.dataset_offsets[ds.SOURCE_NAME]
+            local_ids = np.array(sorted(ds.source_id2name), dtype=np.int64)
+            if local_ids.size == 0:
+                continue
+            resolved = source_to_target_np[local_ids + offset] != 0
+            msg = f"{ds.SOURCE_NAME}: {int(resolved.sum())} of {local_ids.size} source labels"
+            ann_label_id = getattr(ds, "_ann_label_id", None)
+            if ann_label_id is not None and ann_label_id.size:
+                counts = np.bincount(ann_label_id, minlength=int(local_ids.max()) + 1)
+                n_resolved = int(counts[local_ids[resolved]].sum())
+                msg += f", {n_resolved / ann_label_id.size:.1%} of annotations,"
+            msg += " map to a target class"
+            if resolved.any():
+                logger.info(msg)
+            else:
+                logger.warning(msg + "; check source label keys against the mapping.")
 
     def _resolve_source_to_target_maps(
         self,

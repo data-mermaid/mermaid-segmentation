@@ -53,9 +53,30 @@ def _fetch_paginated_results(url: str, *, timeout: int = 30) -> list[dict]:
     return records
 
 
+def _normalize_provider_id(provider_id: object) -> str | None:
+    """Return ``provider_id`` as an int string (``82``, ``82.0`` and ``"82.0"`` ->
+    ``"82"``).
+
+    Must match ``CoralNetDataset``'s ``source_label_name``; ``None`` if not an integer.
+    """
+    try:
+        value = float(provider_id)
+    except (TypeError, ValueError):
+        return None
+    if not value.is_integer():
+        return None
+    return str(int(value))
+
+
 def _parse_coralnet_label_mapping(record: dict) -> CoralNetLabelMapping | None:
-    provider_id = record.get("provider_id")
+    if record.get("provider_id") is None:
+        return None
+    provider_id = _normalize_provider_id(record["provider_id"])
     if provider_id is None:
+        logger.warning(
+            "_parse_coralnet_label_mapping: skipping record with non-integer provider_id %r",
+            record["provider_id"],
+        )
         return None
     return CoralNetLabelMapping(
         id=record.get("id"),
@@ -64,7 +85,7 @@ def _parse_coralnet_label_mapping(record: dict) -> CoralNetLabelMapping | None:
         growth_form_id=record.get("growth_form_id"),
         growth_form_name=record.get("growth_form_name"),
         provider=record.get("provider"),
-        provider_id=str(provider_id),
+        provider_id=provider_id,
         provider_label=record.get("provider_label"),
     )
 

@@ -16,6 +16,7 @@ filename for backward compatibility; pin a specific build via
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -28,6 +29,34 @@ from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from mermaidseg.datasets.utils import get_image_s3
 
 _LEGACY_ANNOTATIONS_PATH = "coralnet_annotations_30112025.parquet"
+
+logger = logging.getLogger(__name__)
+
+
+def _as_int_ids(values: pd.Series, column: str) -> pd.Series:
+    """Return ``values`` as int64, raising on nulls or non-integral values.
+
+    CoralNet ids are numeric. A float column (one null is enough to force float64) would
+    otherwise stringify as ``"82.0"`` / ``"nan"`` and silently miss the provider_id
+    mapping.
+    """
+    numeric = pd.to_numeric(values, errors="coerce")
+    bad = numeric.isna() | (numeric != numeric.round())
+    if bad.any():
+        examples = values[bad].unique()[:5].tolist()
+        raise ValueError(
+            f"CoralNet {column} must be non-null integers; {int(bad.sum())} invalid rows "
+            f"(e.g. {examples})."
+        )
+    return numeric.astype(np.int64)
+
+
+def _as_int_id_set(ids: list[int | str], name: str) -> set[int]:
+    """Coerce configured source ids (YAML may quote them) to ints."""
+    try:
+        return {int(i) for i in ids}
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain integer source ids, got {ids!r}") from exc
 
 
 def _resolve_default_annotations_path() -> str:
@@ -109,14 +138,25 @@ class CoralNetDataset(BaseCoralDataset):
 
         df_annotations, df_images = self.load_annotations()
 
+        present = set(df_annotations["source_id"].unique().tolist())
         if self.whitelist_sources is not None:
-            df_annotations = df_annotations[
-                df_annotations["source_id"].apply(lambda x: x in self.whitelist_sources)
-            ]
+            wanted = _as_int_id_set(self.whitelist_sources, "whitelist_sources")
+            absent = sorted(wanted - present)
+            if absent:
+                raise ValueError(
+                    f"whitelist_sources lists ids absent from {self.annotations_path}: {absent}"
+                )
+            df_annotations = df_annotations[df_annotations["source_id"].isin(wanted)]
         if self.blacklist_sources is not None:
-            df_annotations = df_annotations[
-                df_annotations["source_id"].apply(lambda x: x not in self.blacklist_sources)
-            ]
+            unwanted = _as_int_id_set(self.blacklist_sources, "blacklist_sources")
+            absent = sorted(unwanted - present)
+            if absent:
+                logger.warning(
+                    "blacklist_sources lists ids absent from %s: %s",
+                    self.annotations_path,
+                    absent,
+                )
+            df_annotations = df_annotations[~df_annotations["source_id"].isin(unwanted)]
         if self.whitelist_sources is not None or self.blacklist_sources is not None:
             df_annotations = df_annotations.reset_index(drop=True)
             df_images = self._derive_df_images_from_annotations(df_annotations)
@@ -127,7 +167,7 @@ class CoralNetDataset(BaseCoralDataset):
         """Load CoralNet annotations from a parquet file on S3.
 
         The dataset emits labels in CoralNet's own provider label space, so
-        each row's ``coralnet_id`` (cast to ``str``) becomes the
+        each row's ``coralnet_id`` (validated as an integer, then cast to ``str``) becomes the
         ``source_label_name``. No CoralNet -> MERMAID translation happens
         here; that mapping is owned by
         :mod:`mermaidseg.dataset_reconciliation.label_mapping` and is applied
@@ -141,6 +181,8 @@ class CoralNetDataset(BaseCoralDataset):
                 f"CoralNet annotations parquet at {annotations_path} is missing required "
                 f"columns: {sorted(missing)}"
             )
+        df_annotations["source_id"] = _as_int_ids(df_annotations["source_id"], "source_id")
+        df_annotations["coralnet_id"] = _as_int_ids(df_annotations["coralnet_id"], "coralnet_id")
         df_annotations["source_label_name"] = df_annotations["coralnet_id"].astype(str)
         columns = ["source_id", "image_id", "row", "col", "coralnet_id", "source_label_name"]
         # The resized training parquet carries a per-image resolved S3 key (resized or original)
