@@ -387,3 +387,22 @@ def test_base_dataset_rejects_null_image_id() -> None:
     images = ann[["source_id", "image_id"]].drop_duplicates().reset_index(drop=True)
     with pytest.raises(ValueError, match="must not be null"):
         _PointStub(ann, images)
+
+
+def test_annotation_index_warns_on_dropped_annotations(caplog) -> None:
+    """Annotations whose image is missing from df_images must be counted, not vanish."""
+    ann = pd.DataFrame(
+        {
+            "image_id": ["a", "a", "ghost"],
+            "source_id": [1, 1, 1],
+            "row": [0, 1, 2],
+            "col": [0, 0, 0],
+            "source_label_name": ["9", "10", "9"],
+        }
+    )
+    images = pd.DataFrame({"source_id": [1], "image_id": ["a"]})
+    with caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"):
+        ds = _PointStub(ann, images)
+    assert len(ds._ann_label_id) == 2
+    assert "dropped 1 of 3 annotations" in caplog.text
+    assert "1 with no matching image" in caplog.text
