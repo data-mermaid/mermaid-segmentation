@@ -13,6 +13,9 @@ requires-python = ">=3.11"
 dependencies = [
     "albumentations",
     "boto3",
+    # Floor for the eMudhra intermediate CA compromise fix. Keeps pip-based installs
+    # (Docker image, demo) from resolving an older CA bundle.
+    "certifi>=2026.10.19",
     "datasets>=3.0",
     "huggingface-hub>=0.36.2",
     "numpy>=1.24,<2",
