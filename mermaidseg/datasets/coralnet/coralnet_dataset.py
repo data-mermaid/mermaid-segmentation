@@ -16,12 +16,18 @@ otherwise the original). Pin a specific build via
 ``MERMAID_CORALNET_MANIFEST_PATH`` or ``MERMAID_CORALNET_MANIFEST_VERSION``.
 Images with no ``image_s3_key`` are skipped (never loaded at the wrong
 resolution); the dataset recovers by serving a different image.
+
+Duplicate images (the same photo uploaded to several sources) are removed with
+``image_blacklist`` and their merged annotations applied with
+``annotation_overrides``; both are produced by ``mermaidseg.datasets.coralnet.dedup``
+and versioned in ``configs/coralnet/``.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -40,6 +46,7 @@ _DEFAULT_MANIFEST_PATH = (
     f"etl-outputs/coralnet/{_DEFAULT_RUN}/coralnet_training_manifest_{_DEFAULT_RUN}.parquet"
 )
 _CORALNET_ID2NAME_KEY = "coralnet-public-images/temporary/coralnet_id2name.json"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _resolve_default_manifest_path() -> str:
@@ -83,6 +90,14 @@ class CoralNetDataset(BaseCoralDataset):
         source_bucket (str, optional): S3 bucket name containing the dataset files.
         source_s3_prefix (str, optional): S3 prefix containing per-source CoralNet image folders.
         whitelist_sources / blacklist_sources: Optional CoralNet source-id allowlist/denylist.
+        image_blacklist (str | list, optional): CoralNet image ids to drop, or a parquet reference
+            with an ``image_id`` column. Applied after the source filters. A reference is a path
+            relative to the repo root if that file exists (e.g.
+            ``configs/coralnet/image_blacklist.parquet``), otherwise an absolute local path, an S3
+            URI or a key relative to ``source_bucket``.
+        annotation_overrides (str, optional): Parquet reference (as for ``image_blacklist``) with
+            columns ``image_id``, ``row``, ``col``, ``coralnet_id``. Every image listed there has
+            all its manifest points replaced by the listed ones.
         **base_kwargs: Forwarded to :class:`BaseCoralDataset`.
     """
 
@@ -95,6 +110,8 @@ class CoralNetDataset(BaseCoralDataset):
     s3: boto3.client
     whitelist_sources: list[int | str] | None
     blacklist_sources: list[int | str] | None
+    image_blacklist: str | list[int | str] | None
+    annotation_overrides: str | None
 
     def __init__(
         self,
@@ -103,6 +120,8 @@ class CoralNetDataset(BaseCoralDataset):
         source_s3_prefix: str = "coralnet-public-images",
         whitelist_sources: list[int | str] | None = None,
         blacklist_sources: list[int | str] | None = None,
+        image_blacklist: str | list[int | str] | None = None,
+        annotation_overrides: str | None = None,
         **base_kwargs: Any,
     ):
         self.manifest_path = manifest_path or _resolve_default_manifest_path()
@@ -111,10 +130,14 @@ class CoralNetDataset(BaseCoralDataset):
         self.s3 = boto3.client("s3")
         self.whitelist_sources = whitelist_sources
         self.blacklist_sources = blacklist_sources
+        self.image_blacklist = image_blacklist
+        self.annotation_overrides = annotation_overrides
         if self.whitelist_sources is not None and self.blacklist_sources is not None:
             raise ValueError("Cannot specify both whitelist and blacklist sources.")
 
         df_annotations, df_images = self.load_annotations()
+        if self.annotation_overrides is not None:
+            df_annotations = self._apply_annotation_overrides(df_annotations)
 
         if self.whitelist_sources is not None:
             df_annotations = df_annotations[
@@ -124,7 +147,16 @@ class CoralNetDataset(BaseCoralDataset):
             df_annotations = df_annotations[
                 df_annotations["source_id"].apply(lambda x: x not in self.blacklist_sources)
             ]
-        if self.whitelist_sources is not None or self.blacklist_sources is not None:
+        if self.image_blacklist is not None:
+            df_annotations = df_annotations[
+                ~df_annotations["image_id"].astype(str).isin(self._load_image_blacklist())
+            ]
+        if (
+            self.whitelist_sources is not None
+            or self.blacklist_sources is not None
+            or self.image_blacklist is not None
+            or self.annotation_overrides is not None
+        ):
             df_annotations = df_annotations.reset_index(drop=True)
             df_images = self._derive_df_images_from_annotations(df_annotations)
 
@@ -166,6 +198,48 @@ class CoralNetDataset(BaseCoralDataset):
 
         df_images = self._derive_df_images_from_annotations(df_annotations)
         return df_annotations, df_images
+
+    def _read_parquet_ref(self, ref: str) -> pd.DataFrame:
+        """Read a dedup parquet: a repo-relative path if that file exists, else a storage ref."""
+        repo_path = _REPO_ROOT / ref
+        if not Path(ref).is_absolute() and repo_path.is_file():
+            return pd.read_parquet(repo_path)
+        return LocalS3Cache.get().read_parquet_ref(ref, self.source_bucket)
+
+    def _load_image_blacklist(self) -> set[str]:
+        if isinstance(self.image_blacklist, str):
+            df = self._read_parquet_ref(self.image_blacklist)
+            return set(df["image_id"].astype(str))
+        return {str(x) for x in self.image_blacklist}
+
+    def _apply_annotation_overrides(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
+        """Replace the points of every image in ``annotation_overrides`` with the listed ones.
+
+        ``image_key`` and ``source_id`` are taken from the image's manifest rows, so overrides
+        for images missing from the manifest are dropped.
+        """
+        overrides = self._read_parquet_ref(self.annotation_overrides)[
+            ["image_id", "row", "col", "coralnet_id"]
+        ]
+        overrides["image_id"] = overrides["image_id"].astype(str)
+        image_ids = df_annotations["image_id"].astype(str)
+        images = df_annotations.assign(image_id=image_ids)[
+            ["source_id", "image_id", "image_key"]
+        ].drop_duplicates("image_id")
+        n_missing = len(set(overrides["image_id"]) - set(images["image_id"]))
+        if n_missing:
+            logger.warning("annotation_overrides: %d images are not in the manifest", n_missing)
+        overrides = overrides.merge(images, on="image_id")
+
+        coralnet_id2name = LocalS3Cache.get().read_json(self.source_bucket, _CORALNET_ID2NAME_KEY)
+        overrides["coralnet_name"] = overrides["coralnet_id"].map(
+            lambda x: coralnet_id2name.get(str(x))
+        )
+        overrides["source_label_name"] = overrides["coralnet_name"].astype(str).str.lower()
+        key_cols = ("source_id", "image_id", "row", "col", "coralnet_id")
+        overrides = overrides.astype({c: df_annotations[c].dtype for c in key_cols})
+        kept = df_annotations[~image_ids.isin(set(overrides["image_id"].astype(str)))]
+        return pd.concat([kept, overrides[df_annotations.columns]], ignore_index=True)
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
         return (
