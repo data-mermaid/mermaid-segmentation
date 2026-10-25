@@ -21,10 +21,14 @@ image. Annotations and image keys are derived from this single file.
 - `etl/` — reproducible, tested ETL that builds the annotations + image-metadata
   parquets ([CoralNet-ETL](../../../wiki/CoralNet-ETL.md)).
 - `scraper/` — scraping utilities and CSV artifacts originally located under
-  the repo-root `scraping/` directory.
+  the repo-root `scraping/` directory. `scraper/source_metadata.py` fetches
+  source names, admins and locations for the dedup split.
+- `dedup/` — removes images uploaded to several sources, merges their
+  annotations and builds leak-free train/val/test splits (see below).
 - `nbs/` — exploration and annotation-aggregation notebooks for the CoralNet
   sources. The `CoralNet_Annotations.ipynb` notebook has been superseded by
   the `etl/` module; treat it as historical reference only.
+  `Dedup_Review.ipynb` visualises what the deduplication did to each image.
 
 ## Description
 
@@ -42,6 +46,40 @@ the full S3 key with ``MERMAID_CORALNET_MANIFEST_PATH``. With neither set,
 ``CoralNetDataset`` falls back to the default published manifest under
 ``etl-outputs/coralnet/``. See
 [CoralNet-ETL](../../../wiki/CoralNet-ETL.md) for ETL usage and runtimes.
+
+## Duplicate images and the dedup splits
+
+CoralNet gives every upload a new `image_id`, so the same photo uploaded to
+several sources looks like different images. With the old source-level splits
+about half of the val/test images were exact copies of train images. The
+`dedup/` package finds copies by content hash, keeps one copy per photo (from
+the best-ranked source of its cluster), merges the annotations of all copies
+onto it (finest consistent label wins; conflicts go to manual-review files),
+and splits the result so val/test only use sources that share no image with
+another source. Run the steps in order:
+
+```bash
+python -m mermaidseg.datasets.coralnet.dedup.hashing --all-sources   # ~35 min
+python -m mermaidseg.datasets.coralnet.dedup.conflicts
+python -m mermaidseg.datasets.coralnet.dedup.dedup
+python -m mermaidseg.datasets.coralnet.scraper.source_metadata        # once, ~1 h
+python -m mermaidseg.datasets.coralnet.dedup.splits                   # writes configs/data_config_dedup.yaml
+python -m mermaidseg.datasets.coralnet.dedup.leakage --config configs/data_config_dedup.yaml
+```
+
+Versioned results and curated inputs live in `configs/coralnet/`:
+`image_blacklist.parquet` and `annotation_overrides.parquet` (read by
+`CoralNetDataset` through the data config), `source_splits.csv`,
+`low_quality_sources.txt` (sources excluded entirely) and
+`mermaid_benthic_hierarchy.json` (a snapshot of the MERMAID API's benthic
+attribute hierarchy, used to roll labels up to the training classes when
+balancing the split). Intermediate outputs (hashes, pair lists, provenance,
+review files) go to `data/coralnet_dedup/`, which is not versioned.
+
+`CoralNetDataset` resolves a relative `image_blacklist` /
+`annotation_overrides` reference against the repo root when that file exists,
+so `configs/coralnet/...` works from any working directory; otherwise the
+reference is an S3 key, as for the manifest.
 
 ## Incomplete S3 folders and CoralNet remediation
 
