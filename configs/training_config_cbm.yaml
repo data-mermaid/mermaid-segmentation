@@ -9,6 +9,31 @@ training:
         ignore_index: 0
         per_pixel_loss_weight: 0.0
         per_image_loss_weight: 1.0
+    # Taxonomy-aware terms added to the concept loss (remove the section to disable).
+    taxonomic_loss:
+        # Parent-child tree from concept_mapping_path, as in the hierarchical metrics.
+        # Multi-parent taxa: permissive (keep all parents), exclude, or strict (error).
+        ambiguity_policy: permissive
+        # mu: marginal partial-label CE for pixels labelled only to a coarse taxonomic rank.
+        partial_weight: 0.0
+        # Optimizer updates over which the partial loss's uniform-target mix anneals from 1 to 0
+        # (0 = off).
+        partial_uniform_anneal_iters: 0
+        # Label-free KL coherence between adjacent rank heads: 0 before kl_start_iters, then a
+        # linear ramp to kl_weight over kl_ramp_iters. Both count optimizer updates, like
+        # scheduler.warmup_iters, so they mean the same whatever iterations_per_train_epoch is.
+        kl_weight: 0.0
+        kl_start_iters: 0
+        kl_ramp_iters: 0
+        kl_stop_grad_coarse: true
+        kl_pixels: all_valid  # or not_fine_labelled
+        kl_boundary_px: 0
+    # Expected taxonomic distance of each rank head's prediction, from the tree distance matrix the
+    # mistake-severity metric uses (0 = same taxon, 1 = siblings, ... ; 'none' at the maximum),
+    # normalised to [0, 1] per rank and averaged over ranks like the per-rank CE. 0 = off.
+    distance_loss:
+        weight: 0.0
+        ambiguity_policy: permissive  # multi-parent taxa take their closest lineage
     max_grad_norm: 0.5
     epochs: 100
     optimizer:

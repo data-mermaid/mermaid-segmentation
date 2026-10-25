@@ -445,17 +445,22 @@ def _run_training(args: argparse.Namespace) -> None:
     cfg.logger.experiment_name = "mermaid"
     cfg_logger.logger.experiment_name = "mermaid"
 
+    # wandb is the default logging backend; MLflow is opt-in via
+    # logger_config.yaml (logger.enable_mlflow: true).
     with Logger(
         config=cfg_logger,
         meta_model=meta_model,
         log_epochs=cfg.logger.get("log_epochs", 1),
         log_checkpoint=cfg_logger.logger.get("log_checkpoint", 50),
         checkpoint_dir=".",
-        enable_mlflow=True,
+        enable_mlflow=cfg_logger.logger.get("enable_mlflow", False),
+        enable_wandb=cfg_logger.logger.get("enable_wandb", True),
         id2label={0: "ignore", **registry.target_id2label},
     ) as logger:
         if logger.mlflow_run_id is not None:
             logging.info("MLflow run_id: %s", logger.mlflow_run_id)
+        if logger.wandb_run_id is not None:
+            logging.info("wandb run_id: %s", logger.wandb_run_id)
 
         logger.log_dataloader_params(train_loader, prefix="train_loader")
         logger.log_dataloader_params(val_loader, prefix="val_loader")
