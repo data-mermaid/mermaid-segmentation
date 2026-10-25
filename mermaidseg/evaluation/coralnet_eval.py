@@ -1,4 +1,4 @@
-"""CoralNet validation evaluation (per source id + aggregate)."""
+"""CoralNet evaluation on one split of a data config (per source id + aggregate)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 
 from mermaidseg.datasets.coralnet.coralnet_dataset import CoralNetDataset
 from mermaidseg.evaluation.gt_mapping import build_class_lookup, build_concept_lookup
+from mermaidseg.evaluation.hierarchical_eval import HierarchicalSpec
 from mermaidseg.evaluation.point_datasets import run_point_evaluation
 from mermaidseg.evaluation.predictor import CBMPredictor
 
@@ -19,6 +20,8 @@ def evaluate_coralnet(
     *,
     predictor: CBMPredictor,
     whitelist_sources: list[int] | None,
+    image_blacklist: str | list[int | str] | None = None,
+    annotation_overrides: str | None = None,
     id2label: dict[int, str],
     concept_names: list[str],
     taxonomy_csv: str | Path,
@@ -27,10 +30,19 @@ def evaluate_coralnet(
     batch_size: int = 8,
     num_workers: int = 8,
     max_images_per_unit: int | None = None,
+    hierarchical_spec: HierarchicalSpec | None = None,
 ) -> dict:
-    logger.info("Building CoralNet dataset (whitelist_sources=%s) ...", whitelist_sources)
+    logger.info(
+        "Building CoralNet dataset (whitelist_sources=%s, image_blacklist=%s, "
+        "annotation_overrides=%s) ...",
+        whitelist_sources,
+        image_blacklist,
+        annotation_overrides,
+    )
     base = CoralNetDataset(
         whitelist_sources=whitelist_sources,
+        image_blacklist=image_blacklist,
+        annotation_overrides=annotation_overrides,
         transform=None,
         split="val",
     )
@@ -55,4 +67,5 @@ def evaluate_coralnet(
         batch_size=batch_size,
         num_workers=num_workers,
         max_images_per_unit=max_images_per_unit,
+        hierarchical_spec=hierarchical_spec,
     )

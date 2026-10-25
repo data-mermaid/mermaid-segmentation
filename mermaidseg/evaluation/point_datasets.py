@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup
+from mermaidseg.evaluation.hierarchical_eval import HierarchicalPointEval, HierarchicalSpec
 from mermaidseg.evaluation.metrics import ConceptLayout, MetricBundle, bleached_block_from_binary
 from mermaidseg.evaluation.predictor import CBMPredictor, make_eval_transform
 from mermaidseg.evaluation.reporting import fmt, write_csv, write_json
@@ -198,8 +199,14 @@ def run_point_evaluation(
     num_workers: int = 8,
     max_images_per_unit: int | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    hierarchical_spec: HierarchicalSpec | None = None,
 ) -> dict:
-    """Run a point-annotation evaluation with per-unit streaming reports."""
+    """Run a point-annotation evaluation with per-unit streaming reports.
+
+    With ``hierarchical_spec``, every unit and the pooled result also get a ``hierarchical``
+    block (see :mod:`mermaidseg.evaluation.hierarchical_eval`). Without it (the default) the
+    evaluation and its outputs are unchanged.
+    """
     if eval_name == "coralnet" and "bleached" not in concept_names:
         raise RuntimeError(
             "CoralNet eval requires a concept channel named exactly 'bleached'. "
@@ -279,6 +286,8 @@ def run_point_evaluation(
 
     pending: dict[str, MetricBundle] = {}
     pooled = MetricBundle.create(num_classes, layout)
+    pending_hier: dict[str, HierarchicalPointEval] = {}
+    pooled_hier = HierarchicalPointEval(hierarchical_spec) if hierarchical_spec is not None else None
     unit_results: dict[str, dict] = {}
     macro: dict[str, list[float]] = defaultdict(list)
     csv_rows: list[dict] = []
@@ -289,6 +298,8 @@ def run_point_evaluation(
     def finalize_unit(unit: str) -> None:
         bundle = pending.pop(unit)
         d = bundle.to_dict(class_id2name=id2label, include_class_detail=True)
+        if unit in pending_hier:
+            d["hierarchical"] = pending_hier.pop(unit).compute()
         unit_results[unit] = d
         _log_unit(logger, unit, d)
         pooled.merge(bundle)
@@ -313,6 +324,8 @@ def run_point_evaluation(
         pooled_d = pooled.to_dict(class_id2name=id2label, include_class_detail=True)
         if eval_name == "coralnet":
             pooled_d["bleached"] = bleached_block_from_binary(pooled_d.get("binary") or {})
+        if pooled_hier is not None:
+            pooled_d["hierarchical"] = pooled_hier.compute()
         return pooled_d
 
     def _flush(final: bool) -> None:
@@ -342,6 +355,8 @@ def run_point_evaluation(
             if bundle is None:
                 bundle = MetricBundle.create(num_classes, layout)
                 pending[unit] = bundle
+                if hierarchical_spec is not None:
+                    pending_hier[unit] = HierarchicalPointEval(hierarchical_spec)
 
             if not batch["ok"][b]:
                 n_failed += 1
@@ -360,6 +375,10 @@ def run_point_evaluation(
                     bundle.update(
                         batch["class_ids"][b], pred_class, batch["concept_rows"][b], pred_probs
                     )
+                    if pooled_hier is not None:
+                        point_probs = ks.transpose(0, 1)  # (N, K), still on the model device
+                        pending_hier[unit].update(batch["concept_rows"][b], point_probs)
+                        pooled_hier.update(batch["concept_rows"][b], point_probs)
 
             remaining[unit] = remaining.get(unit, 0) - 1
             if remaining.get(unit, 0) <= 0:
