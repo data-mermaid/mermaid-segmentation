@@ -17,13 +17,17 @@ from tqdm import tqdm
 import mermaidseg.model.loss
 import mermaidseg.model.models
 from mermaidseg.dataset_reconciliation.concepts import (
+    DEFAULT_CLASS_TO_CONCEPTS_CSV,
     postprocess_predicted_concepts,
     source_labels_to_concepts,
 )
 from mermaidseg.dataset_reconciliation.label_mapping import (
     source_labels_to_target_labels,
 )
+from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
 from mermaidseg.io import ConfigDict
+from mermaidseg.model.distance_loss import TaxonomicDistanceLoss
+from mermaidseg.model.taxonomy_loss import TaxonomicLoss
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +253,44 @@ class MetaModel:
             ):
                 loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
             self.loss = loss_cls(**loss_kwargs)
+
+        # Optional taxonomy-aware terms (partial-label CE, KL coherence) added to the concept loss.
+        self.taxonomic_loss = None
+        taxonomic_cfg = training_kwargs.get("taxonomic_loss")
+        if taxonomic_cfg is not None:
+            if self.training_mode != "concept-bottleneck":
+                raise ValueError("taxonomic_loss requires training_mode 'concept-bottleneck'.")
+            taxonomic_kwargs = dict(taxonomic_cfg)
+            # Reduce the partial loss like the concept loss's per-rank cross-entropy.
+            for key in ("per_pixel_loss_weight", "per_image_loss_weight"):
+                if key in training_kwargs.get("loss", {}):
+                    taxonomic_kwargs.setdefault(key, training_kwargs.loss[key])
+            # Same tree as the hierarchical metrics: class_to_concepts.csv, permissive by default.
+            taxonomy = build_taxonomy_tree(
+                training_kwargs.get("concept_mapping_path") or DEFAULT_CLASS_TO_CONCEPTS_CSV,
+                ambiguity_policy=taxonomic_kwargs.pop("ambiguity_policy", "permissive"),
+            )
+            self.taxonomic_loss = TaxonomicLoss(
+                taxonomy, self.concept_value2id, **taxonomic_kwargs
+            ).to(device)
+
+        # Optional expected tree-distance loss over the rank heads, independent of the above.
+        self.distance_loss = None
+        distance_cfg = training_kwargs.get("distance_loss")
+        if distance_cfg is not None and distance_cfg.get("weight", 0.0) > 0:
+            if self.training_mode != "concept-bottleneck":
+                raise ValueError("distance_loss requires training_mode 'concept-bottleneck'.")
+            distance_kwargs = dict(distance_cfg)
+            for key in ("per_pixel_loss_weight", "per_image_loss_weight"):
+                if key in training_kwargs.get("loss", {}):
+                    distance_kwargs.setdefault(key, training_kwargs.loss[key])
+            taxonomy = build_taxonomy_tree(
+                training_kwargs.get("concept_mapping_path") or DEFAULT_CLASS_TO_CONCEPTS_CSV,
+                ambiguity_policy=distance_kwargs.pop("ambiguity_policy", "permissive"),
+            )
+            self.distance_loss = TaxonomicDistanceLoss(
+                taxonomy, self.concept_value2id, **distance_kwargs
+            ).to(device)
 
         optimizer_cfg = dict(training_kwargs.optimizer)
         optimizer_cls = getattr(torch.optim, optimizer_cfg.pop("type", None))
@@ -485,6 +527,21 @@ class MetaModel:
             loss, loss_components = self.loss(
                 outputs, target_labels, concept_logits, target_concepts
             )
+            if self.taxonomic_loss is not None:
+                taxonomic_value, taxonomic_components = self.taxonomic_loss(
+                    concept_logits,
+                    target_concepts,
+                    target_labels,
+                    step=self.global_step,
+                )
+                loss = loss + taxonomic_value
+                loss_components.update(taxonomic_components)
+            if self.distance_loss is not None:
+                distance_value, distance_components = self.distance_loss(
+                    concept_logits, target_concepts
+                )
+                loss = loss + distance_value
+                loss_components.update(distance_components)
 
         elif self.training_mode == "concept":
             assert target_concepts is not None, "target_concepts must be provided in 'concept' mode"
