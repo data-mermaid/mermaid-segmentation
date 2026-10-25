@@ -11,6 +11,8 @@ nbs/profiler_logs/*
 eval_out/*
 nbs_tmp/*
 scraping/source*.csv
+logs/*
+claude/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
