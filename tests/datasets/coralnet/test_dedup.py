@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import sys
 
+import numpy as np
 import pandas as pd
 import pytest
+from PIL import Image
 
-from mermaidseg.datasets.coralnet.dedup import dedup, leakage, splits
+from mermaidseg.datasets.coralnet.dedup import dedup, leakage, near_dup_merge, splits
 from mermaidseg.datasets.coralnet.dedup.common import (
     DEFAULT_BUCKET,
     DEFAULT_MANIFEST,
@@ -16,6 +18,7 @@ from mermaidseg.datasets.coralnet.dedup.common import (
     add_split_labels,
     compare_labels,
     coralnet_splits,
+    exact_blacklist,
     load_concepts,
     read_source_list,
 )
@@ -116,8 +119,8 @@ def test_dedup_end_to_end(tmp_path, concepts_csv, monkeypatch):
 
     outputs = tmp_path / "outputs"
     outputs.mkdir()
-    pd.DataFrame({"source_id": [1, 2, 3], "image_id": ["10", "20", "30"],
-                  "hash": ["h", "h", "u"]}).to_parquet(outputs / "image_hashes_exact_all.parquet")
+    pd.DataFrame({"source_id": [1, 2, 3], "image_id": ["10", "20", "30"], "hash": ["h", "h", "u"],
+                  "image_s3_key": ["k10", "k20", "k30"]}).to_parquet(outputs / "image_hashes_exact_all.parquet")
     pd.DataFrame({"source_id": [1, 2], "cluster": [0, 0], "rank": [1, 2]}).to_csv(
         outputs / "annotation_source_ranking.csv", index=False)
     cfg = tmp_path / "data_config.yaml"
@@ -130,11 +133,13 @@ def test_dedup_end_to_end(tmp_path, concepts_csv, monkeypatch):
         "dedup", "--outputs", str(outputs), "--out-dir", str(out_dir), "--config-dir", str(config_dir),
         "--cache-root", str(tmp_path / "cache"), "--concepts-csv", str(concepts_csv),
         "--split-config", str(cfg), "--exclude-sources", str(exclude),
+        "--near-dup-labels", str(tmp_path / "no_labels.csv"),
     ])
     dedup.main()
 
     blacklist = pd.read_parquet(config_dir / "image_blacklist.parquet")
-    assert blacklist[["source_id", "image_id", "kept_image_id"]].to_numpy().tolist() == [[2, "20", "10"]]
+    assert blacklist[["source_id", "image_id", "kept_image_id", "reason"]].to_numpy().tolist() == [
+        [2, "20", "10", "exact"]]
     overrides = pd.read_parquet(config_dir / "annotation_overrides.parquet").sort_values("row")
     assert overrides[["image_id", "row", "col", "coralnet_id"]].to_numpy().tolist() == [
         ["10", 5, 5, 2], ["10", 6, 6, 4], ["10", 7, 7, 4]]
@@ -147,6 +152,67 @@ def test_dedup_end_to_end(tmp_path, concepts_csv, monkeypatch):
     assert pd.read_parquet(out_dir / "images_unique.parquet")["image_id"].tolist() == ["30"]
     summary = json.loads((out_dir / "summary.json").read_text())
     assert summary["n_points_before"] == 6 and summary["n_points_after"] == 4
+
+
+def test_near_dup_merge(tmp_path, feat):
+    """Image A (101, source 2) has three near duplicates: B (102), the same picture re-encoded (source 1, same size, so
+    an identity transform), C (103), a half-size copy (homography), and D (104), a byte-identical copy of C that
+    exact deduplication already removed (labelled pairs refer to it). A is kept (largest; ties with B
+    broken by the newer source). E (105) was labelled ``fp`` and stays.
+
+    At A's (100, 100) the labels of A (hard coral), B (acropora) and C (acropora sp., at its (50, 50))
+    meet: the finest wins. B adds (200, 300); C's (10, 10) is added at about (20, 20).
+    """
+    rng = np.random.default_rng(0)
+    big = Image.fromarray(rng.integers(0, 255, (60, 80, 3), dtype=np.uint8)).resize((800, 600), Image.BICUBIC)
+    for name, im, q in (("a", big, 95), ("b", big, 70), ("c", big.resize((400, 300), Image.BICUBIC), 90),
+                        ("e", Image.fromarray(rng.integers(0, 255, (600, 800, 3), dtype=np.uint8)), 90)):
+        im.save(tmp_path / f"{name}.jpg", quality=q)
+    images = pd.DataFrame({"source_id": [2, 1, 3, 4], "image_id": ["101", "102", "103", "105"],
+                           "hash": ["ha", "hb", "hc", "he"], "image_s3_key": ["a.jpg", "b.jpg", "c.jpg", "e.jpg"]})
+    points = pd.DataFrame({
+        "image_id": ["101", "101", "102", "102", "103", "103", "105"],
+        "row": [100, 300, 100, 200, 50, 10, 5], "col": [100, 400, 100, 300, 50, 10, 5],
+        "coralnet_id": [1, 4, 2, 4, 3, 4, 4],
+    }).assign(category="same_label", has_unmapped=False, in_kept=True, n_copies_at_loc=1)
+    labels = pd.DataFrame({"image_a": ["101", "104", "101"], "image_b": ["102", "101", "105"],
+                           "label": ["dup", "dup", "fp"]}).set_index(["image_a", "image_b"])
+
+    out = near_dup_merge.merge_near_duplicates(images, points, labels, {"104": "103"}, tmp_path,
+                                               dedup.make_resolver(feat), workers=2)
+
+    assert out["blacklist"][["image_id", "kept_image_id", "reason"]].to_numpy().tolist() == [
+        ["102", "101", "near_dup"], ["103", "101", "near_dup"]]
+    copies = out["copies"].set_index("image_id")
+    assert copies["transform"].to_dict() == {"102": "identity", "103": "homography"}
+    assert copies.loc["103", "n_joined"] == 1
+    ov = out["overrides"].sort_values(["row", "col"]).reset_index(drop=True)
+    assert (ov["image_id"] == "101").all()
+    assert len(ov) == 4
+    assert abs(ov.loc[0, "row"] - 20) <= 1 and abs(ov.loc[0, "col"] - 20) <= 1 and ov.loc[0, "coralnet_id"] == 4
+    assert ov.loc[1:, ["row", "col", "coralnet_id", "category"]].to_numpy().tolist() == [
+        [100, 100, 2, "finer"], [200, 300, 4, "same_label"], [300, 400, 4, "same_label"]]
+    prov = out["provenance"].sort_values(["row", "col"]).reset_index(drop=True)
+    assert prov["change"].tolist() == ["added", "replaced", "added", "unchanged"]
+    assert prov.loc[1, "copy_labels"] == [1, 2, 3]
+
+
+def test_exact_blacklist(tmp_path):
+    pd.DataFrame({"image_id": ["1", "2"], "reason": ["exact", "near_dup"]}).to_parquet(tmp_path / "b.parquet")
+    assert exact_blacklist(tmp_path / "b.parquet") == {"1"}
+    pd.DataFrame({"image_id": [1, 2]}).to_parquet(tmp_path / "old.parquet")  # before near duplicates
+    assert exact_blacklist(tmp_path / "old.parquet") == {"1", "2"}
+
+
+def test_anneal_fixed_groups():
+    """Group 0 is pinned to test even though it is not eligible; the others balance around it."""
+    X = np.array([[50.0, 0], [40, 10], [10, 40], [50, 50], [400, 400]])
+    n = X.sum(1)
+    eligible = np.array([False, True, True, True, False])
+    fixed = np.array([2, -1, -1, -1, -1])
+    a, _ = splits.anneal(X, n, X.sum(0), eligible, (100.0, 100.0), (0.1, 0.1), 10.0, np.ones(2, bool),
+                         np.zeros(2), 0.0, 2000, 0, fixed)
+    assert a[0] == 2 and a[4] == 0
 
 
 def test_replace_coralnet_block():
