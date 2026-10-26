@@ -27,7 +27,7 @@ export MERMAID_AWS_MODE=launcher && direnv reload
 make sm-check
 ```
 
-`sm-check` validates SDK version, region, credentials, execution-role trust
+`sm-check` validates the `sagemaker-core` version (2.27.0 or later), region, credentials, execution-role trust
 (`sagemaker.amazonaws.com`), and warns about staging-bucket IAM and `HF_TOKEN`.
 
 ## One-time: build and push the image

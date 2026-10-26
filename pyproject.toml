@@ -53,7 +53,7 @@ training = [
 ]
 # Host-side SageMaker job submission (scripts/launch_*.py); imported lazily.
 sagemaker = [
-    "sagemaker>=2.0,<3.0",
+    "sagemaker-core>=2.27,<3",
 ]
 # CoralNet ETL + scraper console scripts (coralnet-etl/-refresh/-resize): ibis/duckdb
 # for the ETL/manifest, bs4/selenium for scraping.

@@ -18,7 +18,7 @@ class CheckResult(NamedTuple):
     fatal: bool = False
 
 
-MIN_SAGEMAKER_VERSION = (2, 200, 0)
+MIN_SAGEMAKER_CORE_VERSION = (2, 27, 0)
 MIN_BOTO3_VERSION = (1, 26, 0)
 
 
@@ -33,24 +33,24 @@ def _parse_version(raw: str) -> tuple[int, ...]:
 
 
 def check_sagemaker_sdk() -> CheckResult:
-    """Check SageMaker SDK is installed and recent enough."""
+    """Check sagemaker-core is installed and recent enough."""
     try:
-        installed = version("sagemaker")
+        installed = version("sagemaker-core")
     except PackageNotFoundError:
         return CheckResult(
-            "sagemaker SDK",
+            "sagemaker-core",
             False,
             "not installed — run: uv sync --extra sagemaker",
             fatal=True,
         )
-    if _parse_version(installed) < MIN_SAGEMAKER_VERSION:
+    if _parse_version(installed) < MIN_SAGEMAKER_CORE_VERSION:
         return CheckResult(
-            "sagemaker SDK",
+            "sagemaker-core",
             False,
-            f"found {installed}, need >= {'.'.join(map(str, MIN_SAGEMAKER_VERSION))}",
+            f"found {installed}, need >= {'.'.join(map(str, MIN_SAGEMAKER_CORE_VERSION))}",
             fatal=True,
         )
-    return CheckResult("sagemaker SDK", True, f"v{installed}")
+    return CheckResult("sagemaker-core", True, f"v{installed}")
 
 
 def check_boto3() -> CheckResult:
