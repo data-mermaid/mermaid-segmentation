@@ -4,7 +4,8 @@ Inputs: the sources of ``--split-config`` (the universe), the deduplication outp
 (blacklist + merged annotations, in ``--config-dir``), the content hashes of ``hashing --all-sources``
 and the source metadata of ``mermaidseg.datasets.coralnet.scraper.source_metadata``.
 
-Sources in ``--exclude-sources`` (low quality) are left out entirely.
+Sources in ``--exclude-sources`` (low quality) are left out entirely; the groups of the sources in
+``--test-sources`` go to test.
 
 1. Counts. Per source, images and points per training class on the deduplicated data
    (blacklisted copies removed, merged annotations applied). Labels are mapped the way training
@@ -12,13 +13,17 @@ Sources in ``--exclude-sources`` (low quality) are left out entirely.
    MERMAID benthic hierarchy into the ``class_subset`` of ``--training-config``
    (``label_roll_up``). Labels that end up outside the subset are not counted.
 2. Groups. Sources that belong together are put on the same side: connected components of
-   - sources that share an image (the copies are deduplicated, but the sources stay together), and
+   - sources that share an image (the copies are deduplicated, but the sources stay together),
+   - sources with a pair of images labelled ``dup`` or ``unsure`` in ``--near-dup-labels`` (treated
+     as sharing an image), and
    - sources of one project: at least one admin in common and either IDs at most ``--max-id-gap``
      apart (in the sorted list of universe sources) or locations at most ``--max-km`` apart.
-3. Eligibility. A group may go to val/test only if none of its sources shares an image with
-   another source and it has at most ``--max-group-frac`` of an eval split's target size.
-   Everything else is train.
-4. Assignment. Simulated annealing over the eligible groups minimises, for val and test,
+3. Eligibility. The groups of ``--test-sources`` are fixed to test, whatever their size or overlap.
+   Any other group may go to val/test only if none of its sources shares an image with another
+   source and it has at most ``--max-group-frac`` of an eval split's target size. Everything else
+   is train.
+4. Assignment. Simulated annealing over the eligible groups (the fixed ones count towards test)
+   minimises, for val and test,
    ``w_size * (size error)^2 + mean_c (share error of class c)^2``, where the size error is the
    relative deviation from ``--val-frac`` / ``--test-frac`` of all images and the share error of a
    class is the relative deviation of the split's share of that class's points from the same
@@ -64,6 +69,7 @@ from mermaidseg.datasets.coralnet.dedup.common import (
     read_source_list,
     repo_relative,
 )
+from mermaidseg.datasets.coralnet.dedup.near_dup_merge import DEFAULT_LABELS, load_labels
 
 SPLITS = ("train", "val", "test")
 
@@ -109,12 +115,16 @@ def project_edges(meta: pd.DataFrame, sources: list[int], max_id_gap: int, max_k
     return [(a, b, why) for (a, b), why in edges.items()]
 
 
-def anneal(X, n, P, eligible, targets, fracs, w_size, cls_mask, min_pts, w_cov, iters, seed):
-    """Assign eligible groups to 0 (train), 1 (val), 2 (test); returns (assignment, cost)."""
+def anneal(X, n, P, eligible, targets, fracs, w_size, cls_mask, min_pts, w_cov, iters, seed, fixed=None):
+    """Assign eligible groups to 0 (train), 1 (val), 2 (test); returns (assignment, cost).
+
+    ``fixed``: per group, a split it is pinned to, or -1 (free; the default for every group).
+    """
     rng = np.random.default_rng(seed)
-    idx = np.flatnonzero(eligible)
-    a = np.zeros(len(n), dtype=int)
-    p0 = sum(targets) / n[idx].sum()
+    fixed = np.full(len(n), -1) if fixed is None else np.asarray(fixed)
+    idx = np.flatnonzero(eligible & (fixed < 0))
+    a = np.where(fixed >= 0, fixed, 0)
+    p0 = max(sum(targets) - n[fixed > 0].sum(), 0) / n[idx].sum()
     a[idx] = np.where(rng.random(len(idx)) < p0, rng.integers(1, 3, len(idx)), 0)
     S = {s: X[a == s].sum(0) for s in (1, 2)}
     N = {s: n[a == s].sum() for s in (1, 2)}
@@ -191,6 +201,10 @@ def main() -> None:
     p.add_argument("--split-config", type=Path, default=DEFAULT_SPLIT_CONFIG)
     p.add_argument("--exclude-sources", type=Path, default=DEFAULT_EXCLUDE_SOURCES,
                    help="Text file of source ids to leave out entirely (one per line).")
+    p.add_argument("--test-sources", type=Path, default=CONFIG_DIR / "test_sources.txt",
+                   help="Text file of source ids whose groups go to test (one per line).")
+    p.add_argument("--near-dup-labels", type=Path, default=DEFAULT_LABELS,
+                   help="Pair labels of Near_Duplicate_Review.ipynb; dup / unsure pairs link their sources.")
     p.add_argument("--outputs", type=Path, default=DEFAULT_OUTPUTS, help="Where the hashing outputs are.")
     p.add_argument("--config-dir", type=Path, default=CONFIG_DIR,
                    help="Where the dedup blacklist / overrides are and source_splits.csv goes.")
@@ -222,6 +236,9 @@ def main() -> None:
     root = Path(args.cache_root) / DEFAULT_BUCKET
     excluded = read_source_list(args.exclude_sources)
     sources = sorted(set().union(*coralnet_splits(args.split_config).values()) - excluded)
+    forced_test = read_source_list(args.test_sources if args.test_sources.exists() else None)
+    if forced_test - set(sources):
+        raise SystemExit(f"--test-sources not in the universe: {sorted(forced_test - set(sources))}")
 
     # 1. Per-source images and mapped-class point counts on the deduplicated data.
     ann = dedup_annotations(root, sources, args.config_dir)
@@ -247,6 +264,12 @@ def main() -> None:
     cross_sources = set(shared.loc[shared.groupby("hash")["source_id"].transform("nunique") > 1, "source_id"])
     overlap_edges = {tuple(sorted(e)) for _, g in shared.groupby("hash") for e in zip(g["source_id"].iloc[:-1],
                                                                                      g["source_id"].iloc[1:], strict=True)}
+    labels = load_labels(args.near_dup_labels)
+    near = labels[labels["label"].isin(["dup", "unsure"]) & (labels["source_a"] != labels["source_b"])
+                  & labels["source_a"].isin(sources) & labels["source_b"].isin(sources)]
+    near_edges = {tuple(sorted(e)) for e in near[["source_a", "source_b"]].to_numpy().tolist()} - overlap_edges
+    overlap_edges |= near_edges
+    cross_sources |= {s for e in near_edges for s in e}
     meta = pd.read_csv(args.metadata)
     proj = project_edges(meta, sources, args.max_id_gap, args.max_km)
     graph = nx.Graph()
@@ -257,6 +280,7 @@ def main() -> None:
     group_of = {s: i for i, c in enumerate(comps) for s in c}
     print(f"{len(proj)} project links ({sum(e[2] == 'id' for e in proj)} by id, "
           f"{sum(e[2] == 'location' for e in proj)} by location), {len(overlap_edges)} overlap links "
+          f"({len(near_edges)} from near duplicates only) "
           f"-> {len(comps)} groups")
 
     # 3. Group features and eligibility.
@@ -271,18 +295,24 @@ def main() -> None:
     targets = tuple(f * N for f in fracs)
     cap = args.max_group_frac * min(targets)
     grp["eligible"] = ~grp["shares_images"] & (grp["n_images"] <= cap) & (grp["n_images"] > 0)
+    test_groups = {group_of[s] for s in forced_test}
+    grp["fixed"] = np.where(grp.index.isin(test_groups), SPLITS.index("test"), -1)
+    if test_groups:
+        t = src[src["group"].isin(test_groups)]
+        print(f"fixed to test: {len(test_groups)} groups, {len(t)} sources {sorted(t['source_id'])}, "
+              f"{t['n_images'].sum():,} images")
     print(f"eligible groups: {int(grp['eligible'].sum())} with {int(grp.loc[grp['eligible'], 'n_images'].sum()):,} "
           f"images (cap {cap:,.0f} images per group); targets {targets[0]:,.0f} / {targets[1]:,.0f}")
 
     # 4. Assignment.
     P = X.sum(0)
     cls_mask = args.min_class_points <= P
-    pool = X[grp["eligible"].to_numpy()].sum(0)
+    pool = X[(grp["eligible"] | (grp["fixed"] >= 0)).to_numpy()].sum(0)
     min_pts = np.minimum(args.min_eval_points, pool / 4)
     best = None
     for r in range(args.restarts):
         a, c = anneal(X, n, P, grp["eligible"].to_numpy(), targets, fracs, args.w_size, cls_mask,
-                      min_pts, args.w_coverage, args.iters, args.seed + r)
+                      min_pts, args.w_coverage, args.iters, args.seed + r, grp["fixed"].to_numpy())
         print(f"restart {r}: cost {c:.4f}")
         if best is None or c < best[1]:
             best = (a, c)
@@ -294,6 +324,7 @@ def main() -> None:
                  if c in meta.columns]
     src = src.merge(meta[["source_id", *meta_cols]], on="source_id", how="left")
     src["eligible_group"] = src["group"].map(grp["eligible"])
+    src["fixed_to_test"] = src["group"].isin(test_groups)
     src.sort_values(["split", "group", "source_id"]).to_csv(args.config_dir / "source_splits.csv", index=False)
 
     split_counts = pd.DataFrame({s: X[grp["split"].to_numpy() == s].sum(0) for s in SPLITS}, index=counts.columns)
@@ -319,6 +350,9 @@ def main() -> None:
         "split_config": str(args.split_config),
         "args": {k: str(v) for k, v in vars(args).items()},
         "n_groups": len(grp), "n_eligible_groups": int(grp["eligible"].sum()),
+        "test_sources": sorted(forced_test),
+        "fixed_to_test": sorted(src.loc[src["fixed_to_test"], "source_id"].tolist()),
+        "n_near_dup_links": len(near_edges),
         "cost": float(best[1]),
         "splits": {
             s: {

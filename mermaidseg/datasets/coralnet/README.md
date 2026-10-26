@@ -28,7 +28,8 @@ image. Annotations and image keys are derived from this single file.
 - `nbs/` — exploration and annotation-aggregation notebooks for the CoralNet
   sources. The `CoralNet_Annotations.ipynb` notebook has been superseded by
   the `etl/` module; treat it as historical reference only.
-  `Dedup_Review.ipynb` visualises what the deduplication did to each image.
+  `Dedup_Review.ipynb` visualises what the deduplication did to each image;
+  `Near_Duplicate_Review.ipynb` is where near-duplicate pairs are labelled.
 
 ## Description
 
@@ -56,12 +57,18 @@ about half of the val/test images were exact copies of train images. The
 the best-ranked source of its cluster), merges the annotations of all copies
 onto it (finest consistent label wins; conflicts go to manual-review files),
 and splits the result so val/test only use sources that share no image with
-another source. Run the steps in order:
+another source. Re-encoded, resized or cropped copies are not byte-identical:
+`near_duplicates` finds candidates, you label them in
+`Near_Duplicate_Review.ipynb`, and `dedup` then removes the pairs labelled
+`dup` too, mapping their points onto the kept copy through the estimated
+homography. Run the steps in order:
 
 ```bash
 python -m mermaidseg.datasets.coralnet.dedup.hashing --all-sources   # ~35 min
 python -m mermaidseg.datasets.coralnet.dedup.conflicts
 python -m mermaidseg.datasets.coralnet.dedup.dedup
+python -m mermaidseg.datasets.coralnet.dedup.near_duplicates          # ~1 h; then label in the notebook
+python -m mermaidseg.datasets.coralnet.dedup.dedup                    # again, with the labels
 python -m mermaidseg.datasets.coralnet.scraper.source_metadata        # once, ~1 h
 python -m mermaidseg.datasets.coralnet.dedup.splits                   # writes configs/data_config_dedup.yaml
 python -m mermaidseg.datasets.coralnet.dedup.leakage --config configs/data_config_dedup.yaml
@@ -70,7 +77,9 @@ python -m mermaidseg.datasets.coralnet.dedup.leakage --config configs/data_confi
 Versioned results and curated inputs live in `configs/coralnet/`:
 `image_blacklist.parquet` and `annotation_overrides.parquet` (read by
 `CoralNetDataset` through the data config), `source_splits.csv`,
-`low_quality_sources.txt` (sources excluded entirely) and
+`low_quality_sources.txt` (sources excluded entirely), `test_sources.txt`
+(sources whose split group goes to test), `near_dup_labels.csv` (the
+near-duplicate pair labels) and
 `mermaid_benthic_hierarchy.json` (a snapshot of the MERMAID API's benthic
 attribute hierarchy, used to roll labels up to the training classes when
 balancing the split). Intermediate outputs (hashes, pair lists, provenance,

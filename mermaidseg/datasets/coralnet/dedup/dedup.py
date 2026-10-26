@@ -26,9 +26,15 @@ from ``conflicts``. Only sources listed in a split of ``--split-config`` are use
    ``compatible``, ``contradictory``, ``unknown`` and any location with an unmapped label are
    written to the manual review files with the label that was picked.
 
+3. Near duplicates. The pairs labelled ``dup`` in ``--near-dup-labels`` (``Near_Duplicate_Review.ipynb``)
+   are merged the same way, after mapping each copy's points onto the kept copy (see
+   ``near_dup_merge``). Skipped if the labels file does not exist.
+
 Outputs read by training, in ``--config-dir`` (``configs/coralnet/``, versioned):
 
-- ``image_blacklist.parquet``: the copies to remove (``image_blacklist`` of ``CoralNetDataset``);
+- ``image_blacklist.parquet``: the copies to remove (``image_blacklist`` of ``CoralNetDataset``), with
+  the copy kept in their place and the ``reason`` (``exact`` / ``near_dup``; an exact copy of an
+  image removed as a near duplicate points to that image, not to the final kept copy);
 - ``annotation_overrides.parquet``: the merged points of every kept copy whose annotations change
   (``annotation_overrides`` of ``CoralNetDataset``; replaces all of that image's points).
 
@@ -41,6 +47,11 @@ Other outputs, in ``--out-dir``:
   (``origin_copy_rank``, see ``images_duplicated.parquet``) and every copy's label there;
 - ``review_points.csv``: one row per flagged location, with every copy's label;
 - ``review_images.csv``: one row per kept image with flagged locations;
+- ``near_dup_copies.parquet``: one row per near-duplicate copy removed, with its kept copy, the
+  transform and how many of its points were transferred;
+- ``near_dup_point_provenance.parquet``: every location of every near-duplicate kept copy (as
+  ``point_provenance.parquet``; ``copy_ranks`` refer to ``near_dup_copies.parquet``, 0 = kept copy);
+- ``near_dup_review_points.csv``: its locations with compatible / contradictory / unmapped labels;
 - ``summary.json``.
 
 Usage:
@@ -72,6 +83,12 @@ from mermaidseg.datasets.coralnet.dedup.common import (
     load_concepts,
     load_id2name,
     read_source_list,
+)
+from mermaidseg.datasets.coralnet.dedup.near_dup_merge import (
+    DEFAULT_LABELS,
+    POINT_COLUMNS,
+    load_labels,
+    merge_near_duplicates,
 )
 
 REVIEW_CATEGORIES = ("compatible", "contradictory", "unknown")
@@ -134,6 +151,9 @@ def main() -> None:
     p.add_argument("--split-config", type=Path, default=DEFAULT_SPLIT_CONFIG)
     p.add_argument("--exclude-sources", type=Path, default=DEFAULT_EXCLUDE_SOURCES,
                    help="Text file of source ids to leave out entirely (one per line).")
+    p.add_argument("--near-dup-labels", type=Path, default=DEFAULT_LABELS,
+                   help="Pair labels of Near_Duplicate_Review.ipynb; pairs labelled dup are merged.")
+    p.add_argument("--workers", type=int, default=32, help="Threads decoding near-duplicate images.")
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     args.config_dir.mkdir(parents=True, exist_ok=True)
@@ -145,7 +165,8 @@ def main() -> None:
 
     excluded = read_source_list(args.exclude_sources)
     sources = sorted(set().union(*coralnet_splits(args.split_config).values()) - excluded)
-    hashes = pd.read_parquet(args.outputs / "image_hashes_exact_all.parquet", columns=["source_id", "image_id", "hash"])
+    hashes = pd.read_parquet(args.outputs / "image_hashes_exact_all.parquet",
+                             columns=["source_id", "image_id", "hash", "image_s3_key"])
     hashes["image_id"] = hashes["image_id"].astype(str)
     missing = sorted(set(sources) - set(hashes["source_id"]))
     if missing:
@@ -174,10 +195,10 @@ def main() -> None:
         ["hash", "kept_source_id", "kept_image_id"], axis=1)
     dup = dup.merge(kept, on="hash")
     blacklist = dup.loc[~dup["keep"], ["source_id", "image_id", "hash", "kept_source_id", "kept_image_id"]]
+    blacklist = blacklist.assign(reason="exact")
 
     unique.to_parquet(args.out_dir / "images_unique.parquet", index=False)
     dup.to_parquet(args.out_dir / "images_duplicated.parquet", index=False)
-    blacklist.to_parquet(args.config_dir / "image_blacklist.parquet", index=False)
     print(f"unique: {len(unique):,} images; duplicated: {len(dup):,} copies of {len(kept):,} images; "
           f"blacklist: {len(blacklist):,}")
 
@@ -220,7 +241,6 @@ def main() -> None:
         columns={"kept_source_id": "source_id", "kept_image_id": "image_id"})
     overrides = overrides[["source_id", "image_id", "row", "col", "coralnet_id", "category", "has_unmapped",
                            "in_kept", "n_copies_at_loc", "hash"]].astype({"coralnet_id": "int32"})
-    overrides.to_parquet(args.config_dir / "annotation_overrides.parquet", index=False)
 
     # Provenance of every merged location of every duplicated image (for nbs/Dedup_Review.ipynb).
     prov = locs.copy()
@@ -267,6 +287,65 @@ def main() -> None:
     per_img = per_img.sort_values("n_flagged", ascending=False)
     per_img.to_csv(args.out_dir / "review_images.csv", index=False)
 
+    # 3. Near duplicates labelled in Near_Duplicate_Review.ipynb, on the images kept so far.
+    n_points_after = int(unique["n_points"].sum() + len(locs))
+    nd_summary = {}
+    if args.near_dup_labels.exists():
+        labels = load_labels(args.near_dup_labels)
+        exact_kept = dict(zip(blacklist["image_id"], blacklist["kept_image_id"], strict=True))
+        labelled = {exact_kept.get(i, i) for lvl in (0, 1) for i in labels.index.get_level_values(lvl)}
+        alive = pd.concat([unique, dup[dup["keep"]]])[["source_id", "image_id", "hash", "image_s3_key"]]
+        cand = alive[alive["image_id"].isin(labelled)]
+        dup_pts = locs[locs["kept_image_id"].isin(cand["image_id"])].rename(columns={"kept_image_id": "image_id"})
+        uniq_pts = ann[ann["image_id"].isin(set(cand["image_id"]) - set(dup_pts["image_id"]))].assign(
+            category="same_label", has_unmapped=False, in_kept=True, n_copies_at_loc=1)
+        cand_points = pd.concat([dup_pts, uniq_pts], ignore_index=True)[["image_id", *POINT_COLUMNS]]
+        nd = merge_near_duplicates(cand, cand_points, labels, exact_kept, root, resolve, workers=args.workers)
+        if len(nd["blacklist"]):
+            nd_blacklist, nd_overrides, nd_copies, nd_prov = (
+                nd[k] for k in ("blacklist", "overrides", "copies", "provenance"))
+            blacklist = pd.concat([blacklist, nd_blacklist], ignore_index=True)
+            overrides = pd.concat([overrides[~overrides["image_id"].isin(nd_overrides["image_id"])], nd_overrides],
+                                  ignore_index=True)
+            group_images = set(nd_blacklist["image_id"]) | set(nd_overrides["image_id"])
+            n_points_after += len(nd_overrides) - int(cand_points["image_id"].isin(group_images).sum())
+            nd_copies.to_parquet(args.out_dir / "near_dup_copies.parquet", index=False)
+            nd_prov.to_parquet(args.out_dir / "near_dup_point_provenance.parquet", index=False)
+
+            # Review file: locations where a removed copy's label met another label and was flagged.
+            ids = pd.concat([nd_copies[["group", "copy_rank", "source_id", "image_id"]],
+                             nd_prov.drop_duplicates("group")[["group", "source_id", "image_id"]].assign(copy_rank=0)])
+            name_of = {(g, r): f"{s}/{i}" for g, r, s, i in ids[["group", "copy_rank", "source_id", "image_id"]]
+                       .itertuples(index=False)}
+            touched = nd_prov["copy_ranks"].map(lambda r: max(r) > 0 and len(r) > 1)
+            flagged = nd_prov[touched & (nd_prov["category"].isin(REVIEW_CATEGORIES) | nd_prov["has_unmapped"])].copy()
+            flagged["labels_by_copy"] = [
+                " | ".join(f"{name_of[g, r]}: {id2name.get(lid, '?')}" for r, lid in zip(rs, ls, strict=True))
+                for g, rs, ls in flagged[["group", "copy_ranks", "copy_labels"]].itertuples(index=False)]
+            flagged["chosen_label"] = flagged["coralnet_id"].map(id2name)
+            flagged["kept_copy_label"] = flagged["kept_label"].map(id2name)
+            flagged[["group", "source_id", "image_id", "row", "col", "category", "has_unmapped", "chosen_label",
+                     "kept_copy_label", "labels_by_copy", "coralnet_id", "hash"]].to_csv(
+                args.out_dir / "near_dup_review_points.csv", index=False)
+            nd_summary = {
+                "near_dup_labels": str(args.near_dup_labels),
+                "n_near_dup_groups": int(nd_copies["group"].nunique()),
+                "n_near_dup_removed": len(nd_blacklist),
+                "near_dup_transforms": nd_copies["transform"].value_counts().to_dict(),
+                "n_near_dup_points_transferred": int(nd_copies["n_transferred"].sum()),
+                "n_near_dup_points_joined": int(nd_copies["n_joined"].sum()),
+                "n_near_dup_points_outside": int(nd_copies["n_outside"].sum()),
+                "n_near_dup_points_dropped_no_transform": int(
+                    nd_copies.loc[nd_copies["transform"] == "failed", "n_points"].sum()),
+                "near_dup_changes": nd_prov["change"].value_counts().to_dict(),
+                "n_near_dup_review_points": len(flagged),
+            }
+    blacklist = blacklist.astype({"source_id": "int32", "kept_source_id": "int32"})
+    blacklist.to_parquet(args.config_dir / "image_blacklist.parquet", index=False)
+    overrides = overrides.astype({"source_id": "int32", "row": "int16", "col": "int16", "coralnet_id": "int32",
+                                  "has_unmapped": bool, "in_kept": bool, "n_copies_at_loc": "int64"})
+    overrides.to_parquet(args.config_dir / "annotation_overrides.parquet", index=False)
+
     summary = {
         "split_config": str(args.split_config),
         "excluded_sources": sorted(excluded),
@@ -277,8 +356,9 @@ def main() -> None:
         "n_duplicated_images": len(kept),
         "n_duplicate_copies": len(dup),
         "n_blacklisted": len(blacklist),
+        "n_blacklisted_exact": int((blacklist["reason"] == "exact").sum()),
         "n_points_before": int(n_points["n_points"].sum()),
-        "n_points_after": int(unique["n_points"].sum() + len(locs)),
+        "n_points_after": n_points_after,
         "n_overridden_images": len(changed_hashes),
         "n_points_added_from_other_copies": int((~locs["in_kept"]).sum()),
         "n_kept_labels_replaced": int((locs["in_kept"] & (locs["coralnet_id"] != locs["kept_label"])).sum()),
@@ -286,6 +366,7 @@ def main() -> None:
         "n_locations_with_unmapped": int(locs["has_unmapped"].sum()),
         "n_review_points": len(review),
         "n_review_images": len(per_img),
+        **nd_summary,
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=int))
     print(json.dumps(summary, indent=2, default=int))

@@ -41,6 +41,18 @@ def read_source_list(path: Path | None) -> set[int]:
     return {int(ln) for ln in lines if ln}
 
 
+def exact_blacklist(path: Path) -> set[str]:
+    """Image ids of ``image_blacklist.parquet`` removed as byte-identical copies.
+
+    The near-duplicate search and review run on the data after exact deduplication only, so the
+    copies removed as labelled near duplicates (``reason == "near_dup"``) stay visible to them.
+    """
+    df = pd.read_parquet(path)
+    if "reason" in df.columns:
+        df = df[df["reason"] == "exact"]
+    return set(df["image_id"].astype(str))
+
+
 def coralnet_splits(config_path: Path) -> dict[str, set[int]]:
     """Return ``{split: set(source_id)}`` from a data config's ``coralnet`` whitelists."""
 
