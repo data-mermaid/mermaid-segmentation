@@ -1,0 +1,9 @@
+dataset,dataset_key,annotation_type,image_type,level,n_classes,images_train,images_val,images_test,annotations_train,annotations_val,annotations_test,pixels_train,pixels_val,pixels_test
+moorea_labeled_corals,moorea_labeled_corals,,,source,29,2002,0,0,386441,0,0,386441,0,0
+pacific_labeled_corals,pacific_labeled_corals,,,source,20,0,0,4419,0,0,155788,0,0,155788
+catlin_seaview,catlin_seaview,,,source,194,11357,0,0,858370,0,0,858370,0,0
+benthos_yuval,benthos_yuval,,,source,8,0,0,60,0,0,6079,0,0,216236375
+ucsd_mosaics,ucsd_mosaics,,,source,34,4670,0,0,71569,0,0,684990454,0,0
+coralscapes_v2,coralscapes_v2,,,source,95,1790,170,473,204771,17515,56740,3278131352,309297014,843144589
+mermaid,mermaid,,,source,243,15208,0,0,380200,0,0,380200,0,0
+coralnet,coralnet,,,source,3306,650707,37424,31555,20709117,903534,987570,20709117,903534,987570

@@ -1,4 +1,4 @@
-"""CoralNet eval split selection: ``--coralnet-split`` and the dedup fields of the data config."""
+"""CoralNet eval split selection: ``--coralnet-splits`` and the dedup fields of the data config."""
 
 from __future__ import annotations
 
@@ -35,34 +35,19 @@ def evaluate_script():
 
 def test_split_field(evaluate_script):
     f = evaluate_script._split_field
-    assert f(DATA, "coralnet", "whitelist_sources") == [3]
-    assert f(DATA, "coralnet", "whitelist_sources", "test") == [4, 5]
-    assert f(DATA, "coralnet", "annotation_overrides", "test") == "/ov.parquet"
-    assert f(DATA, "coralnet", "annotation_overrides", "val") is None
-    assert f(DATA, "benthos_yuval", "whitelist_sites") == ["RS24"]
-    assert f(DATA, "benthos_yuval", "whitelist_sites", "train") is None
-    assert f(DATA, "missing", "whitelist_sources") is None
+    assert f(DATA, "coralnet", "val", "whitelist_sources") == [3]
+    assert f(DATA, "coralnet", "test", "whitelist_sources") == [4, 5]
+    assert f(DATA, "coralnet", "test", "annotation_overrides") == "/ov.parquet"
+    assert f(DATA, "coralnet", "val", "annotation_overrides") is None
+    assert f(DATA, "benthos_yuval", "val", "whitelist_sites") == ["RS24"]
+    assert f(DATA, "benthos_yuval", "train", "whitelist_sites") is None
+    assert f(DATA, "missing", "val", "whitelist_sources") is None
 
 
-def test_coralnet_split_without_sources_fails_early(evaluate_script, tmp_path):
-    cfg = tmp_path / "data.yaml"
-    cfg.write_text(
-        "data:\n  local_cache_dir: null\n  coralnet:\n    val:\n      whitelist_sources: [3]\n"
-    )
-    argv = [
-        "--checkpoint",
-        "x",
-        "--output-dir",
-        str(tmp_path / "out"),
-        "--data-config",
-        str(cfg),
-        "--evals",
-        "coralnet",
-        "--coralnet-split",
-        "test",
-    ]
-    with pytest.raises(ValueError, match="no coralnet test whitelist_sources"):
-        evaluate_script.main(argv)
+def test_coralnet_split_without_sources_fails_early(evaluate_script):
+    data = {"coralnet": {"val": {"whitelist_sources": [3]}}}
+    with pytest.raises(ValueError, match=r"no coralnet\.test\.whitelist_sources"):
+        evaluate_script._coralnet_sources(data, "test")
 
 
 def test_evaluate_coralnet_forwards_dedup_fields(monkeypatch):

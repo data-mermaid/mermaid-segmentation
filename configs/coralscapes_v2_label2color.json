@@ -1,0 +1,477 @@
+{
+  "acanthaster planci": [
+    179,
+    245,
+    234
+  ],
+  "acropora alive": [
+    236,
+    128,
+    255
+  ],
+  "acropora bleached": [
+    255,
+    236,
+    254
+  ],
+  "acropora dead": [
+    118,
+    63,
+    128
+  ],
+  "algae covered brain coral": [
+    208,
+    207,
+    58
+  ],
+  "algae covered branching coral": [
+    6,
+    71,
+    245
+  ],
+  "algae covered lobophylliidae": [
+    50,
+    208,
+    130
+  ],
+  "algae covered massive coral": [
+    67,
+    182,
+    208
+  ],
+  "algae covered pocillopora": [
+    225,
+    109,
+    77
+  ],
+  "algae covered porites": [
+    173,
+    81,
+    130
+  ],
+  "algae covered substrate": [
+    125,
+    163,
+    125
+  ],
+  "algae covered table acropora": [
+    48,
+    162,
+    221
+  ],
+  "anemone": [
+    0,
+    255,
+    189
+  ],
+  "background": [
+    29,
+    162,
+    216
+  ],
+  "brain coral alive": [
+    114,
+    78,
+    120
+  ],
+  "brain coral bleached": [
+    219,
+    67,
+    238
+  ],
+  "brain coral dead": [
+    78,
+    172,
+    99
+  ],
+  "branching coral alive": [
+    226,
+    91,
+    157
+  ],
+  "branching coral bleached": [
+    252,
+    231,
+    240
+  ],
+  "branching coral dead": [
+    123,
+    50,
+    86
+  ],
+  "cirrhipathes": [
+    6,
+    189,
+    22
+  ],
+  "dark": [
+    31,
+    31,
+    31
+  ],
+  "dead giant clam": [
+    89,
+    155,
+    134
+  ],
+  "feather worm": [
+    159,
+    186,
+    38
+  ],
+  "fish": [
+    255,
+    255,
+    0
+  ],
+  "fungiidae alive": [
+    100,
+    133,
+    248
+  ],
+  "fungiidae bleached": [
+    200,
+    138,
+    27
+  ],
+  "fungiidae dead": [
+    3,
+    92,
+    44
+  ],
+  "galaxea alive": [
+    96,
+    188,
+    108
+  ],
+  "galaxea bleached": [
+    67,
+    243,
+    60
+  ],
+  "galaxea dead": [
+    176,
+    225,
+    11
+  ],
+  "giant clam": [
+    189,
+    255,
+    234
+  ],
+  "goniopora alive": [
+    181,
+    5,
+    120
+  ],
+  "goniopora dead": [
+    179,
+    191,
+    30
+  ],
+  "hard coral alive": [
+    109,
+    232,
+    188
+  ],
+  "hard coral bleached": [
+    70,
+    247,
+    149
+  ],
+  "hard coral dead": [
+    114,
+    15,
+    203
+  ],
+  "hard substrate": [
+    125,
+    125,
+    125
+  ],
+  "human": [
+    255,
+    0,
+    0
+  ],
+  "human-made structure": [
+    182,
+    202,
+    12
+  ],
+  "leather coral alive": [
+    86,
+    184,
+    94
+  ],
+  "lobophylliidae alive": [
+    201,
+    73,
+    234
+  ],
+  "lobophylliidae bleached": [
+    253,
+    187,
+    79
+  ],
+  "lobophylliidae dead": [
+    57,
+    106,
+    220
+  ],
+  "massive alive": [
+    236,
+    150,
+    21
+  ],
+  "massive bleached": [
+    255,
+    248,
+    228
+  ],
+  "massive dead": [
+    134,
+    86,
+    18
+  ],
+  "meandering coral alive": [
+    230,
+    193,
+    0
+  ],
+  "meandering coral bleached": [
+    251,
+    243,
+    216
+  ],
+  "meandering coral dead": [
+    119,
+    100,
+    14
+  ],
+  "millepora": [
+    244,
+    150,
+    115
+  ],
+  "millepora bleached": [
+    164,
+    226,
+    52
+  ],
+  "millepora dead": [
+    119,
+    128,
+    174
+  ],
+  "nephtheidae alive": [
+    132,
+    109,
+    91
+  ],
+  "other animal": [
+    0,
+    255,
+    255
+  ],
+  "other coral alive": [
+    224,
+    118,
+    119
+  ],
+  "other coral bleached": [
+    250,
+    224,
+    225
+  ],
+  "other coral dead": [
+    114,
+    60,
+    61
+  ],
+  "pavona alive": [
+    13,
+    191,
+    102
+  ],
+  "pavona bleached": [
+    118,
+    249,
+    130
+  ],
+  "pavona dead": [
+    141,
+    130,
+    175
+  ],
+  "pocillopora alive": [
+    255,
+    146,
+    150
+  ],
+  "pocillopora bleached": [
+    250,
+    219,
+    220
+  ],
+  "pocillopora dead": [
+    130,
+    66,
+    66
+  ],
+  "porites alive": [
+    11,
+    16,
+    145
+  ],
+  "porites bleached": [
+    213,
+    10,
+    25
+  ],
+  "porites dead": [
+    40,
+    24,
+    243
+  ],
+  "rubble": [
+    161,
+    153,
+    128
+  ],
+  "sand": [
+    194,
+    178,
+    128
+  ],
+  "sea cucumber": [
+    0,
+    231,
+    255
+  ],
+  "sea urchin": [
+    0,
+    142,
+    255
+  ],
+  "seagrass": [
+    125,
+    222,
+    125
+  ],
+  "seriatopora alive": [
+    191,
+    19,
+    6
+  ],
+  "seriatopora bleached": [
+    247,
+    89,
+    191
+  ],
+  "seriatopora dead": [
+    75,
+    131,
+    128
+  ],
+  "soft coral (malacalcyonacea) alive": [
+    147,
+    144,
+    54
+  ],
+  "soft coral (malacalcyonacea) bleached": [
+    7,
+    227,
+    247
+  ],
+  "sponge": [
+    240,
+    80,
+    80
+  ],
+  "stylophora alive": [
+    255,
+    111,
+    194
+  ],
+  "stylophora bleached": [
+    255,
+    220,
+    241
+  ],
+  "stylophora dead": [
+    123,
+    54,
+    94
+  ],
+  "table acropora alive": [
+    189,
+    119,
+    255
+  ],
+  "table acropora bleached": [
+    244,
+    233,
+    253
+  ],
+  "table acropora dead": [
+    85,
+    53,
+    116
+  ],
+  "thin plate/encrusting coral alive": [
+    91,
+    28,
+    190
+  ],
+  "thin plate/encrusting coral bleached": [
+    42,
+    209,
+    57
+  ],
+  "thin plate/encrusting coral dead": [
+    8,
+    19,
+    242
+  ],
+  "transect line": [
+    0,
+    255,
+    0
+  ],
+  "transect tools": [
+    8,
+    205,
+    12
+  ],
+  "trash": [
+    255,
+    0,
+    134
+  ],
+  "turbinaria": [
+    228,
+    255,
+    119
+  ],
+  "turbinaria dead": [
+    169,
+    30,
+    70
+  ],
+  "water column": [
+    152,
+    127,
+    66
+  ],
+  "water surface": [
+    202,
+    109,
+    174
+  ],
+  "xeniidae alive": [
+    139,
+    142,
+    168
+  ]
+}

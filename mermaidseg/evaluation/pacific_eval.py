@@ -14,7 +14,6 @@ from mermaidseg.datasets.pacific_labeled_corals.pacific_labeled_corals_dataset i
     PacificLabeledCoralsDataset,
 )
 from mermaidseg.evaluation.gt_mapping import build_class_lookup, build_concept_lookup
-from mermaidseg.evaluation.hierarchical_eval import HierarchicalSpec
 from mermaidseg.evaluation.point_datasets import run_point_evaluation
 from mermaidseg.evaluation.predictor import CBMPredictor
 
@@ -36,7 +35,6 @@ def evaluate_pacific(
     batch_size: int = 8,
     num_workers: int = 8,
     max_images_per_unit: int | None = None,
-    hierarchical_spec: HierarchicalSpec | None = None,
 ) -> dict:
     logger.info(
         "Building Pacific Labeled Corals dataset (subsets=%s sites=%s) ...",
@@ -71,8 +69,8 @@ def evaluate_pacific(
         concept_names=concept_names,
         id2label=id2label,
         output_dir=output_dir,
+        taxonomy_csv=taxonomy_csv,
         batch_size=batch_size,
         num_workers=num_workers,
         max_images_per_unit=max_images_per_unit,
-        hierarchical_spec=hierarchical_spec,
     )

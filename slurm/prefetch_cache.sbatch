@@ -49,7 +49,7 @@ cd $SCRATCH/mermaid-segmentation
 uv sync --locked
 
 srun uv run python scripts/prefetch_cache.py \
-    --data-config configs/data_config_all.yaml \
+    --data-config configs/data_config_dedup.yaml \
     --training-config configs/training_config_cbm.yaml \
     --workers 32 \
     --hf-models facebook/dinov3-vitl16-pretrain-lvd1689m

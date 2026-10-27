@@ -98,7 +98,7 @@ for i in range(torch.cuda.device_count()):
 
 # Match the SLURM CPU allocation when running under Slurm (falls back to 50 for
 # local runs). MERMAIDSEG_NUM_WORKERS / MERMAIDSEG_PREFETCH_FACTOR override both
-# (the 1M-step job uses 56 workers and prefetch 2 on 64 CPUs).
+# (the 1M-step job sets MERMAIDSEG_NUM_WORKERS=28 on 32 CPUs).
 NUM_WORKERS = int(
     os.environ.get("MERMAIDSEG_NUM_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", "50"))
 )
@@ -122,8 +122,8 @@ parser.add_argument(
 )
 parser.add_argument(
     "--data-config",
-    default="../configs/data_config_all.yaml",
-    help="path to the data config YAML (default: 256 crops, all sources)",
+    default="../configs/data_config_dedup.yaml",
+    help="path to the data config YAML (default: 256 crops, deduplicated CoralNet splits)",
 )
 parser.add_argument("--per-pixel-loss-weight", type=float, default=None)
 parser.add_argument("--per-image-loss-weight", type=float, default=None)

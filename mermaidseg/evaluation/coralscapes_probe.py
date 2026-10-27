@@ -1,9 +1,10 @@
 """CoralscapesV2 linear-probe evaluation.
 
 Trains a linear SVM (sklearn ``LinearSVC``) on activated concept features sampled
-at a fixed probe point set (see ``scripts/build_coralscapes_v2_probe_points.py``),
-then applies it over the CoralscapesV2 test split and reports accuracy and mIoU
-over the 95 classes.
+at a fixed probe point set from the train split (see
+``scripts/build_coralscapes_v2_probe_points.py``), then applies that one SVM over
+each requested CoralscapesV2 split (``val`` and/or ``test``) and reports accuracy
+and mIoU over the 95 classes.
 
 Every 1024x2048 image is predicted with three windows, each resized to the model
 input size:
@@ -19,13 +20,16 @@ applied to the averaged logits. Probe pixels and the dense SVM both read that
 activated map, so train and test use the same features. Only the ``concepts``
 feature kind is supported.
 
-The bleached concept is scored from the same activated map, not from the SVM
+The binary concepts in ``REPORTED_BINARY_CONCEPTS`` (``bleached``,
+``anthropogenic``) are scored from the same activated map, not from the SVM
 class prediction. ``TRUE`` (code 2) is the positive class, ``FALSE`` (code 1) is
 the negative class, ``not_given`` (code 0) is excluded, and mask id 0
 (unannotated) is excluded separately. A probability of exactly 0.5 counts as a
-negative prediction.
+negative prediction. Hierarchical metrics (consistency, mistake severity, ECE)
+are computed from the per-rank softmax of the same map against the taxonomy of
+each pixel's class in ``class_to_concepts.csv``.
 
-Probe/test images are resolved either from a local Cityscapes-style mirror
+Probe/eval images are resolved either from a local Cityscapes-style mirror
 (``--coralscapes-root``, matched by stem, md5-verified) or from the HuggingFace
 dataset ``josauder/coralscapesV2`` (matched by label md5).
 """
@@ -45,7 +49,13 @@ from numpy.typing import NDArray
 from tqdm import tqdm
 
 from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPES_V2_ID2NAME
-from mermaidseg.evaluation.metrics import BleachedScore, ClassConfusion
+from mermaidseg.evaluation.gt_mapping import build_concept_lookup
+from mermaidseg.evaluation.hierarchical import HierarchicalScore
+from mermaidseg.evaluation.metrics import (
+    REPORTED_BINARY_CONCEPTS,
+    BinaryConceptScore,
+    ClassConfusion,
+)
 from mermaidseg.evaluation.predictor import CBMPredictor
 from mermaidseg.evaluation.reporting import fmt, write_json
 
@@ -54,9 +64,11 @@ logger = logging.getLogger(__name__)
 NUM_CLASSES = 95
 CORALSCAPES_HEIGHT = 1024
 CORALSCAPES_WIDTH = 2048
+SPLITS = ("val", "test")
+_HF_SPLIT_NAMES = {"val": "validation", "test": "test"}
 _TILE = 1024
 _SVM_STRIP_ROWS = 128
-_ALLOWED_BLEACHED_CELLS = ("true", "false", "not_given")
+_ALLOWED_CONCEPT_CELLS = ("true", "false", "not_given")
 
 
 def _to_label(arr_like) -> NDArray[np.uint8]:
@@ -162,14 +174,14 @@ def reassemble_concept_logits(predictor: CBMPredictor, image_rgb: NDArray[np.uin
     return average_window_logits(logits, boxes, CORALSCAPES_HEIGHT, CORALSCAPES_WIDTH)
 
 
-def _raw_bleached_cell(value: object) -> str:
+def _raw_concept_cell(value: object) -> str:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return "nan"
     return str(value).strip().lower()
 
 
-def build_coralscapes_bleached_codes(csv_path: str | Path) -> NDArray[np.int8]:
-    """Map CoralscapesV2 class id -> bleached code (0 not_given, 1 FALSE, 2 TRUE).
+def build_coralscapes_concept_codes(csv_path: str | Path, concept: str) -> NDArray[np.int8]:
+    """Map CoralscapesV2 class id -> binary concept code (0 not_given, 1 FALSE, 2 TRUE).
 
     Index 0 stays 0. That slot is unannotated mask pixels, not a class lookup,
     and it is not the class named ``background``. A native class missing from the
@@ -194,12 +206,12 @@ def build_coralscapes_bleached_codes(csv_path: str | Path) -> NDArray[np.int8]:
         if matched.empty:
             raise RuntimeError(
                 f"CoralscapesV2 class {class_id} {name!r} is missing from {path}. "
-                "A missing row is not bleached=not_given."
+                f"A missing row is not {concept}=not_given."
             )
-        cells = {_raw_bleached_cell(value) for value in matched["bleached"].tolist()}
+        cells = {_raw_concept_cell(value) for value in matched[concept].tolist()}
         if len(cells) != 1:
             raise RuntimeError(
-                f"CoralscapesV2 class {class_id} {name!r} has conflicting bleached cells: "
+                f"CoralscapesV2 class {class_id} {name!r} has conflicting {concept} cells: "
                 f"{sorted(cells)}"
             )
         cell = next(iter(cells))
@@ -214,13 +226,14 @@ def build_coralscapes_bleached_codes(csv_path: str | Path) -> NDArray[np.int8]:
             n_not_given += 1
         else:
             raise RuntimeError(
-                f"CoralscapesV2 class {class_id} {name!r} has bleached cell {cell!r}. "
-                f"Expected one of {list(_ALLOWED_BLEACHED_CELLS)}."
+                f"CoralscapesV2 class {class_id} {name!r} has {concept} cell {cell!r}. "
+                f"Expected one of {list(_ALLOWED_CONCEPT_CELLS)}."
             )
     if int(codes[0]) != 0:
-        raise RuntimeError("label id 0 must stay bleached code 0 (unannotated, not a class)")
+        raise RuntimeError(f"label id 0 must stay {concept} code 0 (unannotated, not a class)")
     logger.info(
-        "CoralscapesV2 bleached codes: %d TRUE, %d FALSE, %d not_given (label 0 is unannotated)",
+        "CoralscapesV2 %s codes: %d TRUE, %d FALSE, %d not_given (label 0 is unannotated)",
+        concept,
         n_true,
         n_false,
         n_not_given,
@@ -255,21 +268,23 @@ class LocalMirrorSource:
             )
         return img, lab
 
-    def iter_test(self):
+    def _label_paths(self, split: str) -> list[Path]:
+        return sorted((self.root / "gtFine" / split).glob("*/*_gtFine_labelIds.png"))
+
+    def iter_split(self, split: str):
         from PIL import Image
 
-        paths = sorted((self.root / "gtFine" / "test").glob("*/*_gtFine_labelIds.png"))
-        for p in paths:
+        for p in self._label_paths(split):
             site = p.parent.name
             stem = p.name.replace("_gtFine_labelIds.png", "")
             img = np.asarray(
-                Image.open(self.root / "leftImg8bit" / "test" / site / f"{stem}_leftImg8bit.png").convert("RGB"),
+                Image.open(self.root / "leftImg8bit" / split / site / f"{stem}_leftImg8bit.png").convert("RGB"),
                 dtype=np.uint8,
             )
             yield f"{site}/{stem}", img, _to_label(Image.open(p))
 
-    def num_test(self) -> int:
-        return len(list((self.root / "gtFine" / "test").glob("*/*_gtFine_labelIds.png")))
+    def num_split(self, split: str) -> int:
+        return len(self._label_paths(split))
 
 
 class HFSource:
@@ -303,16 +318,16 @@ class HFSource:
         item = self.ds["train"][i]
         return np.asarray(item["image"].convert("RGB"), dtype=np.uint8), _to_label(item["label"])
 
-    def iter_test(self):
-        test = self.ds["test"]
-        for i in range(len(test)):
-            item = test[i]
+    def iter_split(self, split: str):
+        ds = self.ds[_HF_SPLIT_NAMES[split]]
+        for i in range(len(ds)):
+            item = ds[i]
             yield str(i), np.asarray(item["image"].convert("RGB"), dtype=np.uint8), _to_label(
                 item["label"]
             )
 
-    def num_test(self) -> int:
-        return len(self.ds["test"])
+    def num_split(self, split: str) -> int:
+        return len(self.ds[_HF_SPLIT_NAMES[split]])
 
 
 def build_source(coralscapes_root: str | Path | None, hf_repo: str):
@@ -424,6 +439,135 @@ def _predict_classes_from_activated(
     return pred
 
 
+def _class_taxonomy_targets(
+    hier: HierarchicalScore,
+    concept_names: list[str],
+    taxonomy_csv: str | Path,
+    device: torch.device,
+) -> torch.Tensor:
+    """Dense taxonomy ids per CoralscapesV2 class, shape ``(R, NUM_CLASSES + 1)``.
+
+    Column 0 is unannotated mask pixels and is not_given at every rank.
+    """
+    names = [CORALSCAPES_V2_ID2NAME[i] for i in range(1, NUM_CLASSES + 1)]
+    lookup = build_concept_lookup("coralscapes_v2", names, concept_names, taxonomy_csv)
+    rows = np.stack([np.zeros(len(concept_names), dtype=np.int8), *(lookup.row(n) for n in names)])
+    return hier.dense_targets(torch.from_numpy(rows).to(device))
+
+
+def _evaluate_split(
+    *,
+    split: str,
+    predictor: CBMPredictor,
+    source,
+    weff: torch.Tensor,
+    beff: torch.Tensor,
+    classes: torch.Tensor,
+    probe_info: dict,
+    concept_names: list[str],
+    concept_codes: dict[str, NDArray[np.int8]],
+    taxonomy_csv: str | Path,
+    out_dir: Path,
+    max_images: int | None,
+) -> dict:
+    """Score one split with the fitted SVM, the binary concepts, and the hierarchy."""
+    kind = "concepts"
+    eval_class_ids = list(range(1, NUM_CLASSES + 1))
+    conf = ClassConfusion(NUM_CLASSES + 1, ignore_index=0)  # 0..95, 0 = ignore
+    binary = {concept: BinaryConceptScore(threshold=0.5) for concept in concept_codes}
+    hier = HierarchicalScore(concept_names, taxonomy_csv)
+    class_targets = _class_taxonomy_targets(hier, concept_names, taxonomy_csv, predictor.device)
+    results: dict = {
+        "eval": "coralscapes",
+        "split": split,
+        "feature_kinds": {kind: {"probe": probe_info}},
+    }
+
+    def _dump(status: str, processed: int) -> dict:
+        d = conf.to_dict(id2name=CORALSCAPES_V2_ID2NAME, class_ids=eval_class_ids)
+        scores = {"status": status, "num_images": processed, "accuracy": d["accuracy"], "miou": d["miou"]}
+        if status == "done":
+            scores["per_class"] = d["per_class"]
+            results["hierarchical"] = hier.to_dict()
+        results["feature_kinds"][kind][split] = scores
+        for concept, score in binary.items():
+            results[concept] = {**score.to_dict(), "status": status, "num_images": processed}
+        write_json(out_dir / "metrics.json", results)
+        return scores
+
+    n_images = source.num_split(split)
+    if max_images is not None:
+        n_images = min(n_images, max_images)
+    t0 = time.time()
+    processed = 0
+    for _key, image_np, label_np in tqdm(
+        source.iter_split(split), total=n_images, desc=f"dense {split} (concepts)"
+    ):
+        if max_images is not None and processed >= max_images:
+            break
+        what = f"{split} image {processed}"
+        _require_rgb(image_np, what)
+        _require_label(label_np, what)
+        if int(label_np.min()) < 0 or int(label_np.max()) > NUM_CLASSES:
+            raise RuntimeError(
+                f"{what} has label ids outside 0..{NUM_CLASSES} "
+                f"(min={int(label_np.min())}, max={int(label_np.max())})"
+            )
+        activated = _activated_concepts(predictor, image_np)
+        if int(activated.shape[0]) != len(concept_names):
+            raise RuntimeError(
+                f"activated concept map has {int(activated.shape[0])} channels, "
+                f"but concept_names has {len(concept_names)}"
+            )
+        pred = _predict_classes_from_activated(activated, weff, beff, classes)
+        conf.update(label_np.reshape(-1), pred.cpu().numpy().reshape(-1))
+        unannotated = label_np == 0
+        for concept, score in binary.items():
+            prob = activated[concept_names.index(concept)].cpu().numpy()
+            score.update(concept_codes[concept][label_np], prob, unannotated=unannotated)
+        labels = torch.from_numpy(label_np).to(activated.device).long().reshape(-1)
+        hier.update(activated.reshape(activated.shape[0], -1), class_targets[:, labels])
+        processed += 1
+        if processed % 25 == 0:
+            _dump("running", processed)
+
+    scores = _dump("done", processed)
+    logger.info(
+        "[coralscapes_%s/%s] DONE in %.1fs: acc=%s miou=%s over %d images",
+        split,
+        kind,
+        time.time() - t0,
+        fmt(scores["accuracy"]),
+        fmt(scores["miou"]),
+        processed,
+    )
+    for concept in binary:
+        block = results[concept]
+        logger.info(
+            "[coralscapes_%s/%s] acc=%s precision=%s recall=%s f1=%s "
+            "(n_true=%d n_false=%d n_not_given=%d n_unannotated=%d)",
+            split,
+            concept,
+            fmt(block["accuracy"]),
+            fmt(block["precision"]),
+            fmt(block["recall"]),
+            fmt(block["f1"]),
+            block["n_true"],
+            block["n_false"],
+            block["n_not_given"],
+            block["n_unannotated"],
+        )
+    h = results["hierarchical"]
+    logger.info(
+        "[coralscapes_%s/hierarchical] consistency=%s severity(mean norm)=%s ECE(mean)=%s",
+        split,
+        fmt(h.get("consistency/overall")),
+        fmt(h.get("severity/mean_normalized")),
+        fmt(h.get("ece/mean")),
+    )
+    return results
+
+
 def evaluate_coralscapes_probe(
     *,
     predictor: CBMPredictor,
@@ -433,14 +577,17 @@ def evaluate_coralscapes_probe(
     output_dir: str | Path,
     concept_names: list[str],
     taxonomy_csv: str | Path,
+    splits: Sequence[str] = ("test",),
     hf_repo: str = "josauder/coralscapesV2",
     svm_c: float = 1.0,
     max_test_images: int | None = None,
-) -> dict:
-    import json
+) -> dict[str, dict]:
+    """Fit the probe once on the train probe points, then score every split in ``splits``.
 
-    out_dir = Path(output_dir) / "coralscapes"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    Returns ``{split: metrics}``; each split's metrics also go to
+    ``<output_dir>/coralscapes_<split>/metrics.json``. ``max_test_images`` caps every split.
+    """
+    import json
 
     with Path(probe_json).open() as f:
         probe = json.load(f)
@@ -458,31 +605,23 @@ def evaluate_coralscapes_probe(
             "Concept logits are averaged across the three windows, then activated. "
             f"Got {feature_kinds!r}."
         )
-    if "bleached" not in concept_names:
+    unknown = [split for split in splits if split not in SPLITS]
+    if unknown:
+        raise ValueError(f"unknown Coralscapes splits {unknown}; expected a subset of {SPLITS}")
+    missing = [c for c in REPORTED_BINARY_CONCEPTS if c not in concept_names]
+    if missing:
         raise RuntimeError(
-            "Coralscapes eval requires a concept channel named exactly 'bleached'. "
-            f"concept_names has {len(concept_names)} entries and no 'bleached'."
+            f"Coralscapes eval requires concept channels named exactly {missing}, "
+            f"which concept_names ({len(concept_names)} entries) does not have."
         )
-    bleached_index = concept_names.index("bleached")
-    bleached_codes = build_coralscapes_bleached_codes(taxonomy_csv)
-
-    source = build_source(coralscapes_root, hf_repo)
-    id2name = {int(k): v for k, v in CORALSCAPES_V2_ID2NAME.items()}
-    num_conf_classes = NUM_CLASSES + 1  # 0..95, 0 = ignore
-    eval_class_ids = list(range(1, NUM_CLASSES + 1))
-    kind = "concepts"
-
-    results: dict = {
-        "eval": "coralscapes",
-        "feature_kinds": {},
-        "bleached": {"status": "running"},
+    concept_codes = {
+        concept: build_coralscapes_concept_codes(taxonomy_csv, concept)
+        for concept in REPORTED_BINARY_CONCEPTS
     }
 
-    def _dump() -> None:
-        write_json(out_dir / "metrics.json", results)
-
+    source = build_source(coralscapes_root, hf_repo)
+    kind = "concepts"
     logger.info("=== CoralscapesV2 linear probe: feature kind = %s ===", kind)
-    t0 = time.time()
     X, y = _extract_probe_features(predictor, source, images)
     classes_present = sorted(set(int(c) for c in y))
     logger.info(
@@ -493,96 +632,29 @@ def evaluate_coralscapes_probe(
     )
     scaler, svm, train_acc = _fit_linear_svm(X, y, svm_c)
     logger.info("[coralscapes/%s] SVM train accuracy = %s", kind, fmt(train_acc))
-
     weff, beff, classes = _folded_linear(scaler, svm, predictor.device)
-
-    conf = ClassConfusion(num_conf_classes, ignore_index=0)
-    bleached = BleachedScore(threshold=0.5)
-    n_test = source.num_test() if max_test_images is None else min(source.num_test(), max_test_images)
-    results["feature_kinds"][kind] = {
-        "probe": {
-            "num_points": int(X.shape[0]),
-            "feature_dim": int(X.shape[1]),
-            "num_classes_present": len(classes_present),
-            "classes_present": classes_present,
-            "train_accuracy": train_acc,
-        },
-        "test": {"status": "running", "num_images": 0},
+    probe_info = {
+        "num_points": int(X.shape[0]),
+        "feature_dim": int(X.shape[1]),
+        "num_classes_present": len(classes_present),
+        "classes_present": classes_present,
+        "train_accuracy": train_acc,
     }
-    _dump()
 
-    processed = 0
-    for _key, image_np, label_np in tqdm(source.iter_test(), total=n_test, desc="dense test (concepts)"):
-        if max_test_images is not None and processed >= max_test_images:
-            break
-        _require_rgb(image_np, f"test image {processed}")
-        _require_label(label_np, f"test image {processed}")
-        if int(label_np.min()) < 0 or int(label_np.max()) > NUM_CLASSES:
-            raise RuntimeError(
-                f"test image {processed} has label ids outside 0..{NUM_CLASSES} "
-                f"(min={int(label_np.min())}, max={int(label_np.max())})"
-            )
-        activated = _activated_concepts(predictor, image_np)
-        if int(activated.shape[0]) <= bleached_index:
-            raise RuntimeError(
-                f"activated concept map has {int(activated.shape[0])} channels, "
-                f"but bleached is index {bleached_index}"
-            )
-        pred = _predict_classes_from_activated(activated, weff, beff, classes)
-        conf.update(label_np.reshape(-1), pred.detach().cpu().numpy().reshape(-1))
-        bleached_prob = activated[bleached_index].detach().cpu().numpy()
-        bleached.update(
-            bleached_codes[label_np],
-            bleached_prob,
-            unannotated=(label_np == 0),
+    return {
+        split: _evaluate_split(
+            split=split,
+            predictor=predictor,
+            source=source,
+            weff=weff,
+            beff=beff,
+            classes=classes,
+            probe_info=probe_info,
+            concept_names=concept_names,
+            concept_codes=concept_codes,
+            taxonomy_csv=taxonomy_csv,
+            out_dir=Path(output_dir) / f"coralscapes_{split}",
+            max_images=max_test_images,
         )
-        processed += 1
-        if processed % 25 == 0:
-            d = conf.to_dict(id2name=id2name, class_ids=eval_class_ids)
-            results["feature_kinds"][kind]["test"] = {
-                "status": "running",
-                "num_images": processed,
-                "accuracy": d["accuracy"],
-                "miou": d["miou"],
-            }
-            running_bleached = bleached.to_dict()
-            running_bleached["status"] = "running"
-            running_bleached["num_images"] = processed
-            results["bleached"] = running_bleached
-            _dump()
-
-    d = conf.to_dict(id2name=id2name, class_ids=eval_class_ids)
-    results["feature_kinds"][kind]["test"] = {
-        "status": "done",
-        "num_images": processed,
-        "accuracy": d["accuracy"],
-        "miou": d["miou"],
-        "per_class": d["per_class"],
+        for split in splits
     }
-    done_bleached = bleached.to_dict()
-    done_bleached["status"] = "done"
-    done_bleached["num_images"] = processed
-    results["bleached"] = done_bleached
-    _dump()
-    logger.info(
-        "[coralscapes/%s] DONE in %.1fs: test acc=%s miou=%s over %d images",
-        kind,
-        time.time() - t0,
-        fmt(d["accuracy"]),
-        fmt(d["miou"]),
-        processed,
-    )
-    logger.info(
-        "[coralscapes/bleached] acc=%s precision=%s recall=%s f1=%s "
-        "(n_true=%d n_false=%d n_not_given=%d n_unannotated=%d)",
-        fmt(done_bleached["accuracy"]),
-        fmt(done_bleached["precision"]),
-        fmt(done_bleached["recall"]),
-        fmt(done_bleached["f1"]),
-        done_bleached["n_true"],
-        done_bleached["n_false"],
-        done_bleached["n_not_given"],
-        done_bleached["n_unannotated"],
-    )
-
-    return results

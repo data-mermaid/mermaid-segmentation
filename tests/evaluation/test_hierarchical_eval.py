@@ -1,28 +1,24 @@
-"""``evaluate.py --hierarchical``: point-eval hierarchical and taxonomy-loss metrics on a toy taxonomy."""
+"""HierarchicalSpec and HierarchicalPointEval on a toy taxonomy.
+
+These cover the taxonomy-loss helpers. Point-eval wiring lives in the local
+hierarchical scorer (``mermaidseg.evaluation.hierarchical``), not here.
+"""
 
 from __future__ import annotations
 
-import math
-import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 
-from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
-from mermaidseg.evaluation.gt_mapping import ClassLookup, build_concept_lookup
+from mermaidseg.evaluation.gt_mapping import build_concept_lookup
 from mermaidseg.evaluation.hierarchical_eval import (
     HierarchicalSpec,
     concept_value2id_from_names,
 )
-from mermaidseg.evaluation.point_datasets import run_point_evaluation
-from mermaidseg.evaluation.predictor import CBMPredictor
-from mermaidseg.model.taxonomy_loss import TaxonomicCoherenceLoss
 
-RANKS = ["kingdom", "phylum", "class", "order", "family", "genus"]
 LINEAGES = {  # genus -> (class, order, family); kingdom animalia, phylum cnidaria
     "acropora": ("hexacorallia", "scleractinia", "acroporidae"),
     "montipora": ("hexacorallia", "scleractinia", "acroporidae"),
@@ -70,110 +66,6 @@ def taxonomy_csv(tmp_path: Path) -> Path:
     path = tmp_path / "class_to_concepts.csv"
     df.to_csv(path, index=False)
     return path
-
-
-class _FakeCBM(torch.nn.Module):
-    """Spatially constant per-rank probabilities; enough of the CBM interface for CBMPredictor."""
-
-    def __init__(self):
-        super().__init__()
-        self.concept_classifier = torch.nn.Conv2d(len(PROBS), 2, 1)
-        self.register_buffer("probs", torch.tensor(list(PROBS.values())))
-
-    def forward(self, images):
-        b, _, h, w = images.shape
-        hidden = self.probs[None, :, None, None].expand(b, -1, h, w)
-        return SimpleNamespace(hidden_states=hidden, logits=torch.zeros(b, 2, h, w))
-
-
-class _FakePointDataset:
-    """Two images in two units; one fully labelled point and one family-only point each."""
-
-    def __init__(self):
-        self.df_images = pd.DataFrame({"site": ["a", "b"], "image_id": ["1", "2"]})
-        self.df_annotations = pd.DataFrame(
-            {
-                "image_id": ["1", "1", "2", "2"],
-                "row": [3, 10, 5, 20],
-                "col": [4, 12, 6, 25],
-                "source_label_name": ["acropora", "acroporidae", "acropora", "acroporidae"],
-            }
-        )
-
-    def read_image(self, **_):
-        return np.full((32, 32, 3), 128, dtype=np.uint8)
-
-
-def _run(tmp_path, taxonomy_csv, spec):
-    names = ["acropora", "acroporidae"]
-    return run_point_evaluation(
-        eval_name=SOURCE,
-        base_ds=_FakePointDataset(),
-        unit_col="site",
-        key_cols=["image_id"],
-        predictor=CBMPredictor(_FakeCBM(), input_size=(16, 16), device="cpu"),
-        class_lookup=ClassLookup({n: 1 for n in names}, {0: "ignore", 1: "coral"}),
-        concept_lookup=build_concept_lookup(SOURCE, names, CONCEPT_NAMES, taxonomy_csv),
-        concept_names=CONCEPT_NAMES,
-        id2label={0: "ignore", 1: "coral"},
-        output_dir=tmp_path / "out",
-        num_workers=0,
-        hierarchical_spec=spec,
-    )
-
-
-def test_default_run_has_no_hierarchical_block(tmp_path, taxonomy_csv):
-    result = _run(tmp_path, taxonomy_csv, spec=None)
-    assert "hierarchical" not in result["pooled"]
-    assert all("hierarchical" not in unit for unit in result["units"].values())
-
-
-def test_evaluate_cli_defaults_to_no_hierarchical():
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-    import evaluate
-
-    args = evaluate.build_parser().parse_args(["--checkpoint", "x", "--output-dir", "y"])
-    assert args.hierarchical is False and args.ambiguity_policy == "permissive"
-
-
-def test_point_metrics_values(tmp_path, taxonomy_csv):
-    spec = HierarchicalSpec.build(CONCEPT_NAMES, taxonomy_csv)
-    result = _run(tmp_path, taxonomy_csv, spec)
-    h = result["pooled"]["hierarchical"]
-    assert h["num_points"] == 4
-    assert set(result["units"]) == {"a", "b"}
-    assert result["units"]["a"]["hierarchical"]["num_points"] == 2
-
-    # Partial target: the family-only points' genus mass inside Acroporidae.
-    assert h["partial/family->genus/subtree_mass"] == pytest.approx(0.08 + 0.04 + 0.25, abs=1e-6)
-    assert h["partial/family->genus/argmax_in_subtree"] == 0.0  # argmax is porites
-    assert h["partial/family->genus/n"] == 2
-    assert "partial/order->family/subtree_mass" not in h  # no point stops at order
-
-    # Expected distance at genus for the acropora points: siblings 1, same order 2,
-    # other class (lineages meet at phylum) 4, out of a maximum of 6.
-    expected = ((0.25 + 0.04) * 1 + (0.33 + 0.12) * 2 + (0.10 + 0.08) * 4) / 6
-    assert h["expected_distance/genus"] == pytest.approx(expected, abs=1e-6)
-    assert h["expected_distance/genus/n"] == 2
-    assert h["expected_distance/family/n"] == 4
-
-    # KL matches the training KL loss on the same probabilities (log-probs as logits).
-    coherence = TaxonomicCoherenceLoss(
-        build_taxonomy_tree(taxonomy_csv), concept_value2id_from_names(CONCEPT_NAMES)
-    )
-    logits = torch.tensor(list(PROBS.values())).log()[None, :, None, None]
-    _, kl_components = coherence(logits, torch.zeros_like(logits), torch.zeros(1, 1, 1, dtype=torch.long))
-    for pair in ("class->order", "order->family", "family->genus"):
-        assert h[f"kl/{pair}"] == pytest.approx(kl_components[f"kl/{pair}"], abs=1e-6)
-
-    # HierarchicalMetrics: argmax lineage hexacorallia/scleractinia/acroporidae/porites.
-    assert h["consistency/order->family"] == 1.0
-    assert h["consistency/family->genus"] == 0.0
-    assert h["severity/genus"] == pytest.approx(2.0)  # acropora predicted as porites
-    assert not math.isnan(h["ece/mean"])
-
-    md = (tmp_path / "out" / SOURCE / "metrics.json").read_text()
-    assert '"hierarchical"' in md
 
 
 def test_spec_rejects_mismatched_channel_order(taxonomy_csv):

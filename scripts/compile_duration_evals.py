@@ -14,9 +14,10 @@ eval of that same checkpoint after the extra 25k linear decay to LR 0, so
 
 An eval counts as finished only when ``<out>/.done`` exists (see
 slurm/sweep_loss_weights_eval.sbatch). Headline metrics match
-``scripts/compile_sweep_loss_weights.py`` and are filled only when ``.done``
-exists and ``summary.json`` parses. Every other cell stays in the CSV with
-metric columns as NaN, so the grid is stable while jobs are still running.
+``scripts/compile_sweep_loss_weights.py`` (including the merged ``extended/``
+evals) and are filled only when ``.done`` exists and ``summary.json`` parses.
+Every other cell stays in the CSV with metric columns as NaN, so the grid is
+stable while jobs are still running.
 
 Usage:
     python scripts/compile_duration_evals.py
@@ -30,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import re
 import sys
 from pathlib import Path
@@ -42,9 +42,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from compile_sweep_loss_weights import (  # noqa: E402
     METRIC_COLUMNS,
-    _empty_metrics,
+    STATUS_COLUMNS,
     _format_value,
-    _metrics_from_summary,
+    load_cell,
 )
 
 # Must match configs/training_config_cbm_duration.yaml and the cooldown launcher.
@@ -76,7 +76,7 @@ ID_COLUMNS = [
     "ckpt_epoch",
     "resolution",
     "run",
-    "done",
+    *STATUS_COLUMNS,
 ]
 ALL_COLUMNS = ID_COLUMNS + METRIC_COLUMNS
 
@@ -98,22 +98,6 @@ def cooldown_run_name(steps: int) -> str:
     return f"{MAIN_RUN}_cd{steps}"
 
 
-def _load_metrics(out_dir: Path) -> tuple[bool, dict[str, float]]:
-    """Return ``(done, metrics)``. Metrics stay NaN unless `.done` and a dict summary."""
-    metrics = _empty_metrics()
-    if not (out_dir / ".done").exists():
-        return False, metrics
-
-    summary_path = out_dir / "summary.json"
-    try:
-        summary = json.loads(summary_path.read_text())
-    except (OSError, ValueError):
-        return True, metrics
-    if not isinstance(summary, dict):
-        return True, metrics
-    return True, _metrics_from_summary(summary)
-
-
 def _row(
     *,
     cooldown: bool,
@@ -122,7 +106,6 @@ def _row(
     run: str,
     out_dir: Path,
 ) -> dict:
-    done, metrics = _load_metrics(out_dir)
     row: dict[str, object] = {
         "cooldown": cooldown,
         "constant_lr_steps": steps,
@@ -130,9 +113,8 @@ def _row(
         "ckpt_epoch": ckpt_epoch_for_steps(steps),
         "resolution": resolution,
         "run": run,
-        "done": done,
     }
-    row.update(metrics)
+    row.update(load_cell(out_dir))
     return row
 
 
@@ -260,15 +242,15 @@ def main(argv: list[str] | None = None) -> None:
     rows = build_rows(args.peak_root, args.cooldown_root)
     write_csv(rows, args.output)
 
-    def _count(cooldown: bool) -> tuple[int, int]:
+    def _count(cooldown: bool) -> str:
         subset = [r for r in rows if r["cooldown"] is cooldown]
-        return sum(1 for r in subset if r["done"]), len(subset)
+        done = sum(1 for r in subset if r["done"])
+        extended = sum(1 for r in subset if r["done_extended"])
+        return f"{done}/{len(subset)} done, {extended}/{len(subset)} extended done"
 
-    peak_done, peak_total = _count(False)
-    cd_done, cd_total = _count(True)
     print(f"Wrote {len(rows)} rows to {args.output}")
-    print(f"  peak:     {peak_done}/{peak_total} done")
-    print(f"  cooldown: {cd_done}/{cd_total} done")
+    print(f"  peak:     {_count(False)}")
+    print(f"  cooldown: {_count(True)}")
 
 
 if __name__ == "__main__":

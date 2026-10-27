@@ -14,8 +14,8 @@ training:
     # One epoch of 150_000 optimizer updates. The first 4000 are linear warmup;
     # LinearLR then decays to 0 over the remaining 146_000 updates (stepped per
     # update, so a single epoch actually decays). model_step{N} is written every
-    # 25_000 updates. ViT-H+ overrides batch_size / grad_accum_steps on the CLI
-    # (microbatch 16, 2 steps) so the effective batch stays 32.
+    # 25_000 updates. ViT-H+ overrides batch_size on the CLI to 64 with no
+    # gradient accumulation.
     epochs: 1
     optimizer:
         type: AdamW

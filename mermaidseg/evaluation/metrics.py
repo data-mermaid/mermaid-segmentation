@@ -21,6 +21,10 @@ from numpy.typing import NDArray
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 
+#: Binary concepts reported explicitly (accuracy / precision / recall / F1) next to
+#: the macro binary scores.
+REPORTED_BINARY_CONCEPTS: tuple[str, ...] = ("bleached", "anthropogenic")
+
 
 def _safe_div(num: float, den: float) -> float:
     return float(num) / float(den) if den else float("nan")
@@ -299,19 +303,19 @@ class BinaryConceptStats:
         }
 
 
-def bleached_block_from_binary(binary: dict, threshold: float = 0.5) -> dict:
-    """Copy the ``bleached`` entry out of a ``BinaryConceptStats.to_dict()`` payload.
+def concept_block_from_binary(binary: dict, concept: str, threshold: float = 0.5) -> dict:
+    """Copy one concept's entry out of a ``BinaryConceptStats.to_dict()`` payload.
 
     Raises if the channel is missing. ``not_given`` points are already excluded
     from the four confusion counts and are reported as ``n_not_given``.
     """
     per = binary.get("per_concept") if isinstance(binary, dict) else None
-    if not isinstance(per, dict) or "bleached" not in per:
+    if not isinstance(per, dict) or concept not in per:
         raise RuntimeError(
-            "Binary concept metrics have no 'bleached' channel. "
-            "The model concept list must include a channel named exactly 'bleached'."
+            f"Binary concept metrics have no {concept!r} channel. "
+            f"The model concept list must include a channel named exactly {concept!r}."
         )
-    stats = per["bleached"]
+    stats = per[concept]
     required = (
         "accuracy",
         "precision",
@@ -327,14 +331,14 @@ def bleached_block_from_binary(binary: dict, threshold: float = 0.5) -> dict:
     )
     missing = [key for key in required if key not in stats]
     if missing:
-        raise RuntimeError(f"bleached stats are missing fields: {missing}")
+        raise RuntimeError(f"{concept} stats are missing fields: {missing}")
     block = {key: stats[key] for key in required}
     block["threshold"] = float(threshold)
     return block
 
 
-class BleachedScore:
-    """Confusion counts for the binary concept ``bleached``.
+class BinaryConceptScore:
+    """Confusion counts for one binary concept (e.g. ``bleached``).
 
     Ground-truth codes are ``2=TRUE`` (positive), ``1=FALSE`` (negative), and
     ``0=not_given`` (excluded). Unannotated Coralscapes pixels (mask id 0) are
@@ -366,7 +370,7 @@ class BleachedScore:
         if np.any(bad):
             found = np.unique(gt[bad]).tolist()
             raise ValueError(
-                f"bleached codes must be 0 (not_given), 1 (False), or 2 (True); found {found}"
+                f"binary concept codes must be 0 (not_given), 1 (False), or 2 (True); found {found}"
             )
         if unannotated is None:
             unlabeled = np.zeros(gt.shape, dtype=bool)
@@ -377,7 +381,7 @@ class BleachedScore:
                     f"unannotated shape {unlabeled.shape} does not match codes {gt.shape}"
                 )
         if np.any(unlabeled & (gt != 0)):
-            raise ValueError("unannotated pixels must have bleached code 0, not TRUE or FALSE")
+            raise ValueError("unannotated pixels must have concept code 0, not TRUE or FALSE")
 
         predicted_positive = prob > self.threshold
         annotated = ~unlabeled

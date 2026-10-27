@@ -141,6 +141,8 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             ``None`` for all three splits.
         transform: Optional Albumentations transform applied to image and mask.
         class_subset: Optional list of source-space (Coralscapes V2) class names to retain.
+        hf_repo_id: HuggingFace dataset repo ID or local dataset directory (e.g. a sparsified
+            copy from ``scripts/build_sparse_dense_datasets.py``) with the same columns.
         source_id2name: Mapping from local source IDs (1..N) to Coralscapes V2 class names.
         source_name2id: Inverse of source_id2name.
         num_source_classes: ``len(source_id2name) + 1`` (incl. background).
@@ -151,6 +153,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     split: str | list[str] | None
     transform: A.BasicTransform | None
     class_subset: list[str] | None
+    hf_repo_id: str
     source_id2name: dict[int, str]
     source_name2id: dict[str, int]
     num_source_classes: int
@@ -161,15 +164,17 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         split: str | list[str] | None = None,
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
+        hf_repo_id: str = CORALSCAPES_V2_HF_REPO,
     ):
         from datasets import concatenate_datasets, load_dataset
 
         self.split = split
         self.transform = transform
         self.class_subset = class_subset
+        self.hf_repo_id = hf_repo_id
         self._global_offset = 0
 
-        hf_dataset = load_dataset(CORALSCAPES_V2_HF_REPO)
+        hf_dataset = load_dataset(self.hf_repo_id)
         if self.split is None:
             self.dataset = concatenate_datasets(
                 [

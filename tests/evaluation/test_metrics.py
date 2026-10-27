@@ -6,12 +6,13 @@ import numpy as np
 import pytest
 
 from mermaidseg.evaluation.metrics import (
+    BinaryConceptScore,
     BinaryConceptStats,
-    BleachedScore,
     ClassConfusion,
     ConceptLayout,
     MetricBundle,
     TaxonomicRankAccuracy,
+    concept_block_from_binary,
 )
 
 
@@ -149,8 +150,20 @@ def test_concept_layout_and_bundle():
     assert "kingdom" in d["taxonomic"]
 
 
-def test_bleached_score_separates_true_false_not_given_and_unannotated():
-    score = BleachedScore(threshold=0.5)
+def test_concept_block_is_copied_per_concept_and_missing_raises():
+    stats = BinaryConceptStats(["bleached", "anthropogenic"], [0, 1])
+    stats.update(np.array([[2, 1], [1, 2], [0, 2]]), np.array([[0.9, 0.1], [0.2, 0.8], [0.9, 0.3]]))
+    binary = stats.to_dict()
+    anthro = concept_block_from_binary(binary, "anthropogenic")
+    assert (anthro["tp"], anthro["fp"], anthro["fn"], anthro["tn"]) == (1, 0, 1, 1)
+    assert anthro["threshold"] == 0.5
+    assert concept_block_from_binary(binary, "bleached")["n_not_given"] == 1
+    with pytest.raises(RuntimeError, match="'sand'"):
+        concept_block_from_binary(binary, "sand")
+
+
+def test_binary_concept_score_separates_true_false_not_given_and_unannotated():
+    score = BinaryConceptScore(threshold=0.5)
     # code 2 / 0.9 -> TP; code 2 / 0.5 -> FN (exactly 0.5 is negative)
     # code 1 / 0.9 -> FP; code 1 / 0.1 -> TN
     # code 0, annotated -> not_given; code 0, unannotated -> not a negative
@@ -169,8 +182,8 @@ def test_bleached_score_separates_true_false_not_given_and_unannotated():
     assert abs(got["accuracy"] - 0.5) < 1e-9
 
 
-def test_bleached_score_rejects_unannotated_marked_true():
-    score = BleachedScore()
+def test_binary_concept_score_rejects_unannotated_marked_true():
+    score = BinaryConceptScore()
     with pytest.raises(ValueError, match="unannotated"):
         score.update(np.array([2]), np.array([0.9]), np.array([True]))
 

@@ -13,6 +13,7 @@ nbs_tmp/*
 scraping/source*.csv
 logs/*
 claude/*
+coralnet_source_report/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

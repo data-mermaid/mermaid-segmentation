@@ -1,0 +1,20 @@
+[
+  {
+    "file": "00",
+    "split": "val",
+    "index": 12,
+    "image": "RS24/4096_0"
+  },
+  {
+    "file": "01",
+    "split": "val",
+    "index": 51,
+    "image": "CR_DoubleWreck/2048_6144"
+  },
+  {
+    "file": "02",
+    "split": "val",
+    "index": 52,
+    "image": "CR_DoubleWreck/2048_8192"
+  }
+]

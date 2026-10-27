@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=mermaid-seg-eval
 #SBATCH --account=vision-beery
-#SBATCH --qos=vision-beery-main
+#SBATCH --qos=vision-beery-free
+#SBATCH --requeue
 #SBATCH --partition=vision-beery-l40s
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=50
-#SBATCH --mem=80G
+#SBATCH --mem=64G
 #SBATCH --time=71:59:00
 #SBATCH --output=/data/vision/beery/scratch/sauder/mermaid-segmentation/logs/slurm-eval-%j.out
 #SBATCH --error=/data/vision/beery/scratch/sauder/mermaid-segmentation/logs/slurm-eval-%j.err
@@ -13,15 +14,17 @@
 set -euo pipefail
 
 # ---------- parameters (passed as positional args from the launcher) ----------
-# Usage: sbatch [--job-name=...] slurm/sweep_loss_weights_eval.sbatch CKPT RES OUT
-#   CKPT : path to the checkpoint (relative to the repo root or absolute)
-#   RES  : eval resolution, 256 or 512
-#   OUT  : output directory for this (checkpoint, resolution) eval
+# Usage: sbatch [--job-name=...] slurm/sweep_loss_weights_eval.sbatch CKPT RES OUT [EVAL_ARGS]
+#   CKPT      : path to the checkpoint (relative to the repo root or absolute)
+#   RES       : eval resolution, 256 or 512
+#   OUT       : output directory for this (checkpoint, resolution) eval
+#   EVAL_ARGS : optional evaluate.py eval selection (default: --evals all)
 # NOTE: do NOT pass these via --export=ALL,VAR=...; on this cluster such jobs are
 # cancelled by a site prolog hook ~1 s after start with no logs (CANCELLED by 0).
 CKPT="${1:-${CKPT:-}}"
 RES="${2:-${RES:-}}"
 OUT="${3:-${OUT:-}}"
+EVAL_ARGS="${4:---evals all}"
 : "${CKPT:?usage: sbatch sweep_loss_weights_eval.sbatch CKPT RES OUT}"
 : "${RES:?usage: sbatch sweep_loss_weights_eval.sbatch CKPT RES OUT}"
 : "${OUT:?usage: sbatch sweep_loss_weights_eval.sbatch CKPT RES OUT}"
@@ -57,7 +60,7 @@ set -a; source $SCRATCH/mermaid-segmentation/.env; set +a
 source "$HOME/.aws/mermaid-training.env"
 
 # ---------- diagnostics ----------
-echo "[batch] node=$(hostname)  job=$SLURM_JOB_ID  gpus=$CUDA_VISIBLE_DEVICES  ckpt=$CKPT  res=$RES  out=$OUT"
+echo "[batch] node=$(hostname)  job=$SLURM_JOB_ID  gpus=$CUDA_VISIBLE_DEVICES  ckpt=$CKPT  res=$RES  out=$OUT  evals=$EVAL_ARGS"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 aws sts get-caller-identity \
     || { echo "AWS credentials invalid — check $HOME/.aws/mermaid-training.env (perms 600, keys not rotated/disabled)"; exit 2; }
@@ -70,11 +73,11 @@ rm -f "$OUT/.done"
 srun uv run python scripts/evaluate.py \
     --checkpoint "$CKPT" \
     --model-config "$MODEL_CONFIG" \
-    --data-config configs/data_config_all.yaml \
+    --data-config configs/data_config_dedup.yaml \
     --id2label demo/id2label.json \
     --concept-id2name nbs/concept_id2name.json \
     --output-dir "$OUT" \
-    --evals all \
+    $EVAL_ARGS \
     --batch-size 8 \
     --num-workers 16 \
     --amp

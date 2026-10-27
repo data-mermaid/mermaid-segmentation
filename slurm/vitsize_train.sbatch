@@ -5,7 +5,7 @@
 #SBATCH --partition=vision-beery-a100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
+#SBATCH --mem=96G
 #SBATCH --time=71:59:00
 #SBATCH --array=0-3
 #SBATCH --output=/data/vision/beery/scratch/sauder/mermaid-segmentation/logs/slurm-vitsize-%A_%a.out
@@ -14,7 +14,7 @@
 # ViT-size sweep: one 150k-update epoch (4k warmup, then linear decay to 0).
 # Array order MUST match scripts/compile_vitsize_evals.py VIT_SIZES.
 #   0 vits, 1 vitb, 2 vitl: batch 32
-#   3 vithplus: microbatch 16 x 2 grad-accum steps (effective batch 32)
+#   3 vithplus: batch 64, no gradient accumulation
 #
 # Checkpoints are local only: nbs/model_checkpoints/cbm_vitsize_<size>/model_step*
 # every 25k optimizer updates. Resubmit this file to continue a timed-out task
@@ -35,7 +35,7 @@ export MERMAIDSEG_NUM_WORKERS=28
 
 EXTRA=()
 if [[ "$SIZE" == "vithplus" ]]; then
-    EXTRA+=(--batch-size 16 --grad-accum-steps 2)
+    EXTRA+=(--batch-size 64)
 fi
 
 # ---------- relocate $HOME so nothing touches the real home dir ----------

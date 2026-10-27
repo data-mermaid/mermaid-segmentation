@@ -52,11 +52,11 @@ def test_grid_matches_the_train_sbatch_and_config():
     assert sizes.group(1).split() == VIT_SIZES
     assert "--array=0-3" in sbatch
     assert "--cpus-per-task=32" in sbatch
-    assert "--mem=128G" in sbatch
+    assert "--mem=96G" in sbatch
     assert "--time=71:59:00" in sbatch
     assert "MERMAIDSEG_NUM_WORKERS=28" in sbatch
-    assert "--grad-accum-steps 2" in sbatch
-    assert "--batch-size 16" in sbatch
+    assert "--batch-size 64" in sbatch
+    assert "--grad-accum-steps" not in sbatch
 
     training = (_REPO / "configs" / "training_config_cbm_vitsize.yaml").read_text()
     assert _yaml_int(training, "iterations_per_train_epoch") == TOTAL_STEPS

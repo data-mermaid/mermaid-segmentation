@@ -12,9 +12,10 @@ updates of the fine-tune. The grid is train resolutions {256, 384, 512, 768}
 x steps 10000..50000 x prediction resolutions {256, 384, 512, 768, 1024}.
 
 ``total_steps`` is 700000 (the cooled rank-16 source) plus the fine-tune step.
-Headline metrics match ``scripts/compile_sweep_loss_weights.py`` and are filled
-only when ``.done`` exists and ``summary.json`` parses. Every other cell stays
-in the CSV with metric columns as NaN.
+Headline metrics match ``scripts/compile_sweep_loss_weights.py`` (including the
+merged ``extended/`` evals) and are filled only when ``.done`` exists and
+``summary.json`` parses. Every other cell stays in the CSV with metric columns
+as NaN.
 
 Usage:
     python scripts/compile_hires_evals.py
@@ -27,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import re
 import sys
 from pathlib import Path
@@ -39,9 +39,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from compile_sweep_loss_weights import (  # noqa: E402
     METRIC_COLUMNS,
-    _empty_metrics,
+    STATUS_COLUMNS,
     _format_value,
-    _metrics_from_summary,
+    load_cell,
 )
 
 # Must match slurm/hires_train.sbatch and configs/training_config_cbm_hires.yaml.
@@ -70,7 +70,7 @@ ID_COLUMNS = [
     "finetune_steps",
     "total_steps",
     "pred_resolution",
-    "done",
+    *STATUS_COLUMNS,
 ]
 ALL_COLUMNS = ID_COLUMNS + METRIC_COLUMNS
 
@@ -96,22 +96,6 @@ def grad_accum_steps(resolution: int, microbatch: int) -> int | None:
     return None
 
 
-def _load_metrics(out_dir: Path) -> tuple[bool, dict[str, float]]:
-    """Return ``(done, metrics)``. Metrics stay NaN unless `.done` and a dict summary."""
-    metrics = _empty_metrics()
-    if not (out_dir / ".done").exists():
-        return False, metrics
-
-    summary_path = out_dir / "summary.json"
-    try:
-        summary = json.loads(summary_path.read_text())
-    except (OSError, ValueError):
-        return True, metrics
-    if not isinstance(summary, dict):
-        return True, metrics
-    return True, _metrics_from_summary(summary)
-
-
 def _row(
     run: str,
     train_resolution: int,
@@ -120,7 +104,6 @@ def _row(
     pred_resolution: int,
     out_dir: Path,
 ) -> dict:
-    done, metrics = _load_metrics(out_dir)
     accum = grad_accum_steps(train_resolution, microbatch)
     row: dict[str, object] = {
         "run": run,
@@ -130,9 +113,8 @@ def _row(
         "finetune_steps": finetune_steps,
         "total_steps": SOURCE_STEPS + finetune_steps,
         "pred_resolution": pred_resolution,
-        "done": done,
     }
-    row.update(metrics)
+    row.update(load_cell(out_dir))
     return row
 
 
@@ -231,9 +213,11 @@ def main(argv: list[str] | None = None) -> None:
     rows = build_rows(args.root)
     write_csv(rows, output)
     n_done = sum(1 for row in rows if row["done"])
+    n_extended = sum(1 for row in rows if row["done_extended"])
     print(
         f"Wrote {len(rows)} rows to {output} "
-        f"({n_done} done, {len(rows) - n_done} missing/incomplete -> NaN)."
+        f"({n_done} done, {len(rows) - n_done} missing/incomplete -> NaN; "
+        f"{n_extended} extended done)."
     )
 
 

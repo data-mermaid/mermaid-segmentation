@@ -139,7 +139,7 @@ def test_write_csv_header_matches_sweep_metrics(tmp_path: Path):
         reader = csv.reader(f)
         header = next(reader)
         first = next(reader)
-    assert header[:7] == [
+    assert header[:8] == [
         "cooldown",
         "constant_lr_steps",
         "total_steps",
@@ -147,8 +147,10 @@ def test_write_csv_header_matches_sweep_metrics(tmp_path: Path):
         "resolution",
         "run",
         "done",
+        "done_extended",
     ]
-    assert header[7:] == METRIC_COLUMNS
+    assert header[8:] == METRIC_COLUMNS
     assert first[0] == "false"
     assert first[6] == "false"
-    assert first[7] == "nan"
+    assert first[7] == "false"
+    assert first[8] == "nan"

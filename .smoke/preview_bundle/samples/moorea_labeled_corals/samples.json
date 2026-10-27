@@ -1,0 +1,20 @@
+[
+  {
+    "file": "00",
+    "split": "train",
+    "image_id": "mcr_lter1_out10m_pole2-3_qu7_20090330",
+    "n_points": 187
+  },
+  {
+    "file": "01",
+    "split": "train",
+    "image_id": "mcr_lter1_out17m_pole2-3_qu8_20090330",
+    "n_points": 196
+  },
+  {
+    "file": "02",
+    "split": "train",
+    "image_id": "mcr_lter3_fringingreef_pole3-4_qu3_20090412",
+    "n_points": 197
+  }
+]

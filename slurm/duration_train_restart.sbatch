@@ -4,8 +4,8 @@
 #SBATCH --qos=vision-beery-main
 #SBATCH --partition=vision-beery-a100
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=256G
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=96G
 #SBATCH --time=14-00:00:00
 #SBATCH --output=/data/vision/beery/scratch/sauder/mermaid-segmentation/logs/slurm-duration-restart-%j.out
 #SBATCH --error=/data/vision/beery/scratch/sauder/mermaid-segmentation/logs/slurm-duration-restart-%j.err
@@ -33,10 +33,8 @@ ITERS_PER_EPOCH=25000
 # Outside the original resume offsets (4..43) and the cooldown seed (1004).
 DATA_SEED=2004
 
-# 64 CPUs, but leave a few for the main process and the pin-memory thread.
-# Prefetch 2 keeps the queued-batch count near the 32-CPU sweep (32*3=96).
-export MERMAIDSEG_NUM_WORKERS=56
-export MERMAIDSEG_PREFETCH_FACTOR=2
+# 32 CPUs, 28 workers, leave the rest for the main process and pin-memory thread.
+export MERMAIDSEG_NUM_WORKERS=28
 
 # ---------- relocate $HOME so nothing touches the real home dir ----------
 export SCRATCH=/data/vision/beery/scratch/sauder

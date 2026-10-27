@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Count images, annotations, and annotated pixels for the reconciled dataset table.
 
-Reads the same cached data as the training jobs (``configs/data_config_all.yaml``
+Reads the same cached data as the training jobs (``configs/data_config_dedup.yaml``
 and the local S3 cache / Hugging Face cache). Crops, padding, and color
 transforms are not applied, so counts are native annotations.
 
@@ -49,7 +49,7 @@ from scipy import ndimage
 logger = logging.getLogger("dataset_table_stats")
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATA_CONFIG = _REPO_ROOT / "configs" / "data_config_all.yaml"
+DEFAULT_DATA_CONFIG = _REPO_ROOT / "configs" / "data_config_dedup.yaml"
 DEFAULT_CONCEPTS_CSV = _REPO_ROOT / "configs" / "class_to_concepts.csv"
 DEFAULT_OUTPUT = _REPO_ROOT / "dataset_stats" / "dataset_table.csv"
 

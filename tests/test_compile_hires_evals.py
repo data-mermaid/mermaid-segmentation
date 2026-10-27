@@ -71,7 +71,7 @@ def test_grid_matches_the_train_sbatch_and_config():
     assert "--array=0-3" in sbatch
     assert "--partition=vision-beery-a100" in sbatch
     assert "--cpus-per-task=32" in sbatch
-    assert "--mem=128G" in sbatch
+    assert "--mem=96G" in sbatch
     assert "--time=71:59:00" in sbatch
     assert "MERMAIDSEG_NUM_WORKERS=28" in sbatch
     assert "--init-weights" in sbatch
@@ -101,7 +101,7 @@ def test_grid_matches_the_train_sbatch_and_config():
     assert "--mem=64G" in eval_sbatch
     assert "--time=4:00:00" in eval_sbatch
     assert "--num-workers 16" in eval_sbatch
-    assert "configs/data_config_all.yaml" in eval_sbatch
+    assert "configs/data_config_dedup.yaml" in eval_sbatch
     assert "EVAL_BATCH=8" in eval_sbatch
     assert "EVAL_BATCH=2" in eval_sbatch
     assert "EVAL_BATCH=1" in eval_sbatch
@@ -140,8 +140,8 @@ def test_grid_matches_the_train_sbatch_and_config():
     assert args.output is None
 
 
-def test_data_configs_match_all_except_spatial_size():
-    base = (_REPO / "configs" / "data_config_all.yaml").read_text()
+def test_data_configs_match_dedup_except_spatial_size():
+    base = (_REPO / "configs" / "data_config_dedup.yaml").read_text()
     for size in (256, 384, 512, 768):
         text = (_REPO / "configs" / f"data_config_hires_{size}.yaml").read_text()
         assert "max_size: 1024" in text

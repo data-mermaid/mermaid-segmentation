@@ -1,0 +1,3 @@
+source_id	split	images_in_source	url
+3373	train	425	https://coralnet.ai/source/3373/
+5688	train	40	https://coralnet.ai/source/5688/

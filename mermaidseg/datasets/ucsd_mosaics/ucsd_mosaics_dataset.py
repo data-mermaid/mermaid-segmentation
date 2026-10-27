@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import albumentations as A
@@ -57,8 +58,10 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         class_subset: Optional list of class names (from ``classes.json``) to
             retain. Non-subset classes (and the ignore label) map to ``0``.
         transform: Optional Albumentations transform applied to image and mask.
-        hf_repo_id: HuggingFace dataset repo ID; override only for testing or
-            to point at a fork of the mirror.
+        hf_repo_id: HuggingFace dataset repo ID or local dataset directory
+            holding ``classes.json`` (e.g. a sparsified copy from
+            ``scripts/build_sparse_dense_datasets.py``); override only for
+            testing or to point at a fork of the mirror.
 
     Attributes:
         SOURCE_NAME: ``"ucsd_mosaics"``.
@@ -118,9 +121,13 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.class_subset = class_subset
         self._global_offset = 0
 
-        classes_path = hf_hub_download(
-            repo_id=self.hf_repo_id, filename="classes.json", repo_type="dataset"
-        )
+        local_dir = Path(self.hf_repo_id)
+        if local_dir.is_dir():
+            classes_path = local_dir / "classes.json"
+        else:
+            classes_path = hf_hub_download(
+                repo_id=self.hf_repo_id, filename="classes.json", repo_type="dataset"
+            )
         with open(classes_path) as f:
             self.class_table = sorted(json.load(f), key=lambda e: int(e["id"]))
 

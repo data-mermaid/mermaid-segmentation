@@ -1,0 +1,20 @@
+[
+  {
+    "file": "00",
+    "split": "train",
+    "image_id": "e1004580-55ea-403b-9a4d-19464871276a",
+    "n_points": 25
+  },
+  {
+    "file": "01",
+    "split": "train",
+    "image_id": "abbdd899-58d7-4476-a33f-65aba737e80b",
+    "n_points": 25
+  },
+  {
+    "file": "02",
+    "split": "train",
+    "image_id": "a3d7e4fb-2d8c-45c0-8475-e0608d54eb96",
+    "n_points": 25
+  }
+]

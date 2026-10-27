@@ -1,0 +1,65 @@
+<!doctype html><html><head><meta charset='utf-8'><title>CoralNet source quality</title><style>
+body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 24px; color: #222; }
+h1, h2 { font-weight: 600; }
+a { color: #0b62a4; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.hists { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 12px;
+         max-width: 1600px; }
+.hists figure { margin: 0; }
+.hists img { width: 100%; border: 1px solid #ddd; }
+.controls { margin: 16px 0; display: flex; gap: 12px; align-items: center; white-space: nowrap; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 13px; }
+th, td { padding: 4px 10px; border-bottom: 1px solid #eee; text-align: right; }
+th { position: sticky; top: 0; background: #f5f5f5; cursor: pointer; user-select: none; }
+th.sorted-asc::after { content: " \25B2"; }
+th.sorted-desc::after { content: " \25BC"; }
+td.l, th.l { text-align: left; }
+tr:hover td { background: #fafafa; }
+.stats { display: flex; flex-wrap: wrap; gap: 24px; margin: 12px 0 24px; }
+.stat { background: #f5f5f5; padding: 8px 14px; border-radius: 6px; }
+.stat b { display: block; font-size: 20px; }
+.bars img { max-width: 100%; border: 1px solid #ddd; margin-bottom: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); gap: 12px; }
+.grid figure { margin: 0; }
+.grid img { width: 100%; border: 1px solid #ddd; }
+.grid figcaption { font-size: 12px; color: #555; }
+.note { color: #a33; }
+details { margin: 16px 0; }
+</style></head><body><h1>CoralNet source quality</h1><p>3 sources, 3,832 images, 83,200 annotated pixels (one per point). Manifest: <code>etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet</code>. Genera and coral genera (hexacorallia + octocorallia) come from <code>configs/class_to_concepts.csv</code>.</p><h2>Distributions over sources</h2><div class='hists'><figure><img src='hist/n_images.png' alt='Images'></figure><figure><img src='hist/n_pixels.png' alt='Annotated pixels'></figure><figure><img src='hist/n_labels.png' alt='Source labels'></figure><figure><img src='hist/n_genera.png' alt='Genera'></figure><figure><img src='hist/n_coral_genera.png' alt='Coral genera'></figure><figure><img src='hist/avg_pixels_per_image.png' alt='Avg pixels / image'></figure></div><h2>Sources</h2><div class='controls'><input id='q' placeholder='Filter...' size='30'><select id='split'><option value=''>all splits</option><option value='train'>train</option><option value='val'>val</option><option value='test'>test</option><option value='none'>none</option></select><span id='count'></span><a href='source_stats.csv'>source_stats.csv</a></div><div class='scroll'><table id='t'><thead><tr><th class='l' data-type='num'>Source</th><th class='l' data-type='str'>Split</th><th data-type='num'>Images</th><th data-type='num'>Annotated pixels</th><th data-type='num'>Source labels</th><th data-type='num'>Genera</th><th data-type='num'>Coral genera</th><th data-type='num'>Avg pixels / image</th><th data-type='num'>% pixels genus-level</th><th data-type='num'>% pixels unmapped</th><th class='l' data-type='str'>CoralNet</th></tr></thead><tbody><tr data-split='val'><td class='l' data-v='1645'><a href='sources/s1645.html'>s1645</a></td><td class='l' data-v='val'>val</td><td data-v='3000.0'>3,000</td><td data-v='60000.0'>60,000</td><td data-v='72.0'>72</td><td data-v='42.0'>42</td><td data-v='40.0'>40</td><td data-v='20.0'>20.0</td><td data-v='19.003333333333334'>19.0</td><td data-v='0.009999999999998899'>0.0</td><td class='l' data-v='1645'><a href='https://coralnet.ai/source/1645/' target='_blank'>coralnet.ai</a></td></tr><tr data-split='train'><td class='l' data-v='23'><a href='sources/s23.html'>s23</a></td><td class='l' data-v='train'>train</td><td data-v='750.0'>750</td><td data-v='15000.0'>15,000</td><td data-v='20.0'>20</td><td data-v='5.0'>5</td><td data-v='4.0'>4</td><td data-v='20.0'>20.0</td><td data-v='1.1066666666666667'>1.1</td><td data-v='2.4933333333333363'>2.5</td><td class='l' data-v='23'><a href='https://coralnet.ai/source/23/' target='_blank'>coralnet.ai</a></td></tr><tr data-split='train'><td class='l' data-v='57'><a href='sources/s57.html'>s57</a></td><td class='l' data-v='train'>train</td><td data-v='82.0'>82</td><td data-v='8200.0'>8,200</td><td data-v='27.0'>27</td><td data-v='9.0'>9</td><td data-v='7.0'>7</td><td data-v='100.0'>100.0</td><td data-v='28.134146341463413'>28.1</td><td data-v='1.9756097560975627'>2.0</td><td class='l' data-v='57'><a href='https://coralnet.ai/source/57/' target='_blank'>coralnet.ai</a></td></tr></tbody></table></div><script>
+const table = document.getElementById('t');
+const tbody = table.tBodies[0];
+const headers = table.tHead.rows[0].cells;
+let sortCol = -1, sortDir = 1;
+for (let i = 0; i < headers.length; i++) {
+  headers[i].addEventListener('click', () => {
+    sortDir = (sortCol === i) ? -sortDir : (headers[i].dataset.type === 'num' ? -1 : 1);
+    sortCol = i;
+    const num = headers[i].dataset.type === 'num';
+    const rows = Array.from(tbody.rows);
+    rows.sort((a, b) => {
+      const x = a.cells[i].dataset.v, y = b.cells[i].dataset.v;
+      return sortDir * (num ? parseFloat(x) - parseFloat(y) : x.localeCompare(y));
+    });
+    rows.forEach(r => tbody.appendChild(r));
+    for (const h of headers) h.classList.remove('sorted-asc', 'sorted-desc');
+    headers[i].classList.add(sortDir > 0 ? 'sorted-asc' : 'sorted-desc');
+  });
+}
+const q = document.getElementById('q'), split = document.getElementById('split');
+const count = document.getElementById('count');
+function applyFilter() {
+  const text = q.value.trim().toLowerCase(), s = split.value;
+  let shown = 0;
+  for (const r of tbody.rows) {
+    const ok = (!text || r.textContent.toLowerCase().includes(text))
+      && (!s || r.dataset.split === s);
+    r.style.display = ok ? '' : 'none';
+    shown += ok;
+  }
+  count.textContent = shown + ' sources shown';
+}
+q.addEventListener('input', applyFilter);
+split.addEventListener('change', applyFilter);
+applyFilter();
+</script></body></html>

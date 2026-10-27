@@ -1,4 +1,4 @@
-"""Strided Coralscapes window geometry and bleached code table."""
+"""Strided Coralscapes window geometry and binary concept code tables."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import torch
 from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPES_V2_ID2NAME
 from mermaidseg.evaluation.coralscapes_probe import (
     average_window_logits,
-    build_coralscapes_bleached_codes,
+    build_coralscapes_concept_codes,
     coralscapes_windows,
     evaluate_coralscapes_probe,
 )
@@ -60,8 +60,24 @@ def test_non_concept_feature_kind_raises(tmp_path: Path):
         )
 
 
+def test_unknown_split_raises(tmp_path: Path):
+    probe = tmp_path / "probe.json"
+    probe.write_text('{"images": [], "num_images": 0, "total_points": 0, "points_per_class_target": 10}')
+    with pytest.raises(ValueError, match="unknown Coralscapes splits"):
+        evaluate_coralscapes_probe(
+            predictor=None,  # type: ignore[arg-type]
+            probe_json=probe,
+            feature_kinds=["concepts"],
+            coralscapes_root=None,
+            output_dir=tmp_path / "out",
+            concept_names=["bleached", "anthropogenic"],
+            taxonomy_csv=_CSV,
+            splits=["train"],
+        )
+
+
 def test_coralscapes_bleached_codes_match_the_concept_table():
-    codes = build_coralscapes_bleached_codes(_CSV)
+    codes = build_coralscapes_concept_codes(_CSV, "bleached")
     assert codes.shape == (96,)
     assert int(codes[0]) == 0
     assert int((codes[1:] == 2).sum()) == 19
@@ -72,6 +88,16 @@ def test_coralscapes_bleached_codes_match_the_concept_table():
     assert by_name["acropora alive"] == 1
     assert by_name["acropora dead"] == 1
     assert by_name["background"] == 1
+    assert by_name["sand"] == 1
+
+
+def test_coralscapes_anthropogenic_codes_match_the_concept_table():
+    codes = build_coralscapes_concept_codes(_CSV, "anthropogenic")
+    assert int(codes[0]) == 0
+    by_name = {name: int(codes[class_id]) for class_id, name in CORALSCAPES_V2_ID2NAME.items()}
+    positives = {name for name, code in by_name.items() if code == 2}
+    assert positives == {"human", "human-made structure", "transect line", "transect tools", "trash"}
+    assert {name for name, code in by_name.items() if code == 0} == {"water column", "water surface"}
     assert by_name["sand"] == 1
 
 
@@ -92,10 +118,10 @@ def _csv_with_sand_cell(tmp_path: Path, cell: str | None, drop_sand: bool = Fals
 def test_missing_coralscapes_class_is_not_treated_as_not_given(tmp_path: Path):
     path = _csv_with_sand_cell(tmp_path, cell=None, drop_sand=True)
     with pytest.raises(RuntimeError, match="sand"):
-        build_coralscapes_bleached_codes(path)
+        build_coralscapes_concept_codes(path, "bleached")
 
 
 def test_unexpected_bleached_cell_raises(tmp_path: Path):
     path = _csv_with_sand_cell(tmp_path, cell="maybe")
     with pytest.raises(RuntimeError, match="maybe"):
-        build_coralscapes_bleached_codes(path)
+        build_coralscapes_concept_codes(path, "bleached")

@@ -4,8 +4,8 @@
 #SBATCH --qos=vision-beery-main
 #SBATCH --partition=vision-beery-a100
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=50
-#SBATCH --mem=256G
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=96G
 #SBATCH --time=71:59:00
 #SBATCH --output=/data/vision/beery/scratch/sauder/mermaid-segmentation/logs/slurm-5x-%j.out
 #SBATCH --error=/data/vision/beery/scratch/sauder/mermaid-segmentation/logs/slurm-5x-%j.err
