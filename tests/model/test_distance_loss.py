@@ -182,5 +182,5 @@ def test_real_class_to_concepts():
     g = genera.index
     assert distance[g("acropora"), g("montipora")] == pytest.approx(1 / 6)  # same family
     assert distance[g("acropora"), g("none")] == 1
-    # Homonym: turbinaria the coral is a sibling of the coral genus Tubastraea (Dendrophylliidae).
-    assert distance[g("turbinaria"), g("tubastraea")] == pytest.approx(1 / 6)
+    # Coral Turbinaria is a sibling of Tubastraea (Dendrophylliidae).
+    assert distance[g("turbinaria_coral"), g("tubastraea")] == pytest.approx(1 / 6)

@@ -76,7 +76,7 @@ p.add_argument(
     "--ambiguity-policy",
     default="permissive",
     choices=["permissive", "exclude", "strict"],
-    help="how to treat multi-parent taxa (e.g. the turbinaria homonym); --hier only",
+    help="how to treat multi-parent taxa (Turbinaria is turbinaria_coral vs turbinaria_algae); --hier only",
 )
 p.add_argument(
     "--concept-mapping",

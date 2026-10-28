@@ -19,6 +19,7 @@ from mermaidseg.logger import (
     WandbLogger,
     get_mlflow_tracking_uri,
     mlflow_connect,
+    prune_rolling_checkpoints,
 )
 from tests._dataset_stubs import make_mermaid_stub, make_registry_stub
 
@@ -505,6 +506,68 @@ class TestSaveModelCheckpoint:
         assert ckpt["warmup_iters_completed"] == 4000
         assert ckpt["epoch_complete"] is False
         assert ckpt["epoch"] == 0
+
+    def test_atomic_checkpoint_leaves_no_partial(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="atomic-ckpt")
+        meta.global_step = 1000
+        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        lgr.save_model_checkpoint(
+            meta,
+            epoch=0,
+            metrics_dict={},
+            is_best=False,
+            checkpoint_name="model_preempt1000",
+            epoch_complete=False,
+            atomic=True,
+        )
+        directory = tmp_path / "model_checkpoints" / "atomic-ckpt"
+        final = directory / "model_preempt1000"
+        assert final.is_file()
+        assert not (directory / "model_preempt1000.partial").exists()
+        ckpt = torch.load(final, weights_only=False)
+        assert ckpt["global_step"] == 1000
+        assert ckpt["epoch_complete"] is False
+        assert ckpt["optimizer_state_dict"]
+        assert ckpt["scheduler_state_dict"]
+        assert ckpt["model_state_dict"]
+
+        (directory / "model_preempt500").write_bytes(b"stale")
+        (directory / "model_preempt500.partial").write_bytes(b"partial")
+        (directory / "model_step25000").write_bytes(b"keep")
+        (directory / "model_epoch0").write_bytes(b"keep")
+        prune_rolling_checkpoints(str(directory), keep_name="model_preempt1000")
+        assert final.is_file()
+        assert (directory / "model_step25000").is_file()
+        assert (directory / "model_epoch0").is_file()
+        assert not (directory / "model_preempt500").exists()
+        assert not (directory / "model_preempt500.partial").exists()
+
+    def test_wandb_run_id_env_resumes(self, monkeypatch):
+        monkeypatch.setenv("WANDB_RUN_ID", "engaging-cbm_vitsize_vitl")
+        with (
+            patch("mermaidseg.logger.WANDB_IMPORT_ERROR", None),
+            patch("mermaidseg.logger.wandb") as mock_wandb,
+        ):
+            mock_wandb.init.return_value = MagicMock(id="engaging-cbm_vitsize_vitl")
+            WandbLogger(
+                project="mermaidseg",
+                run_name="cbm_vitsize_vitl",
+                config={},
+                num_classes=3,
+            )
+        assert mock_wandb.init.call_args.kwargs["id"] == "engaging-cbm_vitsize_vitl"
+        assert mock_wandb.init.call_args.kwargs["resume"] == "allow"
+
+    def test_wandb_run_id_unset_starts_a_new_run(self, monkeypatch):
+        monkeypatch.delenv("WANDB_RUN_ID", raising=False)
+        with (
+            patch("mermaidseg.logger.WANDB_IMPORT_ERROR", None),
+            patch("mermaidseg.logger.wandb") as mock_wandb,
+        ):
+            mock_wandb.init.return_value = MagicMock(id="fresh")
+            WandbLogger(project="mermaidseg", run_name="fresh", config={}, num_classes=3)
+        assert mock_wandb.init.call_args.kwargs["id"] is None
+        assert mock_wandb.init.call_args.kwargs["resume"] is None
 
     def test_mlflow_model_logged_when_local_disabled(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="mlflow-no-local")

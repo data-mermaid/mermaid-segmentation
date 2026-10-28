@@ -208,7 +208,7 @@ def test_none_is_not_a_descendant_of_concrete_taxa():
 
 
 def test_parent_matrices_from_class_to_concepts():
-    """The real CSV maps onto the run's concept channels and keeps known multi-parent taxa."""
+    """The real CSV maps onto the run's concept channels, with Turbinaria split by lineage."""
     sources = {"benthos_yuval", "catlin_seaview", "coralnet", "coralscapes_v2", "mermaid"}
     value2id = ConceptSchema.from_csv(DEFAULT_CLASS_TO_CONCEPTS_CSV, sources=sources).concept_value2id
     matrices = build_parent_matrices(build_taxonomy_tree(DEFAULT_CLASS_TO_CONCEPTS_CSV), value2id)
@@ -218,8 +218,14 @@ def test_parent_matrices_from_class_to_concepts():
     family_genus = matrices[(4, 5)]
     assert family_genus.shape == (len(families), len(genera))
     assert family_genus[families.index("acroporidae"), genera.index("acropora")] == 1
-    parents = {families[i] for i in family_genus[:, genera.index("turbinaria")].nonzero().flatten()}
-    assert parents == {"dendrophylliidae", "sargassaceae"}
+    coral_parents = {
+        families[i] for i in family_genus[:, genera.index("turbinaria_coral")].nonzero().flatten()
+    }
+    algae_parents = {
+        families[i] for i in family_genus[:, genera.index("turbinaria_algae")].nonzero().flatten()
+    }
+    assert coral_parents == {"dendrophylliidae"}
+    assert algae_parents == {"sargassaceae"}
     assert family_genus[families.index("none"), genera.index("none")] == 1
     assert family_genus[:, genera.index("none")].sum() == 1  # never a child of a real taxon
 

@@ -18,7 +18,7 @@ from mermaidseg.datasets import (
     setup_local_cache,
 )
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
-from mermaidseg.logger import Logger
+from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
 from mermaidseg.model.models import align_peft_checkpoint_state_dict
@@ -134,6 +134,15 @@ parser.add_argument(
     help="microbatches per optimizer step (default: training config, usually 1)",
 )
 parser.add_argument(
+    "--preempt-checkpoint-every-steps",
+    type=int,
+    default=0,
+    help=(
+        "Also write one rolling model_preempt{step} checkpoint every N optimizer "
+        "updates (0 disables). model_step / model_epoch interval checkpoints are unchanged."
+    ),
+)
+parser.add_argument(
     "--checkpoint",
     default=None,
     help="path to a checkpoint to resume from (overrides the CHECKPOINT constant)",
@@ -164,6 +173,8 @@ parser.add_argument(
 )
 parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
 args = parser.parse_args()
+if args.preempt_checkpoint_every_steps < 0:
+    parser.error("--preempt-checkpoint-every-steps must be >= 0")
 _init_flags = [args.checkpoint, args.init_checkpoint, args.init_weights]
 if sum(flag is not None for flag in _init_flags) > 1:
     parser.error("pass only one of --checkpoint, --init-checkpoint, and --init-weights")
@@ -404,21 +415,43 @@ with Logger(
 
     metrics_all: dict[int, dict] = {}
     checkpoint_every = int(cfg.training.get("checkpoint_every_steps", 0) or 0)
+    preempt_every = int(args.preempt_checkpoint_every_steps or 0)
     total_updates = int(cfg.training.epochs) * int(cfg.training.iterations_per_train_epoch)
 
     for epoch in range(start_epoch, cfg.training.epochs):
 
         def _save_step_checkpoint(meta, epoch=epoch):
-            if checkpoint_every <= 0 or meta.global_step % checkpoint_every != 0:
-                return
-            run_logger.save_model_checkpoint(
-                meta,
-                epoch,
-                {},
-                is_best=False,
-                checkpoint_name=f"model_step{meta.global_step}",
-                epoch_complete=meta.global_step >= total_updates,
-            )
+            step = int(meta.global_step)
+            # Interval checkpoints (eval cadence). Unchanged when preempt_every is 0,
+            # which is every CSAIL job.
+            if checkpoint_every > 0 and step % checkpoint_every == 0:
+                run_logger.save_model_checkpoint(
+                    meta,
+                    epoch,
+                    {},
+                    is_best=False,
+                    checkpoint_name=f"model_step{step}",
+                    epoch_complete=step >= total_updates,
+                )
+            # One rolling file for preemption. epoch_complete stays false until the
+            # run is finished, so a resume reseeds with SEED + global_step and
+            # continues this epoch. Older model_preempt* files are deleted after
+            # the rename; model_step* and model_epoch* are not.
+            if preempt_every > 0 and step > 0 and step % preempt_every == 0:
+                name = f"model_preempt{step}"
+                run_logger.save_model_checkpoint(
+                    meta,
+                    epoch,
+                    {},
+                    is_best=False,
+                    checkpoint_name=name,
+                    epoch_complete=step >= total_updates,
+                    atomic=True,
+                )
+                prune_rolling_checkpoints(
+                    os.path.join(run_logger.checkpoint_dir, "model_checkpoints", meta.run_name),
+                    keep_name=name,
+                )
 
         metrics = train_model(
             meta_model=meta_model,
