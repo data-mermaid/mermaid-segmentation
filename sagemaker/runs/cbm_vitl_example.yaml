@@ -1,0 +1,36 @@
+# Concept-bottleneck ViT-L (LoRA + DPT) on SageMaker. Mirrors the cbm_vitsize_vitl task of
+# slurm/engaging/vitsize_train.sbatch (effective batch 32: batch-size 16 x grad-accum-steps 2);
+# Slurm is the default launcher, this is the backup path.
+job:
+  name_prefix: mermaidseg-cbm-vitl
+  image: mermaid-segmentation-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.g5.4xlarge
+  # The ML volume also holds the trainer's write-through S3 mirror (/opt/ml/cache) unless a
+  # `cache` channel is given: size it for the mirror plus checkpoints, not just the code.
+  volume_gb: 200
+  max_runtime_hours: 48
+  env:
+    MERMAIDSEG_NUM_WORKERS: "12"
+
+# Optional input channels (extra `channels:` entries are mounted at /opt/ml/input/data/<name>).
+# A channel named `cache` becomes MERMAIDSEG_LOCAL_CACHE_DIR; without one the entrypoint points it
+# at /opt/ml/cache on the ML volume and the trainer fills it from S3 as it reads.
+# training:
+#   channels:
+#     cache:
+#       s3_uri: s3://<bucket>/<prefix>/
+#       input_mode: File
+
+# Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher). Config paths are
+# relative to nbs/, where the trainer runs; keys under `overrides` become `--<key> <value>`.
+config:
+  config_training: ../configs/training_config_cbm_vitsize.yaml
+  config_model: ../configs/model_config_cbm_dpt_lora_vitl_256.yaml
+  overrides:
+    run-name: cbm_vitsize_vitl_sagemaker
+    per-pixel-loss-weight: 0.5
+    per-image-loss-weight: 0.5
+    preempt-checkpoint-every-steps: 1000
+    batch-size: 16
+    grad-accum-steps: 2

@@ -6,7 +6,7 @@
 # Autosave the .ipynb file every 30 seconds (default: 120s).
 # Captures any cell outputs that reached the browser before a disconnect.
 # Does NOT capture outputs produced while the browser is disconnected —
-# use scripts/train.py with file-based logging for long-running cells.
+# use nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py (or slurm/engaging/) with file-based logging for long-running cells.
 c.ServerApp.autosave_interval = 30  # noqa: F821 — Jupyter injects `c` at runtime
 
 # Never cull idle kernels. Without this, JupyterLab can kill a kernel that

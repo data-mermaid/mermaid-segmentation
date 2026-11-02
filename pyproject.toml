@@ -40,6 +40,10 @@ test-live = [
 demo = [
     "gradio>=5.0",
 ]
+# Host-side SageMaker job submission (scripts/launch_training.py); imported lazily.
+sagemaker = [
+    "sagemaker-core>=2.27,<3",
+]
 
 [dependency-groups]
 research = [
