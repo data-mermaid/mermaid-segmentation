@@ -1,18 +1,25 @@
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import torch
+import transformers
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModel, DPTConfig
+from transformers import AutoConfig, AutoModel, DPTConfig, PretrainedConfig
 from transformers.modeling_outputs import SemanticSegmenterOutput
 from transformers.models.dpt.modeling_dpt import DPTNeck
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 
 DEFAULT_LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
+# from_config's dtype override is ``dtype`` from transformers 4.56 on, ``torch_dtype`` before.
+_FROM_CONFIG_DTYPE_KWARG = (
+    "dtype"
+    if tuple(int(part) for part in transformers.__version__.split(".")[:2]) >= (4, 56)
+    else "torch_dtype"
+)
 
 
 @dataclass
@@ -412,6 +419,19 @@ def align_peft_checkpoint_state_dict(
     }
 
 
+def _as_pretrained_config(encoder_config: Mapping[str, Any] | PretrainedConfig) -> PretrainedConfig:
+    """Return ``encoder_config`` as a ``PretrainedConfig``, rebuilding it from a ``to_dict()``."""
+    if isinstance(encoder_config, PretrainedConfig):
+        return encoder_config
+    fields = dict(encoder_config)
+    model_type = fields.pop("model_type", None)
+    if not model_type:
+        raise ValueError(
+            "encoder_config dict needs a 'model_type' key (from PretrainedConfig.to_dict())."
+        )
+    return AutoConfig.for_model(model_type, **fields)
+
+
 class DPTHead(torch.nn.Module):
     """Dense Prediction Transformer head over selected ViT hidden states.
 
@@ -537,11 +557,20 @@ class _DPTDINOv3Base(torch.nn.Module):
         lora_dropout: float = 0.05,
         lora_target_modules: Sequence[str] = DEFAULT_LORA_TARGET_MODULES,
         lora_bias: str = "none",
+        encoder_config: Mapping[str, Any] | PretrainedConfig | None = None,
         **kwargs: Any,
     ):
         super().__init__()
         token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
-        base_encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
+        if encoder_config is not None:
+            # Random-init encoder from a stored config: no hub access; weights come from a state dict.
+            # fp32 regardless of the config's dtype, so an fp32 state dict is not down-cast.
+            base_encoder = AutoModel.from_config(
+                _as_pretrained_config(encoder_config),
+                **{_FROM_CONFIG_DTYPE_KWARG: torch.float32},
+            )
+        else:
+            base_encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
 
         config = base_encoder.config
         hidden_size = config.hidden_size
@@ -685,9 +714,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
                     concept_features
                 )
         else:
-            logits, concept_outputs, concept_logits = self._forward_concept_tail(
-                concept_features
-            )
+            logits, concept_outputs, concept_logits = self._forward_concept_tail(concept_features)
         return ConceptBottleneckOutput(
             loss=None,
             logits=logits,

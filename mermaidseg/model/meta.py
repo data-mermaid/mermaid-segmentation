@@ -3,7 +3,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-import albumentations as A
 import numpy as np
 import pandas as pd
 import torch
@@ -898,17 +897,3 @@ class MetaModel:
         for k, v in avg_loss_components.items():
             metric_results[f"loss/{k}"] = v
         return last_loss, metric_results
-
-    @torch.no_grad()  # type:ignore
-    def predict(
-        self,
-        image: torch.Tensor | NDArray[Any],
-        transform: A.BasicTransform | None = None,
-    ) -> NDArray[Any]:
-        """Predict the (target-space) segmentation for a single image."""
-        if transform:
-            image = transform(image=image)["image"]
-        inputs = torch.tensor(image).unsqueeze(0)
-
-        pred = self.batch_predict(inputs)
-        return pred.argmax(dim=1).cpu().numpy()[0]
