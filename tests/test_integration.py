@@ -12,9 +12,12 @@ Marks: integration (can be deselected with '-m "not integration"')
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 import torch
 
+from mermaidseg.io import ConfigDict
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
 
 from .conftest import IMAGE_SIZE, NUM_CLASSES
@@ -118,6 +121,42 @@ def test_evaluator_returns_metrics(minimal_config, tiny_loader, make_meta_model)
     assert isinstance(metrics, dict)
     assert len(metrics) > 0
     assert "accuracy" in metrics or "miou" in metrics
+
+
+class _RecordingLogger:
+    """Captures (payload, step) pairs passed to Logger.log."""
+
+    def __init__(self) -> None:
+        self.logged: list[tuple[dict[str, float], int]] = []
+
+    def log(self, payload: dict[str, float], step: int) -> None:
+        self.logged.append((dict(payload), step))
+
+
+@pytest.mark.integration
+def test_train_epoch_logs_per_batch_loss_on_global_step(
+    minimal_config, tiny_loader, make_meta_model
+):
+    """train_epoch emits train/batch_loss against the monotonic global_step each batch."""
+    cfg = copy.deepcopy(minimal_config)
+    cfg.training = ConfigDict({**dict(cfg.training), "training_mode": "standard"})
+    meta = make_meta_model(cfg, run_name="test-batch-logging")
+    evaluator = EvaluatorSemanticSegmentation(num_classes=NUM_CLASSES, device="cpu")
+    run_logger = _RecordingLogger()
+
+    assert meta.global_step == 0
+    # tiny_loader yields a single batch; iterations_per_train_epoch defaults to len(loader).
+    meta.train_epoch(tiny_loader, evaluator, run_logger=run_logger, log_interval=1, epoch=0)
+    assert meta.global_step == 1
+    batch_logs = [(p, s) for p, s in run_logger.logged if "train/batch_loss" in p]
+    assert batch_logs, "train/batch_loss was not logged per batch"
+    assert batch_logs[0][1] == 1, "first batch should log at global_step == 1"
+
+    # A second epoch continues advancing the same global-step axis.
+    meta.train_epoch(tiny_loader, evaluator, run_logger=run_logger, log_interval=1, epoch=1)
+    assert meta.global_step == 2
+    steps = [s for p, s in run_logger.logged if "train/batch_loss" in p]
+    assert steps == sorted(steps) and steps[-1] == 2
 
 
 @pytest.mark.integration

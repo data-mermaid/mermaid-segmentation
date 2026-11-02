@@ -71,6 +71,62 @@ class _AlwaysFailDataset(BaseCoralDataset):
         raise RuntimeError("simulated read failure")
 
 
+class _SyntheticDataset(BaseCoralDataset):
+    """Minimal subclass that returns a constant RGB image."""
+
+    def read_image(self, **row_kwargs) -> np.ndarray:
+        return np.zeros((20, 20, 3), dtype=np.uint8)
+
+
+def _make_two_image_annotations(
+    *,
+    img0_labels: list[str | None],
+    img1_labels: list[str | None],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rows: list[int] = []
+    cols: list[int] = []
+    labels: list[str | None] = []
+    image_ids: list[str] = []
+
+    for image_id, label_list in [("img0", img0_labels), ("img1", img1_labels)]:
+        for row, col, label in zip([5, 10], [5, 10], label_list, strict=False):
+            if label is None:
+                continue
+            image_ids.append(image_id)
+            rows.append(row)
+            cols.append(col)
+            labels.append(label)
+
+    df_annotations = pd.DataFrame(
+        {
+            "image_id": image_ids,
+            "region_id": [1 if iid == "img0" else 2 for iid in image_ids],
+            "region_name": ["r0" if iid == "img0" else "r1" for iid in image_ids],
+            "source_label_name": labels,
+            "row": rows,
+            "col": cols,
+        }
+    )
+    df_images = pd.DataFrame(
+        {
+            "image_id": ["img0", "img1"],
+            "region_id": [1, 2],
+            "region_name": ["r0", "r1"],
+        }
+    )
+    return df_annotations, df_images
+
+
+class _CropOutDataset(_SyntheticDataset):
+    """Simulates RandomResizedCrop wiping labels on idx 0 only."""
+
+    def _load_item(self, idx: int) -> tuple[Any, Any]:
+        image, mask = super()._load_item(idx)
+        if idx == 0:
+            mask = np.zeros_like(mask)
+        return image, mask
+
+
 # --- create_annotation_mask ---
 
 
@@ -115,6 +171,24 @@ def test_create_annotation_mask_overlapping_padding():
     assert mask[10, 16] == 2
 
 
+def test_create_annotation_mask_offset_matches_where_pass():
+    """Folded offset must equal the previous ``np.where(mask > 0, mask + offset, mask)`` pass."""
+    annotations = _make_annotations([10, 20], [5, 15], ["Coral", "Sand"])
+    source_name2id = {"Coral": 1, "Sand": 2}
+    offset = 10
+    baseline = create_annotation_mask(annotations, (50, 50), source_name2id)
+    shifted = np.where(baseline > 0, baseline + offset, baseline)
+    folded = create_annotation_mask(annotations, (50, 50), source_name2id, offset=offset)
+    np.testing.assert_array_equal(folded, shifted)
+    assert folded.dtype == np.int32
+
+
+def test_create_annotation_mask_dtype_is_int32():
+    annotations = _make_annotations([1], [1], ["Coral"])
+    mask = create_annotation_mask(annotations, (8, 8), {"Coral": 1})
+    assert mask.dtype == np.int32
+
+
 def test_create_annotation_mask_unknown_label_skipped(caplog):
     annotations = _make_annotations([5, 10], [5, 10], ["Coral", "UnknownLabel"])
 
@@ -155,15 +229,37 @@ def test_base_dataset_set_global_offset_validates_negative(minimal_dataset):
         minimal_dataset.set_global_offset(-1)
 
 
-def test_base_dataset_set_global_offset_shifts_mask_via_helper():
-    """Verify offset arithmetic on the helper directly: offset=10 → values become 11/12."""
-    minimal_mask = np.array([[0, 1, 2], [2, 0, 1]], dtype=np.int64)
-    offset = 10
-    shifted = np.where(minimal_mask > 0, minimal_mask + offset, minimal_mask)
-    assert shifted[0, 0] == 0
-    assert shifted[0, 1] == 11
-    assert shifted[0, 2] == 12
-    assert shifted[1, 1] == 0
+def test_base_dataset_set_global_offset_shifts_emitted_mask():
+    """Folded offset in ``_load_item`` must match the previous ``np.where`` post-pass."""
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=["Coral"],
+        img1_labels=["Coral"],
+    )
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+        split="val",
+    )
+    _, local_mask = ds[0]
+    ds.set_global_offset(10)
+    _, global_mask = ds[0]
+    expected = np.where(local_mask > 0, local_mask + 10, local_mask)
+    np.testing.assert_array_equal(global_mask, expected)
+
+
+def test_base_dataset_ann_positions_match_boolean_scan(minimal_dataset):
+    """Precomputed groupby indices must select the same rows (and order) as a boolean scan."""
+    for image_id in minimal_dataset.df_images["image_id"]:
+        positions = minimal_dataset._ann_positions[image_id]
+        indexed = minimal_dataset.df_annotations.iloc[positions][
+            ["row", "col", "source_label_name"]
+        ]
+        scanned = minimal_dataset.df_annotations.loc[
+            minimal_dataset.df_annotations["image_id"] == image_id,
+            ["row", "col", "source_label_name"],
+        ]
+        pd.testing.assert_frame_equal(indexed.reset_index(drop=True), scanned.reset_index(drop=True))
 
 
 # --- BaseCoralDataset.collate_fn ---
@@ -194,7 +290,9 @@ def test_collate_fn_all_none_returns_empty_tensors(minimal_dataset, caplog):
 # --- BaseCoralDataset.__getitem__ ---
 
 
-def test_base_dataset_getitem_skips_and_logs_on_read_failure(single_image_annotations, caplog):
+def test_base_dataset_getitem_raises_and_logs_when_all_items_fail(
+    single_image_annotations, caplog
+):
     df_annotations, df_images = single_image_annotations
     ds = _AlwaysFailDataset(
         df_annotations=df_annotations,
@@ -202,10 +300,14 @@ def test_base_dataset_getitem_skips_and_logs_on_read_failure(single_image_annota
         class_subset=["Coral"],
     )
 
-    with caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"):
-        result = ds[0]
+    # With a single-image dataset, recurse-on-failure exhausts every index and
+    # raises rather than returning a ``(None, None)`` placeholder.
+    with (
+        caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"),
+        pytest.raises(RuntimeError),
+    ):
+        _ = ds[0]
 
-    assert result == (None, None)
     assert "img1" in caplog.text
     assert "RuntimeError" in caplog.text
 
@@ -219,7 +321,8 @@ def test_base_dataset_records_failure_context(single_image_annotations):
         split="train",
     )
 
-    _ = ds[0]
+    with pytest.raises(RuntimeError):
+        _ = ds[0]
     failures = ds.load_failures_df()
     assert len(failures) == 1
 
@@ -243,7 +346,8 @@ def test_base_dataset_saves_failure_report_as_parquet(single_image_annotations, 
         class_subset=["Coral"],
     )
 
-    _ = ds[0]
+    with pytest.raises(RuntimeError):
+        _ = ds[0]
     output_path = tmp_path / "load_failures.parquet"
     saved_path = ds.save_load_failures(output_path)
 
@@ -252,3 +356,74 @@ def test_base_dataset_saves_failure_report_as_parquet(single_image_annotations, 
     saved_df = pd.read_parquet(output_path)
     assert len(saved_df) == 1
     assert saved_df.iloc[0]["image_id"] == "img1"
+
+
+# --- BaseCoralDataset empty-mask skip (train split only) ---
+
+
+def test_train_skips_image_with_no_annotations(monkeypatch):
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=[],
+        img1_labels=["Coral"],
+    )
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        split="train",
+    )
+    monkeypatch.setattr(np.random, "randint", lambda low, high: 0)
+
+    _, mask = ds[0]
+
+    assert np.any(mask > 0)
+
+
+def test_train_skips_crop_that_removed_all_labels(monkeypatch):
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=["Coral"],
+        img1_labels=["Coral"],
+    )
+    ds = _CropOutDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+        split="train",
+    )
+    monkeypatch.setattr(np.random, "randint", lambda low, high: 0)
+
+    _, mask = ds[0]
+
+    assert np.any(mask > 0)
+
+
+def test_val_returns_empty_mask_without_recursion():
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=[],
+        img1_labels=["Coral"],
+    )
+    # Do not pass class_subset: that filter re-derives df_images from remaining
+    # annotations and would drop the unlabeled image we want to probe.
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        split="val",
+    )
+
+    _, mask = ds[0]
+
+    assert np.all(mask == 0)
+
+
+def test_train_raises_when_all_items_are_empty():
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=[],
+        img1_labels=[],
+    )
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        split="train",
+    )
+
+    with pytest.raises(RuntimeError, match="empty \\(no labels\\)"):
+        _ = ds[0]

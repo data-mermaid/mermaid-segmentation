@@ -60,8 +60,19 @@ class FakeMetaModel:
         self._val_losses = val_losses or [0.9] * epochs
         self._val_metrics_seq = val_metrics_seq or [{"accuracy": 0.5}] * epochs
         self._val_idx = 0
+        self.global_step = 0
 
-    def train_epoch(self, _loader, _evaluator):
+    def train_epoch(
+        self,
+        _loader,
+        _evaluator,
+        run_logger=None,
+        log_interval=1,
+        epoch=None,
+        on_optimizer_step=None,
+    ):
+        # Advance the global step like the real MetaModel so train_model logs against it.
+        self.global_step += 1
         timing = {
             "data_loading_sec": 0.0,
             "forward_sec": 0.0,
@@ -128,6 +139,20 @@ def test_metric_of_interest_allowlist_accepts_known_metrics(metric_name: str) ->
 
     assert len(metrics) == 1
     assert logger.checkpoint_epochs == [0]
+
+
+def test_save_best_checkpoint_can_be_disabled() -> None:
+    meta = FakeMetaModel(epochs=1, val_metrics_seq=[{"accuracy": 0.9}])
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        save_best_checkpoint=False,
+    )
+    assert logger.checkpoint_epochs == []
 
 
 def test_metric_direction_accuracy_maximize_and_loss_minimize() -> None:
@@ -248,6 +273,7 @@ def test_early_stopping_runs_final_test_eval_on_stop_epoch(monkeypatch) -> None:
         logger,
         epoch,
         split="train",
+        step=None,
     ):
         calls.append((epoch, split))
         return {"accuracy": 0.5}
@@ -441,6 +467,30 @@ def test_train_model_logs_main_metric_set_to_logger() -> None:
         "train/samples_per_sec",
     ):
         assert key in logged_keys, f"{key!r} was not logged (logged: {sorted(logged_keys)})"
+
+
+def test_train_model_logs_against_global_step_axis() -> None:
+    """Epoch/val metrics are logged at meta_model.global_step, not the epoch index.
+
+    FakeMetaModel.train_epoch advances global_step by 1 per epoch, so across two epochs
+    the logged steps should be [1, 2] (global step) rather than [0, 1] (epoch).
+    """
+    meta = FakeMetaModel(
+        epochs=2,
+        val_losses=[0.9, 0.9],
+        val_metrics_seq=[{"accuracy": 0.5}, {"accuracy": 0.5}],
+    )
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    logged_steps = sorted({step for _, step in logger.logged})
+    assert logged_steps == [1, 2], f"expected global-step axis [1, 2], got {logged_steps}"
 
 
 def test_train_model_logs_test_time_taken_to_logger(monkeypatch) -> None:
