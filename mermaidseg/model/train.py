@@ -1,12 +1,15 @@
 import logging
 import time
 import warnings
+from collections.abc import Callable
 
 import numpy as np
 import torch
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
 
+from mermaidseg.datasets.local_cache import LocalS3Cache
+from mermaidseg.datasets.utils import emit_cache_stats, emit_load_stage_stats
 from mermaidseg.logger import Logger
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel
@@ -76,6 +79,9 @@ def train_model(
     early_stopping_patience: int = 10,
     early_stopping_min_delta: float = 0.0,
     max_load_failure_rate: float | None = 0.05,
+    train_log_interval: int = 1,
+    on_optimizer_step: Callable[[MetaModel], None] | None = None,
+    save_best_checkpoint: bool = True,
 ):
     """Train a model, logging losses and metrics per epoch.
 
@@ -112,6 +118,11 @@ def train_model(
             systemic data problems instead of silently training on a shrunken dataset. Set to
             ``None`` to disable. Only enforced when the loader's dataset tracks load failures.
             Defaults to 0.05.
+        train_log_interval (int, optional): Log per-batch train losses to the logger every
+            ``train_log_interval`` iterations (1 = every batch). Defaults to 1.
+        on_optimizer_step: Called from ``train_epoch`` after each successful optimizer update.
+        save_best_checkpoint: When True, write ``model_epoch{N}`` whenever the validation
+            metric improves. Step-checkpointed runs pass False so only ``model_step*`` is saved.
     Returns:
         dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
             ``train_metrics``, ``validation_metrics`` (if ``val_loader`` is provided), and
@@ -145,17 +156,31 @@ def train_model(
         meta_model.model.train(True)
         failures_before = _loader_load_failure_count(train_loader)
         train_loss, train_metric_results, train_timing = meta_model.train_epoch(
-            train_loader, evaluator
+            train_loader,
+            evaluator,
+            run_logger=logger,
+            log_interval=train_log_interval,
+            epoch=epoch,
+            on_optimizer_step=on_optimizer_step,
         )
         _enforce_load_failure_rate(train_loader, failures_before, max_load_failure_rate, epoch)
+        # Monotonic global-step (iteration) axis for wandb; falls back to epoch when the
+        # meta-model does not track a global step (e.g. lightweight test doubles).
+        step = getattr(meta_model, "global_step", epoch)
         logging.info("LOSS train %s", train_loss)
         logging.info("TRAIN METRICS: %s", train_metric_results)
+        train_cache_stats = LocalS3Cache.get().snapshot_stats()
+        emit_cache_stats(
+            f"EPOCH {epoch} train cache: {train_cache_stats.s3_fetches} fetched from S3, "
+            f"{train_cache_stats.local_hits} served from local"
+        )
+        emit_load_stage_stats(f"EPOCH {epoch} train", train_cache_stats)
         epoch_loss_dict["train/loss"] = train_loss
         epoch_loss_dict["train/data_loading_sec"] = train_timing["data_loading_sec"]
         epoch_loss_dict["train/forward_sec"] = train_timing["forward_sec"]
         epoch_loss_dict["train/backward_sec"] = train_timing["backward_sec"]
         metrics_epoch[epoch] = {"train_metrics": train_metric_results}
-        _log_metric_dict(logger, "train", train_metric_results, epoch)
+        _log_metric_dict(logger, "train", train_metric_results, step)
 
         scheduler = getattr(meta_model, "scheduler", None)
         metric_value: float | None = None
@@ -167,10 +192,16 @@ def train_model(
             epoch_loss_dict["validation/time_taken"] = time.time() - val_start
             logging.info("LOSS valid %s", val_loss)
             logging.info("VALID METRICS: %s", val_metric_results)
+            val_cache_stats = LocalS3Cache.get().snapshot_stats()
+            emit_cache_stats(
+                f"EPOCH {epoch} val cache: {val_cache_stats.s3_fetches} fetched from S3, "
+                f"{val_cache_stats.local_hits} served from local"
+            )
+            emit_load_stage_stats(f"EPOCH {epoch} val", val_cache_stats)
 
             epoch_loss_dict["validation/loss"] = val_loss
             metrics_epoch[epoch]["validation_metrics"] = val_metric_results
-            _log_metric_dict(logger, "validation", val_metric_results, epoch)
+            _log_metric_dict(logger, "validation", val_metric_results, step)
 
             metric_value = extract_metric_value(metric_of_interest, val_loss, val_metric_results)
             if direction == "min":
@@ -183,7 +214,7 @@ def train_model(
                 best_results[metric_name] = metric_value
                 best_results["epoch"] = epoch
                 epochs_without_improvement = 0
-                if logger is not None:
+                if logger is not None and save_best_checkpoint:
                     logger.save_model_checkpoint(meta_model, epoch, val_metric_results)
             else:
                 epochs_without_improvement += 1
@@ -200,7 +231,10 @@ def train_model(
             getattr(meta_model, "warmup_iters", 0) == 0
             or meta_model._warmup_iters_completed >= meta_model.warmup_iters
         )
-        if scheduler is not None and warmup_complete:
+        # Iteration schedules are stepped inside train_epoch. Stepping them again here would
+        # add an extra decay step after the epoch's last iteration.
+        step_every = getattr(meta_model, "scheduler_step_every", "epoch")
+        if scheduler is not None and warmup_complete and step_every != "iteration":
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 if metric_value is not None:
                     scheduler.step(metric_value)
@@ -214,7 +248,7 @@ def train_model(
 
         if scheduler is not None and logger is not None:
             current_lr = meta_model.optimizer.param_groups[0]["lr"]
-            logger.log({"train/lr": current_lr}, step=epoch)
+            logger.log({"train/lr": current_lr}, step=step)
 
         epoch_wall = time.time() - epoch_start_time
         epoch_loss_dict["train/time_taken"] = epoch_wall
@@ -230,15 +264,19 @@ def train_model(
         if epoch == end_epoch - 1:
             epoch_loss_dict["train/total_training_sec"] = time.perf_counter() - training_start
 
+        # Surface the epoch index on the iteration axis so it is available in wandb.
+        epoch_loss_dict["epoch"] = float(epoch)
         if logger is not None:
-            logger.log(epoch_loss_dict, step=epoch)
+            logger.log(epoch_loss_dict, step=step)
 
         metrics_epoch[epoch]["loss"] = epoch_loss_dict
         log_every = max(logger.log_epochs, 1) if logger is not None else 1
 
         if should_stop_early:
             if test_loader is not None:
-                _ = evaluate_and_log(evaluator, test_loader, meta_model, logger, epoch, "test")
+                _ = evaluate_and_log(
+                    evaluator, test_loader, meta_model, logger, epoch, "test", step=step
+                )
             break
 
         if epoch % log_every > 0 and epoch < (end_epoch - 1):
@@ -246,13 +284,15 @@ def train_model(
 
         if test_loader is not None:
             test_start = time.time()
-            _ = evaluate_and_log(evaluator, test_loader, meta_model, logger, epoch, "test")
+            _ = evaluate_and_log(
+                evaluator, test_loader, meta_model, logger, epoch, "test", step=step
+            )
             test_time = time.time() - test_start
             epoch_loss_dict["test/time_taken"] = test_time
             # epoch_loss_dict was already logged above (before test eval ran), so log this
-            # timing metric directly to keep it in MLflow (matches main's behavior).
+            # timing metric directly to keep it on the global-step axis.
             if logger is not None:
-                logger.log({"test/time_taken": test_time}, step=epoch)
+                logger.log({"test/time_taken": test_time}, step=step)
     return metrics_epoch
 
 
@@ -260,11 +300,11 @@ def _log_metric_dict(
     logger: Logger | None,
     prefix: str,
     metric_results: dict[str, float | NDArray[np.float64]],
-    epoch: int,
+    step: int,
 ) -> None:
     if logger is None or not metric_results:
         return
-    logger.log({f"{prefix}/{name}": value for name, value in metric_results.items()}, step=epoch)
+    logger.log({f"{prefix}/{name}": value for name, value in metric_results.items()}, step=step)
 
 
 def evaluate_and_log(
@@ -274,6 +314,7 @@ def evaluate_and_log(
     logger: Logger | None,
     epoch: int,
     split: str = "train",
+    step: int | None = None,
 ) -> dict[str, float | NDArray[np.float64]]:
     """Evaluate a split and optionally log its metrics.
 
@@ -283,9 +324,10 @@ def evaluate_and_log(
             either a tuple of tensors or a dictionary of tensors.
         meta_model (MetaModel): The model to be evaluated.
         logger (Logger | None): Optional logger used to log metrics and image predictions.
-        epoch (int): The current epoch number, used for logging purposes.
+        epoch (int): The current epoch number, used for logging messages.
         split (str, optional): The dataset split being evaluated (e.g., "train", "validation", "test").
             Defaults to "train".
+        step (int | None, optional): Logging step for the metrics. Defaults to ``epoch`` when None.
     Returns:
         Dict[str, Union[float, NDArray[np.float64]]]: A dictionary containing the evaluation metrics.
     """
@@ -293,7 +335,7 @@ def evaluate_and_log(
         loader,
         meta_model,
     )
-    _log_metric_dict(logger, split, metric_results, epoch)
+    _log_metric_dict(logger, split, metric_results, epoch if step is None else step)
     logging.info("%s metrics (epoch %d): %s", split, epoch, metric_results)
 
     return metric_results

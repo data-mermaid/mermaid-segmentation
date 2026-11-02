@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 import numpy as np
 import torch
 import tqdm
@@ -12,6 +14,7 @@ from mermaidseg.model.concept_metrics import (
     map_taxonomy_to_dense,
 )
 from mermaidseg.model.meta import MetaModel
+from mermaidseg.model.rank_outputs import RankBatch, RankOutputConsumer
 
 
 class Evaluator:
@@ -41,12 +44,14 @@ class Evaluator:
         concept_value2id: dict[str, dict[str, int]] | None = None,
         ignore_index: int = 0,
         include_classification: bool = True,
+        rank_output_consumers: Sequence[RankOutputConsumer] | None = None,
     ):
         self.epoch = 0
         self.device = device
         self.num_classes = num_classes
         self.concept_value2id = concept_value2id
         self._binary_accuracy_metrics: dict[str, Metric] = {}
+        self.rank_output_consumers: list[RankOutputConsumer] = list(rank_output_consumers or [])
 
         if metric_dict:
             self.metric_dict = metric_dict
@@ -105,7 +110,11 @@ class Evaluator:
         return self._compute_concept_metric_results()
 
     def _compute_concept_metric_results(self) -> dict[str, float]:
-        if not self.concept_metric_dict and not self._binary_accuracy_metrics:
+        if (
+            not self.concept_metric_dict
+            and not self._binary_accuracy_metrics
+            and not self.rank_output_consumers
+        ):
             return {}
         metric_results: dict[str, float] = {}
         for metric_name in self.concept_metric_dict:
@@ -123,6 +132,10 @@ class Evaluator:
                 binary_values.append(float(value.item() if value.ndim == 0 else value.mean()))
                 metric.reset()
             metric_results["accuracy/multi_hot"] = sum(binary_values) / len(binary_values)
+
+        for consumer in self.rank_output_consumers:
+            metric_results.update(consumer.compute())
+            consumer.reset()
 
         return metric_results
 
@@ -212,6 +225,7 @@ class Evaluator:
             return
 
         offset = 0
+        rank_batches: dict[str, RankBatch] = {}
 
         for concept in TAXONOMIC_CONCEPTS:
             if concept not in self.concept_value2id:
@@ -222,12 +236,28 @@ class Evaluator:
             concept_outputs_order = concept_outputs[:, offset : offset + order_concept_length, ...]
             offset += order_concept_length
 
+            rank_scores = concept_outputs_order
             concept_labels_order = map_taxonomy_to_dense(concept_labels_order)
             concept_outputs_order = map_taxonomy_predictions_to_dense(concept_outputs_order)
+
+            # Before the guard below: ranks without an accuracy metric still feed consumers.
+            if self.rank_output_consumers:
+                rank_batches[concept] = RankBatch(
+                    rank=concept,
+                    scores=rank_scores,
+                    target=concept_labels_order,
+                    pred=concept_outputs_order,
+                    valid=concept_labels_order.ne(0),
+                )
+
             metric_key = f"accuracy/{concept}"
             if metric_key not in self.concept_metric_dict:
                 continue
             self.concept_metric_dict[metric_key].update(concept_outputs_order, concept_labels_order)
+
+        if rank_batches:
+            for consumer in self.rank_output_consumers:
+                consumer.update(rank_batches)
 
         concept_labels_binary = concept_labels[:, offset:, ...]
         concept_outputs_binary = concept_outputs[:, offset:, ...]

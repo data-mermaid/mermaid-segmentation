@@ -36,6 +36,7 @@ dependencies = [
     "safetensors>=0.4.0",
     "ibis-framework[duckdb]>=9.0",
     "peft>=0.19.1",
+    "wandb>=0.25.0",
 ]
 
 [project.scripts]
@@ -46,7 +47,6 @@ coralnet-remediate = "mermaidseg.datasets.coralnet.scraper.remediate_incomplete:
 notebooks = [
     "jupyter",
     "ipywidgets",
-    "wandb>=0.25.0",
     "hvplot>=0.12.2",
     "great-tables>=0.21.0",
 ]

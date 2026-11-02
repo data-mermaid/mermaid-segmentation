@@ -147,31 +147,60 @@ def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> Con
     return config
 
 
+_RESERVED_DATA_KEYS = frozenset({"local_cache_dir", "local_cache_write_through"})
+_TRANSFORMS_BEFORE_NORMALIZE = frozenset({"ColorJitter"})
+
+
+def _order_transform_items(items: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    """Place color jitter-style transforms before ``Normalize`` when config merge appends them."""
+    normalize_idx = next((i for i, (name, _) in enumerate(items) if name == "Normalize"), None)
+    if normalize_idx is None:
+        return items
+
+    deferred = [(name, params) for i, (name, params) in enumerate(items) if i > normalize_idx and name in _TRANSFORMS_BEFORE_NORMALIZE]
+    if not deferred:
+        return items
+
+    ordered: list[tuple[str, Any]] = []
+    for name, params in items:
+        if name in _TRANSFORMS_BEFORE_NORMALIZE and (name, params) in deferred:
+            continue
+        if name == "Normalize":
+            ordered.extend(deferred)
+        ordered.append((name, params))
+    return ordered
+
+
 def preprocess_data_config(data_cfg_orig):
     """Normalize the split data config (configs/data_config.yaml).
 
     Expands the per-dataset ``default`` block into every dataset that does not override it, then
     compiles each split's ``augmentation``/``transform`` spec into an ``albumentations.Compose``
-    object.
+    object. Reserved keys (e.g. ``local_cache_dir``) under ``data`` are left untouched.
     """
     data_cfg = data_cfg_orig.copy()
     if "default" in data_cfg.data:
         default = data_cfg.data.pop("default", None)
         for dataset_name in list(data_cfg.data.keys()):
+            if dataset_name in _RESERVED_DATA_KEYS:
+                continue
             dataset_tmp = data_cfg.data.get(dataset_name, None)
             data_cfg.data[dataset_name] = default.copy() if default is not None else {}
             if dataset_tmp is not None:
                 data_cfg.data[dataset_name].update(dataset_tmp)
 
     for dataset_name in data_cfg.data:
+        if dataset_name in _RESERVED_DATA_KEYS:
+            continue
         for split_name in data_cfg.data[dataset_name]:
             split_cfg = data_cfg.data[dataset_name][split_name]
             # Use whichever key is present (only one should appear): 'augmentation' or 'transform'
             key = next((k for k in ("augmentation", "transform") if k in split_cfg), None)
             if key:
                 transform_spec = split_cfg.pop(key)
+                transform_items = _order_transform_items(list(transform_spec.items()))
                 split_cfg.transform = A.Compose(
-                    [getattr(A, name)(**params) for name, params in transform_spec.items()]
+                    [getattr(A, name)(**params) for name, params in transform_items]
                 )
 
     return data_cfg

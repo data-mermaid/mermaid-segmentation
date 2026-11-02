@@ -8,8 +8,12 @@ nbs/mlruns/*
 nbs/model_checkpoints/*
 nbs/profiler_logs/*
 */wandb/*
+eval_out/*
 nbs_tmp/*
 scraping/source*.csv
+logs/*
+claude/*
+coralnet_source_report/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -156,6 +160,9 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Locally installed CLI tools (e.g. uv, via `UV_INSTALL_DIR=./bin`)
+/bin/
 
 # Spyder project settings
 .spyderproject
