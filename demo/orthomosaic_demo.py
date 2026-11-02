@@ -1,7 +1,7 @@
 """Orthomosaic CBM prediction demo.
 
 Runs the concept-bottleneck model over overlapping 2048x2048 patches of a large
-orthomosaic (each patch resized to 512x512 for inference), stitches predictions
+orthomosaic (each patch resized to the model input size for inference), stitches predictions
 back to full resolution with a max-confidence merge, and renders:
 
 1. MERMAID class argmax (colorized) + a legend PDF.
@@ -41,6 +41,7 @@ from inference import (  # noqa: E402
     build_model,
     build_transforms,
     load_artifacts,
+    model_input_size,
     predict,
     preprocess,
     tile_starts,
@@ -64,7 +65,6 @@ DEFAULT_MODEL_CONFIG = _REPO_ROOT / "configs" / "model_config_cbm_dpt_lora_vitl.
 DEFAULT_TAXONOMY_CSV = _REPO_ROOT / "configs" / "class_to_concepts.csv"
 
 PATCH_SIZE = 2048
-INFER_SIZE = 512
 TILE_OVERLAP = 0.2
 
 # Output 1 (MERMAID class): drop classes with fewer than this many pixels.
@@ -264,7 +264,7 @@ def run(
         concept_id2name=concept_id2name,
     )
     model = build_model(artifacts, device)
-    model_transform, display_transform = build_transforms((INFER_SIZE, INFER_SIZE))
+    model_transform, display_transform = build_transforms(model_input_size(artifacts.model_cfg))
 
     concept_names = _concept_names(artifacts.concept_id2name)
     num_concepts = model.concept_classifier.in_channels

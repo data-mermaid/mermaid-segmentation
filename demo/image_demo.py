@@ -37,6 +37,7 @@ from inference import (  # noqa: E402
     build_model,
     build_transforms,
     load_artifacts,
+    model_input_size,
     predict,
     preprocess,
 )
@@ -54,8 +55,6 @@ _REPO_ROOT = _DEMO_DIR.parent
 DEFAULT_IMAGE = _DEMO_DIR / "input.png"
 DEFAULT_CHECKPOINT = Path("/Users/jonathan/Downloads/model_epoch101")
 DEFAULT_MODEL_CONFIG = _REPO_ROOT / "configs" / "model_config_cbm_dpt_lora_vitl.yaml"
-
-INFER_SIZE = 512
 
 # Output 1 (MERMAID class): drop classes with fewer than this many pixels from
 # the legend, and never legend the ``ignore`` class (id 0).
@@ -159,7 +158,7 @@ def run(
         concept_id2name=concept_id2name,
     )
     model = build_model(artifacts, device)
-    model_transform, display_transform = build_transforms((INFER_SIZE, INFER_SIZE))
+    model_transform, display_transform = build_transforms(model_input_size(artifacts.model_cfg))
 
     concept_names = _concept_names(artifacts.concept_id2name)
     num_concepts = model.concept_classifier.in_channels

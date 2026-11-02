@@ -33,25 +33,21 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 import time
 from pathlib import Path
 
 import torch
 import yaml
 
+from mermaidseg.datasets.local_cache import setup_local_cache
+from mermaidseg.evaluation.gt_mapping import load_benthic_hierarchy
+from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
+from mermaidseg.evaluation.predictor import CBMPredictor
+from mermaidseg.evaluation.reporting import fmt, write_json
+from mermaidseg.inference import load_bundle, load_checkpoint_model
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEMO_DIR = _REPO_ROOT / "demo"
-if str(_DEMO_DIR) not in sys.path:
-    sys.path.insert(0, str(_DEMO_DIR))
-
-from inference import build_model, load_artifacts  # noqa: E402  (demo module)
-
-from mermaidseg.datasets.local_cache import setup_local_cache  # noqa: E402
-from mermaidseg.evaluation.gt_mapping import load_benthic_hierarchy  # noqa: E402
-from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS  # noqa: E402
-from mermaidseg.evaluation.predictor import CBMPredictor  # noqa: E402
-from mermaidseg.evaluation.reporting import fmt, write_json  # noqa: E402
 
 logger = logging.getLogger("evaluate")
 
@@ -96,6 +92,40 @@ def _model_input_size(model_config: str | Path) -> tuple[int, int]:
     return 512, 512
 
 
+def _load_int_keyed_json(path: str | Path) -> dict[int, str]:
+    with Path(path).open() as f:
+        return {int(k): v for k, v in json.load(f).items()}
+
+
+def _load_model(args: argparse.Namespace, device: torch.device):
+    """Return ``(predictor, id2label, concept_id2name)`` for a checkpoint or a bundle directory.
+
+    A bundle loads with ``format="checkpoint"``: evaluation needs batched eager forwards, which
+    the exported graph does not provide.
+    """
+    if (Path(args.checkpoint) / "model.json").is_file():
+        bundle = load_bundle(args.checkpoint, device, format="checkpoint")
+        id2label = (
+            _load_int_keyed_json(args.id2label) if args.id2label else dict(enumerate(bundle.classes))
+        )
+        concept_id2name = (
+            _load_int_keyed_json(args.concept_id2name)
+            if args.concept_id2name
+            else {i + 1: name for i, name in enumerate(bundle.concept_names)}
+        )
+        return CBMPredictor.from_bundle(bundle, device, amp=args.amp), id2label, concept_id2name
+    id2label = _load_int_keyed_json(args.id2label or _DEMO_DIR / "id2label.json")
+    concept_id2name = _load_int_keyed_json(args.concept_id2name or _DEMO_DIR / "concept_id2name.json")
+    cfg = _load_yaml(args.model_config)
+    model = load_checkpoint_model(
+        args.checkpoint, dict(cfg.get("model") or cfg), id2label, concept_id2name, device
+    )
+    predictor = CBMPredictor(
+        model, input_size=_model_input_size(args.model_config), device=device, amp=args.amp
+    )
+    return predictor, id2label, concept_id2name
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--checkpoint", required=True, type=Path, help="Model checkpoint path")
@@ -104,8 +134,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=_REPO_ROOT / "configs" / "model_config_cbm_dpt_lora_vitl.yaml",
     )
-    p.add_argument("--id2label", type=Path, default=_DEMO_DIR / "id2label.json")
-    p.add_argument("--concept-id2name", type=Path, default=_DEMO_DIR / "concept_id2name.json")
+    p.add_argument(
+        "--id2label",
+        type=Path,
+        default=None,
+        help="id2label.json (default: demo/id2label.json, or the bundle's classes)",
+    )
+    p.add_argument(
+        "--concept-id2name",
+        type=Path,
+        default=None,
+        help="concept_id2name.json (default: demo/concept_id2name.json, or the bundle's concepts)",
+    )
     p.add_argument("--data-config", type=Path, default=_REPO_ROOT / "configs" / "data_config_512.yaml")
     p.add_argument("--output-dir", required=True, type=Path)
     p.add_argument(
@@ -248,17 +288,9 @@ def main(argv: list[str] | None = None) -> None:
 
     # --- Model --------------------------------------------------------------
     logger.info("Loading model artifacts (checkpoint=%s) ...", args.checkpoint)
-    artifacts = load_artifacts(
-        checkpoint=args.checkpoint,
-        model_config=args.model_config,
-        id2label=args.id2label,
-        concept_id2name=args.concept_id2name,
-    )
-    model = build_model(artifacts, device)
-    input_size = _model_input_size(args.model_config)
-    predictor = CBMPredictor(model, input_size=input_size, device=device, amp=args.amp)
-    id2label = artifacts.id2label
-    concept_names = [name for _, name in sorted(artifacts.concept_id2name.items(), key=lambda kv: int(kv[0]))]
+    predictor, id2label, concept_id2name = _load_model(args, device)
+    input_size = predictor.input_size
+    concept_names = [name for _, name in sorted(concept_id2name.items(), key=lambda kv: int(kv[0]))]
     logger.info(
         "Model: input_size=%s num_classes=%d num_concepts=%d (concept_names=%d)",
         input_size,

@@ -123,7 +123,7 @@ def _load(args: argparse.Namespace) -> DemoArtifacts:
             pass
     if not checkpoint:
         raise SystemExit("Provide --checkpoint or set DEMO_CHECKPOINT.")
-    if not model_config:
+    if not model_config and not (Path(checkpoint) / "model.json").is_file():
         raise SystemExit("Provide --model-config or set DEMO_MODEL_CONFIG.")
     return load_artifacts(
         checkpoint=checkpoint,

@@ -12,6 +12,11 @@ from mermaidseg.inference.bundle import (
     load_bundle,
     write_sidecar,
 )
+from mermaidseg.inference.checkpoint import (
+    SUPPORTED_CBM_MODELS,
+    derive_concept_value2id,
+    load_checkpoint_model,
+)
 from mermaidseg.inference.export import ParityError, export_graph
 from mermaidseg.inference.predictor import CBMPredictor
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD, preprocess
@@ -23,9 +28,12 @@ __all__ = [
     "ManifestError",
     "ModelBundle",
     "ParityError",
+    "SUPPORTED_CBM_MODELS",
+    "derive_concept_value2id",
     "export_bundle",
     "export_graph",
     "load_bundle",
+    "load_checkpoint_model",
     "preprocess",
     "write_sidecar",
 ]
