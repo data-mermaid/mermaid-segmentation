@@ -99,6 +99,13 @@ class ModelBundle:
         return int(height), int(width)
 
     @property
+    def validated_input_size(self) -> tuple[int, int]:
+        """Size the run validated at; the serving size for a manifest that predates the field."""
+        spec = self.metadata["input"]
+        height, width = spec.get("validated_size_hw", spec["size_hw"])
+        return int(height), int(width)
+
+    @property
     def mean(self) -> tuple[float, ...]:
         return tuple(float(v) for v in self.metadata["input"]["mean"])
 
@@ -164,8 +171,14 @@ def write_sidecar(
     input_size: Sequence[int],
     mean: Sequence[float],
     std: Sequence[float],
+    model_config_input_size: Sequence[int] | None = None,
 ) -> Path:
     """Write the run's weight-free ``model.json`` into ``out_dir`` and return its path.
+
+    ``input_size`` is the size the run validates at (its val transform). It is recorded as
+    ``input.size_hw`` (the serving size until ``export_bundle`` overrides it) and as
+    ``input.validated_size_hw``; ``model_config_input_size``, when given, is recorded as
+    ``input.model_config_size_hw``.
 
     ``model_cfg`` is the run's model config (including ``name``); the label maps come from the
     in-memory registry. Concept names are stored in concept-index (sorted id) order. The
@@ -191,7 +204,7 @@ def write_sidecar(
     )
     names = [concept_id2name[k] for k in sorted(concept_id2name, key=int)]
 
-    manifest = {
+    manifest: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "task": TASK_NAME,
         "run_name": run_name,
@@ -204,6 +217,7 @@ def write_sidecar(
         },
         "input": {
             "size_hw": [int(input_size[0]), int(input_size[1])],
+            "validated_size_hw": [int(input_size[0]), int(input_size[1])],
             "mean": [float(v) for v in mean],
             "std": [float(v) for v in std],
             "channel_order": "RGB",
@@ -216,6 +230,11 @@ def write_sidecar(
         },
         "trained_with": _environment(),
     }
+    if model_config_input_size is not None:
+        manifest["input"]["model_config_size_hw"] = [
+            int(model_config_input_size[0]),
+            int(model_config_input_size[1]),
+        ]
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / MANIFEST_NAME
@@ -456,6 +475,7 @@ def export_bundle(
     out_dir: str | Path,
     *,
     graph: bool = False,
+    input_size: Sequence[int] | None = None,
 ) -> Path:
     """Export a run checkpoint plus its sidecar into a bundle directory and return it.
 
@@ -468,6 +488,10 @@ def export_bundle(
     ``model.json`` last and replaces ``out_dir`` only once complete, so a failed export leaves
     any previous bundle at ``out_dir`` untouched. Weights are stored with the canonical
     (transformers 4.x) encoder key layout, and ``exported_with`` records this environment.
+
+    ``input_size`` (height, width) sets the bundle's serving ``input.size_hw``; it defaults to
+    the size the run validated at, and a different choice logs a warning. The sidecar's
+    ``validated_size_hw`` and ``model_config_size_hw`` are kept as recorded.
     """
     manifest = _read_manifest(Path(sidecar_path))
     state_dict, run_config = _load_checkpoint(Path(checkpoint_path))
@@ -490,8 +514,22 @@ def export_bundle(
         {k: v.detach().contiguous() for k, v in trained.state_dict().items()}
     )
 
+    spec = dict(manifest["input"])
+    validated = tuple(spec.get("validated_size_hw", spec["size_hw"]))
+    spec["validated_size_hw"] = list(validated)
+    serving = validated if input_size is None else (int(input_size[0]), int(input_size[1]))
+    if serving != validated:
+        logger.warning(
+            "Bundle serving size %s differs from the validated size %s; accuracy at the "
+            "serving size is not what validation measured.",
+            serving,
+            validated,
+        )
+    spec["size_hw"] = list(serving)
+
     bundle_manifest = {
         **manifest,
+        "input": spec,
         "exported_with": _environment(),
         "encoder_config": _jsonable(encoder_config.to_dict()),
         "weights": {"checkpoint": WEIGHTS_NAME, "graph": None},

@@ -97,25 +97,55 @@ def _load_int_keyed_json(path: str | Path) -> dict[int, str]:
         return {int(k): v for k, v in json.load(f).items()}
 
 
+def _sidecar_label_maps(
+    args: argparse.Namespace,
+) -> tuple[dict[int, str], dict[int, str]] | None:
+    """``(id2label, concept_id2name)`` from ``--sidecar``, or None when it is not given.
+
+    The sidecar lists classes and concepts in index order; concept ids are 1-indexed, like the
+    trainer's. Combining ``--sidecar`` with explicit label maps raises ``ValueError``.
+    """
+    if args.sidecar is None:
+        return None
+    if args.id2label or args.concept_id2name:
+        raise ValueError("--sidecar already supplies the label maps; drop --id2label/--concept-id2name.")
+    with Path(args.sidecar).open() as f:
+        manifest = json.load(f)
+    id2label = dict(enumerate(manifest["classes"]))
+    concept_id2name = {i + 1: name for i, name in enumerate(manifest["concepts"]["names"])}
+    return id2label, concept_id2name
+
+
 def _load_model(args: argparse.Namespace, device: torch.device):
     """Return ``(predictor, id2label, concept_id2name)`` for a checkpoint or a bundle directory.
 
     A bundle loads with ``format="checkpoint"``: evaluation needs batched eager forwards, which
     the exported graph does not provide.
     """
+    sidecar_maps = _sidecar_label_maps(args)
     if (Path(args.checkpoint) / "model.json").is_file():
         bundle = load_bundle(args.checkpoint, device, format="checkpoint")
-        id2label = (
-            _load_int_keyed_json(args.id2label) if args.id2label else dict(enumerate(bundle.classes))
-        )
-        concept_id2name = (
-            _load_int_keyed_json(args.concept_id2name)
-            if args.concept_id2name
-            else {i + 1: name for i, name in enumerate(bundle.concept_names)}
-        )
+        if sidecar_maps:
+            id2label, concept_id2name = sidecar_maps
+        else:
+            id2label = (
+                _load_int_keyed_json(args.id2label)
+                if args.id2label
+                else dict(enumerate(bundle.classes))
+            )
+            concept_id2name = (
+                _load_int_keyed_json(args.concept_id2name)
+                if args.concept_id2name
+                else {i + 1: name for i, name in enumerate(bundle.concept_names)}
+            )
         return CBMPredictor.from_bundle(bundle, device, amp=args.amp), id2label, concept_id2name
-    id2label = _load_int_keyed_json(args.id2label or _DEMO_DIR / "id2label.json")
-    concept_id2name = _load_int_keyed_json(args.concept_id2name or _DEMO_DIR / "concept_id2name.json")
+    if sidecar_maps:
+        id2label, concept_id2name = sidecar_maps
+    else:
+        id2label = _load_int_keyed_json(args.id2label or _DEMO_DIR / "id2label.json")
+        concept_id2name = _load_int_keyed_json(
+            args.concept_id2name or _DEMO_DIR / "concept_id2name.json"
+        )
     cfg = _load_yaml(args.model_config)
     model = load_checkpoint_model(
         args.checkpoint, dict(cfg.get("model") or cfg), id2label, concept_id2name, device
@@ -145,6 +175,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="concept_id2name.json (default: demo/concept_id2name.json, or the bundle's concepts)",
+    )
+    p.add_argument(
+        "--sidecar",
+        type=Path,
+        default=None,
+        help="The run's model.json (next to its checkpoints); supplies both label maps. "
+        "Cannot be combined with --id2label or --concept-id2name.",
     )
     p.add_argument("--data-config", type=Path, default=_REPO_ROOT / "configs" / "data_config_512.yaml")
     p.add_argument("--output-dir", required=True, type=Path)
@@ -276,6 +313,7 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    _sidecar_label_maps(args)  # reject conflicting label-map flags before any heavy setup
     evals = ALL_EVALS if "all" in args.evals else list(dict.fromkeys(args.evals))
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

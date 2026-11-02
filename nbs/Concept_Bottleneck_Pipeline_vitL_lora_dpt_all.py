@@ -1,8 +1,14 @@
 import copy
-import json
 import os
 
 import torch
+from cbm_run_setup import (
+    logger_id2label,
+    resolve_concept_mapping_default,
+    resolve_output_dir,
+    run_checkpoint_dir,
+    sidecar_kwargs,
+)
 from nb_setup import check_env_wandb
 from torch.utils.data import ConcatDataset, DataLoader
 
@@ -17,6 +23,7 @@ from mermaidseg.datasets import (
     make_worker_init_fn,
     setup_local_cache,
 )
+from mermaidseg.inference import write_sidecar
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.eval import Evaluator
@@ -90,7 +97,7 @@ def load_training_checkpoint(
 # (see scripts/prefetch_cache.py) and metrics go to wandb. No MLflow / SageMaker
 # / AWS SSO is required. Set MERMAIDSEG_S3_OFFLINE=1 to fail loudly on any cache
 # miss instead of silently falling back to S3.
-check_env_wandb()
+# check_env_wandb() runs after the config loads (only when wandb logging is enabled).
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 for i in range(torch.cuda.device_count()):
@@ -171,6 +178,14 @@ parser.add_argument(
     default=None,
     help="torch seed for data shuffling (default: 4). Cooldown jobs pass a different seed",
 )
+parser.add_argument(
+    "--output-dir",
+    default=None,
+    help=(
+        "checkpoint root; checkpoints go to <output-dir>/model_checkpoints/<run-name>. "
+        "Overrides MERMAIDSEG_OUTPUT_DIR (default: the current directory)"
+    ),
+)
 parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
 args = parser.parse_args()
 if args.preempt_checkpoint_every_steps < 0:
@@ -198,6 +213,9 @@ cfg = setup_config(
     }
 )
 cfg = update_config_with_args(cfg, args)
+
+if cfg.logger.get("enable_wandb", False):
+    check_env_wandb()
 
 # Loss-weight sweep overrides (leave the config value untouched when not given).
 if args.per_pixel_loss_weight is not None:
@@ -231,10 +249,9 @@ loader_kwargs = {
 if NUM_WORKERS > 0:
     loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
 
-concept_mapping_path = (
-    cfg.training.get("concept_mapping_path")
-    or "/data/vision/beery/scratch/sauder/mermaid-segmentation/configs/class_to_concepts.csv"
-)
+# MERMAIDSEG_CONCEPT_MAPPING_PATH overrides the repo's configs/class_to_concepts.csv when the
+# training config names no concept_mapping_path.
+concept_mapping_path = cfg.training.get("concept_mapping_path") or resolve_concept_mapping_default()
 
 # -- 3. Registry / model / evaluator --------------------------------------
 _, registry_datasets = prepare_splits_for_registry(dataset_dict)
@@ -268,8 +285,10 @@ val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwar
 print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
 assert registry.num_concepts == schema.num_channels
 concept_id2name = schema.channel_id2name()
-with open("concept_id2name.json", "w") as f:
-    json.dump({str(k): v for k, v in concept_id2name.items()}, f)
+
+output_dir = resolve_output_dir(args.output_dir)
+# MetaModel pops "name" from the kwargs it receives, so the sidecar reads a copy.
+_sidecar_model_cfg = copy.deepcopy(dict(cfg.model))
 
 meta_model = MetaModel(
     run_name=cfg.run_name,
@@ -283,6 +302,19 @@ meta_model = MetaModel(
     concept_matrix=registry.concept_matrix,
     conceptid2labelid=registry.conceptid2labelid(),
     concept_value2id=registry.concept_value2id,
+)
+
+# Weight-free model.json next to this run's checkpoints (input spec from the val transform).
+write_sidecar(
+    run_checkpoint_dir(output_dir, cfg.run_name),
+    **sidecar_kwargs(
+        run_name=cfg.run_name,
+        model_cfg=_sidecar_model_cfg,
+        target_id2label=registry.target_id2label,
+        concept_id2name=concept_id2name,
+        concept_value2id=registry.concept_value2id,
+        val_transform=val_datasets[0].transform,
+    ),
 )
 
 start_epoch = 0
@@ -356,11 +388,11 @@ with Logger(
     meta_model=meta_model,
     log_epochs=cfg_logger.logger.get("log_epochs", 1),
     log_checkpoint=1,
-    checkpoint_dir=".",
-    id2label={0: "ignore", **registry.target_id2label},
+    checkpoint_dir=output_dir,
+    id2label=logger_id2label(registry.target_id2label),
     save_local_checkpoints=True,
 ) as run_logger:
-    assert run_logger.enable_wandb, (
+    assert run_logger.enable_wandb or not cfg_logger.logger.get("enable_wandb", False), (
         "wandb logging was not started — check WANDB_API_KEY and "
         "config.logger.enable_wandb (see warnings above)"
     )

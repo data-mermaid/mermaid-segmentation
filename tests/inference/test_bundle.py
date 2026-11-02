@@ -261,3 +261,79 @@ def test_load_names_the_transformers_versions_when_weights_do_not_fit(bundle_dir
     save_file(weights, broken / "weights.safetensors")
     with pytest.raises(ManifestError, match="running transformers"):
         load_bundle(broken, format="checkpoint")
+
+
+def _read_sidecar(path):
+    return json.loads(path.read_text())["input"]
+
+
+def test_sidecar_records_validated_and_model_config_sizes(trained_run, tmp_path):
+    from mermaidseg.inference import IMAGENET_MEAN, IMAGENET_STD, write_sidecar
+    from tests.inference._tiny import concept_id2name, concept_value2id, id2label
+
+    path = write_sidecar(
+        tmp_path / "sc",
+        run_name=RUN_NAME,
+        model_cfg=trained_run["model_cfg"],
+        id2label=id2label(),
+        concept_id2name=concept_id2name(),
+        concept_value2id=concept_value2id(),
+        input_size=(64, 64),
+        model_config_input_size=(128, 96),
+        mean=IMAGENET_MEAN,
+        std=IMAGENET_STD,
+    )
+    spec = _read_sidecar(path)
+    assert spec["size_hw"] == [64, 64]
+    assert spec["validated_size_hw"] == [64, 64]
+    assert spec["model_config_size_hw"] == [128, 96]
+
+
+def test_sidecar_without_model_config_size_omits_it(sidecar_path):
+    spec = _read_sidecar(sidecar_path)
+    assert spec["validated_size_hw"] == list(INPUT_SIZE)
+    assert "model_config_size_hw" not in spec
+
+
+def test_export_serves_the_validated_size_by_default(bundle_dir, caplog):
+    bundle = load_bundle(bundle_dir)
+    assert bundle.input_size == INPUT_SIZE
+    assert bundle.metadata["input"]["validated_size_hw"] == list(INPUT_SIZE)
+    assert bundle.validated_input_size == INPUT_SIZE
+
+
+def test_export_default_size_does_not_warn(sidecar_path, checkpoint_path, tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger=bundle_module.__name__):
+        export_bundle(checkpoint_path, sidecar_path, tmp_path / "bundle")
+    assert "serving size" not in caplog.text
+
+
+def test_export_input_size_overrides_serving_size_and_warns(
+    sidecar_path, checkpoint_path, tmp_path, caplog
+):
+    with caplog.at_level(logging.WARNING, logger=bundle_module.__name__):
+        out = export_bundle(
+            checkpoint_path, sidecar_path, tmp_path / "bundle", input_size=(32, 48)
+        )
+    bundle = load_bundle(out)
+    assert bundle.input_size == (32, 48)
+    assert bundle.validated_input_size == INPUT_SIZE
+    assert "serving size" in caplog.text
+
+
+def test_export_input_size_equal_to_validated_does_not_warn(
+    sidecar_path, checkpoint_path, tmp_path, caplog
+):
+    with caplog.at_level(logging.WARNING, logger=bundle_module.__name__):
+        out = export_bundle(
+            checkpoint_path, sidecar_path, tmp_path / "bundle", input_size=list(INPUT_SIZE)
+        )
+    assert load_bundle(out).input_size == INPUT_SIZE
+    assert "serving size" not in caplog.text
+
+
+def test_load_bundle_without_validated_size_falls_back_to_serving_size(bundle_dir, tmp_path):
+    old = _rewrite_manifest(
+        bundle_dir, tmp_path / "old", lambda m: m["input"].pop("validated_size_hw")
+    )
+    assert load_bundle(old).validated_input_size == INPUT_SIZE
