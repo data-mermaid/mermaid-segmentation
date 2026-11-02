@@ -87,6 +87,15 @@ def build_source_to_concepts(
     """Build ``(N+1, C)`` lookup tensor from global source ids and a frozen schema."""
     max_gid = max(global_id2source) if global_id2source else 0
     table = np.zeros((max_gid + 1, schema.num_channels), dtype=np.float32)
+    warned: set[tuple[str, str]] = set()
     for gid, (source, label) in global_id2source.items():
+        key = (source.lower(), label.lower())
+        if key not in schema.row_by_key and key not in warned:
+            warned.add(key)
+            print(
+                f"DEBUG WARNING: unmapped source label (concept mapping): "
+                f"source_dataset={key[0]!r} label={key[1]!r}",
+                flush=True,
+            )
         table[gid] = schema.row_for(source, label)
     return torch.from_numpy(table)
