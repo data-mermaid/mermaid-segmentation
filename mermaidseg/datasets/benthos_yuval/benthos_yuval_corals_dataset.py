@@ -1,8 +1,7 @@
 """Benthos Yuval PyTorch dataset (dense segmentation tiles).
 
-Reads tiles produced by ``verify_raw_data_and_add_to_s3.py`` and emits ``(image,
-source_labels)`` pairs in the Benthos Yuval source-label space. See ``README.md`` for
-dataset details.
+Reads tiles produced by ``verify_raw_data_and_add_to_s3.py`` and emits ``(image, source_labels)``
+pairs in the Benthos Yuval source-label space. See ``README.md`` for dataset details.
 """
 
 from __future__ import annotations
@@ -73,6 +72,7 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
+        self.s3 = boto3.client("s3")
         self.whitelist_sites = whitelist_sites
         self.blacklist_sites = blacklist_sites
 
@@ -80,7 +80,7 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
 
         # Mask PNGs are in the global ``classes.json`` ID space; remap to the
-        # sorted local space set up by ``BaseCoralDataset``.
+        # value-counts-ordered local space set up by ``BaseCoralDataset``.
         self._classes_global = self._load_classes_json()
         self._classes_global_to_local = self._build_classes_global_to_local()
 
@@ -122,18 +122,14 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
     def _load_classes_json(self) -> dict[str, int]:
         """Fetch ``classes.json`` from S3 (used to interpret the dense mask PNGs)."""
         key = f"{self.source_s3_prefix}/classes.json"
-        response = self.s3.get_object(Bucket=self.source_bucket, Key=key)
-        try:
-            body = response["Body"].read()
-        finally:
-            response["Body"].close()
+        body = self.s3.get_object(Bucket=self.source_bucket, Key=key)["Body"].read()
         return {str(name): int(idx) for name, idx in json.loads(body).items()}
 
     def _build_classes_global_to_local(self) -> np.ndarray:
         """Lookup table from classes.json IDs to local source IDs.
 
-        Background, classes filtered out by ``class_subset``, and any unknown class fall
-        through to local ID 0.
+        Background, classes filtered out by ``class_subset``, and any unknown class fall through to
+        local ID 0.
         """
         max_global = max(self._classes_global.values()) + 1
         lookup = np.zeros(max_global, dtype=np.int64)
@@ -150,7 +146,9 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         num_source_classes: int,
     ) -> None:
         """Replace local source maps and rebuild the classes.json lookup."""
-        super().set_source_vocabulary(source_id2name, source_name2id, num_source_classes)
+        self.source_id2name = dict(source_id2name)
+        self.source_name2id = dict(source_name2id)
+        self.num_source_classes = int(num_source_classes)
         self._classes_global_to_local = self._build_classes_global_to_local()
 
     def set_global_offset(self, offset: int) -> None:

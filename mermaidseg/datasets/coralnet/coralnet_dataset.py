@@ -16,11 +16,12 @@ filename for backward compatibility; pin a specific build via
 
 from __future__ import annotations
 
-import logging
+import json
 import os
 from typing import Any
 
 import boto3
+import fsspec
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -30,38 +31,9 @@ from mermaidseg.datasets.utils import get_image_s3
 
 _LEGACY_ANNOTATIONS_PATH = "coralnet_annotations_30112025.parquet"
 
-logger = logging.getLogger(__name__)
-
-
-def _as_int_ids(values: pd.Series, column: str) -> pd.Series:
-    """Return ``values`` as int64, raising on nulls or non-integral values.
-
-    CoralNet ids are numeric. A float column (one null is enough to force float64) would
-    otherwise stringify as ``"82.0"`` / ``"nan"`` and silently miss the provider_id
-    mapping.
-    """
-    numeric = pd.to_numeric(values, errors="coerce")
-    bad = numeric.isna() | (numeric != numeric.round())
-    if bad.any():
-        examples = values[bad].unique()[:5].tolist()
-        raise ValueError(
-            f"CoralNet {column} must be non-null integers; {int(bad.sum())} invalid rows "
-            f"(e.g. {examples})."
-        )
-    return numeric.astype(np.int64)
-
-
-def _as_int_id_set(ids: list[int | str], name: str) -> set[int]:
-    """Coerce configured source ids (YAML may quote them) to ints."""
-    try:
-        return {int(i) for i in ids}
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must contain integer source ids, got {ids!r}") from exc
-
 
 def _resolve_default_annotations_path() -> str:
-    """Resolve the default ``annotations_path`` from env vars, falling back to the
-    legacy file.
+    """Resolve the default ``annotations_path`` from env vars, falling back to the legacy file.
 
     Precedence:
         1. ``MERMAID_CORALNET_ANNOTATIONS_PATH`` — full S3 key as published by the ETL.
@@ -81,8 +53,8 @@ def _resolve_default_annotations_path() -> str:
 
 
 class CoralNetDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet
-    file stored on S3.
+    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file stored
+    on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in CoralNet's own provider-ID label
@@ -107,10 +79,6 @@ class CoralNetDataset(BaseCoralDataset):
 
     SOURCE_NAME = "coralnet"
 
-    # Columns every CoralNet annotations parquet must provide. ``source_label_name`` is derived
-    # from ``coralnet_id``; ``image_s3_key`` is optional (present only in the resized parquet).
-    REQUIRED_COLUMNS: tuple[str, ...] = ("source_id", "image_id", "row", "col", "coralnet_id")
-
     annotations_path: str
     source_ids: list[int | str]
     source_bucket: str
@@ -131,6 +99,7 @@ class CoralNetDataset(BaseCoralDataset):
         self.annotations_path = annotations_path or _resolve_default_annotations_path()
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
+        self.s3 = boto3.client("s3")
         self.whitelist_sources = whitelist_sources
         self.blacklist_sources = blacklist_sources
         if self.whitelist_sources is not None and self.blacklist_sources is not None:
@@ -138,25 +107,14 @@ class CoralNetDataset(BaseCoralDataset):
 
         df_annotations, df_images = self.load_annotations()
 
-        present = set(df_annotations["source_id"].unique().tolist())
         if self.whitelist_sources is not None:
-            wanted = _as_int_id_set(self.whitelist_sources, "whitelist_sources")
-            absent = sorted(wanted - present)
-            if absent:
-                raise ValueError(
-                    f"whitelist_sources lists ids absent from {self.annotations_path}: {absent}"
-                )
-            df_annotations = df_annotations[df_annotations["source_id"].isin(wanted)]
+            df_annotations = df_annotations[
+                df_annotations["source_id"].apply(lambda x: x in self.whitelist_sources)
+            ]
         if self.blacklist_sources is not None:
-            unwanted = _as_int_id_set(self.blacklist_sources, "blacklist_sources")
-            absent = sorted(unwanted - present)
-            if absent:
-                logger.warning(
-                    "blacklist_sources lists ids absent from %s: %s",
-                    self.annotations_path,
-                    absent,
-                )
-            df_annotations = df_annotations[~df_annotations["source_id"].isin(unwanted)]
+            df_annotations = df_annotations[
+                df_annotations["source_id"].apply(lambda x: x not in self.blacklist_sources)
+            ]
         if self.whitelist_sources is not None or self.blacklist_sources is not None:
             df_annotations = df_annotations.reset_index(drop=True)
             df_images = self._derive_df_images_from_annotations(df_annotations)
@@ -167,7 +125,7 @@ class CoralNetDataset(BaseCoralDataset):
         """Load CoralNet annotations from a parquet file on S3.
 
         The dataset emits labels in CoralNet's own provider label space, so
-        each row's ``coralnet_id`` (validated as an integer, then cast to ``str``) becomes the
+        each row's ``coralnet_id`` (cast to ``str``) becomes the
         ``source_label_name``. No CoralNet -> MERMAID translation happens
         here; that mapping is owned by
         :mod:`mermaidseg.dataset_reconciliation.label_mapping` and is applied
@@ -175,44 +133,42 @@ class CoralNetDataset(BaseCoralDataset):
         """
         annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
         df_annotations = pd.read_parquet(annotations_path)
-        missing = set(self.REQUIRED_COLUMNS) - set(df_annotations.columns)
-        if missing:
-            raise ValueError(
-                f"CoralNet annotations parquet at {annotations_path} is missing required "
-                f"columns: {sorted(missing)}"
-            )
-        df_annotations["source_id"] = _as_int_ids(df_annotations["source_id"], "source_id")
-        df_annotations["coralnet_id"] = _as_int_ids(df_annotations["coralnet_id"], "coralnet_id")
-        df_annotations["source_label_name"] = df_annotations["coralnet_id"].astype(str)
-        columns = ["source_id", "image_id", "row", "col", "coralnet_id", "source_label_name"]
-        # The resized training parquet carries a per-image resolved S3 key (resized or original)
-        # with row/col already scaled to that image. The legacy parquet omits it, in which case
-        # read_image falls back to constructing the original key.
-        if "image_s3_key" in df_annotations.columns:
-            columns.append("image_s3_key")
-        df_annotations = df_annotations[columns]
+        id2name_path = (
+            "s3://dev-datamermaid-sm-sources/coralnet-public-images/temporary/coralnet_id2name.json"
+        )
+
+        with fsspec.open(id2name_path, "r") as f:
+            coralnet_id2name = json.load(f)
+
+        df_annotations["coralnet_name"] = df_annotations["coralnet_id"].map(
+            lambda x: coralnet_id2name.get(str(x))
+        )
+        df_annotations["source_label_name"] = (
+            df_annotations["coralnet_name"].astype(str).str.lower()
+        )
+
+        df_annotations = df_annotations[
+            [
+                "source_id",
+                "image_id",
+                "row",
+                "col",
+                "coralnet_id",
+                "coralnet_name",
+                "source_label_name",
+            ]
+        ]
 
         df_images = self._derive_df_images_from_annotations(df_annotations)
         return df_annotations, df_images
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
-        columns = ["source_id", "image_id"]
-        if "image_s3_key" in df_annotations.columns:
-            columns.append("image_s3_key")
         return (
-            df_annotations[columns]
+            df_annotations[["source_id", "image_id"]]
             .drop_duplicates(subset=["source_id", "image_id"])
             .reset_index(drop=True)
         )
 
-    def read_image(
-        self,
-        image_id: str,
-        source_id: str,
-        image_s3_key: str | None = None,
-        **row_kwargs: Any,
-    ) -> NDArray[Any]:
-        if not isinstance(image_s3_key, str) or not image_s3_key:
-            image_s3_key = None
-        key = image_s3_key or f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
+    def read_image(self, image_id: str, source_id: str, **row_kwargs: Any) -> NDArray[Any]:
+        key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
         return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))

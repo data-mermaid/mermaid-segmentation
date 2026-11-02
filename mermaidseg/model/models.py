@@ -1,7 +1,5 @@
-import math
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -11,34 +9,12 @@ from transformers.modeling_outputs import SemanticSegmenterOutput
 from transformers.models.dpt.modeling_dpt import DPTNeck
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
-from mermaidseg.dataset_reconciliation.morphology import DEFAULT_MORPHOLOGY_CHANNELS
 
 DEFAULT_LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
 
-@dataclass
-class ConceptBottleneckOutput(SemanticSegmenterOutput):
-    """Segmenter output for concept-bottleneck models.
-
-    Both ``concept_outputs`` and ``concept_logits`` are retained intentionally: logits
-    feed the training loss; activations feed the class head and inference.
-    ``hidden_states`` is unused (left ``None``) so activations are not overloaded.
-    """
-
-    concept_outputs: torch.Tensor | None = None
-    concept_logits: torch.Tensor | None = None
-
-
-@dataclass
-class DualSegmenterOutput(SemanticSegmenterOutput):
-    """Flat class logits plus optional morphology logits for the dual-head model."""
-
-    morphology_logits: torch.Tensor | None = None
-
-
 class LinearClassifier(torch.nn.Module):
-    """A linear classifier module that performs pixel-wise classification on reshaped
-    embeddings.
+    """A linear classifier module that performs pixel-wise classification on reshaped embeddings.
 
     This module takes input embeddings, reshapes them to a 2D spatial format, and applies
     a 1x1 convolution to perform classification. It's commonly used as a classification
@@ -90,8 +66,8 @@ class LinearClassifier(torch.nn.Module):
 
 
 class ConceptHead(torch.nn.Module):
-    """A concept classification head module that performs pixel-wise classification on
-    reshaped embeddings.
+    """A concept classification head module that performs pixel-wise classification on reshaped
+    embeddings.
 
     This module takes input embeddings, reshapes them to a 2D spatial format, and
     applies a 1x1 convolution to perform classification. It's commonly used as a classification
@@ -133,11 +109,15 @@ class ConceptHead(torch.nn.Module):
 class LinearDINOv3(torch.nn.Module):
     """DINOv3 encoder with a linear segmentation head.
 
-    Encodes input images with a frozen-or-trainable DINOv3 backbone and classifies each
-    spatial token with a 1×1 conv, then bilinearly upsamples back to input resolution.
+    Encodes input images with a frozen-or-trainable DINOv3 backbone and
+    classifies each spatial token with a 1×1 conv, then bilinearly upsamples
+    back to input resolution.
 
-    When ``use_lora=True``, PEFT LoRA adapters are injected into the encoder attention
-    projections; base weights stay frozen and only adapters + head train.
+    Attributes:
+        encoder: DINOv3 model loaded via `AutoModel.from_pretrained`.
+        head (LinearClassifier): Per-token classification head.
+        token_width (int): Width of the patch-token grid.
+        token_height (int): Height of the patch-token grid.
     """
 
     def __init__(
@@ -145,53 +125,27 @@ class LinearDINOv3(torch.nn.Module):
         encoder_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
         num_classes: int = 2,
         input_size: tuple[int, int] = (512, 512),
-        use_lora: bool = False,
-        lora_r: int = 16,
-        lora_alpha: int = 32,
-        lora_dropout: float = 0.05,
-        lora_target_modules: Sequence[str] = ("q_proj", "v_proj"),
-        lora_bias: str = "none",
         **kwargs: Any,
     ):
         """Initialize encoder and linear segmentation head.
 
         Args:
             encoder_name (str): HuggingFace model ID for the DINOv3 encoder.
-            num_classes (int): Number of segmentation output classes.
+                Defaults to "facebook/dinov3-vitb16-pretrain-lvd1689m".
+            num_classes (int): Number of segmentation output classes. Defaults to 2.
             input_size (tuple[int, int]): Expected (height, width) of input images.
-            use_lora (bool): If True, wrap the encoder with PEFT LoRA adapters.
-            lora_r / lora_alpha / lora_dropout / lora_target_modules / lora_bias:
-                PEFT LoRA hyperparameters (ignored when ``use_lora`` is False).
+                Determines the token grid size. Defaults to (512, 512).
             **kwargs: Forwarded to `AutoModel.from_pretrained` (e.g., `token`).
         """
         super().__init__()
 
         token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
-        base_encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
-        self.use_lora = use_lora
-        if use_lora:
-            self.encoder = _wrap_encoder_with_lora(
-                base_encoder,
-                lora_r=lora_r,
-                lora_alpha=lora_alpha,
-                lora_dropout=lora_dropout,
-                lora_target_modules=lora_target_modules,
-                lora_bias=lora_bias,
-            )
-        else:
-            self.encoder = base_encoder
+        self.encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
         hidden_size = self.encoder.config.hidden_size
         patch_size = self.encoder.config.patch_size
         self.token_width = input_size[1] // patch_size
         self.token_height = input_size[0] // patch_size
         self.head = LinearClassifier(hidden_size, self.token_width, self.token_height, num_classes)
-        # Gates the encoder forward under no_grad when the backbone is frozen (set by
-        # freeze_encoder). Mirrors _DPTDINOv3Base so a frozen probe doesn't build the autograd
-        # graph over the backbone or hold its activations. LoRA keeps this False so adapters
-        # still receive gradients through the encoder forward.
-        self._encoder_frozen = False
-        if use_lora:
-            self.freeze_encoder()
 
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
         """Run encoder + linear head and upsample to input resolution.
@@ -202,122 +156,52 @@ class LinearDINOv3(torch.nn.Module):
         Returns:
             SemanticSegmenterOutput: `.logits` has shape (B, num_classes, H, W).
         """
-        if self._encoder_frozen:
-            # Frozen probe: skip building the autograd graph over the backbone (saves activation
-            # memory and backward compute; only the head trains).
-            with torch.no_grad():
-                outputs = self.encoder(x, **kwargs)
-        else:
-            outputs = self.encoder(x, **kwargs)
+        outputs = self.encoder(x, **kwargs)
         # Skip the 5 DINOv3 prefix tokens (CLS + 4 register tokens)
         patch_embeddings = outputs.last_hidden_state[:, 5:, :]
 
+        # convert to logits and upsample to the size of the pixel values
         logits = self.head(patch_embeddings)
         logits = torch.nn.functional.interpolate(
             logits, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
 
-        return SemanticSegmenterOutput(loss=None, logits=logits)
+        loss = None
+        # if labels is not None:
+        #     logits = torch.nn.functional.interpolate(
+        #         logits, size=labels.shape[-2:], mode="bilinear", align_corners=False
+        #     )
+        #     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=0)
+        #     loss = loss_fct(logits.squeeze(), labels.squeeze())
+
+        return SemanticSegmenterOutput(loss=loss, logits=logits)
 
     def freeze_encoder(self) -> None:
-        """Freeze encoder base weights; keep LoRA adapters trainable when present.
+        """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
+        parameters to `False`.
 
-        Without LoRA, also run the encoder under ``torch.no_grad`` (frozen probe). With
-        LoRA, adapters stay trainable so the encoder forward must keep gradients.
+        This prevents the encoder layers from being updated during training, effectively making them
+        static while allowing other parts of the model to be trained.
         """
-        if self.use_lora:
-            for name, param in self.encoder.named_parameters():
-                param.requires_grad = "lora_" in name
-            self._encoder_frozen = False
-            return
         for param in self.encoder.parameters():
             param.requires_grad = False
-        self._encoder_frozen = True
 
     def unfreeze_encoder(self) -> None:
-        """Unfreeze the full encoder (base weights + LoRA adapters, if any)."""
+        """Unfreezes the encoder layers of the model by setting the `requires_grad` attribute of all
+        parameters in the encoder to True.
+
+        This allows these layers to be trainable during the training process.
+        """
         for param in self.encoder.parameters():
             param.requires_grad = True
-        self._encoder_frozen = False
-
-
-class LinearLoRADINOv3(LinearDINOv3):
-    """LinearDINOv3 with LoRA enabled by default (Q/V adapters unless overridden)."""
-
-    def __init__(self, **kwargs: Any):
-        kwargs.setdefault("use_lora", True)
-        kwargs.setdefault("lora_target_modules", ("q_proj", "v_proj"))
-        super().__init__(**kwargs)
-
-
-class LinearDualDINOv3(LinearDINOv3):
-    """LinearDINOv3 with a parallel morphology head (taxonomy class + growth form).
-
-    Class logits stay on ``.logits`` for eval compatibility. Morphology logits are
-    multi-label channels (plating/branching/…) and are supervised only when targets
-    are known (see :class:`~mermaidseg.model.loss.DualTaxonomicalLoss`).
-    """
-
-    def __init__(
-        self,
-        num_morphology: int | None = None,
-        morphology_names: Sequence[str] | None = None,
-        **kwargs: Any,
-    ):
-        names = (
-            list(morphology_names)
-            if morphology_names is not None
-            else list(DEFAULT_MORPHOLOGY_CHANNELS)
-        )
-        n_morph = int(num_morphology) if num_morphology is not None else len(names)
-        if n_morph != len(names):
-            raise ValueError(
-                f"num_morphology ({n_morph}) must match len(morphology_names) ({len(names)})"
-            )
-        super().__init__(**kwargs)
-        self.morphology_names = names
-        self.num_morphology = n_morph
-        hidden_size = self.encoder.config.hidden_size
-        self.morph_head = LinearClassifier(
-            hidden_size, self.token_width, self.token_height, n_morph
-        )
-
-    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> DualSegmenterOutput:
-        if self._encoder_frozen:
-            with torch.no_grad():
-                outputs = self.encoder(x, **kwargs)
-        else:
-            outputs = self.encoder(x, **kwargs)
-        patch_embeddings = outputs.last_hidden_state[:, 5:, :]
-
-        logits = self.head(patch_embeddings)
-        logits = torch.nn.functional.interpolate(
-            logits, size=x.shape[-2:], mode="bilinear", align_corners=False
-        )
-        morph_logits = self.morph_head(patch_embeddings)
-        morph_logits = torch.nn.functional.interpolate(
-            morph_logits, size=x.shape[-2:], mode="bilinear", align_corners=False
-        )
-        return DualSegmenterOutput(loss=None, logits=logits, morphology_logits=morph_logits)
-
-
-class LinearDualLoRADINOv3(LinearDualDINOv3):
-    """Dual-head LinearDINOv3 with LoRA enabled by default."""
-
-    def __init__(self, **kwargs: Any):
-        kwargs.setdefault("use_lora", True)
-        kwargs.setdefault("lora_target_modules", ("q_proj", "v_proj"))
-        super().__init__(**kwargs)
 
 
 class ConceptBottleneckDINOv3(torch.nn.Module):
     """DINOv3 encoder with a concept bottleneck for segmentation.
 
     Adds an intermediate concept prediction head between the DINOv3 backbone and the
-    final segmentation classifier. The concept predictions are supervised jointly with the
-    segmentation task; activated concept outputs are returned via
-    `ConceptBottleneckOutput.concept_outputs` and raw concept logits via
-    `ConceptBottleneckOutput.concept_logits`.
+    final segmentation classifier. The concept logits are supervised jointly with the
+    segmentation task and are returned via `SemanticSegmenterOutput.hidden_states`.
 
     Attributes:
         encoder: DINOv3 backbone loaded via `AutoModel.from_pretrained`.
@@ -364,17 +248,15 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         )
         self.concept_classifier = torch.nn.Conv2d(num_concepts, num_classes, kernel_size=1)
 
-    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> ConceptBottleneckOutput:
+    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
         """Run encoder → concept head → segmentation classifier.
 
         Args:
             x (torch.Tensor): Input image tensor with shape (B, C, H, W).
             labels: Unused; accepted for API compatibility.
         Returns:
-            ConceptBottleneckOutput: `.logits` has shape (B, num_classes, H, W);
-                `.concept_outputs` holds the activated concept outputs in ``[0, 1]`` and
-                `.concept_logits` holds the raw pre-activation logits, both with shape
-                (B, num_concepts, H, W).
+            SemanticSegmenterOutput: `.logits` has shape (B, num_classes, H, W);
+                `.hidden_states` contains concept logits with shape (B, num_concepts, H, W).
         """
         outputs = self.encoder(x, **kwargs)
         # Skip the 5 DINOv3 prefix tokens (CLS + 4 register tokens)
@@ -401,26 +283,21 @@ class ConceptBottleneckDINOv3(torch.nn.Module):
         #     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=0)
         #     loss = loss_fct(logits.squeeze(), labels.squeeze())
 
-        return ConceptBottleneckOutput(
-            loss=loss,
-            logits=logits,
-            concept_outputs=concept_outputs,
-            concept_logits=concept_logits,
-        )
+        return SemanticSegmenterOutput(loss=loss, logits=logits, hidden_states=concept_outputs)
 
     def freeze_encoder(self) -> None:
-        """Freezes the encoder layers of the model by setting the `requires_grad`
-        attribute of their parameters to `False`.
+        """Freezes the encoder layers of the model by setting the `requires_grad` attribute of their
+        parameters to `False`.
 
-        This prevents the encoder layers from being updated during training, effectively
-        making them static while allowing other parts of the model to be trained.
+        This prevents the encoder layers from being updated during training, effectively making them
+        static while allowing other parts of the model to be trained.
         """
         for param in self.encoder.parameters():
             param.requires_grad = False
 
     def unfreeze_encoder(self) -> None:
-        """Unfreezes the encoder layers of the model by setting the `requires_grad`
-        attribute of all parameters in the encoder to True.
+        """Unfreezes the encoder layers of the model by setting the `requires_grad` attribute of all
+        parameters in the encoder to True.
 
         This allows these layers to be trainable during the training process.
         """
@@ -452,9 +329,9 @@ def _wrap_encoder_with_lora(
 ) -> torch.nn.Module:
     """Wrap a DINOv3 encoder with PEFT LoRA adapters.
 
-    The pretrained backbone weights are frozen and only the injected low-rank adapter
-    matrices remain trainable, which keeps the parameter/optimizer footprint small while
-    still adapting the attention projections.
+    The pretrained backbone weights are frozen and only the injected low-rank adapter matrices
+    remain trainable, which keeps the parameter/optimizer footprint small while still adapting the
+    attention projections.
     """
     lora_config = LoraConfig(
         r=lora_r,
@@ -511,14 +388,11 @@ class DPTHead(torch.nn.Module):
             neck_ignore_stages=[],
         )
         self.neck = DPTNeck(dpt_config)
-        norm_groups = min(32, fusion_hidden_size)
-        while fusion_hidden_size % norm_groups != 0:
-            norm_groups -= 1
         self.head = torch.nn.Sequential(
             torch.nn.Conv2d(
                 fusion_hidden_size, fusion_hidden_size, kernel_size=3, padding=1, bias=False
             ),
-            torch.nn.GroupNorm(norm_groups, fusion_hidden_size),
+            torch.nn.BatchNorm2d(fusion_hidden_size),
             torch.nn.ReLU(inplace=True),
             torch.nn.Dropout(dropout),
             torch.nn.Conv2d(fusion_hidden_size, out_channels, kernel_size=1),
@@ -538,41 +412,16 @@ class DPTHead(torch.nn.Module):
             raise ValueError(
                 f"DPTHead expects {self.num_stages} hidden states, got {len(hidden_states)}."
             )
-        # Derive the patch-token grid from the actual sequence length (minus the
-        # CLS token) so the head works for any input resolution, not just the one
-        # baked in at construction from ``input_size``.
-        token_height, token_width = self._infer_token_grid(hidden_states[0].shape[1] - 1)
-        features = self.neck(hidden_states, token_height, token_width)
+        features = self.neck(hidden_states, self.token_height, self.token_width)
         return self.head(features[-1])
-
-    def _infer_token_grid(self, num_patch_tokens: int) -> tuple[int, int]:
-        """Resolve the (height, width) patch grid for ``num_patch_tokens``.
-
-        Uses the configured token grid when it matches; otherwise reshapes
-        ``num_patch_tokens`` while preserving the configured aspect ratio (which handles
-        square and non-square inputs at arbitrary resolutions).
-        """
-        if num_patch_tokens == self.token_height * self.token_width:
-            return self.token_height, self.token_width
-
-        aspect = self.token_width / self.token_height
-        token_height = int(round(math.sqrt(num_patch_tokens / aspect)))
-        token_width = num_patch_tokens // token_height if token_height else 0
-        if token_height * token_width != num_patch_tokens:
-            raise ValueError(
-                f"Cannot reshape {num_patch_tokens} patch tokens into a grid with "
-                f"aspect ratio {aspect:.4f} (configured grid "
-                f"{self.token_height}x{self.token_width})."
-            )
-        return token_height, token_width
 
 
 class _DPTDINOv3Base(torch.nn.Module):
     """Shared backbone/head wiring for the DPT DINOv3 models.
 
-    The encoder can either be adapted with PEFT LoRA (``use_lora=True``) or used as a
-    plain frozen backbone (``use_lora=False``), in which case only the DPT head (and any
-    downstream concept layers) is trained.
+    The encoder can either be adapted with PEFT LoRA (``use_lora=True``) or used as a plain frozen
+    backbone (``use_lora=False``), in which case only the DPT head (and any downstream concept
+    layers) is trained.
     """
 
     def __init__(
@@ -654,9 +503,8 @@ class _DPTDINOv3Base(torch.nn.Module):
     def _encode(self, x: torch.Tensor, **kwargs: Any) -> list[torch.Tensor]:
         """Run the encoder and return the selected hidden states (CLS + patches).
 
-        When the (non-LoRA) backbone is frozen the encoder pass runs under
-        ``torch.no_grad`` to save memory; the LoRA path always keeps gradients so the
-        adapters can learn.
+        When the (non-LoRA) backbone is frozen the encoder pass runs under ``torch.no_grad`` to save
+        memory; the LoRA path always keeps gradients so the adapters can learn.
         """
         if self._encoder_frozen:
             with torch.no_grad():
@@ -727,36 +575,18 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         self.concept_proj = torch.nn.Conv2d(concept_feature_dim, num_concepts, kernel_size=1)
         self.concept_classifier = torch.nn.Conv2d(num_concepts, num_classes, kernel_size=1)
 
-    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> ConceptBottleneckOutput:
+    def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
         """Run encoder + DPT head, the concept bottleneck, and the class classifier."""
         hidden_states = self._encode(x, **kwargs)
         concept_features = self.dpt_head(hidden_states)
         concept_features = torch.nn.functional.interpolate(
             concept_features, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
-        if concept_features.device.type == "cuda":
-            with torch.autocast(device_type="cuda", enabled=False):
-                logits, concept_outputs, concept_logits = self._forward_concept_tail(
-                    concept_features
-                )
-        else:
-            logits, concept_outputs, concept_logits = self._forward_concept_tail(concept_features)
-        return ConceptBottleneckOutput(
-            loss=None,
-            logits=logits,
-            concept_outputs=concept_outputs,
-            concept_logits=concept_logits,
-        )
-
-    def _forward_concept_tail(
-        self, concept_features: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run concept projection, activation, and class projection in fp32."""
-        concept_logits = self.concept_proj(concept_features.float())
+        concept_logits = self.concept_proj(concept_features)
         concept_outputs = self.concept_outputs_activation(concept_logits)
         classifier_input = concept_outputs.detach() if self.detach_concepts else concept_outputs
-        logits = self.concept_classifier(classifier_input.float())
-        return logits, concept_outputs, concept_logits
+        logits = self.concept_classifier(classifier_input)
+        return SemanticSegmenterOutput(loss=None, logits=logits, hidden_states=concept_outputs)
 
     def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
         offset = 0
@@ -766,10 +596,10 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
             concept_values = self.concept_value2id[concept]
             order_concept_length = len(list(concept_values.values())[0])
             chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
-            activated_parts.append(torch.softmax(chunk.float(), dim=1))
+            activated_parts.append(torch.softmax(chunk, dim=1))
             offset += order_concept_length
 
-        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...].float()))
+        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...]))
         return torch.cat(activated_parts, dim=1)
 
 

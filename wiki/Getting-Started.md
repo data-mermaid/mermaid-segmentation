@@ -82,8 +82,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ## 3. Install dependencies
 
 ```bash
-# Contributor setup: test/lint tooling (groups) + notebooks & CoralNet ETL (extras)
-uv sync --group dev --extra notebooks --extra coralnet
+uv sync --group tests --group lint --group notebooks
 ```
 
 ## 4. Install pre-commit hooks

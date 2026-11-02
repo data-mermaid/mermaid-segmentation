@@ -136,9 +136,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     Attributes:
         SOURCE_NAME: ``"coralscapes_v2"``.
-        split: Optional HuggingFace split(s). A single name (``"train"`` /
-            ``"validation"`` / ``"test"``), a list of names to concatenate, or
-            ``None`` for all three splits.
+        split: Optional dataset split identifier (``"train"`` / ``"validation"`` / ``"test"``).
         transform: Optional Albumentations transform applied to image and mask.
         class_subset: Optional list of source-space (Coralscapes V2) class names to retain.
         source_id2name: Mapping from local source IDs (1..N) to Coralscapes V2 class names.
@@ -148,7 +146,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     SOURCE_NAME = "coralscapes_v2"
 
-    split: str | list[str] | None
+    split: str | None
     transform: A.BasicTransform | None
     class_subset: list[str] | None
     source_id2name: dict[int, str]
@@ -158,34 +156,28 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     def __init__(
         self,
-        split: str | list[str] | None = None,
+        split: str | None = None,
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
-        padding: int | None = None,
     ):
         from datasets import concatenate_datasets, load_dataset
 
         self.split = split
         self.transform = transform
         self.class_subset = class_subset
-        # Accepted for a uniform dataset constructor interface; unused here — Coralscapes
-        # carries dense HF masks, not point annotations, so there is nothing to pad.
-        self.padding = padding
         self._global_offset = 0
 
-        hf_dataset = load_dataset(CORALSCAPES_V2_HF_REPO)
-        if self.split is None:
+        self.dataset = load_dataset(CORALSCAPES_V2_HF_REPO)
+        if self.split is not None:
+            self.dataset = self.dataset[self.split]
+        else:
             self.dataset = concatenate_datasets(
                 [
-                    hf_dataset["train"],
-                    hf_dataset["validation"],
-                    hf_dataset["test"],
+                    self.dataset["train"],
+                    self.dataset["validation"],
+                    self.dataset["test"],
                 ]
             )
-        elif isinstance(self.split, str):
-            self.dataset = hf_dataset[self.split]
-        else:
-            self.dataset = concatenate_datasets([hf_dataset[s] for s in self.split])
 
         if self.class_subset is not None:
             ordered = list(self.class_subset)
@@ -200,8 +192,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _build_native_to_local(self) -> np.ndarray:
         """Build a vectorized lookup from native Coralscapes V2 IDs to local source IDs.
 
-        Native ID ``0`` and any class not present in ``class_subset`` map to ``0``
-        (background).
+        Native ID ``0`` and any class not present in ``class_subset`` map to ``0`` (background).
         """
         native_id2name = CORALSCAPES_V2_ID2NAME
         max_native = max(native_id2name) + 1
@@ -246,10 +237,9 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
-        On any internal load/transform error we emit a warning to logger + stdout +
-        stderr and return ``(None, None)``. :meth:`collate_fn` filters out these
-        placeholders, so a failed item drops out of the batch instead of crashing the
-        loader.
+        On any internal load/transform error we emit a warning to logger + stdout + stderr and
+        return ``(None, None)``. :meth:`collate_fn` filters out these placeholders, so a failed item
+        drops out of the batch instead of crashing the loader.
         """
         try:
             return self._load_item(idx)
@@ -277,12 +267,10 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return image, mask
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Filter out ``(None, None)`` items (failed loads) and stack into batched
-        tensors.
+        """Filter out ``(None, None)`` items (failed loads) and stack into batched tensors.
 
-        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this
-        filter drops them so a failed item simply leaves the batch instead of crashing
-        the loader.
+        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this filter drops
+        them so a failed item simply leaves the batch instead of crashing the loader.
         """
         batch_size = len(batch)
         filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]

@@ -1,15 +1,10 @@
 """
 Serialization strategy:
-- Training checkpoints (``checkpoints/``): torch.save (pickle) — full state (model +
-  optimizer + scheduler) for resume. One artifact per improving/periodic-checkpoint epoch.
-- MLflow best-model logging (``best-model/model.pt``): a lean, resume-agnostic snapshot
-  (weights + metrics only, no optimizer/scheduler state) written under a fixed filename that
-  is overwritten on every new best — it never accumulates one file per epoch.
+- Training checkpoints: torch.save (pickle) — full state for resume.
+- MLflow best-model logging: torch.save to a temp dir then mlflow.log_artifact.
   We avoid mlflow.pytorch.log_model because its internal session flush triggers
   UniqueViolation on the SageMaker managed MLflow PostgreSQL backend.
   Load with torch.load('model.pt').
-- Frozen parameters (e.g. a frozen backbone) are excluded from saved state dicts by default —
-  see ``save_full_state_dict`` — since they are byte-identical across every checkpoint of a run.
 - Published models: SafeTensors — zero-copy, no arbitrary code execution.
 """
 
@@ -25,8 +20,6 @@ import warnings
 from datetime import datetime, timedelta
 from typing import Any
 
-import boto3.exceptions
-import botocore.exceptions
 import mlflow
 import numpy as np
 import torch
@@ -48,30 +41,15 @@ from mermaidseg.model.meta import MetaModel
 logger = logging.getLogger(__name__)
 
 
-LOCAL_DEFAULT_URI = "./segmentation"
+try:
+    import wandb
 
-# Expected, non-fatal failures for MLflow-logging calls: a tracking-backend/connection error
-# (MlflowException) or local artifact IO (OSError). These are caught + warned so a transient
-# logging failure never crashes training. Everything else — AttributeError/KeyError/TypeError,
-# i.e. the "dropped/misnamed metric" class of bug — is intentionally NOT caught so it surfaces
-# loudly instead of silently degrading observability (the failure mode /ml-training-review targets).
-_MLFLOW_LOG_ERRORS = (mlflow.exceptions.MlflowException, OSError)
-# Init/connect additionally tolerates RuntimeError: `mlflow_connect` deliberately re-raises an
-# unreachable-tracking-server failure as RuntimeError (see below), and init degrades gracefully
-# (disable MLflow, keep training) on that expected infra failure.
-_MLFLOW_CONNECT_ERRORS = (*_MLFLOW_LOG_ERRORS, RuntimeError)
-# Artifact uploads (log_artifact) additionally tolerate transient S3 failures. On the SageMaker
-# managed backend, artifacts go to S3 and mlflow's S3ArtifactRepository calls boto3 upload_file
-# with no wrapping, so a throttle/timeout/connection blip surfaces as a boto exception — NOT an
-# MlflowException or OSError. Catching these keeps a transient artifact-store hiccup from killing
-# a long training run at checkpoint time (its prior behavior), while a programming bug in the
-# upload path still propagates. Note: an auth/permission ClientError raised directly (not wrapped
-# in S3UploadFailedError) still surfaces — a misconfigured artifact store should fail loudly.
-_MLFLOW_ARTIFACT_ERRORS = (
-    *_MLFLOW_LOG_ERRORS,
-    botocore.exceptions.BotoCoreError,
-    boto3.exceptions.S3UploadFailedError,
-)
+    WANDB_IMPORT_ERROR = None
+except ImportError as err:
+    wandb = None
+    WANDB_IMPORT_ERROR = err
+
+LOCAL_DEFAULT_URI = "./segmentation"
 
 
 def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
@@ -116,8 +94,8 @@ def get_mlflow_tracking_uri(config_uri: str | None = None) -> str:
 def mlflow_connect(uri: str | None = None) -> timedelta:
     """Set the MLflow tracking URI and verify connectivity.
 
-    Returns the time taken to establish the connection. The connection test may take a
-    long time to fail unless ``MLFLOW_HTTP_REQUEST_MAX_RETRIES`` is set to a low number.
+    Returns the time taken to establish the connection. The connection test may take a long time to
+    fail unless ``MLFLOW_HTTP_REQUEST_MAX_RETRIES`` is set to a low number.
     """
     if uri is None:
         uri = get_mlflow_tracking_uri()
@@ -130,11 +108,6 @@ def mlflow_connect(uri: str | None = None) -> timedelta:
             logger.warning(
                 "URI is a SageMaker ARN but sagemaker-mlflow is not installed. Install with: pip install sagemaker-mlflow"
             )
-
-    # MLflow 3.x disallows file-store backends by default. Set the opt-out
-    # env var automatically for local paths so dry-runs work without extra setup.
-    if uri and not uri.startswith(("http", "arn:")):
-        os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 
     mlflow.set_tracking_uri(uri=uri)
     try:
@@ -191,58 +164,12 @@ def resume_run(run_id: str) -> mlflow.ActiveRun:
         ) from e
 
 
-def _frozen_param_names(model: torch.nn.Module) -> set[str]:
-    """Return the ``state_dict`` keys of parameters with ``requires_grad=False``.
-
-    Used to exclude a frozen backbone (byte-identical across every checkpoint of a run)
-    from saved checkpoints. Buffers (e.g. norm running stats) are never in this set
-    since they are not returned by ``named_parameters``.
-    """
-    return {name for name, param in model.named_parameters() if not param.requires_grad}
-
-
-# Tag written on the MLflow run so a restarted SageMaker job (which keeps the same job name /
-# MERMAIDSEG_RUN_ID across a Managed-Spot interruption) can find and resume the SAME run instead
-# of starting a fresh one. See Logger.__init__ and download_latest_checkpoint.
-_RESUME_KEY_TAG = "mermaidseg.resume_key"
-
-
-def _epoch_from_checkpoint_path(path: str) -> int:
-    """Parse the epoch index out of a ``.../model_epoch{N}`` checkpoint artifact path.
-
-    Returns -1 for anything that doesn't match, so it sorts below real checkpoints.
-    """
-    name = path.rsplit("/", 1)[-1]
-    marker = "model_epoch"
-    if marker not in name:
-        return -1
-    suffix = name.split(marker, 1)[1]
-    digits = "".join(c for c in suffix if c.isdigit())
-    return int(digits) if digits else -1
-
-
-def _find_run_by_resume_key(experiment_name: str, resume_key: str) -> str | None:
-    """Return the run_id of a prior run tagged with ``resume_key`` in
-    ``experiment_name``.
-
-    Used to resume the same MLflow run after a Managed-Spot restart. Returns ``None`` if
-    the experiment or a matching run does not exist (i.e. this is the first attempt).
-    """
-    client = mlflow.tracking.MlflowClient()
-    experiment = client.get_experiment_by_name(experiment_name)
-    if experiment is None:
-        return None
-    runs = client.search_runs(
-        [experiment.experiment_id],
-        filter_string=f"tags.`{_RESUME_KEY_TAG}` = '{resume_key}'",
-        order_by=["attributes.start_time DESC"],
-        max_results=1,
-    )
-    return runs[0].info.run_id if runs else None
-
-
 class Logger:
-    """MLflow-focused logger for experiment tracking during training and evaluation."""
+    """MLflow-focused logger for experiment tracking during training and evaluation.
+
+    wandb support is deprecated; pass ``enable_wandb=True`` to use the legacy ``WandbLogger``
+    delegate during the deprecation period.
+    """
 
     def __init__(
         self,
@@ -252,6 +179,7 @@ class Logger:
         log_checkpoint=50,
         checkpoint_dir=".",
         enable_mlflow=True,
+        enable_wandb=False,
         id2label=None,
         id2concept=None,
         save_local_checkpoints=None,
@@ -266,10 +194,8 @@ class Logger:
         self.run_name = meta_model.run_name
         self.enable_mlflow = enable_mlflow
         self.mlflow_run_id = None
-        # True when __init__ resumed a prior run (Managed-Spot restart) rather than creating a new
-        # one; train.py uses this to know whether to restore training state from a checkpoint.
-        self.resumed = False
         self.enabled = False
+        self._wandb_logger = None
         self.id2label = id2label
         self.id2concept = id2concept
         logger_cfg = getattr(config, "logger", None)
@@ -304,18 +230,6 @@ class Logger:
 
         self.save_local_models = self.save_local_checkpoints
 
-        # Bound local checkpoint disk usage: keep only the most recent N files per run.
-        # None or <= 0 disables rotation (keep everything, prior behavior).
-        self.keep_last_n_checkpoints = getattr(logger_cfg, "keep_last_n_checkpoints", 3)
-        # Frozen params (e.g. a frozen backbone) are excluded from saved state dicts by
-        # default since they never change across a run's checkpoints. Opt out for full
-        # fine-tuning runs where nothing is frozen, or when full-state resume fidelity
-        # (all buffers/params, however static) matters more than checkpoint size.
-        self.save_full_state_dict = getattr(logger_cfg, "save_full_state_dict", False)
-        # Most recent is_best=True local checkpoint path per run_name, protected from
-        # rotation so a run of periodic (is_best=False) saves can't evict the local best.
-        self._best_local_checkpoint_paths: dict[str, str] = {}
-
         if enable_mlflow:
             self.enabled = experiment_name is not None
 
@@ -340,38 +254,16 @@ class Logger:
                     if self._log_system_metrics and self._system_metrics_interval is not None:
                         mlflow.set_system_metrics_sampling_interval(self._system_metrics_interval)
 
-                    # Managed-Spot resume: if this SageMaker job (identified by the stable
-                    # MERMAIDSEG_RUN_ID env var the launcher injects) already has a run, reattach
-                    # to it so an interrupted run continues in-place. Absent the env var, behaviour
-                    # is unchanged (a fresh run per launch).
-                    resume_key = os.environ.get("MERMAIDSEG_RUN_ID")
-                    resumable_run_id = (
-                        _find_run_by_resume_key(experiment_name, resume_key) if resume_key else None
-                    )
-
-                    if mlflow.active_run() is not None:
-                        logger.info("MLflow run %s already active", self.run_name)
-                        self.mlflow_run_id = mlflow.active_run().info.run_id
-                    elif resumable_run_id is not None:
-                        logger.info(
-                            "Resuming MLflow run %s (resume_key=%s)", resumable_run_id, resume_key
-                        )
-                        run = mlflow.start_run(
-                            run_id=resumable_run_id,
-                            log_system_metrics=self._log_system_metrics,
-                        )
-                        self.mlflow_run_id = run.info.run_id
-                        self.resumed = True
-                    else:
+                    if mlflow.active_run() is None:
                         logger.info("Starting MLflow RUN: %s", self.run_name)
                         run = mlflow.start_run(
                             run_name=self.run_name,
                             log_system_metrics=self._log_system_metrics,
                         )
                         self.mlflow_run_id = run.info.run_id
-                        if resume_key:
-                            # Tag so a later spot restart of this job can find and resume this run.
-                            mlflow.set_tag(_RESUME_KEY_TAG, resume_key)
+                    else:
+                        logger.info("MLflow run %s already active", self.run_name)
+                        self.mlflow_run_id = mlflow.active_run().info.run_id
 
                     if config is not None:
                         logger.info("Logging config to MLflow...")
@@ -412,13 +304,33 @@ class Logger:
                         # Log concept metadata
                         self._log_concept_metadata(meta_model)
 
-                except _MLFLOW_CONNECT_ERRORS as e:
+                except Exception as e:
                     logger.warning("Failed to initialize MLflow logging: %s", e)
                     if self.mlflow_run_id is not None:
                         with contextlib.suppress(Exception):
                             mlflow.end_run()
                         self.mlflow_run_id = None
                     self.enabled = False
+
+        if enable_wandb:
+            warnings.warn(
+                "enable_wandb is deprecated and will be removed in a future release. Use the MLflow-based Logger workflow instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if WANDB_IMPORT_ERROR is not None:
+                logger.warning("wandb is not installed. Wandb logging is disabled.")
+            else:
+                try:
+                    self._wandb_logger = WandbLogger(
+                        project=experiment_name or "mermaidseg",
+                        run_name=self.run_name,
+                        config=config,
+                        num_classes=int(meta_model.num_classes),
+                        _warn=False,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to initialize wandb logging: %s", e)
 
     @property
     def _mlflow_active(self) -> bool:
@@ -451,7 +363,7 @@ class Logger:
                 concept_matrix.to_csv(csv_path)
                 mlflow.log_artifact(csv_path, artifact_path="metadata")
                 logger.info("Logged concept matrix to MLflow")
-        except _MLFLOW_ARTIFACT_ERRORS as e:
+        except Exception as e:
             logger.warning("Failed to log concept matrix to MLflow: %s", e)
 
     def _unpack_metrics(self, metrics_dict: dict, key_prefix: str = "") -> dict[str, float]:
@@ -513,7 +425,7 @@ class Logger:
                 name=dataset.__class__.__name__,
             )
             mlflow.log_input(meta, context=context)
-        except _MLFLOW_LOG_ERRORS as e:
+        except Exception as e:
             logger.warning("Failed to log dataset to MLflow: %s", e)
 
     def log_datasets(self, dataset, context: str = "training") -> None:
@@ -534,8 +446,8 @@ class Logger:
     def log_reconciliation(self, registry) -> None:
         """Log the joint :class:`SourceLabelRegistry` artifacts to MLflow.
 
-        Saves ``global_id2source``, ``target_id2label``, ``source_to_target`` and (when
-        present) ``concept_id2name`` so MLflow runs are self-describing.
+        Saves ``global_id2source``, ``target_id2label``, ``source_to_target`` and (when present)
+        ``concept_id2name`` so MLflow runs are self-describing.
         """
         if not self._ensure_active_run():
             return
@@ -564,7 +476,7 @@ class Logger:
                 )
             mlflow.log_param("num_target_classes", int(registry.num_target_classes))
             mlflow.log_param("num_global_source_classes", int(registry.num_global_source_classes))
-        except _MLFLOW_LOG_ERRORS as e:
+        except Exception as e:
             logger.warning("Failed to log SourceLabelRegistry to MLflow: %s", e)
 
     def log_dataset_statistics(
@@ -672,7 +584,7 @@ class Logger:
             if dataset_variant is not None:
                 tags["benchmark.dataset_variant"] = dataset_variant
             mlflow.set_tags(tags)
-        except _MLFLOW_LOG_ERRORS as e:
+        except Exception as e:
             logger.warning("Failed to log benchmark context: %s", e)
 
     def log_dataloader_params(self, loader: DataLoader, prefix: str = "dataloader") -> None:
@@ -689,12 +601,16 @@ class Logger:
                     f"{prefix}_prefetch_factor": getattr(loader, "prefetch_factor", None),
                 }
             )
-        except _MLFLOW_LOG_ERRORS as e:
+        except Exception as e:
             logger.warning("Failed to log dataloader params: %s", e)
 
+    @property
+    def enable_wandb(self) -> bool:
+        """True when a ``WandbLogger`` delegate is active (deprecated)."""
+        return self._wandb_logger is not None
+
     def _ensure_active_run(self) -> bool:
-        """Guarantee an active MLflow run exists, resuming the original when
-        possible."""
+        """Guarantee an active MLflow run exists, resuming the original when possible."""
         if not self._mlflow_active:
             return False
         try:
@@ -728,7 +644,7 @@ class Logger:
                 "Started new MLflow run %s (was %s)", self.mlflow_run_id, original_run_id
             )
             return True
-        except _MLFLOW_LOG_ERRORS as e:
+        except Exception as e:
             logger.warning("Failed to ensure active MLflow run: %s", e)
             return False
 
@@ -738,64 +654,11 @@ class Logger:
                 metrics_to_log = self._unpack_metrics(log_dict)
                 if metrics_to_log:
                     mlflow.log_metrics(metrics_to_log, step=step)
-            except _MLFLOW_LOG_ERRORS as e:
+            except Exception as e:
                 logger.warning("Failed to log metrics to MLflow: %s", e)
 
-    def download_latest_checkpoint(self) -> str | None:
-        """Download the highest-epoch full checkpoint of the active run; return its
-        local path.
-
-        Used on Managed-Spot resume to fetch the last saved training state (the
-        ``checkpoints/`` artifacts written by :meth:`save_model_checkpoint`). Returns
-        ``None`` when MLflow is disabled, there is no active run, or the run has no
-        checkpoint artifacts yet (first launch).
-        """
-        if not self._mlflow_active or self.mlflow_run_id is None:
-            return None
-        try:
-            client = mlflow.tracking.MlflowClient()
-            artifacts = client.list_artifacts(self.mlflow_run_id, "checkpoints")
-            if not artifacts:
-                return None
-            latest = max(artifacts, key=lambda a: _epoch_from_checkpoint_path(a.path))
-            return mlflow.artifacts.download_artifacts(
-                run_id=self.mlflow_run_id, artifact_path=latest.path
-            )
-        except _MLFLOW_LOG_ERRORS as e:
-            logger.warning("Failed to download latest checkpoint from MLflow: %s", e)
-            return None
-
-    def _prune_local_checkpoints(self, run_name: str) -> None:
-        """Delete older local checkpoint files beyond ``keep_last_n_checkpoints``.
-
-        No-op when rotation is disabled (``keep_last_n_checkpoints`` is ``None`` or <=
-        0). Only prunes local disk — MLflow artifacts already uploaded to
-        ``checkpoints/`` are untouched, so run history remains browsable in MLflow even
-        after local pruning. The most recent ``is_best=True`` checkpoint for this run is
-        never pruned, even if it is the oldest file on disk — otherwise a run of
-        subsequent periodic (``is_best=False``) saves would silently evict the local
-        best checkpoint despite that being the file most worth keeping around.
-        """
-        if not self.keep_last_n_checkpoints or self.keep_last_n_checkpoints <= 0:
-            return
-        run_dir = os.path.join(self.checkpoint_dir, "model_checkpoints", run_name)
-        if not os.path.isdir(run_dir):
-            return
-        protected = self._best_local_checkpoint_paths.get(run_name)
-        files = [os.path.join(run_dir, f) for f in os.listdir(run_dir)]
-        files = [f for f in files if os.path.isfile(f)]
-        files.sort(key=os.path.getmtime)
-        kept = set(files[-self.keep_last_n_checkpoints :])
-        if protected in files:
-            kept.add(protected)
-        for old_file in files:
-            if old_file in kept:
-                continue
-            try:
-                os.remove(old_file)
-                logger.info("Pruned old local checkpoint: %s", old_file)
-            except OSError as e:
-                logger.warning("Failed to prune old checkpoint %s: %s", old_file, e)
+        if self._wandb_logger is not None:
+            self._wandb_logger.log(log_dict, step=step)
 
     def save_model_checkpoint(
         self,
@@ -806,46 +669,25 @@ class Logger:
     ):
         """Save a model checkpoint locally and/or to MLflow.
 
-        Local persistence is controlled by ``save_local_checkpoints``; local files
-        beyond ``keep_last_n_checkpoints`` (most recent) are pruned automatically.
-        MLflow logging to ``checkpoints/`` is independent of local persistence and keeps
-        the full improving/periodic-checkpoint history for the run.
+        Local persistence is controlled by ``save_local_checkpoints``. MLflow logging is independent
+        of local persistence.
 
-        Frozen parameters (``requires_grad=False``, e.g. a frozen backbone) are excluded
-        from ``model_state_dict`` by default via ``save_full_state_dict=False`` since
-        they are byte-identical across every checkpoint of a run — set
-        ``config.logger.save_full_state_dict: true`` to save the full state instead.
-        Checkpoints with frozen params excluded must be loaded with ``strict=False``,
-        then have the frozen backbone reloaded separately (see
-        ``checkpoint['config']['model']``).
+        When ``is_best`` is True (the default), the checkpoint is also written to the ``best-model``
+        artifact path and tagged accordingly.  Pass ``is_best=False`` to save a checkpoint without
+        overwriting the current best model.
 
-        When ``is_best`` is True (the default), a lean, resume-agnostic snapshot
-        (weights + metrics, no optimizer/scheduler state) is also written to the ``best-
-        model`` artifact path under a fixed filename (``model.pt``) that is overwritten
-        on every call — it never accumulates one file per improving epoch. Pass
-        ``is_best=False`` for periodic, non-improvement checkpoints (see
-        ``log_checkpoint``).
-
-        Checkpoint files are named ``model_epoch{epoch}`` — resuming from a previous
-        epoch will overwrite the file unless ``checkpoint_dir`` or ``run_name`` differs.
+        Checkpoint files are named ``model_epoch{epoch}`` — resuming from a previous epoch will
+        overwrite the file unless ``checkpoint_dir`` or ``run_name`` differs.
         """
         timestamp = time.strftime("%Y%m%d%H%M%S")
 
-        full_state_dict = meta_model_run.model.cpu().state_dict()
-        frozen_keys = (
-            set() if self.save_full_state_dict else _frozen_param_names(meta_model_run.model)
-        )
-        excludes_frozen_params = bool(frozen_keys)
-        model_state_dict = {k: v for k, v in full_state_dict.items() if k not in frozen_keys}
-
         checkpoint: dict[str, Any] = {
             "config": self.config,
-            "model_state_dict": model_state_dict,
+            "model_state_dict": meta_model_run.model.cpu().state_dict(),
             "optimizer_state_dict": meta_model_run.optimizer.state_dict(),
             "epoch": epoch,
             "timestamp": timestamp,
             "metrics": metrics_dict,
-            "excludes_frozen_params": excludes_frozen_params,
         }
 
         meta_model_run.model = meta_model_run.model.to(meta_model_run.device)
@@ -869,9 +711,6 @@ class Logger:
             torch.save(checkpoint, model_path)  # type: ignore
             local_checkpoint_saved = True
             logger.info("Checkpoint saved locally: %s", model_path)
-            if is_best:
-                self._best_local_checkpoint_paths[meta_model_run.run_name] = model_path
-            self._prune_local_checkpoints(meta_model_run.run_name)
         else:
             logger.info("Local checkpoint saving disabled, skipping disk write")
 
@@ -889,41 +728,26 @@ class Logger:
                 mlflow.log_metrics(checkpoint_metrics, step=epoch)
 
                 if is_best:
-                    # Log a lean, resume-agnostic snapshot as a plain artifact instead of
-                    # mlflow.pytorch.log_model() which triggers an internal PostgreSQL
-                    # session flush on the SageMaker managed MLflow backend, re-inserting
-                    # already-committed metrics and causing UniqueViolation on metric_pk.
-                    # No optimizer/scheduler state (that lives in checkpoints/ for resume),
-                    # and always written under a fixed filename so repeated "new best" saves
-                    # overwrite in place instead of accumulating one file per epoch.
-                    scalar_metrics = {
-                        k: float(v)
-                        for k, v in metrics_dict.items()
-                        if not isinstance(v, np.ndarray)
-                    }
-                    # Lean snapshot: everything in `checkpoint` except resume-only state
-                    # (optimizer/scheduler), which already lives in checkpoints/.
-                    best_checkpoint = {
-                        k: v
-                        for k, v in checkpoint.items()
-                        if k not in ("optimizer_state_dict", "scheduler_state_dict")
-                    }
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        best_pt = os.path.join(tmpdir, "model.pt")
-                        torch.save(best_checkpoint, best_pt)  # type: ignore
-                        mlflow.log_artifact(best_pt, artifact_path="best-model")
+                    # Log best model as a plain artifact instead of
+                    # mlflow.pytorch.log_model() which triggers an internal
+                    # PostgreSQL session flush on the SageMaker managed MLflow
+                    # backend, re-inserting already-committed metrics and
+                    # causing UniqueViolation on metric_pk.
+                    if local_checkpoint_saved:
+                        mlflow.log_artifact(model_path, artifact_path="best-model")
+                    else:
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            best_pt = os.path.join(tmpdir, "model.pt")
+                            torch.save(checkpoint, best_pt)  # type: ignore
+                            mlflow.log_artifact(best_pt, artifact_path="best-model")
 
+                    with tempfile.TemporaryDirectory() as tmpdir:
                         metadata_path = os.path.join(tmpdir, "metadata.json")
-                        strict_clause = (
-                            ", strict=False)  # frozen backbone excluded — reload it "
-                            "separately per ckpt['config']['model']"
-                            if excludes_frozen_params
-                            else ")"
-                        )
-                        load_with = (
-                            "ckpt = torch.load('model.pt'); "
-                            f"model.load_state_dict(ckpt['model_state_dict']{strict_clause}"
-                        )
+                        scalar_metrics = {
+                            k: float(v)
+                            for k, v in metrics_dict.items()
+                            if not isinstance(v, np.ndarray)
+                        }
                         with open(metadata_path, "w") as f:
                             json.dump(
                                 {
@@ -933,8 +757,7 @@ class Logger:
                                     "run_name": meta_model_run.run_name,
                                     "model_class": meta_model_run.model.__class__.__name__,
                                     "serialization": "pickle",
-                                    "excludes_frozen_params": excludes_frozen_params,
-                                    "load_with": load_with,
+                                    "load_with": "ckpt = torch.load('model.pt'); model.load_state_dict(ckpt['model_state_dict'])",
                                 },
                                 f,
                                 indent=2,
@@ -948,12 +771,21 @@ class Logger:
                     )
 
                 logger.info("Checkpoint logged to MLflow (epoch %d): %s", epoch, model_path)
-            except _MLFLOW_ARTIFACT_ERRORS as e:
+            except Exception as e:
                 logger.warning("Failed to log checkpoint/model to MLflow: %s", e)
                 if is_best:
                     with contextlib.suppress(Exception):
                         mlflow.set_tag("best_model_logged", "false")
                         mlflow.set_tag("best_model_log_error", str(e)[:500])
+
+        if self._wandb_logger is not None:
+            self._wandb_logger.save_checkpoint(
+                model_path=model_path,
+                epoch=epoch,
+                metrics_dict=metrics_dict,
+                checkpoint=checkpoint,
+                local_checkpoint_saved=local_checkpoint_saved,
+            )
 
     def save_safetensors_for_publish(
         self,
@@ -996,7 +828,7 @@ class Logger:
             logger.warning("Failed to export SafeTensors model: %s", e)
 
     def end_run(self):
-        """Properly end the MLflow run.
+        """Properly end the MLflow run (and wandb delegate, if active).
 
         Should be called at the end of training to ensure proper cleanup.
         """
@@ -1008,9 +840,100 @@ class Logger:
             except Exception as e:
                 logger.warning("Failed to end MLflow run: %s", e)
 
+        if self._wandb_logger is not None:
+            self._wandb_logger.end_run()
+
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.end_run()
         return False
+
+
+class WandbLogger:
+    """Deprecated standalone wandb logger.
+
+    .. deprecated::
+        ``WandbLogger`` will be removed in a future release.
+        Migrate to the MLflow-based :class:`Logger` workflow.
+    """
+
+    def __init__(
+        self,
+        project: str,
+        run_name: str,
+        config,
+        num_classes: int,
+        *,
+        _warn: bool = True,
+    ):
+        if _warn:
+            warnings.warn(
+                "WandbLogger is deprecated and will be removed in a future release. Use the MLflow-based Logger instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if WANDB_IMPORT_ERROR is not None:
+            raise ImportError(
+                "wandb is required for WandbLogger but is not installed. Install with: pip install wandb"
+            ) from WANDB_IMPORT_ERROR
+
+        self.wandb_run = wandb.init(
+            project=project,
+            name=run_name,
+            config=config,
+        )
+        self.wandb_run.config.update({"num_classes": num_classes})
+
+    def log(self, log_dict, step):
+        """Log metrics to the active wandb run."""
+        if self.wandb_run is None:
+            return
+        try:
+            self.wandb_run.log(log_dict, step=step)
+        except Exception as e:
+            logger.warning("Failed to log metrics to wandb: %s", e)
+
+    def save_checkpoint(
+        self,
+        model_path: str,
+        epoch: int,
+        metrics_dict: dict[str, Any],
+        checkpoint: dict[str, Any],
+        local_checkpoint_saved: bool,
+    ):
+        """Log a model checkpoint artifact to wandb."""
+        if self.wandb_run is None:
+            return
+        temp_file_path = None
+        try:
+            artifact_file = model_path
+            if not local_checkpoint_saved:
+                with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp_file:
+                    temp_file_path = tmp_file.name
+                torch.save(checkpoint, temp_file_path)  # type: ignore
+                artifact_file = temp_file_path
+            artifact = wandb.Artifact(
+                f"checkpoint-epoch{epoch}",
+                type="model",
+                metadata=metrics_dict,
+            )
+            artifact.add_file(artifact_file)
+            self.wandb_run.log_artifact(artifact)
+            logger.info("Checkpoint logged to wandb: %s", model_path)
+        except Exception as e:
+            logger.warning("Failed to log checkpoint to wandb: %s", e)
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
+    def end_run(self):
+        """Finish the active wandb run."""
+        if self.wandb_run is None:
+            return
+        try:
+            self.wandb_run.finish()
+            logger.info("Ended wandb run")
+        except Exception as e:
+            logger.warning("Failed to end wandb run: %s", e)
