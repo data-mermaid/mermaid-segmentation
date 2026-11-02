@@ -19,7 +19,7 @@ The demo needs a checkpoint plus label/concept metadata. Most of this is **not g
 
 | File | MLflow artifact path | How it is produced |
 |------|---------------------|-------------------|
-| `id2label.json` | `metadata/id2label.json` | Built in `scripts/train.py` as `{0: "background", **registry.target_id2label}` and logged by `Logger` |
+| `id2label.json` | `metadata/id2label.json` | Built in `scripts/train.py` as `{0: "ignore", **registry.target_id2label}` and logged by `Logger` |
 | `concept_id2name.json` | `metadata/concept_id2name.json` | Built by `SourceLabelRegistry._build_concepts()` and logged via `Logger.log_reconciliation()` |
 
 Download both from an MLflow run (under `metadata/`) and place them in `demo/`, or pass paths with `--id2label` / `--concept-id2name`.
@@ -75,3 +75,71 @@ Pin the `mermaidseg` git ref in `requirements.txt` (`@main` or a release tag) so
 - Dual **one-hot** (MERMAID class or taxonomic rank) and **multi-hot** (morphologic/non-coral concept) overlay panels
 - Click a pixel to inspect top classes, taxonomy tree, and other concept activations
 - Sample image gallery from `static/`
+
+## Static video demo
+
+Render an offline video showing the inferno concept highlight panel, driven by a CSV schedule that switches the highlighted concept expression at specified timestamps (hard cut). Title/subtitle banner is burned in at the top.
+
+```bash
+uv run python demo/video_demo.py INPUT.mp4 \
+  --output demo/output.mp4 \
+  --concepts-csv demo/video_concepts_example.csv \
+  --checkpoint /path/to/model_checkpoint \
+  --model-config configs/model_config_cbm_dpt_lora_vitl.yaml \
+  --fps 10
+```
+
+Optional flags: `--id2label`, `--concept-id2name`, `--device`, `--fps`.
+
+Tiled inference for higher effective resolution (overlapping windows at the model's native tile size):
+
+```bash
+uv run python demo/video_demo.py INPUT.mp4 \
+  ... \
+  --processing-resolution 1080x1920 \
+  --tile-overlap 0.2
+```
+
+Frames are resized to `HEIGHTxWIDTH`, then inferred in tiles matching the model config `input_size` (e.g. 512×512). Stride per axis is `(1 - overlap) × tile_size` (default overlap 0.2 → stride 409), and overlapping predictions are blended with linear distance-to-edge weights (each tile contributes proportionally to its distance from its own border, so a two-tile overlap is a single linear ramp equal-weighted at the midpoint).
+
+### Concepts CSV
+
+Columns: `timestamp,display_title,display_subtitle,expression`
+
+- `timestamp`: seconds into the source video when this row becomes active (piecewise-constant; last row with `timestamp <= t` wins).
+- `display_title` / `display_subtitle`: text burned into the output frame banner.
+- `expression`: per-pixel concept expression (see below).
+
+See [video_concepts_example.csv](video_concepts_example.csv) for a full walkthrough.
+
+### Expression DSL
+
+Each atom resolves to a `(H, W)` map in `[0, 1]` from the model's concept activations (`concept_probs`).
+
+| Atom form | Example | Resolves to channel |
+|-----------|---------|---------------------|
+| Taxonomic | `class:hexacorallia`, `genus:acropora` | `class__hexacorallia`, `genus__acropora` |
+| Bare | `live`, `bleached`, `branching`, `tabular`, `background`, `dark`, `transect` | same name |
+| Numeric | `1`, `0.5` | constant map |
+
+Operators (per-pixel, result clamped to `[0, 1]`):
+
+- `*` — intersection / AND ("times")
+- `+` — union / OR (for mutually exclusive ranks)
+- `-` — subtract (e.g. `1 - genus:acropora`)
+
+Parentheses group sub-expressions. Sentinel `@classes` renders MERMAID class segmentation (argmax class colored via the demo palette) instead of a viridis heatmap.
+
+Example expressions from the sample CSV:
+
+```
+live * (class:hexacorallia + class:octocorallia)
+bleached * class:hexacorallia
+genus:acropora * tabular
+branching * (1 - genus:acropora)
+@classes
+```
+
+Highlight panel: inferno where composite > 0.4: `(1-mask)*RGB + mask*(v*inferno(v) + (1-v)*RGB)`.
+
+Implementation: [concept_expr.py](concept_expr.py) (parser/evaluator), [video_demo.py](video_demo.py) (CLI/renderer).

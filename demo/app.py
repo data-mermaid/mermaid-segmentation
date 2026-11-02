@@ -68,6 +68,7 @@ DEFAULT_MULTIHOT: tuple[str, ...] = (
     "background",
     "anthropogenic",
     "dark",
+    "fish",
 )
 
 CSS = """
