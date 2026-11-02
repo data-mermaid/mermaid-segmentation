@@ -1,55 +1,70 @@
 """CoralNet PyTorch dataset.
 
-Reads CoralNet point annotations from a Parquet file on S3 and emits
-``(image, source_labels)`` tuples where ``source_labels`` is in the
-**CoralNet provider label space** — i.e. the integer IDs used by CoralNet's
-own label catalogue. Mapping into the MERMAID benthic attribute target space
-is performed externally via
+Reads CoralNet point annotations from a self-contained training manifest
+Parquet file on S3 and emits ``(image, source_labels)`` tuples where
+``source_labels`` is in the **CoralNet provider label space** — i.e. the
+integer IDs used by CoralNet's own label catalogue. Mapping into the MERMAID
+benthic attribute target space is performed externally via
 :mod:`mermaidseg.dataset_reconciliation.label_mapping`.
 
-The Parquet file referenced by ``annotations_path`` is produced by the
-reproducible ETL at :mod:`mermaidseg.datasets.coralnet.etl` (see
-``wiki/CoralNet-ETL.md``). Default-path resolution falls back to the legacy
-filename for backward compatibility; pin a specific build via
-``MERMAID_CORALNET_ANNOTATIONS_PATH`` or ``MERMAID_CORALNET_ANNOTATIONS_VERSION``.
+The training manifest (``coralnet_training_manifest_<run>.parquet``) carries
+per-annotation rows with ``(row, col, coralnet_id)`` in the **resized**
+coordinate space (longest edge clamped to 2048; see
+``mermaidseg.datasets.coralnet.preprocessing.resize``) plus the resolved
+``image_s3_key`` for each image (resized copy when the image was resized,
+otherwise the original). Pin a specific build via
+``MERMAID_CORALNET_MANIFEST_PATH`` or ``MERMAID_CORALNET_MANIFEST_VERSION``.
+Images with no ``image_s3_key`` are skipped (never loaded at the wrong
+resolution); the dataset recovers by serving a different image.
+
+Duplicate images (the same photo uploaded to several sources) are removed with
+``image_blacklist`` and their merged annotations applied with
+``annotation_overrides``; both are produced by ``mermaidseg.datasets.coralnet.dedup``
+and versioned in ``configs/coralnet/``.
 """
 
 from __future__ import annotations
 
-import json
+import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import boto3
-import fsspec
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
+from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.datasets.utils import get_image_s3
 
-_LEGACY_ANNOTATIONS_PATH = "coralnet_annotations_30112025.parquet"
+logger = logging.getLogger(__name__)
+
+_DEFAULT_RUN = "20260623_nogit"
+_DEFAULT_MANIFEST_PATH = (
+    f"etl-outputs/coralnet/{_DEFAULT_RUN}/coralnet_training_manifest_{_DEFAULT_RUN}.parquet"
+)
+_CORALNET_ID2NAME_KEY = "coralnet-public-images/temporary/coralnet_id2name.json"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _resolve_default_annotations_path() -> str:
-    """Resolve the default ``annotations_path`` from env vars, falling back to the legacy file.
+def _resolve_default_manifest_path() -> str:
+    """Resolve the default training manifest key from env vars.
 
     Precedence:
-        1. ``MERMAID_CORALNET_ANNOTATIONS_PATH`` — full S3 key as published by the ETL.
-        2. ``MERMAID_CORALNET_ANNOTATIONS_VERSION`` — version tag from
-            :func:`mermaidseg.datasets.coralnet.etl.compute_version_tag`;
-            builds ``coralnet_annotations_<version>.parquet``.
-        3. Legacy literal ``coralnet_annotations_30112025.parquet`` so existing
-            training runs keep working until the next default is published.
+        1. ``MERMAID_CORALNET_MANIFEST_PATH`` — full S3 key.
+        2. ``MERMAID_CORALNET_MANIFEST_VERSION`` — version tag; builds
+           ``etl-outputs/coralnet/<version>/coralnet_training_manifest_<version>.parquet``.
+        3. :data:`_DEFAULT_MANIFEST_PATH`.
     """
-    explicit = os.getenv("MERMAID_CORALNET_ANNOTATIONS_PATH")
+    explicit = os.getenv("MERMAID_CORALNET_MANIFEST_PATH")
     if explicit:
         return explicit
-    version = os.getenv("MERMAID_CORALNET_ANNOTATIONS_VERSION")
+    version = os.getenv("MERMAID_CORALNET_MANIFEST_VERSION")
     if version:
-        return f"coralnet_annotations_{version}.parquet"
-    return _LEGACY_ANNOTATIONS_PATH
+        return f"etl-outputs/coralnet/{version}/coralnet_training_manifest_{version}.parquet"
+    return _DEFAULT_MANIFEST_PATH
 
 
 class CoralNetDataset(BaseCoralDataset):
@@ -62,50 +77,67 @@ class CoralNetDataset(BaseCoralDataset):
     with a :class:`SourceLabelRegistry`).
 
     Attributes:
-        annotations_path (str): Path to the Parquet file containing image annotations,
-            produced by the ETL at :mod:`mermaidseg.datasets.coralnet.etl`.
+        manifest_path (str): Key (relative to ``source_bucket``) of the self-contained
+            training manifest parquet.
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-source CoralNet image folders live.
         s3 (boto3.client): Boto3 S3 client for accessing images.
     Args:
-        annotations_path (str, optional): Key (relative to ``source_bucket``) of the parquet file
-            with annotations. If ``None`` (default), resolved from ``MERMAID_CORALNET_ANNOTATIONS_PATH``
-            or ``MERMAID_CORALNET_ANNOTATIONS_VERSION``; falls back to the legacy literal.
+        manifest_path (str, optional): Key (relative to ``source_bucket``) of the training
+            manifest parquet. If ``None`` (default), resolved from
+            ``MERMAID_CORALNET_MANIFEST_PATH`` or ``MERMAID_CORALNET_MANIFEST_VERSION``;
+            falls back to the default published manifest.
         source_bucket (str, optional): S3 bucket name containing the dataset files.
         source_s3_prefix (str, optional): S3 prefix containing per-source CoralNet image folders.
         whitelist_sources / blacklist_sources: Optional CoralNet source-id allowlist/denylist.
+        image_blacklist (str | list, optional): CoralNet image ids to drop, or a parquet reference
+            with an ``image_id`` column. Applied after the source filters. A reference is a path
+            relative to the repo root if that file exists (e.g.
+            ``configs/coralnet/image_blacklist.parquet``), otherwise an absolute local path, an S3
+            URI or a key relative to ``source_bucket``.
+        annotation_overrides (str, optional): Parquet reference (as for ``image_blacklist``) with
+            columns ``image_id``, ``row``, ``col``, ``coralnet_id``. Every image listed there has
+            all its manifest points replaced by the listed ones.
         **base_kwargs: Forwarded to :class:`BaseCoralDataset`.
     """
 
     SOURCE_NAME = "coralnet"
 
-    annotations_path: str
+    manifest_path: str
     source_ids: list[int | str]
     source_bucket: str
     source_s3_prefix: str
     s3: boto3.client
     whitelist_sources: list[int | str] | None
     blacklist_sources: list[int | str] | None
+    image_blacklist: str | list[int | str] | None
+    annotation_overrides: str | None
 
     def __init__(
         self,
-        annotations_path: str | None = None,
+        manifest_path: str | None = None,
         source_bucket: str = "dev-datamermaid-sm-sources",
         source_s3_prefix: str = "coralnet-public-images",
         whitelist_sources: list[int | str] | None = None,
         blacklist_sources: list[int | str] | None = None,
+        image_blacklist: str | list[int | str] | None = None,
+        annotation_overrides: str | None = None,
         **base_kwargs: Any,
     ):
-        self.annotations_path = annotations_path or _resolve_default_annotations_path()
+        self.manifest_path = manifest_path or _resolve_default_manifest_path()
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
         self.s3 = boto3.client("s3")
         self.whitelist_sources = whitelist_sources
         self.blacklist_sources = blacklist_sources
+        self.image_blacklist = image_blacklist
+        self.annotation_overrides = annotation_overrides
         if self.whitelist_sources is not None and self.blacklist_sources is not None:
             raise ValueError("Cannot specify both whitelist and blacklist sources.")
 
         df_annotations, df_images = self.load_annotations()
+        if self.annotation_overrides is not None:
+            df_annotations = self._apply_annotation_overrides(df_annotations)
 
         if self.whitelist_sources is not None:
             df_annotations = df_annotations[
@@ -115,39 +147,43 @@ class CoralNetDataset(BaseCoralDataset):
             df_annotations = df_annotations[
                 df_annotations["source_id"].apply(lambda x: x not in self.blacklist_sources)
             ]
-        if self.whitelist_sources is not None or self.blacklist_sources is not None:
+        if self.image_blacklist is not None:
+            df_annotations = df_annotations[
+                ~df_annotations["image_id"].astype(str).isin(self._load_image_blacklist())
+            ]
+        if (
+            self.whitelist_sources is not None
+            or self.blacklist_sources is not None
+            or self.image_blacklist is not None
+            or self.annotation_overrides is not None
+        ):
             df_annotations = df_annotations.reset_index(drop=True)
             df_images = self._derive_df_images_from_annotations(df_annotations)
 
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
 
     def load_annotations(self) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Load CoralNet annotations from a parquet file on S3.
+        """Load CoralNet annotations from the training manifest parquet on S3.
 
-        The dataset emits labels in CoralNet's own provider label space, so
-        each row's ``coralnet_id`` (cast to ``str``) becomes the
-        ``source_label_name``. No CoralNet -> MERMAID translation happens
-        here; that mapping is owned by
+        The manifest carries per-annotation rows plus the resolved ``image_s3_key``
+        for each image. ``source_label_name`` is derived from ``coralnet_id`` via
+        ``coralnet_id2name.json`` (the manifest's ``source_label_name`` column
+        holds numeric IDs and is overwritten). No CoralNet -> MERMAID translation
+        happens here; that mapping is owned by
         :mod:`mermaidseg.dataset_reconciliation.label_mapping` and is applied
         at training time on the GPU via a long-tensor lookup.
         """
-        annotations_path = f"s3://{self.source_bucket}/{self.annotations_path}"
-        df_annotations = pd.read_parquet(annotations_path)
-        id2name_path = (
-            "s3://dev-datamermaid-sm-sources/coralnet-public-images/temporary/coralnet_id2name.json"
+        df = LocalS3Cache.get().read_parquet(self.source_bucket, self.manifest_path)
+        coralnet_id2name = LocalS3Cache.get().read_json(
+            self.source_bucket,
+            _CORALNET_ID2NAME_KEY,
         )
 
-        with fsspec.open(id2name_path, "r") as f:
-            coralnet_id2name = json.load(f)
+        df["coralnet_name"] = df["coralnet_id"].map(lambda x: coralnet_id2name.get(str(x)))
+        df["source_label_name"] = df["coralnet_name"].astype(str).str.lower()
+        df = df.rename(columns={"image_s3_key": "image_key"})
 
-        df_annotations["coralnet_name"] = df_annotations["coralnet_id"].map(
-            lambda x: coralnet_id2name.get(str(x))
-        )
-        df_annotations["source_label_name"] = (
-            df_annotations["coralnet_name"].astype(str).str.lower()
-        )
-
-        df_annotations = df_annotations[
+        df_annotations = df[
             [
                 "source_id",
                 "image_id",
@@ -156,19 +192,79 @@ class CoralNetDataset(BaseCoralDataset):
                 "coralnet_id",
                 "coralnet_name",
                 "source_label_name",
+                "image_key",
             ]
         ]
 
         df_images = self._derive_df_images_from_annotations(df_annotations)
         return df_annotations, df_images
 
+    def _read_parquet_ref(self, ref: str) -> pd.DataFrame:
+        """Read a dedup parquet: a repo-relative path if that file exists, else a storage ref."""
+        repo_path = _REPO_ROOT / ref
+        if not Path(ref).is_absolute() and repo_path.is_file():
+            return pd.read_parquet(repo_path)
+        return LocalS3Cache.get().read_parquet_ref(ref, self.source_bucket)
+
+    def _load_image_blacklist(self) -> set[str]:
+        if isinstance(self.image_blacklist, str):
+            df = self._read_parquet_ref(self.image_blacklist)
+            return set(df["image_id"].astype(str))
+        return {str(x) for x in self.image_blacklist}
+
+    def _apply_annotation_overrides(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
+        """Replace the points of every image in ``annotation_overrides`` with the listed ones.
+
+        ``image_key`` and ``source_id`` are taken from the image's manifest rows, so overrides
+        for images missing from the manifest are dropped.
+        """
+        overrides = self._read_parquet_ref(self.annotation_overrides)[
+            ["image_id", "row", "col", "coralnet_id"]
+        ]
+        overrides["image_id"] = overrides["image_id"].astype(str)
+        image_ids = df_annotations["image_id"].astype(str)
+        images = df_annotations.assign(image_id=image_ids)[
+            ["source_id", "image_id", "image_key"]
+        ].drop_duplicates("image_id")
+        n_missing = len(set(overrides["image_id"]) - set(images["image_id"]))
+        if n_missing:
+            logger.warning("annotation_overrides: %d images are not in the manifest", n_missing)
+        overrides = overrides.merge(images, on="image_id")
+
+        coralnet_id2name = LocalS3Cache.get().read_json(self.source_bucket, _CORALNET_ID2NAME_KEY)
+        overrides["coralnet_name"] = overrides["coralnet_id"].map(
+            lambda x: coralnet_id2name.get(str(x))
+        )
+        overrides["source_label_name"] = overrides["coralnet_name"].astype(str).str.lower()
+        key_cols = ("source_id", "image_id", "row", "col", "coralnet_id")
+        overrides = overrides.astype({c: df_annotations[c].dtype for c in key_cols})
+        kept = df_annotations[~image_ids.isin(set(overrides["image_id"].astype(str)))]
+        return pd.concat([kept, overrides[df_annotations.columns]], ignore_index=True)
+
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
         return (
-            df_annotations[["source_id", "image_id"]]
+            df_annotations[["source_id", "image_id", "image_key"]]
             .drop_duplicates(subset=["source_id", "image_id"])
             .reset_index(drop=True)
         )
 
-    def read_image(self, image_id: str, source_id: str, **row_kwargs: Any) -> NDArray[Any]:
-        key = f"{self.source_s3_prefix}/s{source_id}/images/{image_id}.jpg"
-        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
+    def read_image(
+        self,
+        image_id: str,
+        source_id: str,
+        image_key: str | None = None,
+        **row_kwargs: Any,
+    ) -> NDArray[Any]:
+        # ``image_key`` (resized vs original) comes from the training manifest via df_images.
+        # When the manifest has no entry we deliberately do NOT fall back to the original
+        # full-resolution image: its pixels would be misaligned with the 2048-resized annotation
+        # coordinates. Raising here lets BaseCoralDataset warn and recover with a different image.
+        if not (isinstance(image_key, str) and image_key):
+            raise KeyError(
+                f"No manifest entry for source_id={source_id} image_id={image_id}; "
+                f"refusing to load the original full-resolution image (its pixels would be "
+                f"misaligned with the 2048-resized annotation coordinates)."
+            )
+        return np.array(
+            get_image_s3(s3=None, bucket=self.source_bucket, key=image_key).convert("RGB")
+        )

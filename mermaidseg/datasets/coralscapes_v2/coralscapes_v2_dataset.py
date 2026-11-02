@@ -22,7 +22,7 @@ from mermaidseg.datasets.utils import emit_dataset_warning
 
 logger = logging.getLogger(__name__)
 
-CORALSCAPES_V2_HF_REPO = "josauder/314d3951853dad8855bd06248987f626"
+CORALSCAPES_V2_HF_REPO = "josauder/coralscapesV2"
 
 CORALSCAPES_V2_ID2NAME: dict[int, str] = {
     1: "acanthaster planci",
@@ -69,9 +69,9 @@ CORALSCAPES_V2_ID2NAME: dict[int, str] = {
     42: "lobophylliidae alive",
     43: "lobophylliidae bleached",
     44: "lobophylliidae dead",
-    45: "massive coral alive",
-    46: "massive coral bleached",
-    47: "massive coral dead",
+    45: "massive alive",
+    46: "massive bleached",
+    47: "massive dead",
     48: "meandering coral alive",
     49: "meandering coral bleached",
     50: "meandering coral dead",
@@ -125,7 +125,7 @@ CORALSCAPES_V2_ID2NAME: dict[int, str] = {
 
 class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     """A PyTorch Dataset wrapping the HuggingFace
-    `Coralscapes V2 <https://huggingface.co/datasets/josauder/314d3951853dad8855bd06248987f626>`_
+    `Coralscapes V2 <https://huggingface.co/datasets/josauder/coralscapesV2>`_
     dataset.
 
     Each item returned is a tuple ``(image, source_labels)`` where
@@ -136,9 +136,13 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     Attributes:
         SOURCE_NAME: ``"coralscapes_v2"``.
-        split: Optional dataset split identifier (``"train"`` / ``"validation"`` / ``"test"``).
+        split: Optional HuggingFace split(s). A single name (``"train"`` /
+            ``"validation"`` / ``"test"``), a list of names to concatenate, or
+            ``None`` for all three splits.
         transform: Optional Albumentations transform applied to image and mask.
         class_subset: Optional list of source-space (Coralscapes V2) class names to retain.
+        hf_repo_id: HuggingFace dataset repo ID or local dataset directory (e.g. a sparsified
+            copy from ``scripts/build_sparse_dense_datasets.py``) with the same columns.
         source_id2name: Mapping from local source IDs (1..N) to Coralscapes V2 class names.
         source_name2id: Inverse of source_id2name.
         num_source_classes: ``len(source_id2name) + 1`` (incl. background).
@@ -146,9 +150,10 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     SOURCE_NAME = "coralscapes_v2"
 
-    split: str | None
+    split: str | list[str] | None
     transform: A.BasicTransform | None
     class_subset: list[str] | None
+    hf_repo_id: str
     source_id2name: dict[int, str]
     source_name2id: dict[str, int]
     num_source_classes: int
@@ -156,28 +161,32 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     def __init__(
         self,
-        split: str | None = None,
+        split: str | list[str] | None = None,
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
+        hf_repo_id: str = CORALSCAPES_V2_HF_REPO,
     ):
         from datasets import concatenate_datasets, load_dataset
 
         self.split = split
         self.transform = transform
         self.class_subset = class_subset
+        self.hf_repo_id = hf_repo_id
         self._global_offset = 0
 
-        self.dataset = load_dataset(CORALSCAPES_V2_HF_REPO)
-        if self.split is not None:
-            self.dataset = self.dataset[self.split]
-        else:
+        hf_dataset = load_dataset(self.hf_repo_id)
+        if self.split is None:
             self.dataset = concatenate_datasets(
                 [
-                    self.dataset["train"],
-                    self.dataset["validation"],
-                    self.dataset["test"],
+                    hf_dataset["train"],
+                    hf_dataset["validation"],
+                    hf_dataset["test"],
                 ]
             )
+        elif isinstance(self.split, str):
+            self.dataset = hf_dataset[self.split]
+        else:
+            self.dataset = concatenate_datasets([hf_dataset[s] for s in self.split])
 
         if self.class_subset is not None:
             ordered = list(self.class_subset)
@@ -193,13 +202,16 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """Build a vectorized lookup from native Coralscapes V2 IDs to local source IDs.
 
         Native ID ``0`` and any class not present in ``class_subset`` map to ``0`` (background).
+        The global offset is folded directly into the foreground entries so ``_load_item`` does not
+        need a separate ``np.where`` shift pass. ``int32`` keeps the emitted mask small.
         """
         native_id2name = CORALSCAPES_V2_ID2NAME
         max_native = max(native_id2name) + 1
-        lookup = np.zeros(max_native, dtype=np.int64)
+        lookup = np.zeros(max_native, dtype=np.int32)
+        offset = self._global_offset
         for native_id, name in native_id2name.items():
             local_id = self.source_name2id.get(name, 0)
-            lookup[native_id] = local_id
+            lookup[native_id] = local_id + offset if local_id else 0
         return lookup
 
     def set_source_vocabulary(
@@ -250,14 +262,13 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             return None, None
 
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
-        image = np.array(self.dataset[idx]["image"])
-        native_mask = np.asarray(self.dataset[idx]["label"], dtype=np.int64)
+        # Fetch the HF row once: ``datasets`` eagerly decodes every Image column on each row access,
+        # so indexing twice would decode both the image and the label PNG twice.
+        row = self.dataset[idx]
+        image = np.array(row["image"])
+        # The native label is uint8; index the (offset-folded, int32) lookup directly.
+        native_mask = np.asarray(row["label"])
         mask = self._native_to_local[native_mask]
-
-        if self._global_offset:
-            mask = np.where(mask > 0, mask + self._global_offset, mask).astype(
-                mask.dtype, copy=False
-            )
 
         if self.transform:
             transformed = self.transform(image=image, mask=mask)

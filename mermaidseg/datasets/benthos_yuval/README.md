@@ -20,7 +20,7 @@ fully-labelled photomosaics for three sites:
 | Code | Region                 | Site                                                              | Depth (m) | Approx. surveyed area |
 | ---- | ---------------------- | ----------------------------------------------------------------- | --------- | --------------------- |
 | RS   | Northern Red Sea       | IUI Eilat reef, Gulf of Aqaba, Israel                             | 24-28     | 5x5 m                 |
-| CR   | Eastern Caribbean      | Double-Wreck reef, St. Eustatius                                  | 20        | 12x2 m                |
+| CR   | Eastern Caribbean      | Double-Wreck reef, Sint. Eustatius                                | 20        | 12x2 m                |
 | MD   | Eastern Mediterranean  | Spartan Reef offshore Haifa, Israel                               | 20        | 5x4 m                 |
 
 Manual full-segmentation labels were drawn in Labelbox over **eight
