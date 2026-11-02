@@ -8,11 +8,13 @@ precomputed ``(N+1, C)`` float tensor (with row 0 as the all-zeros background ro
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-import pandas as pd
-import requests
 import torch
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 DEFAULT_CLASS_TO_CONCEPTS_CSV = (
     Path(__file__).resolve().parents[2] / "configs" / "class_to_concepts.csv"
@@ -97,6 +99,8 @@ def initialize_benthic_hierarchy(
     See the original implementation in ``mermaidseg.datasets.concepts`` (now moved here) for full
     docstring.
     """
+    import requests
+
     response = requests.get(hierarchy_json_url, timeout=30)
     response.raise_for_status()
     data = response.json()
@@ -256,6 +260,8 @@ def encode_concept_channels_from_df(
         channel_names: ordered channel column names.
         concept_value2id: structure expected by loss/model slicing.
     """
+    import pandas as pd
+
     meta_cols = ["source_dataset_source", "source_label_class_name"]
     if "global_id" in df_mapping.columns:
         meta_cols = ["global_id", *meta_cols]
@@ -382,6 +388,8 @@ def initialize_benthic_concepts(
     It returns the processed concept mapping DataFrame, tensors for source to concept mappings, and
     dictionaries for taxonomic and one-hot concept ID mappings.
     """
+    import pandas as pd
+
     df_mapping = pd.read_csv(mapping_location)
     df_mapping = df_mapping.copy()
     df_mapping["source_label_class_name"] = (
