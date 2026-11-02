@@ -6,7 +6,9 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+import torch
 
+from mermaidseg.inference import ManifestError
 from tests.inference._tiny import (
     CLASS_NAMES,
     concept_id2name,
@@ -55,3 +57,30 @@ def test_sidecar_with_explicit_maps_is_an_error(evaluate_script, sidecar, flag):
     args = _args(evaluate_script, "--sidecar", str(sidecar), flag, "x.json")
     with pytest.raises(ValueError, match="--sidecar"):
         evaluate_script._sidecar_label_maps(args)
+
+
+def test_bundle_with_explicit_label_maps_is_an_error(evaluate_script, tmp_path):
+    (tmp_path / "model.json").write_text("{}")
+    for flag in ("--id2label", "--concept-id2name", "--sidecar"):
+        args = evaluate_script.build_parser().parse_args(
+            ["--output-dir", "o", "--checkpoint", str(tmp_path), flag, "x.json"]
+        )
+        with pytest.raises(ValueError, match="carries its own"):
+            evaluate_script._load_model(args, torch.device("cpu"))
+
+
+def test_sidecar_of_another_run_is_refused_for_a_checkpoint(evaluate_script, sidecar, tmp_path):
+    ckpt = tmp_path / "model_epoch1"
+    torch.save(
+        {
+            "model_state_dict": {},
+            "config": {"run_name": "some-other-run", "model": {}},
+        },
+        ckpt,
+    )
+    args = evaluate_script.build_parser().parse_args(
+        ["--output-dir", "o", "--checkpoint", str(ckpt), "--sidecar", str(sidecar),
+         "--model-config", "unused.yaml"]
+    )
+    with pytest.raises(ManifestError, match="does not belong"):
+        evaluate_script._load_model(args, torch.device("cpu"))

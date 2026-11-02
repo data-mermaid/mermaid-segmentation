@@ -5,10 +5,15 @@ Kept apart from the script so they can be unit-tested without running training.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+import albumentations as A
+
+logger = logging.getLogger(__name__)
 
 OUTPUT_DIR_ENV = "MERMAIDSEG_OUTPUT_DIR"
 CONCEPT_MAPPING_ENV = "MERMAIDSEG_CONCEPT_MAPPING_PATH"
@@ -38,13 +43,25 @@ def val_input_spec(
 ) -> tuple[tuple[int, int], tuple[float, ...], tuple[float, ...]]:
     """Return ``(size_hw, mean, std)`` from a validation ``albumentations.Compose``.
 
-    The size comes from its ``Resize``; without one, ``fallback_size`` (the model config
-    ``input_size``) is used. ``Normalize`` is required.
+    The size comes from its ``Resize``; without any spatial transform, ``fallback_size`` (the
+    model config ``input_size``) is used. Any other spatial transform (SmallestMaxSize,
+    CenterCrop, ...) raises, as its output size is not recorded here. ``Normalize`` is required.
     """
-    by_name = {type(t).__name__: t for t in getattr(val_transform, "transforms", [])}
+    transforms = list(getattr(val_transform, "transforms", []))
+    by_name = {type(t).__name__: t for t in transforms}
     normalize = by_name.get("Normalize")
     if normalize is None:
         raise ValueError("The validation transform has no Normalize; cannot record mean/std.")
+    unknown = [
+        type(t).__name__
+        for t in transforms
+        if isinstance(t, A.DualTransform) and not isinstance(t, A.Resize)
+    ]
+    if unknown:
+        raise ValueError(
+            f"The validation transform has spatial transforms {unknown} whose output size "
+            "cannot be recorded; only Resize is supported."
+        )
     resize = by_name.get("Resize")
     if resize is not None:
         size = (int(resize.height), int(resize.width))
@@ -66,15 +83,24 @@ def sidecar_kwargs(
     target_id2label: Mapping[int, str],
     concept_id2name: Mapping[Any, str],
     concept_value2id: Mapping[str, Any],
-    val_transform: Any,
+    val_transforms: Sequence[Any],
 ) -> dict[str, Any]:
     """Keyword arguments for ``mermaidseg.inference.write_sidecar`` (minus ``out_dir``).
 
-    ``input_size`` is the validated size (val transform); ``model_config_input_size`` is the
+    ``val_transforms`` holds every validation dataset's transform; they must agree on size and
+    normalisation. ``input_size`` is the validated size; ``model_config_input_size`` is the
     model config's ``input_size``, which a later evaluation may swap for another.
     """
     config_size = model_cfg.get("input_size")
-    size, mean, std = val_input_spec(val_transform, config_size)
+    specs = {val_input_spec(t, config_size) for t in val_transforms}
+    if not specs:
+        raise ValueError("No validation transforms given; cannot record the input spec.")
+    if len(specs) > 1:
+        raise ValueError(
+            f"Validation datasets differ in size/mean/std ({sorted(specs)}); one sidecar "
+            "cannot describe them all."
+        )
+    size, mean, std = specs.pop()
     if config_size is None:
         model_config_size = None
     elif isinstance(config_size, int):
@@ -97,3 +123,21 @@ def sidecar_kwargs(
 def run_checkpoint_dir(output_dir: str, run_name: str) -> str:
     """Folder where ``Logger.save_model_checkpoint`` writes this run's checkpoints."""
     return os.path.join(output_dir, "model_checkpoints", run_name)
+
+
+def write_run_sidecar(
+    out_dir: str | Path, *, model_cfg: Mapping[str, Any], sidecar_kwargs: Mapping[str, Any]
+) -> Path | None:
+    """Write the run's ``model.json``, or warn and return None for a model class with no bundle."""
+    from mermaidseg.inference import write_sidecar
+    from mermaidseg.inference.bundle import TRAINED_CLASSES
+
+    name = model_cfg.get("name")
+    if name not in TRAINED_CLASSES:
+        logger.warning(
+            "Model class %r cannot be exported as a bundle; skipping model.json for %s.",
+            name,
+            out_dir,
+        )
+        return None
+    return write_sidecar(out_dir, **sidecar_kwargs)

@@ -7,6 +7,7 @@ module adapts them to the demo's call signatures.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +71,8 @@ __all__ = [
 DEFAULT_INPUT_SIZE: tuple[int, int] = (512, 512)
 
 
+logger = logging.getLogger(__name__)
+
 @dataclass
 class DemoArtifacts:
     model_cfg: dict[str, Any]
@@ -114,27 +117,35 @@ def load_artifacts(
     """Load checkpoint and model config from local paths.
 
     ``checkpoint`` may also be a bundle directory (``model.json`` + weights). The bundle supplies
-    the model config, labels and concepts; ``model_config``, ``id2label`` and ``concept_id2name``
-    then only override what the bundle carries (``model_config`` is ignored).
+    the model config, labels and concepts, so passing ``id2label`` or ``concept_id2name`` with one
+    raises ``ValueError`` (``model_config`` is ignored).
     """
     demo_dir = Path(__file__).resolve().parent
     if _is_bundle(checkpoint):
+        if id2label or concept_id2name:
+            raise ValueError(
+                "The bundle carries its own classes and concept names; do not pass "
+                "id2label/concept_id2name."
+            )
         # Evaluation and the demos need batched eager forwards, never the exported graph.
         bundle = load_bundle(checkpoint, format="checkpoint")
         height, width = bundle.input_size
         return DemoArtifacts(
             model_cfg={"name": INFERENCE_CLASS, "input_size": [height, width]},
-            id2label=_load_int_keyed_json(id2label)
-            if id2label
-            else dict(enumerate(bundle.classes)),
-            concept_id2name=_load_int_keyed_json(concept_id2name)
-            if concept_id2name
-            else {i + 1: name for i, name in enumerate(bundle.concept_names)},
+            id2label=dict(enumerate(bundle.classes)),
+            concept_id2name={i + 1: name for i, name in enumerate(bundle.concept_names)},
             checkpoint_path=str(checkpoint),
             bundle=bundle,
         )
     if model_config is None:
         raise ValueError("model_config is required unless checkpoint is a bundle directory.")
+    if not (id2label and concept_id2name):
+        logger.warning(
+            "Using the default label maps in %s for %s; pass both id2label and concept_id2name "
+            "if the checkpoint was trained on other labels.",
+            demo_dir,
+            checkpoint,
+        )
     id2label_path = Path(id2label or demo_dir / "id2label.json")
     concept_path = Path(concept_id2name or demo_dir / "concept_id2name.json")
     cfg = _load_yaml(model_config)

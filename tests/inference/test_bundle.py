@@ -337,3 +337,81 @@ def test_load_bundle_without_validated_size_falls_back_to_serving_size(bundle_di
         bundle_dir, tmp_path / "old", lambda m: m["input"].pop("validated_size_hw")
     )
     assert load_bundle(old).validated_input_size == INPUT_SIZE
+
+
+def _rewrite_sidecar(path, edit):
+    manifest = json.loads(path.read_text())
+    edit(manifest)
+    path.write_text(json.dumps(manifest))
+
+
+def test_sidecar_rerun_with_other_classes_is_refused(trained_run, tmp_path):
+    from tests.inference._tiny import write_tiny_sidecar
+
+    path = write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+    _rewrite_sidecar(path, lambda m: m["classes"].append("extra"))
+    with pytest.raises(ManifestError, match=r"classes.*run"):
+        write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+
+
+def test_sidecar_rerun_with_other_concepts_is_refused(trained_run, tmp_path):
+    from tests.inference._tiny import write_tiny_sidecar
+
+    path = write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+    _rewrite_sidecar(path, lambda m: m["concepts"]["names"].reverse())
+    with pytest.raises(ManifestError, match="concepts.names"):
+        write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+
+
+def test_sidecar_rerun_with_other_architecture_is_refused(trained_run, tmp_path):
+    from tests.inference._tiny import write_tiny_sidecar
+
+    path = write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+    _rewrite_sidecar(path, lambda m: m["architecture"].update(encoder_name="other"))
+    with pytest.raises(ManifestError, match="architecture"):
+        write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+
+
+def test_matching_sidecar_resume_rewrites_only_trained_with(trained_run, tmp_path):
+    from tests.inference._tiny import write_tiny_sidecar
+
+    path = write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+    _rewrite_sidecar(
+        path,
+        lambda m: m["trained_with"].update(mermaidseg="old-sha") or m["input"].update(mean=[9.0]),
+    )
+    write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+    manifest = json.loads(path.read_text())
+    assert manifest["trained_with"]["mermaidseg"] != "old-sha"
+    assert manifest["input"]["mean"] == [9.0]
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_failed_sidecar_write_keeps_the_previous_file(trained_run, tmp_path, monkeypatch):
+    from tests.inference._tiny import write_tiny_sidecar
+
+    path = write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+    before = path.read_text()
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bundle_module.os, "replace", boom)
+    with pytest.raises(OSError):
+        write_tiny_sidecar(tmp_path / "run", trained_run["model_cfg"])
+    assert path.read_text() == before
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_environment_uses_the_image_git_sha_when_git_is_unavailable(monkeypatch):
+    monkeypatch.setattr(bundle_module, "_git", lambda *a: None)
+    monkeypatch.setenv("MERMAIDSEG_GIT_SHA", "abc123")
+    env = bundle_module._environment()
+    assert env["mermaidseg"] == "abc123"
+    assert env["mermaidseg_dirty"] is None
+
+
+def test_environment_without_git_or_env_sha_is_unknown(monkeypatch):
+    monkeypatch.setattr(bundle_module, "_git", lambda *a: None)
+    monkeypatch.delenv("MERMAIDSEG_GIT_SHA", raising=False)
+    assert bundle_module._environment()["mermaidseg"] == "unknown"

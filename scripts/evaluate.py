@@ -45,6 +45,11 @@ from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.predictor import CBMPredictor
 from mermaidseg.evaluation.reporting import fmt, write_json
 from mermaidseg.inference import load_bundle, load_checkpoint_model
+from mermaidseg.inference.bundle import (
+    _check_checkpoint_matches_sidecar,
+    _load_checkpoint,
+    _read_manifest,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEMO_DIR = _REPO_ROOT / "demo"
@@ -122,26 +127,31 @@ def _load_model(args: argparse.Namespace, device: torch.device):
     A bundle loads with ``format="checkpoint"``: evaluation needs batched eager forwards, which
     the exported graph does not provide.
     """
-    sidecar_maps = _sidecar_label_maps(args)
     if (Path(args.checkpoint) / "model.json").is_file():
+        if args.sidecar or args.id2label or args.concept_id2name:
+            raise ValueError(
+                "The bundle carries its own classes and concept names; drop "
+                "--sidecar/--id2label/--concept-id2name."
+            )
         bundle = load_bundle(args.checkpoint, device, format="checkpoint")
-        if sidecar_maps:
-            id2label, concept_id2name = sidecar_maps
-        else:
-            id2label = (
-                _load_int_keyed_json(args.id2label)
-                if args.id2label
-                else dict(enumerate(bundle.classes))
-            )
-            concept_id2name = (
-                _load_int_keyed_json(args.concept_id2name)
-                if args.concept_id2name
-                else {i + 1: name for i, name in enumerate(bundle.concept_names)}
-            )
+        id2label = dict(enumerate(bundle.classes))
+        concept_id2name = {i + 1: name for i, name in enumerate(bundle.concept_names)}
         return CBMPredictor.from_bundle(bundle, device, amp=args.amp), id2label, concept_id2name
+    sidecar_maps = _sidecar_label_maps(args)
     if sidecar_maps:
         id2label, concept_id2name = sidecar_maps
+        _, run_config = _load_checkpoint(Path(args.checkpoint))
+        _check_checkpoint_matches_sidecar(
+            _read_manifest(Path(args.sidecar)), run_config, Path(args.checkpoint)
+        )
     else:
+        if not (args.id2label and args.concept_id2name):
+            logger.warning(
+                "Using the default label maps in %s for %s; pass --sidecar or both "
+                "--id2label and --concept-id2name if the checkpoint was trained on other labels.",
+                _DEMO_DIR,
+                args.checkpoint,
+            )
         id2label = _load_int_keyed_json(args.id2label or _DEMO_DIR / "id2label.json")
         concept_id2name = _load_int_keyed_json(
             args.concept_id2name or _DEMO_DIR / "concept_id2name.json"
@@ -168,20 +178,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--id2label",
         type=Path,
         default=None,
-        help="id2label.json (default: demo/id2label.json, or the bundle's classes)",
+        help="id2label.json for a checkpoint (default: demo/id2label.json). "
+        "Not allowed with a bundle, which carries its own classes.",
     )
     p.add_argument(
         "--concept-id2name",
         type=Path,
         default=None,
-        help="concept_id2name.json (default: demo/concept_id2name.json, or the bundle's concepts)",
+        help="concept_id2name.json for a checkpoint (default: demo/concept_id2name.json). "
+        "Not allowed with a bundle, which carries its own concept names.",
     )
     p.add_argument(
         "--sidecar",
         type=Path,
         default=None,
         help="The run's model.json (next to its checkpoints); supplies both label maps. "
-        "Cannot be combined with --id2label or --concept-id2name.",
+        "Cannot be combined with --id2label, --concept-id2name, or a bundle --checkpoint.",
     )
     p.add_argument("--data-config", type=Path, default=_REPO_ROOT / "configs" / "data_config_512.yaml")
     p.add_argument("--output-dir", required=True, type=Path)

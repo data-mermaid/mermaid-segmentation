@@ -8,6 +8,7 @@ from cbm_run_setup import (
     resolve_output_dir,
     run_checkpoint_dir,
     sidecar_kwargs,
+    write_run_sidecar,
 )
 from nb_setup import check_env_wandb
 from torch.utils.data import ConcatDataset, DataLoader
@@ -23,7 +24,6 @@ from mermaidseg.datasets import (
     make_worker_init_fn,
     setup_local_cache,
 )
-from mermaidseg.inference import write_sidecar
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.eval import Evaluator
@@ -305,15 +305,16 @@ meta_model = MetaModel(
 )
 
 # Weight-free model.json next to this run's checkpoints (input spec from the val transform).
-write_sidecar(
+write_run_sidecar(
     run_checkpoint_dir(output_dir, cfg.run_name),
-    **sidecar_kwargs(
+    model_cfg=_sidecar_model_cfg,
+    sidecar_kwargs=sidecar_kwargs(
         run_name=cfg.run_name,
         model_cfg=_sidecar_model_cfg,
         target_id2label=registry.target_id2label,
         concept_id2name=concept_id2name,
         concept_value2id=registry.concept_value2id,
-        val_transform=val_datasets[0].transform,
+        val_transforms=[d.transform for d in val_datasets],
     ),
 )
 

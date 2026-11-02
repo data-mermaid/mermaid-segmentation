@@ -38,7 +38,7 @@ class TestId2Label:
             target_id2label=target,
             concept_id2name={0: "a"},
             concept_value2id={},
-            val_transform=_val(),
+            val_transforms=[_val()],
         )
         assert kwargs["id2label"] == setup.logger_id2label(target)
         assert kwargs["id2label"][0] == "ignore"
@@ -52,7 +52,7 @@ class TestSidecarSizes:
             target_id2label={1: "coral"},
             concept_id2name={1: "a"},
             concept_value2id={},
-            val_transform=_val(**val),
+            val_transforms=[_val(**val)],
         )
 
     def test_records_validated_and_model_config_sizes(self):
@@ -120,3 +120,45 @@ class TestConceptMappingDefault:
 
     def test_repo_default_exists(self):
         assert Path(setup.resolve_concept_mapping_default({})).is_file()
+
+
+class TestValSpecStrictness:
+    def _kwargs(self, transforms):
+        return setup.sidecar_kwargs(
+            run_name="r",
+            model_cfg={"name": "X"},
+            target_id2label={1: "coral"},
+            concept_id2name={1: "a"},
+            concept_value2id={},
+            val_transforms=transforms,
+        )
+
+    def test_agreeing_datasets_pass(self):
+        assert self._kwargs([_val(), _val()])["input_size"] == (256, 256)
+
+    def test_differing_sizes_raise(self):
+        with pytest.raises(ValueError, match="differ"):
+            self._kwargs([_val(width=256), _val(width=128)])
+
+    def test_differing_normalisation_raises(self):
+        with pytest.raises(ValueError, match="differ"):
+            self._kwargs([_val(), _val(mean=(0.9, 0.9, 0.9))])
+
+    @pytest.mark.parametrize(
+        "spatial",
+        [A.SmallestMaxSize(max_size=64), A.LongestMaxSize(max_size=64), A.CenterCrop(8, 8)],
+    )
+    def test_unrecognised_spatial_transform_raises(self, spatial):
+        t = A.Compose([spatial, A.Normalize(mean=(0, 0, 0), std=(1, 1, 1))])
+        with pytest.raises(ValueError, match=type(spatial).__name__):
+            setup.val_input_spec(t, [512, 512])
+
+
+class TestWriteRunSidecar:
+    def test_non_exportable_model_class_is_skipped_with_a_warning(self, tmp_path, caplog):
+        result = setup.write_run_sidecar(
+            tmp_path, model_cfg={"name": "ConceptBottleneckDINOv3"}, sidecar_kwargs={}
+        )
+        assert result is None
+        assert "ConceptBottleneckDINOv3" in caplog.text
+        assert not list(tmp_path.iterdir())

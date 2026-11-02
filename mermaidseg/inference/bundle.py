@@ -238,8 +238,51 @@ def write_sidecar(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / MANIFEST_NAME
-    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    if path.exists():
+        manifest = _resume_manifest(path, manifest, run_name)
+    _write_text_atomic(path, json.dumps(manifest, indent=2) + "\n")
     return path
+
+
+def _resume_manifest(
+    path: Path, new_manifest: dict[str, Any], run_name: str
+) -> dict[str, Any]:
+    """The existing sidecar with only ``trained_with`` refreshed, or a refusal when it differs.
+
+    Older checkpoints in the folder are labelled by the existing sidecar, so a rerun under the
+    same run name may not change the classes, concept names or architecture.
+    """
+    existing = _read_manifest(path)
+    differing = [
+        label
+        for label, old, new in (
+            ("classes", existing.get("classes"), new_manifest["classes"]),
+            (
+                "concepts.names",
+                existing.get("concepts", {}).get("names"),
+                new_manifest["concepts"]["names"],
+            ),
+            ("architecture", existing.get("architecture"), new_manifest["architecture"]),
+        )
+        if old != new
+    ]
+    if differing:
+        raise ManifestError(
+            f"{path.parent} already holds a sidecar for run {run_name!r} whose "
+            f"{', '.join(differing)} differ from this run's; its older checkpoints would be "
+            "re-labelled. Use a new run name or output directory."
+        )
+    return {**existing, "trained_with": new_manifest["trained_with"]}
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _read_manifest(path: Path) -> dict[str, Any]:
@@ -393,10 +436,14 @@ def _installed_version(name: str) -> str:
 
 
 def _environment() -> dict[str, Any]:
-    """The mermaidseg commit (and whether tracked files differ from it) plus library versions."""
+    """The mermaidseg commit (and whether tracked files differ from it) plus library versions.
+
+    Without git (a container), the commit comes from ``MERMAIDSEG_GIT_SHA`` and the dirty flag
+    stays None.
+    """
     status = _git("status", "--porcelain", "--untracked-files=no")
     return {
-        "mermaidseg": _git("rev-parse", "HEAD") or "unknown",
+        "mermaidseg": _git("rev-parse", "HEAD") or os.environ.get("MERMAIDSEG_GIT_SHA") or "unknown",
         "mermaidseg_dirty": None if status is None else bool(status),
         "torch": torch.__version__,
         "transformers": _installed_version("transformers"),

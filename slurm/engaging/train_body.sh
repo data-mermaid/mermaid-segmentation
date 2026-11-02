@@ -69,12 +69,13 @@ on_usr1() {
 trap on_usr1 USR1
 
 cd "$REPO/nbs"
+# --output-dir beats an inherited MERMAIDSEG_OUTPUT_DIR, so checkpoints land in $CKPT_DIR.
 # CKPT_ARGS is empty on a fresh run. Expand it only when it has elements so
 # bash 3.2 with set -u does not treat an empty array as unbound.
 if ((${#CKPT_ARGS[@]})); then
-    srun "${TRAIN_CMD[@]}" "${CKPT_ARGS[@]}" &
+    srun "${TRAIN_CMD[@]}" --output-dir "$REPO/nbs" "${CKPT_ARGS[@]}" &
 else
-    srun "${TRAIN_CMD[@]}" &
+    srun "${TRAIN_CMD[@]}" --output-dir "$REPO/nbs" &
 fi
 TRAIN_PID=$!
 set +e
