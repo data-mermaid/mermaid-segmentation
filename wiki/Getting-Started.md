@@ -85,21 +85,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --group tests --group lint --group notebooks
 ```
 
-## 4. Install pre-commit hooks
-
-Pre-commit runs Ruff (linting and formatting) automatically on each commit. Install it once:
-
-```bash
-uv run pre-commit install
-```
-
-Verify it is installed correctly :
-
-```bash
-uv run pre-commit --version
-```
-
-## 5. Set up your environment file
+## 4. Set up your environment file
 
 Copy the example environment file and fill in your values:
 
@@ -111,11 +97,11 @@ Open `.env` and set:
 
 ```
 AWS_PROFILE=mermaid-core
-HF_TOKEN=hf_xxxxxxxxxxxx        # see step 8
+HF_TOKEN=hf_xxxxxxxxxxxx        # see step 7
 MLFLOW_TRACKING_URI=...         # get this value from the team lead
 ```
 
-## 6. Authenticate with AWS
+## 5. Authenticate with AWS
 
 This project uses AWS SSO. If you have not configured the `mermaid-core` profile yet, run the interactive setup first:
 
@@ -140,7 +126,7 @@ aws sso login --profile mermaid-core
 
 Follow the browser prompt to complete authentication.
 
-## 7. Verify your AWS session
+## 6. Verify your AWS session
 
 ```bash
 aws sts get-caller-identity
@@ -148,7 +134,7 @@ aws sts get-caller-identity
 
 You should see a JSON response with your account ID and user ARN. If this fails, see [Common issues](#common-issues) below.
 
-## 8. Set up your HuggingFace token
+## 7. Set up your HuggingFace token
 
 DINOv3 models are gated on HuggingFace and require authentication.
 
@@ -157,11 +143,11 @@ DINOv3 models are gated on HuggingFace and require authentication.
    - **CLI** (recommended): `hf auth login` and paste your token when prompted
    - **Environment variable**: add `HF_TOKEN=hf_xxxx` to your `.env` file (create a token at [hf.co/settings/tokens](https://hf.co/settings/tokens))
 
-## 9. Get your MLflow tracking URI
+## 8. Get your MLflow tracking URI
 
 Ask the team lead for the `MLFLOW_TRACKING_URI` value (it points to the SageMaker MLflow app) and add it to your `.env`.
 
-## 10. Confirm everything works
+## 9. Confirm everything works
 
 ```bash
 uv run pytest -m "not slow and not integration"
@@ -175,6 +161,9 @@ All tests should pass. If they do, you're set up correctly.
 
 **`.env` changes not picked up by Jupyter**
 Run `direnv allow` in the repo root, then restart the Jupyter kernel.
+
+**`git commit` fails after pulling the pre-commit removal**
+If you installed the pre-commit hook before, remove it with `rm .git/hooks/pre-commit`. Otherwise the leftover hook script fails on every `git commit`.
 
 **HuggingFace "403 Forbidden"**
 Your access request hasn't been approved yet, or you haven't added the token. Visit the model page on HuggingFace to check your request status.

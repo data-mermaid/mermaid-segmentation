@@ -1,0 +1,77 @@
+# File hygiene checks on files changed in the PR, replacing the former pre-commit hooks
+# (pre-commit-hooks v6.0.0). Dropped, not ported:
+#   - nbqa-ruff: lint.yml already runs ruff on .ipynb files.
+#   - uv-lock: lint.yml runs `uv lock --check`.
+#   - docformatter: manual, run with `make docformat`.
+name: Hygiene
+
+on:
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Detect changed files
+        id: changed-all
+        uses: tj-actions/changed-files@v46
+        with:
+          separator: "\n"
+      - name: Detect changed YAML files
+        id: changed-yaml
+        uses: tj-actions/changed-files@v46
+        with:
+          separator: "\n"
+          files: |
+            **/*.yaml
+            **/*.yml
+      - name: Detect changed text files
+        id: changed-text
+        uses: tj-actions/changed-files@v46
+        with:
+          separator: "\n"
+          files: |
+            **/*.py
+            **/*.md
+            **/*.yaml
+            **/*.yml
+            **/*.toml
+            **/*.txt
+            **/*.json
+            **/*.csv
+            **/*.sh
+            **/*.sbatch
+            **/*.cfg
+            **/*.ini
+            **/Makefile
+            **/Dockerfile
+      - name: Check for large files
+        if: steps.changed-all.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-all.outputs.all_changed_files }}
+        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 check-added-large-files --maxkb=1000 --enforce-all
+      - name: Check for case conflicts
+        if: steps.changed-all.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-all.outputs.all_changed_files }}
+        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 check-case-conflict
+      - name: Check YAML syntax
+        if: steps.changed-yaml.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-yaml.outputs.all_changed_files }}
+        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 check-yaml
+      - name: Check trailing whitespace
+        if: steps.changed-text.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-text.outputs.all_changed_files }}
+        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 trailing-whitespace-fixer
+      - name: Check end of file newline
+        if: steps.changed-text.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-text.outputs.all_changed_files }}
+        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 end-of-file-fixer

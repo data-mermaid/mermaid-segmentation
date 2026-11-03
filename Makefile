@@ -1,4 +1,4 @@
-.PHONY: sync logs lcc-log check kernel \
+.PHONY: sync logs lcc-log check kernel docformat \
 	sm-sync sm-check sm-validate sm-dry-run sm-launch sm-build sm-smoke sm-require-env \
 	sm-jobs sm-status sm-logs sm-errors sm-metrics sm-require-job
 
@@ -14,6 +14,13 @@ kernel:
 		--user \
 		--name=mermaid-seg \
 		--display-name "Python (mermaid-seg)"
+
+# Wrap docstrings with docformatter (manual; not run in CI or on commit).
+# docformatter exits 3 when it rewrote files, which is success here.
+docformat:
+	uv run --group dev docformatter --wrap-summaries 100 --wrap-descriptions 100 --in-place \
+		--recursive mermaidseg scripts demo tests nbs; \
+	rc=$$?; [ $$rc -eq 0 ] || [ $$rc -eq 3 ]
 
 # Tail training logs. Requires at least one logs/train_*.log file to exist.
 logs:

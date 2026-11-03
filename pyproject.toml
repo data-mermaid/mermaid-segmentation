@@ -74,7 +74,6 @@ tests = [
 ]
 lint = [
     "ruff>=0.15.8",
-    "pre-commit>=3.0",
 ]
 dev = [
     {include-group = "tests"},
@@ -100,7 +99,7 @@ ignore = ["E501"]
 "**/*.ipynb" = [
     "F821",   # undefined names — common in exploratory notebook cells
     "B018",   # useless expression — used to display values in notebooks
-    "E501",   # line too long — handled by docformatter; notebook cells are hard to wrap
+    "E501",   # line too long — docstrings are wrapped by `make docformat` (docformatter); notebook cells are hard to wrap
     "UP031",
     "PD003", # pandas-vet: prefer isna — wrong for Ibis .isnull() / SQL NULL
 ]
