@@ -152,7 +152,8 @@ def test_benthos_scoring_and_nodata():
     from mermaidseg.evaluation.benthos_eval import load_spec
     from mermaidseg.evaluation.metrics import ClassConfusion
     from mermaidseg.evaluation.predictor import CBMPredictor
-    from mermaidseg.model.concept_expr import ConceptResolver, evaluate as eval_expr
+    from mermaidseg.model.concept_expr import ConceptResolver
+    from mermaidseg.model.concept_expr import evaluate as eval_expr
 
     classes = load_spec(_BENTHOS_SPEC)
     names = [

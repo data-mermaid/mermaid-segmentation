@@ -312,9 +312,7 @@ def test_export_input_size_overrides_serving_size_and_warns(
     sidecar_path, checkpoint_path, tmp_path, caplog
 ):
     with caplog.at_level(logging.WARNING, logger=bundle_module.__name__):
-        out = export_bundle(
-            checkpoint_path, sidecar_path, tmp_path / "bundle", input_size=(32, 48)
-        )
+        out = export_bundle(checkpoint_path, sidecar_path, tmp_path / "bundle", input_size=(32, 48))
     bundle = load_bundle(out)
     assert bundle.input_size == (32, 48)
     assert bundle.validated_input_size == INPUT_SIZE

@@ -157,7 +157,11 @@ def _order_transform_items(items: list[tuple[str, Any]]) -> list[tuple[str, Any]
     if normalize_idx is None:
         return items
 
-    deferred = [(name, params) for i, (name, params) in enumerate(items) if i > normalize_idx and name in _TRANSFORMS_BEFORE_NORMALIZE]
+    deferred = [
+        (name, params)
+        for i, (name, params) in enumerate(items)
+        if i > normalize_idx and name in _TRANSFORMS_BEFORE_NORMALIZE
+    ]
     if not deferred:
         return items
 

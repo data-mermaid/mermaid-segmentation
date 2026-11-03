@@ -47,7 +47,9 @@ def test_uncovered_pixel_raises():
 
 def test_non_concept_feature_kind_raises(tmp_path: Path):
     probe = tmp_path / "probe.json"
-    probe.write_text('{"images": [], "num_images": 0, "total_points": 0, "points_per_class_target": 10}')
+    probe.write_text(
+        '{"images": [], "num_images": 0, "total_points": 0, "points_per_class_target": 10}'
+    )
     with pytest.raises(RuntimeError, match="only supports feature kind"):
         evaluate_coralscapes_probe(
             predictor=None,  # type: ignore[arg-type]
@@ -62,7 +64,9 @@ def test_non_concept_feature_kind_raises(tmp_path: Path):
 
 def test_unknown_split_raises(tmp_path: Path):
     probe = tmp_path / "probe.json"
-    probe.write_text('{"images": [], "num_images": 0, "total_points": 0, "points_per_class_target": 10}')
+    probe.write_text(
+        '{"images": [], "num_images": 0, "total_points": 0, "points_per_class_target": 10}'
+    )
     with pytest.raises(ValueError, match="unknown Coralscapes splits"):
         evaluate_coralscapes_probe(
             predictor=None,  # type: ignore[arg-type]
@@ -96,8 +100,17 @@ def test_coralscapes_anthropogenic_codes_match_the_concept_table():
     assert int(codes[0]) == 0
     by_name = {name: int(codes[class_id]) for class_id, name in CORALSCAPES_V2_ID2NAME.items()}
     positives = {name for name, code in by_name.items() if code == 2}
-    assert positives == {"human", "human-made structure", "transect line", "transect tools", "trash"}
-    assert {name for name, code in by_name.items() if code == 0} == {"water column", "water surface"}
+    assert positives == {
+        "human",
+        "human-made structure",
+        "transect line",
+        "transect tools",
+        "trash",
+    }
+    assert {name for name, code in by_name.items() if code == 0} == {
+        "water column",
+        "water surface",
+    }
     assert by_name["sand"] == 1
 
 

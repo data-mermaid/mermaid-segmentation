@@ -48,8 +48,13 @@ def evaluate_coralnet(
         split=split,
     )
     names = base.df_annotations["source_label_name"].astype(str).str.lower().unique().tolist()
-    logger.info("CoralNet %s: %d images, %d annotations, %d distinct labels",
-                split, len(base.df_images), len(base.df_annotations), len(names))
+    logger.info(
+        "CoralNet %s: %d images, %d annotations, %d distinct labels",
+        split,
+        len(base.df_images),
+        len(base.df_annotations),
+        len(names),
+    )
 
     class_lookup = build_class_lookup(SOURCE_NAME, names, id2label, hierarchy)
     concept_lookup = build_concept_lookup(SOURCE_NAME, names, concept_names, taxonomy_csv)

@@ -118,7 +118,9 @@ def per_image_points(df_ann: pd.DataFrame) -> dict[tuple[int, str], tuple[np.nda
     return out
 
 
-def compare_points(a: tuple[np.ndarray, np.ndarray], b: tuple[np.ndarray, np.ndarray]) -> tuple[int, int]:
+def compare_points(
+    a: tuple[np.ndarray, np.ndarray], b: tuple[np.ndarray, np.ndarray]
+) -> tuple[int, int]:
     """Return (#shared (row, col) points, #shared points with the same label)."""
     _, ia, ib = np.intersect1d(a[0], b[0], assume_unique=False, return_indices=True)
     return len(ia), int((a[1][ia] == b[1][ib]).sum())
@@ -135,7 +137,9 @@ def add_overlap_pcts(
     - ``pct_ann_overlap_same_label``: shared points that also agree on the label / shared points.
     """
     sums = (
-        df_pairs.groupby(["source_a", "source_b"])[["ann_a", "ann_b", "ann_overlap", "ann_overlap_same_label"]]
+        df_pairs.groupby(["source_a", "source_b"])[
+            ["ann_a", "ann_b", "ann_overlap", "ann_overlap_same_label"]
+        ]
         .sum()
         .reset_index()
     )
@@ -145,22 +149,35 @@ def add_overlap_pcts(
     s["pct_image_overlap"] = 100 * np.maximum(
         ov_img / s["source_a"].map(n_images), ov_img / s["source_b"].map(n_images)
     )
-    s["pct_ann_overlap"] = 100 * np.maximum(ov_ann / s["source_a"].map(n_ann), ov_ann / s["source_b"].map(n_ann))
+    s["pct_ann_overlap"] = 100 * np.maximum(
+        ov_ann / s["source_a"].map(n_ann), ov_ann / s["source_b"].map(n_ann)
+    )
     s["pct_ann_overlap_in_shared"] = 100 * np.maximum(ov_ann / s["ann_a"], ov_ann / s["ann_b"])
-    s["pct_ann_overlap_same_label"] = 100 * s["ann_overlap_same_label"] / s["ann_overlap"].where(ov_ann > 0)
+    s["pct_ann_overlap_same_label"] = (
+        100 * s["ann_overlap_same_label"] / s["ann_overlap"].where(ov_ann > 0)
+    )
     return s.drop(columns=["ann_a", "ann_b", "ann_overlap", "ann_overlap_same_label"])
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--sources", type=int, nargs="+", help="CoralNet source ids to compare.")
     parser.add_argument(
-        "--n-sources", type=int, default=5, help="If --sources is omitted, take the N largest sources."
+        "--n-sources",
+        type=int,
+        default=5,
+        help="If --sources is omitted, take the N largest sources.",
     )
-    parser.add_argument("--all-sources", action="store_true", help="Compare every source in the manifest.")
+    parser.add_argument(
+        "--all-sources", action="store_true", help="Compare every source in the manifest."
+    )
     parser.add_argument("--cache-root", default=DEFAULT_CACHE_ROOT)
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
-    parser.add_argument("--manifest", default=DEFAULT_MANIFEST, help="Manifest key relative to the bucket.")
+    parser.add_argument(
+        "--manifest", default=DEFAULT_MANIFEST, help="Manifest key relative to the bucket."
+    )
     parser.add_argument("--hash-mode", choices=["exact", "perceptual"], default="exact")
     parser.add_argument("--workers", type=int, default=32)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUTS)
@@ -176,7 +193,9 @@ def main() -> None:
     manifest_path = root / args.manifest
 
     if args.all_sources:
-        sources = sorted(pq.read_table(manifest_path, columns=["source_id"])["source_id"].unique().to_pylist())
+        sources = sorted(
+            pq.read_table(manifest_path, columns=["source_id"])["source_id"].unique().to_pylist()
+        )
     elif args.sources:
         sources = sorted(set(args.sources))
     else:
@@ -186,14 +205,18 @@ def main() -> None:
     print(f"Sources: {sources}" if len(sources) <= 20 else f"Sources: all {len(sources)}")
 
     df_ann = load_annotations(manifest_path, None if args.all_sources else sources)
-    df_images = df_ann[["source_id", "image_id", "image_s3_key"]].drop_duplicates(["source_id", "image_id"])
+    df_images = df_ann[["source_id", "image_id", "image_s3_key"]].drop_duplicates(
+        ["source_id", "image_id"]
+    )
     df_images = df_images.reset_index(drop=True)
     print(f"Loaded {len(df_ann):,} annotations on {len(df_images):,} images")
 
     df_images["hash"] = hash_images(df_images, root, args.hash_mode, args.workers)
     n_missing = df_images["hash"].isna().sum()
     if n_missing:
-        print(f"WARNING: {n_missing:,} images missing/unreadable in the local cache; they are excluded")
+        print(
+            f"WARNING: {n_missing:,} images missing/unreadable in the local cache; they are excluded"
+        )
     df_images = df_images.dropna(subset=["hash"])
 
     n_images = df_images.groupby("source_id").size().reindex(sources, fill_value=0)
@@ -211,7 +234,9 @@ def main() -> None:
     print(f"{len(shared):,} hashes shared by >= 2 sources")
 
     # Only images that take part in a cross-source match need their points grouped.
-    involved = pd.DataFrame([si for v in shared.values() for si in v], columns=["source_id", "image_id"])
+    involved = pd.DataFrame(
+        [si for v in shared.values() for si in v], columns=["source_id", "image_id"]
+    )
     df_ann = df_ann.merge(involved, on=["source_id", "image_id"])
     points = per_image_points(df_ann)
     pair_rows = []
@@ -235,8 +260,15 @@ def main() -> None:
     df_pairs = pd.DataFrame(
         pair_rows,
         columns=[
-            "source_a", "image_a", "source_b", "image_b", "hash",
-            "ann_a", "ann_b", "ann_overlap", "ann_overlap_same_label",
+            "source_a",
+            "image_a",
+            "source_b",
+            "image_b",
+            "hash",
+            "ann_a",
+            "ann_b",
+            "ann_overlap",
+            "ann_overlap_same_label",
         ],
     )
 
@@ -252,7 +284,9 @@ def main() -> None:
         .reset_index()
     )
     if len(sources) <= 20:
-        all_pairs = pd.DataFrame(list(itertools.combinations(sources, 2)), columns=["source_a", "source_b"])
+        all_pairs = pd.DataFrame(
+            list(itertools.combinations(sources, 2)), columns=["source_a", "source_b"]
+        )
         summary = all_pairs.merge(agg, on=["source_a", "source_b"], how="left")
     else:  # listing every zero-overlap pair is quadratic in the number of sources
         summary = agg.sort_values("n_overlap_images", ascending=False)
@@ -277,11 +311,17 @@ def main() -> None:
     for s in sources if len(sources) <= 20 else []:
         print(f"  {s}: {n_images[s]:,} [{int(dup_within.get(s, 0))}]")
     per_source = pd.DataFrame(
-        {"n_images": n_images, "n_annotations": n_ann, "n_dup_within": dup_within.reindex(sources, fill_value=0)}
+        {
+            "n_images": n_images,
+            "n_annotations": n_ann,
+            "n_dup_within": dup_within.reindex(sources, fill_value=0),
+        }
     )
     per_source.rename_axis("source_id").to_csv(args.out_dir / f"source_images_{tag}.csv")
     print("\nPairwise overlap:")
-    with pd.option_context("display.width", 200, "display.max_columns", None, "display.float_format", "{:.2f}".format):
+    with pd.option_context(
+        "display.width", 200, "display.max_columns", None, "display.float_format", "{:.2f}".format
+    ):
         print(summary.head(50).to_string(index=False))
     print(f"\nWrote {args.out_dir}/source_overlap_{tag}.csv and source_overlap_pairs_{tag}.csv")
 

@@ -599,7 +599,8 @@ def build(
         )
 
     ordered_image_indexes = sorted(
-        used_image_indexes, key=lambda image_index: (records[image_index].site, records[image_index].stem)
+        used_image_indexes,
+        key=lambda image_index: (records[image_index].site, records[image_index].stem),
     )
     images_out: list[dict] = []
     total_points = 0
@@ -608,7 +609,12 @@ def build(
         label = _load_label(Path(record.path))
         points = sorted(
             image_points[image_index],
-            key=lambda point: (point["class_id"], point["row"], point["col"], point["component_index"]),
+            key=lambda point: (
+                point["class_id"],
+                point["row"],
+                point["col"],
+                point["component_index"],
+            ),
         )
         total_points += len(points)
         images_out.append(
@@ -707,7 +713,9 @@ def build(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--local-root",
         type=Path,

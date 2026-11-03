@@ -244,9 +244,7 @@ def write_sidecar(
     return path
 
 
-def _resume_manifest(
-    path: Path, new_manifest: dict[str, Any], run_name: str
-) -> dict[str, Any]:
+def _resume_manifest(path: Path, new_manifest: dict[str, Any], run_name: str) -> dict[str, Any]:
     """The existing sidecar with only ``trained_with`` refreshed, or a refusal when it differs.
 
     Older checkpoints in the folder are labelled by the existing sidecar, so a rerun under the
@@ -443,7 +441,9 @@ def _environment() -> dict[str, Any]:
     """
     status = _git("status", "--porcelain", "--untracked-files=no")
     return {
-        "mermaidseg": _git("rev-parse", "HEAD") or os.environ.get("MERMAIDSEG_GIT_SHA") or "unknown",
+        "mermaidseg": _git("rev-parse", "HEAD")
+        or os.environ.get("MERMAIDSEG_GIT_SHA")
+        or "unknown",
         "mermaidseg_dirty": None if status is None else bool(status),
         "torch": torch.__version__,
         "transformers": _installed_version("transformers"),

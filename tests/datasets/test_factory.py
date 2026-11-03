@@ -31,18 +31,14 @@ def stub_classes():
 
 
 def test_skips_none_and_string_none_splits(stub_classes, monkeypatch):
-    monkeypatch.setattr(
-        "mermaidseg.datasets.factory.NO_PADDING_DATASETS", frozenset({"dense"})
-    )
+    monkeypatch.setattr("mermaidseg.datasets.factory.NO_PADDING_DATASETS", frozenset({"dense"}))
     data_cfg = ConfigDict(
         {
             "points": {"train": {"whitelist": [1]}, "val": None, "test": "None"},
             "dense": {"train": {"split": "train"}},
         }
     )
-    built = build_datasets(
-        data_cfg, padding=7, dataset_classes=stub_classes, verbose=False
-    )
+    built = build_datasets(data_cfg, padding=7, dataset_classes=stub_classes, verbose=False)
 
     assert set(built) == {("points", "train"), ("dense", "train")}
     # Point dataset receives padding; dense (no-padding) dataset does not.
@@ -51,9 +47,7 @@ def test_skips_none_and_string_none_splits(stub_classes, monkeypatch):
 
 
 def test_names_and_splits_filters(stub_classes, monkeypatch):
-    monkeypatch.setattr(
-        "mermaidseg.datasets.factory.NO_PADDING_DATASETS", frozenset({"dense"})
-    )
+    monkeypatch.setattr("mermaidseg.datasets.factory.NO_PADDING_DATASETS", frozenset({"dense"}))
     data_cfg = ConfigDict(
         {
             "points": {"train": {"a": 1}, "val": {"b": 2}},
@@ -73,7 +67,5 @@ def test_names_and_splits_filters(stub_classes, monkeypatch):
 
 def test_missing_section_is_skipped(stub_classes):
     data_cfg = ConfigDict({"points": {"train": {"a": 1}}})  # no "dense" section
-    built = build_datasets(
-        data_cfg, padding=0, dataset_classes=stub_classes, verbose=False
-    )
+    built = build_datasets(data_cfg, padding=0, dataset_classes=stub_classes, verbose=False)
     assert set(built) == {("points", "train")}

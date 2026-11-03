@@ -109,7 +109,10 @@ def _require_rgb(image: np.ndarray, what: str) -> None:
 
 
 def _require_label(label: np.ndarray, what: str) -> None:
-    if label.ndim != 2 or tuple(int(s) for s in label.shape) != (CORALSCAPES_HEIGHT, CORALSCAPES_WIDTH):
+    if label.ndim != 2 or tuple(int(s) for s in label.shape) != (
+        CORALSCAPES_HEIGHT,
+        CORALSCAPES_WIDTH,
+    ):
         raise ValueError(
             f"{what} label must be {CORALSCAPES_HEIGHT}x{CORALSCAPES_WIDTH}, got shape {tuple(label.shape)}"
         )
@@ -131,9 +134,7 @@ def average_window_logits(
     if window_logits.dim() != 4:
         raise ValueError(f"window_logits must be (N, K, h, w); got {tuple(window_logits.shape)}")
     if window_logits.shape[0] != len(windows):
-        raise ValueError(
-            f"got {window_logits.shape[0]} logit maps for {len(windows)} windows"
-        )
+        raise ValueError(f"got {window_logits.shape[0]} logit maps for {len(windows)} windows")
     canvas = torch.zeros(
         (window_logits.shape[1], height, width),
         device=window_logits.device,
@@ -157,7 +158,9 @@ def average_window_logits(
 
 
 @torch.no_grad()
-def reassemble_concept_logits(predictor: CBMPredictor, image_rgb: NDArray[np.uint8]) -> torch.Tensor:
+def reassemble_concept_logits(
+    predictor: CBMPredictor, image_rgb: NDArray[np.uint8]
+) -> torch.Tensor:
     """Run the three Coralscapes windows and return averaged concept logits ``(K, 1024, 2048)``."""
     _require_rgb(image_rgb, "Coralscapes image")
     crops: list[torch.Tensor] = []
@@ -255,7 +258,9 @@ class LocalMirrorSource:
         from PIL import Image
 
         img = np.asarray(
-            Image.open(self.root / "leftImg8bit" / "train" / site / f"{stem}_leftImg8bit.png").convert("RGB"),
+            Image.open(
+                self.root / "leftImg8bit" / "train" / site / f"{stem}_leftImg8bit.png"
+            ).convert("RGB"),
             dtype=np.uint8,
         )
         lab = _to_label(
@@ -278,7 +283,9 @@ class LocalMirrorSource:
             site = p.parent.name
             stem = p.name.replace("_gtFine_labelIds.png", "")
             img = np.asarray(
-                Image.open(self.root / "leftImg8bit" / split / site / f"{stem}_leftImg8bit.png").convert("RGB"),
+                Image.open(
+                    self.root / "leftImg8bit" / split / site / f"{stem}_leftImg8bit.png"
+                ).convert("RGB"),
                 dtype=np.uint8,
             )
             yield f"{site}/{stem}", img, _to_label(Image.open(p))
@@ -322,8 +329,10 @@ class HFSource:
         ds = self.ds[_HF_SPLIT_NAMES[split]]
         for i in range(len(ds)):
             item = ds[i]
-            yield str(i), np.asarray(item["image"].convert("RGB"), dtype=np.uint8), _to_label(
-                item["label"]
+            yield (
+                str(i),
+                np.asarray(item["image"].convert("RGB"), dtype=np.uint8),
+                _to_label(item["label"]),
             )
 
     def num_split(self, split: str) -> int:
@@ -399,7 +408,9 @@ def _fit_linear_svm(X: NDArray[np.float32], y: NDArray[np.int64], svm_c: float):
     return scaler, svm, train_acc
 
 
-def _folded_linear(scaler, svm, device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _folded_linear(
+    scaler, svm, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fold StandardScaler into the SVM linear layer: scores = X @ Weff.T + beff."""
     coef = torch.tensor(svm.coef_, dtype=torch.float32, device=device)  # (ncls, D)
     intercept = torch.tensor(svm.intercept_, dtype=torch.float32, device=device)  # (ncls,)
@@ -485,7 +496,12 @@ def _evaluate_split(
 
     def _dump(status: str, processed: int) -> dict:
         d = conf.to_dict(id2name=CORALSCAPES_V2_ID2NAME, class_ids=eval_class_ids)
-        scores = {"status": status, "num_images": processed, "accuracy": d["accuracy"], "miou": d["miou"]}
+        scores = {
+            "status": status,
+            "num_images": processed,
+            "accuracy": d["accuracy"],
+            "miou": d["miou"],
+        }
         if status == "done":
             scores["per_class"] = d["per_class"]
             results["hierarchical"] = hier.to_dict()
@@ -623,7 +639,7 @@ def evaluate_coralscapes_probe(
     kind = "concepts"
     logger.info("=== CoralscapesV2 linear probe: feature kind = %s ===", kind)
     X, y = _extract_probe_features(predictor, source, images)
-    classes_present = sorted(set(int(c) for c in y))
+    classes_present = sorted({int(c) for c in y})
     logger.info(
         "[coralscapes/%s] probe features: X=%s, %d classes present",
         kind,

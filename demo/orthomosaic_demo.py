@@ -114,7 +114,7 @@ CLASS_TO_BENTHOS_COLOR: dict[str, str] = {
     "sponge": "Sponge",
     "hard coral": "Hard Coral",
     "human": "Other",
-    "porites":"Xenia"
+    "porites": "Xenia",
 }
 
 
@@ -273,9 +273,7 @@ def run(
     name2idx = _name_to_index(concept_names)
 
     # Resolve channel indices for each output.
-    benthos_channel_groups = [
-        [name2idx[name] for name in names] for _, names, _ in BENTHOS_SPEC
-    ]
+    benthos_channel_groups = [[name2idx[name] for name in names] for _, names, _ in BENTHOS_SPEC]
     morph_channels = [name2idx[name] for _, name, _, _ in MORPH_SPEC]
     morph_weights = np.array([w for _, _, w, _ in MORPH_SPEC], dtype=np.float32)
     genus_entries = _cnidarian_genus_channels(taxonomy_csv, name2idx)
@@ -396,16 +394,12 @@ def run(
     class_idx_full = class_canvas.idx
     class_counts = np.bincount(class_idx_full.reshape(-1), minlength=num_classes)
     small_classes = [
-        cid
-        for cid in range(num_classes)
-        if cid != 0 and 0 < class_counts[cid] < CLASS_MIN_PIXELS
+        cid for cid in range(num_classes) if cid != 0 and 0 < class_counts[cid] < CLASS_MIN_PIXELS
     ]
     if small_classes:
         drop = np.isin(class_idx_full, np.array(small_classes, dtype=class_idx_full.dtype))
         class_idx_full = np.where(drop, 0, class_idx_full).astype(class_canvas.idx.dtype)
-        logger.info(
-            "Dropped %d MERMAID classes with <%d px.", len(small_classes), CLASS_MIN_PIXELS
-        )
+        logger.info("Dropped %d MERMAID classes with <%d px.", len(small_classes), CLASS_MIN_PIXELS)
 
     class_rgb = class_palette[class_idx_full]
     _save_big_png(class_rgb, output_dir / "mermaid_class_argmax.png")

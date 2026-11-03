@@ -57,13 +57,27 @@ from mermaidseg.datasets.coralnet.dedup.common import (
     specificity,
 )
 
-CATEGORIES = ("same_label", "equivalent", "a_finer", "b_finer", "compatible", "contradictory", "unmapped")
+CATEGORIES = (
+    "same_label",
+    "equivalent",
+    "a_finer",
+    "b_finer",
+    "compatible",
+    "contradictory",
+    "unmapped",
+)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--outputs", type=Path, default=DEFAULT_OUTPUTS,
-                   help="Where the hashing outputs are and these outputs go.")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--outputs",
+        type=Path,
+        default=DEFAULT_OUTPUTS,
+        help="Where the hashing outputs are and these outputs go.",
+    )
     p.add_argument("--cache-root", default=DEFAULT_CACHE_ROOT)
     p.add_argument("--concepts-csv", type=Path, default=DEFAULT_CONCEPTS_CSV)
     p.add_argument("--split-config", type=Path, default=DEFAULT_SPLIT_CONFIG)
@@ -75,24 +89,41 @@ def main() -> None:
     id2name = load_id2name(root)
     concepts = load_concepts(args.concepts_csv)
 
-    pairs = pd.read_csv(args.outputs / "source_overlap_pairs_exact_all.csv", dtype={"image_a": str, "image_b": str})
+    pairs = pd.read_csv(
+        args.outputs / "source_overlap_pairs_exact_all.csv", dtype={"image_a": str, "image_b": str}
+    )
     pairs["pair_id"] = np.arange(len(pairs))
-    involved = pd.concat([
-        pairs[["source_a", "image_a"]].set_axis(["source_id", "image_id"], axis=1),
-        pairs[["source_b", "image_b"]].set_axis(["source_id", "image_id"], axis=1),
-    ]).drop_duplicates()
-    ann = pq.read_table(root / DEFAULT_MANIFEST, columns=["source_id", "image_id", "row", "col", "coralnet_id"],
-                        filters=[("source_id", "in", sorted(involved["source_id"].unique().tolist()))]).to_pandas()
+    involved = pd.concat(
+        [
+            pairs[["source_a", "image_a"]].set_axis(["source_id", "image_id"], axis=1),
+            pairs[["source_b", "image_b"]].set_axis(["source_id", "image_id"], axis=1),
+        ]
+    ).drop_duplicates()
+    ann = pq.read_table(
+        root / DEFAULT_MANIFEST,
+        columns=["source_id", "image_id", "row", "col", "coralnet_id"],
+        filters=[("source_id", "in", sorted(involved["source_id"].unique().tolist()))],
+    ).to_pandas()
     ann["image_id"] = ann["image_id"].astype(str)
-    ann = ann.merge(involved, on=["source_id", "image_id"]).drop_duplicates(["source_id", "image_id", "row", "col"])
+    ann = ann.merge(involved, on=["source_id", "image_id"]).drop_duplicates(
+        ["source_id", "image_id", "row", "col"]
+    )
     print(f"{len(pairs):,} image pairs, {len(ann):,} annotations on involved images")
 
     pts = (
         pairs[["pair_id", "source_a", "image_a", "source_b", "image_b"]]
-        .merge(ann.rename(columns={"source_id": "source_a", "image_id": "image_a", "coralnet_id": "label_a"}),
-               on=["source_a", "image_a"])
-        .merge(ann.rename(columns={"source_id": "source_b", "image_id": "image_b", "coralnet_id": "label_b"}),
-               on=["source_b", "image_b", "row", "col"])
+        .merge(
+            ann.rename(
+                columns={"source_id": "source_a", "image_id": "image_a", "coralnet_id": "label_a"}
+            ),
+            on=["source_a", "image_a"],
+        )
+        .merge(
+            ann.rename(
+                columns={"source_id": "source_b", "image_id": "image_b", "coralnet_id": "label_b"}
+            ),
+            on=["source_b", "image_b", "row", "col"],
+        )
     )
     print(f"{len(pts):,} shared points")
 
@@ -107,11 +138,16 @@ def main() -> None:
 
     combo_counts = (
         pts[pts["category"] != "same_label"]
-        .groupby(["source_a", "source_b", "label_a", "label_b", "category"]).size().rename("n_points").reset_index()
+        .groupby(["source_a", "source_b", "label_a", "label_b", "category"])
+        .size()
+        .rename("n_points")
+        .reset_index()
     )
     combo_counts["name_a"] = combo_counts["label_a"].map(id2name)
     combo_counts["name_b"] = combo_counts["label_b"].map(id2name)
-    combo_counts = combo_counts.sort_values(["source_a", "source_b", "n_points"], ascending=[True, True, False])
+    combo_counts = combo_counts.sort_values(
+        ["source_a", "source_b", "n_points"], ascending=[True, True, False]
+    )
     combo_counts.to_csv(args.outputs / "annotation_conflict_labels.csv", index=False)
 
     counts = pts.groupby(["source_a", "source_b", "category"]).size().unstack(fill_value=0)  # noqa: PD010
@@ -123,8 +159,11 @@ def main() -> None:
         out[f"pct_{c}"] = 100 * out[f"n_{c}"] / out["n_shared_points"]
 
     # Source descriptors: label vocabulary and how specific its labels are.
-    src_ann = pq.read_table(root / DEFAULT_MANIFEST, columns=["source_id", "image_id", "coralnet_id"],
-                            filters=[("source_id", "in", sorted(set(out["source_a"]) | set(out["source_b"])))]).to_pandas()
+    src_ann = pq.read_table(
+        root / DEFAULT_MANIFEST,
+        columns=["source_id", "image_id", "coralnet_id"],
+        filters=[("source_id", "in", sorted(set(out["source_a"]) | set(out["source_b"])))],
+    ).to_pandas()
     spec_of = {lid: specificity(f) for lid, f in feat.items()}
     src = src_ann.groupby("source_id").agg(
         n_labels=("coralnet_id", "nunique"),
@@ -133,7 +172,9 @@ def main() -> None:
         median_image_id=("image_id", lambda s: float(np.median(pd.to_numeric(s, errors="coerce")))),
     )
     src["ann_per_image"] = src["ann_per_image"] / src["n_img"]
-    src["mean_tax_ranks"] = src_ann.assign(s=src_ann["coralnet_id"].map(spec_of)).groupby("source_id")["s"].mean()
+    src["mean_tax_ranks"] = (
+        src_ann.assign(s=src_ann["coralnet_id"].map(spec_of)).groupby("source_id")["s"].mean()
+    )
     for side in ("a", "b"):
         for c in ("n_labels", "ann_per_image", "mean_tax_ranks"):
             out[f"{c}_{side}"] = out[f"source_{side}"].map(src[c])
@@ -147,9 +188,13 @@ def main() -> None:
             return "review", f"{r['pct_contradictory']:.0f}% of shared points contradict"
         finer = r["n_a_finer"] + r["n_b_finer"]
         if finer and r["n_a_finer"] >= args.finer_majority * finer:
-            return str(int(r["source_a"])), f"finer on {100 * r['n_a_finer'] / finer:.0f}% of consistent disagreements"
+            return str(
+                int(r["source_a"])
+            ), f"finer on {100 * r['n_a_finer'] / finer:.0f}% of consistent disagreements"
         if finer and r["n_b_finer"] >= args.finer_majority * finer:
-            return str(int(r["source_b"])), f"finer on {100 * r['n_b_finer'] / finer:.0f}% of consistent disagreements"
+            return str(
+                int(r["source_b"])
+            ), f"finer on {100 * r['n_b_finer'] / finer:.0f}% of consistent disagreements"
         newer = max(r["source_a"], r["source_b"])
         why = "labels equivalent" if not finer else "no clear finer source"
         return str(int(newer)), f"{why}; newer source"
@@ -159,8 +204,19 @@ def main() -> None:
     out["newer_source"] = out[["source_a", "source_b"]].max(axis=1)
 
     overlap = pd.read_csv(args.outputs / "source_overlap_exact_all.csv")
-    out = overlap[["source_a", "source_b", "split_a", "split_b", "cross_split", "n_images_a", "n_images_b",
-                   "n_overlap_images", "pct_image_overlap"]].merge(out, on=["source_a", "source_b"], how="left")
+    out = overlap[
+        [
+            "source_a",
+            "source_b",
+            "split_a",
+            "split_b",
+            "cross_split",
+            "n_images_a",
+            "n_images_b",
+            "n_overlap_images",
+            "pct_image_overlap",
+        ]
+    ].merge(out, on=["source_a", "source_b"], how="left")
     count_cols = ["n_shared_points", *[f"n_{c}" for c in CATEGORIES]]
     out[count_cols] = out[count_cols].fillna(0).astype(int)
     no_pts = out["n_shared_points"] == 0
@@ -173,8 +229,11 @@ def main() -> None:
     # Per-cluster source ranking from the pairwise picks.
     graph = nx.Graph()
     graph.add_edges_from(out[["source_a", "source_b"]].to_numpy())
-    cluster_of = {s: i for i, comp in enumerate(sorted(nx.connected_components(graph), key=len, reverse=True))
-                  for s in comp}
+    cluster_of = {
+        s: i
+        for i, comp in enumerate(sorted(nx.connected_components(graph), key=len, reverse=True))
+        for s in comp
+    }
     score = dict.fromkeys(graph.nodes, 0)
     n_review = dict.fromkeys(graph.nodes, 0)
     for a, b, keep in zip(out["source_a"], out["source_b"], out["keep"], strict=True):
@@ -206,7 +265,14 @@ def main() -> None:
     print("Shared points in disagreeing pairs by category:")
     print((100 * tot / tot.sum()).round(1).to_string())
     print("\nRecommendation (pairs with disagreements):")
-    print(dis["reason"].str.split(";").str[0].str.replace(r"\d+%", "N%", regex=True).value_counts().to_string())
+    print(
+        dis["reason"]
+        .str.split(";")
+        .str[0]
+        .str.replace(r"\d+%", "N%", regex=True)
+        .value_counts()
+        .to_string()
+    )
     print(f"\nWrote {args.outputs}/annotation_conflicts.csv and annotation_conflict_labels.csv")
 
 

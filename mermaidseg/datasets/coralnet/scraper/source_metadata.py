@@ -41,17 +41,25 @@ def parse_source_page(html: str) -> dict:
         spans = li.find_all("span", recursive=False)
         if len(spans) < 2:
             continue
-        key, value = spans[0].get_text(strip=True), " ".join(spans[1].get_text(" ", strip=True).split())
+        key, value = (
+            spans[0].get_text(strip=True),
+            " ".join(spans[1].get_text(" ", strip=True).split()),
+        )
         if key.startswith("Latitude"):
             lat, _, lon = value.partition(",")
-            out["latitude"], out["longitude"] = pd.to_numeric(lat, errors="coerce"), pd.to_numeric(lon, errors="coerce")
+            out["latitude"], out["longitude"] = (
+                pd.to_numeric(lat, errors="coerce"),
+                pd.to_numeric(lon, errors="coerce"),
+            )
         elif key.startswith("Created"):
             out["created"] = value
         elif key.startswith("Point generation"):
             out["point_generation"] = value
     desc = soup.find(id="description-box")
     if desc is not None:
-        out["description"] = " ".join(desc.get_text(" ", strip=True).removeprefix("Description").split())
+        out["description"] = " ".join(
+            desc.get_text(" ", strip=True).removeprefix("Description").split()
+        )
     members = soup.find(id="members-column")
     if members is not None:
         aff = members.find("div", class_="center")
@@ -67,7 +75,9 @@ def parse_source_page(html: str) -> dict:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--split-config", type=Path, default=DEFAULT_SPLIT_CONFIG)
     p.add_argument("--out", type=Path, default=DEFAULT_OUTPUTS / "coralnet_source_metadata.csv")
     p.add_argument("--delay", type=float, default=1.0)

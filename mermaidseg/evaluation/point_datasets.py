@@ -91,9 +91,12 @@ class PointEvalDataset(Dataset):
             if image.ndim == 2:
                 image = np.stack([image] * 3, axis=-1)
             h, w = image.shape[:2]
-            img_tensor = torch.from_numpy(
-                self.transform(image=image)["image"]
-            ).permute(2, 0, 1).contiguous().float()
+            img_tensor = (
+                torch.from_numpy(self.transform(image=image)["image"])
+                .permute(2, 0, 1)
+                .contiguous()
+                .float()
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to load image (unit=%s key=%s): %s", unit, key_t, e)
             th, tw = self.input_hw
@@ -243,9 +246,7 @@ def run_point_evaluation(
     all_names = sorted(
         base_ds.df_annotations["source_label_name"].astype(str).str.lower().unique().tolist()
     )
-    unmapped_class = sorted(
-        n for n in all_names if class_lookup.name_to_class_id.get(n, 0) == 0
-    )
+    unmapped_class = sorted(n for n in all_names if class_lookup.name_to_class_id.get(n, 0) == 0)
     unmapped_concept = sorted(n for n in all_names if n not in concept_lookup.name_to_row)
     if unmapped_class:
         logger.info(
@@ -315,9 +316,7 @@ def run_point_evaluation(
         _flush(final=False)
 
     def _macro_dict() -> dict:
-        return {
-            k: (float(np.nanmean(v)) if len(v) else float("nan")) for k, v in macro.items()
-        }
+        return {k: (float(np.nanmean(v)) if len(v) else float("nan")) for k, v in macro.items()}
 
     def _pooled_dict() -> dict:
         pooled_d = pooled.to_dict(class_id2name=id2label, include_class_detail=True)
@@ -332,7 +331,9 @@ def run_point_evaluation(
         payload = {
             "eval": eval_name,
             "num_units_done": len(unit_results),
-            "num_units_total": len(remaining) if not max_images_per_unit else len(unit_results) + len(pending),
+            "num_units_total": len(remaining)
+            if not max_images_per_unit
+            else len(unit_results) + len(pending),
             "images_processed": processed,
             "images_failed": n_failed,
             "pooled": pooled_d,

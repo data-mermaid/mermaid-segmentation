@@ -208,7 +208,10 @@ def run(
     ]
     present.sort(key=lambda cid: int(class_counts[cid]), reverse=True)
     class_legend = [
-        (artifacts.id2label.get(cid, f"class_{cid}").title(), tuple(int(v) for v in class_palette[cid]))
+        (
+            artifacts.id2label.get(cid, f"class_{cid}").title(),
+            tuple(int(v) for v in class_palette[cid]),
+        )
         for cid in present
     ]
     _save_legend_pdf(
@@ -231,9 +234,14 @@ def run(
         mask = (value >= CONCEPT_THRESHOLD)[..., None]
         out = np.where(mask, blended, rgb_f)
         _save_png(np.clip(out, 0, 255).astype(np.uint8), output_dir / f"concept_{name}.png")
-        logger.info("Concept %r (%s): max=%.3f, >=%.1f in %.2f%% of pixels",
-                    name, expression, float(value.max()), CONCEPT_THRESHOLD,
-                    100.0 * float(mask.mean()))
+        logger.info(
+            "Concept %r (%s): max=%.3f, >=%.1f in %.2f%% of pixels",
+            name,
+            expression,
+            float(value.max()),
+            CONCEPT_THRESHOLD,
+            100.0 * float(mask.mean()),
+        )
 
     logger.info("Done. Outputs written to %s", output_dir)
 

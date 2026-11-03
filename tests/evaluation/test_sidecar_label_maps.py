@@ -37,7 +37,9 @@ def sidecar(tmp_path_factory):
 
 
 def _args(evaluate_script, *argv):
-    return evaluate_script.build_parser().parse_args(["--output-dir", "o", "--checkpoint", "c", *argv])
+    return evaluate_script.build_parser().parse_args(
+        ["--output-dir", "o", "--checkpoint", "c", *argv]
+    )
 
 
 def test_sidecar_supplies_both_label_maps(evaluate_script, sidecar):
@@ -79,8 +81,16 @@ def test_sidecar_of_another_run_is_refused_for_a_checkpoint(evaluate_script, sid
         ckpt,
     )
     args = evaluate_script.build_parser().parse_args(
-        ["--output-dir", "o", "--checkpoint", str(ckpt), "--sidecar", str(sidecar),
-         "--model-config", "unused.yaml"]
+        [
+            "--output-dir",
+            "o",
+            "--checkpoint",
+            str(ckpt),
+            "--sidecar",
+            str(sidecar),
+            "--model-config",
+            "unused.yaml",
+        ]
     )
     with pytest.raises(ManifestError, match="does not belong"):
         evaluate_script._load_model(args, torch.device("cpu"))

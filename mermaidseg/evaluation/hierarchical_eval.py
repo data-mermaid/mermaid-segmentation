@@ -66,7 +66,7 @@ def concept_value2id_from_names(concept_names: list[str]) -> dict[str, dict[str,
         expected_index += len(indices)
         values = [concept_names[i][len(prefix) :] for i in indices]
         placeholder = [0] * len(values)
-        value2id[rank] = {"not_given": placeholder, **{v: placeholder for v in values}}
+        value2id[rank] = {"not_given": placeholder, **dict.fromkeys(values, placeholder)}
     return value2id
 
 
@@ -201,7 +201,8 @@ class LossTargetMetrics:
             if valid[d].any():
                 distance_rows = spec.distance[rank].to(device).double()[targets[d][valid[d]]]
                 self._add(
-                    f"expected_distance/{rank}", (rank_probs[d][valid[d]] * distance_rows).sum(dim=1)
+                    f"expected_distance/{rank}",
+                    (rank_probs[d][valid[d]] * distance_rows).sum(dim=1),
                 )
 
     def compute(self) -> dict[str, float]:
@@ -224,7 +225,9 @@ class HierarchicalPointEval:
 
     def __init__(self, spec: HierarchicalSpec, flush_points: int = 20_000):
         self.spec = spec
-        self.hierarchical = HierarchicalMetrics(spec.tree, ranks=tuple(spec.ranks), score_transform="none")
+        self.hierarchical = HierarchicalMetrics(
+            spec.tree, ranks=tuple(spec.ranks), score_transform="none"
+        )
         self.loss_targets = LossTargetMetrics(spec)
         self.flush_points = int(flush_points)
         self.num_points = 0
@@ -236,7 +239,9 @@ class HierarchicalPointEval:
         """Accumulate ``N`` points: concept rows ``(N, K)`` (0/1/2) and probabilities ``(N, K)``."""
         if probs.shape[0] == 0:
             return
-        self._rows.append(torch.as_tensor(np.asarray(concept_rows), dtype=torch.long, device=probs.device))
+        self._rows.append(
+            torch.as_tensor(np.asarray(concept_rows), dtype=torch.long, device=probs.device)
+        )
         self._probs.append(probs.float())
         self._buffered += int(probs.shape[0])
         self.num_points += int(probs.shape[0])

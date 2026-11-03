@@ -51,9 +51,7 @@ def _identity_source_to_target(dataset: Any) -> dict[str, str]:
 def _static_source_to_target(static: dict[str, str], dataset: Any) -> dict[str, str]:
     """Filter a static ``source_name -> target_name`` dict to the dataset's source space."""
     ds_names_lower = {n.lower() for n in dataset.source_name2id}
-    return {
-        name: target for name, target in static.items() if name.lower() in ds_names_lower
-    }
+    return {name: target for name, target in static.items() if name.lower() in ds_names_lower}
 
 
 _BUILTIN_DEFAULT_FETCHERS = {
@@ -89,7 +87,7 @@ class SourceLabelRegistry:
         source_to_target_name_maps: Optional mapping
             ``{SOURCE_NAME: {source_label_name: target_label_name}}``. Defaults
             are looked up per ``SOURCE_NAME``: ``mermaid`` is identity,
-            ``coralscapes``, ``coralscapes_v2`` ``catlin_seaview``, ``moorea_labeled_corals``, ``ucsd_mosaics``, ``benthos_yuval`` use the static dict, 
+            ``coralscapes``, ``coralscapes_v2`` ``catlin_seaview``, ``moorea_labeled_corals``, ``ucsd_mosaics``, ``benthos_yuval`` use the static dict,
             ``coralnet`` and
              are fetched from the MERMAID API.
         concept_hierarchy: Optional benthic-attribute name->parent-name dict.
@@ -161,9 +159,7 @@ class SourceLabelRegistry:
             for local_id, source_name in sorted(ds.source_id2name.items()):
                 global_id = local_id + running_offset
                 self.global_id2source[global_id] = (ds.SOURCE_NAME, source_name)
-                ds_target_for_source.append(
-                    resolved_maps[ds.SOURCE_NAME].get(source_name.lower())
-                )
+                ds_target_for_source.append(resolved_maps[ds.SOURCE_NAME].get(source_name.lower()))
             per_dataset_target_lists.append(ds_target_for_source)
             running_offset += len(ds.source_id2name)
         self.dataset_offsets = offsets

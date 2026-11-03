@@ -113,7 +113,9 @@ def _sidecar_label_maps(
     if args.sidecar is None:
         return None
     if args.id2label or args.concept_id2name:
-        raise ValueError("--sidecar already supplies the label maps; drop --id2label/--concept-id2name.")
+        raise ValueError(
+            "--sidecar already supplies the label maps; drop --id2label/--concept-id2name."
+        )
     with Path(args.sidecar).open() as f:
         manifest = json.load(f)
     id2label = dict(enumerate(manifest["classes"]))
@@ -167,7 +169,9 @@ def _load_model(args: argparse.Namespace, device: torch.device):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--checkpoint", required=True, type=Path, help="Model checkpoint path")
     p.add_argument(
         "--model-config",
@@ -195,7 +199,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="The run's model.json (next to its checkpoints); supplies both label maps. "
         "Cannot be combined with --id2label, --concept-id2name, or a bundle --checkpoint.",
     )
-    p.add_argument("--data-config", type=Path, default=_REPO_ROOT / "configs" / "data_config_512.yaml")
+    p.add_argument(
+        "--data-config", type=Path, default=_REPO_ROOT / "configs" / "data_config_512.yaml"
+    )
     p.add_argument("--output-dir", required=True, type=Path)
     p.add_argument(
         "--evals",
@@ -224,8 +230,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--amp", action="store_true", help="bf16 autocast for the encoder")
 
     # Assets.
-    p.add_argument("--taxonomy-csv", type=Path, default=_REPO_ROOT / "configs" / "class_to_concepts.csv")
-    p.add_argument("--benthos-spec", type=Path, default=_REPO_ROOT / "configs" / "eval" / "benthos_zero_shot.yaml")
+    p.add_argument(
+        "--taxonomy-csv", type=Path, default=_REPO_ROOT / "configs" / "class_to_concepts.csv"
+    )
+    p.add_argument(
+        "--benthos-spec",
+        type=Path,
+        default=_REPO_ROOT / "configs" / "eval" / "benthos_zero_shot.yaml",
+    )
     p.add_argument(
         "--probe-points",
         type=Path,
@@ -238,7 +250,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=["concepts"],
         choices=["concepts", "dpt", "backbone"],
     )
-    p.add_argument("--coralscapes-root", type=Path, default=None, help="Local CoralscapesV2 mirror root")
+    p.add_argument(
+        "--coralscapes-root", type=Path, default=None, help="Local CoralscapesV2 mirror root"
+    )
     p.add_argument("--svm-c", type=float, default=1.0)
 
     # Debug limiters.
@@ -278,7 +292,10 @@ def _point_lines(title: str, pooled: dict) -> list[str]:
         f"## {title}",
         f"- class accuracy: {fmt(pooled['class_accuracy'])}",
         "- taxonomic acc_all/acc_living: "
-        + ", ".join(f"{r}={fmt(v['acc_all'])}/{fmt(v['acc_living'])}" for r, v in pooled["taxonomic"].items()),
+        + ", ".join(
+            f"{r}={fmt(v['acc_all'])}/{fmt(v['acc_living'])}"
+            for r, v in pooled["taxonomic"].items()
+        ),
         f"- binary macro acc/F1: {fmt(b.get('macro_accuracy'))}/{fmt(b.get('macro_f1'))}",
         *_concept_lines(pooled),
         "",
@@ -421,8 +438,12 @@ def main(argv: list[str] | None = None) -> None:
             lambda: {
                 "pacific": evaluate_pacific(
                     predictor=predictor,
-                    whitelist_subsets=_split_field(data, "pacific_labeled_corals", "val", "whitelist_subsets"),
-                    whitelist_sites=_split_field(data, "pacific_labeled_corals", "val", "whitelist_sites"),
+                    whitelist_subsets=_split_field(
+                        data, "pacific_labeled_corals", "val", "whitelist_subsets"
+                    ),
+                    whitelist_sites=_split_field(
+                        data, "pacific_labeled_corals", "val", "whitelist_sites"
+                    ),
                     id2label=id2label,
                     concept_names=concept_names,
                     taxonomy_csv=args.taxonomy_csv,

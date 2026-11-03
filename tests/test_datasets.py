@@ -259,7 +259,9 @@ def test_base_dataset_ann_positions_match_boolean_scan(minimal_dataset):
             minimal_dataset.df_annotations["image_id"] == image_id,
             ["row", "col", "source_label_name"],
         ]
-        pd.testing.assert_frame_equal(indexed.reset_index(drop=True), scanned.reset_index(drop=True))
+        pd.testing.assert_frame_equal(
+            indexed.reset_index(drop=True), scanned.reset_index(drop=True)
+        )
 
 
 # --- BaseCoralDataset.collate_fn ---
@@ -290,9 +292,7 @@ def test_collate_fn_all_none_returns_empty_tensors(minimal_dataset, caplog):
 # --- BaseCoralDataset.__getitem__ ---
 
 
-def test_base_dataset_getitem_raises_and_logs_when_all_items_fail(
-    single_image_annotations, caplog
-):
+def test_base_dataset_getitem_raises_and_logs_when_all_items_fail(single_image_annotations, caplog):
     df_annotations, df_images = single_image_annotations
     ds = _AlwaysFailDataset(
         df_annotations=df_annotations,

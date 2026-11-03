@@ -67,8 +67,14 @@ def _loss(ranks=RANKS, paths=PATHS, **kwargs) -> TaxonomicDistanceLoss:
 def _pixels(paths: list[tuple[str | None, ...]], ranks=RANKS, probs=None):
     """One image with one pixel per path; logits are log of the spec probabilities."""
     labels = torch.tensor(
-        [[v for classes, value in zip(ranks.values(), path, strict=True) for v in _encode(classes, value)]
-         for path in paths]
+        [
+            [
+                v
+                for classes, value in zip(ranks.values(), path, strict=True)
+                for v in _encode(classes, value)
+            ]
+            for path in paths
+        ]
     ).T  # (C, W)
     probs = torch.tensor(probs or ORDER_PROBS + FAMILY_PROBS + GENUS_PROBS)
     logits = probs.log()[:, None].expand(-1, len(paths)).clone()
@@ -111,8 +117,12 @@ def test_near_mistakes_cost_less_than_far_ones():
     loss = _loss()
     _, labels = _pixels([ACROPORA])
     costs = {}
-    for name, genus in (("correct", "acropora"), ("sibling", "montipora"), ("same order", "porites"),
-                        ("other order", "sarcophyton")):
+    for name, genus in (
+        ("correct", "acropora"),
+        ("sibling", "montipora"),
+        ("same order", "porites"),
+        ("other order", "sarcophyton"),
+    ):
         logits = torch.full((1, 12, 1, 1), -20.0)
         logits[0, [0, 2 + 0, 5 + GENERA.index(genus)]] = 20.0  # order/family right, genus varies
         costs[name] = loss(logits, labels)[1]["distance/genus"]
@@ -132,8 +142,6 @@ def test_unlabelled_ranks_and_void_pixels_contribute_nothing():
     assert with_void.item() == pytest.approx(without_void.item(), abs=1e-6)
     total, components = loss(*_pixels([VOID]))
     assert total.item() == 0.0 and components["distance"] == 0.0
-
-
 
 
 def test_gradient_is_probability_times_distance_excess():
@@ -172,7 +180,9 @@ def test_channels_missing_from_tree_raise():
 
 def test_real_class_to_concepts():
     sources = {"benthos_yuval", "catlin_seaview", "coralnet", "coralscapes_v2", "mermaid"}
-    value2id = ConceptSchema.from_csv(DEFAULT_CLASS_TO_CONCEPTS_CSV, sources=sources).concept_value2id
+    value2id = ConceptSchema.from_csv(
+        DEFAULT_CLASS_TO_CONCEPTS_CSV, sources=sources
+    ).concept_value2id
     loss = TaxonomicDistanceLoss(build_taxonomy_tree(DEFAULT_CLASS_TO_CONCEPTS_CSV), value2id)
     genera = [v for v in value2id["genus"] if v != "not_given"]
     distance = loss.distance_genus

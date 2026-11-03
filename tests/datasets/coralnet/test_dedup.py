@@ -28,8 +28,14 @@ NG = "not_given"
 # CoralNet label id -> (name, concept fields: six taxonomic ranks + bleached).
 LABELS = {
     1: ("hard coral", ["animalia", "cnidaria", "hexacorallia", NG, NG, NG, NG]),
-    2: ("acropora", ["animalia", "cnidaria", "hexacorallia", "scleractinia", "acroporidae", "acropora", NG]),
-    3: ("acropora sp.", ["animalia", "cnidaria", "hexacorallia", "scleractinia", "acroporidae", "acropora", NG]),
+    2: (
+        "acropora",
+        ["animalia", "cnidaria", "hexacorallia", "scleractinia", "acroporidae", "acropora", NG],
+    ),
+    3: (
+        "acropora sp.",
+        ["animalia", "cnidaria", "hexacorallia", "scleractinia", "acroporidae", "acropora", NG],
+    ),
     4: ("sand", ["none"] * 6 + [NG]),
     5: ("bleached", [NG] * 6 + ["true"]),
     6: ("unlisted label", None),
@@ -40,9 +46,16 @@ LABELS = {
 @pytest.fixture
 def concepts_csv(tmp_path):
     rows = [
-        {"source_label_class_name": name, "source_dataset_source": "coralnet", "target_label_class_name": "",
-         "target_dataset_source": "", "species": NG, **dict(zip([*RANKS, "bleached"], fields, strict=True))}
-        for name, fields in LABELS.values() if fields is not None
+        {
+            "source_label_class_name": name,
+            "source_dataset_source": "coralnet",
+            "target_label_class_name": "",
+            "target_dataset_source": "",
+            "species": NG,
+            **dict(zip([*RANKS, "bleached"], fields, strict=True)),
+        }
+        for name, fields in LABELS.values()
+        if fields is not None
     ]
     path = tmp_path / "class_to_concepts.csv"
     pd.DataFrame(rows).to_csv(path, index=False)
@@ -52,7 +65,10 @@ def concepts_csv(tmp_path):
 @pytest.fixture
 def feat(concepts_csv):
     concepts = load_concepts(concepts_csv)
-    return {lid: (concepts.loc[name] if name in concepts.index else None) for lid, (name, _) in LABELS.items()}
+    return {
+        lid: (concepts.loc[name] if name in concepts.index else None)
+        for lid, (name, _) in LABELS.items()
+    }
 
 
 def test_compare_labels(feat):
@@ -89,8 +105,10 @@ def test_config_helpers(tmp_path):
     assert read_source_list(None) == set()
 
     cfg = tmp_path / "data_config.yaml"
-    cfg.write_text("data:\n  coralnet:\n    train:\n      whitelist_sources: [1, 2]\n"
-                   "    val:\n      whitelist_sources: [3]\n")
+    cfg.write_text(
+        "data:\n  coralnet:\n    train:\n      whitelist_sources: [1, 2]\n"
+        "    val:\n      whitelist_sources: [3]\n"
+    )
     assert coralnet_splits(cfg) == {"train": {1, 2}, "val": {3}}
 
     pairs = pd.DataFrame({"source_a": [1, 1, 4], "source_b": [2, 3, 5], "n": [1, 1, 1]})
@@ -109,46 +127,78 @@ def test_dedup_end_to_end(tmp_path, concepts_csv, monkeypatch):
     (bucket / DEFAULT_MANIFEST).parent.mkdir(parents=True)
     (bucket / ID2NAME_KEY).parent.mkdir(parents=True)
     (bucket / ID2NAME_KEY).write_text(json.dumps({str(k): name for k, (name, _) in LABELS.items()}))
-    pd.DataFrame({
-        "source_id": pd.array([1, 1, 2, 2, 2, 3], dtype="int32"),
-        "image_id": ["10", "10", "20", "20", "20", "30"],
-        "row": pd.array([5, 6, 5, 6, 7, 1], dtype="int16"),
-        "col": pd.array([5, 6, 5, 6, 7, 1], dtype="int16"),
-        "coralnet_id": pd.array([1, 4, 2, 2, 4, 4], dtype="int32"),
-    }).to_parquet(bucket / DEFAULT_MANIFEST, index=False)
+    pd.DataFrame(
+        {
+            "source_id": pd.array([1, 1, 2, 2, 2, 3], dtype="int32"),
+            "image_id": ["10", "10", "20", "20", "20", "30"],
+            "row": pd.array([5, 6, 5, 6, 7, 1], dtype="int16"),
+            "col": pd.array([5, 6, 5, 6, 7, 1], dtype="int16"),
+            "coralnet_id": pd.array([1, 4, 2, 2, 4, 4], dtype="int32"),
+        }
+    ).to_parquet(bucket / DEFAULT_MANIFEST, index=False)
 
     outputs = tmp_path / "outputs"
     outputs.mkdir()
-    pd.DataFrame({"source_id": [1, 2, 3], "image_id": ["10", "20", "30"], "hash": ["h", "h", "u"],
-                  "image_s3_key": ["k10", "k20", "k30"]}).to_parquet(outputs / "image_hashes_exact_all.parquet")
+    pd.DataFrame(
+        {
+            "source_id": [1, 2, 3],
+            "image_id": ["10", "20", "30"],
+            "hash": ["h", "h", "u"],
+            "image_s3_key": ["k10", "k20", "k30"],
+        }
+    ).to_parquet(outputs / "image_hashes_exact_all.parquet")
     pd.DataFrame({"source_id": [1, 2], "cluster": [0, 0], "rank": [1, 2]}).to_csv(
-        outputs / "annotation_source_ranking.csv", index=False)
+        outputs / "annotation_source_ranking.csv", index=False
+    )
     cfg = tmp_path / "data_config.yaml"
     cfg.write_text("data:\n  coralnet:\n    train:\n      whitelist_sources: [1, 2, 3]\n")
     exclude = tmp_path / "exclude.txt"
     exclude.write_text("")
 
     out_dir, config_dir = tmp_path / "dedup", tmp_path / "configs"
-    monkeypatch.setattr(sys, "argv", [
-        "dedup", "--outputs", str(outputs), "--out-dir", str(out_dir), "--config-dir", str(config_dir),
-        "--cache-root", str(tmp_path / "cache"), "--concepts-csv", str(concepts_csv),
-        "--split-config", str(cfg), "--exclude-sources", str(exclude),
-        "--near-dup-labels", str(tmp_path / "no_labels.csv"),
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dedup",
+            "--outputs",
+            str(outputs),
+            "--out-dir",
+            str(out_dir),
+            "--config-dir",
+            str(config_dir),
+            "--cache-root",
+            str(tmp_path / "cache"),
+            "--concepts-csv",
+            str(concepts_csv),
+            "--split-config",
+            str(cfg),
+            "--exclude-sources",
+            str(exclude),
+            "--near-dup-labels",
+            str(tmp_path / "no_labels.csv"),
+        ],
+    )
     dedup.main()
 
     blacklist = pd.read_parquet(config_dir / "image_blacklist.parquet")
     assert blacklist[["source_id", "image_id", "kept_image_id", "reason"]].to_numpy().tolist() == [
-        [2, "20", "10", "exact"]]
+        [2, "20", "10", "exact"]
+    ]
     overrides = pd.read_parquet(config_dir / "annotation_overrides.parquet").sort_values("row")
     assert overrides[["image_id", "row", "col", "coralnet_id"]].to_numpy().tolist() == [
-        ["10", 5, 5, 2], ["10", 6, 6, 4], ["10", 7, 7, 4]]
+        ["10", 5, 5, 2],
+        ["10", 6, 6, 4],
+        ["10", 7, 7, 4],
+    ]
     prov = pd.read_parquet(out_dir / "point_provenance.parquet").sort_values("row")
     assert prov["change"].tolist() == ["replaced", "unchanged", "added"]
     assert prov["category"].tolist() == ["finer", "contradictory", "same_label"]
     assert prov["origin_copy_rank"].tolist() == [1, 0, 1]
     review = pd.read_csv(out_dir / "review_points.csv")
-    assert review[["row", "category", "chosen_label"]].to_numpy().tolist() == [[6, "contradictory", "sand"]]
+    assert review[["row", "category", "chosen_label"]].to_numpy().tolist() == [
+        [6, "contradictory", "sand"]
+    ]
     assert pd.read_parquet(out_dir / "images_unique.parquet")["image_id"].tolist() == ["30"]
     summary = json.loads((out_dir / "summary.json").read_text())
     assert summary["n_points_before"] == 6 and summary["n_points_after"] == 4
@@ -164,43 +214,77 @@ def test_near_dup_merge(tmp_path, feat):
     meet: the finest wins. B adds (200, 300); C's (10, 10) is added at about (20, 20).
     """
     rng = np.random.default_rng(0)
-    big = Image.fromarray(rng.integers(0, 255, (60, 80, 3), dtype=np.uint8)).resize((800, 600), Image.BICUBIC)
-    for name, im, q in (("a", big, 95), ("b", big, 70), ("c", big.resize((400, 300), Image.BICUBIC), 90),
-                        ("e", Image.fromarray(rng.integers(0, 255, (600, 800, 3), dtype=np.uint8)), 90)):
+    big = Image.fromarray(rng.integers(0, 255, (60, 80, 3), dtype=np.uint8)).resize(
+        (800, 600), Image.BICUBIC
+    )
+    for name, im, q in (
+        ("a", big, 95),
+        ("b", big, 70),
+        ("c", big.resize((400, 300), Image.BICUBIC), 90),
+        ("e", Image.fromarray(rng.integers(0, 255, (600, 800, 3), dtype=np.uint8)), 90),
+    ):
         im.save(tmp_path / f"{name}.jpg", quality=q)
-    images = pd.DataFrame({"source_id": [2, 1, 3, 4], "image_id": ["101", "102", "103", "105"],
-                           "hash": ["ha", "hb", "hc", "he"], "image_s3_key": ["a.jpg", "b.jpg", "c.jpg", "e.jpg"]})
-    points = pd.DataFrame({
-        "image_id": ["101", "101", "102", "102", "103", "103", "105"],
-        "row": [100, 300, 100, 200, 50, 10, 5], "col": [100, 400, 100, 300, 50, 10, 5],
-        "coralnet_id": [1, 4, 2, 4, 3, 4, 4],
-    }).assign(category="same_label", has_unmapped=False, in_kept=True, n_copies_at_loc=1)
-    labels = pd.DataFrame({"image_a": ["101", "104", "101"], "image_b": ["102", "101", "105"],
-                           "label": ["dup", "dup", "fp"]}).set_index(["image_a", "image_b"])
+    images = pd.DataFrame(
+        {
+            "source_id": [2, 1, 3, 4],
+            "image_id": ["101", "102", "103", "105"],
+            "hash": ["ha", "hb", "hc", "he"],
+            "image_s3_key": ["a.jpg", "b.jpg", "c.jpg", "e.jpg"],
+        }
+    )
+    points = pd.DataFrame(
+        {
+            "image_id": ["101", "101", "102", "102", "103", "103", "105"],
+            "row": [100, 300, 100, 200, 50, 10, 5],
+            "col": [100, 400, 100, 300, 50, 10, 5],
+            "coralnet_id": [1, 4, 2, 4, 3, 4, 4],
+        }
+    ).assign(category="same_label", has_unmapped=False, in_kept=True, n_copies_at_loc=1)
+    labels = pd.DataFrame(
+        {
+            "image_a": ["101", "104", "101"],
+            "image_b": ["102", "101", "105"],
+            "label": ["dup", "dup", "fp"],
+        }
+    ).set_index(["image_a", "image_b"])
 
-    out = near_dup_merge.merge_near_duplicates(images, points, labels, {"104": "103"}, tmp_path,
-                                               dedup.make_resolver(feat), workers=2)
+    out = near_dup_merge.merge_near_duplicates(
+        images, points, labels, {"104": "103"}, tmp_path, dedup.make_resolver(feat), workers=2
+    )
 
     assert out["blacklist"][["image_id", "kept_image_id", "reason"]].to_numpy().tolist() == [
-        ["102", "101", "near_dup"], ["103", "101", "near_dup"]]
+        ["102", "101", "near_dup"],
+        ["103", "101", "near_dup"],
+    ]
     copies = out["copies"].set_index("image_id")
     assert copies["transform"].to_dict() == {"102": "identity", "103": "homography"}
     assert copies.loc["103", "n_joined"] == 1
     ov = out["overrides"].sort_values(["row", "col"]).reset_index(drop=True)
     assert (ov["image_id"] == "101").all()
     assert len(ov) == 4
-    assert abs(ov.loc[0, "row"] - 20) <= 1 and abs(ov.loc[0, "col"] - 20) <= 1 and ov.loc[0, "coralnet_id"] == 4
+    assert (
+        abs(ov.loc[0, "row"] - 20) <= 1
+        and abs(ov.loc[0, "col"] - 20) <= 1
+        and ov.loc[0, "coralnet_id"] == 4
+    )
     assert ov.loc[1:, ["row", "col", "coralnet_id", "category"]].to_numpy().tolist() == [
-        [100, 100, 2, "finer"], [200, 300, 4, "same_label"], [300, 400, 4, "same_label"]]
+        [100, 100, 2, "finer"],
+        [200, 300, 4, "same_label"],
+        [300, 400, 4, "same_label"],
+    ]
     prov = out["provenance"].sort_values(["row", "col"]).reset_index(drop=True)
     assert prov["change"].tolist() == ["added", "replaced", "added", "unchanged"]
     assert prov.loc[1, "copy_labels"] == [1, 2, 3]
 
 
 def test_exact_blacklist(tmp_path):
-    pd.DataFrame({"image_id": ["1", "2"], "reason": ["exact", "near_dup"]}).to_parquet(tmp_path / "b.parquet")
+    pd.DataFrame({"image_id": ["1", "2"], "reason": ["exact", "near_dup"]}).to_parquet(
+        tmp_path / "b.parquet"
+    )
     assert exact_blacklist(tmp_path / "b.parquet") == {"1"}
-    pd.DataFrame({"image_id": [1, 2]}).to_parquet(tmp_path / "old.parquet")  # before near duplicates
+    pd.DataFrame({"image_id": [1, 2]}).to_parquet(
+        tmp_path / "old.parquet"
+    )  # before near duplicates
     assert exact_blacklist(tmp_path / "old.parquet") == {"1", "2"}
 
 
@@ -210,31 +294,56 @@ def test_anneal_fixed_groups():
     n = X.sum(1)
     eligible = np.array([False, True, True, True, False])
     fixed = np.array([2, -1, -1, -1, -1])
-    a, _ = splits.anneal(X, n, X.sum(0), eligible, (100.0, 100.0), (0.1, 0.1), 10.0, np.ones(2, bool),
-                         np.zeros(2), 0.0, 2000, 0, fixed)
+    a, _ = splits.anneal(
+        X,
+        n,
+        X.sum(0),
+        eligible,
+        (100.0, 100.0),
+        (0.1, 0.1),
+        10.0,
+        np.ones(2, bool),
+        np.zeros(2),
+        0.0,
+        2000,
+        0,
+        fixed,
+    )
     assert a[0] == 2 and a[4] == 0
 
 
 def test_replace_coralnet_block():
-    text = ("data:\n  mermaid:\n    train: {}\n  coralnet:\n    train:\n      whitelist_sources: [1]\n"
-            "  catlin:\n    train: {}\n")
-    out = splits.replace_coralnet_block(text, {"train": [1, 2], "val": [3]},
-                                        {"image_blacklist": "configs/coralnet/image_blacklist.parquet"})
+    text = (
+        "data:\n  mermaid:\n    train: {}\n  coralnet:\n    train:\n      whitelist_sources: [1]\n"
+        "  catlin:\n    train: {}\n"
+    )
+    out = splits.replace_coralnet_block(
+        text,
+        {"train": [1, 2], "val": [3]},
+        {"image_blacklist": "configs/coralnet/image_blacklist.parquet"},
+    )
     assert out.startswith("data:\n  mermaid:\n    train: {}\n  coralnet:\n")
     assert out.endswith("  catlin:\n    train: {}\n")
-    assert "      whitelist_sources: [1, 2]\n      image_blacklist: configs/coralnet/image_blacklist.parquet\n" in out
+    assert (
+        "      whitelist_sources: [1, 2]\n      image_blacklist: configs/coralnet/image_blacklist.parquet\n"
+        in out
+    )
     assert "    val:\n      whitelist_sources: [3]\n" in out
 
 
 def test_project_edges():
-    meta = pd.DataFrame({
-        "source_id": [10, 11, 20, 30, 40],
-        "admins": ["ann", "ann;bob", "ann", "carl", "ann"],
-        "latitude": [0.0, 40.0, 0.1, 0.0, -30.0],
-        "longitude": [0.0, 40.0, 0.1, 0.0, -30.0],
-    })
+    meta = pd.DataFrame(
+        {
+            "source_id": [10, 11, 20, 30, 40],
+            "admins": ["ann", "ann;bob", "ann", "carl", "ann"],
+            "latitude": [0.0, 40.0, 0.1, 0.0, -30.0],
+            "longitude": [0.0, 40.0, 0.1, 0.0, -30.0],
+        }
+    )
     sources = [10, 11, 20, 30, 40]
-    edges = {(a, b): why for a, b, why in splits.project_edges(meta, sources, max_id_gap=1, max_km=50)}
+    edges = {
+        (a, b): why for a, b, why in splits.project_edges(meta, sources, max_id_gap=1, max_km=50)
+    }
     # The id gap counts positions in the sorted source list: 10-11 and 11-20 are neighbours.
     # 10-20: two positions apart but ~16 km apart. 40: same admin, but far in the list and on the
     # map. 30: a different admin.
@@ -243,17 +352,25 @@ def test_project_edges():
 
 def test_leakage(tmp_path, monkeypatch):
     pd.DataFrame({"source_id": [1, 1, 2, 3], "hash": ["a", "b", "a", "c"]}).to_parquet(
-        tmp_path / "image_hashes_exact_all.parquet")
+        tmp_path / "image_hashes_exact_all.parquet"
+    )
     pd.DataFrame({"source_a": [1], "source_b": [2], "n_overlap_images": [1]}).to_csv(
-        tmp_path / "source_overlap_exact_all.csv", index=False)
+        tmp_path / "source_overlap_exact_all.csv", index=False
+    )
     cfg = tmp_path / "cfg.yaml"
-    cfg.write_text("coralnet:\n  train:\n    whitelist_sources: [1]\n  val:\n    whitelist_sources: [2]\n"
-                   "  test:\n    whitelist_sources: [3]\n")
+    cfg.write_text(
+        "coralnet:\n  train:\n    whitelist_sources: [1]\n  val:\n    whitelist_sources: [2]\n"
+        "  test:\n    whitelist_sources: [3]\n"
+    )
     monkeypatch.setattr(sys, "argv", ["leakage", "--config", str(cfg), "--outputs", str(tmp_path)])
     leakage.main()
 
-    per_source = pd.read_csv(tmp_path / "split_leakage_cfg.csv").set_index(["eval_split", "other_split"])
+    per_source = pd.read_csv(tmp_path / "split_leakage_cfg.csv").set_index(
+        ["eval_split", "other_split"]
+    )
     assert per_source.loc[("val", "train"), "n_dup"] == 1
     assert per_source.loc[("test", "train"), "n_dup"] == 0
     pairs = pd.read_csv(tmp_path / "split_leakage_pairs_cfg.csv")
-    assert pairs[["source_a", "source_b", "split_a", "split_b"]].to_numpy().tolist() == [[1, 2, "train", "val"]]
+    assert pairs[["source_a", "source_b", "split_a", "split_b"]].to_numpy().tolist() == [
+        [1, 2, "train", "val"]
+    ]

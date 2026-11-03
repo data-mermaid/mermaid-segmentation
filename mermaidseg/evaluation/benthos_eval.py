@@ -25,7 +25,8 @@ from mermaidseg.datasets.benthos_yuval.benthos_yuval_corals_dataset import (
 from mermaidseg.evaluation.metrics import ClassConfusion
 from mermaidseg.evaluation.predictor import CBMPredictor
 from mermaidseg.evaluation.reporting import fmt, write_json
-from mermaidseg.model.concept_expr import ConceptResolver, evaluate as eval_expr, tokenize
+from mermaidseg.model.concept_expr import ConceptResolver, tokenize
+from mermaidseg.model.concept_expr import evaluate as eval_expr
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ def evaluate_benthos(
     resolver = ConceptResolver(concept_names)
     _validate_spec(classes, resolver)
     gt_to_spec = _build_gt_name_to_spec(classes)
-    spec_id2name = {i: n for i, n in enumerate(class_names)}
+    spec_id2name = dict(enumerate(class_names))
 
     logger.info("Building Benthos dataset (whitelist_sites=%s) ...", whitelist_sites)
     base = BenthosYuvalCoralsDataset(whitelist_sites=whitelist_sites, transform=None)
@@ -120,7 +121,9 @@ def evaluate_benthos(
     def _dump(final: bool) -> None:
         payload = {
             "eval": "benthos",
-            "spec": [{"name": e["name"], "expr": e["expr"], "gt": e.get("gt", [])} for e in classes],
+            "spec": [
+                {"name": e["name"], "expr": e["expr"], "gt": e.get("gt", [])} for e in classes
+            ],
             "per_site": {},
             "benthos": {},
         }

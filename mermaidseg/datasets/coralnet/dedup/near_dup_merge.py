@@ -40,9 +40,29 @@ import pandas as pd
 from mermaidseg.datasets.coralnet.dedup.common import CONFIG_DIR
 
 DEFAULT_LABELS = CONFIG_DIR / "near_dup_labels.csv"
-LABEL_COLUMNS = ["image_a", "image_b", "label", "pair", "group", "call", "score", "source_a", "split_a",
-                 "source_b", "split_b", "labelled_at"]
-POINT_COLUMNS = ["row", "col", "coralnet_id", "category", "has_unmapped", "in_kept", "n_copies_at_loc"]
+LABEL_COLUMNS = [
+    "image_a",
+    "image_b",
+    "label",
+    "pair",
+    "group",
+    "call",
+    "score",
+    "source_a",
+    "split_a",
+    "source_b",
+    "split_b",
+    "labelled_at",
+]
+POINT_COLUMNS = [
+    "row",
+    "col",
+    "coralnet_id",
+    "category",
+    "has_unmapped",
+    "in_kept",
+    "n_copies_at_loc",
+]
 
 
 def load_labels(path: Path | str) -> pd.DataFrame:
@@ -77,7 +97,9 @@ def _apply(H: np.ndarray, xy: np.ndarray) -> np.ndarray:
     return p[:, :2] / p[:, 2:3]
 
 
-def pair_transform(fa, fb, min_inliers: int, identity_tol: float) -> tuple[np.ndarray | None, int, str]:
+def pair_transform(
+    fa, fb, min_inliers: int, identity_tol: float
+) -> tuple[np.ndarray | None, int, str]:
     """Full-resolution map from image a onto image b: ``(H, inliers, kind)`` with ``kind`` one of
     ``identity`` / ``homography`` / ``failed`` (``H`` is ``None`` for ``failed``)."""
     from mermaidseg.datasets.coralnet.dedup.near_duplicates import match_homography
@@ -98,7 +120,9 @@ def pair_transform(fa, fb, min_inliers: int, identity_tol: float) -> tuple[np.nd
     turns = edges[:, 0] * np.roll(edges[:, 1], -1) - edges[:, 1] * np.roll(edges[:, 0], -1)
     if not (np.all(turns > 0) or np.all(turns < 0)) or not np.isfinite(quad).all():
         return None, inliers, "failed"
-    if size_a == size_b and np.abs(quad - _corners(*size_a)).max() <= identity_tol * np.hypot(*size_a):
+    if size_a == size_b and np.abs(quad - _corners(*size_a)).max() <= identity_tol * np.hypot(
+        *size_a
+    ):
         return np.eye(3), inliers, "identity"
     return H, inliers, "homography"
 
@@ -133,8 +157,12 @@ def merge_near_duplicates(
     lab = labels.reset_index()
     for side in ("image_a", "image_b"):
         lab[side] = lab[side].map(lambda i: exact_kept.get(i, i))
-    dup = lab[(lab["label"] == "dup") & lab["image_a"].isin(src_of) & lab["image_b"].isin(src_of)
-              & (lab["image_a"] != lab["image_b"])]
+    dup = lab[
+        (lab["label"] == "dup")
+        & lab["image_a"].isin(src_of)
+        & lab["image_b"].isin(src_of)
+        & (lab["image_a"] != lab["image_b"])
+    ]
     graph = nx.Graph()
     graph.add_edges_from(dup[["image_a", "image_b"]].to_numpy())
     comps = sorted((sorted(c) for c in nx.connected_components(graph)), key=lambda c: c[0])
@@ -143,14 +171,18 @@ def merge_near_duplicates(
         return {k: pd.DataFrame() for k in ("blacklist", "overrides", "copies", "provenance")}
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        feats = dict(zip(members, ex.map(lambda i: _features(bucket_root / key_of[i]), members),
-                         strict=True))
-    pts = points[points["image_id"].isin(members)].drop_duplicates(["image_id", "row", "col", "coralnet_id"])
+        feats = dict(
+            zip(members, ex.map(lambda i: _features(bucket_root / key_of[i]), members), strict=True)
+        )
+    pts = points[points["image_id"].isin(members)].drop_duplicates(
+        ["image_id", "row", "col", "coralnet_id"]
+    )
     pts_by_img = dict(iter(pts.groupby("image_id")))
     no_points = points.iloc[:0]
 
     blacklist, copies, prov = [], [], []
     for gid, comp in enumerate(comps):
+
         def keep_order(i):
             size = feats[i][0] if feats[i] is not None else (0, 0)
             n = len(pts_by_img.get(i, no_points))
@@ -163,7 +195,9 @@ def merge_near_duplicates(
         tg = nx.DiGraph()
         tg.add_nodes_from(comp)
         pair_info = {}
-        for a, b in sorted(tuple(sorted(e)) for e in graph.subgraph(comp).edges()):  # subgraph order is random
+        for a, b in sorted(
+            tuple(sorted(e)) for e in graph.subgraph(comp).edges()
+        ):  # subgraph order is random
             H, inl, kind = pair_transform(feats[a], feats[b], min_inliers, identity_tol)
             pair_info[a, b] = pair_info[b, a] = (inl, kind)
             if H is not None:
@@ -186,20 +220,39 @@ def merge_near_duplicates(
         own = kp.reset_index(drop=True)
         for i in order[1:]:
             p = pts_by_img.get(i, no_points)
-            info = {"group": gid, "image_id": i, "source_id": src_of[i], "copy_rank": rank[i],
-                    "kept_image_id": kept, "kept_source_id": src_of[kept],
-                    "path_length": len(paths[i]) - 1 if i in paths else None, "n_points": len(p),
-                    "n_transferred": 0, "n_joined": 0, "n_outside": 0}
+            info = {
+                "group": gid,
+                "image_id": i,
+                "source_id": src_of[i],
+                "copy_rank": rank[i],
+                "kept_image_id": kept,
+                "kept_source_id": src_of[kept],
+                "path_length": len(paths[i]) - 1 if i in paths else None,
+                "n_points": len(p),
+                "n_transferred": 0,
+                "n_joined": 0,
+                "n_outside": 0,
+            }
             nb = [n for n in graph.neighbors(i) if n in comp]
             info["pair_kinds"] = ";".join(sorted({pair_info[i, n][1] for n in nb}))
-            info["transform"] = ("failed" if i not in to_kept else
-                                 "identity" if np.allclose(to_kept[i], np.eye(3)) else "homography")
+            info["transform"] = (
+                "failed"
+                if i not in to_kept
+                else "identity"
+                if np.allclose(to_kept[i], np.eye(3))
+                else "homography"
+            )
             copies.append(info)
             if i not in to_kept or not len(p) or kept_size is None:
                 continue
             xy = np.rint(_apply(to_kept[i], p[["col", "row"]].to_numpy(float)))
             tol = 0.5 if info["transform"] == "identity" else snap_px
-            inside = (xy[:, 0] >= 0) & (xy[:, 0] < kept_size[0]) & (xy[:, 1] >= 0) & (xy[:, 1] < kept_size[1])
+            inside = (
+                (xy[:, 0] >= 0)
+                & (xy[:, 0] < kept_size[0])
+                & (xy[:, 1] >= 0)
+                & (xy[:, 1] < kept_size[1])
+            )
             info["n_outside"] = int((~inside).sum())
             existing = np.concatenate(loc_xy)
             new = []
@@ -224,29 +277,53 @@ def merge_near_duplicates(
             labs = sorted(labs)
             distinct = tuple(dict.fromkeys(lid for _, lid in labs))
             in_kept = k < len(own)
-            if in_kept and len(labs) == 1:  # untouched point of the kept copy: keep its exact-merge record
+            if (
+                in_kept and len(labs) == 1
+            ):  # untouched point of the kept copy: keep its exact-merge record
                 rec = own.loc[k, POINT_COLUMNS].to_dict()
                 rec["change"] = "unchanged"
             else:
                 lid, cat, unm = resolve(distinct)
                 base = own.loc[k] if in_kept else None
-                rec = {"row": xy[k, 1], "col": xy[k, 0], "coralnet_id": lid,
-                       "category": cat if len(distinct) > 1 or base is None else base["category"],
-                       "has_unmapped": bool(unm or (base is not None and base["has_unmapped"])),
-                       "in_kept": bool(base["in_kept"]) if base is not None else False,
-                       "n_copies_at_loc": (int(base["n_copies_at_loc"]) if base is not None else 0)
-                       + len({r for r, _ in labs if r > 0})}
-                rec["change"] = ("added" if base is None else
-                                 "replaced" if lid != base["coralnet_id"] else "unchanged")
-            rec.update(group=gid, image_id=kept, source_id=src_of[kept],
-                       hash=hash_of[kept], kept_label=int(own.loc[k, "coralnet_id"]) if in_kept else None,
-                       copy_ranks=[r for r, _ in labs], copy_labels=[int(lid) for _, lid in labs])
+                rec = {
+                    "row": xy[k, 1],
+                    "col": xy[k, 0],
+                    "coralnet_id": lid,
+                    "category": cat if len(distinct) > 1 or base is None else base["category"],
+                    "has_unmapped": bool(unm or (base is not None and base["has_unmapped"])),
+                    "in_kept": bool(base["in_kept"]) if base is not None else False,
+                    "n_copies_at_loc": (int(base["n_copies_at_loc"]) if base is not None else 0)
+                    + len({r for r, _ in labs if r > 0}),
+                }
+                rec["change"] = (
+                    "added"
+                    if base is None
+                    else "replaced"
+                    if lid != base["coralnet_id"]
+                    else "unchanged"
+                )
+            rec.update(
+                group=gid,
+                image_id=kept,
+                source_id=src_of[kept],
+                hash=hash_of[kept],
+                kept_label=int(own.loc[k, "coralnet_id"]) if in_kept else None,
+                copy_ranks=[r for r, _ in labs],
+                copy_labels=[int(lid) for _, lid in labs],
+            )
             rows.append(rec)
         prov.append(pd.DataFrame(rows))
         for i in order[1:]:
-            blacklist.append({"source_id": src_of[i], "image_id": i, "hash": hash_of[i],
-                              "kept_source_id": src_of[kept], "kept_image_id": kept,
-                              "reason": "near_dup"})
+            blacklist.append(
+                {
+                    "source_id": src_of[i],
+                    "image_id": i,
+                    "hash": hash_of[i],
+                    "kept_source_id": src_of[kept],
+                    "kept_image_id": kept,
+                    "reason": "near_dup",
+                }
+            )
 
     out_cols = ["source_id", "image_id", *POINT_COLUMNS, "hash"]
     prov = pd.concat(prov, ignore_index=True)

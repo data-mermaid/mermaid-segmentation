@@ -193,8 +193,12 @@ def test_bundle_merge_pooling():
     layout = ConceptLayout.from_concept_names(names)
     a = MetricBundle.create(4, layout)
     b = MetricBundle.create(4, layout)
-    a.update(np.array([1]), np.array([1]), np.array([[2, 1, 2]]), np.array([[0.9, 0.1, 0.9]], np.float32))
-    b.update(np.array([2]), np.array([3]), np.array([[2, 1, 1]]), np.array([[0.9, 0.1, 0.2]], np.float32))
+    a.update(
+        np.array([1]), np.array([1]), np.array([[2, 1, 2]]), np.array([[0.9, 0.1, 0.9]], np.float32)
+    )
+    b.update(
+        np.array([2]), np.array([3]), np.array([[2, 1, 1]]), np.array([[0.9, 0.1, 0.2]], np.float32)
+    )
     pooled = a.clone()
     pooled.merge(b)
     assert pooled.num_points == 2

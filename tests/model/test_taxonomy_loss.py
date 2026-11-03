@@ -133,10 +133,6 @@ def test_void_pixels_contribute_nothing(partial_loss):
     assert all(v == 0.0 for k, v in components.items() if k.startswith("partial/"))
 
 
-
-
-
-
 def test_void_pixel_does_not_change_loss(partial_loss):
     with_void, _ = partial_loss(*_pixels([PIXEL_B, VOID]))
     without_void, _ = partial_loss(*_pixels([PIXEL_B]))
@@ -210,7 +206,9 @@ def test_none_is_not_a_descendant_of_concrete_taxa():
 def test_parent_matrices_from_class_to_concepts():
     """The real CSV maps onto the run's concept channels, with Turbinaria split by lineage."""
     sources = {"benthos_yuval", "catlin_seaview", "coralnet", "coralscapes_v2", "mermaid"}
-    value2id = ConceptSchema.from_csv(DEFAULT_CLASS_TO_CONCEPTS_CSV, sources=sources).concept_value2id
+    value2id = ConceptSchema.from_csv(
+        DEFAULT_CLASS_TO_CONCEPTS_CSV, sources=sources
+    ).concept_value2id
     matrices = build_parent_matrices(build_taxonomy_tree(DEFAULT_CLASS_TO_CONCEPTS_CSV), value2id)
 
     families = [v for v in value2id["family"] if v != "not_given"]

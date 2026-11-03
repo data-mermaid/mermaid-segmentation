@@ -63,12 +63,12 @@ class ClassConfusion:
             self.num_classes, self.num_classes
         )
 
-    def merge(self, other: "ClassConfusion") -> None:
+    def merge(self, other: ClassConfusion) -> None:
         if other.num_classes != self.num_classes:
             raise ValueError("Cannot merge ClassConfusion with different num_classes")
         self.cm += other.cm
 
-    def clone(self) -> "ClassConfusion":
+    def clone(self) -> ClassConfusion:
         out = ClassConfusion(self.num_classes, self.ignore_index)
         out.cm = self.cm.copy()
         return out
@@ -86,8 +86,7 @@ class ClassConfusion:
         pred = self.cm.sum(axis=0).astype(np.float64)
         union = gt + pred - tp
         with np.errstate(invalid="ignore", divide="ignore"):
-            iou = np.where(union > 0, tp / union, np.nan)
-        return iou
+            return np.where(union > 0, tp / union, np.nan)
 
     def _eval_class_ids(self, class_ids: list[int] | None) -> list[int]:
         if class_ids is not None:
@@ -104,7 +103,9 @@ class ClassConfusion:
         vals = vals[~np.isnan(vals)]
         return float(vals.mean()) if vals.size else float("nan")
 
-    def to_dict(self, id2name: dict[int, str] | None = None, class_ids: list[int] | None = None) -> dict:
+    def to_dict(
+        self, id2name: dict[int, str] | None = None, class_ids: list[int] | None = None
+    ) -> dict:
         iou = self.per_class_iou()
         ids = self._eval_class_ids(class_ids)
         per_class = {}
@@ -168,13 +169,13 @@ class TaxonomicRankAccuracy:
         self.correct_living += int(correct[living].sum())
         self.total_living += int(living.sum())
 
-    def merge(self, other: "TaxonomicRankAccuracy") -> None:
+    def merge(self, other: TaxonomicRankAccuracy) -> None:
         self.correct_all += other.correct_all
         self.total_all += other.total_all
         self.correct_living += other.correct_living
         self.total_living += other.total_living
 
-    def clone(self) -> "TaxonomicRankAccuracy":
+    def clone(self) -> TaxonomicRankAccuracy:
         return TaxonomicRankAccuracy(
             rank=self.rank,
             channel_indices=list(self.channel_indices),
@@ -246,7 +247,7 @@ class BinaryConceptStats:
         self.tn += (valid & gt_false & ~p).sum(axis=0).astype(np.int64)
         self.n_not_given += (g == 0).sum(axis=0).astype(np.int64)
 
-    def merge(self, other: "BinaryConceptStats") -> None:
+    def merge(self, other: BinaryConceptStats) -> None:
         if other.names != self.names:
             raise ValueError("Cannot merge BinaryConceptStats with different concepts")
         self.tp += other.tp
@@ -255,7 +256,7 @@ class BinaryConceptStats:
         self.tn += other.tn
         self.n_not_given += other.n_not_given
 
-    def clone(self) -> "BinaryConceptStats":
+    def clone(self) -> BinaryConceptStats:
         out = BinaryConceptStats(self.names, self.channel_indices, self.threshold)
         out.tp = self.tp.copy()
         out.fp = self.fp.copy()
@@ -427,7 +428,7 @@ class ConceptLayout:
     binary_indices: list[int]
 
     @classmethod
-    def from_concept_names(cls, concept_names: list[str]) -> "ConceptLayout":
+    def from_concept_names(cls, concept_names: list[str]) -> ConceptLayout:
         taxo: list[tuple[str, list[int], int | None]] = []
         for rank in TAXONOMIC_CONCEPTS:
             prefix = f"{rank}__"
@@ -460,7 +461,7 @@ class MetricBundle:
     num_points: int = 0
 
     @classmethod
-    def create(cls, num_classes: int, layout: ConceptLayout, ignore_index: int = 0) -> "MetricBundle":
+    def create(cls, num_classes: int, layout: ConceptLayout, ignore_index: int = 0) -> MetricBundle:
         taxo = [
             TaxonomicRankAccuracy(rank=rank, channel_indices=idx, none_local_index=none_local)
             for rank, idx, none_local in layout.taxo
@@ -487,7 +488,7 @@ class MetricBundle:
             self.binary.update(gt_rows, pred_probs)
         self.num_points += int(np.asarray(gt_class).reshape(-1).shape[0])
 
-    def merge(self, other: "MetricBundle") -> None:
+    def merge(self, other: MetricBundle) -> None:
         self.class_confusion.merge(other.class_confusion)
         for a, b in zip(self.taxo, other.taxo, strict=True):
             a.merge(b)
@@ -495,7 +496,7 @@ class MetricBundle:
             self.binary.merge(other.binary)
         self.num_points += other.num_points
 
-    def clone(self) -> "MetricBundle":
+    def clone(self) -> MetricBundle:
         return MetricBundle(
             class_confusion=self.class_confusion.clone(),
             taxo=[t.clone() for t in self.taxo],

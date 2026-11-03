@@ -28,6 +28,7 @@ from inference import (  # noqa: E402
     predict,
     preprocess,
 )
+
 from mermaidseg.dataset_reconciliation.concepts import (  # noqa: E402
     TAXONOMIC_CONCEPTS,
     parse_concept_rank,

@@ -14,7 +14,9 @@ def test_sample_at_points_equals_interpolate_and_index():
     c, h, w = 6, 9, 11
     height, width = 71, 83
     maps = torch.randn(c, h, w)
-    up = F.interpolate(maps.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False)[0]
+    up = F.interpolate(
+        maps.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False
+    )[0]
     rows = np.array([0, 5, 40, 70, height - 1, 33])
     cols = np.array([0, 6, 82, 1, width - 1, 50])
     ref = up[:, rows, cols]
@@ -25,7 +27,9 @@ def test_sample_at_points_equals_interpolate_and_index():
 def test_sample_at_points_corner_pixels():
     maps = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
     height, width = 30, 40
-    up = F.interpolate(maps.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False)[0]
+    up = F.interpolate(
+        maps.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False
+    )[0]
     rows = np.array([0, height - 1])
     cols = np.array([0, width - 1])
     ref = up[:, rows, cols]

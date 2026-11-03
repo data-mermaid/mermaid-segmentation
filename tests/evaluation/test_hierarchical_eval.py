@@ -55,13 +55,30 @@ SOURCE = "pacific_labeled_corals"
 @pytest.fixture
 def taxonomy_csv(tmp_path: Path) -> Path:
     rows = [
-        {"kingdom": "animalia", "phylum": "cnidaria", "class": c, "order": o, "family": f, "genus": g,
-         "source_label_class_name": g, "live": "true"}
+        {
+            "kingdom": "animalia",
+            "phylum": "cnidaria",
+            "class": c,
+            "order": o,
+            "family": f,
+            "genus": g,
+            "source_label_class_name": g,
+            "live": "true",
+        }
         for g, (c, o, f) in LINEAGES.items()
     ]
-    rows.append({"kingdom": "animalia", "phylum": "cnidaria", "class": "hexacorallia",
-                 "order": "scleractinia", "family": "acroporidae", "genus": "not_given",
-                 "source_label_class_name": "acroporidae", "live": "true"})
+    rows.append(
+        {
+            "kingdom": "animalia",
+            "phylum": "cnidaria",
+            "class": "hexacorallia",
+            "order": "scleractinia",
+            "family": "acroporidae",
+            "genus": "not_given",
+            "source_label_class_name": "acroporidae",
+            "live": "true",
+        }
+    )
     df = pd.DataFrame(rows).assign(source_dataset_source=SOURCE)
     path = tmp_path / "class_to_concepts.csv"
     df.to_csv(path, index=False)
@@ -86,12 +103,16 @@ def test_chunked_updates_match_per_point_updates(taxonomy_csv):
     from mermaidseg.evaluation.hierarchical_eval import HierarchicalPointEval
 
     spec = HierarchicalSpec.build(CONCEPT_NAMES, taxonomy_csv)
-    lookup = build_concept_lookup(SOURCE, ["acropora", "acroporidae", "porites"], CONCEPT_NAMES, taxonomy_csv)
+    lookup = build_concept_lookup(
+        SOURCE, ["acropora", "acroporidae", "porites"], CONCEPT_NAMES, taxonomy_csv
+    )
     rng = np.random.default_rng(0)
     rows = np.stack([lookup.row(n) for n in rng.choice(["acropora", "acroporidae", "porites"], 50)])
     logits = torch.tensor(rng.normal(size=(50, len(CONCEPT_NAMES))), dtype=torch.float32)
     probs = torch.cat(
-        [logits[:, o : o + n].softmax(dim=1) for _, o, n in spec.slices] + [logits[:, 16:].sigmoid()], dim=1
+        [logits[:, o : o + n].softmax(dim=1) for _, o, n in spec.slices]
+        + [logits[:, 16:].sigmoid()],
+        dim=1,
     )
     per_point = HierarchicalPointEval(spec, flush_points=1)
     chunked = HierarchicalPointEval(spec, flush_points=1000)

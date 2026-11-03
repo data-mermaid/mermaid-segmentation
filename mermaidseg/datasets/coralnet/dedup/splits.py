@@ -79,8 +79,11 @@ def dedup_annotations(root: Path, sources: list[int], config_dir: Path) -> pd.Da
 
     Mirrors ``CoralNetDataset(image_blacklist=..., annotation_overrides=...)``.
     """
-    ann = pq.read_table(root / DEFAULT_MANIFEST, columns=["source_id", "image_id", "row", "col", "coralnet_id"],
-                        filters=[("source_id", "in", sources)]).to_pandas()
+    ann = pq.read_table(
+        root / DEFAULT_MANIFEST,
+        columns=["source_id", "image_id", "row", "col", "coralnet_id"],
+        filters=[("source_id", "in", sources)],
+    ).to_pandas()
     ann["image_id"] = ann["image_id"].astype(str)
     blacklist = set(pd.read_parquet(config_dir / "image_blacklist.parquet")["image_id"].astype(str))
     overrides = pd.read_parquet(config_dir / "annotation_overrides.parquet")[list(ann.columns)]
@@ -91,11 +94,16 @@ def dedup_annotations(root: Path, sources: list[int], config_dir: Path) -> pd.Da
 
 def haversine_km(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
-    a = np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
+    a = (
+        np.sin((lat2 - lat1) / 2) ** 2
+        + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
+    )
     return 6371 * 2 * np.arcsin(np.sqrt(a))
 
 
-def project_edges(meta: pd.DataFrame, sources: list[int], max_id_gap: int, max_km: float) -> list[tuple]:
+def project_edges(
+    meta: pd.DataFrame, sources: list[int], max_id_gap: int, max_km: float
+) -> list[tuple]:
     """Pairs of sources sharing an admin that are close in ID or in location."""
     rank = {s: i for i, s in enumerate(sources)}
     meta = meta[meta["source_id"].isin(rank) & meta["admins"].notna()].set_index("source_id")
@@ -104,18 +112,27 @@ def project_edges(meta: pd.DataFrame, sources: list[int], max_id_gap: int, max_k
     for _, ids in by_admin.groupby(by_admin):
         ids = sorted(set(ids.index))
         for i, a in enumerate(ids):
-            for b in ids[i + 1:]:
+            for b in ids[i + 1 :]:
                 if (a, b) in edges:
                     continue
                 near_id = abs(rank[a] - rank[b]) <= max_id_gap
-                near_loc = haversine_km(meta.loc[a, "latitude"], meta.loc[a, "longitude"],
-                                        meta.loc[b, "latitude"], meta.loc[b, "longitude"]) <= max_km  # NaN -> False
+                near_loc = (
+                    haversine_km(
+                        meta.loc[a, "latitude"],
+                        meta.loc[a, "longitude"],
+                        meta.loc[b, "latitude"],
+                        meta.loc[b, "longitude"],
+                    )
+                    <= max_km
+                )  # NaN -> False
                 if near_id or near_loc:
                     edges[a, b] = "id" if near_id else "location"
     return [(a, b, why) for (a, b), why in edges.items()]
 
 
-def anneal(X, n, P, eligible, targets, fracs, w_size, cls_mask, min_pts, w_cov, iters, seed, fixed=None):
+def anneal(
+    X, n, P, eligible, targets, fracs, w_size, cls_mask, min_pts, w_cov, iters, seed, fixed=None
+):
     """Assign eligible groups to 0 (train), 1 (val), 2 (test); returns (assignment, cost).
 
     ``fixed``: per group, a split it is pinned to, or -1 (free; the default for every group).
@@ -174,7 +191,9 @@ def anneal(X, n, P, eligible, targets, fracs, w_size, cls_mask, min_pts, w_cov, 
     return a, cost[1] + cost[2]
 
 
-def replace_coralnet_block(config_text: str, splits: dict[str, list[int]], extra: dict[str, str]) -> str:
+def replace_coralnet_block(
+    config_text: str, splits: dict[str, list[int]], extra: dict[str, str]
+) -> str:
     """Swap the ``coralnet:`` block of a data config for one with the given whitelists."""
     lines = config_text.splitlines(keepends=True)
     start = next(i for i, ln in enumerate(lines) if re.match(r"^  coralnet:\s*$", ln))
@@ -197,30 +216,68 @@ def replace_coralnet_block(config_text: str, splits: dict[str, list[int]], extra
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--split-config", type=Path, default=DEFAULT_SPLIT_CONFIG)
-    p.add_argument("--exclude-sources", type=Path, default=DEFAULT_EXCLUDE_SOURCES,
-                   help="Text file of source ids to leave out entirely (one per line).")
-    p.add_argument("--test-sources", type=Path, default=CONFIG_DIR / "test_sources.txt",
-                   help="Text file of source ids whose groups go to test (one per line).")
-    p.add_argument("--near-dup-labels", type=Path, default=DEFAULT_LABELS,
-                   help="Pair labels of Near_Duplicate_Review.ipynb; dup / unsure pairs link their sources.")
-    p.add_argument("--outputs", type=Path, default=DEFAULT_OUTPUTS, help="Where the hashing outputs are.")
-    p.add_argument("--config-dir", type=Path, default=CONFIG_DIR,
-                   help="Where the dedup blacklist / overrides are and source_splits.csv goes.")
-    p.add_argument("--metadata", type=Path, default=DEFAULT_OUTPUTS / "coralnet_source_metadata.csv")
+    p.add_argument(
+        "--exclude-sources",
+        type=Path,
+        default=DEFAULT_EXCLUDE_SOURCES,
+        help="Text file of source ids to leave out entirely (one per line).",
+    )
+    p.add_argument(
+        "--test-sources",
+        type=Path,
+        default=CONFIG_DIR / "test_sources.txt",
+        help="Text file of source ids whose groups go to test (one per line).",
+    )
+    p.add_argument(
+        "--near-dup-labels",
+        type=Path,
+        default=DEFAULT_LABELS,
+        help="Pair labels of Near_Duplicate_Review.ipynb; dup / unsure pairs link their sources.",
+    )
+    p.add_argument(
+        "--outputs", type=Path, default=DEFAULT_OUTPUTS, help="Where the hashing outputs are."
+    )
+    p.add_argument(
+        "--config-dir",
+        type=Path,
+        default=CONFIG_DIR,
+        help="Where the dedup blacklist / overrides are and source_splits.csv goes.",
+    )
+    p.add_argument(
+        "--metadata", type=Path, default=DEFAULT_OUTPUTS / "coralnet_source_metadata.csv"
+    )
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUTS / "splits")
     p.add_argument("--out-config", type=Path, default=REPO_ROOT / "configs/data_config_dedup.yaml")
     p.add_argument("--cache-root", default=DEFAULT_CACHE_ROOT)
-    p.add_argument("--mapping", type=Path, default=REPO_ROOT / "configs/coralnet_to_mermaid_mapping_temporary.json")
-    p.add_argument("--training-config", type=Path, default=REPO_ROOT / "configs/training_config_cbm.yaml",
-                   help="Its training.class_subset is the class space (with label roll-up).")
-    p.add_argument("--hierarchy", type=Path, default=CONFIG_DIR / "mermaid_benthic_hierarchy.json",
-                   help="MERMAID benthic hierarchy snapshot (name -> parent); fetched from the API if missing.")
+    p.add_argument(
+        "--mapping",
+        type=Path,
+        default=REPO_ROOT / "configs/coralnet_to_mermaid_mapping_temporary.json",
+    )
+    p.add_argument(
+        "--training-config",
+        type=Path,
+        default=REPO_ROOT / "configs/training_config_cbm.yaml",
+        help="Its training.class_subset is the class space (with label roll-up).",
+    )
+    p.add_argument(
+        "--hierarchy",
+        type=Path,
+        default=CONFIG_DIR / "mermaid_benthic_hierarchy.json",
+        help="MERMAID benthic hierarchy snapshot (name -> parent); fetched from the API if missing.",
+    )
     p.add_argument("--val-frac", type=float, default=0.10)
     p.add_argument("--test-frac", type=float, default=0.10)
-    p.add_argument("--max-group-frac", type=float, default=0.25,
-                   help="Largest group allowed in val/test, as a fraction of that split's target size.")
+    p.add_argument(
+        "--max-group-frac",
+        type=float,
+        default=0.25,
+        help="Largest group allowed in val/test, as a fraction of that split's target size.",
+    )
     p.add_argument("--max-id-gap", type=int, default=3)
     p.add_argument("--max-km", type=float, default=50.0)
     p.add_argument("--min-class-points", type=int, default=500)
@@ -238,36 +295,65 @@ def main() -> None:
     sources = sorted(set().union(*coralnet_splits(args.split_config).values()) - excluded)
     forced_test = read_source_list(args.test_sources if args.test_sources.exists() else None)
     if forced_test - set(sources):
-        raise SystemExit(f"--test-sources not in the universe: {sorted(forced_test - set(sources))}")
+        raise SystemExit(
+            f"--test-sources not in the universe: {sorted(forced_test - set(sources))}"
+        )
 
     # 1. Per-source images and mapped-class point counts on the deduplicated data.
     ann = dedup_annotations(root, sources, args.config_dir)
     id2name = load_id2name(root)
-    mapping = {k.lower(): v.lower() for k, v in json.loads(args.mapping.read_text()).items() if v is not None}
+    mapping = {
+        k.lower(): v.lower()
+        for k, v in json.loads(args.mapping.read_text()).items()
+        if v is not None
+    }
     if not args.hierarchy.exists():
         args.hierarchy.write_text(json.dumps(initialize_benthic_hierarchy(), indent=0))
-    hierarchy = {k.lower(): (v.lower() if v else None) for k, v in json.loads(args.hierarchy.read_text()).items()}
-    subset = {c.lower() for c in yaml.safe_load(args.training_config.read_text())["training"]["class_subset"]}
-    label_to_cls = {lid: roll_up_label(mapping[name], hierarchy, subset) if name in mapping else None
-                    for lid, name in id2name.items()}
+    hierarchy = {
+        k.lower(): (v.lower() if v else None)
+        for k, v in json.loads(args.hierarchy.read_text()).items()
+    }
+    subset = {
+        c.lower()
+        for c in yaml.safe_load(args.training_config.read_text())["training"]["class_subset"]
+    }
+    label_to_cls = {
+        lid: roll_up_label(mapping[name], hierarchy, subset) if name in mapping else None
+        for lid, name in id2name.items()
+    }
     ann["cls"] = ann["coralnet_id"].map(label_to_cls)
     n_img = ann.groupby("source_id")["image_id"].nunique().reindex(sources, fill_value=0)
     counts = ann.dropna(subset=["cls"]).groupby(["source_id", "cls"]).size().unstack(fill_value=0)  # noqa: PD010
     counts = counts.reindex(sources, fill_value=0)
-    print(f"{len(sources)} sources ({len(excluded)} excluded), {n_img.sum():,} images, {len(ann):,} points "
-          f"({ann['cls'].notna().mean():.1%} mapped to {counts.shape[1]} of {len(subset)} training classes)")
+    print(
+        f"{len(sources)} sources ({len(excluded)} excluded), {n_img.sum():,} images, {len(ann):,} points "
+        f"({ann['cls'].notna().mean():.1%} mapped to {counts.shape[1]} of {len(subset)} training classes)"
+    )
 
     # 2. Groups: shared images + same project.
-    hashes = pd.read_parquet(args.outputs / "image_hashes_exact_all.parquet", columns=["source_id", "hash"])
+    hashes = pd.read_parquet(
+        args.outputs / "image_hashes_exact_all.parquet", columns=["source_id", "hash"]
+    )
     hashes = hashes[hashes["source_id"].isin(sources)].drop_duplicates()
     shared = hashes[hashes.duplicated("hash", keep=False)]
-    cross_sources = set(shared.loc[shared.groupby("hash")["source_id"].transform("nunique") > 1, "source_id"])
-    overlap_edges = {tuple(sorted(e)) for _, g in shared.groupby("hash") for e in zip(g["source_id"].iloc[:-1],
-                                                                                     g["source_id"].iloc[1:], strict=True)}
+    cross_sources = set(
+        shared.loc[shared.groupby("hash")["source_id"].transform("nunique") > 1, "source_id"]
+    )
+    overlap_edges = {
+        tuple(sorted(e))
+        for _, g in shared.groupby("hash")
+        for e in zip(g["source_id"].iloc[:-1], g["source_id"].iloc[1:], strict=True)
+    }
     labels = load_labels(args.near_dup_labels)
-    near = labels[labels["label"].isin(["dup", "unsure"]) & (labels["source_a"] != labels["source_b"])
-                  & labels["source_a"].isin(sources) & labels["source_b"].isin(sources)]
-    near_edges = {tuple(sorted(e)) for e in near[["source_a", "source_b"]].to_numpy().tolist()} - overlap_edges
+    near = labels[
+        labels["label"].isin(["dup", "unsure"])
+        & (labels["source_a"] != labels["source_b"])
+        & labels["source_a"].isin(sources)
+        & labels["source_b"].isin(sources)
+    ]
+    near_edges = {
+        tuple(sorted(e)) for e in near[["source_a", "source_b"]].to_numpy().tolist()
+    } - overlap_edges
     overlap_edges |= near_edges
     cross_sources |= {s for e in near_edges for s in e}
     meta = pd.read_csv(args.metadata)
@@ -278,16 +364,27 @@ def main() -> None:
     graph.add_edges_from((a, b) for a, b, _ in proj)
     comps = sorted(nx.connected_components(graph), key=lambda c: (-len(c), min(c)))
     group_of = {s: i for i, c in enumerate(comps) for s in c}
-    print(f"{len(proj)} project links ({sum(e[2] == 'id' for e in proj)} by id, "
-          f"{sum(e[2] == 'location' for e in proj)} by location), {len(overlap_edges)} overlap links "
-          f"({len(near_edges)} from near duplicates only) "
-          f"-> {len(comps)} groups")
+    print(
+        f"{len(proj)} project links ({sum(e[2] == 'id' for e in proj)} by id, "
+        f"{sum(e[2] == 'location' for e in proj)} by location), {len(overlap_edges)} overlap links "
+        f"({len(near_edges)} from near duplicates only) "
+        f"-> {len(comps)} groups"
+    )
 
     # 3. Group features and eligibility.
-    src = pd.DataFrame({"source_id": sources, "group": [group_of[s] for s in sources], "n_images": n_img.to_numpy(),
-                        "shares_images": [s in cross_sources for s in sources]})
-    grp = src.groupby("group").agg(n_images=("n_images", "sum"), shares_images=("shares_images", "any"),
-                                   n_sources=("source_id", "size"))
+    src = pd.DataFrame(
+        {
+            "source_id": sources,
+            "group": [group_of[s] for s in sources],
+            "n_images": n_img.to_numpy(),
+            "shares_images": [s in cross_sources for s in sources],
+        }
+    )
+    grp = src.groupby("group").agg(
+        n_images=("n_images", "sum"),
+        shares_images=("shares_images", "any"),
+        n_sources=("source_id", "size"),
+    )
     X = counts.groupby(src.set_index("source_id")["group"]).sum().reindex(grp.index).to_numpy(float)
     n = grp["n_images"].to_numpy(float)
     N = n.sum()
@@ -299,10 +396,14 @@ def main() -> None:
     grp["fixed"] = np.where(grp.index.isin(test_groups), SPLITS.index("test"), -1)
     if test_groups:
         t = src[src["group"].isin(test_groups)]
-        print(f"fixed to test: {len(test_groups)} groups, {len(t)} sources {sorted(t['source_id'])}, "
-              f"{t['n_images'].sum():,} images")
-    print(f"eligible groups: {int(grp['eligible'].sum())} with {int(grp.loc[grp['eligible'], 'n_images'].sum()):,} "
-          f"images (cap {cap:,.0f} images per group); targets {targets[0]:,.0f} / {targets[1]:,.0f}")
+        print(
+            f"fixed to test: {len(test_groups)} groups, {len(t)} sources {sorted(t['source_id'])}, "
+            f"{t['n_images'].sum():,} images"
+        )
+    print(
+        f"eligible groups: {int(grp['eligible'].sum())} with {int(grp.loc[grp['eligible'], 'n_images'].sum()):,} "
+        f"images (cap {cap:,.0f} images per group); targets {targets[0]:,.0f} / {targets[1]:,.0f}"
+    )
 
     # 4. Assignment.
     P = X.sum(0)
@@ -311,8 +412,21 @@ def main() -> None:
     min_pts = np.minimum(args.min_eval_points, pool / 4)
     best = None
     for r in range(args.restarts):
-        a, c = anneal(X, n, P, grp["eligible"].to_numpy(), targets, fracs, args.w_size, cls_mask,
-                      min_pts, args.w_coverage, args.iters, args.seed + r, grp["fixed"].to_numpy())
+        a, c = anneal(
+            X,
+            n,
+            P,
+            grp["eligible"].to_numpy(),
+            targets,
+            fracs,
+            args.w_size,
+            cls_mask,
+            min_pts,
+            args.w_coverage,
+            args.iters,
+            args.seed + r,
+            grp["fixed"].to_numpy(),
+        )
         print(f"restart {r}: cost {c:.4f}")
         if best is None or c < best[1]:
             best = (a, c)
@@ -320,14 +434,21 @@ def main() -> None:
     src["split"] = src["group"].map(grp["split"])
 
     # Outputs.
-    meta_cols = [c for c in ("name", "admins", "affiliation", "latitude", "longitude", "created", "public")
-                 if c in meta.columns]
+    meta_cols = [
+        c
+        for c in ("name", "admins", "affiliation", "latitude", "longitude", "created", "public")
+        if c in meta.columns
+    ]
     src = src.merge(meta[["source_id", *meta_cols]], on="source_id", how="left")
     src["eligible_group"] = src["group"].map(grp["eligible"])
     src["fixed_to_test"] = src["group"].isin(test_groups)
-    src.sort_values(["split", "group", "source_id"]).to_csv(args.config_dir / "source_splits.csv", index=False)
+    src.sort_values(["split", "group", "source_id"]).to_csv(
+        args.config_dir / "source_splits.csv", index=False
+    )
 
-    split_counts = pd.DataFrame({s: X[grp["split"].to_numpy() == s].sum(0) for s in SPLITS}, index=counts.columns)
+    split_counts = pd.DataFrame(
+        {s: X[grp["split"].to_numpy() == s].sum(0) for s in SPLITS}, index=counts.columns
+    )
     dist = split_counts.copy()
     dist["total"] = P
     for s in SPLITS:
@@ -341,15 +462,19 @@ def main() -> None:
     def js(p, q):
         p, q = p / p.sum(), q / q.sum()
         m = (p + q) / 2
+
         def kl(x, y):
-            return np.sum(np.where(x > 0, x * np.log2(np.where(x > 0, x, 1) / np.where(y > 0, y, 1)), 0))
+            return np.sum(
+                np.where(x > 0, x * np.log2(np.where(x > 0, x, 1) / np.where(y > 0, y, 1)), 0)
+            )
 
         return float((kl(p, m) + kl(q, m)) / 2)
 
     summary = {
         "split_config": str(args.split_config),
         "args": {k: str(v) for k, v in vars(args).items()},
-        "n_groups": len(grp), "n_eligible_groups": int(grp["eligible"].sum()),
+        "n_groups": len(grp),
+        "n_eligible_groups": int(grp["eligible"].sum()),
         "test_sources": sorted(forced_test),
         "fixed_to_test": sorted(src.loc[src["fixed_to_test"], "source_id"].tolist()),
         "n_near_dup_links": len(near_edges),
@@ -366,18 +491,39 @@ def main() -> None:
             }
             for s in SPLITS
         },
-        "classes_missing": {s: split_counts.index[split_counts[s] == 0].tolist() for s in ("val", "test")},
-        "classes_below_min": {s: split_counts.index[split_counts[s] < min_pts].tolist() for s in ("val", "test")},
+        "classes_missing": {
+            s: split_counts.index[split_counts[s] == 0].tolist() for s in ("val", "test")
+        },
+        "classes_below_min": {
+            s: split_counts.index[split_counts[s] < min_pts].tolist() for s in ("val", "test")
+        },
         "classes_absent_from_coralnet": sorted(subset - set(counts.columns)),
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-    print(json.dumps({k: summary[k] for k in ("splits", "classes_missing", "classes_below_min", "classes_absent_from_coralnet")}, indent=2))
+    print(
+        json.dumps(
+            {
+                k: summary[k]
+                for k in (
+                    "splits",
+                    "classes_missing",
+                    "classes_below_min",
+                    "classes_absent_from_coralnet",
+                )
+            },
+            indent=2,
+        )
+    )
 
     whitelists = {s: sorted(src.loc[src["split"] == s, "source_id"].tolist()) for s in SPLITS}
     # Repo-relative when inside the repo: CoralNetDataset resolves those against the repo root.
-    extra = {"image_blacklist": repo_relative(args.config_dir / "image_blacklist.parquet"),
-             "annotation_overrides": repo_relative(args.config_dir / "annotation_overrides.parquet")}
-    args.out_config.write_text(replace_coralnet_block(args.split_config.read_text(), whitelists, extra))
+    extra = {
+        "image_blacklist": repo_relative(args.config_dir / "image_blacklist.parquet"),
+        "annotation_overrides": repo_relative(args.config_dir / "annotation_overrides.parquet"),
+    }
+    args.out_config.write_text(
+        replace_coralnet_block(args.split_config.read_text(), whitelists, extra)
+    )
     print(f"Wrote {args.out_config}")
 
 

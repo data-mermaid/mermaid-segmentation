@@ -83,7 +83,9 @@ def thumbnail(path: Path) -> tuple[np.ndarray, int, int]:
 def hash_stage(args: argparse.Namespace) -> None:
     root = Path(args.cache_root) / DEFAULT_BUCKET
     exact = pd.read_parquet(args.outputs / "image_hashes_exact_all.parquet")
-    reps = exact.drop_duplicates("hash").reset_index(drop=True)[["hash", "source_id", "image_id", "image_s3_key"]]
+    reps = exact.drop_duplicates("hash").reset_index(drop=True)[
+        ["hash", "source_id", "image_id", "image_s3_key"]
+    ]
     print(f"{len(exact):,} hashed images, {len(reps):,} distinct files to decode")
     chunk_dir = args.out_dir / "chunks"
     chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +101,7 @@ def hash_stage(args: argparse.Namespace) -> None:
             out = chunk_dir / f"{start:07d}.npz"
             if out.exists():
                 continue
-            res = list(ex.map(_one, reps["image_s3_key"].iloc[start:start + CHUNK]))
+            res = list(ex.map(_one, reps["image_s3_key"].iloc[start : start + CHUNK]))
             ok = np.array([r is not None for r in res])
             thumbs = np.zeros((len(res), THUMB, THUMB), np.uint8)
             wh = np.zeros((len(res), 2), np.int32)
@@ -126,9 +128,9 @@ def phash_bits(thumbs: np.ndarray) -> np.ndarray:
     """(N, 64) bool: low 8x8 DCT coefficients above their median (as in imagehash.phash)."""
     out = np.empty((len(thumbs), 64), bool)
     for s in range(0, len(thumbs), 50_000):
-        low = dctn(thumbs[s:s + 50_000].astype(np.float32), axes=(1, 2), norm="ortho")[:, :8, :8]
+        low = dctn(thumbs[s : s + 50_000].astype(np.float32), axes=(1, 2), norm="ortho")[:, :8, :8]
         low = low.reshape(len(low), 64)
-        out[s:s + 50_000] = low > np.median(low, axis=1, keepdims=True)
+        out[s : s + 50_000] = low > np.median(low, axis=1, keepdims=True)
     return out
 
 
@@ -141,7 +143,9 @@ def unpack_bits(h: np.ndarray) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------------- candidates
-def candidate_pairs(thumbs: np.ndarray, max_phash: int, min_corr: float, chunk: int = 2048) -> pd.DataFrame:
+def candidate_pairs(
+    thumbs: np.ndarray, max_phash: int, min_corr: float, chunk: int = 2048
+) -> pd.DataFrame:
     """All (i, j, rot) with pHash(rot90(thumb_i, rot)) within ``max_phash`` bits of pHash(thumb_j)
     and thumbnail correlation >= ``min_corr``; i < j, best rotation per pair."""
     import torch
@@ -165,17 +169,23 @@ def candidate_pairs(thumbs: np.ndarray, max_phash: int, min_corr: float, chunk: 
         rt = np.ascontiguousarray(np.rot90(thumbs, rot, axes=(1, 2)))
         q_bits, q_thumb = signs(phash_bits(rt)), unit(rt)
         for s in range(0, len(thumbs), chunk):
-            dot = q_bits[s:s + chunk] @ db_bits.T
-            corr = q_thumb[s:s + chunk] @ db_thumb.T
+            dot = q_bits[s : s + chunk] @ db_bits.T
+            corr = q_thumb[s : s + chunk] @ db_thumb.T
             i, j = torch.nonzero((dot >= min_dot) & (corr >= min_corr), as_tuple=True)
             d, c = dot[i, j], corr[i, j]
             i = i + s
             keep = i != j
-            found.append(pd.DataFrame({
-                "i": i[keep].cpu().numpy(), "j": j[keep].cpu().numpy(), "rot": rot,
-                "phash_dist": ((64 - d[keep].float()) / 2).round().int().cpu().numpy(),
-                "thumb_corr": c[keep].float().cpu().numpy(),
-            }))
+            found.append(
+                pd.DataFrame(
+                    {
+                        "i": i[keep].cpu().numpy(),
+                        "j": j[keep].cpu().numpy(),
+                        "rot": rot,
+                        "phash_dist": ((64 - d[keep].float()) / 2).round().int().cpu().numpy(),
+                        "thumb_corr": c[keep].float().cpu().numpy(),
+                    }
+                )
+            )
             del dot, corr
     pairs = pd.concat(found, ignore_index=True)
     # Canonical order (i < j); rotating i by r equals rotating j by -r.
@@ -195,7 +205,9 @@ def candidates_stage(args: argparse.Namespace) -> None:
         for col in ("hash", "source_id", "image_id", "width", "height"):
             pairs[f"{col}_{side}"] = rep[col].to_numpy()
     pairs.to_parquet(args.out_dir / "candidate_pairs.parquet", index=False)
-    print(f"{len(pairs):,} candidate pairs (pHash <= {args.max_phash}, thumbnail corr >= {args.min_thumb_corr})")
+    print(
+        f"{len(pairs):,} candidate pairs (pHash <= {args.max_phash}, thumbnail corr >= {args.min_thumb_corr})"
+    )
 
 
 # --------------------------------------------------------------------------------------- verify
@@ -220,12 +232,19 @@ def _highpass(a: np.ndarray) -> np.ndarray:
     return a - cv2.GaussianBlur(a, (0, 0), 3)
 
 
-def _patch_median(a: np.ndarray, b: np.ndarray, valid: np.ndarray, min_patches: int = 8) -> tuple[float, int]:
+def _patch_median(
+    a: np.ndarray, b: np.ndarray, valid: np.ndarray, min_patches: int = 8
+) -> tuple[float, int]:
     """Median over fully covered PATCH x PATCH tiles of the correlation between a and b."""
     ny, nx = b.shape[0] // PATCH, b.shape[1] // PATCH
 
     def tiles(x):
-        return x[:ny * PATCH, :nx * PATCH].reshape(ny, PATCH, nx, PATCH).transpose(0, 2, 1, 3).reshape(ny * nx, -1)
+        return (
+            x[: ny * PATCH, : nx * PATCH]
+            .reshape(ny, PATCH, nx, PATCH)
+            .transpose(0, 2, 1, 3)
+            .reshape(ny * nx, -1)
+        )
 
     ok = tiles(valid.astype(np.float32)).mean(1) >= 0.95
     x, y = tiles(a)[ok], tiles(b)[ok]
@@ -248,7 +267,9 @@ def match_homography(fa, fb) -> tuple[np.ndarray | None, int]:
     good = [m[0] for m in matches if len(m) == 2 and m[0].distance < 0.8 * m[1].distance]
     if len(good) < 12:
         return None, len(good)
-    H, mask = cv2.findHomography(pa[[m.queryIdx for m in good]], pb[[m.trainIdx for m in good]], cv2.RANSAC, 4.0)
+    H, mask = cv2.findHomography(
+        pa[[m.queryIdx for m in good]], pb[[m.trainIdx for m in good]], cv2.RANSAC, 4.0
+    )
     if H is None:
         return None, 0
     return H, int(mask.sum())
@@ -276,13 +297,25 @@ def verify_stage(args: argparse.Namespace) -> None:
     hashes = pd.unique(pairs[["hash_i", "hash_j"]].to_numpy().ravel())
     print(f"Verifying {len(pairs):,} pairs over {len(hashes):,} images")
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        feats = dict(zip(hashes, ex.map(lambda h: _load_features(root / keys[h]), hashes), strict=True))
+        feats = dict(
+            zip(hashes, ex.map(lambda h: _load_features(root / keys[h]), hashes), strict=True)
+        )
         # ORB features are rotation invariant, so the thumbnail rotation is not needed here.
-        res = list(ex.map(lambda hh: verify_pair(feats[hh[0]], feats[hh[1]]),
-                          zip(pairs["hash_i"], pairs["hash_j"], strict=True), chunksize=256))
+        res = list(
+            ex.map(
+                lambda hh: verify_pair(feats[hh[0]], feats[hh[1]]),
+                zip(pairs["hash_i"], pairs["hash_j"], strict=True),
+                chunksize=256,
+            )
+        )
     pairs[["inliers", "overlap", "score"]] = pd.DataFrame(res, index=pairs.index)
     pairs.to_parquet(args.out_dir / "verified_pairs.parquet", index=False)
-    print(pd.cut(pairs["score"], [-1, 0, 0.2, 0.4, 0.6, 0.8, 0.9, 1]).value_counts().sort_index().to_string())
+    print(
+        pd.cut(pairs["score"], [-1, 0, 0.2, 0.4, 0.6, 0.8, 0.9, 1])
+        .value_counts()
+        .sort_index()
+        .to_string()
+    )
 
 
 # --------------------------------------------------------------------------------------- report
@@ -290,7 +323,9 @@ def report_stage(args: argparse.Namespace) -> None:
     pairs = pd.read_parquet(args.out_dir / "verified_pairs.parquet")
     pairs["near_dup"] = pairs["score"] >= args.dup_thr
     pairs["ambiguous"] = pairs["score"].between(args.ambiguous_thr, args.dup_thr, inclusive="left")
-    pairs["same_size"] = (pairs["width_i"] == pairs["width_j"]) & (pairs["height_i"] == pairs["height_j"])
+    pairs["same_size"] = (pairs["width_i"] == pairs["width_j"]) & (
+        pairs["height_i"] == pairs["height_j"]
+    )
     pairs["same_source"] = pairs["source_id_i"] == pairs["source_id_j"]
     pairs.to_parquet(args.out_dir / "near_dup_pairs.parquet", index=False)
     nd = pairs[pairs["near_dup"]]
@@ -298,8 +333,11 @@ def report_stage(args: argparse.Namespace) -> None:
     # Groups of exact hashes linked by near duplicates, expanded to every copy.
     graph = nx.Graph()
     graph.add_edges_from(nd[["hash_i", "hash_j"]].to_numpy())
-    group_of = {h: g for g, comp in enumerate(sorted(nx.connected_components(graph), key=len, reverse=True))
-                for h in comp}
+    group_of = {
+        h: g
+        for g, comp in enumerate(sorted(nx.connected_components(graph), key=len, reverse=True))
+        for h in comp
+    }
     exact = pd.read_parquet(args.outputs / "image_hashes_exact_all.parquet")
     copies = exact[exact["hash"].isin(group_of)].copy()
     copies["group"] = copies["hash"].map(group_of)
@@ -312,9 +350,19 @@ def report_stage(args: argparse.Namespace) -> None:
 
     # Source pairs linked by a near-duplicate pair (any copy of either exact hash).
     srcs = exact.groupby("hash")["source_id"].agg(lambda s: sorted(set(s)))
-    rows = [tuple(sorted((a, b))) for hi, hj in nd[["hash_i", "hash_j"]].itertuples(index=False)
-            for a in srcs[hi] for b in srcs[hj] if a != b]
-    sp = pd.DataFrame(rows, columns=["source_a", "source_b"]).value_counts().rename("n_near_dup_pairs").reset_index()
+    rows = [
+        tuple(sorted((a, b)))
+        for hi, hj in nd[["hash_i", "hash_j"]].itertuples(index=False)
+        for a in srcs[hi]
+        for b in srcs[hj]
+        if a != b
+    ]
+    sp = (
+        pd.DataFrame(rows, columns=["source_a", "source_b"])
+        .value_counts()
+        .rename("n_near_dup_pairs")
+        .reset_index()
+    )
     sp = add_split_labels(sp, splits).sort_values("n_near_dup_pairs", ascending=False)
     sp.to_csv(args.out_dir / "near_dup_source_pairs.csv", index=False)
 
@@ -336,7 +384,8 @@ def report_stage(args: argparse.Namespace) -> None:
         "n_cross_split_source_pairs": int(sp["cross_split"].sum()),
         "n_groups_spanning_splits": int((n_splits > 1).sum()),
         "images_in_cross_split_groups": {
-            s: int(cross.loc[cross["split"] == s, "image_id"].nunique()) for s in ("train", "val", "test")
+            s: int(cross.loc[cross["split"] == s, "image_id"].nunique())
+            for s in ("train", "val", "test")
         },
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
@@ -344,22 +393,45 @@ def report_stage(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=[*STAGES, "all"], default="all",
-                   help="Run one stage, or all of them in order.")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--stage",
+        choices=[*STAGES, "all"],
+        default="all",
+        help="Run one stage, or all of them in order.",
+    )
     p.add_argument("--cache-root", default=DEFAULT_CACHE_ROOT)
-    p.add_argument("--outputs", type=Path, default=DEFAULT_OUTPUTS, help="Where hashing wrote its outputs.")
+    p.add_argument(
+        "--outputs", type=Path, default=DEFAULT_OUTPUTS, help="Where hashing wrote its outputs."
+    )
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUTS / "near_dup")
-    p.add_argument("--split-config", type=Path, default=REPO_ROOT / "configs/data_config_dedup.yaml")
+    p.add_argument(
+        "--split-config", type=Path, default=REPO_ROOT / "configs/data_config_dedup.yaml"
+    )
     p.add_argument("--blacklist", type=Path, default=CONFIG_DIR / "image_blacklist.parquet")
     p.add_argument("--workers", type=int, default=64)
-    p.add_argument("--max-phash", type=int, default=14, help="Candidates: pHash Hamming distance at most ...")
-    p.add_argument("--min-thumb-corr", type=float, default=0.7, help="... and thumbnail correlation at least.")
-    p.add_argument("--dup-thr", type=float, default=0.6, help="Near duplicate: verified score at least.")
-    p.add_argument("--ambiguous-thr", type=float, default=0.4, help="Ambiguous: score in [this, --dup-thr).")
+    p.add_argument(
+        "--max-phash", type=int, default=14, help="Candidates: pHash Hamming distance at most ..."
+    )
+    p.add_argument(
+        "--min-thumb-corr", type=float, default=0.7, help="... and thumbnail correlation at least."
+    )
+    p.add_argument(
+        "--dup-thr", type=float, default=0.6, help="Near duplicate: verified score at least."
+    )
+    p.add_argument(
+        "--ambiguous-thr", type=float, default=0.4, help="Ambiguous: score in [this, --dup-thr)."
+    )
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    stages = {"hash": hash_stage, "candidates": candidates_stage, "verify": verify_stage, "report": report_stage}
+    stages = {
+        "hash": hash_stage,
+        "candidates": candidates_stage,
+        "verify": verify_stage,
+        "report": report_stage,
+    }
     for name in STAGES if args.stage == "all" else (args.stage,):
         stages[name](args)
 

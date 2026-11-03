@@ -25,7 +25,9 @@ from mermaidseg.datasets.coralnet.dedup.common import (
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_SPLIT_CONFIG)
     parser.add_argument("--outputs", type=Path, default=DEFAULT_OUTPUTS)
     parser.add_argument("--hash-mode", default="exact")
@@ -37,7 +39,9 @@ def main() -> None:
 
     for k, v in splits.items():
         uncached = sorted(v - set(hashes["source_id"]))
-        print(f"{k}: {len(v)} sources, {hashes['source_id'].isin(v).sum():,} hashed images; uncached: {uncached}")
+        print(
+            f"{k}: {len(v)} sources, {hashes['source_id'].isin(v).sum():,} hashed images; uncached: {uncached}"
+        )
 
     per_source = []
     for e, o in [("val", "train"), ("test", "train"), ("test", "val")]:
@@ -47,12 +51,22 @@ def main() -> None:
         x = hashes[hashes["source_id"].isin(splits[e])]
         dup = x["hash"].isin(other)
         print(f"\n{e} images also in {o}: {dup.sum():,}/{len(x):,} ({100 * dup.mean():.1f}%)")
-        t = x.assign(dup=dup).groupby("source_id")["dup"].agg(n_images="size", n_dup="sum").reset_index()
+        t = (
+            x.assign(dup=dup)
+            .groupby("source_id")["dup"]
+            .agg(n_images="size", n_dup="sum")
+            .reset_index()
+        )
         t["pct_dup"] = 100 * t["n_dup"] / t["n_images"]
         t.insert(0, "eval_split", e)
         t.insert(1, "other_split", o)
         per_source.append(t)
-        print(t[t["n_dup"] > 0].drop(columns=["eval_split", "other_split"]).round(1).to_string(index=False))
+        print(
+            t[t["n_dup"] > 0]
+            .drop(columns=["eval_split", "other_split"])
+            .round(1)
+            .to_string(index=False)
+        )
 
     cross = add_split_labels(pairs, splits)
     cross = cross[cross["cross_split"]]

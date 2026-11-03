@@ -34,9 +34,10 @@ def _mock_s3(data: bytes = b"image-bytes") -> MagicMock:
 
 
 def test_parse_storage_ref_s3_uri():
-    assert parse_storage_ref(
-        "s3://my-bucket/path/to/file.parquet", "default"
-    ) == ("my-bucket", "path/to/file.parquet")
+    assert parse_storage_ref("s3://my-bucket/path/to/file.parquet", "default") == (
+        "my-bucket",
+        "path/to/file.parquet",
+    )
 
 
 def test_parse_storage_ref_relative_key():

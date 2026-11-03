@@ -109,9 +109,7 @@ def _warm_dataset(ds, workers: int, fail_fast: bool) -> tuple[int, list[str]]:
             ds.read_label(**row)
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = {
-            pool.submit(_warm, (i, row)): i for i, row in enumerate(rows)
-        }
+        futures = {pool.submit(_warm, (i, row)): i for i, row in enumerate(rows)}
         for done, fut in enumerate(as_completed(futures), start=1):
             idx = futures[fut]
             try:
@@ -139,9 +137,7 @@ def _download_hf_models(repos: list[str]) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    cfg = setup_config(
-        {"data": args.data_config, "training": args.training_config}
-    )
+    cfg = setup_config({"data": args.data_config, "training": args.training_config})
     padding = cfg.training.get("padding") if hasattr(cfg, "training") else None
 
     setup_local_cache(cfg.data)

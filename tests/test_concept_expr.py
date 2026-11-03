@@ -182,7 +182,7 @@ def test_tile_blend_weights_linear_ramp_in_overlap() -> None:
     acc = np.zeros(length, dtype=np.float32)
     weight = np.zeros(length, dtype=np.float32)
     preds = [0.0, 1.0]
-    for start, value in zip(starts, preds):
+    for start, value in zip(starts, preds, strict=False):
         acc[start : start + tile] += value * row
         weight[start : start + tile] += row
     blended = acc / np.maximum(weight, 1e-6)

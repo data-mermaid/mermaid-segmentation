@@ -61,9 +61,13 @@ def _letters(n: int) -> list[str]:
 class NearDupReview:
     """Loads the near-duplicate outputs once; ``select`` picks groups, ``show`` renders one."""
 
-    def __init__(self, outputs: Path | str = DEFAULT_OUTPUTS, config_dir: Path | str = CONFIG_DIR,
-                 split_config: Path | str = REPO_ROOT / "configs/data_config_dedup.yaml",
-                 cache_root: str = DEFAULT_CACHE_ROOT):
+    def __init__(
+        self,
+        outputs: Path | str = DEFAULT_OUTPUTS,
+        config_dir: Path | str = CONFIG_DIR,
+        split_config: Path | str = REPO_ROOT / "configs/data_config_dedup.yaml",
+        cache_root: str = DEFAULT_CACHE_ROOT,
+    ):
         outputs = Path(outputs)
         self.root = Path(cache_root) / DEFAULT_BUCKET
         pairs = pd.read_parquet(outputs / "near_dup/near_dup_pairs.parquet")
@@ -92,24 +96,40 @@ class NearDupReview:
         # Review groups: connected components of all review pairs.
         graph = nx.Graph()
         graph.add_edges_from(pairs[["image_a", "image_b"]].to_numpy())
-        img = pd.concat([pairs[[f"{c}_{s}" for c in ("image", "source", "split", "key")]]
-                         .set_axis(["image_id", "source_id", "split", "key"], axis=1) for s in "ab"])
+        img = pd.concat(
+            [
+                pairs[[f"{c}_{s}" for c in ("image", "source", "split", "key")]].set_axis(
+                    ["image_id", "source_id", "split", "key"], axis=1
+                )
+                for s in "ab"
+            ]
+        )
         img = img.drop_duplicates("image_id").set_index("image_id")
         comp = {i: c for c, comp in enumerate(nx.connected_components(graph)) for i in comp}
         img["comp"] = img.index.map(comp)
         pairs["comp"] = pairs["image_a"].map(comp)
-        g = img.groupby("comp").agg(n_images=("source_id", "size"), n_sources=("source_id", "nunique"),
-                                    n_splits=("split", "nunique"),
-                                    splits=("split", lambda s: "/".join(sorted(set(s)))),
-                                    sources=("source_id", lambda s: sorted(set(s))))
-        pg = pairs.groupby("comp").agg(n_pairs=("call", "size"), n_ambiguous=("ambiguous", "sum"),
-                                       min_score=("score", "min"), max_score=("score", "max"))
+        g = img.groupby("comp").agg(
+            n_images=("source_id", "size"),
+            n_sources=("source_id", "nunique"),
+            n_splits=("split", "nunique"),
+            splits=("split", lambda s: "/".join(sorted(set(s)))),
+            sources=("source_id", lambda s: sorted(set(s))),
+        )
+        pg = pairs.groupby("comp").agg(
+            n_pairs=("call", "size"),
+            n_ambiguous=("ambiguous", "sum"),
+            min_score=("score", "min"),
+            max_score=("score", "max"),
+        )
         g = g.join(pg)
-        g["category"] = np.select([g["n_splits"] > 1, g["n_sources"] > 1], CATEGORIES[:2], CATEGORIES[2])
+        g["category"] = np.select(
+            [g["n_splits"] > 1, g["n_sources"] > 1], CATEGORIES[:2], CATEGORIES[2]
+        )
         g["has_ambiguous"] = g["n_ambiguous"] > 0
         g["_cat"] = g["category"].map(CATEGORIES.index)
-        g = g.sort_values(["_cat", "has_ambiguous", "n_images", "min_score"],
-                          ascending=[True, False, False, True]).drop(columns="_cat")
+        g = g.sort_values(
+            ["_cat", "has_ambiguous", "n_images", "min_score"], ascending=[True, False, False, True]
+        ).drop(columns="_cat")
         # Stable-in-order group ids G0001, ... (priority order) and pair ids G0001-1, ...
         g["group"] = [f"G{k + 1:04d}" for k in range(len(g))]
         group_of = g["group"]
@@ -125,17 +145,31 @@ class NearDupReview:
     def overview(self) -> pd.DataFrame:
         """Groups, images and pairs per category, and images per split."""
         g = self.groups
-        out = g.groupby("category").agg(groups=("n_images", "size"), images=("n_images", "sum"),
-                                        pairs=("n_pairs", "sum"), ambiguous_pairs=("n_ambiguous", "sum"))
+        out = g.groupby("category").agg(
+            groups=("n_images", "size"),
+            images=("n_images", "sum"),
+            pairs=("n_pairs", "sum"),
+            ambiguous_pairs=("n_ambiguous", "sum"),
+        )
         out = out.reindex(CATEGORIES).fillna(0).astype(int)
         cat_of_img = self.images["group"].map(g["category"])
-        out = out.join(pd.crosstab(cat_of_img, self.images["split"]).reindex(CATEGORIES).fillna(0).astype(int))
+        out = out.join(
+            pd.crosstab(cat_of_img, self.images["split"]).reindex(CATEGORIES).fillna(0).astype(int)
+        )
         out.loc["total"] = out.sum()
         return out
 
-    def select(self, category: str | list[str] | None = None, split: str | None = None,
-               sources: list[int] | None = None, ambiguous: bool | None = None, min_images: int = 2,
-               order: str = "priority", n: int | None = None, seed: int = 0) -> pd.DataFrame:
+    def select(
+        self,
+        category: str | list[str] | None = None,
+        split: str | None = None,
+        sources: list[int] | None = None,
+        ambiguous: bool | None = None,
+        min_images: int = 2,
+        order: str = "priority",
+        n: int | None = None,
+        seed: int = 0,
+    ) -> pd.DataFrame:
         """Groups (rows of ``self.groups``) matching all given filters.
 
         ``split``: any image in that split; ``sources``: any image from these sources;
@@ -177,20 +211,32 @@ class NearDupReview:
         name = self.source_name.get(source_id)
         return "private/deleted" if pd.isna(name) else str(name)
 
-    def plot_group(self, group: str, max_images: int | None = 12, ncol: int = 4, px: int = 400) -> plt.Figure:
-        imgs = self.images[self.images["group"] == group].sort_values(["source_id", "image_id"]).head(max_images)
+    def plot_group(
+        self, group: str, max_images: int | None = 12, ncol: int = 4, px: int = 400
+    ) -> plt.Figure:
+        imgs = (
+            self.images[self.images["group"] == group]
+            .sort_values(["source_id", "image_id"])
+            .head(max_images)
+        )
         ncol = min(ncol, len(imgs))
         nrow = -(-len(imgs) // ncol)
-        fig, axes = plt.subplots(nrow, ncol, figsize=(3.6 * ncol, 3.0 * nrow), squeeze=False, layout="constrained")
-        for a, (lab, (iid, r)) in zip(axes.flat, zip(_letters(len(imgs)), imgs.iterrows(), strict=True),
-                                      strict=False):
+        fig, axes = plt.subplots(
+            nrow, ncol, figsize=(3.6 * ncol, 3.0 * nrow), squeeze=False, layout="constrained"
+        )
+        for a, (lab, (iid, r)) in zip(
+            axes.flat, zip(_letters(len(imgs)), imgs.iterrows(), strict=True), strict=False
+        ):
             im = self._load(r["key"], px)
             a.imshow(im)
             w, h = Image.open(self.root / r["key"]).size
-            a.set_title(f"{lab}: {r['source_id']}/{iid} [{r['split']}]\n{self._name(r['source_id'])[:40]} · {w}x{h}",
-                        fontsize=8, loc="left")
+            a.set_title(
+                f"{lab}: {r['source_id']}/{iid} [{r['split']}]\n{self._name(r['source_id'])[:40]} · {w}x{h}",
+                fontsize=8,
+                loc="left",
+            )
             a.axis("off")
-        for a in axes.flat[len(imgs):]:
+        for a in axes.flat[len(imgs) :]:
             a.axis("off")
         return fig
 
@@ -198,24 +244,38 @@ class NearDupReview:
         imgs = self.images[self.images["group"] == group].sort_values(["source_id", "image_id"])
         lab = dict(zip(imgs.index, _letters(len(imgs)), strict=True))
         p = self.pairs[self.pairs["group"] == group]
-        t = pd.DataFrame({
-            "images": [f"{lab[a]}–{lab[b]}" for a, b in zip(p["image_a"], p["image_b"], strict=True)],
-            "call": p["call"], "score": p["score"].round(3), "inliers": p["inliers"],
-            "phash_dist": p["phash_dist"], "rotated": p["rot"] != 0,
-            "a": p["source_a"].astype(str) + "/" + p["image_a"], "b": p["source_b"].astype(str) + "/" + p["image_b"],
-        })
+        t = pd.DataFrame(
+            {
+                "images": [
+                    f"{lab[a]}–{lab[b]}" for a, b in zip(p["image_a"], p["image_b"], strict=True)
+                ],
+                "call": p["call"],
+                "score": p["score"].round(3),
+                "inliers": p["inliers"],
+                "phash_dist": p["phash_dist"],
+                "rotated": p["rot"] != 0,
+                "a": p["source_a"].astype(str) + "/" + p["image_a"],
+                "b": p["source_b"].astype(str) + "/" + p["image_b"],
+            }
+        )
         return t.head(max_rows)
 
-    def show(self, group: str, max_images: int | None = 12, max_rows: int | None = 20, dpi: int = 72) -> None:
+    def show(
+        self, group: str, max_images: int | None = 12, max_rows: int | None = 20, dpi: int = 72
+    ) -> None:
         """Header, all images of the group (lettered) and its pairs (ids = ``pair`` in the labels CSV)."""
         from IPython.display import Markdown, display
 
         g = self.groups.loc[group]
         srcs = ", ".join(f"{s} ({self._name(s)[:30]})" for s in g["sources"][:6])
         more = f", +{len(g['sources']) - 6} more" if len(g["sources"]) > 6 else ""
-        display(Markdown(f"---\n### {group} · {g['category']} · {g['n_images']} images · splits: {g['splits']}\n"
-                         f"Sources: {srcs}{more}. Pairs: {g['n_pairs']} ({g['n_ambiguous']} ambiguous), "
-                         f"score {g['min_score']:.2f}–{g['max_score']:.2f}."))
+        display(
+            Markdown(
+                f"---\n### {group} · {g['category']} · {g['n_images']} images · splits: {g['splits']}\n"
+                f"Sources: {srcs}{more}. Pairs: {g['n_pairs']} ({g['n_ambiguous']} ambiguous), "
+                f"score {g['min_score']:.2f}–{g['max_score']:.2f}."
+            )
+        )
         self._display_jpeg(self.plot_group(group, max_images), dpi)
         if max_images is not None and g["n_images"] > max_images:
             print(f"… {g['n_images'] - max_images} more images (show(..., max_images=None))")
@@ -233,9 +293,11 @@ class NearDupReview:
         sel = self.select(**select_kwargs)
         n_pages = -(-len(sel) // per_page)
         print(f"Page {k + 1}/{n_pages} ({len(sel)} groups)")
-        self.show_many(sel.iloc[k * per_page:(k + 1) * per_page])
+        self.show_many(sel.iloc[k * per_page : (k + 1) * per_page])
 
-    def align(self, pair: str) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+    def align(
+        self, pair: str
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
         """Colour images a and b (at the verification size), a warped onto b (as in the verification)
         and the absolute high-pass difference (NaN outside the overlap); the last two are None if the
         pair cannot be aligned."""
@@ -252,8 +314,12 @@ class NearDupReview:
             good = [m[0] for m in matches if len(m) == 2 and m[0].distance < 0.8 * m[1].distance]
         H = None
         if len(good) >= 12:
-            H, _ = cv2.findHomography(fa[1][[m.queryIdx for m in good]], fb[1][[m.trainIdx for m in good]],
-                                      cv2.RANSAC, 4.0)
+            H, _ = cv2.findHomography(
+                fa[1][[m.queryIdx for m in good]],
+                fb[1][[m.trainIdx for m in good]],
+                cv2.RANSAC,
+                4.0,
+            )
         if H is None:
             return ca, cb, None, None
         diff = np.abs(cv2.warpPerspective(_highpass(fa[0]), H, size) - _highpass(fb[0]))
@@ -272,15 +338,21 @@ class NearDupReview:
             src = p[f"source_{side}"]
             w, h = Image.open(self.root / p[f"key_{side}"]).size
             a.imshow(im)
-            a.set_title(f"{side}: {src}/{p[f'image_{side}']} [{p[f'split_{side}']}] {w}x{h}\n"
-                        f"{self._name(src)[:60]}", fontsize=9, loc="left")
+            a.set_title(
+                f"{side}: {src}/{p[f'image_{side}']} [{p[f'split_{side}']}] {w}x{h}\n"
+                f"{self._name(src)[:60]}",
+                fontsize=9,
+                loc="left",
+            )
         if warped is None:
             ax[1, 0].text(0.5, 0.5, "could not align", ha="center", va="center", fontsize=12)
         else:
             ax[1, 0].imshow(warped)
             ax[1, 0].set_title("a aligned onto b", fontsize=9, loc="left")
             ax[1, 1].imshow(diff, cmap="magma", vmin=0, vmax=40)
-            ax[1, 1].set_title("|high-pass difference| (dark = identical detail)", fontsize=9, loc="left")
+            ax[1, 1].set_title(
+                "|high-pass difference| (dark = identical detail)", fontsize=9, loc="left"
+            )
         for a in ax.flat:
             a.axis("off")
         return fig
@@ -289,7 +361,9 @@ class NearDupReview:
         """Show ``pair_figure`` for one pair."""
         p = self.pairs.loc[pair]
         fig = self.pair_figure(pair)
-        fig.suptitle(f"{pair}: {p['call']}, score {p['score']:.3f}, {p['inliers']} inliers", fontsize=10)
+        fig.suptitle(
+            f"{pair}: {p['call']}, score {p['score']:.3f}, {p['inliers']} inliers", fontsize=10
+        )
         self._display_jpeg(fig, dpi)
 
 
@@ -311,15 +385,18 @@ class PairLabeler:
     10 pairs) and jumps to the next group. The next pairs are rendered in the background.
     """
 
-    def __init__(self, review: NearDupReview, path: Path | str, pairs: list[str] | None = None,
-                 dpi: int = 80):
+    def __init__(
+        self, review: NearDupReview, path: Path | str, pairs: list[str] | None = None, dpi: int = 80
+    ):
         import ipywidgets as w
 
         self.r, self.path, self.dpi = review, Path(path), dpi
         self.order = list(review.pairs.index if pairs is None else pairs)
         self.labels = load_labels(self.path)["label"].to_dict()
         pairs_df = review.pairs.loc[self.order]
-        self._keys = dict(zip(self.order, zip(pairs_df["image_a"], pairs_df["image_b"], strict=True), strict=True))
+        self._keys = dict(
+            zip(self.order, zip(pairs_df["image_a"], pairs_df["image_b"], strict=True), strict=True)
+        )
         self._group = dict(zip(self.order, pairs_df["group"], strict=True))
         self._cache: dict[str, Future] = {}
         self._pool = ThreadPoolExecutor(max_workers=2)
@@ -331,14 +408,18 @@ class PairLabeler:
         for b, lab in zip(buttons, LABELS, strict=True):
             b.on_click(lambda _, lab=lab: self.label(lab))
         back, skip = w.Button(description="← Back"), w.Button(description="Skip →")
-        rest = w.Button(description="Group: rest dup", tooltip="Label every unlabelled pair of this group dup")
+        rest = w.Button(
+            description="Group: rest dup", tooltip="Label every unlabelled pair of this group dup"
+        )
         nxt = w.Button(description="Next unlabelled ⇥")
         back.on_click(lambda _: self.go(self.i - 1))
         skip.on_click(lambda _: self.go(self.i + 1))
         rest.on_click(lambda _: self.label_rest_of_group())
         nxt.on_click(lambda _: self.go(self._next_open(self.i + 1)))
         self.status = w.HTML()
-        self.widget = w.VBox([self.header, w.HBox([*buttons, back, skip, nxt, rest]), self.status, self.image])
+        self.widget = w.VBox(
+            [self.header, w.HBox([*buttons, back, skip, nxt, rest]), self.status, self.image]
+        )
         self.i = 0
         self.go(self._next_open(0))
 
@@ -369,20 +450,21 @@ class PairLabeler:
             + ", ".join(f"{lab} {int(counts.get(lab, 0))}" for lab in LABELS)
             + f"<br>group {p['group']}: {g['category']}, {g['n_images']} images, {g['n_pairs']} pairs, "
             f"splits {g['splits']} &nbsp;·&nbsp; algorithm: <b>{p['call']}</b>, score {p['score']:.3f}, "
-            f"{p['inliers']} inliers, pHash {p['phash_dist']}"
-            + f"<br>current label: <b>{cur}</b>"
+            f"{p['inliers']} inliers, pHash {p['phash_dist']}" + f"<br>current label: <b>{cur}</b>"
         )
         self.image.value = self._render(pair).result()
         for k2 in (self.i + 1, self.i + 2):  # prefetch
             if k2 < len(self.order):
                 self._render(self.order[k2])
-        for old in [q for q in self._cache if q not in self.order[max(0, self.i - 2):self.i + 3]]:
+        for old in [q for q in self._cache if q not in self.order[max(0, self.i - 2) : self.i + 3]]:
             del self._cache[old]
 
     # ------------------------------------------------------------------------------------------ labels
     def _write(self, pairs: list[str], label: str) -> None:
         rows = self.r.pairs.loc[pairs].reset_index()
-        rows = rows.assign(label=label, labelled_at=pd.Timestamp.now().isoformat(timespec="seconds"))
+        rows = rows.assign(
+            label=label, labelled_at=pd.Timestamp.now().isoformat(timespec="seconds")
+        )
         rows[LABEL_COLUMNS].to_csv(self.path, mode="a", header=not self.path.exists(), index=False)
         for q in pairs:
             self.labels[self._key(q)] = label
@@ -395,7 +477,9 @@ class PairLabeler:
 
     def label_rest_of_group(self) -> None:
         group = self.r.pairs.loc[self.order[self.i], "group"]
-        todo = [q for q in self.order if self._group[q] == group and self._key(q) not in self.labels]
+        todo = [
+            q for q in self.order if self._group[q] == group and self._key(q) not in self.labels
+        ]
         if todo:
             self._write(todo, "dup")
         self.status.value = f"group {group}: {len(todo)} pairs labelled <b>dup</b>"

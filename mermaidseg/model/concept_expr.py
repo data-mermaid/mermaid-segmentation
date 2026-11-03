@@ -216,7 +216,9 @@ def parse(expression: str) -> list[_Token]:
     return _to_rpn(tokens)
 
 
-def _apply_binary(op: str, left: NDArray[np.float32], right: NDArray[np.float32]) -> NDArray[np.float32]:
+def _apply_binary(
+    op: str, left: NDArray[np.float32], right: NDArray[np.float32]
+) -> NDArray[np.float32]:
     if op == "+":
         return np.clip(left + right, 0.0, 1.0)
     if op == "-":

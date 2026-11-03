@@ -395,7 +395,9 @@ def initialize_benthic_concepts(
     df_mapping["source_label_class_name"] = (
         df_mapping["source_label_class_name"].astype(str).str.lower()
     )
-    df_mapping["source_dataset_source"] = df_mapping["source_dataset_source"].astype(str).str.lower()
+    df_mapping["source_dataset_source"] = (
+        df_mapping["source_dataset_source"].astype(str).str.lower()
+    )
     num_global_source = len(global_id2source) if global_id2source is not None else len(df_mapping)
 
     if global_id2source is not None:

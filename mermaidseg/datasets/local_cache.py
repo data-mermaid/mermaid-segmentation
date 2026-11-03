@@ -431,8 +431,5 @@ def setup_local_cache(
             cache.offline,
         )
     if cache.offline:
-        logger.info(
-            "MERMAIDSEG_S3_OFFLINE set: cache misses will raise instead of "
-            "contacting S3."
-        )
+        logger.info("MERMAIDSEG_S3_OFFLINE set: cache misses will raise instead of contacting S3.")
     return stats

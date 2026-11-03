@@ -37,6 +37,7 @@ from mermaidseg.model.concept_metrics import reduce_masked_loss, taxonomic_targe
 
 logger = logging.getLogger(__name__)
 
+
 def taxonomic_rank_slices(
     concept_value2id: dict[str, dict[str, list[int]]],
 ) -> list[tuple[str, int, list[str]]]:

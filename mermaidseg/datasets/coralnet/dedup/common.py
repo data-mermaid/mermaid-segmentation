@@ -15,7 +15,9 @@ from mermaidseg.datasets.coralnet.coralnet_dataset import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_CACHE_ROOT = os.environ.get("MERMAIDSEG_LOCAL_CACHE_DIR", "/archive/vision/beery/red_sea_coral/cache_MERMAID")
+DEFAULT_CACHE_ROOT = os.environ.get(
+    "MERMAIDSEG_LOCAL_CACHE_DIR", "/archive/vision/beery/red_sea_coral/cache_MERMAID"
+)
 DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
 DEFAULT_MANIFEST = _DEFAULT_MANIFEST_PATH
 ID2NAME_KEY = _CORALNET_ID2NAME_KEY
@@ -29,8 +31,13 @@ DEFAULT_CONCEPTS_CSV = REPO_ROOT / "configs/class_to_concepts.csv"
 DEFAULT_EXCLUDE_SOURCES = CONFIG_DIR / "low_quality_sources.txt"
 
 TAX_RANKS = ("kingdom", "phylum", "class", "order", "family", "genus")
-NON_CONCEPT_COLS = ("source_label_class_name", "source_dataset_source", "target_label_class_name",
-                    "target_dataset_source", "species")
+NON_CONCEPT_COLS = (
+    "source_label_class_name",
+    "source_dataset_source",
+    "target_label_class_name",
+    "target_dataset_source",
+    "species",
+)
 
 
 def read_source_list(path: Path | None) -> set[int]:
@@ -96,7 +103,11 @@ def load_concepts(csv_path: Path) -> pd.DataFrame:
     df = df[df["source_dataset_source"] == "coralnet"]
     df["name"] = df["source_label_class_name"].str.strip().str.lower()
     cols = [c for c in df.columns if c not in NON_CONCEPT_COLS and c != "name"]
-    return df.drop_duplicates("name").set_index("name")[cols].apply(lambda s: s.str.strip().str.lower())
+    return (
+        df.drop_duplicates("name")
+        .set_index("name")[cols]
+        .apply(lambda s: s.str.strip().str.lower())
+    )
 
 
 def compare_labels(fa: pd.Series | None, fb: pd.Series | None) -> str:

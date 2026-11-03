@@ -126,12 +126,18 @@ def make_resolver(feat: dict[int, pd.Series | None]):
             elif "contradictory" in rel.values():
                 out = (labels[0], "contradictory", has_unmapped)
             else:
-                covers = [a for a in mapped if all(rel[a, b] in ("a_finer", "equivalent") for b in mapped if b != a)]
+                covers = [
+                    a
+                    for a in mapped
+                    if all(rel[a, b] in ("a_finer", "equivalent") for b in mapped if b != a)
+                ]
                 if covers:
                     cat = "finer" if any(r == "a_finer" for r in rel.values()) else "equivalent"
                     out = (covers[0], cat, has_unmapped)
                 else:
-                    best = min(range(len(mapped)), key=lambda i: (*(-n for n in n_specified(mapped[i])), i))
+                    best = min(
+                        range(len(mapped)), key=lambda i: (*(-n for n in n_specified(mapped[i])), i)
+                    )
                     out = (mapped[best], "compatible", has_unmapped)
         cache[labels] = out
         return out
@@ -140,20 +146,40 @@ def make_resolver(feat: dict[int, pd.Series | None]):
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--outputs", type=Path, default=DEFAULT_OUTPUTS,
-                   help="Where the hashing and conflicts outputs are.")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--outputs",
+        type=Path,
+        default=DEFAULT_OUTPUTS,
+        help="Where the hashing and conflicts outputs are.",
+    )
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUTS / "dedup")
-    p.add_argument("--config-dir", type=Path, default=CONFIG_DIR,
-                   help="Where the files training reads (blacklist, overrides) go.")
+    p.add_argument(
+        "--config-dir",
+        type=Path,
+        default=CONFIG_DIR,
+        help="Where the files training reads (blacklist, overrides) go.",
+    )
     p.add_argument("--cache-root", default=DEFAULT_CACHE_ROOT)
     p.add_argument("--concepts-csv", type=Path, default=DEFAULT_CONCEPTS_CSV)
     p.add_argument("--split-config", type=Path, default=DEFAULT_SPLIT_CONFIG)
-    p.add_argument("--exclude-sources", type=Path, default=DEFAULT_EXCLUDE_SOURCES,
-                   help="Text file of source ids to leave out entirely (one per line).")
-    p.add_argument("--near-dup-labels", type=Path, default=DEFAULT_LABELS,
-                   help="Pair labels of Near_Duplicate_Review.ipynb; pairs labelled dup are merged.")
-    p.add_argument("--workers", type=int, default=32, help="Threads decoding near-duplicate images.")
+    p.add_argument(
+        "--exclude-sources",
+        type=Path,
+        default=DEFAULT_EXCLUDE_SOURCES,
+        help="Text file of source ids to leave out entirely (one per line).",
+    )
+    p.add_argument(
+        "--near-dup-labels",
+        type=Path,
+        default=DEFAULT_LABELS,
+        help="Pair labels of Near_Duplicate_Review.ipynb; pairs labelled dup are merged.",
+    )
+    p.add_argument(
+        "--workers", type=int, default=32, help="Threads decoding near-duplicate images."
+    )
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     args.config_dir.mkdir(parents=True, exist_ok=True)
@@ -165,16 +191,23 @@ def main() -> None:
 
     excluded = read_source_list(args.exclude_sources)
     sources = sorted(set().union(*coralnet_splits(args.split_config).values()) - excluded)
-    hashes = pd.read_parquet(args.outputs / "image_hashes_exact_all.parquet",
-                             columns=["source_id", "image_id", "hash", "image_s3_key"])
+    hashes = pd.read_parquet(
+        args.outputs / "image_hashes_exact_all.parquet",
+        columns=["source_id", "image_id", "hash", "image_s3_key"],
+    )
     hashes["image_id"] = hashes["image_id"].astype(str)
     missing = sorted(set(sources) - set(hashes["source_id"]))
     if missing:
-        raise SystemExit(f"{len(missing)} sources in {args.split_config} were never hashed: {missing[:20]}")
+        raise SystemExit(
+            f"{len(missing)} sources in {args.split_config} were never hashed: {missing[:20]}"
+        )
     hashes = hashes[hashes["source_id"].isin(sources)].reset_index(drop=True)
 
-    ann = pq.read_table(root / DEFAULT_MANIFEST, columns=["source_id", "image_id", "row", "col", "coralnet_id"],
-                        filters=[("source_id", "in", sources)]).to_pandas()
+    ann = pq.read_table(
+        root / DEFAULT_MANIFEST,
+        columns=["source_id", "image_id", "row", "col", "coralnet_id"],
+        filters=[("source_id", "in", sources)],
+    ).to_pandas()
     ann["image_id"] = ann["image_id"].astype(str)
     n_points = ann.groupby(["source_id", "image_id"]).size().rename("n_points").reset_index()
     hashes = hashes.merge(n_points, on=["source_id", "image_id"], how="left")
@@ -185,26 +218,40 @@ def main() -> None:
     unique = hashes[hashes["n_copies"] == 1].drop(columns="n_copies")
     dup = hashes[hashes["n_copies"] > 1].copy()
     ranking = pd.read_csv(args.outputs / "annotation_source_ranking.csv")
-    dup["cluster"] = dup["source_id"].map(dict(zip(ranking["source_id"], ranking["cluster"], strict=True)))
-    dup["source_rank"] = dup["source_id"].map(dict(zip(ranking["source_id"], ranking["rank"], strict=True)))
-    dup = dup.sort_values(["hash", "source_rank", "source_id", "n_points", "image_id"],
-                          ascending=[True, True, False, False, True], na_position="last")
+    dup["cluster"] = dup["source_id"].map(
+        dict(zip(ranking["source_id"], ranking["cluster"], strict=True))
+    )
+    dup["source_rank"] = dup["source_id"].map(
+        dict(zip(ranking["source_id"], ranking["rank"], strict=True))
+    )
+    dup = dup.sort_values(
+        ["hash", "source_rank", "source_id", "n_points", "image_id"],
+        ascending=[True, True, False, False, True],
+        na_position="last",
+    )
     dup["copy_rank"] = dup.groupby("hash").cumcount()
     dup["keep"] = dup["copy_rank"] == 0
     kept = dup.loc[dup["keep"], ["hash", "source_id", "image_id"]].set_axis(
-        ["hash", "kept_source_id", "kept_image_id"], axis=1)
+        ["hash", "kept_source_id", "kept_image_id"], axis=1
+    )
     dup = dup.merge(kept, on="hash")
-    blacklist = dup.loc[~dup["keep"], ["source_id", "image_id", "hash", "kept_source_id", "kept_image_id"]]
+    blacklist = dup.loc[
+        ~dup["keep"], ["source_id", "image_id", "hash", "kept_source_id", "kept_image_id"]
+    ]
     blacklist = blacklist.assign(reason="exact")
 
     unique.to_parquet(args.out_dir / "images_unique.parquet", index=False)
     dup.to_parquet(args.out_dir / "images_duplicated.parquet", index=False)
-    print(f"unique: {len(unique):,} images; duplicated: {len(dup):,} copies of {len(kept):,} images; "
-          f"blacklist: {len(blacklist):,}")
+    print(
+        f"unique: {len(unique):,} images; duplicated: {len(dup):,} copies of {len(kept):,} images; "
+        f"blacklist: {len(blacklist):,}"
+    )
 
     # 2. Pool every copy's points on the kept copy and resolve each location.
-    pts = ann.merge(dup[["source_id", "image_id", "hash", "copy_rank", "kept_source_id", "kept_image_id"]],
-                    on=["source_id", "image_id"])
+    pts = ann.merge(
+        dup[["source_id", "image_id", "hash", "copy_rank", "kept_source_id", "kept_image_id"]],
+        on=["source_id", "image_id"],
+    )
     pts = pts.drop_duplicates(["hash", "copy_rank", "row", "col", "coralnet_id"])
     pts = pts.sort_values(["hash", "row", "col", "copy_rank"]).reset_index(drop=True)
     loc_keys = ["hash", "row", "col"]
@@ -219,13 +266,19 @@ def main() -> None:
     locs["kept_label"] = kept_label
 
     n_labels = pts.groupby("loc")["coralnet_id"].nunique()
-    locs["coralnet_id"] = pts[first].set_index("loc")["coralnet_id"].astype("int64")  # single-label locations
+    locs["coralnet_id"] = (
+        pts[first].set_index("loc")["coralnet_id"].astype("int64")
+    )  # single-label locations
     locs["category"] = "same_label"
     locs["has_unmapped"] = False
     multi = n_labels.index[n_labels > 1]
     resolve = make_resolver(feat)
-    label_tuples = (pts[pts["loc"].isin(multi)].drop_duplicates(["loc", "coralnet_id"])
-                    .groupby("loc")["coralnet_id"].agg(tuple))
+    label_tuples = (
+        pts[pts["loc"].isin(multi)]
+        .drop_duplicates(["loc", "coralnet_id"])
+        .groupby("loc")["coralnet_id"]
+        .agg(tuple)
+    )
     resolved = [resolve(t) for t in label_tuples]
     locs.loc[label_tuples.index, "coralnet_id"] = [r[0] for r in resolved]
     locs.loc[label_tuples.index, "category"] = [r[1] for r in resolved]
@@ -236,11 +289,26 @@ def main() -> None:
     # Kept copies whose own (row, col, label) set differs from the merged one get an override.
     own = pts[pts["copy_rank"] == 0].groupby("hash").size()
     n_locs = locs.groupby("hash").size()
-    changed_hashes = set(locs.loc[locs["changed"], "hash"]) | set(own.index[own.reindex(n_locs.index) != n_locs])
+    changed_hashes = set(locs.loc[locs["changed"], "hash"]) | set(
+        own.index[own.reindex(n_locs.index) != n_locs]
+    )
     overrides = locs[locs["hash"].isin(changed_hashes)].rename(
-        columns={"kept_source_id": "source_id", "kept_image_id": "image_id"})
-    overrides = overrides[["source_id", "image_id", "row", "col", "coralnet_id", "category", "has_unmapped",
-                           "in_kept", "n_copies_at_loc", "hash"]].astype({"coralnet_id": "int32"})
+        columns={"kept_source_id": "source_id", "kept_image_id": "image_id"}
+    )
+    overrides = overrides[
+        [
+            "source_id",
+            "image_id",
+            "row",
+            "col",
+            "coralnet_id",
+            "category",
+            "has_unmapped",
+            "in_kept",
+            "n_copies_at_loc",
+            "hash",
+        ]
+    ].astype({"coralnet_id": "int32"})
 
     # Provenance of every merged location of every duplicated image (for nbs/Dedup_Review.ipynb).
     prov = locs.copy()
@@ -253,37 +321,82 @@ def main() -> None:
     prov["copy_ranks"] = by_loc["copy_rank"].agg(list)
     prov["copy_labels"] = by_loc["coralnet_id"].agg(list)
     prov["overridden"] = prov["hash"].isin(changed_hashes)
-    prov = prov[["hash", "kept_source_id", "kept_image_id", "row", "col", "coralnet_id", "kept_label", "change",
-                 "category", "has_unmapped", "review", "in_kept", "n_copies_at_loc", "origin_copy_rank",
-                 "copy_ranks", "copy_labels", "overridden"]].astype(
-        {"coralnet_id": "int32", "kept_label": "Int32", "origin_copy_rank": "int16"})
+    prov = prov[
+        [
+            "hash",
+            "kept_source_id",
+            "kept_image_id",
+            "row",
+            "col",
+            "coralnet_id",
+            "kept_label",
+            "change",
+            "category",
+            "has_unmapped",
+            "review",
+            "in_kept",
+            "n_copies_at_loc",
+            "origin_copy_rank",
+            "copy_ranks",
+            "copy_labels",
+            "overridden",
+        ]
+    ].astype({"coralnet_id": "int32", "kept_label": "Int32", "origin_copy_rank": "int16"})
     prov.to_parquet(args.out_dir / "point_provenance.parquet", index=False)
 
     # Manual review files.
     flagged = locs[locs["review"]]
     detail = pts[pts["loc"].isin(flagged.index)].copy()
-    detail["entry"] = (detail["source_id"].astype(str) + "/" + detail["image_id"] + ": "
-                       + detail["coralnet_id"].map(id2name).fillna("?"))
+    detail["entry"] = (
+        detail["source_id"].astype(str)
+        + "/"
+        + detail["image_id"]
+        + ": "
+        + detail["coralnet_id"].map(id2name).fillna("?")
+    )
     review = flagged.join(detail.groupby("loc")["entry"].agg(" | ".join).rename("labels_by_copy"))
     review["chosen_label"] = review["coralnet_id"].map(id2name)
     review["kept_copy_label"] = review["kept_label"].map(id2name)
-    review = review[["kept_source_id", "kept_image_id", "row", "col", "category", "has_unmapped", "chosen_label",
-                     "kept_copy_label", "labels_by_copy", "coralnet_id", "hash"]]
+    review = review[
+        [
+            "kept_source_id",
+            "kept_image_id",
+            "row",
+            "col",
+            "category",
+            "has_unmapped",
+            "chosen_label",
+            "kept_copy_label",
+            "labels_by_copy",
+            "coralnet_id",
+            "hash",
+        ]
+    ]
     review.to_csv(args.out_dir / "review_points.csv", index=False)
 
     per_img = locs.groupby(["kept_source_id", "kept_image_id"]).agg(
-        n_points=("review", "size"), n_flagged=("review", "sum"),
+        n_points=("review", "size"),
+        n_flagged=("review", "sum"),
         n_contradictory=("category", lambda s: int((s == "contradictory").sum())),
         n_compatible=("category", lambda s: int((s == "compatible").sum())),
         n_unknown=("category", lambda s: int((s == "unknown").sum())),
         n_unmapped=("has_unmapped", "sum"),
     )
     per_img = per_img[per_img["n_flagged"] > 0].reset_index()
-    copies = dup.groupby("hash").apply(
-        lambda g: ", ".join(f"{s}/{i}" for s, i in zip(g["source_id"], g["image_id"], strict=True)),
-        include_groups=False).rename("copies")
-    per_img = per_img.merge(kept.set_index(["kept_source_id", "kept_image_id"])["hash"].reset_index(),
-                            on=["kept_source_id", "kept_image_id"]).merge(copies, left_on="hash", right_index=True)
+    copies = (
+        dup.groupby("hash")
+        .apply(
+            lambda g: ", ".join(
+                f"{s}/{i}" for s, i in zip(g["source_id"], g["image_id"], strict=True)
+            ),
+            include_groups=False,
+        )
+        .rename("copies")
+    )
+    per_img = per_img.merge(
+        kept.set_index(["kept_source_id", "kept_image_id"])["hash"].reset_index(),
+        on=["kept_source_id", "kept_image_id"],
+    ).merge(copies, left_on="hash", right_index=True)
     per_img = per_img.sort_values("n_flagged", ascending=False)
     per_img.to_csv(args.out_dir / "review_images.csv", index=False)
 
@@ -293,40 +406,87 @@ def main() -> None:
     if args.near_dup_labels.exists():
         labels = load_labels(args.near_dup_labels)
         exact_kept = dict(zip(blacklist["image_id"], blacklist["kept_image_id"], strict=True))
-        labelled = {exact_kept.get(i, i) for lvl in (0, 1) for i in labels.index.get_level_values(lvl)}
-        alive = pd.concat([unique, dup[dup["keep"]]])[["source_id", "image_id", "hash", "image_s3_key"]]
+        labelled = {
+            exact_kept.get(i, i) for lvl in (0, 1) for i in labels.index.get_level_values(lvl)
+        }
+        alive = pd.concat([unique, dup[dup["keep"]]])[
+            ["source_id", "image_id", "hash", "image_s3_key"]
+        ]
         cand = alive[alive["image_id"].isin(labelled)]
-        dup_pts = locs[locs["kept_image_id"].isin(cand["image_id"])].rename(columns={"kept_image_id": "image_id"})
-        uniq_pts = ann[ann["image_id"].isin(set(cand["image_id"]) - set(dup_pts["image_id"]))].assign(
-            category="same_label", has_unmapped=False, in_kept=True, n_copies_at_loc=1)
-        cand_points = pd.concat([dup_pts, uniq_pts], ignore_index=True)[["image_id", *POINT_COLUMNS]]
-        nd = merge_near_duplicates(cand, cand_points, labels, exact_kept, root, resolve, workers=args.workers)
+        dup_pts = locs[locs["kept_image_id"].isin(cand["image_id"])].rename(
+            columns={"kept_image_id": "image_id"}
+        )
+        uniq_pts = ann[
+            ann["image_id"].isin(set(cand["image_id"]) - set(dup_pts["image_id"]))
+        ].assign(category="same_label", has_unmapped=False, in_kept=True, n_copies_at_loc=1)
+        cand_points = pd.concat([dup_pts, uniq_pts], ignore_index=True)[
+            ["image_id", *POINT_COLUMNS]
+        ]
+        nd = merge_near_duplicates(
+            cand, cand_points, labels, exact_kept, root, resolve, workers=args.workers
+        )
         if len(nd["blacklist"]):
             nd_blacklist, nd_overrides, nd_copies, nd_prov = (
-                nd[k] for k in ("blacklist", "overrides", "copies", "provenance"))
+                nd[k] for k in ("blacklist", "overrides", "copies", "provenance")
+            )
             blacklist = pd.concat([blacklist, nd_blacklist], ignore_index=True)
-            overrides = pd.concat([overrides[~overrides["image_id"].isin(nd_overrides["image_id"])], nd_overrides],
-                                  ignore_index=True)
+            overrides = pd.concat(
+                [overrides[~overrides["image_id"].isin(nd_overrides["image_id"])], nd_overrides],
+                ignore_index=True,
+            )
             group_images = set(nd_blacklist["image_id"]) | set(nd_overrides["image_id"])
-            n_points_after += len(nd_overrides) - int(cand_points["image_id"].isin(group_images).sum())
+            n_points_after += len(nd_overrides) - int(
+                cand_points["image_id"].isin(group_images).sum()
+            )
             nd_copies.to_parquet(args.out_dir / "near_dup_copies.parquet", index=False)
             nd_prov.to_parquet(args.out_dir / "near_dup_point_provenance.parquet", index=False)
 
             # Review file: locations where a removed copy's label met another label and was flagged.
-            ids = pd.concat([nd_copies[["group", "copy_rank", "source_id", "image_id"]],
-                             nd_prov.drop_duplicates("group")[["group", "source_id", "image_id"]].assign(copy_rank=0)])
-            name_of = {(g, r): f"{s}/{i}" for g, r, s, i in ids[["group", "copy_rank", "source_id", "image_id"]]
-                       .itertuples(index=False)}
+            ids = pd.concat(
+                [
+                    nd_copies[["group", "copy_rank", "source_id", "image_id"]],
+                    nd_prov.drop_duplicates("group")[["group", "source_id", "image_id"]].assign(
+                        copy_rank=0
+                    ),
+                ]
+            )
+            name_of = {
+                (g, r): f"{s}/{i}"
+                for g, r, s, i in ids[["group", "copy_rank", "source_id", "image_id"]].itertuples(
+                    index=False
+                )
+            }
             touched = nd_prov["copy_ranks"].map(lambda r: max(r) > 0 and len(r) > 1)
-            flagged = nd_prov[touched & (nd_prov["category"].isin(REVIEW_CATEGORIES) | nd_prov["has_unmapped"])].copy()
+            flagged = nd_prov[
+                touched & (nd_prov["category"].isin(REVIEW_CATEGORIES) | nd_prov["has_unmapped"])
+            ].copy()
             flagged["labels_by_copy"] = [
-                " | ".join(f"{name_of[g, r]}: {id2name.get(lid, '?')}" for r, lid in zip(rs, ls, strict=True))
-                for g, rs, ls in flagged[["group", "copy_ranks", "copy_labels"]].itertuples(index=False)]
+                " | ".join(
+                    f"{name_of[g, r]}: {id2name.get(lid, '?')}"
+                    for r, lid in zip(rs, ls, strict=True)
+                )
+                for g, rs, ls in flagged[["group", "copy_ranks", "copy_labels"]].itertuples(
+                    index=False
+                )
+            ]
             flagged["chosen_label"] = flagged["coralnet_id"].map(id2name)
             flagged["kept_copy_label"] = flagged["kept_label"].map(id2name)
-            flagged[["group", "source_id", "image_id", "row", "col", "category", "has_unmapped", "chosen_label",
-                     "kept_copy_label", "labels_by_copy", "coralnet_id", "hash"]].to_csv(
-                args.out_dir / "near_dup_review_points.csv", index=False)
+            flagged[
+                [
+                    "group",
+                    "source_id",
+                    "image_id",
+                    "row",
+                    "col",
+                    "category",
+                    "has_unmapped",
+                    "chosen_label",
+                    "kept_copy_label",
+                    "labels_by_copy",
+                    "coralnet_id",
+                    "hash",
+                ]
+            ].to_csv(args.out_dir / "near_dup_review_points.csv", index=False)
             nd_summary = {
                 "near_dup_labels": str(args.near_dup_labels),
                 "n_near_dup_groups": int(nd_copies["group"].nunique()),
@@ -336,14 +496,24 @@ def main() -> None:
                 "n_near_dup_points_joined": int(nd_copies["n_joined"].sum()),
                 "n_near_dup_points_outside": int(nd_copies["n_outside"].sum()),
                 "n_near_dup_points_dropped_no_transform": int(
-                    nd_copies.loc[nd_copies["transform"] == "failed", "n_points"].sum()),
+                    nd_copies.loc[nd_copies["transform"] == "failed", "n_points"].sum()
+                ),
                 "near_dup_changes": nd_prov["change"].value_counts().to_dict(),
                 "n_near_dup_review_points": len(flagged),
             }
     blacklist = blacklist.astype({"source_id": "int32", "kept_source_id": "int32"})
     blacklist.to_parquet(args.config_dir / "image_blacklist.parquet", index=False)
-    overrides = overrides.astype({"source_id": "int32", "row": "int16", "col": "int16", "coralnet_id": "int32",
-                                  "has_unmapped": bool, "in_kept": bool, "n_copies_at_loc": "int64"})
+    overrides = overrides.astype(
+        {
+            "source_id": "int32",
+            "row": "int16",
+            "col": "int16",
+            "coralnet_id": "int32",
+            "has_unmapped": bool,
+            "in_kept": bool,
+            "n_copies_at_loc": "int64",
+        }
+    )
     overrides.to_parquet(args.config_dir / "annotation_overrides.parquet", index=False)
 
     summary = {
@@ -361,7 +531,9 @@ def main() -> None:
         "n_points_after": n_points_after,
         "n_overridden_images": len(changed_hashes),
         "n_points_added_from_other_copies": int((~locs["in_kept"]).sum()),
-        "n_kept_labels_replaced": int((locs["in_kept"] & (locs["coralnet_id"] != locs["kept_label"])).sum()),
+        "n_kept_labels_replaced": int(
+            (locs["in_kept"] & (locs["coralnet_id"] != locs["kept_label"])).sum()
+        ),
         "locations_by_category": locs["category"].value_counts().to_dict(),
         "n_locations_with_unmapped": int(locs["has_unmapped"].sum()),
         "n_review_points": len(review),

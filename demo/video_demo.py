@@ -282,7 +282,9 @@ def render_video(
     if not writer.isOpened():
         raise ValueError(f"Could not open output video writer: {output_video}")
 
-    total_out_frames = max(1, (frame_count + frame_stride - 1) // frame_stride) if frame_count else None
+    total_out_frames = (
+        max(1, (frame_count + frame_stride - 1) // frame_stride) if frame_count else None
+    )
     frame_idx = 0
     written = 0
 

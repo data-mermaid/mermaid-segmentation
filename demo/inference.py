@@ -73,6 +73,7 @@ DEFAULT_INPUT_SIZE: tuple[int, int] = (512, 512)
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class DemoArtifacts:
     model_cfg: dict[str, Any]
