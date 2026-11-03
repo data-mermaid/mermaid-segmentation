@@ -3,7 +3,7 @@
 #       -t <ECR_URI>:training-<tag> -f docker/jobs/Dockerfile .
 #
 # The launcher selects the entrypoint script via CONTAINER_ENTRYPOINT_SCRIPT; the default,
-# scripts/sagemaker_train_entrypoint.py, runs nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py.
+# scripts/sagemaker_train_entrypoint.py, runs scripts/train.py.
 #
 # Base: nvidia/cuda 12.6 + cuDNN runtime. Python 3.12 and every package come from uv.lock via
 # `uv sync --locked`, the same stack Slurm runs (torch 2.7.1 from the lock bundles its CUDA 12.6
@@ -43,7 +43,6 @@ RUN uv sync --locked --no-dev --extra sagemaker --group research --no-install-pr
 COPY mermaidseg ./mermaidseg
 COPY scripts ./scripts
 COPY configs ./configs
-COPY nbs ./nbs
 RUN uv sync --locked --no-dev --extra sagemaker --group research
 
 # The image has no .git; the build passes the commit so sidecars record the mermaidseg SHA.

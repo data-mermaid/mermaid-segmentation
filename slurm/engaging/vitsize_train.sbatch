@@ -42,10 +42,10 @@ export WANDB_RUN_GROUP=cbm_vitsize_engaging
 SBATCH_PATH="$REPO/slurm/engaging/vitsize_train.sbatch"
 
 TRAIN_CMD=(
-    uv run python Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py
+    uv run python scripts/train.py
     --run-name "$RUN"
-    --training-config ../configs/training_config_cbm_vitsize.yaml
-    --model-config "../configs/model_config_cbm_dpt_lora_${SIZE}_256.yaml"
+    --training-config configs/training_config_cbm_vitsize.yaml
+    --model-config "configs/model_config_cbm_dpt_lora_${SIZE}_256.yaml"
     --per-pixel-loss-weight 0.5
     --per-image-loss-weight 0.5
     --preempt-checkpoint-every-steps "$PREEMPT_EVERY"

@@ -274,8 +274,8 @@ class ValidateTrainerConfigTest(unittest.TestCase):
 
     def test_missing_block_and_missing_file_are_errors(self):
         self.assertTrue(lt.validate_trainer_config(None))
-        errors = lt.validate_trainer_config({"config_model": "../configs/nope.yaml"})
-        self.assertEqual(errors, ["Config file not found: ../configs/nope.yaml"])
+        errors = lt.validate_trainer_config({"config_model": "configs/nope.yaml"})
+        self.assertEqual(errors, ["Config file not found: configs/nope.yaml"])
 
     def test_dry_run_on_example_makes_no_aws_call(self):
         with patch("launch_training.boto3") as mock_boto3:

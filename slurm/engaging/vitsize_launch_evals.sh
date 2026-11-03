@@ -39,7 +39,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-CKPT_GLOB="nbs/model_checkpoints/cbm_vitsize_*/model_step*"
+CKPT_GLOB="outputs/model_checkpoints/cbm_vitsize_*/model_step*"
 EVAL_SBATCH="slurm/engaging/vitsize_eval.sbatch"
 OUT_BASE="eval_out/vitsize"
 RESOLUTIONS=(256 512)

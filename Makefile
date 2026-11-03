@@ -70,7 +70,7 @@ sm-launch: sm-require-env
 # Bakes the commit into the image (no .git inside) so sidecars record the mermaidseg SHA.
 sm-build:
 	docker buildx build --platform linux/amd64 \
-		--build-arg GIT_SHA=$$(git rev-parse HEAD)$$(test -z "$$(git status --porcelain -- mermaidseg scripts configs nbs pyproject.toml uv.lock)" || echo -dirty) \
+		--build-arg GIT_SHA=$$(git rev-parse HEAD)$$(test -z "$$(git status --porcelain -- mermaidseg scripts configs pyproject.toml uv.lock)" || echo -dirty) \
 		-t mermaid-segmentation-jobs:training-latest -f docker/jobs/Dockerfile .
 
 sm-smoke:

@@ -23,10 +23,10 @@ job:
 #       input_mode: File
 
 # Consumed by scripts/sagemaker_train_entrypoint.py (NOT the launcher). Config paths are
-# relative to nbs/, where the trainer runs; keys under `overrides` become `--<key> <value>`.
+# relative to the repo root, where the trainer runs; keys under `overrides` become `--<key> <value>`.
 config:
-  config_training: ../configs/training_config_cbm_vitsize.yaml
-  config_model: ../configs/model_config_cbm_dpt_lora_vitl_256.yaml
+  config_training: configs/training_config_cbm_vitsize.yaml
+  config_model: configs/model_config_cbm_dpt_lora_vitl_256.yaml
   overrides:
     run-name: cbm_vitsize_vitl_sagemaker
     per-pixel-loss-weight: 0.5

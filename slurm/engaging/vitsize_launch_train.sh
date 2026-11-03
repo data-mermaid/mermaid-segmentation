@@ -46,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-CKPT_ROOT="nbs/model_checkpoints"
+CKPT_ROOT="outputs/model_checkpoints"
 
 has_ckpt() {
     local run="$1"

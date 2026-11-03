@@ -1,10 +1,10 @@
 """In-container entrypoint for a mermaid-segmentation TrainingJob.
 
 Reads the run YAML from /opt/ml/input/data/config/, applies any top-level `env:` keys,
-maps SageMaker's environment onto the trainer's, then runs from nbs/ the same trainer the
+maps SageMaker's environment onto the trainer's, then runs from the repo root the same trainer the
 Slurm jobs run (slurm/engaging/train_body.sh):
 
-    python Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py <flags from the run YAML>
+    python scripts/train.py <flags from the run YAML>
 
 Secrets: `WANDB_API_KEY_SECRET_ID` / `HF_TOKEN_SECRET_ID` name Secrets Manager secrets; their
 values are fetched here and exported as WANDB_API_KEY / HF_TOKEN, so the job's Environment never
@@ -62,7 +62,7 @@ SYNC_INTERVAL_S = 60
 # Outside /opt/ml/model and /opt/ml/output so SageMaker does not upload the mirror.
 LOCAL_CACHE_FALLBACK = "/opt/ml/cache"
 DEFAULT_RUN_NAME = "mermaid_base_run_dinov3_lora_dpt_all"
-DEFAULT_TRAINING_CONFIG = "../configs/training_config_cbm.yaml"
+DEFAULT_TRAINING_CONFIG = "configs/training_config_cbm.yaml"
 
 # Secret-id variable -> the variable the trainer reads.
 SECRET_ENV = {
@@ -71,15 +71,15 @@ SECRET_ENV = {
 }
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-NBS_DIR = REPO_ROOT / "nbs"
-TRAINER_SCRIPT = "Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py"
+REPO_DIR = REPO_ROOT
+TRAINER_SCRIPT = "scripts/train.py"
 
 # Override keys that start a run from a checkpoint; a resume replaces them with --checkpoint.
 _INIT_OVERRIDES = ("checkpoint", "init-checkpoint", "init-weights")
 # What resume.sh verify_ckpt requires before handing a checkpoint to the trainer.
 _RESUME_KEYS = ("model_state_dict", "optimizer_state_dict", "scheduler_state_dict")
 
-# Run-YAML `config:` keys that name config files (paths relative to nbs/) -> trainer flags.
+# Run-YAML `config:` keys that name config files (paths relative to the repo root) -> trainer flags.
 _CONFIG_FLAGS = {
     "config_model": "--model-config",
     "config_training": "--training-config",
@@ -220,7 +220,7 @@ def training_complete(
 def resume_args(
     seg: Mapping,
     checkpoint_root: Path,
-    nbs_dir: Path = NBS_DIR,
+    repo_dir: Path = REPO_DIR,
     load: Callable[[Path], dict] | None = None,
 ) -> list[str] | None:
     """Trainer args that resume the run from `checkpoint_root`; None when it already finished.
@@ -229,7 +229,7 @@ def resume_args(
     when checkpoints exist but none loads: restarting from step 0 would overwrite them.
     """
     load = load or _torch_load
-    epoch_iters, total_steps = training_steps(seg, nbs_dir)
+    epoch_iters, total_steps = training_steps(seg, repo_dir)
     directory = checkpoint_root / "model_checkpoints" / run_name(seg)
     if training_complete(directory, total_steps, epoch_iters, load=load):
         return None
@@ -249,10 +249,10 @@ def run_name(seg: Mapping) -> str:
     return str((seg.get("overrides") or {}).get("run-name", DEFAULT_RUN_NAME))
 
 
-def training_steps(seg: Mapping, nbs_dir: Path = NBS_DIR) -> tuple[int, int]:
+def training_steps(seg: Mapping, repo_dir: Path = REPO_DIR) -> tuple[int, int]:
     """(iterations per epoch, total optimizer steps), with the run's overrides applied."""
     training = yaml.safe_load(
-        (nbs_dir / seg.get("config_training", DEFAULT_TRAINING_CONFIG)).read_text()
+        (repo_dir / seg.get("config_training", DEFAULT_TRAINING_CONFIG)).read_text()
     )["training"]
     overrides = seg.get("overrides") or {}
     epoch_iters = int(
@@ -401,10 +401,10 @@ def build_trainer_argv(
     return argv + list(resume or [])
 
 
-def missing_config_files(seg: Mapping, nbs_dir: Path = NBS_DIR) -> list[str]:
-    """Config paths named in `seg` that do not exist (resolved from `nbs_dir`, as the trainer runs)."""
+def missing_config_files(seg: Mapping, repo_dir: Path = REPO_DIR) -> list[str]:
+    """Config paths named in `seg` that do not exist (resolved from `repo_dir`, as the trainer runs)."""
     return [
-        str(seg[key]) for key in _CONFIG_FLAGS if key in seg and not (nbs_dir / seg[key]).is_file()
+        str(seg[key]) for key in _CONFIG_FLAGS if key in seg and not (repo_dir / seg[key]).is_file()
     ]
 
 
@@ -529,7 +529,7 @@ def main():
     cmd = build_trainer_argv(seg)
     missing = missing_config_files(seg)
     if missing:
-        raise SystemExit(f"Config files not found under {NBS_DIR}: {missing}")
+        raise SystemExit(f"Config files not found under {REPO_DIR}: {missing}")
 
     # SageMaker creates this directory only when the job has a checkpoint config.
     checkpointing = CHECKPOINT_DIR.is_dir()
@@ -563,11 +563,11 @@ def main():
         log.info("Smoke test OK — skipping trainer invocation")
         return
 
-    log.info("Invoking (cwd=%s): %s", NBS_DIR, " ".join(cmd))
+    log.info("Invoking (cwd=%s): %s", REPO_DIR, " ".join(cmd))
     if not checkpointing:
-        sys.exit(subprocess.call(cmd, cwd=NBS_DIR))
+        sys.exit(subprocess.call(cmd, cwd=REPO_DIR))
 
-    sys.exit(run_mirrored(cmd, local_run_dir, synced_run_dir, cwd=NBS_DIR))
+    sys.exit(run_mirrored(cmd, local_run_dir, synced_run_dir, cwd=REPO_DIR))
 
 
 if __name__ == "__main__":

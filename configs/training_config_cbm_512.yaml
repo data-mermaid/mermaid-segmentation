@@ -2,7 +2,7 @@ training:
     training_mode: "concept-bottleneck"
     freeze_encoder: true
     detach_concepts: true
-    concept_mapping_path: "../configs/class_to_concepts.csv"
+    concept_mapping_path: "configs/class_to_concepts.csv"
     loss:
         type: ConceptBottleneckLoss
         lambda_weight: 1

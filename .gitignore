@@ -10,6 +10,10 @@ nbs/profiler_logs/*
 */wandb/*
 eval_out/*
 nbs_tmp/*
+outputs/
+wandb/
+mlruns/
+profiler_logs/
 scraping/source*.csv
 logs/*
 claude/*

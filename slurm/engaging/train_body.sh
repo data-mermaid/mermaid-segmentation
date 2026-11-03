@@ -19,7 +19,7 @@ export WANDB_RUN_ID="engaging-${RUN//[^A-Za-z0-9_-]/-}"
 export WANDB_RESUME=allow
 export WANDB_RUN_GROUP
 
-CKPT_DIR="$REPO/nbs/model_checkpoints/$RUN"
+CKPT_DIR="$REPO/outputs/model_checkpoints/$RUN"
 mkdir -p "$CKPT_DIR"
 
 # A wall-time handoff records the continuation's job id here. If that job is
@@ -68,14 +68,13 @@ on_usr1() {
 }
 trap on_usr1 USR1
 
-cd "$REPO/nbs"
 # --output-dir beats an inherited MERMAIDSEG_OUTPUT_DIR, so checkpoints land in $CKPT_DIR.
 # CKPT_ARGS is empty on a fresh run. Expand it only when it has elements so
 # bash 3.2 with set -u does not treat an empty array as unbound.
 if ((${#CKPT_ARGS[@]})); then
-    srun "${TRAIN_CMD[@]}" --output-dir "$REPO/nbs" "${CKPT_ARGS[@]}" &
+    srun "${TRAIN_CMD[@]}" --output-dir "$REPO/outputs" "${CKPT_ARGS[@]}" &
 else
-    srun "${TRAIN_CMD[@]}" --output-dir "$REPO/nbs" &
+    srun "${TRAIN_CMD[@]}" --output-dir "$REPO/outputs" &
 fi
 TRAIN_PID=$!
 set +e

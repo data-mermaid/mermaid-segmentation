@@ -16,14 +16,14 @@ IMAGE="mermaid-segmentation-jobs:${KIND}-smoke-local"
 
 echo "[smoke] Building ${IMAGE}..."
 docker buildx build --platform linux/amd64 --load \
-    --build-arg GIT_SHA="$(git rev-parse HEAD)$(test -z "$(git status --porcelain -- mermaidseg scripts configs nbs pyproject.toml uv.lock)" || echo -dirty)" \
+    --build-arg GIT_SHA="$(git rev-parse HEAD)$(test -z "$(git status --porcelain -- mermaidseg scripts configs pyproject.toml uv.lock)" || echo -dirty)" \
     -t "${IMAGE}" -f docker/jobs/Dockerfile .
 
 # 1. The trainer's import chain loads in *this* image. This catches version skew baked into the
 #    image (a transformers/torch pair that resolves on a laptop but not in the container).
 echo "[smoke] Checking the trainer import chain..."
-docker run --rm --workdir /opt/ml/code/nbs --entrypoint python "${IMAGE}" -c "
-import cbm_run_setup
+docker run --rm --workdir /opt/ml/code --entrypoint python "${IMAGE}" -c "
+import mermaidseg.run_setup
 from mermaidseg.datasets import build_datasets, setup_local_cache
 from mermaidseg.model.meta import MetaModel
 from mermaidseg.logger import Logger

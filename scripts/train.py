@@ -1,16 +1,8 @@
 import copy
 import os
+from pathlib import Path
 
 import torch
-from cbm_run_setup import (
-    logger_id2label,
-    resolve_concept_mapping_default,
-    resolve_output_dir,
-    run_checkpoint_dir,
-    sidecar_kwargs,
-    write_run_sidecar,
-)
-from nb_setup import check_env_wandb
 from torch.utils.data import ConcatDataset, DataLoader
 
 from mermaidseg.dataset_reconciliation import (
@@ -30,10 +22,21 @@ from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
 from mermaidseg.model.models import align_peft_checkpoint_state_dict
 from mermaidseg.model.train import train_model
+from mermaidseg.run_setup import (
+    check_env_wandb,
+    logger_id2label,
+    resolve_concept_mapping_default,
+    resolve_output_dir,
+    run_checkpoint_dir,
+    sidecar_kwargs,
+    write_run_sidecar,
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # LoRA + DPT concept-bottleneck entrypoint. The encoder comes from the model config
 # (ViT-L by default; the ViT-size sweep passes S/B/L/H+ configs).
-CHECKPOINT = None  # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt_all/model_epoch34" # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch13"
+CHECKPOINT = None  # "outputs/model_checkpoints/mermaid_base_run_dinov3_lora_dpt_all/model_epoch34" # "outputs/model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch13"
 
 
 def load_training_checkpoint(
@@ -119,17 +122,17 @@ PERSISTENT_WORKERS = NUM_WORKERS > 0
 parser = get_parser()
 parser.add_argument(
     "--training-config",
-    default="../configs/training_config_cbm.yaml",
+    default=str(REPO_ROOT / "configs" / "training_config_cbm.yaml"),
     help="path to the training config YAML",
 )
 parser.add_argument(
     "--model-config",
-    default="../configs/model_config_cbm_dpt_lora_vitl.yaml",
+    default=str(REPO_ROOT / "configs" / "model_config_cbm_dpt_lora_vitl.yaml"),
     help="path to the model config YAML (default: rank-16 ViT-L LoRA)",
 )
 parser.add_argument(
     "--data-config",
-    default="../configs/data_config_dedup.yaml",
+    default=str(REPO_ROOT / "configs" / "data_config_dedup.yaml"),
     help="path to the data config YAML (default: 256 crops, deduplicated CoralNet splits)",
 )
 parser.add_argument("--per-pixel-loss-weight", type=float, default=None)
@@ -183,7 +186,7 @@ parser.add_argument(
     default=None,
     help=(
         "checkpoint root; checkpoints go to <output-dir>/model_checkpoints/<run-name>. "
-        "Overrides MERMAIDSEG_OUTPUT_DIR (default: the current directory)"
+        "Overrides MERMAIDSEG_OUTPUT_DIR (default: <repo>/outputs)"
     ),
 )
 parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
@@ -209,7 +212,7 @@ cfg = setup_config(
         "data": args.data_config,
         "training": args.training_config,
         "model": args.model_config,
-        "logger": "../configs/logger_config.yaml",
+        "logger": str(REPO_ROOT / "configs" / "logger_config.yaml"),
     }
 )
 cfg = update_config_with_args(cfg, args)

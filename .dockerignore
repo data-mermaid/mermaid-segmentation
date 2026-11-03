@@ -1,9 +1,10 @@
 # Build context for docker/jobs/Dockerfile. Local environments, secrets, VCS metadata and run
-# outputs stay out, so `COPY nbs` never bakes in local checkpoints.
+# outputs stay out, so the build never bakes in local checkpoints.
 .git
 .venv
 .env
 logs
+outputs
 nbs/model_checkpoints
 **/model_checkpoints
 nbs/mlruns

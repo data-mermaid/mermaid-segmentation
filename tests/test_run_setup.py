@@ -1,24 +1,21 @@
-"""Tests for the helpers behind nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py."""
+"""Tests for mermaidseg.run_setup, the helpers behind scripts/train.py."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
 import albumentations as A
 import pytest
 
-_NBS = Path(__file__).resolve().parent.parent / "nbs"
-if str(_NBS) not in sys.path:
-    sys.path.insert(0, str(_NBS))
+import mermaidseg.run_setup as setup
 
-import cbm_run_setup as setup  # noqa: E402
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _val(width=256, height=256, mean=(0.1, 0.2, 0.3), std=(0.4, 0.5, 0.6)):
-    return A.Compose(
-        [A.Resize(height=height, width=width), A.Normalize(mean=mean, std=std)]
-    )
+    return A.Compose([A.Resize(height=height, width=width), A.Normalize(mean=mean, std=std)])
 
 
 class TestId2Label:
@@ -102,11 +99,16 @@ class TestOutputDir:
     def test_env_beats_default(self):
         assert setup.resolve_output_dir(None, {setup.OUTPUT_DIR_ENV: "env"}) == "env"
 
-    def test_default_is_cwd(self):
-        assert setup.resolve_output_dir(None, {}) == "."
+    def test_default_is_repo_outputs_independent_of_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        resolved = setup.resolve_output_dir(None, {})
+        assert resolved == str(REPO_ROOT / "outputs")
+        assert Path(resolved).is_absolute()
 
     def test_empty_env_is_unset(self):
-        assert setup.resolve_output_dir(None, {setup.OUTPUT_DIR_ENV: ""}) == "."
+        assert (
+            setup.resolve_output_dir(None, {setup.OUTPUT_DIR_ENV: ""}) == setup.DEFAULT_OUTPUT_DIR
+        )
 
     def test_run_checkpoint_dir_matches_logger_layout(self):
         assert setup.run_checkpoint_dir("out", "r1") == "out/model_checkpoints/r1"
@@ -119,7 +121,9 @@ class TestConceptMappingDefault:
         )
 
     def test_repo_default_exists(self):
-        assert Path(setup.resolve_concept_mapping_default({})).is_file()
+        resolved = Path(setup.resolve_concept_mapping_default({}))
+        assert resolved == REPO_ROOT / "configs" / "class_to_concepts.csv"
+        assert resolved.is_file()
 
 
 class TestValSpecStrictness:
@@ -162,3 +166,27 @@ class TestWriteRunSidecar:
         assert result is None
         assert "ConceptBottleneckDINOv3" in caplog.text
         assert not list(tmp_path.iterdir())
+
+
+class TestTrainerDefaults:
+    def test_default_config_paths_exist_and_are_repo_anchored(self):
+        source = (REPO_ROOT / "scripts" / "train.py").read_text()
+        for name in (
+            "training_config_cbm.yaml",
+            "model_config_cbm_dpt_lora_vitl.yaml",
+            "data_config_dedup.yaml",
+            "logger_config.yaml",
+        ):
+            assert (REPO_ROOT / "configs" / name).is_file(), name
+            assert f'str(REPO_ROOT / "configs" / "{name}")' in source, name
+
+    def test_trainer_help_runs_from_another_cwd(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "train.py"), "--help"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "--training-config" in result.stdout

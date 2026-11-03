@@ -34,9 +34,9 @@ job:
   max_runtime_hours: 48
 
 config:
-  config_data: ../configs/data_config_dedup.yaml
-  config_model: ../configs/model_config_cbm_dpt_lora_vitl_256.yaml
-  config_training: ../configs/training_config_cbm_vitsize.yaml
+  config_data: configs/data_config_dedup.yaml
+  config_model: configs/model_config_cbm_dpt_lora_vitl_256.yaml
+  config_training: configs/training_config_cbm_vitsize.yaml
 """
 
 LONG_COMMENT_HEADER = "\n".join(f"# {'x' * 76}" for _ in range(6))  # > 200 chars
@@ -81,7 +81,7 @@ def test_raises_on_multiple_run_yamls(tmp_path, monkeypatch):
         entrypoint._find_run_yaml()
 
 
-TRAINER = "Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py"
+TRAINER = "scripts/train.py"
 
 
 def test_env_maps_cache_channel_and_model_dir():
@@ -110,9 +110,9 @@ def test_env_does_not_override_values_already_set():
 
 def test_argv_runs_the_cbm_trainer_with_config_flags_and_overrides():
     seg = {
-        "config_model": "../configs/m.yaml",
-        "config_training": "../configs/t.yaml",
-        "config_data": "../configs/d.yaml",
+        "config_model": "configs/m.yaml",
+        "config_training": "configs/t.yaml",
+        "config_data": "configs/d.yaml",
         "overrides": {
             "run-name": "cbm_vitl",
             "per-pixel-loss-weight": 0.5,
@@ -127,11 +127,11 @@ def test_argv_runs_the_cbm_trainer_with_config_flags_and_overrides():
         "-u",
         TRAINER,
         "--model-config",
-        "../configs/m.yaml",
+        "configs/m.yaml",
         "--training-config",
-        "../configs/t.yaml",
+        "configs/t.yaml",
         "--data-config",
-        "../configs/d.yaml",
+        "configs/d.yaml",
         "--run-name",
         "cbm_vitl",
         "--per-pixel-loss-weight",
@@ -159,15 +159,15 @@ def test_argv_rejects_an_override_that_shadows_a_config_flag(key):
 
 
 def test_missing_config_files_reports_paths_that_do_not_exist(tmp_path):
-    nbs = tmp_path / "nbs"
-    nbs.mkdir()
-    (tmp_path / "configs").mkdir()
-    (tmp_path / "configs" / "t.yaml").write_text("x: 1\n")
-    seg = {"config_training": "../configs/t.yaml", "config_model": "../configs/nope.yaml"}
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "configs").mkdir()
+    (repo / "configs" / "t.yaml").write_text("x: 1\n")
+    seg = {"config_training": "configs/t.yaml", "config_model": "configs/nope.yaml"}
 
-    missing = entrypoint.missing_config_files(seg, nbs)
+    missing = entrypoint.missing_config_files(seg, repo)
 
-    assert missing == ["../configs/nope.yaml"]
+    assert missing == ["configs/nope.yaml"]
 
 
 class FakeSecretsClient:
@@ -303,7 +303,7 @@ def test_resume_args_pass_the_latest_checkpoint_of_the_named_run(tmp_path):
     ckpt_root = tmp_path / "ckpt"
     _touch(ckpt_root / "model_checkpoints" / "myrun", "model_step300", "model_step700")
     seg = {"config_training": str(cfg), "overrides": {"run-name": "myrun"}}
-    args = entrypoint.resume_args(seg, ckpt_root, nbs_dir=tmp_path, load=_loadable)
+    args = entrypoint.resume_args(seg, ckpt_root, repo_dir=tmp_path, load=_loadable)
 
     assert args == [
         "--checkpoint",
@@ -314,7 +314,7 @@ def test_resume_args_pass_the_latest_checkpoint_of_the_named_run(tmp_path):
 def test_resume_args_are_empty_with_no_checkpoint(tmp_path):
     cfg = _write_training_config(tmp_path)
     seg = {"config_training": str(cfg), "overrides": {"run-name": "myrun"}}
-    assert entrypoint.resume_args(seg, tmp_path / "ckpt", nbs_dir=tmp_path) == []
+    assert entrypoint.resume_args(seg, tmp_path / "ckpt", repo_dir=tmp_path) == []
 
 
 def test_resume_args_are_none_when_training_already_finished(tmp_path):
@@ -324,7 +324,7 @@ def test_resume_args_are_none_when_training_already_finished(tmp_path):
     seg = {"config_training": str(cfg), "overrides": {"run-name": "myrun"}}
     load = lambda path: {"global_step": 1000, "epoch_complete": True}  # noqa: E731
 
-    assert entrypoint.resume_args(seg, ckpt_root, nbs_dir=tmp_path, load=load) is None
+    assert entrypoint.resume_args(seg, ckpt_root, repo_dir=tmp_path, load=load) is None
 
 
 def _loadable(path):
@@ -349,7 +349,7 @@ def test_resume_args_fall_back_past_an_unloadable_newest_checkpoint(tmp_path):
             raise EOFError("truncated")
         return _loadable(path)
 
-    args = entrypoint.resume_args(seg, tmp_path / "ckpt", nbs_dir=tmp_path, load=load)
+    args = entrypoint.resume_args(seg, tmp_path / "ckpt", repo_dir=tmp_path, load=load)
 
     assert args == ["--checkpoint", str(run_dir / "model_step300")]
 
@@ -366,7 +366,7 @@ def test_resume_args_skip_a_checkpoint_without_scheduler_state(tmp_path):
             del ckpt["scheduler_state_dict"]
         return ckpt
 
-    args = entrypoint.resume_args(seg, tmp_path / "ckpt", nbs_dir=tmp_path, load=load)
+    args = entrypoint.resume_args(seg, tmp_path / "ckpt", repo_dir=tmp_path, load=load)
 
     assert args == ["--checkpoint", str(run_dir / "model_step300")]
 
@@ -380,7 +380,7 @@ def test_resume_args_abort_when_checkpoints_exist_but_none_loads(tmp_path):
         raise EOFError("truncated")
 
     with pytest.raises(SystemExit, match="no resumable checkpoint") as exc_info:
-        entrypoint.resume_args(seg, tmp_path / "ckpt", nbs_dir=tmp_path, load=broken)
+        entrypoint.resume_args(seg, tmp_path / "ckpt", repo_dir=tmp_path, load=broken)
 
     assert "model_step300" in str(exc_info.value)
     assert "model_step700" in str(exc_info.value)
@@ -396,7 +396,7 @@ def test_resume_args_count_steps_with_the_epochs_override(tmp_path):
     def load(path):
         return {**_loadable(path), "global_step": 1000, "epoch_complete": True}
 
-    args = entrypoint.resume_args(seg, tmp_path / "ckpt", nbs_dir=tmp_path, load=load)
+    args = entrypoint.resume_args(seg, tmp_path / "ckpt", repo_dir=tmp_path, load=load)
 
     assert args == ["--checkpoint", str(run_dir / "model_step1000")]
 
@@ -411,7 +411,7 @@ def test_resume_args_rank_epoch_files_with_the_iterations_override(tmp_path):
         "overrides": {"run-name": "myrun", "iterations-per-train-epoch": 100},
     }
 
-    args = entrypoint.resume_args(seg, tmp_path / "ckpt", nbs_dir=tmp_path, load=_loadable)
+    args = entrypoint.resume_args(seg, tmp_path / "ckpt", repo_dir=tmp_path, load=_loadable)
 
     assert args == ["--checkpoint", str(run_dir / "model_step500")]
 
@@ -570,8 +570,8 @@ def test_restore_then_sync_uploads_nothing_new(tmp_path):
 
 
 def test_main_resumes_from_the_restored_mirror_and_mirrors_the_result(tmp_path, monkeypatch):
-    nbs = tmp_path / "nbs"
-    nbs.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
     cfg = _write_training_config(tmp_path, epochs=1, iters=1000)
     config_dir, synced_root, local_root = tmp_path / "cfg", tmp_path / "ckpt", tmp_path / "local"
     config_dir.mkdir()
@@ -587,7 +587,7 @@ def test_main_resumes_from_the_restored_mirror_and_mirrors_the_result(tmp_path, 
         "CONFIG_DIR": config_dir,
         "CHECKPOINT_DIR": synced_root,
         "LOCAL_CHECKPOINT_DIR": local_root,
-        "NBS_DIR": nbs,
+        "REPO_DIR": repo,
     }.items():
         monkeypatch.setattr(entrypoint, name, value)
     monkeypatch.setattr(entrypoint, "_torch_load", _loadable)

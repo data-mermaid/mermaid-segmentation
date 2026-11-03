@@ -121,11 +121,21 @@ git clone git@github.com:data-mermaid/mermaid-segmentation.git ~/mermaid-segment
 cd ~/mermaid-segmentation
 # If slurm/engaging is not on the default branch, check that branch out first.
 
-ln -sfn ~/orcd/scratch/mermaidseg/checkpoints nbs/model_checkpoints
+mkdir -p outputs && ln -sfn ~/orcd/scratch/mermaidseg/checkpoints outputs/model_checkpoints
 ln -sfn ~/orcd/scratch/mermaidseg/eval_out eval_out
 export UV_CACHE_DIR="$HOME/orcd/scratch/mermaidseg/uv-cache"
 export UV_LINK_MODE=copy
 uv sync --locked
+```
+
+Clones made before the trainer moved to `scripts/train.py` have the old link at
+`nbs/model_checkpoints`. Replace it once so the new path resolves to the same
+scratch directory and existing runs still resume:
+
+```bash
+cd ~/mermaid-segmentation
+rm nbs/model_checkpoints          # removes the symlink only; the scratch data is untouched
+mkdir -p outputs && ln -sfn ~/orcd/scratch/mermaidseg/checkpoints outputs/model_checkpoints
 ```
 
 ## 5. wandb

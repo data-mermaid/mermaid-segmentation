@@ -1,4 +1,4 @@
-"""Small helpers for ``Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py``.
+"""Small helpers for ``scripts/train.py``.
 
 Kept apart from the script so they can be unit-tested without running training.
 """
@@ -17,12 +17,13 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR_ENV = "MERMAIDSEG_OUTPUT_DIR"
 CONCEPT_MAPPING_ENV = "MERMAIDSEG_CONCEPT_MAPPING_PATH"
-DEFAULT_OUTPUT_DIR = "."
-DEFAULT_CONCEPT_MAPPING = Path(__file__).resolve().parent.parent / "configs" / "class_to_concepts.csv"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUTPUT_DIR = str(_REPO_ROOT / "outputs")
+DEFAULT_CONCEPT_MAPPING = _REPO_ROOT / "configs" / "class_to_concepts.csv"
 
 
 def resolve_output_dir(flag: str | None, env: Mapping[str, str] | None = None) -> str:
-    """Checkpoint root: ``--output-dir`` wins, then ``MERMAIDSEG_OUTPUT_DIR``, then ``.``."""
+    """Checkpoint root: ``--output-dir`` wins, then ``MERMAIDSEG_OUTPUT_DIR``, then ``<repo>/outputs``."""
     env = os.environ if env is None else env
     return flag or env.get(OUTPUT_DIR_ENV) or DEFAULT_OUTPUT_DIR
 
@@ -141,3 +142,48 @@ def write_run_sidecar(
         )
         return None
     return write_sidecar(out_dir, **sidecar_kwargs)
+
+
+def check_wandb_auth() -> None:
+    """Confirm wandb is authenticated in this environment.
+
+    Checks for a resolved API key (via ``WANDB_API_KEY``, ``wandb login``, or
+    ``~/.netrc``) without starting a run. Call before
+    ``Logger(..., enable_wandb=True)`` so a missing login surfaces immediately
+    instead of mid-training.
+
+    Raises:
+        RuntimeError: If no wandb API key can be resolved.
+    """
+    import wandb
+
+    api_key = wandb.api.api_key
+    if not api_key:
+        raise RuntimeError(
+            "wandb is not authenticated. Run `wandb login` in a terminal, "
+            "set WANDB_API_KEY, or call wandb.login(key=...) in a notebook cell."
+        )
+    print(f"wandb authenticated (API key ...{api_key[-4:]})")
+
+
+def check_env_wandb() -> None:
+    """Validate the environment for wandb-backed, AWS-free training runs.
+
+    Prints the resolved wandb / HF / cache-offline settings and confirms wandb
+    authentication (via ``check_wandb_auth``). Use this at the top of training
+    scripts instead of ``check_env`` / ``check_aws_session`` when tracking to
+    wandb and reading data from the pre-warmed local cache.
+
+    Raises:
+        RuntimeError: If wandb cannot resolve an API key.
+    """
+    print(f"WANDB_PROJECT       : {os.getenv('WANDB_PROJECT', '(not set — using config default)')}")
+    print(f"WANDB_ENTITY        : {os.getenv('WANDB_ENTITY', '(not set — using default entity)')}")
+    print(f"WANDB_DIR           : {os.getenv('WANDB_DIR', '(not set — using ./wandb)')}")
+    print(f"HF_TOKEN            : {'set' if os.getenv('HF_TOKEN') else '(not set)'}")
+    offline = os.getenv("MERMAIDSEG_S3_OFFLINE")
+    print(
+        "MERMAIDSEG_S3_OFFLINE: "
+        + (f"{offline} (cache misses will raise)" if offline else "(not set — S3 fallback enabled)")
+    )
+    check_wandb_auth()

@@ -38,13 +38,25 @@ def test_build_context_excludes_local_artefacts_and_secrets():
     dockerignore = ROOT / ".dockerignore"
     assert dockerignore.is_file()
     patterns = {line.strip().rstrip("/") for line in dockerignore.read_text().splitlines()}
-    for required in (".venv", ".env", ".git", "nbs/model_checkpoints", "logs", "**/wandb"):
+    for required in (
+        ".venv",
+        ".env",
+        ".git",
+        "outputs",
+        "nbs/model_checkpoints",
+        "logs",
+        "**/wandb",
+    ):
         assert required in patterns, required
+
+
+def test_dockerfile_does_not_copy_nbs():
+    assert not re.search(r"^COPY nbs\b", INSTRUCTIONS, re.MULTILINE)
 
 
 def test_builds_record_a_dirty_tree_in_the_git_sha():
     # `git diff` misses untracked files, which COPY still bakes into the image.
-    status = "git status --porcelain -- mermaidseg scripts configs nbs pyproject.toml uv.lock"
+    status = "git status --porcelain -- mermaidseg scripts configs pyproject.toml uv.lock"
     for path in ("Makefile", "docker/jobs/local_smoke.sh"):
         text = (ROOT / path).read_text()
         assert status in text, path

@@ -2,7 +2,7 @@
 
 Container definition for SageMaker jobs launched by
 `scripts/launch_training.py` (the backup to Slurm; both run
-`nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py`). The launcher chooses the
+`scripts/train.py` from the repo root). The launcher chooses the
 in-container entrypoint via `CONTAINER_ENTRYPOINT_SCRIPT`.
 
 ## Files

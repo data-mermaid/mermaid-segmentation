@@ -1,7 +1,7 @@
 """Launch a mermaid-segmentation training run as a SageMaker TrainingJob.
 
 SageMaker is the backup path; Slurm (slurm/engaging/) is the default. Both run the same
-trainer, nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py, via the container entrypoint.
+trainer, scripts/train.py, via the container entrypoint.
 
 Reads a per-run YAML and submits CreateTrainingJob via sagemaker-core's
 TrainingJob. The run YAML is the single source of truth: the same
