@@ -126,6 +126,8 @@ class NestedLayersCBM(ConceptBottleneckDPTDINOv3):
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
+        if "layer" not in self.encoder._modules:
+            return  # transformers 5.x: the blocks are already at ``encoder.model.layer``
         layers = self.encoder._modules.pop("layer")
         holder = torch.nn.Module()
         holder.layer = layers

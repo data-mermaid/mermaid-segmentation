@@ -22,11 +22,15 @@ jobs:
         uses: tj-actions/changed-files@v46
         with:
           separator: "\n"
+          # Off so paths arrive unescaped; they reach `run` only through env vars.
+          safe_output: false
       - name: Detect changed YAML files
         id: changed-yaml
         uses: tj-actions/changed-files@v46
         with:
           separator: "\n"
+          # Off so paths arrive unescaped; they reach `run` only through env vars.
+          safe_output: false
           files: |
             **/*.yaml
             **/*.yml
@@ -35,6 +39,8 @@ jobs:
         uses: tj-actions/changed-files@v46
         with:
           separator: "\n"
+          # Off so paths arrive unescaped; they reach `run` only through env vars.
+          safe_output: false
           files: |
             **/*.py
             **/*.md
@@ -54,7 +60,14 @@ jobs:
         if: steps.changed-all.outputs.any_changed == 'true'
         env:
           FILES: ${{ steps.changed-all.outputs.all_changed_files }}
-        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 check-added-large-files --maxkb=1000 --enforce-all
+        # Exempt by exact path: the generated lockfile and the CoralNet tables kept as config data.
+        run: |
+          printf '%s\n' "$FILES" \
+            | { grep -vxF \
+                -e uv.lock \
+                -e configs/coralnet/annotation_overrides.parquet \
+                -e configs/coralnet/image_blacklist.parquet || true; } \
+            | xargs -r -d '\n' uvx --from pre-commit-hooks==6.0.0 check-added-large-files --maxkb=1000 --enforce-all
       - name: Check for case conflicts
         if: steps.changed-all.outputs.any_changed == 'true'
         env:
