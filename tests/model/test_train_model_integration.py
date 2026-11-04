@@ -187,17 +187,20 @@ def test_reduce_on_plateau_receives_validation_metric() -> None:
     assert scheduler.metric_history == [0.4, 0.5]
 
 
-def test_early_stopping_triggers_with_patience_and_min_delta() -> None:
+@pytest.mark.parametrize(
+    ("accuracies", "epochs_run"),
+    [
+        # 0.55 beats 0.50 by 0.05 < 0.1: no improvement, patience 1 stops after epoch 1.
+        ([0.5, 0.55, 0.9, 0.9, 0.9], 2),
+        # 0.65 beats 0.50 by 0.15 > 0.1: improvement; epoch 2 repeats it and stops there.
+        ([0.5, 0.65, 0.65, 0.9, 0.9], 3),
+    ],
+)
+def test_early_stopping_triggers_with_patience_and_min_delta(accuracies, epochs_run) -> None:
     meta = FakeMetaModel(
         epochs=5,
-        val_losses=[0.9, 0.9, 0.9, 0.9, 0.9],
-        val_metrics_seq=[
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-        ],
+        val_losses=[0.9] * 5,
+        val_metrics_seq=[{"accuracy": a} for a in accuracies],
     )
     metrics = train_model(
         meta_model=meta,
@@ -207,10 +210,10 @@ def test_early_stopping_triggers_with_patience_and_min_delta() -> None:
         metric_of_interest="accuracy",
         early_stopping=True,
         early_stopping_patience=1,
-        early_stopping_min_delta=0.0,
+        early_stopping_min_delta=0.1,
     )
 
-    assert len(metrics) == 2
+    assert len(metrics) == epochs_run
 
 
 def test_early_stopping_runs_final_test_eval_on_stop_epoch(monkeypatch) -> None:

@@ -30,7 +30,8 @@ def _standard_cfg(minimal_config, **training):
 def _images_labels(n: int) -> tuple[torch.Tensor, torch.Tensor]:
     generator = torch.Generator().manual_seed(0)
     images = torch.randn(n, 3, *IMAGE_SIZE, generator=generator)
-    labels = torch.ones(n, *IMAGE_SIZE, dtype=torch.long)
+    # Each pair of images shares a class, so consecutive microbatches differ in their labels.
+    labels = (torch.arange(n) // 2 % 3 + 1)[:, None, None].expand(n, *IMAGE_SIZE).contiguous()
     return images, labels
 
 
@@ -53,14 +54,16 @@ def test_restore_warmup_marks_old_checkpoints_complete():
     assert meta._warmup_iters_completed == 10
 
 
-def test_bf16_does_not_enable_grad_scaler(minimal_config, make_meta_model):
+def test_bf16_does_not_enable_grad_scaler(minimal_config, make_meta_model, monkeypatch):
+    # Pretend CUDA bf16 is available so the constructor reaches the scaler gate; the model
+    # itself stays on the CPU.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
     cfg = _standard_cfg(minimal_config, mixed_precision=True, mixed_precision_dtype="bfloat16")
     meta = make_meta_model(cfg, run_name="bf16-scaler")
+    assert meta.use_amp is True
     assert meta.amp_dtype == torch.bfloat16
     assert meta.scaler.is_enabled() is False
-    # The constructor gate, isolated from the CPU "no CUDA" short-circuit.
-    enabled = torch.amp.GradScaler(enabled=True and meta.amp_dtype == torch.float16)
-    assert enabled.is_enabled() is False
 
 
 def test_accumulate_loss_averages_in_fp32(minimal_config, make_meta_model):

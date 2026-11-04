@@ -277,14 +277,41 @@ def test_kl_spec_example_values():
     assert total.item() == pytest.approx(0.1248, abs=1e-4)
 
 
+# Per-pixel distributions (order, family, genus) with distinct KL terms.
+SPEC_DIST = (ORDER_PROBS, FAMILY_PROBS, GENUS_PROBS)  # (KL_ORDER_FAMILY, KL_FAMILY_GENUS)
+CONSISTENT_DIST = (  # coarse probabilities equal the summed children: both KL terms are 0
+    [0.8, 0.2],
+    [0.5, 0.3, 0.2],
+    [0.2, 0.2, 0.1, 0.2, 0.1, 0.1, 0.1],
+)
+# family->genus only: genus sums per family are [0.4, 0.4, 0.2]
+FAMILY_OFF_DIST = (
+    [0.85, 0.15],
+    FAMILY_PROBS,
+    [0.1, 0.2, 0.1, 0.2, 0.2, 0.1, 0.1],
+)
+KL_FAMILY_OFF = sum(p * math.log(p / q) for p, q in zip(FAMILY_PROBS, [0.4, 0.4, 0.2], strict=True))
+
+
+def _mixed_pixels(paths, dists):
+    """One pixel per (path, distribution) pair: labels from the path, logits from the dist."""
+    labels = torch.tensor([_concept_row(RANKS, path) for path in paths]).T[None, :, None, :]
+    logits = torch.cat([_logits(*dist) for dist in dists], dim=-1)
+    return logits, labels
+
+
 def test_kl_is_independent_of_labels():
-    loss = _coherence()
-    logits, labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C, VOID])
+    # Pixels with full, family-only, order-only and no labels, all with different KL values.
+    logits, labels = _mixed_pixels(
+        [PIXEL_A, PIXEL_B, PIXEL_C, VOID],
+        [SPEC_DIST, CONSISTENT_DIST, FAMILY_OFF_DIST, CONSISTENT_DIST],
+    )
     target_labels = torch.tensor([[[3, 1, 1, 0]]])
-    _, components = loss(logits, labels, target_labels)
-    per_pixel = [loss(logits[..., i : i + 1], *_no_labels())[0].item() for i in range(4)]
-    assert per_pixel == pytest.approx([KL_ORDER_FAMILY + KL_FAMILY_GENUS] * 4, abs=1e-6)
-    assert components["kl/family->genus"] == pytest.approx(KL_FAMILY_GENUS, abs=1e-6)
+    _, components = _coherence()(logits, labels, target_labels)
+    assert components["kl/order->family"] == pytest.approx(KL_ORDER_FAMILY / 4, abs=1e-6)
+    assert components["kl/family->genus"] == pytest.approx(
+        (KL_FAMILY_GENUS + KL_FAMILY_OFF) / 4, abs=1e-6
+    )
 
 
 def test_kl_void_pixels_contribute_nothing():
@@ -342,11 +369,16 @@ def test_kl_gradcheck_without_stop_grad():
 
 def test_kl_not_fine_labelled_selects_pixels_per_pair():
     loss = _coherence(pixels="not_fine_labelled")
-    logits, labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C])
+    # A: fully labelled; B: family labelled, no genus; C: order labelled only.
+    logits, labels = _mixed_pixels(
+        [PIXEL_A, PIXEL_B, PIXEL_C], [CONSISTENT_DIST, FAMILY_OFF_DIST, SPEC_DIST]
+    )
     _, components = loss(logits, labels, torch.zeros(1, 1, 3, dtype=torch.long))
     # order->family: only pixel C lacks a family label; family->genus: pixels B and C.
     assert components["kl/order->family"] == pytest.approx(KL_ORDER_FAMILY, abs=1e-6)
-    assert components["kl/family->genus"] == pytest.approx(KL_FAMILY_GENUS, abs=1e-6)
+    assert components["kl/family->genus"] == pytest.approx(
+        (KL_FAMILY_OFF + KL_FAMILY_GENUS) / 2, abs=1e-6
+    )
     _, components = loss(logits[..., :1], labels[..., :1], torch.zeros(1, 1, 1, dtype=torch.long))
     assert components["kl/order->family"] == 0.0
     assert components["kl/family->genus"] == 0.0
