@@ -22,6 +22,7 @@ from mermaidseg.datasets.coralnet.scraper.downloader import (
     _PAGINATED_EXPORT_THRESHOLD,
     CoralNetDownloader,
     _extract_page_image_ids,
+    build_export_form,
     export_prep_timeout_seconds,
     export_serve_timeout_seconds,
     half_open_batches,
@@ -854,3 +855,33 @@ def test_paginated_export_parallel_produces_correct_output(paginated_downloader,
     key = s3_io.object_key_annotation_csv("p", 1)
     df = pd.read_csv(io.BytesIO(fake_s3.objects[("b", key)]))
     assert set(df["Name"]) == {"a.jpg", "b.jpg", "c.jpg", "d.jpg"}
+
+
+_EXPORT_OPTIONAL_COLUMNS = ["annotator_info", "metadata_date_aux", "metadata_other"]
+
+
+def test_build_export_form_bulk_selects_all_images():
+    assert build_export_form("tok") == {
+        "csrfmiddlewaretoken": "tok",
+        "browse_action": "export_annotations",
+        "image_select_type": "all",
+        "label_format": "both",
+        "optional_columns": _EXPORT_OPTIONAL_COLUMNS,
+    }
+
+
+def test_build_export_form_per_page_selects_given_images():
+    assert build_export_form("tok", (5713072, 5713073)) == {
+        "csrfmiddlewaretoken": "tok",
+        "browse_action": "export_annotations",
+        "image_form_type": "search",
+        "image_select_type": "selected",
+        "image_id_list": "5713072_5713073",
+        "label_format": "both",
+        "optional_columns": _EXPORT_OPTIONAL_COLUMNS,
+    }
+
+
+def test_build_export_form_rejects_empty_image_ids():
+    with pytest.raises(ValueError, match="image_ids"):
+        build_export_form("t", [])

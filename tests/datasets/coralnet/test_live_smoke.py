@@ -9,16 +9,14 @@ pytest_plugins = ["tests.datasets.coralnet.conftest_live"]
 import io
 import re
 import urllib.parse
-from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 from bs4 import BeautifulSoup
 
 from mermaidseg.datasets.coralnet.scraper.downloader import (
-    CoralNetDownloader,
     _extract_page_image_ids,
-    _PageWorkItem,
+    build_export_form,
 )
 from mermaidseg.datasets.coralnet.scraper.parsers import (
     classifier_plot_data_from_source_html,
@@ -37,36 +35,6 @@ from tests.datasets.coralnet.coralnet_live import (
 PlaywrightError = pytest.importorskip("playwright.sync_api").Error
 
 pytestmark = pytest.mark.live
-
-
-def _production_export_form(csrf: str, image_ids: tuple[int, ...]) -> dict:
-    """Return the ``export_prep`` form the scraper itself builds for one browse page.
-
-    Runs :meth:`CoralNetDownloader._export_one_page` against a stub session and captures the
-    ``data`` it POSTs, so the live tests track the production form instead of a hand-copied dict.
-    """
-    browse_html = (
-        '<form id="export-annotations-prep-form">'
-        f'<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}"/></form>'
-    )
-    session = MagicMock()
-    session.get.side_effect = [MagicMock(text=browse_html), MagicMock(text="Name,Row,Column\n")]
-    session.post.return_value.json.return_value = {"session_data_timestamp": "t"}
-
-    dl = CoralNetDownloader("u", "p")
-    item = _PageWorkItem(
-        page_num=1,
-        page_url=f"{CORALNET_BASE}/source/0/browse/images/",
-        csrf=csrf,
-        images_on_page=len(image_ids),
-        image_ids=tuple(image_ids),
-    )
-    with (
-        patch.object(dl, "_get_export_session", return_value=session),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
-    ):
-        dl._export_one_page(0, item)
-    return session.post.call_args.kwargs["data"]
 
 
 def test_public_source_overview_structure(page, public_source_id, refresh_fixtures):
@@ -237,7 +205,7 @@ def test_paginated_annotation_export_produces_csv(page, public_source_id, coraln
         if not page_image_ids:
             return None
 
-        form = _production_export_form(csrf_token, tuple(page_image_ids))
+        form = build_export_form(csrf_token, page_image_ids)
         prep_resp = context.request.post(
             f"{CORALNET_BASE}/source/{public_source_id}/annotation/export_prep/",
             data=urllib.parse.urlencode(form, doseq=True),
@@ -405,7 +373,7 @@ def test_ui_export_post_body_matches_production_payload(
     assert set(ui_ids) == set(expected_image_ids), (
         f"image_id_list mismatch: UI sent {ui_ids}, page DOM has {expected_image_ids}"
     )
-    production_form = _production_export_form(fields["csrfmiddlewaretoken"], ui_ids)
+    production_form = build_export_form(fields["csrfmiddlewaretoken"], ui_ids)
     assert production_form["image_id_list"] == fields["image_id_list"], (
         "scraper encodes image_id_list differently from the UI: "
         f"{production_form['image_id_list']!r} vs {fields['image_id_list']!r}"

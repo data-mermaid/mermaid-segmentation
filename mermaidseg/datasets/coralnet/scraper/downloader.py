@@ -9,7 +9,7 @@ import re
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,6 +76,31 @@ def _extract_page_image_ids(soup: BeautifulSoup) -> tuple[int, ...]:
         if match:
             seen.setdefault(int(match.group(1)), None)
     return tuple(seen)
+
+
+def build_export_form(csrf: str, image_ids: Sequence[int] | None = None) -> dict:
+    """Return the form POSTed to ``/source/<id>/annotation/export_prep/``.
+
+    With ``image_ids=None`` this is the bulk form, which exports every image in the source
+    (``image_select_type=all``). With ids it is the per-page form, which exports only those images
+    (``image_select_type=selected`` plus underscore-joined ``image_id_list``) and carries
+    ``image_form_type=search``, the required discriminator of CoralNet's ``ImageSearchForm``.
+
+    Raises:
+        ValueError: ``image_ids`` is given but empty.
+    """
+    if image_ids is not None and len(image_ids) == 0:
+        raise ValueError("image_ids must be None (bulk) or contain at least one id")
+    form: dict = {"csrfmiddlewaretoken": csrf, "browse_action": "export_annotations"}
+    if image_ids is None:
+        form["image_select_type"] = "all"
+    else:
+        form["image_form_type"] = "search"
+        form["image_select_type"] = "selected"
+        form["image_id_list"] = "_".join(str(pk) for pk in image_ids)
+    form["label_format"] = "both"
+    form["optional_columns"] = ["annotator_info", "metadata_date_aux", "metadata_other"]
+    return form
 
 
 @dataclass(frozen=True)
@@ -424,17 +449,7 @@ class CoralNetDownloader:
             csrf = parse_export_annotations_prep_form(response.text)
             if not csrf:
                 raise RuntimeError("Could not find export annotations form / CSRF")
-            form_data = {
-                "csrfmiddlewaretoken": csrf,
-                "browse_action": "export_annotations",
-                "image_select_type": "all",
-                "label_format": "both",
-                "optional_columns": [
-                    "annotator_info",
-                    "metadata_date_aux",
-                    "metadata_other",
-                ],
-            }
+            form_data = build_export_form(csrf)
             export_request_url = f"{self.CORALNET_URL}/source/{source_id}/annotation/export_prep/"
             export_response = None
             for attempt in range(1, _EXPORT_PREP_RETRIES + 1):
@@ -730,19 +745,7 @@ class CoralNetDownloader:
                 raise RuntimeError(
                     f"Worker session: no CSRF on browse page {item.page_num} of source {source_id}"
                 )
-            form_data = {
-                "csrfmiddlewaretoken": csrf_input["value"],
-                "browse_action": "export_annotations",
-                "image_form_type": "search",
-                "image_select_type": "selected",
-                "image_id_list": "_".join(str(pk) for pk in item.image_ids),
-                "label_format": "both",
-                "optional_columns": [
-                    "annotator_info",
-                    "metadata_date_aux",
-                    "metadata_other",
-                ],
-            }
+            form_data = build_export_form(csrf_input["value"], item.image_ids)
             export_response = session.post(
                 export_url,
                 headers={"Referer": item.page_url},
