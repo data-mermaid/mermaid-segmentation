@@ -48,6 +48,10 @@ def test_class_confusion_pooling():
     assert pooled.total == 4
     # 3 correct out of 4
     assert abs(pooled.accuracy() - 3 / 4) < 1e-9
+    # The source accumulator is untouched: 2 points, 1 correct.
+    assert a.total == 2
+    assert abs(a.accuracy() - 1 / 2) < 1e-9
+    assert b.total == 2
 
 
 def test_taxonomic_rank_accuracy_all_vs_living():
@@ -135,6 +139,9 @@ def test_concept_layout_and_bundle():
     layout = ConceptLayout.from_concept_names(names)
     assert [r for r, _, _ in layout.taxo] == ["kingdom", "class"]
     assert layout.binary_names == ["live", "sand"]
+    assert layout.binary_indices == [4, 5]
+    # (rank, global channel indices, local index of the rank's "none" channel)
+    assert layout.taxo == [("kingdom", [0, 1], 1), ("class", [2, 3], 1)]
 
     bundle = MetricBundle.create(num_classes=4, layout=layout)
     gt_class = np.array([1, 2])
@@ -148,6 +155,21 @@ def test_concept_layout_and_bundle():
     assert d["num_points"] == 2
     assert abs(d["class_accuracy"] - 0.5) < 1e-9
     assert "kingdom" in d["taxonomic"]
+    # live: row0 True/0.9 -> TP, row1 False/0.2 -> TN.
+    # sand: row0 False/0.1 -> TN, row1 True/0.8 -> TP.
+    per = bundle.binary.per_concept()
+    assert (per["live"]["tp"], per["live"]["fp"], per["live"]["fn"], per["live"]["tn"]) == (
+        1,
+        0,
+        0,
+        1,
+    )
+    assert (per["sand"]["tp"], per["sand"]["fp"], per["sand"]["fn"], per["sand"]["tn"]) == (
+        1,
+        0,
+        0,
+        1,
+    )
 
 
 def test_concept_block_is_copied_per_concept_and_missing_raises():
@@ -204,3 +226,18 @@ def test_bundle_merge_pooling():
     assert pooled.num_points == 2
     assert pooled.class_confusion.total == 2
     assert pooled.taxo[0].total_all == 2
+    # live: a has one TP, b has one TN; the pool has both.
+    pooled_live = pooled.binary.per_concept()["live"]
+    assert (pooled_live["tp"], pooled_live["fp"], pooled_live["fn"], pooled_live["tn"]) == (
+        1,
+        0,
+        0,
+        1,
+    )
+    # The source bundle is unchanged and shares no binary state with the clone.
+    assert a.num_points == 1
+    assert a.class_confusion.total == 1
+    assert a.taxo[0].total_all == 1
+    a_live = a.binary.per_concept()["live"]
+    assert (a_live["tp"], a_live["tn"]) == (1, 0)
+    assert pooled.binary is not a.binary

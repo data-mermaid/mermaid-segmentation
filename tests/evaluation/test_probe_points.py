@@ -98,9 +98,11 @@ def test_exclude_disk_removes_radius_16_inclusive():
 
 def test_pick_points_quota_one_is_the_distance_transform_maximum():
     mask = np.zeros((30, 30), dtype=bool)
-    mask[5:25, 5:25] = True
+    # Rows and columns 5..23 form a 19x19 square; its unique distance-transform
+    # maximum is the center pixel (14, 14), 10 px from the background.
+    mask[5:24, 5:24] = True
     points = builder.pick_points_in_component(mask, quota=1, exclusion_radius=16)
-    assert points == [builder.interior_point(mask)]
+    assert points == [(14, 14)]
 
 
 def test_pick_points_quota_two_are_separated_by_the_disk():

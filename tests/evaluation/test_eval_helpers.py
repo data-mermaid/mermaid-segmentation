@@ -148,14 +148,12 @@ def test_benthos_spec_load_and_validate():
         _validate_spec(classes, ConceptResolver(["live", "sand"]))
 
 
-def test_benthos_scoring_and_nodata():
-    from mermaidseg.evaluation.benthos_eval import load_spec
-    from mermaidseg.evaluation.metrics import ClassConfusion
-    from mermaidseg.evaluation.predictor import CBMPredictor
-    from mermaidseg.model.concept_expr import ConceptResolver
-    from mermaidseg.model.concept_expr import evaluate as eval_expr
+def test_benthos_scoring_and_nodata(monkeypatch, tmp_path):
+    import pandas as pd
 
-    classes = load_spec(_BENTHOS_SPEC)
+    from mermaidseg.evaluation import benthos_eval
+    from mermaidseg.evaluation.predictor import CBMPredictor
+
     names = [
         "class__hexacorallia",
         "class__octocorallia",
@@ -169,26 +167,59 @@ def test_benthos_scoring_and_nodata():
         "phylum__chordata",
         "dark",
     ]
-    resolver = ConceptResolver(names)
-    k, hh = len(names), 4
-    cp = np.zeros((k, hh, hh), np.float32)
-    cp[names.index("class__hexacorallia"), :2, :2] = 0.9
-    cp[names.index("live"), :2, :2] = 0.9
-    cp[names.index("sand"), 2:, 2:] = 0.95
-    score = np.stack([eval_expr(e["expr"], cp, resolver) for e in classes], axis=0)
-    up = CBMPredictor.upsample_scores(torch.from_numpy(score), 8, 8)
-    pred = up.argmax(0).numpy()
+    # Tile 8x8. GT: Coral (id 1) in the top-left quadrant, Sand (id 2) in the
+    # bottom-right quadrant, the other 32 pixels are unlabeled (id 0).
+    mask = np.zeros((8, 8), np.int64)
+    mask[:4, :4] = 1
+    mask[4:, 4:] = 2
+    # Nodata (RGB == 0) at one Coral pixel and one Sand pixel.
+    rgb = np.full((8, 8, 3), 100, np.uint8)
+    rgb[0, 0] = 0
+    rgb[7, 7] = 0
 
-    gt = np.full((8, 8), -1, np.int64)
-    gt[:4, :4] = 0  # Hard Coral
-    gt[4:, 4:] = 2  # Sand
-    nodata = np.zeros((8, 8), bool)
-    nodata[0, 0] = True
-    valid = (gt >= 0) & (~nodata)
-    cm = ClassConfusion(len(classes), ignore_index=None)
-    cm.update(gt[valid], pred[valid])
-    assert int(valid.sum()) == 31
-    assert cm.accuracy() == 1.0
+    class FakeDataset:
+        _classes_global = {"unlabeled": 0, "Coral": 1, "Sand": 2}
+        df_images = pd.DataFrame({"site": ["S"], "image_id": ["t0"]})
+
+        def __init__(self, whitelist_sites, transform):
+            pass
+
+        def read_image(self, image_id, site):
+            return rgb
+
+        def read_label(self, image_id, site):
+            return mask
+
+    class FakePredictor:
+        device = torch.device("cpu")
+        upsample_scores = staticmethod(CBMPredictor.upsample_scores)
+
+        def preprocess(self, image):
+            return torch.zeros(3, 4, 4)
+
+        def forward_features(self, img_tensor, kind):
+            cp = torch.zeros(1, len(names), 4, 4)
+            cp[0, names.index("class__hexacorallia"), :2, :2] = 0.9
+            cp[0, names.index("live"), :2, :2] = 0.9
+            cp[0, names.index("sand"), 2:, 2:] = 0.95
+            return cp
+
+    monkeypatch.setattr(benthos_eval, "BenthosYuvalCoralsDataset", FakeDataset)
+    result = benthos_eval.evaluate_benthos(
+        predictor=FakePredictor(),
+        whitelist_sites=None,
+        concept_names=names,
+        spec_path=_BENTHOS_SPEC,
+        output_dir=tmp_path,
+    )
+    # 32 labeled pixels minus the 2 nodata ones; the 32 unlabeled pixels are not nodata.
+    assert result["site_stats"]["S"] == {
+        "tiles": 1,
+        "nodata_px": 2,
+        "unlabeled_or_oos_px": 32,
+        "valid_px": 30,
+    }
+    assert result["benthos"]["accuracy"] == 1.0
 
 
 def test_svm_folding_matches_sklearn():
