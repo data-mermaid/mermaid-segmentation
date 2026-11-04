@@ -114,6 +114,20 @@ def test_parse_image_status_zero_confirmed_like_public_source():
     assert c.total_images == 40
 
 
+def test_parse_image_status_counts_distinct_values_per_row():
+    """Each row label maps to its own field (all four counts differ)."""
+    html = (
+        '<h4>Image Status</h4><table class="detail_box_table">'
+        '<tr><td>Unclassified:</td><td><a href="#">1,001</a></td></tr>'
+        '<tr><td>Unconfirmed:</td><td><a href="#">22</a></td></tr>'
+        '<tr><td>Confirmed:</td><td><a href="#">303</a></td></tr>'
+        '<tr><td>Total images:</td><td><a href="#">1,326</a></td></tr>'
+        "</table>"
+    )
+    c = parse_image_status_counts(html)
+    assert (c.unclassified, c.unconfirmed, c.confirmed, c.total_images) == (1001, 22, 303, 1326)
+
+
 def test_classify_skip_no_confirmed_when_site_reports_zero_confirmed():
     probe = SourceProbe(
         5961,
@@ -167,12 +181,16 @@ def test_parse_export_annotations_prep_form():
 
 
 def test_classify_manual_when_website_fewer_than_s3_images():
+    """Website < S3 images is MANUAL_REVIEW even though the image-list CSV is missing.
+
+    Without the early guard, the missing CSV would fall through to FULL_REDOWNLOAD.
+    """
     probe = SourceProbe(1, "https://example/s1/", True, None, total_images_website=5)
     act = classify_remediation_action(
         probe=probe,
         has_images_folder=True,
         has_annotations_csv=True,
-        has_image_list_csv=True,
+        has_image_list_csv=False,
         n_images_s3=50,
         n_images_csv=50,
         n_annotations=100,
@@ -192,7 +210,7 @@ def test_classify_redownload_csv_when_annotation_read_failed_and_site_has_images
         has_image_list_csv=True,
         n_images_s3=5,
         n_images_csv=5,
-        n_annotations=0,
+        n_annotations=100,
         annotations_csv_read_failed=True,
         annotations_empty=False,
         image_count_match=False,
@@ -561,7 +579,7 @@ def test_paginated_export_three_pages_concatenated(paginated_downloader, fake_s3
     assert ("b", key) in fake_s3.objects
     df = pd.read_csv(io.BytesIO(fake_s3.objects[("b", key)]))
     assert len(df) == 5
-    assert set(df["Name"]) == {"a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"}
+    assert list(df["Name"]) == ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]
 
     expected_id_lists = {
         "csrf1": "_".join(str(i) for i in range(1000, 1020)),
@@ -716,11 +734,28 @@ def test_paginated_export_retries_on_page_timeout(paginated_downloader, fake_s3)
     assert set(df["Name"]) == {"a.jpg", "b.jpg"}
 
 
-def test_paginated_export_checkpoint_uploads_partial(paginated_downloader, fake_s3):
-    """With ``checkpoint_every_pages=2`` and 3 pages, the CSV is uploaded twice.
+@pytest.mark.parametrize(
+    ("every", "expected_uploads"),
+    [
+        (2, [["a.jpg", "b.jpg"], ["a.jpg", "b.jpg", "c.jpg"]]),
+        (
+            1,
+            [
+                ["a.jpg"],
+                ["a.jpg", "b.jpg"],
+                ["a.jpg", "b.jpg", "c.jpg"],
+                ["a.jpg", "b.jpg", "c.jpg"],
+            ],
+        ),
+    ],
+)
+def test_paginated_export_checkpoint_uploads_partial(
+    paginated_downloader, fake_s3, every, expected_uploads
+):
+    """Each checkpoint uploads the cumulative partial CSV; the final upload holds all 3 pages.
 
-    Once at the checkpoint after page 2, and again as the final upload after page 3. The final CSV
-    must contain rows from all three pages.
+    ``every=2``: checkpoint after page 2, then the final upload. ``every=1``: the checkpoints grow
+    cumulatively (not just the latest page), then the final upload.
     """
     dl = paginated_downloader
 
@@ -749,18 +784,26 @@ def test_paginated_export_checkpoint_uploads_partial(paginated_downloader, fake_
     ]
 
     key = s3_io.object_key_annotation_csv("p", 1)
+    uploaded_names: list[list[str]] = []
+    real_upload = downloader_mod._upload_csv
+
+    def snapshot_upload(s3_client, bucket, k, df):
+        real_upload(s3_client, bucket, k, df)
+        body = pd.read_csv(io.BytesIO(fake_s3.objects[(bucket, k)]))
+        uploaded_names.append(list(body["Name"]))
+
     with (
         _mock_paginated_session(dl, get=get_responses, post=post_responses),
-        patch.object(downloader_mod, "_upload_csv", wraps=downloader_mod._upload_csv) as upload_spy,
+        patch.object(downloader_mod, "_upload_csv", snapshot_upload),
     ):
         ok = dl.download_annotations_paginated(
-            1, "b", "p", page_workers=1, checkpoint_every_pages=2
+            1, "b", "p", page_workers=1, checkpoint_every_pages=every
         )
 
     assert ok is True
-    assert upload_spy.call_count == 2
+    assert uploaded_names == expected_uploads
     df = pd.read_csv(io.BytesIO(fake_s3.objects[("b", key)]))
-    assert set(df["Name"]) == {"a.jpg", "b.jpg", "c.jpg"}
+    assert list(df["Name"]) == ["a.jpg", "b.jpg", "c.jpg"]
 
 
 def test_paginated_export_parallel_produces_correct_output(paginated_downloader, fake_s3):

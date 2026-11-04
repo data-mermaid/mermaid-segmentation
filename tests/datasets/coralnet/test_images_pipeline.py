@@ -83,6 +83,36 @@ def test_build_images_deterministic_bytes(tmp_path, fake_s3, jpeg_small_bytes, j
     assert h1 == h2
 
 
+def test_write_parquet_deterministic_is_row_order_independent(
+    tmp_path, fake_s3, jpeg_small_bytes, jpeg_large_bytes
+):
+    ann_df = _seed_images(
+        fake_s3,
+        bucket="b",
+        prefix="p",
+        jpeg_small_bytes=jpeg_small_bytes,
+        jpeg_large_bytes=jpeg_large_bytes,
+    )
+    img_df = build_images(ann_df, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
+    reversed_df = img_df.iloc[::-1].reset_index(drop=True)
+    assert list(reversed_df["image_id"]) != list(img_df["image_id"])
+
+    p1 = tmp_path / "a.parquet"
+    p2 = tmp_path / "b.parquet"
+    write_parquet_deterministic(img_df, p1, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY)
+    write_parquet_deterministic(reversed_df, p2, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY)
+
+    assert p1.read_bytes() == p2.read_bytes()
+    written = pq.read_table(p2).to_pandas()
+    assert list(zip(written["source_id"], written["image_id"], strict=True)) == [
+        (1, "100"),
+        (1, "101"),
+        (1, "102"),
+        (2, "200"),
+        (2, "201"),
+    ]
+
+
 def test_build_images_handles_missing_objects(fake_s3, jpeg_small_bytes):
     ann_df = pd.DataFrame(
         {
@@ -124,5 +154,6 @@ def test_build_images_round_trips_through_parquet(
 def test_next_part_index_uses_filename_max_not_loaded_count(tmp_path):
     cp = tmp_path / "images.parquet"
     (tmp_path / "images.part_00000.parquet").write_bytes(b"not parquet")
-    (tmp_path / "images.part_00001.parquet").write_bytes(b"not parquet")
-    assert _next_part_index(cp) == 2
+    (tmp_path / "images.part_00003.parquet").write_bytes(b"not parquet")
+    # Two files exist, but the highest index is 3, so the next index is 4 (not the file count).
+    assert _next_part_index(cp) == 4

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
+from PIL import Image
 
 from mermaidseg.datasets.coralnet.etl.jpeg_header import (
     _find_sof_dimensions,
@@ -42,10 +45,22 @@ def test_read_jpeg_size_from_s3_not_found(fake_s3):
 
 def test_read_jpeg_size_from_s3_corrupt(fake_s3, jpeg_corrupt_bytes):
     fake_s3.put("b", "corrupt.jpg", jpeg_corrupt_bytes)
-    w, h, _, status = read_jpeg_size_from_s3(fake_s3, "b", "corrupt.jpg")
-    # PIL also rejects it; final status is "corrupt".
-    assert w is None and h is None
-    assert status in {"corrupt", "pil_fallback"}
+    w, h, size, status = read_jpeg_size_from_s3(fake_s3, "b", "corrupt.jpg")
+    # Neither the SOF scan nor PIL can read it, so the final status is "corrupt".
+    assert (w, h) == (None, None)
+    assert size == len(jpeg_corrupt_bytes)
+    assert status == "corrupt"
+
+
+def test_read_jpeg_size_from_s3_pil_fallback_recovers_dimensions(fake_s3):
+    """A non-JPEG image has no SOF marker, so PIL supplies the dimensions."""
+    buf = io.BytesIO()
+    Image.new("RGB", (30, 20)).save(buf, format="PNG")
+    png = buf.getvalue()
+    fake_s3.put("b", "img.png", png)
+    w, h, size, status = read_jpeg_size_from_s3(fake_s3, "b", "img.png")
+    assert (w, h, size) == (30, 20, len(png))
+    assert status == "pil_fallback"
 
 
 @pytest.mark.parametrize("marker", [0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC9])

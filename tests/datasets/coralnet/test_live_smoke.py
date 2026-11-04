@@ -9,12 +9,17 @@ pytest_plugins = ["tests.datasets.coralnet.conftest_live"]
 import io
 import re
 import urllib.parse
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 from bs4 import BeautifulSoup
 
-from mermaidseg.datasets.coralnet.scraper.downloader import _extract_page_image_ids
+from mermaidseg.datasets.coralnet.scraper.downloader import (
+    CoralNetDownloader,
+    _extract_page_image_ids,
+    _PageWorkItem,
+)
 from mermaidseg.datasets.coralnet.scraper.parsers import (
     classifier_plot_data_from_source_html,
     parse_export_annotations_prep_form,
@@ -32,6 +37,36 @@ from tests.datasets.coralnet.coralnet_live import (
 PlaywrightError = pytest.importorskip("playwright.sync_api").Error
 
 pytestmark = pytest.mark.live
+
+
+def _production_export_form(csrf: str, image_ids: tuple[int, ...]) -> dict:
+    """Return the ``export_prep`` form the scraper itself builds for one browse page.
+
+    Runs :meth:`CoralNetDownloader._export_one_page` against a stub session and captures the
+    ``data`` it POSTs, so the live tests track the production form instead of a hand-copied dict.
+    """
+    browse_html = (
+        '<form id="export-annotations-prep-form">'
+        f'<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}"/></form>'
+    )
+    session = MagicMock()
+    session.get.side_effect = [MagicMock(text=browse_html), MagicMock(text="Name,Row,Column\n")]
+    session.post.return_value.json.return_value = {"session_data_timestamp": "t"}
+
+    dl = CoralNetDownloader("u", "p")
+    item = _PageWorkItem(
+        page_num=1,
+        page_url=f"{CORALNET_BASE}/source/0/browse/images/",
+        csrf=csrf,
+        images_on_page=len(image_ids),
+        image_ids=tuple(image_ids),
+    )
+    with (
+        patch.object(dl, "_get_export_session", return_value=session),
+        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+    ):
+        dl._export_one_page(0, item)
+    return session.post.call_args.kwargs["data"]
 
 
 def test_public_source_overview_structure(page, public_source_id, refresh_fixtures):
@@ -88,14 +123,23 @@ def test_browse_images_pagination(page, public_source_id):
         pytest.skip(reason)
 
     wrappers = page.locator("span.thumb_wrapper")
-    assert wrappers.count() >= 1
+    thumbs_on_first_page = wrappers.count()
+    assert thumbs_on_first_page >= 1
 
     first = wrappers.first
     assert first.locator("a").count() >= 1
     assert first.locator("img").count() >= 1
     assert first.locator("img").first.get_attribute("title")
 
-    if wrappers.count() > 20:
+    # More images in the source than on this page means the page must link to the next one.
+    overview = page.goto(
+        f"{CORALNET_BASE}/source/{public_source_id}/", wait_until="domcontentloaded"
+    )
+    if skip_reason_for_source_response(overview, public_source_id):
+        return
+    total_images = parse_total_images_from_source_html(page.content())
+    if total_images > thumbs_on_first_page:
+        page.goto(url, wait_until="domcontentloaded")
         assert page.locator('a[title="Next page"]').count() >= 1
 
 
@@ -193,17 +237,14 @@ def test_paginated_annotation_export_produces_csv(page, public_source_id, coraln
         if not page_image_ids:
             return None
 
+        form = _production_export_form(csrf_token, tuple(page_image_ids))
         prep_resp = context.request.post(
             f"{CORALNET_BASE}/source/{public_source_id}/annotation/export_prep/",
-            form={
-                "csrfmiddlewaretoken": csrf_token,
-                "browse_action": "export_annotations",
-                "image_form_type": "search",
-                "image_select_type": "selected",
-                "image_id_list": "_".join(str(pk) for pk in page_image_ids),
-                "label_format": "both",
+            data=urllib.parse.urlencode(form, doseq=True),
+            headers={
+                "Referer": browse_url,
+                "Content-Type": "application/x-www-form-urlencoded",
             },
-            headers={"Referer": browse_url},
             timeout=180_000,
         )
         if not prep_resp.ok:
@@ -364,6 +405,13 @@ def test_ui_export_post_body_matches_production_payload(
     assert set(ui_ids) == set(expected_image_ids), (
         f"image_id_list mismatch: UI sent {ui_ids}, page DOM has {expected_image_ids}"
     )
+    production_form = _production_export_form(fields["csrfmiddlewaretoken"], ui_ids)
+    assert production_form["image_id_list"] == fields["image_id_list"], (
+        "scraper encodes image_id_list differently from the UI: "
+        f"{production_form['image_id_list']!r} vs {fields['image_id_list']!r}"
+    )
+    missing = set(fields) - set(production_form)
+    assert not missing, f"UI sends fields the scraper's export_prep form lacks: {sorted(missing)}"
     assert len(ui_ids) <= 100, (
         f"CoralNet validator caps image_id_list at 100, UI sent {len(ui_ids)}"
     )

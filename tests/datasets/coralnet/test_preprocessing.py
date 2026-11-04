@@ -57,13 +57,15 @@ def test_resize_image_no_resize_if_below_threshold():
     img = Image.new("RGB", (800, 400), color="blue")
     img_bytes = BytesIO()
     img.save(img_bytes, format="JPEG")
+    original = img_bytes.getvalue()
     img_bytes.seek(0)
 
     resized_bytes = resize_image_to_threshold(img_bytes, threshold=1024)
+
+    # The fast path returns the input bytes untouched (no lossy re-encode).
+    assert resized_bytes.getvalue() == original
     resized_img = Image.open(resized_bytes)
     resized_img.load()
-
-    # Should return original dimensions
     assert resized_img.width == 800
     assert resized_img.height == 400
 
@@ -332,6 +334,66 @@ def test_combine_checkpoints_most_recent_timestamp_wins_regardless_of_order():
     assert by_id.loc["b", "status"] == "skipped"
 
 
+def test_combine_checkpoints_timestamp_beats_run_order_when_both_timestamped():
+    """Between two timestamped rows the newer timestamp wins, even from the earlier checkpoint."""
+    ckpt_first = pd.DataFrame(
+        {
+            "source_id": [1],
+            "image_id": ["a"],
+            "status": ["completed"],
+            "resize_timestamp": [datetime(2026, 6, 3)],
+            "error_message": [None],
+            "skip_reason": [None],
+        }
+    )
+    ckpt_second = pd.DataFrame(
+        {
+            "source_id": [1],
+            "image_id": ["a"],
+            "status": ["failed"],
+            "resize_timestamp": [datetime(2026, 5, 1)],
+            "error_message": ["stale"],
+            "skip_reason": [None],
+        }
+    )
+
+    combined = combine_checkpoints(
+        [_checkpoint_table(ckpt_first), _checkpoint_table(ckpt_second)]
+    ).to_pandas()
+
+    assert len(combined) == 1
+    assert combined.iloc[0]["status"] == "completed"
+    assert combined.iloc[0]["resize_timestamp"] == datetime(2026, 6, 3)
+
+
+@pytest.mark.parametrize("first_is_x", [True, False])
+def test_combine_checkpoints_ties_go_to_the_later_checkpoint(first_is_x):
+    """Equal timestamps (image ``t``) and all-null timestamps (image ``n``) both resolve to
+    the later checkpoint in the input sequence."""
+    ts = datetime(2026, 6, 3)
+
+    def ckpt(tag: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "source_id": [1, 1],
+                "image_id": ["t", "n"],
+                "status": [f"completed_{tag}", f"skipped_{tag}"],
+                "resize_timestamp": [ts, None],
+                "error_message": [None, None],
+                "skip_reason": [None, None],
+            }
+        )
+
+    order = ["x", "y"] if first_is_x else ["y", "x"]
+    combined = combine_checkpoints([_checkpoint_table(ckpt(tag)) for tag in order]).to_pandas()
+
+    later = order[-1]
+    by_id = combined.set_index("image_id")
+    assert len(combined) == 2
+    assert by_id.loc["t", "status"] == f"completed_{later}"
+    assert by_id.loc["n", "status"] == f"skipped_{later}"
+
+
 def test_combine_checkpoints_empty_raises():
     """An empty checkpoint list is a caller error, not a silent empty table."""
     with pytest.raises(ValueError, match="at least one checkpoint"):
@@ -445,15 +507,48 @@ def test_manifest_dimensions_and_keys_match_resize():
     assert manifest.loc["below", "resized_width"] == 800
     assert manifest.loc["below", "resized_height"] == 600
 
-    # Above threshold: same int() truncation the resize worker applies
-    scale = threshold / 3000
-    assert manifest.loc["above", "resized_width"] == int(3000 * scale)
-    assert manifest.loc["above", "resized_height"] == int(2000 * scale)
+    # Above threshold: 3000x2000 scales by 2048/3000 to 2048 x 1365.33, truncated to 1365
+    assert manifest.loc["above", "resized_width"] == 2048
+    assert manifest.loc["above", "resized_height"] == 1365
 
     # Keys match the single source of truth in resize.py
     assert manifest.loc["above", "output_s3_key"] == _resized_s3_key_for(
         "etl-outputs/coralnet", 2, "above", threshold
     )
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "exp_width", "exp_height"),
+    [
+        # Scale is exactly 0.5; 3001 * 0.5 = 1500.5 must truncate to 1500, never round to 1501.
+        (4096, 3001, 2048, 1500),
+        # Portrait: the longest edge is the height, so the scale comes from it, not the width.
+        (3001, 4096, 1500, 2048),
+    ],
+)
+def test_manifest_truncates_and_uses_longest_edge(width, height, exp_width, exp_height):
+    images = pd.DataFrame(
+        {"source_id": [1], "image_id": ["x"], "width": [width], "height": [height]}
+    )
+    checkpoint_df = pd.DataFrame(
+        {
+            "source_id": [1],
+            "image_id": ["x"],
+            "status": ["completed"],
+            "resize_timestamp": [datetime(2026, 6, 3)],
+            "error_message": [None],
+        }
+    )
+
+    manifest = build_manifest(
+        images=ibis.memtable(images),
+        checkpoint=ibis.memtable(checkpoint_df),
+        output_prefix="out",
+        threshold=2048,
+    ).to_pandas()
+
+    assert manifest.loc[0, "resized_width"] == exp_width
+    assert manifest.loc[0, "resized_height"] == exp_height
 
 
 # ============================================================================
@@ -497,26 +592,43 @@ def test_inspect_image_grayscale(grayscale_jpeg_bytes):
 
 
 def test_inspect_image_truncated(truncated_jpeg_bytes):
-    """Inspection fails for truncated JPEG."""
+    """Inspection reports a truncated JPEG as TRUNCATED, not a generic decode failure."""
     image_bytes = BytesIO(truncated_jpeg_bytes)
     inspection = inspect_image(image_bytes)
 
     assert inspection.is_valid is False
-    assert inspection.issue_type in (IssueType.TRUNCATED, IssueType.DECODE_FAILURE)
+    assert inspection.issue_type == IssueType.TRUNCATED
     assert inspection.error_message is not None
 
 
-def test_inspect_image_corrupted_header(corrupted_header_jpeg_bytes):
-    """Inspection fails for JPEG with corrupted header."""
+def test_inspect_image_unreadable_header_is_unsupported_format(corrupted_header_jpeg_bytes):
+    """A JPEG whose header bytes are overwritten is unidentifiable to PIL."""
     image_bytes = BytesIO(corrupted_header_jpeg_bytes)
     inspection = inspect_image(image_bytes)
 
     assert inspection.is_valid is False
-    assert inspection.issue_type in (
-        IssueType.DECODE_FAILURE,
-        IssueType.CORRUPTED_HEADER,
-        IssueType.UNSUPPORTED_FORMAT,
-    )
+    assert inspection.issue_type == IssueType.UNSUPPORTED_FORMAT
+
+
+@pytest.mark.parametrize("message", ["bad Huffman code", "invalid JPEG marker"])
+def test_inspect_image_decoder_bad_or_invalid_error_is_corrupted_header(
+    monkeypatch, valid_rgb_jpeg_bytes, message
+):
+    """A decoder OSError mentioning "bad"/"invalid" (and not truncation) is CORRUPTED_HEADER.
+
+    PIL's own decoders rarely emit such messages for synthetic files, so the error is injected.
+    """
+
+    def raise_os_error(*args, **kwargs):
+        raise OSError(message)
+
+    monkeypatch.setattr(Image, "open", raise_os_error)
+
+    inspection = inspect_image(BytesIO(valid_rgb_jpeg_bytes))
+
+    assert inspection.is_valid is False
+    assert inspection.issue_type == IssueType.CORRUPTED_HEADER
+    assert message in inspection.error_message
 
 
 def test_inspect_image_empty(empty_bytes):
