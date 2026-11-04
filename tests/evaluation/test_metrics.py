@@ -202,6 +202,8 @@ def test_binary_concept_score_separates_true_false_not_given_and_unannotated():
     assert got["precision"] == 0.5
     assert got["recall"] == 0.5
     assert abs(got["accuracy"] - 0.5) < 1e-9
+    # F1 = 2tp / (2tp + fp + fn) = 2 / 4
+    assert got["f1"] == 0.5
 
 
 def test_binary_concept_score_rejects_unannotated_marked_true():
@@ -241,3 +243,73 @@ def test_bundle_merge_pooling():
     a_live = a.binary.per_concept()["live"]
     assert (a_live["tp"], a_live["tn"]) == (1, 0)
     assert pooled.binary is not a.binary
+
+
+def test_class_confusion_drops_out_of_range_gt_and_clips_out_of_range_pred():
+    cm = ClassConfusion(num_classes=3)
+    # GT 3 and -1 are dropped; pred 5 clips to 2 and pred -2 clips to 0.
+    cm.update(np.array([1, 3, -1, 2, 2]), np.array([1, 1, 1, 5, -2]))
+    assert cm.cm.tolist() == [[0, 0, 0], [0, 1, 0], [1, 0, 1]]
+
+
+def test_class_confusion_miou_skips_nan_classes_and_the_ignore_class():
+    cm = ClassConfusion(num_classes=3, ignore_index=0)
+    # A prediction of 0 gives class 0 IoU 0.0; class 2 is never seen, so its IoU is NaN.
+    # Class 1: tp=1, union=2 -> 0.5. Only class 1 is averaged.
+    cm.update(np.array([1, 1]), np.array([1, 0]))
+    assert cm.miou() == 0.5
+
+
+def test_class_confusion_to_dict():
+    cm = ClassConfusion(num_classes=4, ignore_index=0)
+    # Rows: gt 1 -> [pred 1, pred 0]; gt 2 -> [pred 1]. Class 3 is never seen.
+    cm.update(np.array([1, 1, 2]), np.array([1, 0, 1]))
+    assert cm.to_dict(id2name={1: "a", 2: "b"}) == {
+        "accuracy": 1 / 3,
+        "miou": 1 / 6,
+        "total": 3,
+        "per_class": {
+            "a": {"iou": 1 / 3, "gt_count": 2, "pred_count": 2, "tp": 1},
+            "b": {"iou": 0.0, "gt_count": 1, "pred_count": 0, "tp": 0},
+            "3": {"iou": None, "gt_count": 0, "pred_count": 0, "tp": 0},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("prob", "tp", "fn"),
+    [(0.5, 0, 1), (np.nextafter(0.5, 1.0), 1, 0)],
+    ids=["exactly-threshold-is-negative", "just-above-is-positive"],
+)
+def test_binary_concept_stats_threshold_boundary(prob, tp, fn):
+    stats = BinaryConceptStats(["c"], [0])
+    stats.update(np.array([[2]]), np.array([[prob]], dtype=np.float64))
+    per = stats.per_concept()["c"]
+    assert (per["tp"], per["fn"]) == (tp, fn)
+
+
+@pytest.mark.parametrize("code", [-1, 3])
+def test_binary_concept_stats_rejects_codes_outside_0_to_2(code):
+    stats = BinaryConceptStats(["c"], [0])
+    with pytest.raises(ValueError, match=rf"found \[{code}\]"):
+        stats.update(np.array([[1], [code]]), np.array([[0.9], [0.9]]))
+
+
+@pytest.mark.parametrize(
+    ("second_codes", "expected"),
+    [
+        # Second concept is all true negatives: accuracy 1.0, F1 undefined and skipped.
+        ([1, 1], {"macro_accuracy": 0.75, "macro_f1": 2 / 3, "n_concepts_scored": 2}),
+        # Second concept is all not_given: skipped from both macros.
+        ([0, 0], {"macro_accuracy": 0.5, "macro_f1": 2 / 3, "n_concepts_scored": 1}),
+    ],
+    ids=["true-negatives-only", "not-given-only"],
+)
+def test_binary_concept_stats_macro_scores_skip_undefined_concepts(second_codes, expected):
+    stats = BinaryConceptStats(["a", "b"], [0, 1])
+    # Concept a: code 2 / 0.9 -> TP, code 1 / 0.9 -> FP: accuracy 0.5, F1 2/3.
+    gt = np.array([[2, second_codes[0]], [1, second_codes[1]]])
+    probs = np.array([[0.9, 0.1], [0.9, 0.1]])
+    stats.update(gt, probs)
+    got = stats.to_dict()
+    assert {key: got[key] for key in expected} == pytest.approx(expected)
