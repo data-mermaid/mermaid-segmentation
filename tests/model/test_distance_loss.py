@@ -175,3 +175,41 @@ def test_real_class_to_concepts():
     assert distance[g("acropora"), g("none")] == 1
     # Coral Turbinaria is a sibling of Tubastraea (Dendrophylliidae).
     assert distance[g("turbinaria_coral"), g("tubastraea")] == pytest.approx(1 / 6)
+
+
+def test_image_without_labelled_pixels_is_skipped():
+    # Image 0: a full and a family-only label; image 1: void everywhere, with different logits.
+    logits, labels = _pixels([ACROPORA, FAMILY_ONLY])
+    void_logits, void_labels = _pixels([VOID, VOID])
+    logits = torch.cat([logits, torch.randn_like(void_logits)])
+    labels = torch.cat([labels, void_labels])
+    _, components = _loss()(logits, labels)
+    assert components["distance/order"] == pytest.approx(ORDER_EXPECTED, abs=1e-6)
+    assert components["distance/family"] == pytest.approx(FAMILY_EXPECTED, abs=1e-6)
+    assert components["distance/genus"] == pytest.approx(GENUS_EXPECTED, abs=1e-6)
+
+
+def _order_probs(alcyonacea: float | None) -> list[float]:
+    order = [0.5, 0.5] if alcyonacea is None else [1 - alcyonacea, alcyonacea]
+    return order + FAMILY_PROBS + GENUS_PROBS
+
+
+def test_per_pixel_and_per_image_means_mix():
+    # Order-only scleractinia pixels; the order loss of a pixel is p(alcyonacea).
+    # Image 0 [0.1] (+ two void pixels), image 1 [0.2, 0.4, 0.6].
+    order_only = ("scleractinia", None, None)
+    images = [[0.1, None, None], [0.2, 0.4, 0.6]]
+    logits, labels = [], []
+    for image in images:
+        pixels = [
+            _pixels([order_only if p is not None else VOID], probs=_order_probs(p)) for p in image
+        ]
+        logits.append(torch.cat([x for x, _ in pixels], dim=-1))
+        labels.append(torch.cat([y for _, y in pixels], dim=-1))
+    loss = _loss(per_pixel_loss_weight=0.25, per_image_loss_weight=0.5)
+    _, components = loss(torch.cat(logits), torch.cat(labels))
+    per_pixel_mean = (0.1 + 0.2 + 0.4 + 0.6) / 4
+    per_image_mean = (0.1 + 0.4) / 2
+    assert components["distance/order"] == pytest.approx(
+        0.25 * per_pixel_mean + 0.5 * per_image_mean, abs=1e-6
+    )

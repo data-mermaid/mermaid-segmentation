@@ -387,3 +387,39 @@ def test_train_model_logs_test_time_taken_to_logger(monkeypatch) -> None:
     assert "test/time_taken" in logged_keys, (
         f"test/time_taken not logged (got {sorted(logged_keys)})"
     )
+
+
+@pytest.mark.parametrize(("warmup_done", "expected_lr"), [(5, 0.1), (10, 0.05)])
+def test_epoch_scheduler_waits_for_warmup(warmup_done, expected_lr) -> None:
+    meta = FakeMetaModel(epochs=1)
+    meta.scheduler = torch.optim.lr_scheduler.StepLR(meta.optimizer, step_size=1, gamma=0.5)
+    meta.warmup_iters = 10
+    meta._warmup_iters_completed = warmup_done
+    train_model(meta_model=meta, evaluator=object(), train_loader=_tiny_loader())
+    assert meta.optimizer.param_groups[0]["lr"] == pytest.approx(expected_lr)
+
+
+def test_enforce_load_failure_rate_allows_rate_equal_to_threshold() -> None:
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=5))
+    _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
+
+
+def test_enforce_load_failure_rate_noop_for_empty_dataset() -> None:
+    loader = _FakeLoader(_FakeFailDataset(size=0, failures=3))
+    _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
+
+
+def test_min_delta_applies_to_minimised_metric() -> None:
+    # 0.95 is below the best 1.0 by less than 0.1, so only 0.85 counts as an improvement.
+    meta = FakeMetaModel(epochs=3, val_losses=[1.0, 0.95, 0.85])
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="loss",
+        early_stopping_min_delta=0.1,
+    )
+    assert logger.checkpoint_epochs == [0, 2]

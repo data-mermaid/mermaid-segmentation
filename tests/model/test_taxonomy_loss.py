@@ -475,3 +475,104 @@ def test_taxonomic_loss_disabled_is_zero():
 
     assert loss.partial_loss is None and loss.coherence_loss is None
     assert total.item() == 0.0 and components == {}
+
+
+# --- reduction, anneal and TaxonomicLoss forwarding --------------------------------------------
+
+
+def test_uniform_anneal_midpoint_mixes_halfway():
+    loss = TaxonomicPartialLoss(
+        _tree(RANKS, PATHS), _concept_value2id(RANKS), uniform_anneal_iters=10
+    )
+    total, _ = loss(*_pixels([PIXEL_B]), step=5)
+    marginal = -math.log(0.85) - math.log(0.37)
+    uniform = (
+        -(math.log(0.60) + math.log(0.25)) / 2 - sum(math.log(p) for p in (0.08, 0.25, 0.04)) / 3
+    )
+    assert total.item() == pytest.approx((marginal + uniform) / 2, abs=1e-5)
+
+
+def test_partial_loss_skips_image_without_labelled_pixels(partial_loss):
+    # Image 0: a full and an order-only label; image 1: void everywhere, with different logits.
+    logits, labels = _pixels([PIXEL_A, PIXEL_C])
+    void_logits, void_labels = _pixels([VOID, VOID])
+    logits = torch.cat([logits, torch.randn_like(void_logits)])
+    labels = torch.cat([labels, void_labels])
+    total, components = partial_loss(logits, labels)
+    assert components["partial/order->family"] == pytest.approx(-math.log(0.85), abs=1e-5)
+    assert components["partial/family->genus"] == pytest.approx(-math.log(0.37), abs=1e-5)
+    assert total.item() == pytest.approx(-math.log(0.85) - math.log(0.37), abs=1e-5)
+
+
+def _order_only_batch(alcyoniidae_probs: list[list[float]]):
+    """Order-labelled scleractinia pixels; each family head puts ``a`` on alcyoniidae.
+
+    The order->family loss of a pixel is ``-log(1 - a)``; ``None`` is a void pixel.
+    """
+    logits, labels = [], []
+    for image in alcyoniidae_probs:
+        family = [[(1 - a) / 2, (1 - a) / 2, a] if a is not None else FAMILY_PROBS for a in image]
+        logits.append(torch.cat([_logits(ORDER_PROBS, f, GENUS_PROBS) for f in family], dim=-1))
+        paths = [PIXEL_C if a is not None else VOID for a in image]
+        labels.append(torch.tensor([_concept_row(RANKS, p) for p in paths]).T[None, :, None, :])
+    return torch.cat(logits), torch.cat(labels)
+
+
+def test_partial_loss_mixes_per_pixel_and_per_image_means():
+    # Pixel losses: image 0 [ln 2], image 1 [ln 4, ln 8, ln 8].
+    # Per-pixel mean 9/4 ln 2, per-image mean (1 + 8/3) / 2 ln 2 = 11/6 ln 2.
+    logits, labels = _order_only_batch([[0.5, None, None], [0.75, 0.875, 0.875]])
+    loss = TaxonomicPartialLoss(
+        _tree(RANKS, PATHS),
+        _concept_value2id(RANKS),
+        per_pixel_loss_weight=0.25,
+        per_image_loss_weight=0.5,
+    )
+    total, _ = loss(logits, labels)
+    assert total.item() == pytest.approx((0.25 * 9 / 4 + 0.5 * 11 / 6) * math.log(2), abs=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "inner", "attribute", "expected"),
+    [
+        ({"partial_uniform_anneal_iters": 7}, "partial_loss", "uniform_anneal_iters", 7),
+        ({"per_pixel_loss_weight": 0.3}, "partial_loss", "per_pixel_loss_weight", 0.3),
+        ({"per_image_loss_weight": 0.6}, "partial_loss", "per_image_loss_weight", 0.6),
+        ({"kl_stop_grad_coarse": False}, "coherence_loss", "stop_grad_coarse", False),
+        ({"kl_pixels": "not_fine_labelled"}, "coherence_loss", "pixels", "not_fine_labelled"),
+        ({"kl_boundary_px": 3}, "coherence_loss", "boundary_px", 3),
+    ],
+)
+def test_taxonomic_loss_forwards_kwargs_to_inner_losses(kwargs, inner, attribute, expected):
+    loss = TaxonomicLoss(
+        _tree(RANKS, PATHS), _concept_value2id(RANKS), partial_weight=1.0, kl_weight=1.0, **kwargs
+    )
+    assert getattr(getattr(loss, inner), attribute) == expected
+
+
+def test_taxonomic_loss_passes_step_to_partial_loss():
+    loss = TaxonomicLoss(
+        _tree(RANKS, PATHS),
+        _concept_value2id(RANKS),
+        partial_weight=1.0,
+        partial_uniform_anneal_iters=10,
+    )
+    _, components = loss(*_pixels([PIXEL_B]), torch.zeros(1, 1, 1, dtype=torch.long), step=10)
+    marginal = -math.log(0.85) - math.log(0.37)
+    assert components["partial"] == pytest.approx(marginal / len(TAXONOMIC_CONCEPTS), abs=1e-5)
+
+
+def test_kl_boundary_px_excludes_boundary_pixels():
+    # Labels 1 and 2 are 3 px apart, so with width 2 only pixels 2 and 3 are in the band.
+    target_labels = torch.tensor([[[1, 1, 0, 0, 2, 2, 2, 0, 0, 0]]])
+    dists = [SPEC_DIST, CONSISTENT_DIST, FAMILY_OFF_DIST, FAMILY_OFF_DIST] + [CONSISTENT_DIST] * 6
+    logits = torch.cat([_logits(*dist) for dist in dists], dim=-1)
+    concept_labels, _ = _no_labels(10)
+    _, components = _coherence(boundary_px=2)(logits, concept_labels, target_labels)
+    assert components["kl/order->family"] == pytest.approx(KL_ORDER_FAMILY / 8, abs=1e-6)
+    assert components["kl/family->genus"] == pytest.approx(KL_FAMILY_GENUS / 8, abs=1e-6)
+
+
+def test_coherence_rejects_unknown_pixel_mode():
+    with pytest.raises(ValueError, match="kl_pixels must be one of"):
+        _coherence(pixels="labelled")
