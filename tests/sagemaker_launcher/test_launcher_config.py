@@ -36,6 +36,20 @@ class JobConfigTest(unittest.TestCase):
             )
         self.assertIn("image", str(ctx.exception))
 
+    def test_volume_and_runtime_reject_zero(self):
+        base = {
+            "name_prefix": "x",
+            "image": "i",
+            "entrypoint": "e",
+            "instance_type": "t",
+            "volume_gb": 1,
+            "max_runtime_hours": 1,
+        }
+        for field in ("volume_gb", "max_runtime_hours"):
+            with self.subTest(field=field), self.assertRaises(ValidationError) as ctx:
+                JobConfig(**{**base, field: 0})
+            self.assertIn(field, str(ctx.exception))
+
 
 class ShardConfigTest(unittest.TestCase):
     def test_workers_must_be_positive(self):

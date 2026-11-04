@@ -265,6 +265,12 @@ def test_training_complete_needs_a_final_step_file_that_finished(tmp_path):
     assert not entrypoint.training_complete(tmp_path, 1000, 1000, load=midway)
 
 
+def test_training_complete_is_false_for_an_epoch_boundary_before_the_final_step(tmp_path):
+    _touch(tmp_path, "model_step1000")
+    early = lambda path: {"global_step": 999, "epoch_complete": True}  # noqa: E731
+    assert not entrypoint.training_complete(tmp_path, 1000, 1000, load=early)
+
+
 def test_training_complete_accepts_the_last_epoch_file(tmp_path):
     _touch(tmp_path, "model_epoch0")
     done = lambda path: {"global_step": 1000, "epoch_complete": True}  # noqa: E731

@@ -229,9 +229,33 @@ class MainSubmitTest(unittest.TestCase):
         self.assertEqual(kwargs["training_job_name"], "mermaidseg-test-rid")
         self.assertEqual(kwargs["region"], lt.REGION)
         self.assertIs(kwargs["session"], mock_boto3.Session.return_value)
-        mock_boto3.client.return_value.upload_file.assert_called_once()
         mock_create.return_value.wait.assert_called_once_with(logs=True)
         self.assertEqual(region_at_wait, [lt.REGION])
+
+    def test_uploads_run_config_under_the_run_id_prefix(self):
+        _, mock_boto3, _ = self._run_main([])
+        mock_boto3.client.return_value.upload_file.assert_called_once()
+        _, bucket, key = mock_boto3.client.return_value.upload_file.call_args.args
+        self.assertEqual(bucket, lt.STAGING_BUCKET)
+        self.assertEqual(key, "runs/mermaidseg-test-rid/config/run.yaml")
+
+    def test_cli_values_are_forwarded_into_the_job_request(self):
+        mock_create, _, _ = self._run_main(
+            [
+                "--hf-token-secret-id",
+                "hf-secret",
+                "--wandb-secret-id",
+                "wb-secret",
+                "--role-arn",
+                "arn:aws:iam::1:role/custom",
+            ]
+        )
+        kwargs = mock_create.call_args.kwargs
+        env = kwargs["environment"]
+        self.assertEqual(env["MLFLOW_TRACKING_URI"], "arn:mlflow")
+        self.assertEqual(env["HF_TOKEN_SECRET_ID"], "hf-secret")
+        self.assertEqual(env["WANDB_API_KEY_SECRET_ID"], "wb-secret")
+        self.assertEqual(kwargs["role_arn"], "arn:aws:iam::1:role/custom")
 
     def test_no_wait_submits_without_waiting(self):
         mock_create, _, _ = self._run_main(["--no-wait"])

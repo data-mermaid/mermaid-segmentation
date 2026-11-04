@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -27,7 +29,6 @@ class TestId2Label:
         }
 
     def test_matches_logger_inputs(self):
-        # The script passes this same function's result to Logger(id2label=...).
         target = {1: "coral"}
         kwargs = setup.sidecar_kwargs(
             run_name="r",
@@ -37,8 +38,7 @@ class TestId2Label:
             concept_value2id={},
             val_transforms=[_val()],
         )
-        assert kwargs["id2label"] == setup.logger_id2label(target)
-        assert kwargs["id2label"][0] == "ignore"
+        assert kwargs["id2label"] == {0: "ignore", 1: "coral"}
 
 
 class TestSidecarSizes:
@@ -110,8 +110,18 @@ class TestOutputDir:
             setup.resolve_output_dir(None, {setup.OUTPUT_DIR_ENV: ""}) == setup.DEFAULT_OUTPUT_DIR
         )
 
-    def test_run_checkpoint_dir_matches_logger_layout(self):
-        assert setup.run_checkpoint_dir("out", "r1") == "out/model_checkpoints/r1"
+    def test_run_checkpoint_dir_matches_logger_layout(self, tmp_mlflow_uri, tmp_path, make_config):
+        from mermaidseg.logger import Logger
+
+        from .conftest import FakeMetaModel
+
+        meta = FakeMetaModel(run_name="r1")
+        lgr = Logger(
+            config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
+        )
+        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
+        (written,) = (tmp_path / "model_checkpoints").glob("*/*")
+        assert Path(setup.run_checkpoint_dir(str(tmp_path), "r1")) == written.parent
 
 
 class TestConceptMappingDefault:
@@ -169,16 +179,30 @@ class TestWriteRunSidecar:
 
 
 class TestTrainerDefaults:
-    def test_default_config_paths_exist_and_are_repo_anchored(self):
-        source = (REPO_ROOT / "scripts" / "train.py").read_text()
-        for name in (
-            "training_config_cbm.yaml",
-            "model_config_cbm_dpt_lora_vitl.yaml",
-            "data_config_dedup.yaml",
-            "logger_config.yaml",
-        ):
-            assert (REPO_ROOT / "configs" / name).is_file(), name
-            assert f'str(REPO_ROOT / "configs" / "{name}")' in source, name
+    def test_default_config_paths_exist_and_are_repo_anchored(self, monkeypatch):
+        """Run the script up to ``parse_args`` and read the defaults argparse holds."""
+
+        class _Parsed(Exception):
+            pass
+
+        def _capture(self, *args, **kwargs):
+            raise _Parsed(self)
+
+        monkeypatch.setattr(argparse.ArgumentParser, "parse_args", _capture)
+        monkeypatch.setattr(sys, "argv", ["train.py"])
+        with pytest.raises(_Parsed) as raised:
+            runpy.run_path(str(REPO_ROOT / "scripts" / "train.py"), run_name="train_under_test")
+        parser = raised.value.args[0]
+
+        expected = {
+            "training_config": "training_config_cbm.yaml",
+            "model_config": "model_config_cbm_dpt_lora_vitl.yaml",
+            "data_config": "data_config_dedup.yaml",
+        }
+        for dest, name in expected.items():
+            default = Path(parser.get_default(dest))
+            assert default == REPO_ROOT / "configs" / name, dest
+            assert default.is_file(), dest
 
     def test_trainer_help_runs_from_another_cwd(self, tmp_path):
         result = subprocess.run(

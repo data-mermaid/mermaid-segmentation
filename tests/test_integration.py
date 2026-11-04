@@ -20,7 +20,37 @@ import torch
 from mermaidseg.io import ConfigDict
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
 
-from .conftest import NUM_CLASSES
+from .conftest import IMAGE_SIZE, NUM_CLASSES
+
+# Zero encoder features and a zero-weight head leave the logits equal to the head bias, so every
+# pixel predicts class 2 with logits [0, 0, 5, 0].
+_BIAS = [0.0, 0.0, 5.0, 0.0]
+
+
+def _constant_prediction_setup(meta):
+    """Pin the head to a constant prediction and build a batch whose masks are hand-countable.
+
+    Each 56x56 mask has four 28x28 quadrants: class 2, class 1, class 3, and class 0 (ignored).
+    """
+    conv = meta.model.head.classifier
+    with torch.no_grad():
+        conv.weight.zero_()
+        conv.bias.copy_(torch.tensor(_BIAS))
+    masks = torch.zeros(2, *IMAGE_SIZE, dtype=torch.long)
+    masks[:, :28, :28] = 2
+    masks[:, :28, 28:] = 1
+    masks[:, 28:, :28] = 3
+    images = torch.randn(2, 3, *IMAGE_SIZE)
+    return torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(images, masks), batch_size=2, num_workers=0
+    )
+
+
+# Of the non-ignored pixels one third are class 2, the predicted class.
+EXPECTED_ACCURACY = 1 / 3
+# Cross-entropy over the non-ignored pixels: one third are class 2 at ln(1 + 3e^-5) = 0.0200, and
+# two thirds are class 1 or 3 at 5 + 0.0200.
+EXPECTED_LOSS = 0.0200 + 2 / 3 * 5.0
 
 
 @pytest.mark.integration
@@ -32,8 +62,8 @@ def test_metamodel_instantiates_from_config(minimal_config, make_meta_model):
     assert meta.num_classes == NUM_CLASSES
     assert meta.model_name == "LinearDINOv3"
     assert meta.device == "cpu"
-    assert meta.optimizer is not None
-    assert isinstance(meta.optimizer, torch.optim.Optimizer)
+    assert isinstance(meta.optimizer, torch.optim.SGD)
+    assert meta.optimizer.param_groups[0]["lr"] == 0.01
     assert meta.loss is not None
 
 
@@ -80,16 +110,16 @@ def test_one_val_step_produces_predictions(minimal_config, tiny_loader, make_met
 
 
 @pytest.mark.integration
-def test_evaluator_returns_metrics(minimal_config, tiny_loader, make_meta_model):
-    """Evaluator produces metric dict with expected keys."""
+def test_evaluator_returns_metrics(minimal_config, make_meta_model):
+    """Accuracy ignores class 0 and counts the one predicted class among the rest."""
     meta = make_meta_model(minimal_config, run_name="test-eval")
+    loader = _constant_prediction_setup(meta)
     evaluator = EvaluatorSemanticSegmentation(num_classes=NUM_CLASSES, device="cpu")
 
-    metrics = evaluator.evaluate_model(tiny_loader, meta)
+    metrics = evaluator.evaluate_model(loader, meta)
 
-    assert isinstance(metrics, dict)
-    assert len(metrics) > 0
-    assert "accuracy" in metrics or "miou" in metrics
+    assert set(metrics) == {"accuracy"}
+    assert metrics["accuracy"] == pytest.approx(EXPECTED_ACCURACY, abs=1e-6)
 
 
 class _RecordingLogger:
@@ -129,37 +159,41 @@ def test_train_epoch_logs_per_batch_loss_on_global_step(
 
 
 @pytest.mark.integration
-def test_metamodel_train_epoch_returns_loss_and_metrics(
-    minimal_config, tiny_loader, make_meta_model
-):
-    """MetaModel.train_epoch returns loss and metric dict."""
+def test_metamodel_train_epoch_returns_loss_and_metrics(minimal_config, make_meta_model):
+    """train_epoch reports the pre-update loss and moves the head bias against the error."""
     meta = make_meta_model(minimal_config, run_name="test-epoch")
+    loader = _constant_prediction_setup(meta)
     evaluator = EvaluatorSemanticSegmentation(num_classes=NUM_CLASSES, device="cpu")
+    bias_before = meta.model.head.classifier.bias.detach().clone()
 
-    loss, metrics, timing = meta.train_epoch(tiny_loader, evaluator)
+    loss, metrics, timing = meta.train_epoch(loader, evaluator)
 
-    assert isinstance(loss, float)
-    assert loss >= 0
-    assert isinstance(metrics, dict)
-    assert isinstance(timing, dict)
-    assert "data_loading_sec" in timing
-    assert "forward_sec" in timing
-    assert "backward_sec" in timing
-    assert "num_samples" in timing
+    assert loss == pytest.approx(EXPECTED_LOSS, abs=1e-3)
+    assert metrics["accuracy"] == pytest.approx(EXPECTED_ACCURACY, abs=1e-6)
+    bias_after = meta.model.head.classifier.bias.detach()
+    assert not torch.equal(bias_after, bias_before)
+    # Class 2 is over-predicted and classes 1 and 3 are under-predicted, so SGD lowers bias[2]
+    # and raises bias[1] and bias[3].
+    assert bias_after[2] < bias_before[2]
+    assert bias_after[1] > bias_before[1]
+    assert bias_after[3] > bias_before[3]
+    assert timing["num_samples"] == 2
 
 
 @pytest.mark.integration
-def test_metamodel_validation_epoch_returns_loss_and_metrics(
-    minimal_config, tiny_loader, make_meta_model
-):
-    """MetaModel.validation_epoch returns loss and metric dict in eval mode."""
+def test_metamodel_validation_epoch_returns_loss_and_metrics(minimal_config, make_meta_model):
+    """validation_epoch returns the batch loss and accuracy without touching the weights."""
     meta = make_meta_model(minimal_config, run_name="test-val-epoch")
+    loader = _constant_prediction_setup(meta)
     evaluator = EvaluatorSemanticSegmentation(num_classes=NUM_CLASSES, device="cpu")
+    bias_before = meta.model.head.classifier.bias.detach().clone()
 
-    val_loss, val_metrics = meta.validation_epoch(tiny_loader, evaluator)
+    val_loss, val_metrics = meta.validation_epoch(loader, evaluator)
 
-    assert isinstance(val_loss, float)
-    assert isinstance(val_metrics, dict)
+    assert val_loss == pytest.approx(EXPECTED_LOSS, abs=1e-3)
+    assert val_metrics["accuracy"] == pytest.approx(EXPECTED_ACCURACY, abs=1e-6)
+    assert val_metrics["loss/classification"] == pytest.approx(EXPECTED_LOSS, abs=1e-3)
+    assert torch.equal(meta.model.head.classifier.bias, bias_before)
 
 
 @pytest.mark.integration
