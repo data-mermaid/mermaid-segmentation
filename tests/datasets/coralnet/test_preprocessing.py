@@ -22,6 +22,7 @@ from mermaidseg.datasets.coralnet.preprocessing.manifest import (
 )
 from mermaidseg.datasets.coralnet.preprocessing.resize import (
     _resized_s3_key_for,
+    build_todo_from_checkpoint,
     get_pending_items,
     read_checkpoint,
     resize_and_upload_all_images,
@@ -179,7 +180,7 @@ def test_checkpoint_write_and_read(tmp_path):
 
 
 def test_checkpoint_pending_items_extracted():
-    """Only pending items are returned for processing."""
+    """Pending and failed items are returned for processing; completed ones are not."""
     df_checkpoint = pd.DataFrame(
         {
             "source_id": [1, 1, 2, 2],
@@ -192,8 +193,7 @@ def test_checkpoint_pending_items_extracted():
 
     df_pending = get_pending_items(df_checkpoint)
 
-    assert len(df_pending) == 2
-    assert list(df_pending["image_id"]) == ["b", "d"]
+    assert list(df_pending["image_id"]) == ["b", "c", "d"]
 
 
 def test_resize_and_upload_image_returns_completed_result():
@@ -672,6 +672,105 @@ def test_resize_download_error_is_failed_not_corrupted(valid_rgb_jpeg_bytes, tmp
     assert row["status"] == "failed"
     assert pd.isna(row["skip_reason"])
     assert row["error_message"].startswith("ClientError")
+
+
+def _todo_for(image_ids):
+    return pd.DataFrame(
+        [
+            {
+                "source_id": 1,
+                "image_id": image_id,
+                "original_s3_key": f"coralnet-public-images/s1/images/{image_id}.jpg",
+                "output_s3_key": f"etl-outputs/coralnet/resized/s1/images/{image_id}.jpg",
+            }
+            for image_id in image_ids
+        ]
+    )
+
+
+def _run_resize(todo_df, checkpoint_path, s3):
+    return resize_and_upload_all_images(
+        df_todo=todo_df,
+        bucket="test-bucket",
+        output_prefix="etl-outputs/coralnet",
+        checkpoint_path=checkpoint_path,
+        threshold=2048,
+        workers=2,
+        s3_client=s3,
+    )
+
+
+def test_resize_rerun_retries_failed_download_in_place(valid_rgb_jpeg_bytes, tmp_path):
+    """A failed row is retried on the next run and its checkpoint row is overwritten."""
+    flaky_s3 = MagicMock()
+
+    def flaky_get(Bucket, Key):
+        if "valid" in Key:
+            return {"Body": BytesIO(valid_rgb_jpeg_bytes)}
+        raise ClientError({"Error": {"Code": "SlowDown", "Message": "slow"}}, "GetObject")
+
+    flaky_s3.get_object.side_effect = flaky_get
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+    todo_df = _todo_for(["valid", "flaky"])
+    assert _run_resize(todo_df, checkpoint_path, flaky_s3) == (1, 0, 1, 0)
+
+    healthy_s3 = MagicMock()
+    healthy_s3.get_object.side_effect = lambda Bucket, Key: {"Body": BytesIO(valid_rgb_jpeg_bytes)}
+    assert _run_resize(todo_df, checkpoint_path, healthy_s3) == (2, 0, 0, 0)
+
+    df_checkpoint = read_checkpoint(checkpoint_path)
+    flaky_rows = df_checkpoint[df_checkpoint["image_id"] == "flaky"]
+    assert len(flaky_rows) == 1
+    assert flaky_rows.iloc[0]["status"] == "completed"
+
+
+def test_resize_rerun_does_not_retry_corrupted_image(
+    valid_rgb_jpeg_bytes, truncated_jpeg_bytes, tmp_path
+):
+    """A skipped (corrupted) row is not downloaded again on the next run."""
+    first_s3 = MagicMock()
+    first_s3.get_object.side_effect = lambda Bucket, Key: {
+        "Body": BytesIO(truncated_jpeg_bytes if "bad" in Key else valid_rgb_jpeg_bytes)
+    }
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+    todo_df = _todo_for(["valid", "bad"])
+    assert _run_resize(todo_df, checkpoint_path, first_s3) == (1, 0, 0, 1)
+
+    second_s3 = MagicMock()
+    second_s3.get_object.side_effect = lambda Bucket, Key: {"Body": BytesIO(valid_rgb_jpeg_bytes)}
+    assert _run_resize(todo_df, checkpoint_path, second_s3) == (1, 0, 0, 1)
+
+    requested_keys = [call.kwargs["Key"] for call in second_s3.get_object.call_args_list]
+    assert requested_keys == []
+
+
+def test_build_todo_from_checkpoint_selects_failed_and_pending_rows(tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+    write_checkpoint(
+        checkpoint_path,
+        pd.DataFrame(
+            {
+                "source_id": [1, 1, 1, 1],
+                "image_id": ["done", "skip", "fail", "wait"],
+                "status": ["completed", "skipped", "failed", "pending"],
+                "resize_timestamp": [None] * 4,
+                "error_message": [None] * 4,
+                "skip_reason": [None, "corrupted_truncated", None, None],
+            }
+        ),
+    )
+    df_images = pd.DataFrame(
+        {
+            "source_id": [1, 1, 1, 1],
+            "image_id": ["done", "skip", "fail", "wait"],
+            "width": [4000] * 4,
+            "height": [3000] * 4,
+        }
+    )
+
+    todo = build_todo_from_checkpoint(df_images, checkpoint_path, "etl-outputs/coralnet")
+
+    assert sorted(todo["image_id"]) == ["fail", "wait"]
 
 
 def test_resize_resumes_only_pending_items(valid_rgb_jpeg_bytes, tmp_path):

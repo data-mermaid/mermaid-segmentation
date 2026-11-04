@@ -206,7 +206,7 @@ def build_todo_from_checkpoint(
     threshold: int = 2048,
     source_prefix: str | None = None,
 ) -> pd.DataFrame:
-    """Build a resize todo list from pending checkpoint rows and an images parquet."""
+    """Build a resize todo list from pending and failed checkpoint rows and an images parquet."""
     source_prefix = source_prefix or DEFAULT_PREFIX
     pending = get_pending_items(read_checkpoint(checkpoint_path))
     if pending.empty:
@@ -276,15 +276,15 @@ def read_checkpoint(checkpoint_path: Path | str) -> pd.DataFrame:
 
 
 def get_pending_items(df_checkpoint: pd.DataFrame) -> pd.DataFrame:
-    """Extract only pending items from checkpoint.
+    """Extract the items a run should (re)process: pending, plus failed ones retried on resume.
 
     Args:
         df_checkpoint: Checkpoint DataFrame
 
     Returns:
-        Subset of df_checkpoint with status == "pending"
+        Subset of df_checkpoint with status "pending" or "failed"
     """
-    return df_checkpoint[df_checkpoint["status"] == "pending"].copy()
+    return df_checkpoint[df_checkpoint["status"].isin(["pending", "failed"])].copy()
 
 
 def init_checkpoint_from_todo(df_todo: pd.DataFrame) -> pd.DataFrame:
@@ -317,7 +317,7 @@ def _validate_and_download(
 ) -> tuple[io.BytesIO | None, ImageInspection]:
     """Download and validate image in one step.
 
-    Download errors propagate to the caller so they are recorded as retryable failures.
+    Download errors propagate to the caller, which records them as failed; the next run retries them.
     ``inspect_image`` catches its own decode errors and reports them as an invalid inspection.
 
     Returns:
