@@ -20,7 +20,6 @@ from tqdm import tqdm
 from mermaidseg.datasets.coralnet.etl.config import DEFAULT_PREFIX
 from mermaidseg.datasets.coralnet.preprocessing.inspect import (
     ImageInspection,
-    IssueType,
     inspect_image,
 )
 
@@ -318,36 +317,24 @@ def _validate_and_download(
 ) -> tuple[io.BytesIO | None, ImageInspection]:
     """Download and validate image in one step.
 
+    Download errors propagate to the caller so they are recorded as retryable failures.
+    ``inspect_image`` catches its own decode errors and reports them as an invalid inspection.
+
     Returns:
         (image_bytes, inspection) where image_bytes is None if validation failed.
     """
-    try:
-        response = s3_client.get_object(Bucket=bucket, Key=original_key)
-        image_bytes = io.BytesIO(response["Body"].read())
-        inspection = inspect_image(image_bytes)
-        if not inspection.is_valid:
-            logger.warning(
-                "Validation failed for %s/%s: %s — %s",
-                source_id,
-                image_id,
-                inspection.issue_type.value,
-                inspection.error_message,
-            )
-        return (image_bytes if inspection.is_valid else None, inspection)
-    except Exception as e:
-        logger.warning("Failed to download %s/%s: %s", source_id, image_id, e)
-        return (
-            None,
-            ImageInspection(
-                is_valid=False,
-                issue_type=IssueType.UNKNOWN,
-                format=None,
-                channels=None,
-                width=None,
-                height=None,
-                error_message=f"Download failed: {type(e).__name__}",
-            ),
+    response = s3_client.get_object(Bucket=bucket, Key=original_key)
+    image_bytes = io.BytesIO(response["Body"].read())
+    inspection = inspect_image(image_bytes)
+    if not inspection.is_valid:
+        logger.warning(
+            "Validation failed for %s/%s: %s — %s",
+            source_id,
+            image_id,
+            inspection.issue_type.value,
+            inspection.error_message,
         )
+    return (image_bytes if inspection.is_valid else None, inspection)
 
 
 def _result_row(

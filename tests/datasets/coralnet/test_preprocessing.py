@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, Mock
 import ibis
 import pandas as pd
 import pytest
+from botocore.exceptions import ClientError
 from PIL import Image
 
 from mermaidseg.datasets.coralnet.preprocessing.inspect import (
@@ -647,6 +648,46 @@ def test_resize_mixed_batch(valid_rgb_jpeg_bytes, truncated_jpeg_bytes, tmp_path
     assert completed.iloc[0]["image_id"] == "valid"
     assert skipped.iloc[0]["image_id"] == "bad"
     assert "corrupted_" in str(skipped.iloc[0]["skip_reason"])
+
+
+def test_resize_download_error_is_failed_not_corrupted(valid_rgb_jpeg_bytes, tmp_path):
+    """A transient S3 download error is a retryable failure, never a corrupted-image skip."""
+    mock_s3 = MagicMock()
+
+    def get_object_side_effect(Bucket, Key):
+        if "valid" in Key:
+            return {"Body": BytesIO(valid_rgb_jpeg_bytes)}
+        raise ClientError({"Error": {"Code": "SlowDown", "Message": "slow"}}, "GetObject")
+
+    mock_s3.get_object.side_effect = get_object_side_effect
+    checkpoint_path = tmp_path / "checkpoint.parquet"
+    todo_df = pd.DataFrame(
+        [
+            {
+                "source_id": 1,
+                "image_id": image_id,
+                "original_s3_key": f"coralnet-public-images/s1/images/{image_id}.jpg",
+                "output_s3_key": f"etl-outputs/coralnet/resized/s1/images/{image_id}.jpg",
+            }
+            for image_id in ("valid", "flaky")
+        ]
+    )
+
+    num_resized, num_skipped, num_failed, num_corrupted = resize_and_upload_all_images(
+        df_todo=todo_df,
+        bucket="test-bucket",
+        output_prefix="etl-outputs/coralnet",
+        checkpoint_path=checkpoint_path,
+        threshold=2048,
+        workers=2,
+        s3_client=mock_s3,
+    )
+
+    assert (num_resized, num_skipped, num_failed, num_corrupted) == (1, 0, 1, 0)
+    row = read_checkpoint(checkpoint_path).set_index("image_id").loc["flaky"]
+    assert row["status"] == "failed"
+    assert pd.isna(row["skip_reason"])
+    assert row["error_message"].startswith("ClientError")
 
 
 def test_resize_resumes_only_pending_items(valid_rgb_jpeg_bytes, tmp_path):
