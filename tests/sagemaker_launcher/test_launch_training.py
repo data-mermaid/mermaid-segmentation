@@ -405,6 +405,39 @@ class RealLaunchValidationTest(unittest.TestCase):
         mock_boto3.client.assert_not_called()
 
 
+RESERVED_ENV_KEYS = ["MERMAIDSEG_RUN_ID", "CONTAINER_ENTRYPOINT_SCRIPT", "AWS_DEFAULT_REGION"]
+
+
+@requires_sagemaker_core
+class ReservedJobEnvTest(unittest.TestCase):
+    def test_a_reserved_key_in_job_env_is_rejected_naming_the_key(self):
+        for key in RESERVED_ENV_KEYS:
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError) as ctx:
+                    _build_kwargs(_minimal_yaml() + f"  env:\n    {key}: x\n")
+                self.assertIn(key, str(ctx.exception))
+
+    def test_an_allowed_job_env_key_reaches_the_environment_beside_the_run_id(self):
+        env = _build_kwargs(_minimal_yaml() + "  env:\n    FOO: bar\n", run_id="rid-9")[
+            "environment"
+        ]
+        self.assertEqual(env["FOO"], "bar")
+        self.assertEqual(env["MERMAIDSEG_RUN_ID"], "rid-9")
+
+    def test_main_rejects_a_reserved_key_before_any_upload(self):
+        for key in RESERVED_ENV_KEYS:
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as d:
+                yaml_path = Path(d) / "run.yaml"
+                yaml_path.write_text(_minimal_yaml() + f"  env:\n    {key}: x\nconfig: {{}}\n")
+                with (
+                    patch("launch_training.boto3") as mock_boto3,
+                    self.assertRaises(ValueError) as ctx,
+                ):
+                    lt.main(["--run-config", str(yaml_path)])
+                self.assertIn(key, str(ctx.exception))
+                mock_boto3.client.assert_not_called()
+
+
 class ConfigFlagOverrideTest(unittest.TestCase):
     def test_validate_reports_an_override_that_shadows_a_config_flag(self):
         errors = lt.validate_trainer_config({"overrides": {"training-config": "x.yaml"}})

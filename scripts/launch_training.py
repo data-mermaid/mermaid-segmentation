@@ -88,6 +88,20 @@ def make_run_id(prefix: str) -> str:
     return run_id
 
 
+# Env keys the launcher sets itself; a run YAML `job.env` may not override them.
+RESERVED_ENV_KEYS = ("AWS_DEFAULT_REGION", "CONTAINER_ENTRYPOINT_SCRIPT", "MERMAIDSEG_RUN_ID")
+
+
+def check_job_env(job_env: dict) -> None:
+    """Raise ValueError when `job_env` sets a key the launcher reserves."""
+    clashes = sorted(set(job_env) & set(RESERVED_ENV_KEYS))
+    if clashes:
+        raise ValueError(
+            f"job.env must not set {', '.join(clashes)}: the launcher sets "
+            f"{', '.join(RESERVED_ENV_KEYS)}"
+        )
+
+
 def _upload_run_config(run_config: Path, run_id: str, s3_client) -> str:
     """Upload the run YAML under `runs/<run_id>/config/` and return that prefix's S3 URI."""
     key_prefix = f"runs/{run_id}/config"
@@ -120,6 +134,7 @@ def build_training_job_kwargs(
     )
 
     job = cfg.job
+    check_job_env(job.env)
     env = {
         "AWS_DEFAULT_REGION": REGION,
         "CONTAINER_ENTRYPOINT_SCRIPT": job.entrypoint,
@@ -275,6 +290,8 @@ def main(argv=None):
     except ValueError as exc:
         sys.exit(f"ERROR: {exc}")
     cw_url = _cloudwatch_url(run_id)
+
+    check_job_env(cfg.job.env)
 
     # Checked before any upload or submit, so a bad run YAML fails here and not on a GPU instance.
     seg = (yaml.safe_load(args.run_config.read_text()) or {}).get("config")
