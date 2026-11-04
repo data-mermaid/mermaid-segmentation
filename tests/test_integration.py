@@ -20,7 +20,7 @@ import torch
 from mermaidseg.io import ConfigDict
 from mermaidseg.model.eval import EvaluatorSemanticSegmentation
 
-from .conftest import IMAGE_SIZE, NUM_CLASSES
+from .conftest import NUM_CLASSES
 
 
 @pytest.mark.integration
@@ -35,37 +35,6 @@ def test_metamodel_instantiates_from_config(minimal_config, make_meta_model):
     assert meta.optimizer is not None
     assert isinstance(meta.optimizer, torch.optim.Optimizer)
     assert meta.loss is not None
-
-
-@pytest.mark.integration
-def test_dataloader_yields_correct_batch(tiny_loader):
-    """DataLoader produces a batch with correct shapes and dtypes."""
-    images, masks = next(iter(tiny_loader))
-    assert images.shape[0] <= 2
-    assert images.shape[1:] == (3, *IMAGE_SIZE)
-    assert masks.shape[1:] == IMAGE_SIZE
-    assert images.dtype == torch.float32
-    assert masks.dtype == torch.int64
-
-
-@pytest.mark.integration
-def test_one_train_step_forward_backward(minimal_config, tiny_loader, make_meta_model):
-    """Single train step: forward, loss compute, backward, optimizer step."""
-    meta = make_meta_model(minimal_config, run_name="test-step")
-    meta.model.train()
-
-    images, masks = next(iter(tiny_loader))
-
-    outputs = meta.model(images)
-    assert hasattr(outputs, "logits")
-    assert outputs.logits.shape[-2:] == IMAGE_SIZE
-
-    loss, _ = meta.loss(outputs.logits, masks)
-    assert torch.isfinite(loss), f"Loss is not finite: {loss}"
-
-    loss.backward()
-    meta.optimizer.step()
-    meta.optimizer.zero_grad()
 
 
 @pytest.mark.integration

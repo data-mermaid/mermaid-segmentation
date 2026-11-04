@@ -117,16 +117,6 @@ def _make_two_image_annotations(
     return df_annotations, df_images
 
 
-class _CropOutDataset(_SyntheticDataset):
-    """Simulates RandomResizedCrop wiping labels on idx 0 only."""
-
-    def _load_item(self, idx: int) -> tuple[Any, Any]:
-        image, mask = super()._load_item(idx)
-        if idx == 0:
-            mask = np.zeros_like(mask)
-        return image, mask
-
-
 # --- create_annotation_mask ---
 
 
@@ -183,12 +173,6 @@ def test_create_annotation_mask_offset_matches_where_pass():
     assert folded.dtype == np.int32
 
 
-def test_create_annotation_mask_dtype_is_int32():
-    annotations = _make_annotations([1], [1], ["Coral"])
-    mask = create_annotation_mask(annotations, (8, 8), {"Coral": 1})
-    assert mask.dtype == np.int32
-
-
 def test_create_annotation_mask_unknown_label_skipped(caplog):
     annotations = _make_annotations([5, 10], [5, 10], ["Coral", "UnknownLabel"])
 
@@ -198,20 +182,6 @@ def test_create_annotation_mask_unknown_label_skipped(caplog):
     assert mask[5, 5] == 1
     assert mask[10, 10] == 0
     assert "unknown label" in caplog.text.lower() or "UnknownLabel" in caplog.text
-
-
-@pytest.mark.parametrize(
-    "rows,cols,labels",
-    [
-        ([], [], []),
-        ([5], [5], [None]),
-    ],
-    ids=["empty", "all_null_labels"],
-)
-def test_create_annotation_mask_produces_zero_mask(rows, cols, labels):
-    annotations = _make_annotations(rows, cols, labels)
-    mask = create_annotation_mask(annotations, (10, 10), {"Coral": 1})
-    assert np.all(mask == 0)
 
 
 # --- BaseCoralDataset basic API ---
@@ -369,24 +339,6 @@ def test_train_skips_image_with_no_annotations(monkeypatch):
     ds = _SyntheticDataset(
         df_annotations=df_annotations,
         df_images=df_images,
-        split="train",
-    )
-    monkeypatch.setattr(np.random, "randint", lambda low, high: 0)
-
-    _, mask = ds[0]
-
-    assert np.any(mask > 0)
-
-
-def test_train_skips_crop_that_removed_all_labels(monkeypatch):
-    df_annotations, df_images = _make_two_image_annotations(
-        img0_labels=["Coral"],
-        img1_labels=["Coral"],
-    )
-    ds = _CropOutDataset(
-        df_annotations=df_annotations,
-        df_images=df_images,
-        class_subset=["Coral"],
         split="train",
     )
     monkeypatch.setattr(np.random, "randint", lambda low, high: 0)

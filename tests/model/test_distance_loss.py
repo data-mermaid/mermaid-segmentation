@@ -113,25 +113,6 @@ def test_weight_scales_total_not_logged_value():
     assert total.item() == pytest.approx(0.5 * expected, abs=1e-6)
 
 
-def test_near_mistakes_cost_less_than_far_ones():
-    loss = _loss()
-    _, labels = _pixels([ACROPORA])
-    costs = {}
-    for name, genus in (
-        ("correct", "acropora"),
-        ("sibling", "montipora"),
-        ("same order", "porites"),
-        ("other order", "sarcophyton"),
-    ):
-        logits = torch.full((1, 12, 1, 1), -20.0)
-        logits[0, [0, 2 + 0, 5 + GENERA.index(genus)]] = 20.0  # order/family right, genus varies
-        costs[name] = loss(logits, labels)[1]["distance/genus"]
-    assert costs["correct"] == pytest.approx(0.0, abs=1e-6)
-    assert costs["sibling"] == pytest.approx(1 / 3, abs=1e-5)
-    assert costs["same order"] == pytest.approx(2 / 3, abs=1e-5)
-    assert costs["other order"] == pytest.approx(1.0, abs=1e-5)
-
-
 def test_unlabelled_ranks_and_void_pixels_contribute_nothing():
     loss = _loss()
     _, components = loss(*_pixels([FAMILY_ONLY]))

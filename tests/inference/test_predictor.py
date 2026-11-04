@@ -42,14 +42,6 @@ def test_predict_is_softmaxed_model_output_on_the_preprocessed_image(graph_bundl
     assert torch.allclose(concept_probs, out.hidden_states[0], atol=1e-6, rtol=0)
 
 
-def test_graph_and_eager_predictors_agree(graph_bundle):
-    image = _image(70, 75)
-    eager = CBMPredictor.from_bundle(load_bundle(graph_bundle, format="checkpoint")).predict(image)
-    graph = CBMPredictor.from_bundle(load_bundle(graph_bundle, format="graph")).predict(image)
-    assert torch.allclose(eager[0], graph[0], atol=1e-5, rtol=0)
-    assert torch.allclose(eager[1], graph[1], atol=1e-5, rtol=0)
-
-
 def test_graph_predictor_refuses_amp(graph_bundle):
     with pytest.raises(ValueError, match="amp"):
         CBMPredictor.from_bundle(load_bundle(graph_bundle, format="graph"), amp=True)

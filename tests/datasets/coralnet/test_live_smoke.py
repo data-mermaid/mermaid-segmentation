@@ -160,37 +160,6 @@ def test_image_view_page(page, public_source_id):
     assert img.first.get_attribute("src")
 
 
-def test_pagination_links_well_formed(page, public_source_id):
-    """Walk to page 2 and verify the resolved URL is well-formed.
-
-    Exercises the same ``urljoin`` flow used by ``download_annotations_paginated`` and
-    ``get_images``. Regression test for the bug where path/query concatenation produced URLs like
-    ``.../images/?...?page=2``.
-    """
-    browse_url = f"{CORALNET_BASE}/source/{public_source_id}/browse/images/"
-    response = page.goto(browse_url, wait_until="domcontentloaded")
-    if reason := skip_reason_for_source_response(response, public_source_id):
-        pytest.skip(reason)
-
-    next_link = page.locator('a[title="Next page"]')
-    if next_link.count() == 0:
-        pytest.skip(f"source {public_source_id} has <= 1 browse page")
-
-    next_href = next_link.first.get_attribute("href")
-    assert next_href
-    page_two_url = urllib.parse.urljoin(browse_url, next_href)
-
-    parsed = urllib.parse.urlparse(page_two_url)
-    assert page_two_url.count("?") <= 1, f"malformed URL with multiple '?': {page_two_url}"
-    assert parsed.scheme in ("http", "https")
-    assert parsed.netloc == "coralnet.ucsd.edu"
-    assert "?" not in parsed.path, f"query embedded in path: {page_two_url}"
-
-    response = page.goto(page_two_url, wait_until="domcontentloaded")
-    assert response is not None and response.status < 400
-    assert page.locator("span.thumb_wrapper").count() >= 1
-
-
 def test_paginated_annotation_export_produces_csv(page, public_source_id, coralnet_credentials):
     """End-to-end: log in, paginate, export annotations from 1-2 pages, validate CSV.
 

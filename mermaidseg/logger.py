@@ -1208,15 +1208,6 @@ class WandbLogger:
         except Exception as e:
             logger.warning("Failed to log dataset to wandb: %s", e)
 
-    def log_datasets(self, dataset, context: str = "training") -> None:
-        """Log one or more datasets: unwrap combined/concat wrappers or log as one."""
-        sub = getattr(dataset, "_datasets", None) or getattr(dataset, "datasets", None)
-        if sub is not None:
-            for sub_dataset in sub:
-                self.log_dataset(sub_dataset, context=context)
-        else:
-            self.log_dataset(dataset, context=context)
-
     def log_dataloader_params(self, loader, prefix: str = "dataloader") -> None:
         """Log DataLoader configuration as wandb config keys."""
         if self.wandb_run is None:
@@ -1243,39 +1234,6 @@ class WandbLogger:
             self.wandb_run.log(log_dict, step=step)
         except Exception as e:
             logger.warning("Failed to log metrics to wandb: %s", e)
-
-    def save_checkpoint(
-        self,
-        model_path: str,
-        epoch: int,
-        metrics_dict: dict[str, Any],
-        checkpoint: dict[str, Any],
-        local_checkpoint_saved: bool,
-    ):
-        """Log a model checkpoint artifact to wandb."""
-        if self.wandb_run is None:
-            return
-        temp_file_path = None
-        try:
-            artifact_file = model_path
-            if not local_checkpoint_saved:
-                with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp_file:
-                    temp_file_path = tmp_file.name
-                torch.save(checkpoint, temp_file_path)  # type: ignore
-                artifact_file = temp_file_path
-            artifact = wandb.Artifact(
-                f"checkpoint-epoch{epoch}",
-                type="model",
-                metadata=metrics_dict,
-            )
-            artifact.add_file(artifact_file)
-            self.wandb_run.log_artifact(artifact)
-            logger.info("Checkpoint logged to wandb: %s", model_path)
-        except Exception as e:
-            logger.warning("Failed to log checkpoint to wandb: %s", e)
-        finally:
-            if temp_file_path and os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
 
     def end_run(self):
         """Finish the active wandb run."""

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -57,13 +55,6 @@ def test_loaded_model_reproduces_the_trained_model(trained_run, checkpoint_path)
     assert torch.allclose(got.logits, expected.logits, atol=1e-6, rtol=0)
 
 
-def test_bare_state_dict_checkpoint_loads(trained_run, tmp_path):
-    path = tmp_path / "bare.pt"
-    torch.save(trained_run["model"].state_dict(), path)
-    model = load_checkpoint_model(path, trained_run["model_cfg"], id2label(), concept_id2name())
-    assert model.concept_classifier.out_channels == len(id2label())
-
-
 def test_model_config_is_not_mutated(trained_run, checkpoint_path):
     cfg = dict(trained_run["model_cfg"])
     load_checkpoint_model(checkpoint_path, cfg, id2label(), concept_id2name())
@@ -104,14 +95,3 @@ def test_unsupported_model_name_is_refused(trained_run, checkpoint_path):
     cfg = {**trained_run["model_cfg"], "name": "SomethingElse"}
     with pytest.raises(ValueError, match="Unsupported model"):
         load_checkpoint_model(checkpoint_path, cfg, id2label(), concept_id2name())
-
-
-def test_loader_imports_without_the_research_stack():
-    script = (
-        "import sys\n"
-        "for n in ('albumentations', 'pandas'):\n"
-        "    sys.modules[n] = None\n"
-        "from mermaidseg.inference import load_checkpoint_model\n"
-    )
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr

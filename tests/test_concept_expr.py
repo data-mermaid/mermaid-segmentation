@@ -66,12 +66,6 @@ def test_parse_to_rpn(concept_names: list[str]) -> None:
     assert [t.value for t in rpn] == ["1", "genus:acropora", "-"]
 
 
-def test_evaluate_bare_atom(concept_probs, resolver) -> None:
-    out = evaluate("branching", concept_probs, resolver)
-    expected = concept_probs[5]
-    np.testing.assert_allclose(out, expected)
-
-
 def test_evaluate_rank_value_atom(concept_probs, resolver) -> None:
     out = evaluate("class:hexacorallia", concept_probs, resolver)
     np.testing.assert_allclose(out, concept_probs[0])

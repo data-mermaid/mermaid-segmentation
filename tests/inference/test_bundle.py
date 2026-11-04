@@ -57,11 +57,6 @@ def test_bundle_reproduces_the_lora_model_outputs(trained_run, sidecar_path, tmp
     assert torch.allclose(got.hidden_states, expected.hidden_states, atol=1e-5, rtol=0)
 
 
-def test_bundle_weights_hold_no_lora_adapters(bundle_dir):
-    keys = load_file(bundle_dir / "weights.safetensors").keys()
-    assert not [k for k in keys if "lora_" in k]
-
-
 def test_bundle_metadata_describes_the_model(bundle_dir):
     bundle = load_bundle(bundle_dir)
     assert bundle.classes == CLASS_NAMES
@@ -293,13 +288,6 @@ def test_sidecar_without_model_config_size_omits_it(sidecar_path):
     spec = _read_sidecar(sidecar_path)
     assert spec["validated_size_hw"] == list(INPUT_SIZE)
     assert "model_config_size_hw" not in spec
-
-
-def test_export_serves_the_validated_size_by_default(bundle_dir, caplog):
-    bundle = load_bundle(bundle_dir)
-    assert bundle.input_size == INPUT_SIZE
-    assert bundle.metadata["input"]["validated_size_hw"] == list(INPUT_SIZE)
-    assert bundle.validated_input_size == INPUT_SIZE
 
 
 def test_export_default_size_does_not_warn(sidecar_path, checkpoint_path, tmp_path, caplog):

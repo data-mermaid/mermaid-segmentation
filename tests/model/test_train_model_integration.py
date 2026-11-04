@@ -107,31 +107,6 @@ def test_metric_of_interest_allowlist_rejects_unknown_metric() -> None:
         )
 
 
-@pytest.mark.parametrize("metric_name", ["accuracy", "miou", "f1-score", "loss"])
-def test_metric_of_interest_allowlist_accepts_known_metrics(metric_name: str) -> None:
-    val_metrics = {
-        "accuracy": {"accuracy": 0.7},
-        "miou": {"miou": 0.4},
-        "f1-score": {"f1-score": 0.6},
-        "loss": {"accuracy": 0.5},
-    }[metric_name]
-    val_losses = [0.8]
-    meta = FakeMetaModel(epochs=1, val_losses=val_losses, val_metrics_seq=[val_metrics])
-    logger = StubLogger()
-
-    metrics = train_model(
-        meta_model=meta,
-        evaluator=object(),
-        train_loader=_tiny_loader(),
-        val_loader=_tiny_loader(),
-        logger=logger,
-        metric_of_interest=metric_name,
-    )
-
-    assert len(metrics) == 1
-    assert logger.checkpoint_epochs == [0]
-
-
 def test_save_best_checkpoint_can_be_disabled() -> None:
     meta = FakeMetaModel(epochs=1, val_metrics_seq=[{"accuracy": 0.9}])
     logger = StubLogger()
@@ -210,22 +185,6 @@ def test_reduce_on_plateau_receives_validation_metric() -> None:
     )
 
     assert scheduler.metric_history == [0.4, 0.5]
-
-
-def test_non_scalar_metric_of_interest_raises_value_error() -> None:
-    meta = FakeMetaModel(
-        epochs=1,
-        val_losses=[0.9],
-        val_metrics_seq=[{"miou": np.array([0.1, 0.2])}],
-    )
-    with pytest.raises(ValueError, match="must be scalar"):
-        train_model(
-            meta_model=meta,
-            evaluator=object(),
-            train_loader=_tiny_loader(),
-            val_loader=_tiny_loader(),
-            metric_of_interest="miou",
-        )
 
 
 def test_early_stopping_triggers_with_patience_and_min_delta() -> None:

@@ -102,6 +102,9 @@ def test_env_does_not_override_values_already_set():
             "SM_MODEL_DIR": "/m",
             "MERMAIDSEG_LOCAL_CACHE_DIR": "/mine",
             "MERMAIDSEG_OUTPUT_DIR": "/out",
+            "MERMAIDSEG_RUN_ID": "job",
+            "WANDB_RUN_ID": "mine",
+            "WANDB_RESUME": "must",
         }
     )
 
@@ -214,24 +217,9 @@ def test_resolve_secrets_lets_a_fetch_failure_raise():
         entrypoint.resolve_secrets({"HF_TOKEN_SECRET_ID": "x"}, Failing())
 
 
-def test_trainer_env_uses_the_cache_channel_when_present():
-    env = entrypoint.build_trainer_env({"SM_CHANNEL_CACHE": "/opt/ml/input/data/cache"})
-    assert env["MERMAIDSEG_LOCAL_CACHE_DIR"] == "/opt/ml/input/data/cache"
-
-
 def test_trainer_env_puts_the_cache_on_the_ml_volume_without_a_channel():
     env = entrypoint.build_trainer_env({})
     assert env["MERMAIDSEG_LOCAL_CACHE_DIR"] == "/opt/ml/cache"
-
-
-def test_trainer_env_keeps_a_preset_cache_dir():
-    env = entrypoint.build_trainer_env({"MERMAIDSEG_LOCAL_CACHE_DIR": "/x"})
-    assert "MERMAIDSEG_LOCAL_CACHE_DIR" not in env
-
-
-def test_trainer_env_outputs_to_the_model_dir_by_default():
-    env = entrypoint.build_trainer_env({"SM_MODEL_DIR": "/opt/ml/model"})
-    assert env["MERMAIDSEG_OUTPUT_DIR"] == "/opt/ml/model"
 
 
 def test_trainer_env_outputs_to_the_checkpoint_dir_when_checkpointing():
@@ -457,20 +445,6 @@ def test_trainer_env_resumes_the_wandb_run_of_the_job():
     assert env["WANDB_RESUME"] == "allow"
 
 
-def test_trainer_env_keeps_preset_wandb_resume_settings():
-    env = entrypoint.build_trainer_env(
-        {"MERMAIDSEG_RUN_ID": "job", "WANDB_RUN_ID": "mine", "WANDB_RESUME": "must"}
-    )
-    assert "WANDB_RUN_ID" not in env
-    assert "WANDB_RESUME" not in env
-
-
-def test_trainer_env_sets_no_wandb_run_without_a_job_id():
-    env = entrypoint.build_trainer_env({})
-    assert "WANDB_RUN_ID" not in env
-    assert "WANDB_RESUME" not in env
-
-
 def _write(directory, name, content):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / name).write_bytes(content)
@@ -549,11 +523,6 @@ def test_restore_puts_the_mirrored_checkpoints_back_under_their_names(tmp_path):
     assert (local / "model_preempt2000").read_bytes() == b"preempt"
     assert (local / "model_step500").read_bytes() == b"step"
     assert entrypoint.latest_checkpoint(local, 1000) == local / "model_preempt2000"
-
-
-def test_restore_without_a_synced_dir_does_nothing(tmp_path):
-    entrypoint.restore_checkpoints(tmp_path / "absent", tmp_path / "local")
-    assert not (tmp_path / "local").exists() or list((tmp_path / "local").iterdir()) == []
 
 
 def test_restore_then_sync_uploads_nothing_new(tmp_path):

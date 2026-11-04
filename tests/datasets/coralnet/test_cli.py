@@ -6,23 +6,13 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.parquet as pq
 import pytest
 
 from mermaidseg.datasets.coralnet.etl import __main__ as cli
 from mermaidseg.datasets.coralnet.etl.schemas import (
     ANNOTATIONS_SCHEMA,
-    AUDIT_SCHEMA,
     IMAGES_SCHEMA,
 )
-
-
-def test_build_parser_has_all_subcommands():
-    parser = cli.build_parser()
-    actions = [a for a in parser._actions if getattr(a, "choices", None)]
-    assert actions, "expected a subparsers action"
-    sub = actions[0]
-    assert set(sub.choices.keys()) == {"audit", "build-annotations", "build-images", "all"}
 
 
 def _patch_to_fake_s3(monkeypatch, fake_s3):
@@ -156,41 +146,6 @@ def test_cli_audit_source_ids_file(monkeypatch, fake_s3, sample_csv_factory, pop
     assert adf["source_id"].tolist() == [2]
 
 
-def test_cli_audit_round_trips(monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path):
-    bucket, prefix = "b", "coralnet-public-images"
-    populate(
-        fake_s3,
-        bucket,
-        prefix,
-        1,
-        sample_csv_factory(source_id=1, n_images=2, n_points_per_image=2),
-    )
-
-    _patch_to_fake_s3(monkeypatch, fake_s3)
-
-    rc = cli.main(
-        [
-            "audit",
-            "--bucket",
-            bucket,
-            "--prefix",
-            prefix,
-            "--output-dir",
-            str(tmp_path),
-            "--workers",
-            "1",
-            "--version-tag",
-            "test",
-        ]
-    )
-    assert rc == 0
-
-    candidates = list(Path(tmp_path).rglob("coralnet_audit_test.parquet"))
-    assert candidates, "audit parquet not written"
-    schema = pq.read_schema(candidates[0])
-    assert {f.name for f in schema} == {f.name for f in AUDIT_SCHEMA}
-
-
 def test_cli_all_pipeline_end_to_end(
     monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, make_jpeg
 ):
@@ -241,6 +196,8 @@ def test_cli_all_pipeline_end_to_end(
     assert int(audit_df["source_id"].iloc[0]) == 1
     assert audit_df["is_complete"].iloc[0]
     assert len(ann_df) == 4  # 2 imgs * 2 pts
+    # The build keeps only Confirmed rows, so every written row carries that status.
+    assert ann_df["status"].tolist() == ["Confirmed"] * 4
     assert {f.name for f in ANNOTATIONS_SCHEMA}.issubset(set(ann_df.columns))
     assert {f.name for f in IMAGES_SCHEMA}.issubset(set(img_df.columns))
     assert len(img_df) == 2

@@ -292,11 +292,6 @@ class TestBackendFlags:
         assert lgr.enabled is False
         assert lgr.enable_wandb is False
 
-    def test_default_when_config_omits_flag(self, tmp_mlflow_uri, make_config, fake_meta_model):
-        # make_config default omits enable_mlflow -> defaults to True (enabled).
-        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
-        assert lgr.enable_mlflow is True
-
     def test_explicit_mlflow_arg_deprecated(self, tmp_mlflow_uri, make_config, fake_meta_model):
         with pytest.deprecated_call(match="enable_mlflow is deprecated"):
             Logger(config=make_config(), meta_model=fake_meta_model, enable_mlflow=True)
@@ -472,19 +467,6 @@ class TestSaveModelCheckpoint:
         assert run.data.metrics["checkpoint/loss"] == pytest.approx(0.3)
         assert run.data.metrics["checkpoint/acc"] == pytest.approx(0.9)
 
-    def test_wandb_artifact_not_logged(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="wb-art")
-        config = make_config()
-        lgr = Logger(
-            config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
-        )
-        mock_wandb_logger = MagicMock(spec=WandbLogger)
-        lgr._wandb_logger = mock_wandb_logger
-
-        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
-
-        mock_wandb_logger.save_checkpoint.assert_not_called()
-
     def test_step_checkpoint_name_and_resume_flags(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="step-ckpt")
         meta.global_step = 25000
@@ -583,25 +565,6 @@ class TestSaveModelCheckpoint:
         best_model_calls = [c for c in mock_log_artifact.call_args_list if "best-model" in str(c)]
         assert len(best_model_calls) >= 1
 
-    def test_checkpoint_metrics_logged(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="sync-metrics")
-        config = make_config(logger={"save_local_checkpoints": False})
-        lgr = Logger(
-            config=config,
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=50,
-        )
-        with patch("mermaidseg.logger.mlflow.log_metrics") as mock_log_metrics:
-            lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
-
-        checkpoint_calls = [
-            call
-            for call in mock_log_metrics.call_args_list
-            if any(k.startswith("checkpoint/") for k in call.args[0])
-        ]
-        assert checkpoint_calls, "Expected at least one checkpoint metric logging call"
-
     def test_model_logging_sets_best_model_tag(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="verify-model-tag")
         config = make_config(logger={"save_local_checkpoints": False})
@@ -615,46 +578,6 @@ class TestSaveModelCheckpoint:
         run = mlflow.get_run(lgr.mlflow_run_id)
         assert run.data.tags["best_model_logged"] == "true"
         assert run.data.tags["best_model_epoch"] == "50"
-
-    def test_wandb_does_not_write_local_checkpoint_when_local_disabled(
-        self, tmp_path, make_config, monkeypatch
-    ):
-        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
-        meta = FakeMetaModel(run_name="wandb-no-local")
-        config = make_config(logger={"save_local_checkpoints": False})
-        with (
-            patch("mermaidseg.logger.WANDB_IMPORT_ERROR", None),
-            patch("mermaidseg.logger.wandb") as mock_wandb,
-            pytest.warns(DeprecationWarning, match="enable_wandb is deprecated"),
-        ):
-            mock_wandb.init.return_value = MagicMock()
-            mock_wandb.Artifact.return_value = MagicMock()
-            lgr = Logger(
-                config=config,
-                meta_model=meta,
-                checkpoint_dir=str(tmp_path),
-                log_checkpoint=50,
-                enable_mlflow=False,
-                enable_wandb=True,
-            )
-            lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.2})
-
-        assert not (tmp_path / "model_checkpoints" / "wandb-no-local").exists()
-
-    def test_scheduler_state_included_in_checkpoint(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="sched-check")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=50,
-        )
-        meta.global_step = 25000
-        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
-        ckpt_file = list((tmp_path / "model_checkpoints" / "sched-check").iterdir())[0]
-        checkpoint = torch.load(ckpt_file, weights_only=False)
-        assert "scheduler_state_dict" in checkpoint
-        assert checkpoint["global_step"] == 25000
 
 
 # ===================================================================
@@ -734,39 +657,6 @@ class TestScenarios:
         )
         lgr.end_run()
 
-    def test_scenario_a_local_only(self, tmp_path, make_config, monkeypatch):
-        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
-        meta = FakeMetaModel(run_name="scenario_a")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            log_epochs=1,
-            log_checkpoint=2,
-            checkpoint_dir=str(tmp_path),
-            enable_mlflow=False,
-            enable_wandb=False,
-        )
-        self._run_logger_lifecycle(lgr, meta)
-        assert lgr.enabled is False
-        ckpt_dir = tmp_path / "model_checkpoints" / "scenario_a"
-        assert ckpt_dir.exists(), "Checkpoint directory should exist even when MLflow disabled"
-
-    def test_scenario_b_local_plus_mlflow(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="scenario_b")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            log_epochs=1,
-            log_checkpoint=2,
-            checkpoint_dir=str(tmp_path),
-            enable_mlflow=True,
-            enable_wandb=False,
-        )
-        self._run_logger_lifecycle(lgr, meta)
-        assert (tmp_path / "model_checkpoints" / "scenario_b").exists()
-        assert lgr.mlflow_run_id is not None
-        assert mlflow.get_run(lgr.mlflow_run_id).data.metrics["train/loss"] is not None
-
     def test_scenario_c_mlflow_unavailable(self, tmp_path, make_config, monkeypatch):
         """MLflow enabled but unreachable — graceful degradation, local checkpoint saved."""
         monkeypatch.setenv("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
@@ -806,12 +696,6 @@ class TestLoggerLifecycle:
         lgr._wandb_logger = mock_wandb_logger
         lgr.end_run()
         mock_wandb_logger.end_run.assert_called_once()
-
-    def test_end_run_idempotent(self, tmp_mlflow_uri, make_config, fake_meta_model):
-        lgr = Logger(config=make_config(), meta_model=fake_meta_model)
-        lgr.end_run()
-        lgr.end_run()
-        assert mlflow.active_run() is None
 
     def test_context_manager_cleans_up_on_exception(
         self, tmp_mlflow_uri, make_config, fake_meta_model

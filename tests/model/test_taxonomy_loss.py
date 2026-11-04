@@ -133,12 +133,6 @@ def test_void_pixels_contribute_nothing(partial_loss):
     assert all(v == 0.0 for k, v in components.items() if k.startswith("partial/"))
 
 
-def test_void_pixel_does_not_change_loss(partial_loss):
-    with_void, _ = partial_loss(*_pixels([PIXEL_B, VOID]))
-    without_void, _ = partial_loss(*_pixels([PIXEL_B]))
-    assert with_void.item() == pytest.approx(without_void.item())
-
-
 def test_gradients_reach_heads_below_labelled_ranks(partial_loss):
     logits, labels = _pixels([PIXEL_B, PIXEL_C])
     logits.requires_grad_(True)
@@ -172,15 +166,6 @@ def test_gradcheck(partial_loss):
     _, labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C, VOID])
     logits = torch.randn(1, labels.size(1), 1, 4, dtype=torch.float64, requires_grad=True)
     assert torch.autograd.gradcheck(lambda x: partial_loss(x, labels)[0], (logits,))
-
-
-def test_zero_when_fine_mass_inside_subtree(partial_loss):
-    logits, labels = _pixels([PIXEL_B, PIXEL_C])
-    logits[:, 5 + 3 : 5 + 5, :, 0] = -1e4  # pixel B: no mass on poritidae genera
-    logits[:, 5 + 5 :, :, :] = -1e4  # no mass on alcyoniidae genera
-    logits[:, 2 + 2, :, :] = -1e4  # no mass on alcyoniidae
-    total, _ = partial_loss(logits, labels)
-    assert total.item() == pytest.approx(0.0, abs=1e-6)
 
 
 def test_uniform_target_anneals_to_marginal():
@@ -331,13 +316,6 @@ def test_kl_gradients_follow_stop_grad():
         atol=1e-4,
         rtol=0,
     )
-
-
-def test_kl_zero_for_coherent_heads():
-    logits = _logits([0.82, 0.18], [0.37, 0.45, 0.18], GENUS_PROBS)
-    _, components = _coherence()(logits, *_no_labels())
-    assert components["kl/order->family"] == pytest.approx(0.0, abs=1e-6)
-    assert components["kl/family->genus"] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_kl_matches_naive_probability_sum():

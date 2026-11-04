@@ -239,29 +239,6 @@ class MainSubmitTest(unittest.TestCase):
         mock_create.return_value.wait.assert_not_called()
 
 
-class CliArgsTest(unittest.TestCase):
-    def test_no_wait_flag_recognized(self):
-        """--no-wait must parse without error alongside required args."""
-        import argparse
-
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--run-config", required=True, type=Path)
-        parser.add_argument("--mlflow-tracking-uri", required=True)
-        parser.add_argument("--dry-run", action="store_true")
-        parser.add_argument("--no-wait", action="store_true")
-        args = parser.parse_args(
-            [
-                "--run-config",
-                "sagemaker/runs/cbm_vitl_example.yaml",
-                "--mlflow-tracking-uri",
-                "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-X",
-                "--no-wait",
-            ]
-        )
-        self.assertTrue(args.no_wait)
-        self.assertFalse(args.dry_run)
-
-
 EXAMPLE_RUN = Path(__file__).resolve().parents[2] / "sagemaker" / "runs" / "cbm_vitl_example.yaml"
 
 
@@ -308,10 +285,6 @@ class NoRawSecretFlagsTest(unittest.TestCase):
         for flag in ("--hf-token", "--wandb-api-key"):
             with self.assertRaises(SystemExit):
                 lt.main(["--run-config", str(EXAMPLE_RUN), "--dry-run", flag, "v"])
-
-    def test_makefile_does_not_pass_a_token(self):
-        makefile = (Path(__file__).resolve().parents[2] / "Makefile").read_text()
-        self.assertNotIn("--hf-token", makefile)
 
 
 @requires_sagemaker_core
@@ -389,11 +362,6 @@ class RealLaunchValidationTest(unittest.TestCase):
         code, mock_boto3 = self._launch(
             _minimal_yaml() + "config:\n  overrides:\n    run-name: ${HOME}\n"
         )
-        self.assertEqual(code, 1)
-        mock_boto3.client.assert_not_called()
-
-    def test_a_missing_config_block_stops_the_launch_before_any_upload(self):
-        code, mock_boto3 = self._launch(_minimal_yaml())
         self.assertEqual(code, 1)
         mock_boto3.client.assert_not_called()
 

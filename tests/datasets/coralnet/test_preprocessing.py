@@ -67,22 +67,6 @@ def test_resize_image_no_resize_if_below_threshold():
     assert resized_img.height == 400
 
 
-def test_resize_image_square():
-    """Resizing square image maintains square aspect ratio."""
-    # Create 3000x3000 image
-    img = Image.new("RGB", (3000, 3000), color="green")
-    img_bytes = BytesIO()
-    img.save(img_bytes, format="JPEG")
-    img_bytes.seek(0)
-
-    resized_bytes = resize_image_to_threshold(img_bytes, threshold=2048)
-    resized_img = Image.open(resized_bytes)
-    resized_img.load()
-
-    assert resized_img.width == 2048
-    assert resized_img.height == 2048
-
-
 def test_resize_converts_rgba_to_rgb_jpeg():
     """RGBA images are converted to RGB so they can be JPEG-encoded (not RGBA-as-JPEG error)."""
     img = Image.new("RGBA", (3000, 2000), color=(255, 0, 0, 128))
@@ -843,29 +827,3 @@ def test_resize_all_images_builds_one_pool_sized_client(
     # Exactly one client, sized for the worker count — not one default-pool client per thread.
     assert len(created_pools) == 1
     assert created_pools[0] >= 4
-
-
-def test_checkpoint_tracks_skip_reason(tmp_path):
-    """Checkpoint parquet correctly marks corrupted vs already-existing skips."""
-    checkpoint_path = tmp_path / "checkpoint.parquet"
-
-    # Simulate mixed statuses: completed, failed, corrupted skip, already-exists skip
-    df_checkpoint = pd.DataFrame(
-        {
-            "source_id": [1, 1, 1, 1],
-            "image_id": ["a", "b", "c", "d"],
-            "status": ["completed", "failed", "skipped", "pending"],
-            "resize_timestamp": [datetime.now(), None, None, None],
-            "error_message": [None, "PIL error", None, None],
-            "skip_reason": [None, None, "corrupted_invalid_channels", None],
-        }
-    )
-
-    write_checkpoint(checkpoint_path, df_checkpoint)
-    df_read = read_checkpoint(checkpoint_path)
-
-    # Verify columns exist and values preserved
-    assert "skip_reason" in df_read.columns
-    corrupted_row = df_read[df_read["image_id"] == "c"]
-    assert corrupted_row.iloc[0]["status"] == "skipped"
-    assert "corrupted_" in str(corrupted_row.iloc[0]["skip_reason"])

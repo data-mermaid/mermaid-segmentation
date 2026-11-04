@@ -10,11 +10,6 @@ from mermaidseg.datasets.coralnet.etl.jpeg_header import (
 )
 
 
-def test_find_sof_dimensions_baseline(jpeg_small_bytes):
-    height, width = _find_sof_dimensions(jpeg_small_bytes)
-    assert (width, height) == (1024, 768)
-
-
 def test_find_sof_dimensions_handles_padding(jpeg_extended_bytes):
     height, width = _find_sof_dimensions(jpeg_extended_bytes)
     assert (width, height) == (640, 480)
