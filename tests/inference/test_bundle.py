@@ -89,9 +89,19 @@ def _drop_one_class(manifest):
         (_drop_one_concept, "concept"),
         (_drop_one_class, "classes"),
         (lambda m: m.update(schema_version=2), "schema_version"),
+        (lambda m: m.update(task="other-task"), "task="),
+        (lambda m: m["concepts"]["rank_order"].reverse(), "rank_order"),
         (lambda m: m["architecture"].update({"class": "ConceptBottleneckDINOv3"}), "architecture"),
     ],
-    ids=["stale_rank_widths", "concept_count", "class_count", "schema_version", "architecture"],
+    ids=[
+        "stale_rank_widths",
+        "concept_count",
+        "class_count",
+        "schema_version",
+        "task",
+        "rank_order",
+        "architecture",
+    ],
 )
 def test_load_rejects_a_manifest_that_does_not_fit_the_weights(bundle_dir, tmp_path, edit, message):
     broken = _rewrite_manifest(bundle_dir, tmp_path / "broken", edit)
@@ -401,3 +411,59 @@ def test_environment_without_git_or_env_sha_is_unknown(monkeypatch):
     monkeypatch.setattr(bundle_module, "_git", lambda *a: None)
     monkeypatch.delenv("MERMAIDSEG_GIT_SHA", raising=False)
     assert bundle_module._environment()["mermaidseg"] == "unknown"
+
+
+@pytest.mark.parametrize("fmt", ["onnx", "Checkpoint", ""], ids=["unknown", "wrong_case", "empty"])
+def test_load_rejects_an_unknown_format_before_reading_the_bundle(tmp_path, fmt):
+    # The path does not exist, so only a guard ahead of the manifest read raises this message.
+    with pytest.raises(ValueError, match="format must be one of"):
+        load_bundle(tmp_path / "missing", format=fmt)
+
+
+def test_load_graph_format_of_a_bundle_exported_without_a_graph_is_refused(bundle_dir):
+    # Catches: falling through to torch.export.load on a bundle with no graph file.
+    with pytest.raises(ManifestError, match="no exported graph"):
+        load_bundle(bundle_dir, format="graph")
+
+
+def _sidecar_kwargs(trained_run, **overrides):
+    from mermaidseg.inference import IMAGENET_MEAN, IMAGENET_STD
+    from tests.inference._tiny import concept_id2name, concept_value2id, id2label
+
+    kwargs = {
+        "run_name": RUN_NAME,
+        "model_cfg": trained_run["model_cfg"],
+        "id2label": id2label(),
+        "concept_id2name": concept_id2name(),
+        "concept_value2id": concept_value2id(),
+        "input_size": INPUT_SIZE,
+        "mean": IMAGENET_MEAN,
+        "std": IMAGENET_STD,
+    }
+    return {**kwargs, **overrides}
+
+
+@pytest.mark.parametrize(
+    "id2label",
+    [{0: "a", 2: "b"}, {1: "a", 2: "b"}, {0: "a", 1: "b", 3: "c"}],
+    ids=["gap", "starts_at_one", "gap_after_run"],
+)
+def test_write_sidecar_rejects_class_ids_that_are_not_contiguous_from_zero(
+    trained_run, tmp_path, id2label
+):
+    # Catches: dropping the check, which would index classes by sorted position and shift labels.
+    from mermaidseg.inference import write_sidecar
+
+    with pytest.raises(ValueError, match="contiguous"):
+        write_sidecar(tmp_path / "sc", **_sidecar_kwargs(trained_run, id2label=id2label))
+
+
+def test_write_sidecar_rejects_a_value_map_missing_a_taxonomic_rank(trained_run, tmp_path):
+    # Catches: dropping the check, which would raise a bare KeyError, or skip the rank width.
+    from mermaidseg.inference import write_sidecar
+    from tests.inference._tiny import concept_value2id
+
+    value2id = concept_value2id()
+    del value2id["genus"]
+    with pytest.raises(ValueError, match="no 'genus' rank"):
+        write_sidecar(tmp_path / "sc", **_sidecar_kwargs(trained_run, concept_value2id=value2id))

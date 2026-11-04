@@ -68,3 +68,108 @@ def test_graph_predictor_rejects_feature_calls(graph_bundle, call):
     predictor = CBMPredictor.from_bundle(bundle)
     with pytest.raises(NotImplementedError, match='format="checkpoint"'):
         call(predictor, torch.zeros(1, 3, *bundle.input_size))
+
+
+def _eager_predictor(graph_bundle):
+    bundle = load_bundle(graph_bundle, format="checkpoint")
+    return CBMPredictor.from_bundle(bundle), bundle.model
+
+
+def _images(batch: int) -> torch.Tensor:
+    return torch.randn(batch, 3, 64, 64, generator=torch.Generator().manual_seed(7))
+
+
+def _expected_concepts(model, x):
+    return model(x).hidden_states
+
+
+def _expected_dpt(model, x):
+    feat = model.dpt_head(model._encode(x))
+    return F.interpolate(feat, size=x.shape[-2:], mode="bilinear", align_corners=False)
+
+
+def _expected_backbone(model, x):
+    # Last selected hidden state, CLS dropped, laid out as the 4x4 patch grid of a 64x64 input
+    # with 16-pixel patches.
+    tokens = model._encode(x)[-1][:, 1:, :]
+    grid = tokens.permute(0, 2, 1).reshape(x.shape[0], 32, 4, 4)
+    return F.interpolate(grid, size=x.shape[-2:], mode="bilinear", align_corners=False)
+
+
+@pytest.mark.parametrize(
+    ("kind", "channels", "expected"),
+    [
+        ("concepts", 14, _expected_concepts),  # 6 ranks x 2 values + 2 tail concepts
+        ("dpt", 8, _expected_dpt),  # fusion_hidden_size
+        ("backbone", 32, _expected_backbone),  # encoder hidden_size
+    ],
+)
+def test_eager_forward_features_are_the_models_own_submodule_output_at_input_resolution(
+    graph_bundle, kind, channels, expected
+):
+    # Catches: "concepts" returning another output, "dpt" skipping the resize or reading the
+    # wrong submodule, "backbone" taking a different hidden state or keeping the CLS token.
+    predictor, model = _eager_predictor(graph_bundle)
+    x = _images(2)
+
+    got = predictor.forward_features(x, kind)
+
+    assert got.shape == (2, channels, 64, 64)
+    with torch.no_grad():
+        reference = expected(model, x)
+    assert torch.allclose(got, reference, atol=1e-5, rtol=0)
+
+
+@pytest.mark.parametrize("kind", ["bogus", "Concepts"])
+def test_forward_features_rejects_an_unknown_kind(graph_bundle, kind):
+    # Catches: dropping the kind guard, which sends any unknown kind down the backbone path.
+    predictor, _ = _eager_predictor(graph_bundle)
+    with pytest.raises(ValueError, match="Unknown feature kind"):
+        predictor.forward_features(_images(1), kind)
+
+
+def test_eager_forward_concept_logits_are_the_models_pre_activation_logits(graph_bundle):
+    # Catches: returning the activated concept probabilities instead of the raw logits.
+    predictor, model = _eager_predictor(graph_bundle)
+    x = _images(2)
+
+    got = predictor.forward_concept_logits(x)
+
+    assert got.shape == (2, 14, 64, 64)
+    with torch.no_grad():
+        out = model(x)
+    assert torch.allclose(got, out.concept_logits, atol=1e-5, rtol=0)
+    assert not torch.allclose(got, out.hidden_states, atol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "points",
+    [[1.0, 2.0], [[1, 2, 3]], [[[1, 2]]]],
+    ids=["one_dimensional", "three_columns", "three_dimensional"],
+)
+def test_predict_points_rejects_points_that_are_not_n_by_2(graph_bundle, points):
+    # Catches: dropping the shape guard, which would silently read the first two columns.
+    predictor, _ = _eager_predictor(graph_bundle)
+    with pytest.raises(ValueError, match=r"must be \(N, 2\)"):
+        predictor.predict_points(_image(40, 50), points)
+
+
+def test_activate_concept_logits_softmaxes_each_rank_and_sigmoids_the_tail(graph_bundle):
+    # Six rank pairs (each width 2) then two tail concepts, over two pixels. Pixel 0 is all
+    # zeros. At pixel 1 even ranks hold (0, ln 3) and odd ranks (ln 3, 0); the tail holds
+    # (ln 3, -ln 3). softmax(0, ln 3) = (1/4, 3/4); sigmoid(ln 3) = 3/4, sigmoid(-ln 3) = 1/4.
+    # Catches: sigmoid on a rank (0.5, 0.75), softmax on the tail (0.9, 0.1), a shifted offset.
+    predictor, _ = _eager_predictor(graph_bundle)
+    ln3 = 1.0986123
+    column = [0.0, ln3, ln3, 0.0] * 3 + [ln3, -ln3]
+    logits = torch.zeros(14, 1, 2)
+    logits[:, 0, 1] = torch.tensor(column)
+
+    got = predictor.activate_concept_logits(logits)
+
+    quarter_pairs = [0.25, 0.75, 0.75, 0.25] * 3
+    expected = torch.zeros(14, 1, 2)
+    expected[:, 0, 0] = 0.5
+    expected[:, 0, 1] = torch.tensor(quarter_pairs + [0.75, 0.25])
+    assert got.shape == (14, 1, 2)
+    assert torch.allclose(got, expected, atol=1e-6, rtol=0)

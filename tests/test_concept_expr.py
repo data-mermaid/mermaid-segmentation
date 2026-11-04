@@ -268,3 +268,86 @@ def test_load_schedule_and_active_row() -> None:
     assert active_schedule_row(rows, 3.0).display_title == "Live Hard Coral"
     assert active_schedule_row(rows, 4.5).display_title == "Bleached Hard Coral"
     assert active_schedule_row(rows, 22.0).expression == "phylum:chordata"
+
+
+@pytest.fixture
+def abc_probs() -> np.ndarray:
+    # Channels a, b, c as constant 1x1 maps.
+    return np.array([0.9, 0.3, 0.2], dtype=np.float32).reshape(3, 1, 1)
+
+
+@pytest.fixture
+def abc_resolver() -> ConceptResolver:
+    return ConceptResolver(["a", "b", "c"])
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("a + b * c", 0.96),  # a + (b * c); (a + b) * c would clip to 1 and give 0.2
+        ("a * b + c", 0.47),  # (a * b) + c; a * (b + c) would give 0.45
+        ("a - b * c", 0.84),  # a - (b * c); (a - b) * c would give 0.12
+        ("a - b - c", 0.4),  # (a - b) - c; a - (b - c) would give 0.8
+        ("a - b + c", 0.8),  # (a - b) + c; a - (b + c) would give 0.4
+    ],
+)
+def test_evaluate_applies_precedence_and_left_associativity_without_parentheses(
+    abc_probs, abc_resolver, expression, expected
+) -> None:
+    out = evaluate(expression, abc_probs, abc_resolver)
+    np.testing.assert_allclose(out, [[expected]], atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("a + d", 1.0),  # raw 0.9 + 0.8 = 1.7
+        ("c - a", 0.0),  # raw 0.2 - 0.9 = -0.7
+        ("3 * a", 1.0),  # raw 2.7
+    ],
+    ids=["add_above_one", "subtract_below_zero", "multiply_above_one"],
+)
+def test_binary_operators_clip_to_the_unit_interval(expression, expected) -> None:
+    probs = np.array([0.9, 0.3, 0.2, 0.8], dtype=np.float32).reshape(4, 1, 1)
+    resolver = ConceptResolver(["a", "b", "c", "d"])
+    out = evaluate(expression, probs, resolver)
+    np.testing.assert_allclose(out, [[expected]], atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("expression", "message"),
+    [
+        ("live, live", "Misplaced comma"),
+        ("max(, live)", "Empty function argument"),
+        ("max()", "Empty function argument"),
+        ("live)", "Mismatched parentheses"),
+        ("live $ live", "Unexpected token"),
+        ("   ", "Empty expression"),
+        ("+ live", "Not enough operands for operator"),
+        ("live live", "Invalid expression"),
+    ],
+    ids=[
+        "comma_outside_function",
+        "empty_argument_before_comma",
+        "empty_argument_list",
+        "extra_closing_paren",
+        "unexpected_character",
+        "empty_expression",
+        "operator_without_operands",
+        "two_values_without_operator",
+    ],
+)
+def test_evaluate_rejects_a_malformed_expression(expression, message, concept_probs, resolver):
+    with pytest.raises(ConceptExpressionError, match=message):
+        evaluate(expression, concept_probs, resolver)
+
+
+def test_evaluate_resolves_atoms_through_a_plain_mapping(abc_probs) -> None:
+    # The mapping is looked up verbatim, so a rank:value atom is a literal key here, not split.
+    out = evaluate("x * y:z", abc_probs, {"x": 0, "y:z": 2})
+    np.testing.assert_allclose(out, [[0.18]], atol=1e-6)
+
+
+def test_evaluate_rejects_an_atom_missing_from_a_plain_mapping(abc_probs) -> None:
+    with pytest.raises(ConceptExpressionError, match="Unknown concept atom 'zzz'"):
+        evaluate("a + zzz", abc_probs, {"a": 0})
