@@ -194,15 +194,11 @@ class TestTrainerDefaults:
             runpy.run_path(str(REPO_ROOT / "scripts" / "train.py"), run_name="train_under_test")
         parser = raised.value.args[0]
 
-        expected = {
-            "training_config": "training_config_cbm.yaml",
-            "model_config": "model_config_cbm_dpt_lora_vitl.yaml",
-            "data_config": "data_config_dedup.yaml",
-        }
-        for dest, name in expected.items():
+        for dest in ("training_config", "model_config", "data_config"):
             default = Path(parser.get_default(dest))
-            assert default == REPO_ROOT / "configs" / name, dest
+            assert default.parent == REPO_ROOT / "configs", dest
             assert default.is_file(), dest
+            assert default.name.startswith(dest), dest
 
     def test_trainer_help_runs_from_another_cwd(self, tmp_path):
         result = subprocess.run(

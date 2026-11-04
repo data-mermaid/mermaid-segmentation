@@ -426,6 +426,7 @@ class ReservedJobEnvTest(unittest.TestCase):
                     self.assertRaises(SystemExit) as ctx,
                 ):
                     lt.main(["--run-config", str(yaml_path)])
+                self.assertTrue(str(ctx.exception.code).startswith("ERROR: "))
                 self.assertIn(key, str(ctx.exception.code))
                 mock_boto3.client.assert_not_called()
 

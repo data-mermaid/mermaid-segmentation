@@ -1,5 +1,7 @@
 # Unit test audit: mermaid-segmentation-rebuild (branch `main-rebuild`, f5a254e)
 
+> Note: this report records the suite as it stood at f5a254e, before the fixes. `hierarchical_eval.py` and the dead WandbLogger methods it lists have since been deleted.
+
 Date: 2026-11-04. The audit only read code; nothing in the repo was changed. It followed the spk-overture `unit-test-auditor` procedure, run as six parallel auditors, one per area. Line numbers are relative to the repo root.
 
 ## Totals

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -42,10 +43,15 @@ class FakeMetaModel:
 
 @pytest.fixture(autouse=True)
 def _cleanup_mlflow_run():
-    """Ensure no active MLflow run leaks between tests."""
+    """Ensure no active MLflow run or tracking URI leaks between tests."""
+    saved_uri = mlflow.get_tracking_uri()
+    # set_tracking_uri exports MLFLOW_TRACKING_URI, which outranks the config URI in Logger; a
+    # restore that was never explicitly set must clear it again.
+    explicit = "MLFLOW_TRACKING_URI" in os.environ
     yield
     if mlflow.active_run() is not None:
         mlflow.end_run()
+    mlflow.set_tracking_uri(saved_uri if explicit else None)
 
 
 @pytest.fixture()
