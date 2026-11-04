@@ -834,6 +834,7 @@ def test_resize_rerun_retries_failed_download_in_place(valid_rgb_jpeg_bytes, tmp
     flaky_rows = df_checkpoint[df_checkpoint["image_id"] == "flaky"]
     assert len(flaky_rows) == 1
     assert flaky_rows.iloc[0]["status"] == "completed"
+    assert pd.isna(flaky_rows.iloc[0]["error_message"])
 
 
 def test_resize_rerun_does_not_retry_corrupted_image(

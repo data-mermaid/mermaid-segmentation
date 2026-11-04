@@ -506,12 +506,9 @@ def resize_and_upload_all_images(
     def apply_result(res: dict[str, Any]) -> None:
         pos = row_index[(int(res["source_id"]), str(res["image_id"]))]
         checkpoint_df.loc[pos, "status"] = res["status"]
-        if res["resize_timestamp"] is not None:
-            checkpoint_df.loc[pos, "resize_timestamp"] = res["resize_timestamp"]
-        if res["error_message"] is not None:
-            checkpoint_df.loc[pos, "error_message"] = res["error_message"]
-        if res["skip_reason"] is not None:
-            checkpoint_df.loc[pos, "skip_reason"] = res["skip_reason"]
+        checkpoint_df.loc[pos, "resize_timestamp"] = res["resize_timestamp"]
+        checkpoint_df.loc[pos, "error_message"] = res["error_message"]
+        checkpoint_df.loc[pos, "skip_reason"] = res["skip_reason"]
 
     since_flush = 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
