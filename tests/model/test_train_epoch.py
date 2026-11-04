@@ -8,6 +8,7 @@ import math
 import pytest
 import torch
 
+from mermaidseg.model.meta import MAX_CONSECUTIVE_EMPTY_BATCHES
 from tests.conftest import IMAGE_SIZE
 
 # Zero encoder features and a zero-weight head leave the logits equal to this bias everywhere.
@@ -57,11 +58,68 @@ def test_resume_offset_outside_the_epoch_restarts_it(
     assert meta.global_step == global_step + updates_run
 
 
-def test_empty_batch_skips_its_update(minimal_config, make_meta_model):
-    meta = make_meta_model(_cfg(minimal_config, iterations=2), run_name="empty-batch")
-    _, _, timing = meta.train_epoch([_empty_batch(), _batch(1)], evaluator=None, epoch=0)
+def _count_optimizer_steps(meta) -> list[int]:
+    steps: list[int] = []
+    meta.optimizer.register_step_post_hook(lambda *_: steps.append(1))
+    return steps
+
+
+def _inf_grad_on_calls(meta, calls: set[int]) -> None:
+    """Make the head bias gradient infinite on the given backward calls (0-based)."""
+    seen = {"n": 0}
+
+    def _hook(grad):
+        index = seen["n"]
+        seen["n"] += 1
+        return torch.full_like(grad, math.inf) if index in calls else grad
+
+    meta.model.head.classifier.bias.register_hook(_hook)
+
+
+def test_empty_batch_is_replaced_by_the_next_batch(minimal_config, make_meta_model):
+    meta = make_meta_model(_cfg(minimal_config, iterations=3, lr=0.0), run_name="empty-batch")
+    _pin_head(meta)
+    steps = _count_optimizer_steps(meta)
+    loader = [_batch(2), _empty_batch(), _batch(1), _batch(1)]
+
+    loss, _, timing = meta.train_epoch(loader, evaluator=None, epoch=0)
+
+    assert meta.global_step == 3
+    assert len(steps) == 3
+    assert loss == pytest.approx((CE_PREDICTED + 2 * CE_OTHER) / 3, abs=1e-5)
+    assert timing["skipped_updates"] == 0
+    assert timing["num_samples"] == 6
+
+
+def test_too_many_consecutive_empty_batches_raise(minimal_config, make_meta_model):
+    meta = make_meta_model(_cfg(minimal_config, iterations=1), run_name="empty-cap")
+    loader = [_empty_batch()] * MAX_CONSECUTIVE_EMPTY_BATCHES + [_batch(1)]
+    with pytest.raises(
+        RuntimeError, match=rf"{MAX_CONSECUTIVE_EMPTY_BATCHES} consecutive.*every item failed"
+    ):
+        meta.train_epoch(loader, evaluator=None, epoch=0)
+
+
+def test_empty_batches_below_the_cap_do_not_raise(minimal_config, make_meta_model):
+    meta = make_meta_model(_cfg(minimal_config, iterations=1), run_name="empty-below-cap")
+    loader = [_empty_batch()] * (MAX_CONSECUTIVE_EMPTY_BATCHES - 1) + [_batch(1)]
+    _, _, timing = meta.train_epoch(loader, evaluator=None, epoch=0)
     assert meta.global_step == 1
     assert timing["num_samples"] == 2
+
+
+def test_empty_batch_inside_an_accumulation_window(minimal_config, make_meta_model):
+    cfg = _cfg(minimal_config, iterations=1, lr=0.0)
+    cfg.training.grad_accum_steps = 2
+    meta = make_meta_model(cfg, run_name="empty-accum")
+    _pin_head(meta)
+    loader = [_batch(2), _empty_batch(), _batch(1)]
+
+    loss, _, timing = meta.train_epoch(loader, evaluator=None, epoch=0)
+
+    assert meta.global_step == 1
+    assert timing["num_samples"] == 4
+    assert loss == pytest.approx((CE_PREDICTED + CE_OTHER) / 2, abs=1e-5)
 
 
 def test_non_finite_grad_norm_skips_the_step(minimal_config, make_meta_model):
@@ -89,3 +147,26 @@ def test_returned_loss_is_the_mean_over_the_updates_run(minimal_config, make_met
 
     assert meta.global_step == 3
     assert loss == pytest.approx((CE_PREDICTED + CE_OTHER) / 2, abs=1e-5)
+
+
+def test_skipped_update_is_left_out_of_the_average(minimal_config, make_meta_model):
+    meta = make_meta_model(_cfg(minimal_config, iterations=2, lr=0.0), run_name="skip-avg")
+    _pin_head(meta)
+    _inf_grad_on_calls(meta, {1})
+
+    loss, _, timing = meta.train_epoch([_batch(2), _batch(1)], evaluator=None, epoch=0)
+
+    assert meta.global_step == 1
+    assert timing["skipped_updates"] == 1
+    assert loss == pytest.approx(CE_PREDICTED, abs=1e-5)
+
+
+def test_average_loss_is_nan_when_every_update_is_skipped(minimal_config, make_meta_model):
+    meta = make_meta_model(_cfg(minimal_config, iterations=2), run_name="all-skipped")
+    _inf_grad_on_calls(meta, {0, 1})
+
+    loss, _, timing = meta.train_epoch([_batch(1)], evaluator=None, epoch=0)
+
+    assert math.isnan(loss)
+    assert timing["skipped_updates"] == 2
+    assert meta.global_step == 0

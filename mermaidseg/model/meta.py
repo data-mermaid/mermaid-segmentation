@@ -30,6 +30,9 @@ from mermaidseg.model.taxonomy_loss import TaxonomicLoss
 
 logger = logging.getLogger(__name__)
 
+# Empty batches in a row that train_epoch tolerates before treating the data source as broken.
+MAX_CONSECUTIVE_EMPTY_BATCHES = 10
+
 
 def _resolve_amp_dtype(dtype_config: Any | None) -> torch.dtype:
     """Map config strings to torch autocast dtypes."""
@@ -583,6 +586,12 @@ class MetaModel:
         a fresh run starts at 0. The next epoch in the same process starts at 0 as
         well, because ``global_step`` already counts the updates of earlier epochs.
 
+        An empty batch (every item failed to load) does not use up a microbatch: it
+        is logged and replaced by the next batch from the loader. After
+        ``MAX_CONSECUTIVE_EMPTY_BATCHES`` empty batches in a row, a ``RuntimeError``
+        is raised. A non-finite loss or grad norm skips its update: the window is
+        dropped and ``global_step`` does not advance.
+
         Args:
             train_loader: DataLoader yielding ``(inputs, source_labels)`` batches.
                 Each batch is one microbatch.
@@ -598,7 +607,11 @@ class MetaModel:
                 ``global_step`` and the LR schedule have advanced.
 
         Returns:
-            A 3-tuple of ``(average_loss, metric_results, timing)``.
+            A 3-tuple of ``(average_loss, metric_results, timing)``. The average loss
+            and the ``loss/*`` components are means over the updates whose optimizer
+            step was applied; the average loss is NaN when no step was applied.
+            ``timing["skipped_updates"]`` counts the updates skipped for a non-finite
+            loss or grad norm.
         """
         if self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
             self.model.freeze_encoder()
@@ -636,7 +649,8 @@ class MetaModel:
                 iterations_per_train_epoch,
             )
             start_update = 0
-        n_updates = iterations_per_train_epoch - start_update
+        n_applied = 0
+        skipped_updates = 0
 
         for _update_idx in tqdm(range(start_update, iterations_per_train_epoch)):
             self.optimizer.zero_grad(set_to_none=True)
@@ -646,26 +660,33 @@ class MetaModel:
             did_backward = False
 
             for _micro in range(self.grad_accum_steps):
-                assert self._train_loader_iter is not None
-                try:
-                    data = next(self._train_loader_iter)
-                except StopIteration:
-                    self._train_loader_iter = iter(train_loader)
-                    self._train_loader = train_loader
-                    data = next(self._train_loader_iter)
+                consecutive_empty = 0
+                while True:
+                    assert self._train_loader_iter is not None
+                    try:
+                        data = next(self._train_loader_iter)
+                    except StopIteration:
+                        self._train_loader_iter = iter(train_loader)
+                        self._train_loader = train_loader
+                        data = next(self._train_loader_iter)
 
-                if use_cuda:
-                    torch.cuda.synchronize()
-                data_time_total += time.perf_counter() - batch_end
+                    if use_cuda:
+                        torch.cuda.synchronize()
+                    data_time_total += time.perf_counter() - batch_end
+                    batch_end = time.perf_counter()
 
-                images, source_labels = data
-                if images.numel() == 0:
+                    images, source_labels = data
+                    if images.numel() > 0:
+                        break
                     logger.warning(
                         "train_epoch: skipping an empty batch (all items failed to load)."
                     )
-                    window_failed = True
-                    batch_end = time.perf_counter()
-                    break
+                    consecutive_empty += 1
+                    if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_BATCHES:
+                        raise RuntimeError(
+                            f"train_epoch: {consecutive_empty} consecutive empty batches; "
+                            "every item failed to load in each of them."
+                        )
                 images = images.to(self.device).float()
                 source_labels = source_labels.long().to(self.device)
                 target_labels = self._to_target_labels(source_labels)
@@ -730,6 +751,7 @@ class MetaModel:
                 batch_end = time.perf_counter()
 
             if window_failed or not micro_losses:
+                skipped_updates += 1
                 self._abort_accumulation(did_backward)
                 if use_cuda:
                     torch.cuda.synchronize()
@@ -763,9 +785,11 @@ class MetaModel:
             backward_time_total += time.perf_counter() - backward_start
 
             if not step_applied:
+                skipped_updates += 1
                 batch_end = time.perf_counter()
                 continue
 
+            n_applied += 1
             running_loss += batch_loss
             for key, value in mean_components.items():
                 running_loss_components[key] = running_loss_components.get(key, 0.0) + value
@@ -794,9 +818,16 @@ class MetaModel:
             if self.training_mode in ("concept-bottleneck", "concept"):
                 metric_results.update(evaluator.compute_concept_metric_results())
 
-        denom = n_updates if n_updates > 0 else 1
-        last_loss = running_loss / denom
-        avg_loss_components = {k: v / denom for k, v in running_loss_components.items()}
+        if n_applied > 0:
+            last_loss = running_loss / n_applied
+        else:
+            last_loss = float("nan")
+            logger.warning(
+                "train_epoch: no optimizer update was applied this epoch (%s skipped); "
+                "the average loss is NaN.",
+                skipped_updates,
+            )
+        avg_loss_components = {k: v / n_applied for k, v in running_loss_components.items()}
         for k, v in avg_loss_components.items():
             metric_results[f"loss/{k}"] = v
         timing = {
@@ -804,6 +835,7 @@ class MetaModel:
             "forward_sec": forward_time_total,
             "backward_sec": backward_time_total,
             "num_samples": num_samples,
+            "skipped_updates": skipped_updates,
         }
         return last_loss, metric_results, timing
 
