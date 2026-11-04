@@ -1,0 +1,54 @@
+training:
+    training_mode: "concept-bottleneck"
+    freeze_encoder: true
+    detach_concepts: true
+    concept_mapping_path: "../configs/class_to_concepts.csv"
+    loss:
+        type: ConceptBottleneckLoss
+        lambda_weight: 1
+        ignore_index: 0
+        # Compromise from the pixel-vs-image loss-weight sweep.
+        per_pixel_loss_weight: 0.5
+        per_image_loss_weight: 0.5
+    max_grad_norm: 0.5
+    # Phase 1 of a 100k-update from-scratch run on the deduplicated CoralNet splits
+    # (slurm/scratch100k_train.sbatch), Jonathan's duration recipe at 1/10 the length:
+    # 3 epochs x 25000 updates = 75_000 updates, model_epoch{N} after (N+1)*25000. The first
+    # 4000 updates are linear warmup; the rest stay at the peak LR (ConstantLR factor 1).
+    # Phase 2 (training_config_cbm_scratch100k_cooldown.yaml) cools down linearly over 25_000.
+    # Taxonomy loss terms are added per run with --set (see the sbatch).
+    epochs: 3
+    optimizer:
+        type: AdamW
+        lr: 0.00005          # fallback / default; also the DPT + concept/class head LR
+        weight_decay: 0.01
+        lora_lr: 0.00001     # backbone LoRA adapter params
+        dpt_lr: 0.00005      # DPT head + concept_proj + concept_classifier
+    scheduler:
+        type: ConstantLR
+        factor: 1.0          # multiply peak LR by 1, i.e. hold it
+        total_iters: 1000    # epoch steps; factor 1 never changes the LR
+        warmup_iters: 4000   # in ITERATIONS; keep <= iterations_per_train_epoch
+        warmup_start_factor: 0.01
+    mixed_precision: true
+    mixed_precision_dtype: bfloat16
+    iterations_per_train_epoch: 25000
+    iterations_per_val_epoch: 400
+    # Microbatch 16 x 2 accumulation = effective batch 32, as in the ft50k runs (batch 32 does
+    # not fit an A100 80GB with the extra per-pixel loss terms); the baseline uses the same.
+    batch_size: 16
+    grad_accum_steps: 2
+    class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
+                    'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
+                    'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
+                    'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fish', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
+                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human', 'Human-made structure', 'Hydnophora',
+                    'Isopora', 'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis',
+                    'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium',
+                    'Orbicella annularis', 'Orbicella faveolata', 'Pachyseris', 'Padina', 'Pavona', 'Pectinia', 'Platygyra',
+                    'Pocillopora', 'Porites', 'Porites astreoides', 'Psammocora', 'Rock', 'Rubble', 'Sand', 'Sargassum',
+                    'Sea urchin', 'Seagrass', 'Seriatopora', 'Siderastrea siderea', 'Soft coral', 'Sponge', 'Stylophora',
+                    'Symphyllia', 'Transect tools', 'Tridacna giant clam', 'Turbinaria-algae', 'Turbinaria-coral',
+                    'Turf algae', 'Zoanthid']
+    padding: 3
+    label_roll_up: True

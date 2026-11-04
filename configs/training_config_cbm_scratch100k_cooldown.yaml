@@ -1,0 +1,50 @@
+training:
+    training_mode: "concept-bottleneck"
+    freeze_encoder: true
+    detach_concepts: true
+    concept_mapping_path: "../configs/class_to_concepts.csv"
+    loss:
+        type: ConceptBottleneckLoss
+        lambda_weight: 1
+        ignore_index: 0
+        per_pixel_loss_weight: 0.5
+        per_image_loss_weight: 0.5
+    max_grad_norm: 0.5
+    # Phase 2 of slurm/scratch100k_train.sbatch: the 25k-update cooldown of
+    # training_config_cbm_scratch100k.yaml (copy of training_config_cbm_cooldown.yaml with
+    # microbatch 16 x 2). One epoch. LinearLR is stepped every iteration from the loaded peak LR down to 0.
+    # An epoch-level scheduler would hold the peak LR for all 25000 steps.
+    epochs: 1
+    optimizer:
+        type: AdamW
+        lr: 0.00005          # fallback / default; also the DPT + concept/class head LR
+        weight_decay: 0.01
+        lora_lr: 0.00001     # backbone LoRA adapter params
+        dpt_lr: 0.00005      # DPT head + concept_proj + concept_classifier
+    scheduler:
+        type: LinearLR
+        start_factor: 1.0
+        end_factor: 0.0
+        total_iters: 25000   # in ITERATIONS (step_every: iteration)
+        step_every: iteration
+        warmup_iters: 0
+    mixed_precision: true
+    mixed_precision_dtype: bfloat16
+    iterations_per_train_epoch: 25000
+    iterations_per_val_epoch: 400
+    batch_size: 16
+    grad_accum_steps: 2
+    class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
+                    'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
+                    'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
+                    'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fish', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
+                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human', 'Human-made structure', 'Hydnophora',
+                    'Isopora', 'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis',
+                    'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium',
+                    'Orbicella annularis', 'Orbicella faveolata', 'Pachyseris', 'Padina', 'Pavona', 'Pectinia', 'Platygyra',
+                    'Pocillopora', 'Porites', 'Porites astreoides', 'Psammocora', 'Rock', 'Rubble', 'Sand', 'Sargassum',
+                    'Sea urchin', 'Seagrass', 'Seriatopora', 'Siderastrea siderea', 'Soft coral', 'Sponge', 'Stylophora',
+                    'Symphyllia', 'Transect tools', 'Tridacna giant clam', 'Turbinaria-algae', 'Turbinaria-coral',
+                    'Turf algae', 'Zoanthid']
+    padding: 3
+    label_roll_up: True
