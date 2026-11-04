@@ -22,7 +22,7 @@ from mermaidseg.datasets.utils import emit_dataset_warning
 
 logger = logging.getLogger(__name__)
 
-CORALSCAPES_V2_HF_REPO = "josauder/314d3951853dad8855bd06248987f626"
+CORALSCAPES_V2_HF_REPO = "josauder/coralscapesV2"
 
 CORALSCAPES_V2_ID2NAME: dict[int, str] = {
     1: "acanthaster planci",
@@ -69,9 +69,9 @@ CORALSCAPES_V2_ID2NAME: dict[int, str] = {
     42: "lobophylliidae alive",
     43: "lobophylliidae bleached",
     44: "lobophylliidae dead",
-    45: "massive coral alive",
-    46: "massive coral bleached",
-    47: "massive coral dead",
+    45: "massive alive",
+    46: "massive bleached",
+    47: "massive dead",
     48: "meandering coral alive",
     49: "meandering coral bleached",
     50: "meandering coral dead",
@@ -125,7 +125,7 @@ CORALSCAPES_V2_ID2NAME: dict[int, str] = {
 
 class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     """A PyTorch Dataset wrapping the HuggingFace
-    `Coralscapes V2 <https://huggingface.co/datasets/josauder/314d3951853dad8855bd06248987f626>`_
+    `Coralscapes V2 <https://huggingface.co/datasets/josauder/coralscapesV2>`_
     dataset.
 
     Each item returned is a tuple ``(image, source_labels)`` where
@@ -141,6 +141,8 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             ``None`` for all three splits.
         transform: Optional Albumentations transform applied to image and mask.
         class_subset: Optional list of source-space (Coralscapes V2) class names to retain.
+        hf_repo_id: HuggingFace dataset repo ID or local dataset directory (e.g. a sparsified
+            copy from ``scripts/build_sparse_dense_datasets.py``) with the same columns.
         source_id2name: Mapping from local source IDs (1..N) to Coralscapes V2 class names.
         source_name2id: Inverse of source_id2name.
         num_source_classes: ``len(source_id2name) + 1`` (incl. background).
@@ -151,6 +153,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     split: str | list[str] | None
     transform: A.BasicTransform | None
     class_subset: list[str] | None
+    hf_repo_id: str
     source_id2name: dict[int, str]
     source_name2id: dict[str, int]
     num_source_classes: int
@@ -161,19 +164,17 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         split: str | list[str] | None = None,
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
-        padding: int | None = None,
+        hf_repo_id: str = CORALSCAPES_V2_HF_REPO,
     ):
         from datasets import concatenate_datasets, load_dataset
 
         self.split = split
         self.transform = transform
         self.class_subset = class_subset
-        # Accepted for a uniform dataset constructor interface; unused here — Coralscapes
-        # carries dense HF masks, not point annotations, so there is nothing to pad.
-        self.padding = padding
+        self.hf_repo_id = hf_repo_id
         self._global_offset = 0
 
-        hf_dataset = load_dataset(CORALSCAPES_V2_HF_REPO)
+        hf_dataset = load_dataset(self.hf_repo_id)
         if self.split is None:
             self.dataset = concatenate_datasets(
                 [
@@ -200,15 +201,17 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _build_native_to_local(self) -> np.ndarray:
         """Build a vectorized lookup from native Coralscapes V2 IDs to local source IDs.
 
-        Native ID ``0`` and any class not present in ``class_subset`` map to ``0``
-        (background).
+        Native ID ``0`` and any class not present in ``class_subset`` map to ``0`` (background).
+        The global offset is folded directly into the foreground entries so ``_load_item`` does not
+        need a separate ``np.where`` shift pass. ``int32`` keeps the emitted mask small.
         """
         native_id2name = CORALSCAPES_V2_ID2NAME
         max_native = max(native_id2name) + 1
-        lookup = np.zeros(max_native, dtype=np.int64)
+        lookup = np.zeros(max_native, dtype=np.int32)
+        offset = self._global_offset
         for native_id, name in native_id2name.items():
             local_id = self.source_name2id.get(name, 0)
-            lookup[native_id] = local_id
+            lookup[native_id] = local_id + offset if local_id else 0
         return lookup
 
     def set_source_vocabulary(
@@ -246,10 +249,9 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
-        On any internal load/transform error we emit a warning to logger + stdout +
-        stderr and return ``(None, None)``. :meth:`collate_fn` filters out these
-        placeholders, so a failed item drops out of the batch instead of crashing the
-        loader.
+        On any internal load/transform error we emit a warning to logger + stdout + stderr and
+        return ``(None, None)``. :meth:`collate_fn` filters out these placeholders, so a failed item
+        drops out of the batch instead of crashing the loader.
         """
         try:
             return self._load_item(idx)
@@ -260,14 +262,13 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             return None, None
 
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
-        image = np.array(self.dataset[idx]["image"])
-        native_mask = np.asarray(self.dataset[idx]["label"], dtype=np.int64)
+        # Fetch the HF row once: ``datasets`` eagerly decodes every Image column on each row access,
+        # so indexing twice would decode both the image and the label PNG twice.
+        row = self.dataset[idx]
+        image = np.array(row["image"])
+        # The native label is uint8; index the (offset-folded, int32) lookup directly.
+        native_mask = np.asarray(row["label"])
         mask = self._native_to_local[native_mask]
-
-        if self._global_offset:
-            mask = np.where(mask > 0, mask + self._global_offset, mask).astype(
-                mask.dtype, copy=False
-            )
 
         if self.transform:
             transformed = self.transform(image=image, mask=mask)
@@ -277,12 +278,10 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return image, mask
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Filter out ``(None, None)`` items (failed loads) and stack into batched
-        tensors.
+        """Filter out ``(None, None)`` items (failed loads) and stack into batched tensors.
 
-        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this
-        filter drops them so a failed item simply leaves the batch instead of crashing
-        the loader.
+        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this filter drops
+        them so a failed item simply leaves the batch instead of crashing the loader.
         """
         batch_size = len(batch)
         filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]

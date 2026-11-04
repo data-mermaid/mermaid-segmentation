@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import albumentations as A
@@ -57,8 +58,10 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         class_subset: Optional list of class names (from ``classes.json``) to
             retain. Non-subset classes (and the ignore label) map to ``0``.
         transform: Optional Albumentations transform applied to image and mask.
-        hf_repo_id: HuggingFace dataset repo ID; override only for testing or
-            to point at a fork of the mirror.
+        hf_repo_id: HuggingFace dataset repo ID or local dataset directory
+            holding ``classes.json`` (e.g. a sparsified copy from
+            ``scripts/build_sparse_dense_datasets.py``); override only for
+            testing or to point at a fork of the mirror.
 
     Attributes:
         SOURCE_NAME: ``"ucsd_mosaics"``.
@@ -118,9 +121,13 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.class_subset = class_subset
         self._global_offset = 0
 
-        classes_path = hf_hub_download(
-            repo_id=self.hf_repo_id, filename="classes.json", repo_type="dataset"
-        )
+        local_dir = Path(self.hf_repo_id)
+        if local_dir.is_dir():
+            classes_path = local_dir / "classes.json"
+        else:
+            classes_path = hf_hub_download(
+                repo_id=self.hf_repo_id, filename="classes.json", repo_type="dataset"
+            )
         with open(classes_path) as f:
             self.class_table = sorted(json.load(f), key=lambda e: int(e["id"]))
 
@@ -179,14 +186,17 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """Build a vectorized lookup from native UCSD IDs (0..34) to local source IDs.
 
         Native ID ``0`` (ignore) and any class not present in ``class_subset`` map to ``0``
-        (background).
+        (background). The global offset is folded directly into the foreground entries so
+        ``__getitem__`` does not need a separate ``np.where`` shift pass. ``int32`` keeps the emitted
+        mask small.
         """
         max_native = max(int(entry["id"]) for entry in self.class_table) + 1
-        lookup = np.zeros(max_native, dtype=np.int64)
+        lookup = np.zeros(max_native, dtype=np.int32)
+        offset = self._global_offset
         for entry in self.class_table:
             native_id = int(entry["id"])
             local_id = self.source_name2id.get(entry["name"], 0)
-            lookup[native_id] = local_id
+            lookup[native_id] = local_id + offset if local_id else 0
         return lookup
 
     def set_source_vocabulary(
@@ -225,16 +235,12 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         try:
             row = self.dataset[idx]
             image = np.array(row["image"])
-            native_mask = np.asarray(row["label"], dtype=np.int64)
+            # The native label is uint8; index the (offset-folded, int32) lookup directly.
+            native_mask = np.asarray(row["label"])
             mask = self._native_to_local[native_mask]
         except Exception as e:
             logger.warning("UCSDMosaicsDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e)
             return None, None
-
-        if self._global_offset:
-            mask = np.where(mask > 0, mask + self._global_offset, mask).astype(
-                mask.dtype, copy=False
-            )
 
         if self.transform:
             try:

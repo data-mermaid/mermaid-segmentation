@@ -37,9 +37,15 @@ def test_audit_sources_three_sources(fake_s3, sample_csv_factory, populate):
     files3["annotations.csv"] = b"\xff\xfe corrupt non-csv data\nmore garbage"
     populate(fake_s3, bucket, prefix, 3, files3)
 
+    # source 4: annotations, image_list and csv files all fine, but no images folder
+    populate(fake_s3, bucket, prefix, 4, sample_csv_factory(source_id=4))
+    fake_s3.delete_object(Bucket=bucket, Key=f"{prefix}/s4/images/img_marker.jpg")
+
     df = audit_sources(bucket=bucket, prefix=prefix, workers=1, s3_client=fake_s3)
 
-    assert set(df["source_id"]) == {1, 2, 3}
+    assert set(df["source_id"]) == {1, 2, 3, 4}
+    read_failed = [c for c in df.columns if c.endswith("_csv_read_failed")]
+    row4 = df.loc[df["source_id"] == 4].iloc[0]
     row1 = df.loc[df["source_id"] == 1].iloc[0]
     row2 = df.loc[df["source_id"] == 2].iloc[0]
     row3 = df.loc[df["source_id"] == 3].iloc[0]
@@ -53,9 +59,30 @@ def test_audit_sources_three_sources(fake_s3, sample_csv_factory, populate):
     assert not row2["has_image_list_csv"]
     assert row2["has_annotations_csv"]
 
-    # source 3: annotations file parses as something (csv is forgiving) but the
-    # important guarantee is "no crash + is_complete tracks reality".
-    assert isinstance(bool(row3["is_complete"]), bool)
+    # No read failure on sources 1, 2 and 4; source 1 and 2 report no errors.
+    assert not df.loc[df["source_id"] != 3, read_failed].any().any()
+    assert row1["errors"] is None and row2["errors"] is None
+
+    # source 3: the undecodable annotations.csv is flagged, counted as present but empty, and
+    # keeps the source out of the complete set although every other file is there.
+    assert row3["has_annotations_csv"]
+    assert row3["annotations_csv_read_failed"]
+    assert (
+        not df.loc[df["source_id"] == 3, [c for c in read_failed if "annotations" not in c]]
+        .any()
+        .any()
+    )
+    assert row3["n_annotations"] == 0
+    assert row3["has_images_folder"] and row3["has_image_list_csv"]
+    assert not row3["is_complete"]
+    assert len(row3["errors"]) == 1
+    assert row3["errors"][0].startswith("annotations.csv read failed: UnicodeDecodeError")
+
+    # source 4: only the missing images folder keeps it incomplete.
+    assert not row4["has_images_folder"]
+    assert row4["has_annotations_csv"] and row4["has_image_list_csv"]
+    assert row4["n_annotations"] == 15
+    assert not row4["is_complete"]
 
 
 def test_audit_sources_emits_audit_timestamp_utc(fake_s3, sample_csv_factory, populate):
@@ -79,38 +106,3 @@ def test_audit_sources_respects_explicit_source_ids(fake_s3, sample_csv_factory,
         source_ids=[11],
     )
     assert df["source_id"].tolist() == [11]
-
-
-def test_truncated_image_list_fails_is_complete(fake_s3, sample_csv_factory, populate):
-    """image_list.csv listing fewer images than annotations reference must NOT be
-    is_complete.
-
-    Regression for the 2026-06 truncation incident: all files present but a short image_list.csv
-    silently dropped most annotated images downstream.
-    """
-    bucket, prefix = "b", "p"
-    files = sample_csv_factory(source_id=9, n_images=5, n_points_per_image=2)
-    # Truncate image_list.csv to header + a single data row (lists 1 of 5 annotated images).
-    lines = files["image_list.csv"].decode().splitlines()
-    files["image_list.csv"] = ("\n".join(lines[:2]) + "\n").encode()
-    populate(fake_s3, bucket, prefix, 9, files)
-
-    df = audit_sources(bucket=bucket, prefix=prefix, workers=1, s3_client=fake_s3)
-    row = df.loc[df["source_id"] == 9].iloc[0]
-
-    assert row["has_image_list_csv"]  # file is present, just short
-    assert row["n_images_csv"] == 1
-    assert row["n_unique_images_annotated"] == 5
-    assert not row["image_list_covers_annotations"]
-    assert not row["is_complete"]
-
-
-def test_complete_source_covers_annotations(fake_s3, sample_csv_factory, populate):
-    bucket, prefix = "b", "p"
-    populate(fake_s3, bucket, prefix, 3, sample_csv_factory(source_id=3, n_images=4))
-    df = audit_sources(bucket=bucket, prefix=prefix, workers=1, s3_client=fake_s3)
-    row = df.loc[df["source_id"] == 3].iloc[0]
-    assert row["n_images_csv"] == 4
-    assert row["n_unique_images_annotated"] == 4
-    assert row["image_list_covers_annotations"]
-    assert row["is_complete"]

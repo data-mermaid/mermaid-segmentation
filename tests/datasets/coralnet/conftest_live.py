@@ -9,20 +9,6 @@ import pytest
 from tests.datasets.coralnet.coralnet_live import resolve_public_source_id
 
 
-def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--refresh-fixtures",
-        action="store_true",
-        default=False,
-        help="Save live CoralNet HTML snapshots into fixtures/coralnet_html/",
-    )
-
-
-@pytest.fixture(scope="session")
-def refresh_fixtures(request: pytest.FixtureRequest) -> bool:
-    return bool(request.config.getoption("--refresh-fixtures"))
-
-
 @pytest.fixture(scope="session")
 def public_source_id() -> int:
     return resolve_public_source_id()

@@ -7,99 +7,82 @@ name = "mermaidseg"
 version = "0.1.0"
 description = "A package for the segmentation of MERMAID coral data."
 requires-python = ">=3.11"
-# Core = inference + data-loading only. Training, CoralNet ETL/scraper, notebooks/viz,
-# and the demo live in extras (see [project.optional-dependencies]). s3fs stays here
-# because the datasets read their annotation parquets from s3:// via pandas.
 dependencies = [
-    "albumentations",
-    "boto3",
-    # Floor for the eMudhra intermediate CA compromise fix. Keeps pip-based installs
-    # (Docker image, demo) from resolving an older CA bundle.
-    "certifi>=2026.10.19",
-    "datasets>=3.0",
-    "huggingface-hub>=0.36.2",
+    "torch>=2.4,<2.8",
+    "transformers",
+    "peft>=0.19.1",
     "numpy>=1.24,<2",
     "opencv-python-headless>=4.11.0.86",
-    "pandas",
-    "peft>=0.19.1",
-    "pillow",
-    "pydantic>=2",
     "pyyaml",
-    "requests",
-    "s3fs>=2024.2.0",
+    "pillow",
     "safetensors>=0.4.0",
-    "torch>=2.4,<2.8",
-    "tqdm",
-    # <5: transformers 5.x imports torch.distributed.tensor.DTensor, unavailable on the
-    # pinned torch<2.8 — an unpinned upper bound resolved 4.57.6 on macOS/py3.12 (fine) but
-    # 5.7.0 on the Linux/py3.11 SageMaker container (ImportError at model-build time).
-    "transformers>=4.56,<5",
+    "huggingface-hub>=0.36.2",
 ]
 
 [project.scripts]
 coralnet-etl = "mermaidseg.datasets.coralnet.etl.__main__:main"
 coralnet-remediate = "mermaidseg.datasets.coralnet.scraper.remediate_incomplete:main"
-coralnet-refresh = "mermaidseg.datasets.coralnet.scraper.refresh_image_lists:main"
-coralnet-resize = "mermaidseg.datasets.coralnet.preprocessing.resize:main"
 
 [project.optional-dependencies]
-# Training + experiment tracking (mermaidseg/logger.py, mermaidseg/model/eval.py).
-# (pydantic — used by experiment.py / config_schema.py / training_mode.py — is a core dep above.)
-training = [
-    "mlflow",
-    "psutil",  # scripts/diagnostics/dataloader_rss_repro.py (host-RAM / worker USS diagnostics)
-    "sagemaker-mlflow>=0.2.0",
-    "torchmetrics",
-]
-# Host-side SageMaker job submission (scripts/launch_*.py); imported lazily.
-sagemaker = [
-    "sagemaker-core>=2.27,<3",
-]
-# CoralNet ETL + scraper console scripts (coralnet-etl/-refresh/-resize): ibis/duckdb
-# for the ETL/manifest, bs4/selenium for scraping.
-coralnet = [
-    "ibis-framework[duckdb]>=9.0",
-    "beautifulsoup4",
-    "selenium",
-    "webdriver-manager",
-]
-# Interactive exploration + plotting.
 notebooks = [
     "jupyter",
     "ipywidgets",
-    "ipykernel>=7.2.0",
-    "matplotlib>=3.10.8",
-    "seaborn>=0.13.2",
     "hvplot>=0.12.2",
     "great-tables>=0.21.0",
+]
+scraping = [
+    "selenium",
+    "webdriver-manager",
 ]
 test-live = [
     "playwright>=1.50",
 ]
 demo = [
     "gradio>=5.0",
-    # No-op off-Spaces; provides `import spaces` + @spaces.GPU for local runs.
-    "spaces>=0.30",
 ]
-# Everything (used by CI and `uv sync --extra all` / `uv sync --all-extras`).
-all = [
-    "mermaidseg[training,sagemaker,coralnet,notebooks,demo]",
+# Host-side SageMaker job submission (scripts/launch_training.py); imported lazily.
+sagemaker = [
+    "sagemaker-core>=2.27,<3",
 ]
 
 [dependency-groups]
+research = [
+    "albumentations",
+    "beautifulsoup4",
+    "boto3",
+    "pandas",
+    "requests",
+    "datasets>=3.0",
+    "s3fs",
+    "segmentation-models-pytorch",
+    "mlflow",
+    "tqdm",
+    "torchmetrics",
+    "anytree",
+    "openpyxl",
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
+    "seaborn>=0.13.2",
+    "sagemaker-mlflow>=0.2.0",
+    "requests-auth-aws-sigv4>=0.7",
+    "ibis-framework[duckdb]>=9.0",
+    "wandb>=0.25.0",
+]
 tests = [
     "pytest>=8.0",
     "pytest-cov>=4.0",
 ]
 lint = [
     "ruff>=0.15.8",
-    "pre-commit>=3.0",
 ]
 dev = [
     {include-group = "tests"},
     {include-group = "lint"},
     "docformatter>=1.7.7",
 ]
+
+[tool.uv]
+default-groups = ["dev", "research"]
 
 [tool.setuptools]
 packages = { find = { where = ["."], include = ["mermaidseg*"] } }
@@ -116,7 +99,7 @@ ignore = ["E501"]
 "**/*.ipynb" = [
     "F821",   # undefined names — common in exploratory notebook cells
     "B018",   # useless expression — used to display values in notebooks
-    "E501",   # line too long — handled by docformatter; notebook cells are hard to wrap
+    "E501",   # line too long — docstrings are wrapped by `make docformat` (docformatter); notebook cells are hard to wrap
     "UP031",
     "PD003", # pandas-vet: prefer isna — wrong for Ibis .isnull() / SQL NULL
 ]
@@ -142,8 +125,7 @@ addopts = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
-    "live: marks tests as live integration tests requiring S3 and/or CoralNet access (deselect with '-m \"not live\"')",
-    "smoke: marks fast offline smoke tests of the training pipeline wiring",
+    "live: marks tests as live integration tests requiring CoralNet access (deselect with '-m \"not live\"')",
 ]
 
 [tool.coverage.run]

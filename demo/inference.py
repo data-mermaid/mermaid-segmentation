@@ -1,22 +1,41 @@
-"""Artifact loading and single-image inference for the demo."""
+"""Artifact loading and single-image inference for the demo.
+
+Model loading, preprocessing and tiling/blending are owned by ``mermaidseg.inference``; this
+module adapts them to the demo's call signatures.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 import os
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import albumentations as A
 import numpy as np
 import torch
 import yaml
 from numpy.typing import NDArray
 
-import mermaidseg.model.models as mm_models
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS, parse_concept_rank
+from mermaidseg.inference import (
+    SUPPORTED_CBM_MODELS,
+    CBMPredictor,
+    ModelBundle,
+    load_bundle,
+    load_checkpoint_model,
+)
+from mermaidseg.inference import preprocess as _preprocess_image
+from mermaidseg.inference.bundle import INFERENCE_CLASS, MANIFEST_NAME
+from mermaidseg.inference.preprocess import (
+    DEFAULT_TILE_OVERLAP,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    resize_rgb,
+    tile_blend_weights,
+    tile_starts,
+)
+from mermaidseg.inference.preprocess import predict_tiled as _predict_tiled
 from mermaidseg.model.models import (
     ConceptBottleneckDINOv3,
     ConceptBottleneckDPTDINOv3,
@@ -25,17 +44,34 @@ from mermaidseg.model.models import (
 
 CBMModel = ConceptBottleneckDINOv3 | ConceptBottleneckDPTLoRADINOv3 | ConceptBottleneckDPTDINOv3
 
-SUPPORTED_CBM_MODELS: frozenset[str] = frozenset(
-    {
-        "ConceptBottleneckDINOv3",
-        "ConceptBottleneckDPTLoRADINOv3",
-        "ConceptBottleneckDPTDINOv3",
-    }
-)
+__all__ = [
+    "DEFAULT_INPUT_SIZE",
+    "DEFAULT_TILE_OVERLAP",
+    "IMAGENET_MEAN",
+    "IMAGENET_STD",
+    "SUPPORTED_CBM_MODELS",
+    "CBMModel",
+    "DemoArtifacts",
+    "build_model",
+    "build_transforms",
+    "classes_from_concepts",
+    "default_taxonomy_csv",
+    "load_artifacts",
+    "model_input_size",
+    "parse_processing_resolution",
+    "predict",
+    "predict_concepts",
+    "predict_tiled",
+    "preprocess",
+    "resolve_paths",
+    "tile_blend_weights",
+    "tile_starts",
+]
 
-IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
-IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 DEFAULT_INPUT_SIZE: tuple[int, int] = (512, 512)
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,6 +80,7 @@ class DemoArtifacts:
     id2label: dict[int, str]
     concept_id2name: dict[int, str]
     checkpoint_path: str
+    bundle: ModelBundle | None = None
 
 
 def _load_yaml(path: str | Path) -> dict[str, Any]:
@@ -60,14 +97,56 @@ def _load_int_keyed_json(path: str | Path) -> dict[int, str]:
     return {int(k): v for k, v in raw.items()}
 
 
+def model_input_size(model_cfg: dict[str, Any]) -> tuple[int, int]:
+    """The model config's ``input_size`` (height, width), or ``DEFAULT_INPUT_SIZE`` if absent."""
+    size = model_cfg.get("input_size")
+    if isinstance(size, list | tuple) and len(size) == 2:
+        return int(size[0]), int(size[1])
+    return DEFAULT_INPUT_SIZE
+
+
+def _is_bundle(path: str | Path) -> bool:
+    return (Path(path) / MANIFEST_NAME).is_file()
+
+
 def load_artifacts(
     checkpoint: str | Path,
-    model_config: str | Path,
+    model_config: str | Path | None = None,
     id2label: str | Path | None = None,
     concept_id2name: str | Path | None = None,
 ) -> DemoArtifacts:
-    """Load checkpoint and model config from local paths."""
+    """Load checkpoint and model config from local paths.
+
+    ``checkpoint`` may also be a bundle directory (``model.json`` + weights). The bundle supplies
+    the model config, labels and concepts, so passing ``id2label`` or ``concept_id2name`` with one
+    raises ``ValueError`` (``model_config`` is ignored).
+    """
     demo_dir = Path(__file__).resolve().parent
+    if _is_bundle(checkpoint):
+        if id2label or concept_id2name:
+            raise ValueError(
+                "The bundle carries its own classes and concept names; do not pass "
+                "id2label/concept_id2name."
+            )
+        # Evaluation and the demos need batched eager forwards, never the exported graph.
+        bundle = load_bundle(checkpoint, format="checkpoint")
+        height, width = bundle.input_size
+        return DemoArtifacts(
+            model_cfg={"name": INFERENCE_CLASS, "input_size": [height, width]},
+            id2label=dict(enumerate(bundle.classes)),
+            concept_id2name={i + 1: name for i, name in enumerate(bundle.concept_names)},
+            checkpoint_path=str(checkpoint),
+            bundle=bundle,
+        )
+    if model_config is None:
+        raise ValueError("model_config is required unless checkpoint is a bundle directory.")
+    if not (id2label and concept_id2name):
+        logger.warning(
+            "Using the default label maps in %s for %s; pass both id2label and concept_id2name "
+            "if the checkpoint was trained on other labels.",
+            demo_dir,
+            checkpoint,
+        )
     id2label_path = Path(id2label or demo_dir / "id2label.json")
     concept_path = Path(concept_id2name or demo_dir / "concept_id2name.json")
     cfg = _load_yaml(model_config)
@@ -80,129 +159,51 @@ def load_artifacts(
     )
 
 
-def _num_concepts_from_state_dict(state_dict: Mapping[str, Any]) -> int | None:
-    weight = state_dict.get("concept_classifier.weight")
-    if weight is None:
-        return None
-    return int(weight.shape[1])
-
-
-def _derive_concept_value2id(
-    concept_id2name: Mapping[int, str],
-) -> dict[str, dict[str, list[int]]]:
-    concept_value2id: dict[str, dict[str, list[int]]] = {}
-    for rank in TAXONOMIC_CONCEPTS:
-        entries: list[tuple[int, str]] = []
-        for idx, name in sorted(concept_id2name.items(), key=lambda kv: int(kv[0])):
-            parsed_rank, value = parse_concept_rank(name)
-            if parsed_rank == rank:
-                entries.append((idx, value))
-        if not entries:
-            continue
-        width = len(entries)
-        mapping: dict[str, list[int]] = {"not_given": [0] * width}
-        for i, (_, value) in enumerate(entries):
-            encoded = [1] * width
-            encoded[i] = 2
-            mapping[value] = encoded
-        concept_value2id[rank] = mapping
-    return concept_value2id
-
-
-def _normalize_checkpoint_state_dict(sd: Mapping[str, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    for key, value in sd.items():
-        if key.startswith("encoder.model."):
-            key = key.replace("encoder.model.", "encoder.", 1)
-        if ".base_model.model.model." in key:
-            key = key.replace(".base_model.model.model.", ".base_model.model.", 1)
-        normalized[key] = value
-    return normalized
-
-
-def _load_state_dict_flexible(
-    model: torch.nn.Module, sd: Mapping[str, Any], *, strict: bool = True
-) -> None:
-    """Load ``sd`` into ``model``, tolerant of LoRA encoder key-nesting differences.
-
-    Different mermaidseg revisions wrap the LoRA encoder with a different number of
-    ``.model.`` levels (``encoder.base_model.model.model.layer`` vs collapsed
-    ``encoder.base_model.model.layer``). Pick whichever of the raw / normalized key
-    forms overlaps the instantiated model's keys best, then load it with ``strict``
-    (``False`` for checkpoints that omit frozen-backbone keys).
-    """
-    model_keys = set(model.state_dict().keys())
-    candidates = {"raw": dict(sd), "normalized": _normalize_checkpoint_state_dict(sd)}
-    best = max(candidates.values(), key=lambda c: len(model_keys & c.keys()))
-    model.load_state_dict(best, strict=strict)
-
-
 def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMModel:
-    num_classes = max(artifacts.id2label.keys()) + 1
-    # Always deserialize to CPU: on ZeroGPU only the final .to(device) is intercepted;
-    # a cuda map_location would bypass the weight-packing hijack.
-    ckpt = torch.load(artifacts.checkpoint_path, map_location="cpu", weights_only=False)
-    state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-
-    num_concepts = _num_concepts_from_state_dict(state_dict) or len(artifacts.concept_id2name)
-    if num_concepts <= 0:
-        raise ValueError("Could not determine num_concepts from checkpoint or concept_id2name.")
-    if not artifacts.concept_id2name:
-        raise ValueError("concept_id2name is required.")
-
-    model_cfg = dict(artifacts.model_cfg)
-    model_name = model_cfg.pop("name", "ConceptBottleneckDINOv3")
-    if model_name not in SUPPORTED_CBM_MODELS:
-        raise ValueError(
-            f"Unsupported model {model_name!r}; expected one of {sorted(SUPPORTED_CBM_MODELS)}"
-        )
-    model_kwargs: dict[str, Any] = model_cfg
-    if "input_size" in model_kwargs and isinstance(model_kwargs["input_size"], list):
-        model_kwargs["input_size"] = tuple(model_kwargs["input_size"])
-    model_kwargs.setdefault(
-        "concept_value2id",
-        _derive_concept_value2id(artifacts.concept_id2name),
+    if artifacts.bundle is not None:
+        return artifacts.bundle.model.to(device).eval()
+    return load_checkpoint_model(
+        artifacts.checkpoint_path,
+        artifacts.model_cfg,
+        artifacts.id2label,
+        artifacts.concept_id2name,
+        device,
     )
 
-    model_cls = getattr(mm_models, model_name)
-    model = model_cls(num_classes=num_classes, num_concepts=num_concepts, **model_kwargs)
-    # Checkpoints saved with excludes_frozen_params=True (the Logger default) omit
-    # frozen-backbone keys since model_cls(...) above already re-initializes the same
-    # frozen backbone; strict=True would otherwise raise on every load of such a checkpoint.
-    strict = not (isinstance(ckpt, dict) and ckpt.get("excludes_frozen_params", False))
-    _load_state_dict_flexible(model, state_dict, strict=strict)
-    return model.to(device).eval()
+
+class _Transform:
+    """Resize (and optionally normalize) to ``input_size``, as ``mermaidseg.inference`` does."""
+
+    def __init__(self, input_size: tuple[int, int], normalize: bool):
+        self.input_size = (int(input_size[0]), int(input_size[1]))
+        self.normalize = normalize
+
+    def __call__(self, image_rgb_uint8: NDArray[np.uint8]) -> NDArray[Any] | torch.Tensor:
+        if self.normalize:
+            return _preprocess_image(image_rgb_uint8, self.input_size, IMAGENET_MEAN, IMAGENET_STD)
+        return resize_rgb(image_rgb_uint8, self.input_size)
 
 
 def build_transforms(
     input_size: tuple[int, int] = DEFAULT_INPUT_SIZE,
-) -> tuple[A.Compose, A.Compose]:
-    height, width = int(input_size[0]), int(input_size[1])
-    model_transforms = [
-        A.Resize(height=height, width=width, p=1),
-        A.Normalize(mean=list(IMAGENET_MEAN), std=list(IMAGENET_STD)),
-    ]
-    display_transforms = [A.Resize(height=height, width=width, p=1)]
-    return A.Compose(model_transforms), A.Compose(display_transforms)
+) -> tuple[_Transform, _Transform]:
+    """Return ``(model_transform, display_transform)`` for ``preprocess``."""
+    return _Transform(input_size, normalize=True), _Transform(input_size, normalize=False)
 
 
 def preprocess(
     image_rgb_uint8: NDArray[np.uint8],
-    model_transform: A.Compose,
-    display_transform: A.Compose,
+    model_transform: _Transform,
+    display_transform: _Transform,
 ) -> tuple[torch.Tensor, NDArray[np.uint8]]:
-    normalized = model_transform(image=image_rgb_uint8)["image"]
-    display = display_transform(image=image_rgb_uint8)["image"]
-    image_tensor = torch.from_numpy(normalized).permute(2, 0, 1).unsqueeze(0).float()
-    return image_tensor, display.astype(np.uint8)
+    image_tensor = model_transform(image_rgb_uint8).unsqueeze(0).float()
+    display = display_transform(image_rgb_uint8)
+    return image_tensor, np.asarray(display, dtype=np.uint8)
 
 
 @torch.no_grad()
 def predict_concepts(model: CBMModel, image_tensor: torch.Tensor) -> torch.Tensor:
     outputs = model(image_tensor)
-    # The Space installs mermaidseg from the SHA pinned in requirements.txt, whose
-    # ConceptBottleneckOutput carries activated concepts in `hidden_states` (main
-    # renamed it to `concept_outputs`). Flip this when repinning to main.
     return outputs.hidden_states
 
 
@@ -211,74 +212,85 @@ def classes_from_concepts(model: CBMModel, concept_activations: torch.Tensor) ->
     return model.concept_classifier(concept_activations)
 
 
+def parse_processing_resolution(value: str) -> tuple[int, int]:
+    """Parse ``HxW`` processing resolution (height, width)."""
+    normalized = value.lower().replace("x", ",").replace(" ", "")
+    parts = [p for p in normalized.split(",") if p]
+    if len(parts) != 2:
+        raise ValueError(
+            f"processing_resolution must be HEIGHTxWIDTH or HEIGHT,WIDTH; got {value!r}"
+        )
+    height, width = int(parts[0]), int(parts[1])
+    if height <= 0 or width <= 0:
+        raise ValueError(f"processing_resolution dimensions must be positive; got {value!r}")
+    return height, width
+
+
+@torch.no_grad()
+def predict_tiled(
+    model: CBMModel,
+    image_rgb_uint8: NDArray[np.uint8],
+    model_transform: _Transform,
+    display_transform: _Transform,
+    tile_size: tuple[int, int],
+    device: torch.device | str,
+    *,
+    processing_resolution: tuple[int, int] | None = None,
+    min_overlap: float = DEFAULT_TILE_OVERLAP,
+) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.int64], NDArray[np.uint8]]:
+    """Run CBM inference, optionally using overlapping tiles at ``processing_resolution``.
+
+    Without ``processing_resolution`` the whole image is resized to the model input (no tiling).
+    """
+    if processing_resolution is None:
+        image_tensor, display_rgb = preprocess(image_rgb_uint8, model_transform, display_transform)
+        class_probs, concept_probs, pred_mask = predict(model, image_tensor.to(device))
+        return class_probs, concept_probs, pred_mask, display_rgb
+
+    predictor = CBMPredictor(model, input_size=tile_size, device=device)
+    class_probs, concept_probs = _predict_tiled(
+        predictor.predict,
+        image_rgb_uint8,
+        tile_size,
+        processing_resolution=processing_resolution,
+        min_overlap=min_overlap,
+    )
+    pred_mask = class_probs.argmax(axis=0).astype(np.int64)
+    return class_probs, concept_probs, pred_mask, resize_rgb(image_rgb_uint8, processing_resolution)
+
+
 @torch.no_grad()
 def predict(
     model: CBMModel, image_tensor: torch.Tensor
-) -> tuple[NDArray[np.float16], NDArray[np.float16], NDArray[np.int16]]:
-    """Run the model and return (class_probs, concept_probs, pred_mask).
-
-    Softmax/argmax run in float32 on-device; the returned prob maps are cast to float16
-    *before* ``.cpu()`` so the device→host copy (and the downstream ZeroGPU fork-
-    boundary pickle) is halved. These outputs are visualization-only, so float16
-    precision is sufficient. pred_mask is int16 (num_classes << 32767).
-    """
+) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.int64]]:
     concept_probs = predict_concepts(model, image_tensor)
     class_logits = classes_from_concepts(model, concept_probs)
     class_probs = torch.softmax(class_logits, dim=1)
     pred_mask = class_probs.argmax(dim=1)
     return (
-        class_probs[0].half().cpu().numpy(),
-        concept_probs[0].half().cpu().numpy(),
-        pred_mask[0].to(torch.int16).cpu().numpy(),
+        class_probs[0].cpu().numpy().astype(np.float32),
+        concept_probs[0].cpu().numpy().astype(np.float32),
+        pred_mask[0].cpu().numpy().astype(np.int64),
     )
 
 
 def default_taxonomy_csv() -> str:
-    """Default path to class-to-concepts CSV.
-
-    Prefers the copy bundled next to this file (used on HF Spaces, where only ``demo/``
-    is uploaded) and falls back to the repo ``configs/`` copy.
-    """
+    """Default path to class-to-concepts CSV (repo ``configs/class_to_concepts.csv``)."""
     demo_dir = Path(__file__).resolve().parent
-    bundled = demo_dir / "class_to_concepts.csv"
-    if bundled.is_file():
-        return str(bundled)
     return str(demo_dir.parent / "configs" / "class_to_concepts.csv")
-
-
-def default_model_config() -> str:
-    """Default path to the model config YAML (bundled demo copy, else repo configs)."""
-    demo_dir = Path(__file__).resolve().parent
-    bundled = demo_dir / "model_config_cbm_dpt_lora_vitl.yaml"
-    if bundled.is_file():
-        return str(bundled)
-    return str(demo_dir.parent / "configs" / "model_config_cbm_dpt_lora_vitl.yaml")
-
-
-DEFAULT_CHECKPOINT_REPO = "datamermaid/mermaid-segmentation-cbm"
-DEFAULT_CHECKPOINT_FILE = "checkpoint.pt"
-
-
-def resolve_checkpoint(explicit: str | None = None) -> str:
-    """Resolve the checkpoint to a local file path.
-
-    Uses ``explicit`` / ``DEMO_CHECKPOINT`` when it points at an existing local file
-    (local development). Otherwise downloads the checkpoint from the HF model repo
-    (``DEMO_CHECKPOINT_REPO`` / ``DEMO_CHECKPOINT_FILE``), which is how the demo gets
-    its weights on HF Spaces where they are not bundled.
-    """
-    candidate = explicit or os.environ.get("DEMO_CHECKPOINT")
-    if candidate and Path(candidate).is_file():
-        return candidate
-    repo_id = os.environ.get("DEMO_CHECKPOINT_REPO", DEFAULT_CHECKPOINT_REPO)
-    filename = os.environ.get("DEMO_CHECKPOINT_FILE", DEFAULT_CHECKPOINT_FILE)
-    from huggingface_hub import hf_hub_download
-
-    return hf_hub_download(repo_id=repo_id, filename=filename, token=os.environ.get("HF_TOKEN"))
 
 
 def resolve_paths() -> tuple[str, str, str]:
     """Resolve checkpoint, model config, and taxonomy CSV from env vars or defaults."""
-    model_config = os.environ.get("DEMO_MODEL_CONFIG", default_model_config())
+    demo_dir = Path(__file__).resolve().parent
+    checkpoint = os.environ.get("DEMO_CHECKPOINT", "")
+    model_config = os.environ.get(
+        "DEMO_MODEL_CONFIG",
+        str(demo_dir.parent / "configs" / "model_config_cbm_dpt_lora_vitl.yaml"),
+    )
     taxonomy_csv = os.environ.get("DEMO_TAXONOMY_CSV", default_taxonomy_csv())
-    return resolve_checkpoint(), model_config, taxonomy_csv
+    if not checkpoint:
+        raise ValueError(
+            "Set DEMO_CHECKPOINT to a local checkpoint path, or pass --checkpoint on the CLI."
+        )
+    return checkpoint, model_config, taxonomy_csv

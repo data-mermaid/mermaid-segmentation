@@ -1,0 +1,95 @@
+# File hygiene checks on files changed in the PR, replacing the former pre-commit hooks
+# (pre-commit-hooks v6.0.0). Dropped, not ported:
+#   - nbqa-ruff: lint.yml already runs ruff on .ipynb files.
+#   - uv-lock: lint.yml runs `uv lock --check`.
+#   - docformatter: manual, run with `make docformat`.
+name: Hygiene
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
+      - name: Detect changed files
+        id: changed-all
+        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c  # v46.0.5
+        with:
+          separator: "\n"
+          # Off so paths arrive unescaped; they reach `run` only through env vars.
+          safe_output: false
+      - name: Detect changed YAML files
+        id: changed-yaml
+        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c  # v46.0.5
+        with:
+          separator: "\n"
+          # Off so paths arrive unescaped; they reach `run` only through env vars.
+          safe_output: false
+          files: |
+            **/*.yaml
+            **/*.yml
+      - name: Detect changed text files
+        id: changed-text
+        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c  # v46.0.5
+        with:
+          separator: "\n"
+          # Off so paths arrive unescaped; they reach `run` only through env vars.
+          safe_output: false
+          files: |
+            **/*.py
+            **/*.md
+            **/*.yaml
+            **/*.yml
+            **/*.toml
+            **/*.txt
+            **/*.json
+            **/*.csv
+            **/*.sh
+            **/*.sbatch
+            **/*.cfg
+            **/*.ini
+            **/Makefile
+            **/Dockerfile
+      - name: Check for large files
+        if: steps.changed-all.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-all.outputs.all_changed_files }}
+        # Exempt by exact path: the generated lockfile and the CoralNet tables kept as config data.
+        run: |
+          printf '%s\n' "$FILES" \
+            | { grep -vxF \
+                -e uv.lock \
+                -e configs/coralnet/annotation_overrides.parquet \
+                -e configs/coralnet/image_blacklist.parquet || true; } \
+            | xargs -r -d '\n' uvx --from pre-commit-hooks==6.0.0 check-added-large-files --maxkb=1000 --enforce-all
+      - name: Check for case conflicts
+        if: steps.changed-all.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-all.outputs.all_changed_files }}
+        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 check-case-conflict
+      - name: Check YAML syntax
+        if: steps.changed-yaml.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-yaml.outputs.all_changed_files }}
+        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 check-yaml
+      - name: Check trailing whitespace
+        if: steps.changed-text.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-text.outputs.all_changed_files }}
+        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 trailing-whitespace-fixer
+      - name: Check end of file newline
+        if: steps.changed-text.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed-text.outputs.all_changed_files }}
+        run: printf '%s\n' "$FILES" | xargs -d '\n' uvx --from pre-commit-hooks==6.0.0 end-of-file-fixer

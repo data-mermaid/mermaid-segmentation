@@ -8,11 +8,13 @@ precomputed ``(N+1, C)`` float tensor (with row 0 as the all-zeros background ro
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-import pandas as pd
-import requests
 import torch
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 DEFAULT_CLASS_TO_CONCEPTS_CSV = (
     Path(__file__).resolve().parents[2] / "configs" / "class_to_concepts.csv"
@@ -57,7 +59,7 @@ MORPHOLOGIC_CONCEPTS = [
     "cup_coral",
 ]
 
-HEALTH_CONCEPTS = ["dead", "bleached"]
+HEALTH_CONCEPTS = ["live", "bleached"]
 
 NONCORAL_CONCEPTS = [
     "algae",
@@ -65,11 +67,14 @@ NONCORAL_CONCEPTS = [
     "anthropogenic",
     "trash",
     "transect",
+    "transect_line",
     "macroalgae",
     "dark",
     "human",
     "sand",
     "hard_substrate",
+    "calcifying",
+    "fish",
 ]
 
 
@@ -86,17 +91,6 @@ def parse_concept_rank(name: str) -> tuple[str | None, str]:
     return rank, value
 
 
-def normalize_benthic_hierarchy(
-    hierarchy: dict[str, str | None],
-) -> dict[str, str | None]:
-    """Return a lowercase copy of a benthic-attribute name -> parent-name hierarchy."""
-    return {
-        k.lower(): (v.lower() if v is not None else None)
-        for k, v in hierarchy.items()
-        if k is not None
-    }
-
-
 def initialize_benthic_hierarchy(
     hierarchy_json_url: str = "https://api.datamermaid.org/v1/benthicattributes/",
 ) -> dict[str, str | None]:
@@ -105,6 +99,8 @@ def initialize_benthic_hierarchy(
     See the original implementation in ``mermaidseg.datasets.concepts`` (now moved here) for full
     docstring.
     """
+    import requests
+
     response = requests.get(hierarchy_json_url, timeout=30)
     response.raise_for_status()
     data = response.json()
@@ -123,12 +119,10 @@ def initialize_benthic_hierarchy(
         parent_id = attr["parent"]
         hierarchy_id_dict[node_id] = parent_id
         id2name_dict[node_id] = attr["name"]
-    return normalize_benthic_hierarchy(
-        {
-            id2name_dict.get(node_id): id2name_dict.get(parent_id)
-            for node_id, parent_id in hierarchy_id_dict.items()
-        }
-    )
+    return {
+        id2name_dict.get(node_id): id2name_dict.get(parent_id)
+        for node_id, parent_id in hierarchy_id_dict.items()
+    }
 
 
 def get_hierarchy_level(
@@ -266,6 +260,8 @@ def encode_concept_channels_from_df(
         channel_names: ordered channel column names.
         concept_value2id: structure expected by loss/model slicing.
     """
+    import pandas as pd
+
     meta_cols = ["source_dataset_source", "source_label_class_name"]
     if "global_id" in df_mapping.columns:
         meta_cols = ["global_id", *meta_cols]
@@ -392,7 +388,16 @@ def initialize_benthic_concepts(
     It returns the processed concept mapping DataFrame, tensors for source to concept mappings, and
     dictionaries for taxonomic and one-hot concept ID mappings.
     """
+    import pandas as pd
+
     df_mapping = pd.read_csv(mapping_location)
+    df_mapping = df_mapping.copy()
+    df_mapping["source_label_class_name"] = (
+        df_mapping["source_label_class_name"].astype(str).str.lower()
+    )
+    df_mapping["source_dataset_source"] = (
+        df_mapping["source_dataset_source"].astype(str).str.lower()
+    )
     num_global_source = len(global_id2source) if global_id2source is not None else len(df_mapping)
 
     if global_id2source is not None:
@@ -415,8 +420,28 @@ def initialize_benthic_concepts(
         )
 
         df_mapping = df_mapping.merge(
-            df_id2source, on=["source_label_class_name", "source_dataset_source"], how="right"
+            df_id2source,
+            on=["source_label_class_name", "source_dataset_source"],
+            how="right",
+            indicator=True,
         )
+        unmapped = df_mapping.loc[df_mapping["_merge"] == "right_only"]
+        warned: set[tuple[str, str]] = set()
+        for source_dataset, label_name in zip(
+            unmapped["source_dataset_source"],
+            unmapped["source_label_class_name"],
+            strict=False,
+        ):
+            key = (source_dataset, label_name)
+            if key in warned:
+                continue
+            warned.add(key)
+            print(
+                f"DEBUG WARNING: unmapped source label (concept mapping): "
+                f"source_dataset={source_dataset!r} label={label_name!r}",
+                flush=True,
+            )
+        df_mapping = df_mapping.drop(columns=["_merge"])
 
         ### TODO: FIX BUG - This will be resolved once the class_to_concepts.csv file is fully updated
         # if df_mapping.shape[0] != df_id2source.shape[0]:

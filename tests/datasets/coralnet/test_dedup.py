@@ -1,0 +1,391 @@
+"""CoralNet deduplication rules (``mermaidseg.datasets.coralnet.dedup``) on tiny synthetic inputs."""
+
+from __future__ import annotations
+
+import json
+import sys
+
+import numpy as np
+import pandas as pd
+import pytest
+from PIL import Image
+
+from mermaidseg.datasets.coralnet.dedup import dedup, leakage, near_dup_merge, splits
+from mermaidseg.datasets.coralnet.dedup.common import (
+    DEFAULT_BUCKET,
+    DEFAULT_MANIFEST,
+    ID2NAME_KEY,
+    add_split_labels,
+    compare_labels,
+    coralnet_splits,
+    exact_blacklist,
+    load_concepts,
+    read_source_list,
+)
+
+RANKS = ["kingdom", "phylum", "class", "order", "family", "genus"]
+NG = "not_given"
+# CoralNet label id -> (name, concept fields: six taxonomic ranks + bleached).
+LABELS = {
+    1: ("hard coral", ["animalia", "cnidaria", "hexacorallia", NG, NG, NG, NG]),
+    2: (
+        "acropora",
+        ["animalia", "cnidaria", "hexacorallia", "scleractinia", "acroporidae", "acropora", NG],
+    ),
+    3: (
+        "acropora sp.",
+        ["animalia", "cnidaria", "hexacorallia", "scleractinia", "acroporidae", "acropora", NG],
+    ),
+    4: ("sand", ["none"] * 6 + [NG]),
+    5: ("bleached", [NG] * 6 + ["true"]),
+    6: ("unlisted label", None),
+    7: ("other unlisted label", None),
+}
+
+
+@pytest.fixture
+def concepts_csv(tmp_path):
+    rows = [
+        {
+            "source_label_class_name": name,
+            "source_dataset_source": "coralnet",
+            "target_label_class_name": "",
+            "target_dataset_source": "",
+            "species": NG,
+            **dict(zip([*RANKS, "bleached"], fields, strict=True)),
+        }
+        for name, fields in LABELS.values()
+        if fields is not None
+    ]
+    path = tmp_path / "class_to_concepts.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+@pytest.fixture
+def feat(concepts_csv):
+    concepts = load_concepts(concepts_csv)
+    return {
+        lid: (concepts.loc[name] if name in concepts.index else None)
+        for lid, (name, _) in LABELS.items()
+    }
+
+
+def test_compare_labels(feat):
+    assert compare_labels(feat[2], feat[1]) == "a_finer"
+    assert compare_labels(feat[1], feat[2]) == "b_finer"
+    assert compare_labels(feat[2], feat[3]) == "equivalent"
+    assert compare_labels(feat[1], feat[5]) == "compatible"
+    assert compare_labels(feat[2], feat[4]) == "contradictory"
+    assert compare_labels(feat[2], feat[6]) == "unmapped"
+
+
+@pytest.mark.parametrize(
+    ("labels", "expected"),
+    [
+        ((2,), (2, "same_label", False)),
+        ((1, 2), (2, "finer", False)),  # the finest consistent label wins, whichever copy has it
+        ((2, 1), (2, "finer", False)),
+        ((3, 2), (3, "equivalent", False)),  # synonyms: the best-ranked copy's label
+        ((5, 1), (1, "compatible", False)),  # no superset: most taxonomic ranks specified
+        ((4, 2), (4, "contradictory", False)),  # clash: the best-ranked copy's label
+        ((6, 2), (2, "unmapped", True)),  # labels missing from the CSV are ignored
+        ((6, 7), (6, "unknown", True)),
+        ((1, 6, 2), (2, "finer", True)),
+    ],
+)
+def test_resolver(feat, labels, expected):
+    assert dedup.make_resolver(feat)(labels) == expected
+
+
+def test_config_helpers(tmp_path):
+    lst = tmp_path / "sources.txt"
+    lst.write_text("12  # low quality\n\n# comment\n7\n")
+    assert read_source_list(lst) == {7, 12}
+    assert read_source_list(None) == set()
+
+    cfg = tmp_path / "data_config.yaml"
+    cfg.write_text(
+        "data:\n  coralnet:\n    train:\n      whitelist_sources: [1, 2]\n"
+        "    val:\n      whitelist_sources: [3]\n"
+    )
+    assert coralnet_splits(cfg) == {"train": {1, 2}, "val": {3}}
+
+    # (1, 4) pairs a train source with an unused one: the splits differ but the pair is not
+    # cross-split, because an unused source is not in any split.
+    pairs = pd.DataFrame({"source_a": [1, 1, 4, 1], "source_b": [2, 3, 5, 4], "n": [1, 1, 1, 1]})
+    out = add_split_labels(pairs, coralnet_splits(cfg))
+    assert out["cross_split"].tolist() == [False, True, False, False]
+    assert out["split_a"].tolist() == ["train", "train", "unused", "train"]
+    assert out["split_b"].tolist() == ["train", "val", "unused", "unused"]
+
+
+def test_dedup_end_to_end(tmp_path, concepts_csv, monkeypatch):
+    """Image 10 (source 1) and 20 (source 2) are copies; source 1 is better ranked, so 10 is kept.
+
+    At (5, 5) the copy's finer label replaces the kept one, at (6, 6) the labels contradict (kept
+    copy's label stays, point goes to review), and (7, 7) is added from the copy. Image 30 is unique.
+    """
+    bucket = tmp_path / "cache" / DEFAULT_BUCKET
+    (bucket / DEFAULT_MANIFEST).parent.mkdir(parents=True)
+    (bucket / ID2NAME_KEY).parent.mkdir(parents=True)
+    (bucket / ID2NAME_KEY).write_text(json.dumps({str(k): name for k, (name, _) in LABELS.items()}))
+    pd.DataFrame(
+        {
+            "source_id": pd.array([1, 1, 2, 2, 2, 3], dtype="int32"),
+            "image_id": ["10", "10", "20", "20", "20", "30"],
+            "row": pd.array([5, 6, 5, 6, 7, 1], dtype="int16"),
+            "col": pd.array([5, 6, 5, 6, 7, 1], dtype="int16"),
+            "coralnet_id": pd.array([1, 4, 2, 2, 4, 4], dtype="int32"),
+        }
+    ).to_parquet(bucket / DEFAULT_MANIFEST, index=False)
+
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    pd.DataFrame(
+        {
+            "source_id": [1, 2, 3],
+            "image_id": ["10", "20", "30"],
+            "hash": ["h", "h", "u"],
+            "image_s3_key": ["k10", "k20", "k30"],
+        }
+    ).to_parquet(outputs / "image_hashes_exact_all.parquet")
+    pd.DataFrame({"source_id": [1, 2], "cluster": [0, 0], "rank": [1, 2]}).to_csv(
+        outputs / "annotation_source_ranking.csv", index=False
+    )
+    cfg = tmp_path / "data_config.yaml"
+    cfg.write_text("data:\n  coralnet:\n    train:\n      whitelist_sources: [1, 2, 3]\n")
+    exclude = tmp_path / "exclude.txt"
+    exclude.write_text("")
+
+    out_dir, config_dir = tmp_path / "dedup", tmp_path / "configs"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dedup",
+            "--outputs",
+            str(outputs),
+            "--out-dir",
+            str(out_dir),
+            "--config-dir",
+            str(config_dir),
+            "--cache-root",
+            str(tmp_path / "cache"),
+            "--concepts-csv",
+            str(concepts_csv),
+            "--split-config",
+            str(cfg),
+            "--exclude-sources",
+            str(exclude),
+            "--near-dup-labels",
+            str(tmp_path / "no_labels.csv"),
+        ],
+    )
+    dedup.main()
+
+    blacklist = pd.read_parquet(config_dir / "image_blacklist.parquet")
+    assert blacklist[["source_id", "image_id", "kept_image_id", "reason"]].to_numpy().tolist() == [
+        [2, "20", "10", "exact"]
+    ]
+    overrides = pd.read_parquet(config_dir / "annotation_overrides.parquet").sort_values("row")
+    assert overrides[["image_id", "row", "col", "coralnet_id"]].to_numpy().tolist() == [
+        ["10", 5, 5, 2],
+        ["10", 6, 6, 4],
+        ["10", 7, 7, 4],
+    ]
+    prov = pd.read_parquet(out_dir / "point_provenance.parquet").sort_values("row")
+    assert prov["change"].tolist() == ["replaced", "unchanged", "added"]
+    assert prov["category"].tolist() == ["finer", "contradictory", "same_label"]
+    assert prov["origin_copy_rank"].tolist() == [1, 0, 1]
+    review = pd.read_csv(out_dir / "review_points.csv")
+    assert review[["row", "category", "chosen_label"]].to_numpy().tolist() == [
+        [6, "contradictory", "sand"]
+    ]
+    assert pd.read_parquet(out_dir / "images_unique.parquet")["image_id"].tolist() == ["30"]
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["n_points_before"] == 6 and summary["n_points_after"] == 4
+
+
+def test_near_dup_merge(tmp_path, feat):
+    """Image A (101, source 2) has three near duplicates: B (102), the same picture re-encoded (source 1, same size, so
+    an identity transform), C (103), a half-size copy (homography), and D (104), a byte-identical copy of C that
+    exact deduplication already removed (labelled pairs refer to it). A is kept (largest; ties with B
+    broken by the newer source). E (105) was labelled ``fp`` and stays.
+
+    At A's (100, 100) the labels of A (hard coral), B (acropora) and C (acropora sp., at its (50, 50))
+    meet: the finest wins. B adds (200, 300); C's (10, 10) is added at about (20, 20).
+    """
+    rng = np.random.default_rng(0)
+    big = Image.fromarray(rng.integers(0, 255, (60, 80, 3), dtype=np.uint8)).resize(
+        (800, 600), Image.BICUBIC
+    )
+    for name, im, q in (
+        ("a", big, 95),
+        ("b", big, 70),
+        ("c", big.resize((400, 300), Image.BICUBIC), 90),
+        ("e", Image.fromarray(rng.integers(0, 255, (600, 800, 3), dtype=np.uint8)), 90),
+    ):
+        im.save(tmp_path / f"{name}.jpg", quality=q)
+    images = pd.DataFrame(
+        {
+            "source_id": [2, 1, 3, 4],
+            "image_id": ["101", "102", "103", "105"],
+            "hash": ["ha", "hb", "hc", "he"],
+            "image_s3_key": ["a.jpg", "b.jpg", "c.jpg", "e.jpg"],
+        }
+    )
+    points = pd.DataFrame(
+        {
+            "image_id": ["101", "101", "102", "102", "103", "103", "105"],
+            "row": [100, 300, 100, 200, 50, 10, 5],
+            "col": [100, 400, 100, 300, 50, 10, 5],
+            "coralnet_id": [1, 4, 2, 4, 3, 4, 4],
+        }
+    ).assign(category="same_label", has_unmapped=False, in_kept=True, n_copies_at_loc=1)
+    labels = pd.DataFrame(
+        {
+            "image_a": ["101", "104", "101"],
+            "image_b": ["102", "101", "105"],
+            "label": ["dup", "dup", "fp"],
+        }
+    ).set_index(["image_a", "image_b"])
+
+    out = near_dup_merge.merge_near_duplicates(
+        images, points, labels, {"104": "103"}, tmp_path, dedup.make_resolver(feat), workers=2
+    )
+
+    assert out["blacklist"][["image_id", "kept_image_id", "reason"]].to_numpy().tolist() == [
+        ["102", "101", "near_dup"],
+        ["103", "101", "near_dup"],
+    ]
+    copies = out["copies"].set_index("image_id")
+    assert copies["transform"].to_dict() == {"102": "identity", "103": "homography"}
+    assert copies.loc["103", "n_joined"] == 1
+    ov = out["overrides"].sort_values(["row", "col"]).reset_index(drop=True)
+    assert (ov["image_id"] == "101").all()
+    assert len(ov) == 4
+    assert (
+        abs(ov.loc[0, "row"] - 20) <= 1
+        and abs(ov.loc[0, "col"] - 20) <= 1
+        and ov.loc[0, "coralnet_id"] == 4
+    )
+    assert ov.loc[1:, ["row", "col", "coralnet_id", "category"]].to_numpy().tolist() == [
+        [100, 100, 2, "finer"],
+        [200, 300, 4, "same_label"],
+        [300, 400, 4, "same_label"],
+    ]
+    prov = out["provenance"].sort_values(["row", "col"]).reset_index(drop=True)
+    assert prov["change"].tolist() == ["added", "replaced", "added", "unchanged"]
+    assert prov.loc[1, "copy_labels"] == [1, 2, 3]
+
+
+def test_exact_blacklist(tmp_path):
+    pd.DataFrame({"image_id": ["1", "2"], "reason": ["exact", "near_dup"]}).to_parquet(
+        tmp_path / "b.parquet"
+    )
+    assert exact_blacklist(tmp_path / "b.parquet") == {"1"}
+    pd.DataFrame({"image_id": [1, 2]}).to_parquet(
+        tmp_path / "old.parquet"
+    )  # before near duplicates
+    assert exact_blacklist(tmp_path / "old.parquet") == {"1", "2"}
+
+
+def test_anneal_fixed_groups():
+    """Group 0 is eligible but pinned to test, so it stays there; the others balance around it.
+
+    Test is full with group 0 alone (40 points, target 40), so the free group that fills val
+    (target 40) is group 2 (40 points); group 3 (20) and the ineligible group 4 stay in train.
+    """
+    X = np.array([[40.0, 0], [0, 40], [20, 20], [10, 10], [400, 400]])
+    n = X.sum(1)
+    eligible = np.array([True, True, True, True, False])
+    fixed = np.array([2, -1, -1, -1, -1])
+    for seed in range(4):
+        a, _ = splits.anneal(
+            X,
+            n,
+            X.sum(0),
+            eligible,
+            (40.0, 40.0),
+            (0.1, 0.1),
+            10.0,
+            np.ones(2, bool),
+            np.zeros(2),
+            0.0,
+            2000,
+            seed,
+            fixed,
+        )
+        assert a.tolist() == [2, 0, 1, 0, 0]
+
+
+def test_replace_coralnet_block():
+    text = (
+        "data:\n  mermaid:\n    train: {}\n  coralnet:\n    train:\n      whitelist_sources: [1]\n"
+        "  catlin:\n    train: {}\n"
+    )
+    out = splits.replace_coralnet_block(
+        text,
+        {"train": [1, 2], "val": [3]},
+        {"image_blacklist": "configs/coralnet/image_blacklist.parquet"},
+    )
+    assert out.startswith("data:\n  mermaid:\n    train: {}\n  coralnet:\n")
+    assert out.endswith("  catlin:\n    train: {}\n")
+    assert (
+        "      whitelist_sources: [1, 2]\n      image_blacklist: configs/coralnet/image_blacklist.parquet\n"
+        in out
+    )
+    assert "    val:\n      whitelist_sources: [3]\n" in out
+
+
+def test_project_edges():
+    meta = pd.DataFrame(
+        {
+            "source_id": [10, 11, 20, 30, 40],
+            "admins": ["ann", "ann;bob", "ann", "carl", "ann"],
+            "latitude": [0.0, 40.0, 0.1, 0.0, -30.0],
+            "longitude": [0.0, 40.0, 0.1, 0.0, -30.0],
+        }
+    )
+    sources = [10, 11, 20, 30, 40]
+    edges = {
+        (a, b): why for a, b, why in splits.project_edges(meta, sources, max_id_gap=1, max_km=50)
+    }
+    # The id gap counts positions in the sorted source list: 10-11 and 11-20 are neighbours.
+    # 10-20: two positions apart but ~16 km apart. 40: same admin, but far in the list and on the
+    # map. 30: a different admin.
+    assert edges == {(10, 11): "id", (11, 20): "id", (10, 20): "location"}
+
+
+def test_leakage(tmp_path, monkeypatch):
+    # Source 2 (val) shares "a" with source 1 (train) and "d" with source 3 (test).
+    pd.DataFrame(
+        {"source_id": [1, 1, 2, 2, 3, 3], "hash": ["a", "b", "a", "d", "c", "d"]}
+    ).to_parquet(tmp_path / "image_hashes_exact_all.parquet")
+    pd.DataFrame({"source_a": [1, 2], "source_b": [2, 3], "n_overlap_images": [1, 1]}).to_csv(
+        tmp_path / "source_overlap_exact_all.csv", index=False
+    )
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        "coralnet:\n  train:\n    whitelist_sources: [1]\n  val:\n    whitelist_sources: [2]\n"
+        "  test:\n    whitelist_sources: [3]\n"
+    )
+    monkeypatch.setattr(sys, "argv", ["leakage", "--config", str(cfg), "--outputs", str(tmp_path)])
+    leakage.main()
+
+    per_source = pd.read_csv(tmp_path / "split_leakage_cfg.csv").set_index(
+        ["eval_split", "other_split"]
+    )
+    assert per_source.loc[("val", "train"), "n_dup"] == 1
+    assert per_source.loc[("val", "train"), "n_images"] == 2
+    assert per_source.loc[("test", "train"), "n_dup"] == 0
+    assert per_source.loc[("test", "val"), "n_dup"] == 1
+    assert per_source.loc[("test", "val"), "n_images"] == 2
+    assert per_source.loc[("test", "val"), "source_id"] == 3
+    assert len(per_source) == 3
+    pairs = pd.read_csv(tmp_path / "split_leakage_pairs_cfg.csv")
+    assert pairs[["source_a", "source_b", "split_a", "split_b"]].to_numpy().tolist() == [
+        [1, 2, "train", "val"],
+        [2, 3, "val", "test"],
+    ]

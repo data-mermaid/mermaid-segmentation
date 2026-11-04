@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from mermaidseg.dataset_reconciliation.dataset_stats import (
     compute_class_by_source,
     compute_class_counts,
@@ -169,7 +171,7 @@ class TestComputeSourceStats:
 
         stub = make_mermaid_stub(
             image_to_classes={
-                "img-1": ["Acropora"],
+                "img-1": ["Acropora", "Acropora", "Porites"],
                 "img-2": ["Acropora", "Porites"],
             },
             image_to_region={"img-1": "Indonesia", "img-2": "Caribbean"},
@@ -188,7 +190,9 @@ class TestComputeSourceStats:
         assert set(result["source_type"]) == {"region"}
         idx = result.set_index("source_key")
         assert idx.loc["Indonesia", "train_images"] == 1
+        assert idx.loc["Indonesia", "train_annotations"] == 3
         assert idx.loc["Indonesia", "val_images"] == 0
+        assert idx.loc["Caribbean", "val_images"] == 1
         assert idx.loc["Caribbean", "val_annotations"] == 2
         assert "test_images" not in result.columns
 
@@ -219,28 +223,31 @@ class TestComputeTrainSummary:
         import pandas as pd
         from torch.utils.data import Subset
 
+        # Train annotation counts per class: A=16, B=8, C=4, D=2, E=1, F=1 (total 32), so
+        # p = 1/2, 1/4, 1/8, 1/16, 1/32, 1/32 and entropy = 1.9375 bits.
+        names = ["A", "B", "C", "D", "E", "F"]
         stub = make_mermaid_stub(
             image_to_classes={
-                "img-1": ["Acropora", "Acropora", "Porites"],
-                "img-2": ["Acropora"],
-                "img-3": ["Macroalgae"],
+                "img-1": ["A"] * 10 + ["B"] * 8 + ["C"] * 4,
+                "img-2": ["A"] * 6 + ["D"] * 2 + ["E", "F"],
+                "img-3": ["A"],
             },
-            image_to_region={"img-1": "A", "img-2": "A", "img-3": "B"},
-            source_id2name={1: "Acropora", 2: "Porites", 3: "Macroalgae"},
+            image_to_region={"img-1": "R", "img-2": "R", "img-3": "R"},
+            source_id2name={i + 1: n for i, n in enumerate(names)},
             global_offset=0,
         )
-        # Add a zero-annotation image; make_mermaid_stub drops these because
-        # df_images is derived from df_annotations.
+        # make_mermaid_stub derives df_images from df_annotations, so add a
+        # zero-annotation image by hand.
         stub.df_images = pd.concat(
             [
                 stub.df_images,
-                pd.DataFrame([{"image_id": "img-4", "region_id": "B", "region_name": "B"}]),
+                pd.DataFrame([{"image_id": "img-4", "region_id": "R", "region_name": "R"}]),
             ],
             ignore_index=True,
         )
         registry = make_registry_stub(
-            target_id2label={1: "Acropora", 2: "Porites", 3: "Macroalgae"},
-            source_to_target_pairs=[(1, 1), (2, 2), (3, 3)],
+            target_id2label={i + 1: n for i, n in enumerate(names)},
+            source_to_target_pairs=[(i + 1, i + 1) for i in range(len(names))],
         )
         resolved = _resolve(
             {
@@ -253,20 +260,21 @@ class TestComputeTrainSummary:
         summary = compute_train_summary(resolved, registry)
 
         assert summary["total_images"] == 4
-        assert summary["total_annotations"] == 5
-        assert summary["splits"]["train"] == {"images": 2, "annotations": 4}
+        assert summary["total_annotations"] == 33
+        assert summary["splits"]["train"] == {"images": 2, "annotations": 32}
+        assert summary["splits"]["val"] == {"images": 1, "annotations": 1}
         assert summary["splits"]["test"] == {"images": 1, "annotations": 0}
-        assert summary["num_target_classes"] == 4  # 3 targets + ignore (id 0)
-        assert summary["eligible_num_classes"] == 3
+        assert summary["num_target_classes"] == 7  # 6 targets + background
+        assert summary["eligible_num_classes"] == 6
 
-        assert abs(summary["top1_share"] - 0.75) < 1e-9
-        assert abs(summary["top3_share"] - 1.0) < 1e-9
-        assert abs(summary["top5_share"] - 1.0) < 1e-9
-        assert 1.0 <= summary["effective_num_classes"] <= summary["eligible_num_classes"]
+        assert summary["top1_share"] == pytest.approx(16 / 32)
+        assert summary["top3_share"] == pytest.approx(28 / 32)
+        assert summary["top5_share"] == pytest.approx(31 / 32)
+        assert summary["effective_num_classes"] == pytest.approx(2**1.9375)
 
         assert summary["annotations_per_image"]["test"]["min"] == 0
-        assert summary["annotations_per_image"]["train"]["max"] == 3
-        assert summary["annotations_per_image"]["train"]["mean"] == 2.0
+        assert summary["annotations_per_image"]["train"]["max"] == 22
+        assert summary["annotations_per_image"]["train"]["mean"] == 16.0
 
 
 class TestComputeClassBySource:

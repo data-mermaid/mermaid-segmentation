@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -28,7 +29,6 @@ class FakeMetaModel:
         num_concepts: int | None = None,
         conceptid2labelid: dict[int, int] | None = None,
         concept_matrix: Any | None = None,
-        freeze_backbone: bool = False,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
@@ -36,26 +36,22 @@ class FakeMetaModel:
         self.conceptid2labelid = conceptid2labelid
         self.concept_matrix = concept_matrix
         self.device = "cpu"
-        if freeze_backbone:
-            # "backbone" (frozen) feeding into a trainable "head", mirroring the
-            # frozen-encoder + trainable-decoder pattern used in real models.
-            self.model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, num_classes))
-            for param in self.model[0].parameters():
-                param.requires_grad = False
-        else:
-            self.model = nn.Linear(4, num_classes)
-        self.optimizer = torch.optim.SGD(
-            (p for p in self.model.parameters() if p.requires_grad), lr=0.01
-        )
+        self.model = nn.Linear(4, num_classes)
+        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1)
 
 
 @pytest.fixture(autouse=True)
 def _cleanup_mlflow_run():
-    """Ensure no active MLflow run leaks between tests."""
+    """Ensure no active MLflow run or tracking URI leaks between tests."""
+    saved_uri = mlflow.get_tracking_uri()
+    # set_tracking_uri exports MLFLOW_TRACKING_URI, which outranks the config URI in Logger; a
+    # restore that was never explicitly set must clear it again.
+    explicit = "MLFLOW_TRACKING_URI" in os.environ
     yield
     if mlflow.active_run() is not None:
         mlflow.end_run()
+    mlflow.set_tracking_uri(saved_uri if explicit else None)
 
 
 @pytest.fixture()
@@ -76,8 +72,8 @@ def fake_meta_model():
 def make_config():
     """Factory that builds a ConfigDict.
 
-    Override any nested value via keyword arguments, e.g.
-    ``make_config(logger={"experiment_name": "custom"})``.
+    Override any nested value via keyword arguments, e.g. ``make_config(logger={"experiment_name":
+    "custom"})``.
     """
 
     def _factory(**overrides: Any) -> ConfigDict:
@@ -106,6 +102,21 @@ def make_config():
         return ConfigDict(base)
 
     return _factory
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    # Registered here so the option exists at CLI parse time (plugins loaded from test modules are too late).
+    parser.addoption(
+        "--refresh-fixtures",
+        action="store_true",
+        default=False,
+        help="Save live CoralNet HTML snapshots into fixtures/coralnet_html/",
+    )
+
+
+@pytest.fixture(scope="session")
+def refresh_fixtures(request: pytest.FixtureRequest) -> bool:
+    return bool(request.config.getoption("--refresh-fixtures"))
 
 
 @pytest.fixture()
@@ -149,8 +160,8 @@ def tiny_loader(tiny_batch):
 def mock_dinov3_encoder(monkeypatch):
     """AutoModel.from_pretrained mock returning controlled hidden states.
 
-    Returns a factory that patches AutoModel on a target module. Uses hidden_size=64
-    (small for fast CI), patch_size=14, n_prefix_tokens=5 (CLS + 4 registers).
+    Returns a factory that patches AutoModel on a target module. Uses hidden_size=64 (small for fast
+    CI), patch_size=14, n_prefix_tokens=5 (CLS + 4 registers).
     """
     hidden_size = 64
     patch_size = 14

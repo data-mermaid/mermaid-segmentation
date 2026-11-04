@@ -1,482 +1,521 @@
-"""Background-safe training entry point.
-
-Mirrors the logic in nbs/Base_Pipeline.ipynb as a CLI script. Run via uv so
-it uses the locked project venv. Cell outputs freeze when the browser
-disconnects — this script writes structured logs to a file so progress is
-always captured.
-
-The run is configured by four split configs, each with a sensible default:
-``--config-data`` (configs/data_config.yaml), ``--config-model``
-(configs/model_config_cbm.yaml), ``--config-training``
-(configs/training_config_cbm.yaml), and ``--config-logger``
-(configs/logger_config.yaml). Override any one independently.
-
-Usage::
-
-    # Foreground (debug) — uses the default split configs
-    uv run python scripts/train.py
-
-    # Override an individual split (e.g. standard, non-CBM training)
-    uv run python scripts/train.py \\
-        --config-model configs/model_config.yaml \\
-        --config-training configs/training_config.yaml
-
-    # Background — safe to close the browser window
-    nohup uv run python scripts/train.py \\
-        --auto-shutdown \\
-        > logs/train_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-    echo $! > logs/train.pid
-
-    # Follow progress from any terminal tab
-    tail -f logs/train_*.log
-
-    # Dry run (1 batch, smoke test)
-    uv run python scripts/train.py --dry-run
-"""
-
-import argparse
 import copy
-import faulthandler
-import json
-import logging
 import os
-import signal
-import sys
-import time
-from datetime import datetime
 from pathlib import Path
 
 import torch
+from torch.utils.data import ConcatDataset, DataLoader
 
-from mermaidseg.experiment import Experiment
-from mermaidseg.io import get_parser
-from mermaidseg.logger import Logger
-from mermaidseg.model.checkpoint import restore_training_state
-from mermaidseg.model.metric_policy import SUPPORTED_METRIC_NAMES
+from mermaidseg.dataset_reconciliation import (
+    ConceptSchema,
+    SourceLabelRegistry,
+    attach_registry,
+    prepare_splits_for_registry,
+)
+from mermaidseg.datasets import (
+    build_datasets,
+    make_worker_init_fn,
+    setup_local_cache,
+)
+from mermaidseg.io import get_parser, setup_config, update_config_with_args
+from mermaidseg.logger import Logger, prune_rolling_checkpoints
+from mermaidseg.model.eval import Evaluator
+from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
+from mermaidseg.model.models import align_peft_checkpoint_state_dict
 from mermaidseg.model.train import train_model
+from mermaidseg.run_setup import (
+    check_env_wandb,
+    logger_id2label,
+    resolve_concept_mapping_default,
+    resolve_output_dir,
+    run_checkpoint_dir,
+    sidecar_kwargs,
+    write_run_sidecar,
+)
 
-_METADATA = Path("/opt/ml/metadata/resource-metadata.json")
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
-
-def _configure_third_party_loggers() -> None:
-    """Reduce verbosity from chatty third-party libraries."""
-    logging.getLogger("botocore.tokens").setLevel(logging.WARNING)
-
-
-def _setup_logging(log_dir: Path) -> None:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"train_{timestamp}.log"
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stderr),
-            logging.FileHandler(log_file),
-        ],
-    )
-    _configure_third_party_loggers()
-    logging.info("Logging to %s", log_file)
+# LoRA + DPT concept-bottleneck entrypoint. The encoder comes from the model config
+# (ViT-L by default; the ViT-size sweep passes S/B/L/H+ configs).
+CHECKPOINT = None  # "outputs/model_checkpoints/mermaid_base_run_dinov3_lora_dpt_all/model_epoch34" # "outputs/model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch13"
 
 
-def _cleanup_pid(pid_file: Path) -> None:
-    pid_file.unlink(missing_ok=True)
+def load_training_checkpoint(
+    meta_model: MetaModel,
+    checkpoint_path: str,
+    device: torch.device | str,
+    *,
+    load_optimizer: bool = True,
+    load_scheduler: bool = True,
+) -> int:
+    """Load model weights and, when resuming, optimizer and scheduler state.
 
-
-def _write_pid(pid_file: Path) -> None:
-    pid_file.parent.mkdir(parents=True, exist_ok=True)
-    pid_file.write_text(str(os.getpid()))
-
-
-def _stop_current_space() -> None:
-    """Stop the SageMaker JupyterLab app via delete_app.
-
-    SageMaker has no ``stop_space`` API.  The documented way to stop a running
-    JupyterLab app is ``delete_app`` — this terminates the instance while keeping EFS
-    data intact.  No-op outside SageMaker.
+    ``load_optimizer=False`` keeps the freshly constructed optimizer and schedule
+    (hi-res fine-tune from cooled weights). ``load_scheduler=False`` still restores
+    optimizer moments and leaves the epoch counter, ``global_step``, and scheduler
+    for the caller to restart (cooldown). Call ``meta_model.rebuild_scheduler()``
+    after that path so the new schedule binds to the restored learning rates.
     """
-    if not _METADATA.exists():
-        logging.info("Not running on SageMaker — skipping auto-shutdown")
-        return
-    import boto3
-    import botocore.exceptions
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    if not isinstance(state_dict, dict):
+        raise ValueError(f"Checkpoint at {checkpoint_path!r} has no model_state_dict")
+    state_dict = align_peft_checkpoint_state_dict(state_dict, meta_model.model)
+    meta_model.model.load_state_dict(state_dict)
+    del state_dict
 
-    info = json.loads(_METADATA.read_text())
-    try:
-        boto3.client("sagemaker").delete_app(
-            DomainId=info["DomainId"],
-            SpaceName=info["SpaceName"],
-            AppType="JupyterLab",
-            AppName=info.get("AppName", "default"),
-        )
-        logging.info(
-            "Space shutdown initiated (DomainId=%s, SpaceName=%s)",
-            info["DomainId"],
-            info["SpaceName"],
-        )
-    except botocore.exceptions.ClientError as e:
-        logging.warning("Auto-shutdown failed (check sagemaker:DeleteApp permission): %s", e)
+    if not load_optimizer:
+        return 0
+
+    # Restore optimizer state. torch.load(map_location=device) already placed the
+    # state tensors on `device`, and the model was loaded in place (same Parameter
+    # objects the optimizer references), so the param<->state mapping stays valid.
+    if "optimizer_state_dict" in checkpoint:
+        meta_model.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    if not load_scheduler:
+        return 0
+
+    # Restore the LR scheduler so an epoch schedule continues from the correct step
+    # instead of restarting its decay. `scheduler` may be None when no scheduler was
+    # configured.
+    scheduler = getattr(meta_model, "scheduler", None)
+    if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+    # Step checkpoints store how far warmup got. Older epoch checkpoints omit it;
+    # those are past warmup (it finishes inside epoch 0), so the helper marks it done.
+    restore_warmup_progress(meta_model, checkpoint)
+
+    if "global_step" in checkpoint:
+        meta_model.global_step = int(checkpoint["global_step"])
+
+    # Missing epoch_complete means an older epoch-boundary checkpoint: start the next epoch.
+    # A mid-epoch model_step* file sets epoch_complete false and continues this epoch.
+    meta_model.resuming_within_epoch = not bool(checkpoint.get("epoch_complete", True))
+    return next_epoch_from_checkpoint(checkpoint)
 
 
-def _batch_is_non_empty(batch: object) -> bool:
-    if not isinstance(batch, tuple | list) or len(batch) < 2:
-        return True
-    images, labels = batch[0], batch[1]
-    if isinstance(images, torch.Tensor) and images.numel() == 0:
-        return False
-    return not (isinstance(labels, torch.Tensor) and labels.numel() == 0)
+# -- 0. Environment --------------------------------------------------------
+# wandb-backed, AWS-free run: data is served from the pre-warmed local cache
+# (see scripts/prefetch_cache.py) and metrics go to wandb. No MLflow / SageMaker
+# / AWS SSO is required. Set MERMAIDSEG_S3_OFFLINE=1 to fail loudly on any cache
+# miss instead of silently falling back to S3.
+# check_env_wandb() runs after the config loads (only when wandb logging is enabled).
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+for i in range(torch.cuda.device_count()):
+    print(f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
 
-def _take_first_non_empty_batch(loader: object, split: str) -> tuple[torch.Tensor, torch.Tensor]:
-    for batch in loader:
-        if _batch_is_non_empty(batch):
-            return batch
-    raise RuntimeError(
-        f"Dry run could not find a non-empty batch for split '{split}'. Check data access credentials and dataset availability."
+# Match the SLURM CPU allocation when running under Slurm (falls back to 50 for
+# local runs). MERMAIDSEG_NUM_WORKERS / MERMAIDSEG_PREFETCH_FACTOR override both
+# (the 1M-step job sets MERMAIDSEG_NUM_WORKERS=28 on 32 CPUs).
+NUM_WORKERS = int(
+    os.environ.get("MERMAIDSEG_NUM_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", "50"))
+)
+PREFETCH_FACTOR = int(os.environ.get("MERMAIDSEG_PREFETCH_FACTOR", "3"))
+PERSISTENT_WORKERS = NUM_WORKERS > 0
+
+# -- 1. Config -------------------------------------------------------------
+# Optional CLI overrides so this script can be driven by a hyperparameter sweep
+# (see slurm/sweep_loss_weights_train.sbatch). With no extra args the behavior is
+# identical to the previous hardcoded run.
+parser = get_parser()
+parser.add_argument(
+    "--training-config",
+    default=str(REPO_ROOT / "configs" / "training_config_cbm.yaml"),
+    help="path to the training config YAML",
+)
+parser.add_argument(
+    "--model-config",
+    default=str(REPO_ROOT / "configs" / "model_config_cbm_dpt_lora_vitl.yaml"),
+    help="path to the model config YAML (default: rank-16 ViT-L LoRA)",
+)
+parser.add_argument(
+    "--data-config",
+    default=str(REPO_ROOT / "configs" / "data_config_dedup.yaml"),
+    help="path to the data config YAML (default: 256 crops, deduplicated CoralNet splits)",
+)
+parser.add_argument("--per-pixel-loss-weight", type=float, default=None)
+parser.add_argument("--per-image-loss-weight", type=float, default=None)
+parser.add_argument(
+    "--grad-accum-steps",
+    type=int,
+    default=None,
+    help="microbatches per optimizer step (default: training config, usually 1)",
+)
+parser.add_argument(
+    "--preempt-checkpoint-every-steps",
+    type=int,
+    default=0,
+    help=(
+        "Also write one rolling model_preempt{step} checkpoint every N optimizer "
+        "updates (0 disables). model_step / model_epoch interval checkpoints are unchanged."
+    ),
+)
+parser.add_argument(
+    "--checkpoint",
+    default=None,
+    help="path to a checkpoint to resume from (overrides the CHECKPOINT constant)",
+)
+parser.add_argument(
+    "--init-checkpoint",
+    default=None,
+    help=(
+        "path to a checkpoint whose model and optimizer initialize a new run "
+        "(epoch 0, fresh scheduler). Mutually exclusive with --checkpoint "
+        "and --init-weights"
+    ),
+)
+parser.add_argument(
+    "--init-weights",
+    default=None,
+    help=(
+        "path to a checkpoint whose model weights initialize a new run. The "
+        "optimizer and warmup schedule stay as just constructed. Mutually "
+        "exclusive with --checkpoint and --init-checkpoint"
+    ),
+)
+parser.add_argument(
+    "--data-seed",
+    type=int,
+    default=None,
+    help="torch seed for data shuffling (default: 4). Cooldown jobs pass a different seed",
+)
+parser.add_argument(
+    "--output-dir",
+    default=None,
+    help=(
+        "checkpoint root; checkpoints go to <output-dir>/model_checkpoints/<run-name>. "
+        "Overrides MERMAIDSEG_OUTPUT_DIR (default: <repo>/outputs)"
+    ),
+)
+parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
+args = parser.parse_args()
+if args.preempt_checkpoint_every_steps < 0:
+    parser.error("--preempt-checkpoint-every-steps must be >= 0")
+_init_flags = [args.checkpoint, args.init_checkpoint, args.init_weights]
+if sum(flag is not None for flag in _init_flags) > 1:
+    parser.error("pass only one of --checkpoint, --init-checkpoint, and --init-weights")
+
+SEED = 4 if args.data_seed is None else args.data_seed
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+# CLI --checkpoint (e.g. from the sweep's checkpoint auto-discovery) takes
+# precedence over the hardcoded CHECKPOINT constant so runs can resume.
+if args.checkpoint:
+    CHECKPOINT = args.checkpoint
+
+cfg = setup_config(
+    {
+        "data": args.data_config,
+        "training": args.training_config,
+        "model": args.model_config,
+        "logger": str(REPO_ROOT / "configs" / "logger_config.yaml"),
+    }
+)
+cfg = update_config_with_args(cfg, args)
+
+if cfg.logger.get("enable_wandb", False):
+    check_env_wandb()
+
+# Loss-weight sweep overrides (leave the config value untouched when not given).
+if args.per_pixel_loss_weight is not None:
+    cfg.training.loss.per_pixel_loss_weight = args.per_pixel_loss_weight
+if args.per_image_loss_weight is not None:
+    cfg.training.loss.per_image_loss_weight = args.per_image_loss_weight
+if args.grad_accum_steps is not None:
+    cfg.training.grad_accum_steps = args.grad_accum_steps
+
+# Encoder, iterations, batch size, and epochs come from the model and training configs.
+
+# Set experiment on the config the Logger actually reads.
+cfg_logger = copy.deepcopy(cfg)
+cfg_logger.logger.experiment_name = "mermaid"
+
+# -- 2. Datasets -----------------------------------------------------------
+cache_stats = setup_local_cache(cfg.data)
+
+# Shared build loop (also used by scripts/prefetch_cache.py) so the training job
+# and the cache-prefetch job always agree on which source objects are needed.
+dataset_dict = build_datasets(cfg.data, padding=cfg.training.padding)
+
+loader_kwargs = {
+    "batch_size": cfg.training.batch_size,
+    "num_workers": NUM_WORKERS,
+    "pin_memory": True,
+    "persistent_workers": PERSISTENT_WORKERS,
+    "drop_last": True,
+    "prefetch_factor": PREFETCH_FACTOR,
+}
+if NUM_WORKERS > 0:
+    loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
+
+# MERMAIDSEG_CONCEPT_MAPPING_PATH overrides the repo's configs/class_to_concepts.csv when the
+# training config names no concept_mapping_path.
+concept_mapping_path = cfg.training.get("concept_mapping_path") or resolve_concept_mapping_default()
+
+# -- 3. Registry / model / evaluator --------------------------------------
+_, registry_datasets = prepare_splits_for_registry(dataset_dict)
+
+run_sources = {ds.SOURCE_NAME for ds in registry_datasets}
+schema = ConceptSchema.from_csv(concept_mapping_path, sources=run_sources)
+
+registry = SourceLabelRegistry(
+    registry_datasets,
+    target_label_subset=cfg.training.class_subset,
+    compute_concepts=cfg.training.training_mode != "standard",
+    concept_mapping_path=concept_mapping_path,
+    concept_schema=schema,
+    label_roll_up=cfg.training.get("label_roll_up", False),
+).to(device)
+
+attach_registry(registry, dataset_dict.values())
+
+# repeat coralscapes_v2 train dataset 5 times
+train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"] + [
+    ds
+    for (name, split), ds in dataset_dict.items()
+    if name == "coralscapes_v2" and split == "train"
+] * 5
+val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
+
+train_loader = DataLoader(ConcatDataset(train_datasets), shuffle=True, **loader_kwargs)
+loader_kwargs["prefetch_factor"] = 2
+val_loader = DataLoader(ConcatDataset(val_datasets), shuffle=True, **loader_kwargs)
+
+print(f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
+assert registry.num_concepts == schema.num_channels
+concept_id2name = schema.channel_id2name()
+
+output_dir = resolve_output_dir(args.output_dir)
+# MetaModel pops "name" from the kwargs it receives, so the sidecar reads a copy.
+_sidecar_model_cfg = copy.deepcopy(dict(cfg.model))
+
+meta_model = MetaModel(
+    run_name=cfg.run_name,
+    num_classes=registry.num_target_classes,
+    num_concepts=registry.num_concepts or None,
+    device=device,
+    model_kwargs=cfg.model.copy(),
+    training_kwargs=cfg.training.copy(),
+    source_to_target_lookup=registry.source_to_target,
+    source_to_concepts_lookup=registry.source_to_concepts,
+    concept_matrix=registry.concept_matrix,
+    conceptid2labelid=registry.conceptid2labelid(),
+    concept_value2id=registry.concept_value2id,
+)
+
+# Weight-free model.json next to this run's checkpoints (input spec from the val transform).
+write_run_sidecar(
+    run_checkpoint_dir(output_dir, cfg.run_name),
+    model_cfg=_sidecar_model_cfg,
+    sidecar_kwargs=sidecar_kwargs(
+        run_name=cfg.run_name,
+        model_cfg=_sidecar_model_cfg,
+        target_id2label=registry.target_id2label,
+        concept_id2name=concept_id2name,
+        concept_value2id=registry.concept_value2id,
+        val_transforms=[d.transform for d in val_datasets],
+    ),
+)
+
+start_epoch = 0
+init_checkpoint = args.init_checkpoint
+init_weights = args.init_weights
+if init_weights:
+    load_training_checkpoint(
+        meta_model, init_weights, device, load_optimizer=False, load_scheduler=False
     )
-
-
-def _save_failure_report_if_available(
-    dataset: object,
-    log_dir: Path,
-    explicit_output_path: str | None = None,
-) -> Path | None:
-    num_failures = getattr(dataset, "num_load_failures", None)
-    save_failures = getattr(dataset, "save_load_failures", None)
-    if not callable(num_failures) or not callable(save_failures):
-        return None
-    n_failures = int(num_failures())
-    if n_failures == 0:
-        return None
-
-    report_path = (
-        Path(explicit_output_path)
-        if explicit_output_path
-        else (log_dir / f"data_load_failures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet")
+    # Optimizer and warmup were built with the training config before the load.
+    # Leave them alone: a cooled source has LR 0 and Adam moments we do not want.
+    fresh_lrs = [group["lr"] for group in meta_model.optimizer.param_groups]
+    print(
+        f"Loaded weights from {init_weights!r}; fresh optimizer lrs={fresh_lrs} "
+        "(epoch 0, global_step 0)"
     )
-    saved_path = Path(save_failures(report_path))
-    logging.warning("Saved %d data-load failure records to %s", n_failures, saved_path)
-    return saved_path
-
-
-def _save_failure_reports_if_available(
-    dataset_dict: dict[tuple[str, str], object],
-    log_dir: Path,
-    explicit_output_path: str | None = None,
-) -> list[Path]:
-    """Save a data-load-failure parquet report per ``(name, split)`` dataset that
-    tracked failures.
-
-    Multi-dataset equivalent of ``_save_failure_report_if_available``: the multi-dataset
-    training path builds one dataset instance per ``(name, split)`` pair rather than a
-    single dataset, so each is checked and reported independently.
-    """
-    saved_paths: list[Path] = []
-    for (name, split), dataset in dataset_dict.items():
-        output_path: str | None = None
-        if explicit_output_path:
-            base = Path(explicit_output_path)
-            output_path = str(base.with_name(f"{base.stem}_{name}_{split}{base.suffix}"))
-        saved = _save_failure_report_if_available(dataset, log_dir, output_path)
-        if saved is not None:
-            saved_paths.append(saved)
-    return saved_paths
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    base = get_parser()
-    base.add_argument(
-        "--config-data",
-        type=str,
-        default="configs/data_config.yaml",
-        help="path to data config file",
-    )
-    base.add_argument(
-        "--config-model",
-        type=str,
-        default="configs/model_config_cbm.yaml",
-        help="path to model config file",
-    )
-    base.add_argument(
-        "--config-training",
-        type=str,
-        default="configs/training_config_cbm.yaml",
-        help="path to training config file",
-    )
-    base.add_argument(
-        "--config-logger",
-        type=str,
-        default="configs/logger_config.yaml",
-        help="path to logger config file",
-    )
-    base.add_argument(
-        "--experiment-name",
-        type=str,
-        default=None,
-        help="MLflow experiment name; overrides the logger config (e.g. 'baselines')",
-    )
-    base.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="run one batch only (smoke test)",
-    )
-    base.add_argument(
-        "--auto-shutdown",
-        action="store_true",
-        help="stop the SageMaker space after a clean training finish",
-    )
-    base.add_argument(
-        "--log-dir",
-        type=str,
-        default="logs",
-        help="directory for log files and PID file",
-    )
-    base.add_argument(
-        "--failure-report-path",
-        type=str,
-        default=None,
-        help="optional parquet path for data-load failure report (default: logs/data_load_failures_<timestamp>.parquet)",
-    )
-    base.add_argument(
-        "--early-stopping",
-        action="store_true",
-        help="enable early stopping on validation metric_of_interest",
-    )
-    base.add_argument(
-        "--early-stopping-patience",
-        type=int,
-        default=10,
-        help="epochs without improvement before early stopping",
-    )
-    base.add_argument(
-        "--early-stopping-min-delta",
-        type=float,
-        default=0.0,
-        help="minimum improvement required to reset early stopping patience",
-    )
-    base.add_argument(
-        "--metric-of-interest",
-        type=str,
-        default="miou",
-        choices=sorted(SUPPORTED_METRIC_NAMES),
-        help="metric used for checkpointing and early stopping",
-    )
-    base.add_argument(
-        "--per-class-metrics",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "log per-class f1/iou in addition to macro accuracy/miou. "
-            "Default: on for training_mode=standard, off for concept/concept-bottleneck "
-            "(taxonomic rank cardinality, e.g. genus, makes per-class series numerous)."
-        ),
-    )
-    base.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="random seed for reproducibility",
-    )
-    base.add_argument(
-        "--num-workers",
-        type=int,
-        default=0,
-        help="DataLoader num_workers (default: 0)",
-    )
-    base.add_argument(
-        "--persistent-workers",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Keep DataLoader workers alive across epochs (default: on). "
-        "--no-persistent-workers reclaims worker RAM every epoch (tightest-RAM instances).",
-    )
-    return base
-
-
-def main() -> None:
-    # Dump a native (C-level) traceback to stderr on a fatal signal (segfault, SIGABRT) or
-    # Python-fatal error. Images are decoded in forked DataLoader workers via libjpeg/PIL and
-    # boto3; a crash there otherwise exits with no traceback and the job dies silently. In the
-    # SageMaker container PYTHONFAULTHANDLER=1 already enables this at interpreter startup; this
-    # call covers local runs where that env var is not set. Enabling twice is harmless.
-    faulthandler.enable()
-
-    parser = _build_parser()
-    args = parser.parse_args()
-
-    log_dir = Path(args.log_dir)
-    _setup_logging(log_dir)
-    pid_file = log_dir / "train.pid"
-    _write_pid(pid_file)
-
-    def _handle_sigterm(_sig: int, _frame: object) -> None:
-        logging.warning("SIGTERM received — exiting")
-        _cleanup_pid(pid_file)
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-
-    try:
-        _run_training(args)
-    except Exception:
-        logging.exception("Training failed")
-        sys.exit(1)
-    finally:
-        _cleanup_pid(pid_file)
-
-    if args.auto_shutdown:
-        _SHUTDOWN_GRACE_SEC = 5
-        logging.info("Waiting %ds for MLflow flush before shutdown...", _SHUTDOWN_GRACE_SEC)
-        time.sleep(_SHUTDOWN_GRACE_SEC)
-        _stop_current_space()
-
-
-def _run_training(args: argparse.Namespace) -> None:
-    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-
-    if not os.getenv("MLFLOW_TRACKING_URI"):
-        logging.warning(
-            "MLFLOW_TRACKING_URI is not set — MLflow will log to a local filesystem store. "
-            "Set MLFLOW_TRACKING_URI to the SageMaker MLflow App ARN for remote tracking:\n"
-            '    export MLFLOW_TRACKING_URI="arn:aws:sagemaker:us-east-1:ACCOUNT:mlflow-app/APP-ID"'
-        )
-
-    # The Experiment owns config loading, the override merge, and the dataset -> registry -> model
-    # -> evaluator assembly that used to be inlined here (so notebooks and `dry-run` build the same
-    # objects the same way). Process concerns — seeding, dry-run truncation, failure reports, the
-    # Logger/provenance context, and the training loop — stay in this CLI adapter.
-    experiment = Experiment.from_args(args)
-    cfg = experiment.config
-    cfg_logger = copy.deepcopy(cfg)
-
-    device = experiment.device
-    logging.info("Device: %s", device)
-
-    seed = experiment.overrides.seed
-    torch.manual_seed(seed)
+    torch.manual_seed(SEED)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    logging.info("Seed: %d", seed)
+        torch.cuda.manual_seed_all(SEED)
+    print(f"Re-seeded RNG to {SEED} for the new run's data order")
+elif init_checkpoint:
+    load_training_checkpoint(meta_model, init_checkpoint, device, load_scheduler=False)
+    # Bind a fresh schedule to the restored peak LRs (do not continue the
+    # source run's scheduler). Epoch and global_step stay at 0.
+    meta_model.rebuild_scheduler()
+    print(f"Loaded init checkpoint {init_checkpoint!r}; starting a new run at epoch 0")
+    # Re-seed after model init so the shuffle stream is exactly `SEED`, not that
+    # seed advanced by construction. Augmentations stay entropy-seeded.
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+    print(f"Re-seeded RNG to {SEED} for the new run's data order")
+elif CHECKPOINT:
+    start_epoch = load_training_checkpoint(meta_model, CHECKPOINT, device)
+    print(f"Loaded checkpoint {CHECKPOINT!r}; resuming at epoch {start_epoch}")
+    if start_epoch >= int(cfg.training.epochs):
+        print(
+            f"Checkpoint already covers all {int(cfg.training.epochs)} epoch(s). "
+            "Exiting without further training."
+        )
+        raise SystemExit(0)
+    # Offset the RNG by the number of already-trained epochs so the resumed run
+    # sees a different data-shuffling stream instead of replaying the epoch
+    # 0..N-1 orderings. The DataLoader's RandomSampler draws from the global
+    # torch generator (re-seeded to SEED at startup), and the training loop is
+    # iterated below, so re-seeding here changes the permutations for every
+    # resumed epoch. (Augmentations already vary per run via Albumentations'
+    # own entropy-seeded RNG.)
+    if getattr(meta_model, "resuming_within_epoch", False):
+        resume_seed = SEED + int(meta_model.global_step)
+        seed_note = f"{meta_model.global_step} completed updates"
+    else:
+        resume_seed = SEED + start_epoch
+        seed_note = f"{start_epoch} trained epochs"
+    torch.manual_seed(resume_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(resume_seed)
+    print(f"Re-seeded RNG to {resume_seed} (SEED={SEED} + {seed_note})")
 
-    train_loader, val_loader = experiment.dataloaders()
-    dataset_val_loaders = experiment.dataset_val_loaders()
-    dataset_dict = experiment.datasets()
-    registry = experiment.registry
-    train_dataset_combined = experiment.train_dataset
-    val_dataset_combined = experiment.val_dataset
+evaluator = Evaluator(
+    num_classes=registry.num_target_classes,
+    device=device,
+    calculate_concept_metrics=cfg.training.training_mode != "standard",
+    concept_value2id=registry.concept_value2id,
+)
+# -- 5. Train (run lifecycle managed by `with`) ---------------------------
+# Backend selection is config-driven (configs/logger_config.yaml sets
+# enable_mlflow: false, enable_wandb: true).
+with Logger(
+    config=cfg_logger,
+    meta_model=meta_model,
+    log_epochs=cfg_logger.logger.get("log_epochs", 1),
+    log_checkpoint=1,
+    checkpoint_dir=output_dir,
+    id2label=logger_id2label(registry.target_id2label),
+    save_local_checkpoints=True,
+) as run_logger:
+    assert run_logger.enable_wandb or not cfg_logger.logger.get("enable_wandb", False), (
+        "wandb logging was not started — check WANDB_API_KEY and "
+        "config.logger.enable_wandb (see warnings above)"
+    )
+    run_logger.log_dict(
+        {str(k): v for k, v in concept_id2name.items()},
+        "metadata/concept_id2name.json",
+    )
+    run_logger.log_params(
+        {
+            "model/encoder_name": cfg.model.encoder_name,
+            "model/head": "dpt",
+            "model/adapter": "lora",
+            "model/lora_r": cfg.model.lora_r,
+            "model/lora_alpha": cfg.model.lora_alpha,
+            "loss/per_pixel_loss_weight": cfg.training.loss.per_pixel_loss_weight,
+            "loss/per_image_loss_weight": cfg.training.loss.per_image_loss_weight,
+            "train/batch_size": cfg.training.batch_size,
+            "train/grad_accum_steps": int(cfg.training.get("grad_accum_steps", 1)),
+        }
+    )
+    if init_weights:
+        run_logger.log_params(
+            {
+                "init/weights": init_weights,
+                "init/optimizer": "fresh",
+                "init/start_epoch": 0,
+            }
+        )
+    elif init_checkpoint:
+        run_logger.log_params({"init/checkpoint": init_checkpoint, "init/start_epoch": 0})
+    elif CHECKPOINT:
+        run_logger.log_params({"init/checkpoint": CHECKPOINT, "init/start_epoch": start_epoch})
+    print(f"\nwandb run_id : {run_logger.wandb_run_id}")
+    print(f"wandb run URL: {run_logger.run_url}\n")
 
-    logging.info(
-        "Dataset: %s (%d samples)",
-        "Combined",
-        (len(train_loader) + len(val_loader)) * cfg.training.batch_size,
+    # Reuse the logger helpers instead of hand-rolling concept extraction.
+    run_logger.log_dataloader_params(train_loader, prefix="train_loader")
+    run_logger.log_dataloader_params(val_loader, prefix="val_loader")
+    run_logger.log_reconciliation(registry)  # writes metadata/concept_id2name.json
+
+    train_size = sum(len(d) for d in train_datasets)
+    val_size = sum(len(d) for d in val_datasets)
+    run_logger.log_params(
+        {
+            "data/train_size": train_size,
+            "data/val_size": val_size,
+            "data/total_size": sum(len(d) for d in dataset_dict.values()),
+            "data/seed": SEED,
+            "data/dataset_name": "ALL",
+        }
     )
 
-    report_written = False
+    metrics_all: dict[int, dict] = {}
+    checkpoint_every = int(cfg.training.get("checkpoint_every_steps", 0) or 0)
+    preempt_every = int(args.preempt_checkpoint_every_steps or 0)
+    total_updates = int(cfg.training.epochs) * int(cfg.training.iterations_per_train_epoch)
 
-    def _write_failure_reports_once() -> None:
-        nonlocal report_written
-        if report_written:
-            return
-        paths = _save_failure_reports_if_available(
-            dataset_dict=dataset_dict,
-            log_dir=Path(experiment.overrides.log_dir),
-            explicit_output_path=experiment.overrides.failure_report_path,
-        )
-        report_written = bool(paths)
+    for epoch in range(start_epoch, cfg.training.epochs):
 
-    if experiment.overrides.dry_run:
-        max_dry_epochs = 3
-        actual_epochs = cfg.training.epochs
-        if actual_epochs > max_dry_epochs:
-            cfg.training.epochs = max_dry_epochs
-            logging.info("Dry run: capping epochs %d → %d", actual_epochs, max_dry_epochs)
-        logging.info("Dry run: limiting to 1 batch per epoch")
-        try:
-            train_loader = [_take_first_non_empty_batch(train_loader, "train")]
-            val_loader = [_take_first_non_empty_batch(val_loader, "val")]
-            dataset_val_loaders = {
-                name: [_take_first_non_empty_batch(loader, f"val/{name}")]
-                for name, loader in dataset_val_loaders.items()
-            }
-        except RuntimeError:
-            _write_failure_reports_once()
-            raise
-
-    meta_model = experiment.meta_model()
-    evaluator = experiment.evaluator()
-
-    # Route the run to an MLflow experiment. --experiment-name (or the run YAML override)
-    # wins; otherwise fall back to whatever the logger config declares.
-    if experiment.overrides.experiment_name:
-        cfg.logger.experiment_name = experiment.overrides.experiment_name
-        cfg_logger.logger.experiment_name = experiment.overrides.experiment_name
-
-    with Logger(
-        config=cfg_logger,
-        meta_model=meta_model,
-        log_epochs=cfg.logger.get("log_epochs", 1),
-        log_checkpoint=cfg_logger.logger.get("log_checkpoint", 50),
-        checkpoint_dir=".",
-        enable_mlflow=True,
-        id2label={0: "ignore", **registry.target_id2label},
-    ) as logger:
-        if logger.mlflow_run_id is not None:
-            logging.info("MLflow run_id: %s", logger.mlflow_run_id)
-
-        logger.log_benchmark_context(label=cfg.run_name)
-        logger.log_dataloader_params(train_loader, prefix="train_loader")
-        logger.log_dataloader_params(val_loader, prefix="val_loader")
-        logger.log_reconciliation(registry)
-        # ConcatDataset exposes `.datasets`, which resolve_split_annotations already
-        # recurses into per-source, so this works directly against the multi-dataset
-        # train/val splits built above (closes #139).
-        logger.log_dataset_statistics(
-            {"train": train_dataset_combined, "val": val_dataset_combined}, registry
-        )
-
-        # Managed-Spot resume: if the Logger reattached to a prior run for this job (via the
-        # MERMAIDSEG_RUN_ID the launcher injects), restore model/optimizer/scheduler/epoch from
-        # that run's latest checkpoint and continue where it left off. On a first launch (no prior
-        # run, or no checkpoint yet) start_epoch stays -1 and training begins at epoch 0.
-        start_epoch = -1
-        if logger.resumed:
-            checkpoint_path = logger.download_latest_checkpoint()
-            if checkpoint_path is not None:
-                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-                start_epoch = restore_training_state(
-                    meta_model.model,
-                    meta_model.optimizer,
-                    checkpoint,
-                    scheduler=getattr(meta_model, "scheduler", None),
+        def _save_step_checkpoint(meta, epoch=epoch):
+            step = int(meta.global_step)
+            # Interval checkpoints (eval cadence). Unchanged when preempt_every is 0,
+            # which is every CSAIL job.
+            if checkpoint_every > 0 and step % checkpoint_every == 0:
+                run_logger.save_model_checkpoint(
+                    meta,
+                    epoch,
+                    {},
+                    is_best=False,
+                    checkpoint_name=f"model_step{step}",
+                    epoch_complete=step >= total_updates,
                 )
-                logging.info("Resuming training from epoch %d (spot restart)", start_epoch)
-            else:
-                logging.warning(
-                    "Logger resumed a run but found no checkpoint artifact; starting from epoch 0"
+            # One rolling file for preemption. epoch_complete stays false until the
+            # run is finished, so a resume reseeds with SEED + global_step and
+            # continues this epoch. Older model_preempt* files are deleted after
+            # the rename; model_step* and model_epoch* are not.
+            if preempt_every > 0 and step > 0 and step % preempt_every == 0:
+                name = f"model_preempt{step}"
+                run_logger.save_model_checkpoint(
+                    meta,
+                    epoch,
+                    {},
+                    is_best=False,
+                    checkpoint_name=name,
+                    epoch_complete=step >= total_updates,
+                    atomic=True,
+                )
+                prune_rolling_checkpoints(
+                    os.path.join(run_logger.checkpoint_dir, "model_checkpoints", meta.run_name),
+                    keep_name=name,
                 )
 
-        try:
-            # test_loader is None: the multi-dataset config does not define test splits yet,
-            # so there is no test data to evaluate (see data_config.yaml).
-            train_model(
-                meta_model=meta_model,
-                evaluator=evaluator,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                test_loader=None,
-                dataset_val_loaders=dataset_val_loaders,
-                logger=logger,
-                start_epoch=start_epoch,
-                metric_of_interest=experiment.overrides.metric_of_interest,
-                early_stopping=experiment.overrides.early_stopping,
-                early_stopping_patience=experiment.overrides.early_stopping_patience,
-                early_stopping_min_delta=experiment.overrides.early_stopping_min_delta,
+        metrics = train_model(
+            meta_model=meta_model,
+            evaluator=evaluator,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            logger=run_logger,
+            start_epoch=epoch,
+            end_epoch=epoch + 1,
+            metric_of_interest="accuracy",
+            train_log_interval=cfg.logger.get("train_log_interval", 1),
+            on_optimizer_step=_save_step_checkpoint,
+            save_best_checkpoint=checkpoint_every <= 0,
+        )
+        metrics_all.update(metrics)
+        # Step-checkpointed runs (the ViT-size sweep) already saved model_step*.
+        # Other runs still write model_epoch{N} at the end of each epoch.
+        if checkpoint_every <= 0 and cfg.training.iterations_per_train_epoch > 1000:
+            run_logger.save_model_checkpoint(
+                meta_model,
+                epoch,
+                metrics[epoch].get("validation_metrics", {}),
+                is_best=False,
             )
-        finally:
-            _write_failure_reports_once()
-        logging.info("Training complete")
-
-
-if __name__ == "__main__":
-    main()
+    if not metrics_all:
+        print("No training epochs ran.")
+    else:
+        final_epoch = max(metrics_all)
+        print("Final train metrics     :", metrics_all[final_epoch].get("train_metrics"))
+        print("Final validation metrics:", metrics_all[final_epoch].get("validation_metrics"))
+    print(f"wandb run URL: {run_logger.run_url}")

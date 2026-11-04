@@ -10,7 +10,6 @@ METRIC_POLICY = {
     "loss": "min",
     "accuracy": "max",
     "miou": "max",
-    "miou_weighted": "max",
     "f1-score": "max",
 }
 

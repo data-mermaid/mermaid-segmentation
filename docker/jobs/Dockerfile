@@ -1,42 +1,53 @@
-# GPU image for mermaid-segmentation SageMaker jobs (TrainingJob +
-# ProcessingJob). Built from the mermaid-segmentation/ directory:
+# GPU image for mermaid-segmentation SageMaker TrainingJobs. Built from the mermaid-segmentation/ directory:
 #   docker buildx build --platform linux/amd64 \
 #       -t <ECR_URI>:training-<tag> -f docker/jobs/Dockerfile .
 #
-# Same image runs both Training and Processing — the launcher selects
-# which entrypoint script to invoke via CONTAINER_ENTRYPOINT_SCRIPT.
+# The launcher selects the entrypoint script via CONTAINER_ENTRYPOINT_SCRIPT; the default,
+# scripts/sagemaker_train_entrypoint.py, runs scripts/train.py.
 #
-# Base: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime (Python 3.11, torch 2.5.1)
-# Matches pyproject.toml requires-python>=3.11, torch>=2.4,<2.8.
+# Base: nvidia/cuda 12.6 + cuDNN runtime. Python 3.12 and every package come from uv.lock via
+# `uv sync --locked`, the same stack Slurm runs (torch 2.7.1 from the lock bundles its CUDA 12.6
+# libraries). No official pytorch/pytorch 2.7.1 image ships Python 3.12, so Python is installed by
+# uv rather than taken from the base image.
 #
-# See docker/jobs/CLAUDE.md for build/push recipe and tagging conventions.
+# See docker/jobs/README.md for build/push recipe and tagging conventions.
 
-ARG BASE_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
 FROM ${BASE_IMAGE}
 
-# HF_TOKEN is injected at runtime by the launcher (scripts/launch_training.py sets it in the
-# SageMaker Estimator environment). Do NOT bake it via ARG/ENV — that persists the secret in
-# image layers (docker history/inspect). Gated-model downloads happen at run time, not build.
+# Pinned uv. Update together with the uv used to refresh uv.lock.
+COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /uvx /usr/local/bin/
+
+# Secrets (HF_TOKEN, WANDB_API_KEY) are never baked into the image or set in the job Environment:
+# the entrypoint fetches them at run time from Secrets Manager (see docker/jobs/README.md).
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        git build-essential libgl1 libglib2.0-0 && \
+        ca-certificates git build-essential libgl1 libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/ml/code
 
+# UV_PYTHON matches .python-version.
+ENV UV_PYTHON=3.12 \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_LINK_MODE=copy \
+    PATH="/opt/ml/code/.venv/bin:${PATH}"
+
+# Dependencies first (cached until the lock changes): base deps, the `sagemaker` extra and the
+# `research` group (wandb, mlflow, albumentations, ...). `--locked` fails if uv.lock is stale.
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --locked --no-dev --extra sagemaker --group research --no-install-project
+
 # Project itself (editable so scripts/ stays importable).
-COPY pyproject.toml README.md ./
 COPY mermaidseg ./mermaidseg
 COPY scripts ./scripts
 COPY configs ./configs
-COPY artifacts ./artifacts
+RUN uv sync --locked --no-dev --extra sagemaker --group research
 
-# Image carries the training stack only (mlflow/torchmetrics → training extra). The CoralNet
-# ETL/processing tasks (coralnet-etl/-refresh/-resize) need the `coralnet` extra (ibis/duckdb,
-# bs4) — add `,coralnet` here and rebuild when those jobs next need to run.
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e ".[training]"
+# The image has no .git; the build passes the commit so sidecars record the mermaidseg SHA.
+ARG GIT_SHA=unknown
+ENV MERMAIDSEG_GIT_SHA=$GIT_SHA
 
 COPY docker/jobs/entrypoint.sh /opt/ml/code/entrypoint.sh
 RUN chmod +x /opt/ml/code/entrypoint.sh

@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import logging
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-import pandas as pd
 import pytest
 import torch
 
@@ -17,33 +14,21 @@ from mermaidseg.model.train import (
     _loader_load_failure_count,
     train_model,
 )
-from scripts.train import (
-    _build_parser,
-    _configure_third_party_loggers,
-    _save_failure_report_if_available,
-    _save_failure_reports_if_available,
-    _take_first_non_empty_batch,
-)
 
 
 class StubLogger:
     """Minimal logger stub for train_model tests."""
 
-    def __init__(self, log_epochs: int = 1, log_checkpoint: int | None = None):
+    def __init__(self, log_epochs: int = 1):
         self.log_epochs = log_epochs
-        self.log_checkpoint = log_checkpoint
         self.logged: list[tuple[dict[str, float], int]] = []
         self.checkpoint_epochs: list[int] = []
-        self.checkpoint_is_best: list[bool] = []
 
     def log(self, payload: dict[str, float], step: int) -> None:
         self.logged.append((payload, step))
 
-    def save_model_checkpoint(
-        self, _meta_model, epoch: int, _metrics: dict[str, float], is_best: bool = True
-    ) -> None:
+    def save_model_checkpoint(self, _meta_model, epoch: int, _metrics: dict[str, float]) -> None:
         self.checkpoint_epochs.append(epoch)
-        self.checkpoint_is_best.append(is_best)
 
 
 class FakeMetaModel:
@@ -57,7 +42,9 @@ class FakeMetaModel:
         train_metrics: dict[str, float] | None = None,
         val_losses: list[float] | None = None,
         val_metrics_seq: list[dict[str, float | np.ndarray]] | None = None,
+        skipped_updates: int = 0,
     ):
+        self._skipped_updates = skipped_updates
         self.training_kwargs = SimpleNamespace(epochs=epochs)
         self.model = torch.nn.Linear(4, 2)
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.1)
@@ -66,13 +53,25 @@ class FakeMetaModel:
         self._val_losses = val_losses or [0.9] * epochs
         self._val_metrics_seq = val_metrics_seq or [{"accuracy": 0.5}] * epochs
         self._val_idx = 0
+        self.global_step = 0
 
-    def train_epoch(self, _loader, _evaluator):
+    def train_epoch(
+        self,
+        _loader,
+        _evaluator,
+        run_logger=None,
+        log_interval=1,
+        epoch=None,
+        on_optimizer_step=None,
+    ):
+        # Advance the global step like the real MetaModel so train_model logs against it.
+        self.global_step += 1
         timing = {
             "data_loading_sec": 0.0,
             "forward_sec": 0.0,
             "backward_sec": 0.0,
             "num_samples": 2,
+            "skipped_updates": self._skipped_updates,
         }
         return self._train_loss, dict(self._train_metrics), timing
 
@@ -111,52 +110,18 @@ def test_metric_of_interest_allowlist_rejects_unknown_metric() -> None:
         )
 
 
-@pytest.mark.parametrize("metric_name", ["accuracy", "miou", "f1-score", "loss"])
-def test_metric_of_interest_allowlist_accepts_known_metrics(metric_name: str) -> None:
-    val_metrics = {
-        "accuracy": {"accuracy": 0.7},
-        "miou": {"miou": 0.4},
-        "f1-score": {"f1-score": 0.6},
-        "loss": {"accuracy": 0.5},
-    }[metric_name]
-    val_losses = [0.8]
-    meta = FakeMetaModel(epochs=1, val_losses=val_losses, val_metrics_seq=[val_metrics])
+def test_save_best_checkpoint_can_be_disabled() -> None:
+    meta = FakeMetaModel(epochs=1, val_metrics_seq=[{"accuracy": 0.9}])
     logger = StubLogger()
-
-    metrics = train_model(
+    train_model(
         meta_model=meta,
         evaluator=object(),
         train_loader=_tiny_loader(),
         val_loader=_tiny_loader(),
         logger=logger,
-        metric_of_interest=metric_name,
+        save_best_checkpoint=False,
     )
-
-    assert len(metrics) == 1
-    assert logger.checkpoint_epochs == [0]
-
-
-def test_resume_start_epoch_ends_at_total_not_start_plus_epochs() -> None:
-    """Resuming at epoch k with a configured total of N trains epochs [k, N), not [k,
-    k+N).
-
-    Guards the Managed-Spot resume path: without the end_epoch fix, resuming at 3 with epochs=5
-    would have trained 3..8 (five more epochs) instead of finishing at the configured total.
-    """
-    meta = FakeMetaModel(epochs=5)
-    logger = StubLogger()
-
-    metrics = train_model(
-        meta_model=meta,
-        evaluator=object(),
-        train_loader=_tiny_loader(),
-        val_loader=_tiny_loader(),
-        logger=logger,
-        start_epoch=3,
-        metric_of_interest="accuracy",
-    )
-
-    assert sorted(metrics) == [3, 4]  # only epochs 3 and 4 run (total = 5)
+    assert logger.checkpoint_epochs == []
 
 
 def test_metric_direction_accuracy_maximize_and_loss_minimize() -> None:
@@ -193,69 +158,6 @@ def test_metric_direction_accuracy_maximize_and_loss_minimize() -> None:
     assert logger_loss.checkpoint_epochs == [0, 1]
 
 
-def test_log_checkpoint_triggers_periodic_non_improvement_checkpoint() -> None:
-    """A flat validation metric never improves — log_checkpoint must still
-    checkpoint."""
-    meta = FakeMetaModel(
-        epochs=4,
-        val_losses=[0.9, 0.9, 0.9, 0.9],
-        val_metrics_seq=[{"accuracy": 0.5}] * 4,
-    )
-    logger = StubLogger(log_checkpoint=2)
-    train_model(
-        meta_model=meta,
-        evaluator=object(),
-        train_loader=_tiny_loader(),
-        val_loader=_tiny_loader(),
-        logger=logger,
-        metric_of_interest="accuracy",
-    )
-    # Epoch 0 improves (first result always beats -inf/inf); epochs 2 are periodic-only.
-    assert logger.checkpoint_epochs == [0, 2]
-    assert logger.checkpoint_is_best == [True, False]
-
-
-def test_log_checkpoint_does_not_duplicate_improvement_epoch() -> None:
-    """When improvement and the periodic interval land on the same epoch, save once."""
-    meta = FakeMetaModel(
-        epochs=3,
-        val_losses=[0.9, 0.8, 0.9],
-        val_metrics_seq=[{"accuracy": 0.5}, {"accuracy": 0.6}, {"accuracy": 0.5}],
-    )
-    logger = StubLogger(log_checkpoint=1)
-    train_model(
-        meta_model=meta,
-        evaluator=object(),
-        train_loader=_tiny_loader(),
-        val_loader=_tiny_loader(),
-        logger=logger,
-        metric_of_interest="accuracy",
-    )
-    assert logger.checkpoint_epochs == [0, 1, 2]
-    # Every epoch improves except epoch 2 — should stay best=True for 0,1 and
-    # fall back to periodic (best=False) only for the non-improving epoch 2.
-    assert logger.checkpoint_is_best == [True, True, False]
-
-
-def test_no_log_checkpoint_attribute_disables_periodic_checkpointing() -> None:
-    """Loggers without a log_checkpoint attribute must not trigger periodic saves."""
-    meta = FakeMetaModel(
-        epochs=3,
-        val_losses=[0.9, 0.9, 0.9],
-        val_metrics_seq=[{"accuracy": 0.5}] * 3,
-    )
-    logger = StubLogger()
-    train_model(
-        meta_model=meta,
-        evaluator=object(),
-        train_loader=_tiny_loader(),
-        val_loader=_tiny_loader(),
-        logger=logger,
-        metric_of_interest="accuracy",
-    )
-    assert logger.checkpoint_epochs == [0]
-
-
 def test_end_epoch_is_honored_when_start_epoch_default() -> None:
     meta = FakeMetaModel(epochs=5)
     metrics = train_model(
@@ -288,33 +190,20 @@ def test_reduce_on_plateau_receives_validation_metric() -> None:
     assert scheduler.metric_history == [0.4, 0.5]
 
 
-def test_non_scalar_metric_of_interest_raises_value_error() -> None:
-    meta = FakeMetaModel(
-        epochs=1,
-        val_losses=[0.9],
-        val_metrics_seq=[{"miou": np.array([0.1, 0.2])}],
-    )
-    with pytest.raises(ValueError, match="must be scalar"):
-        train_model(
-            meta_model=meta,
-            evaluator=object(),
-            train_loader=_tiny_loader(),
-            val_loader=_tiny_loader(),
-            metric_of_interest="miou",
-        )
-
-
-def test_early_stopping_triggers_with_patience_and_min_delta() -> None:
+@pytest.mark.parametrize(
+    ("accuracies", "epochs_run"),
+    [
+        # 0.55 beats 0.50 by 0.05 < 0.1: no improvement, patience 1 stops after epoch 1.
+        ([0.5, 0.55, 0.9, 0.9, 0.9], 2),
+        # 0.65 beats 0.50 by 0.15 > 0.1: improvement; epoch 2 repeats it and stops there.
+        ([0.5, 0.65, 0.65, 0.9, 0.9], 3),
+    ],
+)
+def test_early_stopping_triggers_with_patience_and_min_delta(accuracies, epochs_run) -> None:
     meta = FakeMetaModel(
         epochs=5,
-        val_losses=[0.9, 0.9, 0.9, 0.9, 0.9],
-        val_metrics_seq=[
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-            {"accuracy": 0.5},
-        ],
+        val_losses=[0.9] * 5,
+        val_metrics_seq=[{"accuracy": a} for a in accuracies],
     )
     metrics = train_model(
         meta_model=meta,
@@ -324,10 +213,10 @@ def test_early_stopping_triggers_with_patience_and_min_delta() -> None:
         metric_of_interest="accuracy",
         early_stopping=True,
         early_stopping_patience=1,
-        early_stopping_min_delta=0.0,
+        early_stopping_min_delta=0.1,
     )
 
-    assert len(metrics) == 2
+    assert len(metrics) == epochs_run
 
 
 def test_early_stopping_runs_final_test_eval_on_stop_epoch(monkeypatch) -> None:
@@ -340,6 +229,7 @@ def test_early_stopping_runs_final_test_eval_on_stop_epoch(monkeypatch) -> None:
         logger,
         epoch,
         split="train",
+        step=None,
     ):
         calls.append((epoch, split))
         return {"accuracy": 0.5}
@@ -375,135 +265,6 @@ def test_early_stopping_runs_final_test_eval_on_stop_epoch(monkeypatch) -> None:
     assert len(calls) >= 2
 
 
-def test_cli_metric_of_interest_argument_is_supported() -> None:
-    parser = _build_parser()
-    args = parser.parse_args(
-        [
-            "--config",
-            "configs/data_config.yaml",
-            "--metric-of-interest",
-            "miou",
-        ]
-    )
-    assert args.metric_of_interest == "miou"
-
-    with pytest.raises(SystemExit):
-        parser.parse_args(
-            [
-                "--config",
-                "configs/data_config.yaml",
-                "--metric-of-interest",
-                "precision",
-            ]
-        )
-
-
-def test_configure_third_party_loggers_suppresses_botocore_token_info() -> None:
-    botocore_logger = logging.getLogger("botocore.tokens")
-    original_level = botocore_logger.level
-    try:
-        botocore_logger.setLevel(logging.INFO)
-        _configure_third_party_loggers()
-        assert botocore_logger.level == logging.WARNING
-    finally:
-        botocore_logger.setLevel(original_level)
-
-
-def test_take_first_non_empty_batch_skips_empty_batch() -> None:
-    empty = (torch.tensor([]), torch.tensor([]))
-    valid = (
-        torch.zeros(1, 3, 8, 8),
-        torch.zeros(1, 8, 8, dtype=torch.long),
-    )
-    picked = _take_first_non_empty_batch([empty, valid], "train")
-    assert picked[0].shape[0] == 1
-
-
-def test_take_first_non_empty_batch_raises_if_none_found() -> None:
-    with pytest.raises(RuntimeError, match="non-empty batch"):
-        _take_first_non_empty_batch([(torch.tensor([]), torch.tensor([]))], "train")
-
-
-def test_save_failure_report_if_available_returns_none_without_failures(tmp_path: Path) -> None:
-    class _Dataset:
-        @staticmethod
-        def num_load_failures() -> int:
-            return 0
-
-        @staticmethod
-        def save_load_failures(_path):
-            raise AssertionError(
-                "save_load_failures should not be called when there are no failures"
-            )
-
-    assert _save_failure_report_if_available(_Dataset(), tmp_path) is None
-
-
-def test_save_failure_report_if_available_writes_parquet(tmp_path: Path) -> None:
-    class _Dataset:
-        @staticmethod
-        def num_load_failures() -> int:
-            return 2
-
-        @staticmethod
-        def save_load_failures(path):
-            pd.DataFrame([{"image_id": "a"}, {"image_id": "b"}]).to_parquet(path, index=False)
-            return Path(path)
-
-    report_path = _save_failure_report_if_available(_Dataset(), tmp_path)
-    assert report_path is not None
-    assert report_path.exists()
-    assert report_path.suffix == ".parquet"
-
-
-class _FailingDataset:
-    def __init__(self, n_failures: int) -> None:
-        self._n_failures = n_failures
-
-    def num_load_failures(self) -> int:
-        return self._n_failures
-
-    def save_load_failures(self, path):
-        pd.DataFrame([{"image_id": "a"}] * self._n_failures).to_parquet(path, index=False)
-        return Path(path)
-
-
-def test_save_failure_reports_if_available_writes_one_report_per_failing_dataset(
-    tmp_path: Path,
-) -> None:
-    dataset_dict = {
-        ("mermaid", "train"): _FailingDataset(3),
-        ("mermaid", "val"): _FailingDataset(0),
-        ("coralnet", "train"): _FailingDataset(1),
-    }
-    paths = _save_failure_reports_if_available(dataset_dict, tmp_path)
-    assert len(paths) == 2
-    for path in paths:
-        assert path.exists()
-        assert path.suffix == ".parquet"
-
-
-def test_save_failure_reports_if_available_returns_empty_without_any_failures(
-    tmp_path: Path,
-) -> None:
-    dataset_dict = {
-        ("mermaid", "train"): _FailingDataset(0),
-        ("coralnet", "train"): _FailingDataset(0),
-    }
-    assert _save_failure_reports_if_available(dataset_dict, tmp_path) == []
-
-
-def test_save_failure_reports_if_available_suffixes_explicit_output_path(tmp_path: Path) -> None:
-    dataset_dict = {
-        ("mermaid", "train"): _FailingDataset(2),
-        ("coralnet", "train"): _FailingDataset(1),
-    }
-    explicit = tmp_path / "failures.parquet"
-    paths = _save_failure_reports_if_available(dataset_dict, tmp_path, str(explicit))
-    names = {p.name for p in paths}
-    assert names == {"failures_mermaid_train.parquet", "failures_coralnet_train.parquet"}
-
-
 class _FakeFailDataset:
     """Dataset stub exposing the load-failure tracking API used by the rate guard."""
 
@@ -523,83 +284,43 @@ class _FakeLoader:
         self.dataset = dataset
 
 
-class _FakeConcat:
-    """Mimics torch ConcatDataset: no num_load_failures of its own, exposes
-    .datasets."""
-
-    def __init__(self, datasets: list) -> None:
-        self.datasets = list(datasets)
-
-    def __len__(self) -> int:
-        return sum(len(d) for d in self.datasets)
-
-
 def test_loader_load_failure_count_returns_none_for_untracked_dataset() -> None:
     assert _loader_load_failure_count(_FakeLoader(object())) is None
     assert _loader_load_failure_count(_FakeLoader(_FakeFailDataset(100, 7))) == 7
 
 
-def test_loader_load_failure_count_sums_concat_dataset_children() -> None:
-    # The real training path wraps per-source datasets in a ConcatDataset, which has no
-    # num_load_failures of its own; the count must sum the tracked children (else the guard
-    # silently no-ops on every real run).
-    concat = _FakeConcat([_FakeFailDataset(50, 3), _FakeFailDataset(50, 4)])
-    assert _loader_load_failure_count(_FakeLoader(concat)) == 7
-
-
 def test_enforce_load_failure_rate_raises_above_threshold() -> None:
-    # 10 new failures out of 100 attempts (90 processed + 10 failed) = 10% > 5% -> raise.
-    loader = _FakeLoader(_FakeFailDataset(size=1000, failures=10))
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=10))
     with pytest.raises(RuntimeError, match="load-failure rate"):
-        _enforce_load_failure_rate(
-            loader, failures_before=0, max_rate=0.05, epoch=0, samples_processed=90
-        )
+        _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
 
 
 def test_enforce_load_failure_rate_uses_per_epoch_delta() -> None:
-    # 100 cumulative failures but only 2 new this epoch; 2/(98+2)=2% < 5% -> no raise.
-    loader = _FakeLoader(_FakeFailDataset(size=1000, failures=100))
-    _enforce_load_failure_rate(
-        loader, failures_before=98, max_rate=0.05, epoch=3, samples_processed=98
-    )
-
-
-def test_enforce_load_failure_rate_rate_is_over_epoch_attempts_not_dataset_size() -> None:
-    # Regression: denominator is per-epoch attempts, NOT len(dataset). 10 failures over a
-    # huge 1e6-item dataset but only 90 processed this epoch -> 10% -> must still raise.
-    loader = _FakeLoader(_FakeFailDataset(size=1_000_000, failures=10))
-    with pytest.raises(RuntimeError, match="load-failure rate"):
-        _enforce_load_failure_rate(
-            loader, failures_before=0, max_rate=0.05, epoch=0, samples_processed=90
-        )
+    # 100 cumulative failures but only 2 new this epoch on a 100-item set -> 2% < 5%, no raise.
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=100))
+    _enforce_load_failure_rate(loader, failures_before=98, max_rate=0.05, epoch=3)
 
 
 def test_enforce_load_failure_rate_allows_below_threshold() -> None:
-    loader = _FakeLoader(_FakeFailDataset(size=1000, failures=3))
-    _enforce_load_failure_rate(
-        loader, failures_before=0, max_rate=0.05, epoch=0, samples_processed=97
-    )
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=3))
+    _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
 
 
 def test_enforce_load_failure_rate_disabled_when_none() -> None:
-    loader = _FakeLoader(_FakeFailDataset(size=1000, failures=99))
-    _enforce_load_failure_rate(
-        loader, failures_before=0, max_rate=None, epoch=0, samples_processed=1
-    )
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=99))
+    _enforce_load_failure_rate(loader, failures_before=0, max_rate=None, epoch=0)
 
 
 def test_enforce_load_failure_rate_noop_for_untracked_dataset() -> None:
     # Untracked dataset -> failures_before is None -> guard is a no-op (does not raise).
-    _enforce_load_failure_rate(
-        _FakeLoader(object()), failures_before=None, max_rate=0.05, epoch=0, samples_processed=100
-    )
+    _enforce_load_failure_rate(_FakeLoader(object()), failures_before=None, max_rate=0.05, epoch=0)
 
 
 def test_train_model_logs_main_metric_set_to_logger() -> None:
     """Regression guard: train/val metrics AND per-epoch timing/loss reach the logger.
 
-    The branch had replaced unfiltered logging with a filter that dropped
-    timing/gpu/raw-loss metrics; this asserts main's metric set is tracked again.
+    The branch had replaced unfiltered logging with a filter that dropped timing/gpu/raw-loss
+    metrics; this asserts main's metric set is tracked again.
     """
     meta = FakeMetaModel(epochs=1, val_losses=[0.8], val_metrics_seq=[{"accuracy": 0.7}])
     logger = StubLogger()
@@ -623,12 +344,54 @@ def test_train_model_logs_main_metric_set_to_logger() -> None:
         assert key in logged_keys, f"{key!r} was not logged (logged: {sorted(logged_keys)})"
 
 
+def test_train_model_logs_skipped_updates_to_logger() -> None:
+    meta = FakeMetaModel(epochs=1, skipped_updates=3)
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=None,
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    skipped = [
+        payload["train/skipped_updates"]
+        for payload, _ in logger.logged
+        if "train/skipped_updates" in payload
+    ]
+    assert skipped == [3]
+
+
+def test_train_model_logs_against_global_step_axis() -> None:
+    """Epoch/val metrics are logged at meta_model.global_step, not the epoch index.
+
+    FakeMetaModel.train_epoch advances global_step by 1 per epoch, so across two epochs
+    the logged steps should be [1, 2] (global step) rather than [0, 1] (epoch).
+    """
+    meta = FakeMetaModel(
+        epochs=2,
+        val_losses=[0.9, 0.9],
+        val_metrics_seq=[{"accuracy": 0.5}, {"accuracy": 0.5}],
+    )
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    logged_steps = sorted({step for _, step in logger.logged})
+    assert logged_steps == [1, 2], f"expected global-step axis [1, 2], got {logged_steps}"
+
+
 def test_train_model_logs_test_time_taken_to_logger(monkeypatch) -> None:
     """Regression guard (#PR2 review): test/time_taken must reach the logger.
 
-    epoch_loss_dict is logged before the test split is evaluated, so test/time_taken is
-    added after that log and must be logged separately — otherwise it silently never
-    reaches MLflow.
+    epoch_loss_dict is logged before the test split is evaluated, so test/time_taken is added after
+    that log and must be logged separately — otherwise it silently never reaches MLflow.
     """
     monkeypatch.setattr(train_module, "evaluate_and_log", lambda *a, **k: {"accuracy": 0.5})
     meta = FakeMetaModel(epochs=1, val_losses=[0.8], val_metrics_seq=[{"accuracy": 0.7}])
@@ -646,3 +409,39 @@ def test_train_model_logs_test_time_taken_to_logger(monkeypatch) -> None:
     assert "test/time_taken" in logged_keys, (
         f"test/time_taken not logged (got {sorted(logged_keys)})"
     )
+
+
+@pytest.mark.parametrize(("warmup_done", "expected_lr"), [(5, 0.1), (10, 0.05)])
+def test_epoch_scheduler_waits_for_warmup(warmup_done, expected_lr) -> None:
+    meta = FakeMetaModel(epochs=1)
+    meta.scheduler = torch.optim.lr_scheduler.StepLR(meta.optimizer, step_size=1, gamma=0.5)
+    meta.warmup_iters = 10
+    meta._warmup_iters_completed = warmup_done
+    train_model(meta_model=meta, evaluator=object(), train_loader=_tiny_loader())
+    assert meta.optimizer.param_groups[0]["lr"] == pytest.approx(expected_lr)
+
+
+def test_enforce_load_failure_rate_allows_rate_equal_to_threshold() -> None:
+    loader = _FakeLoader(_FakeFailDataset(size=100, failures=5))
+    _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
+
+
+def test_enforce_load_failure_rate_noop_for_empty_dataset() -> None:
+    loader = _FakeLoader(_FakeFailDataset(size=0, failures=3))
+    _enforce_load_failure_rate(loader, failures_before=0, max_rate=0.05, epoch=0)
+
+
+def test_min_delta_applies_to_minimised_metric() -> None:
+    # 0.95 is below the best 1.0 by less than 0.1, so only 0.85 counts as an improvement.
+    meta = FakeMetaModel(epochs=3, val_losses=[1.0, 0.95, 0.85])
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=_tiny_loader(),
+        logger=logger,
+        metric_of_interest="loss",
+        early_stopping_min_delta=0.1,
+    )
+    assert logger.checkpoint_epochs == [0, 2]

@@ -1,6 +1,5 @@
-.PHONY: sync logs lcc-log check kernel \
-	train-local train-local-taxonomical train-local-dual compare-local compare-local-coralnet \
-	sm-sync sm-check sm-validate sm-dry-run sm-launch sm-smoke sm-require-env \
+.PHONY: sync logs lcc-log check kernel docformat \
+	sm-sync sm-check sm-validate sm-dry-run sm-launch sm-build sm-smoke sm-require-env \
 	sm-jobs sm-status sm-logs sm-errors sm-metrics sm-require-job
 
 # Re-sync the uv environment and Jupyter kernel from the current branch.
@@ -15,6 +14,13 @@ kernel:
 		--user \
 		--name=mermaid-seg \
 		--display-name "Python (mermaid-seg)"
+
+# Wrap docstrings with docformatter (manual; not run in CI or on commit).
+# docformatter exits 3 when it rewrote files, which is success here.
+docformat:
+	uv run --group dev docformatter --wrap-summaries 100 --wrap-descriptions 100 --in-place \
+		--recursive mermaidseg scripts demo tests nbs; \
+	rc=$$?; [ $$rc -eq 0 ] || [ $$rc -eq 3 ]
 
 # Tail training logs. Requires at least one logs/train_*.log file to exist.
 logs:
@@ -33,54 +39,15 @@ check_env(); \
 check_aws_session(); \
 check_mlflow_version()"
 
-# --- Local loss smoke test (see docs/local-loss-testing.md) ---
-# Fully OFFLINE: builds the real model (cached DINOv3 backbone) + the real taxonomical/dual loss +
-# hierarchy eval over synthetic batches, and runs a few train steps. No S3, no creds, no network —
-# exercises exactly the wiring unit tests miss (model-output -> loss shapes, buffer/device
-# placement, the new loss components + hierarchy metrics). HF_HUB_OFFLINE avoids any hub lookup.
-LOCAL_MODEL_CONFIG    ?= configs/model_config_dinov3_lora_qv_r8.yaml
-LOCAL_TRAINING_CONFIG ?= configs/training_config_dinov3_lora_taxonomical.yaml
-
-# Generic: override LOCAL_MODEL_CONFIG / LOCAL_TRAINING_CONFIG to smoke any model + loss combo.
-train-local:
-	HF_HUB_OFFLINE=1 uv run python scripts/diagnostics/local_loss_smoke.py \
-		--model-config $(LOCAL_MODEL_CONFIG) \
-		--training-config $(LOCAL_TRAINING_CONFIG)
-
-# TaxonomicalLoss (CE + tree-distance + level CE) on the LoRA q/v model.
-train-local-taxonomical: LOCAL_MODEL_CONFIG    = configs/model_config_dinov3_lora_qv_r8.yaml
-train-local-taxonomical: LOCAL_TRAINING_CONFIG = configs/training_config_dinov3_lora_taxonomical.yaml
-train-local-taxonomical: train-local
-
-# DualTaxonomicalLoss (adds masked morphology BCE) on the dual head.
-train-local-dual: LOCAL_MODEL_CONFIG    = configs/model_config_dinov3_dual_lora_qv_r8.yaml
-train-local-dual: LOCAL_TRAINING_CONFIG = configs/training_config_dinov3_dual_taxonomical.yaml
-train-local-dual: train-local
-
-# Controlled offline comparison: CE baseline vs Taxonomical vs Dual on a structured synthetic task
-# where the hierarchy is real (siblings look alike). A mechanism demo, NOT a coral-quality verdict.
-COMPARE_ARGS ?= --steps 80 --noise 1.2
-compare-local:
-	HF_HUB_OFFLINE=1 uv run python scripts/diagnostics/local_loss_compare.py $(COMPARE_ARGS)
-
-# Same CE-vs-Taxonomical-vs-Dual comparison, but on the REAL downloaded CoralNet subset
-# (data/coralnet_local_subset) instead of synthetic patches: real reef photos, real benthic
-# hierarchy, real coral-genus confusion. Loss weights default to the taxonomical training config.
-# Needs the subset on disk; fetches + caches the public benthic hierarchy on first run (no creds).
-COMPARE_CORALNET_ARGS ?= --n-train 20 --n-val 10 --steps 60
-compare-local-coralnet:
-	HF_HUB_OFFLINE=1 uv run python scripts/diagnostics/local_loss_compare_coralnet.py $(COMPARE_CORALNET_ARGS)
-
-# --- SageMaker TrainingJob (see wiki/SageMaker-Jobs.md) ---
+# --- SageMaker TrainingJob: backup to Slurm; same trainer (see wiki/SageMaker-Jobs.md) ---
 # Account ARNs in .env (gitignored), loaded by direnv. Login: aws sso login --profile wcs-sso
-SM_RUN_CONFIG ?= sagemaker/runs/example-training.yaml
+SM_RUN_CONFIG ?= sagemaker/runs/cbm_vitl_example.yaml
 
 # Read from environment (.env + direnv). Profile name is not a secret.
 SM_AWS_ENV = AWS_DEFAULT_REGION=$(AWS_DEFAULT_REGION) AWS_PROFILE=$(SM_AWS_PROFILE)
 
 sm-require-env:
 	@test -n "$$SM_ROLE_ARN" || (echo "SM_ROLE_ARN not set — add to .env (see .env.example)" && exit 1)
-	@test -n "$$MLFLOW_TRACKING_URI" || (echo "MLFLOW_TRACKING_URI not set — add to .env (see .env.example)" && exit 1)
 	@test -n "$$SM_AWS_PROFILE" || (echo "SM_AWS_PROFILE not set — add to .env (e.g. wcs-launcher)" && exit 1)
 
 sm-sync:
@@ -91,40 +58,30 @@ sm-check: sm-require-env
 		--role-arn $(SM_ROLE_ARN) \
 		--check-hf-token
 
-# Offline schema + value validation of a run YAML (and its referenced split configs).
-# No AWS creds needed — pure local check. Pass SM_RUN_CONFIG=<path> to target another run.
+# Offline validation of a run YAML (schema + the trainer command and config files it names).
+# No AWS call. Pass SM_RUN_CONFIG=<path> to target another run.
 sm-validate:
-	uv run --extra training python -m mermaidseg.experiment validate $(SM_RUN_CONFIG)
+	uv run --extra sagemaker python scripts/launch_training.py --run-config $(SM_RUN_CONFIG) --dry-run
 
 sm-dry-run: sm-require-env
 	$(SM_AWS_ENV) uv run --extra sagemaker python scripts/launch_training.py \
 		--run-config $(SM_RUN_CONFIG) \
-		--mlflow-tracking-uri $(MLFLOW_TRACKING_URI) \
 		--role-arn $(SM_ROLE_ARN) \
 		--dry-run
 
 sm-launch: sm-require-env
 	$(SM_AWS_ENV) uv run --extra sagemaker python scripts/launch_training.py \
 		--run-config $(SM_RUN_CONFIG) \
-		--mlflow-tracking-uri $(MLFLOW_TRACKING_URI) \
-		--role-arn $(SM_ROLE_ARN) \
-		$(if $(HF_TOKEN),--hf-token $(HF_TOKEN),)
+		--role-arn $(SM_ROLE_ARN)
+
+# Bakes the commit into the image (no .git inside) so sidecars record the mermaidseg SHA.
+sm-build:
+	docker buildx build --platform linux/amd64 \
+		--build-arg GIT_SHA=$$(git rev-parse HEAD)$$(test -z "$$(git status --porcelain -- mermaidseg scripts configs pyproject.toml uv.lock)" || echo -dirty) \
+		-t mermaid-segmentation-jobs:training-latest -f docker/jobs/Dockerfile .
 
 sm-smoke:
 	bash docker/jobs/local_smoke.sh training
-
-# Authoritative DataLoader host-RAM proof: runs the RSS/USS repro INSIDE the Linux training image
-# (real fork + /proc USS accounting — the macOS default `spawn` does not reproduce the CoW leak).
-# Mounts the working tree so it exercises the CURRENT code. --shm-size mirrors SageMaker (the tiny
-# 64MB default kills DataLoader workers). Override args via RSS_ARGS=... See
-# scripts/diagnostics/dataloader_rss_findings.md.
-RSS_IMAGE ?= 554812291621.dkr.ecr.us-east-1.amazonaws.com/mermaid-segmentation-jobs:training-focal-2026-07-23
-RSS_ARGS ?= --rows 6000000 --images 100000 --epochs 5 --batches-per-epoch 150 --num-workers 4 --batch-size 16 --out /work/_rss.csv
-rss-repro-docker:
-	docker run --rm --platform linux/amd64 --shm-size=8g \
-		-v "$$(pwd):/work" -w /work -e PYTHONPATH=/work \
-		--entrypoint python $(RSS_IMAGE) \
-		scripts/diagnostics/dataloader_rss_repro.py $(RSS_ARGS)
 
 # --- SageMaker job debugging / monitoring (see wiki/SageMaker-Jobs.md) ---
 # Read-only. Pass JOB=<training-job-name> (the run-id printed at launch, or `make sm-jobs`).

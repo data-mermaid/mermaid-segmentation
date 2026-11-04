@@ -19,12 +19,13 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
+from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.datasets.utils import get_image_s3
 
 
 class CatlinSeaviewDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading Catlin Seaview annotated coral reef images from a
-    Parquet file stored on S3.
+    """A PyTorch Dataset for loading Catlin Seaview annotated coral reef images from a Parquet file
+    stored on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in the Catlin Seaview source label
@@ -84,6 +85,7 @@ class CatlinSeaviewDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
+        self.s3 = boto3.client("s3")
         self.whitelist_regions = whitelist_regions
         self.blacklist_regions = blacklist_regions
 
@@ -101,7 +103,7 @@ class CatlinSeaviewDataset(BaseCoralDataset):
         at training time on the GPU via a long-tensor lookup.
         """
         annotations_uri = f"s3://{self.source_bucket}/{self.annotations_path}"
-        df_annotations = pd.read_parquet(annotations_uri)
+        df_annotations = LocalS3Cache.get().read_parquet(self.source_bucket, self.annotations_path)
 
         missing = set(self.REQUIRED_COLUMNS) - set(df_annotations.columns)
         if missing:
@@ -136,4 +138,4 @@ class CatlinSeaviewDataset(BaseCoralDataset):
 
     def read_image(self, image_id: str, region: str, **row_kwargs: Any) -> NDArray[Any]:
         key = f"{self.source_s3_prefix}/images/{region}/{image_id}.jpg"
-        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))

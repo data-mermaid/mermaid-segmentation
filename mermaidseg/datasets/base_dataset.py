@@ -10,100 +10,55 @@ externally by [`mermaidseg.dataset_reconciliation`](../dataset_reconciliation/).
 from __future__ import annotations
 
 import logging
-import os
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import albumentations as A
-import boto3
 import numpy as np
 import pandas as pd
 import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
-from mermaidseg.datasets.utils import (
-    create_annotation_mask_from_arrays,
-    emit_dataset_warning,
-    s3_training_config,
-)
-
-try:  # resource is Unix-only; the RSS diagnostic is optional and silently skipped without it
-    import resource
-except ImportError:  # pragma: no cover - non-Unix platforms
-    resource = None
+from mermaidseg.datasets.local_cache import CacheStatsHandles, LocalS3Cache
+from mermaidseg.datasets.utils import create_annotation_mask, emit_dataset_warning
 
 logger = logging.getLogger(__name__)
 
-# Optional per-worker RSS logging for OOM investigations. Off unless MERMAIDSEG_LOG_WORKER_RSS
-# is truthy. Read at import (each worker process re-evaluates it), consistent with the cache-dir
-# env handling in utils.py.
-_LOG_WORKER_RSS = os.environ.get("MERMAIDSEG_LOG_WORKER_RSS", "").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-_RSS_LOG_INTERVAL = 500
-_rss_getitem_count = 0
-
-# Cap on the number of full load-failure *records* retained per dataset. The failure *count*
-# (`num_load_failures`) is always exact; only the rich per-failure dicts are bounded, so a
-# systemic failure (which would otherwise append a dict every sample for the whole run) can't grow
-# `_load_failures` without bound in each forked worker. 1000 records is plenty to diagnose a
-# pattern; the count still drives the per-epoch failure-rate guard in model/train.py.
-_LOAD_FAILURE_RECORD_CAP = 1000
-
-
-def _maybe_log_worker_rss() -> None:
-    """Periodically log this process's peak RSS when ``MERMAIDSEG_LOG_WORKER_RSS`` is
-    set.
-
-    Diagnostic for OOM investigations: SageMaker samples instance memory only once a minute, so
-    a sub-minute spike (many large images decoded across workers at once) is invisible there.
-    This surfaces per-worker memory from inside the load loop, every ``_RSS_LOG_INTERVAL`` items.
-    """
-    global _rss_getitem_count
-    if not _LOG_WORKER_RSS or resource is None:
-        return
-    _rss_getitem_count += 1
-    if _rss_getitem_count % _RSS_LOG_INTERVAL:
-        return
-    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    worker = torch.utils.data.get_worker_info()
-    wid = worker.id if worker is not None else "main"
-    # ru_maxrss is bytes on macOS, kilobytes on Linux — report both readings.
-    emit_dataset_warning(
-        f"[rss] worker={wid} items={_rss_getitem_count} ru_maxrss={ru} "
-        f"(~{ru / 1024:.0f}MB-if-KB / ~{ru / 1048576:.0f}MB-if-bytes)"
-    )
-
-
-def _reinit_s3_clients(dataset: object) -> None:
-    """Drop any fork-inherited S3 client so each worker builds its own lazily.
-
-    Walks ConcatDataset wrappers to reach each underlying BaseCoralDataset. Resetting to
-    ``None`` (rather than eagerly constructing a client here) keeps creation lazy and
-    per-process — the fresh client is built on first ``.s3`` access inside the worker.
-    We gate on ``isinstance`` rather than ``hasattr(dataset, "s3")`` because ``s3`` is
-    now a property: ``hasattr`` would invoke its getter and create a client in the wrong
-    place.
-    """
-    if isinstance(dataset, BaseCoralDataset):
-        dataset._s3 = None
-    for child in getattr(dataset, "datasets", []):
-        _reinit_s3_clients(child)
-
 
 def worker_init_fn(worker_id: int) -> None:
-    """Configure logging and reinitialize S3 clients in forked DataLoader workers."""
+    """Configure logging in DataLoader worker processes.
+
+    Pass this as ``worker_init_fn`` to DataLoader when ``num_workers > 0`` so
+    that warnings emitted in worker subprocesses are visible.
+    """
     logging.basicConfig(
         level=logging.WARNING,
         format=f"[worker-{worker_id}] %(levelname)s %(name)s: %(message)s",
     )
-    worker_info = torch.utils.data.get_worker_info()
-    if worker_info is not None:
-        _reinit_s3_clients(worker_info.dataset)
+
+
+def make_worker_init_fn(stats: CacheStatsHandles) -> Callable[[int], None]:
+    """Return a DataLoader worker init that configures logging and cache stats."""
+
+    def init_fn(worker_id: int) -> None:
+        worker_init_fn(worker_id)
+        # Each DataLoader worker is a single-sample producer, so OpenCV's internal thread pool (used
+        # by the albumentations cv2 backend) only oversubscribes the CPUs shared across all workers.
+        # Pinning it to 0 (single-threaded) avoids that contention; the transformed output is
+        # unchanged.
+        try:
+            import cv2
+
+            cv2.setNumThreads(0)
+        except Exception:  # pragma: no cover - cv2 always present in training env
+            pass
+        LocalS3Cache.configure_from_env()
+        LocalS3Cache.get().attach_stats(stats)
+
+    return init_fn
 
 
 class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
@@ -154,13 +109,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     _load_failures: list[dict[str, Any]]
     _annotation_count_by_image: dict[str, int]
     _annotation_labels_by_image: dict[str, str]
-    # Contiguous numpy annotation index (aligned to df_images positional idx), replacing the old
-    # str-keyed dict + per-sample DataFrame slice on the hot path. None for datasets without
-    # point-annotation row/col columns (e.g. dense-mask subclasses that override _load_item).
-    _ann_offsets: np.ndarray | None
-    _ann_row: np.ndarray | None
-    _ann_col: np.ndarray | None
-    _ann_label_id: np.ndarray | None
+    _ann_positions: dict[Any, NDArray[np.intp]]
 
     def __init__(
         self,
@@ -178,11 +127,6 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.padding = padding
         self.class_subset = class_subset
         self._global_offset = 0
-        # Lazily-created, per-process S3 client (see the ``s3`` property). Never construct it
-        # here: a boto3 client is unpicklable and not fork-safe, so it must not be carried across
-        # a DataLoader worker boundary. ``setdefault`` avoids clobbering a client a subclass or
-        # test injected via ``self.s3 = ...`` before calling ``super().__init__()``.
-        self.__dict__.setdefault("_s3", None)
 
         if "source_label_name" not in self.df_annotations.columns:
             raise ValueError(
@@ -197,44 +141,29 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             ].reset_index(drop=True)
             self.df_images = self._derive_df_images_from_annotations(self.df_annotations)
 
-        # Sorted (not frequency) order so splits with the same label set agree on ids even
-        # without the registry; split_wiring remaps any remaining differences.
-        ordered_names = sorted(self.df_annotations["source_label_name"].dropna().unique())
+        ordered_names = self.df_annotations["source_label_name"].value_counts().index.tolist()
         self.source_id2name = dict(enumerate(ordered_names, start=1))
         self.source_name2id = {v: k for k, v in self.source_id2name.items()}
         self.num_source_classes = len(self.source_id2name) + 1  # +1 for background
 
         self._annotation_count_by_image = self.df_annotations["image_id"].value_counts().to_dict()
-        grouped_by_image = self.df_annotations.groupby("image_id")
         self._annotation_labels_by_image = (
-            grouped_by_image["source_label_name"]
+            self.df_annotations.groupby("image_id")["source_label_name"]
             .apply(lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)})))
             .to_dict()
         )
-
-        # Precompute a numpy-native, per-image annotation index so __getitem__ never touches the
-        # multi-million-row DataFrame or a str-keyed Python dict on the hot path. Under forked
-        # DataLoader workers, per-sample access to pandas object columns / str-keyed dicts writes
-        # CPython refcounts into their header pages, which copy-on-write into each worker's RSS and
-        # accumulate for the whole run under persistent_workers (the dinov3-lora-qv-r8 OOM; see
-        # scripts/diagnostics/dataloader_rss_findings.md). Contiguous numpy arrays carry no
-        # per-element Python objects, so slicing them dirties nothing shared.
-        self._ann_offsets = None
-        self._ann_row = None
-        self._ann_col = None
-        self._ann_label_id = None
-        if {"row", "col", "source_label_name"}.issubset(self.df_annotations.columns):
-            self._build_annotation_index()
-
+        # Positional (iloc) index of annotation rows per image_id so __getitem__ can look up an
+        # image's annotations in O(1) instead of scanning the whole annotations table each call.
+        # ``groupby(...).indices`` returns ascending positional indices per group, so the selected
+        # rows and their order match the previous boolean-mask selection exactly.
+        self._ann_positions = self.df_annotations.groupby("image_id", sort=False).indices
         self._load_failures = []
-        self._load_failure_count = 0
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
         """Re-derive ``df_images`` after filtering ``df_annotations``.
 
-        The default implementation auto-detects column structure for the bundled MERMAID
-        and CoralNet shapes. Subclasses are encouraged to override this when they have a
-        fixed schema.
+        The default implementation auto-detects column structure for the bundled MERMAID and
+        CoralNet shapes. Subclasses are encouraged to override this when they have a fixed schema.
         """
         if "region_id" in df_annotations.columns:
             return (
@@ -254,104 +183,6 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             "subclass."
         )
 
-    def _build_annotation_index(self) -> None:
-        """Precompute the contiguous numpy annotation index used by :meth:`_load_item`.
-
-        Reorders all point annotations so image ``idx`` (positional in ``df_images``)
-        owns the contiguous slice ``[_ann_offsets[idx]:_ann_offsets[idx + 1]]`` of
-        ``_ann_row`` / ``_ann_col`` / ``_ann_label_id``. Built once in the main process;
-        the per-sample hot path then touches only these numpy arrays (no pandas object
-        columns, no str-keyed dict), keeping forked workers copy-on-write-clean. Images
-        with no annotations get an empty slice. Annotations whose label is unmapped/NaN
-        or whose image is absent from ``df_images`` are dropped (mirrors
-        :func:`create_annotation_mask`'s unknown-label handling).
-        """
-        # The index is keyed by image_id; null or duplicate ids (e.g. a composite
-        # (source_id, image_id) key) would silently merge different images' annotations.
-        n_null = int(self.df_images["image_id"].isna().sum())
-        if n_null:
-            raise ValueError(
-                f"{type(self).__name__}: df_images.image_id must not be null for point "
-                f"annotations; {n_null} null rows."
-            )
-        duplicated = self.df_images["image_id"].duplicated()
-        if duplicated.any():
-            examples = self.df_images.loc[duplicated, "image_id"].unique()[:5].tolist()
-            raise ValueError(
-                f"{type(self).__name__}: df_images.image_id must be unique for point "
-                f"annotations; {int(duplicated.sum())} duplicate rows (e.g. {examples})."
-            )
-
-        num_images = len(self.df_images)
-        # image_id -> positional index in df_images. Built once here (main process); never touched
-        # per sample. Positional (df_images order) so it matches _load_item's ``.iloc[idx]``.
-        id_to_pos = {img_id: i for i, img_id in enumerate(self.df_images["image_id"].to_numpy())}
-
-        ann = self.df_annotations
-        label_id_raw = ann["source_label_name"].map(self.source_name2id).to_numpy()
-        img_pos_raw = ann["image_id"].map(id_to_pos).to_numpy()
-        no_label = pd.isna(label_id_raw)
-        no_image = pd.isna(img_pos_raw)
-        keep = ~no_label & ~no_image
-        n_dropped = int((~keep).sum())
-        if n_dropped:
-            logger.warning(
-                "%s(split=%r): dropped %d of %d annotations (%d with no label, "
-                "%d with no matching image in df_images).",
-                type(self).__name__,
-                self.split,
-                n_dropped,
-                len(ann),
-                int(no_label.sum()),
-                int((no_image & ~no_label).sum()),
-            )
-
-        img_pos = img_pos_raw[keep].astype(np.int64)
-        rows = ann["row"].to_numpy()[keep]
-        cols = ann["col"].to_numpy()[keep]
-        label_ids = label_id_raw[keep]
-
-        # Stable sort groups each image's annotations contiguously while preserving their order.
-        order = np.argsort(img_pos, kind="stable")
-        self._ann_row = np.ascontiguousarray(rows[order], dtype=np.intp)
-        self._ann_col = np.ascontiguousarray(cols[order], dtype=np.intp)
-        self._ann_label_id = np.ascontiguousarray(label_ids[order], dtype=np.int64)
-
-        counts = np.bincount(img_pos, minlength=num_images)
-        offsets = np.zeros(num_images + 1, dtype=np.int64)
-        np.cumsum(counts, out=offsets[1:])
-        self._ann_offsets = offsets
-
-    def set_source_vocabulary(
-        self,
-        source_id2name: dict[int, str],
-        source_name2id: dict[str, int],
-        num_source_classes: int,
-    ) -> None:
-        """Replace local source maps, remapping the baked annotation index to match.
-
-        ``_ann_label_id`` stores ids from the current ``source_name2id``, so swapping
-        the maps alone would permute every emitted label. Remap once here (main process)
-        via a numpy lookup so ``__getitem__`` stays numpy-only. Idempotent: re-applying
-        the same vocabulary is an identity remap. Raises ``KeyError`` if a current label
-        name is missing from the new vocabulary.
-        """
-        ann_label_id = getattr(self, "_ann_label_id", None)
-        if ann_label_id is not None and self.source_id2name:
-            lut = np.zeros(max(self.source_id2name) + 1, dtype=np.int64)
-            for old_id, name in self.source_id2name.items():
-                if name not in source_name2id:
-                    raise KeyError(
-                        f"{type(self).__name__} (split={self.split!r}): source label {name!r} "
-                        "is missing from the new vocabulary; build it with "
-                        "prepare_splits_for_registry so it covers every split."
-                    )
-                lut[old_id] = source_name2id[name]
-            self._ann_label_id = lut[ann_label_id]
-        self.source_id2name = dict(source_id2name)
-        self.source_name2id = dict(source_name2id)
-        self.num_source_classes = int(num_source_classes)
-
     def set_global_offset(self, offset: int) -> None:
         """Set the global source-label offset assigned by the registry.
 
@@ -369,36 +200,6 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """Current global offset assigned by the registry (default 0)."""
         return self._global_offset
 
-    @property
-    def s3(self) -> boto3.client:
-        """Lazily-created, per-process boto3 S3 client.
-
-        A boto3 client is neither picklable nor fork-safe, so it must never be created
-        at construction time and carried across a process boundary. Building it on first
-        access means each process — the main process, or a spawned/forked DataLoader
-        worker — gets its own. :meth:`__getstate__` drops it before pickling (``spawn``
-        workers) and :func:`_reinit_s3_clients` resets it in ``worker_init_fn``
-        (``fork`` workers), so a client is never shared across the boundary.
-        """
-        if getattr(self, "_s3", None) is None:
-            self._s3 = boto3.client("s3", config=s3_training_config())
-        return self._s3
-
-    @s3.setter
-    def s3(self, client: Any) -> None:
-        # Retained so tests/helpers can inject a fake client via ``dataset.s3 = ...``.
-        self._s3 = client
-
-    def __getstate__(self) -> dict[str, Any]:
-        """Drop the unpicklable S3 client so the dataset can be sent to a ``spawn``
-        worker.
-
-        The worker recreates it lazily on first :attr:`s3` access.
-        """
-        state = self.__dict__.copy()
-        state["_s3"] = None
-        return state
-
     def __len__(self) -> int:
         return self.df_images.shape[0]
 
@@ -412,18 +213,38 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
-        On any internal load/transform error we record the failure, emit a warning to
-        logger + stdout + stderr, and return ``(None, None)``. The dataset's
-        :meth:`collate_fn` filters out these placeholders, so a failed item drops out of
-        the batch instead of crashing the loader.
+        On any internal load/transform error we record the failure, emit a
+        warning to logger + stdout + stderr, and recurse on a *different,
+        randomly chosen* index. This avoids returning ``(None, None)``
+        placeholders that break ``default_collate`` (and any downstream code
+        expecting a valid tensor), and spreads recovery across the dataset
+        instead of marching into a contiguous block of broken images. If every
+        item in the dataset fails, a ``RuntimeError`` is raised so the caller
+        knows the dataset is unusable.
         """
-        _maybe_log_worker_rss()
+        return self._safe_getitem(idx, attempts=0)
+
+    @staticmethod
+    def _next_random_idx(idx: int, n: int) -> int:
+        """Return a uniform random index in ``[0, n)`` that is not ``idx``."""
+        if n > 1:
+            next_idx = int(np.random.randint(0, n - 1))
+            if next_idx >= idx:
+                next_idx += 1  # skip idx itself, keeping a uniform draw over the other indices
+            return next_idx
+        return idx
+
+    def _safe_getitem(self, idx: int, attempts: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        n = len(self)
+        if n == 0:
+            raise RuntimeError(f"{self.__class__.__name__}: dataset is empty")
+
         try:
-            return self._load_item(idx)
+            image, mask = self._load_item(idx)
         except Exception as e:
             try:
-                row_kwargs = self.df_images.iloc[idx].to_dict()
-                image_id = row_kwargs.get("image_id")
+                image_id = self.df_images.loc[idx, "image_id"]
+                row_kwargs = self.df_images.loc[idx].to_dict()
             except Exception:
                 image_id = None
                 row_kwargs = {}
@@ -434,51 +255,84 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
                 f"{self.__class__.__name__}: skipping idx={idx} image_id={image_id} "
                 f"(source={source_info}): {type(e).__name__}: {e}"
             )
-            return None, None
+
+            if attempts + 1 >= n:
+                raise RuntimeError(
+                    f"{self.__class__.__name__}: all {n} items failed to load; "
+                    f"last error: {type(e).__name__}: {e}"
+                ) from e
+
+            return self._safe_getitem(self._next_random_idx(idx, n), attempts=attempts + 1)
+
+        # During training, a sample with no labels is useless: either the image has
+        # no annotations, or RandomResizedCrop cropped them all out. Recurse to a
+        # different random image (same recovery path as a load failure).
+        if self.split == "train" and not np.any(mask > 0):
+            if attempts + 1 >= n:
+                raise RuntimeError(
+                    f"{self.__class__.__name__}: all {n} items were empty (no labels)"
+                )
+            return self._safe_getitem(self._next_random_idx(idx, n), attempts=attempts + 1)
+
+        # Diagnostics: record one produced sample plus how many extra loads (failed or empty-crop
+        # retries) it took to get here. No-op unless load-stats are attached (see setup_local_cache).
+        cache = LocalS3Cache.get()
+        cache.record_retries(attempts)
+        cache.record_sample()
+        return image, mask
 
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Perform a single load (no error handling).
 
-        Subclasses should override this rather than :meth:`__getitem__` so they inherit
-        the recursive-on-failure behaviour for free.
+        Subclasses should override this rather than :meth:`__getitem__` so they
+        inherit the recursive-on-failure behaviour for free.
         """
-        row_kwargs = self.df_images.iloc[idx].to_dict()
+        cache = LocalS3Cache.get()
+        image_id = self.df_images.loc[idx, "image_id"]
+        row_kwargs = self.df_images.loc[idx].to_dict()
 
+        t0 = time.perf_counter()
         image = self.read_image(**row_kwargs)
+        t1 = time.perf_counter()
 
-        # Slice the precomputed contiguous numpy arrays for this image — no DataFrame / str-dict
-        # access on the hot path (keeps forked workers copy-on-write-clean; see __init__).
-        start = int(self._ann_offsets[idx])
-        end = int(self._ann_offsets[idx + 1])
-        local_mask = create_annotation_mask_from_arrays(
-            self._ann_row[start:end],
-            self._ann_col[start:end],
-            self._ann_label_id[start:end],
+        positions = self._ann_positions.get(image_id)
+        if positions is None:
+            annotations = self.df_annotations.iloc[:0]
+        else:
+            annotations = self.df_annotations.iloc[positions]
+        annotations = annotations[["row", "col", "source_label_name"]]
+        t2 = time.perf_counter()
+
+        # ``offset`` is folded into the label ids inside ``create_annotation_mask`` (background
+        # stays 0), which is equivalent to the previous post-hoc ``np.where(mask > 0, mask + offset,
+        # mask)`` pass but avoids allocating/scanning the full-resolution mask again.
+        local_mask = create_annotation_mask(
+            annotations,
             image.shape,
+            self.source_name2id,
             padding=self.padding,
+            offset=self._global_offset,
         )
-
-        if self._global_offset:
-            local_mask = np.where(
-                local_mask > 0, local_mask + self._global_offset, local_mask
-            ).astype(local_mask.dtype, copy=False)
+        t3 = time.perf_counter()
 
         if self.transform:
             transformed = self.transform(image=image, mask=local_mask)
             image = transformed["image"].transpose(2, 0, 1)
             local_mask = transformed["mask"]
+        t4 = time.perf_counter()
+
+        # Per-stage timers (process-local accumulation; flushed in batches) to diagnose where the
+        # loader spends time. No-op unless load-stats are attached (see setup_local_cache).
+        cache.record_stage("image_load", t1 - t0)
+        cache.record_stage("annotation", t2 - t1)
+        cache.record_stage("mask", t3 - t2)
+        cache.record_stage("transform", t4 - t3)
 
         return image, local_mask
 
     def _record_load_failure(
         self, image_id: Any, row_kwargs: dict[str, Any], error: Exception
     ) -> None:
-        # Always count (the failure-rate guard in model/train.py reads num_load_failures()); only
-        # the rich record list is capped, so a systemic failure can't grow RSS without bound in
-        # each forked worker (see _LOAD_FAILURE_RECORD_CAP).
-        self._load_failure_count += 1
-        if len(self._load_failures) >= _LOAD_FAILURE_RECORD_CAP:
-            return
         record = {
             "timestamp_utc": pd.Timestamp.utcnow().isoformat(),
             "dataset_class": self.__class__.__name__,
@@ -492,30 +346,18 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             "missing_annotations": image_id not in self._annotation_count_by_image,
             "error_type": type(error).__name__,
             "error_message": str(error),
-            "annotations_path": getattr(self, "annotations_path", None),
+            "annotations_path": getattr(self, "annotations_path", None)
+            or getattr(self, "manifest_path", None),
             "source_bucket": getattr(self, "source_bucket", None),
         }
         self._load_failures.append(record)
 
     def num_load_failures(self) -> int:
-        """Return the exact cumulative count of data-loading failures.
-
-        This is the count, not ``len(load_failures_df())`` — the stored records are capped at
-        ``_LOAD_FAILURE_RECORD_CAP`` but the count is always exact, so the per-epoch failure-rate
-        guard stays correct even past the cap.
-
-        Known limitation: failures recorded inside forked DataLoader workers do not propagate back
-        to the main-process dataset copy, so with ``num_workers>0`` this under-counts (a
-        pre-existing issue, tracked separately — see the plan's B3 note).
-        """
-        return self._load_failure_count
+        """Return the number of recorded data-loading failures."""
+        return len(self._load_failures)
 
     def load_failures_df(self) -> pd.DataFrame:
-        """Return a DataFrame of retained load-failure records.
-
-        A *sample* (the first ``_LOAD_FAILURE_RECORD_CAP`` records) when
-        :meth:`num_load_failures` exceeds the cap.
-        """
+        """Return a DataFrame with all recorded data-loading failures."""
         return pd.DataFrame(self._load_failures)
 
     def save_load_failures(self, output_path: str | Path) -> Path:
@@ -525,14 +367,13 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.load_failures_df().to_parquet(path, index=False)
         return path
 
-    @staticmethod
-    def collate_fn(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Collate function that filters out ``(None, None)`` items (failed loads).
+    def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
+        """Collate function that defensively filters out ``(None, None)`` items.
 
-        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load (after
-        recording the failure and emitting a warning); this filter drops them so a failed
-        item simply leaves the batch instead of crashing the loader. If every item in the
-        batch failed, empty tensors are returned and the training loop skips the step.
+        In normal operation :meth:`__getitem__` recovers from load failures by
+        recursing on the next index, so the batch should not contain ``None``
+        placeholders. This filter remains as a safety net for callers that
+        construct batches by hand or override ``__getitem__``.
 
         Args:
             batch: List of ``(image, source_labels)`` tuples possibly containing

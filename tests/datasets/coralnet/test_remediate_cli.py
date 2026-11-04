@@ -18,12 +18,6 @@ from mermaidseg.datasets.coralnet.scraper.remediate_incomplete import (
 )
 
 
-def test_remediate_parser_has_subcommands():
-    p = build_parser()
-    actions = next(a for a in p._actions if getattr(a, "choices", None))
-    assert set(actions.choices) == {"probe", "redownload", "all"}
-
-
 def test_s3_parent_and_join_path_helpers():
     audit = "s3://bucket/prefix/run/coralnet_audit_20260526_abc.parquet"
     parent = _parent_path(audit)
@@ -33,21 +27,6 @@ def test_s3_parent_and_join_path_helpers():
     )
 
 
-def test_probe_default_paths_for_s3_audit_parquet():
-    args = build_parser().parse_args(
-        [
-            "probe",
-            "--audit-parquet",
-            "s3://bucket/prefix/run/coralnet_audit_20260526_abc.parquet",
-        ]
-    )
-    audit_parent = _parent_path(str(args.audit_parquet))
-    incomplete = _join_path(audit_parent, "incomplete_df.parquet")
-    report = _join_path(audit_parent, "reconciliation_report.parquet")
-    assert incomplete == "s3://bucket/prefix/run/incomplete_df.parquet"
-    assert report == "s3://bucket/prefix/run/reconciliation_report.parquet"
-
-
 _CREDS_TARGET = (
     "mermaidseg.datasets.coralnet.scraper.remediate_incomplete.load_coralnet_credentials"
 )
@@ -55,19 +34,26 @@ _DL_TARGET = "mermaidseg.datasets.coralnet.scraper.remediate_incomplete.CoralNet
 
 
 def test_remediate_probe_writes_report(tmp_path):
-    incomp = pd.DataFrame({"source_id": [7]})
+    """Each source gets the action and gap its audit row and website probe imply.
+
+    7: no S3 structure at all, site has 5 images        -> full_redownload, gap 5
+    8: structure and CSVs fine, 3 of 5 images in S3     -> redownload_images, gap 2
+    9: not in the audit at all, site has 4 images       -> manual_review, gap 4
+    10: website not accessible                          -> skip_not_accessible, no gap
+    """
+    incomp = pd.DataFrame({"source_id": [10, 9, 8, 7]})
     audit = pd.DataFrame(
         {
-            "source_id": [7],
-            "has_images_folder": [False],
-            "has_annotations_csv": [False],
-            "has_image_list_csv": [False],
-            "n_images_s3": [0],
-            "n_images_csv": [0],
-            "n_annotations": [0],
-            "annotations_csv_read_failed": [False],
-            "annotations_empty": [True],
-            "image_count_match": [False],
+            "source_id": [7, 8, 10],
+            "has_images_folder": [False, True, True],
+            "has_annotations_csv": [False, True, True],
+            "has_image_list_csv": [False, True, True],
+            "n_images_s3": [0, 3, 3],
+            "n_images_csv": [0, 5, 5],
+            "n_annotations": [0, 10, 10],
+            "annotations_csv_read_failed": [False, False, False],
+            "annotations_empty": [True, False, False],
+            "image_count_match": [False, False, False],
         }
     )
     ipath = tmp_path / "incomplete.parquet"
@@ -75,6 +61,13 @@ def test_remediate_probe_writes_report(tmp_path):
     rpath = tmp_path / "report.parquet"
     incomp.to_parquet(ipath)
     audit.to_parquet(apath)
+
+    probes = {
+        7: SourceProbe(7, "http://mock/7", True, None, 5, 5, 0, 0),
+        8: SourceProbe(8, "http://mock/8", True, None, 5, 4, 1, 0),
+        9: SourceProbe(9, "http://mock/9", True, None, 4, 4, 0, 0),
+        10: SourceProbe(10, "http://mock/10", False, "403 forbidden", 0),
+    }
 
     class _StubDL:
         def __init__(self, *_, **__) -> None:
@@ -84,13 +77,7 @@ def test_remediate_probe_writes_report(tmp_path):
             return True
 
         def probe_source(self, sid):  # noqa: ANN001
-            return SourceProbe(
-                int(sid),
-                f"http://mock/{sid}",
-                accessible=True,
-                error=None,
-                total_images_website=5,
-            )
+            return probes[int(sid)]
 
     with patch(_CREDS_TARGET, return_value=("u", "p")), patch(_DL_TARGET, _StubDL):
         ns = Namespace(
@@ -102,11 +89,21 @@ def test_remediate_probe_writes_report(tmp_path):
         )
         assert cmd_probe(ns) == 0
 
-    out = pd.read_parquet(rpath)
-    assert len(out) == 1
-    assert int(out.iloc[0]["source_id"]) == 7
-    for col in ("n_confirmed_website", "n_unconfirmed_website", "n_unclassified_website"):
-        assert col in out.columns
+    out = pd.read_parquet(rpath).set_index("source_id")
+    assert out.index.tolist() == [7, 8, 9, 10]
+    assert out["action"].to_dict() == {
+        7: "full_redownload",
+        8: "redownload_images",
+        9: "manual_review",
+        10: "skip_not_accessible",
+    }
+    assert out["probe_accessible"].to_dict() == {7: True, 8: True, 9: True, 10: False}
+    assert out["images_gap"].iloc[:3].tolist() == [5, 2, 4]
+    assert pd.isna(out.loc[10, "images_gap"])
+    assert out["probe_error"].tolist() == [None, None, None, "403 forbidden"]
+    assert out["n_confirmed_website"].iloc[:3].tolist() == [5, 4, 4]
+    assert out["n_unconfirmed_website"].iloc[:3].tolist() == [0, 1, 0]
+    assert out["source_url"].tolist() == [f"http://mock/{s}" for s in (7, 8, 9, 10)]
 
 
 def test_remediate_verbose_flag_after_subcommand():

@@ -1,0 +1,4 @@
+# Sources forced into the CoralNet test split (dedup.splits --test-sources); their whole split
+# group (sources sharing images or belonging to the same project) goes to test with them.
+4710  # Thuwal Bleaching Taxonomic
+4721  # Thuwal Bleaching Conditions

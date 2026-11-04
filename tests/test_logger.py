@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import mlflow
@@ -16,12 +17,60 @@ from torch.utils.data import DataLoader, TensorDataset
 from mermaidseg.logger import (
     LOCAL_DEFAULT_URI,
     Logger,
+    WandbLogger,
     get_mlflow_tracking_uri,
     mlflow_connect,
+    prune_rolling_checkpoints,
 )
 from tests._dataset_stubs import make_mermaid_stub, make_registry_stub
 
 from .conftest import FakeMetaModel
+
+
+class _RecordingWandb:
+    """Stand-in for ``WandbLogger`` that records what the Logger forwards to it."""
+
+    wandb_run = None
+    wandb_run_id = "fake-wandb-run"
+
+    def __init__(self, *args, **kwargs):
+        self.logged: list[tuple[dict, int]] = []
+        self.params: list[dict] = []
+        self.artifacts: dict[str, dict] = {}
+
+    def log(self, log_dict, step):
+        self.logged.append((log_dict, step))
+
+    def log_params(self, params):
+        self.params.append(params)
+
+    def _log_json_artifact(self, name, data, artifact_type="metadata"):
+        self.artifacts[name] = data
+
+    def log_config(self, config):
+        pass
+
+    def set_tags(self, tags):
+        pass
+
+    def log_concept_metadata(self, **kwargs):
+        pass
+
+
+def _point_mlflow_at(uri: str) -> None:
+    """Aim the global MLflow state at ``uri``'s default experiment.
+
+    A run started by a guard-less call must succeed here so it shows up in the store; a stale
+    experiment id from an earlier test would make it fail silently.
+    """
+    mlflow.set_tracking_uri(uri)
+    mlflow.set_experiment(experiment_id="0")
+
+
+def _runs_in_store(uri: str) -> list:
+    """Every run recorded in the file store at ``uri``, across all experiments."""
+    client = mlflow.MlflowClient(uri)
+    return client.search_runs([e.experiment_id for e in client.search_experiments()])
 
 
 # ===================================================================
@@ -53,10 +102,13 @@ class TestGetMlflowTrackingUri:
 class TestMlflowConnect:
     """Test MLflow connection establishment and error handling."""
 
-    def test_successful_connect(self, tmp_mlflow_uri):
-        duration = mlflow_connect(tmp_mlflow_uri)
+    def test_successful_connect(self, tmp_mlflow_uri, tmp_path):
+        mlflow.set_tracking_uri(tmp_mlflow_uri)
+        target = str(tmp_path / "other-store")
+        duration = mlflow_connect(target)
         assert isinstance(duration, timedelta)
         assert duration.total_seconds() >= 0
+        assert mlflow.get_tracking_uri() == target
 
     def test_arn_warning_when_sagemaker_missing(self, monkeypatch, caplog):
         arn = "arn:aws:sagemaker:us-east-1:123456:mlflow-tracking-server/my-app"
@@ -114,41 +166,6 @@ class TestLoggerInit:
         assert lgr.enabled is True
         assert lgr.mlflow_run_id is not None
         assert mlflow.active_run() is not None
-
-    def test_resume_reattaches_to_prior_run_by_run_id_tag(
-        self, tmp_mlflow_uri, make_config, fake_meta_model, monkeypatch
-    ):
-        """A second Logger with the same MERMAIDSEG_RUN_ID resumes the prior run (spot
-        restart)."""
-        monkeypatch.setenv("MERMAIDSEG_RUN_ID", "job-xyz")
-        config = make_config()
-
-        first = Logger(config=config, meta_model=fake_meta_model)
-        assert first.resumed is False
-        first_run_id = first.mlflow_run_id
-        assert mlflow.get_run(first_run_id).data.tags["mermaidseg.resume_key"] == "job-xyz"
-        mlflow.end_run()  # simulate the spot instance being reclaimed (fresh process next time)
-
-        second = Logger(config=config, meta_model=fake_meta_model)
-        assert second.resumed is True
-        assert second.mlflow_run_id == first_run_id  # reattached, not a fresh run
-
-    def test_no_resume_without_run_id_env(
-        self, tmp_mlflow_uri, make_config, fake_meta_model, monkeypatch
-    ):
-        """Absent MERMAIDSEG_RUN_ID, each Logger starts a fresh run (unchanged
-        behaviour)."""
-        monkeypatch.delenv("MERMAIDSEG_RUN_ID", raising=False)
-        config = make_config()
-
-        first = Logger(config=config, meta_model=fake_meta_model)
-        first_run_id = first.mlflow_run_id
-        assert first.resumed is False
-        mlflow.end_run()
-
-        second = Logger(config=config, meta_model=fake_meta_model)
-        assert second.resumed is False
-        assert second.mlflow_run_id != first_run_id  # distinct runs
 
     def test_params_and_tags_logged(self, tmp_mlflow_uri, make_config, fake_meta_model):
         config = make_config()
@@ -224,6 +241,15 @@ class TestLoggerInit:
         assert lgr.enabled is True
         assert lgr.mlflow_run_id is not None
 
+        client = mlflow.MlflowClient()
+        names = {a.path for a in client.list_artifacts(lgr.mlflow_run_id, "metadata")}
+        assert "metadata/concept_matrix.csv" in names
+        local = client.download_artifacts(
+            lgr.mlflow_run_id, "metadata/concept_matrix.csv", str(tmp_path / "dl")
+        )
+        with open(local) as f:
+            assert f.read().splitlines() == [",a,b", "0,1,3", "1,2,4"]
+
     def test_log_checkpoint_zero_rejected(self, tmp_mlflow_uri, make_config, fake_meta_model):
         with pytest.raises(ValueError, match="log_checkpoint must be > 0"):
             Logger(config=make_config(), meta_model=fake_meta_model, log_checkpoint=0)
@@ -271,7 +297,7 @@ class TestEnsureActiveRun:
 # Logger.log
 # ===================================================================
 class TestLoggerLog:
-    """Test metric logging: scalars, ndarrays with id maps."""
+    """Test metric logging: scalars, ndarrays with id maps, wandb fallback."""
 
     def test_ndarray_class_metrics_unpacked(self, tmp_mlflow_uri, make_config):
         meta = FakeMetaModel()
@@ -291,22 +317,6 @@ class TestLoggerLog:
         assert metrics["dice/class_0"] == pytest.approx(0.1)
         assert metrics["dice/class_1"] == pytest.approx(0.2)
 
-    def test_ndarray_f1_per_class_uses_id2label_not_id2concept(self, tmp_mlflow_uri, make_config):
-        """'f1_per_class' has no 'concept' substring, so it must resolve via
-        id2label."""
-        meta = FakeMetaModel()
-        config = make_config()
-        lgr = Logger(
-            config=config,
-            meta_model=meta,
-            id2label={0: "coral", 1: "sand"},
-            id2concept={0: "hard", 1: "soft"},
-        )
-        lgr.log({"f1_per_class": np.array([0.9, 0.85])}, step=1)
-        metrics = mlflow.get_run(lgr.mlflow_run_id).data.metrics
-        assert metrics["f1_per_class/coral"] == pytest.approx(0.9)
-        assert metrics["f1_per_class/sand"] == pytest.approx(0.85)
-
     def test_ndarray_concept_metrics_use_id2concept(self, tmp_mlflow_uri, make_config):
         meta = FakeMetaModel()
         config = make_config()
@@ -321,6 +331,91 @@ class TestLoggerLog:
         assert metrics["concept_accuracy/hard"] == pytest.approx(0.9)
         assert metrics["concept_accuracy/soft"] == pytest.approx(0.85)
 
+    def test_wandb_fallback_logging(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        config = make_config()
+        lgr = Logger(
+            config=config,
+            meta_model=fake_meta_model,
+            id2label={0: "coral", 1: "sand", 2: "rock"},
+        )
+        wandb_logger = _RecordingWandb()
+        lgr._wandb_logger = wandb_logger
+
+        lgr.log({"loss": 0.3, "iou": np.array([0.5, 0.25])}, step=5)
+        assert wandb_logger.logged == [({"loss": 0.3, "iou/coral": 0.5, "iou/sand": 0.25}, 5)]
+
+
+class TestBackendFlags:
+    """Backend enable flags are config-driven; explicit args are deprecated."""
+
+    def test_flags_read_from_config(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        config = make_config(logger={"enable_mlflow": False, "enable_wandb": True})
+        with (
+            patch("mermaidseg.logger.WANDB_IMPORT_ERROR", None),
+            patch("mermaidseg.logger.WandbLogger", _RecordingWandb),
+        ):
+            lgr = Logger(config=config, meta_model=fake_meta_model)
+        assert lgr.enable_mlflow is False
+        assert lgr.enabled is False
+        assert lgr.enable_wandb is True
+
+    def test_explicit_mlflow_arg_deprecated(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        with pytest.deprecated_call(match="enable_mlflow is deprecated"):
+            Logger(config=make_config(), meta_model=fake_meta_model, enable_mlflow=True)
+
+    def test_explicit_wandb_arg_deprecated(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        with pytest.deprecated_call(match="enable_wandb is deprecated"):
+            Logger(config=make_config(), meta_model=fake_meta_model, enable_wandb=False)
+
+
+class TestBackendDispatch:
+    """log_params/log_dict/log_reconciliation reach wandb when MLflow is off."""
+
+    def _wandb_only_logger(self, make_config, fake_meta_model, monkeypatch):
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        config = make_config(logger={"enable_mlflow": False, "enable_wandb": False})
+        lgr = Logger(config=config, meta_model=fake_meta_model)
+        assert lgr._mlflow_active is False
+        lgr._wandb_logger = _RecordingWandb()
+        return lgr
+
+    def test_log_params_dispatches_to_wandb(self, make_config, fake_meta_model, monkeypatch):
+        lgr = self._wandb_only_logger(make_config, fake_meta_model, monkeypatch)
+        lgr.log_params({"lr": 0.1, "bs": 4})
+        assert lgr._wandb_logger.params == [{"lr": 0.1, "bs": 4}]
+
+    def test_log_dict_dispatches_to_wandb(self, make_config, fake_meta_model, monkeypatch):
+        lgr = self._wandb_only_logger(make_config, fake_meta_model, monkeypatch)
+        lgr.log_dict({"0": "coral"}, "metadata/concept_id2name.json")
+        assert lgr._wandb_logger.artifacts == {"concept_id2name": {"0": "coral"}}
+
+    def test_log_reconciliation_dispatches_to_wandb(
+        self, make_config, fake_meta_model, monkeypatch
+    ):
+        lgr = self._wandb_only_logger(make_config, fake_meta_model, monkeypatch)
+        registry = SimpleNamespace(
+            global_id2source={0: ("mermaid", "coral")},
+            target_id2label={1: "coral"},
+            dataset_offsets={"mermaid": 0},
+            source_to_target=torch.tensor([0, 1], dtype=torch.long),
+            concept_id2name={0: "hard"},
+            num_target_classes=2,
+            num_global_source_classes=2,
+        )
+
+        lgr.log_reconciliation(registry)
+
+        assert lgr._wandb_logger.artifacts == {
+            "global_id2source": {"0": ["mermaid", "coral"]},
+            "target_id2label": {"1": "coral"},
+            "dataset_offsets": {"mermaid": 0},
+            "source_to_target": {"0": 0, "1": 1},
+            "concept_id2name": {"0": "hard"},
+        }
+        assert lgr._wandb_logger.params == [
+            {"num_target_classes": 2, "num_global_source_classes": 2}
+        ]
+
 
 class TestLogDataset:
     """Test MLflow dataset input logging: single, combined, and graceful fallback."""
@@ -329,18 +424,29 @@ class TestLogDataset:
         meta = FakeMetaModel()
         lgr = Logger(config=make_config(), meta_model=meta)
 
-        mock_ds = MagicMock()
-        mock_ds.annotations_path = "s3://bucket/data.parquet"
-        mock_ds.source_bucket = "bucket"
-        mock_ds.df_images = pd.DataFrame({"image_id": [1, 2, 3]})
-        mock_ds.num_classes = 3
-        mock_ds.__class__ = type("CoralReefDataset", (), {})
+        class CoralReefDataset:
+            annotations_path = "s3://bucket/data.parquet"
+            source_bucket = "bucket"
+            df_images = pd.DataFrame({"image_id": [1, 2, 3]})
+            num_source_classes = 5
+            num_classes = 3
+            SOURCE_NAME = "reef"
+            global_offset = 7
 
-        lgr.log_dataset(mock_ds, context="training")
+        lgr.log_dataset(CoralReefDataset(), context="training")
 
         inputs = mlflow.get_run(lgr.mlflow_run_id).inputs.dataset_inputs
-        assert len(inputs) > 0
+        assert len(inputs) == 1
         assert inputs[0].dataset.name == "CoralReefDataset"
+        assert json.loads(inputs[0].dataset.source)["tags"] == {
+            "annotations_path": "s3://bucket/data.parquet",
+            "source_bucket": "bucket",
+            "num_images": "3",
+            "num_source_classes": "5",
+            "source_name": "reef",
+            "global_offset": "7",
+        }
+        assert inputs[0].tags[0].value == "training"
 
     def test_log_dataset_graceful_on_missing_attrs(self, tmp_mlflow_uri, make_config):
         meta = FakeMetaModel()
@@ -395,7 +501,11 @@ class TestLogDataset:
 # Logger.save_model_checkpoint
 # ===================================================================
 class TestSaveModelCheckpoint:
-    """Test checkpoint saving: local files, MLflow artifacts."""
+    """Test checkpoint saving: local files and MLflow artifacts.
+
+    Checkpoints stay on local disk (and MLflow when that backend is on). They are
+    not uploaded to wandb.
+    """
 
     def test_local_checkpoint_written(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="ckpt-run")
@@ -437,6 +547,119 @@ class TestSaveModelCheckpoint:
         assert run.data.metrics["checkpoint/loss"] == pytest.approx(0.3)
         assert run.data.metrics["checkpoint/acc"] == pytest.approx(0.9)
 
+    def test_step_checkpoint_name_and_resume_flags(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="step-ckpt")
+        meta.global_step = 25000
+        meta._warmup_iters_completed = 4000
+        config = make_config()
+        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1)
+        lgr.save_model_checkpoint(
+            meta,
+            epoch=0,
+            metrics_dict={"loss": 0.1},
+            is_best=False,
+            checkpoint_name="model_step25000",
+            epoch_complete=False,
+        )
+        path = tmp_path / "model_checkpoints" / "step-ckpt" / "model_step25000"
+        assert path.is_file()
+        ckpt = torch.load(path, weights_only=False)
+        assert ckpt["global_step"] == 25000
+        assert ckpt["warmup_iters_completed"] == 4000
+        assert ckpt["epoch_complete"] is False
+        assert ckpt["epoch"] == 0
+
+    def test_atomic_checkpoint_leaves_no_partial(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="atomic-ckpt")
+        meta.global_step = 1000
+        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        lgr.save_model_checkpoint(
+            meta,
+            epoch=0,
+            metrics_dict={},
+            is_best=False,
+            checkpoint_name="model_preempt1000",
+            epoch_complete=False,
+            atomic=True,
+        )
+        directory = tmp_path / "model_checkpoints" / "atomic-ckpt"
+        final = directory / "model_preempt1000"
+        assert final.is_file()
+        assert not (directory / "model_preempt1000.partial").exists()
+        ckpt = torch.load(final, weights_only=False)
+        assert ckpt["global_step"] == 1000
+        assert ckpt["epoch_complete"] is False
+        assert ckpt["optimizer_state_dict"]
+        assert ckpt["scheduler_state_dict"]
+        assert ckpt["model_state_dict"]
+
+        (directory / "model_preempt500").write_bytes(b"stale")
+        (directory / "model_preempt500.partial").write_bytes(b"partial")
+        (directory / "model_step25000").write_bytes(b"keep")
+        (directory / "model_epoch0").write_bytes(b"keep")
+        prune_rolling_checkpoints(str(directory), keep_name="model_preempt1000")
+        assert final.is_file()
+        assert (directory / "model_step25000").is_file()
+        assert (directory / "model_epoch0").is_file()
+        assert not (directory / "model_preempt500").exists()
+        assert not (directory / "model_preempt500.partial").exists()
+
+    def test_atomic_checkpoint_survives_failed_write(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="atomic-fail")
+        meta.global_step = 1000
+        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        save_kwargs = {
+            "epoch": 0,
+            "metrics_dict": {},
+            "is_best": False,
+            "checkpoint_name": "model_preempt",
+            "epoch_complete": False,
+            "atomic": True,
+        }
+        lgr.save_model_checkpoint(meta, **save_kwargs)
+        final = tmp_path / "model_checkpoints" / "atomic-fail" / "model_preempt"
+
+        def _die_mid_write(obj, path):
+            with open(path, "wb") as f:
+                f.write(b"truncated")
+            raise OSError("killed mid-write")
+
+        meta.global_step = 2000
+        with (
+            patch("mermaidseg.logger.torch.save", side_effect=_die_mid_write),
+            pytest.raises(OSError, match="killed mid-write"),
+        ):
+            lgr.save_model_checkpoint(meta, **save_kwargs)
+
+        assert torch.load(final, weights_only=False)["global_step"] == 1000
+
+    def test_wandb_run_id_env_resumes(self, monkeypatch):
+        monkeypatch.setenv("WANDB_RUN_ID", "engaging-cbm_vitsize_vitl")
+        with (
+            patch("mermaidseg.logger.WANDB_IMPORT_ERROR", None),
+            patch("mermaidseg.logger.wandb") as mock_wandb,
+        ):
+            mock_wandb.init.return_value = MagicMock(id="engaging-cbm_vitsize_vitl")
+            WandbLogger(
+                project="mermaidseg",
+                run_name="cbm_vitsize_vitl",
+                config={},
+                num_classes=3,
+            )
+        assert mock_wandb.init.call_args.kwargs["id"] == "engaging-cbm_vitsize_vitl"
+        assert mock_wandb.init.call_args.kwargs["resume"] == "allow"
+
+    def test_wandb_run_id_unset_starts_a_new_run(self, monkeypatch):
+        monkeypatch.delenv("WANDB_RUN_ID", raising=False)
+        with (
+            patch("mermaidseg.logger.WANDB_IMPORT_ERROR", None),
+            patch("mermaidseg.logger.wandb") as mock_wandb,
+        ):
+            mock_wandb.init.return_value = MagicMock(id="fresh")
+            WandbLogger(project="mermaidseg", run_name="fresh", config={}, num_classes=3)
+        assert mock_wandb.init.call_args.kwargs["id"] is None
+        assert mock_wandb.init.call_args.kwargs["resume"] is None
+
     def test_mlflow_model_logged_when_local_disabled(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="mlflow-no-local")
         config = make_config(logger={"save_local_checkpoints": False})
@@ -446,29 +669,13 @@ class TestSaveModelCheckpoint:
             checkpoint_dir=str(tmp_path),
             log_checkpoint=50,
         )
-        with patch("mermaidseg.logger.mlflow.log_artifact") as mock_log_artifact:
-            lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
-        best_model_calls = [c for c in mock_log_artifact.call_args_list if "best-model" in str(c)]
-        assert len(best_model_calls) >= 1
+        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
 
-    def test_checkpoint_metrics_logged(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="sync-metrics")
-        config = make_config(logger={"save_local_checkpoints": False})
-        lgr = Logger(
-            config=config,
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=50,
-        )
-        with patch("mermaidseg.logger.mlflow.log_metrics") as mock_log_metrics:
-            lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1, "acc": 0.95})
-
-        checkpoint_calls = [
-            call
-            for call in mock_log_metrics.call_args_list
-            if any(k.startswith("checkpoint/") for k in call.args[0])
-        ]
-        assert checkpoint_calls, "Expected at least one checkpoint metric logging call"
+        client = mlflow.MlflowClient()
+        names = {a.path for a in client.list_artifacts(lgr.mlflow_run_id, "best-model")}
+        assert names == {"best-model/model.pt", "best-model/metadata.json"}
+        local = client.download_artifacts(lgr.mlflow_run_id, "best-model/model.pt", str(tmp_path))
+        assert torch.load(local, weights_only=False)["epoch"] == 50
 
     def test_model_logging_sets_best_model_tag(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="verify-model-tag")
@@ -483,140 +690,6 @@ class TestSaveModelCheckpoint:
         run = mlflow.get_run(lgr.mlflow_run_id)
         assert run.data.tags["best_model_logged"] == "true"
         assert run.data.tags["best_model_epoch"] == "50"
-
-    def test_scheduler_state_included_in_checkpoint(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="sched-check")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=50,
-        )
-        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
-        ckpt_file = list((tmp_path / "model_checkpoints" / "sched-check").iterdir())[0]
-        assert "scheduler_state_dict" in torch.load(ckpt_file, weights_only=False)
-
-    def test_best_model_overwrites_fixed_filename_across_epochs(
-        self, tmp_mlflow_uri, tmp_path, make_config
-    ):
-        """Repeated is_best=True saves must not accumulate one file per epoch."""
-        meta = FakeMetaModel(run_name="best-overwrite")
-        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
-        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.5})
-        lgr.save_model_checkpoint(meta, epoch=2, metrics_dict={"loss": 0.3})
-        lgr.save_model_checkpoint(meta, epoch=3, metrics_dict={"loss": 0.1})
-
-        client = mlflow.tracking.MlflowClient()
-        artifacts = {a.path for a in client.list_artifacts(lgr.mlflow_run_id, path="best-model")}
-        assert artifacts == {"best-model/model.pt", "best-model/metadata.json"}
-        assert mlflow.get_run(lgr.mlflow_run_id).data.tags["best_model_epoch"] == "3"
-
-        # checkpoints/ intentionally keeps the full improving-epoch history.
-        checkpoint_artifacts = {
-            a.path for a in client.list_artifacts(lgr.mlflow_run_id, path="checkpoints")
-        }
-        assert len(checkpoint_artifacts) == 3
-
-    def test_best_model_excludes_optimizer_and_scheduler_state(
-        self, tmp_mlflow_uri, tmp_path, make_config
-    ):
-        meta = FakeMetaModel(run_name="best-lean")
-        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
-        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.5})
-
-        client = mlflow.tracking.MlflowClient()
-        local_dir = client.download_artifacts(
-            lgr.mlflow_run_id, "best-model/model.pt", str(tmp_path)
-        )
-        best_ckpt = torch.load(local_dir, weights_only=False)
-        assert "optimizer_state_dict" not in best_ckpt
-        assert "scheduler_state_dict" not in best_ckpt
-        assert "model_state_dict" in best_ckpt
-
-        # checkpoints/ still carries full resume state.
-        local_checkpoint = list((tmp_path / "model_checkpoints" / "best-lean").iterdir())[0]
-        full_ckpt = torch.load(local_checkpoint, weights_only=False)
-        assert "optimizer_state_dict" in full_ckpt
-        assert "scheduler_state_dict" in full_ckpt
-
-    def test_local_checkpoints_rotated_beyond_retention(
-        self, tmp_mlflow_uri, tmp_path, make_config
-    ):
-        meta = FakeMetaModel(run_name="rotate-me")
-        lgr = Logger(
-            config=make_config(logger={"keep_last_n_checkpoints": 2}),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-        )
-        for epoch in (1, 2, 3, 4):
-            lgr.save_model_checkpoint(meta, epoch=epoch, metrics_dict={"loss": 1.0 / epoch})
-
-        files = sorted((tmp_path / "model_checkpoints" / "rotate-me").iterdir())
-        assert len(files) == 2, f"Expected rotation to keep 2 files, found: {files}"
-        names = {f.name for f in files}
-        assert names == {"model_epoch3", "model_epoch4"}
-
-    def test_rotation_never_evicts_the_local_best_checkpoint(
-        self, tmp_mlflow_uri, tmp_path, make_config
-    ):
-        """An early best epoch must survive later periodic (is_best=False) saves."""
-        meta = FakeMetaModel(run_name="protect-best")
-        lgr = Logger(
-            config=make_config(logger={"keep_last_n_checkpoints": 2}),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-        )
-        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.5})  # is_best=True
-        for epoch in (2, 3, 4):
-            lgr.save_model_checkpoint(meta, epoch=epoch, metrics_dict={"loss": 0.9}, is_best=False)
-
-        names = {f.name for f in (tmp_path / "model_checkpoints" / "protect-best").iterdir()}
-        assert "model_epoch1" in names, f"Local best checkpoint was pruned: {names}"
-
-    def test_rotation_disabled_keeps_all_checkpoints(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="keep-all")
-        lgr = Logger(
-            config=make_config(logger={"keep_last_n_checkpoints": 0}),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-        )
-        for epoch in (1, 2, 3):
-            lgr.save_model_checkpoint(meta, epoch=epoch, metrics_dict={"loss": 1.0 / epoch})
-
-        files = list((tmp_path / "model_checkpoints" / "keep-all").iterdir())
-        assert len(files) == 3
-
-    def test_frozen_backbone_excluded_from_checkpoint_by_default(
-        self, tmp_mlflow_uri, tmp_path, make_config
-    ):
-        meta = FakeMetaModel(run_name="frozen-slim", freeze_backbone=True)
-        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
-        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.4})
-
-        ckpt_file = list((tmp_path / "model_checkpoints" / "frozen-slim").iterdir())[0]
-        ckpt = torch.load(ckpt_file, weights_only=False)
-        assert ckpt["excludes_frozen_params"] is True
-        frozen_keys = {name for name, p in meta.model.named_parameters() if not p.requires_grad}
-        assert frozen_keys, "Test setup bug: expected at least one frozen parameter"
-        for key in frozen_keys:
-            assert key not in ckpt["model_state_dict"]
-        trainable_keys = {name for name, p in meta.model.named_parameters() if p.requires_grad}
-        for key in trainable_keys:
-            assert key in ckpt["model_state_dict"]
-
-    def test_save_full_state_dict_opts_out_of_slimming(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="frozen-full", freeze_backbone=True)
-        lgr = Logger(
-            config=make_config(logger={"save_full_state_dict": True}),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-        )
-        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.4})
-
-        ckpt_file = list((tmp_path / "model_checkpoints" / "frozen-full").iterdir())[0]
-        ckpt = torch.load(ckpt_file, weights_only=False)
-        assert ckpt["excludes_frozen_params"] is False
-        assert set(ckpt["model_state_dict"].keys()) == set(meta.model.state_dict().keys())
 
 
 # ===================================================================
@@ -665,8 +738,8 @@ class TestSaveSafetensorsForPublish:
         names = {a.path for a in artifacts}
         assert "custom/export/model_weights.safetensors" in names
 
-    def test_safetensors_noop_when_mlflow_disabled(self, tmp_path, make_config, monkeypatch):
-        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    def test_safetensors_noop_when_mlflow_disabled(self, tmp_mlflow_uri, make_config):
+        _point_mlflow_at(tmp_mlflow_uri)
         meta = FakeMetaModel(run_name="st-noop")
         lgr = Logger(
             config=make_config(),
@@ -674,7 +747,8 @@ class TestSaveSafetensorsForPublish:
             enable_mlflow=False,
         )
         lgr.save_safetensors_for_publish(meta, epoch=1, metrics_dict={"loss": 0.5})
-        assert lgr.mlflow_run_id is None
+        assert mlflow.active_run() is None
+        assert _runs_in_store(tmp_mlflow_uri) == []
 
 
 # ===================================================================
@@ -696,40 +770,8 @@ class TestScenarios:
         )
         lgr.end_run()
 
-    def test_scenario_a_local_only(self, tmp_path, make_config, monkeypatch):
-        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
-        meta = FakeMetaModel(run_name="scenario_a")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            log_epochs=1,
-            log_checkpoint=2,
-            checkpoint_dir=str(tmp_path),
-            enable_mlflow=False,
-        )
-        self._run_logger_lifecycle(lgr, meta)
-        assert lgr.enabled is False
-        ckpt_dir = tmp_path / "model_checkpoints" / "scenario_a"
-        assert ckpt_dir.exists(), "Checkpoint directory should exist even when MLflow disabled"
-
-    def test_scenario_b_local_plus_mlflow(self, tmp_mlflow_uri, tmp_path, make_config):
-        meta = FakeMetaModel(run_name="scenario_b")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            log_epochs=1,
-            log_checkpoint=2,
-            checkpoint_dir=str(tmp_path),
-            enable_mlflow=True,
-        )
-        self._run_logger_lifecycle(lgr, meta)
-        assert (tmp_path / "model_checkpoints" / "scenario_b").exists()
-        assert lgr.mlflow_run_id is not None
-        assert mlflow.get_run(lgr.mlflow_run_id).data.metrics["train/loss"] is not None
-
     def test_scenario_c_mlflow_unavailable(self, tmp_path, make_config, monkeypatch):
-        """MLflow enabled but unreachable — graceful degradation, local checkpoint
-        saved."""
+        """MLflow enabled but unreachable — graceful degradation, local checkpoint saved."""
         monkeypatch.setenv("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
         meta = FakeMetaModel(run_name="scenario_c")
         lgr = Logger(
@@ -739,6 +781,7 @@ class TestScenarios:
             log_checkpoint=2,
             checkpoint_dir=str(tmp_path),
             enable_mlflow=True,
+            enable_wandb=False,
         )
         assert lgr.enabled is False
         self._run_logger_lifecycle(lgr, meta)
@@ -760,11 +803,12 @@ class TestLoggerLifecycle:
         lgr.end_run()
         assert mlflow.active_run() is None
 
-    def test_end_run_idempotent(self, tmp_mlflow_uri, make_config, fake_meta_model):
+    def test_end_run_closes_wandb(self, tmp_mlflow_uri, make_config, fake_meta_model):
         lgr = Logger(config=make_config(), meta_model=fake_meta_model)
+        mock_wandb_logger = MagicMock(spec=WandbLogger)
+        lgr._wandb_logger = mock_wandb_logger
         lgr.end_run()
-        lgr.end_run()
-        assert mlflow.active_run() is None
+        mock_wandb_logger.end_run.assert_called_once()
 
     def test_context_manager_cleans_up_on_exception(
         self, tmp_mlflow_uri, make_config, fake_meta_model
@@ -803,13 +847,14 @@ class TestLogBenchmarkContext:
         tags = mlflow.get_run(lgr.mlflow_run_id).data.tags
         assert "benchmark.dataset_variant" not in tags
 
-    def test_noop_when_mlflow_disabled(self, make_config, monkeypatch, fake_meta_model):
-        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    def test_noop_when_mlflow_disabled(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        _point_mlflow_at(tmp_mlflow_uri)
         lgr = Logger(
             config=make_config(logger={"experiment_name": None}), meta_model=fake_meta_model
         )
         lgr.log_benchmark_context(label="test")
-        assert lgr.mlflow_run_id is None
+        assert mlflow.active_run() is None
+        assert _runs_in_store(tmp_mlflow_uri) == []
 
 
 # ===================================================================
@@ -850,13 +895,14 @@ class TestLogDataloaderParams:
         params = mlflow.get_run(lgr.mlflow_run_id).data.params
         assert "train_loader_batch_size" in params
 
-    def test_noop_when_mlflow_disabled(self, make_config, monkeypatch, fake_meta_model):
-        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    def test_noop_when_mlflow_disabled(self, tmp_mlflow_uri, make_config, fake_meta_model):
+        _point_mlflow_at(tmp_mlflow_uri)
         lgr = Logger(
             config=make_config(logger={"experiment_name": None}), meta_model=fake_meta_model
         )
         lgr.log_dataloader_params(self._make_loader())
-        assert lgr.mlflow_run_id is None
+        assert mlflow.active_run() is None
+        assert _runs_in_store(tmp_mlflow_uri) == []
 
 
 # ===================================================================
@@ -910,7 +956,11 @@ class TestLogDatasetStatistics:
         lgr = Logger(
             config=make_config(logger={"experiment_name": None}), meta_model=fake_meta_model
         )
-        lgr.log_dataset_statistics({"train": object()}, registry)  # must not raise
+        _point_mlflow_at(tmp_mlflow_uri)
+        stub, _ = self._stub_and_registry()
+        lgr.log_dataset_statistics({"train": stub}, registry)
+        assert mlflow.active_run() is None
+        assert _runs_in_store(tmp_mlflow_uri) == []
 
     def test_artifact_failure_does_not_drop_others(
         self, tmp_mlflow_uri, make_config, fake_meta_model

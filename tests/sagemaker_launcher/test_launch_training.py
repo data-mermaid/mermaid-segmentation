@@ -105,8 +105,9 @@ class BuildTrainingJobKwargsTest(unittest.TestCase):
             env["CONTAINER_ENTRYPOINT_SCRIPT"], "scripts/sagemaker_train_entrypoint.py"
         )
 
-    def test_hf_token_only_set_when_given(self):
-        self.assertNotIn("HF_TOKEN", _build_kwargs(_minimal_yaml())["environment"])
+    def test_hf_secret_id_only_set_when_given(self):
+        env = _build_kwargs(_minimal_yaml())["environment"]
+        self.assertNotIn("HF_TOKEN_SECRET_ID", env)
         from mermaidseg.sagemaker.launcher_config import parse_run_config
 
         cfg = parse_run_config(_minimal_yaml(), kind="training", strict=False)
@@ -116,9 +117,10 @@ class BuildTrainingJobKwargsTest(unittest.TestCase):
             staging_bucket="b",
             mlflow_uri="m",
             role="role",
-            hf_token="hf_secret",
+            hf_token_secret_id="hf-secret",
         )
-        self.assertEqual(kwargs["environment"]["HF_TOKEN"], "hf_secret")
+        self.assertEqual(kwargs["environment"]["HF_TOKEN_SECRET_ID"], "hf-secret")
+        self.assertNotIn("HF_TOKEN", kwargs["environment"])
 
     def test_tags_are_resources_tag_objects(self):
         from sagemaker.core.resources import Tag
@@ -161,7 +163,7 @@ class ChannelsTest(unittest.TestCase):
 @requires_sagemaker_core
 class SpotAndRunIdTest(unittest.TestCase):
     def test_run_id_always_injected_for_resume(self):
-        """MERMAIDSEG_RUN_ID is set on every job so a spot restart can resume its MLflow
+        """MERMAIDSEG_RUN_ID is set on every job so a spot restart can resume its wandb
         run."""
         kwargs = _build_kwargs(_minimal_yaml(), run_id="mermaidseg-test-abc")
         self.assertEqual(kwargs["environment"]["MERMAIDSEG_RUN_ID"], "mermaidseg-test-abc")
@@ -200,7 +202,7 @@ class MainSubmitTest(unittest.TestCase):
         region_at_wait = []
         with tempfile.TemporaryDirectory() as d:
             yaml_path = Path(d) / "run.yaml"
-            yaml_path.write_text(_minimal_yaml())
+            yaml_path.write_text(_minimal_yaml() + "config: {}\n")
             with (
                 patch.dict(os.environ),
                 patch("launch_training.make_run_id", return_value="mermaidseg-test-rid"),
@@ -227,9 +229,33 @@ class MainSubmitTest(unittest.TestCase):
         self.assertEqual(kwargs["training_job_name"], "mermaidseg-test-rid")
         self.assertEqual(kwargs["region"], lt.REGION)
         self.assertIs(kwargs["session"], mock_boto3.Session.return_value)
-        mock_boto3.client.return_value.upload_file.assert_called_once()
         mock_create.return_value.wait.assert_called_once_with(logs=True)
         self.assertEqual(region_at_wait, [lt.REGION])
+
+    def test_uploads_run_config_under_the_run_id_prefix(self):
+        _, mock_boto3, _ = self._run_main([])
+        mock_boto3.client.return_value.upload_file.assert_called_once()
+        _, bucket, key = mock_boto3.client.return_value.upload_file.call_args.args
+        self.assertEqual(bucket, lt.STAGING_BUCKET)
+        self.assertEqual(key, "runs/mermaidseg-test-rid/config/run.yaml")
+
+    def test_cli_values_are_forwarded_into_the_job_request(self):
+        mock_create, _, _ = self._run_main(
+            [
+                "--hf-token-secret-id",
+                "hf-secret",
+                "--wandb-secret-id",
+                "wb-secret",
+                "--role-arn",
+                "arn:aws:iam::1:role/custom",
+            ]
+        )
+        kwargs = mock_create.call_args.kwargs
+        env = kwargs["environment"]
+        self.assertEqual(env["MLFLOW_TRACKING_URI"], "arn:mlflow")
+        self.assertEqual(env["HF_TOKEN_SECRET_ID"], "hf-secret")
+        self.assertEqual(env["WANDB_API_KEY_SECRET_ID"], "wb-secret")
+        self.assertEqual(kwargs["role_arn"], "arn:aws:iam::1:role/custom")
 
     def test_no_wait_submits_without_waiting(self):
         mock_create, _, _ = self._run_main(["--no-wait"])
@@ -237,24 +263,175 @@ class MainSubmitTest(unittest.TestCase):
         mock_create.return_value.wait.assert_not_called()
 
 
-class CliArgsTest(unittest.TestCase):
-    def test_no_wait_flag_recognized(self):
-        """--no-wait must parse without error alongside required args."""
-        import argparse
+EXAMPLE_RUN = Path(__file__).resolve().parents[2] / "sagemaker" / "runs" / "cbm_vitl_example.yaml"
 
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--run-config", required=True, type=Path)
-        parser.add_argument("--mlflow-tracking-uri", required=True)
-        parser.add_argument("--dry-run", action="store_true")
-        parser.add_argument("--no-wait", action="store_true")
-        args = parser.parse_args(
-            [
-                "--run-config",
-                "sagemaker/runs/example-training.yaml",
-                "--mlflow-tracking-uri",
-                "arn:aws:sagemaker:us-east-1:554812291621:mlflow-app/app-X",
-                "--no-wait",
-            ]
+
+class ValidateTrainerConfigTest(unittest.TestCase):
+    def test_example_run_config_is_valid(self):
+        import yaml
+
+        seg = yaml.safe_load(EXAMPLE_RUN.read_text())["config"]
+        self.assertEqual(lt.validate_trainer_config(seg), [])
+
+    def test_missing_block_and_missing_file_are_errors(self):
+        self.assertTrue(lt.validate_trainer_config(None))
+        errors = lt.validate_trainer_config({"config_model": "configs/nope.yaml"})
+        self.assertEqual(errors, ["Config file not found: configs/nope.yaml"])
+
+    def test_dry_run_on_example_makes_no_aws_call(self):
+        with patch("launch_training.boto3") as mock_boto3:
+            lt.main(["--run-config", str(EXAMPLE_RUN), "--dry-run"])
+        mock_boto3.client.assert_not_called()
+        mock_boto3.Session.assert_not_called()
+
+
+@requires_sagemaker_core
+class WandbEnvTest(unittest.TestCase):
+    def test_wandb_secret_id_is_passed_never_the_key(self):
+        from mermaidseg.sagemaker.launcher_config import parse_run_config
+
+        cfg = parse_run_config(_minimal_yaml(), kind="training", strict=False)
+        kwargs = lt.build_training_job_kwargs(
+            cfg=cfg,
+            run_id="r",
+            staging_bucket="b",
+            mlflow_uri=None,
+            role="role",
+            wandb_secret_id="wb-secret",
         )
-        self.assertTrue(args.no_wait)
-        self.assertFalse(args.dry_run)
+        self.assertEqual(kwargs["environment"]["WANDB_API_KEY_SECRET_ID"], "wb-secret")
+        self.assertNotIn("WANDB_API_KEY", kwargs["environment"])
+        self.assertNotIn("MLFLOW_TRACKING_URI", kwargs["environment"])
+
+
+class NoRawSecretFlagsTest(unittest.TestCase):
+    def test_raw_value_flags_are_gone(self):
+        for flag in ("--hf-token", "--wandb-api-key"):
+            with self.assertRaises(SystemExit):
+                lt.main(["--run-config", str(EXAMPLE_RUN), "--dry-run", flag, "v"])
+
+
+@requires_sagemaker_core
+class CheckpointConfigTest(unittest.TestCase):
+    def test_spot_adds_checkpoint_config_under_the_run_prefix(self):
+        kwargs = _build_kwargs(_minimal_yaml(use_spot=True), run_id="mermaidseg-test-abc")
+        ckpt = kwargs["checkpoint_config"]
+        self.assertEqual(
+            ckpt.s3_uri, "s3://dev-datamermaid-sm-data/runs/mermaidseg-test-abc/checkpoints/"
+        )
+        self.assertEqual(ckpt.local_path, "/opt/ml/checkpoints")
+
+    def test_on_demand_has_no_checkpoint_config(self):
+        self.assertNotIn("checkpoint_config", _build_kwargs(_minimal_yaml(use_spot=False)))
+
+
+class RunIdTest(unittest.TestCase):
+    def test_run_ids_from_the_same_second_differ(self):
+        frozen = MagicMock()
+        frozen.now.return_value.strftime.return_value = "20261102T120000Z"
+        with patch("launch_training.datetime", frozen):
+            first, second = lt.make_run_id("p"), lt.make_run_id("p")
+        self.assertNotEqual(first, second)
+        self.assertRegex(first, r"^p-20261102T120000Z-[0-9a-f]{6}$")
+
+
+class ConfigVariableTest(unittest.TestCase):
+    def test_a_variable_in_the_config_block_is_an_error(self):
+        errors = lt.validate_trainer_config({"overrides": {"run-name": "${USER}-run"}})
+        self.assertTrue(any("$" in e for e in errors), errors)
+
+    def test_dry_run_rejects_a_variable_the_trainer_would_receive_literally(self):
+        with tempfile.TemporaryDirectory() as d:
+            yaml_path = Path(d) / "run.yaml"
+            yaml_path.write_text(
+                _minimal_yaml() + "config:\n  overrides:\n    run-name: ${HOME}-run\n"
+            )
+            with patch("launch_training.boto3"), self.assertRaises(SystemExit) as exit_info:
+                lt.main(["--run-config", str(yaml_path), "--dry-run"])
+        self.assertEqual(exit_info.exception.code, 1)
+
+
+class RunIdValidationTest(unittest.TestCase):
+    def test_a_prefix_that_overflows_the_job_name_limit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            lt.make_run_id("p" * 40)
+        self.assertTrue(lt.make_run_id("p" * 39))
+
+    def test_a_prefix_with_an_underscore_is_rejected(self):
+        with self.assertRaises(ValueError):
+            lt.make_run_id("bad_prefix")
+
+    def test_dry_run_reports_a_bad_prefix(self):
+        with tempfile.TemporaryDirectory() as d:
+            yaml_path = Path(d) / "run.yaml"
+            yaml_path.write_text(_minimal_yaml().replace("mermaidseg-test", "bad_prefix"))
+            with patch("launch_training.boto3"), self.assertRaises(SystemExit) as exit_info:
+                lt.main(["--run-config", str(yaml_path), "--dry-run"])
+        self.assertNotEqual(exit_info.exception.code, 0)
+
+
+class RealLaunchValidationTest(unittest.TestCase):
+    def _launch(self, yaml_text):
+        with tempfile.TemporaryDirectory() as d:
+            yaml_path = Path(d) / "run.yaml"
+            yaml_path.write_text(yaml_text)
+            with (
+                patch("launch_training.boto3") as mock_boto3,
+                self.assertRaises(SystemExit) as exit_info,
+            ):
+                lt.main(["--run-config", str(yaml_path)])
+        return exit_info.exception.code, mock_boto3
+
+    def test_a_variable_in_the_config_block_stops_the_launch_before_any_upload(self):
+        code, mock_boto3 = self._launch(
+            _minimal_yaml() + "config:\n  overrides:\n    run-name: ${HOME}\n"
+        )
+        self.assertEqual(code, 1)
+        mock_boto3.client.assert_not_called()
+
+    def test_a_spot_run_that_moves_the_output_dir_stops_the_launch(self):
+        code, mock_boto3 = self._launch(
+            _minimal_yaml(use_spot=True) + "config:\n  overrides:\n    output-dir: /x\n"
+        )
+        self.assertNotEqual(code, 0)
+        mock_boto3.client.assert_not_called()
+
+
+RESERVED_ENV_KEYS = ["MERMAIDSEG_RUN_ID", "CONTAINER_ENTRYPOINT_SCRIPT", "AWS_DEFAULT_REGION"]
+
+
+@requires_sagemaker_core
+class ReservedJobEnvTest(unittest.TestCase):
+    def test_a_reserved_key_in_job_env_is_rejected_naming_the_key(self):
+        for key in RESERVED_ENV_KEYS:
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError) as ctx:
+                    _build_kwargs(_minimal_yaml() + f"  env:\n    {key}: x\n")
+                self.assertIn(key, str(ctx.exception))
+
+    def test_an_allowed_job_env_key_reaches_the_environment_beside_the_run_id(self):
+        env = _build_kwargs(_minimal_yaml() + "  env:\n    FOO: bar\n", run_id="rid-9")[
+            "environment"
+        ]
+        self.assertEqual(env["FOO"], "bar")
+        self.assertEqual(env["MERMAIDSEG_RUN_ID"], "rid-9")
+
+    def test_main_rejects_a_reserved_key_before_any_upload(self):
+        for key in RESERVED_ENV_KEYS:
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as d:
+                yaml_path = Path(d) / "run.yaml"
+                yaml_path.write_text(_minimal_yaml() + f"  env:\n    {key}: x\nconfig: {{}}\n")
+                with (
+                    patch("launch_training.boto3") as mock_boto3,
+                    self.assertRaises(SystemExit) as ctx,
+                ):
+                    lt.main(["--run-config", str(yaml_path)])
+                self.assertTrue(str(ctx.exception.code).startswith("ERROR: "))
+                self.assertIn(key, str(ctx.exception.code))
+                mock_boto3.client.assert_not_called()
+
+
+class ConfigFlagOverrideTest(unittest.TestCase):
+    def test_validate_reports_an_override_that_shadows_a_config_flag(self):
+        errors = lt.validate_trainer_config({"overrides": {"training-config": "x.yaml"}})
+        self.assertTrue(any("training-config" in e for e in errors), errors)

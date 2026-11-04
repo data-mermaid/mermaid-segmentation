@@ -26,7 +26,12 @@ import boto3
 import botocore.exceptions
 import mlflow
 
-from mermaidseg.logger import mlflow_connect, resume_run  # noqa: F401 — re-exported
+from mermaidseg.logger import (  # noqa: F401 — re-exported
+    mlflow_connect,
+    resume_run,
+    resume_wandb_run,
+)
+from mermaidseg.run_setup import check_env_wandb, check_wandb_auth  # noqa: F401 — re-exported
 
 
 def check_env() -> None:
@@ -156,3 +161,30 @@ def reconnect_mlflow(run_id: str | None = None) -> None:
     if run_id:
         resume_run(run_id)
         print(f"Resumed run: {mlflow.active_run().info.run_id}")
+
+
+def reconnect_wandb(
+    run_id: str | None = None, project: str | None = None, entity: str | None = None
+) -> None:
+    """Reconnect to wandb after a kernel restart.
+
+    Args:
+        run_id: wandb run ID to resume (``logger.wandb_run_id``, printed after
+                Logger init, or from the wandb UI). If None, just verifies
+                authentication.
+        project: wandb project the run belongs to, if not inferable from the
+                 environment (``WANDB_PROJECT``).
+        entity: wandb entity/team the run belongs to, if not inferable from
+                the environment (``WANDB_ENTITY``).
+
+    Example::
+
+        # After kernel restart, re-run setup cells then:
+        from nbs.nb_setup import reconnect_wandb
+
+        reconnect_wandb("paste-run-id")
+    """
+    check_wandb_auth()
+    if run_id:
+        run = resume_wandb_run(run_id, project=project, entity=entity)
+        print(f"Resumed wandb run: {run.id}")

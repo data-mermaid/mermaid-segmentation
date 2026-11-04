@@ -19,24 +19,25 @@ def fresh_module(monkeypatch):
     return _reload
 
 
-def test_legacy_fallback_when_no_env(monkeypatch, fresh_module):
-    monkeypatch.delenv("MERMAID_CORALNET_ANNOTATIONS_PATH", raising=False)
-    monkeypatch.delenv("MERMAID_CORALNET_ANNOTATIONS_VERSION", raising=False)
+def test_default_fallback_when_no_env(monkeypatch, fresh_module):
+    monkeypatch.delenv("MERMAID_CORALNET_MANIFEST_PATH", raising=False)
+    monkeypatch.delenv("MERMAID_CORALNET_MANIFEST_VERSION", raising=False)
     mod = fresh_module()
-    assert mod._resolve_default_annotations_path() == "coralnet_annotations_30112025.parquet"
+    assert mod._resolve_default_manifest_path() == mod._DEFAULT_MANIFEST_PATH
 
 
 def test_version_env_builds_versioned_filename(monkeypatch, fresh_module):
-    monkeypatch.delenv("MERMAID_CORALNET_ANNOTATIONS_PATH", raising=False)
-    monkeypatch.setenv("MERMAID_CORALNET_ANNOTATIONS_VERSION", "20260515_deadbeef")
+    monkeypatch.delenv("MERMAID_CORALNET_MANIFEST_PATH", raising=False)
+    monkeypatch.setenv("MERMAID_CORALNET_MANIFEST_VERSION", "20260515_deadbeef")
     mod = fresh_module()
     assert (
-        mod._resolve_default_annotations_path() == "coralnet_annotations_20260515_deadbeef.parquet"
+        mod._resolve_default_manifest_path()
+        == "etl-outputs/coralnet/20260515_deadbeef/coralnet_training_manifest_20260515_deadbeef.parquet"
     )
 
 
 def test_explicit_path_env_wins(monkeypatch, fresh_module):
-    monkeypatch.setenv("MERMAID_CORALNET_ANNOTATIONS_PATH", "custom/path.parquet")
-    monkeypatch.setenv("MERMAID_CORALNET_ANNOTATIONS_VERSION", "ignored")
+    monkeypatch.setenv("MERMAID_CORALNET_MANIFEST_PATH", "custom/path.parquet")
+    monkeypatch.setenv("MERMAID_CORALNET_MANIFEST_VERSION", "ignored")
     mod = fresh_module()
-    assert mod._resolve_default_annotations_path() == "custom/path.parquet"
+    assert mod._resolve_default_manifest_path() == "custom/path.parquet"

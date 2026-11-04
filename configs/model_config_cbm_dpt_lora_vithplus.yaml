@@ -1,0 +1,16 @@
+model:
+  name: "ConceptBottleneckDPTLoRADINOv3"
+  encoder_name: "facebook/dinov3-vith16plus-pretrain-lvd1689m"
+  # 512x512 eval of the ViT-H+ sweep run. Training uses
+  # model_config_cbm_dpt_lora_vithplus_256.yaml.
+  input_size: [512, 512]
+  concept_feature_dim: 256
+  out_indices: null
+  neck_hidden_sizes: [256, 512, 1024, 1024]
+  fusion_hidden_size: 256
+  reassemble_factors: [4, 2, 1, 0.5]
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  lora_bias: "none"
