@@ -277,3 +277,4 @@ These gaps were deliberately left for later:
 - The `dataset_reconciliation` modules (`registry`, `concepts`, `label_mapping`, `taxonomy_tree`).
 - `launcher_config.parse_run_config` accepts but ignores `kind`. It is kept as is to match mermaid-classifier's schema.
 - The `MetaModel._step_iteration_scheduler` warmup guard can never fire from its only caller. It is kept as a defensive check, so deleting it is an equivalent mutation, not a gap.
+- The preprocessing live tests (`test_preprocessing_live.py`) were removed on 2026-11-04. The offline resize tests in `test_preprocessing.py` cover the same logic, and the live copies had gone stale unnoticed.
