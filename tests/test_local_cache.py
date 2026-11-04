@@ -153,11 +153,22 @@ def test_load_stage_stats_flush_and_snapshot(tmp_path):
     cache.record_stage("image_load", 0.25)
     cache.record_stage("mask", 0.05)
     cache.record_retries(2)
-    cache._flush_every = 1
+    cache._flush_every = 2
+
     cache.record_sample()
+    assert stats.samples.value == 0
+    assert stats.retries.value == 0
+    assert stats.stage_sec["image_load"].value == 0.0
+
+    # The second sample reaches the threshold and flushes before any snapshot is taken.
+    cache.record_sample()
+    assert stats.samples.value == 2
+    assert stats.retries.value == 2
+    assert stats.stage_sec["image_load"].value == pytest.approx(0.25)
+    assert stats.stage_sec["mask"].value == pytest.approx(0.05)
 
     snapshot = cache.snapshot_stats()
-    assert snapshot.samples == 1
+    assert snapshot.samples == 2
     assert snapshot.retries == 2
     assert snapshot.stage_sec["image_load"] == pytest.approx(0.25)
     assert snapshot.stage_sec["mask"] == pytest.approx(0.05)

@@ -51,14 +51,39 @@ def resolver(concept_names: list[str]) -> ConceptResolver:
     return ConceptResolver(concept_names)
 
 
-def test_tokenize_rank_value_and_bare_atoms() -> None:
-    tokens = tokenize("live * (class:hexacorallia + class:octocorallia)")
-    values = [t.value for t in tokens]
-    assert "live" in values
-    assert "class:hexacorallia" in values
-    assert "class:octocorallia" in values
-    assert "(" in values
-    assert ")" in values
+@pytest.mark.parametrize(
+    "expression,expected",
+    [
+        (
+            "live * (class:hexacorallia + class:octocorallia)",
+            [
+                ("IDENT", "live"),
+                ("OP", "*"),
+                ("OP", "("),
+                ("IDENT", "class:hexacorallia"),
+                ("OP", "+"),
+                ("IDENT", "class:octocorallia"),
+                ("OP", ")"),
+            ],
+        ),
+        (
+            "max(1.5, live) - 2",
+            [
+                ("IDENT", "max"),
+                ("OP", "("),
+                ("NUMBER", "1.5"),
+                ("OP", ","),
+                ("IDENT", "live"),
+                ("OP", ")"),
+                ("OP", "-"),
+                ("NUMBER", "2"),
+            ],
+        ),
+    ],
+    ids=["rank-values-and-parens", "numbers-comma-minus"],
+)
+def test_tokenize_kinds_and_values(expression, expected) -> None:
+    assert [(t.kind.name, t.value) for t in tokenize(expression)] == expected
 
 
 def test_parse_to_rpn(concept_names: list[str]) -> None:
@@ -202,23 +227,28 @@ def test_parse_processing_resolution() -> None:
 def test_render_inferno_mask_panel() -> None:
     from video_demo import render_inferno_mask_panel
 
-    rgb = np.full((2, 2, 3), 200, dtype=np.uint8)
-    values = np.array([[0.2, 0.8], [0.39, 0.41]], dtype=np.float32)
+    rgb = np.array([[[200, 100, 0], [200, 100, 0]], [[200, 100, 0], [200, 100, 0]]], dtype=np.uint8)
+    values = np.array([[0.5, 1.0], [0.4, 0.2]], dtype=np.float32)
     out = render_inferno_mask_panel(rgb, values, threshold=0.4)
-    assert out[0, 0, 1] == 200
-    assert out[0, 1, 1] != 200
-    assert out[1, 0, 1] == 200
-    assert out[1, 1, 1] != 200
+    # v * inferno(v) + (1 - v) * rgb, truncated to uint8; inferno(0.5) = #bc3754-ish
+    # (187.6, 55.1, 84.2) and inferno(1.0) = (252.0, 254.6, 164.5).
+    assert out[0, 0].tolist() == [193, 77, 42]
+    assert out[0, 1].tolist() == [252, 254, 164]
+    # v == threshold is not highlighted; neither is anything below it.
+    assert out[1, 0].tolist() == [200, 100, 0]
+    assert out[1, 1].tolist() == [200, 100, 0]
 
 
 def test_banner_layout_scales_with_frame_height() -> None:
     from video_demo import _banner_layout
 
     banner_h, title_scale, subtitle_scale, title_y, subtitle_y, thickness = _banner_layout(1440)
-    assert banner_h >= 120
-    assert title_scale > 1.0
-    assert subtitle_y > title_y
-    assert thickness >= 2
+    assert banner_h == 144
+    assert title_scale == pytest.approx(144 / 68)
+    assert subtitle_scale == pytest.approx(144 / 92)
+    assert (title_y, subtitle_y) == (63, 118)
+    assert thickness == 3
+    assert _banner_layout(600)[0] == 120
 
 
 def test_normalize_banner_text_replaces_unicode_math_symbols() -> None:
