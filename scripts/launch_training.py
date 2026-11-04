@@ -291,7 +291,10 @@ def main(argv=None):
         sys.exit(f"ERROR: {exc}")
     cw_url = _cloudwatch_url(run_id)
 
-    check_job_env(cfg.job.env)
+    try:
+        check_job_env(cfg.job.env)
+    except ValueError as exc:
+        sys.exit(f"ERROR: {exc}")
 
     # Checked before any upload or submit, so a bad run YAML fails here and not on a GPU instance.
     seg = (yaml.safe_load(args.run_config.read_text()) or {}).get("config")

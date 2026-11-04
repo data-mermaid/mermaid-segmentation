@@ -399,10 +399,10 @@ class ReservedJobEnvTest(unittest.TestCase):
                 yaml_path.write_text(_minimal_yaml() + f"  env:\n    {key}: x\nconfig: {{}}\n")
                 with (
                     patch("launch_training.boto3") as mock_boto3,
-                    self.assertRaises(ValueError) as ctx,
+                    self.assertRaises(SystemExit) as ctx,
                 ):
                     lt.main(["--run-config", str(yaml_path)])
-                self.assertIn(key, str(ctx.exception))
+                self.assertIn(key, str(ctx.exception.code))
                 mock_boto3.client.assert_not_called()
 
 
