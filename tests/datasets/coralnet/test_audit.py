@@ -37,9 +37,15 @@ def test_audit_sources_three_sources(fake_s3, sample_csv_factory, populate):
     files3["annotations.csv"] = b"\xff\xfe corrupt non-csv data\nmore garbage"
     populate(fake_s3, bucket, prefix, 3, files3)
 
+    # source 4: annotations, image_list and csv files all fine, but no images folder
+    populate(fake_s3, bucket, prefix, 4, sample_csv_factory(source_id=4))
+    fake_s3.delete_object(Bucket=bucket, Key=f"{prefix}/s4/images/img_marker.jpg")
+
     df = audit_sources(bucket=bucket, prefix=prefix, workers=1, s3_client=fake_s3)
 
-    assert set(df["source_id"]) == {1, 2, 3}
+    assert set(df["source_id"]) == {1, 2, 3, 4}
+    read_failed = [c for c in df.columns if c.endswith("_csv_read_failed")]
+    row4 = df.loc[df["source_id"] == 4].iloc[0]
     row1 = df.loc[df["source_id"] == 1].iloc[0]
     row2 = df.loc[df["source_id"] == 2].iloc[0]
     row3 = df.loc[df["source_id"] == 3].iloc[0]
@@ -53,9 +59,30 @@ def test_audit_sources_three_sources(fake_s3, sample_csv_factory, populate):
     assert not row2["has_image_list_csv"]
     assert row2["has_annotations_csv"]
 
-    # source 3: annotations file parses as something (csv is forgiving) but the
-    # important guarantee is "no crash + is_complete tracks reality".
-    assert isinstance(bool(row3["is_complete"]), bool)
+    # No read failure on sources 1, 2 and 4; source 1 and 2 report no errors.
+    assert not df.loc[df["source_id"] != 3, read_failed].any().any()
+    assert row1["errors"] is None and row2["errors"] is None
+
+    # source 3: the undecodable annotations.csv is flagged, counted as present but empty, and
+    # keeps the source out of the complete set although every other file is there.
+    assert row3["has_annotations_csv"]
+    assert row3["annotations_csv_read_failed"]
+    assert (
+        not df.loc[df["source_id"] == 3, [c for c in read_failed if "annotations" not in c]]
+        .any()
+        .any()
+    )
+    assert row3["n_annotations"] == 0
+    assert row3["has_images_folder"] and row3["has_image_list_csv"]
+    assert not row3["is_complete"]
+    assert len(row3["errors"]) == 1
+    assert row3["errors"][0].startswith("annotations.csv read failed: UnicodeDecodeError")
+
+    # source 4: only the missing images folder keeps it incomplete.
+    assert not row4["has_images_folder"]
+    assert row4["has_annotations_csv"] and row4["has_image_list_csv"]
+    assert row4["n_annotations"] == 15
+    assert not row4["is_complete"]
 
 
 def test_audit_sources_emits_audit_timestamp_utc(fake_s3, sample_csv_factory, populate):

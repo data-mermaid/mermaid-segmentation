@@ -75,7 +75,8 @@ def test_cli_audit_explicit_source_ids(
     monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
 ):
     bucket, prefix = "b", "coralnet-public-images"
-    for sid in (1, 3):
+    # Sources 2 and 4 are in S3 but not requested, so ignoring --source-ids would audit them.
+    for sid in (1, 2, 3, 4):
         populate(
             fake_s3,
             bucket,
@@ -115,13 +116,15 @@ def test_cli_audit_source_ids_file(monkeypatch, fake_s3, sample_csv_factory, pop
     pd.DataFrame({"source_id": [2]}).to_csv(csv_path, index=False)
 
     bucket, prefix = "b", "coralnet-public-images"
-    populate(
-        fake_s3,
-        bucket,
-        prefix,
-        2,
-        sample_csv_factory(source_id=2, n_images=1, n_points_per_image=2),
-    )
+    # Only source 2 is listed in the file; 1 and 5 are in S3 as well.
+    for sid in (1, 2, 5):
+        populate(
+            fake_s3,
+            bucket,
+            prefix,
+            sid,
+            sample_csv_factory(source_id=sid, n_images=1, n_points_per_image=2),
+        )
     _patch_to_fake_s3(monkeypatch, fake_s3)
 
     rc = cli.main(

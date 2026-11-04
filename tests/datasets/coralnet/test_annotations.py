@@ -50,25 +50,60 @@ def test_build_annotations_merges_per_source(fake_s3, sample_csv_factory, popula
     assert "20000" in set(ann_df.loc[ann_df["source_id"] == 2, "image_id"])
 
 
-def test_build_annotations_sorts_deterministically(fake_s3, sample_csv_factory, populate):
+def test_build_annotations_sorts_deterministically(fake_s3, populate):
+    """Rows come back ordered by (source_id, image_id, row, col), not in file or audit order."""
+    # Source 5: image 30 listed before image 4 (string order "30" < "4"), points out of order.
     populate(
-        fake_s3, "b", "p", 5, sample_csv_factory(source_id=5, n_images=2, n_points_per_image=2)
+        fake_s3,
+        "b",
+        "p",
+        5,
+        {
+            "annotations.csv": (
+                b"Name,Row,Column,Label ID,Status\n"
+                b"z.jpg,9,1,100,Confirmed\n"
+                b"z.jpg,2,7,100,Confirmed\n"
+                b"z.jpg,2,3,100,Confirmed\n"
+                b"y.jpg,5,5,100,Confirmed\n"
+            ),
+            "image_list.csv": (b"Name,Image Page\nz.jpg,/image/30/view/\ny.jpg,/image/4/view/\n"),
+        },
+    )
+    populate(
+        fake_s3,
+        "b",
+        "p",
+        2,
+        {
+            "annotations.csv": b"Name,Row,Column,Label ID,Status\nq.jpg,1,1,100,Confirmed\n",
+            "image_list.csv": b"Name,Image Page\nq.jpg,/image/8/view/\n",
+        },
     )
     audit = audit_sources(bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-    a = build_annotations(audit, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-    b = build_annotations(audit, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-    assert a.equals(b)
-    keys = list(zip(a["source_id"], a["image_id"], a["row"], a["col"], strict=False))
-    assert keys == sorted(keys)
+    # Feed the audit in reverse so the sources are read 5 then 2.
+    audit = audit.iloc[::-1].reset_index(drop=True)
+    assert audit["source_id"].tolist() == [5, 2]
+    out = build_annotations(audit, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
+    assert out[["source_id", "image_id", "row", "col"]].to_numpy().tolist() == [
+        [2, "8", 1, 1],
+        [5, "30", 2, 3],
+        [5, "30", 2, 7],
+        [5, "30", 9, 1],
+        [5, "4", 5, 5],
+    ]
 
 
 def test_build_annotations_strips_all_status_suffixes(fake_s3, populate):
-    """Only Confirmed rows are kept in the merged parquet."""
+    """Every status suffix is stripped from image_list names so they join to annotations.csv.
+
+    annotations.csv carries its own Status (which wins over the suffix), so a row survives only if
+    its bare name matched the stripped image_list name.
+    """
     annotations = (
         "Name,Row,Column,Label ID,Status\n"
         "a.jpg,1,2,100,Confirmed\n"
-        "b.jpg,3,4,101,Unconfirmed\n"
-        "c.jpg,5,6,102,Unclassified\n"
+        "b.jpg,3,4,101,Confirmed\n"
+        "c.jpg,5,6,102,Confirmed\n"
     )
     image_list = (
         "Name,Image Page\n"
@@ -81,9 +116,9 @@ def test_build_annotations_strips_all_status_suffixes(fake_s3, populate):
 
     audit = audit_sources(bucket="b", prefix="p", workers=1, s3_client=fake_s3)
     ann = build_annotations(audit, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-    assert len(ann) == 1
-    assert ann["image_id"].iloc[0] == "1"
-    assert ann["status"].iloc[0] == "Confirmed"
+    assert ann["image_id"].tolist() == ["1", "2", "3"]
+    assert ann["coralnet_id"].tolist() == [100, 101, 102]
+    assert (ann["status"] == "Confirmed").all()
 
 
 def test_build_annotations_drops_unconfirmed_when_status_from_image_list_suffix(fake_s3, populate):
@@ -105,6 +140,7 @@ def test_build_annotations_drops_unconfirmed_when_status_from_image_list_suffix(
 
 
 def test_build_annotations_skips_incomplete_sources(fake_s3, sample_csv_factory, populate):
+    """Source 2 loads fine (rows, images, matching names) but has no images folder."""
     bucket, prefix = "b", "p"
     populate(
         fake_s3,
@@ -113,9 +149,15 @@ def test_build_annotations_skips_incomplete_sources(fake_s3, sample_csv_factory,
         1,
         sample_csv_factory(source_id=1, n_images=1, n_points_per_image=1),
     )
-    files2 = sample_csv_factory(source_id=2)
-    files2.pop("image_list.csv")
-    populate(fake_s3, bucket, prefix, 2, files2)
+    populate(
+        fake_s3,
+        bucket,
+        prefix,
+        2,
+        sample_csv_factory(source_id=2, n_images=1, n_points_per_image=1),
+    )
+    fake_s3.delete_object(Bucket=bucket, Key=f"{prefix}/s2/images/img_marker.jpg")
     audit = audit_sources(bucket=bucket, prefix=prefix, workers=1, s3_client=fake_s3)
+    assert audit.set_index("source_id")["is_complete"].to_dict() == {1: True, 2: False}
     ann = build_annotations(audit, bucket=bucket, prefix=prefix, workers=1, s3_client=fake_s3)
-    assert set(ann["source_id"].unique()) == {1}
+    assert ann["source_id"].tolist() == [1]

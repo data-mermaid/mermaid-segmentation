@@ -111,10 +111,13 @@ def test_config_helpers(tmp_path):
     )
     assert coralnet_splits(cfg) == {"train": {1, 2}, "val": {3}}
 
-    pairs = pd.DataFrame({"source_a": [1, 1, 4], "source_b": [2, 3, 5], "n": [1, 1, 1]})
+    # (1, 4) pairs a train source with an unused one: the splits differ but the pair is not
+    # cross-split, because an unused source is not in any split.
+    pairs = pd.DataFrame({"source_a": [1, 1, 4, 1], "source_b": [2, 3, 5, 4], "n": [1, 1, 1, 1]})
     out = add_split_labels(pairs, coralnet_splits(cfg))
-    assert out["cross_split"].tolist() == [False, True, False]
-    assert out["split_b"].tolist() == ["train", "val", "unused"]
+    assert out["cross_split"].tolist() == [False, True, False, False]
+    assert out["split_a"].tolist() == ["train", "train", "unused", "train"]
+    assert out["split_b"].tolist() == ["train", "val", "unused", "unused"]
 
 
 def test_dedup_end_to_end(tmp_path, concepts_csv, monkeypatch):
@@ -289,27 +292,32 @@ def test_exact_blacklist(tmp_path):
 
 
 def test_anneal_fixed_groups():
-    """Group 0 is pinned to test even though it is not eligible; the others balance around it."""
-    X = np.array([[50.0, 0], [40, 10], [10, 40], [50, 50], [400, 400]])
+    """Group 0 is eligible but pinned to test, so it stays there; the others balance around it.
+
+    Test is full with group 0 alone (40 points, target 40), so the free group that fills val
+    (target 40) is group 2 (40 points); group 3 (20) and the ineligible group 4 stay in train.
+    """
+    X = np.array([[40.0, 0], [0, 40], [20, 20], [10, 10], [400, 400]])
     n = X.sum(1)
-    eligible = np.array([False, True, True, True, False])
+    eligible = np.array([True, True, True, True, False])
     fixed = np.array([2, -1, -1, -1, -1])
-    a, _ = splits.anneal(
-        X,
-        n,
-        X.sum(0),
-        eligible,
-        (100.0, 100.0),
-        (0.1, 0.1),
-        10.0,
-        np.ones(2, bool),
-        np.zeros(2),
-        0.0,
-        2000,
-        0,
-        fixed,
-    )
-    assert a[0] == 2 and a[4] == 0
+    for seed in range(4):
+        a, _ = splits.anneal(
+            X,
+            n,
+            X.sum(0),
+            eligible,
+            (40.0, 40.0),
+            (0.1, 0.1),
+            10.0,
+            np.ones(2, bool),
+            np.zeros(2),
+            0.0,
+            2000,
+            seed,
+            fixed,
+        )
+        assert a.tolist() == [2, 0, 1, 0, 0]
 
 
 def test_replace_coralnet_block():
@@ -351,10 +359,11 @@ def test_project_edges():
 
 
 def test_leakage(tmp_path, monkeypatch):
-    pd.DataFrame({"source_id": [1, 1, 2, 3], "hash": ["a", "b", "a", "c"]}).to_parquet(
-        tmp_path / "image_hashes_exact_all.parquet"
-    )
-    pd.DataFrame({"source_a": [1], "source_b": [2], "n_overlap_images": [1]}).to_csv(
+    # Source 2 (val) shares "a" with source 1 (train) and "d" with source 3 (test).
+    pd.DataFrame(
+        {"source_id": [1, 1, 2, 2, 3, 3], "hash": ["a", "b", "a", "d", "c", "d"]}
+    ).to_parquet(tmp_path / "image_hashes_exact_all.parquet")
+    pd.DataFrame({"source_a": [1, 2], "source_b": [2, 3], "n_overlap_images": [1, 1]}).to_csv(
         tmp_path / "source_overlap_exact_all.csv", index=False
     )
     cfg = tmp_path / "cfg.yaml"
@@ -369,8 +378,14 @@ def test_leakage(tmp_path, monkeypatch):
         ["eval_split", "other_split"]
     )
     assert per_source.loc[("val", "train"), "n_dup"] == 1
+    assert per_source.loc[("val", "train"), "n_images"] == 2
     assert per_source.loc[("test", "train"), "n_dup"] == 0
+    assert per_source.loc[("test", "val"), "n_dup"] == 1
+    assert per_source.loc[("test", "val"), "n_images"] == 2
+    assert per_source.loc[("test", "val"), "source_id"] == 3
+    assert len(per_source) == 3
     pairs = pd.read_csv(tmp_path / "split_leakage_pairs_cfg.csv")
     assert pairs[["source_a", "source_b", "split_a", "split_b"]].to_numpy().tolist() == [
-        [1, 2, "train", "val"]
+        [1, 2, "train", "val"],
+        [2, 3, "val", "test"],
     ]
