@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import io
 import os
+import uuid
 
+import ibis
 import pandas as pd
 import pytest
 from PIL import Image
@@ -36,8 +38,29 @@ def test_s3_client():
     return boto3.client("s3")
 
 
+@pytest.fixture
+def test_prefix(request, test_bucket, test_s3_client):
+    """Per-run unique S3 prefix; skips without credentials; deletes only its own objects after."""
+    try:
+        test_s3_client.head_bucket(Bucket=test_bucket)
+    except Exception:
+        pytest.skip("S3 credentials not available")
+
+    name = request.node.name.removeprefix("test_").replace("_", "-")
+    prefix = f"etl-test/{name}-{uuid.uuid4().hex}"
+    yield prefix
+
+    # The uuid suffix guarantees the prefix is unique to this run; the trailing slash keeps the
+    # listing from matching any sibling prefix.
+    paginator = test_s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=test_bucket, Prefix=f"{prefix}/"):
+        keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+        if keys:
+            test_s3_client.delete_objects(Bucket=test_bucket, Delete={"Objects": keys})
+
+
 @pytest.mark.live
-def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, tmp_path):
+def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, test_prefix, tmp_path):
     """Full pipeline: scan → resize/upload → manifest.
 
     This test:
@@ -47,13 +70,6 @@ def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, tmp_path):
     4. Verifies resized image exists on S3
     5. Builds manifest and validates schema
     """
-    # Skip if no S3 credentials
-    try:
-        test_s3_client.head_bucket(Bucket=test_bucket)
-    except Exception:
-        pytest.skip("S3 credentials not available")
-
-    test_prefix = "etl-test/preprocess-test"
     threshold = 1024
 
     # Create and upload a test image (2000x1500, longest edge > threshold)
@@ -121,11 +137,11 @@ def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, tmp_path):
 
     # Build and validate manifest
     df_manifest = build_manifest(
-        df_images=df_images,
-        df_checkpoint=df_checkpoint,
+        images=ibis.memtable(df_images),
+        checkpoint=ibis.memtable(df_checkpoint),
         output_prefix=test_prefix,
         threshold=threshold,
-    )
+    ).to_pandas()
 
     # Check manifest schema
     required_columns = [
@@ -149,26 +165,19 @@ def test_resize_and_upload_end_to_end(test_bucket, test_s3_client, tmp_path):
     assert df_manifest.loc[0, "original_width"] == 2000
     assert df_manifest.loc[0, "original_height"] == 1500
     assert df_manifest.loc[0, "status"] == "completed"
-    # Longest edge (2000) scaled to 1024: 1024 x (1500/2000) = 1024 x 750
+    # Longest edge (2000) scaled to 1024: height 1500 * 1024 / 2000 = 768
     assert df_manifest.loc[0, "resized_width"] == 1024
     assert df_manifest.loc[0, "resized_height"] == 768  # 1500 * 1024 / 2000
     assert df_manifest.loc[0, "output_s3_key"] == resized_key
 
 
 @pytest.mark.live
-def test_resize_and_upload_multi_source(test_bucket, test_s3_client, tmp_path):
+def test_resize_and_upload_multi_source(test_bucket, test_s3_client, test_prefix, tmp_path):
     """Test pipeline with multiple sources (source_id=1, source_id=2).
 
     This test verifies that the pipeline correctly handles images from different sources, with mixed
     resize needs.
     """
-    # Skip if no S3 credentials
-    try:
-        test_s3_client.head_bucket(Bucket=test_bucket)
-    except Exception:
-        pytest.skip("S3 credentials not available")
-
-    test_prefix = "etl-test/preprocess-multi-source"
     threshold = 2048
 
     # Create test images for two sources
@@ -247,11 +256,11 @@ def test_resize_and_upload_multi_source(test_bucket, test_s3_client, tmp_path):
     # Build manifest and verify
     df_checkpoint = pd.read_parquet(checkpoint_path)
     df_manifest = build_manifest(
-        df_images=df_images,
-        df_checkpoint=df_checkpoint,
+        images=ibis.memtable(df_images),
+        checkpoint=ibis.memtable(df_checkpoint),
         output_prefix=test_prefix,
         threshold=threshold,
-    )
+    ).to_pandas()
 
     assert len(df_manifest) == 3  # All 3 images
     completed = df_manifest[df_manifest["status"] == "completed"]
@@ -259,19 +268,12 @@ def test_resize_and_upload_multi_source(test_bucket, test_s3_client, tmp_path):
 
 
 @pytest.mark.live
-def test_scan_respects_already_resized(test_bucket, test_s3_client, tmp_path):
+def test_scan_respects_already_resized(test_bucket, test_s3_client, test_prefix, tmp_path):
     """Test that scan skips images already resized on S3.
 
     This test verifies idempotency: if an image is already resized
     and on S3, scan should not include it in the todo list.
     """
-    # Skip if no S3 credentials
-    try:
-        test_s3_client.head_bucket(Bucket=test_bucket)
-    except Exception:
-        pytest.skip("S3 credentials not available")
-
-    test_prefix = "etl-test/preprocess-idempotent"
     threshold = 1024
 
     # Create and upload original image
@@ -322,19 +324,12 @@ def test_scan_respects_already_resized(test_bucket, test_s3_client, tmp_path):
 
 
 @pytest.mark.live
-def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
+def test_checkpoint_recovery(test_bucket, test_s3_client, test_prefix, tmp_path):
     """Test that Phase 2 can resume from a checkpoint (fault tolerance).
 
     This test verifies that if Phase 2 is interrupted, it can resume by reading the checkpoint and
     only processing pending items.
     """
-    # Skip if no S3 credentials
-    try:
-        test_s3_client.head_bucket(Bucket=test_bucket)
-    except Exception:
-        pytest.skip("S3 credentials not available")
-
-    test_prefix = "etl-test/preprocess-checkpoint-recovery"
     threshold = 2048
 
     # Create two test images
@@ -412,7 +407,10 @@ def test_checkpoint_recovery(test_bucket, test_s3_client, tmp_path):
         s3_client=test_s3_client,
     )
 
-    # All items already completed, should be skipped
-    assert num_resized2 == 0, "No new resizes on second pass (all completed)"
-    assert num_skipped2 == 2, f"Expected 2 skipped, got {num_skipped2}"
+    # With no pending rows the function returns _summarise_checkpoint(checkpoint), which counts
+    # status == "completed" as resized and only status == "skipped" as skipped. Both rows are
+    # already "completed", so the second pass reports (2, 0, 0, 0) and does no new work.
+    assert num_resized2 == 2, f"Checkpoint still counts 2 completed, got {num_resized2}"
+    assert num_skipped2 == 0, f"Expected 0 skipped, got {num_skipped2}"
+    assert num_failed2 == 0
     assert num_corrupted2 == 0

@@ -98,6 +98,21 @@ def make_config():
     return _factory
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    # Registered here so the option exists at CLI parse time (plugins loaded from test modules are too late).
+    parser.addoption(
+        "--refresh-fixtures",
+        action="store_true",
+        default=False,
+        help="Save live CoralNet HTML snapshots into fixtures/coralnet_html/",
+    )
+
+
+@pytest.fixture(scope="session")
+def refresh_fixtures(request: pytest.FixtureRequest) -> bool:
+    return bool(request.config.getoption("--refresh-fixtures"))
+
+
 @pytest.fixture()
 def minimal_config():
     """Minimal ConfigDict for MetaModel instantiation with a mocked DINOv3 encoder."""
@@ -109,6 +124,7 @@ def minimal_config():
                 "input_size": IMAGE_SIZE,
             },
             "training": {
+                "training_mode": "standard",
                 "epochs": 1,
                 "batch_size": 2,
                 "optimizer": {"type": "SGD", "lr": 0.01},

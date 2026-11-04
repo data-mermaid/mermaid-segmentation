@@ -117,6 +117,7 @@ def test_rebuild_scheduler_binds_to_restored_lr(minimal_config, make_meta_model)
     assert meta.scheduler_step_every == "iteration"
 
 
+@pytest.mark.integration
 def test_warmup_then_iteration_decay_reaches_zero_at_the_last_step(
     minimal_config, tiny_loader, make_meta_model
 ):
