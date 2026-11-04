@@ -179,6 +179,7 @@ def train_model(
         epoch_loss_dict["train/data_loading_sec"] = train_timing["data_loading_sec"]
         epoch_loss_dict["train/forward_sec"] = train_timing["forward_sec"]
         epoch_loss_dict["train/backward_sec"] = train_timing["backward_sec"]
+        epoch_loss_dict["train/skipped_updates"] = train_timing["skipped_updates"]
         metrics_epoch[epoch] = {"train_metrics": train_metric_results}
         _log_metric_dict(logger, "train", train_metric_results, step)
 

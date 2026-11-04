@@ -42,7 +42,9 @@ class FakeMetaModel:
         train_metrics: dict[str, float] | None = None,
         val_losses: list[float] | None = None,
         val_metrics_seq: list[dict[str, float | np.ndarray]] | None = None,
+        skipped_updates: int = 0,
     ):
+        self._skipped_updates = skipped_updates
         self.training_kwargs = SimpleNamespace(epochs=epochs)
         self.model = torch.nn.Linear(4, 2)
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.1)
@@ -69,6 +71,7 @@ class FakeMetaModel:
             "forward_sec": 0.0,
             "backward_sec": 0.0,
             "num_samples": 2,
+            "skipped_updates": self._skipped_updates,
         }
         return self._train_loss, dict(self._train_metrics), timing
 
@@ -339,6 +342,25 @@ def test_train_model_logs_main_metric_set_to_logger() -> None:
         "train/samples_per_sec",
     ):
         assert key in logged_keys, f"{key!r} was not logged (logged: {sorted(logged_keys)})"
+
+
+def test_train_model_logs_skipped_updates_to_logger() -> None:
+    meta = FakeMetaModel(epochs=1, skipped_updates=3)
+    logger = StubLogger()
+    train_model(
+        meta_model=meta,
+        evaluator=object(),
+        train_loader=_tiny_loader(),
+        val_loader=None,
+        logger=logger,
+        metric_of_interest="accuracy",
+    )
+    skipped = [
+        payload["train/skipped_updates"]
+        for payload, _ in logger.logged
+        if "train/skipped_updates" in payload
+    ]
+    assert skipped == [3]
 
 
 def test_train_model_logs_against_global_step_axis() -> None:

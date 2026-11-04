@@ -649,6 +649,13 @@ class MetaModel:
                 iterations_per_train_epoch,
             )
             start_update = 0
+        epoch_already_complete = start_update == iterations_per_train_epoch
+        if epoch_already_complete:
+            logger.info(
+                "train_epoch: epoch %s is already complete at global step %s; nothing to run.",
+                epoch_index,
+                self.global_step,
+            )
         n_applied = 0
         skipped_updates = 0
 
@@ -822,11 +829,12 @@ class MetaModel:
             last_loss = running_loss / n_applied
         else:
             last_loss = float("nan")
-            logger.warning(
-                "train_epoch: no optimizer update was applied this epoch (%s skipped); "
-                "the average loss is NaN.",
-                skipped_updates,
-            )
+            if not epoch_already_complete:
+                logger.warning(
+                    "train_epoch: no optimizer update was applied this epoch (%s skipped); "
+                    "the average loss is NaN.",
+                    skipped_updates,
+                )
         avg_loss_components = {k: v / n_applied for k, v in running_loss_components.items()}
         for k, v in avg_loss_components.items():
             metric_results[f"loss/{k}"] = v

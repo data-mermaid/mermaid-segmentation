@@ -170,3 +170,56 @@ def test_average_loss_is_nan_when_every_update_is_skipped(minimal_config, make_m
     assert math.isnan(loss)
     assert timing["skipped_updates"] == 2
     assert meta.global_step == 0
+
+
+def test_epoch_already_complete_on_resume_runs_nothing(minimal_config, make_meta_model, caplog):
+    meta = make_meta_model(_cfg(minimal_config, iterations=2), run_name="already-complete")
+    meta.global_step = 2
+    steps = _count_optimizer_steps(meta)
+
+    with caplog.at_level("INFO", logger="mermaidseg.model.meta"):
+        loss, metric_results, timing = meta.train_epoch([_batch(1)], evaluator=None, epoch=0)
+
+    assert math.isnan(loss)
+    assert meta.global_step == 2
+    assert steps == []
+    assert timing == {
+        "data_loading_sec": 0.0,
+        "forward_sec": 0.0,
+        "backward_sec": 0.0,
+        "num_samples": 0,
+        "skipped_updates": 0,
+    }
+    assert metric_results == {}
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+    assert any("already complete" in m for m in messages)
+    assert not any("no optimizer update was applied" in r.getMessage() for r in caplog.records)
+
+
+def test_non_finite_loss_skips_the_update(minimal_config, make_meta_model):
+    meta = make_meta_model(_cfg(minimal_config, iterations=1), run_name="inf-loss")
+    _pin_head(meta)
+    steps = _count_optimizer_steps(meta)
+    with torch.no_grad():
+        meta.model.head.classifier.bias[0] = math.inf  # infinite logits make the forward loss NaN
+
+    loss, _, timing = meta.train_epoch([_batch(1)], evaluator=None, epoch=0)
+
+    assert timing["skipped_updates"] == 1
+    assert steps == []
+    assert meta.global_step == 0
+    assert math.isnan(loss)
+
+
+def test_consecutive_empty_count_resets_after_each_real_batch(minimal_config, make_meta_model):
+    cfg = _cfg(minimal_config, iterations=1)
+    cfg.training.grad_accum_steps = 2
+    meta = make_meta_model(cfg, run_name="empty-reset")
+    run = [_empty_batch()] * 6 + [_batch(1)]
+    loader = run + run  # 12 empties in total, never 10 in a row
+    assert MAX_CONSECUTIVE_EMPTY_BATCHES < 12
+
+    _, _, timing = meta.train_epoch(loader, evaluator=None, epoch=0)
+
+    assert meta.global_step == 1
+    assert timing["num_samples"] == 4
