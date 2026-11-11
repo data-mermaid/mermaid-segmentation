@@ -126,80 +126,220 @@ class ClassConfusion:
 
 @dataclass
 class TaxonomicRankAccuracy:
-    """Per-rank taxonomic accuracy including / excluding ``None``.
+    """Per-rank taxonomic accuracy and macro F1 over three point scopes.
 
     Concept channels use ``0=not_given, 1=inactive, 2=active``. A pixel is
     *given* at this rank if any channel in the rank slice equals 2. The GT class
     is the channel holding the 2; the prediction is the argmax over the same
     channels of the model's (per-rank softmax) probabilities.
 
-    - ``acc_all``: over all *given* pixels (including the ``rank__none`` value).
-    - ``acc_living``: over given pixels whose GT value is not ``rank__none``.
+    Each scope has its own GT taxon x predicted taxon confusion matrix:
+
+    - ``all``: every given pixel, ``rank__none`` included.
+    - ``living``: given pixels whose GT is not ``rank__none`` and whose per-point
+      ``live`` flag is set (see :func:`~mermaidseg.evaluation.gt_mapping.point_scopes`).
+      Without ``live`` every non-``none`` pixel is living.
+    - ``coral``: given pixels whose per-point ``coral`` flag is set (live hard and
+      soft corals). Empty, hence NaN, unless ``coral`` is passed.
+
+    Per scope, ``acc_<scope>`` is the accuracy and ``macro_f1_<scope>`` the mean
+    one-vs-rest F1 over the taxa with GT support in that scope. Only GT rows are
+    restricted: a scoped pixel predicted as another taxon (or ``rank__none``) is a
+    false negative for its own taxon, while an out-of-scope pixel predicted as a
+    taxon is not a false positive for it. ``f1_none`` is the one-vs-rest F1 of
+    ``rank__none`` over all given pixels (NaN without that channel or support).
     """
 
     rank: str
     channel_indices: list[int]
     none_local_index: int | None = None
-    correct_all: int = 0
-    total_all: int = 0
-    correct_living: int = 0
-    total_living: int = 0
+    values: list[str] | None = None
+    confusion: NDArray[np.int64] | None = None
+    confusion_living: NDArray[np.int64] | None = None
+    confusion_coral: NDArray[np.int64] | None = None
 
-    def update(self, gt_rows: NDArray[np.integer], pred_probs: NDArray[np.floating]) -> None:
+    def __post_init__(self) -> None:
+        n = len(self.channel_indices)
+        for name in ("confusion", "confusion_living", "confusion_coral"):
+            cm = getattr(self, name)
+            if cm is None:
+                setattr(self, name, np.zeros((n, n), dtype=np.int64))
+            elif cm.shape != (n, n):
+                raise ValueError(f"{self.rank} {name} must be {(n, n)}, got {cm.shape}")
+        if self.values is not None and len(self.values) != n:
+            raise ValueError(f"{self.rank} has {n} channels but {len(self.values)} values")
+
+    def update(
+        self,
+        gt_rows: NDArray[np.integer],
+        pred_probs: NDArray[np.floating],
+        live: NDArray[np.bool_] | None = None,
+        coral: NDArray[np.bool_] | None = None,
+    ) -> None:
+        """Accumulate points; ``live`` / ``coral`` are per-point flags aligned with ``gt_rows``."""
         if not self.channel_indices:
             return
         g = np.asarray(gt_rows)[:, self.channel_indices]
         p = np.asarray(pred_probs)[:, self.channel_indices]
+        for name, flags in (("live", live), ("coral", coral)):
+            if flags is not None and np.asarray(flags).shape != (g.shape[0],):
+                raise ValueError(f"{name} must have shape ({g.shape[0]},), got {np.shape(flags)}")
         active = g == 2
         valid = active.any(axis=1)
         if not valid.any():
             return
         gt_idx = active[valid].argmax(axis=1)
         pred_idx = p[valid].argmax(axis=1)
-        correct = gt_idx == pred_idx
-
-        self.correct_all += int(correct.sum())
-        self.total_all += int(valid.sum())
 
         if self.none_local_index is not None:
-            living = gt_idx != self.none_local_index
+            not_none = gt_idx != self.none_local_index
         else:
-            living = np.ones_like(gt_idx, dtype=bool)
-        self.correct_living += int(correct[living].sum())
-        self.total_living += int(living.sum())
+            not_none = np.ones_like(gt_idx, dtype=bool)
+        living = not_none if live is None else not_none & np.asarray(live, dtype=bool)[valid]
+        if coral is None:
+            in_coral = np.zeros_like(gt_idx, dtype=bool)
+        else:
+            in_coral = not_none & np.asarray(coral, dtype=bool)[valid]
+
+        n = len(self.channel_indices)
+        flat = gt_idx * n + pred_idx
+        self.confusion += np.bincount(flat, minlength=n * n).reshape(n, n)
+        self.confusion_living += np.bincount(flat[living], minlength=n * n).reshape(n, n)
+        self.confusion_coral += np.bincount(flat[in_coral], minlength=n * n).reshape(n, n)
 
     def merge(self, other: "TaxonomicRankAccuracy") -> None:
-        self.correct_all += other.correct_all
-        self.total_all += other.total_all
-        self.correct_living += other.correct_living
-        self.total_living += other.total_living
+        if other.channel_indices != self.channel_indices:
+            raise ValueError(f"Cannot merge {self.rank} accumulators with different channels")
+        self.confusion += other.confusion
+        self.confusion_living += other.confusion_living
+        self.confusion_coral += other.confusion_coral
 
     def clone(self) -> "TaxonomicRankAccuracy":
         return TaxonomicRankAccuracy(
             rank=self.rank,
             channel_indices=list(self.channel_indices),
             none_local_index=self.none_local_index,
-            correct_all=self.correct_all,
-            total_all=self.total_all,
-            correct_living=self.correct_living,
-            total_living=self.total_living,
+            values=list(self.values) if self.values is not None else None,
+            confusion=self.confusion.copy(),
+            confusion_living=self.confusion_living.copy(),
+            confusion_coral=self.confusion_coral.copy(),
         )
 
     @property
+    def total_all(self) -> int:
+        return int(self.confusion.sum())
+
+    @property
+    def total_living(self) -> int:
+        return int(self.confusion_living.sum())
+
+    @property
+    def total_coral(self) -> int:
+        return int(self.confusion_coral.sum())
+
+    @staticmethod
+    def _accuracy(cm: NDArray[np.int64]) -> float:
+        return _safe_div(int(np.trace(cm)), int(cm.sum()))
+
+    @property
     def acc_all(self) -> float:
-        return _safe_div(self.correct_all, self.total_all)
+        return self._accuracy(self.confusion)
 
     @property
     def acc_living(self) -> float:
-        return _safe_div(self.correct_living, self.total_living)
+        return self._accuracy(self.confusion_living)
 
-    def to_dict(self) -> dict:
-        return {
+    @property
+    def acc_coral(self) -> float:
+        return self._accuracy(self.confusion_coral)
+
+    @staticmethod
+    def _per_taxon_f1(cm: NDArray[np.int64]) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+        """Per-taxon F1 and GT support; ``2TP + FP + FN`` equals GT count + predicted count."""
+        tp = np.diag(cm).astype(np.float64)
+        support = cm.sum(axis=1)
+        denom = (support + cm.sum(axis=0)).astype(np.float64)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            f1 = np.where(denom > 0, 2.0 * tp / denom, np.nan)
+        return f1, support
+
+    @staticmethod
+    def _macro(f1: NDArray[np.float64], support: NDArray[np.int64]) -> tuple[float, int]:
+        present = support > 0
+        if not present.any():
+            return float("nan"), 0
+        return float(f1[present].mean()), int(present.sum())
+
+    @property
+    def macro_f1_all(self) -> float:
+        return self._macro(*self._per_taxon_f1(self.confusion))[0]
+
+    @property
+    def macro_f1_living(self) -> float:
+        return self._macro(*self._per_taxon_f1(self.confusion_living))[0]
+
+    @property
+    def macro_f1_coral(self) -> float:
+        return self._macro(*self._per_taxon_f1(self.confusion_coral))[0]
+
+    @property
+    def f1_none(self) -> float:
+        if self.none_local_index is None:
+            return float("nan")
+        return float(self._per_taxon_f1(self.confusion)[0][self.none_local_index])
+
+    def to_dict(self, include_detail: bool = False) -> dict:
+        f1_all, support_all = self._per_taxon_f1(self.confusion)
+        f1_living, support_living = self._per_taxon_f1(self.confusion_living)
+        f1_coral, support_coral = self._per_taxon_f1(self.confusion_coral)
+        macro_all, n_taxa_all = self._macro(f1_all, support_all)
+        macro_living, n_taxa_living = self._macro(f1_living, support_living)
+        macro_coral, n_taxa_coral = self._macro(f1_coral, support_coral)
+        out = {
             "acc_all": self.acc_all,
             "acc_living": self.acc_living,
+            "acc_coral": self.acc_coral,
             "n_all": self.total_all,
             "n_living": self.total_living,
+            "n_coral": self.total_coral,
+            "macro_f1_all": macro_all,
+            "macro_f1_living": macro_living,
+            "macro_f1_coral": macro_coral,
+            "f1_none": self.f1_none,
+            "n_taxa_all": n_taxa_all,
+            "n_taxa_living": n_taxa_living,
+            "n_taxa_coral": n_taxa_coral,
+            "n_none": (
+                int(support_all[self.none_local_index])
+                if self.none_local_index is not None
+                else 0
+            ),
         }
+        if include_detail:
+
+            def _f1(f1: NDArray[np.float64], support: NDArray[np.int64], i: int) -> float | None:
+                if i == self.none_local_index or support[i] == 0 or np.isnan(f1[i]):
+                    return None
+                return float(f1[i])
+
+            names = self.values or [str(i) for i in range(len(self.channel_indices))]
+            pred_all = self.confusion.sum(axis=0)
+            per_taxon = {}
+            for i, name in enumerate(names):
+                if support_all[i] == 0 and pred_all[i] == 0:
+                    continue
+                per_taxon[name] = {
+                    "support": int(support_all[i]),
+                    "support_living": int(support_living[i]),
+                    "support_coral": int(support_coral[i]),
+                    "pred_count": int(pred_all[i]),
+                    "tp": int(self.confusion[i, i]),
+                    "f1_all": None if np.isnan(f1_all[i]) else float(f1_all[i]),
+                    "f1_living": _f1(f1_living, support_living, i),
+                    "f1_coral": _f1(f1_coral, support_coral, i),
+                }
+            out["per_taxon"] = per_taxon
+        return out
 
 
 class BinaryConceptStats:
@@ -462,7 +602,12 @@ class MetricBundle:
     @classmethod
     def create(cls, num_classes: int, layout: ConceptLayout, ignore_index: int = 0) -> "MetricBundle":
         taxo = [
-            TaxonomicRankAccuracy(rank=rank, channel_indices=idx, none_local_index=none_local)
+            TaxonomicRankAccuracy(
+                rank=rank,
+                channel_indices=idx,
+                none_local_index=none_local,
+                values=[layout.concept_names[i].split("__", 1)[1] for i in idx],
+            )
             for rank, idx, none_local in layout.taxo
         ]
         binary = BinaryConceptStats(layout.binary_names, layout.binary_indices)
@@ -479,10 +624,12 @@ class MetricBundle:
         pred_class: NDArray[np.integer],
         gt_rows: NDArray[np.integer],
         pred_probs: NDArray[np.floating],
+        live: NDArray[np.bool_] | None = None,
+        coral: NDArray[np.bool_] | None = None,
     ) -> None:
         self.class_confusion.update(gt_class, pred_class)
         for t in self.taxo:
-            t.update(gt_rows, pred_probs)
+            t.update(gt_rows, pred_probs, live=live, coral=coral)
         if self.binary is not None:
             self.binary.update(gt_rows, pred_probs)
         self.num_points += int(np.asarray(gt_class).reshape(-1).shape[0])
@@ -504,14 +651,17 @@ class MetricBundle:
         )
 
     def to_dict(
-        self, class_id2name: dict[int, str] | None = None, include_class_detail: bool = False
+        self,
+        class_id2name: dict[int, str] | None = None,
+        include_class_detail: bool = False,
+        include_taxon_detail: bool = False,
     ) -> dict:
         out = {
             "num_points": self.num_points,
             "class_accuracy": self.class_confusion.accuracy(),
             "class_miou": self.class_confusion.miou(),
             "class_points_scored": self.class_confusion.total,
-            "taxonomic": {t.rank: t.to_dict() for t in self.taxo},
+            "taxonomic": {t.rank: t.to_dict(include_detail=include_taxon_detail) for t in self.taxo},
             "binary": self.binary.to_dict() if self.binary is not None else {},
         }
         if include_class_detail:

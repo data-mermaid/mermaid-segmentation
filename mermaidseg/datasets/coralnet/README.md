@@ -70,8 +70,8 @@ python -m mermaidseg.datasets.coralnet.dedup.dedup
 python -m mermaidseg.datasets.coralnet.dedup.near_duplicates          # ~1 h; then label in the notebook
 python -m mermaidseg.datasets.coralnet.dedup.dedup                    # again, with the labels
 python -m mermaidseg.datasets.coralnet.scraper.source_metadata        # once, ~1 h
-python -m mermaidseg.datasets.coralnet.dedup.splits                   # writes configs/data_config_dedup.yaml
-python -m mermaidseg.datasets.coralnet.dedup.leakage --config configs/data_config_dedup.yaml
+python -m mermaidseg.datasets.coralnet.dedup.splits                   # writes configs/data_config.yaml
+python -m mermaidseg.datasets.coralnet.dedup.leakage --config configs/data_config.yaml
 ```
 
 Versioned results and curated inputs live in `configs/coralnet/`:

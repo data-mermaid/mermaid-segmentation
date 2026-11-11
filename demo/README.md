@@ -24,6 +24,8 @@ The demo needs a checkpoint plus label/concept metadata. Most of this is **not g
 
 Download both from an MLflow run (under `metadata/`) and place them in `demo/`, or pass paths with `--id2label` / `--concept-id2name`.
 
+The checked-in `concept_id2name.json` is the 706-channel layout built from the current `configs/class_to_concepts.csv` (with the `rubble`, `water surface` and `water column` channels) and the sources of `configs/data_config.yaml`. Checkpoints trained on the older 703-channel table do not load against it; export a checkpoint from a run trained on the current table. Every training run also writes its layout to `nbs/model_checkpoints/<run>/concept_id2name.json`.
+
 The taxonomy tree uses `configs/class_to_concepts.csv` from the repo (or any compatible CSV). Set `DEMO_TAXONOMY_CSV` to override; if the file is missing, the demo still runs but taxonomy parent edges are omitted.
 
 ## Local usage (repo environment)

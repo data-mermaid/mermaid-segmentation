@@ -1,6 +1,7 @@
 model:
   name: "ConceptBottleneckDPTLoRADINOv3"
   encoder_name: "facebook/dinov3-vitl16-pretrain-lvd1689m"
+  # Default input size. --resolution (training pipeline, scripts/evaluate.py) overrides it.
   input_size: [512, 512]
   # Concept bottleneck: DPT features -> concepts -> classes.
   concept_feature_dim: 256

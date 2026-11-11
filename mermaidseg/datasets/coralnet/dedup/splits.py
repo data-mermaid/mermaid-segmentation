@@ -210,10 +210,10 @@ def main() -> None:
                    help="Where the dedup blacklist / overrides are and source_splits.csv goes.")
     p.add_argument("--metadata", type=Path, default=DEFAULT_OUTPUTS / "coralnet_source_metadata.csv")
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUTS / "splits")
-    p.add_argument("--out-config", type=Path, default=REPO_ROOT / "configs/data_config_dedup.yaml")
+    p.add_argument("--out-config", type=Path, default=REPO_ROOT / "configs/data_config.yaml")
     p.add_argument("--cache-root", default=DEFAULT_CACHE_ROOT)
     p.add_argument("--mapping", type=Path, default=REPO_ROOT / "configs/coralnet_to_mermaid_mapping_temporary.json")
-    p.add_argument("--training-config", type=Path, default=REPO_ROOT / "configs/training_config_cbm.yaml",
+    p.add_argument("--training-config", type=Path, default=REPO_ROOT / "configs/training_config_cbm_100k.yaml",
                    help="Its training.class_subset is the class space (with label roll-up).")
     p.add_argument("--hierarchy", type=Path, default=CONFIG_DIR / "mermaid_benthic_hierarchy.json",
                    help="MERMAID benthic hierarchy snapshot (name -> parent); fetched from the API if missing.")

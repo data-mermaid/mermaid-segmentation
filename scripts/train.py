@@ -1,25 +1,26 @@
 """Background-safe training entry point.
 
-Mirrors the logic in nbs/Base_Pipeline.ipynb as a CLI script. Run via uv so
+Single-GPU CLI training run. Run via uv so
 it uses the locked project venv. Cell outputs freeze when the browser
 disconnects — this script writes structured logs to a file so progress is
 always captured.
 
 The run is configured by four split configs, each with a sensible default:
 ``--config-data`` (configs/data_config.yaml), ``--config-model``
-(configs/model_config_cbm.yaml), ``--config-training``
-(configs/training_config_cbm.yaml), and ``--config-logger``
-(configs/logger_config.yaml). Override any one independently.
+(configs/model_config_cbm_dpt_lora_vitl.yaml), ``--config-training``
+(configs/training_config_cbm_100k.yaml), and ``--config-logger``
+(configs/logger_config.yaml). Override any one independently. The cluster
+experiments train with nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py
+through slurm/train.sbatch instead.
 
 Usage::
 
     # Foreground (debug) — uses the default split configs
     uv run python scripts/train.py
 
-    # Override an individual split (e.g. standard, non-CBM training)
+    # Override an individual split (e.g. a different encoder)
     uv run python scripts/train.py \\
-        --config-model configs/model_config.yaml \\
-        --config-training configs/training_config.yaml
+        --config-model configs/model_config_cbm_dpt_lora_vitb.yaml
 
     # Background — safe to close the browser window
     nohup uv run python scripts/train.py \\
@@ -187,13 +188,13 @@ def _build_parser() -> argparse.ArgumentParser:
     base.add_argument(
         "--config-model",
         type=str,
-        default="configs/model_config_cbm.yaml",
+        default="configs/model_config_cbm_dpt_lora_vitl.yaml",
         help="path to model config file",
     )
     base.add_argument(
         "--config-training",
         type=str,
-        default="configs/training_config_cbm.yaml",
+        default="configs/training_config_cbm_100k.yaml",
         help="path to training config file",
     )
     base.add_argument(

@@ -8,10 +8,10 @@ Jupyter notebooks are the primary way to run training and evaluation experiments
 
 | Notebook | Purpose |
 |----------|---------|
-| `nbs/Base_Pipeline.ipynb` | Train a standard (non-concept) segmentation model end-to-end |
-| `nbs/Concept_Bottleneck_Pipeline.ipynb` | Train a concept bottleneck model end-to-end |
-| `nbs/Model_Evaluation.ipynb` | Quantitative and qualitative evaluation of trained models |
 | `nbs/datasets/Dataset_Exploration.ipynb` | Explore dataset classes and concept mappings |
+
+Training and evaluation run as scripts: `nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py`
+trains a concept bottleneck model, and `scripts/evaluate.py` evaluates a checkpoint.
 
 ---
 
@@ -28,14 +28,13 @@ Then restart JupyterLab and select it from the kernel menu.
 
 ---
 
-## Running a training notebook
+## Running a training run
 
 1. Pick a config file from `configs/` (or create a new one — see [Reproducibility](Reproducibility))
-2. Open `nbs/Base_Pipeline.ipynb` (or the CBM variant)
-3. Set the config path in the first cell
-4. Run all cells in order (`Run → Run All Cells`)
+2. From `nbs/`, run `uv run python Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py --run-name <name>`,
+   passing `--training-config`, `--model-config` or `--data-config` to change the defaults
 
-The notebook will load data from S3, train the model, and log the run to MLflow automatically. You don't need to add logging calls — it's handled by the pipeline.
+The pipeline loads data from S3, trains the model, and logs the run to wandb automatically.
 
 ---
 

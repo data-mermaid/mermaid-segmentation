@@ -37,6 +37,7 @@ from mermaidseg.model.concept_metrics import reduce_masked_loss, taxonomic_targe
 
 logger = logging.getLogger(__name__)
 
+
 def taxonomic_rank_slices(
     concept_value2id: dict[str, dict[str, list[int]]],
 ) -> list[tuple[str, int, list[str]]]:
@@ -155,11 +156,6 @@ class TaxonomicPartialLoss(torch.nn.Module):
     Every pixel labelled at rank ``r - 1`` selects its children at rank ``r`` with a row lookup in
     ``A_{r-1->r}``, independent of whether rank ``r`` is labelled. Each pair is reduced and logged
     separately.
-
-    Optionally mixes in a uniform-target variant ``-(1/|S|) sum_{j in S} log p_j`` with weight
-    ``alpha``, annealed linearly from 1 to 0 over ``uniform_anneal_iters`` training steps. The
-    uniform target counteracts the marginal loss reinforcing whichever fine class the model already
-    prefers inside the labelled subtree. ``uniform_anneal_iters=0`` disables it.
     """
 
     def __init__(
@@ -168,12 +164,10 @@ class TaxonomicPartialLoss(torch.nn.Module):
         concept_value2id: dict[str, dict[str, list[int]]],
         per_pixel_loss_weight: float = 0.0,
         per_image_loss_weight: float = 1.0,
-        uniform_anneal_iters: int = 0,
     ) -> None:
         super().__init__()
         self.per_pixel_loss_weight = per_pixel_loss_weight
         self.per_image_loss_weight = per_image_loss_weight
-        self.uniform_anneal_iters = uniform_anneal_iters
         self.slices = taxonomic_rank_slices(concept_value2id)
 
         matrices = build_parent_matrices(taxonomy, concept_value2id)
@@ -199,23 +193,16 @@ class TaxonomicPartialLoss(torch.nn.Module):
                     missing,
                 )
 
-    def uniform_alpha(self, step: int) -> float:
-        if self.uniform_anneal_iters <= 0:
-            return 0.0
-        return max(0.0, 1.0 - step / self.uniform_anneal_iters)
-
     def forward(
         self,
         concept_logits: torch.Tensor,
         concept_labels: torch.Tensor,
-        step: int = 0,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Sum of the ``(d, r)`` partial terms, plus per-term and per-depth logging values.
 
         Args:
             concept_logits: Raw concept logits ``(B, C, H, W)``; taxonomic ranks come first.
             concept_labels: Concept targets ``(B, C, H, W)`` in the taxonomic 0/1/2 encoding.
-            step: Training step, used only to anneal the uniform-target mix.
         """
         targets, valid, depth = rank_targets(concept_labels, self.slices)
 
@@ -224,7 +211,6 @@ class TaxonomicPartialLoss(torch.nn.Module):
         for d, (rank, _, _) in enumerate(self.slices):
             loss_components[f"depth_frac/{rank}"] = ((depth == d).sum() / num_labelled).item()
 
-        alpha = self.uniform_alpha(step)
         total = concept_logits.new_zeros(())
         for r in range(1, len(self.slices)):
             d = r - 1
@@ -242,10 +228,6 @@ class TaxonomicPartialLoss(torch.nn.Module):
             lse_all = pixel_logits.logsumexp(dim=1)
             lse_subtree = pixel_logits.masked_fill(~in_subtree, float("-inf")).logsumexp(dim=1)
             pixel_loss = lse_all - lse_subtree
-            if alpha > 0:
-                log_probs = pixel_logits - lse_all.unsqueeze(1)
-                uniform = -(log_probs * in_subtree).sum(dim=1) / in_subtree.sum(dim=1)
-                pixel_loss = (1 - alpha) * pixel_loss + alpha * uniform
 
             per_pixel = concept_logits.new_zeros(mask.shape)
             per_pixel[mask] = pixel_loss
@@ -398,28 +380,21 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
 class TaxonomicLoss(torch.nn.Module):
     """Taxonomy-aware terms added on top of the per-rank cross-entropy of the concept loss.
 
-        L = mu * sum_r L_partial^(r-1->r) / num_ranks + lambda(t) * sum_r L_KL^(r) / num_ranks
+        L = mu * sum_r L_partial^(r-1->r) / num_ranks + lambda * sum_r L_KL^(r) / num_ranks
 
     Both terms are divided by the number of taxonomic ranks like the per-rank cross-entropy in
-    :class:`~mermaidseg.model.loss.ConceptBottleneckLoss`, so their weights are on the same scale. ``lambda(t)`` is 0 before
-    ``kl_start_iters``, then ramps linearly to ``kl_weight`` over ``kl_ramp_iters``. ``t`` counts
-    optimizer updates (``MetaModel.global_step``), the unit of the LR warmup and decay, so the
-    schedule means the same in every config and survives a mid-epoch resume. Each term is only
-    built when its weight is positive.
+    :class:`~mermaidseg.model.loss.ConceptBottleneckLoss`, so their weights are on the same scale.
+    Both weights are constant from the first update; the LR warmup and decay are the only schedule.
+    Each term is only built when its weight is positive.
 
     Args:
         taxonomy: Parent-child structure from ``build_taxonomy_tree`` over ``class_to_concepts.csv``,
             the same tree the hierarchical metrics use.
         concept_value2id: Concept name -> value -> channel mapping.
         partial_weight: Weight ``mu`` of :class:`TaxonomicPartialLoss`. Defaults to 0 (off).
-        partial_uniform_anneal_iters: Optimizer updates over which the partial loss's uniform-target
-            mix anneals from 1 to 0. Defaults to 0 (no uniform mix).
         per_pixel_loss_weight: Partial-loss reduction, matching the concept loss's setting.
         per_image_loss_weight: Partial-loss reduction, matching the concept loss's setting.
-        kl_weight: Peak weight ``lambda_kl`` of :class:`TaxonomicCoherenceLoss`. Defaults to 0 (off).
-        kl_start_iters: The KL weight is 0 before this many optimizer updates.
-        kl_ramp_iters: The KL weight then ramps linearly to ``kl_weight`` over this many updates
-            (0 = jump straight to ``kl_weight``).
+        kl_weight: Weight ``lambda`` of :class:`TaxonomicCoherenceLoss`. Defaults to 0 (off).
         kl_stop_grad_coarse: Detach the coarse head's distribution in each KL pair.
         kl_pixels: ``"all_valid"`` or ``"not_fine_labelled"``.
         kl_boundary_px: Exclude pixels within this many px of an annotated label boundary.
@@ -430,21 +405,16 @@ class TaxonomicLoss(torch.nn.Module):
         taxonomy: TaxonomyTree,
         concept_value2id: dict[str, dict[str, list[int]]],
         partial_weight: float = 0.0,
-        partial_uniform_anneal_iters: int = 0,
         per_pixel_loss_weight: float = 0.0,
         per_image_loss_weight: float = 1.0,
         kl_weight: float = 0.0,
-        kl_start_iters: int = 0,
-        kl_ramp_iters: int = 0,
         kl_stop_grad_coarse: bool = True,
         kl_pixels: str = "all_valid",
         kl_boundary_px: int = 0,
     ) -> None:
         super().__init__()
         self.partial_weight = partial_weight
-        self.kl_peak_weight = kl_weight
-        self.kl_start_iters = kl_start_iters
-        self.kl_ramp_iters = kl_ramp_iters
+        self.kl_weight = kl_weight
         self.num_ranks = len(TAXONOMIC_CONCEPTS)
 
         self.partial_loss = None
@@ -454,7 +424,6 @@ class TaxonomicLoss(torch.nn.Module):
                 concept_value2id,
                 per_pixel_loss_weight=per_pixel_loss_weight,
                 per_image_loss_weight=per_image_loss_weight,
-                uniform_anneal_iters=partial_uniform_anneal_iters,
             )
         self.coherence_loss = None
         if kl_weight > 0:
@@ -466,20 +435,11 @@ class TaxonomicLoss(torch.nn.Module):
                 boundary_px=kl_boundary_px,
             )
 
-    def kl_weight(self, step: int) -> float:
-        """``lambda(t)``: 0 before ``kl_start_iters``, then a linear ramp to the peak weight."""
-        if self.kl_peak_weight <= 0 or step < self.kl_start_iters:
-            return 0.0
-        if self.kl_ramp_iters <= 0:
-            return self.kl_peak_weight
-        return self.kl_peak_weight * min(1.0, (step - self.kl_start_iters) / self.kl_ramp_iters)
-
     def forward(
         self,
         concept_logits: torch.Tensor,
         concept_labels: torch.Tensor,
         target_labels: torch.Tensor,
-        step: int = 0,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Weighted sum of the enabled taxonomic terms, plus their logging values.
 
@@ -487,30 +447,24 @@ class TaxonomicLoss(torch.nn.Module):
             concept_logits: Raw concept logits ``(B, C, H, W)``; taxonomic ranks come first.
             concept_labels: Concept targets ``(B, C, H, W)`` in the taxonomic 0/1/2 encoding.
             target_labels: Target-space labels ``(B, H, W)``; used only for the KL boundary band.
-            step: Optimizer updates so far (``MetaModel.global_step``). Drives the KL weight
-                schedule and the partial loss's uniform-target anneal.
         """
         loss_components: dict[str, float] = {}
         total = concept_logits.new_zeros(())
 
         if self.partial_loss is not None:
-            partial_value, partial_components = self.partial_loss(
-                concept_logits, concept_labels, step=step
-            )
+            partial_value, partial_components = self.partial_loss(concept_logits, concept_labels)
             partial_value = partial_value / self.num_ranks
             loss_components.update(partial_components)
             loss_components["partial"] = partial_value.item()
             total = total + self.partial_weight * partial_value
 
-        kl_weight = self.kl_weight(step)
-        if self.coherence_loss is not None and kl_weight > 0:
+        if self.coherence_loss is not None:
             kl_value, kl_components = self.coherence_loss(
                 concept_logits, concept_labels, target_labels
             )
             kl_value = kl_value / self.num_ranks
             loss_components.update(kl_components)
             loss_components["kl"] = kl_value.item()
-            loss_components["kl_weight"] = kl_weight
-            total = total + kl_weight * kl_value
+            total = total + self.kl_weight * kl_value
 
         return total, loss_components

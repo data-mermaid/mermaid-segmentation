@@ -12,10 +12,24 @@ from pathlib import Path
 
 import torch
 
+from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
 from mermaidseg.evaluation.metrics import ConceptLayout
 from mermaidseg.model.hierarchical_metrics import HierarchicalMetrics
 from mermaidseg.model.rank_outputs import RankBatch
+
+#: Headline keys of ``HierarchicalMetrics.compute()`` reported per unit and in macro means.
+HIER_HEADLINE_KEYS: tuple[str, ...] = (
+    "consistency/overall",
+    *(
+        f"consistency/{c}->{f}"
+        for c, f in zip(TAXONOMIC_CONCEPTS, TAXONOMIC_CONCEPTS[1:], strict=False)
+    ),
+    *(f"severity/{rank}" for rank in TAXONOMIC_CONCEPTS),
+    "severity/mean_normalized",
+    *(f"ece/{rank}" for rank in TAXONOMIC_CONCEPTS),
+    "ece/mean",
+)
 
 
 class HierarchicalScore:
@@ -42,7 +56,25 @@ class HierarchicalScore:
                     "must be the one the checkpoint was trained with."
                 )
             self._slices.append(slice(indices[0], indices[-1] + 1))
+        self.tree = tree
         self.metrics = HierarchicalMetrics(tree, ranks=self.ranks)
+
+    def fresh(self) -> "HierarchicalScore":
+        """Empty accumulator with this one's validated tree and channel slices."""
+        out = object.__new__(HierarchicalScore)
+        out.ranks = self.ranks
+        out._slices = list(self._slices)
+        out.tree = self.tree
+        out.metrics = HierarchicalMetrics(self.tree, ranks=self.ranks)
+        src = self.metrics
+        if src._device is not None:
+            # Read-only tree lookups; sharing them skips rebuilding per accumulator.
+            out.metrics._device = src._device
+            out.metrics._incidence = src._incidence
+            out.metrics._distance = src._distance
+            out.metrics._taxon_mask = src._taxon_mask
+            out.metrics._taxon_or_none_mask = src._taxon_or_none_mask
+        return out
 
     def dense_targets(self, concept_rows: torch.Tensor) -> torch.Tensor:
         """``(M, K)`` concept rows with 0/1/2 codes -> ``(R, M)`` dense ids."""

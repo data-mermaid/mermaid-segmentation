@@ -882,15 +882,21 @@ class Logger:
         checkpoint so a resume continues that epoch instead of skipping it.
 
         ``atomic=True`` writes ``<name>.partial`` and renames it into place, so a kill during
-        ``torch.save`` does not leave a truncated file at the final path. The Engaging preempt
+        ``torch.save`` does not leave a truncated file at the final path. The rolling preempt
         checkpoints use this. Interval checkpoints keep the direct write.
+
+        The live module stays on its device. A detached CPU copy of the state dict is saved
+        so a DDP reducer keeps the parameter storage it was built with.
         """
         timestamp = time.strftime("%Y%m%d%H%M%S")
         filename = checkpoint_name or f"model_epoch{epoch}"
 
         checkpoint: dict[str, Any] = {
             "config": self.config,
-            "model_state_dict": meta_model_run.model.cpu().state_dict(),
+            "model_state_dict": {
+                key: value.detach().cpu().clone()
+                for key, value in meta_model_run.model.state_dict().items()
+            },
             "optimizer_state_dict": meta_model_run.optimizer.state_dict(),
             "epoch": epoch,
             "epoch_complete": bool(epoch_complete),
@@ -900,7 +906,6 @@ class Logger:
             "metrics": metrics_dict,
         }
 
-        meta_model_run.model = meta_model_run.model.to(meta_model_run.device)
         if getattr(meta_model_run, "scheduler", None) is not None:
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
@@ -1076,8 +1081,8 @@ class WandbLogger:
                 "wandb is required for WandbLogger but is not installed. Install with: pip install wandb"
             ) from WANDB_IMPORT_ERROR
 
-        # Engaging requeues set WANDB_RUN_ID so a restarted process appends to the
-        # same run. CSAIL jobs leave it unset and keep starting a new run.
+        # slurm/train.sbatch sets WANDB_RUN_ID so every resubmitted job of a run
+        # appends to the same wandb run. Without it, each process starts a new run.
         if run_id is None:
             env_run_id = os.environ.get("WANDB_RUN_ID", "").strip()
             if env_run_id:

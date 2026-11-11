@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup
-from mermaidseg.evaluation.hierarchical import HierarchicalScore
+from mermaidseg.evaluation.hierarchical import HIER_HEADLINE_KEYS, HierarchicalScore
 from mermaidseg.evaluation.metrics import ConceptLayout, MetricBundle, concept_block_from_binary
 from mermaidseg.evaluation.predictor import CBMPredictor, make_eval_transform
 from mermaidseg.evaluation.reporting import fmt, write_csv, write_json
@@ -104,6 +104,8 @@ class PointEvalDataset(Dataset):
                 "cols": np.zeros(0, np.int64),
                 "class_ids": np.zeros(0, np.int64),
                 "concept_rows": np.zeros((0, self.concept_lookup.num_channels), np.int8),
+                "live": np.zeros(0, bool),
+                "coral": np.zeros(0, bool),
                 "H": 1,
                 "W": 1,
                 "unit": unit,
@@ -123,6 +125,7 @@ class PointEvalDataset(Dataset):
             concept_rows = np.stack([self.concept_lookup.row(n) for n in names]).astype(np.int8)
         else:
             concept_rows = np.zeros((0, self.concept_lookup.num_channels), np.int8)
+        scopes = np.array([self.concept_lookup.scopes(n) for n in names], dtype=bool).reshape(-1, 2)
 
         return {
             "ok": True,
@@ -131,6 +134,8 @@ class PointEvalDataset(Dataset):
             "cols": cols_a,
             "class_ids": class_ids,
             "concept_rows": concept_rows,
+            "live": scopes[:, 0],
+            "coral": scopes[:, 1],
             "H": int(h),
             "W": int(w),
             "unit": unit,
@@ -145,6 +150,8 @@ def _collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "cols": [b["cols"] for b in batch],
         "class_ids": [b["class_ids"] for b in batch],
         "concept_rows": [b["concept_rows"] for b in batch],
+        "live": [b["live"] for b in batch],
+        "coral": [b["coral"] for b in batch],
         "H": [b["H"] for b in batch],
         "W": [b["W"] for b in batch],
         "unit": [b["unit"] for b in batch],
@@ -152,32 +159,80 @@ def _collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _unit_row_for_csv(unit: str, d: dict) -> dict:
-    row = {
-        "unit": unit,
-        "num_points": d["num_points"],
-        "class_accuracy": d["class_accuracy"],
-        "class_miou": d["class_miou"],
-        "binary_macro_accuracy": d["binary"].get("macro_accuracy") if d["binary"] else None,
-        "binary_macro_f1": d["binary"].get("macro_f1") if d["binary"] else None,
+_TAX_SCALARS = (
+    "acc_all",
+    "acc_living",
+    "acc_coral",
+    "macro_f1_all",
+    "macro_f1_living",
+    "macro_f1_coral",
+    "f1_none",
+)
+_CONCEPT_SCALARS = ("accuracy", "precision", "recall", "f1")
+
+
+def _scalar(value: Any) -> float:
+    return float("nan") if value is None else float(value)
+
+
+def unit_scalars(d: dict, binary_concepts: Sequence[str] = ()) -> dict[str, float]:
+    """Flat scalar metrics of one unit (or pooled) dict, for per-unit CSVs and macro means."""
+    binary = d.get("binary") or {}
+    out = {
+        "class_accuracy": _scalar(d["class_accuracy"]),
+        "class_miou": _scalar(d["class_miou"]),
+        "binary_macro_accuracy": _scalar(binary.get("macro_accuracy")),
+        "binary_macro_f1": _scalar(binary.get("macro_f1")),
     }
     for rank, rd in d["taxonomic"].items():
-        row[f"tax_{rank}_acc_all"] = rd["acc_all"]
-        row[f"tax_{rank}_acc_living"] = rd["acc_living"]
-    return row
+        for key in _TAX_SCALARS:
+            out[f"tax_{rank}_{key}"] = _scalar(rd.get(key))
+    for concept in binary_concepts:
+        block = d.get(concept) or {}
+        for key in _CONCEPT_SCALARS:
+            out[f"{concept}_{key}"] = _scalar(block.get(key))
+    if "hierarchical" in d:
+        h = d["hierarchical"] or {}
+        for key in HIER_HEADLINE_KEYS:
+            out[f"hier/{key}"] = _scalar(h.get(key))
+    return out
+
+
+def unit_scalar_keys(
+    ranks: Sequence[str], binary_concepts: Sequence[str] = (), with_hier: bool = True
+) -> list[str]:
+    """Every key :func:`unit_scalars` can emit, in its order."""
+    keys = ["class_accuracy", "class_miou", "binary_macro_accuracy", "binary_macro_f1"]
+    keys += [f"tax_{rank}_{key}" for rank in ranks for key in _TAX_SCALARS]
+    keys += [f"{concept}_{key}" for concept in binary_concepts for key in _CONCEPT_SCALARS]
+    if with_hier:
+        keys += [f"hier/{key}" for key in HIER_HEADLINE_KEYS]
+    return keys
+
+
+def _unit_row_for_csv(unit: str, d: dict, binary_concepts: Sequence[str] = ()) -> dict:
+    return {"unit": unit, "num_points": d["num_points"], **unit_scalars(d, binary_concepts)}
 
 
 def _log_unit(logger_: logging.Logger, unit: str, d: dict) -> None:
     tax = " ".join(
-        f"{r}={fmt(v['acc_all'])}/{fmt(v['acc_living'])}" for r, v in d["taxonomic"].items()
+        f"{r}={fmt(v['acc_all'])}/{fmt(v['acc_living'])}/{fmt(v['acc_coral'])}"
+        for r, v in d["taxonomic"].items()
+    )
+    tax_f1 = " ".join(
+        f"{r}={fmt(v['macro_f1_all'])}/{fmt(v['macro_f1_living'])}/{fmt(v['macro_f1_coral'])}"
+        f"/{fmt(v['f1_none'])}"
+        for r, v in d["taxonomic"].items()
     )
     binm = d["binary"] or {}
     logger_.info(
-        "[unit %s] points=%d class_acc=%s | tax(all/living) %s | binary macro acc=%s f1=%s",
+        "[unit %s] points=%d class_acc=%s | tax(all/living/coral) %s | "
+        "tax macroF1(all/living/coral/none) %s | binary macro acc=%s f1=%s",
         unit,
         d["num_points"],
         fmt(d["class_accuracy"]),
         tax,
+        tax_f1,
         fmt(binm.get("macro_accuracy")),
         fmt(binm.get("macro_f1")),
     )
@@ -289,6 +344,8 @@ def run_point_evaluation(
     pending: dict[str, MetricBundle] = {}
     pooled = MetricBundle.create(num_classes, layout)
     hier = HierarchicalScore(concept_names, taxonomy_csv) if taxonomy_csv is not None else None
+    # Per-unit hierarchical accumulators; the pooled one still sees every point.
+    pending_hier: dict[str, HierarchicalScore] = {}
     unit_results: dict[str, dict] = {}
     macro: dict[str, list[float]] = defaultdict(list)
     csv_rows: list[dict] = []
@@ -298,29 +355,31 @@ def run_point_evaluation(
 
     def finalize_unit(unit: str) -> None:
         bundle = pending.pop(unit)
+        unit_hier = pending_hier.pop(unit, None)
         d = bundle.to_dict(class_id2name=id2label, include_class_detail=True)
+        for concept in binary_concepts:
+            d[concept] = concept_block_from_binary(d.get("binary") or {}, concept)
+        if hier is not None:
+            d["hierarchical"] = (unit_hier or hier.fresh()).to_dict()
         unit_results[unit] = d
         _log_unit(logger, unit, d)
         pooled.merge(bundle)
-        # collect macro scalars
-        macro["class_accuracy"].append(d["class_accuracy"])
-        macro["class_miou"].append(d["class_miou"])
-        if d["binary"]:
-            macro["binary_macro_accuracy"].append(d["binary"]["macro_accuracy"])
-            macro["binary_macro_f1"].append(d["binary"]["macro_f1"])
-        for rank, rd in d["taxonomic"].items():
-            macro[f"tax_{rank}_acc_all"].append(rd["acc_all"])
-            macro[f"tax_{rank}_acc_living"].append(rd["acc_living"])
-        csv_rows.append(_unit_row_for_csv(unit, d))
+        for key, value in unit_scalars(d, binary_concepts).items():
+            macro[key].append(value)
+        csv_rows.append(_unit_row_for_csv(unit, d, binary_concepts))
         _flush(final=False)
 
     def _macro_dict() -> dict:
-        return {
-            k: (float(np.nanmean(v)) if len(v) else float("nan")) for k, v in macro.items()
-        }
+        out = {}
+        for k, v in macro.items():
+            finite = [x for x in v if not np.isnan(x)]
+            out[k] = float(np.mean(finite)) if finite else float("nan")
+        return out
 
     def _pooled_dict() -> dict:
-        pooled_d = pooled.to_dict(class_id2name=id2label, include_class_detail=True)
+        pooled_d = pooled.to_dict(
+            class_id2name=id2label, include_class_detail=True, include_taxon_detail=True
+        )
         for concept in binary_concepts:
             pooled_d[concept] = concept_block_from_binary(pooled_d.get("binary") or {}, concept)
         if hier is not None:
@@ -354,6 +413,8 @@ def run_point_evaluation(
             if bundle is None:
                 bundle = MetricBundle.create(num_classes, layout)
                 pending[unit] = bundle
+                if hier is not None:
+                    pending_hier[unit] = hier.fresh()
 
             if not batch["ok"][b]:
                 n_failed += 1
@@ -370,11 +431,18 @@ def run_point_evaluation(
                     pred_class = cs.argmax(dim=0).cpu().numpy()
                     pred_probs = ks.transpose(0, 1).cpu().numpy()  # (N, K)
                     bundle.update(
-                        batch["class_ids"][b], pred_class, batch["concept_rows"][b], pred_probs
+                        batch["class_ids"][b],
+                        pred_class,
+                        batch["concept_rows"][b],
+                        pred_probs,
+                        live=batch["live"][b],
+                        coral=batch["coral"][b],
                     )
                     if hier is not None:
                         rows_t = torch.from_numpy(batch["concept_rows"][b]).to(ks.device)
-                        hier.update(ks, hier.dense_targets(rows_t))
+                        targets = hier.dense_targets(rows_t)
+                        hier.update(ks, targets)
+                        pending_hier[unit].update(ks, targets)
 
             remaining[unit] = remaining.get(unit, 0) - 1
             if remaining.get(unit, 0) <= 0:
@@ -405,13 +473,25 @@ def run_point_evaluation(
     )
     for rank, rd in pooled_d["taxonomic"].items():
         logger.info(
-            "[%s] POOLED tax %s: acc_all=%s (n=%d) acc_living=%s (n=%d)",
+            "[%s] POOLED tax %s: acc_all=%s (n=%d) acc_living=%s (n=%d) acc_coral=%s (n=%d) "
+            "macroF1_all=%s (%d taxa) macroF1_living=%s (%d taxa) macroF1_coral=%s (%d taxa) "
+            "f1_none=%s (n=%d)",
             eval_name,
             rank,
             fmt(rd["acc_all"]),
             rd["n_all"],
             fmt(rd["acc_living"]),
             rd["n_living"],
+            fmt(rd["acc_coral"]),
+            rd["n_coral"],
+            fmt(rd["macro_f1_all"]),
+            rd["n_taxa_all"],
+            fmt(rd["macro_f1_living"]),
+            rd["n_taxa_living"],
+            fmt(rd["macro_f1_coral"]),
+            rd["n_taxa_coral"],
+            fmt(rd["f1_none"]),
+            rd["n_none"],
         )
     for concept in binary_concepts:
         block = pooled_d[concept]

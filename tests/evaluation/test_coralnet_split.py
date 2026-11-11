@@ -68,17 +68,19 @@ def test_evaluate_coralnet_forwards_dedup_fields(monkeypatch):
     monkeypatch.setattr(coralnet_eval, "build_concept_lookup", lambda *a, **k: None)
     monkeypatch.setattr(coralnet_eval, "run_point_evaluation", lambda **k: {"base": k["base_ds"]})
 
-    coralnet_eval.evaluate_coralnet(
-        predictor=None,
-        whitelist_sources=[4, 5],
-        image_blacklist="/bl.parquet",
-        annotation_overrides="/ov.parquet",
-        id2label={},
-        concept_names=[],
-        taxonomy_csv="x",
-        hierarchy=None,
-        output_dir="out",
-    )
+    kwargs = {
+        "predictor": None,
+        "whitelist_sources": [4, 5],
+        "image_blacklist": "/bl.parquet",
+        "annotation_overrides": "/ov.parquet",
+        "id2label": {},
+        "concept_names": [],
+        "taxonomy_csv": "x",
+        "hierarchy": None,
+        "output_dir": "out",
+    }
+    result = coralnet_eval.evaluate_coralnet(**kwargs)
     assert seen["whitelist_sources"] == [4, 5]
     assert seen["image_blacklist"] == "/bl.parquet"
     assert seen["annotation_overrides"] == "/ov.parquet"
+    assert result["whitelist_sources"] == [4, 5]

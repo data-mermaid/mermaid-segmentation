@@ -11,8 +11,8 @@ directory. Once this succeeds, the GPU training job can run with
 Example::
 
     python scripts/prefetch_cache.py \
-        --data-config configs/data_config_dedup.yaml \
-        --training-config configs/training_config_cbm.yaml \
+        --data-config configs/data_config.yaml \
+        --training-config configs/training_config_cbm_100k.yaml \
         --workers 32
 """
 
@@ -43,12 +43,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--data-config",
-        default="configs/data_config_dedup.yaml",
+        default="configs/data_config.yaml",
         help="Path to the data config YAML.",
     )
     parser.add_argument(
         "--training-config",
-        default="configs/training_config_cbm.yaml",
+        default="configs/training_config_cbm_100k.yaml",
         help="Path to the training config YAML (used for the `padding` value).",
     )
     parser.add_argument(

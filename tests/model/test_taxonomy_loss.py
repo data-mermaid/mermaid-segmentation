@@ -187,19 +187,6 @@ def test_zero_when_fine_mass_inside_subtree(partial_loss):
     assert total.item() == pytest.approx(0.0, abs=1e-6)
 
 
-def test_uniform_target_anneals_to_marginal():
-    taxonomy, value2id = _tree(RANKS, PATHS), _concept_value2id(RANKS)
-    loss = TaxonomicPartialLoss(taxonomy, value2id, uniform_anneal_iters=10)
-    logits, labels = _pixels([PIXEL_B])
-
-    uniform, _ = loss(logits, labels, step=0)
-    order_family = -sum(math.log(p) for p in FAMILY_PROBS[:2]) / 2
-    family_genus = -sum(math.log(p) for p in GENUS_PROBS[:3]) / 3
-    assert uniform.item() == pytest.approx(order_family + family_genus, abs=1e-5)
-    annealed, _ = loss(logits, labels, step=10)
-    assert annealed.item() == pytest.approx(-math.log(0.85) - math.log(0.37), abs=1e-5)
-
-
 def test_none_is_not_a_descendant_of_concrete_taxa():
     ranks = {"order": ["alcyonacea", "none"], "family": ["alcyoniidae", "none"]}
     paths = [("alcyonacea", "alcyoniidae"), ("alcyonacea", "none"), ("none", "none")]
@@ -408,30 +395,14 @@ def test_coherence_handles_taxonomy_defects(caplog):
     assert total.item() == pytest.approx(0.0, abs=1e-6)
 
 
-def test_kl_weight_schedule():
-    loss = TaxonomicLoss(
-        _tree(RANKS, PATHS),
-        _concept_value2id(RANKS),
-        kl_weight=0.2,
-        kl_start_iters=2000,
-        kl_ramp_iters=4000,
-    )
-    assert [loss.kl_weight(s) for s in (0, 1999, 2000, 3000, 6000, 10000)] == pytest.approx(
-        [0, 0, 0, 0.05, 0.2, 0.2]
-    )
-
-
-def test_kl_schedule_follows_step():
+def test_kl_weight_is_constant():
     concept_logits = _logits(ORDER_PROBS, FAMILY_PROBS, GENUS_PROBS)
     concept_labels, target_labels = _no_labels()
-    loss = TaxonomicLoss(
-        _tree(RANKS, PATHS), _concept_value2id(RANKS), kl_weight=0.5, kl_start_iters=100
-    )
-    before, components = loss(concept_logits, concept_labels, target_labels, step=99)
-    assert before.item() == 0.0 and "kl" not in components
-    after, components = loss(concept_logits, concept_labels, target_labels, step=100)
-    assert components["kl_weight"] == 0.5
-    assert after.item() == pytest.approx(0.5 * components["kl"], abs=1e-6)
+    loss = TaxonomicLoss(_tree(RANKS, PATHS), _concept_value2id(RANKS), kl_weight=0.5)
+    total, components = loss(concept_logits, concept_labels, target_labels)
+    assert "kl_weight" not in components
+    assert components["kl"] > 0.0
+    assert total.item() == pytest.approx(0.5 * components["kl"], abs=1e-6)
 
 
 def test_taxonomic_loss_scales_kl_term():
@@ -456,7 +427,7 @@ def test_taxonomic_loss_sums_both_terms():
     kl, _ = TaxonomicLoss(taxonomy, value2id, kl_weight=0.5)(*args)
     both, components = TaxonomicLoss(taxonomy, value2id, partial_weight=2.0, kl_weight=0.5)(*args)
 
-    assert {"partial", "kl", "kl_weight"} <= components.keys()
+    assert {"partial", "kl"} <= components.keys()
     assert both.item() == pytest.approx(partial.item() + kl.item(), abs=1e-6)
 
 

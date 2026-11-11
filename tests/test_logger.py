@@ -507,6 +507,24 @@ class TestSaveModelCheckpoint:
         assert ckpt["epoch_complete"] is False
         assert ckpt["epoch"] == 0
 
+    def test_save_leaves_parameters_in_place(self, tmp_mlflow_uri, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="inplace-ckpt")
+        weight = meta.model.weight
+        ptr = weight.data_ptr()
+        device = weight.device
+        values = weight.detach().clone()
+        config = make_config()
+        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1)
+        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.1}, is_best=False)
+
+        assert meta.model.weight.data_ptr() == ptr
+        assert meta.model.weight.device == device
+        path = tmp_path / "model_checkpoints" / "inplace-ckpt" / "model_epoch1"
+        ckpt = torch.load(path, weights_only=False)
+        saved = ckpt["model_state_dict"]["weight"]
+        assert saved.device.type == "cpu"
+        torch.testing.assert_close(saved, values)
+
     def test_atomic_checkpoint_leaves_no_partial(self, tmp_mlflow_uri, tmp_path, make_config):
         meta = FakeMetaModel(run_name="atomic-ckpt")
         meta.global_step = 1000
@@ -543,19 +561,19 @@ class TestSaveModelCheckpoint:
         assert not (directory / "model_preempt500.partial").exists()
 
     def test_wandb_run_id_env_resumes(self, monkeypatch):
-        monkeypatch.setenv("WANDB_RUN_ID", "engaging-cbm_vitsize_vitl")
+        monkeypatch.setenv("WANDB_RUN_ID", "r1-cbm_lossw_pix0.5_img0.5")
         with (
             patch("mermaidseg.logger.WANDB_IMPORT_ERROR", None),
             patch("mermaidseg.logger.wandb") as mock_wandb,
         ):
-            mock_wandb.init.return_value = MagicMock(id="engaging-cbm_vitsize_vitl")
+            mock_wandb.init.return_value = MagicMock(id="r1-cbm_lossw_pix0.5_img0.5")
             WandbLogger(
                 project="mermaidseg",
-                run_name="cbm_vitsize_vitl",
+                run_name="cbm_lossw_pix0.5_img0.5",
                 config={},
                 num_classes=3,
             )
-        assert mock_wandb.init.call_args.kwargs["id"] == "engaging-cbm_vitsize_vitl"
+        assert mock_wandb.init.call_args.kwargs["id"] == "r1-cbm_lossw_pix0.5_img0.5"
         assert mock_wandb.init.call_args.kwargs["resume"] == "allow"
 
     def test_wandb_run_id_unset_starts_a_new_run(self, monkeypatch):

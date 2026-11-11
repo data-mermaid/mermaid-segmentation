@@ -126,7 +126,7 @@ print(f"  checkpoint    {ck.stat().st_size} bytes  md5={hashlib.md5(ck.read_byte
 # ---------------------------------------------------------------- config
 config_path_dict = {
     "data": "../configs/data_config.yaml",
-    "training": "../configs/training_config_cbm.yaml",
+    "training": "../configs/training_config_cbm_100k.yaml",
     "model": "../configs/model_config_cbm_dpt_lora_vitl.yaml",
     "logger": "../configs/logger_config.yaml",
 }

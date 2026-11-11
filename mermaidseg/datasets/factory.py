@@ -48,6 +48,36 @@ def _is_skip(split_cfg: Any) -> bool:
     return split_cfg is None or split_cfg == "None"
 
 
+_CONCEPT_SPLITS = ("train", "val", "test")
+
+
+def configured_source_names(
+    data_cfg: Any,
+    *,
+    dataset_classes: dict[str, type] | None = None,
+) -> set[str]:
+    """``SOURCE_NAME``s with a non-skipped train, val, or test block.
+
+    Does not instantiate datasets. ``data_cfg`` is the ``data`` section, either
+    raw YAML or the preprocessed mapping passed to :func:`build_datasets`.
+    A profile that sets a train split to ``None`` drops that dataset only when
+    this function is called on the profile. Call it on the unmodified config to
+    freeze the concept channels.
+    """
+    dataset_classes = dataset_classes or DATASET_CLASSES
+    sources: set[str] = set()
+    for name, cls in dataset_classes.items():
+        try:
+            section = data_cfg.get(name) if hasattr(data_cfg, "get") else data_cfg[name]
+        except KeyError:
+            continue
+        if section is None or not hasattr(section, "get"):
+            continue
+        if any(not _is_skip(section.get(split)) for split in _CONCEPT_SPLITS):
+            sources.add(cls.SOURCE_NAME)
+    return sources
+
+
 def build_datasets(
     data_cfg: Any,
     padding: int | None = None,

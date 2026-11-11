@@ -24,9 +24,9 @@ Load it by setting ``hf_repo_id: <output-dir>`` on the dataset's train split in 
 
 Usage:
     python scripts/build_sparse_dense_datasets.py --dataset coralscapes_v2 \\
-        --output-dir data_quality/coralscapes_v2_sparse25_pad3_seed0
+        --output-dir data_sparse/components/coralscapes_v2_sparse25_pad3_seed0
     python scripts/build_sparse_dense_datasets.py --dataset ucsd_mosaics \\
-        --output-dir data_quality/ucsd_mosaics_sparse25_pad3_seed0 --num-proc 16
+        --output-dir data_sparse/components/ucsd_mosaics_sparse25_pad3_seed0 --num-proc 16
 """
 
 from __future__ import annotations

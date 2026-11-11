@@ -1,0 +1,69 @@
+training:
+    training_mode: "concept-bottleneck"
+    freeze_encoder: true
+    detach_concepts: true
+    concept_mapping_path: "../configs/class_to_concepts.csv"
+    loss:
+        type: ConceptBottleneckLoss
+        lambda_weight: 1
+        ignore_index: 0
+        per_pixel_loss_weight: 0.5
+        per_image_loss_weight: 0.5
+    # Taxonomy-aware terms added to the concept loss. The pipeline flags --kl-weight,
+    # --partial-weight and --distance-weight set the weights; a section whose weights are
+    # all 0 is dropped. Every weight is constant from the first update.
+    taxonomic_loss:
+        # Multi-parent taxa: permissive (keep all parents), exclude, or strict (error).
+        ambiguity_policy: permissive
+        # Marginal partial-label CE for pixels labelled only to a coarse taxonomic rank.
+        partial_weight: 0.0
+        # Label-free KL coherence between adjacent rank heads.
+        kl_weight: 0.0
+        kl_stop_grad_coarse: true
+        kl_pixels: all_valid  # or not_fine_labelled
+        kl_boundary_px: 0
+    # Expected taxonomic distance of each rank head's prediction under the tree distance
+    # matrix of the mistake-severity metric, normalised to [0, 1] per rank.
+    distance_loss:
+        weight: 0.0
+        ambiguity_policy: permissive  # multi-parent taxa take their closest lineage
+    # 100k optimizer updates: 4k linear warmup, then LinearLR to 0 at update 100k.
+    # model_step{N} every 10k updates. Ten epochs of 10k updates, so validation runs every 10k. Shared by the loss-weight sweep, the taxonomy-loss,
+    # data-size, sparsification and ViT-size experiments.
+    epochs: 10
+    max_grad_norm: 0.5
+    optimizer:
+        type: AdamW
+        lr: 0.00005          # fallback / default; also the DPT + concept/class head LR
+        weight_decay: 0.01
+        lora_lr: 0.00001     # backbone LoRA adapter params
+        dpt_lr: 0.00005      # DPT head + concept_proj + concept_classifier
+    scheduler:
+        type: LinearLR
+        start_factor: 1.0
+        end_factor: 0.0
+        total_iters: 96000  # optimizer updates after warmup; step_every is iteration
+        step_every: iteration
+        warmup_iters: 4000
+        warmup_start_factor: 0.01
+    mixed_precision: true
+    mixed_precision_dtype: bfloat16
+    iterations_per_val_epoch: 400
+    iterations_per_train_epoch: 10000
+    batch_size: 32
+    grad_accum_steps: 1
+    checkpoint_every_steps: 10000
+    class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
+                    'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
+                    'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
+                    'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fish', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
+                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human', 'Human-made structure', 'Hydnophora',
+                    'Isopora', 'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis',
+                    'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium',
+                    'Orbicella annularis', 'Orbicella faveolata', 'Pachyseris', 'Padina', 'Pavona', 'Pectinia', 'Platygyra',
+                    'Pocillopora', 'Porites', 'Porites astreoides', 'Psammocora', 'Rock', 'Rubble', 'Sand', 'Sargassum',
+                    'Sea urchin', 'Seagrass', 'Seriatopora', 'Siderastrea siderea', 'Soft coral', 'Sponge', 'Stylophora',
+                    'Symphyllia', 'Transect tools', 'Tridacna giant clam', 'Turbinaria-algae', 'Turbinaria-coral',
+                    'Turf algae', 'Zoanthid']
+    padding: 3
+    label_roll_up: True

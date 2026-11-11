@@ -42,6 +42,11 @@ Algorithm (full train census, target ``K`` points per class, default ``K=10``):
 5. The image list is exactly the images that own at least one point, sorted by
    site then stem.
 
+``--label-space legacy39`` remaps each mask through the published 95-to-39
+table before the census, and stores V1 class ids. ``label_md5`` is still the
+hash of the original 95-class mask. Each ``--per-class`` value is selected on
+its own; a smaller k is not a prefix of a larger one.
+
 Usage:
     uv run python scripts/build_coralscapes_v2_probe_points.py \
         --local-root /Users/jonathan/mit/coralscapes_v2 \
@@ -49,6 +54,12 @@ Usage:
         --per-class 10 \
         --min-component-size 4 \
         --exclusion-radius 16
+
+    uv run python scripts/build_coralscapes_v2_probe_points.py \\
+        --local-root /Users/jonathan/mit/coralscapes_v2 \\
+        --output configs/eval/coralscapes_v2_39_probe_k10.json \\
+        --per-class 10 \\
+        --label-space legacy39
 
 On that local mirror (1790 train masks) three components can hold only one
 pixel once a radius-16 disk is removed, so those classes are stored short of
@@ -79,7 +90,11 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPES_V2_ID2NAME
+from mermaidseg.datasets.coralscapes.coralscapes_dataset import CORALSCAPES_ID2NAME
+from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import (
+    CORALSCAPES_V2_ID2NAME,
+    coralscapes_v2_to_legacy_lut,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,11 +145,26 @@ def _md5(arr: np.ndarray) -> str:
     return hashlib.md5(np.ascontiguousarray(arr, dtype=np.uint8).tobytes()).hexdigest()
 
 
-def _class_name(class_id: int) -> str:
-    name = CORALSCAPES_V2_ID2NAME.get(class_id)
+def _class_name(class_id: int, id2name: dict[int, str] | None = None) -> str:
+    if id2name is None:
+        name = CORALSCAPES_V2_ID2NAME.get(class_id)
+        if name is None:
+            raise ProbeSelectionError(f"class id {class_id} is outside CoralscapesV2 ids 1..95")
+        return name
+    name = id2name.get(class_id)
     if name is None:
-        raise ProbeSelectionError(f"class id {class_id} is outside CoralscapesV2 ids 1..95")
+        raise ProbeSelectionError(f"class id {class_id} is not in the active label map")
     return name
+
+
+def remap_label(label: np.ndarray, lut: np.ndarray) -> np.ndarray:
+    """Apply a 1D class-id lookup. Index 0 stays unannotated when the lut says so."""
+    if lut.ndim != 1:
+        raise ProbeSelectionError(f"label lut must be 1D, got shape {lut.shape}")
+    max_id = int(label.max()) if label.size else 0
+    if max_id >= len(lut):
+        raise ProbeSelectionError(f"label id {max_id} is outside the lut of length {len(lut)}")
+    return np.asarray(lut, dtype=np.uint8)[label]
 
 
 def interior_point(mask: np.ndarray) -> tuple[int, int]:
@@ -302,7 +332,7 @@ def select_class_assignments(
 
 
 def components_in_label(
-    label: np.ndarray, min_component_size: int
+    label: np.ndarray, min_component_size: int, num_classes: int = NUM_CLASSES
 ) -> dict[int, list[tuple[int, int]]]:
     """Return ``class_id -> [(component_index, size), ...]`` for one label mask.
 
@@ -312,11 +342,11 @@ def components_in_label(
     if label.ndim != 2:
         raise ProbeSelectionError(f"label must be 2D, got shape {label.shape}")
     max_id = int(label.max()) if label.size else 0
-    if max_id > NUM_CLASSES:
+    if max_id > num_classes:
         raise ProbeSelectionError(
-            f"label contains class id {max_id}, but CoralscapesV2 ids only go to {NUM_CLASSES}"
+            f"label contains class id {max_id}, but the active label ids only go to {num_classes}"
         )
-    present = [int(class_id) for class_id in np.unique(label) if 1 <= int(class_id) <= NUM_CLASSES]
+    present = [int(class_id) for class_id in np.unique(label) if 1 <= int(class_id) <= num_classes]
     found: dict[int, list[tuple[int, int]]] = {}
     for class_id in present:
         labeled, n_components = ndimage.label(label == class_id, structure=_STRUCT8)
@@ -335,7 +365,10 @@ def components_in_label(
 
 
 def census_train_components(
-    records: list[ImageRecord], min_component_size: int
+    records: list[ImageRecord],
+    min_component_size: int,
+    num_classes: int = NUM_CLASSES,
+    label_lut: np.ndarray | None = None,
 ) -> dict[int, list[Component]]:
     """Collect kept components for every class across the training split."""
     by_class: dict[int, list[Component]] = defaultdict(list)
@@ -347,7 +380,9 @@ def census_train_components(
                 f"{record.site}/{record.stem} label shape {label.shape} "
                 f"does not match the recorded size {(record.height, record.width)}"
             )
-        for class_id, comps in components_in_label(label, min_component_size).items():
+        if label_lut is not None:
+            label = remap_label(label, label_lut)
+        for class_id, comps in components_in_label(label, min_component_size, num_classes).items():
             for component_index, size in comps:
                 by_class[class_id].append(
                     Component(
@@ -367,6 +402,7 @@ def _points_for_image(
     label: np.ndarray,
     jobs: list[tuple[int, Component, int]],
     exclusion_radius: int,
+    id2name: dict[int, str] | None = None,
 ) -> tuple[list[dict], list[str], list[dict]]:
     """Place probe pixels for every ``(class_id, component, quota)`` job in one image.
 
@@ -388,7 +424,7 @@ def _points_for_image(
             component_mask = labeled == component.component_index
             size = int(component_mask.sum())
             where = (
-                f"class {_class_name(class_id)} ({class_id}) in "
+                f"class {_class_name(class_id, id2name)} ({class_id}) in "
                 f"{component.site}/{component.stem}, component {component.component_index}"
             )
             if size != component.size:
@@ -407,7 +443,7 @@ def _points_for_image(
                 shortfalls.append(
                     {
                         "class_id": int(class_id),
-                        "class_name": _class_name(class_id),
+                        "class_name": _class_name(class_id, id2name),
                         "site": component.site,
                         "stem": component.stem,
                         "component_index": int(component.component_index),
@@ -436,12 +472,26 @@ def _points_for_image(
     return points, errors, shortfalls
 
 
+def _resolve_label_space(
+    label_space: str,
+) -> tuple[int, dict[int, str], np.ndarray | None, str]:
+    if label_space == "v2":
+        return NUM_CLASSES, CORALSCAPES_V2_ID2NAME, None, "coralscapes_v2"
+    if label_space == "legacy39":
+        return 39, dict(CORALSCAPES_ID2NAME), coralscapes_v2_to_legacy_lut(), "coralscapes_legacy39"
+    raise ValueError(f"label_space must be 'v2' or 'legacy39', got {label_space!r}")
+
+
 def build(
     local_root: Path,
     output: Path,
     per_class: int,
     min_component_size: int,
     exclusion_radius: int,
+    label_space: str = "v2",
+    label_lut: np.ndarray | None = None,
+    id2name: dict[int, str] | None = None,
+    class_ids: list[int] | None = None,
 ) -> None:
     if per_class < 1:
         raise ValueError(f"--per-class must be >= 1, got {per_class}")
@@ -450,10 +500,27 @@ def build(
     if exclusion_radius < 0:
         raise ValueError(f"--exclusion-radius must be >= 0, got {exclusion_radius}")
 
+    spec_classes, spec_names, spec_lut, json_label_space = _resolve_label_space(label_space)
+    lut = spec_lut if label_lut is None else np.asarray(label_lut, dtype=np.uint8)
+    names = spec_names if id2name is None else id2name
+    probed_ids = (
+        list(range(1, spec_classes + 1)) if class_ids is None else [int(i) for i in class_ids]
+    )
+    if not probed_ids:
+        raise ValueError("class_ids must contain at least one class")
+    component_classes = max(probed_ids)
+
     label_paths = _label_paths(local_root, "train")
     if not label_paths:
         raise FileNotFoundError(f"No train labelIds under {local_root}/gtFine/train")
-    logger.info("Found %d train label masks under %s", len(label_paths), local_root)
+    logger.info(
+        "Found %d train label masks under %s (label_space=%s, %d classes, k=%d)",
+        len(label_paths),
+        local_root,
+        json_label_space,
+        len(probed_ids),
+        per_class,
+    )
 
     records: list[ImageRecord] = []
     for path in label_paths:
@@ -464,16 +531,21 @@ def build(
             ImageRecord(path=str(path), site=site, stem=stem, height=int(height), width=int(width))
         )
 
-    by_class = census_train_components(records, min_component_size=min_component_size)
+    by_class = census_train_components(
+        records,
+        min_component_size=min_component_size,
+        num_classes=component_classes,
+        label_lut=lut,
+    )
 
     assignments: dict[int, list[tuple[Component, int]]] = {}
-    for class_id in range(1, NUM_CLASSES + 1):
+    for class_id in probed_ids:
         components = by_class.get(class_id, [])
         try:
             assignments[class_id] = select_class_assignments(components, per_class)
         except ProbeSelectionError as exc:
             raise ProbeSelectionError(
-                f"class {_class_name(class_id)} ({class_id}) has {len(components)} "
+                f"class {_class_name(class_id, names)} ({class_id}) has {len(components)} "
                 f"components of size >= {min_component_size} in the train split: {exc}"
             ) from exc
 
@@ -501,8 +573,13 @@ def build(
                 f"{EXPECTED_HEIGHT}x{EXPECTED_WIDTH}"
             )
             continue
+        if lut is not None:
+            label = remap_label(label, lut)
         points, errors, shortfalls = _points_for_image(
-            label, jobs_by_image[image_index], exclusion_radius=exclusion_radius
+            label,
+            jobs_by_image[image_index],
+            exclusion_radius=exclusion_radius,
+            id2name=names,
         )
         image_points[image_index] = points
         placement_errors.extend(errors)
@@ -532,7 +609,7 @@ def build(
 
     points_per_class: dict[int, int] = {}
     detail: dict[str, dict] = {}
-    for class_id in range(1, NUM_CLASSES + 1):
+    for class_id in probed_ids:
         class_assignments = assignments[class_id]
         seen: set[tuple[int, int, int]] = set()
         placed_counts: list[int] = []
@@ -545,7 +622,7 @@ def build(
             ]
             n_placed = len(component_points)
             where = (
-                f"class {_class_name(class_id)} ({class_id}) component "
+                f"class {_class_name(class_id, names)} ({class_id}) component "
                 f"{component.component_index} in {component.site}/{component.stem}"
             )
             if n_placed < 1 or n_placed > quota:
@@ -574,18 +651,18 @@ def build(
         quotas = [quota for _component, quota in class_assignments]
         if sum(quotas) != per_class:
             raise ProbeSelectionError(
-                f"class {_class_name(class_id)} ({class_id}) quotas sum to {sum(quotas)}, "
+                f"class {_class_name(class_id, names)} ({class_id}) quotas sum to {sum(quotas)}, "
                 f"expected {per_class}"
             )
         n_points = len(seen)
         if n_points != sum(placed_counts) or n_points < 1:
             raise ProbeSelectionError(
-                f"class {_class_name(class_id)} ({class_id}) produced {n_points} distinct pixels "
+                f"class {_class_name(class_id, names)} ({class_id}) produced {n_points} distinct pixels "
                 f"from placed counts {placed_counts}"
             )
         points_per_class[class_id] = n_points
         detail[str(class_id)] = {
-            "class_name": _class_name(class_id),
+            "class_name": _class_name(class_id, names),
             "n_components": len(by_class.get(class_id, [])),
             "n_points": n_points,
             "points_shortfall": per_class - n_points,
@@ -599,7 +676,8 @@ def build(
         )
 
     ordered_image_indexes = sorted(
-        used_image_indexes, key=lambda image_index: (records[image_index].site, records[image_index].stem)
+        used_image_indexes,
+        key=lambda image_index: (records[image_index].site, records[image_index].stem),
     )
     images_out: list[dict] = []
     total_points = 0
@@ -608,7 +686,12 @@ def build(
         label = _load_label(Path(record.path))
         points = sorted(
             image_points[image_index],
-            key=lambda point: (point["class_id"], point["row"], point["col"], point["component_index"]),
+            key=lambda point: (
+                point["class_id"],
+                point["row"],
+                point["col"],
+                point["component_index"],
+            ),
         )
         total_points += len(points)
         images_out.append(
@@ -623,11 +706,11 @@ def build(
         )
 
     shortfall_points = sum(item["quota"] - item["placed"] for item in placement_shortfalls)
-    expected_total = NUM_CLASSES * per_class - shortfall_points
+    expected_total = len(probed_ids) * per_class - shortfall_points
     if total_points != expected_total or total_points != sum(points_per_class.values()):
         raise ProbeSelectionError(
             f"total points {total_points} != {expected_total} "
-            f"({NUM_CLASSES} classes * {per_class} minus {shortfall_points} shortfall pixels)"
+            f"({len(probed_ids)} classes * {per_class} minus {shortfall_points} shortfall pixels)"
         )
     for item in placement_shortfalls:
         logger.warning(
@@ -649,12 +732,14 @@ def build(
         f"--per-class {per_class} "
         f"--min-component-size {min_component_size} "
         f"--exclusion-radius {exclusion_radius}"
+        + ("" if label_space == "v2" else f" --label-space {label_space}")
     )
     payload = {
         "dataset": "josauder/coralscapesV2",
         "split": "train",
         "algorithm": "full_train_component_census_v2",
-        "num_classes": NUM_CLASSES,
+        "label_space": json_label_space,
+        "num_classes": spec_classes if class_ids is None else component_classes,
         "points_per_class_target": per_class,
         "min_component_size": min_component_size,
         "connectivity": 8,
@@ -679,7 +764,7 @@ def build(
         "image_width": EXPECTED_WIDTH,
         "source": f"local_mirror:{local_root}",
         "command": command,
-        "id2label": {str(class_id): name for class_id, name in CORALSCAPES_V2_ID2NAME.items()},
+        "id2label": {str(class_id): names[class_id] for class_id in sorted(names)},
         "points_per_class": {str(class_id): int(n) for class_id, n in points_per_class.items()},
         "points_per_class_detail": detail,
         "placement_shortfalls": placement_shortfalls,
@@ -707,7 +792,9 @@ def build(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--local-root",
         type=Path,
@@ -722,6 +809,13 @@ def main() -> None:
     parser.add_argument("--per-class", type=int, default=10)
     parser.add_argument("--min-component-size", type=int, default=4)
     parser.add_argument("--exclusion-radius", type=int, default=16)
+    parser.add_argument(
+        "--label-space",
+        choices=("v2", "legacy39"),
+        default="v2",
+        help="v2 keeps native ids 1..95. legacy39 remaps masks onto the original 39 classes "
+        "before selecting components. label_md5 stays the hash of the original mask.",
+    )
     args = parser.parse_args()
     build(
         local_root=args.local_root,
@@ -729,6 +823,7 @@ def main() -> None:
         per_class=args.per_class,
         min_component_size=args.min_component_size,
         exclusion_radius=args.exclusion_radius,
+        label_space=args.label_space,
     )
 
 

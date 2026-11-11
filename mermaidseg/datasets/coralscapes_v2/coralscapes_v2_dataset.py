@@ -5,11 +5,14 @@ tuples where ``source_labels`` is in the **native Coralscapes V2 1..95 label
 space**. The static mapping into the MERMAID benthic-attribute target space
 lives in
 :mod:`mermaidseg.dataset_reconciliation.label_mapping.coralscapes_v2_to_mermaid`.
+The published collapse back onto the original Coralscapes 39 classes is
+:data:`CORALSCAPES_V2_TO_LEGACY_NAME`.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import albumentations as A
@@ -18,6 +21,7 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
+from mermaidseg.datasets.coralscapes.coralscapes_dataset import CORALSCAPES_ID2NAME
 from mermaidseg.datasets.utils import emit_dataset_warning
 
 logger = logging.getLogger(__name__)
@@ -122,6 +126,132 @@ CORALSCAPES_V2_ID2NAME: dict[int, str] = {
     95: "xeniidae alive",
 }
 
+# Legacy column of the CoralscapesV2 dataset card (the paper's 95 -> 39 map).
+# The card calls V1 class 12 "hard substrate"; this repo's Coralscapes ids name
+# that class "unknown hard substrate".
+CORALSCAPES_V2_TO_LEGACY_NAME: dict[str, str] = {
+    "acanthaster planci": "crown of thorn",
+    "acropora alive": "acropora alive",
+    "acropora bleached": "branching bleached",
+    "acropora dead": "branching dead",
+    "algae covered brain coral": "algae covered substrate",
+    "algae covered branching coral": "algae covered substrate",
+    "algae covered lobophylliidae": "algae covered substrate",
+    "algae covered massive coral": "algae covered substrate",
+    "algae covered pocillopora": "algae covered substrate",
+    "algae covered porites": "algae covered substrate",
+    "algae covered substrate": "algae covered substrate",
+    "algae covered table acropora": "algae covered substrate",
+    "anemone": "anemone",
+    "background": "background",
+    "brain coral alive": "meandering alive",
+    "brain coral bleached": "meandering bleached",
+    "brain coral dead": "meandering dead",
+    "branching coral alive": "branching alive",
+    "branching coral bleached": "branching bleached",
+    "branching coral dead": "branching dead",
+    "cirrhipathes": "other coral alive",
+    "dark": "dark",
+    "dead giant clam": "dead clam",
+    "feather worm": "other animal",
+    "fish": "fish",
+    "fungiidae alive": "other coral alive",
+    "fungiidae bleached": "other coral bleached",
+    "fungiidae dead": "other coral dead",
+    "galaxea alive": "other coral alive",
+    "galaxea bleached": "other coral bleached",
+    "galaxea dead": "massive/meandering dead",
+    "giant clam": "clam",
+    "goniopora alive": "other coral alive",
+    "goniopora dead": "other coral dead",
+    "hard coral alive": "other coral alive",
+    "hard coral bleached": "other coral bleached",
+    "hard coral dead": "other coral dead",
+    "hard substrate": "unknown hard substrate",
+    "human": "human",
+    "human-made structure": "unknown hard substrate",
+    "leather coral alive": "other coral alive",
+    "lobophylliidae alive": "meandering alive",
+    "lobophylliidae bleached": "meandering bleached",
+    "lobophylliidae dead": "meandering dead",
+    "massive alive": "massive/meandering alive",
+    "massive bleached": "massive/meandering bleached",
+    "massive dead": "massive/meandering dead",
+    "meandering coral alive": "meandering alive",
+    "meandering coral bleached": "meandering bleached",
+    "meandering coral dead": "meandering dead",
+    "millepora": "millepora",
+    "millepora bleached": "branching bleached",
+    "millepora dead": "branching dead",
+    "nephtheidae alive": "other coral alive",
+    "other animal": "other animal",
+    "other coral alive": "other coral alive",
+    "other coral bleached": "other coral bleached",
+    "other coral dead": "other coral dead",
+    "pavona alive": "other coral alive",
+    "pavona bleached": "other coral bleached",
+    "pavona dead": "other coral dead",
+    "pocillopora alive": "pocillopora alive",
+    "pocillopora bleached": "branching bleached",
+    "pocillopora dead": "branching dead",
+    "porites alive": "massive/meandering alive",
+    "porites bleached": "massive/meandering bleached",
+    "porites dead": "massive/meandering dead",
+    "rubble": "rubble",
+    "sand": "sand",
+    "sea cucumber": "sea cucumber",
+    "sea urchin": "sea urchin",
+    "seagrass": "seagrass",
+    "seriatopora alive": "branching alive",
+    "seriatopora bleached": "branching bleached",
+    "seriatopora dead": "branching dead",
+    "soft coral (malacalcyonacea) alive": "other coral alive",
+    "soft coral (malacalcyonacea) bleached": "other coral bleached",
+    "sponge": "sponge",
+    "stylophora alive": "stylophora alive",
+    "stylophora bleached": "branching bleached",
+    "stylophora dead": "branching dead",
+    "table acropora alive": "table acropora alive",
+    "table acropora bleached": "branching bleached",
+    "table acropora dead": "table acropora dead",
+    "thin plate/encrusting coral alive": "other coral alive",
+    "thin plate/encrusting coral bleached": "other coral bleached",
+    "thin plate/encrusting coral dead": "other coral dead",
+    "transect line": "transect line",
+    "transect tools": "transect tools",
+    "trash": "trash",
+    "turbinaria": "turbinaria",
+    "turbinaria dead": "other coral dead",
+    "water column": "background",
+    "water surface": "background",
+    "xeniidae alive": "other coral alive",
+}
+
+
+def coralscapes_v2_to_legacy_lut() -> NDArray[np.uint8]:
+    """Map a native CoralscapesV2 mask onto the original 39-class ids.
+
+    Index 0 stays 0 (unannotated). Indexes 1..95 are the V1 ids of
+    :data:`CORALSCAPES_V2_TO_LEGACY_NAME`.
+    """
+    legacy_ids = {name: class_id for class_id, name in CORALSCAPES_ID2NAME.items()}
+    fine_names = set(CORALSCAPES_V2_ID2NAME.values())
+    if set(CORALSCAPES_V2_TO_LEGACY_NAME) != fine_names:
+        missing = sorted(fine_names - set(CORALSCAPES_V2_TO_LEGACY_NAME))
+        extra = sorted(set(CORALSCAPES_V2_TO_LEGACY_NAME) - fine_names)
+        raise RuntimeError(
+            f"95-to-39 map does not match the V2 names: missing={missing} extra={extra}"
+        )
+    unknown = sorted(set(CORALSCAPES_V2_TO_LEGACY_NAME.values()) - set(legacy_ids))
+    if unknown:
+        raise RuntimeError(
+            f"95-to-39 map uses names that are not Coralscapes V1 classes: {unknown}"
+        )
+    lut = np.zeros(len(CORALSCAPES_V2_ID2NAME) + 1, dtype=np.uint8)
+    for class_id, name in CORALSCAPES_V2_ID2NAME.items():
+        lut[class_id] = legacy_ids[CORALSCAPES_V2_TO_LEGACY_NAME[name]]
+    return lut
+
 
 class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     """A PyTorch Dataset wrapping the HuggingFace
@@ -143,6 +273,10 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         class_subset: Optional list of source-space (Coralscapes V2) class names to retain.
         hf_repo_id: HuggingFace dataset repo ID or local dataset directory (e.g. a sparsified
             copy from ``scripts/build_sparse_dense_datasets.py``) with the same columns.
+        hf_revision: Optional hub revision. Required with ``image_keep`` on a hub repo so the
+            allowlist cannot attach to a later version of the split.
+        image_keep: Optional parquet allowlist of training rows. Masks are not rewritten.
+        image_keep_n_rows: Split length the allowlist was built from, checked before selecting.
         source_id2name: Mapping from local source IDs (1..N) to Coralscapes V2 class names.
         source_name2id: Inverse of source_id2name.
         num_source_classes: ``len(source_id2name) + 1`` (incl. background).
@@ -165,16 +299,30 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
         hf_repo_id: str = CORALSCAPES_V2_HF_REPO,
+        hf_revision: str | None = None,
+        image_keep: str | None = None,
+        image_keep_n_rows: int | None = None,
     ):
         from datasets import concatenate_datasets, load_dataset
+
+        from mermaidseg.datasets.data_size import apply_hf_image_keep
 
         self.split = split
         self.transform = transform
         self.class_subset = class_subset
         self.hf_repo_id = hf_repo_id
+        self.hf_revision = hf_revision
+        self.image_keep = image_keep
+        self.image_keep_n_rows = image_keep_n_rows
         self._global_offset = 0
+        if image_keep is not None:
+            if image_keep_n_rows is None:
+                raise ValueError("image_keep requires image_keep_n_rows")
+            if hf_revision is None and not Path(hf_repo_id).is_dir():
+                raise ValueError("image_keep on a hub dataset requires hf_revision")
 
-        hf_dataset = load_dataset(self.hf_repo_id)
+        revision_kwargs = {"revision": hf_revision} if hf_revision else {}
+        hf_dataset = load_dataset(self.hf_repo_id, **revision_kwargs)
         if self.split is None:
             self.dataset = concatenate_datasets(
                 [
@@ -187,6 +335,11 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             self.dataset = hf_dataset[self.split]
         else:
             self.dataset = concatenate_datasets([hf_dataset[s] for s in self.split])
+
+        if image_keep is not None:
+            self.dataset = apply_hf_image_keep(
+                self.dataset, image_keep, self.SOURCE_NAME, image_keep_n_rows
+            )
 
         if self.class_subset is not None:
             ordered = list(self.class_subset)

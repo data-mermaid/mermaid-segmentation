@@ -1,14 +1,15 @@
 """Full-scale evaluation suite for the concept-bottleneck coral model.
 
 This package provides standalone, cluster-ready evaluations that run at *source
-resolution* (the model runs at its configured ``input_size`` and predictions are
+resolution* (the model runs at the evaluation resolution and predictions are
 sampled/upsampled back to the original image resolution before metrics are
 computed):
 
 - CoralNet val / test sources (per source id + aggregate)
 - Pacific Labeled Corals validation (per region + aggregate)
-- Benthos zero-shot segmentation (per orthomosaic + aggregate)
-- CoralscapesV2 linear probe (dense val / test accuracy / mIoU)
+- CoralscapesV2 linear probes, 95-class and the published 39-class map
+  (dense val / test accuracy / mIoU)
+- Validation loss on the val splits of the training data config
 
 The command-line entry point is ``scripts/evaluate.py``.
 """
@@ -23,6 +24,6 @@ __all__ = [
     "point_datasets",
     "coralnet_eval",
     "pacific_eval",
-    "benthos_eval",
     "coralscapes_probe",
+    "val_loss",
 ]

@@ -108,9 +108,26 @@ plt.show()
 ```
 
 ### Segmentation Models
-To train segmentation models using a specified config file one can use the `nbs/Base_Pipeline.ipynb` or `nbs/Concept_Bottleneck_Pipeline.ipynb` notebooks.
+Concept-bottleneck models are trained with `nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py`
+(run from `nbs/`; `--training-config`, `--model-config`, `--data-config` and `--resolution`
+select the experiment). On the CSAIL cluster, `slurm/train.sbatch` wraps it, and one launcher
+per paper experiment submits the runs:
 
-To evaluate any trained segmentation model, you can use the notebook `nbs/Model_Evaluation.ipynb` which contains both quantitative performance analyses through dataset level performance metrics and qualitative analyses by visualizing model results and corresponding class probabilities.
+| Launcher | Runs |
+|----------|------|
+| `slurm/launch_lossw.sh` | per-pixel / per-image loss-weight sweep |
+| `slurm/launch_duration.sh` | 1M-step constant-LR peak run and its 25k cooldowns |
+| `slurm/launch_hires.sh` | 256-768 px fine-tunes of the 275k + 25k checkpoint |
+| `slurm/launch_taxloss.sh` | KL, partial-label and tree-distance taxonomy losses |
+| `slurm/launch_build_profiles.sh`, `slurm/launch_data_experiments.sh` | data-size and sparsified-data experiments |
+| `slurm/launch_vitsize.sh` | ViT-S / B / H+ encoders |
+| `slurm/launch_final.sh` | final model on train + val, then its 768 px fine-tune |
+
+Every launcher is idempotent and accepts `--dry-run`.
+
+`scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
+few-shot probes and the validation loss). `slurm/launch_evals.sh` runs it on every experiment
+checkpoint, and `scripts/compile_evals.py` collects the results into `eval_out/compiled.csv`.
 
 ### Running Tests
 
@@ -174,7 +191,7 @@ SafeTensors format ensures:
 - Self-contained metadata
 ### Concept Bottleneck Models
 
-When using concept bottleneck models (via `nbs/Concept_Bottleneck_Pipeline.ipynb`), the evaluation metrics use a hard-coded `num_classes=3` parameter. This is intentional and correct for the current implementation.
+When using concept bottleneck models, the evaluation metrics use a hard-coded `num_classes=3` parameter. This is intentional and correct for the current implementation.
 
 **Why 3 classes?** Each concept in the bottleneck can have exactly three states:
 - **True (1)**: Concept is present

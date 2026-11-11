@@ -350,7 +350,7 @@ def main() -> None:
     p.add_argument("--cache-root", default=DEFAULT_CACHE_ROOT)
     p.add_argument("--outputs", type=Path, default=DEFAULT_OUTPUTS, help="Where hashing wrote its outputs.")
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUTS / "near_dup")
-    p.add_argument("--split-config", type=Path, default=REPO_ROOT / "configs/data_config_dedup.yaml")
+    p.add_argument("--split-config", type=Path, default=REPO_ROOT / "configs/data_config.yaml")
     p.add_argument("--blacklist", type=Path, default=CONFIG_DIR / "image_blacklist.parquet")
     p.add_argument("--workers", type=int, default=64)
     p.add_argument("--max-phash", type=int, default=14, help="Candidates: pHash Hamming distance at most ...")

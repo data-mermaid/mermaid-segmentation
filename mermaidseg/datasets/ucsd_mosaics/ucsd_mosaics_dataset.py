@@ -62,6 +62,11 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             holding ``classes.json`` (e.g. a sparsified copy from
             ``scripts/build_sparse_dense_datasets.py``); override only for
             testing or to point at a fork of the mirror.
+        hf_revision: Optional hub revision. Required with ``image_keep`` on a hub repo so the
+            allowlist cannot attach to a later version of the splits.
+        image_keep: Optional parquet allowlist of ``(site, filename)`` rows. Masks stay dense.
+        image_keep_n_rows: Row count after the site and ``original_split`` filters, checked
+            before the allowlist is applied.
 
     Attributes:
         SOURCE_NAME: ``"ucsd_mosaics"``.
@@ -101,9 +106,14 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         class_subset: list[str] | None = None,
         transform: A.BasicTransform | None = None,
         hf_repo_id: str = HF_REPO_ID,
+        hf_revision: str | None = None,
+        image_keep: str | None = None,
+        image_keep_n_rows: int | None = None,
     ):
         from datasets import concatenate_datasets, get_dataset_split_names, load_dataset
         from huggingface_hub import hf_hub_download
+
+        from mermaidseg.datasets.data_size import apply_hf_image_keep
 
         if whitelist_sites is not None and blacklist_sites is not None:
             raise ValueError("Cannot specify both whitelist_sites and blacklist_sites.")
@@ -119,27 +129,46 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.blacklist_original_splits = blacklist_original_splits
         self.transform = transform
         self.class_subset = class_subset
+        self.hf_revision = hf_revision
+        self.image_keep = image_keep
+        self.image_keep_n_rows = image_keep_n_rows
         self._global_offset = 0
+        if image_keep is not None:
+            if image_keep_n_rows is None:
+                raise ValueError("image_keep requires image_keep_n_rows")
+            if hf_revision is None and not Path(hf_repo_id).is_dir():
+                raise ValueError("image_keep on a hub dataset requires hf_revision")
 
+        revision_kwargs = {"revision": hf_revision} if hf_revision else {}
         local_dir = Path(self.hf_repo_id)
         if local_dir.is_dir():
             classes_path = local_dir / "classes.json"
         else:
             classes_path = hf_hub_download(
-                repo_id=self.hf_repo_id, filename="classes.json", repo_type="dataset"
+                repo_id=self.hf_repo_id,
+                filename="classes.json",
+                repo_type="dataset",
+                **revision_kwargs,
             )
         with open(classes_path) as f:
             self.class_table = sorted(json.load(f), key=lambda e: int(e["id"]))
 
-        all_sites = list(get_dataset_split_names(self.hf_repo_id))
+        all_sites = list(get_dataset_split_names(self.hf_repo_id, **revision_kwargs))
         self.sites = self._select_sites(all_sites)
 
-        per_site = [load_dataset(self.hf_repo_id, split=site) for site in self.sites]
+        per_site = [
+            load_dataset(self.hf_repo_id, split=site, **revision_kwargs) for site in self.sites
+        ]
         self.dataset = concatenate_datasets(per_site) if len(per_site) > 1 else per_site[0]
 
         keep_original = self._resolved_original_splits()
         if keep_original is not None:
             self.dataset = self.dataset.filter(lambda ex: ex["original_split"] in keep_original)
+
+        if image_keep is not None:
+            self.dataset = apply_hf_image_keep(
+                self.dataset, image_keep, self.SOURCE_NAME, image_keep_n_rows
+            )
 
         if self.class_subset is not None:
             ordered = list(self.class_subset)

@@ -33,8 +33,8 @@ def evaluate_coralnet(
     max_images_per_unit: int | None = None,
 ) -> dict:
     logger.info(
-        "Building CoralNet %s dataset (whitelist_sources=%s, image_blacklist=%s, "
-        "annotation_overrides=%s) ...",
+        "Building CoralNet %s dataset (whitelist_sources=%s, "
+        "image_blacklist=%s, annotation_overrides=%s) ...",
         split,
         whitelist_sources,
         image_blacklist,
@@ -54,7 +54,7 @@ def evaluate_coralnet(
     class_lookup = build_class_lookup(SOURCE_NAME, names, id2label, hierarchy)
     concept_lookup = build_concept_lookup(SOURCE_NAME, names, concept_names, taxonomy_csv)
 
-    return run_point_evaluation(
+    result = run_point_evaluation(
         eval_name=f"coralnet_{split}",
         base_ds=base,
         unit_col="source_id",
@@ -71,3 +71,5 @@ def evaluate_coralnet(
         num_workers=num_workers,
         max_images_per_unit=max_images_per_unit,
     )
+    result["whitelist_sources"] = sorted(whitelist_sources or [])
+    return result

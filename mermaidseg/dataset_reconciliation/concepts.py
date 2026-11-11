@@ -71,8 +71,11 @@ NONCORAL_CONCEPTS = [
     "human",
     "sand",
     "hard_substrate",
+    "rubble",
     "calcifying",
     "fish",
+    "water surface",
+    "water column",
 ]
 
 

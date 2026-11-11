@@ -56,7 +56,7 @@ import yaml
 logger = logging.getLogger("coralnet_source_report")
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATA_CONFIG = _REPO_ROOT / "configs" / "data_config_dedup.yaml"
+DEFAULT_DATA_CONFIG = _REPO_ROOT / "configs" / "data_config.yaml"
 DEFAULT_CONCEPTS_CSV = _REPO_ROOT / "configs" / "class_to_concepts.csv"
 DEFAULT_OUTPUT_DIR = _REPO_ROOT / "coralnet_source_report"
 DEFAULT_BUCKET = "dev-datamermaid-sm-sources"

@@ -62,7 +62,7 @@ class NearDupReview:
     """Loads the near-duplicate outputs once; ``select`` picks groups, ``show`` renders one."""
 
     def __init__(self, outputs: Path | str = DEFAULT_OUTPUTS, config_dir: Path | str = CONFIG_DIR,
-                 split_config: Path | str = REPO_ROOT / "configs/data_config_dedup.yaml",
+                 split_config: Path | str = REPO_ROOT / "configs/data_config.yaml",
                  cache_root: str = DEFAULT_CACHE_ROOT):
         outputs = Path(outputs)
         self.root = Path(cache_root) / DEFAULT_BUCKET

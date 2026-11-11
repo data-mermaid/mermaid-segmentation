@@ -206,24 +206,53 @@ def preprocess_data_config(data_cfg_orig):
     return data_cfg
 
 
-def setup_config(config_path_dict: dict[str, str | None]) -> ConfigDict:
+def apply_resolution(spec: Any, resolution: int) -> Any:
+    """Set every ``RandomResizedCrop`` size and ``Resize`` width/height in a raw data spec.
+
+    Walks the uncompiled YAML mapping in place, so it must run before
+    ``preprocess_data_config`` turns the transform specs into albumentations objects.
+    ``SmallestMaxSize`` and every other transform are left unchanged.
+    """
+    if isinstance(spec, Mapping):
+        for key, value in spec.items():
+            if key == "RandomResizedCrop" and isinstance(value, Mapping):
+                value["size"] = [resolution, resolution]
+            elif key == "Resize" and isinstance(value, Mapping):
+                value["width"] = resolution
+                value["height"] = resolution
+            else:
+                apply_resolution(value, resolution)
+    elif isinstance(spec, list):
+        for item in spec:
+            apply_resolution(item, resolution)
+    return spec
+
+
+def setup_config(
+    config_path_dict: dict[str, str | None], resolution: int | None = None
+) -> ConfigDict:
     """Load and merge the split config files into a single ConfigDict.
 
     Takes a mapping of section name -> YAML path, e.g.::
 
         {"data": "configs/data_config.yaml",
-         "model": "configs/model_config_cbm.yaml",
-         "training": "configs/training_config_cbm.yaml",
+         "model": "configs/model_config_cbm_dpt_lora_vitl.yaml",
+         "training": "configs/training_config_cbm_100k.yaml",
          "logger": "configs/logger_config.yaml"}
 
     Each file is loaded under its section key (a file may already wrap its
     contents in that key, or not — both are accepted). The data config is
     additionally normalized via ``preprocess_data_config`` (per-dataset default
     expansion + albumentations transform compilation).
+
+    ``resolution`` sets the square train crop, the val/test resize
+    (:func:`apply_resolution`), and ``model.input_size``.
     """
     cfg = ConfigDict()
     if "data" in config_path_dict:
         data_cfg = load_config(config_path_dict["data"])
+        if resolution is not None:
+            apply_resolution(data_cfg, int(resolution))
         data_cfg = preprocess_data_config(data_cfg)
         if "data" in data_cfg:
             cfg.update(data_cfg)
@@ -235,6 +264,8 @@ def setup_config(config_path_dict: dict[str, str | None]) -> ConfigDict:
             cfg.update(model_cfg)
         else:
             cfg.model = model_cfg
+        if resolution is not None:
+            cfg.model.input_size = [int(resolution), int(resolution)]
     if "training" in config_path_dict:
         training_cfg = load_config(config_path_dict["training"])
         if "training" in training_cfg:
