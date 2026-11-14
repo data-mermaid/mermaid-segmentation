@@ -13,9 +13,9 @@
 # Per-point and per-image live hard coral genera / families (scripts/taxon_diversity_predict.py) of one taxv2
 # scratch100k run at step 100k (<RUN>_cd/model_epoch0), scored with the run's pinned concept CSV and concept map.
 # Writes eval_out/taxon_diversity/test_<NAME>_step100000_<TAG>{,_dense,_images}.parquet.
-# Usage: sbatch slurm/taxon_diversity_predict.sbatch RUN NAME TAG "SOURCE SOURCE ..."
+# Usage: sbatch scripts/analysis_slurm/taxon_diversity_predict.sbatch RUN NAME TAG "SOURCE SOURCE ..."
 set -euo pipefail
-RUN="${1:?usage: sbatch slurm/taxon_diversity_predict.sbatch RUN NAME TAG SOURCES}"
+RUN="${1:?usage: sbatch scripts/analysis_slurm/taxon_diversity_predict.sbatch RUN NAME TAG SOURCES}"
 NAME="${2:?}"
 TAG="${3:?}"
 read -r -a SOURCES <<< "${4:?}"

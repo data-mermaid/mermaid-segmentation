@@ -100,7 +100,7 @@ class Context:
 
 
 def _run_paths(run: str, step_dir: str | None) -> tuple[Path, Path, Path]:
-    """Checkpoint, concept map and concept CSV of a scratch100k run (as slurm/coral_cover_predict.sbatch)."""
+    """Checkpoint, concept map and concept CSV of a scratch100k run (as scripts/analysis_slurm/coral_cover_predict.sbatch)."""
     ckpt = _REPO_ROOT / "nbs/model_checkpoints" / (step_dir or f"{run}_cd/model_epoch0")
     csv = _REPO_ROOT / "nbs/model_checkpoints" / run / "class_to_concepts.csv"
     if csv.is_file():

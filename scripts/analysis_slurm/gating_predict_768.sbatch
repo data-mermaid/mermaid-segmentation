@@ -14,7 +14,7 @@
 # inat/Genus_Geographic_Gating_CD275k_Res768.ipynb. Same 18 genus-eligible test sources and gate
 # (inat/data/gating/gate_allow.json, combined iNat + train/val annotation matrix) as the 256 px KL05 notebook.
 # Writes inat/data/gating_cd275k_res768/{points,dense,dense_images}.parquet, genus_probs.npy, genus_names.json.
-# Usage: sbatch slurm/gating_predict_768.sbatch
+# Usage: sbatch scripts/analysis_slurm/gating_predict_768.sbatch
 set -euo pipefail
 
 SOURCES=(290 1990 2311 2682 3357 3606 3656 3697 4091 4342 4721 4957 5181 5227 6405 6494 6702 7116)

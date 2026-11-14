@@ -16,7 +16,7 @@
 # genus or family level (18 each; 290 is genus-only, 1776 family-only). Writes
 # eval_out/taxon_diversity/test_cd275k_res768_step50000_viable_conf{,_dense,_hist,_images}.parquet;
 # the notebook reads _conf (points with top-2 probabilities) and _conf_hist (pixels by confidence bin).
-# Usage: sbatch slurm/taxon_diversity_conf_768.sbatch
+# Usage: sbatch scripts/analysis_slurm/taxon_diversity_conf_768.sbatch
 set -euo pipefail
 
 SOURCES=(290 1776 1990 2311 2682 3357 3606 3656 3697 4091 4342 4721 4957 5181 5227 6405 6494 6702 7116)

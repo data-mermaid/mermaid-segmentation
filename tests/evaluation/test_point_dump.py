@@ -123,16 +123,16 @@ def test_taxon_metrics_sum_to_rank_accuracy(data):
     for t in pooled.taxo:
         tm = taxon_metrics(df, t.rank)
         assert tm["n_gt"].sum() == t.total_all
-        assert tm["tp"].sum() == t.correct_all
+        assert tm["tp"].sum() == int(np.trace(t.confusion))
         assert tm["n_pred"].sum() == t.total_all
         per = taxon_metrics(df, t.rank, by="source_id")
-        assert per["tp"].sum() == t.correct_all
+        assert per["tp"].sum() == int(np.trace(t.confusion))
 
 
 def test_confusions_and_finest_rank(data):
     df, _, pooled, _ = data
     c = confusions(df, "genus")
     assert (c["gt"].astype(str) != c["pred"].astype(str)).all()
-    assert c["n"].sum() == pooled.taxo[-1].total_all - pooled.taxo[-1].correct_all
+    assert c["n"].sum() == pooled.taxo[-1].total_all - int(np.trace(pooled.taxo[-1].confusion))
     has_genus = df["gt_genus"].notna() & (df["gt_genus"].astype(str) != "none")
     assert (df.loc[has_genus, "gt_finest_rank"] == "genus").all()

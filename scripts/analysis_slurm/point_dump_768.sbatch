@@ -12,10 +12,10 @@
 
 # Per-point prediction dump on the full CoralNet test split (144 sources) for error analysis, with the 768 px
 # diversity model (cbm_cd275000_res768, step 50k, KL w=0.5, taxv2), predicted at 768 px. Same model, concept table
-# and settings as the taxon-diversity runs (slurm/taxon_diversity_conf_768.sbatch). Batch size 2: 8 runs out of
+# and settings as the taxon-diversity runs (scripts/analysis_slurm/taxon_diversity_conf_768.sbatch). Batch size 2: 8 runs out of
 # GPU memory at 768 px. Writes results_tmp/cbm_cd275000_res768_step50000/test/ (see
 # mermaidseg/evaluation/point_dump.py; analyse with nbs/Test_Point_Analysis.ipynb).
-# Usage: sbatch slurm/point_dump_768.sbatch
+# Usage: sbatch scripts/analysis_slurm/point_dump_768.sbatch
 set -euo pipefail
 
 REPO=/data/vision/beery/scratch/viktordo/mermaid-segmentation

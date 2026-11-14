@@ -15,7 +15,7 @@
 # Same final concept list and taxonomy CSV as results_tmp/cbm_final_res256_step300000, so the two dumps share
 # ground truth. Batch size 2: 8 runs out of GPU memory at 768 px.
 # Writes results_tmp/cbm_final_res768_step50000/test/.
-# Usage: sbatch slurm/point_dump_final_768.sbatch
+# Usage: sbatch scripts/analysis_slurm/point_dump_final_768.sbatch
 set -euo pipefail
 
 REPO=/data/vision/beery/scratch/viktordo/mermaid-segmentation
