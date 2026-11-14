@@ -21,6 +21,7 @@ from tqdm import tqdm
 
 import mermaidseg.model.loss
 import mermaidseg.model.models
+from mermaidseg.dataset_reconciliation.concept_source_mask import apply_concept_source_mask
 from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
     postprocess_predicted_concepts,
@@ -251,6 +252,8 @@ class MetaModel:
         # each rank's loader yields that rank's shard of the global microbatch.
         self.distributed = bool(training_kwargs.pop("distributed", False))
         self._ddp_step: DistributedDataParallel | None = None
+        # Keep table of training.concept_source_mask, set by set_concept_source_mask.
+        self.concept_source_keep: torch.Tensor | None = None
         self.world_size = 1
         if self.data_parallel and self.distributed:
             raise ValueError("data_parallel and distributed are mutually exclusive.")
@@ -551,6 +554,24 @@ class MetaModel:
             return source_labels
         return source_labels_to_target_labels(source_labels, self.source_to_target_lookup)
 
+    def set_concept_source_mask(self, keep: torch.Tensor | None) -> None:
+        """Mask source x concept training targets (``training.concept_source_mask``).
+
+        ``keep`` is the ``(S + 1, C)`` bool table of
+        :class:`~mermaidseg.dataset_reconciliation.concept_source_mask.ConceptSourceMask`. Training
+        batches must then carry a keep-table row per sample (``attach_source_rows``). Validation is
+        not masked.
+        """
+        if keep is not None:
+            if self.training_mode not in ("concept", "concept-bottleneck"):
+                raise ValueError("concept_source_mask requires a concept training mode.")
+            if self.num_concepts is not None and keep.shape[1] != self.num_concepts:
+                raise ValueError(
+                    f"concept source mask has {keep.shape[1]} channels, the model {self.num_concepts}"
+                )
+            keep = keep.to(device=self.device, dtype=torch.bool)
+        self.concept_source_keep = keep
+
     def _to_concept_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         if self.source_to_concepts_lookup is None:
             raise RuntimeError(
@@ -696,6 +717,7 @@ class MetaModel:
                 and primary.loss_fn is self.loss
                 and primary.taxonomic_loss is self.taxonomic_loss
                 and primary.distance_loss is self.distance_loss
+                and primary.concept_keep is self.concept_source_keep
             ):
                 return replicas
         if self.loss is None:
@@ -711,6 +733,7 @@ class MetaModel:
             self.source_to_concepts_lookup,
             use_amp=self.use_amp,
             amp_dtype=self.amp_dtype,
+            concept_keep=self.concept_source_keep,
         )
         return self._shard_replicas
 
@@ -729,6 +752,7 @@ class MetaModel:
                 and step.loss_fn is self.loss
                 and step.taxonomic_loss is self.taxonomic_loss
                 and step.distance_loss is self.distance_loss
+                and step.concept_keep is self.concept_source_keep
             ):
                 return ddp
         if self.loss is None:
@@ -745,6 +769,7 @@ class MetaModel:
                 self.source_to_concepts_lookup,
                 self.use_amp,
                 self.amp_dtype,
+                self.concept_source_keep,
             )
         )
         device = torch.device(self.device)
@@ -788,6 +813,7 @@ class MetaModel:
         *,
         source_labels: torch.Tensor | None = None,
         return_maps: bool = True,
+        source_rows: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, dict[str, float]]:
         """Perform batch prediction and compute the loss.
 
@@ -805,6 +831,10 @@ class MetaModel:
                 and concepts itself.
             return_maps: With ``data_parallel``, keep the per-GPU maps in
                 ``_metric_shards``. Pass False when the batch is not scored.
+            source_rows: Keep-table row per sample, for ``concept_source_keep``
+                with ``data_parallel`` / ``distributed`` (each GPU masks its
+                own shard). On a single GPU, ``train_epoch`` masks
+                ``target_concepts`` before calling this.
         Returns:
             A 4-tuple of ``(loss, outputs, concept_outputs, loss_components)``.
             With ``data_parallel``, ``outputs`` and ``concept_outputs`` are
@@ -827,6 +857,7 @@ class MetaModel:
                 images,
                 source_labels,
                 return_maps=return_maps,
+                source_rows=source_rows,
             )
             self._metric_shards = parallel.shards if return_maps else None
             return parallel.loss, None, None, parallel.components
@@ -841,7 +872,7 @@ class MetaModel:
             # Training must backward the tensor DDP returned, not a copy from the
             # stashed tuple, so the reducer hooks fire.
             if torch.is_grad_enabled():
-                loss = ddp(images, source_labels, return_maps=return_maps)
+                loss = ddp(images, source_labels, return_maps=return_maps, source_rows=source_rows)
                 output = ddp.module.last
                 if output is None:
                     raise RuntimeError("distributed forward did not stash its outputs.")
@@ -851,6 +882,7 @@ class MetaModel:
                     images,
                     source_labels,
                     return_maps=return_maps,
+                    source_rows=source_rows,
                 )
             self._metric_shards = (
                 [
@@ -1030,7 +1062,13 @@ class MetaModel:
                     torch.cuda.synchronize()
                 data_time_total += time.perf_counter() - batch_end
 
-                images, source_labels = data
+                images, source_labels, *extra = data
+                source_rows = extra[0] if extra else None
+                if self.concept_source_keep is not None and source_rows is None:
+                    raise RuntimeError(
+                        "concept_source_mask is set but the train batch has no source rows; "
+                        "wrap the train datasets with attach_source_rows."
+                    )
                 if images.numel() == 0:
                     if self.distributed:
                         # Skipping on one rank would leave the others waiting in a collective.
@@ -1047,8 +1085,12 @@ class MetaModel:
                 self._train_microbatches_seen += 1
                 images = images.to(self.device, non_blocking=True).float()
                 source_labels = source_labels.to(self.device, non_blocking=True).long()
+                if self.concept_source_keep is None:
+                    source_rows = None
+                else:
+                    source_rows = torch.as_tensor(source_rows).to(self.device).long()
                 if self.data_parallel or self.distributed:
-                    # Each GPU maps its own shard of source labels.
+                    # Each GPU maps (and masks) its own shard of source labels.
                     target_labels = None
                     target_concepts = None
                 else:
@@ -1058,6 +1100,10 @@ class MetaModel:
                         if self.training_mode in ("concept", "concept-bottleneck")
                         else None
                     )
+                    if target_concepts is not None and source_rows is not None:
+                        target_concepts = apply_concept_source_mask(
+                            target_concepts, self.concept_source_keep, source_rows
+                        )
 
                 # Distributed: gradients are all-reduced once, in the window's last backward.
                 sync_grads = _micro == self.grad_accum_steps - 1
@@ -1071,6 +1117,7 @@ class MetaModel:
                         target_concepts,
                         source_labels=source_labels,
                         return_maps=record_metrics,
+                        source_rows=source_rows,
                     )
                     if sync_timing:
                         torch.cuda.synchronize()

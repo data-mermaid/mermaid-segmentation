@@ -23,6 +23,7 @@ from torch import nn
 from torch.nn.parallel import parallel_apply
 from torch.nn.parallel.scatter_gather import scatter
 
+from mermaidseg.dataset_reconciliation.concept_source_mask import apply_concept_source_mask
 from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
 from mermaidseg.dataset_reconciliation.label_mapping import source_labels_to_target_labels
 
@@ -121,17 +122,24 @@ def shard_targets(
     source_labels: torch.Tensor,
     target_lookup: torch.Tensor | None,
     concept_lookup: torch.Tensor,
+    concept_keep: torch.Tensor | None = None,
+    source_rows: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Target labels and concept maps for one shard, built on that shard's device.
 
     Same lookups as ``MetaModel._to_target_labels`` and ``_to_concept_labels``.
-    A ``None`` target lookup is the identity, as in ``MetaModel``.
+    A ``None`` target lookup is the identity, as in ``MetaModel``. With ``concept_keep`` and
+    ``source_rows``, masked source x concept targets are set to 0 (``training.concept_source_mask``).
     """
     if target_lookup is None:
         target_labels = source_labels
     else:
         target_labels = source_labels_to_target_labels(source_labels, target_lookup)
     target_concepts = source_labels_to_concepts(source_labels, concept_lookup)
+    if concept_keep is not None:
+        if source_rows is None:
+            raise RuntimeError("concept_source_mask is set but the batch has no source rows.")
+        target_concepts = apply_concept_source_mask(target_concepts, concept_keep, source_rows)
     return target_labels, target_concepts
 
 
@@ -176,6 +184,7 @@ class ShardStep(nn.Module):
         concept_lookup: torch.Tensor,
         use_amp: bool,
         amp_dtype: torch.dtype,
+        concept_keep: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.model = model
@@ -184,6 +193,7 @@ class ShardStep(nn.Module):
         self.distance_loss = distance_loss
         self.register_buffer("target_lookup", target_lookup, persistent=False)
         self.register_buffer("concept_lookup", concept_lookup, persistent=False)
+        self.register_buffer("concept_keep", concept_keep, persistent=False)
         self.use_amp = use_amp
         self.amp_dtype = amp_dtype
 
@@ -192,6 +202,7 @@ class ShardStep(nn.Module):
         images: torch.Tensor,
         source_labels: torch.Tensor,
         return_maps: bool = True,
+        source_rows: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -201,7 +212,11 @@ class ShardStep(nn.Module):
         dict[str, float],
     ]:
         target_labels, target_concepts = shard_targets(
-            source_labels, self.target_lookup, self.concept_lookup
+            source_labels,
+            self.target_lookup,
+            self.concept_lookup,
+            self.concept_keep,
+            source_rows,
         )
         with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
             segmentation_outputs = self.model(images)
@@ -257,8 +272,11 @@ class DDPLossStep(nn.Module):
         images: torch.Tensor,
         source_labels: torch.Tensor,
         return_maps: bool = True,
+        source_rows: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self.last = self.step(images, source_labels, return_maps=bool(return_maps))
+        self.last = self.step(
+            images, source_labels, return_maps=bool(return_maps), source_rows=source_rows
+        )
         return self.last[0]
 
 
@@ -394,6 +412,7 @@ def build_shard_replicas(
     *,
     use_amp: bool,
     amp_dtype: torch.dtype,
+    concept_keep: torch.Tensor | None = None,
 ) -> ShardReplicas:
     """Copy the model, losses, and label lookups onto each of the 4 GPUs."""
     require_data_parallel_gpus(torch.cuda.device_count())
@@ -406,6 +425,7 @@ def build_shard_replicas(
     for lookup, name in (
         (target_lookup, "the target lookup"),
         (concept_lookup, "the concept lookup"),
+        (concept_keep, "the concept source mask"),
     ):
         if lookup is not None and (
             lookup.device.type != "cuda" or lookup.device.index not in (None, 0)
@@ -420,6 +440,7 @@ def build_shard_replicas(
         concept_lookup,
         use_amp,
         amp_dtype,
+        concept_keep,
     )
     return ShardReplicas(step, [torch.device("cuda", index) for index in range(DATA_PARALLEL_GPUS)])
 
@@ -430,6 +451,7 @@ def parallel_forward_loss(
     source_labels: torch.Tensor,
     *,
     return_maps: bool = True,
+    source_rows: torch.Tensor | None = None,
 ) -> ParallelLoss:
     """Run lookup, forward, and loss on 4 GPUs and average the scalar losses.
 
@@ -453,6 +475,10 @@ def parallel_forward_loss(
     device_ids = [device.index for device in replicas.devices]
     scattered = scatter((images, source_labels), device_ids, dim=0)
     kwargs_tup = tuple({"return_maps": bool(return_maps)} for _ in device_ids)
+    if source_rows is not None:
+        # Same equal split as the batch (the batch size is divisible by the GPU count).
+        rows = scatter(source_rows.to(images.device), device_ids, dim=0)
+        kwargs_tup = tuple({**kw, "source_rows": r} for kw, r in zip(kwargs_tup, rows, strict=True))
     shard_outputs = parallel_apply(
         replicas.modules, scattered, kwargs_tup=kwargs_tup, devices=device_ids
     )

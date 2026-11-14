@@ -24,7 +24,13 @@ from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
 from mermaidseg.model.models import align_optimizer_state_dict
 from mermaidseg.model.train import train_model
-from mermaidseg.run_setup import build_meta_model, build_registry, load_model_weights
+from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
+from mermaidseg.run_setup import (
+    build_meta_model,
+    build_registry,
+    load_model_weights,
+    load_run_concept_source_mask,
+)
 
 # LoRA + DPT concept-bottleneck entrypoint. The encoder comes from the model config
 # (ViT-L by default; the ViT-size sweep passes S/B/L/H+ configs).
@@ -350,6 +356,17 @@ train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "tra
 ] * 5
 val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
 
+# training.concept_source_mask: zero the targets of source x binary concept pairs listed in the
+# mask CSV. Train batches then carry each sample's keep-table row; validation is not masked.
+concept_source_mask = load_run_concept_source_mask(cfg.training, schema)
+if concept_source_mask is not None:
+    train_datasets = attach_source_rows(train_datasets, concept_source_mask)
+    print0(
+        f"Concept source mask {concept_source_mask.path}: {concept_source_mask.num_masked} "
+        f"{concept_source_mask.dataset} source x concept pairs over "
+        f"{len(concept_source_mask.source_ids)} sources"
+    )
+
 train_loader = make_shuffled_loader(ConcatDataset(train_datasets), **loader_kwargs)
 loader_kwargs["prefetch_factor"] = 2
 val_loader = make_shuffled_loader(ConcatDataset(val_datasets), **loader_kwargs)
@@ -369,6 +386,8 @@ if DIST.is_main:
     print(f"Wrote class and concept layouts ({len(concept_id2name)} channels) to {run_dir}")
 
 meta_model = build_meta_model(cfg, registry, device)
+if concept_source_mask is not None:
+    meta_model.set_concept_source_mask(concept_source_mask.keep)
 
 start_epoch = 0
 init_checkpoint = args.init_checkpoint

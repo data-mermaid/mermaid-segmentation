@@ -19,6 +19,11 @@ from mermaidseg.dataset_reconciliation import (
     attach_registry,
     prepare_splits_for_registry,
 )
+from mermaidseg.dataset_reconciliation.concept_removal import load_concept_removal
+from mermaidseg.dataset_reconciliation.concept_source_mask import (
+    ConceptSourceMask,
+    load_concept_source_mask,
+)
 from mermaidseg.dataset_reconciliation.concepts import DEFAULT_CLASS_TO_CONCEPTS_CSV
 from mermaidseg.datasets import configured_source_names
 from mermaidseg.io import setup_config
@@ -42,6 +47,39 @@ def target_labels(training_cfg: Any) -> list[str] | None:
     return sorted(dict.fromkeys(str(label).lower() for label in subset))
 
 
+def concept_removal_list(training_cfg: Any, mapping_path: str | Path) -> list[str]:
+    """Channel names listed by ``training.concept_removal`` (a CSV path), or none."""
+    path = training_cfg.get("concept_removal")
+    if not path:
+        return []
+    return load_concept_removal(resolve_repo_path(path), concepts_csv=mapping_path)
+
+
+def load_run_concept_source_mask(training_cfg: Any, schema: ConceptSchema) -> ConceptSourceMask | None:
+    """The keep table of ``training.concept_source_mask`` (a CSV path), or ``None``."""
+    path = training_cfg.get("concept_source_mask")
+    if not path:
+        return None
+    mapping_path = concept_mapping_path(training_cfg)
+    return load_concept_source_mask(
+        resolve_repo_path(path),
+        schema,
+        concepts_csv=mapping_path,
+        removed_concepts=concept_removal_list(training_cfg, mapping_path),
+    )
+
+
+def resolve_repo_path(path: str | Path) -> Path:
+    """A config path as given if it exists, else relative to the repository root.
+
+    The pipeline runs from ``nbs/``, so ``configs/...`` paths are tried against the repo root too.
+    """
+    path = Path(path)
+    if path.is_absolute() or path.exists():
+        return path
+    return REPO_ROOT / path
+
+
 def build_registry(
     dataset_dict: Mapping[tuple[str, str], Any],
     training_cfg: Any,
@@ -63,7 +101,13 @@ def build_registry(
             f"({schema_config})"
         )
     mapping_path = concept_mapping_path(training_cfg)
-    schema = ConceptSchema.from_csv(mapping_path, sources=schema_sources)
+    removed = concept_removal_list(training_cfg, mapping_path)
+    schema = ConceptSchema.from_csv(mapping_path, sources=schema_sources, removed_concepts=removed)
+    if removed:
+        print(
+            f"Removed {len(removed)} concept channels ({training_cfg.concept_removal}); "
+            f"{schema.num_channels} remain"
+        )
     registry = SourceLabelRegistry(
         registry_datasets,
         target_labels=target_labels(training_cfg),

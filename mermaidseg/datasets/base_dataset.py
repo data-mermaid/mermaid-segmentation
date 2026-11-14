@@ -291,7 +291,22 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         cache = LocalS3Cache.get()
         cache.record_retries(attempts)
         cache.record_sample()
+        if getattr(self, "_return_source_row", False):
+            # Here, not in __getitem__: after a retry, ``idx`` is the image actually returned.
+            rows = self._source_rows
+            return image, mask, int(rows.loc[idx]) if rows is not None else 0
         return image, mask
+
+    def set_source_rows(self, rows: pd.Series | None) -> None:
+        """Also return a keep-table row per sample (``training.concept_source_mask``).
+
+        ``rows`` maps each ``df_images`` index to its row; ``None`` returns row 0 for every sample.
+        See :func:`mermaidseg.dataset_reconciliation.concept_source_mask.attach_source_rows`.
+        """
+        if rows is not None and not rows.index.equals(self.df_images.index):
+            raise ValueError("source rows must be indexed like df_images")
+        self._source_rows = rows
+        self._return_source_row = True
 
     def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         """Perform a single load (no error handling).

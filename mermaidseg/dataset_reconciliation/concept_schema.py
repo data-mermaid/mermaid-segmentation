@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,18 +37,43 @@ class ConceptSchema:
         *,
         sources: set[str],
         binary_taxonomy_encoding: bool = True,
+        removed_concepts: Iterable[str] = (),
     ) -> ConceptSchema:
-        """Build a schema from CSV rows whose ``source_dataset_source`` is in ``sources``."""
+        """Build a schema from CSV rows whose ``source_dataset_source`` is in ``sources``.
+
+        ``removed_concepts`` (channel names, ``training.concept_removal``) are left out: a removed
+        taxonomic value becomes ``not_given`` at its rank, a removed binary concept loses its column.
+        Exactly those channels must disappear; anything else is an error.
+        """
         df = pd.read_csv(path)
         df = df.copy()
         df["source_label_class_name"] = df["source_label_class_name"].astype(str).str.lower()
         df["source_dataset_source"] = df["source_dataset_source"].astype(str).str.lower()
         sources_lower = {s.lower() for s in sources}
         df_run = df[df["source_dataset_source"].isin(sources_lower)].reset_index(drop=True)
+        removed_concepts = list(dict.fromkeys(removed_concepts))
+        if removed_concepts:
+            from mermaidseg.dataset_reconciliation.concept_removal import apply_concept_removal
+
+            _, full_channels, _ = encode_concept_channels_from_df(
+                df_run, binary_taxonomy_encoding=binary_taxonomy_encoding
+            )
+            not_channels = sorted(set(removed_concepts) - set(full_channels))
+            if not_channels:
+                raise ValueError(f"removed concepts that are not channels of this run: {not_channels}")
+            df_run = apply_concept_removal(df_run, removed_concepts)
 
         encoded_df, channel_names, concept_value2id = encode_concept_channels_from_df(
             df_run, binary_taxonomy_encoding=binary_taxonomy_encoding
         )
+
+        if removed_concepts:
+            expected = [c for c in full_channels if c not in set(removed_concepts)]
+            if list(channel_names) != expected:
+                raise RuntimeError(
+                    "concept removal changed more than the removed channels: "
+                    f"{sorted(set(expected) ^ set(channel_names))}"
+                )
 
         taxonomic_keys = [k for k in concept_value2id if k in TAXONOMIC_CONCEPTS]
         if taxonomic_keys != [k for k in TAXONOMIC_CONCEPTS if k in concept_value2id]:

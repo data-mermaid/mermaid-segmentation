@@ -13,13 +13,22 @@ recomputing it.
 from __future__ import annotations
 
 import hashlib
+import logging
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
+import torch
+import yaml
+from torch.utils.data import Dataset
 
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+
+logger = logging.getLogger(__name__)
 
 # Concept channel encoding (see ``encode_concept_channels_from_df``).
 NOT_GIVEN, FALSE, TRUE = 0, 1, 2
@@ -96,3 +105,162 @@ def meta_path(mask_csv: str | Path) -> Path:
     """Sidecar path: ``coralnet_only_false.csv`` -> ``coralnet_only_false.meta.yaml``."""
     mask_csv = Path(mask_csv)
     return mask_csv.with_name(mask_csv.stem + ".meta.yaml")
+
+
+# ---------- training side ----------
+
+
+@dataclass(frozen=True)
+class ConceptSourceMask:
+    """Keep table for one run: row 0 keeps every channel, row ``i`` belongs to ``source_ids[i - 1]``.
+
+    ``keep[row, channel]`` is False where that source's targets for that channel are set to 0.
+    Datasets other than ``dataset`` (and its sources missing from the file) use row 0.
+    """
+
+    dataset: str
+    source_ids: tuple[str, ...]
+    keep: torch.Tensor  # (len(source_ids) + 1, num_channels), bool
+    path: str
+
+    @property
+    def num_masked(self) -> int:
+        return int((~self.keep).sum())
+
+    def row_by_source(self) -> dict[str, int]:
+        return {source: i + 1 for i, source in enumerate(self.source_ids)}
+
+    def rows_for(self, source_ids: Iterable[Any]) -> np.ndarray:
+        """Keep-table rows for a sequence of source ids; unknown sources get row 0."""
+        lookup = self.row_by_source()
+        return np.array([lookup.get(str(s), 0) for s in source_ids], dtype=np.int64)
+
+
+def load_concept_source_mask(
+    path: str | Path,
+    schema: ConceptSchema,
+    *,
+    concepts_csv: str | Path | None = None,
+    removed_concepts: Iterable[str] = (),
+) -> ConceptSourceMask:
+    """Read a mask CSV written by ``scripts/build_concept_source_mask.py`` into a keep table.
+
+    Checks, before training starts:
+    - every concept is a binary channel of ``schema``; concepts in ``removed_concepts`` (removed
+      from the run by ``training.concept_removal``) are skipped, anything else is an error;
+    - with ``concepts_csv``, its sha1 matches the one recorded in the ``.meta.yaml`` sidecar, so a
+      mask built for another concept table is refused.
+    """
+    path = Path(path)
+    meta_file = meta_path(path)
+    if not meta_file.is_file():
+        raise FileNotFoundError(f"concept source mask {path} has no sidecar {meta_file}")
+    meta = yaml.safe_load(meta_file.read_text())
+    if concepts_csv is not None and meta.get("concepts_csv_sha1") != file_sha1(concepts_csv):
+        raise ValueError(
+            f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "
+            f"but this run uses {concepts_csv} (sha1 {file_sha1(concepts_csv)}). "
+            "Rebuild it with scripts/build_concept_source_mask.py."
+        )
+
+    df = pd.read_csv(path, dtype={"source_id": str, "concept": str})
+    missing_cols = {"source_id", "concept"} - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"{path} is missing columns {sorted(missing_cols)}")
+
+    binary = set(binary_concepts(schema))
+    removed = set(removed_concepts)
+    unknown = sorted(set(df["concept"]) - binary - removed)
+    if unknown:
+        raise ValueError(
+            f"{path} lists concepts that are not binary channels of this run: {unknown}"
+        )
+    skipped = df["concept"].isin(removed) & ~df["concept"].isin(binary)
+    if skipped.any():
+        logger.info(
+            "concept source mask: skipping %d rows of removed concepts %s",
+            int(skipped.sum()),
+            sorted(set(df.loc[skipped, "concept"])),
+        )
+    df = df[~skipped]
+
+    source_ids = tuple(sorted(df["source_id"].unique(), key=_source_sort_key))
+    row = {source: i + 1 for i, source in enumerate(source_ids)}
+    channel = {name: i for i, name in enumerate(schema.channel_names)}
+    keep = torch.ones(len(source_ids) + 1, schema.num_channels, dtype=torch.bool)
+    if len(df):
+        keep[
+            torch.as_tensor(df["source_id"].map(row).to_numpy()),
+            torch.as_tensor(df["concept"].map(channel).to_numpy()),
+        ] = False
+    return ConceptSourceMask(
+        dataset=str(meta.get("dataset", "coralnet")),
+        source_ids=source_ids,
+        keep=keep,
+        path=str(path),
+    )
+
+
+def _source_sort_key(source: str) -> tuple[int, int | str]:
+    return (0, int(source)) if source.isdigit() else (1, source)
+
+
+def apply_concept_source_mask(
+    target_concepts: torch.Tensor,
+    keep: torch.Tensor,
+    source_rows: torch.Tensor,
+) -> torch.Tensor:
+    """Set masked channels of each sample's concept targets to 0 (not_given).
+
+    Args:
+        target_concepts: ``(B, C, H, W)`` concept targets.
+        keep: ``(S + 1, C)`` bool keep table (see :class:`ConceptSourceMask`).
+        source_rows: ``(B,)`` keep-table row of each sample.
+    """
+    keep_b = keep.to(target_concepts.device)[source_rows.to(target_concepts.device).long()]
+    return target_concepts * keep_b.to(target_concepts.dtype)[:, :, None, None]
+
+
+class _ConstantSourceRow(Dataset):
+    """Adds a constant keep-table row to a dataset that does not subclass ``BaseCoralDataset``."""
+
+    def __init__(self, dataset: Dataset, row: int = 0) -> None:
+        self.dataset = dataset
+        self.row = int(row)
+
+    def __len__(self) -> int:
+        return len(self.dataset)  # type: ignore[arg-type]
+
+    def __getitem__(self, idx: int) -> tuple[Any, ...]:
+        return (*self.dataset[idx], self.row)
+
+    def __getattr__(self, name: str) -> Any:
+        # Forward attribute lookups (SOURCE_NAME, num_load_failures, ...) to the wrapped dataset.
+        if name == "dataset":
+            raise AttributeError(name)
+        return getattr(self.dataset, name)
+
+
+def attach_source_rows(datasets: Sequence[Dataset], mask: ConceptSourceMask) -> list[Dataset]:
+    """Make every training dataset return ``(image, labels, source_row)``.
+
+    ``BaseCoralDataset`` subclasses return the row from ``_safe_getitem``, so a retry on another
+    image returns that image's row. Datasets of ``mask.dataset`` map each image's ``source_id``;
+    the others, and datasets outside the base class (wrapped), always return row 0.
+    """
+    from mermaidseg.datasets.base_dataset import BaseCoralDataset
+
+    out: list[Dataset] = []
+    wrapped: dict[int, Dataset] = {}
+    for ds in datasets:
+        if isinstance(ds, BaseCoralDataset):
+            if getattr(ds, "SOURCE_NAME", None) == mask.dataset:
+                rows = mask.rows_for(ds.df_images["source_id"])
+                ds.set_source_rows(pd.Series(rows, index=ds.df_images.index))
+            else:
+                ds.set_source_rows(None)
+            out.append(ds)
+        else:
+            # The same dataset object can appear several times (repeated coralscapes_v2).
+            out.append(wrapped.setdefault(id(ds), _ConstantSourceRow(ds, 0)))
+    return out

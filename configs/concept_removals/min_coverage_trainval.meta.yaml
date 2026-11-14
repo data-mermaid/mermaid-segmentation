@@ -1,0 +1,42 @@
+rule:
+  min_images: 100
+  min_noncoralnet_images: 50
+  min_annotations: 500
+  dense_annotations_per_mask: 50
+  min_coralnet_sources: 3
+rule_description: remove if (images < 100 and non-CoralNet images < 50) or annotations
+  < 500 (dense mask = 50) or (no non-CoralNet dataset and CoralNet sources < 3)
+data_config: configs/data_config_trainval.yaml
+data_config_sha1: f9ea647ee11742deba3a44547da6bcc8ec670fd8
+label_counts: dataset_stats/label_counts_trainval.parquet
+label_counts_sha1: 54c2fc18401d376a75070c0170327c58aed8bf07
+datasets_counted:
+- catlin_seaview
+- coralnet
+- coralscapes_v2
+- mermaid
+- moorea_labeled_corals
+- ucsd_mosaics
+concepts_csv: configs/class_to_concepts.csv
+concepts_csv_sha1: 3a037104b959826b03433555c161d2ae4ad7f5bb
+schema_config: configs/data_config.yaml
+n_channels: 706
+n_removed: 357
+removed_by_kind:
+  binary: 2
+  class: 8
+  family: 84
+  genus: 235
+  kingdom: 1
+  order: 25
+  phylum: 2
+channels_by_kind:
+  binary: 42
+  class: 28
+  family: 174
+  genus: 367
+  kingdom: 6
+  order: 72
+  phylum: 17
+created: '2026-11-14T18:49:30'
+git_commit: e94f206
