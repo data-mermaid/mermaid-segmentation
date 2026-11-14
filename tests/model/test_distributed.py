@@ -426,6 +426,10 @@ def _ddp_window_worker(
             for name, param in inner.named_parameters()
             if param.requires_grad
         }
+        # numpy, not tensors: queued tensors go through shared memory, which can be gone by the
+        # time the parent reads them once this worker exits (EOFError in queue.get).
+        grads = {name: tensor.cpu().numpy() for name, tensor in grads.items()}
+        weights = {name: tensor.cpu().numpy() for name, tensor in weights.items()}
         queue.put((rank, {"grads": grads, "weights": weights, "clip": float(clip)}))
     finally:
         dist.destroy_process_group()
@@ -498,9 +502,13 @@ def test_replica_window_matches_serial_microbatches():
     for payload in payloads:
         assert payload["clip"] == pytest.approx(serial_clip, rel=1e-5, abs=1e-6)
         for name, grad in serial_grads.items():
-            torch.testing.assert_close(payload["grads"][name], grad, rtol=1e-5, atol=1e-6)
+            torch.testing.assert_close(
+                torch.from_numpy(payload["grads"][name]), grad, rtol=1e-5, atol=1e-6
+            )
         for name, weight in serial_weights.items():
-            torch.testing.assert_close(payload["weights"][name], weight, rtol=1e-5, atol=1e-6)
+            torch.testing.assert_close(
+                torch.from_numpy(payload["weights"][name]), weight, rtol=1e-5, atol=1e-6
+            )
 
 
 def _nccl_window_worker(
