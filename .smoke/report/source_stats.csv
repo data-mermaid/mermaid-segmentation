@@ -1,0 +1,4 @@
+source_id,split,n_images,n_pixels,n_labels,n_genera,n_coral_genera,avg_pixels_per_image,pct_genus_level,pct_unmapped,n_images_with_key,coralnet_url
+1645,val,3000,60000,72,42,40,20.0,19.003333333333334,0.009999999999998899,3000,https://coralnet.ai/source/1645/
+23,train,750,15000,20,5,4,20.0,1.1066666666666667,2.4933333333333363,750,https://coralnet.ai/source/23/
+57,train,82,8200,27,9,7,100.0,28.134146341463413,1.9756097560975627,82,https://coralnet.ai/source/57/

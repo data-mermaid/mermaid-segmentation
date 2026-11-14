@@ -1,0 +1,24 @@
+[
+  {
+    "source_id": 3373,
+    "split": "train",
+    "n_images_in_source": 425,
+    "image_ids": [
+      "2762832",
+      "3428430",
+      "3579441"
+    ],
+    "url": "https://coralnet.ai/source/3373/"
+  },
+  {
+    "source_id": 5688,
+    "split": "train",
+    "n_images_in_source": 40,
+    "image_ids": [
+      "4716991",
+      "4717009",
+      "4717015"
+    ],
+    "url": "https://coralnet.ai/source/5688/"
+  }
+]

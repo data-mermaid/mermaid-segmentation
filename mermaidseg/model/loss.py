@@ -37,6 +37,41 @@ def iter_concept_slices(
     )
 
 
+def binary_concept_losses(
+    concept_logits: torch.Tensor,
+    concept_labels: torch.Tensor,
+    names: list[str],
+    *,
+    per_pixel_loss_weight: float,
+    per_image_loss_weight: float,
+) -> dict[str, float]:
+    """The ``multi_hot`` loss of each binary channel on its own, keyed ``multi_hot/<name>``.
+
+    Same masked BCE and pixel/image blend as ``calculate_multi_hot_concept_loss``, reduced
+    per channel. Channels with no labelled pixel in the batch are left out.
+    """
+    if concept_logits.shape[1] != len(names):
+        raise ValueError(
+            f"{len(names)} binary concept names for {concept_logits.shape[1]} channels"
+        )
+    mask = concept_labels.gt(0).to(concept_logits.dtype)
+    targets = torch.clamp(concept_labels - 1, 0.01, 0.99)
+    per_element = F.binary_cross_entropy_with_logits(concept_logits, targets, reduction="none")
+    sums = (per_element * mask).flatten(2).sum(dim=2)
+    counts = mask.flatten(2).sum(dim=2)
+    channel_counts = counts.sum(dim=0)
+    per_pixel = sums.sum(dim=0) / channel_counts.clamp(min=1)
+    has_valid = counts > 0
+    per_image_values = (sums / counts.clamp(min=1)) * has_valid
+    per_image = per_image_values.sum(dim=0) / has_valid.sum(dim=0).clamp(min=1)
+    values = per_pixel_loss_weight * per_pixel + per_image_loss_weight * per_image
+    return {
+        f"multi_hot/{name}": value
+        for name, value, count in zip(names, values.tolist(), channel_counts.tolist(), strict=True)
+        if count > 0
+    }
+
+
 def _masked_cross_entropy(
     outputs: torch.Tensor,
     target_labels: torch.Tensor,
@@ -239,10 +274,12 @@ class ConceptBottleneckLoss(torch.nn.Module):
         per_pixel_loss_weight: float = 0.0,
         per_image_loss_weight: float = 1.0,
         taxonomic_label_smoothing: float = 0.01,
+        binary_concept_names: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__()
         self.class_loss = class_loss(ignore_index=ignore_index, **kwargs)
+        self.binary_concept_names = binary_concept_names
         self.ignore_index = ignore_index
         self.lambda_weight = lambda_weight
         self.concept_value2id = concept_value2id
@@ -298,6 +335,16 @@ class ConceptBottleneckLoss(torch.nn.Module):
                     per_pixel_loss_weight=self.per_pixel_loss_weight,
                     per_image_loss_weight=self.per_image_loss_weight,
                 )
+                if self.binary_concept_names is not None:
+                    loss_components.update(
+                        binary_concept_losses(
+                            outputs_slice.detach(),
+                            labels_slice,
+                            self.binary_concept_names,
+                            per_pixel_loss_weight=self.per_pixel_loss_weight,
+                            per_image_loss_weight=self.per_image_loss_weight,
+                        )
+                    )
             else:
                 slice_loss = calculate_taxonomic_rank_loss(
                     outputs_slice,

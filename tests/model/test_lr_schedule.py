@@ -8,7 +8,9 @@ from __future__ import annotations
 import copy
 
 import pytest
+import torch
 
+from mermaidseg.model.lr_schedule import ConstantThenLinearLR
 from mermaidseg.model.train import train_model
 
 
@@ -166,6 +168,97 @@ def test_warmup_then_iteration_decay_reaches_zero_at_the_last_step(
     assert lrs[-1] == pytest.approx(0.0, abs=1e-12)
     assert meta.scheduler.last_epoch == decay
     assert meta._warmup_iters_completed == warmup
+
+
+def _optimizer_step(opt: torch.optim.Optimizer) -> None:
+    """Take a no-op optimizer step so the scheduler step is ordered correctly."""
+    for group in opt.param_groups:
+        for param in group["params"]:
+            if param.grad is None:
+                param.grad = torch.zeros_like(param)
+    opt.step()
+
+
+def test_constant_then_linear_holds_then_reaches_zero():
+    """Five plateau steps stay at the base LR; the next four land on zero."""
+    opt = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.02)
+    sched = ConstantThenLinearLR(opt, constant_iters=5, decay_iters=4, end_factor=0.0)
+    assert sched.last_epoch == 0
+    assert opt.param_groups[0]["lr"] == pytest.approx(0.02)
+
+    lrs: list[float] = []
+    for _ in range(9):
+        _optimizer_step(opt)
+        sched.step()
+        lrs.append(opt.param_groups[0]["lr"])
+
+    assert lrs[:5] == pytest.approx([0.02] * 5)
+    assert lrs[5:] == pytest.approx([0.015, 0.01, 0.005, 0.0])
+
+
+def test_constant_then_linear_scales_each_group_from_its_own_base():
+    groups = [
+        {"params": [torch.nn.Parameter(torch.zeros(1))], "lr": 0.02},
+        {"params": [torch.nn.Parameter(torch.zeros(1))], "lr": 0.01},
+    ]
+    opt = torch.optim.SGD(groups)
+    sched = ConstantThenLinearLR(opt, constant_iters=1, decay_iters=2, end_factor=0.0)
+    _optimizer_step(opt)
+    sched.step()  # still inside the plateau
+    assert [group["lr"] for group in opt.param_groups] == pytest.approx([0.02, 0.01])
+    _optimizer_step(opt)
+    sched.step()  # halfway
+    assert [group["lr"] for group in opt.param_groups] == pytest.approx([0.01, 0.005])
+    _optimizer_step(opt)
+    sched.step()
+    assert [group["lr"] for group in opt.param_groups] == pytest.approx([0.0, 0.0])
+
+
+@pytest.mark.integration
+def test_warmup_plateau_then_decay_survives_an_epoch_boundary(
+    minimal_config, tiny_loader, make_meta_model
+):
+    """Warmup, a plateau, and a decay to 0, with the plateau crossing an epoch."""
+    base_lr = 0.02
+    warmup, constant, decay = 2, 2, 2
+    cfg = copy.deepcopy(minimal_config)
+    cfg.training.training_mode = "standard"
+    cfg.training.epochs = 2
+    cfg.training.iterations_per_train_epoch = 3
+    cfg.training.optimizer.lr = base_lr
+    cfg.training.scheduler = {
+        "type": "ConstantThenLinearLR",
+        "constant_iters": constant,
+        "decay_iters": decay,
+        "end_factor": 0.0,
+        "step_every": "iteration",
+        "warmup_iters": warmup,
+        "warmup_start_factor": 0.01,
+    }
+    meta = make_meta_model(cfg, run_name="plateau")
+    assert meta.optimizer.param_groups[0]["lr"] == pytest.approx(base_lr * 0.01)
+    lrs: list[float] = []
+
+    def _record(model) -> None:
+        lrs.append(model.optimizer.param_groups[0]["lr"])
+
+    for epoch in range(2):
+        train_model(
+            meta,
+            evaluator=None,
+            train_loader=tiny_loader,
+            start_epoch=epoch,
+            end_epoch=epoch + 1,
+            max_load_failure_rate=None,
+            on_optimizer_step=_record,
+        )
+
+    assert len(lrs) == warmup + constant + decay
+    assert lrs[warmup - 1] == pytest.approx(base_lr)
+    assert lrs[warmup : warmup + constant] == pytest.approx([base_lr] * constant)
+    assert lrs[warmup + constant] < base_lr
+    assert lrs[-1] == pytest.approx(0.0, abs=1e-12)
+    assert meta.scheduler.last_epoch == constant + decay
 
 
 @pytest.mark.integration

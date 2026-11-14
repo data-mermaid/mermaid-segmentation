@@ -9,9 +9,9 @@ without ``not_given``.
 ``not_given`` (rank unknown) is not a channel. ``none`` (not an organism, e.g. "Rock") is a channel
 but not a taxon, and has no parent-child edges.
 
-Channels are keyed on the value alone, so homonyms would share a channel and get two parents. The
-CSV disambiguates them instead (``turbinaria_coral`` / ``turbinaria_algae``); ``AmbiguityPolicy``
-covers any that reappear.
+Channels are keyed on the value alone, so one name used for two taxa would share a channel and
+have two parents. The CSV keeps those lineages apart: ``turbinaria_coral`` (Dendrophylliidae) and
+``turbinaria_algae`` (Sargassaceae). See ``AmbiguityPolicy``.
 """
 
 from __future__ import annotations

@@ -47,12 +47,12 @@ There are two entry points for training, notebooks or train.py. Both can be used
 Once you have verified your approach with a small subset, moving your training to SageMaker on the full dataset.
 
 **Notebooks — for early exploration:**
-Use `nbs/Base_Pipeline.ipynb` (or the CBM variant) when you're testing an initial idea on a small sample. Notebooks are well-suited for quick iteration: checking that a config loads correctly, validating that a model runs on a small data subset, or inspecting intermediate outputs before committing to a full run.
+Use a notebook when you're testing an initial idea on a small sample. Notebooks are well-suited for quick iteration: checking that a config loads correctly, validating that a model runs on a small data subset, or inspecting intermediate outputs before committing to a full run.
 
 ```
 configs/my_experiment.yaml
         ↓
-nbs/Base_Pipeline.ipynb  (small subset, exploratory)
+notebook  (small subset, exploratory)
         ↓
 MLflow run logged automatically
 ```

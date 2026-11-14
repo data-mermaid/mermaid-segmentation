@@ -88,6 +88,9 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             annotations.
         class_subset: Optional list of source-label names to retain. When set,
             both ``df_annotations`` and the source label space are filtered.
+        image_keep: Optional parquet allowlist (``dataset`` plus the image key columns)
+            applied after the subclass's own train filters and before ``class_subset``.
+            Absent means every image that survived those filters is kept.
         source_id2name: Mapping from local source-label IDs (``1..N``) to
             source-label names.
         source_name2id: Inverse of ``source_id2name``.
@@ -119,14 +122,23 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         transform: A.BasicTransform | None = None,
         padding: int | None = None,
         class_subset: list[str] | None = None,
+        image_keep: str | Path | None = None,
     ):
-        self.df_annotations = df_annotations
-        self.df_images = df_images
         self.split = split
         self.transform = transform
         self.padding = padding
         self.class_subset = class_subset
+        self.image_keep = image_keep
         self._global_offset = 0
+
+        if image_keep is not None:
+            from mermaidseg.datasets.data_size import filter_point_frames
+
+            df_annotations, df_images = filter_point_frames(
+                df_annotations, df_images, image_keep, self.SOURCE_NAME
+            )
+        self.df_annotations = df_annotations
+        self.df_images = df_images
 
         if "source_label_name" not in self.df_annotations.columns:
             raise ValueError(
@@ -234,9 +246,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             return next_idx
         return idx
 
-    def _safe_getitem(
-        self, idx: int, attempts: int
-    ) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def _safe_getitem(self, idx: int, attempts: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
         n = len(self)
         if n == 0:
             raise RuntimeError(f"{self.__class__.__name__}: dataset is empty")

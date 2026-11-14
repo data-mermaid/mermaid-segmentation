@@ -149,7 +149,7 @@ class TestComputeClassCounts:
             "test_fraction",
         ]
         assert counts["target_id"].tolist() == [0, 1, 2, 3]
-        assert counts["target_name"].tolist() == ["background", "Acropora", "Porites", "Other"]
+        assert counts["target_name"].tolist() == ["ignore", "Acropora", "Porites", "Other"]
         assert counts["class_kind"].tolist() == [
             "background",
             "target",

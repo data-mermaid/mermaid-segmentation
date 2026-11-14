@@ -1,0 +1,20 @@
+[
+  {
+    "file": "00",
+    "split": "train",
+    "image_id": "38012045701",
+    "n_points": 50
+  },
+  {
+    "file": "01",
+    "split": "train",
+    "image_id": "30009253901",
+    "n_points": 50
+  },
+  {
+    "file": "02",
+    "split": "train",
+    "image_id": "37006083501",
+    "n_points": 100
+  }
+]

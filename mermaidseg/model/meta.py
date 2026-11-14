@@ -1,6 +1,10 @@
+import contextlib
+import faulthandler
 import logging
+import os
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import albumentations as A
@@ -11,6 +15,7 @@ import transformers
 
 # from mermaidseg.model.eval import Evaluator
 from numpy.typing import NDArray
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -26,10 +31,71 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
 )
 from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
 from mermaidseg.io import ConfigDict
+from mermaidseg.model.data_parallel import (
+    DDPLossStep,
+    MetricShard,
+    ShardReplicas,
+    ShardStep,
+    apply_concept_bottleneck_loss,
+    build_shard_replicas,
+    parallel_forward_loss,
+    require_data_parallel_gpus,
+)
 from mermaidseg.model.distance_loss import TaxonomicDistanceLoss
+from mermaidseg.model.distributed import (
+    all_ranks_finite,
+    current_context,
+    is_distributed,
+    is_main_process,
+    reduce_components,
+    require_world_size,
+)
+from mermaidseg.model.lr_schedule import ConstantThenLinearLR
 from mermaidseg.model.taxonomy_loss import TaxonomicLoss
 
 logger = logging.getLogger(__name__)
+
+_BATCH_LOSS_KEY = "__batch_loss__"
+
+STALL_DUMP_ENV = "MERMAIDSEG_STALL_DUMP_SEC"
+DEFAULT_STALL_DUMP_SEC = 180.0
+SLOW_FETCH_WARN_SEC = 60.0
+
+
+def stall_dump_seconds_from_env() -> float:
+    """Seconds one optimizer update may run before every thread's stack is dumped.
+
+    ``MERMAIDSEG_STALL_DUMP_SEC`` (default 180). 0 or a negative value disables the dump.
+    """
+    raw = os.environ.get(STALL_DUMP_ENV, "").strip()
+    seconds = DEFAULT_STALL_DUMP_SEC if not raw else float(raw)
+    return max(0.0, seconds)
+
+
+def watch_for_stalls(updates: Iterable[int], seconds: float) -> Iterator[int]:
+    """Yield ``updates``, re-arming a faulthandler stack dump before each one.
+
+    The timer runs in C, so it still fires when the main thread holds the GIL.
+    It is cancelled when iteration ends, breaks, or raises.
+    """
+    if seconds <= 0:
+        yield from updates
+        return
+    try:
+        for update in updates:
+            faulthandler.dump_traceback_later(seconds, repeat=False, exit=False)
+            yield update
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+def records_train_metrics(microbatch_index: int, every: int) -> bool:
+    """True for the training microbatches whose predictions update the metrics.
+
+    ``microbatch_index`` counts microbatches since this ``MetaModel`` was built,
+    starting at 0, so the first microbatch is always scored.
+    """
+    return int(microbatch_index) % max(1, int(every)) == 0
 
 
 def _resolve_amp_dtype(dtype_config: Any | None) -> torch.dtype:
@@ -176,6 +242,34 @@ class MetaModel:
             "concept",
             "concept-bottleneck",
         ], f"Invalid training_mode: {self.training_mode}"
+        # Fail before the encoder loads. A 1-GPU job with the 768px minibatch
+        # would run the KL term on the whole batch.
+        self.data_parallel = bool(training_kwargs.pop("data_parallel", False))
+        self._metric_shards = None
+        self._shard_replicas: ShardReplicas | None = None
+        # One process per GPU (torchrun). The process group must already exist;
+        # each rank's loader yields that rank's shard of the global microbatch.
+        self.distributed = bool(training_kwargs.pop("distributed", False))
+        self._ddp_step: DistributedDataParallel | None = None
+        self.world_size = 1
+        if self.data_parallel and self.distributed:
+            raise ValueError("data_parallel and distributed are mutually exclusive.")
+        if self.data_parallel:
+            require_data_parallel_gpus(torch.cuda.device_count())
+            logger.info(
+                "data_parallel: %s GPUs; each shard computes its own loss.",
+                torch.cuda.device_count(),
+            )
+        if self.distributed:
+            if not is_distributed():
+                raise RuntimeError(
+                    "distributed requires an initialized process group (launch with torchrun)."
+                )
+            self.world_size = current_context().world_size
+            require_world_size(self.world_size)
+            logger.info(
+                "distributed: %s ranks; each rank computes its shard's loss.", self.world_size
+            )
 
         freeze_encoder = training_kwargs.pop(
             "freeze_encoder",
@@ -198,6 +292,9 @@ class MetaModel:
             self.use_amp = False
         self.scaler = torch.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == torch.float16)
         self.grad_accum_steps = max(1, int(training_kwargs.get("grad_accum_steps", 1)))
+        # Training metrics only; validation scores every batch.
+        self.train_metrics_every = max(1, int(training_kwargs.get("train_metrics_every", 1)))
+        self._train_microbatches_seen = 0
         self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
         self._train_loader_iter = None
         self._train_loader = None
@@ -346,7 +443,11 @@ class MetaModel:
             raise ValueError(
                 f"scheduler.step_every must be 'epoch' or 'iteration', got {step_every!r}"
             )
-        scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_cfg.pop("type", None))
+        scheduler_type = scheduler_cfg.pop("type", None)
+        if scheduler_type == "ConstantThenLinearLR":
+            scheduler_cls = ConstantThenLinearLR
+        else:
+            scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_type)
         self.scheduler = scheduler_cls(self.optimizer, **scheduler_cfg)
         self.scheduler_step_every = step_every
         self.warmup_iters = warmup_iters
@@ -407,13 +508,21 @@ class MetaModel:
         if did_backward and self.scaler.is_enabled():
             self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
+        if self._shard_replicas is not None:
+            self._shard_replicas.zero_grads()
 
     def _apply_accumulated_step(self) -> bool:
         """Clip once, then step Adam/SGD on the averaged gradient.
 
+        With data parallel, the replicas' gradients are first summed onto the
+        primary parameters, so clipping sees the whole window's gradient.
+
         Returns True when the optimizer step was applied (not skipped by the scaler
         or a non-finite grad norm).
         """
+        if self._shard_replicas is not None:
+            self._shard_replicas.reduce_grads()
+            self._shard_replicas.invalidate()
         scale_before = self.scaler.get_scale()
         if self.max_grad_norm is not None and self.max_grad_norm > 0:
             self.scaler.unscale_(self.optimizer)
@@ -487,32 +596,275 @@ class MetaModel:
         assert isinstance(outputs, torch.Tensor)
         return outputs, concept_outputs
 
+    def _update_evaluator(
+        self,
+        evaluator: Any,
+        outputs: torch.Tensor,
+        target_labels: torch.Tensor,
+        concept_outputs: torch.Tensor | None,
+        target_concepts: torch.Tensor | None,
+    ) -> None:
+        """Update ``evaluator`` with one batch already small enough to sit on its device."""
+        device = getattr(evaluator, "device", self.device)
+        outputs = outputs.detach().to(device)
+        target_labels = target_labels.to(device)
+        if concept_outputs is not None:
+            concept_outputs = concept_outputs.detach().to(device)
+        if target_concepts is not None:
+            target_concepts = target_concepts.to(device)
+
+        if self.training_mode == "concept":
+            assert target_concepts is not None
+            target_concept_preds = postprocess_predicted_concepts(
+                target_concepts.detach().cpu().numpy(),
+                self.concept_matrix,
+                self.conceptid2labelid,
+            ).to(device)
+            for metric in evaluator.metric_dict.values():
+                metric.update(outputs, target_concept_preds)
+        else:
+            preds = outputs.argmax(dim=1) if outputs.ndim > 3 else outputs
+            for metric in evaluator.metric_dict.values():
+                metric.update(preds, target_labels)
+        if self.training_mode in ("concept-bottleneck", "concept"):
+            evaluator.evaluate_concepts(concept_outputs, target_concepts)
+
+    def _consume_metric_shards(self, evaluator: Any) -> bool:
+        """Update metrics from one GPU shard at a time.
+
+        Returns False when this step was not data-parallel. Shards are dropped
+        after they are consumed so a 768px map does not stay on GPU 0 alongside
+        the next shard.
+        """
+        shards = self._metric_shards
+        self._metric_shards = None
+        if not shards:
+            return False
+        for shard in shards:
+            outputs = shard.outputs
+            target_labels = shard.target_labels
+            concept_outputs = shard.concept_outputs
+            target_concepts = shard.target_concepts
+            shard.outputs = None
+            shard.concept_outputs = None
+            shard.target_labels = None
+            shard.target_concepts = None
+            assert outputs is not None
+            assert target_labels is not None
+            self._update_evaluator(
+                evaluator, outputs, target_labels, concept_outputs, target_concepts
+            )
+        return True
+
+    def _record_batch_metrics(
+        self,
+        evaluator: Any | None,
+        outputs: torch.Tensor | None,
+        target_labels: torch.Tensor | None,
+        concept_outputs: torch.Tensor | None,
+        target_concepts: torch.Tensor | None,
+    ) -> None:
+        """Record train or val metrics for the batch that just finished.
+
+        ``evaluator=None`` records nothing and drops any data-parallel shards.
+        """
+        if evaluator is None:
+            self._metric_shards = None
+            return
+        if self.distributed and getattr(evaluator, "rank_output_consumers", None):
+            raise RuntimeError("rank output consumers are not reduced across ranks.")
+        if self._consume_metric_shards(evaluator):
+            return
+        if self.data_parallel or self.distributed:
+            raise RuntimeError("data-parallel forward did not return metric shards.")
+        assert outputs is not None
+        assert target_labels is not None
+        self._update_evaluator(evaluator, outputs, target_labels, concept_outputs, target_concepts)
+
+    def _get_shard_replicas(self) -> ShardReplicas:
+        """Per-GPU copies of the model, losses, and lookups, built on first use.
+
+        Built lazily so they copy weights loaded after construction
+        (``--init-weights`` / ``--checkpoint``). Rebuilt if ``model`` or a loss
+        module has been replaced since.
+        """
+        replicas = self._shard_replicas
+        if replicas is not None:
+            primary = replicas.modules[0]
+            if (
+                primary.model is self.model
+                and primary.loss_fn is self.loss
+                and primary.taxonomic_loss is self.taxonomic_loss
+                and primary.distance_loss is self.distance_loss
+            ):
+                return replicas
+        if self.loss is None:
+            raise RuntimeError("data_parallel requires a loss.")
+        if self.source_to_concepts_lookup is None:
+            raise RuntimeError("data_parallel requires concept labels.")
+        self._shard_replicas = build_shard_replicas(
+            self.model,
+            self.loss,
+            self.taxonomic_loss,
+            self.distance_loss,
+            self.source_to_target_lookup,
+            self.source_to_concepts_lookup,
+            use_amp=self.use_amp,
+            amp_dtype=self.amp_dtype,
+        )
+        return self._shard_replicas
+
+    def _get_ddp_step(self) -> DistributedDataParallel:
+        """This rank's lookup, forward, and loss, wrapped in DDP, built on first use.
+
+        Built lazily, like the replicas, so it wraps weights loaded after
+        construction and the ``requires_grad`` set by ``freeze_encoder``.
+        Rebuilt if ``model`` or a loss module has been replaced since.
+        """
+        ddp = self._ddp_step
+        if ddp is not None:
+            step = ddp.module.step
+            if (
+                step.model is self.model
+                and step.loss_fn is self.loss
+                and step.taxonomic_loss is self.taxonomic_loss
+                and step.distance_loss is self.distance_loss
+            ):
+                return ddp
+        if self.loss is None:
+            raise RuntimeError("distributed requires a loss.")
+        if self.source_to_concepts_lookup is None:
+            raise RuntimeError("distributed requires concept labels.")
+        step = DDPLossStep(
+            ShardStep(
+                self.model,
+                self.loss,
+                self.taxonomic_loss,
+                self.distance_loss,
+                self.source_to_target_lookup,
+                self.source_to_concepts_lookup,
+                self.use_amp,
+                self.amp_dtype,
+            )
+        )
+        device = torch.device(self.device)
+        # Buffers (lookups, loss matrices, model buffers) are identical on every
+        # rank and never updated, so they are not re-broadcast each forward.
+        # A bucket view of the 1x1 DPT/concept conv grads is not stride-compatible
+        # (see the reducer's "Grad strides do not match bucket view strides"
+        # warning), so leave the grads in their own storage.
+        self._ddp_step = DistributedDataParallel(
+            step,
+            device_ids=[device.index] if device.type == "cuda" else None,
+            broadcast_buffers=False,
+        )
+        return self._ddp_step
+
+    def _grad_sync_context(self, sync: bool) -> contextlib.AbstractContextManager[Any]:
+        """``no_sync`` for every microbatch but the last of a distributed window."""
+        if not self.distributed or sync:
+            return contextlib.nullcontext()
+        return self._get_ddp_step().no_sync()
+
+    def _finish_skipped_reduction(self) -> None:
+        """Finish the reduction a synced forward prepared when its backward is skipped.
+
+        A synced DDP forward arms the gradient hooks for the next backward. If
+        that backward never runs, the next ``no_sync`` backward would all-reduce.
+        Back-propagating zero through every trainable parameter completes the
+        reduction on all ranks (they skip together); the window's gradients
+        are then discarded.
+        """
+        params = [p for p in self._get_ddp_step().module.parameters() if p.requires_grad]
+        if params:
+            sum(p.sum() * 0.0 for p in params).backward()
+
     def batch_predict_loss(
         self,
         images: torch.Tensor,
-        target_labels: torch.Tensor,
+        target_labels: torch.Tensor | None = None,
         target_concepts: torch.Tensor | None = None,
         target_dim: tuple[int, int] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, float]]:
+        *,
+        source_labels: torch.Tensor | None = None,
+        return_maps: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, dict[str, float]]:
         """Perform batch prediction and compute the loss.
 
         Args:
             images: Image tensor batch (already on-device, float).
             target_labels: Target-space label tensor (already on-device, long).
+                Unused with ``data_parallel``.
             target_concepts: Target concept tensor. Required for ``"concept"``
-                and ``"concept-bottleneck"`` modes; unused otherwise.
+                and ``"concept-bottleneck"`` modes; unused otherwise and with
+                ``data_parallel``.
             target_dim: Target spatial dimensions for output resizing.
                 Defaults to the input spatial dimensions.
+            source_labels: Global source-label map (on cuda:0, long). Required
+                with ``data_parallel``: each GPU maps its shard to target labels
+                and concepts itself.
+            return_maps: With ``data_parallel``, keep the per-GPU maps in
+                ``_metric_shards``. Pass False when the batch is not scored.
         Returns:
             A 4-tuple of ``(loss, outputs, concept_outputs, loss_components)``.
+            With ``data_parallel``, ``outputs`` and ``concept_outputs`` are
+            ``None``; the maps stay on each GPU in ``_metric_shards`` so they
+            are not concatenated onto GPU 0 before backward.
         """
+        self._metric_shards = None
         loss = None
         outputs = None
         concept_outputs = None
         loss_components: dict[str, float] = {}
 
-        if target_dim is None:
-            target_dim = (images.size(-2), images.size(-1))
+        if self.data_parallel:
+            if self.training_mode != "concept-bottleneck":
+                raise RuntimeError("data_parallel is implemented for concept-bottleneck training.")
+            if source_labels is None:
+                raise RuntimeError("data_parallel requires source labels.")
+            parallel = parallel_forward_loss(
+                self._get_shard_replicas(),
+                images,
+                source_labels,
+                return_maps=return_maps,
+            )
+            self._metric_shards = parallel.shards if return_maps else None
+            return parallel.loss, None, None, parallel.components
+
+        if self.distributed:
+            if self.training_mode != "concept-bottleneck":
+                raise RuntimeError("distributed is implemented for concept-bottleneck training.")
+            if source_labels is None:
+                raise RuntimeError("distributed requires source labels.")
+            ddp = self._get_ddp_step()
+            # Validation (no grad) bypasses the DDP wrapper; it has nothing to reduce.
+            # Training must backward the tensor DDP returned, not a copy from the
+            # stashed tuple, so the reducer hooks fire.
+            if torch.is_grad_enabled():
+                loss = ddp(images, source_labels, return_maps=return_maps)
+                output = ddp.module.last
+                if output is None:
+                    raise RuntimeError("distributed forward did not stash its outputs.")
+                _, outputs, concept_outputs, labels, concepts, loss_components = output
+            else:
+                loss, outputs, concept_outputs, labels, concepts, loss_components = ddp.module.step(
+                    images,
+                    source_labels,
+                    return_maps=return_maps,
+                )
+            self._metric_shards = (
+                [
+                    MetricShard(
+                        outputs=outputs,
+                        concept_outputs=concept_outputs,
+                        target_labels=labels,
+                        target_concepts=concepts,
+                    )
+                ]
+                if return_maps
+                else None
+            )
+            return loss, None, None, loss_components
 
         with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
             segmentation_outputs = self.model(images)
@@ -521,27 +873,15 @@ class MetaModel:
             assert target_concepts is not None, (
                 "target_concepts must be provided in 'concept-bottleneck' mode"
             )
-            concept_outputs = segmentation_outputs.hidden_states.detach()
-            concept_logits = segmentation_outputs.concept_logits.float()
-            outputs = segmentation_outputs.logits.float()
-            loss, loss_components = self.loss(
-                outputs, target_labels, concept_logits, target_concepts
+            assert self.loss is not None
+            loss, outputs, concept_outputs, loss_components = apply_concept_bottleneck_loss(
+                segmentation_outputs,
+                self.loss,
+                self.taxonomic_loss,
+                self.distance_loss,
+                target_labels,
+                target_concepts,
             )
-            if self.taxonomic_loss is not None:
-                taxonomic_value, taxonomic_components = self.taxonomic_loss(
-                    concept_logits,
-                    target_concepts,
-                    target_labels,
-                    step=self.global_step,
-                )
-                loss = loss + taxonomic_value
-                loss_components.update(taxonomic_components)
-            if self.distance_loss is not None:
-                distance_value, distance_components = self.distance_loss(
-                    concept_logits, target_concepts
-                )
-                loss = loss + distance_value
-                loss_components.update(distance_components)
 
         elif self.training_mode == "concept":
             assert target_concepts is not None, "target_concepts must be provided in 'concept' mode"
@@ -614,6 +954,10 @@ class MetaModel:
         running_loss_components: dict[str, float] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
         use_cuda = self.device != "cpu" and torch.cuda.is_available()
+        # The phase barriers only make the data/forward/backward totals exact.
+        # With data parallel they would also stall the other GPUs, so those
+        # totals are host-side times there; perf/step_sec stays wall time.
+        sync_timing = use_cuda and not (self.data_parallel or self.distributed)
 
         data_time_total = 0.0
         forward_time_total = 0.0
@@ -639,113 +983,173 @@ class MetaModel:
             start_update = 0
         n_updates = iterations_per_train_epoch - start_update
 
-        for _update_idx in tqdm(range(start_update, iterations_per_train_epoch)):
+        rank = current_context().rank
+        stall_dump_sec = stall_dump_seconds_from_env()
+        if stall_dump_sec > 0:
+            # faulthandler labels each stack by thread id only.
+            logger.warning(
+                "rank %d: an update running over %.0f s dumps all stacks to stderr; "
+                "this rank's main thread is 0x%016x",
+                rank,
+                stall_dump_sec,
+                threading.get_ident(),
+            )
+
+        for _update_idx in watch_for_stalls(
+            tqdm(range(start_update, iterations_per_train_epoch), disable=not is_main_process()),
+            stall_dump_sec,
+        ):
+            step_start = time.perf_counter()
+            step_data_wait = 0.0
             self.optimizer.zero_grad(set_to_none=True)
-            micro_losses: list[float] = []
+            micro_losses: list[torch.Tensor] = []
             micro_components: list[dict[str, float]] = []
             window_failed = False
             did_backward = False
 
             for _micro in range(self.grad_accum_steps):
                 assert self._train_loader_iter is not None
+                fetch_start = time.perf_counter()
                 try:
                     data = next(self._train_loader_iter)
                 except StopIteration:
                     self._train_loader_iter = iter(train_loader)
                     self._train_loader = train_loader
                     data = next(self._train_loader_iter)
+                fetch_sec = time.perf_counter() - fetch_start
+                step_data_wait += fetch_sec
+                if fetch_sec > SLOW_FETCH_WARN_SEC:
+                    logger.warning(
+                        "rank %d: train loader took %.0f s for one microbatch (update %d)",
+                        rank,
+                        fetch_sec,
+                        int(self.global_step) + 1,
+                    )
 
-                if use_cuda:
+                if sync_timing:
                     torch.cuda.synchronize()
                 data_time_total += time.perf_counter() - batch_end
 
                 images, source_labels = data
                 if images.numel() == 0:
+                    if self.distributed:
+                        # Skipping on one rank would leave the others waiting in a collective.
+                        raise RuntimeError("train_epoch: empty batch in a distributed run.")
                     logger.warning(
                         "train_epoch: skipping an empty batch (all items failed to load)."
                     )
                     window_failed = True
                     batch_end = time.perf_counter()
                     break
-                images = images.to(self.device).float()
-                source_labels = source_labels.long().to(self.device)
-                target_labels = self._to_target_labels(source_labels)
-                target_concepts = (
-                    self._to_concept_labels(source_labels)
-                    if self.training_mode in ("concept", "concept-bottleneck")
-                    else None
+                record_metrics = evaluator is not None and records_train_metrics(
+                    self._train_microbatches_seen, self.train_metrics_every
                 )
+                self._train_microbatches_seen += 1
+                images = images.to(self.device, non_blocking=True).float()
+                source_labels = source_labels.to(self.device, non_blocking=True).long()
+                if self.data_parallel or self.distributed:
+                    # Each GPU maps its own shard of source labels.
+                    target_labels = None
+                    target_concepts = None
+                else:
+                    target_labels = self._to_target_labels(source_labels)
+                    target_concepts = (
+                        self._to_concept_labels(source_labels)
+                        if self.training_mode in ("concept", "concept-bottleneck")
+                        else None
+                    )
 
-                if use_cuda:
-                    torch.cuda.synchronize()
-                forward_start = time.perf_counter()
-                loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
-                    images, target_labels, target_concepts
-                )
-                if use_cuda:
-                    torch.cuda.synchronize()
-                forward_time_total += time.perf_counter() - forward_start
-                assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
+                # Distributed: gradients are all-reduced once, in the window's last backward.
+                sync_grads = _micro == self.grad_accum_steps - 1
+                with self._grad_sync_context(sync_grads):
+                    if sync_timing:
+                        torch.cuda.synchronize()
+                    forward_start = time.perf_counter()
+                    loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
+                        images,
+                        target_labels,
+                        target_concepts,
+                        source_labels=source_labels,
+                        return_maps=record_metrics,
+                    )
+                    if sync_timing:
+                        torch.cuda.synchronize()
+                    forward_time_total += time.perf_counter() - forward_start
+                    assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
 
-                if not torch.isfinite(loss):
-                    logger.warning("train_epoch: skipping non-finite loss (value=%s)", loss.item())
-                    window_failed = True
-                    batch_end = time.perf_counter()
-                    break
+                    # Distributed: skip the window if any rank's shard loss is non-finite,
+                    # as the single-process path does when the mean over shards is.
+                    finite = (
+                        all_ranks_finite(loss) if self.distributed else bool(torch.isfinite(loss))
+                    )
+                    if not finite:
+                        logger.warning(
+                            "train_epoch: skipping non-finite loss (value=%s)", loss.item()
+                        )
+                        self._metric_shards = None
+                        del loss
+                        if self.distributed and sync_grads:
+                            self._finish_skipped_reduction()
+                        window_failed = True
+                        batch_end = time.perf_counter()
+                        break
 
-                if use_cuda:
-                    torch.cuda.synchronize()
-                backward_start = time.perf_counter()
-                self._accumulate_loss(loss)
-                did_backward = True
-                if use_cuda:
-                    torch.cuda.synchronize()
-                backward_time_total += time.perf_counter() - backward_start
+                    if sync_timing:
+                        torch.cuda.synchronize()
+                    backward_start = time.perf_counter()
+                    self._accumulate_loss(loss)
+                    did_backward = True
+                    if sync_timing:
+                        torch.cuda.synchronize()
+                    backward_time_total += time.perf_counter() - backward_start
 
-                micro_losses.append(float(loss.detach()))
+                micro_losses.append(loss.detach())
                 micro_components.append(loss_components)
-                num_samples += int(target_labels.size(0))
-                outputs = outputs.detach()
+                num_samples += int(images.size(0)) * self.world_size
+                # Drop the graph before metrics. Data-parallel shards are already
+                # detached, so this frees activations before the next shard's maps
+                # are copied onto the evaluator device.
+                if outputs is not None:
+                    outputs = outputs.detach()
                 if concept_outputs is not None:
                     concept_outputs = concept_outputs.detach()
                 del loss
 
-                if evaluator is not None:
-                    if self.training_mode == "concept":
-                        target_concept_preds = postprocess_predicted_concepts(
-                            target_concepts.detach().cpu().numpy(),
-                            self.concept_matrix,
-                            self.conceptid2labelid,
-                        ).to(self.device)
-                        for metric in evaluator.metric_dict.values():
-                            metric.update(outputs, target_concept_preds)
-                    else:
-                        preds = outputs.argmax(dim=1) if outputs.ndim > 3 else outputs
-                        for metric in evaluator.metric_dict.values():
-                            metric.update(preds, target_labels)
-                    if self.training_mode in ("concept-bottleneck", "concept"):
-                        evaluator.evaluate_concepts(concept_outputs, target_concepts)
+                self._record_batch_metrics(
+                    evaluator if record_metrics else None,
+                    outputs,
+                    target_labels,
+                    concept_outputs,
+                    target_concepts,
+                )
 
-                if use_cuda:
+                if sync_timing:
                     torch.cuda.synchronize()
                 batch_end = time.perf_counter()
 
             if window_failed or not micro_losses:
                 self._abort_accumulation(did_backward)
-                if use_cuda:
+                if sync_timing:
                     torch.cuda.synchronize()
                 batch_end = time.perf_counter()
                 continue
 
             n_micro = len(micro_losses)
-            batch_loss = sum(micro_losses) / n_micro
+            batch_loss = sum(torch.stack(micro_losses).double().tolist()) / n_micro
             mean_components: dict[str, float] = {}
             for comps in micro_components:
                 for key, value in comps.items():
                     mean_components[key] = mean_components.get(key, 0.0) + value
             mean_components = {key: value / n_micro for key, value in mean_components.items()}
+            if self.distributed:
+                # Mean over ranks of the per-rank window means: the mean over shards
+                # the single-process data-parallel path logs.
+                mean_components = reduce_components(
+                    {_BATCH_LOSS_KEY: batch_loss, **mean_components}
+                )
+                batch_loss = mean_components.pop(_BATCH_LOSS_KEY)
 
-            if use_cuda:
+            if sync_timing:
                 torch.cuda.synchronize()
             backward_start = time.perf_counter()
             # Decay starts on the update after warmup finishes. Stepping both on the
@@ -759,7 +1163,7 @@ class MetaModel:
                 self._step_warmup_scheduler()
                 if warmup_done:
                     self._step_iteration_scheduler()
-            if use_cuda:
+            if sync_timing:
                 torch.cuda.synchronize()
             backward_time_total += time.perf_counter() - backward_start
 
@@ -776,6 +1180,10 @@ class MetaModel:
                     {
                         "train/batch_loss": batch_loss,
                         **{f"train/batch_{key}": value for key, value in mean_components.items()},
+                        # Host wall time for this update, and the part of it spent
+                        # blocked on the train loader.
+                        "perf/step_sec": time.perf_counter() - step_start,
+                        "perf/data_wait_sec": step_data_wait,
                     },
                     step=self.global_step,
                 )
@@ -830,7 +1238,7 @@ class MetaModel:
             self._val_loader_iter = iter(val_loader)
             self._val_loader = val_loader
 
-        for _ in tqdm(range(iterations_per_val_epoch)):
+        for _ in tqdm(range(iterations_per_val_epoch), disable=not is_main_process()):
             assert self._val_loader_iter is not None
             try:
                 data = next(self._val_loader_iter)
@@ -840,45 +1248,50 @@ class MetaModel:
                 data = next(self._val_loader_iter)
             images, source_labels = data
             if images.numel() == 0:
+                if self.distributed:
+                    raise RuntimeError("validation_epoch: empty batch in a distributed run.")
                 logger.warning(
                     "validation_epoch: skipping an empty batch (all items failed to load)."
                 )
                 continue
-            images = images.to(self.device).float()
-            source_labels = source_labels.long().to(self.device)
-            target_labels = self._to_target_labels(source_labels)
-            target_concepts = (
-                self._to_concept_labels(source_labels)
-                if self.training_mode in ("concept", "concept-bottleneck")
-                else None
-            )
+            images = images.to(self.device, non_blocking=True).float()
+            source_labels = source_labels.to(self.device, non_blocking=True).long()
+            if self.data_parallel or self.distributed:
+                target_labels = None
+                target_concepts = None
+            else:
+                target_labels = self._to_target_labels(source_labels)
+                target_concepts = (
+                    self._to_concept_labels(source_labels)
+                    if self.training_mode in ("concept", "concept-bottleneck")
+                    else None
+                )
 
             loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
-                images, target_labels, target_concepts
+                images,
+                target_labels,
+                target_concepts,
+                source_labels=source_labels,
+                return_maps=evaluator is not None,
             )
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
             running_loss += loss.item()
             for k, v in loss_components.items():
                 running_loss_components[k] = running_loss_components.get(k, 0.0) + v
+            del loss
 
-            if evaluator is not None:
-                if self.training_mode == "concept":
-                    target_concept_preds = postprocess_predicted_concepts(
-                        target_concepts.detach().cpu().numpy(),
-                        self.concept_matrix,
-                        self.conceptid2labelid,
-                    ).to(self.device)
-                    for metric in evaluator.metric_dict.values():
-                        metric.update(outputs, target_concept_preds)
-                else:
-                    if outputs.ndim > 3:
-                        outputs = outputs.argmax(dim=1)
-                    for metric in evaluator.metric_dict.values():
-                        metric.update(outputs.detach(), target_labels)
+            self._record_batch_metrics(
+                evaluator, outputs, target_labels, concept_outputs, target_concepts
+            )
 
-            if evaluator is not None and self.training_mode in ("concept-bottleneck", "concept"):
-                evaluator.evaluate_concepts(concept_outputs.detach(), target_concepts)
+        if self.distributed:
+            # Mean over ranks of the per-rank sums: the per-batch mean over shards, summed.
+            running_loss_components = reduce_components(
+                {_BATCH_LOSS_KEY: running_loss, **running_loss_components}
+            )
+            running_loss = running_loss_components.pop(_BATCH_LOSS_KEY)
 
+        # Distributed: torchmetrics sums each metric's state over ranks in compute().
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
                 metric_results[metric_name] = (

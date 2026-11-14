@@ -231,8 +231,8 @@ def main() -> None:
 
     cfg = setup_config(
         {
-            "data": "../configs/data_config_512.yaml",
-            "training": "../configs/training_config_cbm_512.yaml",
+            "data": "../configs/data_config.yaml",
+            "training": "../configs/training_config_cbm_100k.yaml",
             "model": "../configs/model_config_cbm_dpt_lora_vitl.yaml",
             "logger": "../configs/logger_config.yaml",
         }

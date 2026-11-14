@@ -339,7 +339,9 @@ class LocalS3Cache:
                 self._record_local_hit()
                 return local.read_bytes()
 
-            if self._write_through:
+            # Offline, a miss can only raise. Taking the lock would cost a flock on
+            # the (network) cache directory for nothing.
+            if self._write_through and not self._offline:
                 lock_path = local.with_suffix(local.suffix + ".lock")
                 with _file_lock(lock_path):
                     if _is_nonempty_file(local):

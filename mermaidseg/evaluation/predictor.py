@@ -41,6 +41,39 @@ def make_eval_transform(input_size: tuple[int, int]) -> A.Compose:
     )
 
 
+def long_edge_size(
+    height: int,
+    width: int,
+    long_edge: int,
+    *,
+    multiple: int = 1,
+) -> tuple[int, int]:
+    """Return ``(height, width)`` with the long side fixed at ``long_edge``.
+
+    The short side keeps the source aspect ratio and is rounded to ``multiple``
+    so a ViT patch grid stays exact. ``long_edge`` must itself be a positive
+    multiple of ``multiple``. Square inputs stay square.
+    """
+    height = int(height)
+    width = int(width)
+    long_edge = int(long_edge)
+    multiple = int(multiple)
+    if height <= 0 or width <= 0:
+        raise ValueError(f"image size must be positive, got {(height, width)}")
+    if multiple <= 0:
+        raise ValueError(f"multiple must be positive, got {multiple}")
+    if long_edge <= 0 or long_edge % multiple != 0:
+        raise ValueError(f"long_edge must be a positive multiple of {multiple}, got {long_edge}")
+
+    def snap(value: float) -> int:
+        snapped = int(round(value / multiple)) * multiple
+        return max(multiple, snapped)
+
+    if height >= width:
+        return long_edge, snap(width * (long_edge / height))
+    return snap(height * (long_edge / width)), long_edge
+
+
 def preprocess_image(image_rgb_uint8: NDArray[np.uint8], transform: A.Compose) -> torch.Tensor:
     """Resize + normalize an HxWx3 uint8 RGB image to a (3, h, w) float tensor."""
     normalized = transform(image=image_rgb_uint8)["image"]
@@ -72,6 +105,17 @@ class CBMPredictor:
     # -- preprocessing ---------------------------------------------------------
     def preprocess(self, image_rgb_uint8: NDArray[np.uint8]) -> torch.Tensor:
         return preprocess_image(image_rgb_uint8, self.transform)
+
+    def preprocess_long_edge(
+        self, image_rgb_uint8: NDArray[np.uint8], long_edge: int
+    ) -> torch.Tensor:
+        """Resize so the long side is ``long_edge``, then ImageNet-normalize.
+
+        The short side keeps aspect ratio and is rounded to ``patch_size``.
+        """
+        height, width = int(image_rgb_uint8.shape[0]), int(image_rgb_uint8.shape[1])
+        out_h, out_w = long_edge_size(height, width, long_edge, multiple=self.patch_size)
+        return preprocess_image(image_rgb_uint8, make_eval_transform((out_h, out_w)))
 
     def _autocast(self):
         if self.amp and self.device.type == "cuda":
@@ -114,7 +158,9 @@ class CBMPredictor:
             hidden_states = self.model._encode(images)
 
         if kind == "dpt":
-            feat = self.model.dpt_head(hidden_states)
+            token_height = images.shape[-2] // self.patch_size
+            token_width = images.shape[-1] // self.patch_size
+            feat = self.model.dpt_head(hidden_states, token_height, token_width)
             feat = F.interpolate(
                 feat.float(), size=images.shape[-2:], mode="bilinear", align_corners=False
             )
@@ -173,8 +219,7 @@ class CBMPredictor:
         activated = activate(logits.unsqueeze(0))
         if activated.dim() != 4 or activated.shape[0] != 1:
             raise RuntimeError(
-                "concept_outputs_activation must return (1, K, H, W); "
-                f"got {tuple(activated.shape)}"
+                f"concept_outputs_activation must return (1, K, H, W); got {tuple(activated.shape)}"
             )
         activated = activated[0]
         if activated.shape != logits.shape:

@@ -195,12 +195,49 @@ def _encode_concept_row(
     return out
 
 
-class ConceptLookup:
-    """Maps source label names to length-K concept rows in model channel order."""
+# Phyla whose ``live`` column decides whether a point is living (dead coral keeps its
+# coral taxonomy). Every other taxon is living whenever its taxonomy is not ``none``.
+LIVE_COLUMN_PHYLA = frozenset({"cnidaria", "echinodermata"})
+# Live hard and soft corals: scleractinians, black corals, octocorals, and hydrocorals.
+CORAL_ORDERS = frozenset({"scleractinia", "antipatharia"})
+CORAL_CLASSES = frozenset({"octocorallia"})
+CORAL_FAMILIES = frozenset({"milleporidae", "stylasteridae"})
 
-    def __init__(self, name_to_row: dict[str, NDArray[np.int8]], num_channels: int):
+
+def point_scopes(row: pd.Series) -> tuple[bool, bool]:
+    """``(live, coral)`` flags of one concept CSV row.
+
+    ``live`` is combined per rank with "GT is not ``rank__none``" by
+    :class:`~mermaidseg.evaluation.metrics.TaxonomicRankAccuracy`, so it only has to
+    reject dead corals / echinoderms. ``coral`` marks live corals in
+    ``CORAL_ORDERS`` / ``CORAL_CLASSES`` / ``CORAL_FAMILIES``.
+    """
+    live_column = _cell_str(row.get("live")) == "true"
+    live = live_column if _cell_str(row.get("phylum")) in LIVE_COLUMN_PHYLA else True
+    coral = live_column and (
+        _cell_str(row.get("order")) in CORAL_ORDERS
+        or _cell_str(row.get("class")) in CORAL_CLASSES
+        or _cell_str(row.get("family")) in CORAL_FAMILIES
+    )
+    return live, coral
+
+
+class ConceptLookup:
+    """Maps source label names to length-K concept rows in model channel order.
+
+    ``name_to_scope`` holds the per-label ``(live, coral)`` flags of :func:`point_scopes`.
+    Labels without an entry are ``(True, False)``: living decided by taxonomy alone.
+    """
+
+    def __init__(
+        self,
+        name_to_row: dict[str, NDArray[np.int8]],
+        num_channels: int,
+        name_to_scope: dict[str, tuple[bool, bool]] | None = None,
+    ):
         self.name_to_row = name_to_row
         self.num_channels = num_channels
+        self.name_to_scope = name_to_scope or {}
         self._zero = np.zeros(num_channels, dtype=np.int8)
         self.unmapped: set[str] = set()
 
@@ -212,6 +249,9 @@ class ConceptLookup:
             return self._zero
         return r
 
+    def scopes(self, source_label_name: str) -> tuple[bool, bool]:
+        return self.name_to_scope.get(str(source_label_name).lower(), (True, False))
+
 
 def build_concept_lookup(
     source_name: str,
@@ -221,6 +261,13 @@ def build_concept_lookup(
 ) -> ConceptLookup:
     """Build a source-label -> concept-row lookup aligned to the model channels."""
     df = pd.read_csv(csv_path)
+    has_live = "live" in df.columns
+    if not has_live:
+        logger.warning(
+            "%s has no 'live' column: living points are decided by taxonomy alone "
+            "and the live-coral scope is empty.",
+            csv_path,
+        )
     df["source_label_class_name"] = df["source_label_class_name"].astype(str).str.lower()
     df["source_dataset_source"] = df["source_dataset_source"].astype(str).str.lower()
     df_src = df[df["source_dataset_source"] == source_name.lower()]
@@ -234,11 +281,14 @@ def build_concept_lookup(
 
     ranks = set(TAXONOMIC_CONCEPTS)
     name_to_row: dict[str, NDArray[np.int8]] = {}
+    name_to_scope: dict[str, tuple[bool, bool]] = {}
     for src_name in source_label_names:
         key = str(src_name).lower()
         row = row_by_label.get(key)
         if row is None:
             continue  # -> zeros (ignored) via ConceptLookup.row
         name_to_row[key] = _encode_concept_row(row, concept_names, ranks)
+        if has_live:
+            name_to_scope[key] = point_scopes(row)
 
-    return ConceptLookup(name_to_row, len(concept_names))
+    return ConceptLookup(name_to_row, len(concept_names), name_to_scope)

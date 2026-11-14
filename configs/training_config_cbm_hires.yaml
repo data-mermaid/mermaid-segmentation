@@ -7,16 +7,14 @@ training:
         type: ConceptBottleneckLoss
         lambda_weight: 1
         ignore_index: 0
-        # Compromise from the pixel-vs-image loss-weight sweep.
         per_pixel_loss_weight: 0.5
         per_image_loss_weight: 0.5
+    # High-resolution fine-tune: 25k optimizer updates from the duration cd275000 cooldown
+    # (--init-weights, fresh optimizer). 4k linear warmup, then LinearLR to 0. The resolution
+    # comes from --resolution. batch_size is the global minibatch; under DDP each rank
+    # loads batch_size / world_size images, and grad_accum_steps keeps the effective batch at 32.
+    epochs: 5
     max_grad_norm: 0.5
-    # One epoch of 50_000 optimizer updates. The first 4000 are linear warmup;
-    # LinearLR then decays to 0 over the remaining 46_000 updates (stepped per
-    # update, so a single epoch actually decays). model_step{N} is written every
-    # 10_000 updates and is not uploaded to wandb. The sbatch overrides
-    # batch_size / grad_accum_steps per resolution so the effective batch stays 32.
-    epochs: 1
     optimizer:
         type: AdamW
         lr: 0.00005          # fallback / default; also the DPT + concept/class head LR
@@ -27,17 +25,19 @@ training:
         type: LinearLR
         start_factor: 1.0
         end_factor: 0.0
-        total_iters: 46000   # optimizer steps after warmup; step_every is iteration
+        total_iters: 21000  # optimizer updates after warmup; step_every is iteration
         step_every: iteration
-        warmup_iters: 4000   # in optimizer updates; keep <= iterations_per_train_epoch
+        warmup_iters: 4000
         warmup_start_factor: 0.01
     mixed_precision: true
     mixed_precision_dtype: bfloat16
-    iterations_per_train_epoch: 50000
     iterations_per_val_epoch: 400
+    iterations_per_train_epoch: 5000
     batch_size: 32
     grad_accum_steps: 1
-    checkpoint_every_steps: 10000
+    # Score every 10th training microbatch; concept metrics are slow at high resolution.
+    train_metrics_every: 10
+    checkpoint_every_steps: 5000
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
                     'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',

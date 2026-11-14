@@ -367,15 +367,22 @@ def _wrap_encoder_with_lora(
     return get_peft_model(encoder, lora_config)
 
 
-def align_peft_checkpoint_state_dict(
+# The coarsest fusion block is called with no skip, so this residual never runs.
+# Checkpoints saved before it was deleted still contain its weights and Adam slots.
+_UNUSED_FUSION_RESIDUAL = "fusion_stage.layers.0.residual_layer1."
+_FUSION_RESIDUAL_INSERT_BEFORE = "fusion_stage.layers.0.residual_layer2."
+_REMOVED_NORM_BUFFERS = (".running_mean", ".running_var", ".num_batches_tracked")
+
+
+def _remap_checkpoint_state_dict(
     state_dict: dict[str, torch.Tensor],
     model: torch.nn.Module,
 ) -> dict[str, torch.Tensor]:
-    """Remap saved checkpoint keys to match ``model.state_dict()``.
+    """Pick the PEFT key layout that overlaps the live module the most.
 
     PEFT / transformers version skew can change the number of nested ``.model.``
-    segments under ``encoder.base_model``; pick the remap variant with the best
-    key overlap against the live module.
+    segments under ``encoder.base_model``. The returned dict keeps every saved
+    tensor, including ones the live module no longer has.
     """
     target_keys = set(model.state_dict().keys())
 
@@ -403,13 +410,177 @@ def align_peft_checkpoint_state_dict(
         _remap(lambda k: _collapse_peft_model(_legacy_encoder_prefix(k))),
         _remap(lambda k: _expand_peft_model(_legacy_encoder_prefix(k))),
     )
-    best_state_dict = max(variants, key=lambda sd: len(set(sd.keys()) & target_keys))
-    removed_norm_buffers = (".running_mean", ".running_var", ".num_batches_tracked")
+    return max(variants, key=lambda sd: len(set(sd.keys()) & target_keys))
+
+
+def align_peft_checkpoint_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    model: torch.nn.Module,
+) -> dict[str, torch.Tensor]:
+    """Remap saved checkpoint keys to match ``model.state_dict()``.
+
+    Keys for the unused coarsest-fusion residual
+    (``fusion_stage.layers.0.residual_layer1``) are dropped so a checkpoint
+    saved before that module was removed still loads.
+    """
+    best_state_dict = _remap_checkpoint_state_dict(state_dict, model)
+    target_keys = set(model.state_dict().keys())
     return {
         key: value
         for key, value in best_state_dict.items()
-        if key in target_keys or not key.endswith(removed_norm_buffers)
+        if _UNUSED_FUSION_RESIDUAL not in key
+        and (key in target_keys or not key.endswith(_REMOVED_NORM_BUFFERS))
     }
+
+
+def _optimizer_group_names(
+    optimizer: torch.optim.Optimizer,
+    model: torch.nn.Module,
+) -> list[list[str]]:
+    """Parameter names in each live optimizer group, in group order."""
+    name_of = {id(param): name for name, param in model.named_parameters()}
+    groups: list[list[str]] = []
+    for group in optimizer.param_groups:
+        names: list[str] = []
+        for param in group["params"]:
+            try:
+                names.append(name_of[id(param)])
+            except KeyError as exc:
+                raise ValueError("Optimizer parameter is not registered on the model") from exc
+        groups.append(names)
+    return groups
+
+
+def _removed_residual_param_names(state_dict: dict[str, torch.Tensor]) -> list[str]:
+    """Parameter names of the deleted residual, in checkpoint registration order."""
+    return [
+        key
+        for key in state_dict
+        if _UNUSED_FUSION_RESIDUAL in key and not key.endswith(_REMOVED_NORM_BUFFERS)
+    ]
+
+
+def _group_size_error(saved: int, live: int, detail: str = "") -> ValueError:
+    message = (
+        "loaded state dict contains a parameter group that doesn't match "
+        f"the size of optimizer's group (saved {saved}, live {live})"
+    )
+    if detail:
+        message = f"{message}: {detail}"
+    return ValueError(message)
+
+
+def align_optimizer_state_dict(
+    optimizer_state: dict[str, Any],
+    optimizer: torch.optim.Optimizer,
+    model: torch.nn.Module,
+    checkpoint_state_dict: dict[str, torch.Tensor],
+) -> tuple[dict[str, Any], int]:
+    """Drop Adam slots for the removed coarsest-fusion residual.
+
+    The residual sat in the middle of a parameter group, between
+    ``layers.0.projection`` and ``layers.0.residual_layer2``. Slots that still
+    correspond to live parameters stay in that order, and the group's learning
+    rate and other hyperparameters are copied through unchanged.
+
+    Returns the state dict for ``optimizer.load_state_dict`` and how many
+    parameter slots were removed. A checkpoint that already matches the live
+    optimizer is returned unchanged with a count of zero.
+    """
+    saved_groups = optimizer_state["param_groups"]
+    live_groups = optimizer.param_groups
+    if len(saved_groups) != len(live_groups):
+        raise ValueError(
+            "loaded state dict has a different number of parameter groups "
+            f"(saved {len(saved_groups)}, live {len(live_groups)})"
+        )
+
+    live_names_per_group = _optimizer_group_names(optimizer, model)
+    if all(
+        len(saved["params"]) == len(live_names)
+        for saved, live_names in zip(saved_groups, live_names_per_group, strict=True)
+    ):
+        return optimizer_state, 0
+
+    removed_names = _removed_residual_param_names(
+        _remap_checkpoint_state_dict(checkpoint_state_dict, model)
+    )
+    new_groups: list[dict[str, Any]] = []
+    n_dropped = 0
+    for saved_group, live_group, live_names in zip(
+        saved_groups, live_groups, live_names_per_group, strict=True
+    ):
+        saved_ids = list(saved_group["params"])
+        if len(saved_ids) == len(live_names):
+            new_groups.append(saved_group)
+            continue
+        if len(saved_ids) < len(live_names):
+            raise _group_size_error(len(saved_ids), len(live_names))
+
+        insert_at = next(
+            (i for i, name in enumerate(live_names) if _FUSION_RESIDUAL_INSERT_BEFORE in name),
+            None,
+        )
+        if insert_at is None:
+            raise _group_size_error(
+                len(saved_ids),
+                len(live_names),
+                "could not find fusion_stage.layers.0.residual_layer2 "
+                "to place the removed residual",
+            )
+        old_names = live_names[:insert_at] + removed_names + live_names[insert_at:]
+        if len(old_names) != len(saved_ids):
+            raise _group_size_error(
+                len(saved_ids),
+                len(live_names),
+                f"reconstructed {len(old_names)} names after accounting for the removed residual",
+            )
+
+        kept_ids: list[int] = []
+        for param_id, name in zip(saved_ids, old_names, strict=True):
+            if _UNUSED_FUSION_RESIDUAL in name:
+                n_dropped += 1
+                continue
+            kept_ids.append(param_id)
+        if len(kept_ids) != len(live_group["params"]):
+            raise _group_size_error(len(saved_ids), len(live_group["params"]))
+
+        saved_slots = optimizer_state["state"]
+        for param_id, param, name in zip(kept_ids, live_group["params"], live_names, strict=True):
+            slot = saved_slots.get(param_id)
+            if not isinstance(slot, dict):
+                continue
+            moment = slot.get("exp_avg")
+            if isinstance(moment, torch.Tensor) and tuple(moment.shape) != tuple(param.shape):
+                raise _group_size_error(
+                    len(saved_ids),
+                    len(live_names),
+                    f"moment shape {tuple(moment.shape)} does not match {name} "
+                    f"shape {tuple(param.shape)}",
+                )
+
+        new_group = dict(saved_group)
+        new_group["params"] = kept_ids
+        param_names = new_group.get("param_names")
+        if param_names is not None:
+            if len(param_names) == len(old_names):
+                new_group["param_names"] = [
+                    name
+                    for name, old_name in zip(param_names, old_names, strict=True)
+                    if _UNUSED_FUSION_RESIDUAL not in old_name
+                ]
+            else:
+                new_group.pop("param_names")
+        new_groups.append(new_group)
+
+    kept_ids = {param_id for group in new_groups for param_id in group["params"]}
+    saved_ids = {param_id for group in saved_groups for param_id in group["params"]}
+    filtered_state = {
+        key: value
+        for key, value in optimizer_state["state"].items()
+        if key in kept_ids or key not in saved_ids
+    }
+    return {"state": filtered_state, "param_groups": new_groups}, n_dropped
 
 
 class DPTHead(torch.nn.Module):
@@ -457,6 +628,12 @@ class DPTHead(torch.nn.Module):
             neck_ignore_stages=[],
         )
         self.neck = DPTNeck(dpt_config)
+        # The coarsest fusion block is called with no skip, so its first residual
+        # unit never runs. Leaving those weights trainable makes DDP wait for a
+        # gradient that never arrives (huggingface/transformers#30633).
+        layer0 = self.neck.fusion_stage.layers[0]
+        if getattr(layer0, "residual_layer1", None) is not None:
+            del layer0.residual_layer1
         norm_groups = min(32, fusion_hidden_size)
         while fusion_hidden_size % norm_groups != 0:
             norm_groups -= 1
@@ -470,13 +647,21 @@ class DPTHead(torch.nn.Module):
             torch.nn.Conv2d(fusion_hidden_size, out_channels, kernel_size=1),
         )
 
-    def forward(self, hidden_states: Sequence[torch.Tensor]) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: Sequence[torch.Tensor],
+        token_height: int | None = None,
+        token_width: int | None = None,
+    ) -> torch.Tensor:
         """Run the DPT neck + conv head.
 
         Args:
             hidden_states: Sequence of ``num_stages`` token tensors, each of
                 shape ``(B, 1 + token_height * token_width, hidden_size)`` with
                 the CLS token at index 0 (register tokens already stripped).
+            token_height: Patch rows in ``hidden_states``. Required for a grid
+                whose aspect differs from the grid stored at construction.
+            token_width: Patch columns in ``hidden_states``.
         Returns:
             torch.Tensor: Dense features of shape ``(B, out_channels, H_f, W_f)``.
         """
@@ -484,10 +669,20 @@ class DPTHead(torch.nn.Module):
             raise ValueError(
                 f"DPTHead expects {self.num_stages} hidden states, got {len(hidden_states)}."
             )
-        # Derive the patch-token grid from the actual sequence length (minus the
-        # CLS token) so the head works for any input resolution, not just the one
-        # baked in at construction from ``input_size``.
-        token_height, token_width = self._infer_token_grid(hidden_states[0].shape[1] - 1)
+        # Prefer the image's real patch grid. Falling back to the sequence length
+        # only works when that length factors at the aspect ratio baked in from
+        # ``input_size`` (square, for the configs used here).
+        if token_height is None or token_width is None:
+            token_height, token_width = self._infer_token_grid(hidden_states[0].shape[1] - 1)
+        else:
+            token_height = int(token_height)
+            token_width = int(token_width)
+            num_patch_tokens = hidden_states[0].shape[1] - 1
+            if token_height * token_width != num_patch_tokens:
+                raise ValueError(
+                    f"Token grid {token_height}x{token_width} does not match "
+                    f"{num_patch_tokens} patch tokens."
+                )
         features = self.neck(hidden_states, token_height, token_width)
         return self.head(features[-1])
 
@@ -597,6 +792,14 @@ class _DPTDINOv3Base(torch.nn.Module):
         if not use_lora:
             self.freeze_encoder()
 
+    def _input_token_grid(self, images: torch.Tensor) -> tuple[int, int]:
+        """Patch grid of an input batch. Both sides must be divisible by ``patch_size``."""
+        height, width = int(images.shape[-2]), int(images.shape[-1])
+        patch = int(self.patch_size)
+        if height % patch or width % patch:
+            raise ValueError(f"Input {(height, width)} is not divisible by patch size {patch}.")
+        return height // patch, width // patch
+
     def _encode(self, x: torch.Tensor, **kwargs: Any) -> list[torch.Tensor]:
         """Run the encoder and return the selected hidden states (CLS + patches).
 
@@ -646,7 +849,8 @@ class _LinearDPTDINOv3(_DPTDINOv3Base):
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> SemanticSegmenterOutput:
         """Run encoder + DPT head and upsample logits to input resolution."""
         hidden_states = self._encode(x, **kwargs)
-        logits = self.dpt_head(hidden_states)
+        token_height, token_width = self._input_token_grid(x)
+        logits = self.dpt_head(hidden_states, token_height, token_width)
         logits = torch.nn.functional.interpolate(
             logits, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
@@ -675,7 +879,8 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
     def forward(self, x: torch.Tensor, labels=None, **kwargs: Any) -> ConceptBottleneckOutput:
         """Run encoder + DPT head, the concept bottleneck, and the class classifier."""
         hidden_states = self._encode(x, **kwargs)
-        concept_features = self.dpt_head(hidden_states)
+        token_height, token_width = self._input_token_grid(x)
+        concept_features = self.dpt_head(hidden_states, token_height, token_width)
         concept_features = torch.nn.functional.interpolate(
             concept_features, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
@@ -685,9 +890,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
                     concept_features
                 )
         else:
-            logits, concept_outputs, concept_logits = self._forward_concept_tail(
-                concept_features
-            )
+            logits, concept_outputs, concept_logits = self._forward_concept_tail(concept_features)
         return ConceptBottleneckOutput(
             loss=None,
             logits=logits,

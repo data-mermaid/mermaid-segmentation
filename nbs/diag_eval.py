@@ -76,7 +76,7 @@ p.add_argument(
     "--ambiguity-policy",
     default="permissive",
     choices=["permissive", "exclude", "strict"],
-    help="how to treat multi-parent taxa (e.g. homonym genera); --hier only",
+    help="how to treat multi-parent taxa (Turbinaria is turbinaria_coral vs turbinaria_algae); --hier only",
 )
 p.add_argument(
     "--concept-mapping",
@@ -126,7 +126,7 @@ print(f"  checkpoint    {ck.stat().st_size} bytes  md5={hashlib.md5(ck.read_byte
 # ---------------------------------------------------------------- config
 config_path_dict = {
     "data": "../configs/data_config.yaml",
-    "training": "../configs/training_config_cbm.yaml",
+    "training": "../configs/training_config_cbm_100k.yaml",
     "model": "../configs/model_config_cbm_dpt_lora_vitl.yaml",
     "logger": "../configs/logger_config.yaml",
 }

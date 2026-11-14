@@ -1,0 +1,18 @@
+{
+  "output_dir": ".smoke/report",
+  "manifest": "etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet",
+  "bucket": "dev-datamermaid-sm-sources",
+  "data_config": "/Users/jonathan/mit/mermaid-segmentation/configs/data_config_all.yaml",
+  "concepts_csv": "/Users/jonathan/mit/mermaid-segmentation/configs/class_to_concepts.csv",
+  "cache_dir": null,
+  "workers": 3,
+  "n_images": 20,
+  "max_edge": 1024,
+  "seed": 0,
+  "sources": [
+    23,
+    57,
+    1645
+  ],
+  "skip_images": false
+}

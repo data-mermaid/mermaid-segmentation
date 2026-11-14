@@ -241,6 +241,16 @@ def test_offline_miss_raises_without_boto3(tmp_path):
     assert snapshot.s3_fetches == 0
 
 
+def test_offline_miss_takes_no_lock(tmp_path):
+    cache = LocalS3Cache.configure(tmp_path, write_through=True, offline=True)
+
+    with pytest.raises(DataLoadError, match="offline mode"):
+        cache.read_bytes("bucket", "sub/missing.png")
+
+    assert not (tmp_path / "bucket" / "sub" / "missing.png.lock").exists()
+    assert not (tmp_path / "bucket").exists()
+
+
 def test_offline_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MERMAIDSEG_S3_OFFLINE", "1")
     cache = LocalS3Cache.configure(tmp_path)

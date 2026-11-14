@@ -6,7 +6,7 @@ how many eval images also appear in the other split, per eval source, and lists 
 responsible together with their annotation overlap.
 
 Usage:
-    python -m mermaidseg.datasets.coralnet.dedup.leakage --config configs/data_config_dedup.yaml
+    python -m mermaidseg.datasets.coralnet.dedup.leakage --config configs/data_config.yaml
 """
 
 from __future__ import annotations

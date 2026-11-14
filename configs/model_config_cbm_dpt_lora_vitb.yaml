@@ -1,8 +1,7 @@
 model:
   name: "ConceptBottleneckDPTLoRADINOv3"
   encoder_name: "facebook/dinov3-vitb16-pretrain-lvd1689m"
-  # 512x512 eval of the ViT-B sweep run. Training uses
-  # model_config_cbm_dpt_lora_vitb_256.yaml.
+  # Default input size. --resolution (training pipeline, scripts/evaluate.py) overrides it.
   input_size: [512, 512]
   concept_feature_dim: 256
   out_indices: null

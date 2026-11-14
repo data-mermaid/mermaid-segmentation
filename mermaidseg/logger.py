@@ -193,6 +193,27 @@ def resume_wandb_run(run_id: str, project: str | None = None, entity: str | None
         raise RuntimeError(f"Could not resume wandb run '{run_id}'.") from e
 
 
+def prune_rolling_checkpoints(
+    directory: str, keep_name: str, prefix: str = "model_preempt"
+) -> None:
+    """Remove other rolling preempt checkpoints in ``directory``.
+
+    Interval checkpoints (``model_step*``, ``model_epoch*``) use other prefixes and
+    are left in place. ``.partial`` files from an interrupted atomic save are removed
+    too. ``keep_name`` is the checkpoint that was just renamed into place.
+    """
+    if not prefix or not os.path.isdir(directory):
+        return
+    for entry in os.listdir(directory):
+        if entry == keep_name or not entry.startswith(prefix):
+            continue
+        path = os.path.join(directory, entry)
+        try:
+            os.remove(path)
+        except OSError:
+            logger.warning("Failed to remove old rolling checkpoint %s", path)
+
+
 def _safe_wandb_artifact_name(name: str) -> str:
     """Sanitize a string into a valid wandb artifact name (alnum, ``_``, ``-``, ``.``)."""
     return re.sub(r"[^a-zA-Z0-9_.\-]", "-", name)
@@ -845,6 +866,7 @@ class Logger:
         is_best: bool = True,
         checkpoint_name: str | None = None,
         epoch_complete: bool = True,
+        atomic: bool = False,
     ):
         """Save a model checkpoint locally and/or to MLflow.
 
@@ -858,13 +880,23 @@ class Logger:
         Checkpoint files are named ``model_epoch{epoch}`` unless ``checkpoint_name`` is set
         (for example ``model_step25000``). ``epoch_complete`` is false for a mid-epoch step
         checkpoint so a resume continues that epoch instead of skipping it.
+
+        ``atomic=True`` writes ``<name>.partial`` and renames it into place, so a kill during
+        ``torch.save`` does not leave a truncated file at the final path. The rolling preempt
+        checkpoints use this. Interval checkpoints keep the direct write.
+
+        The live module stays on its device. A detached CPU copy of the state dict is saved
+        so a DDP reducer keeps the parameter storage it was built with.
         """
         timestamp = time.strftime("%Y%m%d%H%M%S")
         filename = checkpoint_name or f"model_epoch{epoch}"
 
         checkpoint: dict[str, Any] = {
             "config": self.config,
-            "model_state_dict": meta_model_run.model.cpu().state_dict(),
+            "model_state_dict": {
+                key: value.detach().cpu().clone()
+                for key, value in meta_model_run.model.state_dict().items()
+            },
             "optimizer_state_dict": meta_model_run.optimizer.state_dict(),
             "epoch": epoch,
             "epoch_complete": bool(epoch_complete),
@@ -874,7 +906,6 @@ class Logger:
             "metrics": metrics_dict,
         }
 
-        meta_model_run.model = meta_model_run.model.to(meta_model_run.device)
         if getattr(meta_model_run, "scheduler", None) is not None:
             checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
 
@@ -883,14 +914,19 @@ class Logger:
         local_checkpoint_saved = False
         if self.save_local_checkpoints:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
-            if os.path.exists(model_path):
-                logger.warning(
-                    "Checkpoint file already exists and will be overwritten: %s. "
-                    "Use a different checkpoint_dir or run_name when resuming training "
-                    "to avoid silently overwriting prior checkpoints.",
-                    model_path,
-                )
-            torch.save(checkpoint, model_path)  # type: ignore
+            if atomic:
+                partial_path = model_path + ".partial"
+                torch.save(checkpoint, partial_path)  # type: ignore
+                os.replace(partial_path, model_path)
+            else:
+                if os.path.exists(model_path):
+                    logger.warning(
+                        "Checkpoint file already exists and will be overwritten: %s. "
+                        "Use a different checkpoint_dir or run_name when resuming training "
+                        "to avoid silently overwriting prior checkpoints.",
+                        model_path,
+                    )
+                torch.save(checkpoint, model_path)  # type: ignore
             local_checkpoint_saved = True
             logger.info("Checkpoint saved locally: %s", model_path)
         else:
@@ -1044,6 +1080,14 @@ class WandbLogger:
             raise ImportError(
                 "wandb is required for WandbLogger but is not installed. Install with: pip install wandb"
             ) from WANDB_IMPORT_ERROR
+
+        # slurm/train.sbatch sets WANDB_RUN_ID so every resubmitted job of a run
+        # appends to the same wandb run. Without it, each process starts a new run.
+        if run_id is None:
+            env_run_id = os.environ.get("WANDB_RUN_ID", "").strip()
+            if env_run_id:
+                run_id = env_run_id
+                resume = "allow"
 
         self.wandb_run = wandb.init(
             project=project,

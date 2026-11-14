@@ -1,0 +1,20 @@
+[
+  {
+    "file": "00",
+    "split": "val",
+    "image_id": "heron_reef_2012_2012-02-29_20070924HRSL02060",
+    "n_points": 24
+  },
+  {
+    "file": "01",
+    "split": "val",
+    "image_id": "heron_reef_155_2012-02-29_20070925-HSSL-04-093",
+    "n_points": 10
+  },
+  {
+    "file": "02",
+    "split": "val",
+    "image_id": "heron_reef_2804_2012-02-29_20070925HSSL04022",
+    "n_points": 24
+  }
+]
