@@ -65,14 +65,15 @@ class PointEvalDataset(Dataset):
 
         # Pre-group annotations by the per-image key for O(1) lookup in workers.
         ann = base_ds.df_annotations
-        self._groups: dict[tuple, tuple[NDArray, NDArray, list[str]]] = {}
+        # Values: (rows, cols, label names, ``df_annotations`` index of each point).
+        self._groups: dict[tuple, tuple[NDArray, NDArray, list[str], NDArray]] = {}
         grouped = ann.groupby(self.key_cols)
         for key, g in grouped:
             key_t = key if isinstance(key, tuple) else (key,)
             rows = g["row"].to_numpy()
             cols = g["col"].to_numpy()
             names = g["source_label_name"].astype(str).str.lower().tolist()
-            self._groups[key_t] = (rows, cols, names)
+            self._groups[key_t] = (rows, cols, names, g.index.to_numpy())
 
     def __len__(self) -> int:
         return len(self.df_images)
@@ -104,18 +105,26 @@ class PointEvalDataset(Dataset):
                 "cols": np.zeros(0, np.int64),
                 "class_ids": np.zeros(0, np.int64),
                 "concept_rows": np.zeros((0, self.concept_lookup.num_channels), np.int8),
+                "names": [],
+                "ann_idx": np.zeros(0, np.int64),
+                "n_out_of_bounds": 0,
                 "H": 1,
                 "W": 1,
                 "unit": unit,
             }
 
-        rows_a, cols_a, names = self._groups.get(key_t, (np.zeros(0), np.zeros(0), []))
+        rows_a, cols_a, names, ann_idx = self._groups.get(
+            key_t, (np.zeros(0), np.zeros(0), [], np.zeros(0, np.int64))
+        )
         rows_a = np.asarray(rows_a).astype(np.int64)
         cols_a = np.asarray(cols_a).astype(np.int64)
+        ann_idx = np.asarray(ann_idx).astype(np.int64)
         in_bounds = (rows_a >= 0) & (rows_a < h) & (cols_a >= 0) & (cols_a < w)
+        n_out_of_bounds = int((~in_bounds).sum())
         if not in_bounds.all():
             rows_a = rows_a[in_bounds]
             cols_a = cols_a[in_bounds]
+            ann_idx = ann_idx[in_bounds]
             names = [n for n, keep in zip(names, in_bounds, strict=True) if keep]
 
         class_ids = np.array([self.class_lookup.class_id(n) for n in names], dtype=np.int64)
@@ -131,6 +140,9 @@ class PointEvalDataset(Dataset):
             "cols": cols_a,
             "class_ids": class_ids,
             "concept_rows": concept_rows,
+            "names": names,
+            "ann_idx": ann_idx,
+            "n_out_of_bounds": n_out_of_bounds,
             "H": int(h),
             "W": int(w),
             "unit": unit,
@@ -145,6 +157,9 @@ def _collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "cols": [b["cols"] for b in batch],
         "class_ids": [b["class_ids"] for b in batch],
         "concept_rows": [b["concept_rows"] for b in batch],
+        "names": [b.get("names", []) for b in batch],
+        "ann_idx": [b.get("ann_idx") for b in batch],
+        "n_out_of_bounds": [b.get("n_out_of_bounds", 0) for b in batch],
         "H": [b["H"] for b in batch],
         "W": [b["W"] for b in batch],
         "unit": [b["unit"] for b in batch],

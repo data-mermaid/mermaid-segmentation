@@ -166,6 +166,12 @@ def test_point_metrics_values(tmp_path, taxonomy_csv):
     for pair in ("class->order", "order->family", "family->genus"):
         assert h[f"kl/{pair}"] == pytest.approx(kl_components[f"kl/{pair}"], abs=1e-6)
 
+    # TV by hand: genus mass per family is acroporidae .37, alcyoniidae .18, poritidae .45.
+    assert h["tv/family->genus"] == pytest.approx(0.5 * (0.23 + 0.03 + 0.20), abs=1e-6)
+    assert h["tv/order->family"] == pytest.approx(0.05, abs=1e-6)  # scleractinia .80 vs .85
+    assert h["tv/class->order"] == pytest.approx(0.0, abs=1e-6)
+    assert h["tv/family->genus/n"] == 4
+
     # HierarchicalMetrics: argmax lineage hexacorallia/scleractinia/acroporidae/porites.
     assert h["consistency/order->family"] == 1.0
     assert h["consistency/family->genus"] == 0.0

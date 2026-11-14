@@ -3,6 +3,7 @@ import json
 import os
 
 import torch
+import yaml
 from nb_setup import check_env_wandb
 from torch.utils.data import ConcatDataset, DataLoader
 
@@ -162,6 +163,16 @@ parser.add_argument(
     default=None,
     help="torch seed for data shuffling (default: 4). Cooldown jobs pass a different seed",
 )
+parser.add_argument(
+    "--set",
+    action="append",
+    default=[],
+    metavar="KEY=VALUE",
+    help=(
+        "override a config value, e.g. training.distance_loss.weight=0.1 or "
+        "'training.distance_loss={weight: 0.1}'; VALUE is parsed as YAML. Repeatable"
+    ),
+)
 parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
 args = parser.parse_args()
 _init_flags = [args.checkpoint, args.init_checkpoint, args.init_weights]
@@ -195,6 +206,17 @@ if args.per_image_loss_weight is not None:
     cfg.training.loss.per_image_loss_weight = args.per_image_loss_weight
 if args.grad_accum_steps is not None:
     cfg.training.grad_accum_steps = args.grad_accum_steps
+for override in args.set:
+    key, sep, value = override.partition("=")
+    if not sep or not key:
+        parser.error(f"--set expects KEY=VALUE, got {override!r}")
+    *parents, leaf = key.split(".")
+    section = cfg
+    for part in parents:
+        section[part] = section.get(part, {})  # ConfigDict wraps a new dict on assignment
+        section = section[part]
+    section[leaf] = yaml.safe_load(value)
+    print(f"config override: {key} = {section[leaf]!r}")
 
 # Encoder, iterations, batch size, and epochs come from the model and training configs.
 

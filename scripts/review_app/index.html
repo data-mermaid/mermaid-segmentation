@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Point review</title>
+<style>
+  :root {
+    --bg: #111214; --panel: #1b1c1f; --panel-2: #24262a; --line: #33363b; --ink: #ececea; --muted: #9a9a95;
+    --heat: #ff2bd6; --gt-pos: #ffd23f; --gt-neg: #2a78d6; --gt-na: #b0b0b0;
+    --v-model: #e5484d; --v-annot: #30a46c; --v-amb: #e8a33d; --accent: #8ab4ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #stage { flex: 1; position: relative; overflow: hidden; cursor: crosshair; }
+  #stage.dragging { cursor: grabbing; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #side { width: 360px; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; overflow: hidden; }
+  #side .scroll { overflow-y: auto; padding: 12px 14px 16px; flex: 1; }
+  h1 { font-size: 14px; margin: 0 0 2px; font-weight: 600; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 6px;
+    font-weight: 600; }
+  .muted { color: var(--muted); }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  button { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 8px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #555a61; }
+  button.on { border-color: var(--accent); color: #fff; background: #2c3546; }
+  kbd { font: 11px ui-monospace, Menlo, monospace; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; color: var(--ink); }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 2px 0; vertical-align: top; }
+  td:first-child { color: var(--muted); width: 42%; padding-right: 8px; }
+  .counts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; text-align: center; }
+  .counts div { background: var(--panel-2); border-radius: 6px; padding: 4px 0; }
+  .counts b { display: block; font-size: 15px; }
+  .counts span { font-size: 11px; color: var(--muted); }
+  .verdicts { display: grid !important; grid-template-columns: 1fr 1fr; }
+  .verdicts button { text-align: left; }
+  .verdicts .m.on { border-color: var(--v-model); background: #3a2124; }
+  .verdicts .a.on { border-color: var(--v-annot); background: #1d3527; }
+  .verdicts .q.on { border-color: var(--v-amb); background: #3a2f1c; }
+  #imglist { display: flex; flex-direction: column; gap: 2px; }
+  #imglist div { display: flex; justify-content: space-between; padding: 3px 6px; border-radius: 5px; cursor: pointer; }
+  #imglist div:hover { background: var(--panel-2); }
+  #imglist div.cur { background: #2c3546; }
+  #imglist .done { color: var(--v-annot); }
+  .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .bar > div { height: 100%; background: var(--v-annot); width: 0; }
+  .keys td:first-child { width: 34%; }
+  #toast { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); background: #2b2d31;
+    border: 1px solid var(--line); padding: 6px 12px; border-radius: 6px; opacity: 0; transition: opacity .2s;
+    pointer-events: none; }
+  #toast.show { opacity: 1; }
+  .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; font-size: 12px; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px; margin-right: 5px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="cv"></canvas><div id="toast"></div></div>
+  <div id="side"><div class="scroll">
+    <h1 id="title">Point review</h1>
+    <div class="muted" id="subtitle"></div>
+
+    <h2>Image</h2>
+    <div id="imginfo"></div>
+    <div class="counts" id="counts" style="margin-top:8px"></div>
+
+    <h2>Map <span class="muted" style="text-transform:none;letter-spacing:0">(keys 1 2 3 0)</span></h2>
+    <div class="row" id="maps"></div>
+
+    <h2>Navigate <span class="muted" style="text-transform:none;letter-spacing:0">(key e)</span></h2>
+    <div class="row" id="filters"></div>
+
+    <h2>Selected point</h2>
+    <div id="pointinfo" class="muted">Click a point or press <kbd>→</kbd>.</div>
+    <div class="row verdicts" style="margin-top:8px">
+      <button class="m" data-v="model_wrong" title="annotation is right, the model's error is real"><kbd>m</kbd> model wrong</button>
+      <button class="a" data-v="annotation_wrong" title="the model is right, the annotation is wrong"><kbd>a</kbd> annotation wrong</button>
+      <button class="q" data-v="ambiguous" title="cannot tell from the image"><kbd>?</kbd> ambiguous</button>
+      <button data-v="" title="remove the verdict"><kbd>u</kbd> clear</button>
+    </div>
+
+    <h2>Progress</h2>
+    <div id="progress"></div>
+    <div class="bar"><div id="progbar"></div></div>
+    <div id="imglist" style="margin-top:8px"></div>
+
+    <h2>Legend</h2>
+    <div class="legend">
+      <div><span class="dot" style="background:var(--gt-pos)"></span>annotated positive</div>
+      <div><span class="dot" style="background:var(--gt-neg)"></span>annotated negative</div>
+      <div><span class="dot" style="background:var(--gt-na)"></span>not given / unmapped</div>
+      <div><span class="dot" style="border:2px solid var(--heat)"></span>ring: model positive</div>
+      <div><span class="dot" style="background:var(--v-model)"></span>M: model wrong</div>
+      <div><span class="dot" style="background:var(--v-annot)"></span>A: annotation wrong</div>
+    </div>
+    <div class="muted" style="margin-top:6px;font-size:12px">Shading: probability bands 0.25–0.5 / 0.5–0.75 / 0.75–1,
+      edges at 0.25, 0.5, 0.75.</div>
+
+    <h2>Keys</h2>
+    <table class="keys">
+      <tr><td><kbd>→</kbd> <kbd>Tab</kbd></td><td>next point (then next image)</td></tr>
+      <tr><td><kbd>←</kbd> <kbd>⇧Tab</kbd></td><td>previous point</td></tr>
+      <tr><td><kbd>n</kbd> / <kbd>p</kbd></td><td>next / previous image</td></tr>
+      <tr><td><kbd>m</kbd> <kbd>a</kbd> <kbd>?</kbd></td><td>verdict, then next point</td></tr>
+      <tr><td><kbd>u</kbd></td><td>clear verdict</td></tr>
+      <tr><td><kbd>z</kbd> / <kbd>f</kbd></td><td>zoom on point / fit image</td></tr>
+      <tr><td>wheel, drag</td><td>zoom, pan</td></tr>
+      <tr><td><kbd>l</kbd></td><td>labels on all points</td></tr>
+      <tr><td><kbd>e</kbd></td><td>cycle navigation filter</td></tr>
+    </table>
+  </div></div>
+</div>
+<script>
+"use strict";
+// All loading and saving goes through IO: the Flask app's routes by default; the notebook widget
+// (scripts/review_widget.py) supplies its own through window.REVIEW_IO.
+const IO = window.REVIEW_IO || {
+  manifest: async () => (await fetch("/api/manifest")).json(),
+  reviews: async () => (await fetch("/api/reviews")).json(),
+  points: async (iid) => (await fetch(`/data/points/${iid}.json`)).json(),
+  imageSrc: async (iid) => `/data/images/${iid}.jpg`,
+  mapSrc: async (iid, kind) => `/data/maps/${iid}_${kind}.png`,
+  save: async (body) => {
+    const res = await fetch("/api/review", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)});
+    if (!res.ok) throw new Error(res.status);
+  },
+};
+const HEAT = [255, 43, 214];
+const GT_COLOR = {2: "#ffd23f", 1: "#2a78d6", 0: "#b0b0b0"};
+const VERDICT = {model_wrong: ["M", "#e5484d"], annotation_wrong: ["A", "#30a46c"], ambiguous: ["?", "#e8a33d"]};
+const MAP_KEYS = {"1": "live_hard", "2": "hard", "3": "live", "0": "none"};
+const FILTERS = {errors: "FP + FN", unreviewed: "unreviewed FP + FN", all: "all points"};
+const OVERLAY_MAX = 1024;  // overlay raster size (longest side, px)
+
+const S = {
+  man: null, i: 0, pts: {}, img: null, overlays: {}, sel: -1, filter: "errors", map: "live_hard",
+  reviews: {}, labels: false, view: {s: 1, tx: 0, ty: 0}, fitS: 1, cache: {},
+};
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d"), stage = document.getElementById("stage");
+const $ = (id) => document.getElementById(id);
+
+function store(key, value) { try { localStorage.setItem("review:" + key, value); } catch (e) {} }
+function recall(key) { try { return localStorage.getItem("review:" + key); } catch (e) { return null; } }
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 1400);
+}
+
+// ---------------------------------------------------------------- data
+const imgMeta = (i = S.i) => S.man.images[i];
+const callKey = () => "call_" + S.man.target;
+function outcome(p) {
+  const pred = p[callKey()];
+  if (p.gt_code === 2) return pred ? "TP" : "FN";
+  if (p.gt_code === 1) return pred ? "FP" : "TN";
+  return pred ? "NA+" : "NA";
+}
+const isError = (p) => { const o = outcome(p); return o === "FP" || o === "FN"; };
+const verdictOf = (iid, p) => S.reviews[iid + ":" + p.idx] || "";
+
+function navOrder() {
+  const iid = imgMeta().image_id, pts = S.pts[iid] || [];
+  let sel = pts;
+  if (S.filter === "errors") sel = pts.filter(isError);
+  if (S.filter === "unreviewed") sel = pts.filter((p) => isError(p) && !verdictOf(iid, p));
+  return sel.slice().sort((a, b) => a.row - b.row || a.col - b.col).map((p) => p.idx);
+}
+
+function loadImageEl(src) {
+  return new Promise((ok, fail) => { const im = new Image(); im.onload = () => ok(im); im.onerror = fail; im.src = src; });
+}
+
+function buildOverlay(mapImg, W, H) {
+  // Upsample the probability map bilinearly, then shade it in bands with band edges as lines.
+  const k = Math.min(1, OVERLAY_MAX / Math.max(W, H)), ow = Math.round(W * k), oh = Math.round(H * k);
+  const c = document.createElement("canvas"); c.width = ow; c.height = oh;
+  const x = c.getContext("2d", {willReadFrequently: true});
+  x.imageSmoothingEnabled = true; x.imageSmoothingQuality = "high";
+  x.drawImage(mapImg, 0, 0, ow, oh);
+  const d = x.getImageData(0, 0, ow, oh), px = d.data, n = ow * oh;
+  const bands = S.man.bands, band = new Uint8Array(n);
+  for (let j = 0; j < n; j++) {
+    const v = px[4 * j] / 255;
+    let b = 0;
+    for (let q = 0; q < bands.length; q++) if (v >= bands[q][0]) b = q + 1;
+    band[j] = b;
+  }
+  for (let j = 0; j < n; j++) {
+    const b = band[j], xx = j % ow;
+    const edge = b > 0 && ((xx + 1 < ow && band[j + 1] < b) || (xx > 0 && band[j - 1] < b) ||
+      (j + ow < n && band[j + ow] < b) || (j - ow >= 0 && band[j - ow] < b));
+    px[4 * j] = HEAT[0]; px[4 * j + 1] = HEAT[1]; px[4 * j + 2] = HEAT[2];
+    px[4 * j + 3] = edge ? 200 : b ? Math.round(255 * bands[b - 1][2]) : 0;
+  }
+  x.putImageData(d, 0, 0);
+  return c;
+}
+
+async function fetchImage(i) {
+  const m = imgMeta(i), iid = m.image_id;
+  if (S.cache[iid]) return S.cache[iid];
+  const p = (async () => {
+    const img = await loadImageEl(await IO.imageSrc(iid));
+    const overlays = {};
+    for (const kind of Object.keys(S.man.maps)) {
+      const mapImg = await loadImageEl(await IO.mapSrc(iid, kind));
+      overlays[kind] = buildOverlay(mapImg, m.W, m.H);
+    }
+    return {img, overlays};
+  })();
+  S.cache[iid] = p;
+  return p;
+}
+
+async function gotoImage(i, selectWhich = "first") {
+  if (i < 0 || i >= S.man.images.length) { toast(i < 0 ? "first image" : "last image"); return; }
+  S.i = i; store("image", String(i));
+  const got = await fetchImage(i);
+  if (S.i !== i) return;  // a later navigation won
+  S.img = got.img; S.overlays = got.overlays;
+  const order = navOrder();
+  S.sel = order.length ? (selectWhich === "last" ? order[order.length - 1] : order[0]) : -1;
+  fit(); renderSide(); draw();
+  for (const j of [i + 1, i - 1]) if (j >= 0 && j < S.man.images.length) fetchImage(j);  // prefetch
+  const cachedIds = Object.keys(S.cache);
+  if (cachedIds.length > 8) for (const id of cachedIds.slice(0, cachedIds.length - 8)) delete S.cache[id];
+}
+
+// ---------------------------------------------------------------- view
+function resize() {
+  const dpr = window.devicePixelRatio || 1, r = stage.getBoundingClientRect();
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  draw();
+}
+function fit() {
+  const m = imgMeta(), r = stage.getBoundingClientRect();
+  const s = Math.min(r.width / m.W, r.height / m.H) * 0.98;
+  S.fitS = s; S.view = {s, tx: (r.width - m.W * s) / 2, ty: (r.height - m.H * s) / 2};
+}
+function centerOn(p, s = S.view.s) {
+  const r = stage.getBoundingClientRect();
+  S.view = {s, tx: r.width / 2 - p.col * s, ty: r.height / 2 - p.row * s};
+}
+function ensureVisible(p) {
+  if (S.view.s <= S.fitS * 1.2) return;
+  const r = stage.getBoundingClientRect(), x = p.col * S.view.s + S.view.tx, y = p.row * S.view.s + S.view.ty;
+  if (x < r.width * 0.2 || x > r.width * 0.8 || y < r.height * 0.2 || y > r.height * 0.8) centerOn(p);
+}
+const pointById = (idx) => (S.pts[imgMeta().image_id] || [])[idx];
+
+function pill(x, y, text, color) {
+  ctx.font = "600 11px system-ui, sans-serif";
+  const w = ctx.measureText(text).width + 8;
+  ctx.fillStyle = color; ctx.beginPath(); ctx.roundRect(x, y - 8, w, 16, 4); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.fillText(text, x + 4, y + 4);
+}
+function label(x, y, lines) {
+  ctx.font = "11px system-ui, sans-serif";
+  const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 8, h = 14 * lines.length + 4;
+  ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.beginPath(); ctx.roundRect(x - w / 2, y, w, h, 4); ctx.fill();
+  ctx.fillStyle = "#111"; ctx.textAlign = "center";
+  lines.forEach((l, k) => ctx.fillText(l, x, y + 13 + 14 * k));
+  ctx.textAlign = "left";
+}
+
+function draw() {
+  if (!S.img) return;
+  const dpr = window.devicePixelRatio || 1, m = imgMeta(), {s, tx, ty} = S.view;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.save(); ctx.translate(tx, ty); ctx.scale(s, s);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(S.img, 0, 0, m.W, m.H);
+  if (S.map !== "none") ctx.drawImage(S.overlays[S.map], 0, 0, m.W, m.H);
+  ctx.restore();
+
+  const iid = m.image_id, pts = S.pts[iid] || [], nav = new Set(navOrder());
+  const r = Math.max(4, Math.min(9, 6 * Math.sqrt(s / S.fitS)));
+  for (const p of pts) {
+    const x = p.col * s + tx, y = p.row * s + ty, o = outcome(p), v = verdictOf(iid, p);
+    ctx.globalAlpha = nav.has(p.idx) || S.filter === "all" ? 1 : 0.45;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
+    ctx.fillStyle = GT_COLOR[p.gt_code]; ctx.fill();
+    ctx.lineWidth = 2.2; ctx.strokeStyle = p[callKey()] ? "rgb(255,43,214)" : "#fff"; ctx.stroke();
+    ctx.globalAlpha = 1;
+    if (o === "FP" || o === "FN" || v) {
+      const tag = v ? `${o} ${VERDICT[v][0]}` : o;
+      pill(x + r + (p.idx === S.sel ? 13 : 3), y, tag, v ? VERDICT[v][1] : "rgba(20,20,22,0.85)");
+    }
+    if (S.labels && p.idx !== S.sel) label(x, y + r + 3, [p.coralnet, `(${p.mermaid || "unmapped"})`]);
+  }
+  const sp = S.sel >= 0 ? pointById(S.sel) : null;
+  if (sp) {
+    const x = sp.col * s + tx, y = sp.row * s + ty;
+    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,0.7)";
+    ctx.beginPath(); ctx.arc(x, y, r + 9, 0, 2 * Math.PI); ctx.stroke();
+    ctx.lineWidth = 2; ctx.strokeStyle = "#fff";
+    ctx.beginPath(); ctx.arc(x, y, r + 9, 0, 2 * Math.PI); ctx.stroke();
+    label(x, y + r + 12, [sp.coralnet, `(${sp.mermaid || "unmapped"})`]);
+  }
+}
+
+// ---------------------------------------------------------------- side panel
+const pct = (v) => (v == null || Number.isNaN(v) ? "–" : `${Math.round(100 * v)}%`);
+const GT_TEXT = () => ({2: S.man.target_name, 1: `not ${S.man.target_name}`, 0: "not given / unmapped"});
+
+function imageStats(iid) {
+  const pts = S.pts[iid] || [], c = {TP: 0, FP: 0, FN: 0, TN: 0, NA: 0}, rev = {FP: 0, FN: 0};
+  for (const p of pts) {
+    const o = outcome(p), k = o.startsWith("NA") ? "NA" : o;
+    c[k]++;
+    if ((o === "FP" || o === "FN") && verdictOf(iid, p)) rev[o]++;
+  }
+  return {c, rev, errors: c.FP + c.FN, reviewed: rev.FP + rev.FN};
+}
+
+function renderSide() {
+  const m = imgMeta(), st = imageStats(m.image_id);
+  $("title").textContent = `Point review · ${S.man.target_name}`;
+  $("subtitle").textContent = `${S.man.run} · ${S.man.images.length} images${S.man.reviewer ? " · " + S.man.reviewer : ""}`;
+  $("imginfo").innerHTML = `<b>${S.i + 1} / ${S.man.images.length}</b> · source ${m.source_id} · image ${m.image_id}<br>
+    <span class="muted">${S.man.target_name} cover: annotations ${pct(m.gt_cover)} · model at points
+    ${pct(m.model_points_cover)} · all pixels ${pct(m.model_dense_cover)}</span>`;
+  $("counts").innerHTML = ["TP", "FP", "FN", "TN", "NA"].map((k) =>
+    `<div><b>${st.c[k]}</b><span>${k}${k === "FP" || k === "FN" ? ` ${st.rev[k]}✓` : ""}</span></div>`).join("");
+  $("maps").innerHTML = Object.entries(MAP_KEYS).map(([key, kind]) =>
+    `<button data-map="${kind}" class="${S.map === kind ? "on" : ""}">${key} ${kind === "none" ? "none" : S.man.maps[kind]}</button>`).join("");
+  $("filters").innerHTML = Object.entries(FILTERS).map(([k, lab]) =>
+    `<button data-filter="${k}" class="${S.filter === k ? "on" : ""}">${lab}</button>`).join("");
+  renderPoint(); renderProgress();
+}
+
+function renderPoint() {
+  const p = S.sel >= 0 ? pointById(S.sel) : null, box = $("pointinfo");
+  document.querySelectorAll(".verdicts button").forEach((b) => b.classList.remove("on"));
+  if (!p) { box.innerHTML = navOrder().length ? "Click a point or press <kbd>→</kbd>." : "Nothing to review here with this filter. <kbd>n</kbd> next image."; return; }
+  const v = verdictOf(imgMeta().image_id, p), o = outcome(p);
+  box.classList.remove("muted");
+  box.innerHTML = `<table>
+    <tr><td>CoralNet class</td><td>${p.coralnet}</td></tr>
+    <tr><td>MERMAID class</td><td>${p.mermaid || "unmapped"}</td></tr>
+    <tr><td>annotation</td><td>${GT_TEXT()[p.gt_code]}</td></tr>
+    <tr><td>model</td><td>${p[callKey()] ? "positive" : "negative"} · <b>${o}</b></td></tr>
+    <tr><td>P(scleractinia)</td><td>${p.p_hard.toFixed(2)} <span class="muted">(order argmax ${p.pred_order})</span></td></tr>
+    <tr><td>P(live)</td><td>${p.p_live.toFixed(2)}</td></tr>
+    <tr><td>product</td><td>${p.p_live_hard.toFixed(2)}</td></tr>
+    <tr><td>point</td><td>#${p.idx} · row ${p.row}, col ${p.col}</td></tr>
+    <tr><td>verdict</td><td>${v ? `<b style="color:${VERDICT[v][1]}">${v.replace("_", " ")}</b>` : `<span class="muted">${isError(p) ? "not reviewed" : "kept (" + o + ")"}</span>`}</td></tr>
+  </table>`;
+  if (v) document.querySelector(`.verdicts button[data-v="${v}"]`).classList.add("on");
+}
+
+function renderProgress() {
+  let errors = 0, reviewed = 0;
+  const rows = S.man.images.map((m, i) => {
+    const st = imageStats(m.image_id); errors += st.errors; reviewed += st.reviewed;
+    const done = st.errors > 0 && st.reviewed === st.errors;
+    return `<div data-i="${i}" class="${i === S.i ? "cur" : ""}"><span>${m.source_id} · ${m.image_id}</span>
+      <span class="${done ? "done" : "muted"}">${st.errors ? `${st.reviewed}/${st.errors}${done ? " ✓" : ""}` : "no errors"}</span></div>`;
+  });
+  $("progress").innerHTML = `${reviewed} of ${errors} FP + FN points reviewed`;
+  $("progbar").style.width = errors ? `${(100 * reviewed) / errors}%` : "0";
+  $("imglist").innerHTML = rows.join("");
+}
+
+// ---------------------------------------------------------------- actions
+function select(idx) {
+  S.sel = idx;
+  const p = pointById(idx);
+  if (p) ensureVisible(p);
+  renderPoint(); draw();
+}
+function step(dir) {
+  const order = navOrder(), pos = order.indexOf(S.sel);
+  const next = pos < 0 ? (dir > 0 ? 0 : order.length - 1) : pos + dir;
+  if (next >= 0 && next < order.length) return select(order[next]);
+  if (dir > 0 && S.i + 1 < S.man.images.length) return gotoImage(S.i + 1, "first");
+  if (dir < 0 && S.i > 0) return gotoImage(S.i - 1, "last");
+  toast(dir > 0 ? "last point of the last image" : "first point");
+}
+
+async function setVerdict(verdict) {
+  const p = S.sel >= 0 ? pointById(S.sel) : null;
+  if (!p) return;
+  const m = imgMeta(), key = m.image_id + ":" + p.idx;
+  const orderBefore = navOrder(), pos = orderBefore.indexOf(p.idx);
+  const body = {source_id: m.source_id, image_id: m.image_id, idx: p.idx, row: p.row, col: p.col,
+    coralnet: p.coralnet, mermaid: p.mermaid, gt_code: p.gt_code, model_call: p[callKey()] ? 1 : 0,
+    outcome: outcome(p), verdict};
+  try { await IO.save(body); } catch (e) { toast("not saved: " + e.message); return; }
+  if (verdict) S.reviews[key] = verdict; else delete S.reviews[key];
+  renderSide();
+  if (!verdict) { draw(); return; }
+  // Advance from where the point was in the order before the verdict (it may leave the "unreviewed" filter).
+  const order = navOrder(), after = orderBefore.slice(pos + 1).find((idx) => order.includes(idx));
+  if (after !== undefined) select(after);
+  else if (S.i + 1 < S.man.images.length) gotoImage(S.i + 1, "first");
+  else { draw(); toast("all images done"); }
+}
+
+function hit(mx, my) {
+  const {s, tx, ty} = S.view, pts = S.pts[imgMeta().image_id] || [];
+  let best = -1, bd = 14 * 14;
+  for (const p of pts) {
+    const dx = p.col * s + tx - mx, dy = p.row * s + ty - my, d = dx * dx + dy * dy;
+    if (d < bd) { bd = d; best = p.idx; }
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------- events
+let drag = null;
+stage.addEventListener("mousedown", (e) => { drag = {x: e.clientX, y: e.clientY, tx: S.view.tx, ty: S.view.ty, moved: false}; });
+window.addEventListener("mousemove", (e) => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 3) { drag.moved = true; stage.classList.add("dragging"); }
+  if (drag.moved) { S.view.tx = drag.tx + dx; S.view.ty = drag.ty + dy; draw(); }
+});
+window.addEventListener("mouseup", (e) => {
+  if (drag && !drag.moved && e.target === cv) {
+    const r = stage.getBoundingClientRect(), idx = hit(e.clientX - r.left, e.clientY - r.top);
+    if (idx >= 0) select(idx);
+  }
+  drag = null; stage.classList.remove("dragging");
+});
+stage.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = stage.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  const f = Math.exp(-e.deltaY * 0.0015), s = Math.min(S.fitS * 25, Math.max(S.fitS * 0.5, S.view.s * f));
+  const k = s / S.view.s;
+  S.view = {s, tx: mx - (mx - S.view.tx) * k, ty: my - (my - S.view.ty) * k};
+  draw();
+}, {passive: false});
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("button, #imglist div");
+  if (!b) return;
+  if (b.dataset.map) { S.map = b.dataset.map; renderSide(); draw(); }
+  else if (b.dataset.filter) { S.filter = b.dataset.filter; const o = navOrder(); if (!o.includes(S.sel)) S.sel = o.length ? o[0] : -1; renderSide(); draw(); }
+  else if (b.dataset.v !== undefined) setVerdict(b.dataset.v);
+  else if (b.dataset.i !== undefined) gotoImage(Number(b.dataset.i));
+  b.blur();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key;
+  if (k === "ArrowRight" || (k === "Tab" && !e.shiftKey)) { e.preventDefault(); step(1); }
+  else if (k === "ArrowLeft" || (k === "Tab" && e.shiftKey)) { e.preventDefault(); step(-1); }
+  else if (k === "n" || k === "PageDown") gotoImage(S.i + 1);
+  else if (k === "p" || k === "PageUp") gotoImage(S.i - 1);
+  else if (k === "m") setVerdict("model_wrong");
+  else if (k === "a") setVerdict("annotation_wrong");
+  else if (k === "?" || k === "/") setVerdict("ambiguous");
+  else if (k === "u") setVerdict("");
+  else if (k in MAP_KEYS) { S.map = MAP_KEYS[k]; renderSide(); draw(); }
+  else if (k === "f") { fit(); draw(); }
+  else if (k === "z") {
+    const p = S.sel >= 0 ? pointById(S.sel) : null;
+    if (S.view.s > S.fitS * 1.5 || !p) fit(); else centerOn(p, S.fitS * 4);
+    draw();
+  }
+  else if (k === "l") { S.labels = !S.labels; draw(); }
+  else if (k === "e") {
+    const keys = Object.keys(FILTERS); S.filter = keys[(keys.indexOf(S.filter) + 1) % keys.length];
+    const o = navOrder(); if (!o.includes(S.sel)) S.sel = o.length ? o[0] : -1;
+    renderSide(); draw(); toast("navigate: " + FILTERS[S.filter]);
+  }
+});
+window.addEventListener("resize", () => { fit(); resize(); });
+
+// ---------------------------------------------------------------- start
+(async function start() {
+  S.man = await IO.manifest();
+  S.reviews = await IO.reviews();
+  const ids = S.man.images.map((m) => m.image_id);
+  for (let k = 0; k < ids.length; k += 50) {  // all point tables up front, for progress across images
+    await Promise.all(ids.slice(k, k + 50).map(async (iid) => {
+      S.pts[iid] = await IO.points(iid);
+    }));
+  }
+  resize();
+  const last = Number(recall("image"));
+  await gotoImage(Number.isInteger(last) && last >= 0 && last < ids.length ? last : 0);
+})();
+</script>
+</body>
+</html>

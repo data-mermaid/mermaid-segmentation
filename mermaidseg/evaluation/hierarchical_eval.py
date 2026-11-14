@@ -15,6 +15,9 @@ standard metrics) and its ``0/1/2`` concept row. Two accumulators consume them:
     (the distance loss's objective, in ``[0, 1]``); ``.../n`` alongside.
   - ``kl/<coarse>-><fine>``: mean ``KL(p_coarse || aggregated p_fine)`` over all points, with the
     KL loss's renormalisation and multi-parent splits (label-free); ``.../n`` alongside.
+  - ``tv/<coarse>-><fine>``: mean total variation ``0.5 * sum_c |p_coarse(c) - sum_{g in c}
+    p_fine(g)|`` between the same two distributions, in probability units (``[0, 1]``: the
+    share of probability the two heads place differently); ``.../n`` alongside.
 
 Model concept channels must match the tree's channel order rank by rank; :class:`HierarchicalSpec`
 checks this once, so a checkpoint with a different concept layout fails instead of misreporting.
@@ -157,7 +160,7 @@ def point_rank_batches(
 
 
 class LossTargetMetrics:
-    """Held-out partial-label subtree mass, expected tree distance and inter-head KL."""
+    """Held-out partial-label subtree mass, expected tree distance and inter-head KL / TV."""
 
     def __init__(self, spec: HierarchicalSpec):
         self.spec = spec
@@ -196,6 +199,8 @@ class LossTargetMetrics:
             q = q_fine @ spec.kl_groups[d].to(device).double().T
             kl = (p * (p.clamp(min=tiny).log() - q.clamp(min=tiny).log())).sum(dim=1)
             self._add(f"kl/{pair}", kl)
+            # Same two distributions in probability units: 0 = heads agree, 1 = disjoint.
+            self._add(f"tv/{pair}", 0.5 * (p - q).abs().sum(dim=1))
 
         for d, (rank, _, _) in enumerate(spec.slices):
             if valid[d].any():

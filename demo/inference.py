@@ -139,7 +139,12 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
     model_cls = getattr(mm_models, model_name)
     model = model_cls(num_classes=num_classes, num_concepts=num_concepts, **model_kwargs)
     state_dict = mm_models.align_peft_checkpoint_state_dict(state_dict, model)
-    model.load_state_dict(state_dict)
+    # Checkpoints from code that deletes the first DPT fusion layer's residual_layer1 lack its weights. That block
+    # never runs (layer 0 gets no residual), so its missing keys are harmless; any other mismatch still fails.
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    missing = [k for k in missing if "fusion_stage.layers.0.residual_layer1." not in k]
+    if missing or unexpected:
+        raise RuntimeError(f"state_dict mismatch: missing={missing} unexpected={unexpected}")
     return model.to(device).eval()
 
 

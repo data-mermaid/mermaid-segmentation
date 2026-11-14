@@ -184,6 +184,7 @@ def _write_summary(output_dir: Path, summary: dict) -> None:
             "- partial-label subtree mass: "
             + ", ".join(f"{p}={fmt(h.get(f'partial/{p}/subtree_mass'))}" for p in pairs),
             "- inter-head KL: " + ", ".join(f"{p}={fmt(h.get(f'kl/{p}'))}" for p in pairs),
+            "- inter-head TV: " + ", ".join(f"{p}={fmt(h.get(f'tv/{p}'))}" for p in pairs),
         ]
 
     for cn_key, cn_split in (("coralnet", "val"), ("coralnet_test", "test")):
