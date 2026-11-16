@@ -1,143 +1,200 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, Cursor, Copilot, etc.) when working with code in this repository.
+Rules for every coding agent working in this repository, for planning, designing and implementing
+each change. Lookup material (setup, commands, architecture) is linked in section 10.
 
-## Project Overview
+## 0. How to use this file
 
-MermaidSeg is a PyTorch semantic segmentation framework for coral reef imagery. It trains pixel-level benthic segmentation models on sparse point annotations pooled from nine source datasets — each with its own label vocabulary — with images and annotation parquets in S3. This is a research/exploration codebase, not yet in production.
+1. Apply every rule to every change. Cite a rule by section and item, for example 6.1.
+2. A rule that says must, never or always is hard. If a request conflicts with a hard rule, do not
+   make that change. Stop, name the rule, explain the risk, and ask the human to approve an
+   exception or to amend this file.
+3. An exception the human approves in the conversation covers that change only. The closest
+   `AGENTS.md` to the edited file wins.
+4. Every other rule is a judgement rule. Follow it; if you deviate, name the rule and the reason in
+   the change summary.
 
-## Setup
+## 1. Map
 
-Python 3.11+, uv, AWS credentials (`mermaid-core` profile) for S3, CUDA GPU recommended.
+- `mermaidseg/`: the package. All training, evaluation and inference logic.
+- `configs/`: committed YAML configs.
+- `tests/`: the pytest suite, laid out as 7.4 sets.
+- `pyproject.toml`: dependencies, extras, ruff and pytest settings.
 
-```bash
-uv sync                              # core: inference + data loading only
-uv sync --extra all --group dev      # everything + tests/lint (contributor setup)
-```
+## 2. Working agreement
 
-Core deliberately excludes training, ETL, notebook and demo dependencies — they live in extras (`pyproject.toml` documents each; `all` pulls the lot).
+1. For a non-trivial change, explore, then plan, then implement. State in the plan which rules it
+   touches.
+2. Keep diffs minimal: no reformatting, style changes, or refactors of code unrelated to the change.
+3. One PR per root cause. Check related code for the same mistake and include any affected sites in
+   the same PR.
+4. Fix the root cause in the existing structure rather than adding special cases. If the better fix
+   carries risk, explain the trade-off in the PR. Write no backward-compatibility code. The one
+   exception is a model artifact that has already been delivered: convert it to the current format
+   where possible, and keep a loader for it only if conversion is impossible.
+5. Don't commit unless the human approved the exact commit message. Never push, open a PR, or post
+   to GitHub (comments, reviews, replies) without the human's approval.
+6. Never hand-edit a generated file (`uv.lock`, exported artifacts). Change its source and
+   regenerate it.
+7. For a change that affects model outputs, run the evaluation and put the metrics, with the
+   baseline they compare against, in the PR. Don't wait for reviewers to ask.
 
-DINOv3 weights are gated on Hugging Face — `hf auth login`, or `HF_TOKEN` in `.env` (see `.env.example`). `MLFLOW_TRACKING_URI` is a SageMaker MLflow App ARN; unset, MLflow falls back to a local filesystem store.
+## 3. Repository structure
 
-## Commands
+1. `mermaidseg/` and `scripts/` hold only the path that trains, evaluates and serves the model. They
+   must carry no experiment flags and must never import from `experiments/`. Experiments and
+   ablations, code and results, live in `experiments/` and may import the package. To promote
+   experiment logic, move it into the package with tests. Delete abandoned paths.
+2. Training, evaluation and inference logic must live in `mermaidseg/`. Scripts must be thin
+   entrypoints: parse arguments, then call the package. Notebooks must only call package code.
+3. There must be one training entrypoint. Each compute substrate (local, Slurm, SageMaker) has a
+   thin launcher that runs it with the same config. The package must hold no substrate logic.
+4. Evaluation, the demo and the API inference lane must share one inference interface and must not
+   re-implement loading, preprocessing or postprocessing.
+5. A new data source adds a dataset class and a label mapping into the canonical MERMAID
+   benthic-attribute space. The trainer does not change.
+6. Committed code holds no absolute, user-specific or cluster paths. Resolve repository files
+   relative to the package. Scripts run from the repository root.
 
-```bash
-uv run pytest                                   # `live` tests deselected by default (pyproject addopts)
-uv run pytest -m "not integration"              # unit only
-uv run --extra test-live pytest -m live         # needs S3 / CoralNet access + `playwright install chromium`
-uv run --group lint ruff check .                # CI lints changed files only
-pre-commit run --all-files                      # ruff + ruff-format + nbqa-ruff + docformatter + uv-lock
+## 4. Model and PyTorch code
 
-make check                                      # validate env vars, AWS session, MLflow version
-make sync                                       # re-sync uv env + Jupyter kernel from current branch
-make logs                                       # tail logs/train_*.log
-make sm-check / sm-dry-run / sm-launch          # SageMaker TrainingJob (see wiki/SageMaker-Jobs.md)
-```
+1. All layer calls should be visible directly in `forward` — avoid helper functions that hide
+   `nn.Module` calls.
+2. Pass `forward` inputs by name and return a dataclass with named fields rather than a dict of
+   tensors, and keep `__init__` arguments flat (plain values, not nested dicts).
+3. The DINOv3 encoder stays frozen. Only LoRA adapters (when configured) and heads train. Keep a
+   test that asserts the set of trainable parameters.
+4. Never hardcode a device: no `.cuda()`, no `"cuda"` defaults, no `autocast(device_type="cuda")`.
+   Take the device as an argument and derive the autocast device type from it.
+5. Don't hardcode `torch.float32` or `torch.bfloat16` in model `forward`, and don't cast activations
+   by reading a weight's dtype. Always derive the cast target from the input tensor's dtype or
+   `self.dtype`.
+6. The AMP dtype comes from config. Evaluation and inference don't hardcode a precision. Losses
+   compute in fp32.
+7. Every forward pass outside training runs under `model.eval()` and `torch.inference_mode()`.
+8. No NumPy or Python-side computation inside `forward` or the per-step training loop, and no
+   `.item()` or `.cpu()` host syncs there except at logging intervals.
+9. One seeding function seeds Python, NumPy and torch, and seeds DataLoader workers through
+   `worker_init_fn` and a seeded `generator`.
+10. Don't promise bitwise reproducibility across PyTorch releases, platforms, or CPU and GPU.
+11. Load state dicts with `strict=True`, unless the mismatch is intended and the call site says why.
 
-Console scripts (need `--extra coralnet`): `coralnet-etl`, `coralnet-refresh`, `coralnet-remediate`, `coralnet-resize`.
+## 5. Configs and name resolution
 
-## Running Training
+1. A run's settings come only from committed YAML configs and logged CLI overrides, credentials
+   excepted (9.5). The fully resolved config is saved with every run.
+2. Models, losses, optimizers, schedulers and augmentations resolve by class name from config.
+   Renaming one updates every config in `configs/` that names it, in the same change.
+3. An unknown class name or config key must raise an error. Never fall back to a default.
+4. Support only what committed configs use: the configs of the training and serving path, not those
+   under `experiments/`. Ship only the config options, branches, and classes that committed configs
+   need. Every config option must appear in a committed config. Don't add options for a config you
+   plan to add later; add them with that config. Same bar for runtime arguments: if no committed
+   config or entrypoint passes a `forward` or `__call__` parameter, don't add it. Trim those
+   surfaces, then delete the unreachable paths.
 
-Three surfaces, all bottoming out in the same `MetaModel` + `train_model()` call:
+## 6. Train/serve parity and deployment
 
-- **Notebooks** (`nbs/`) — `Base_Pipeline.ipynb` (standard), `Concept_Bottleneck_Pipeline.ipynb`, `Combined_Pipeline.ipynb`, `Model_Evaluation.ipynb`.
-- **CLI** — `scripts/train.py`, background-safe with file logging:
-  ```bash
-  uv run python scripts/train.py --dry-run       # 1 batch, ≤3 epochs
-  uv run python scripts/train.py \
-      --config-model configs/model_config.yaml \
-      --config-training configs/training_config.yaml
-  ```
-- **SageMaker** — `scripts/launch_training.py` reads `sagemaker/runs/*.yaml`, submits against the ECR image built from `docker/jobs/Dockerfile`, and selects the in-container script via `CONTAINER_ENTRYPOINT_SCRIPT`. One image serves both TrainingJobs and ProcessingJobs. See `docker/jobs/README.md`.
+1. Deterministic preprocessing (resize, normalization, tiling) and its normalization constants must
+   be defined once in package code and imported by the evaluation path and by inference.
+2. Augmentation is separate from preprocessing. Serving must run only deterministic preprocessing.
+3. A deployable artifact must describe itself and be versioned as one unit: SafeTensors weights,
+   architecture config, `id2label`, `concept_id2name`, preprocessing parameters and run lineage.
+4. Inference must read label maps and preprocessing parameters only from the artifact, never from
+   repository defaults, committed copies or API constants. Never assume class or concept indices
+   are stable across checkpoints.
+5. The inference path must import only what serving needs: no trainer, experiment-logging, ETL or
+   data-loading code.
+6. A change to preprocessing, the model forward, export or label maps must come with a parity test:
+   the same fixture through the evaluation path and the inference path gives matching outputs
+   within tolerance.
+7. Every run must log the git SHA, a dirty-tree flag, the resolved config, the data version, the
+   lockfile hash and the seed. Artifacts for deployment must come from a clean tree.
+8. The file names and formats of exported artifacts are a contract with their consumers (the demo
+   and `mermaid-inference`). Never change one without coordinating with those consumers.
+9. The request/response contract and API-boundary validation belong to `mermaid-inference`. Never
+   duplicate them here.
 
-## Architecture
+## 7. Tests
 
-| Path | Role |
+1. For a bug fix, write the test first and confirm it fails. Then fix the bug and confirm the test
+   passes.
+2. Build tests from tiny configs and random weights, not real checkpoints, S3 or the network. Use
+   those only when the behavior can't be reproduced at tiny scale, and mark that test `live`.
+3. A test that needs a GPU skips when none is available.
+4. The test for `<path>/<name>.py` lives at `tests/<path>/test_<name>.py`: `scripts/train.py` →
+   `tests/scripts/test_train.py`, `mermaidseg/model/meta.py` → `tests/mermaidseg/model/test_meta.py`.
+   Extend that file if it exists. If you change tests whose file is elsewhere, move that file to
+   the mirrored path in the same change. Reuse existing `conftest.py` fixtures and helpers. One
+   behavior per test, smallest setup that triggers it. No flaky tests: they are worse than none.
+5. Run the tests relevant to the change. Before proposing a PR, run the selection CI runs:
+   `-m "not slow and not integration and not live"`.
+
+## 8. Style and formatting
+
+1. All CI checks must pass. They are defined in `.github/workflows/`.
+2. Always add type annotations when modifying code; CI rejects unannotated functions in changed files.
+3. Docstrings must be Google style (do not duplicate type annotations and defaults). CI checks
+   changed files.
+4. Comments and docstrings that only make sense to the current PR's author or reviewer (for example
+   `# per reviewer comment on PR #NNNN`, `# as discussed in review`) state the *reason* so they
+   stand alone, or are dropped. No debug printouts.
+5. Don't make trivial (1-2 LOC) helper functions that are only used once unless it significantly
+   improves code readability.
+6. Avoid overly defensive code, e.g. checking that an argument is not `None` when `None` was not a
+   valid argument type to begin with.
+7. Keep state explicit: a class definition declares all its members. Don't dynamically `setattr` a
+   field on an object and then dynamically `getattr` the field on the object.
+8. Do not guess user intent and silently correct behavior. Make the expected inputs clear in the
+   docstring, and raise a concise error for unsupported cases rather than adding complex fallback
+   logic.
+9. If uncertain, choose the simpler, more concise implementation.
+
+## 9. Dependencies and security (public repository)
+
+1. Never use system `python3` or bare `pip`/`pip install`. All Python commands go through `uv`
+   (`uv run`, `uv sync --locked`, `uv add`).
+2. Never add a mandatory dependency without the human's approval.
+3. Import an extra's dependencies lazily, at the point of use, so the core install works without
+   them.
+4. Keep dependencies current. Don't pin an old version to avoid a breaking change without a tracked
+   follow-up. Security advisories take priority over feature work.
+5. Never put credentials, tokens or account-specific identifiers in code, configs, notebook outputs
+   or logs. Secrets always come from the environment or the git-ignored `.env`.
+6. Always load checkpoints with `torch.load(weights_only=True)`, third-party weights included. Never
+   use `weights_only=False` except for a resume checkpoint this project's own training wrote, with
+   a comment at the call site that says so.
+7. Always use SafeTensors for an artifact that is published or crosses a trust boundary. Never set
+   `trust_remote_code=True`. Always parse YAML with `yaml.safe_load`.
+8. GitHub Actions dependencies must be locked with a workflow lockfile. If the repository cannot
+   adopt one, each action must be pinned to a full-length commit SHA verified to come from the
+   action's repository, not a fork.
+9. The default `GITHUB_TOKEN` permission must be read-only for repository contents; raise it per
+   job only as required.
+10. Use `pull_request_target` and `workflow_run` only when the workflow needs the privileged
+    context. Workflows they trigger must not check out untrusted code, including code from pull
+    request forks.
+11. The workflow security scan (actionlint and zizmor) must stay in place.
+12. Container images must build from the locked environment and must carry no secrets.
+13. Serving-side and API-boundary security belong to `mermaid-inference`; defer to it. The public
+    demo must load only artifacts this project publishes, never user-supplied weights.
+14. Never commit data, weights, large binaries, generated preview images or OS files (`.DS_Store`).
+
+## 10. Where to look things up
+
+Where a doc disagrees with this file or the code, this file and the code win.
+
+| Need | Where |
 |---|---|
-| `mermaidseg/datasets/` | Nine per-source PyTorch datasets; each emits labels in its own source space |
-| `mermaidseg/dataset_reconciliation/` | Joint label + concept space across datasets — the central mechanism |
-| `mermaidseg/model/` | Architectures, losses, `MetaModel`, training loop, `Evaluator` |
-| `mermaidseg/io.py` | `ConfigDict` + YAML merge + CLI override plumbing |
-| `mermaidseg/logger.py` | MLflow runs, checkpoints, model export |
-| `mermaidseg/sagemaker/` | Pydantic schema for the launcher YAML (host-side only) |
+| Setup, training entrypoints, test commands, make targets | `README.md`: Installation, Training Entrypoints, Running Tests, Common Commands |
+| Lint, test and dependency settings; CI checks | `pyproject.toml`; `.github/workflows/` |
+| Architecture, label reconciliation, known gotchas | `docs/architecture.md` |
+| Demo | `demo/README.md` |
+| Remote training job image | `docker/jobs/README.md` |
+| CoralNet ETL | `wiki/CoralNet-ETL.md` |
+| Source and history of each rule, for editing this file | `docs/agents-md-sources.md` |
 
-### Configuration System
-
-Four independent YAML files, each overridable alone via `--config-data`, `--config-model`, `--config-training`, `--config-logger`; `setup_config()` (`mermaidseg/io.py`) merges them under their section keys and CLI args override the result. `ConfigDict` gives dot-notation access. `preprocess_data_config` expands the per-dataset `default:` block into every dataset that doesn't override it, then compiles each split's `transform:` spec into an `albumentations.Compose`. `class_subset`, `whitelist_sources` and `blacklist_sources` take inline lists of source ids or class names — there is no CSV coercion anywhere in `io.py`, so a filename passed here is treated as a literal label.
-
-Switching between standard and concept-bottleneck training means swapping `--config-model` and `--config-training`, not editing one large config.
-
-### Label-space reconciliation (`mermaidseg/dataset_reconciliation/`)
-
-Each dataset emits `source_labels` in its native space (CoralNet provider IDs, MERMAID benthic attribute IDs, Coralscapes 1..39, Coralscapes V2 1..95, …). `SourceLabelRegistry` is built once per run from the split datasets and produces:
-
-- a global source label space (0 = background, positive ints unique across datasets — `__getitem__` masks arrive already offset into it),
-- `source_to_target`, a `(N+1,)` LongTensor into the **MERMAID benthic attribute space** (the canonical target space; MERMAID's own mapping is the identity),
-- `source_to_concepts`, an `(N+1, C)` FloatTensor of concept rows.
-
-`MetaModel` therefore only does two on-device lookups per batch. `label_mapping.py` holds the `fetch_*_to_mermaid` helpers (several call `https://api.datamermaid.org`; Coralscapes uses static dicts). Adding a dataset means adding a mapping here, not touching the trainer.
-
-### Model Architectures (`mermaidseg/model/models.py`)
-
-Every architecture is a frozen DINOv3 encoder (ViT-B/ViT-L, 512×512 input) plus two orthogonal choices — head type and whether the classifier routes through a concept bottleneck. The six public classes are that matrix:
-
-| | linear 1×1 conv head | DPT multi-scale head | DPT + LoRA |
-|---|---|---|---|
-| **classes** | `LinearDINOv3` | `LinearDPTDINOv3` | `LinearDPTLoRADINOv3` |
-| **concepts → classes** | `ConceptBottleneckDINOv3` | `ConceptBottleneckDPTDINOv3` | `ConceptBottleneckDPTLoRADINOv3` |
-
-All return HuggingFace `SemanticSegmenterOutput` (CBM variants return `ConceptBottleneckOutput`). LoRA adapters attach to the encoder's `q_proj`/`k_proj`/`v_proj`/`o_proj`.
-
-### MetaModel (`mermaidseg/model/meta.py`)
-
-Central training wrapper. Resolves the model by name via `getattr(mermaidseg.model.models, model_name)`, and losses and optimizers the same way. Three training modes:
-
-- `standard` — direct label classification
-- `concept` — concept head predicts concepts, post-processed to labels via `postprocess_predicted_concepts`
-- `concept-bottleneck` — encoder → concept logits → label logits, with combined loss
-
-`freeze_encoder` defaults to `True` when the mode is `concept-bottleneck`, `False` otherwise. Mixed precision, LR warmup and gradient clipping are configured under `training:`.
-
-### Data Pipeline (`mermaidseg/datasets/`)
-
-- `BaseCoralDataset` fetches images from S3, loads point annotations from parquet, and builds masks by padding each point (radius from `training.padding`, default 3px). Load failures are recorded per-dataset rather than raising; `train_model` aborts if the per-epoch failure rate exceeds 5%.
-- Masks use `ignore_index=0` for unlabeled pixels — the vast majority, since annotations are sparse points.
-- Nine dataset classes are exported from `mermaidseg/datasets/__init__.py`; **eight** are wired into `configs/data_config.yaml` and `scripts/train.py`. `UCSDMosaicsDataset` exists but is not yet wired into a run.
-- `datasets/coralnet/` is a subsystem, not a file: `scraper/` (download, refresh, remediate) → `etl/` (versioned audit/annotations/images parquets) → `preprocessing/` (resize + manifest) → `CoralNetDataset`. Pin a build with `MERMAID_CORALNET_ANNOTATIONS_VERSION`. See `wiki/CoralNet-ETL.md`.
-- Concept definitions come from `configs/class_to_concepts.csv` via `ConceptSchema.from_csv`; the benthic hierarchy is fetched from the MERMAID API (`dataset_reconciliation/concepts.py`).
-
-### Experiment Tracking (`mermaidseg/logger.py`)
-
-`Logger` wraps MLflow. It logs params, per-epoch metrics, dataloader params, reconciliation metadata (`metadata/id2label.json`, `metadata/concept_id2name.json`, `metadata/target_id2label.json` — the demo consumes these **by name**, so adding or renaming one is a breaking change), and checkpoints.
-
-Serialization is deliberately three-way (see the `logger.py` module docstring):
-
-- **Training checkpoints** — `torch.save` (pickle), full state for resume.
-- **MLflow best model** — `torch.save` to a temp dir, then `mlflow.log_artifact`; load with `torch.load('model.pt')`. **Not** `mlflow.pytorch.log_model`, whose internal session flush triggers a `UniqueViolation` on SageMaker's managed MLflow PostgreSQL backend.
-- **Published models** — SafeTensors (`save_safetensors_for_publish`), zero-copy and no arbitrary code execution.
-
-### Demo (`demo/`)
-
-A Gradio app for the concept-bottleneck model, deployed to Hugging Face Spaces at
-`https://huggingface.co/spaces/datamermaid/mermaid-segmentation`. `app.py` +
-`inference.py` + `rendering.py`, with static test images.
-
-Two things make it a drift risk rather than just another directory:
-
-- **Its runtime is not this repo's.** `demo/README.md` front-matter pins
-  `sdk_version: 6.17.3` and `python_version: "3.12"`, while the project floor is
-  3.11 and the `demo` extra only asks for `gradio>=5.0`. Reproducing a Spaces bug
-  locally means matching the front-matter, not the lockfile.
-- **It carries committed copies of training outputs** — `id2label.json`,
-  `concept_id2name.json`, `class_to_concepts.csv` — plus its own
-  `model_config_cbm_dpt_lora_vitl.yaml`. Retraining does not update them; they
-  will silently disagree with a newer run's `metadata/` artifacts.
-
-## Key Conventions & Gotchas
-
-- **Resolution by name is pervasive** — model, loss, optimizer, scheduler and every augmentation are looked up by their config string. Renaming a class breaks configs silently, with no import-time error. The one exception is the metric name: `SUPPORTED_METRIC_NAMES` (`mermaidseg/model/metric_policy.py`) backs argparse `choices=`, so a bad `--metric-of-interest` fails immediately.
-- **Checkpoint selection and early stopping both key off `--metric-of-interest`** (default `accuracy`; `METRIC_POLICY` fixes each metric's min/max direction). `--early-stopping` is opt-in, with `--early-stopping-patience` (10) and `--early-stopping-min-delta`.
-- **`concept_mapping_path` is CWD-relative.** `configs/training_config_cbm.yaml` sets `"../configs/class_to_concepts.csv"` and `ConceptSchema.from_csv` passes it straight to `pd.read_csv`, so it resolves only when the working directory is `nbs/`. `scripts/train.py` defaults to that config — run it from the repo root and it raises `FileNotFoundError`. Override the path, or run from `nbs/`. Omitting the key entirely falls back to the correct package-relative default.
-- ImageNet normalization lives in the data config as an Albumentations transform, not in code.
-- `live` tests hit S3 and coralnet.ucsd.edu and are excluded by default in `pyproject.toml` addopts; CI never runs them.
-- The wiki (`wiki/`, 10 pages) carries onboarding, git workflow, reproducibility rules and the SageMaker runbook. Issues follow DSLP templates in `.github/ISSUE_TEMPLATE/`.
+<!-- Adapted from huggingface/{diffusers,transformers,peft,pytorch-image-models,lerobot} and
+vllm-project/vllm (Apache-2.0), pytorch/pytorch (BSD-style), agentsmd/agents.md (MIT), Google's Rules
+of ML and GitHub Docs (CC BY 4.0), the PyTorch docs, and "The ML Test Score" and "Hidden Technical
+Debt in Machine Learning Systems" (title only). Sources and deltas: docs/agents-md-sources.md -->
