@@ -192,6 +192,7 @@ def test_no_retired_paths_or_exports():
         ("final", 300_000, 4000),
         ("hires", 25_000, 4000),
         ("final_hires", 50_000, 4000),
+        ("768_15k", 15_000, 4000),
     ],
 )
 def test_decaying_configs_reach_zero_at_the_last_update(name, updates, warmup):

@@ -70,3 +70,13 @@ def test_channels_that_do_not_match_the_taxonomy_raise():
     names = [n for n in _concept_names() if n != "genus__acropora"]
     with pytest.raises(ValueError, match="genus"):
         HierarchicalScore(names, _CSV)
+
+
+def test_removed_concepts_are_taken_out_of_the_tree():
+    removed = ["genus__acropora", "kingdom__fungi", "bleached"]
+    names = [n for n in _concept_names() if n not in removed]
+    score = HierarchicalScore(names, _CSV, removed_concepts=removed)
+    assert "acropora" not in score.tree.channels["genus"]
+    assert "fungi" not in score.tree.channels["kingdom"]
+    with pytest.raises(ValueError, match="after removing 1 concepts"):
+        HierarchicalScore(_concept_names(), _CSV, removed_concepts=["genus__acropora"])

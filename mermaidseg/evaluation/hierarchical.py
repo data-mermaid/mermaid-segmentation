@@ -8,15 +8,24 @@ concepts, which are already a per-rank softmax, so no score transform is applied
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable
 from pathlib import Path
 
 import torch
 
+from mermaidseg.dataset_reconciliation.concept_removal import apply_concept_removal, concept_kind
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
-from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
+from mermaidseg.dataset_reconciliation.taxonomy_tree import (
+    TaxonomyTree,
+    build_taxonomy_tree,
+    load_taxonomy_frame,
+)
 from mermaidseg.evaluation.metrics import ConceptLayout
 from mermaidseg.model.hierarchical_metrics import HierarchicalMetrics
 from mermaidseg.model.rank_outputs import RankBatch
+
+logger = logging.getLogger(__name__)
 
 #: Headline keys of ``HierarchicalMetrics.compute()`` reported per unit and in macro means.
 HIER_HEADLINE_KEYS: tuple[str, ...] = (
@@ -32,6 +41,24 @@ HIER_HEADLINE_KEYS: tuple[str, ...] = (
 )
 
 
+def _run_taxonomy_tree(taxonomy_csv: str | Path, removed_concepts: Iterable[str]) -> TaxonomyTree:
+    """Taxonomy tree of ``taxonomy_csv`` without the run's removed taxonomic channels.
+
+    Training set removed ``rank__value`` channels to ``not_given`` (``apply_concept_removal``);
+    removed binary concepts do not affect the tree.
+    """
+    df = load_taxonomy_frame(taxonomy_csv)
+    removed = [c for c in dict.fromkeys(removed_concepts) if concept_kind(c) != "binary"]
+    if removed:
+        logger.info(
+            "hierarchical metrics: %d taxonomic channels removed from %s (concept removal)",
+            len(removed),
+            taxonomy_csv,
+        )
+        df = apply_concept_removal(df, removed)
+    return build_taxonomy_tree(df=df)
+
+
 class HierarchicalScore:
     """Accumulates hierarchical metrics from ``(K, N)`` concept probabilities.
 
@@ -40,9 +67,15 @@ class HierarchicalScore:
     :meth:`dense_targets`.
     """
 
-    def __init__(self, concept_names: list[str], taxonomy_csv: str | Path):
+    def __init__(
+        self,
+        concept_names: list[str],
+        taxonomy_csv: str | Path,
+        removed_concepts: Iterable[str] = (),
+    ):
         layout = ConceptLayout.from_concept_names(concept_names)
-        tree = build_taxonomy_tree(taxonomy_csv)
+        tree_removed = list(removed_concepts)
+        tree = _run_taxonomy_tree(taxonomy_csv, tree_removed)
         self.ranks: tuple[str, ...] = tuple(rank for rank, _, _ in layout.taxo)
         self._slices: list[slice] = []
         for rank, indices, _ in layout.taxo:
@@ -52,8 +85,10 @@ class HierarchicalScore:
             if values != tree.channels[rank]:
                 raise ValueError(
                     f"{rank} has {len(values)} model channels but {len(tree.channels[rank])} "
-                    f"channels in {taxonomy_csv}, or they differ in order. The taxonomy CSV "
-                    "must be the one the checkpoint was trained with."
+                    f"channels in {taxonomy_csv} after removing {len(tree_removed)} concepts, "
+                    "or they differ in order. The taxonomy CSV and the concept removal "
+                    "(training.concept_removal of --training-config) must be the ones the "
+                    "checkpoint was trained with."
                 )
             self._slices.append(slice(indices[0], indices[-1] + 1))
         self.tree = tree

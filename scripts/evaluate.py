@@ -11,7 +11,12 @@ Runs, on one checkpoint at one prediction resolution:
                       and one by one), per dataset and overall
 
 ``--evals`` selects a subset (default: all five). The probes are fitted on the train
-probe points and scored on ``--split`` (default ``val``). CoralNet and Pacific report
+probe points and scored on ``--split`` (default ``val``). ``--split train`` scores the
+CoralNet train sources and allows only ``coralnet`` and ``val_loss``; the loss is then
+computed on those train images (val transform, the run's ``concept_source_mask``
+applied) and reported as ``train_loss``. ``--images-per-source N`` draws a seeded random
+sample of at most N images per CoralNet source, written to
+``coralnet_<split>_sample.parquet`` and shared by both evals. CoralNet and Pacific report
 class, taxonomic (all / living / coral, accuracy and macro F1), binary-concept and
 hierarchical metrics (consistency, mistake severity, ECE), with ``bleached`` and
 ``anthropogenic`` called out. Each section is written to ``summary.json`` and
@@ -63,8 +68,10 @@ from mermaidseg.evaluation.reporting import fmt, write_json  # noqa: E402
 logger = logging.getLogger("evaluate")
 
 ALL_EVALS = ["coralnet", "pacific", "coralscapes", "coralscapes39", "val_loss"]
-SPLITS = ["val", "test"]
+SPLITS = ["train", "val", "test"]
+TRAIN_SPLIT_EVALS = ["coralnet", "val_loss"]
 _CONFIGS = _REPO_ROOT / "configs"
+_RESERVED_DATA_KEYS = ("local_cache_dir", "local_cache_write_through")
 
 
 def _load_yaml(path: str | Path) -> dict:
@@ -93,6 +100,50 @@ def _coralnet_sources(data: dict, split: str) -> list[int]:
     if not sources:
         raise ValueError(f"data config has no coralnet.{split}.whitelist_sources")
     return sources
+
+
+def check_split_evals(split: str, evals: list[str]) -> None:
+    """``--split train`` only has CoralNet sources and the loss to score."""
+    if split != "train":
+        return
+    unsupported = [e for e in evals if e not in TRAIN_SPLIT_EVALS]
+    if unsupported:
+        raise ValueError(
+            f"--split train supports only --evals {' '.join(TRAIN_SPLIT_EVALS)}, got {unsupported}"
+        )
+
+
+def run_removed_concepts(training_config: str | Path, taxonomy_csv: str | Path) -> list[str]:
+    """Channels removed by ``training.concept_removal`` of ``training_config``, if any."""
+    from mermaidseg.run_setup import concept_removal_list
+
+    raw = _load_yaml(training_config)
+    return concept_removal_list(raw.get("training", raw), taxonomy_csv)
+
+
+def _val_transform(data: dict, dataset: str) -> dict:
+    """The ``val`` transform of ``dataset``, else of the ``default`` block."""
+    for section in (data.get(dataset), data.get("default")):
+        val = section.get("val") if isinstance(section, dict) else None
+        if isinstance(val, dict):
+            for key in ("transform", "augmentation"):
+                if key in val:
+                    return {key: val[key]}
+    raise ValueError(f"data config has no val transform for {dataset} or default")
+
+
+def coralnet_loss_data_config(data: dict, split: str, image_keep: Path | None) -> dict:
+    """A data config whose only split is ``coralnet.<split>``, as ``val`` with the val transform."""
+    block = data["coralnet"][split]
+    if not isinstance(block, dict):
+        raise ValueError(f"data config has no coralnet.{split}")
+    val = {k: v for k, v in block.items() if k not in ("transform", "augmentation")}
+    val.update(_val_transform(data, "coralnet"))
+    if image_keep is not None:
+        val["image_keep"] = str(Path(image_keep).resolve())
+    out = {k: data[k] for k in _RESERVED_DATA_KEYS if k in data}
+    out["coralnet"] = {"val": val}
+    return {"data": out}
 
 
 def _model_input_size(model_config: str | Path) -> tuple[int, int]:
@@ -182,8 +233,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--split",
         default="val",
         choices=SPLITS,
-        help="CoralNet source split and CoralscapesV2 split scored by the probes",
+        help="CoralNet source split and CoralscapesV2 split scored by the probes "
+        "(train: coralnet and val_loss only)",
     )
+    p.add_argument(
+        "--images-per-source",
+        type=int,
+        default=None,
+        help="Seeded random sample of at most this many images per CoralNet source "
+        "(default: every image)",
+    )
+    p.add_argument("--sample-seed", type=int, default=0, help="Seed of --images-per-source")
     p.add_argument("--batch-size", type=int, default=8, help="Image batch size")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--device", default=None)
@@ -284,12 +344,12 @@ def _point_lines(title: str, pooled: dict) -> list[str]:
     ]
 
 
-def _val_loss_lines(section: dict) -> list[str]:
+def _val_loss_lines(section: dict, title: str = "Validation loss") -> list[str]:
     overall = section.get("overall") or {}
     focus = [f"multi_hot/{concept}" for concept in REPORTED_BINARY_CONCEPTS]
     headline = ["loss", "classification", "concepts", "multi_hot", *focus]
     ranks = [k for k in overall if "/" not in k and k not in headline]
-    lines = ["## Validation loss (overall)"]
+    lines = [f"## {title} (overall)"]
     lines += [f"- {key}: {fmt(overall.get(key))}" for key in headline if key in overall]
     if ranks:
         lines.append("- ranks: " + ", ".join(f"{k}={fmt(overall[k])}" for k in ranks))
@@ -315,6 +375,8 @@ def _write_summary(output_dir: Path, summary: dict) -> None:
             lines += _point_lines("Pacific Labeled Corals (pooled over regions)", section["pooled"])
         elif key == "val_loss":
             lines += _val_loss_lines(section)
+        elif key == "train_loss":
+            lines += _val_loss_lines(section, "CoralNet train-source loss")
         elif key.startswith("coralscapes39_"):
             split = key.removeprefix("coralscapes39_")
             lines.append(f"## CoralscapesV2 39-class linear probe ({split})")
@@ -349,6 +411,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     evals = list(dict.fromkeys(args.evals))
+    check_split_evals(args.split, evals)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -409,6 +472,13 @@ def main(argv: list[str] | None = None) -> None:
             f"which concept_id2name ({len(concept_names)} entries) does not have."
         )
 
+    removed_concepts: list[str] = []
+    if any(e in evals for e in ("coralnet", "pacific", "coralscapes")):
+        removed_concepts = run_removed_concepts(args.training_config, args.taxonomy_csv)
+        logger.info(
+            "Concept removal of %s: %d channels", args.training_config, len(removed_concepts)
+        )
+
     # Benthic hierarchy for CoralNet/Pacific class roll-up.
     hierarchy = None
     if "coralnet" in evals or "pacific" in evals:
@@ -424,8 +494,28 @@ def main(argv: list[str] | None = None) -> None:
         "input_size": list(input_size),
         "split": args.split,
         "evals": evals,
+        "num_removed_concepts": len(removed_concepts),
     }
     t_start = time.time()
+    split = args.split
+
+    # --- Per-source CoralNet sample, shared by the coralnet eval and the train loss ---
+    sample_path = None
+    uses_sample = "coralnet" in evals or (split == "train" and "val_loss" in evals)
+    if args.images_per_source is not None and uses_sample:
+        from mermaidseg.evaluation.coralnet_eval import write_coralnet_sample
+
+        sample_path = write_coralnet_sample(
+            path=output_dir / f"coralnet_{split}_sample.parquet",
+            whitelist_sources=_coralnet_sources(data, split),
+            image_blacklist=_split_field(data, "coralnet", split, "image_blacklist"),
+            annotation_overrides=_split_field(data, "coralnet", split, "annotation_overrides"),
+            images_per_source=args.images_per_source,
+            seed=args.sample_seed,
+        )
+        summary["images_per_source"] = args.images_per_source
+        summary["sample_seed"] = args.sample_seed
+        summary["sample"] = str(sample_path)
 
     def _run(keys: list[str], fn) -> None:
         """Run one eval returning ``{key: result}``; record errors so others still proceed."""
@@ -436,7 +526,6 @@ def main(argv: list[str] | None = None) -> None:
             summary.update({key: {"error": f"{type(e).__name__}: {e}"} for key in keys})
         _write_summary(output_dir, summary)
 
-    split = args.split
     if "coralnet" in evals:
         from mermaidseg.evaluation.coralnet_eval import evaluate_coralnet
 
@@ -450,6 +539,7 @@ def main(argv: list[str] | None = None) -> None:
                     annotation_overrides=_split_field(
                         data, "coralnet", split, "annotation_overrides"
                     ),
+                    image_keep=sample_path,
                     id2label=id2label,
                     concept_names=concept_names,
                     taxonomy_csv=args.taxonomy_csv,
@@ -459,6 +549,7 @@ def main(argv: list[str] | None = None) -> None:
                     batch_size=args.batch_size,
                     num_workers=args.num_workers,
                     max_images_per_unit=args.max_images_per_unit,
+                    removed_concepts=removed_concepts,
                 )
             },
         )
@@ -485,6 +576,7 @@ def main(argv: list[str] | None = None) -> None:
                     batch_size=args.batch_size,
                     num_workers=args.num_workers,
                     max_images_per_unit=args.max_images_per_unit,
+                    removed_concepts=removed_concepts,
                 )
             },
         )
@@ -507,6 +599,7 @@ def main(argv: list[str] | None = None) -> None:
                     splits=[split],
                     svm_c=args.svm_c,
                     max_test_images=args.max_test_images,
+                    removed_concepts=removed_concepts,
                 ).items()
             },
         )
@@ -534,13 +627,27 @@ def main(argv: list[str] | None = None) -> None:
     if "val_loss" in evals:
         from mermaidseg.evaluation.val_loss import evaluate_val_loss
 
+        loss_key = "val_loss"
+        loss_data_config = args.data_config
+        loss_max_images = args.val_loss_max_images
+        if split == "train":
+            loss_key = "train_loss"
+            loss_data_config = output_dir / "data_config_coralnet_train.yaml"
+            loss_data_config.write_text(
+                yaml.safe_dump(
+                    coralnet_loss_data_config(data, "train", sample_path), sort_keys=False
+                )
+            )
+            if sample_path is not None:
+                loss_max_images = None
+
         _run(
-            ["val_loss"],
+            [loss_key],
             lambda: {
-                "val_loss": evaluate_val_loss(
+                loss_key: evaluate_val_loss(
                     checkpoint=args.checkpoint,
                     model_config=args.model_config,
-                    data_config=args.data_config,
+                    data_config=loss_data_config,
                     training_config=args.training_config,
                     resolution=input_size[0],
                     output_dir=output_dir,
@@ -549,7 +656,9 @@ def main(argv: list[str] | None = None) -> None:
                     num_workers=args.num_workers,
                     amp=args.amp,
                     schema_config=args.schema_config,
-                    max_images_per_dataset=args.val_loss_max_images,
+                    max_images_per_dataset=loss_max_images,
+                    name=loss_key,
+                    apply_source_mask=split == "train",
                 )
             },
         )

@@ -19,6 +19,7 @@ results_tmp/*
 visualizations/*
 dataset_stats/*
 coralnet_source_report/
+coralnet_check/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

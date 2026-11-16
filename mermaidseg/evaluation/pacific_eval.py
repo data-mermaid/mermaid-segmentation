@@ -8,6 +8,7 @@ fallback) is used.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 from mermaidseg.datasets.pacific_labeled_corals.pacific_labeled_corals_dataset import (
@@ -36,6 +37,7 @@ def evaluate_pacific(
     batch_size: int = 8,
     num_workers: int = 8,
     max_images_per_unit: int | None = None,
+    removed_concepts: Sequence[str] = (),
 ) -> dict:
     logger.info(
         "Building Pacific Labeled Corals dataset (subsets=%s sites=%s) ...",
@@ -75,4 +77,5 @@ def evaluate_pacific(
         batch_size=batch_size,
         num_workers=num_workers,
         max_images_per_unit=max_images_per_unit,
+        removed_concepts=removed_concepts,
     )

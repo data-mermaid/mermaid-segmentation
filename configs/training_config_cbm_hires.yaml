@@ -3,6 +3,8 @@ training:
     freeze_encoder: true
     detach_concepts: true
     concept_mapping_path: "../configs/class_to_concepts.csv"
+    concept_removal: configs/concept_removals/min_coverage_trainval.csv
+    concept_source_mask: configs/concept_source_masks/coralnet_only_false.csv
     loss:
         type: ConceptBottleneckLoss
         lambda_weight: 1

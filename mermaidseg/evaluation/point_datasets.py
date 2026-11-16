@@ -271,12 +271,14 @@ def run_point_evaluation(
     num_workers: int = 8,
     max_images_per_unit: int | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    removed_concepts: Sequence[str] = (),
 ) -> dict:
     """Run a point-annotation evaluation with per-unit streaming reports.
 
     Each name in ``binary_concepts`` gets its own pooled accuracy / precision / recall / F1
     block. With ``taxonomy_csv``, pooled hierarchical metrics are added under
-    ``pooled["hierarchical"]``.
+    ``pooled["hierarchical"]``; ``removed_concepts`` (``training.concept_removal``) are taken
+    out of its taxonomy tree.
     """
     missing = [c for c in binary_concepts if c not in concept_names]
     if missing:
@@ -358,7 +360,11 @@ def run_point_evaluation(
 
     pending: dict[str, MetricBundle] = {}
     pooled = MetricBundle.create(num_classes, layout)
-    hier = HierarchicalScore(concept_names, taxonomy_csv) if taxonomy_csv is not None else None
+    hier = (
+        HierarchicalScore(concept_names, taxonomy_csv, removed_concepts)
+        if taxonomy_csv is not None
+        else None
+    )
     # Per-unit hierarchical accumulators; the pooled one still sees every point.
     pending_hier: dict[str, HierarchicalScore] = {}
     unit_results: dict[str, dict] = {}

@@ -488,13 +488,14 @@ def _evaluate_split(
     taxonomy_csv: str | Path,
     out_dir: Path,
     max_images: int | None,
+    removed_concepts: Sequence[str] = (),
 ) -> dict:
     """Score one split with the fitted SVM, the binary concepts, and the hierarchy."""
     kind = "concepts"
     eval_class_ids = list(range(1, NUM_CLASSES + 1))
     conf = ClassConfusion(NUM_CLASSES + 1, ignore_index=0)  # 0..95, 0 = ignore
     binary = {concept: BinaryConceptScore(threshold=0.5) for concept in concept_codes}
-    hier = HierarchicalScore(concept_names, taxonomy_csv)
+    hier = HierarchicalScore(concept_names, taxonomy_csv, removed_concepts)
     class_targets = _class_taxonomy_targets(hier, concept_names, taxonomy_csv, predictor.device)
     results: dict = {
         "eval": "coralscapes",
@@ -605,11 +606,13 @@ def evaluate_coralscapes_probe(
     hf_repo: str = "josauder/coralscapesV2",
     svm_c: float = 1.0,
     max_test_images: int | None = None,
+    removed_concepts: Sequence[str] = (),
 ) -> dict[str, dict]:
     """Fit the probe once on the train probe points, then score every split in ``splits``.
 
     Returns ``{split: metrics}``; each split's metrics also go to
     ``<output_dir>/coralscapes_<split>/metrics.json``. ``max_test_images`` caps every split.
+    ``removed_concepts`` (``training.concept_removal``) are taken out of the taxonomy tree.
     """
     import json
 
@@ -679,6 +682,7 @@ def evaluate_coralscapes_probe(
             taxonomy_csv=taxonomy_csv,
             out_dir=Path(output_dir) / f"coralscapes_{split}",
             max_images=max_test_images,
+            removed_concepts=removed_concepts,
         )
         for split in splits
     }

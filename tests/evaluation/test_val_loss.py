@@ -9,9 +9,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from mermaidseg.evaluation.val_loss import _Accumulator, _check_layout, binary_concept_names
+from mermaidseg.evaluation.val_loss import (
+    _Accumulator,
+    _check_layout,
+    binary_concept_names,
+    resolve_concept_mapping_path,
+)
 from mermaidseg.model.concept_metrics import calculate_multi_hot_concept_loss
 from mermaidseg.model.loss import ConceptBottleneckLoss, binary_concept_losses
+from mermaidseg.run_setup import REPO_ROOT
 
 NAMES = ["bleached", "anthropogenic", "sand"]
 WEIGHTS = {"per_pixel_loss_weight": 0.5, "per_image_loss_weight": 0.5}
@@ -75,6 +81,33 @@ def test_accumulator_averages_each_key_over_the_batches_it_appears_in():
     second.add({"loss": 5.0, "multi_hot/bleached": 0.4})
     first.merge(second)
     assert first.means() == pytest.approx({"loss": 3.0, "multi_hot/bleached": 0.3})
+
+
+def test_concept_mapping_path_written_for_nbs_resolves_from_the_repo_root(monkeypatch):
+    from mermaidseg.io import ConfigDict
+
+    monkeypatch.chdir(REPO_ROOT)
+    cfg = ConfigDict({"concept_mapping_path": "../configs/class_to_concepts.csv"})
+    resolve_concept_mapping_path(cfg)
+    assert cfg.concept_mapping_path == str(REPO_ROOT / "configs" / "class_to_concepts.csv")
+
+    cfg = ConfigDict({"concept_mapping_path": "configs/class_to_concepts.csv"})
+    resolve_concept_mapping_path(cfg)
+    assert cfg.concept_mapping_path == "configs/class_to_concepts.csv"
+
+
+def test_concept_mapping_path_ignores_a_copy_relative_to_the_current_directory(
+    monkeypatch, tmp_path
+):
+    from mermaidseg.io import ConfigDict
+
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "class_to_concepts.csv").write_text("stale\n")
+    (tmp_path / "repo").mkdir()
+    monkeypatch.chdir(tmp_path / "repo")
+    cfg = ConfigDict({"concept_mapping_path": "../configs/class_to_concepts.csv"})
+    resolve_concept_mapping_path(cfg)
+    assert cfg.concept_mapping_path == str(REPO_ROOT / "configs" / "class_to_concepts.csv")
 
 
 def test_layout_check_uses_the_files_next_to_the_checkpoint(tmp_path: Path):

@@ -3,13 +3,8 @@ training:
     freeze_encoder: true
     detach_concepts: true
     concept_mapping_path: "../configs/class_to_concepts.csv"
-    # Optional, off unless set (here or with --set training.KEY=PATH):
-    # - concept_removal: concept channels left out of the run (scripts/build_concept_removal.py).
-    #   A removed genus keeps its family and coarser ranks; a removed binary concept loses its channel.
-    # concept_removal: configs/concept_removals/min_coverage_trainval.csv
-    # - concept_source_mask: CoralNet source x binary concept pairs whose training targets are set
-    #   to not_given (scripts/build_concept_source_mask.py). Validation is not masked.
-    # concept_source_mask: configs/concept_source_masks/coralnet_only_false.csv
+    concept_removal: configs/concept_removals/min_coverage_trainval.csv
+    concept_source_mask: configs/concept_source_masks/coralnet_only_false.csv
     loss:
         type: ConceptBottleneckLoss
         lambda_weight: 1

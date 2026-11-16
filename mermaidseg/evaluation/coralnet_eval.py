@@ -1,9 +1,12 @@
-"""CoralNet evaluation on the val or test sources (per source id + aggregate)."""
+"""CoralNet evaluation on the train, val or test sources (per source id + aggregate)."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
+
+import pandas as pd
 
 from mermaidseg.datasets.coralnet.coralnet_dataset import CoralNetDataset
 from mermaidseg.evaluation.gt_mapping import build_class_lookup, build_concept_lookup
@@ -16,12 +19,66 @@ logger = logging.getLogger(__name__)
 SOURCE_NAME = "coralnet"
 
 
+def sample_images_per_source(df_images: pd.DataFrame, n: int, seed: int = 0) -> pd.DataFrame:
+    """At most ``n`` images of each ``source_id``, drawn with ``seed``; smaller sources keep all."""
+    if n < 1:
+        raise ValueError(f"images per source must be positive, got {n}")
+    parts = [
+        group.sample(n=min(n, len(group)), random_state=seed)
+        for _, group in df_images.groupby("source_id", sort=True)
+    ]
+    if not parts:
+        return df_images.iloc[:0].copy()
+    return pd.concat(parts).sort_values(["source_id", "image_id"]).reset_index(drop=True)
+
+
+def write_coralnet_sample(
+    *,
+    path: str | Path,
+    whitelist_sources: list[int] | None,
+    image_blacklist: str | list[int | str] | None = None,
+    annotation_overrides: str | None = None,
+    images_per_source: int,
+    seed: int = 0,
+) -> Path:
+    """Write an ``image_keep`` parquet of a seeded per-source image sample of these sources."""
+    base = CoralNetDataset(
+        whitelist_sources=whitelist_sources,
+        image_blacklist=image_blacklist,
+        annotation_overrides=annotation_overrides,
+        transform=None,
+    )
+    sample = sample_images_per_source(base.df_images, images_per_source, seed)
+    counts = sample["source_id"].value_counts()
+    logger.info(
+        "CoralNet sample: %d of %d images over %d sources (<=%d per source, seed %d); "
+        "%d sources have fewer",
+        len(sample),
+        len(base.df_images),
+        len(counts),
+        images_per_source,
+        seed,
+        int((counts < images_per_source).sum()),
+    )
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "dataset": SOURCE_NAME,
+            "source_id": sample["source_id"].astype(str),
+            "image_id": sample["image_id"].astype(str),
+        }
+    ).to_parquet(path, index=False)
+    return path
+
+
 def evaluate_coralnet(
     *,
     predictor: CBMPredictor,
     whitelist_sources: list[int] | None,
     image_blacklist: str | list[int | str] | None = None,
     annotation_overrides: str | None = None,
+    image_keep: str | Path | None = None,
     id2label: dict[int, str],
     concept_names: list[str],
     taxonomy_csv: str | Path,
@@ -31,19 +88,22 @@ def evaluate_coralnet(
     batch_size: int = 8,
     num_workers: int = 8,
     max_images_per_unit: int | None = None,
+    removed_concepts: Sequence[str] = (),
 ) -> dict:
     logger.info(
         "Building CoralNet %s dataset (whitelist_sources=%s, "
-        "image_blacklist=%s, annotation_overrides=%s) ...",
+        "image_blacklist=%s, annotation_overrides=%s, image_keep=%s) ...",
         split,
         whitelist_sources,
         image_blacklist,
         annotation_overrides,
+        image_keep,
     )
     base = CoralNetDataset(
         whitelist_sources=whitelist_sources,
         image_blacklist=image_blacklist,
         annotation_overrides=annotation_overrides,
+        image_keep=image_keep,
         transform=None,
         split=split,
     )
@@ -70,6 +130,9 @@ def evaluate_coralnet(
         batch_size=batch_size,
         num_workers=num_workers,
         max_images_per_unit=max_images_per_unit,
+        removed_concepts=removed_concepts,
     )
     result["whitelist_sources"] = sorted(whitelist_sources or [])
+    if image_keep is not None:
+        result["image_keep"] = str(image_keep)
     return result

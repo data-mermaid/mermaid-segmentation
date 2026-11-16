@@ -62,11 +62,9 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 57,83,72,False,test,Catlin.Seaview.Survey_Coral.Sea_south,Beto;mgonzalez,,-16.4308,147.854,"Oct. 10, 2012",True,True,False
 290,86,227,False,test,AIMS LTMP,g.coleman;kateosborne,AIMS,-14.33,145.35,"Feb. 26, 2015",True,True,False
 546,91,78,False,test,St. John 2016,sternberg.d.r,"Cal State, Northridge",18.3159,-64.7285,"Nov. 17, 2016",True,True,False
-800,95,1273,False,test,NOAA ESD CAU,kalyande;Thomas.Oliver,NOAA,21.3069,-157.858,"Nov. 15, 2017",True,True,False
 921,97,62,False,test,Water Outlet,ares5510,NMMBA,21.93208,120.745,"Feb. 22, 2018",True,True,False
 1304,100,111,False,test,Reef restoration SBR,phmontoya,Corales de Paz,12.6,-81.7,"Nov. 12, 2018",True,True,False
 1360,102,49,False,test,PMNM Benthic LTM,johnhrburns;keilanibe;kpascoe;spengler,UH Hilo,28.41666,-178.333,"Jan. 25, 2019",True,True,False
-1588,107,31,False,test,INSITU 2019,gsrednick,CSUN Biology,-17.4915,-149.852,"Aug. 16, 2019",True,True,False
 1776,117,447,False,test,Lizard v. Heron 2019,kristen.brown,Kristen Brown- The University of Queensland,-14.668,145.4637,"Feb. 6, 2020",True,True,False
 1826,119,211,False,test,(historic image set) Norfolk Island,coulsonlantz;heroncoral,"UNSW, UON",29.048,167.954,"March 29, 2020",True,True,False
 1832,120,66,False,test,Shrimply the Best Reef 34,kmbxker;taylorwasson,Hawaii Pacific University,21.46686,-157.833,"April 2, 2020",True,True,False
@@ -91,9 +89,7 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 3656,188,360,False,test,SUSMB 2021-2022 Benthic Photogrammetry,kirstengolding,The University of Queensland,-27.4725,153.4089,"Dec. 12, 2022",True,True,False
 3697,192,1048,False,test,"French Polynesia SEA Reef Surveys, 2016-2023",batesej,Sea Education Association,-14.977,-147.633,"Jan. 25, 2023",True,True,False
 3719,193,108,False,test,Adjacent Project,Jayrobynallen,Plymouth University,50.4603,-3.52706,"Feb. 7, 2023",True,True,False
-3765,195,427,False,test,2022 Magnetic Island - settlement tiles - August,hillaryadele;meganw,JCU,-19.1287,146.8774,"March 2, 2023",True,True,False
 3776,198,35,False,test,Shannon Eckhardt,shannoneckhardt,University of New South Wales,-29.0599,167.9525,"March 12, 2023",True,True,False
-3807,201,93,False,test,One Tree Island Geomorphology,Diz,University of Sydney,23.30162,152.5351,"March 21, 2023",True,True,False
 3857,202,24,False,test,leodhaismac,Leodhais18200,northumbria university,8.585,119.4411,"March 23, 2023",True,True,False
 3975,206,914,False,test,TUMCA Ecological Survey,JULIUS;Mathias1988a;Mohammed;WCS_TZ_Marine,Wildlife Conservation Society,5.81418,39.21433,"April 20, 2023",True,True,False
 3985,207,88,False,test,OTI Group 4,shannoneckhardt,University of Sydney,23.5076,152.0916,"April 25, 2023",True,True,False
@@ -117,7 +113,6 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 5181,254,1061,False,test,MarineGEO RLS,ashenkevans;bravovd;brookewicz;carolinacs;cdesouza02;LeahHarper;mdohertyplym;mlonneman;naltmank;Nicola_Foster;SaraMelo;si_ashenkevans;zoe,Smithsonian,18.37,-68.79,"June 13, 2024",True,True,False
 5227,255,136,False,test,Pierrick Harnay 100 points,Pierrick,University of Haifa/ Rode Island,-17.478,-149.863,"June 23, 2024",True,True,False
 5255,256,80,False,test,Halophila stipulacea vs Thalassia testudinum,alianyramos;gsanchez;valeria_hernandez10,University of Puerto Rico Mayaguez Campus,17.9696,-67.0445,"July 3, 2024",True,True,False
-5328,257,52,False,test,Panels Bocas 2024,bravovd;carolinacs;sandovalma,Smithsonian Tropical Research Institute,9.385499,-82.2687,"July 23, 2024",True,True,False
 5331,258,30,False,test,Roatan Honduras 2024,midlandcollege,Midland College,16.33536,86.5709,"July 25, 2024",True,True,False
 5699,270,28,False,test,John Pennekamp,Sophia8303,Nova Southeastern University,47.56267,-52.7108,"Oct. 25, 2024",True,True,False
 5761,273,50,False,test,Identifikasi Koralogi,shndyvianaa_,Universitas Lampung,-5.67613,105.2187,"Oct. 31, 2024",True,True,False
@@ -537,6 +532,9 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 4758,35,55,False,train,KAHO_Overlap_Quadrat,sofiaf,University of Hawaii at Hilo,19.64736,-155.993,"Jan. 31, 2024",True,False,False
 4759,35,19,True,train,KAHO_Overlap_Plot,sofiaf,University of Hawaii at Hilo,19.64736,-155.993,"Jan. 31, 2024",True,False,False
 4906,35,136,True,train,KAHO_LTM,cortesma;kpascoe;sofiaf,University of Hawaii,17.8581,177.2018,"April 5, 2024",True,False,False
+5218,36,490,False,train,Barnacle 2024,ACogger97;tialandry27@;wyethlab,St. Francis Xavier University,45.631,-61.9762,"June 19, 2024",True,True,False
+5411,36,456,False,train,2024 - PVC recruitment,mmurtaug;wyethlab,St. Francis Xavier University,45.6135,-61.3654,"Aug. 27, 2024",True,True,False
+6965,36,2252,False,train,GIT 2025.3,ACogger97;mmurtaug;Paytonplesh;tialandry27@;wyethlab,St. Francis Xaviers University,45.61748,-61.9921,"July 14, 2025",True,True,False
 5755,39,50,True,train,Praktikum Florentinaa,@florentina,Universitas Lampung,-5.67613,105.2187,"Oct. 30, 2024",True,False,False
 5957,39,54,True,train,ardiaroyoo,@ardiaroyo,universitas lampung,-5.66343,105.2216,"Dec. 7, 2024",True,False,False
 5968,39,15,True,train,Zalsa Rs,zalsars19,university of lampung,2.45963,102.2415,"Dec. 7, 2024",True,False,False
@@ -607,10 +605,13 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 376,88,439,False,train,MarineGEO Belize,janiakd;jonesms;seemannj;whippo,Smithsonian,16.80863,-88.0861,"Oct. 8, 2015",True,True,False
 503,90,234,False,train,Perhentian BHAB assemblages relation to coral reef community,likeat92,IOES Bachok,5.903788,102.7537,"Sept. 6, 2016",True,True,False
 554,92,22393,False,train,Kahekili,bvargasangel;ivorwill;jonathan.charendoff;mskye13;samantha.darin;tyekindinger,Coral Reef Ecosystem Program,20.94316,-156.694,"Dec. 6, 2016",True,False,False
+793,94,1235,False,train,MarineGEO Hong Kong,marinegeohk,University of Hong Kong,22.39642,114.1094,"Nov. 6, 2017",True,True,False
+800,95,1273,False,train,NOAA ESD CAU,kalyande;Thomas.Oliver,NOAA,21.3069,-157.858,"Nov. 15, 2017",True,True,False
 841,96,3877,False,train,Vavau,patrick.smallhorn.west;PatrickSmallhornWest,James Cook University,-18.6227,-173.99,"Jan. 28, 2018",True,True,False
 1288,99,31288,False,train,ESD_REA_SAMOA_PRIA_v2,Andrew.E.Gray;bvargasangel;cs389;jonathan.charendoff;Morgan.Winston;mskye13;Thomas.Oliver,Coral Reef Ecosystem Program,-14.2709,-170.233,"Oct. 22, 2018",True,False,False
 1308,101,45,False,train,Richardson's,BeachStuff,University of Hawaii at Hilo,19.7,-155.0,"Nov. 14, 2018",True,True,False
 1546,106,205,False,train,Ensenada lobster project,dan.exton;Elina,Operation Wallacea,15.80798,-87.4374,"July 14, 2019",True,True,False
+1588,107,31,False,train,INSITU 2019,gsrednick,CSUN Biology,-17.4915,-149.852,"Aug. 16, 2019",True,True,False
 1622,108,95,False,train,Waikiki MLCD/FMA/NMA,mmanning;sarahb4,Kapiolani Community College,21.26608,-157.822,"Sept. 12, 2019",True,True,False
 1655,109,160,False,train,Pulau Bidong (PPC deep),Idzhar012,University Malaysia Terengganu,5.619726,103.0639,"Oct. 7, 2019",True,True,False
 1686,110,21,False,train,3Cs38,mdjohnson,Northeastern University,9.4048,82.2692,"Oct. 28, 2019",True,True,False
@@ -620,14 +621,17 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 1783,118,1638,False,train,Sint Eustatius,myrsini_l,University of Amsterdam,16.71643,-62.2192,"Feb. 13, 2020",True,True,False
 1940,121,640,False,train,2016,zuhairahdindar,UNSW,-30.3032,153.1436,"May 27, 2020",True,True,False
 1968,122,183,False,train,Biofouling on the offshore oil platform in the Southwest Gulf of Mexico,pablohernandez27,Universidad Autonóma de Yucatán,20.16449,-91.9624,"June 23, 2020",True,True,False
+2074,125,27,False,train,Bottoms of ARMS,dylan-bipat;mmorgan1398;stweedt,Smithsonian,43.3665,124.2179,"Sept. 1, 2020",True,True,False
 2083,126,849,False,train,Projeto Costão Rochoso subtidal,cammcordeiro;mari_mega,UFF,-22.9861,-41.9924,"Sept. 7, 2020",True,True,False
 2091,127,400,False,train,Reef_research_Okinawa,TITlyf,Tokyo Institute of Technology,24.36461,124.2516,"Sept. 12, 2020",True,True,False
 2162,128,123,False,train,Leah Harper,LeahHarper,Smithsonian Institution,16.80526,88.08314,"Oct. 27, 2020",True,True,False
 2236,130,22,False,train,GRT_Mada,HubertEdwin,"University of Toliara, Institut Halieutique et des Sciences Marines",-23.3684,43.67334,"Dec. 18, 2020",True,True,False
 2239,131,82,False,train,PSEPA2020,Esola22;isabelkerera,"CICA, Lurio University",-16.3553,40.02965,"Dec. 24, 2020",True,True,False
 2274,132,234,False,train,PMNM Circrat- Mortality,keilanibe,UH Hilo,25.24469,-170.561,"Jan. 25, 2021",True,True,False
+2282,133,738,False,train,SEAMOBB-3_France,chenuil,IMBE_OSU Pytheas_MARTERA,43.279,5.342621,"Jan. 27, 2021",True,True,False
 2286,134,2628,False,train,Kulbul,BMurphy;Caitlin_Younis;Hkish94;Jboverys,GBR Biology,-16.846,146.23,"Jan. 31, 2021",True,True,False
 2337,137,100,False,train,NSW-MEMS-Eden-1,tdavis,NSW DPI,-37.04,149.95,"March 8, 2021",True,True,False
+2722,143,189,False,train,andre 2.0,andrebrandao;NunoSimoes,ULHT,38.67595,-9.31849,"Aug. 9, 2021",True,True,False
 2757,144,59,False,train,Pixie Reef 2021,CarolineMW;LeonardLim,Jennifer Marohasy,-16.5467,145.8623,"Sept. 9, 2021",True,True,False
 2762,145,34,False,train,Paleocanal,guimalacastro;rafaelavargens,UFRJ,20.0,39.0,"Sept. 16, 2021",True,True,False
 2799,147,21,False,train,TEST,FH_A,MMRI,4.003,73.002,"Oct. 5, 2021",True,True,False
@@ -649,8 +653,15 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 3653,187,79,False,train,Guam Habitat Mapping,esweeney12;jennifer.kraus,NOAA,13.45,144.62,"Dec. 9, 2022",True,True,False
 3681,189,2528,False,train,Melissa,melex001,James Cook University,-10.2803,40.11605,"Jan. 13, 2023",True,True,False
 3685,190,31,False,train,training set 2,Nico,FIU,18.3104,65.3031,"Jan. 17, 2023",True,True,False
+3722,194,345,False,train,DLAB Tile Assessment,dylan.orcutt,NOAA,27.3333,82.5779,"Feb. 8, 2023",True,True,False
+3765,195,427,False,train,2022 Magnetic Island - settlement tiles - August,hillaryadele;meganw,JCU,-19.1287,146.8774,"March 2, 2023",True,True,False
 3773,197,199,False,train,Recifes Esquecidos,NelsonBarcelos,Labnecton-UFES,18.825,39.514,"March 8, 2023",True,True,False
+3785,200,110,False,train,DLAB tile assessment,c_bair2,Mote Marine Laboratory,24.66165,81.4545,"March 17, 2023",True,True,False
+3807,201,93,False,train,One Tree Island Geomorphology,Diz,University of Sydney,23.30162,152.5351,"March 21, 2023",True,True,False
 3922,203,336,False,train,Pangatalan SRP,ThomasPavy,Thomas Pavy,11.08734,119.5634,"April 3, 2023",True,True,False
+3948,204,354,False,train,Oman ARMS 2023,bdarling;kramerb;stweedt,Smithsonian NMNH,19.9,58.2,"April 11, 2023",True,True,False
+3949,205,154,False,train,Biofouling,Jonas;patricio;silvialmeida,ARDITI & MARE-Madeira,32.64194,-16.9158,"April 11, 2023",True,True,False
+3989,208,178,False,train,Sanibel Island Oyster Gardens,adriansakr,University of Florida,26.44494,-82.0376,"April 28, 2023",True,True,False
 4128,210,142,False,train,New_Large_Corals,mb4360;reagansharkey;sb3061,Nova Southeastern University,26.12231,-80.1433,"June 1, 2023",True,True,False
 4148,211,7127,False,train,BTS_DEF,igorcruz;Oc.jpbcf,Universidade Federal da Bahia,-12.7,-38.5,"June 6, 2023",True,True,False
 4168,212,24,False,train,Demo Benthic Cover Gorgona,mgabriela,Pontificia Universidad Javeriana Cali,2.95175,-78.1786,"June 17, 2023",True,True,False
@@ -667,6 +678,7 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 4948,249,32,False,train,(training set) Norfolk Island Benthic Training Set,heroncoral,Norfolk Team,-29.06,167.96,"April 17, 2024",True,True,False
 4963,251,900,False,train,Kenya bleaching (2024),abmayfield;yusufS,Coral Reef Diagnostics,-4.65456,39.38193,"April 22, 2024",True,True,False
 5155,253,1438,False,train,,,,,,,False,True,False
+5328,257,52,False,train,Panels Bocas 2024,bravovd;carolinacs;sandovalma,Smithsonian Tropical Research Institute,9.385499,-82.2687,"July 23, 2024",True,True,False
 5444,260,460,False,train,Tubbataha,ThomasPavy,Seastems,8.874217,119.8856,"Sept. 6, 2024",True,True,False
 5457,261,2305,False,train,pre-bleaching,rhidav98,MUI,1.9431,73.418,"Sept. 10, 2024",True,True,False
 5477,262,1220,False,train,Rubble Monitoring,gitaal08,IPB University,-4.92719,119.3207,"Sept. 12, 2024",True,True,False
@@ -674,6 +686,7 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 5549,264,192,False,train,Grande Island reef system: Benthic analysis- HPCL artifical reef project,coastalimpact,Coastal Impact,15.35372,15.35372,"Sept. 30, 2024",True,True,False
 5564,266,334,False,train,Fundacion Huinay Benthic Monitoring 2023,JP;StacyAnushka;vivill001;volunteer_Huinay,Fundacion San Ignacio del Huinay,-42.3839,-72.428,"Oct. 2, 2024",True,True,False
 5674,267,24,False,train,MBIO2410 - Mangrove Research,cs3597,Nova Southeastern University,25.13316,80.39854,"Oct. 22, 2024",True,True,False
+5690,268,34,False,train,EFGB ARMS 1 and 2,DemiC3;stweedt,Texas A&M University Galveston/ Smithsonian NMNH,27.9074,-93.5992,"Oct. 24, 2024",True,True,False
 5694,269,50,False,train,Praktikum Koralogi Alpharius,timmy_,Universitas Lampung,-5.67613,105.2187,"Oct. 25, 2024",True,True,False
 5745,271,50,False,train,Koralogi Identifikasi,@an.syafitri,university lampung,-5.67613,105.2187,"Oct. 29, 2024",True,True,False
 5774,274,30,False,train,Sharkplaneos Artificial Reef,Amy_BTR,Beyond The Reef,18.47995,-64.456,"Nov. 1, 2024",True,True,False
@@ -682,6 +695,7 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 5967,279,50,False,train,Lia Aryantii,LiaAryanti,Universitas Lampung,-5.66357,105.2208,"Dec. 7, 2024",True,True,False
 6014,280,50,False,train,Amandha Gusti Ramadhani,AmandaGusti@03,University of Lampung,-5.66343,105.2216,"Dec. 10, 2024",True,True,False
 6204,286,204,False,train,ARMS_Brest_2024-2025,EmmaPECHEREAU,Ifremer_Brest,48.38037,-4.44055,"Feb. 12, 2025",True,True,False
+6207,287,100,False,train,fire coral settlement tiles - Curaçao,enixon96,SIO,12.08527,-68.8981,"Feb. 12, 2025",True,True,False
 6218,288,1127,False,train,,,,,,,False,True,False
 6447,294,600,False,train,Chagos bleaching (2015),abmayfield;yusufS,Coral Reef Diagnostics,-6.63941,71.33949,"March 31, 2025",True,True,False
 6502,298,145,False,train,RSI_JCDC,Nayra;Trees126,RedSea2025,21.52335,39.12396,"April 15, 2025",True,True,False
@@ -727,9 +741,6 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 4482,33,104,False,val,Nualolo 2021,ScottBacon,Malama Na Apapa,22.15969,-159.7,"Oct. 26, 2023",True,True,False
 4483,33,52,False,val,Nualolo 2023,ScottBacon,Malama Na Apapa,22.16012,-159.701,"Oct. 26, 2023",True,True,False
 5316,33,25,False,val,Nualolo 2024,JennaBudke;ScottBacon,Malama Na Apapa,22.16028,-159.7,"July 18, 2024",True,True,False
-5218,36,490,False,val,Barnacle 2024,ACogger97;tialandry27@;wyethlab,St. Francis Xavier University,45.631,-61.9762,"June 19, 2024",True,True,False
-5411,36,456,False,val,2024 - PVC recruitment,mmurtaug;wyethlab,St. Francis Xavier University,45.6135,-61.3654,"Aug. 27, 2024",True,True,False
-6965,36,2252,False,val,GIT 2025.3,ACogger97;mmurtaug;Paytonplesh;tialandry27@;wyethlab,St. Francis Xaviers University,45.61748,-61.9921,"July 14, 2025",True,True,False
 5339,37,50,False,val,data Stasiun 1,indrajaya758894,Universitas Lampung,-5.74006,106.6091,"July 29, 2024",True,True,False
 5484,37,25,False,val,Indra Jaya Pu,indrajaya758894,Universitas Lampung,-5.74036,106.613,"Sept. 16, 2024",True,True,False
 5491,37,50,False,val,Indra Jaya PU 2,indrajaya758894,Universitas Lampung,-5.74036,106.613,"Sept. 16, 2024",True,True,False
@@ -756,7 +767,6 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 155,85,990,False,val,USSGuardianWreck,ckim;kristen.brown,UQ Catlin Seaview Survey,8.91,119.91,"May 11, 2014",True,True,False
 450,89,2480,False,val,HLO GSL,filippo.ferrario,Université Laval,48.67309,-68.0216,"April 18, 2016",True,True,False
 683,93,37,False,val,BREAM Recruit2,thad_murdoch,www.bermudabream.org,32.305,64.788,"June 14, 2017",True,True,False
-793,94,1235,False,val,MarineGEO Hong Kong,marinegeohk,University of Hong Kong,22.39642,114.1094,"Nov. 6, 2017",True,True,False
 958,98,55,False,val,Sitti Masita,siti_masita,Hasanuddin University,-4.78972,119.2966,"Feb. 28, 2018",True,True,False
 1368,103,187,False,val,Algal Distributions/Diversity KBay,pzazueta,Hawaii Pacific University,21.47676,-157.817,"Jan. 30, 2019",True,True,False
 1388,104,1435,False,val,Tonga,patrick.smallhorn.west;PatrickSmallhornWest;SouthworthLucy,James Cook University,-21.1789,-175.198,"Feb. 20, 2019",True,True,False
@@ -764,12 +774,9 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 1724,113,537,False,val,TIBS Directed Research Mangroves,emmagreenberg;jeshea132;Rachel_S5,SFS TIBS,9.3413,-82.2421,"Nov. 23, 2019",True,True,False
 1745,114,387,False,val,Hbay,sleicht17,UH-HIMB,21.27094,-157.696,"Dec. 13, 2019",True,True,False
 1749,115,582,False,val,Maunalua Bay,pmoehlen,University of Hawaii,21.25047,-157.758,"Jan. 3, 2020",True,True,False
-2074,125,27,False,val,Bottoms of ARMS,dylan-bipat;mmorgan1398;stweedt,Smithsonian,43.3665,124.2179,"Sept. 1, 2020",True,True,False
 2208,129,75,False,val,La Sagesse Channel Reef,CaribMarine,Carib Marine,12.01325,-61.6666,"Dec. 6, 2020",True,True,False
-2282,133,738,False,val,SEAMOBB-3_France,chenuil,IMBE_OSU Pytheas_MARTERA,43.279,5.342621,"Jan. 27, 2021",True,True,False
 2544,140,461,False,val,"Calabash Bight Port Royal, Roatan",adu;arlenerodriguez;tzlaef,Centro de Estudios Marinos,16.40934,86.29047,"May 23, 2021",True,True,False
 2667,142,34,False,val,Neushul Redux,mcmahsta;sarahtanja;whippo,Friday Harbor Laboratories,48.53927,-123.0,"July 2, 2021",True,True,False
-2722,143,189,False,val,andre 2.0,andrebrandao;NunoSimoes,ULHT,38.67595,-9.31849,"Aug. 9, 2021",True,True,False
 2765,146,1104,False,val,G_Walls_StFX,aidan.mc01;FishRFriends555;gavin_h;LauraBrady;lgwalls,St Francis Xavier University,45.77051,-61.8911,"Sept. 20, 2021",True,True,False
 2808,149,145,False,val,Saipan ML Test 2,esweeney12,NCCOS,15.16669,145.7054,"Oct. 15, 2021",True,True,False
 2897,150,1136,False,val,MBON P2P_Intertidal Monitoring (ARG_UY),eqmh;gbigatti;gonzalopatagonia,MBON,-45.2078,-66.5081,"Dec. 18, 2021",True,True,False
@@ -785,13 +792,8 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 3402,179,600,False,val,Valentina Rocha,Vjrh2002,UM,25.73226,-80.1629,"Aug. 2, 2022",True,True,False
 3611,186,186,False,val,Evelyn's IA,tsouza98,Le Jardin Academy,21.45302,-157.8,"Nov. 15, 2022",True,True,False
 3692,191,2071,False,val,Project Bira benthic survey,indooceanproject,Indo Ocean Project,-8.0,115.0,"Jan. 21, 2023",True,True,False
-3722,194,345,False,val,DLAB Tile Assessment,dylan.orcutt,NOAA,27.3333,82.5779,"Feb. 8, 2023",True,True,False
 3771,196,187,False,val,Dominica_SSMR,Jlevenson;kiannebenjamin,Dominica Sea Turtle Conservation Org,15.20749,-61.3666,"March 6, 2023",True,True,False
 3777,199,2577,False,val,Project Raja benthic survey,indooceanproject,Indo Ocean Project,-0.44308,130.7536,"March 12, 2023",True,True,False
-3785,200,110,False,val,DLAB tile assessment,c_bair2,Mote Marine Laboratory,24.66165,81.4545,"March 17, 2023",True,True,False
-3948,204,354,False,val,Oman ARMS 2023,bdarling;kramerb;stweedt,Smithsonian NMNH,19.9,58.2,"April 11, 2023",True,True,False
-3949,205,154,False,val,Biofouling,Jonas;patricio;silvialmeida,ARDITI & MARE-Madeira,32.64194,-16.9158,"April 11, 2023",True,True,False
-3989,208,178,False,val,Sanibel Island Oyster Gardens,adriansakr,University of Florida,26.44494,-82.0376,"April 28, 2023",True,True,False
 4200,213,475,False,val,,,,,,,False,True,False
 4291,219,59,False,val,,,,,,,False,True,False
 4311,221,498,False,val,Ain Sukhna Sea Urchin and Coral Cover,DrORedSea,Indiana University Southeast,29.37025,32.573,"Aug. 24, 2023",True,True,False
@@ -806,12 +808,10 @@ source_id,group,n_images,shares_images,split,name,admins,affiliation,latitude,lo
 4966,252,80,False,val,BIOL4411_Biofouling_P1,tai.loureiro,UWA,-35.0833,117.95,"April 24, 2024",True,True,False
 5395,259,999,False,val,Spermonde - Jane Master 2024,jane_cita25,IPB University,-4.92719,119.3207,"Aug. 19, 2024",True,True,False
 5562,265,397,False,val,Coral Reef Conservation: Caribbean,SEA_CRCC,Sea Education Association,15.085,-66.043,"Oct. 2, 2024",True,True,False
-5690,268,34,False,val,EFGB ARMS 1 and 2,DemiC3;stweedt,Texas A&M University Galveston/ Smithsonian NMNH,27.9074,-93.5992,"Oct. 24, 2024",True,True,False
 5760,272,50,False,val,Koralog Tercinta,Haris.Sinaga19,Universitas Lampung,-5.68188,105.233,"Oct. 31, 2024",True,True,False
 5949,278,679,False,val,ESD LBSP American Samoa,ed0ard0sena;jonathan.charendoff;Joy.Smith;jverstaen,NOAA PIFSC,-14.317,-170.711,"Dec. 5, 2024",True,True,False
 6053,282,483,False,val,REEFolution Kenya_Longterm,ewoutknoester,Wageningen University,-4.66125,39.39042,"Dec. 30, 2024",True,True,False
 6068,283,22,False,val,Photo Analysis Sukuta Transect,Ananya,The Innovation Fellowship,26.5553,127.9917,"Jan. 7, 2025",True,True,False
-6207,287,100,False,val,fire coral settlement tiles - Curaçao,enixon96,SIO,12.08527,-68.8981,"Feb. 12, 2025",True,True,False
 6235,289,34,False,val,Henry Fernando Jr,henry.fernando354877,KBD,24.06891,38.0376,"Feb. 18, 2025",True,True,False
 6297,290,2100,False,val,Curaçao BCM Assessment 2025,Fabels_BF,University of Amsterdam; CARMABI,12.16957,-68.99,"March 3, 2025",True,True,False
 6366,292,120,False,val,Diversity in Dzilam and Chabihau,Carcharod0na;scarlet,Universidad Autónoma de Yucatán,21.35649,-89.1173,"March 15, 2025",True,True,False
