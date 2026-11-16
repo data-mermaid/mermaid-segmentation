@@ -1,9 +1,10 @@
-# docker/jobs/
+# SageMaker Job Image
 
-Container definition for SageMaker jobs launched by
-`scripts/launch_training.py` and `scripts/launch_processing.py`. One
-image, both job types — the launcher chooses which in-container
-entrypoint runs via `CONTAINER_ENTRYPOINT_SCRIPT`.
+Container definition for the SageMaker jobs launched by
+`scripts/launch_training.py` and `scripts/launch_processing.py`. One image serves
+both job types — the launcher chooses which in-container entrypoint runs via
+`CONTAINER_ENTRYPOINT_SCRIPT`. This is the build-and-push runbook; whoever ships a
+new image is the audience.
 
 ## Files
 
@@ -19,7 +20,7 @@ entrypoint runs via `CONTAINER_ENTRYPOINT_SCRIPT`.
 - `processing-latest`, `processing-smoke`, `processing-YYYY-MM-DD`
 - `user-<name>-<purpose>-YYYY-MM-DD`
 
-See `mermaid-api/iac/sagemaker-launcher-convention.md` for authoritative rules.
+See `../mermaid-api/iac/sagemaker-launcher-convention.md` (sibling repo) for authoritative rules.
 
 ## Build/push
 
