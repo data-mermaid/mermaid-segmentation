@@ -153,7 +153,7 @@ uv run pytest -m "not integration"
 uv run pytest tests/test_logger.py -v
 ```
 
-`live` tests are deselected by default (pyproject addopts).
+`live` tests are deselected by default via the pyproject addopts. They hit S3 and coralnet.ucsd.edu; CI never runs them.
 
 **Run live tests** (needs S3 / CoralNet access + `playwright install chromium`):
 ```bash
