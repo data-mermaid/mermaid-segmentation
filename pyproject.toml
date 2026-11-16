@@ -94,6 +94,7 @@ tests = [
 lint = [
     "ruff>=0.15.8",
     "pre-commit>=3.0",
+    "mypy>=2.4.1",
 ]
 dev = [
     {include-group = "tests"},
@@ -121,11 +122,20 @@ ignore = ["E501"]
     "PD003", # pandas-vet: prefer isna — wrong for Ibis .isnull() / SQL NULL
 ]
 
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
 [tool.ruff.lint.isort]
 known-first-party = ["mermaidseg"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+follow_imports = "silent"
+explicit_package_bases = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
