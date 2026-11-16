@@ -1,0 +1,28 @@
+# Taxonomical-loss ablation — arm 3/3: DualTaxonomicalLoss + morphology head (LoRA q/v r8).
+# alpha=0.1, beta=0.1, gamma=0.1. Uses the dual model (adds a morphology head); morphology targets
+# are built from the concept CSV (source_to_morphology). Identical to arm 2 except config_model +
+# config_training.
+job:
+  name_prefix: mermaidseg-lora-tax-dual
+  image: mermaid-segmentation-jobs:training-latest
+  entrypoint: scripts/sagemaker_train_entrypoint.py
+  instance_type: ml.g5.2xlarge
+  volume_gb: 200
+  max_runtime_hours: 48
+  env:
+    MERMAID_CORALNET_ANNOTATIONS_PATH: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
+
+config:
+  config_data: configs/data_config_coralnet_mermaid.yaml
+  config_model: configs/model_config_dinov3_dual_lora_qv_r8.yaml
+  config_training: configs/training_config_dinov3_dual_taxonomical.yaml
+  config_logger: configs/logger_config.yaml
+  overrides:
+    run-name: lora-r8-dual
+    experiment-name: taxonomical-loss-ablation
+    epochs: 200
+    seed: 42
+    num-workers: 8
+    metric-of-interest: miou
+    early-stopping: true
+    early-stopping-patience: 20

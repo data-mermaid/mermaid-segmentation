@@ -47,6 +47,12 @@ def _apply_source_vocabulary(
     if hasattr(root, "set_source_vocabulary"):
         root.set_source_vocabulary(source_id2name, source_name2id, num_source_classes)
         return
+    if getattr(root, "_ann_label_id", None) is not None:
+        # Swapping maps under a baked annotation index would silently permute labels.
+        raise TypeError(
+            f"{type(root).__name__} has an annotation index but no set_source_vocabulary(); "
+            "it cannot be safely re-vocabularized."
+        )
     root.source_id2name = dict(source_id2name)
     root.source_name2id = dict(source_name2id)
     root.num_source_classes = int(num_source_classes)
@@ -109,7 +115,8 @@ def select_registry_representatives(
     *,
     prefer_split: str = "train",
 ) -> list[Any]:
-    """One dataset per SOURCE_NAME for ``SourceLabelRegistry`` (train if present, else any)."""
+    """One dataset per SOURCE_NAME for ``SourceLabelRegistry`` (train if present, else
+    any)."""
     representatives: list[Any] = []
     for _source_name, entries in group_splits(dataset_dict).items():
         by_split = {split: ds for _, split, ds in entries}

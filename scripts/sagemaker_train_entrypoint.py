@@ -23,6 +23,11 @@ import yaml
 log = logging.getLogger("seg_train_entrypoint")
 CONFIG_DIR = Path("/opt/ml/input/data/config")
 
+# BooleanOptionalAction flags in scripts/train.py that default to TRUE. For these, a YAML override
+# of ``false`` must be emitted as ``--no-<flag>``; omitting it would let the True default win.
+# Plain store_true flags (default false) are NOT listed — they have no ``--no-`` form.
+_NEGATABLE_BOOL_FLAGS = {"persistent-workers"}
+
 
 def _configure_logging():
     logging.basicConfig(
@@ -34,7 +39,14 @@ def _configure_logging():
 
 def _find_run_yaml() -> Path:
     yamls = sorted(CONFIG_DIR.rglob("*.yaml")) + sorted(CONFIG_DIR.rglob("*.yml"))
-    candidates = [p for p in yamls if "job:" in p.read_text()[:200]]
+    candidates = []
+    for p in yamls:
+        try:
+            parsed = yaml.safe_load(p.read_text())
+        except yaml.YAMLError:
+            continue
+        if isinstance(parsed, dict) and "job" in parsed:
+            candidates.append(p)
     if not candidates:
         raise SystemExit(f"No run YAML with a job: block under {CONFIG_DIR}")
     if len(candidates) > 1:
@@ -53,6 +65,13 @@ def main():
     # directly the YAML is the source of truth.)
     for k, v in (data.get("job", {}).get("env") or {}).items():
         os.environ.setdefault(k, str(v))
+
+    # NOTE: we intentionally do NOT auto-enable the disk image cache here. The full image corpus
+    # (~741K CoralNet images, often multi-MB, plus MERMAID) exceeds the training volume, and the
+    # cache has no eviction bound — so it filled /opt/ml/tmp within ~3 epochs and crashed the job
+    # when torch.save (checkpoint) hit `[Errno 28] No space left on device`. The cache remains
+    # opt-in via MERMAIDSEG_IMAGE_CACHE_DIR (e.g. local dev with ample disk); it is just not
+    # switched on by default for SageMaker runs. See mermaidseg/datasets/utils.py get_image_s3.
 
     # The seg-specific `config:` block names split-config paths (same as
     # scripts/train.py) plus optional CLI overrides as a flat dict.
@@ -76,7 +95,18 @@ def main():
     for flag, path in config_flags.items():
         cmd += [f"--{flag.replace('_', '-')}", path]
     for k, v in overrides.items():
-        cmd += [f"--{k}", str(v)]
+        # Boolean overrides map to a bare flag, not `--flag value` (which breaks store_true /
+        # BooleanOptionalAction args like --early-stopping / --per-class-metrics). true -> `--flag`.
+        # false -> omit for plain store_true flags (no `--no-` form; already default false), but for
+        # BooleanOptionalAction flags that default to TRUE (see _NEGATABLE_BOOL_FLAGS), false MUST be
+        # expressed as `--no-<flag>` or the default would silently win.
+        if isinstance(v, bool):
+            if v:
+                cmd += [f"--{k}"]
+            elif k in _NEGATABLE_BOOL_FLAGS:
+                cmd += [f"--no-{k}"]
+        else:
+            cmd += [f"--{k}", str(v)]
 
     log.info("Invoking: %s", " ".join(cmd))
     rc = subprocess.call(cmd)

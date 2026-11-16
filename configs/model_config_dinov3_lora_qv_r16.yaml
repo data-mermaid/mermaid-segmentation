@@ -1,0 +1,11 @@
+# LinearDINOv3 + LoRA on Q/V projections, rank 16 (Ticket 3).
+model:
+  name: "LinearLoRADINOv3"
+  encoder_name: "facebook/dinov3-vitb16-pretrain-lvd1689m"
+  input_size: [512, 512]
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "v_proj"]
+  lora_bias: "none"

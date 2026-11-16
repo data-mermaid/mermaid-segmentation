@@ -1,11 +1,17 @@
+import contextlib
 import io
 import logging
+import os
 import sys
+import tempfile
+from collections.abc import Sequence
+from pathlib import Path
 
 import boto3
 import numpy as np
 import pandas as pd
 import torch
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset, default_collate
@@ -17,10 +23,11 @@ logger = logging.getLogger(__name__)
 def emit_dataset_warning(message: str) -> None:
     """Emit a dataset-load warning via the logger AND raw stdout/stderr.
 
-    PyTorch DataLoader worker processes often have their ``logging`` handlers unconfigured, which
-    means ``logger.warning`` is silently dropped. To make sure the user sees skip-and-recover
-    messages no matter where they're triggered (main process, worker, notebook, terminal), we
-    additionally ``print`` to both ``sys.stdout`` and ``sys.stderr`` with ``flush=True``.
+    PyTorch DataLoader worker processes often have their ``logging`` handlers
+    unconfigured, which means ``logger.warning`` is silently dropped. To make sure the
+    user sees skip-and-recover messages no matter where they're triggered (main process,
+    worker, notebook, terminal), we additionally ``print`` to both ``sys.stdout`` and
+    ``sys.stderr`` with ``flush=True``.
     """
     logger.warning(message)
     full = f"WARNING: {message}"
@@ -32,28 +39,80 @@ class DataLoadError(Exception):
     """Raised when an image cannot be loaded from S3 or decoded."""
 
 
+_IMAGE_CACHE_DIR: str | None = os.environ.get("MERMAIDSEG_IMAGE_CACHE_DIR")
+
+
+def s3_training_config(max_pool_connections: int = 20) -> BotoConfig:
+    """Botocore config for training-path S3 clients: adaptive retries + timeouts."""
+    return BotoConfig(
+        retries={"max_attempts": 10, "mode": "adaptive"},
+        connect_timeout=10,
+        read_timeout=30,
+        max_pool_connections=max_pool_connections,
+    )
+
+
+def _cache_path(bucket: str, key: str) -> Path | None:
+    if _IMAGE_CACHE_DIR is None:
+        return None
+    return Path(_IMAGE_CACHE_DIR) / bucket / key
+
+
+# Cache observability: log the active cache dir once, and surface a cache-write failure once
+# (rather than silently swallowing every OSError). Each DataLoader worker is a separate process
+# with its own module state, so these fire at most once per worker. Without this, a cache that
+# silently fails to write is indistinguishable from a working one — the exact ambiguity behind
+# "DiskUtilization stayed ~0%": is nothing being written, or is it written somewhere untracked?
+_cache_dir_logged = False
+_cache_write_warned = False
+
+
+def _log_cache_dir_once() -> None:
+    global _cache_dir_logged
+    if not _cache_dir_logged:
+        _cache_dir_logged = True
+        logger.info("Image disk cache enabled: dir=%s", _IMAGE_CACHE_DIR)
+
+
+def _warn_cache_write_failure_once(cached: Path, error: OSError) -> None:
+    global _cache_write_warned
+    if not _cache_write_warned:
+        _cache_write_warned = True
+        emit_dataset_warning(
+            "Image disk cache write failed — caching is a no-op for this process "
+            "(further write failures suppressed). "
+            f"dir={_IMAGE_CACHE_DIR} path={cached} errno={getattr(error, 'errno', None)}: {error}"
+        )
+
+
 def get_image_s3(
     s3: boto3.client,
     bucket: str,
     key: str,
     thumbnail: bool = False,
 ):
-    """Fetches an image from an S3 bucket and returns it as a PIL Image object.
-
-    Args:
-        s3 (boto3.client): The Boto3 S3 client used to interact with S3.
-        bucket (str): The name of the S3 bucket.
-        key (str): The key (path) of the image in the S3 bucket.
-        thumbnail (bool, optional): If True, fetches the thumbnail version of the image by modifying the key. Defaults to False.
-    Returns:
-        PIL.Image.Image: The image loaded from S3 as a PIL Image object.
-    """
+    """Fetch an image from S3, serving from disk cache when
+    ``MERMAIDSEG_IMAGE_CACHE_DIR`` is set."""
     if thumbnail:
         key = key.replace(".png", "_thumbnail.png")
 
+    cached = _cache_path(bucket, key)
+    if cached is not None:
+        _log_cache_dir_once()
+    if cached is not None and cached.exists():
+        try:
+            image = Image.open(cached)
+            image.load()
+            return image
+        except (UnidentifiedImageError, OSError):
+            cached.unlink(missing_ok=True)
+
     try:
         response = s3.get_object(Bucket=bucket, Key=key)
-        image_data = response["Body"].read()
+        try:
+            image_data = response["Body"].read()
+        finally:
+            response["Body"].close()
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
         logger.warning(
@@ -61,13 +120,70 @@ def get_image_s3(
         )
         raise DataLoadError(f"S3 ClientError for s3://{bucket}/{key}: {error_code}") from e
 
+    if cached is not None:
+        try:
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=cached.parent)
+            closed = False
+            try:
+                os.write(fd, image_data)
+                os.close(fd)
+                closed = True
+                os.rename(tmp, cached)
+            except BaseException:
+                if not closed:
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+                Path(tmp).unlink(missing_ok=True)
+                raise
+        except OSError as e:
+            _warn_cache_write_failure_once(cached, e)
+
     try:
         image = Image.open(io.BytesIO(image_data))
+        image.load()
     except (UnidentifiedImageError, OSError) as e:
         logger.warning("Corrupted image (bucket=%s, key=%s): %s", bucket, key, e)
-        raise DataLoadError(f"PIL cannot open image at s3://{bucket}/{key}") from e
+        if cached is not None:
+            cached.unlink(missing_ok=True)
+        raise DataLoadError(f"PIL cannot decode image at s3://{bucket}/{key}") from e
 
     return image
+
+
+def get_image_s3_candidates(
+    s3: boto3.client,
+    bucket: str,
+    keys: Sequence[str],
+    thumbnail: bool = False,
+):
+    """Load the first existing S3 image key, falling back only when a key is missing.
+
+    Image decoding remains content-based through :func:`get_image_s3`; candidate keys
+    handle datasets whose object extension is absent or incorrect. Authorization,
+    networking, and decode failures propagate immediately.
+    """
+    if not keys:
+        raise ValueError("keys must contain at least one candidate.")
+
+    for key in keys:
+        try:
+            return get_image_s3(
+                s3=s3,
+                bucket=bucket,
+                key=key,
+                thumbnail=thumbnail,
+            )
+        except DataLoadError as e:
+            cause = e.__cause__
+            if not isinstance(cause, ClientError):
+                raise
+            error_code = cause.response["Error"]["Code"]
+            if error_code not in {"404", "NoSuchKey", "NotFound"}:
+                raise
+
+    attempted = ", ".join(f"s3://{bucket}/{key}" for key in keys)
+    raise DataLoadError(f"Image not found at any candidate key: {attempted}")
 
 
 def create_annotation_mask(
@@ -91,7 +207,6 @@ def create_annotation_mask(
         np.ndarray: Integer annotation mask with shape (height, width). Values
         are 0 (background) or local source-class IDs (1..N).
     """
-    # TODO: Make padding percentage-based so it scales with image resolution
     mask = np.zeros(shape[:2], dtype=np.int64)
 
     if annotations.empty:
@@ -114,6 +229,39 @@ def create_annotation_mask(
     rows = valid["row"].to_numpy(dtype=np.intp)
     cols = valid["col"].to_numpy(dtype=np.intp)
     label_ids = valid["source_label_name"].map(source_name2id).to_numpy(dtype=np.int64)
+    return create_annotation_mask_from_arrays(rows, cols, label_ids, shape, padding=padding)
+
+
+def create_annotation_mask_from_arrays(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    label_ids: np.ndarray,
+    shape: tuple[int, int],
+    padding: int | None = None,
+) -> np.ndarray:
+    """Scatter integer point annotations into a source-space mask (array-native core).
+
+    This is the hot-path core of :func:`create_annotation_mask`: it takes already-extracted numpy
+    arrays instead of a DataFrame so the per-sample dataset path (see
+    :meth:`BaseCoralDataset._load_item`) never touches pandas object columns — that access is what
+    drives the copy-on-write RSS growth in forked DataLoader workers
+    (``scripts/diagnostics/dataloader_rss_findings.md``).
+
+    Args:
+        rows: Row (y) pixel coordinates, ``intp``.
+        cols: Column (x) pixel coordinates, ``intp``.
+        label_ids: Source-class ids (``int64``, 1..N) aligned to ``rows``/``cols``.
+        shape: Output mask shape ``(height, width)``.
+        padding: Half-size of a square pad region around each point. When > 0, out-of-range
+            coordinates are clipped to the image; with None/0 the coordinates must be in-bounds.
+
+    Returns:
+        Integer mask of shape ``(height, width)``: 0 (background) or local source-class ids.
+    """
+    # TODO: Make padding percentage-based so it scales with image resolution
+    mask = np.zeros(shape[:2], dtype=np.int64)
+    if rows.size == 0:
+        return mask
 
     if padding is not None and padding > 0:
         h, w = shape[:2]
@@ -173,8 +321,8 @@ def _joint_collate(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def get_coralnet_sources():
-    """Discover and validate CoralNet source folders stored in the S3 bucket "dev-datamermaid-sm-
-    sources".
+    """Discover and validate CoralNet source folders stored in the S3 bucket "dev-
+    datamermaid-sm- sources".
 
     Returns:
         whitelist: A list of all valid CoralNet source folder names that contain both

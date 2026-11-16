@@ -24,3 +24,21 @@ The MERMAID dataset is a continuously growing dataset with images uploaded by us
 
 ## Note
 As the mermaid_confirmed_annotations.parquet is continuously being updated, each run currently might have slightly different results due to changes in the (number of) images. As a solution to this, we can potentially save occasional copies of the file (e.g. at the end of every month).
+
+## Known image encoding issue
+
+The upstream image prefix currently contains objects whose key extension does not
+match the encoded image format. A check on 2026-07-24 found 14,258 JPEG payloads
+and 2,423 PNG payloads among 16,681 objects referenced by the annotation parquet,
+while the object keys used the `.png` suffix.
+
+Until upstream storage is normalized, `MermaidDataset`:
+
+- resolves object keys in `.png`, `.jpg`, then `.jpeg` order;
+- lets Pillow detect the encoded format from the object bytes;
+- falls back only when an object key is missing;
+- sends authorization, network, and decode errors through the standard
+  `BaseCoralDataset` failure-recording and batch-skip path.
+
+This compatibility behavior should remain until the upstream keys and encoded
+formats are corrected.

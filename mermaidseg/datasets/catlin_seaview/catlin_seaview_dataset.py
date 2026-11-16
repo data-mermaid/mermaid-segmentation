@@ -23,8 +23,8 @@ from mermaidseg.datasets.utils import get_image_s3
 
 
 class CatlinSeaviewDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading Catlin Seaview annotated coral reef images from a Parquet file
-    stored on S3.
+    """A PyTorch Dataset for loading Catlin Seaview annotated coral reef images from a
+    Parquet file stored on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in the Catlin Seaview source label
@@ -84,7 +84,6 @@ class CatlinSeaviewDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
-        self.s3 = boto3.client("s3")
         self.whitelist_regions = whitelist_regions
         self.blacklist_regions = blacklist_regions
 

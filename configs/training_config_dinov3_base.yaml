@@ -1,0 +1,46 @@
+# Training config for LinearDINOv3 baseline: mermaid+coralnet datasets (issue #129).
+# Linear probe: the DINOv3 backbone is frozen and only the 1x1-conv head trains, so this
+# measures the quality of frozen DINOv3 features. A frozen probe takes a higher LR than
+# full fine-tuning (head-only). Flip freeze_encoder to false (and drop lr to ~5e-5) for a
+# full fine-tune comparison.
+training:
+    training_mode: "standard"
+    freeze_encoder: true
+    loss:
+        type: CrossEntropyLoss
+        ignore_index: 0
+    epochs: 200
+    optimizer:
+        type: AdamW
+        lr: 0.001
+        weight_decay: 0.01
+    scheduler:
+        type: PolynomialLR
+        power: 1
+        total_iters: 200
+        # Frozen probe: no LR warmup (only the head trains on fixed features). Without this,
+        # meta.py defaults warmup_iters to 2000 (~2 epochs) — a fine-tune-oriented default.
+        warmup_iters: 0
+    iterations_per_train_epoch: 1000
+    iterations_per_val_epoch: 200
+    batch_size: 8
+    # Target-class whitelist (SourceLabelRegistry target_label_subset). Ids 1..N are assigned
+    # alphabetically; id 0 is the unmapped/ignore slot (ignore_index: 0). 'Background' is a real
+    # trained class here: the coralnet->mermaid map (configs/coralnet_to_mermaid_mapping_temporary.json)
+    # sends water/unclear/etc. to the benthic target 'Background' (capitalized — match is
+    # case-sensitive). Names must match the produced targets (coralnet map values + MERMAID
+    # benthic-attribute hierarchy) exactly.
+    class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
+                    'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',
+                    'Cyanobacteria', 'Cyphastrea', 'Dark', 'Dictyota', 'Diploastrea', 'Dipsastraea', 'Echinophyllia',
+                    'Echinopora', 'Euphyllia', 'Favia', 'Favites', 'Fungia', 'Galaxea', 'Gardineroseris', 'Goniastrea',
+                    'Goniopora', 'Gorgonian', 'Halimeda', 'Hard coral', 'Heliopora', 'Human-made structure', 'Hydnophora',
+                    'Isopora', 'Leptastrea', 'Leptoria', 'Leptoseris', 'Lobophora', 'Lobophyllia', 'Macroalgae', 'Madracis',
+                    'Merulina', 'Millepora', 'Montastraea', 'Montastraea cavernosa', 'Montipora', 'Mycedium',
+                    'Orbicella annularis', 'Orbicella faveolata', 'Pachyseris', 'Padina', 'Pavona', 'Pectinia', 'Platygyra',
+                    'Pocillopora', 'Porites', 'Porites astreoides', 'Psammocora', 'Rock', 'Rubble', 'Sand', 'Sargassum',
+                    'Sea urchin', 'Seagrass', 'Seriatopora', 'Siderastrea siderea', 'Soft coral', 'Sponge', 'Stylophora',
+                    'Symphyllia', 'Transect tools', 'Tridacna giant clam', 'Turbinaria-algae', 'Turbinaria-coral',
+                    'Turf algae', 'Zoanthid']
+    padding: 3
+    label_roll_up: True

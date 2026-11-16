@@ -13,6 +13,9 @@ requires-python = ">=3.11"
 dependencies = [
     "albumentations",
     "boto3",
+    # Floor for the eMudhra intermediate CA compromise fix. Keeps pip-based installs
+    # (Docker image, demo) from resolving an older CA bundle.
+    "certifi>=2026.10.19",
     "datasets>=3.0",
     "huggingface-hub>=0.36.2",
     "numpy>=1.24,<2",
@@ -20,13 +23,17 @@ dependencies = [
     "pandas",
     "peft>=0.19.1",
     "pillow",
+    "pydantic>=2",
     "pyyaml",
     "requests",
     "s3fs>=2024.2.0",
     "safetensors>=0.4.0",
     "torch>=2.4,<2.8",
     "tqdm",
-    "transformers",
+    # <5: transformers 5.x imports torch.distributed.tensor.DTensor, unavailable on the
+    # pinned torch<2.8 — an unpinned upper bound resolved 4.57.6 on macOS/py3.12 (fine) but
+    # 5.7.0 on the Linux/py3.11 SageMaker container (ImportError at model-build time).
+    "transformers>=4.56,<5",
 ]
 
 [project.scripts]
@@ -37,14 +44,16 @@ coralnet-resize = "mermaidseg.datasets.coralnet.preprocessing.resize:main"
 
 [project.optional-dependencies]
 # Training + experiment tracking (mermaidseg/logger.py, mermaidseg/model/eval.py).
+# (pydantic — used by experiment.py / config_schema.py / training_mode.py — is a core dep above.)
 training = [
     "mlflow",
+    "psutil",  # scripts/diagnostics/dataloader_rss_repro.py (host-RAM / worker USS diagnostics)
     "sagemaker-mlflow>=0.2.0",
     "torchmetrics",
 ]
 # Host-side SageMaker job submission (scripts/launch_*.py); imported lazily.
 sagemaker = [
-    "sagemaker>=2.0,<3.0",
+    "sagemaker-core>=2.27,<3",
 ]
 # CoralNet ETL + scraper console scripts (coralnet-etl/-refresh/-resize): ibis/duckdb
 # for the ETL/manifest, bs4/selenium for scraping.
@@ -134,6 +143,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "live: marks tests as live integration tests requiring S3 and/or CoralNet access (deselect with '-m \"not live\"')",
+    "smoke: marks fast offline smoke tests of the training pipeline wiring",
 ]
 
 [tool.coverage.run]
