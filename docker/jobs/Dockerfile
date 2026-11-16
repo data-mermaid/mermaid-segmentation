@@ -9,7 +9,7 @@
 # Base: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime (Python 3.11, torch 2.5.1)
 # Matches pyproject.toml requires-python>=3.11, torch>=2.4,<2.8.
 #
-# See docker/jobs/CLAUDE.md for build/push recipe and tagging conventions.
+# See docker/jobs/README.md for build/push recipe and tagging conventions.
 
 ARG BASE_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 FROM ${BASE_IMAGE}
