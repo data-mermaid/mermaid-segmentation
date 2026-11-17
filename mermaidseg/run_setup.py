@@ -30,7 +30,6 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
 from mermaidseg.datasets import configured_source_names
 from mermaidseg.io import setup_config
 from mermaidseg.model.meta import MetaModel
-from mermaidseg.model.models import align_peft_checkpoint_state_dict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCHEMA_CONFIG = REPO_ROOT / "configs" / "data_config.yaml"
@@ -146,14 +145,8 @@ def load_model_weights(
     meta_model: MetaModel, checkpoint_path: str | Path, device: torch.device | str
 ) -> dict:
     """Load a checkpoint's model weights into ``meta_model``; returns the checkpoint dict."""
-    # weights_only=False: AGENTS.md 9.6 allows it for resuming this project's own training. Legacy
-    # checkpoints pickle an albumentations Compose in "config", which weights_only=True rejects.
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    raw_state_dict = checkpoint.get("model_state_dict", checkpoint)
-    if not isinstance(raw_state_dict, dict):
-        raise ValueError(f"Checkpoint at {str(checkpoint_path)!r} has no model_state_dict")
-    state_dict = align_peft_checkpoint_state_dict(raw_state_dict, meta_model.model)
-    meta_model.model.load_state_dict(state_dict)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    meta_model.model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     return checkpoint
 
 

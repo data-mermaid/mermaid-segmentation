@@ -11,6 +11,7 @@ import pytest
 import torch
 import yaml
 
+from mermaidseg.inference import loading
 from mermaidseg.inference.loading import DemoArtifacts, build_model, load_artifacts
 from mermaidseg.run_setup import resolve_repo_path
 
@@ -70,4 +71,25 @@ def test_build_model_refuses_a_checkpoint_that_pickles_an_albumentations_compose
         checkpoint_path=str(checkpoint),
     )
     with pytest.raises(pickle.UnpicklingError):
+        build_model(artifacts, "cpu")
+
+
+def test_build_model_rejects_a_state_dict_missing_a_model_key(tmp_path, monkeypatch):
+    class _Model(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.linear = torch.nn.Linear(2, 2)
+
+    monkeypatch.setitem(loading.MODEL_CLASSES, "stub", _Model)
+    state = _Model().state_dict()
+    del state["linear.bias"]
+    checkpoint = tmp_path / "ckpt.pt"
+    torch.save({"model_state_dict": state}, checkpoint)
+    artifacts = DemoArtifacts(
+        model_cfg={"name": "stub"},
+        id2label={0: "ignore", 1: "sand"},
+        concept_id2name={0: "genus:Acropora"},
+        checkpoint_path=str(checkpoint),
+    )
+    with pytest.raises(RuntimeError, match="Missing key"):
         build_model(artifacts, "cpu")

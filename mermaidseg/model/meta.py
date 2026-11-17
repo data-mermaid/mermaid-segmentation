@@ -111,28 +111,17 @@ def _resolve_amp_dtype(dtype_config: Any) -> torch.dtype:
 def next_epoch_from_checkpoint(checkpoint: dict[str, Any]) -> int:
     """Return the epoch index a resumed run should start at.
 
-    Epoch-boundary checkpoints, including every checkpoint written before step
-    checkpoints existed, omit ``epoch_complete`` or set it true. Those resume at
-    ``epoch + 1``. A mid-epoch ``model_step*`` checkpoint sets ``epoch_complete``
-    false and continues the saved epoch.
+    An epoch-boundary checkpoint (``epoch_complete`` true) resumes at ``epoch + 1``. A
+    mid-epoch ``model_step*`` checkpoint (``epoch_complete`` false) continues the saved epoch.
     """
-    saved = int(checkpoint.get("epoch", -1))
-    if bool(checkpoint.get("epoch_complete", True)):
-        return saved + 1
-    return max(saved, 0)
+    if checkpoint["epoch_complete"]:
+        return int(checkpoint["epoch"]) + 1
+    return int(checkpoint["epoch"])
 
 
 def restore_warmup_progress(meta_model: Any, checkpoint: dict[str, Any]) -> None:
-    """Restore how many warmup steps have already run.
-
-    New checkpoints store ``warmup_iters_completed``. Older ones do not; any of
-    those is an epoch boundary, and warmup finishes inside epoch 0, so mark it done.
-    """
-    if "warmup_iters_completed" in checkpoint:
-        meta_model._warmup_iters_completed = int(checkpoint["warmup_iters_completed"])
-        return
-    if getattr(meta_model, "warmup_iters", 0) > 0:
-        meta_model._warmup_iters_completed = meta_model.warmup_iters
+    """Restore how many warmup steps have already run."""
+    meta_model._warmup_iters_completed = int(checkpoint["warmup_iters_completed"])
 
 
 class MetaModel:

@@ -61,21 +61,20 @@ def _images_labels(n: int) -> tuple[torch.Tensor, torch.Tensor]:
     return images, labels
 
 
-def test_next_epoch_from_checkpoint_keeps_old_epoch_boundaries():
-    assert next_epoch_from_checkpoint({"epoch": 3}) == 4
-    assert next_epoch_from_checkpoint({"epoch": 0, "epoch_complete": True}) == 1
-    assert next_epoch_from_checkpoint({"epoch": 0, "epoch_complete": False}) == 0
-    assert next_epoch_from_checkpoint({}) == 0
+@pytest.mark.parametrize(
+    ("epoch_complete", "expected"),
+    [(True, 4), (False, 3)],
+    ids=["epoch-boundary-starts-next-epoch", "mid-epoch-continues-same-epoch"],
+)
+def test_next_epoch_from_checkpoint(epoch_complete, expected):
+    assert next_epoch_from_checkpoint({"epoch": 3, "epoch_complete": epoch_complete}) == expected
 
 
-def test_restore_warmup_marks_old_checkpoints_complete():
+def test_restore_warmup_progress_sets_the_saved_count():
     class _Meta:
-        warmup_iters = 4000
         _warmup_iters_completed = 0
 
     meta = _Meta()
-    restore_warmup_progress(meta, {})
-    assert meta._warmup_iters_completed == 4000
     restore_warmup_progress(meta, {"warmup_iters_completed": 10})
     assert meta._warmup_iters_completed == 10
 

@@ -28,6 +28,7 @@ from mermaidseg.run_setup import resolve_repo_path
 from mermaidseg.training import (
     VAL_GENERATOR_SEED_OFFSET,
     _assemble_train_datasets,
+    load_training_checkpoint,
     make_shuffled_loader,
     seed_run,
 )
@@ -336,3 +337,54 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     mapping_path = Path(wandb_run.params["training_concept_mapping_path"])
     assert mapping_path.is_absolute() and mapping_path.is_file()
     assert wandb_run.finished
+
+
+def _resume_checkpoint(meta) -> dict[str, Any]:
+    """A checkpoint with the keys ``Logger.save_model_checkpoint`` writes."""
+    return {
+        "config": {},
+        "model_state_dict": meta.model.state_dict(),
+        "optimizer_state_dict": meta.optimizer.state_dict(),
+        "epoch": 2,
+        "epoch_complete": False,
+        "global_step": 7,
+        "warmup_iters_completed": 5,
+        "timestamp": "20260101000000",
+        "metrics": {},
+        "scheduler_state_dict": meta.scheduler.state_dict(),
+    }
+
+
+def test_load_training_checkpoint_restores_the_resume_state(
+    minimal_config, make_meta_model, tmp_path
+):
+    meta = make_meta_model(minimal_config, run_name="resume-ok")
+    path = tmp_path / "ckpt.pt"
+    torch.save(_resume_checkpoint(meta), path)
+    start_epoch = load_training_checkpoint(meta, str(path), "cpu", DistContext())
+    assert start_epoch == 2
+    assert meta.global_step == 7
+    assert meta._warmup_iters_completed == 5
+    assert meta.resuming_within_epoch is True
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "optimizer_state_dict",
+        "scheduler_state_dict",
+        "global_step",
+        "epoch_complete",
+        "warmup_iters_completed",
+    ],
+)
+def test_load_training_checkpoint_requires_each_resume_key(
+    minimal_config, make_meta_model, tmp_path, missing
+):
+    meta = make_meta_model(minimal_config, run_name="resume-missing")
+    checkpoint = _resume_checkpoint(meta)
+    del checkpoint[missing]
+    path = tmp_path / "ckpt.pt"
+    torch.save(checkpoint, path)
+    with pytest.raises(KeyError, match=missing):
+        load_training_checkpoint(meta, str(path), "cpu", DistContext())

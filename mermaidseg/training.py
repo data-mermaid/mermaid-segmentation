@@ -25,7 +25,6 @@ from mermaidseg.model.distributed import (
 )
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
-from mermaidseg.model.models import align_optimizer_state_dict
 from mermaidseg.model.train import train_model
 from mermaidseg.run_setup import (
     build_meta_model,
@@ -90,44 +89,18 @@ def load_training_checkpoint(
     (hi-res fine-tune from cooled weights).
     """
     checkpoint = load_model_weights(meta_model, checkpoint_path, device)
-    raw_state_dict = checkpoint.get("model_state_dict", checkpoint)
 
     if not load_optimizer:
         return 0
 
-    # Restore optimizer state. torch.load(map_location=device) already placed the
-    # state tensors on `device`, and the model was loaded in place (same Parameter
-    # objects the optimizer references), so the param<->state mapping stays valid.
-    # A checkpoint saved before the unused fusion residual was removed has four
-    # extra Adam slots in the middle of the non-LoRA group; drop those only.
-    if "optimizer_state_dict" in checkpoint:
-        optimizer_state, n_dropped = align_optimizer_state_dict(
-            checkpoint["optimizer_state_dict"],
-            meta_model.optimizer,
-            meta_model.model,
-            raw_state_dict,
-        )
-        if n_dropped:
-            print0(
-                dist_ctx, f"Dropped {n_dropped} optimizer states for the removed fusion residual"
-            )
-        meta_model.optimizer.load_state_dict(optimizer_state)
-
-    # Restore the LR scheduler so the schedule continues from the correct step
-    # instead of restarting its decay.
-    if checkpoint.get("scheduler_state_dict") is not None:
-        meta_model.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-    # Step checkpoints store how far warmup got. Older epoch checkpoints omit it;
-    # those are past warmup (it finishes inside epoch 0), so the helper marks it done.
+    # torch.load(map_location=device) already placed the state tensors on `device`, and the model
+    # was loaded in place (same Parameter objects the optimizer references).
+    meta_model.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    meta_model.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
     restore_warmup_progress(meta_model, checkpoint)
-
-    if "global_step" in checkpoint:
-        meta_model.global_step = int(checkpoint["global_step"])
-
-    # Missing epoch_complete means an older epoch-boundary checkpoint: start the next epoch.
+    meta_model.global_step = int(checkpoint["global_step"])
     # A mid-epoch model_step* file sets epoch_complete false and continues this epoch.
-    meta_model.resuming_within_epoch = not bool(checkpoint.get("epoch_complete", True))
+    meta_model.resuming_within_epoch = not bool(checkpoint["epoch_complete"])
     return next_epoch_from_checkpoint(checkpoint)
 
 
