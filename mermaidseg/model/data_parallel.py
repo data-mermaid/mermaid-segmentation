@@ -184,7 +184,9 @@ class ShardStep(nn.Module):
             cast("torch.Tensor | None", self.concept_keep),
             source_rows,
         )
-        with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+        with torch.autocast(
+            device_type=images.device.type, dtype=self.amp_dtype, enabled=self.use_amp
+        ):
             segmentation_outputs = self.model(images)
         loss, outputs, concept_outputs, components = apply_concept_bottleneck_loss(
             segmentation_outputs,

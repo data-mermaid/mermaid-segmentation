@@ -80,14 +80,77 @@ def test_restore_warmup_marks_old_checkpoints_complete():
     assert meta._warmup_iters_completed == 10
 
 
-def test_bf16_does_not_enable_grad_scaler(minimal_config, make_meta_model):
+@pytest.mark.parametrize("name", ["float16", "fp16", "half"])
+def test_resolve_amp_dtype_rejects_fp16_aliases(name):
+    with pytest.raises(ValueError, match="mixed_precision_dtype"):
+        meta_module._resolve_amp_dtype(name)
+
+
+def test_resolve_amp_dtype_accepts_bfloat16():
+    assert meta_module._resolve_amp_dtype("bfloat16") is torch.bfloat16
+
+
+def _record_encoder_autocast(meta) -> dict[str, object]:
+    """Record the CPU autocast state seen inside the mocked encoder's forward."""
+    seen: dict[str, object] = {}
+
+    def _record(_module, _args):
+        seen["enabled"] = torch.is_autocast_enabled("cpu")
+        seen["dtype"] = torch.get_autocast_dtype("cpu")
+
+    encoder = next(m for m in meta.model.modules() if hasattr(m, "embed"))
+    encoder.register_forward_pre_hook(_record)
+    return seen
+
+
+def _train_one_step(meta) -> None:
+    images, labels = _images_labels(2)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+    meta.train_epoch(loader, evaluator=None, epoch=0)
+
+
+def test_cpu_train_step_runs_encoder_under_cpu_bf16_autocast(minimal_config, make_meta_model):
+    cfg = _standard_cfg(
+        minimal_config,
+        mixed_precision=True,
+        mixed_precision_dtype="bfloat16",
+        iterations_per_train_epoch=1,
+    )
+    meta = make_meta_model(cfg, run_name="cpu-amp")
+    seen = _record_encoder_autocast(meta)
+    _train_one_step(meta)
+    assert seen == {"enabled": True, "dtype": torch.bfloat16}
+
+
+def test_cpu_train_step_without_mixed_precision_does_not_autocast(minimal_config, make_meta_model):
+    cfg = _standard_cfg(minimal_config, mixed_precision=False, iterations_per_train_epoch=1)
+    meta = make_meta_model(cfg, run_name="cpu-no-amp")
+    seen = _record_encoder_autocast(meta)
+    _train_one_step(meta)
+    assert seen["enabled"] is False
+
+
+def test_cuda_bf16_unsupported_raises_before_building_the_model(minimal_config, monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda *a, **k: False)
     cfg = _standard_cfg(minimal_config, mixed_precision=True, mixed_precision_dtype="bfloat16")
-    meta = make_meta_model(cfg, run_name="bf16-scaler")
-    assert meta.amp_dtype == torch.bfloat16
-    assert meta.scaler.is_enabled() is False
-    # The constructor gate, isolated from the CPU "no CUDA" short-circuit.
-    enabled = torch.amp.GradScaler(enabled=True and meta.amp_dtype == torch.float16)
-    assert enabled.is_enabled() is False
+    with pytest.raises(RuntimeError, match="mixed_precision_dtype"):
+        meta_module.MetaModel(
+            run_name="no-bf16",
+            num_classes=4,
+            model_kwargs=cfg.model,
+            training_kwargs=cfg.training,
+            device=torch.device("cuda"),
+        )
+
+
+def test_cpu_bf16_autocast_keeps_logits_in_fp32(minimal_config, make_meta_model):
+    cfg = _standard_cfg(minimal_config, mixed_precision=True, mixed_precision_dtype="bfloat16")
+    meta = make_meta_model(cfg, run_name="fp32-logits")
+    images, _ = _images_labels(2)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        out = meta.model(images)
+    assert out.logits.dtype == torch.float32
+    assert out.concept_logits.dtype == torch.float32
 
 
 def test_accumulate_loss_averages_in_fp32(minimal_config, make_meta_model):

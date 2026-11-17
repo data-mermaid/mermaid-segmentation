@@ -125,7 +125,7 @@ def evaluate_val_loss(
     device: torch.device,
     batch_size: int = 8,
     num_workers: int = 8,
-    amp: bool = False,
+    amp_dtype: torch.dtype | None = None,
     schema_config: str | Path = DEFAULT_SCHEMA_CONFIG,
     max_images_per_dataset: int | None = 1000,
     per_pixel_loss_weight: float = 0.5,
@@ -187,7 +187,6 @@ def evaluate_val_loss(
     meta = build_meta_model(cfg, registry, device)
     load_model_weights(meta, checkpoint, device)
     meta.model.eval()
-    use_amp = amp and device.type == "cuda"
 
     per_dataset: dict[str, dict] = {}
     overall = _Accumulator()
@@ -220,7 +219,9 @@ def evaluate_val_loss(
                     target_concepts = apply_concept_source_mask(
                         target_concepts, source_mask.keep, batch[2]
                     )
-                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                with torch.autocast(
+                    device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None
+                ):
                     outputs = meta.model(images)
                 loss, _, _, components = apply_concept_bottleneck_loss(
                     outputs,

@@ -401,6 +401,16 @@ class _DPTDINOv3Base(torch.nn.Module):
     The encoder is adapted with PEFT LoRA adapters.
     """
 
+    concept_proj: torch.nn.Conv2d
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Dtype of the concept head parameters, which the concept bottleneck runs in.
+
+        This is fp32 for training.
+        """
+        return self.concept_proj.weight.dtype
+
     def __init__(
         self,
         *,
@@ -547,12 +557,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         concept_features = torch.nn.functional.interpolate(
             concept_features, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
-        if concept_features.device.type == "cuda":
-            with torch.autocast(device_type="cuda", enabled=False):
-                logits, concept_outputs, concept_logits = self._forward_concept_tail(
-                    concept_features
-                )
-        else:
+        with torch.autocast(device_type=concept_features.device.type, enabled=False):
             logits, concept_outputs, concept_logits = self._forward_concept_tail(concept_features)
         return ConceptBottleneckOutput(
             loss=None,
@@ -564,11 +569,11 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
     def _forward_concept_tail(
         self, concept_features: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run concept projection, activation, and class projection in fp32."""
-        concept_logits = self.concept_proj(concept_features.float())
+        """Run concept projection, activation, and class projection in ``self.dtype``."""
+        concept_logits = self.concept_proj(concept_features.to(self.dtype))
         concept_outputs = self.concept_outputs_activation(concept_logits)
         classifier_input = concept_outputs.detach() if self.detach_concepts else concept_outputs
-        logits = self.concept_classifier(classifier_input.float())
+        logits = self.concept_classifier(classifier_input.to(self.dtype))
         return logits, concept_outputs, concept_logits
 
     def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
@@ -581,10 +586,10 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
             concept_values = self.concept_value2id[concept]  # type: ignore[index]
             order_concept_length = len(list(concept_values.values())[0])
             chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
-            activated_parts.append(torch.softmax(chunk.float(), dim=1))
+            activated_parts.append(torch.softmax(chunk.to(self.dtype), dim=1))
             offset += order_concept_length
 
-        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...].float()))
+        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...].to(self.dtype)))
         return torch.cat(activated_parts, dim=1)
 
 

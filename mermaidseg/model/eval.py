@@ -28,7 +28,7 @@ class Evaluator:
     def __init__(
         self,
         num_classes: int,
-        device: str | torch.device = "cuda",
+        device: str | torch.device,
         calculate_concept_metrics: bool = False,
         concept_value2id: dict[str, dict[str, list[int]]] | None = None,
     ) -> None:

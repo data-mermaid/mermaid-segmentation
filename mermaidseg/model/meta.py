@@ -98,18 +98,14 @@ def records_train_metrics(microbatch_index: int, every: int) -> bool:
 
 
 def _resolve_amp_dtype(dtype_config: Any) -> torch.dtype:
-    """Map config strings to torch autocast dtypes."""
+    """Map a config value to the torch autocast dtype; only bfloat16 is supported."""
     if isinstance(dtype_config, torch.dtype):
         return dtype_config
 
     dtype_name = str(dtype_config).lower().replace("-", "").replace("_", "")
     if dtype_name in {"bf16", "bfloat16"}:
         return torch.bfloat16
-    if dtype_name in {"fp16", "float16", "half"}:
-        return torch.float16
-    raise ValueError(
-        f"Unsupported mixed_precision_dtype={dtype_config!r}; expected 'bfloat16' or 'float16'."
-    )
+    raise ValueError(f"Unsupported mixed_precision_dtype={dtype_config!r}; expected 'bfloat16'.")
 
 
 def next_epoch_from_checkpoint(checkpoint: dict[str, Any]) -> int:
@@ -197,7 +193,7 @@ class MetaModel:
         *,
         model_kwargs: ConfigDict,
         training_kwargs: ConfigDict,
-        device: str | torch.device = "cuda",
+        device: str | torch.device,
         source_to_target_lookup: torch.Tensor | None = None,
         source_to_concepts_lookup: torch.Tensor | None = None,
         conceptid2labelid: dict[int, int] | None = None,
@@ -258,11 +254,18 @@ class MetaModel:
         mixed_precision_dtype = training_kwargs.pop("mixed_precision_dtype")
         self.max_grad_norm = float(training_kwargs.pop("max_grad_norm"))
         self.amp_dtype = _resolve_amp_dtype(mixed_precision_dtype)
-        self.use_amp = bool(mixed_precision) and torch.cuda.is_available()
-        if self.use_amp and self.amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
-            logger.warning("CUDA bf16 autocast is not supported on this GPU; disabling AMP.")
-            self.use_amp = False
-        self.scaler = torch.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == torch.float16)
+        self.use_amp = bool(mixed_precision)
+        self.device_type = torch.device(device).type
+        if (
+            self.use_amp
+            and self.device_type == "cuda"
+            and self.amp_dtype == torch.bfloat16
+            and not torch.cuda.is_bf16_supported()
+        ):
+            raise RuntimeError(
+                "mixed_precision_dtype='bfloat16' is not supported on this GPU; "
+                "set training.mixed_precision to false."
+            )
         self.grad_accum_steps = max(1, int(training_kwargs.grad_accum_steps))
         # Training metrics only; validation scores every batch.
         self.train_metrics_every = max(1, int(training_kwargs.train_metrics_every))
@@ -386,47 +389,35 @@ class MetaModel:
     def _accumulate_loss(self, loss: torch.Tensor) -> None:
         """Backward one microbatch, averaged in fp32 across the accumulation window.
 
-        ``GradScaler`` is enabled only for fp16. bf16 autocast leaves it disabled, so
-        this division is the only scale applied to the loss. Callers must pass a
-        finite loss; a non-finite window is discarded before this runs.
+        Callers must pass a finite loss; a non-finite window is discarded before
+        this runs.
         """
         if loss.dtype != torch.float32:
             loss = loss.float()
-        self.scaler.scale(loss / self.grad_accum_steps).backward()
+        (loss / self.grad_accum_steps).backward()
 
-    def _abort_accumulation(self, did_backward: bool) -> None:
-        """Drop a partial window so it cannot become a short optimizer step.
-
-        When fp16 scaling already ran, ``update()`` resets the scaler so the next
-        window may call ``scale().backward()`` again. Disabled scalers (bf16) no-op.
-        """
-        if did_backward and self.scaler.is_enabled():
-            self.scaler.update()
+    def _abort_accumulation(self) -> None:
+        """Drop a partial window so it cannot become a short optimizer step."""
         self.optimizer.zero_grad(set_to_none=True)
 
     def _apply_accumulated_step(self) -> bool:
         """Clip once, then step Adam/SGD on the averaged gradient.
 
-        Returns True when the optimizer step was applied (not skipped by the scaler
-        or a non-finite grad norm).
+        Returns True when the optimizer step was applied (not skipped by a
+        non-finite grad norm).
         """
-        scale_before = self.scaler.get_scale()
         if self.max_grad_norm > 0:
-            self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(self._trainable_params, self.max_grad_norm)
             if not torch.isfinite(grad_norm):
                 logger.warning(
                     "train_epoch: skipping optimizer step due to non-finite grad norm (value=%s)",
                     grad_norm.item(),
                 )
-                if self.scaler.is_enabled():
-                    self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
                 return False
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
-        return self.scaler.get_scale() >= scale_before
+        return True
 
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
@@ -669,7 +660,9 @@ class MetaModel:
             )
             return loss, None, None, loss_components
 
-        with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+        with torch.autocast(
+            device_type=self.device_type, dtype=self.amp_dtype, enabled=self.use_amp
+        ):
             segmentation_outputs = self.model(images)
 
         assert target_concepts is not None, (
@@ -787,7 +780,6 @@ class MetaModel:
             micro_losses: list[torch.Tensor] = []
             micro_components: list[dict[str, float]] = []
             window_failed = False
-            did_backward = False
 
             for _micro in range(self.grad_accum_steps):
                 assert self._train_loader_iter is not None
@@ -893,7 +885,6 @@ class MetaModel:
                         torch.cuda.synchronize()
                     backward_start = time.perf_counter()
                     self._accumulate_loss(loss)
-                    did_backward = True
                     if sync_timing:
                         torch.cuda.synchronize()
                     backward_time_total += time.perf_counter() - backward_start
@@ -923,7 +914,7 @@ class MetaModel:
                 batch_end = time.perf_counter()
 
             if window_failed or not micro_losses:
-                self._abort_accumulation(did_backward)
+                self._abort_accumulation()
                 if sync_timing:
                     torch.cuda.synchronize()
                 batch_end = time.perf_counter()

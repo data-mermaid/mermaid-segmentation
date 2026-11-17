@@ -88,8 +88,8 @@ class CBMPredictor:
         self,
         model: torch.nn.Module,
         input_size: tuple[int, int],
-        device: torch.device | str = "cuda",
-        amp: bool = False,
+        device: torch.device | str,
+        amp_dtype: torch.dtype | None = None,
     ):
         """Wrap a model for inference.
 
@@ -97,7 +97,7 @@ class CBMPredictor:
             model: Concept-bottleneck model exposing ``concept_classifier``.
             input_size: ``(height, width)`` of the evaluation transform.
             device: Device the inputs are moved to.
-            amp: Whether to run the forward pass under bfloat16 autocast on CUDA.
+            amp_dtype: Autocast dtype for the forward pass, or ``None`` to run without autocast.
 
         Raises:
             ValueError: If ``model`` has no ``concept_classifier``.
@@ -106,7 +106,7 @@ class CBMPredictor:
         self.model: Any = model.eval()
         self.input_size = (int(input_size[0]), int(input_size[1]))
         self.device = torch.device(device)
-        self.amp = bool(amp)
+        self.amp_dtype = amp_dtype
         self.transform = make_eval_transform(self.input_size)
 
         if not hasattr(model, "concept_classifier"):
@@ -133,9 +133,11 @@ class CBMPredictor:
         return preprocess_image(image_rgb_uint8, make_eval_transform((out_h, out_w)))
 
     def _autocast(self) -> torch.autocast:
-        if self.amp and self.device.type == "cuda":
-            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-        return torch.autocast(device_type="cpu", enabled=False)
+        return torch.autocast(
+            device_type=self.device.type,
+            dtype=self.amp_dtype,
+            enabled=self.amp_dtype is not None,
+        )
 
     # -- forward passes --------------------------------------------------------
     @torch.no_grad()
