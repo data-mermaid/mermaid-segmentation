@@ -561,11 +561,15 @@ class MetaModel:
         # A bucket view of the 1x1 DPT/concept conv grads is not stride-compatible
         # (see the reducer's "Grad strides do not match bucket view strides"
         # warning), so leave the grads in their own storage.
-        self._ddp_step = DistributedDataParallel(
-            step,
-            device_ids=[device.index] if device.type == "cuda" else None,
-            broadcast_buffers=False,
-        )
+        # Built outside inference mode: a first build inside validation_epoch would
+        # make the reducer's buckets inference tensors that the next backward
+        # cannot update in place.
+        with torch.inference_mode(False):
+            self._ddp_step = DistributedDataParallel(
+                step,
+                device_ids=[device.index] if device.type == "cuda" else None,
+                broadcast_buffers=False,
+            )
         return self._ddp_step
 
     def _grad_sync_context(self, sync: bool) -> contextlib.AbstractContextManager[Any]:

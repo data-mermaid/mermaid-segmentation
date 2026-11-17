@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import torch
 
 import mermaidseg.model.models as models_module
 from mermaidseg.model.models import ConceptBottleneckDPTLoRADINOv3
@@ -53,3 +54,13 @@ def test_from_pretrained_gets_only_the_encoder_name_and_hf_token(mock_dinov3_enc
     ConceptBottleneckDPTLoRADINOv3(**_model_kwargs())
 
     assert calls == [(("facebook/dinov3-vits16-pretrain-lvd1689m",), {"token": "hf-test-token"})]
+
+
+def test_cpu_bf16_autocast_keeps_logits_in_fp32(mock_dinov3_encoder):
+    mock_dinov3_encoder(models_module)
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs())
+    images = torch.randn(2, 3, *IMAGE_SIZE)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        out = model(images)
+    assert out.logits.dtype == torch.float32
+    assert out.concept_logits.dtype == torch.float32

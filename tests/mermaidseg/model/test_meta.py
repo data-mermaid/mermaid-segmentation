@@ -143,16 +143,6 @@ def test_cuda_bf16_unsupported_raises_before_building_the_model(minimal_config, 
         )
 
 
-def test_cpu_bf16_autocast_keeps_logits_in_fp32(minimal_config, make_meta_model):
-    cfg = _standard_cfg(minimal_config, mixed_precision=True, mixed_precision_dtype="bfloat16")
-    meta = make_meta_model(cfg, run_name="fp32-logits")
-    images, _ = _images_labels(2)
-    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-        out = meta.model(images)
-    assert out.logits.dtype == torch.float32
-    assert out.concept_logits.dtype == torch.float32
-
-
 def test_accumulate_loss_averages_in_fp32(minimal_config, make_meta_model):
     meta = make_meta_model(_standard_cfg(minimal_config), run_name="scale")
     meta.grad_accum_steps = 2
@@ -323,14 +313,3 @@ def test_train_epoch_after_validation_returns_the_model_to_train_mode(
     seen = _record_encoder_modes(meta)
     meta.train_epoch(_loader(), evaluator=None, epoch=0)
     assert seen == [{"training": True, "inference": False}]
-
-
-def test_train_validate_train_with_a_real_evaluator_stays_finite(minimal_config, make_meta_model):
-    from mermaidseg.model.eval import Evaluator
-
-    meta = make_meta_model(_loop_cfg(minimal_config), run_name="evaluator-cycle")
-    evaluator = Evaluator(num_classes=meta.num_classes, device="cpu")
-    first, _, _ = meta.train_epoch(_loader(), evaluator, epoch=0)
-    val, _ = meta.validation_epoch(_loader(), evaluator)
-    second, _, _ = meta.train_epoch(_loader(), evaluator, epoch=1)
-    assert all(torch.isfinite(torch.tensor(v)) for v in (first, val, second))

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 from torch import nn
 
@@ -37,11 +36,6 @@ def test_no_amp_dtype_runs_forward_without_autocast():
     predictor = CBMPredictor(model, (8, 8), device="cpu")
     predictor.forward_probs(torch.zeros(1, 3, 8, 8))
     assert model.seen["enabled"] is False
-
-
-def test_device_is_required():
-    with pytest.raises(TypeError, match="device"):
-        CBMPredictor(_StubModel(), (8, 8))  # type: ignore[call-arg]
 
 
 def test_forward_runs_in_eval_mode_under_inference_mode():

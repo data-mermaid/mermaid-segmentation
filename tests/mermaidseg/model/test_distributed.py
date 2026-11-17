@@ -21,7 +21,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import BatchSampler, DataLoader, RandomSampler
+from torch.utils.data import BatchSampler, DataLoader, RandomSampler, TensorDataset
 
 import mermaidseg.model.meta as meta_module
 from mermaidseg.model.data_parallel import DDPLossStep, ShardStep
@@ -35,6 +35,7 @@ from mermaidseg.model.distributed import (
     reduce_components,
     require_world_size,
 )
+from tests.conftest import IMAGE_SIZE
 
 _NUM_SOURCE = 9
 _NUM_CONCEPTS = 5
@@ -672,3 +673,24 @@ def test_ddp_loss_step_returns_only_the_scalar_loss():
     assert step.last is not None
     assert step.last[0] is loss
     assert step.last[1] is not None
+
+
+def test_resume_at_an_epoch_boundary_then_validate_then_train(minimal_config, make_meta_model):
+    """A resume at an epoch's last update builds DDP inside validation, then trains."""
+    cfg = copy.deepcopy(minimal_config)
+    cfg.training.distributed = True
+    cfg.training.iterations_per_train_epoch = 1
+    cfg.training.iterations_per_val_epoch = 1
+    _init_gloo(0, 1, _free_port())
+    try:
+        meta = make_meta_model(cfg, run_name="resume-boundary")
+        meta.global_step = 1
+        images = torch.randn(2, 3, *IMAGE_SIZE)
+        labels = torch.ones(2, *images.shape[-2:], dtype=torch.long)
+        loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+        meta.train_epoch(loader, evaluator=None, epoch=0)
+        meta.validation_epoch(loader)
+        loss, _, _ = meta.train_epoch(loader, evaluator=None, epoch=1)
+        assert torch.isfinite(torch.tensor(loss))
+    finally:
+        dist.destroy_process_group()
