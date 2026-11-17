@@ -111,7 +111,7 @@ def load_config(config_path: str | Path) -> ConfigDict:
 
 def get_parser() -> argparse.ArgumentParser:
     """Create and configure an argument parser for semantic segmentation training."""
-    parser = argparse.ArgumentParser(description="Semantic Segmentation Run")
+    parser = argparse.ArgumentParser(description="Semantic Segmentation Run", allow_abbrev=False)
 
     parser.add_argument("--run-name", type=str)
     parser.add_argument("--batch-size", type=int, help="batch size")

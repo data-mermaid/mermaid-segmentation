@@ -7,8 +7,13 @@ import pytest
 import scripts.train as train_script
 from mermaidseg.run_setup import resolve_repo_path
 from scripts.train import build_parser
+from tests.slurm import test_launchers as launchers
 
 REQUIRED = ["--num-workers", "8"]
+
+repo = launchers.repo
+job = launchers.job
+
 
 CONFIG_FLAGS = (
     "training_config",
@@ -49,3 +54,30 @@ def test_main_rejects_zero_num_workers(monkeypatch):
     monkeypatch.setattr(train_script, "run", lambda args: pytest.fail("run must not start"))
     with pytest.raises(SystemExit):
         train_script.main()
+
+
+def test_main_rejects_checkpoint_with_init_weights(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv", ["train.py", *REQUIRED, "--checkpoint", "x", "--init-weights", "y"]
+    )
+    monkeypatch.setattr(train_script, "run", lambda args: pytest.fail("run must not start"))
+    with pytest.raises(SystemExit):
+        train_script.main()
+
+
+def test_every_final_launcher_job_parses(repo, job):
+    _, jobs = launchers._launch(repo, "final")
+    runs = launchers._runs(jobs)
+    assert list(runs) == ["cbm_final", "cbm_final_res768"]
+    for name, submitted in runs.items():
+        (job / "outputs" / "model_checkpoints" / name).mkdir(parents=True, exist_ok=True)
+        init_weights = launchers._arg(submitted, "--init-weights")
+        if init_weights is not None:
+            (job / init_weights).touch()
+        sbatch_args = submitted[submitted.index("slurm/train.sbatch") + 1 :]
+        result, argv = launchers._run_train(job, *sbatch_args)
+        assert result.returncode == 0, result.stderr
+        assert argv[1] == "scripts/train.py"
+        args = build_parser().parse_args(argv[2:])
+        assert args.run_name == name
+        assert (args.init_weights is not None) == (init_weights is not None)
