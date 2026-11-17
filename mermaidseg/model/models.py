@@ -12,7 +12,7 @@ from transformers import AutoModel, DPTConfig, PreTrainedModel
 from transformers.modeling_outputs import SemanticSegmenterOutput
 from transformers.models.dpt.modeling_dpt import DPTNeck
 
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 
 
 @dataclass

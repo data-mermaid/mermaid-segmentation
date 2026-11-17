@@ -4,7 +4,7 @@ import torch
 from torchmetrics.classification import Accuracy
 from torchmetrics.metric import Metric
 
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.model.concept_metrics import (
     map_taxonomy_predictions_to_dense,
     map_taxonomy_to_dense,

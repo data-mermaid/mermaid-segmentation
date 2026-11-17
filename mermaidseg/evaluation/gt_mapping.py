@@ -26,8 +26,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concepts import (
-    TAXONOMIC_CONCEPTS,
     initialize_benthic_hierarchy,
 )
 from mermaidseg.dataset_reconciliation.label_mapping import (

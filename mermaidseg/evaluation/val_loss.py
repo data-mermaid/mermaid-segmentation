@@ -35,11 +35,11 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     apply_concept_source_mask,
     attach_source_rows,
 )
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local_cache
 from mermaidseg.evaluation.reporting import write_json
 from mermaidseg.io import setup_config

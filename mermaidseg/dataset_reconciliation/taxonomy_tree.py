@@ -23,9 +23,9 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
-    TAXONOMIC_CONCEPTS,
 )
 
 #: Rank order, coarse -> fine. Mirrors the model's active taxonomic channels.

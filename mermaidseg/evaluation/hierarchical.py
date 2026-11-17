@@ -14,8 +14,8 @@ from pathlib import Path
 
 import torch
 
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_removal import apply_concept_removal, concept_kind
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.taxonomy_tree import (
     TaxonomyTree,
     build_taxonomy_tree,

@@ -16,16 +16,16 @@ import torch
 import yaml
 
 from mermaidseg.config import to_plain_dict
-from mermaidseg.dataset_reconciliation import (
-    ConceptSchema,
-    SourceLabelRegistry,
-    attach_registry,
-    prepare_splits_for_registry,
-)
 from mermaidseg.dataset_reconciliation.concept_removal import load_concept_removal
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     ConceptSourceMask,
     load_concept_source_mask,
+)
+from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
+from mermaidseg.dataset_reconciliation.split_wiring import (
+    attach_registry,
+    prepare_splits_for_registry,
 )
 from mermaidseg.datasets import configured_source_names
 from mermaidseg.io import setup_config

@@ -12,7 +12,7 @@ import torch
 import yaml
 
 from mermaidseg.config import lookup_class, validate_section
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS, parse_concept_rank
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS, parse_concept_rank
 from mermaidseg.model.models import MODEL_CLASSES, ConceptBottleneckDPTLoRADINOv3
 
 CBMModel = ConceptBottleneckDPTLoRADINOv3

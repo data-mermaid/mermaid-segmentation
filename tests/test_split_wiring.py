@@ -5,13 +5,13 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from mermaidseg.dataset_reconciliation import (
-    SourceLabelRegistry,
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
+from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
+from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
+from mermaidseg.dataset_reconciliation.split_wiring import (
     attach_registry,
     prepare_splits_for_registry,
 )
-from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
 from mermaidseg.datasets.benthos_yuval.benthos_yuval_corals_dataset import (
     BenthosYuvalCoralsDataset,
 )

@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.io import ConfigDict
 
 NUM_CLASSES = 4

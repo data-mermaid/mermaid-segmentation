@@ -54,7 +54,7 @@ import torch
 import yaml
 
 from mermaidseg.config import RESERVED_DATA_KEYS
-from mermaidseg.dataset_reconciliation import ConceptSchema
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.datasets import configured_source_names
 from mermaidseg.datasets.local_cache import setup_local_cache
 from mermaidseg.evaluation.gt_mapping import load_benthic_hierarchy
