@@ -140,11 +140,17 @@ def test_job_resources_exclude_site_values():
         assert site_option not in train
 
 
+_SITE_PATH = re.compile(r"/(?:data|archive|home)/")
+_SITE_SBATCH = re.compile(r"^\s*#SBATCH\s+--(?:account|qos|partition)\b", re.MULTILINE)
+
+
 def test_no_site_specific_values_are_tracked():
-    for path in _SLURM.iterdir():
+    files = [path for path in _SLURM.rglob("*") if path.is_file()]
+    assert files
+    for path in files:
         text = path.read_text()
-        for needle in ("/data/", "/archive/", "vision-beery", "beery", "sauder"):
-            assert needle not in text, f"{needle} in {path.name}"
+        assert not _SITE_PATH.search(text), f"absolute site path in {path.name}"
+        assert not _SITE_SBATCH.search(text), f"site SBATCH option in {path.name}"
 
 
 def test_no_retired_paths_or_exports():
