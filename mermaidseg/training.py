@@ -199,9 +199,6 @@ def run(args: argparse.Namespace) -> None:
     for i in range(torch.cuda.device_count()):
         print0(dist_ctx, f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
 
-    # Under torchrun the worker count is per rank.
-    persistent_workers = args.num_workers > 0
-
     seed = int(cfg.training.seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -228,6 +225,8 @@ def run(args: argparse.Namespace) -> None:
     cfg_logger = copy.deepcopy(cfg)
 
     # -- 2. Datasets -----------------------------------------------------------
+    if args.cache_dir is not None:
+        cfg.data.local_cache_dir = args.cache_dir
     cache_stats = setup_local_cache(cfg.data)
 
     # Shared build loop (also used by scripts/prefetch_cache.py) so the training job
@@ -236,18 +235,18 @@ def run(args: argparse.Namespace) -> None:
 
     loader_kwargs = {
         "batch_size": cfg.training.batch_size,
+        # Under torchrun the worker count is per rank.
         "num_workers": args.num_workers,
         "pin_memory": True,
-        "persistent_workers": persistent_workers,
+        "persistent_workers": True,
         "drop_last": True,
         "prefetch_factor": cfg.training.loader.prefetch_factor,
     }
-    if args.num_workers > 0:
-        loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
-        if dist_ctx.distributed:
-            loader_kwargs["worker_init_fn"] = make_rank_worker_init_fn(
-                dist_ctx.rank, loader_kwargs["worker_init_fn"]
-            )
+    loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
+    if dist_ctx.distributed:
+        loader_kwargs["worker_init_fn"] = make_rank_worker_init_fn(
+            dist_ctx.rank, loader_kwargs["worker_init_fn"]
+        )
 
     # -- 3. Registry / model / evaluator --------------------------------------
     registry, schema = build_registry(
@@ -281,7 +280,7 @@ def run(args: argparse.Namespace) -> None:
     concept_id2name = schema.channel_id2name()
     if dist_ctx.is_main:
         # scripts/evaluate.py reads the class and concept layouts next to the checkpoint.
-        run_dir = Path("model_checkpoints") / cfg.run_name
+        run_dir = Path(args.output_dir) / "model_checkpoints" / cfg.run_name
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "concept_id2name.json").write_text(
             json.dumps({str(k): v for k, v in concept_id2name.items()})
@@ -356,7 +355,7 @@ def run(args: argparse.Namespace) -> None:
             meta_model=meta_model,
             log_epochs=cfg_logger.logger.get("log_epochs", 1),
             log_checkpoint=1,
-            checkpoint_dir=".",
+            checkpoint_dir=args.output_dir,
             id2label={0: "ignore", **registry.target_id2label},
             save_local_checkpoints=True,
         )

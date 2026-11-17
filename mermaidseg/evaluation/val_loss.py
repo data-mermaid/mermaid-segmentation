@@ -135,6 +135,7 @@ def evaluate_val_loss(
     seed: int = 0,
     name: str = "val_loss",
     apply_source_mask: bool = False,
+    cache_dir: str | Path | None = None,
 ) -> dict:
     """Validation loss components of ``checkpoint``, also written to ``<output_dir>/<name>/``."""
     t0 = time.time()
@@ -149,6 +150,8 @@ def evaluate_val_loss(
     cfg.training.loss.per_image_loss_weight = per_image_loss_weight
     resolve_concept_mapping_path(cfg.training)
 
+    if cache_dir is not None:
+        cfg.data.local_cache_dir = str(cache_dir)
     cache_stats = setup_local_cache(cfg.data)
     dataset_dict = build_datasets(cfg.data, padding=cfg.training.padding, splits=["val"])
     if not dataset_dict:

@@ -13,6 +13,7 @@ Example::
     python scripts/prefetch_cache.py \
         --data-config configs/data_config.yaml \
         --training-config configs/training_config_cbm_final.yaml \
+        --cache-dir /path/to/cache \
         --workers 32
 """
 
@@ -52,6 +53,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--training-config",
         default="configs/training_config_cbm_final.yaml",
         help="Path to the training config YAML (used for the `padding` value).",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Directory of the local S3 cache to fill (required; prefetch has nowhere to write "
+        "without it).",
     )
     parser.add_argument(
         "--datasets",
@@ -148,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     padding = cfg.training.get("padding") if hasattr(cfg, "training") else None
 
+    if args.cache_dir is not None:
+        cfg.data.local_cache_dir = args.cache_dir
     setup_local_cache(cfg.data)
     cache = LocalS3Cache.get()
     if cache.offline:
@@ -158,8 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not cache.enabled:
         logger.error(
-            "Local cache is not configured (data.local_cache_dir is empty). "
-            "Prefetch has nowhere to write."
+            "Local cache is not configured (pass --cache-dir). Prefetch has nowhere to write."
         )
         return 2
 

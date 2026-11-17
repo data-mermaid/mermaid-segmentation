@@ -2,7 +2,6 @@
 # CoralNet validation sources are on the train whitelist, and the Coralscapes v2
 # validation split is part of train. Test splits stay held out.
 data:
-  local_cache_dir: /archive/vision/beery/red_sea_coral/cache_MERMAID
   local_cache_write_through: true
   default:
     train:

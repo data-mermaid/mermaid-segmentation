@@ -76,6 +76,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--output-dir",
+        default="outputs",
+        help="root for run outputs; checkpoints land in <output-dir>/model_checkpoints/<run>",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="local S3 cache root (default: cache disabled)",
+    )
+    parser.add_argument(
         "--checkpoint",
         default=None,
         help="path to a checkpoint to resume from",

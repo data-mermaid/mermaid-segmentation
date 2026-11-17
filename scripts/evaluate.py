@@ -35,7 +35,8 @@ Example (cluster; slurm/eval.sbatch wraps this):
     uv run python scripts/evaluate.py \
         --checkpoint outputs/model_checkpoints/cbm_lossw_pix0.5_img0.5/model_step100000 \
         --model-config configs/model_config_cbm_dpt_lora_vitl.yaml \
-        --resolution 512 --output-dir eval_out/run --batch-size 8 --num-workers 16 --amp
+        --resolution 512 --output-dir eval_out/run --cache-dir /path/to/cache \
+        --batch-size 8 --num-workers 16 --amp
 """
 
 from __future__ import annotations
@@ -185,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--checkpoint", required=True, type=Path, help="Model checkpoint path")
+    p.add_argument("--cache-dir", default=None, help="local S3 cache root (default: disabled)")
     p.add_argument(
         "--model-config", type=Path, default=_CONFIGS / "model_config_cbm_dpt_lora_vitl.yaml"
     )
@@ -425,6 +427,8 @@ def main(argv: list[str] | None = None) -> None:
 
     # --- Local S3 cache -----------------------------------------------------
     data = _data_section(args.data_config)
+    if args.cache_dir is not None:
+        data["local_cache_dir"] = args.cache_dir
     setup_local_cache(data)
 
     # --- Model --------------------------------------------------------------
@@ -660,6 +664,7 @@ def main(argv: list[str] | None = None) -> None:
                     max_images_per_dataset=loss_max_images,
                     name=loss_key,
                     apply_source_mask=split == "train",
+                    cache_dir=args.cache_dir,
                 )
             },
         )

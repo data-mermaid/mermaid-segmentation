@@ -246,5 +246,4 @@ inat/outputs/
 # macOS / local smoke output
 .DS_Store
 .smoke/
-/model_checkpoints/
 /wandb/

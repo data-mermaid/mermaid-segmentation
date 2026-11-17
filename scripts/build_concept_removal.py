@@ -47,9 +47,11 @@ from mermaidseg.io import setup_config  # noqa: E402
 from mermaidseg.run_setup import DEFAULT_SCHEMA_CONFIG  # noqa: E402
 
 
-def coralnet_image_sources(data_config: Path) -> pd.Series:
+def coralnet_image_sources(data_config: Path, cache_dir: str | None = None) -> pd.Series:
     """CoralNet train ``image_id`` -> ``source_id`` for ``data_config``."""
     cfg = setup_config({"data": str(data_config)})
+    if cache_dir is not None:
+        cfg.data.local_cache_dir = cache_dir
     setup_local_cache(cfg.data)
     ds = build_datasets(cfg.data, names=["coralnet"], splits=["train"])[("coralnet", "train")]
     images = ds.df_images[["image_id", "source_id"]].astype(str).drop_duplicates("image_id")
@@ -67,6 +69,7 @@ def main() -> None:
     p.add_argument("--concepts", type=Path, default=Path(DEFAULT_CLASS_TO_CONCEPTS_CSV))
     p.add_argument("--schema-config", type=Path, default=Path(DEFAULT_SCHEMA_CONFIG))
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--cache-dir", default=None, help="local S3 cache root (default: disabled)")
     p.add_argument(
         "--coverage-out", type=Path, default=None, help="optional CSV with every channel"
     )
@@ -77,7 +80,7 @@ def main() -> None:
 
     counts = pd.read_parquet(args.label_counts)
     counts["image_id"] = counts["image_id"].astype(str)
-    img2src = coralnet_image_sources(args.data_config)
+    img2src = coralnet_image_sources(args.data_config, args.cache_dir)
     is_cn = counts["dataset"] == "coralnet"
     counts["source"] = counts["dataset"]
     counts.loc[is_cn, "source"] = counts.loc[is_cn, "image_id"].map(img2src)
