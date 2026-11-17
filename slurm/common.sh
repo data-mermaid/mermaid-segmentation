@@ -1,12 +1,28 @@
 #!/bin/bash
 # Environment shared by every batch job. Source it; do not run it.
 #
-# Everything runs from the single shared checkout $SCRATCH/mermaid-segmentation
-# with its uv environment. $HOME and every cache are relocated onto scratch so
-# nothing touches the real home directory.
+# Everything runs from the checkout that holds this file, with its uv environment.
+# The env file (default $REPO/.env, override with MERMAIDSEG_ENV_FILE) supplies
+# MERMAIDSEG_SCRATCH, MERMAIDSEG_CACHE_DIR, WANDB_API_KEY and the other site values.
+# $HOME and every cache are relocated onto scratch so nothing touches the real home
+# directory.
 
-export SCRATCH=/data/vision/beery/scratch/sauder
-export REPO="$SCRATCH/mermaid-segmentation"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export REPO
+
+# A batch job has no AFS token, so MERMAIDSEG_ENV_FILE may point at an NFS copy.
+ENV_FILE="${MERMAIDSEG_ENV_FILE:-$REPO/.env}"
+if [[ ! -r "$ENV_FILE" ]]; then
+    echo "env file $ENV_FILE not readable; see .env.example" >&2
+    exit 2
+fi
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+SCRATCH="${MERMAIDSEG_SCRATCH:?set MERMAIDSEG_SCRATCH in .env}"
+export SCRATCH
 export HOME=$SCRATCH/home
 export XDG_CACHE_HOME=$HOME/.cache
 export XDG_CONFIG_HOME=$HOME/.config
@@ -24,13 +40,6 @@ LOCAL_TMP="/tmp/${USER:-$(id -un)}-${SLURM_JOB_ID:-$$}"
 export TMPDIR="$LOCAL_TMP"
 mkdir -p "$TMPDIR" "$REPO/logs" "$REPO/wandb"
 trap 'rm -rf "$LOCAL_TMP"' EXIT
-
-# NFS copy of the AFS env file (a batch job has no AFS token). It holds the
-# non-secret repo defaults plus WANDB_API_KEY / WANDB_ENTITY.
-set -a
-# shellcheck disable=SC1090
-source "${MERMAIDSEG_ENV_FILE:-$SCRATCH/mermaid.env}"
-set +a
 
 # No job needs AWS: data comes from the pre-warmed local cache, and a cache miss
 # fails loudly instead of reaching for S3.

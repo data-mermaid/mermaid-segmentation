@@ -4,13 +4,9 @@ model_runs/*
 data/*
 segmentation/*
 test1/*
-nbs/segmentation/*
-nbs/mlruns/*
-nbs/model_checkpoints/*
-nbs/profiler_logs/*
 */wandb/*
 eval_out/*
-nbs_tmp/*
+outputs/
 scraping/source*.csv
 logs/*
 claude/*
@@ -250,3 +246,4 @@ inat/outputs/
 # macOS / local smoke output
 .DS_Store
 .smoke/
+/wandb/

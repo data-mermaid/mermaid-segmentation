@@ -1,7 +1,7 @@
 #!/bin/bash
 # Helpers shared by the slurm/launch_*.sh launchers. Source it; do not run it.
 #
-# Every launcher is idempotent: a run that is finished (nbs/model_checkpoints/RUN/.done)
+# Every launcher is idempotent: a run that is finished (outputs/model_checkpoints/RUN/.done)
 # or has a queued/running job named RUN is skipped, so rerunning a launcher only
 # submits what is missing. Common options:
 #
@@ -14,10 +14,30 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$LIB_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-CKPT_ROOT="nbs/model_checkpoints"
-EVAL_ROOT="${EVAL_ROOT:-eval_out}"
-DS_ROOT="${DS_ROOT:-$REPO_ROOT/data_size}"
-SPARSE_ROOT="${SPARSE_ROOT:-$REPO_ROOT/data_sparse}"
+CKPT_ROOT="outputs/model_checkpoints"
+
+# Site values (SLURM_ACCOUNT, SLURM_QOS, SLURM_PARTITION, MERMAIDSEG_LOG_DIR) come
+# from the git-ignored env file.
+if [[ -f "${MERMAIDSEG_ENV_FILE:-$REPO_ROOT/.env}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${MERMAIDSEG_ENV_FILE:-$REPO_ROOT/.env}"
+    set +a
+fi
+
+require_site_env() {
+    local var
+    for var in SLURM_ACCOUNT SLURM_QOS SLURM_PARTITION MERMAIDSEG_LOG_DIR; do
+        if [[ -z "${!var:-}" ]]; then
+            echo "$var is not set; define it in .env (see .env.example)" >&2
+            exit 2
+        fi
+    done
+    [[ -d "$MERMAIDSEG_LOG_DIR" ]] || {
+        echo "MERMAIDSEG_LOG_DIR $MERMAIDSEG_LOG_DIR does not exist" >&2
+        exit 2
+    }
+}
 
 DRY_RUN=0
 SELECTED=()
@@ -42,6 +62,7 @@ parse_launcher_args() {
         esac
         shift
     done
+    require_site_env
     QUEUED_NAMES=""
     if command -v squeue >/dev/null 2>&1; then
         QUEUED_NAMES="$(squeue --me -h -o '%j' 2>/dev/null || true)"
@@ -75,6 +96,9 @@ checkpoint_ready() {
 
 # sbatch_submit SBATCH_ARGS... : submit one job and set LAST_JOB_ID.
 sbatch_submit() {
+    set -- --account="$SLURM_ACCOUNT" --qos="$SLURM_QOS" --partition="$SLURM_PARTITION" \
+        --output="$MERMAIDSEG_LOG_DIR/slurm-%x-%j.out" \
+        --error="$MERMAIDSEG_LOG_DIR/slurm-%x-%j.err" "$@"
     if ((DRY_RUN)); then
         _FAKE_JOB_ID=$((_FAKE_JOB_ID + 1))
         LAST_JOB_ID="$_FAKE_JOB_ID"

@@ -82,29 +82,13 @@ def test_accumulator_averages_each_key_over_the_batches_it_appears_in():
     assert first.means() == pytest.approx({"loss": 3.0, "multi_hot/bleached": 0.3})
 
 
-def test_concept_mapping_path_written_for_nbs_resolves_from_the_repo_root(monkeypatch):
-    from mermaidseg.io import ConfigDict
-
-    monkeypatch.chdir(REPO_ROOT)
-    cfg = ConfigDict({"concept_mapping_path": "../configs/class_to_concepts.csv"})
-    resolve_concept_mapping_path(cfg)
-    assert cfg.concept_mapping_path == str(REPO_ROOT / "configs" / "class_to_concepts.csv")
-
-    cfg = ConfigDict({"concept_mapping_path": "configs/class_to_concepts.csv"})
-    resolve_concept_mapping_path(cfg)
-    assert cfg.concept_mapping_path == "configs/class_to_concepts.csv"
-
-
-def test_concept_mapping_path_ignores_a_copy_relative_to_the_current_directory(
-    monkeypatch, tmp_path
-):
+def test_concept_mapping_path_resolves_to_the_repo_file_from_any_directory(monkeypatch, tmp_path):
     from mermaidseg.io import ConfigDict
 
     (tmp_path / "configs").mkdir()
-    (tmp_path / "configs" / "class_to_concepts.csv").write_text("stale\n")
-    (tmp_path / "repo").mkdir()
-    monkeypatch.chdir(tmp_path / "repo")
-    cfg = ConfigDict({"concept_mapping_path": "../configs/class_to_concepts.csv"})
+    (tmp_path / "configs" / "class_to_concepts.csv").write_text("decoy\n")
+    monkeypatch.chdir(tmp_path)
+    cfg = ConfigDict({"concept_mapping_path": "configs/class_to_concepts.csv"})
     resolve_concept_mapping_path(cfg)
     assert cfg.concept_mapping_path == str(REPO_ROOT / "configs" / "class_to_concepts.csv")
 

@@ -3,7 +3,6 @@
 import contextlib
 import faulthandler
 import logging
-import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -54,19 +53,19 @@ _BatchLoader = DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Te
 
 _BATCH_LOSS_KEY = "__batch_loss__"
 
-STALL_DUMP_ENV = "MERMAIDSEG_STALL_DUMP_SEC"
-DEFAULT_STALL_DUMP_SEC = 180.0
 SLOW_FETCH_WARN_SEC = 60.0
 
 
-def stall_dump_seconds_from_env() -> float:
+def stall_dump_seconds(training_kwargs: ConfigDict) -> float:
     """Seconds one optimizer update may run before every thread's stack is dumped.
 
-    ``MERMAIDSEG_STALL_DUMP_SEC`` (default 180). 0 or a negative value disables the dump.
+    Args:
+        training_kwargs: Training config holding ``stall_dump_sec``.
+
+    Returns:
+        ``training.stall_dump_sec``, or 0 when it is 0 or negative, which disables the dump.
     """
-    raw = os.environ.get(STALL_DUMP_ENV, "").strip()
-    seconds = DEFAULT_STALL_DUMP_SEC if not raw else float(raw)
-    return max(0.0, seconds)
+    return max(0.0, float(training_kwargs.stall_dump_sec))
 
 
 def watch_for_stalls(updates: Iterable[int], seconds: float) -> Iterator[int]:
@@ -255,7 +254,7 @@ class MetaModel:
                     "distributed requires an initialized process group (launch with torchrun)."
                 )
             self.world_size = current_context().world_size
-            require_world_size(self.world_size)
+            require_world_size(self.world_size, int(training_kwargs.world_size))
             logger.info(
                 "distributed: %s ranks; each rank computes its shard's loss.", self.world_size
             )
@@ -806,7 +805,7 @@ class MetaModel:
         n_updates = iterations_per_train_epoch - start_update
 
         rank = current_context().rank
-        stall_dump_sec = stall_dump_seconds_from_env()
+        stall_dump_sec = stall_dump_seconds(self.training_kwargs)
         if stall_dump_sec > 0:
             # faulthandler labels each stack by thread id only.
             logger.warning(

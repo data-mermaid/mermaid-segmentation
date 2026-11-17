@@ -79,11 +79,11 @@ def _batch(batch_size: int = 12, seed: int = 1) -> tuple[torch.Tensor, torch.Ten
     return images, source_labels
 
 
-def test_batch_must_split_evenly_across_four_gpus():
-    assert require_divisible_batch(16) == 4
-    assert require_divisible_batch(8) == 2
+def test_batch_must_split_evenly_across_the_given_gpus():
+    assert require_divisible_batch(16, 4) == 4
+    assert require_divisible_batch(8, 4) == 2
     with pytest.raises(RuntimeError, match="not divisible"):
-        require_divisible_batch(15)
+        require_divisible_batch(15, 4)
 
 
 def test_shard_targets_match_the_whole_batch_lookup():

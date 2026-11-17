@@ -12,7 +12,8 @@ Example::
 
     python scripts/prefetch_cache.py \
         --data-config configs/data_config.yaml \
-        --training-config configs/training_config_cbm_100k.yaml \
+        --training-config configs/training_config_cbm_final.yaml \
+        --cache-dir /path/to/cache \
         --workers 32
 """
 
@@ -28,6 +29,7 @@ from typing import Any
 from mermaidseg.datasets import build_datasets, setup_local_cache
 from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.io import setup_config
+from mermaidseg.run_setup import resolve_repo_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,8 +51,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--training-config",
-        default="configs/training_config_cbm_100k.yaml",
+        default="configs/training_config_cbm_final.yaml",
         help="Path to the training config YAML (used for the `padding` value).",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Directory of the local S3 cache to fill (required; prefetch has nowhere to write "
+        "without it).",
     )
     parser.add_argument(
         "--datasets",
@@ -139,9 +147,16 @@ def main(argv: list[str] | None = None) -> int:
     """Warm the local S3 cache for the configured datasets and return the exit code."""
     args = _parse_args(argv)
 
-    cfg = setup_config({"data": args.data_config, "training": args.training_config})
+    cfg = setup_config(
+        {
+            "data": str(resolve_repo_path(args.data_config)),
+            "training": str(resolve_repo_path(args.training_config)),
+        }
+    )
     padding = cfg.training.get("padding") if hasattr(cfg, "training") else None
 
+    if args.cache_dir is not None:
+        cfg.data.local_cache_dir = args.cache_dir
     setup_local_cache(cfg.data)
     cache = LocalS3Cache.get()
     if cache.offline:
@@ -152,8 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not cache.enabled:
         logger.error(
-            "Local cache is not configured (data.local_cache_dir is empty). "
-            "Prefetch has nowhere to write."
+            "Local cache is not configured (pass --cache-dir). Prefetch has nowhere to write."
         )
         return 2
 

@@ -260,6 +260,7 @@ def _cbm_config() -> ConfigDict:
             "training": {
                 "training_mode": "concept-bottleneck",
                 "epochs": 1,
+                "stall_dump_sec": 180,
                 "batch_size": 2,
                 "optimizer": {"type": "SGD", "lr": 0.01},
                 "loss": {

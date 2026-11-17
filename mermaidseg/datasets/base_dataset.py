@@ -9,6 +9,7 @@ externally by [`mermaidseg.dataset_reconciliation`](../dataset_reconciliation/).
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from collections.abc import Callable
@@ -40,25 +41,27 @@ def worker_init_fn(worker_id: int) -> None:
     )
 
 
+def _init_worker_with_stats(stats: CacheStatsHandles, worker_id: int) -> None:
+    """Configure logging, OpenCV threads and the local cache, then attach ``stats``."""
+    worker_init_fn(worker_id)
+    # Each DataLoader worker is a single-sample producer, so OpenCV's internal thread pool (used
+    # by the albumentations cv2 backend) only oversubscribes the CPUs shared across all workers.
+    # Pinning it to 0 (single-threaded) avoids that contention; the transformed output is
+    # unchanged.
+    try:
+        import cv2
+
+        cv2.setNumThreads(0)
+    except Exception:  # pragma: no cover - cv2 always present in training env
+        pass
+    LocalS3Cache.configure_from_env()
+    LocalS3Cache.get().attach_stats(stats)
+
+
 def make_worker_init_fn(stats: CacheStatsHandles) -> Callable[[int], None]:
     """Return a DataLoader worker init that configures logging and cache stats."""
-
-    def init_fn(worker_id: int) -> None:
-        worker_init_fn(worker_id)
-        # Each DataLoader worker is a single-sample producer, so OpenCV's internal thread pool (used
-        # by the albumentations cv2 backend) only oversubscribes the CPUs shared across all workers.
-        # Pinning it to 0 (single-threaded) avoids that contention; the transformed output is
-        # unchanged.
-        try:
-            import cv2
-
-            cv2.setNumThreads(0)
-        except Exception:  # pragma: no cover - cv2 always present in training env
-            pass
-        LocalS3Cache.configure_from_env()
-        LocalS3Cache.get().attach_stats(stats)
-
-    return init_fn
+    # A partial over a module-level function pickles, so spawn-started workers can load it.
+    return functools.partial(_init_worker_with_stats, stats)
 
 
 class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):

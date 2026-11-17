@@ -119,6 +119,7 @@ def minimal_config():
                 "training_mode": "concept-bottleneck",
                 "epochs": 1,
                 "batch_size": 2,
+                "stall_dump_sec": 180,
                 "optimizer": {"type": "SGD", "lr": 0.01},
                 "loss": {
                     "type": "ConceptBottleneckLoss",

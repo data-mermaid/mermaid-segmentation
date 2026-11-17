@@ -2,7 +2,7 @@
 # Final model, trained on the train + val splits (configs/data_config_trainval.yaml):
 #
 #   cbm_final         300k iterations at 256px, 4k warmup then linear decay to 0,
-#                     batch 32, pixel/image 0.5/0.5, KL 0.5.
+#                     batch 32, KL 0.5.
 #   cbm_final_res768  50k iterations at 768px from cbm_final's model_step300000
 #                     weights, 4 GPUs (DDP), batch 8 x accum 4 (aggregated 32),
 #                     4k warmup then linear decay to 0, KL 0.5.
@@ -23,13 +23,11 @@ if ((BATCH_768 * ACCUM_768 != 32)); then
     echo "768: batch $BATCH_768 x accum $ACCUM_768 is not 32" >&2
     exit 2
 fi
-COMMON=(--data-config ../configs/data_config_trainval.yaml
-    --per-pixel-loss-weight 0.5
-    --per-image-loss-weight 0.5)
+COMMON=(--data-config configs/data_config_trainval.yaml)
 
 launch_run cbm_final "" -- \
     --group cbm_final -- \
-    --training-config ../configs/training_config_cbm_final.yaml \
+    --training-config configs/training_config_cbm_final.yaml \
     "${COMMON[@]}"
 dep=""
 [[ -n "$LAST_JOB_ID" ]] && dep="afterok:$LAST_JOB_ID"
@@ -37,7 +35,7 @@ dep=""
 launch_branch cbm_final_res768 "$CKPT_ROOT/cbm_final/model_step300000" --init-weights "$dep" \
     --gres=gpu:4 --mem=192G -- \
     --group cbm_final -- \
-    --training-config ../configs/training_config_cbm_final_hires.yaml \
+    --training-config configs/training_config_cbm_final_hires.yaml \
     --resolution 768 \
     "${COMMON[@]}" \
     --batch-size "$BATCH_768" \

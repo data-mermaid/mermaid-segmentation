@@ -111,7 +111,7 @@ def load_config(config_path: str | Path) -> ConfigDict:
 
 def get_parser() -> argparse.ArgumentParser:
     """Create and configure an argument parser for semantic segmentation training."""
-    parser = argparse.ArgumentParser(description="Semantic Segmentation Run")
+    parser = argparse.ArgumentParser(description="Semantic Segmentation Run", allow_abbrev=False)
 
     parser.add_argument("--run-name", type=str)
     parser.add_argument("--batch-size", type=int, help="batch size")
@@ -219,7 +219,7 @@ def setup_config(
 
         {"data": "configs/data_config.yaml",
          "model": "configs/model_config_cbm_dpt_lora_vitl.yaml",
-         "training": "configs/training_config_cbm_100k.yaml",
+         "training": "configs/training_config_cbm_final.yaml",
          "logger": "configs/logger_config.yaml"}
 
     Each file is loaded under its section key (a file may already wrap its

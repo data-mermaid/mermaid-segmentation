@@ -200,7 +200,10 @@ class LocalS3Cache:
 
     @classmethod
     def configure_from_env(cls) -> LocalS3Cache:
-        """Enable the cache at the directory named by the environment, if set."""
+        """Enable the cache at the directory named by the environment, if set.
+
+        Worker-side reader of the variable that `setup_local_cache` writes in the parent.
+        """
         root = os.environ.get(_ENV_CACHE_DIR)
         cache = cls.get()
         if root:
@@ -425,30 +428,33 @@ def setup_local_cache(
     data_cfg: Any,
     stats: CacheStatsHandles | None = None,
 ) -> CacheStatsHandles:
-    """Configure the cache from data config and optional env override."""
+    """Configure the cache from the data config alone.
+
+    The environment variable is only the parent-to-worker channel: it is written
+    from the config root, or cleared when there is none, and never read here.
+    """
     if stats is None:
         stats = create_cache_stats()
 
-    root = os.environ.get(_ENV_CACHE_DIR)
-    if not root:
-        root = getattr(data_cfg, "local_cache_dir", None)
-        if root is None and isinstance(data_cfg, dict):
-            root = data_cfg.get("local_cache_dir")
+    root = getattr(data_cfg, "local_cache_dir", None)
+    if root is None and isinstance(data_cfg, dict):
+        root = data_cfg.get("local_cache_dir")
 
     write_through = getattr(data_cfg, "local_cache_write_through", True)
     if isinstance(data_cfg, dict):
         write_through = data_cfg.get("local_cache_write_through", write_through)
 
     cache = LocalS3Cache.configure(root, write_through=write_through, stats=stats)
-    if root:
-        resolved = str(Path(str(root)).expanduser().resolve())
-        os.environ[_ENV_CACHE_DIR] = resolved
+    if cache.enabled:
+        os.environ[_ENV_CACHE_DIR] = str(cache._root)
         logger.info(
             "Local S3 cache enabled at %s (write_through=%s, offline=%s)",
-            resolved,
+            cache._root,
             write_through,
             cache.offline,
         )
+    else:
+        os.environ.pop(_ENV_CACHE_DIR, None)
     if cache.offline:
         logger.info("MERMAIDSEG_S3_OFFLINE set: cache misses will raise instead of contacting S3.")
     return stats

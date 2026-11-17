@@ -79,9 +79,12 @@ def main() -> None:
         default=None,
         help="optional CSV with the counts of every source x binary concept pair (masked or not)",
     )
+    p.add_argument("--cache-dir", default=None, help="local S3 cache root (default: disabled)")
     args = p.parse_args()
 
     cfg = setup_config({"data": str(args.data_config)})
+    if args.cache_dir is not None:
+        cfg.data.local_cache_dir = args.cache_dir
     setup_local_cache(cfg.data)
     ds = build_datasets(cfg.data, names=["coralnet"], splits=[args.split])[("coralnet", args.split)]
 

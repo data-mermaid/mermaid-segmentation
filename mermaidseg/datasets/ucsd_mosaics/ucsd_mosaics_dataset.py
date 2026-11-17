@@ -6,8 +6,7 @@ Mosaics dense semantic segmentation dataset; Edwards et al. 2017 + Alonso et al.
 Mosaics 1..34 label space** taken straight from the HF ``classes.json``. Pixel value ``0`` in the
 source mask is the unlabeled / unidentified ignore label and is mapped to background.
 
-See ``README.md`` for dataset history and ``nbs/ucsd_mosaics_EDA.ipynb`` for a hands-on tour of the
-HuggingFace mirror.
+See ``README.md`` for dataset history.
 """
 
 from __future__ import annotations

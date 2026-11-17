@@ -16,10 +16,8 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import apply_concept_
 from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
 from mermaidseg.dataset_reconciliation.label_mapping import source_labels_to_target_labels
 
-DATA_PARALLEL_GPUS = 4
 
-
-def require_divisible_batch(batch_size: int, n_gpus: int = DATA_PARALLEL_GPUS) -> int:
+def require_divisible_batch(batch_size: int, n_gpus: int) -> int:
     """Return images per GPU, or raise if ``batch_size`` does not split evenly."""
     if int(batch_size) % int(n_gpus) != 0:
         raise RuntimeError(

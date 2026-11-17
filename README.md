@@ -51,12 +51,21 @@ DINOv3 models (e.g. `facebook/dinov3-vitb16-pretrain-lvd1689m`) are gated on Hug
 If using `.env` with direnv, ensure you run `direnv allow` and restart your shell so it picks up the token.
 
 ### Segmentation Models
-Concept-bottleneck models are trained with `nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py`
-(run from `nbs/`; `--training-config`, `--model-config`, `--data-config` and `--resolution`
-select the experiment). On the CSAIL cluster, `slurm/train.sbatch` wraps it.
+Train a concept-bottleneck model from the repository root:
+
+```bash
+uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
+```
+
+`--num-workers` is required. The config flags `--training-config`, `--model-config`,
+`--data-config`, `--concept-schema-config` and `--logger-config` take repo-relative paths under
+`configs/`, and `--resolution` sets the image size. Checkpoints go to
+`outputs/model_checkpoints/<run>/`; `--output-dir` changes `outputs`.
 
 `slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px
-fine-tune. It is idempotent and accepts `--dry-run`.
+fine-tune. It submits through `slurm/train.sbatch`, with site settings from `.env` (see `.env.example`).
+It is idempotent and accepts `--dry-run`.
+Batch jobs write `.venv`, `outputs/` and `logs/` inside the checkout, so it must be on a filesystem the job can write, not AFS, because batch jobs have no AFS token. Set `MERMAIDSEG_ENV_FILE` to read the settings from an env file elsewhere.
 
 `scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
 few-shot probes and the validation loss).
