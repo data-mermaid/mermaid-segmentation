@@ -34,6 +34,7 @@ from mermaidseg.training import (
     seed_run,
 )
 from scripts.train import build_parser
+from tests.conftest import cbm_test_config
 
 
 def _datasets() -> dict[tuple[str, str], str]:
@@ -400,6 +401,45 @@ def test_load_training_checkpoint_restores_the_resume_state(
     assert meta.global_step == 7
     assert meta._warmup_iters_completed == 5
     assert meta.resuming_within_epoch is True
+
+
+def _warmup_config() -> ConfigDict:
+    minimal_config = cbm_test_config()
+    minimal_config.training.scheduler.update(
+        type="LinearLR",
+        start_factor=1.0,
+        end_factor=0.1,
+        total_iters=20,
+        warmup_iters=10,
+        warmup_start_factor=0.01,
+    )
+    return minimal_config
+
+
+def _lr_after_steps(meta, steps: int) -> list[float]:
+    """Run ``steps`` optimizer steps with the trainer's scheduler order; return each LR."""
+    lrs = []
+    for _ in range(steps):
+        meta.optimizer.step()
+        meta._step_warmup_scheduler()
+        meta._step_iteration_scheduler()
+        lrs.append(meta.optimizer.param_groups[0]["lr"])
+    return lrs
+
+
+def test_resumed_mid_warmup_lr_matches_the_uninterrupted_run(make_meta_model, tmp_path):
+    continuous = _lr_after_steps(make_meta_model(_warmup_config(), run_name="continuous"), 16)
+
+    first = make_meta_model(_warmup_config(), run_name="first-half")
+    _lr_after_steps(first, 5)
+    checkpoint = _resume_checkpoint(first)
+    checkpoint["warmup_iters_completed"] = first._warmup_iters_completed
+    path = tmp_path / "ckpt.pt"
+    torch.save(checkpoint, path)
+
+    resumed = make_meta_model(_warmup_config(), run_name="second-half")
+    load_training_checkpoint(resumed, str(path), "cpu", DistContext())
+    assert _lr_after_steps(resumed, 11) == pytest.approx(continuous[5:])
 
 
 @pytest.mark.parametrize(

@@ -133,6 +133,10 @@ def next_epoch_from_checkpoint(checkpoint: dict[str, Any]) -> int:
 def restore_warmup_progress(meta_model: Any, checkpoint: dict[str, Any]) -> None:
     """Restore how many warmup steps have already run."""
     meta_model._warmup_iters_completed = int(checkpoint["warmup_iters_completed"])
+    # LinearLR is chainable: its next factor depends on last_epoch, which the optimizer's
+    # restored LR already reflects.
+    if meta_model.warmup_scheduler is not None:
+        meta_model.warmup_scheduler.last_epoch = meta_model._warmup_iters_completed
 
 
 class MetaModel:

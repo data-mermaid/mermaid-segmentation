@@ -73,6 +73,7 @@ def test_next_epoch_from_checkpoint(epoch_complete, expected):
 def test_restore_warmup_progress_sets_the_saved_count():
     class _Meta:
         _warmup_iters_completed = 0
+        warmup_scheduler = None
 
     meta = _Meta()
     restore_warmup_progress(meta, {"warmup_iters_completed": 10})
