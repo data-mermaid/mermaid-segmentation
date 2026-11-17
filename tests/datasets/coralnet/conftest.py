@@ -9,14 +9,11 @@ from __future__ import annotations
 
 import io
 import struct
-import threading
 from dataclasses import dataclass, field
 
 import pytest
 from botocore.exceptions import ClientError
 from PIL import Image
-
-from mermaidseg.datasets.coralnet.scraper.downloader import CoralNetDownloader
 
 
 def _make_jpeg_bytes(width: int, height: int, *, sof_marker: int = 0xC0, padding: int = 0) -> bytes:
@@ -202,21 +199,6 @@ def fake_s3() -> FakeS3:
 
 
 @pytest.fixture
-def pandas_csv_reader():
-    """Build a :data:`CsvReader` over a FakeS3 fixture.
-
-    Tests inject this in place of the production ibis-on-DuckDB reader so the code-path matches what
-    the ETL uses end-to-end without depending on a real DuckDB connection or AWS.
-    """
-    from mermaidseg.datasets.coralnet.etl.io import make_csv_reader_s3
-
-    def _factory(fake_s3: FakeS3):
-        return make_csv_reader_s3(fake_s3)
-
-    return _factory
-
-
-@pytest.fixture
 def jpeg_small_bytes() -> bytes:
     return _make_jpeg_bytes(1024, 768)
 
@@ -363,31 +345,3 @@ def bytes_io():
     """Lazy BytesIO factory for tests that need a streaming buffer."""
     return io.BytesIO
 
-
-@pytest.fixture
-def paginated_downloader(fake_s3) -> CoralNetDownloader:
-    """A :class:`CoralNetDownloader` wired for offline paginated-export tests.
-
-    - ``logged_in = True`` (skip real login)
-    - ``s3 = fake_s3`` (in-memory S3)
-    - Phase-2 worker session creation short-circuited to return ``dl.session``
-      so a single ``patch.object(dl.session, ...)`` intercepts both phases.
-
-    Mock-sequence consequence of the worker short-circuit: each browse page is
-    fetched TWICE in the mocked ``dl.session.get`` sequence — once during the
-    phase-1 walk (to discover ``Next page`` links) and once again inside the
-    phase-2 worker (to refresh the CSRF token bound to the worker's session).
-    Tests must size ``get_responses`` as ``len(pages) * 2 + len(pages)``
-    (page walk + per-page CSRF refresh + per-page serve response).
-
-    Production gives each worker its own logged-in ``requests.Session`` (see
-    :meth:`CoralNetDownloader._new_logged_in_session`) to avoid the CoralNet
-    server-side session race; that behaviour is exercised by
-    ``test_get_export_session_creates_independent_logged_in_session_per_thread``.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    dl.s3 = fake_s3
-    dl._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
-    dl._export_thread_local = threading.local()
-    return dl

@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pandas as pd
 import pytest
-import yaml
 
-from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.datasets.factory import configured_source_names
 
 _REPO = Path(__file__).resolve().parents[1]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
@@ -84,12 +80,3 @@ def test_chondrilla_is_live(table):
     rows = table[table["source_label_class_name"].str.startswith("chondrilla")]
     assert len(rows) == 3
     assert (rows["live"] == "TRUE").all()
-
-
-def test_schema_layout_matches_demo():
-    data = yaml.safe_load((_REPO / "configs" / "data_config.yaml").read_text())["data"]
-    schema = ConceptSchema.from_csv(_CSV, sources=configured_source_names(data))
-    demo = json.loads((_REPO / "demo" / "concept_id2name.json").read_text())
-    names = {str(channel_id): name for channel_id, name in schema.channel_id2name().items()}
-    assert names == demo
-    assert "rubble" in demo.values()

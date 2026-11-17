@@ -50,20 +50,17 @@ from pathlib import Path
 import torch
 import yaml
 
+from mermaidseg.dataset_reconciliation import ConceptSchema
+from mermaidseg.datasets import configured_source_names
+from mermaidseg.datasets.local_cache import setup_local_cache
+from mermaidseg.evaluation.gt_mapping import load_benthic_hierarchy
+from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
+from mermaidseg.evaluation.predictor import CBMPredictor
+from mermaidseg.evaluation.reporting import fmt, write_json
+from mermaidseg.inference.loading import build_model, load_artifacts
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEMO_DIR = _REPO_ROOT / "demo"
-if str(_DEMO_DIR) not in sys.path:
-    sys.path.insert(0, str(_DEMO_DIR))
-
-from inference import build_model, load_artifacts  # noqa: E402  (demo module)
-
-from mermaidseg.dataset_reconciliation import ConceptSchema  # noqa: E402
-from mermaidseg.datasets import configured_source_names  # noqa: E402
-from mermaidseg.datasets.local_cache import setup_local_cache  # noqa: E402
-from mermaidseg.evaluation.gt_mapping import load_benthic_hierarchy  # noqa: E402
-from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS  # noqa: E402
-from mermaidseg.evaluation.predictor import CBMPredictor  # noqa: E402
-from mermaidseg.evaluation.reporting import fmt, write_json  # noqa: E402
 
 logger = logging.getLogger("evaluate")
 

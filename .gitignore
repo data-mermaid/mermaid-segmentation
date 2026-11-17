@@ -246,3 +246,7 @@ __marimo__/
 
 # iNat analysis outputs (regenerable)
 inat/outputs/
+
+# macOS / local smoke output
+.DS_Store
+.smoke/

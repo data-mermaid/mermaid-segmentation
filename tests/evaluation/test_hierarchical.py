@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+import yaml
 
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
+from mermaidseg.datasets.factory import configured_source_names
 from mermaidseg.evaluation.gt_mapping import build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
 
@@ -17,8 +19,9 @@ _CSV = _REPO / "configs" / "class_to_concepts.csv"
 
 
 def _concept_names() -> list[str]:
-    raw = json.loads((_REPO / "demo" / "concept_id2name.json").read_text())
-    return [name for _, name in sorted(raw.items(), key=lambda kv: int(kv[0]))]
+    data = yaml.safe_load((_REPO / "configs" / "data_config.yaml").read_text())["data"]
+    schema = ConceptSchema.from_csv(_CSV, sources=configured_source_names(data))
+    return [name for _, name in sorted(schema.channel_id2name().items())]
 
 
 def _rows(names: list[str], labels: list[str]) -> torch.Tensor:
