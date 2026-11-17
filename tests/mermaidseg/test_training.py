@@ -68,6 +68,15 @@ def test_train_datasets_without_repeat_are_not_repeated():
     assert _assemble_train_datasets(_datasets(), data_cfg) == ["a", "cs", "b"]
 
 
+@pytest.mark.parametrize("repeat", [0, -1, 2.5, True])
+def test_train_datasets_reject_an_invalid_repeat_naming_the_dataset(repeat):
+    data_cfg = ConfigDict(
+        {"a": {"train": {}}, "coralscapes_v2": {"train": {"repeat": repeat}}, "b": {"train": {}}}
+    )
+    with pytest.raises(ValueError, match="coralscapes_v2"):
+        _assemble_train_datasets(_datasets(), data_cfg)
+
+
 def test_trainval_config_trains_on_six_coralscapes_v2_copies():
     data_cfg = load_config(resolve_repo_path("configs/data_config_trainval.yaml"))["data"]
     classes = dict.fromkeys(DATASET_CLASSES, _Stub)

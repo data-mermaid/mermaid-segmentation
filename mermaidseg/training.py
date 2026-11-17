@@ -154,11 +154,17 @@ def _assemble_train_datasets(dataset_dict: dict[tuple[str, str], Any], data_cfg:
 
     Returns:
         The train datasets in concatenation order.
+
+    Raises:
+        ValueError: A train split's ``repeat`` is not an int (bools and floats
+            included) or is below 1; the message names the dataset.
     """
     train_items = [(name, ds) for (name, split), ds in dataset_dict.items() if split == "train"]
     datasets = [ds for _, ds in train_items]
     for name, ds in train_items:
-        repeat = int(data_cfg[name]["train"].get("repeat", 1))
+        repeat = data_cfg[name]["train"].get("repeat", 1)
+        if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
+            raise ValueError(f"dataset {name!r}: train repeat must be an int >= 1, got {repeat!r}")
         datasets.extend([ds] * (repeat - 1))
     return datasets
 
