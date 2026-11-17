@@ -10,10 +10,9 @@ from typing import Any
 
 import torch
 import yaml
-from pydantic import ValidationError
 
 import mermaidseg.model.models as mm_models
-from mermaidseg.config import SECTION_MODELS, lookup_class
+from mermaidseg.config import lookup_class, validate_section
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS, parse_concept_rank
 from mermaidseg.model.models import MODEL_CLASSES, ConceptBottleneckDPTLoRADINOv3
 
@@ -45,13 +44,7 @@ def _load_model_section(path: str | Path) -> dict[str, Any]:
         ValueError: If the file has no ``model`` key or the section fails the schema.
             The message names the file.
     """
-    raw = _load_yaml(path)
-    if list(raw) != ["model"]:
-        raise ValueError(f"{path}: expected the single top-level key 'model', got {sorted(raw)}")
-    try:
-        return SECTION_MODELS["model"].model_validate(raw["model"]).model_dump()
-    except ValidationError as exc:
-        raise ValueError(f"{path}: {exc}") from exc
+    return validate_section(_load_yaml(path), "model", path)
 
 
 def _load_int_keyed_json(path: str | Path) -> dict[int, str]:
