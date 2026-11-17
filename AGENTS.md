@@ -16,12 +16,11 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 
 ## 1. Map
 
-- `mermaidseg/`: the package. All training, evaluation and inference logic.
+- `mermaidseg/`: the package. All training (`training.py`), evaluation and inference logic.
 - `configs/`: committed YAML configs and the concept, mask and label-mapping inputs they reference.
-- `scripts/`: entrypoints for evaluation, cache prefetch and the data-config, concept-removal and
-  concept-source-mask builders.
+- `scripts/`: entrypoints for training (`scripts/train.py`), evaluation, cache prefetch and the
+  data-config, concept-removal and concept-source-mask builders.
 - `slurm/`: Slurm launchers and `train.sbatch`.
-- `nbs/`: the training entrypoint, until it moves into the package.
 - `tests/`: the pytest suite, laid out as 7.4 sets.
 - `pyproject.toml`: dependencies, extras, ruff and pytest settings.
 
