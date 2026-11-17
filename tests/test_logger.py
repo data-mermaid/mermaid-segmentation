@@ -309,7 +309,7 @@ class TestSaveModelCheckpoint:
 
 
 # ===================================================================
-# Scenario tests (mirror nbs/test_logger.ipynb scenarios A–D)
+# Scenario tests (scenarios A–D)
 # ===================================================================
 @pytest.mark.integration
 class TestScenarios:

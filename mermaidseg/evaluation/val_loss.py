@@ -46,11 +46,11 @@ from mermaidseg.io import setup_config
 from mermaidseg.model.data_parallel import apply_concept_bottleneck_loss
 from mermaidseg.run_setup import (
     DEFAULT_SCHEMA_CONFIG,
-    REPO_ROOT,
     build_meta_model,
     build_registry,
     load_model_weights,
     load_run_concept_source_mask,
+    resolve_repo_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,16 +90,10 @@ class _Accumulator:
 
 
 def resolve_concept_mapping_path(training_cfg: Any) -> None:
-    """Resolve a relative ``concept_mapping_path`` against ``nbs/``, where the pipeline reads it.
-
-    A file at the same relative path from the current directory may be a different table
-    (e.g. ``../configs/class_to_concepts.csv`` outside the repository), so ``nbs/`` wins.
-    """
+    """Rewrite a relative ``concept_mapping_path`` to its path under the repository root."""
     path = training_cfg.get("concept_mapping_path")
-    if path and not Path(path).is_absolute():
-        candidate = (REPO_ROOT / "nbs" / path).resolve()
-        if candidate.exists():
-            training_cfg.concept_mapping_path = str(candidate)
+    if path:
+        training_cfg.concept_mapping_path = str(resolve_repo_path(path))
 
 
 def _check_layout(checkpoint: Path, registry: Any, channel_names: list[str]) -> None:

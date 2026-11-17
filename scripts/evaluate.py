@@ -33,7 +33,7 @@ the datasets of configs/data_config.yaml.
 
 Example (cluster; slurm/eval.sbatch wraps this):
     uv run python scripts/evaluate.py \
-        --checkpoint nbs/model_checkpoints/cbm_lossw_pix0.5_img0.5/model_step100000 \
+        --checkpoint outputs/model_checkpoints/cbm_lossw_pix0.5_img0.5/model_step100000 \
         --model-config configs/model_config_cbm_dpt_lora_vitl.yaml \
         --resolution 512 --output-dir eval_out/run --batch-size 8 --num-workers 16 --amp
 """
@@ -212,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--training-config",
         type=Path,
-        default=_CONFIGS / "training_config_cbm_100k.yaml",
+        default=_CONFIGS / "training_config_cbm_final.yaml",
         help="val_loss: class subset, padding and loss settings of the training run",
     )
     p.add_argument(

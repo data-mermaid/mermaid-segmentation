@@ -12,7 +12,7 @@ Example::
 
     python scripts/prefetch_cache.py \
         --data-config configs/data_config.yaml \
-        --training-config configs/training_config_cbm_100k.yaml \
+        --training-config configs/training_config_cbm_final.yaml \
         --workers 32
 """
 
@@ -28,6 +28,7 @@ from typing import Any
 from mermaidseg.datasets import build_datasets, setup_local_cache
 from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.io import setup_config
+from mermaidseg.run_setup import resolve_repo_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +50,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--training-config",
-        default="configs/training_config_cbm_100k.yaml",
+        default="configs/training_config_cbm_final.yaml",
         help="Path to the training config YAML (used for the `padding` value).",
     )
     parser.add_argument(
@@ -139,7 +140,12 @@ def main(argv: list[str] | None = None) -> int:
     """Warm the local S3 cache for the configured datasets and return the exit code."""
     args = _parse_args(argv)
 
-    cfg = setup_config({"data": args.data_config, "training": args.training_config})
+    cfg = setup_config(
+        {
+            "data": str(resolve_repo_path(args.data_config)),
+            "training": str(resolve_repo_path(args.training_config)),
+        }
+    )
     padding = cfg.training.get("padding") if hasattr(cfg, "training") else None
 
     setup_local_cache(cfg.data)

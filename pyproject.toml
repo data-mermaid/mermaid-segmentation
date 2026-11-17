@@ -68,7 +68,7 @@ quote-style = "double"
 
 [tool.mypy]
 python_version = "3.11"
-files = ["mermaidseg", "scripts", "nbs", "tests"]
+files = ["mermaidseg", "scripts", "tests"]
 ignore_missing_imports = true
 follow_imports = "silent"
 explicit_package_bases = true
