@@ -57,7 +57,9 @@ class ConceptSchema:
             _, full_channels, _ = encode_concept_channels_from_df(df_run)
             not_channels = sorted(set(removed_concepts) - set(full_channels))
             if not_channels:
-                raise ValueError(f"removed concepts that are not channels of this run: {not_channels}")
+                raise ValueError(
+                    f"removed concepts that are not channels of this run: {not_channels}"
+                )
             df_run = apply_concept_removal(df_run, removed_concepts)
 
         encoded_df, channel_names, concept_value2id = encode_concept_channels_from_df(df_run)

@@ -40,7 +40,13 @@ LABELS = [
     "palythoa",
 ]
 DEAD = {"dead pocillopora"}
-CORAL = {"montastraea", "porites", "acropora cervicornis - bleached", "non-acropora encrusting", "millepora"}
+CORAL = {
+    "montastraea",
+    "porites",
+    "acropora cervicornis - bleached",
+    "non-acropora encrusting",
+    "millepora",
+}
 SIZE = 8
 NUM_CLASSES = 5
 
@@ -146,7 +152,9 @@ def test_units_carry_concept_and_hierarchical_blocks(both):
 
 
 def test_macro_is_the_mean_of_unit_values(both):
-    keys = unit_scalar_keys(list(both["pooled"]["taxonomic"]), REPORTED_BINARY_CONCEPTS, with_hier=True)
+    keys = unit_scalar_keys(
+        list(both["pooled"]["taxonomic"]), REPORTED_BINARY_CONCEPTS, with_hier=True
+    )
     assert set(both["macro"]) == set(keys)
     per_unit = [unit_scalars(d, REPORTED_BINARY_CONCEPTS) for d in both["units"].values()]
     for key in keys:
@@ -197,7 +205,11 @@ def test_pooled_hierarchical_unchanged_by_per_unit_accumulators(tmp_path, both):
         ("millepora", True, True),
         ("cred-octocoral", True, True),
         ("palythoa", True, False),
-        ("chondrilla spp.", True, False),  # sponge: live column ignored outside corals / echinoderms
+        (
+            "chondrilla spp.",
+            True,
+            False,
+        ),  # sponge: live column ignored outside corals / echinoderms
         ("macroalgae", True, False),
         ("sand", True, False),
     ],
@@ -210,7 +222,9 @@ def test_point_scopes_from_the_concept_table(label, live, coral):
 def test_living_and_coral_counts_follow_the_live_column(both):
     table = pd.read_csv(_CSV, dtype=str).fillna("not_given")
     table = table[table["source_dataset_source"] == "coralnet"]
-    table = table.assign(label=table["source_label_class_name"].str.lower()).drop_duplicates("label")
+    table = table.assign(label=table["source_label_class_name"].str.lower()).drop_duplicates(
+        "label"
+    )
     table = table.set_index("label").loc[LABELS]
     labels = FakeDataset(["10", "20"]).df_annotations["source_label_name"]
     assert labels.isin(DEAD).any() and labels.isin(CORAL).any()

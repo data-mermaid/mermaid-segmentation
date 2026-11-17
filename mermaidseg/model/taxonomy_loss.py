@@ -92,6 +92,7 @@ def grouped_log_softmax(logits: torch.Tensor, groups: torch.Tensor) -> torch.Ten
     Args:
         logits: Tensor of shape ``(B, C, ...)``.
         groups: Non-negative group weights of shape ``(G, C)``; every group needs a non-zero weight.
+
     Returns:
         Tensor of shape ``(B, G, ...)``.
     """

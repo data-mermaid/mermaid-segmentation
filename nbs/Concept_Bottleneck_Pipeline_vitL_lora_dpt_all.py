@@ -9,6 +9,7 @@ import torch.distributed as dist
 from nb_setup import check_env_wandb
 from torch.utils.data import ConcatDataset, DataLoader
 
+from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local_cache
 from mermaidseg.io import get_parser, setup_config, update_config_with_args
 from mermaidseg.logger import Logger, prune_rolling_checkpoints
@@ -23,7 +24,6 @@ from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
 from mermaidseg.model.models import align_optimizer_state_dict
 from mermaidseg.model.train import train_model
-from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.run_setup import (
     build_meta_model,
     build_registry,

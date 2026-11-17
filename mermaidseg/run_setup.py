@@ -55,7 +55,9 @@ def concept_removal_list(training_cfg: Any, mapping_path: str | Path) -> list[st
     return load_concept_removal(resolve_repo_path(path), concepts_csv=mapping_path)
 
 
-def load_run_concept_source_mask(training_cfg: Any, schema: ConceptSchema) -> ConceptSourceMask | None:
+def load_run_concept_source_mask(
+    training_cfg: Any, schema: ConceptSchema
+) -> ConceptSourceMask | None:
     """The keep table of ``training.concept_source_mask`` (a CSV path), or ``None``."""
     path = training_cfg.get("concept_source_mask")
     if not path:

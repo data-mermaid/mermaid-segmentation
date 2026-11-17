@@ -322,4 +322,3 @@ def taxon_channel_mask(tree: TaxonomyTree, rank: str) -> np.ndarray:
         [v != NONE_TAXON and v not in excluded for v in tree.channels[rank]],
         dtype=bool,
     )
-

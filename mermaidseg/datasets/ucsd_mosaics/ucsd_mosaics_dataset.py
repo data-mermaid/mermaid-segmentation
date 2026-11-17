@@ -136,9 +136,7 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         all_sites = list(get_dataset_split_names(self.hf_repo_id))
         self.sites = self._select_sites(all_sites)
 
-        per_site = [
-            load_dataset(self.hf_repo_id, split=site) for site in self.sites
-        ]
+        per_site = [load_dataset(self.hf_repo_id, split=site) for site in self.sites]
         self.dataset = concatenate_datasets(per_site) if len(per_site) > 1 else per_site[0]
 
         keep_original = self._resolved_original_splits()

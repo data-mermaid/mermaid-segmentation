@@ -347,6 +347,7 @@ class DPTHead(torch.nn.Module):
             token_height: Patch rows in ``hidden_states``. Required for a grid
                 whose aspect differs from the grid stored at construction.
             token_width: Patch columns in ``hidden_states``.
+
         Returns:
             torch.Tensor: Dense features of shape ``(B, out_channels, H_f, W_f)``.
         """

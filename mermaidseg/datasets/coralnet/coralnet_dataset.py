@@ -80,6 +80,7 @@ class CoralNetDataset(BaseCoralDataset):
             training manifest parquet.
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-source CoralNet image folders live.
+
     Args:
         manifest_path (str, optional): Key (relative to ``source_bucket``) of the training
             manifest parquet. If ``None`` (default), resolved from
@@ -261,6 +262,4 @@ class CoralNetDataset(BaseCoralDataset):
                 f"refusing to load the original full-resolution image (its pixels would be "
                 f"misaligned with the 2048-resized annotation coordinates)."
             )
-        return np.array(
-            get_image_s3(bucket=self.source_bucket, key=image_key).convert("RGB")
-        )
+        return np.array(get_image_s3(bucket=self.source_bucket, key=image_key).convert("RGB"))

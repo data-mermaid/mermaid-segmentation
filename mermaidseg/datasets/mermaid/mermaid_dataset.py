@@ -30,6 +30,7 @@ class MermaidDataset(BaseCoralDataset):
     Attributes:
         annotations_path (str): Path to the Parquet file containing image annotations.
         source_bucket (str): S3 bucket name containing the dataset files.
+
     Args:
         annotations_path (str, optional): S3 path to the Parquet file with annotations.
         source_bucket (str, optional): S3 bucket name containing the dataset files.

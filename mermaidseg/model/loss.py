@@ -163,6 +163,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
                 Taxonomic ranks are scored with cross-entropy and the binary tail with
                 ``binary_cross_entropy_with_logits`` for numerical stability.
             concept_labels (torch.Tensor): The ground truth labels for concept prediction.
+
         Returns:
             A 2-tuple of (total_loss, loss_components) where total_loss is the
             scalar tensor for backprop and loss_components is a dict of detached

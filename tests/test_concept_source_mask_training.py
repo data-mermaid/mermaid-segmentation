@@ -37,13 +37,56 @@ def _table() -> pd.DataFrame:
     """A concept table with every taxonomic rank (the CBM model and the encoder need them all)."""
     rows = [
         # label, kingdom, phylum, class, order, family, genus, bleached, branching, tubular
-        ("acropora", "animalia", "cnidaria", "hexacorallia", "scleractinia", "acroporidae", "acropora", "FALSE", "TRUE", "FALSE"),
-        ("porites", "animalia", "cnidaria", "hexacorallia", "scleractinia", "poritidae", "porites", "FALSE", "FALSE", "TRUE"),
-        ("bleached acropora", "animalia", "cnidaria", "hexacorallia", "scleractinia", "acroporidae", "acropora", "TRUE", "TRUE", "FALSE"),
+        (
+            "acropora",
+            "animalia",
+            "cnidaria",
+            "hexacorallia",
+            "scleractinia",
+            "acroporidae",
+            "acropora",
+            "FALSE",
+            "TRUE",
+            "FALSE",
+        ),
+        (
+            "porites",
+            "animalia",
+            "cnidaria",
+            "hexacorallia",
+            "scleractinia",
+            "poritidae",
+            "porites",
+            "FALSE",
+            "FALSE",
+            "TRUE",
+        ),
+        (
+            "bleached acropora",
+            "animalia",
+            "cnidaria",
+            "hexacorallia",
+            "scleractinia",
+            "acroporidae",
+            "acropora",
+            "TRUE",
+            "TRUE",
+            "FALSE",
+        ),
         ("sand", "none", "none", "none", "none", "none", "none", "FALSE", "FALSE", "FALSE"),
         ("unknown", *["not_given"] * 9),
     ]
-    cols = ["kingdom", "phylum", "class", "order", "family", "genus", "bleached", "branching", "tubular"]
+    cols = [
+        "kingdom",
+        "phylum",
+        "class",
+        "order",
+        "family",
+        "genus",
+        "bleached",
+        "branching",
+        "tubular",
+    ]
     df = pd.DataFrame(rows, columns=["source_label_class_name", *cols])
     df.insert(1, "source_dataset_source", "coralnet")
     return df
@@ -70,9 +113,9 @@ def _lookup(schema: ConceptSchema) -> torch.Tensor:
 
 def _write_mask(tmp_path, rows: list[tuple[str, str]], concepts_csv=None) -> Any:
     path = tmp_path / "mask.csv"
-    pd.DataFrame(rows, columns=["source_id", "concept"]).assign(n_true=0, n_false=1, n_not_given=0).to_csv(
-        path, index=False
-    )
+    pd.DataFrame(rows, columns=["source_id", "concept"]).assign(
+        n_true=0, n_false=1, n_not_given=0
+    ).to_csv(path, index=False)
     meta = {"dataset": "coralnet", "rule": "only_false"}
     if concepts_csv is not None:
         meta["concepts_csv_sha1"] = file_sha1(concepts_csv)
@@ -84,7 +127,9 @@ def _write_mask(tmp_path, rows: list[tuple[str, str]], concepts_csv=None) -> Any
 
 
 def test_keep_table_rows_and_columns(tmp_path):
-    mask = load_concept_source_mask(_write_mask(tmp_path, [("12", "bleached"), ("7", "branching")]), _schema())
+    mask = load_concept_source_mask(
+        _write_mask(tmp_path, [("12", "bleached"), ("7", "branching")]), _schema()
+    )
     assert mask.source_ids == ("7", "12")  # numeric order
     assert mask.num_masked == 2
     keep = mask.keep
@@ -173,7 +218,9 @@ class _PlainDataset(Dataset):
 def test_source_row_follows_the_retried_image(tmp_path):
     ds = _coralnet_dataset()
     image, labels = ds[1]  # unchanged without a mask
-    mask = load_concept_source_mask(_write_mask(tmp_path, [("5", "bleached"), ("7", "bleached")]), _schema())
+    mask = load_concept_source_mask(
+        _write_mask(tmp_path, [("5", "bleached"), ("7", "bleached")]), _schema()
+    )
     (wrapped,) = attach_source_rows([ds], mask)
     assert wrapped is ds
     assert ds[1][2] == mask.row_by_source()["7"]
@@ -257,9 +304,13 @@ def test_train_epoch_masks_concept_targets(make_meta_model, monkeypatch, cbm_sch
 
     monkeypatch.setattr(meta, "batch_predict_loss", spy)
     images = torch.randn(2, 3, *IMAGE_SIZE)
-    labels = torch.ones(2, *IMAGE_SIZE, dtype=torch.long)  # acropora: bleached False, branching True
+    labels = torch.ones(
+        2, *IMAGE_SIZE, dtype=torch.long
+    )  # acropora: bleached False, branching True
     rows = torch.tensor([1, 0])
-    loss, _, _ = meta.train_epoch(DataLoader(TensorDataset(images, labels, rows), batch_size=2), epoch=0)
+    loss, _, _ = meta.train_epoch(
+        DataLoader(TensorDataset(images, labels, rows), batch_size=2), epoch=0
+    )
     assert np.isfinite(loss)
     (targets,) = seen
     assert (targets[0, bleached] == 0).all()  # sample 0's source is masked for bleached
@@ -320,7 +371,9 @@ def test_schema_removal_drops_exactly_the_listed_channels(table_csv, cbm_schema)
     # A removed genus is not_given at genus, its family stays.
     assert porites["family__poritidae"] == 2
     assert all(v == 0 for k, v in porites.items() if k.startswith("genus__"))
-    acropora = dict(zip(reduced.channel_names, reduced.row_for("coralnet", "acropora"), strict=True))
+    acropora = dict(
+        zip(reduced.channel_names, reduced.row_for("coralnet", "acropora"), strict=True)
+    )
     assert acropora["genus__acropora"] == 2
 
 
@@ -347,7 +400,10 @@ def test_coverage_rules():
     for i in range(120):
         counts.append(("coralnet", f"a{i}", "acropora", 5, str(i % 3)))
     # porites: 2 dense masks (50 each) + 450 points in 1 CoralNet source, 1 non-CoralNet dataset.
-    counts += [("coralscapes_v2", "m0", "porites", 9999, ""), ("coralscapes_v2", "m1", "porites", 1, "")]
+    counts += [
+        ("coralscapes_v2", "m0", "porites", 9999, ""),
+        ("coralscapes_v2", "m1", "porites", 1, ""),
+    ]
     for i in range(90):
         counts.append(("coralnet", f"p{i}", "porites", 5, "9"))
     # bleached acropora: 600 points but 10 images in 2 CoralNet sources -> fails images and sources.
@@ -362,5 +418,9 @@ def test_coverage_rules():
     assert cov.loc["genus__porites", "fails_images"]  # 92 < 100 and only 2 non-CoralNet images
     assert not cov.loc["genus__porites", "fails_sources"]  # a non-CoralNet dataset has it
     bleached = cov.loc["bleached"]
-    assert bleached["n_coralnet_sources"] == 2 and bleached["fails_sources"] and bleached["fails_images"]
+    assert (
+        bleached["n_coralnet_sources"] == 2
+        and bleached["fails_sources"]
+        and bleached["fails_images"]
+    )
     assert cov.loc["branching", "n_images"] == 130  # acropora + bleached acropora images

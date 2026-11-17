@@ -108,6 +108,7 @@ def train_model(
         on_optimizer_step: Called from ``train_epoch`` after each successful optimizer update.
         save_best_checkpoint: When True, write ``model_epoch{N}`` whenever the validation
             metric improves. Step-checkpointed runs pass False so only ``model_step*`` is saved.
+
     Returns:
         dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
             ``train_metrics``, ``validation_metrics`` (if ``val_loader`` is provided), and

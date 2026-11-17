@@ -189,6 +189,8 @@ def apply_concept_removal(df_mapping: pd.DataFrame, concepts: Iterable[str]) -> 
             raise ValueError(f"cannot remove {concept!r}: 'none' is not a taxon")
         hit = df[kind].astype(str) == value
         if not hit.any():
-            raise ValueError(f"cannot remove {concept!r}: no {kind} == {value!r} in the concept table")
+            raise ValueError(
+                f"cannot remove {concept!r}: no {kind} == {value!r} in the concept table"
+            )
         df.loc[hit, kind] = "not_given"
     return df

@@ -28,7 +28,7 @@ import pandas as pd
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_concept_source_mask import REPO_ROOT, _git_commit, _rel  # noqa: E402
+from build_concept_source_mask import _git_commit, _rel  # noqa: E402
 
 from mermaidseg.dataset_reconciliation.concept_removal import (  # noqa: E402
     CoverageRule,
@@ -58,13 +58,17 @@ def coralnet_image_sources(data_config: Path) -> pd.Series:
 
 def main() -> None:
     rule = CoverageRule()
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--data-config", type=Path, required=True)
     p.add_argument("--label-counts", type=Path, required=True)
     p.add_argument("--concepts", type=Path, default=Path(DEFAULT_CLASS_TO_CONCEPTS_CSV))
     p.add_argument("--schema-config", type=Path, default=Path(DEFAULT_SCHEMA_CONFIG))
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("--coverage-out", type=Path, default=None, help="optional CSV with every channel")
+    p.add_argument(
+        "--coverage-out", type=Path, default=None, help="optional CSV with every channel"
+    )
     for name, value in rule.as_dict().items():
         p.add_argument(f"--{name.replace('_', '-')}", type=int, default=value)
     args = p.parse_args()

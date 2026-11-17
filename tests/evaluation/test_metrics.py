@@ -193,8 +193,12 @@ def test_bundle_merge_pooling():
     layout = ConceptLayout.from_concept_names(names)
     a = MetricBundle.create(4, layout)
     b = MetricBundle.create(4, layout)
-    a.update(np.array([1]), np.array([1]), np.array([[2, 1, 2]]), np.array([[0.9, 0.1, 0.9]], np.float32))
-    b.update(np.array([2]), np.array([3]), np.array([[2, 1, 1]]), np.array([[0.9, 0.1, 0.2]], np.float32))
+    a.update(
+        np.array([1]), np.array([1]), np.array([[2, 1, 2]]), np.array([[0.9, 0.1, 0.9]], np.float32)
+    )
+    b.update(
+        np.array([2]), np.array([3]), np.array([[2, 1, 1]]), np.array([[0.9, 0.1, 0.2]], np.float32)
+    )
     pooled = a.clone()
     pooled.merge(b)
     assert pooled.num_points == 2
@@ -285,7 +289,9 @@ def test_taxonomic_merge_equals_single_accumulator():
     coral = live & (rng.random(300) < 0.5)
     whole = TaxonomicRankAccuracy("order", list(range(5)), 3, values=list("abcde"))
     whole.update(gt_rows, probs, live=live, coral=coral)
-    parts = [TaxonomicRankAccuracy("order", list(range(5)), 3, values=list("abcde")) for _ in range(3)]
+    parts = [
+        TaxonomicRankAccuracy("order", list(range(5)), 3, values=list("abcde")) for _ in range(3)
+    ]
     for part, idx in zip(parts, np.array_split(np.arange(300), 3), strict=True):
         part.update(gt_rows[idx], probs[idx], live=live[idx], coral=coral[idx])
     merged = parts[0].clone()
@@ -330,7 +336,9 @@ def test_living_and_coral_scopes_match_sklearn(seed):
 def test_dead_coral_counts_in_all_but_not_living():
     # [acropora, porites, none]: a dead acropora predicted acropora, a live porites
     # predicted acropora, and a sand point predicted none.
-    rank = TaxonomicRankAccuracy("genus", [0, 1, 2], none_local_index=2, values=["acropora", "porites", "none"])
+    rank = TaxonomicRankAccuracy(
+        "genus", [0, 1, 2], none_local_index=2, values=["acropora", "porites", "none"]
+    )
     gt = np.array([[2, 1, 1], [1, 2, 1], [1, 1, 2]])
     pred = np.array([[0.9, 0.1, 0.0], [0.8, 0.2, 0.0], [0.0, 0.1, 0.9]], dtype=np.float32)
     live = np.array([False, True, True])
@@ -353,4 +361,6 @@ def test_without_flags_living_is_not_none_and_coral_is_empty():
     assert (d["n_living"], d["n_coral"]) == (1, 0)
     assert np.isnan(d["acc_coral"]) and np.isnan(d["macro_f1_coral"])
     with pytest.raises(ValueError, match="live must have shape"):
-        rank.update(np.array([[2, 1, 1]]), np.array([[1, 0, 0]], np.float32), live=np.array([True, True]))
+        rank.update(
+            np.array([[2, 1, 1]]), np.array([[1, 0, 0]], np.float32), live=np.array([True, True])
+        )

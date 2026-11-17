@@ -639,6 +639,7 @@ class MetaModel:
                 with ``distributed`` (each rank masks its own shard). On a
                 single GPU, ``train_epoch`` masks ``target_concepts`` before
                 calling this.
+
         Returns:
             A 4-tuple of ``(loss, outputs, concept_outputs, loss_components)``.
             With ``distributed``, ``outputs`` and ``concept_outputs`` are

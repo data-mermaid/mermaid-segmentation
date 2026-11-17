@@ -60,13 +60,17 @@ def _git_commit() -> str | None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--data-config", type=Path, default=REPO_ROOT / "configs/data_config.yaml")
     p.add_argument("--concepts", type=Path, default=Path(DEFAULT_CLASS_TO_CONCEPTS_CSV))
     p.add_argument("--schema-config", type=Path, default=Path(DEFAULT_SCHEMA_CONFIG))
     p.add_argument("--split", default="train")
     p.add_argument(
-        "--out", type=Path, default=REPO_ROOT / "configs/concept_source_masks/coralnet_only_false.csv"
+        "--out",
+        type=Path,
+        default=REPO_ROOT / "configs/concept_source_masks/coralnet_only_false.csv",
     )
     p.add_argument(
         "--counts-out",

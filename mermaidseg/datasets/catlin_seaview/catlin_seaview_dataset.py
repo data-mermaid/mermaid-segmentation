@@ -38,6 +38,7 @@ class CatlinSeaviewDataset(BaseCoralDataset):
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-region
             ``images/<region>/<image_id>.jpg`` folders live.
+
     Args:
         annotations_path (str, optional): Key (relative to ``source_bucket``)
             of the Parquet file with annotations.

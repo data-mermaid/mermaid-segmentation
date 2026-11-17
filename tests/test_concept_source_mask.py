@@ -35,9 +35,7 @@ def _schema() -> ConceptSchema:
             "branching": ENC,
         },
         num_channels=len(CHANNELS),
-        row_by_key={
-            ("coralnet", name): np.array(row, np.float32) for name, row in LABELS.items()
-        },
+        row_by_key={("coralnet", name): np.array(row, np.float32) for name, row in LABELS.items()},
     )
 
 
@@ -79,4 +77,7 @@ def test_counts_and_only_false_pairs():
 
 
 def test_meta_path_sits_next_to_the_csv(tmp_path):
-    assert meta_path(tmp_path / "coralnet_only_false.csv") == tmp_path / "coralnet_only_false.meta.yaml"
+    assert (
+        meta_path(tmp_path / "coralnet_only_false.csv")
+        == tmp_path / "coralnet_only_false.meta.yaml"
+    )

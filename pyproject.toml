@@ -36,6 +36,7 @@ tests = [
 lint = [
     "ruff>=0.15.8",
     "pre-commit>=3.0",
+    "mypy>=2.4.1",
 ]
 dev = [
     {include-group = "tests"},
@@ -51,23 +52,32 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C4", "RET", "SIM", "PD"]
+select = ["E", "F", "I", "UP", "B", "C4", "RET", "SIM", "PD", "D"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/*.ipynb" = [
-    "F821",   # undefined names — common in exploratory notebook cells
-    "B018",   # useless expression — used to display values in notebooks
-    "E501",   # line too long — handled by docformatter; notebook cells are hard to wrap
-    "UP031",
-    "PD003", # pandas-vet: prefer isna — wrong for Ibis .isnull() / SQL NULL
-]
+"tests/**" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.isort]
 known-first-party = ["mermaidseg"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["mermaidseg", "scripts", "nbs", "tests"]
+ignore_missing_imports = true
+follow_imports = "silent"
+explicit_package_bases = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -85,6 +95,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "live: marks tests as live integration tests requiring S3 and/or CoralNet access (deselect with '-m \"not live\"')",
+    "smoke: marks fast offline smoke tests of the training pipeline wiring",
 ]
 
 [tool.coverage.run]

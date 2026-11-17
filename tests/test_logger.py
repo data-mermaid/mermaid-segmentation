@@ -29,17 +29,13 @@ def _wandb_logger(lgr: Logger) -> MagicMock:
 class TestLoggerInit:
     """Test Logger initialization: config toggles."""
 
-    def test_save_local_checkpoints_mirrors_deprecated_alias(
-        self, make_config, fake_meta_model
-    ):
+    def test_save_local_checkpoints_mirrors_deprecated_alias(self, make_config, fake_meta_model):
         config = make_config(logger={"save_local_checkpoints": False})
         lgr = Logger(config=config, meta_model=fake_meta_model)
         assert lgr.save_local_checkpoints is False
         assert lgr.save_local_models is False
 
-    def test_save_local_models_alias_sets_checkpoint_flag(
-        self, make_config, fake_meta_model
-    ):
+    def test_save_local_models_alias_sets_checkpoint_flag(self, make_config, fake_meta_model):
         config = make_config(logger={"save_local_checkpoints": None, "save_local_models": False})
         with pytest.deprecated_call(match="save_local_models is deprecated"):
             lgr = Logger(config=config, meta_model=fake_meta_model)
@@ -277,9 +273,7 @@ class TestSaveModelCheckpoint:
         assert mock_wandb.init.call_args.kwargs["id"] is None
         assert mock_wandb.init.call_args.kwargs["resume"] is None
 
-    def test_wandb_does_not_write_local_checkpoint_when_local_disabled(
-        self, tmp_path, make_config
-    ):
+    def test_wandb_does_not_write_local_checkpoint_when_local_disabled(self, tmp_path, make_config):
         meta = FakeMetaModel(run_name="wandb-no-local")
         config = make_config(logger={"save_local_checkpoints": False, "enable_wandb": True})
         with (

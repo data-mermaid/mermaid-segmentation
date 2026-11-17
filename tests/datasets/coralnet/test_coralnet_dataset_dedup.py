@@ -99,7 +99,9 @@ def test_parquet_refs_resolve_against_repo_root(cache, monkeypatch):
     repo = cache / "repo"
     (repo / "configs/coralnet").mkdir(parents=True)
     pd.DataFrame({"image_id": ["20"]}).to_parquet(repo / "configs/coralnet/blacklist.parquet")
-    pd.DataFrame({"image_id": ["11"]}).to_parquet(cache / "cache" / BUCKET / "bucket_blacklist.parquet")
+    pd.DataFrame({"image_id": ["11"]}).to_parquet(
+        cache / "cache" / BUCKET / "bucket_blacklist.parquet"
+    )
     monkeypatch.setattr(cnd, "_REPO_ROOT", repo)
 
     ds = _make(image_blacklist="configs/coralnet/blacklist.parquet")

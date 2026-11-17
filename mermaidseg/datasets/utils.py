@@ -71,6 +71,7 @@ def get_image_s3(
         bucket (str): The name of the S3 bucket.
         key (str): The key (path) of the image in the S3 bucket.
         thumbnail (bool, optional): If True, fetches the thumbnail version of the image by modifying the key. Defaults to False.
+
     Returns:
         PIL.Image.Image: The image loaded from cache or S3 as a PIL Image object.
     """
@@ -100,6 +101,7 @@ def create_annotation_mask(
             label id (background stays 0). Folding it in here is equivalent to a
             ``np.where(mask > 0, mask + offset, mask)`` pass but avoids a second full-resolution
             scan. Defaults to 0.
+
     Returns:
         np.ndarray: Integer annotation mask with shape (height, width). Values
         are 0 (background) or (offset-shifted) local source-class IDs (1..N).

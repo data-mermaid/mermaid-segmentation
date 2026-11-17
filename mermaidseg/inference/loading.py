@@ -126,4 +126,3 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
     if missing or unexpected:
         raise RuntimeError(f"state_dict mismatch: missing={missing} unexpected={unexpected}")
     return model.to(device).eval()
-

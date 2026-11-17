@@ -32,7 +32,9 @@ def write_json(path: str | Path, obj: Any) -> None:
     tmp.replace(path)
 
 
-def write_csv(path: str | Path, rows: list[dict[str, Any]], columns: list[str] | None = None) -> None:
+def write_csv(
+    path: str | Path, rows: list[dict[str, Any]], columns: list[str] | None = None
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:

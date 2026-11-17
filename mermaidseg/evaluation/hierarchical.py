@@ -94,7 +94,7 @@ class HierarchicalScore:
         self.tree = tree
         self.metrics = HierarchicalMetrics(tree, ranks=self.ranks)
 
-    def fresh(self) -> "HierarchicalScore":
+    def fresh(self) -> HierarchicalScore:
         """Empty accumulator with this one's validated tree and channel slices."""
         out = object.__new__(HierarchicalScore)
         out.ranks = self.ranks

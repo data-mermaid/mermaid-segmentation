@@ -358,7 +358,8 @@ class HierarchicalMetrics:
 
     def _taxon_summary(self, rank: str) -> list[dict]:
         """One row per channel seen in GT or prediction (labelled pixels only), sorted by GT
-        support."""
+        support.
+        """
         confusion = self._confusion[rank].cpu().numpy()
         conf_sum = self._pred_conf_sum[rank].cpu().numpy()
         gt_px = confusion.sum(axis=1)
@@ -387,7 +388,8 @@ class HierarchicalMetrics:
     def _compute_consistency(self) -> dict[str, float]:
         """Consistency with truncated lineages dropped (the main score) and, under
         ``.../truncated_as_inconsistent``, counted as inconsistent, plus the pixel counts behind
-        both."""
+        both.
+        """
         out: dict[str, float] = {}
         total = dict.fromkeys(("ok", "n", "trunc", "none_none", "no_parent"), 0)
         labeled = dict.fromkeys(("ok", "n", "trunc"), 0)
@@ -448,7 +450,8 @@ class HierarchicalMetrics:
     def _compute_calibration(self) -> dict[str, float]:
         """ECE over all labelled pixels (``ece/<rank>``) and split by GT type
         (``ece/<rank>/taxon_gt``, ``ece/<rank>/none_gt``), each with its mean confidence, accuracy
-        and pixel count."""
+        and pixel count.
+        """
         out: dict[str, float] = {}
         eces: dict[str, list[float]] = {s: [] for s in CALIBRATION_SUBSETS}
         for rank in self.ranks:
@@ -520,7 +523,8 @@ class HierarchicalMetrics:
 
     def per_taxon_table(self, rank: str) -> list[tuple[str, int, float]]:
         """``(taxon, support, accuracy)`` for every taxon seen at ``rank``, by descending
-        support."""
+        support.
+        """
         if rank not in self._support:
             return []
         support = self._support[rank].cpu().numpy()

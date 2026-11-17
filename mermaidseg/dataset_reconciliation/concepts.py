@@ -253,4 +253,3 @@ def source_labels_to_concepts(
         source_labels = source_labels.long()
     mapped = lookup[source_labels]  # (B, H, W, C)
     return mapped.permute(0, 3, 1, 2).contiguous()
-

@@ -34,15 +34,15 @@ def test_dpt_head_runs_on_nonsquare_grid_when_told_the_shape():
 
 
 def _small_head(**overrides) -> DPTHead:
-    kwargs = dict(
-        hidden_size=16,
-        out_channels=4,
-        token_width=8,
-        token_height=8,
-        neck_hidden_sizes=(8, 8, 8, 8),
-        fusion_hidden_size=8,
-        reassemble_factors=(4, 2, 1, 0.5),
-    )
+    kwargs = {
+        "hidden_size": 16,
+        "out_channels": 4,
+        "token_width": 8,
+        "token_height": 8,
+        "neck_hidden_sizes": (8, 8, 8, 8),
+        "fusion_hidden_size": 8,
+        "reassemble_factors": (4, 2, 1, 0.5),
+    }
     kwargs.update(overrides)
     return DPTHead(**kwargs)
 

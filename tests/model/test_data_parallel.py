@@ -161,4 +161,3 @@ def test_train_epoch_scores_every_nth_microbatch(
     # Six microbatches, indices 0..5; every 4th is scored.
     assert len(calls) == 2
     assert meta._train_microbatches_seen == 6
-

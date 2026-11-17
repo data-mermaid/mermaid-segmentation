@@ -161,10 +161,9 @@ class CBMPredictor:
             token_height = images.shape[-2] // self.patch_size
             token_width = images.shape[-1] // self.patch_size
             feat = self.model.dpt_head(hidden_states, token_height, token_width)
-            feat = F.interpolate(
+            return F.interpolate(
                 feat.float(), size=images.shape[-2:], mode="bilinear", align_corners=False
             )
-            return feat
 
         # kind == "backbone": last selected hidden state, patch tokens only.
         hs = hidden_states[-1]  # (B, 1 + P, C) -- CLS at index 0, register tokens already dropped
@@ -178,10 +177,9 @@ class CBMPredictor:
                 f"(input {tuple(images.shape[-2:])}, patch_size {self.patch_size})."
             )
         feat = patch.transpose(1, 2).reshape(b, channels, th, tw)
-        feat = F.interpolate(
+        return F.interpolate(
             feat.float(), size=images.shape[-2:], mode="bilinear", align_corners=False
         )
-        return feat
 
     @torch.no_grad()
     def forward_concept_logits(self, images: torch.Tensor) -> torch.Tensor:

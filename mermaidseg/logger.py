@@ -1,5 +1,4 @@
-"""
-Serialization strategy:
+"""Serialization strategy:
 - Training checkpoints: torch.save (pickle) — full state for resume.
 """
 
@@ -29,6 +28,7 @@ try:
 except ImportError as err:
     wandb = None
     WANDB_IMPORT_ERROR = err
+
 
 def prune_rolling_checkpoints(
     directory: str, keep_name: str, prefix: str = "model_preempt"

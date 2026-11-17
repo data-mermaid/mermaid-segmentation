@@ -48,9 +48,7 @@ def _identity_source_to_target(dataset: Any) -> dict[str, str]:
 def _static_source_to_target(static: dict[str, str], dataset: Any) -> dict[str, str]:
     """Filter a static ``source_name -> target_name`` dict to the dataset's source space."""
     ds_names_lower = {n.lower() for n in dataset.source_name2id}
-    return {
-        name: target for name, target in static.items() if name.lower() in ds_names_lower
-    }
+    return {name: target for name, target in static.items() if name.lower() in ds_names_lower}
 
 
 _BUILTIN_DEFAULT_FETCHERS = {
@@ -151,9 +149,7 @@ class SourceLabelRegistry:
             for local_id, source_name in sorted(ds.source_id2name.items()):
                 global_id = local_id + running_offset
                 self.global_id2source[global_id] = (ds.SOURCE_NAME, source_name)
-                ds_target_for_source.append(
-                    resolved_maps[ds.SOURCE_NAME].get(source_name.lower())
-                )
+                ds_target_for_source.append(resolved_maps[ds.SOURCE_NAME].get(source_name.lower()))
             per_dataset_target_lists.append(ds_target_for_source)
             running_offset += len(ds.source_id2name)
         self.dataset_offsets = offsets

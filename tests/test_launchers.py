@@ -22,6 +22,7 @@ _REPO = Path(__file__).resolve().parents[1]
 _SLURM = _REPO / "slurm"
 _CONFIGS = _REPO / "configs"
 
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
@@ -180,4 +181,3 @@ def test_final_runs_the_768_fine_tune_after_the_final_run(repo):
     assert _arg(hires, "--resolution") == "768"
     assert _arg(hires, "--training-config") == "../configs/training_config_cbm_final_hires.yaml"
     assert int(_arg(hires, "--batch-size")) * int(_arg(hires, "--grad-accum-steps")) == 32
-
