@@ -25,9 +25,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 aws configure --profile mermaid-core
 echo "AWS_PROFILE=mermaid-core" >> .env
 
-# Configure MLFlow Tracking (SageMaker MLflow App)
-export MLFLOW_TRACKING_URI=arn:aws:sagemaker:{region}:{account-id}:mlflow-app/{app-name}
-
 # Configure Hugging Face (required for DINOv3 models)
 hf auth login
 # Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
@@ -36,15 +33,9 @@ hf auth login
 uv sync
 ```
 
-**Install optional dependency groups** as needed:
+**Install the contributor dependency group** as needed:
 ```bash
 uv sync --group dev         # tests + lint (contributor setup)
-uv sync --group notebooks   # Jupyter, hvplot, ibis, great-tables
-uv sync --extra scraping    # selenium, webdriver-manager
-uv sync --extra smp         # segmentation-models-pytorch (optional model backend)
-
-# Combine
-uv sync --group dev --group notebooks
 ```
 
 
@@ -57,77 +48,18 @@ DINOv3 models (e.g. `facebook/dinov3-vitb16-pretrain-lvd1689m`) are gated on Hug
    - **CLI login** (recommended): Run `hf auth login` and paste your token when prompted.
    - **Environment variable**: Add `HF_TOKEN=hf_xxxxxxxxxxxx` to your `.env` file (create from `.env.example`). Create a token at [hf.co/settings/tokens](https://hf.co/settings/tokens).
 
-If using `.env` with direnv, ensure you run `direnv allow` and restart the Jupyter kernel so it picks up the token.
-
-### Dataset
-In order to access and traverse through MERMAID data we can use the code within the mermaidseg codebase, starting with the `MermaidDataset` class, which already includes the functionality allowing for ML research.
-Similarly, in order to access and traverse through CoralNet data we can use the analogous `CoralNetDataset` class that has the same functionality.
-
-```python
-from mermaidseg.datasets.dataset import MermaidDataset, CoralNet
-from mermaidseg.datasets.utils import get_coralnet_sources
-
-# Mermaid
-dataset_mermaid = MermaidDataset()
-idx = 0
-image, mask, annotations = dataset[idx] # This function returns the image, annotations alongside a semantic segmentation mask.
-
-
-# CoralNet
-all_coralnet_sources = get_coralnet_sources()
-dataset_coralnet = CoralNet(source_ids = all_coralnet_sources)
-idx = 0
-image, mask, annotations = dataset[idx] # This function returns the image, annotations alongside a semantic segmentation mask.
-```
-
-The image and annotations can be visualized based on their benthic attributes and growth forms as such:
-
-```python
-from matplotlib import pyplot as plt
-from mermaidseg.visualization import get_legend_elements
-
-fig, ax = plt.subplots(figsize = (8.5, 7), layout = "tight")
-plt.imshow(image)
-for i, annotation in annotations.iterrows():
-    plt.scatter(annotation['col'], annotation['row'],
-                color=annotation["benthic_color"],
-                marker=annotation["growth_form_marker"],
-                s=80,
-                alpha=0.8)
-
-benthic_legend_elements, growth_legend_elements = get_legend_elements(annotations)
-
-first_legend = plt.legend(handles=benthic_legend_elements, bbox_to_anchor=(0.99, 1),
-                            loc='upper left', title='Benthic\nAttributes')
-plt.gca().add_artist(first_legend)
-plt.legend(handles=growth_legend_elements, bbox_to_anchor=(0.99, 0.4),
-          loc='center left', title='Growth\nForms')
-
-plt.axis("off")
-plt.show()
-```
+If using `.env` with direnv, ensure you run `direnv allow` and restart your shell so it picks up the token.
 
 ### Segmentation Models
 Concept-bottleneck models are trained with `nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py`
 (run from `nbs/`; `--training-config`, `--model-config`, `--data-config` and `--resolution`
-select the experiment). On the CSAIL cluster, `slurm/train.sbatch` wraps it, and one launcher
-per paper experiment submits the runs:
+select the experiment). On the CSAIL cluster, `slurm/train.sbatch` wraps it.
 
-| Launcher | Runs |
-|----------|------|
-| `slurm/launch_lossw.sh` | per-pixel / per-image loss-weight sweep |
-| `slurm/launch_duration.sh` | 1M-step constant-LR peak run and its 25k cooldowns |
-| `slurm/launch_hires.sh` | 256-768 px fine-tunes of the 275k + 25k checkpoint |
-| `slurm/launch_taxloss.sh` | KL, partial-label and tree-distance taxonomy losses |
-| `slurm/launch_build_profiles.sh`, `slurm/launch_data_experiments.sh` | data-size and sparsified-data experiments |
-| `slurm/launch_vitsize.sh` | ViT-S / B / H+ encoders |
-| `slurm/launch_final.sh` | final model on train + val, then its 768 px fine-tune |
-
-Every launcher is idempotent and accepts `--dry-run`.
+`slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px
+fine-tune. It is idempotent and accepts `--dry-run`.
 
 `scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
-few-shot probes and the validation loss). `slurm/launch_evals.sh` runs it on every experiment
-checkpoint, and `scripts/compile_evals.py` collects the results into `eval_out/compiled.csv`.
+few-shot probes and the validation loss).
 
 ### Running Tests
 
@@ -153,52 +85,11 @@ uv run pytest tests/test_logger.py -v
 
 ## Model Serialization Strategy
 
-We use a **hybrid approach** to model serialization, balancing safety, compatibility, and practical training needs:
+Training checkpoints use `torch.save` (pickle): the full state (model + optimizer + scheduler) is needed to resume. Load only checkpoints you trust, because pickle can execute code on load.
 
-| Use Case | Format | Rationale |
-|----------|--------|-----------|
-| **Training Checkpoints** | `torch.save` (pickle) | Full state (model + optimizer + scheduler) needed for resume |
-| **MLflow Model Registry** | TorchScript graph (`export_model=True`) | Safer than pickle; prevents arbitrary code execution on load |
-| **Published/Shared Models** | SafeTensors | Secure format for public distribution; zero-copy memory mapping |
-
-### Why We Moved Away from Pickle-Only
-
-**Security Risk**: Pickle files can execute arbitrary Python code during deserialization. Loading an untrusted pickle file is equivalent to running untrusted code.
-
-**Our Mitigation Strategy**:
-1. **Internal Checkpoints** → Still use pickle (trusted, same-machine use only)
-2. **Registry/Deployment** → Use TorchScript graph export (safe for inference)
-3. **External Sharing** → Use SafeTensors (cannot execute code; fast mmap loading)
-
-### Exporting Models for Sharing
-
-```python
-from mermaidseg.logger import Logger
-
-# After training, export to SafeTensors for publication
-logger.save_safetensors_for_publish(
-    meta_model_run=meta_model,
-    epoch=best_epoch,
-    metrics_dict={"accuracy": best_acc},
-    artifact_path="publish/v1"
-)
-```
-
-SafeTensors format ensures:
-- No arbitrary code execution (unlike pickle)
-- Fixed tensor shapes (prevents shape confusion attacks)
-- Fast zero-copy memory mapping
-- Self-contained metadata
 ### Concept Bottleneck Models
 
-When using concept bottleneck models, the evaluation metrics use a hard-coded `num_classes=3` parameter. This is intentional and correct for the current implementation.
-
-**Why 3 classes?** Each concept in the bottleneck can have exactly three states:
-- **True (1)**: Concept is present
-- **False (0)**: Concept is absent
-- **Masked**: Concept is not evaluated for this pixel
-
-This ternary classification is reflected in the `F1Score` metric used for concept evaluation in `mermaidseg/model/eval.py`. Future implementations may explore multi-class concept labels (e.g., coral families), but this would require architectural changes across the codebase.
+Non-taxonomic concept metrics in `mermaidseg/model/eval.py` are multiclass `Accuracy` with a hard-coded `num_classes=3` and `ignore_index=0`: class 0 is excluded from the metric, and the other two classes are the concept's two states. Taxonomic concepts use `Accuracy` with a per-concept class count derived from `concept_value2id`.
 
 ## DSLP Issue Workflow
 
