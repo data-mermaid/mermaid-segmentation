@@ -5,7 +5,7 @@ import faulthandler
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any, cast
 
 import numpy as np
@@ -50,6 +50,17 @@ logger = logging.getLogger(__name__)
 _BatchLoader = DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
 
 _BATCH_LOSS_KEY = "__batch_loss__"
+
+
+def _sum_components(parts: Iterable[Mapping[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Key-wise float64 sum of scalar tensors; a key missing from a part adds nothing."""
+    totals: dict[str, torch.Tensor] = {}
+    for part in parts:
+        for key, value in part.items():
+            value = value.detach().double()
+            totals[key] = totals[key] + value if key in totals else value
+    return totals
+
 
 SLOW_FETCH_WARN_SEC = 60.0
 
@@ -589,7 +600,7 @@ class MetaModel:
         source_labels: torch.Tensor | None = None,
         return_maps: bool = True,
         source_rows: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, dict[str, float]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, dict[str, torch.Tensor]]:
         """Perform batch prediction and compute the loss.
 
         Args:
@@ -617,7 +628,7 @@ class MetaModel:
         loss = None
         outputs = None
         concept_outputs = None
-        loss_components: dict[str, float] = {}
+        loss_components: dict[str, torch.Tensor] = {}
 
         if self.distributed:
             if source_labels is None:
@@ -709,7 +720,10 @@ class MetaModel:
                 ``global_step`` and the LR schedule have advanced.
 
         Returns:
-            A 3-tuple of ``(average_loss, metric_results, timing)``.
+            A 3-tuple of ``(average_loss, metric_results, timing)``. The data, forward
+            and backward totals in ``timing`` are host-side wall times: they do not
+            wait for queued GPU work, so asynchronous kernels are charged to whichever
+            phase next blocks on the device.
         """
         self.model.train()
         if self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
@@ -719,22 +733,16 @@ class MetaModel:
         if iterations_per_train_epoch <= 0:
             raise ValueError("iterations_per_train_epoch must be > 0.")
 
-        running_loss = 0.0
-        running_loss_components: dict[str, float] = {}
+        # Per-update losses and components stay on the device until they are logged
+        # or the epoch ends; the batch loss rides along under ``_BATCH_LOSS_KEY``.
+        running: dict[str, torch.Tensor] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
-        use_cuda = self.device != "cpu" and torch.cuda.is_available()
-        # The phase barriers only make the data/forward/backward totals exact.
-        # With distributed they would also stall the other GPUs, so those
-        # totals are host-side times there; perf/step_sec stays wall time.
-        sync_timing = use_cuda and not self.distributed
 
         data_time_total = 0.0
         forward_time_total = 0.0
         backward_time_total = 0.0
         num_samples = 0
 
-        if use_cuda:
-            torch.cuda.synchronize()
         batch_end = time.perf_counter()
 
         if self._train_loader is not train_loader:
@@ -772,7 +780,7 @@ class MetaModel:
             step_data_wait = 0.0
             self.optimizer.zero_grad(set_to_none=True)
             micro_losses: list[torch.Tensor] = []
-            micro_components: list[dict[str, float]] = []
+            micro_components: list[dict[str, torch.Tensor]] = []
             window_failed = False
 
             for _micro in range(self.grad_accum_steps):
@@ -794,8 +802,6 @@ class MetaModel:
                         int(self.global_step) + 1,
                     )
 
-                if sync_timing:
-                    torch.cuda.synchronize()
                 data_time_total += time.perf_counter() - batch_end
 
                 images, source_labels, *extra = data
@@ -842,8 +848,6 @@ class MetaModel:
                 # Distributed: gradients are all-reduced once, in the window's last backward.
                 sync_grads = _micro == self.grad_accum_steps - 1
                 with self._grad_sync_context(sync_grads):
-                    if sync_timing:
-                        torch.cuda.synchronize()
                     forward_start = time.perf_counter()
                     loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
                         images,
@@ -853,13 +857,13 @@ class MetaModel:
                         return_maps=record_metrics,
                         source_rows=source_rows,
                     )
-                    if sync_timing:
-                        torch.cuda.synchronize()
                     forward_time_total += time.perf_counter() - forward_start
                     assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
 
                     # Distributed: skip the window if any rank's shard loss is non-finite,
                     # as the single-process path does when the mean over shards is.
+                    # The per-microbatch finite check is a host sync that cannot move to a
+                    # logging interval: a non-finite window must not reach the optimizer.
                     finite = (
                         all_ranks_finite(loss) if self.distributed else bool(torch.isfinite(loss))
                     )
@@ -875,12 +879,8 @@ class MetaModel:
                         batch_end = time.perf_counter()
                         break
 
-                    if sync_timing:
-                        torch.cuda.synchronize()
                     backward_start = time.perf_counter()
                     self._accumulate_loss(loss)
-                    if sync_timing:
-                        torch.cuda.synchronize()
                     backward_time_total += time.perf_counter() - backward_start
 
                 micro_losses.append(loss.detach())
@@ -903,33 +903,19 @@ class MetaModel:
                     target_concepts,
                 )
 
-                if sync_timing:
-                    torch.cuda.synchronize()
                 batch_end = time.perf_counter()
 
             if window_failed or not micro_losses:
                 self._abort_accumulation()
-                if sync_timing:
-                    torch.cuda.synchronize()
                 batch_end = time.perf_counter()
                 continue
 
             n_micro = len(micro_losses)
-            batch_loss = sum(torch.stack(micro_losses).double().tolist()) / n_micro
-            mean_components: dict[str, float] = {}
-            for comps in micro_components:
-                for key, value in comps.items():
-                    mean_components[key] = mean_components.get(key, 0.0) + value
-            mean_components = {key: value / n_micro for key, value in mean_components.items()}
-            if self.distributed:
-                # Mean over ranks of the per-rank window means: the mean over shards.
-                mean_components = reduce_components(
-                    {_BATCH_LOSS_KEY: batch_loss, **mean_components}
-                )
-                batch_loss = mean_components.pop(_BATCH_LOSS_KEY)
+            window_sum = _sum_components(
+                [{_BATCH_LOSS_KEY: loss_i} for loss_i in micro_losses] + micro_components
+            )
+            window_mean = {key: value / n_micro for key, value in window_sum.items()}
 
-            if sync_timing:
-                torch.cuda.synchronize()
             backward_start = time.perf_counter()
             # Decay starts on the update after warmup finishes. Stepping both on the
             # warmup boundary would consume a decay step while the LR is still rising.
@@ -942,30 +928,31 @@ class MetaModel:
                 self._step_warmup_scheduler()
                 if warmup_done:
                     self._step_iteration_scheduler()
-            if sync_timing:
-                torch.cuda.synchronize()
             backward_time_total += time.perf_counter() - backward_start
 
             if not step_applied:
                 batch_end = time.perf_counter()
                 continue
 
-            running_loss += batch_loss
-            for key, value in mean_components.items():
-                running_loss_components[key] = running_loss_components.get(key, 0.0) + value
+            running = _sum_components([running, window_mean])
 
-            if run_logger is not None and self.global_step % max(log_interval, 1) == 0:
-                run_logger.log(
-                    {
-                        "train/batch_loss": batch_loss,
-                        **{f"train/batch_{key}": value for key, value in mean_components.items()},
-                        # Host wall time for this update, and the part of it spent
-                        # blocked on the train loader.
-                        "perf/step_sec": time.perf_counter() - step_start,
-                        "perf/data_wait_sec": step_data_wait,
-                    },
-                    step=self.global_step,
-                )
+            # Distributed: every rank joins the reduction, whether or not it has a logger.
+            if self.global_step % max(log_interval, 1) == 0 and (
+                run_logger is not None or self.distributed
+            ):
+                logged = reduce_components(window_mean)
+                if run_logger is not None:
+                    run_logger.log(
+                        {
+                            "train/batch_loss": logged.pop(_BATCH_LOSS_KEY),
+                            **{f"train/batch_{key}": value for key, value in logged.items()},
+                            # Host wall time for this update, and the part of it spent
+                            # blocked on the train loader.
+                            "perf/step_sec": time.perf_counter() - step_start,
+                            "perf/data_wait_sec": step_data_wait,
+                        },
+                        step=self.global_step,
+                    )
             if on_optimizer_step is not None:
                 on_optimizer_step(self)
             batch_end = time.perf_counter()
@@ -981,10 +968,12 @@ class MetaModel:
             metric_results.update(evaluator.compute_concept_metric_results())
 
         denom = n_updates if n_updates > 0 else 1
-        last_loss = running_loss / denom
-        avg_loss_components = {k: v / denom for k, v in running_loss_components.items()}
-        for k, v in avg_loss_components.items():
-            metric_results[f"loss/{k}"] = v
+        # Summed per-update means are linear in the rank mean, so one reduction here
+        # equals the mean over ranks of each update's mean.
+        epoch_totals = reduce_components(running)
+        last_loss = epoch_totals.pop(_BATCH_LOSS_KEY, 0.0) / denom
+        for k, v in epoch_totals.items():
+            metric_results[f"loss/{k}"] = v / denom
         timing = {
             "data_loading_sec": data_time_total,
             "forward_sec": forward_time_total,
@@ -1006,8 +995,7 @@ class MetaModel:
         if iterations_per_val_epoch <= 0:
             raise ValueError("iterations_per_val_epoch must be > 0.")
 
-        running_loss = 0.0
-        running_loss_components: dict[str, float] = {}
+        running: dict[str, torch.Tensor] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 
         if self._val_loader is not val_loader:
@@ -1047,21 +1035,16 @@ class MetaModel:
                 return_maps=evaluator is not None,
             )
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
-            running_loss += loss.item()
-            for k, v in loss_components.items():
-                running_loss_components[k] = running_loss_components.get(k, 0.0) + v
+            running = _sum_components([running, {_BATCH_LOSS_KEY: loss}, loss_components])
             del loss
 
             self._record_batch_metrics(
                 evaluator, outputs, target_labels, concept_outputs, target_concepts
             )
 
-        if self.distributed:
-            # Mean over ranks of the per-rank sums: the per-batch mean over shards, summed.
-            running_loss_components = reduce_components(
-                {_BATCH_LOSS_KEY: running_loss, **running_loss_components}
-            )
-            running_loss = running_loss_components.pop(_BATCH_LOSS_KEY)
+        # Distributed: the mean over ranks of the per-rank sums is the per-batch mean over
+        # shards, summed.
+        epoch_totals = reduce_components(running)
 
         # Distributed: torchmetrics sums each metric's state over ranks in compute().
         if evaluator is not None:
@@ -1074,10 +1057,7 @@ class MetaModel:
 
             metric_results.update(evaluator.compute_concept_metric_results())
 
-        last_loss = running_loss / iterations_per_val_epoch
-        avg_loss_components = {
-            k: v / iterations_per_val_epoch for k, v in running_loss_components.items()
-        }
-        for k, v in avg_loss_components.items():
-            metric_results[f"loss/{k}"] = v
+        last_loss = epoch_totals.pop(_BATCH_LOSS_KEY, 0.0) / iterations_per_val_epoch
+        for k, v in epoch_totals.items():
+            metric_results[f"loss/{k}"] = v / iterations_per_val_epoch
         return last_loss, metric_results

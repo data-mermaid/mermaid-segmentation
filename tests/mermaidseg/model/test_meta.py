@@ -312,3 +312,69 @@ def test_train_epoch_after_validation_returns_the_model_to_train_mode(
     seen = _record_encoder_modes(meta)
     meta.train_epoch(_loader(), evaluator=None, epoch=0)
     assert seen == [{"training": True, "inference": False}]
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, object], int]] = []
+
+    def log(self, metrics: dict[str, object], step: int) -> None:
+        self.calls.append((metrics, step))
+
+
+def _record_micro_batches(meta) -> list[tuple[float, dict[str, float]]]:
+    """Record each microbatch's loss and components as floats, in call order."""
+    records: list[tuple[float, dict[str, float]]] = []
+    real = meta.batch_predict_loss
+
+    def _recording(*args, **kwargs):
+        loss, outputs, concepts, components = real(*args, **kwargs)
+        records.append((float(loss.detach()), {k: float(v) for k, v in components.items()}))
+        return loss, outputs, concepts, components
+
+    meta.batch_predict_loss = _recording
+    return records
+
+
+def _window_means(records, accum: int, update: int) -> tuple[float, dict[str, float]]:
+    window = records[update * accum : (update + 1) * accum]
+    keys = window[0][1].keys()
+    means = {k: sum(c[k] for _, c in window) / accum for k in keys}
+    return sum(loss for loss, _ in window) / accum, means
+
+
+def test_train_epoch_logs_float_window_means_only_at_the_log_interval(
+    minimal_config, make_meta_model
+):
+    cfg = _standard_cfg(minimal_config, iterations_per_train_epoch=4, grad_accum_steps=2)
+    meta = make_meta_model(cfg, run_name="log-interval")
+    records = _record_micro_batches(meta)
+    run_logger = _RecordingLogger()
+    images, labels = _images_labels(16)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+
+    meta.train_epoch(loader, run_logger=run_logger, log_interval=2, epoch=0)
+
+    assert [step for _, step in run_logger.calls] == [2, 4]
+    for metrics, step in run_logger.calls:
+        assert all(isinstance(v, float) for k, v in metrics.items() if k.startswith("train/"))
+        loss, means = _window_means(records, 2, step - 1)
+        assert metrics["train/batch_loss"] == pytest.approx(loss, rel=1e-6)
+        for key in ("classification", "concepts"):
+            assert metrics[f"train/batch_{key}"] == pytest.approx(means[key], rel=1e-6)
+
+
+def test_train_epoch_epoch_components_average_the_update_means(minimal_config, make_meta_model):
+    cfg = _standard_cfg(minimal_config, iterations_per_train_epoch=4, grad_accum_steps=2)
+    meta = make_meta_model(cfg, run_name="epoch-components")
+    records = _record_micro_batches(meta)
+    images, labels = _images_labels(16)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+
+    last_loss, metrics, _ = meta.train_epoch(loader, epoch=0)
+
+    per_update = [_window_means(records, 2, u) for u in range(4)]
+    assert last_loss == pytest.approx(sum(loss for loss, _ in per_update) / 4, rel=1e-6)
+    for key in ("classification", "concepts"):
+        expected = sum(means[key] for _, means in per_update) / 4
+        assert metrics[f"loss/{key}"] == pytest.approx(expected, rel=1e-6, abs=1e-9)

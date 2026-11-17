@@ -13,7 +13,8 @@ import os
 import socket
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -24,6 +25,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, TensorDataset
 
 import mermaidseg.model.meta as meta_module
+import mermaidseg.model.models as models_module
 from mermaidseg.model.data_parallel import DDPLossStep, ShardStep
 from mermaidseg.model.distributed import (
     DistContext,
@@ -35,7 +37,14 @@ from mermaidseg.model.distributed import (
     reduce_components,
     require_world_size,
 )
-from tests.conftest import IMAGE_SIZE
+from tests.conftest import (
+    CBM_CONCEPT_VALUE2ID,
+    CBM_NUM_CONCEPTS,
+    IMAGE_SIZE,
+    NUM_CLASSES,
+    cbm_concept_lookup,
+    cbm_test_config,
+)
 
 _NUM_SOURCE = 9
 _NUM_CONCEPTS = 5
@@ -694,3 +703,76 @@ def test_resume_at_an_epoch_boundary_then_validate_then_train(minimal_config, ma
         assert torch.isfinite(torch.tensor(loss))
     finally:
         dist.destroy_process_group()
+
+
+class _MockEncoder(nn.Module):
+    """Tiny DINOv3 stand-in with a ``q_proj`` LoRA target, as ``mock_dinov3_encoder`` builds."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(
+            hidden_size=16, patch_size=14, num_hidden_layers=4, num_register_tokens=4
+        )
+        self.embed = nn.Linear(3, 16)
+        self.q_proj = nn.Linear(16, 16)
+
+    def forward(self, pixel_values: torch.Tensor, **_: object) -> SimpleNamespace:
+        patches = nn.functional.avg_pool2d(pixel_values, 14).flatten(2).transpose(1, 2)
+        tokens = self.embed(patches)
+        prefix = tokens.new_zeros(tokens.shape[0], 5, tokens.shape[2])
+        states = self.q_proj(torch.cat([prefix, tokens], dim=1))
+        return SimpleNamespace(hidden_states=(states,) * 5)
+
+
+class _StepLogger:
+    def __init__(self) -> None:
+        self.steps: list[int] = []
+
+    def log(self, metrics: dict[str, object], step: int) -> None:
+        self.steps.append(step)
+
+
+def _distributed_meta_model(world_size: int) -> meta_module.MetaModel:
+    cfg = cbm_test_config()
+    cfg.training.distributed = True
+    cfg.training.world_size = world_size
+    cfg.training.grad_accum_steps = 2
+    cfg.training.iterations_per_train_epoch = 4
+    cfg.training.iterations_per_val_epoch = 2
+    torch.manual_seed(0)
+    auto_model = SimpleNamespace(from_pretrained=lambda *_args, **_kwargs: _MockEncoder())
+    with patch.object(models_module, "AutoModel", auto_model):
+        return meta_module.MetaModel(
+            run_name=f"ddp-train-validate-{world_size}",
+            num_classes=NUM_CLASSES,
+            model_kwargs=cfg.model,
+            training_kwargs=cfg.training,
+            device="cpu",
+            num_concepts=CBM_NUM_CONCEPTS,
+            concept_value2id=cast("dict[str, dict[str, list[int]]]", CBM_CONCEPT_VALUE2ID),
+            source_to_concepts_lookup=cbm_concept_lookup(),
+        )
+
+
+def _train_then_validate_worker(rank: int, world_size: int, port: int, queue) -> None:
+    _init_gloo(rank, world_size, port)
+    try:
+        meta = _distributed_meta_model(world_size)
+        run_logger = _StepLogger() if rank == 0 else None
+        generator = torch.Generator().manual_seed(rank)
+        images = torch.randn(16, 3, *IMAGE_SIZE, generator=generator)
+        labels = torch.randint(1, NUM_CLASSES, (16, *IMAGE_SIZE), generator=generator)
+        loader: DataLoader[Any] = DataLoader(TensorDataset(images, labels), batch_size=2)
+        meta.train_epoch(loader, run_logger=run_logger, log_interval=2, epoch=0)
+        meta.validation_epoch(loader)
+        logged = None if run_logger is None else run_logger.steps
+        queue.put((rank, {"global_step": meta.global_step, "logged": logged}))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_logger_only_on_rank_zero_trains_and_validates_without_desync():
+    """Every rank joins the log-interval reduction, or rank 0 blocks in it alone."""
+    results = _spawn(_train_then_validate_worker, 2)
+    assert [payload["global_step"] for payload in results] == [4, 4]
+    assert [payload["logged"] for payload in results] == [[2, 4], None]

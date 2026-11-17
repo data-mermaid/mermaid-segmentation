@@ -32,7 +32,7 @@ def apply_concept_bottleneck_loss(
     taxonomic_loss: nn.Module | None,
     target_labels: torch.Tensor,
     target_concepts: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     """Compute concept and taxonomy loss terms for one concept-bottleneck batch.
 
     This is the loss body of ``MetaModel.batch_predict_loss``. The single-GPU
@@ -163,7 +163,7 @@ class ShardStep(nn.Module):
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
-        dict[str, float],
+        dict[str, torch.Tensor],
     ]:
         """Run lookup, forward, and loss on this shard.
 
@@ -234,7 +234,7 @@ class DDPLossStep(nn.Module):
                 torch.Tensor | None,
                 torch.Tensor | None,
                 torch.Tensor | None,
-                dict[str, float],
+                dict[str, torch.Tensor],
             ]
             | None
         ) = None

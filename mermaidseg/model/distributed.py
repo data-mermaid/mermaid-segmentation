@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import zlib
-from collections.abc import Callable, Iterator, Sized
+from collections.abc import Callable, Iterator, Mapping, Sized
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -19,6 +19,7 @@ import torch.distributed as dist
 from torch.utils.data import BatchSampler, RandomSampler, Sampler
 
 from mermaidseg.model.data_parallel import require_divisible_batch
+from mermaidseg.model.loss import components_to_floats, stack_components
 
 
 @dataclass(frozen=True)
@@ -224,14 +225,16 @@ def _key_fingerprint(keys: list[str]) -> int:
     return zlib.crc32("\n".join(keys).encode()) + (len(keys) << 32)
 
 
-def reduce_components(values: dict[str, float]) -> dict[str, float]:
-    """Mean of each logged value over ranks, in float64.
+def reduce_components(values: Mapping[str, torch.Tensor | float]) -> dict[str, float]:
+    """Mean of each logged value over ranks, in float64, as host floats.
+
+    Takes scalar tensors or floats and moves them to the host in one transfer.
 
     Every rank must pass the same keys. A fingerprint of the sorted keys is
     compared first, so a mismatch raises instead of reducing misaligned values.
     """
     if not is_distributed():
-        return dict(values)
+        return components_to_floats(values)
     keys = sorted(values)
     device = _collective_device()
     fingerprint = _key_fingerprint(keys)
@@ -241,6 +244,6 @@ def reduce_components(values: dict[str, float]) -> dict[str, float]:
         raise RuntimeError(f"ranks logged different loss components; this rank has {keys}.")
     if not keys:
         return {}
-    stacked = torch.tensor([float(values[key]) for key in keys], dtype=torch.float64, device=device)
+    stacked = stack_components([values[key] for key in keys], device)
     reduced = all_reduce_mean(stacked).tolist()
     return dict(zip(keys, reduced, strict=True))

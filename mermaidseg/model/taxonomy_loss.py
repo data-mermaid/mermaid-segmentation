@@ -190,7 +190,7 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
         self,
         concept_logits: torch.Tensor,
         target_labels: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Sum of the adjacent-pair KL terms, plus per-pair logging values.
 
         Args:
@@ -199,13 +199,9 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
         """
         mask = torch.ones_like(target_labels, dtype=torch.bool)
 
-        loss_components: dict[str, float] = {}
+        loss_components: dict[str, torch.Tensor] = {}
         total = concept_logits.new_zeros(())
         for r in range(len(self.slices) - 1):
-            if not mask.any():
-                loss_components[f"kl/{self._pair_name(r)}"] = 0.0
-                continue
-
             coarse = self._rank_logits(concept_logits, r, getattr(self, f"coarse_keep_{r}"))
             fine = self._rank_logits(concept_logits, r + 1, getattr(self, f"fine_keep_{r}"))
             log_p = coarse.log_softmax(dim=1)
@@ -216,7 +212,7 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
             pair_loss = reduce_masked_loss(
                 kl, mask, per_pixel_loss_weight=0.0, per_image_loss_weight=1.0
             )
-            loss_components[f"kl/{self._pair_name(r)}"] = pair_loss.item()
+            loss_components[f"kl/{self._pair_name(r)}"] = pair_loss.detach()
             total = total + pair_loss
         return total, loss_components
 
@@ -263,21 +259,21 @@ class TaxonomicLoss(torch.nn.Module):
         self,
         concept_logits: torch.Tensor,
         target_labels: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Weighted taxonomic term, plus its logging values.
 
         Args:
             concept_logits: Raw concept logits ``(B, C, H, W)``; taxonomic ranks come first.
             target_labels: Target-space labels ``(B, H, W)``; give the KL pixel mask's shape.
         """
-        loss_components: dict[str, float] = {}
+        loss_components: dict[str, torch.Tensor] = {}
         total = concept_logits.new_zeros(())
 
         if self.coherence_loss is not None:
             kl_value, kl_components = self.coherence_loss(concept_logits, target_labels)
             kl_value = kl_value / self.num_ranks
             loss_components.update(kl_components)
-            loss_components["kl"] = kl_value.item()
+            loss_components["kl"] = kl_value.detach()
             total = total + self.kl_weight * kl_value
 
         return total, loss_components

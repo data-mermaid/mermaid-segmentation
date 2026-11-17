@@ -44,6 +44,7 @@ from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local
 from mermaidseg.evaluation.reporting import write_json
 from mermaidseg.io import setup_config
 from mermaidseg.model.data_parallel import apply_concept_bottleneck_loss
+from mermaidseg.model.loss import components_to_floats
 from mermaidseg.run_setup import (
     DEFAULT_SCHEMA_CONFIG,
     build_meta_model,
@@ -234,7 +235,7 @@ def evaluate_val_loss(
                     target_labels,
                     target_concepts,
                 )
-                acc.add({TOTAL_KEY: loss.item(), **components})
+                acc.add(components_to_floats({TOTAL_KEY: loss, **components}))
         per_dataset[dataset_name] = acc.means()
         overall.merge(acc)
         logger.info(
