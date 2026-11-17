@@ -1,4 +1,5 @@
 */model_checkpoints/*
+/model/
 model_runs/*
 data/*
 segmentation/*
@@ -8,8 +9,17 @@ nbs/mlruns/*
 nbs/model_checkpoints/*
 nbs/profiler_logs/*
 */wandb/*
+eval_out/*
 nbs_tmp/*
 scraping/source*.csv
+logs/*
+claude/*
+inat/data*
+results_tmp/*
+visualizations/*
+dataset_stats/*
+coralnet_source_report/
+coralnet_check/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -157,6 +167,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Locally installed CLI tools (e.g. uv, via `UV_INSTALL_DIR=./bin`)
+/bin/
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -230,3 +243,10 @@ __marimo__/
 
 # Gradio runtime artifacts (local TLS cert, etc.)
 .gradio/
+
+# iNat analysis outputs (regenerable)
+inat/outputs/
+
+# macOS / local smoke output
+.DS_Store
+.smoke/

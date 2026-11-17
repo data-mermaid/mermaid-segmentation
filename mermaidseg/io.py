@@ -1,8 +1,10 @@
+"""Configuration loading, merging, and command-line overrides for training runs."""
+
 import argparse
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import albumentations as A
 import yaml
@@ -11,7 +13,8 @@ import yaml
 class ConfigDict(dict):
     """Dictionary subclass with attribute-style access."""
 
-    def __init__(self, dictionary: Mapping[str, Any] | None = None, **kwargs: Any):
+    def __init__(self, dictionary: Mapping[str, Any] | None = None, **kwargs: Any) -> None:
+        """Initialize from an optional mapping and keywords, wrapping nested dicts."""
         super().__init__()
         if dictionary is not None:
             self.update(dictionary)
@@ -31,18 +34,26 @@ class ConfigDict(dict):
         return value
 
     def __setitem__(self, key: str, value: Any) -> None:
+        """Set an item, wrapping mappings as ``ConfigDict``."""
         super().__setitem__(key, self._wrap(value))
 
     def __getattr__(self, attr: str) -> Any:
+        """Return the item named ``attr``.
+
+        Raises:
+            AttributeError: If the key is missing.
+        """
         try:
             return self[attr]
         except KeyError as exc:
             raise AttributeError(attr) from exc
 
     def __setattr__(self, key: str, value: Any) -> None:
+        """Set the item named ``key``."""
         self[key] = value
 
     def update(self, *args: Any, **kwargs: Any) -> None:
+        """Merge mappings and keyword entries, recursively merging nested mappings."""
         for mapping in args:
             for key, value in dict(mapping).items():
                 current = self.get(key)
@@ -62,6 +73,7 @@ class ConfigDict(dict):
                 self[key] = value
 
     def copy(self) -> "ConfigDict":
+        """Return a deep copy."""
         return ConfigDict(deepcopy(dict(self)))
 
 
@@ -101,119 +113,149 @@ def get_parser() -> argparse.ArgumentParser:
     """Create and configure an argument parser for semantic segmentation training."""
     parser = argparse.ArgumentParser(description="Semantic Segmentation Run")
 
-    # model and dataset
     parser.add_argument("--run-name", type=str)
-    parser.add_argument("--model", type=str, help="model name")
-
-    # training hyper params
     parser.add_argument("--batch-size", type=int, help="batch size")
-    parser.add_argument("--epochs", type=int, help="number of epochs to train")
-    parser.add_argument("--lr", type=float, help="learning rate")
-    parser.add_argument(
-        "--iterations-per-train-epoch", type=int, help="iterations per training epoch"
-    )
-    parser.add_argument(
-        "--iterations-per-val-epoch", type=int, help="iterations per validation epoch"
-    )
-
-    # checkpoint and log
-    parser.add_argument("--model-checkpoint", type=str, help="path to model checkpoint")
-
-    parser.add_argument("--log-epochs", type=int, help="log every log-epochs")
-
-    parser.add_argument("--config", type=str, help="path to config file")
     return parser
 
 
 def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> ConfigDict:
     """Update configuration with command-line overrides."""
     _set_config_value(config, ("run_name",), getattr(args, "run_name", None))
-    _set_config_value(config, ("model", "name"), getattr(args, "model", None))
-    _set_config_value(config, ("model", "checkpoint"), getattr(args, "model_checkpoint", None))
-    _set_config_value(config, ("training", "epochs"), getattr(args, "epochs", None))
-    _set_config_value(config, ("training", "optimizer", "lr"), getattr(args, "lr", None))
     _set_config_value(config, ("training", "batch_size"), getattr(args, "batch_size", None))
-    _set_config_value(
-        config,
-        ("training", "iterations_per_train_epoch"),
-        getattr(args, "iterations_per_train_epoch", None),
-    )
-    _set_config_value(
-        config,
-        ("training", "iterations_per_val_epoch"),
-        getattr(args, "iterations_per_val_epoch", None),
-    )
-    _set_config_value(config, ("logger", "log_epochs"), getattr(args, "log_epochs", None))
     return config
 
 
-def preprocess_data_config(data_cfg_orig):
+_RESERVED_DATA_KEYS = frozenset({"local_cache_dir", "local_cache_write_through"})
+_TRANSFORMS_BEFORE_NORMALIZE = frozenset({"ColorJitter"})
+
+
+def _order_transform_items(items: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    """Place color-jitter transforms before ``Normalize`` when a merge appends them."""
+    normalize_idx = next((i for i, (name, _) in enumerate(items) if name == "Normalize"), None)
+    if normalize_idx is None:
+        return items
+
+    deferred = [
+        (name, params)
+        for i, (name, params) in enumerate(items)
+        if i > normalize_idx and name in _TRANSFORMS_BEFORE_NORMALIZE
+    ]
+    if not deferred:
+        return items
+
+    ordered: list[tuple[str, Any]] = []
+    for name, params in items:
+        if name in _TRANSFORMS_BEFORE_NORMALIZE and (name, params) in deferred:
+            continue
+        if name == "Normalize":
+            ordered.extend(deferred)
+        ordered.append((name, params))
+    return ordered
+
+
+def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:
     """Normalize the split data config (configs/data_config.yaml).
 
     Expands the per-dataset ``default`` block into every dataset that does not override it, then
     compiles each split's ``augmentation``/``transform`` spec into an ``albumentations.Compose``
-    object.
+    object. Reserved keys (e.g. ``local_cache_dir``) under ``data`` are left untouched.
     """
     data_cfg = data_cfg_orig.copy()
     if "default" in data_cfg.data:
         default = data_cfg.data.pop("default", None)
         for dataset_name in list(data_cfg.data.keys()):
+            if dataset_name in _RESERVED_DATA_KEYS:
+                continue
             dataset_tmp = data_cfg.data.get(dataset_name, None)
             data_cfg.data[dataset_name] = default.copy() if default is not None else {}
             if dataset_tmp is not None:
                 data_cfg.data[dataset_name].update(dataset_tmp)
 
     for dataset_name in data_cfg.data:
+        if dataset_name in _RESERVED_DATA_KEYS:
+            continue
         for split_name in data_cfg.data[dataset_name]:
             split_cfg = data_cfg.data[dataset_name][split_name]
             # Use whichever key is present (only one should appear): 'augmentation' or 'transform'
             key = next((k for k in ("augmentation", "transform") if k in split_cfg), None)
             if key:
                 transform_spec = split_cfg.pop(key)
+                transform_items = _order_transform_items(list(transform_spec.items()))
                 split_cfg.transform = A.Compose(
-                    [getattr(A, name)(**params) for name, params in transform_spec.items()]
+                    [getattr(A, name)(**params) for name, params in transform_items]
                 )
 
     return data_cfg
 
 
-def setup_config(config_path_dict: dict[str, str | None]) -> ConfigDict:
+def apply_resolution(spec: Any, resolution: int) -> Any:
+    """Set every ``RandomResizedCrop`` size and ``Resize`` width/height in a raw spec.
+
+    Walks the uncompiled YAML mapping in place, so it must run before
+    ``preprocess_data_config`` turns the transform specs into albumentations objects.
+    ``SmallestMaxSize`` and every other transform are left unchanged.
+    """
+    if isinstance(spec, Mapping):
+        for key, value in spec.items():
+            if key == "RandomResizedCrop" and isinstance(value, Mapping):
+                cast("MutableMapping[str, Any]", value)["size"] = [resolution, resolution]
+            elif key == "Resize" and isinstance(value, Mapping):
+                cast("MutableMapping[str, Any]", value)["width"] = resolution
+                cast("MutableMapping[str, Any]", value)["height"] = resolution
+            else:
+                apply_resolution(value, resolution)
+    elif isinstance(spec, list):
+        for item in spec:
+            apply_resolution(item, resolution)
+    return spec
+
+
+def setup_config(
+    config_path_dict: dict[str, str | None], resolution: int | None = None
+) -> ConfigDict:
     """Load and merge the split config files into a single ConfigDict.
 
     Takes a mapping of section name -> YAML path, e.g.::
 
         {"data": "configs/data_config.yaml",
-         "model": "configs/model_config_cbm.yaml",
-         "training": "configs/training_config_cbm.yaml",
+         "model": "configs/model_config_cbm_dpt_lora_vitl.yaml",
+         "training": "configs/training_config_cbm_100k.yaml",
          "logger": "configs/logger_config.yaml"}
 
     Each file is loaded under its section key (a file may already wrap its
     contents in that key, or not — both are accepted). The data config is
     additionally normalized via ``preprocess_data_config`` (per-dataset default
     expansion + albumentations transform compilation).
+
+    ``resolution`` sets the square train crop, the val/test resize
+    (:func:`apply_resolution`), and ``model.input_size``.
     """
     cfg = ConfigDict()
     if "data" in config_path_dict:
-        data_cfg = load_config(config_path_dict["data"])
+        data_cfg = load_config(cast("str | Path", config_path_dict["data"]))
+        if resolution is not None:
+            apply_resolution(data_cfg, int(resolution))
         data_cfg = preprocess_data_config(data_cfg)
         if "data" in data_cfg:
             cfg.update(data_cfg)
         else:
             cfg.data = data_cfg
     if "model" in config_path_dict:
-        model_cfg = load_config(config_path_dict["model"])
+        model_cfg = load_config(cast("str | Path", config_path_dict["model"]))
         if "model" in model_cfg:
             cfg.update(model_cfg)
         else:
             cfg.model = model_cfg
+        if resolution is not None:
+            cfg.model.input_size = [int(resolution), int(resolution)]
     if "training" in config_path_dict:
-        training_cfg = load_config(config_path_dict["training"])
+        training_cfg = load_config(cast("str | Path", config_path_dict["training"]))
         if "training" in training_cfg:
             cfg.update(training_cfg)
         else:
             cfg.training = training_cfg
     if "logger" in config_path_dict:
-        logger_cfg = load_config(config_path_dict["logger"])
+        logger_cfg = load_config(cast("str | Path", config_path_dict["logger"]))
         if "logger" in logger_cfg:
             cfg.update(logger_cfg)
         else:

@@ -18,8 +18,8 @@ After construction, each registered dataset has had
 
 from __future__ import annotations
 
-import logging
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -28,11 +28,7 @@ from mermaidseg.dataset_reconciliation.concept_schema import (
     ConceptSchema,
     build_source_to_concepts,
 )
-from mermaidseg.dataset_reconciliation.concepts import (
-    initialize_benthic_concepts,
-    initialize_benthic_hierarchy,
-    normalize_benthic_hierarchy,
-)
+from mermaidseg.dataset_reconciliation.concepts import initialize_benthic_hierarchy
 from mermaidseg.dataset_reconciliation.label_mapping import (
     coralscapes_to_mermaid,
     coralscapes_v2_to_mermaid,
@@ -44,8 +40,6 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     fetch_ucsd_mosaics_to_mermaid,
 )
 
-logger = logging.getLogger(__name__)
-
 
 def _identity_source_to_target(dataset: Any) -> dict[str, str]:
     """Return an identity name->name mapping for the given dataset's source space."""
@@ -53,8 +47,7 @@ def _identity_source_to_target(dataset: Any) -> dict[str, str]:
 
 
 def _static_source_to_target(static: dict[str, str], dataset: Any) -> dict[str, str]:
-    """Filter a static ``source_name -> target_name`` dict to the dataset's source
-    space."""
+    """Filter a static ``source_name -> target_name`` dict to the dataset's source space."""
     ds_names_lower = {n.lower() for n in dataset.source_name2id}
     return {name: target for name, target in static.items() if name.lower() in ds_names_lower}
 
@@ -65,10 +58,8 @@ _BUILTIN_DEFAULT_FETCHERS = {
     "coralscapes_v2": lambda ds: _static_source_to_target(coralscapes_v2_to_mermaid(), ds),
 }
 
-# Sources whose source->target map is fetched remotely (CoralNet API / published label
-# files); these require ``fetch_remote=True`` (or an explicit ``source_to_target_name_maps``
-# entry). Add a new remote source here.
-_REMOTE_FETCHERS = {
+
+_REMOTE_FETCHERS: dict[str, Callable[..., Mapping[str, str | None]]] = {
     "coralnet": fetch_coralnet_to_mermaid,
     "catlin_seaview": fetch_catlin_seaview_to_mermaid,
     "moorea_labeled_corals": fetch_moorea_labeled_corals_to_mermaid,
@@ -78,7 +69,19 @@ _REMOTE_FETCHERS = {
 }
 
 
-def roll_up_label(label: str, benthic_hierarchy: dict[str, str], subset: set[str]) -> str | None:
+def roll_up_label(
+    label: str | None, benthic_hierarchy: dict[str, str | None], subset: set[str]
+) -> str | None:
+    """Return ``label`` if it is in ``subset``, else its nearest ancestor in ``subset``.
+
+    Args:
+        label: Target label name, or ``None`` for an unmapped label.
+        benthic_hierarchy: Lower-cased name -> parent-name mapping, ``None`` at the roots.
+        subset: Names that may be returned.
+
+    Returns:
+        The label or ancestor in ``subset``, or ``None`` if there is none.
+    """
     if label in subset:
         return label
     if label in benthic_hierarchy:
@@ -86,10 +89,7 @@ def roll_up_label(label: str, benthic_hierarchy: dict[str, str], subset: set[str
         while parent is not None:
             if parent in subset:
                 return parent
-            # ``.get`` (not ``[]``): a live/paginated hierarchy can have an ancestor whose own
-            # parent isn't itself a key; treat that as "no further parent" (roll up fails ->
-            # background) instead of raising KeyError at registry-build time (container startup).
-            parent = benthic_hierarchy.get(parent)
+            parent = benthic_hierarchy[parent]
     return None
 
 
@@ -104,49 +104,51 @@ class SourceLabelRegistry:
             benthic-attribute target label names (1..M). If ``None``, defaults
             are derived from the union of mapped target names across all
             datasets (sorted alphabetically).
-        source_to_target_name_maps: Optional mapping
-            ``{SOURCE_NAME: {source_label_name: target_label_name}}``. Defaults
-            are looked up per ``SOURCE_NAME``: ``mermaid`` is identity;
-            ``coralscapes``, ``coralscapes_v2``, ``catlin_seaview``,
-            ``moorea_labeled_corals``, ``ucsd_mosaics``, and ``benthos_yuval`` use the static dict;
-            ``coralnet`` is fetched from the MERMAID API.
         concept_hierarchy: Optional benthic-attribute name->parent-name dict.
             If supplied (or if ``compute_concepts=True`` and not supplied), it
             is fetched from the MERMAID API.
         compute_concepts: When ``True``, additionally builds
-            ``source_to_concepts``.
+            ``source_to_concepts`` from ``concept_schema``.
         target_label_subset: Optional list/set of MERMAID target label names
             to retain. Source labels mapped to a target outside the subset
             collapse to background (``0``) in ``source_to_target``.
-        fetch_remote: When ``True`` (default), missing default mappings are
-            fetched from the MERMAID API. Set ``False`` for offline usage —
-            in that case ``source_to_target_name_maps`` must be provided for
-            every registered ``SOURCE_NAME``.
     """
 
     datasets: list[Any]
     target_label2id: dict[str, int]
     target_id2label: dict[int, str]
     num_target_classes: int
-    source_to_target: torch.LongTensor
+    source_to_target: torch.Tensor
     source_to_concepts: torch.Tensor | None
     global_id2source: dict[int, tuple[str, str]]
     dataset_offsets: dict[str, int]
-    concept_value2id: dict[str, int] | None
+    concept_value2id: dict[str, dict[str, list[int]]] | None
 
     def __init__(
         self,
         datasets: list[Any],
         target_labels: list[str] | None = None,
-        source_to_target_name_maps: dict[str, dict[str, str]] | None = None,
-        benthic_hierarchy: dict[str, str] | None = None,
         compute_concepts: bool = False,
         label_roll_up: bool = False,
         target_label_subset: list[str] | set[str] | None = None,
-        fetch_remote: bool = True,
-        concept_mapping_path: str | None = None,
         concept_schema: ConceptSchema | None = None,
     ):
+        """Assign global offsets and build the source-to-target (and concept) lookups.
+
+        Args:
+            datasets: Source datasets to register.
+            target_labels: Ordered target label names, derived from the datasets if ``None``.
+            compute_concepts: Whether to build ``source_to_concepts``.
+            label_roll_up: Whether unmapped targets roll up to the nearest ancestor in
+                ``target_label_subset``.
+            target_label_subset: Target label names to retain.
+            concept_schema: Concept schema, required with ``compute_concepts``.
+
+        Raises:
+            ValueError: If there are no datasets, a dataset lacks or repeats ``SOURCE_NAME``,
+                ``label_roll_up`` has no ``target_label_subset``, or ``compute_concepts`` has
+                no ``concept_schema``.
+        """
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
 
@@ -160,10 +162,7 @@ class SourceLabelRegistry:
             seen_sources.add(name)
 
         self.datasets = list(datasets)
-        provided_maps = dict(source_to_target_name_maps or {})
-        resolved_maps = self._resolve_source_to_target_maps(
-            provided_maps, fetch_remote=fetch_remote
-        )
+        resolved_maps = self._resolve_source_to_target_maps()
 
         # Assign each dataset a disjoint offset in the global source-ID space and
         # record the (source, source_name) pair for every global ID. We also
@@ -210,150 +209,86 @@ class SourceLabelRegistry:
         self.num_target_classes = len(self.target_id2label) + 1  # +1 for background
 
         if label_roll_up:
-            if benthic_hierarchy is None:
-                if not fetch_remote:
-                    raise ValueError(
-                        "label_roll_up=True requires benthic_hierarchy or fetch_remote=True"
-                    )
-                benthic_hierarchy = initialize_benthic_hierarchy()
-            else:
-                benthic_hierarchy = normalize_benthic_hierarchy(benthic_hierarchy)
+            benthic_hierarchy = {
+                k.lower(): (v.lower() if v is not None else None)
+                for k, v in initialize_benthic_hierarchy().items()
+            }
             if subset is None:
                 raise ValueError("label_roll_up=True requires target_label_subset to be set")
-        elif benthic_hierarchy is not None:
-            benthic_hierarchy = normalize_benthic_hierarchy(benthic_hierarchy)
-        self.benthic_hierarchy = benthic_hierarchy
 
         # Dense lookup `global_source_id -> target_class_id`; index 0 stays
         # background, and any source name without a target (or filtered out by
         # `subset`) either has an attempted roll up to a parent class or
         # is left as 0 so it collapses to background at train time.
         source_to_target_np = np.zeros(num_global_source + 1, dtype=np.int64)
+        warned_unmapped: set[tuple[str, str]] = set()
         for ds in self.datasets:
             offset = self.dataset_offsets[ds.SOURCE_NAME]
             for local_id, source_name in sorted(ds.source_id2name.items()):
                 target_name = resolved_maps[ds.SOURCE_NAME].get(source_name.lower())
                 if label_roll_up:
-                    target_name = roll_up_label(target_name, benthic_hierarchy, subset)
+                    target_name = roll_up_label(
+                        target_name, benthic_hierarchy, cast("set[str]", subset)
+                    )
                 if target_name is None:
+                    key = (ds.SOURCE_NAME, source_name.lower())
+                    if key not in warned_unmapped:
+                        warned_unmapped.add(key)
+                        print(
+                            f"DEBUG WARNING: unmapped source label (target mapping): "
+                            f"source_dataset={ds.SOURCE_NAME!r} label={source_name.lower()!r}",
+                            flush=True,
+                        )
                     continue
                 if subset is not None and target_name not in subset:
                     continue
                 target_id = self.target_label2id.get(target_name, 0)
                 source_to_target_np[local_id + offset] = target_id
         self.source_to_target = torch.from_numpy(source_to_target_np).long()
-        self._log_target_coverage(source_to_target_np)
-        self.global_idmask: dict[int, bool] = {
-            global_id: source_to_target_np[global_id] != 0 for global_id in self.global_id2source
-        }
         self.source_to_concepts = None
-        self._concept_matrix = None
         self.concept_id2name: dict[int, str] | None = None
         self.concept_name2id: dict[str, int] | None = None
-        self.concept_value2id: dict[str, dict[str, int]] | None = None
+        self.concept_value2id: dict[str, dict[str, list[int]]] | None = None
         if compute_concepts:
-            self._build_concepts(
-                concept_mapping_path=concept_mapping_path,
-                concept_schema=concept_schema,
-            )
+            if concept_schema is None:
+                raise ValueError("compute_concepts=True requires concept_schema")
+            self._build_concepts(concept_schema)
 
         for ds in self.datasets:
             ds.set_global_offset(self.dataset_offsets[ds.SOURCE_NAME])
 
-    def _log_target_coverage(self, source_to_target_np: np.ndarray) -> None:
-        """Log, per source, how many source labels (and annotations) reach a target.
-
-        Warns when none do: a key mismatch (e.g. ``"82.0"`` vs ``"82"``) otherwise sends
-        every pixel of that source to background with no error.
-        """
-        for ds in self.datasets:
-            offset = self.dataset_offsets[ds.SOURCE_NAME]
-            local_ids = np.array(sorted(ds.source_id2name), dtype=np.int64)
-            if local_ids.size == 0:
-                continue
-            resolved = source_to_target_np[local_ids + offset] != 0
-            msg = f"{ds.SOURCE_NAME}: {int(resolved.sum())} of {local_ids.size} source labels"
-            ann_label_id = getattr(ds, "_ann_label_id", None)
-            if ann_label_id is not None and ann_label_id.size:
-                counts = np.bincount(ann_label_id, minlength=int(local_ids.max()) + 1)
-                n_resolved = int(counts[local_ids[resolved]].sum())
-                msg += f", {n_resolved / ann_label_id.size:.1%} of annotations,"
-            msg += " map to a target class"
-            if resolved.any():
-                logger.info(msg)
-            else:
-                logger.warning(msg + "; check source label keys against the mapping.")
-
-    def _resolve_source_to_target_maps(
-        self,
-        provided: dict[str, dict[str, str]],
-        fetch_remote: bool,
-    ) -> dict[str, dict[str, str]]:
-        """Resolve a ``SOURCE_NAME -> {source_name: target_name}`` map for every
-        dataset."""
+    def _resolve_source_to_target_maps(self) -> dict[str, dict[str, str]]:
+        """Resolve a ``SOURCE_NAME -> {source_name: target_name}`` map per dataset."""
         resolved: dict[str, dict[str, str]] = {}
         for ds in self.datasets:
             name = ds.SOURCE_NAME
             ds_names_lower = {n.lower() for n in ds.source_name2id}
-            if name in provided:
-                resolved[name] = provided[name]
-            elif name in _REMOTE_FETCHERS:
-                if not fetch_remote:
-                    raise ValueError(
-                        f"{name} source-to-target mapping requires fetch_remote=True or "
-                        "an explicit entry in source_to_target_name_maps"
-                    )
-                fetched = _REMOTE_FETCHERS[name]()
+            fetcher = _REMOTE_FETCHERS.get(name)
+            if fetcher is not None:
                 resolved[name] = {
                     src: tgt
-                    for src, tgt in fetched.items()
+                    for src, tgt in fetcher().items()
                     if tgt is not None and src.lower() in ds_names_lower
                 }
-            elif name in _BUILTIN_DEFAULT_FETCHERS:
+                continue
+            if name in _BUILTIN_DEFAULT_FETCHERS:
                 resolved[name] = _BUILTIN_DEFAULT_FETCHERS[name](ds)
-            else:
-                raise ValueError(
-                    f"No default source-to-target mapping for SOURCE_NAME='{name}'. "
-                    "Pass an explicit entry in source_to_target_name_maps."
-                )
+                continue
+            raise ValueError(f"No default source-to-target mapping for SOURCE_NAME='{name}'.")
         return {
             src_name: {k.lower(): v.lower() for k, v in m.items()}
             for src_name, m in resolved.items()
         }
 
-    def _build_concepts(
-        self,
-        concept_mapping_path: str | None = None,
-        concept_schema: ConceptSchema | None = None,
-    ):
-        if concept_schema is not None:
-            self._concept_matrix = None
-            self.concept_value2id = concept_schema.concept_value2id
-            self.concept_id2name = concept_schema.channel_id2name()
-            self.concept_name2id = {v: k for k, v in self.concept_id2name.items()}
-            self.source_to_concepts = build_source_to_concepts(
-                self.global_id2source, concept_schema
-            )
-            return
-
-        concept_matrix, source_to_concepts, concept_value2id = initialize_benthic_concepts(
-            mapping_location=concept_mapping_path,
-            global_id2source=self.global_id2source,
-            global_idmask=self.global_idmask,
-        )
-        self._concept_matrix = concept_matrix
-        self.concept_id2name = dict(enumerate(concept_value2id.keys(), start=1))
+    def _build_concepts(self, concept_schema: ConceptSchema) -> None:
+        self.concept_value2id = concept_schema.concept_value2id
+        self.concept_id2name = concept_schema.channel_id2name()
         self.concept_name2id = {v: k for k, v in self.concept_id2name.items()}
-        self.concept_value2id = concept_value2id
-        self.source_to_concepts = source_to_concepts
-
-    @property
-    def concept_matrix(self):
-        """The pandas concept matrix used by ``postprocess_predicted_concepts``."""
-        return self._concept_matrix
+        self.source_to_concepts = build_source_to_concepts(self.global_id2source, concept_schema)
 
     @property
     def num_concepts(self) -> int:
+        """Number of concept channels, 0 without concepts."""
         if self.source_to_concepts is None:
             return 0
         return int(self.source_to_concepts.shape[1])
@@ -369,21 +304,3 @@ class SourceLabelRegistry:
         if self.source_to_concepts is not None:
             self.source_to_concepts = self.source_to_concepts.to(device)
         return self
-
-    def conceptid2labelid(self) -> dict[int, int] | None:
-        """Backward-compat helper used by ``postprocess_predicted_concepts``.
-
-        Returns a dict mapping per-concept-column index (``benthic_concept_matrix``
-        column ordering, 0-indexed) to the corresponding target label ID (1-indexed, 0
-        if not a leaf class).
-        """
-        return None
-        # if self._concept_matrix is None:
-        #     return None
-        # column_concepts = self._concept_matrix.columns.get_level_values("concept").tolist()
-        # result: dict[int, int] = {}
-        # for col_ind, concept_name in enumerate(column_concepts):
-        #     target_id = self.target_label2id.get(concept_name)
-        #     if target_id is not None:
-        #         result[col_ind] = target_id
-        # return result

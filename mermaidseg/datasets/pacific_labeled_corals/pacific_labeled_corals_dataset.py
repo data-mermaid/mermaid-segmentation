@@ -24,6 +24,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
+from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.datasets.utils import get_image_s3
 
 VALID_ANNOTATOR_COLUMNS: tuple[str, ...] = (
@@ -94,7 +95,8 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
         annotator_column: str = "host",
         fallback_annotator: str | None = "archived",
         **base_kwargs: Any,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         if whitelist_sites is not None and blacklist_sites is not None:
             raise ValueError("Cannot specify both whitelist_sites and blacklist_sites.")
         if whitelist_subsets is not None and blacklist_subsets is not None:
@@ -123,10 +125,9 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
 
     def load_annotations(self) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Load annotations from S3, apply site/subset filters, pick the active
-        annotator."""
+        """Load annotations, apply site/subset filters, pick the active annotator."""
         annotations_uri = f"s3://{self.source_bucket}/{self.annotations_path}"
-        df = pd.read_parquet(annotations_uri)
+        df = LocalS3Cache.get().read_parquet(self.source_bucket, self.annotations_path)
 
         missing = set(self.REQUIRED_COLUMNS) - set(df.columns)
         if missing:
@@ -170,7 +171,7 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
             .reset_index(drop=True)
         )
 
-    def read_image(
+    def read_image(  # type: ignore[override]  # row columns are required named parameters
         self,
         image_id: str,
         site: str,
@@ -178,5 +179,6 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
         image_ext: str,
         **row_kwargs: Any,
     ) -> NDArray[Any]:
+        """Read the source image for one row of ``df_images`` as an RGB array."""
         key = f"{self.source_s3_prefix}/images/{site}/{subset}/{image_id}{image_ext}"
-        return np.array(get_image_s3(s3=self.s3, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(bucket=self.source_bucket, key=key).convert("RGB"))

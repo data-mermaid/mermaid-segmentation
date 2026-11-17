@@ -4,4 +4,3 @@ ci:
   autoupdate_schedule: quarterly
   skip:
     - uv-lock
-    - nbqa-ruff

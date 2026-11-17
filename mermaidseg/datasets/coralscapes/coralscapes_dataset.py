@@ -67,9 +67,9 @@ CORALSCAPES_ID2NAME: dict[int, str] = {
 
 
 class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
-    """A PyTorch Dataset wrapping the HuggingFace
-    `EPFL-ECEO/coralscapes <https://huggingface.co/datasets/EPFL-ECEO/coralscapes>`_
-    dataset.
+    """Wrap the HuggingFace Coralscapes dataset.
+
+    Source: `EPFL-ECEO/coralscapes <https://huggingface.co/datasets/EPFL-ECEO/coralscapes>`_.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is the native Coralscapes 1..39 integer mask (or shifted
@@ -102,16 +102,13 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         split: str | None = None,
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
-        padding: int | None = None,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         from datasets import concatenate_datasets, load_dataset
 
         self.split = split
         self.transform = transform
         self.class_subset = class_subset
-        # Accepted for a uniform dataset constructor interface; unused here — Coralscapes
-        # carries dense HF masks, not point annotations, so there is nothing to pad.
-        self.padding = padding
         self._global_offset = 0
 
         self.dataset = load_dataset("EPFL-ECEO/coralscapes")
@@ -139,15 +136,17 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     def _build_native_to_local(self) -> np.ndarray:
         """Build a vectorized lookup from native Coralscapes IDs to local source IDs.
 
-        Native ID ``0`` and any class not present in ``class_subset`` map to ``0``
-        (background).
+        Native ID ``0`` and any class not present in ``class_subset`` map to ``0`` (background).
+        The global offset is folded directly into the foreground entries so ``_load_item`` does not
+        need a separate ``np.where`` shift pass. ``int32`` keeps the emitted mask small.
         """
         native_id2name = CORALSCAPES_ID2NAME
         max_native = max(native_id2name) + 1
-        lookup = np.zeros(max_native, dtype=np.int64)
+        lookup = np.zeros(max_native, dtype=np.int32)
+        offset = self._global_offset
         for native_id, name in native_id2name.items():
             local_id = self.source_name2id.get(name, 0)
-            lookup[native_id] = local_id
+            lookup[native_id] = local_id + offset if local_id else 0
         return lookup
 
     def set_source_vocabulary(
@@ -177,18 +176,19 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     @property
     def global_offset(self) -> int:
+        """Current global offset assigned by the registry."""
         return self._global_offset
 
     def __len__(self) -> int:
+        """Return the number of rows in the underlying dataset."""
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def __getitem__(self, idx: int) -> tuple[Any, Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
-        On any internal load/transform error we emit a warning to logger + stdout +
-        stderr and return ``(None, None)``. :meth:`collate_fn` filters out these
-        placeholders, so a failed item drops out of the batch instead of crashing the
-        loader.
+        On any internal load/transform error we emit a warning to logger + stdout + stderr and
+        return ``(None, None)``. :meth:`collate_fn` filters out these placeholders, so a failed item
+        drops out of the batch instead of crashing the loader.
         """
         try:
             return self._load_item(idx)
@@ -196,15 +196,14 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             emit_dataset_warning(f"CoralscapesDataset: skipping idx={idx}: {type(e).__name__}: {e}")
             return None, None
 
-    def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
-        image = np.array(self.dataset[idx]["image"])
-        native_mask = np.asarray(self.dataset[idx]["label"], dtype=np.int64)
+    def _load_item(self, idx: int) -> tuple[Any, Any]:
+        # Fetch the HF row once: ``datasets`` eagerly decodes every Image column on each row access,
+        # so indexing twice would decode both the image and the label PNG twice.
+        row = self.dataset[idx]
+        image = np.array(row["image"])
+        # The native label is uint8; index the (offset-folded, int32) lookup directly.
+        native_mask = np.asarray(row["label"])
         mask = self._native_to_local[native_mask]
-
-        if self._global_offset:
-            mask = np.where(mask > 0, mask + self._global_offset, mask).astype(
-                mask.dtype, copy=False
-            )
 
         if self.transform:
             transformed = self.transform(image=image, mask=mask)
@@ -214,12 +213,10 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return image, mask
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Filter out ``(None, None)`` items (failed loads) and stack into batched
-        tensors.
+        """Drop ``(None, None)`` items (failed loads) and stack the rest into tensors.
 
-        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this
-        filter drops them so a failed item simply leaves the batch instead of crashing
-        the loader.
+        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this filter drops
+        them so a failed item simply leaves the batch instead of crashing the loader.
         """
         batch_size = len(batch)
         filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
@@ -237,6 +234,8 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             )
             return torch.tensor([]), torch.tensor([])
 
+        images: Any
+        source_labels: Any
         images, source_labels = zip(*filtered, strict=False)
 
         if isinstance(images[0], torch.Tensor):

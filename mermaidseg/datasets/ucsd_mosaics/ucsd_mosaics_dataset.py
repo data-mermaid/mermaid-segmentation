@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import albumentations as A
@@ -26,9 +27,10 @@ logger = logging.getLogger(__name__)
 
 
 class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
-    """A PyTorch Dataset wrapping the HuggingFace
-    `josauder/UCSD-mosaics-mirror <https://huggingface.co/datasets/josauder/UCSD-mosaics-mirror>`_
-    dataset (Edwards et al. 2017 mosaics, Alonso et al. 2019 patch split,
+    """Wrap the HuggingFace UCSD mosaics dataset.
+
+    Source: `josauder/UCSD-mosaics-mirror <https://huggingface.co/datasets/josauder/UCSD-mosaics-mirror>`_
+    (Edwards et al. 2017 mosaics, Alonso et al. 2019 patch split,
     Raine et al. 2024 GT-Clean cleanup).
 
     Each item is ``(image, source_labels)`` where ``source_labels`` is an
@@ -57,8 +59,10 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         class_subset: Optional list of class names (from ``classes.json``) to
             retain. Non-subset classes (and the ignore label) map to ``0``.
         transform: Optional Albumentations transform applied to image and mask.
-        hf_repo_id: HuggingFace dataset repo ID; override only for testing or
-            to point at a fork of the mirror.
+        hf_repo_id: HuggingFace dataset repo ID or local dataset directory
+            holding ``classes.json`` (e.g. a sparsified copy from
+            ``scripts/build_sparse_dense_datasets.py``); override only for
+            testing or to point at a fork of the mirror.
 
     Attributes:
         SOURCE_NAME: ``"ucsd_mosaics"``.
@@ -98,7 +102,8 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         class_subset: list[str] | None = None,
         transform: A.BasicTransform | None = None,
         hf_repo_id: str = HF_REPO_ID,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         from datasets import concatenate_datasets, get_dataset_split_names, load_dataset
         from huggingface_hub import hf_hub_download
 
@@ -118,9 +123,16 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.class_subset = class_subset
         self._global_offset = 0
 
-        classes_path = hf_hub_download(
-            repo_id=self.hf_repo_id, filename="classes.json", repo_type="dataset"
-        )
+        classes_path: Path | str
+        local_dir = Path(self.hf_repo_id)
+        if local_dir.is_dir():
+            classes_path = local_dir / "classes.json"
+        else:
+            classes_path = hf_hub_download(
+                repo_id=self.hf_repo_id,
+                filename="classes.json",
+                repo_type="dataset",
+            )
         with open(classes_path) as f:
             self.class_table = sorted(json.load(f), key=lambda e: int(e["id"]))
 
@@ -179,14 +191,17 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """Build a vectorized lookup from native UCSD IDs (0..34) to local source IDs.
 
         Native ID ``0`` (ignore) and any class not present in ``class_subset`` map to ``0``
-        (background).
+        (background). The global offset is folded directly into the foreground entries so
+        ``__getitem__`` does not need a separate ``np.where`` shift pass. ``int32`` keeps the emitted
+        mask small.
         """
         max_native = max(int(entry["id"]) for entry in self.class_table) + 1
-        lookup = np.zeros(max_native, dtype=np.int64)
+        lookup = np.zeros(max_native, dtype=np.int32)
+        offset = self._global_offset
         for entry in self.class_table:
             native_id = int(entry["id"])
             local_id = self.source_name2id.get(entry["name"], 0)
-            lookup[native_id] = local_id
+            lookup[native_id] = local_id + offset if local_id else 0
         return lookup
 
     def set_source_vocabulary(
@@ -216,25 +231,24 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     @property
     def global_offset(self) -> int:
+        """Current global offset assigned by the registry."""
         return self._global_offset
 
     def __len__(self) -> int:
+        """Return the number of rows in the underlying dataset."""
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def __getitem__(self, idx: int) -> tuple[Any, Any]:
+        """Return ``(image, source_labels)``, or ``(None, None)`` if loading fails."""
         try:
             row = self.dataset[idx]
             image = np.array(row["image"])
-            native_mask = np.asarray(row["label"], dtype=np.int64)
+            # The native label is uint8; index the (offset-folded, int32) lookup directly.
+            native_mask = np.asarray(row["label"])
             mask = self._native_to_local[native_mask]
         except Exception as e:
             logger.warning("UCSDMosaicsDataset: skipping idx=%d: %s: %s", idx, type(e).__name__, e)
             return None, None
-
-        if self._global_offset:
-            mask = np.where(mask > 0, mask + self._global_offset, mask).astype(
-                mask.dtype, copy=False
-            )
 
         if self.transform:
             try:
@@ -251,40 +265,3 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
                 return None, None
 
         return image, mask
-
-    def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Filter out failed loads and stack into batched tensors."""
-        batch_size = len(batch)
-        filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
-        n_skipped = batch_size - len(filtered)
-        if n_skipped > 0:
-            logger.warning(
-                "UCSDMosaicsDataset.collate_fn: skipped %d/%d items in batch due to load errors",
-                n_skipped,
-                batch_size,
-            )
-        if len(filtered) == 0:
-            logger.warning(
-                "UCSDMosaicsDataset.collate_fn: entire batch of %d items was empty, "
-                "returning empty tensors",
-                batch_size,
-            )
-            return torch.tensor([]), torch.tensor([])
-
-        images, source_labels = zip(*filtered, strict=False)
-
-        if isinstance(images[0], torch.Tensor):
-            images = torch.stack(images)
-            source_labels = torch.stack(source_labels)
-        else:
-            images = torch.stack(
-                [torch.from_numpy(img) if isinstance(img, np.ndarray) else img for img in images]
-            )
-            source_labels = torch.stack(
-                [
-                    torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask
-                    for mask in source_labels
-                ]
-            )
-
-        return images, source_labels

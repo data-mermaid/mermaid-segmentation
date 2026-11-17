@@ -17,7 +17,11 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 ## 1. Map
 
 - `mermaidseg/`: the package. All training, evaluation and inference logic.
-- `configs/`: committed YAML configs.
+- `configs/`: committed YAML configs and the concept, mask and label-mapping inputs they reference.
+- `scripts/`: entrypoints for evaluation, cache prefetch and the data-config, concept-removal and
+  concept-source-mask builders.
+- `slurm/`: Slurm launchers and `train.sbatch`.
+- `nbs/`: the training entrypoint, until it moves into the package.
 - `tests/`: the pytest suite, laid out as 7.4 sets.
 - `pyproject.toml`: dependencies, extras, ruff and pytest settings.
 
@@ -186,12 +190,8 @@ Where a doc disagrees with this file or the code, this file and the code win.
 
 | Need | Where |
 |---|---|
-| Setup, training entrypoints, test commands, make targets | `README.md`: Installation, Training Entrypoints, Running Tests, Common Commands |
+| Setup, training entrypoints, test commands | `README.md`: Installation, Segmentation Models, Running Tests |
 | Lint, test and dependency settings; CI checks | `pyproject.toml`; `.github/workflows/` |
-| Architecture, label reconciliation, known gotchas | `docs/architecture.md` |
-| Demo | `demo/README.md` |
-| Remote training job image | `docker/jobs/README.md` |
-| CoralNet ETL | `wiki/CoralNet-ETL.md` |
 | Source and history of each rule, for editing this file | `docs/agents-md-sources.md` |
 
 <!-- Adapted from huggingface/{diffusers,transformers,peft,pytorch-image-models,lerobot} and

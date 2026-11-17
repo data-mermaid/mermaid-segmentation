@@ -12,7 +12,6 @@ Prerequisites
 - AWS credentials configured with `mermaid-core` profile (for S3 access)
 - Hugging Face account and token (for DINOv3 models; see [Hugging Face Setup](#hugging-face-setup) below)
 - uv (recommended) or pip
-- CUDA GPU recommended
 
 **Quick setup with uv** (recommended):
 ```bash
@@ -26,9 +25,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 aws configure --profile mermaid-core
 echo "AWS_PROFILE=mermaid-core" >> .env
 
-# Configure MLFlow Tracking (SageMaker MLflow App)
-export MLFLOW_TRACKING_URI=arn:aws:sagemaker:{region}:{account-id}:mlflow-app/{app-name}
-
 # Configure Hugging Face (required for DINOv3 models)
 hf auth login
 # Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
@@ -37,21 +33,10 @@ hf auth login
 uv sync
 ```
 
-**Install optional features** (extras) or contributor tooling (groups) as needed:
+**Install the contributor dependency group** as needed:
 ```bash
-uv sync --extra all          # everything: training + sagemaker + coralnet + notebooks + demo
-uv sync --extra training     # mlflow, torchmetrics, wandb (training + eval)
-uv sync --extra coralnet     # ibis/duckdb + bs4/selenium (CoralNet ETL + scraper)
-uv sync --extra sagemaker    # SageMaker job launcher (scripts/launch_*.py)
-uv sync --extra notebooks    # Jupyter, matplotlib, seaborn, hvplot, great-tables
-uv sync --extra demo         # Gradio demo
-uv sync --group dev          # tests + lint (contributor setup)
-
-# Combine extras and groups
-uv sync --extra all --group dev
+uv sync --group dev         # tests + lint (contributor setup)
 ```
-
-Core deliberately excludes training, ETL, notebook and demo dependencies — they live in extras (`pyproject.toml` documents each; `all` pulls the lot). Unset, `MLFLOW_TRACKING_URI` falls back to a local filesystem store.
 
 
 ### Hugging Face Setup
@@ -63,74 +48,18 @@ DINOv3 models (e.g. `facebook/dinov3-vitb16-pretrain-lvd1689m`) are gated on Hug
    - **CLI login** (recommended): Run `hf auth login` and paste your token when prompted.
    - **Environment variable**: Add `HF_TOKEN=hf_xxxxxxxxxxxx` to your `.env` file (create from `.env.example`). Create a token at [hf.co/settings/tokens](https://hf.co/settings/tokens).
 
-If using `.env` with direnv, ensure you run `direnv allow` and restart the Jupyter kernel so it picks up the token.
-
-### Dataset
-In order to access and traverse through MERMAID data we can use the code within the mermaidseg codebase, starting with the `MermaidDataset` class, which already includes the functionality allowing for ML research.
-Similarly, in order to access and traverse through CoralNet data we can use the analogous `CoralNetDataset` class that has the same functionality.
-
-```python
-from mermaidseg.datasets.dataset import MermaidDataset, CoralNet
-from mermaidseg.datasets.utils import get_coralnet_sources
-
-# Mermaid
-dataset_mermaid = MermaidDataset()
-idx = 0
-image, mask, annotations = dataset[idx] # This function returns the image, annotations alongside a semantic segmentation mask.
-
-
-# CoralNet
-all_coralnet_sources = get_coralnet_sources()
-dataset_coralnet = CoralNet(source_ids = all_coralnet_sources)
-idx = 0
-image, mask, annotations = dataset[idx] # This function returns the image, annotations alongside a semantic segmentation mask.
-```
-
-The image and annotations can be visualized based on their benthic attributes and growth forms as such:
-
-```python
-from matplotlib import pyplot as plt
-from mermaidseg.visualization import get_legend_elements
-
-fig, ax = plt.subplots(figsize = (8.5, 7), layout = "tight")
-plt.imshow(image)
-for i, annotation in annotations.iterrows():
-    plt.scatter(annotation['col'], annotation['row'],
-                color=annotation["benthic_color"],
-                marker=annotation["growth_form_marker"],
-                s=80,
-                alpha=0.8)
-
-benthic_legend_elements, growth_legend_elements = get_legend_elements(annotations)
-
-first_legend = plt.legend(handles=benthic_legend_elements, bbox_to_anchor=(0.99, 1),
-                            loc='upper left', title='Benthic\nAttributes')
-plt.gca().add_artist(first_legend)
-plt.legend(handles=growth_legend_elements, bbox_to_anchor=(0.99, 0.4),
-          loc='center left', title='Growth\nForms')
-
-plt.axis("off")
-plt.show()
-```
+If using `.env` with direnv, ensure you run `direnv allow` and restart your shell so it picks up the token.
 
 ### Segmentation Models
-To train segmentation models using a specified config file one can use the `nbs/Base_Pipeline.ipynb` or `nbs/Concept_Bottleneck_Pipeline.ipynb` notebooks.
+Concept-bottleneck models are trained with `nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py`
+(run from `nbs/`; `--training-config`, `--model-config`, `--data-config` and `--resolution`
+select the experiment). On the CSAIL cluster, `slurm/train.sbatch` wraps it.
 
-To evaluate any trained segmentation model, you can use the notebook `nbs/Model_Evaluation.ipynb` which contains both quantitative performance analyses through dataset level performance metrics and qualitative analyses by visualizing model results and corresponding class probabilities.
+`slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px
+fine-tune. It is idempotent and accepts `--dry-run`.
 
-### Training Entrypoints
-
-Three surfaces, all bottoming out in the same `MetaModel` + `train_model()` call:
-
-- **Notebooks** (`nbs/`) — `Base_Pipeline.ipynb` (standard), `Concept_Bottleneck_Pipeline.ipynb`, `Combined_Pipeline.ipynb`, `Model_Evaluation.ipynb`.
-- **CLI** — `scripts/train.py`, background-safe with file logging:
-  ```bash
-  uv run python scripts/train.py --dry-run       # 1 batch, ≤3 epochs
-  uv run python scripts/train.py \
-      --config-model configs/model_config.yaml \
-      --config-training configs/training_config.yaml
-  ```
-- **SageMaker** — `scripts/launch_training.py` reads `sagemaker/runs/*.yaml`, submits against the ECR image built from `docker/jobs/Dockerfile`, and selects the in-container script via `CONTAINER_ENTRYPOINT_SCRIPT`. One image serves both TrainingJobs and ProcessingJobs. See `docker/jobs/README.md`.
+`scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
+few-shot probes and the validation loss).
 
 ### Running Tests
 
@@ -153,76 +82,14 @@ uv run pytest -m "not integration"
 uv run pytest tests/test_logger.py -v
 ```
 
-`live` tests are deselected by default via the pyproject addopts. They hit S3 and coralnet.ucsd.edu; CI never runs them.
-
-**Run live tests** (needs S3 / CoralNet access + `playwright install chromium`):
-```bash
-uv run --extra test-live pytest -m live
-```
-
-### Common Commands
-
-```bash
-uv run --group lint ruff check .                # CI lints changed files only
-pre-commit run --all-files                      # ruff + ruff-format + nbqa-ruff + docformatter + uv-lock
-
-make check                                      # validate env vars, AWS session, MLflow version
-make sync                                       # re-sync uv env + Jupyter kernel from current branch
-make logs                                       # tail logs/train_*.log
-make sm-check / sm-dry-run / sm-launch          # SageMaker TrainingJob (see wiki/SageMaker-Jobs.md)
-```
-
-Console scripts (need `--extra coralnet`): `coralnet-etl`, `coralnet-refresh`, `coralnet-remediate`, `coralnet-resize`.
-
 
 ## Model Serialization Strategy
 
-We use a **hybrid approach** to model serialization, balancing safety, compatibility, and practical training needs:
+Training checkpoints use `torch.save` (pickle): the full state (model + optimizer + scheduler) is needed to resume. Load only checkpoints you trust, because pickle can execute code on load.
 
-| Use Case | Format | Rationale |
-|----------|--------|-----------|
-| **Training Checkpoints** | `torch.save` (pickle) | Full state (model + optimizer + scheduler) needed for resume |
-| **MLflow Model Registry** | TorchScript graph (`export_model=True`) | Safer than pickle; prevents arbitrary code execution on load |
-| **Published/Shared Models** | SafeTensors | Secure format for public distribution; zero-copy memory mapping |
-
-### Why We Moved Away from Pickle-Only
-
-**Security Risk**: Pickle files can execute arbitrary Python code during deserialization. Loading an untrusted pickle file is equivalent to running untrusted code.
-
-**Our Mitigation Strategy**:
-1. **Internal Checkpoints** → Still use pickle (trusted, same-machine use only)
-2. **Registry/Deployment** → Use TorchScript graph export (safe for inference)
-3. **External Sharing** → Use SafeTensors (cannot execute code; fast mmap loading)
-
-### Exporting Models for Sharing
-
-```python
-from mermaidseg.logger import Logger
-
-# After training, export to SafeTensors for publication
-logger.save_safetensors_for_publish(
-    meta_model_run=meta_model,
-    epoch=best_epoch,
-    metrics_dict={"accuracy": best_acc},
-    artifact_path="publish/v1"
-)
-```
-
-SafeTensors format ensures:
-- No arbitrary code execution (unlike pickle)
-- Fixed tensor shapes (prevents shape confusion attacks)
-- Fast zero-copy memory mapping
-- Self-contained metadata
 ### Concept Bottleneck Models
 
-When using concept bottleneck models (via `nbs/Concept_Bottleneck_Pipeline.ipynb`), the evaluation metrics use a hard-coded `num_classes=3` parameter. This is intentional and correct for the current implementation.
-
-**Why 3 classes?** Each concept in the bottleneck can have exactly three states:
-- **True (1)**: Concept is present
-- **False (0)**: Concept is absent
-- **Masked**: Concept is not evaluated for this pixel
-
-This ternary classification is reflected in the `F1Score` metric used for concept evaluation in `mermaidseg/model/eval.py`. Future implementations may explore multi-class concept labels (e.g., coral families), but this would require architectural changes across the codebase.
+Non-taxonomic concept metrics in `mermaidseg/model/eval.py` are multiclass `Accuracy` with a hard-coded `num_classes=3` and `ignore_index=0`: class 0 is excluded from the metric, and the other two classes are the concept's two states. Taxonomic concepts use `Accuracy` with a per-concept class count derived from `concept_value2id`.
 
 ## DSLP Issue Workflow
 
