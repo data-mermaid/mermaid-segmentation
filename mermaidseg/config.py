@@ -69,7 +69,6 @@ class OptimizerConfig(_Strict):
     """``training.optimizer``."""
 
     type: Literal["AdamW"]
-    lr: float
     weight_decay: float
     lora_lr: float
     dpt_lr: float
