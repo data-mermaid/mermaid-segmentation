@@ -47,10 +47,12 @@ from mermaidseg.model.data_parallel import apply_concept_bottleneck_loss
 from mermaidseg.model.loss import components_to_floats
 from mermaidseg.run_setup import (
     DEFAULT_SCHEMA_CONFIG,
+    MODEL_CHECKPOINT_KEYS,
     build_meta_model,
     build_registry,
     load_model_weights,
     load_run_concept_source_mask,
+    read_checkpoint,
     resolve_repo_path,
 )
 from mermaidseg.seeding import make_worker_seeder
@@ -187,7 +189,7 @@ def evaluate_val_loss(
             )
 
     meta = build_meta_model(cfg, registry, device)
-    load_model_weights(meta, checkpoint, device)
+    load_model_weights(meta, read_checkpoint(checkpoint, MODEL_CHECKPOINT_KEYS))
     meta.model.eval()
 
     per_dataset: dict[str, dict] = {}

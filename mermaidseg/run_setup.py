@@ -8,7 +8,7 @@ data-size profile) and an evaluation that only builds val splits use the same la
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,18 @@ from mermaidseg.model.meta import MetaModel
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCHEMA_CONFIG = REPO_ROOT / "configs" / "data_config.yaml"
+
+# Keys `Logger.save_model_checkpoint` writes that a weights-only load and a resume read.
+MODEL_CHECKPOINT_KEYS = ("model_state_dict",)
+RESUME_CHECKPOINT_KEYS = (
+    "model_state_dict",
+    "optimizer_state_dict",
+    "scheduler_state_dict",
+    "warmup_iters_completed",
+    "global_step",
+    "epoch",
+    "epoch_complete",
+)
 
 
 def concept_mapping_path(training_cfg: Any) -> str:
@@ -141,13 +153,26 @@ def build_meta_model(
     )
 
 
-def load_model_weights(
-    meta_model: MetaModel, checkpoint_path: str | Path, device: torch.device | str
-) -> dict:
-    """Load a checkpoint's model weights into ``meta_model``; returns the checkpoint dict."""
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    meta_model.model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+def read_checkpoint(path: str | Path, required_keys: Sequence[str]) -> dict:
+    """Load a checkpoint onto the CPU with ``weights_only=True`` and check its keys.
+
+    Raises:
+        RuntimeError: If the file cannot be loaded or lacks a required key; the message names
+            ``path``.
+    """
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as err:
+        raise RuntimeError(f"cannot load checkpoint {str(path)!r}: {err}") from err
+    missing = [key for key in required_keys if key not in checkpoint]
+    if missing:
+        raise RuntimeError(f"checkpoint {str(path)!r} is missing required keys {missing}")
     return checkpoint
+
+
+def load_model_weights(meta_model: MetaModel, checkpoint: dict) -> None:
+    """Load the model weights of a loaded ``checkpoint`` into ``meta_model``, strictly."""
+    meta_model.model.load_state_dict(checkpoint["model_state_dict"], strict=True)
 
 
 def write_resolved_config(cfg: Any, run_dir: str | Path) -> None:
