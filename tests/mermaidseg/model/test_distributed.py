@@ -9,11 +9,12 @@ single-process accumulation. The last test runs only with 4 visible GPUs.
 from __future__ import annotations
 
 import copy
-import os
-import socket
+import shutil
+import tempfile
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -21,24 +22,36 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import BatchSampler, DataLoader, RandomSampler
+from torch.utils.data import (
+    BatchSampler,
+    ConcatDataset,
+    DataLoader,
+    RandomSampler,
+    TensorDataset,
+)
 
 import mermaidseg.model.meta as meta_module
-from mermaidseg.datasets import make_worker_init_fn
+import mermaidseg.model.models as models_module
 from mermaidseg.model.data_parallel import DDPLossStep, ShardStep
 from mermaidseg.model.distributed import (
     DistContext,
     ShardedBatchSampler,
     all_ranks_finite,
+    broadcast_generator_from_rank0,
     init_distributed_from_env,
-    make_rank_worker_init_fn,
     on_main_process,
     reduce_components,
     require_world_size,
 )
-from tests.mermaidseg.datasets import test_base_dataset as base
-
-spawn_cache_stats = base.spawn_cache_stats
+from mermaidseg.training import make_shuffled_loader
+from tests.conftest import (
+    CBM_CONCEPT_VALUE2ID,
+    CBM_NUM_CONCEPTS,
+    IMAGE_SIZE,
+    NUM_CLASSES,
+    cbm_concept_lookup,
+    cbm_test_config,
+)
 
 _NUM_SOURCE = 9
 _NUM_CONCEPTS = 5
@@ -119,39 +132,34 @@ def _batch(batch_size: int = 36, seed: int = 1) -> tuple[torch.Tensor, torch.Ten
     return images, source_labels
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _init_gloo(rank: int, world_size: int, port: int) -> None:
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(port)
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+def _init_gloo(rank: int, world_size: int, init_method: str) -> None:
+    dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=world_size)
 
 
 def _spawn(worker, world_size: int, extra: tuple = ()) -> list:
     ctx = mp.get_context("spawn")
     queue = ctx.Queue()
-    port = _free_port()
+    rendezvous_dir = tempfile.mkdtemp()
+    init_method = f"file://{rendezvous_dir}/rendezvous"
     processes = [
-        ctx.Process(target=worker, args=(rank, world_size, port, queue, *extra))
+        ctx.Process(target=worker, args=(rank, world_size, init_method, queue, *extra))
         for rank in range(world_size)
     ]
-    for process in processes:
-        process.start()
     try:
-        results = [queue.get(timeout=90) for _ in processes]
-    except Exception:
         for process in processes:
-            process.kill()
-        raise
-    for process in processes:
-        process.join(timeout=30)
-    for process in processes:
-        if process.exitcode != 0:
-            raise RuntimeError(f"gloo worker exited with {process.exitcode}")
+            process.start()
+        results = [queue.get(timeout=90) for _ in processes]
+        for process in processes:
+            process.join(timeout=30)
+        for process in processes:
+            if process.exitcode != 0:
+                raise RuntimeError(f"gloo worker exited with {process.exitcode}")
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+        shutil.rmtree(rendezvous_dir, ignore_errors=True)
     results.sort(key=lambda item: item[0])
     return [payload for _, payload in results]
 
@@ -257,40 +265,119 @@ def test_distributed_init_requires_a_process_group(minimal_config, make_meta_mod
 
 def test_sharded_sampler_matches_single_process_shuffle():
     dataset = _IndexDataset(96)
-    torch.manual_seed(7)
     expected = [
-        list(batch) for batch in DataLoader(dataset, shuffle=True, batch_size=12, drop_last=True)
+        list(batch)
+        for batch in DataLoader(
+            dataset,
+            shuffle=True,
+            batch_size=12,
+            drop_last=True,
+            generator=torch.Generator().manual_seed(7),
+        )
     ]
 
-    reconstructed: list[list[int]] = []
     rank_batches: list[list[list[int]]] = []
     for rank in range(_WORLD):
-        torch.manual_seed(7)
-        sampler = ShardedBatchSampler(dataset, 12, rank, _WORLD, broadcast_seed=lambda seed: seed)
-        rank_batches.append([list(batch) for batch in DataLoader(dataset, batch_sampler=sampler)])
-    for slices in zip(*rank_batches, strict=True):
-        reconstructed.append(sum(slices, []))
+        generator = torch.Generator().manual_seed(7)
+        sampler = ShardedBatchSampler(
+            dataset, 12, rank, _WORLD, generator=generator, broadcast_state=lambda _: None
+        )
+        loader = DataLoader(dataset, batch_sampler=sampler, generator=generator)
+        rank_batches.append([list(batch) for batch in loader])
+    reconstructed = [sum(slices, []) for slices in zip(*rank_batches, strict=True)]
     assert reconstructed == expected
 
 
-def test_sharded_sampler_slices_match_batch_sampler_with_injected_seed():
+def test_sharded_sampler_shuffles_from_the_broadcast_state():
     dataset = _IndexDataset(60)
-    seed = 12345
-    generator = torch.Generator().manual_seed(seed)
-    expected = list(BatchSampler(RandomSampler(dataset, generator=generator), 12, drop_last=True))
+    rank0_state = torch.Generator().manual_seed(12345).get_state()
+    expected = list(
+        BatchSampler(
+            RandomSampler(dataset, generator=torch.Generator().manual_seed(12345)),
+            12,
+            drop_last=True,
+        )
+    )
     iters = [
-        iter(ShardedBatchSampler(dataset, 12, rank, _WORLD, broadcast_seed=lambda _: seed))
+        iter(
+            ShardedBatchSampler(
+                dataset,
+                12,
+                rank,
+                _WORLD,
+                generator=torch.Generator().manual_seed(rank),
+                broadcast_state=lambda generator: generator.set_state(rank0_state),
+            )
+        )
         for rank in range(_WORLD)
     ]
-    reconstructed = []
-    for _ in expected:
-        reconstructed.append(sum((next(it) for it in iters), []))
+    reconstructed = [sum((next(it) for it in iters), []) for _ in expected]
     assert reconstructed == expected
-    assert all(len(batch) == 12 for batch in reconstructed)
 
 
-def _reduce_components_worker(rank: int, world_size: int, port: int, queue) -> None:
-    _init_gloo(rank, world_size, port)
+def _broadcast_generator_worker(rank: int, world_size: int, init_method: str, queue) -> None:
+    _init_gloo(rank, world_size, init_method)
+    try:
+        generator = torch.Generator().manual_seed(100 + rank)
+        broadcast_generator_from_rank0(generator)
+        queue.put((rank, torch.rand(3, generator=generator).tolist()))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_broadcast_generator_gives_every_rank_rank0_state():
+    expected = torch.rand(3, generator=torch.Generator().manual_seed(100)).tolist()
+    assert _spawn(_broadcast_generator_worker, 2) == [expected, expected]
+
+
+_LOADER_SEED = 21
+_LOADER_ITEMS = 24
+_LOADER_BATCH = 4
+
+
+def _index_dataset() -> ConcatDataset:
+    return ConcatDataset([TensorDataset(torch.arange(_LOADER_ITEMS))])
+
+
+def _shuffled_loader_worker(rank: int, world_size: int, init_method: str, queue) -> None:
+    _init_gloo(rank, world_size, init_method)
+    try:
+        # Rank 1 starts from a different seed; the broadcast must align it with rank 0.
+        generator = torch.Generator().manual_seed(_LOADER_SEED + rank)
+        loader = make_shuffled_loader(
+            DistContext(rank=rank, world_size=world_size, local_rank=rank),
+            _index_dataset(),
+            generator,
+            batch_size=_LOADER_BATCH,
+            drop_last=True,
+            num_workers=0,
+        )
+        passes = [[batch[0].tolist() for batch in loader] for _ in range(2)]
+        queue.put((rank, passes))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_distributed_shuffled_loader_matches_single_process_over_two_passes():
+    reference_loader = DataLoader(
+        _index_dataset(),
+        shuffle=True,
+        batch_size=_LOADER_BATCH,
+        drop_last=True,
+        generator=torch.Generator().manual_seed(_LOADER_SEED),
+    )
+    expected = [[batch[0].tolist() for batch in reference_loader] for _ in range(2)]
+    rank0, rank1 = _spawn(_shuffled_loader_worker, 2)
+    for pass_index in range(2):
+        interleaved = [
+            shard0 + shard1
+            for shard0, shard1 in zip(rank0[pass_index], rank1[pass_index], strict=True)
+        ]
+        assert interleaved == expected[pass_index]
+
+
+def _reduce_components_worker(rank: int, world_size: int, init_method: str, queue) -> None:
+    _init_gloo(rank, world_size, init_method)
     try:
         values = {f"k{i}": float(rank + 1 + i) for i in range(3)}
         values["shared"] = float(rank)
@@ -300,8 +387,8 @@ def _reduce_components_worker(rank: int, world_size: int, port: int, queue) -> N
         dist.destroy_process_group()
 
 
-def _on_main_process_worker(rank: int, world_size: int, port: int, queue) -> None:
-    _init_gloo(rank, world_size, port)
+def _on_main_process_worker(rank: int, world_size: int, init_method: str, queue) -> None:
+    _init_gloo(rank, world_size, init_method)
     try:
         ran = 0
 
@@ -331,8 +418,8 @@ def test_reduce_components_is_the_mean_over_ranks():
         assert payload == pytest.approx(expected)
 
 
-def _finite_then_step_worker(rank: int, world_size: int, port: int, queue) -> None:
-    _init_gloo(rank, world_size, port)
+def _finite_then_step_worker(rank: int, world_size: int, init_method: str, queue) -> None:
+    _init_gloo(rank, world_size, init_method)
     try:
         torch.manual_seed(0)
         module = DistributedDataParallel(
@@ -371,13 +458,13 @@ def test_non_finite_shard_aborts_the_window_on_every_rank():
 def _ddp_window_worker(
     rank: int,
     world_size: int,
-    port: int,
+    init_method: str,
     queue,
     state: dict[str, torch.Tensor],
     images: torch.Tensor,
     source_labels: torch.Tensor,
 ) -> None:
-    _init_gloo(rank, world_size, port)
+    _init_gloo(rank, world_size, init_method)
     try:
         target, concepts = _lookups()
         step = ShardStep(
@@ -509,16 +596,14 @@ def test_replica_window_matches_serial_microbatches():
 def _nccl_window_worker(
     rank: int,
     world_size: int,
-    port: int,
+    init_method: str,
     queue,
     state: dict[str, torch.Tensor],
     images: torch.Tensor,
     source_labels: torch.Tensor,
 ) -> None:
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(port)
     torch.cuda.set_device(rank)
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    dist.init_process_group("nccl", init_method=init_method, rank=rank, world_size=world_size)
     try:
         device = torch.device("cuda", rank)
         target, concepts = _lookups()
@@ -586,9 +671,9 @@ def test_four_gpu_window_matches_serial_microbatches_on_one_gpu():
             torch.testing.assert_close(grads[name], grad, rtol=1e-4, atol=1e-5)
 
 
-def _two_window_maps_worker(rank: int, world_size: int, port: int, queue) -> None:
+def _two_window_maps_worker(rank: int, world_size: int, init_method: str, queue) -> None:
     """Reproduce the cluster crash: maps on the first micro, then a second window."""
-    _init_gloo(rank, world_size, port)
+    _init_gloo(rank, world_size, init_method)
     try:
         torch.manual_seed(0)
         target, concepts = _lookups()
@@ -645,9 +730,97 @@ def test_ddp_loss_step_returns_only_the_scalar_loss():
     assert step.last[1] is not None
 
 
-def test_rank_worker_init_runs_the_inner_init_in_a_spawned_worker(
-    monkeypatch, tmp_path, spawn_cache_stats
+def test_resume_at_an_epoch_boundary_then_validate_then_train(
+    minimal_config, make_meta_model, tmp_path
 ):
-    init_fn = make_rank_worker_init_fn(1, make_worker_init_fn(spawn_cache_stats))
-    base.run_in_spawned_worker(init_fn, tmp_path / "cache", monkeypatch)
-    assert spawn_cache_stats.local_hits.value == 1
+    """A resume at an epoch's last update builds DDP inside validation, then trains."""
+    cfg = copy.deepcopy(minimal_config)
+    cfg.training.distributed = True
+    cfg.training.iterations_per_train_epoch = 1
+    cfg.training.iterations_per_val_epoch = 1
+    _init_gloo(0, 1, f"file://{tmp_path}/rendezvous")
+    try:
+        meta = make_meta_model(cfg, run_name="resume-boundary")
+        meta.global_step = 1
+        images = torch.randn(2, 3, *IMAGE_SIZE)
+        labels = torch.ones(2, *images.shape[-2:], dtype=torch.long)
+        loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+        meta.train_epoch(loader, evaluator=None, epoch=0)
+        meta.validation_epoch(loader)
+        loss, _, _ = meta.train_epoch(loader, evaluator=None, epoch=1)
+        assert torch.isfinite(torch.tensor(loss))
+    finally:
+        dist.destroy_process_group()
+
+
+class _MockEncoder(nn.Module):
+    """Tiny DINOv3 stand-in with a ``q_proj`` LoRA target, as ``mock_dinov3_encoder`` builds."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(
+            hidden_size=16, patch_size=14, num_hidden_layers=4, num_register_tokens=4
+        )
+        self.embed = nn.Linear(3, 16)
+        self.q_proj = nn.Linear(16, 16)
+
+    def forward(self, pixel_values: torch.Tensor, **_: object) -> SimpleNamespace:
+        patches = nn.functional.avg_pool2d(pixel_values, 14).flatten(2).transpose(1, 2)
+        tokens = self.embed(patches)
+        prefix = tokens.new_zeros(tokens.shape[0], 5, tokens.shape[2])
+        states = self.q_proj(torch.cat([prefix, tokens], dim=1))
+        return SimpleNamespace(hidden_states=(states,) * 5)
+
+
+class _StepLogger:
+    def __init__(self) -> None:
+        self.steps: list[int] = []
+
+    def log(self, metrics: dict[str, object], step: int) -> None:
+        self.steps.append(step)
+
+
+def _distributed_meta_model(world_size: int) -> meta_module.MetaModel:
+    cfg = cbm_test_config()
+    cfg.training.distributed = True
+    cfg.training.world_size = world_size
+    cfg.training.grad_accum_steps = 2
+    cfg.training.iterations_per_train_epoch = 4
+    cfg.training.iterations_per_val_epoch = 2
+    torch.manual_seed(0)
+    auto_model = SimpleNamespace(from_pretrained=lambda *_args, **_kwargs: _MockEncoder())
+    with patch.object(models_module, "AutoModel", auto_model):
+        return meta_module.MetaModel(
+            run_name=f"ddp-train-validate-{world_size}",
+            num_classes=NUM_CLASSES,
+            model_kwargs=cfg.model,
+            training_kwargs=cfg.training,
+            device="cpu",
+            num_concepts=CBM_NUM_CONCEPTS,
+            concept_value2id=cast("dict[str, dict[str, list[int]]]", CBM_CONCEPT_VALUE2ID),
+            source_to_concepts_lookup=cbm_concept_lookup(),
+        )
+
+
+def _train_then_validate_worker(rank: int, world_size: int, init_method: str, queue) -> None:
+    _init_gloo(rank, world_size, init_method)
+    try:
+        meta = _distributed_meta_model(world_size)
+        run_logger = _StepLogger() if rank == 0 else None
+        generator = torch.Generator().manual_seed(rank)
+        images = torch.randn(16, 3, *IMAGE_SIZE, generator=generator)
+        labels = torch.randint(1, NUM_CLASSES, (16, *IMAGE_SIZE), generator=generator)
+        loader: DataLoader[Any] = DataLoader(TensorDataset(images, labels), batch_size=2)
+        meta.train_epoch(loader, run_logger=run_logger, log_interval=2, epoch=0)
+        meta.validation_epoch(loader)
+        logged = None if run_logger is None else run_logger.steps
+        queue.put((rank, {"global_step": meta.global_step, "logged": logged}))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_logger_only_on_rank_zero_trains_and_validates_without_desync():
+    """Every rank joins the log-interval reduction, or rank 0 blocks in it alone."""
+    results = _spawn(_train_then_validate_worker, 2)
+    assert [payload["global_step"] for payload in results] == [4, 4]
+    assert [payload["logged"] for payload in results] == [[2, 4], None]

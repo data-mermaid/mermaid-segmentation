@@ -19,27 +19,51 @@ from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.distributed import (
     DistContext,
     ShardedBatchSampler,
-    broadcast_from_rank0,
+    broadcast_generator_from_rank0,
     init_distributed_from_env,
-    make_rank_worker_init_fn,
     on_main_process,
 )
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
-from mermaidseg.model.models import align_optimizer_state_dict
 from mermaidseg.model.train import train_model
 from mermaidseg.run_setup import (
+    MODEL_CHECKPOINT_KEYS,
+    RESUME_CHECKPOINT_KEYS,
     build_meta_model,
     build_registry,
     check_env_wandb,
     concept_mapping_path,
     load_model_weights,
     load_run_concept_source_mask,
+    read_checkpoint,
     resolve_repo_path,
     write_resolved_config,
 )
+from mermaidseg.seeding import make_worker_seeder, seed_everything
 
 # LoRA + DPT concept-bottleneck trainer that scripts/train.py calls. The encoder comes from the model config.
+
+
+# The val generator seed is the run seed plus this, so val and train shuffle independently.
+VAL_GENERATOR_SEED_OFFSET = 1_000_003
+
+
+def seed_run(seed: int, train_generator: torch.Generator, val_generator: torch.Generator) -> None:
+    """Seed the global RNGs and both loaders' generators for one run (or resume).
+
+    The loaders draw their shuffle order and worker seeds from these generators on
+    their first iteration, so re-seeding a built loader that has not started
+    iterating changes its whole data order.
+
+    Args:
+        seed: Run seed; the train generator gets it and the val generator gets
+            ``seed + VAL_GENERATOR_SEED_OFFSET``.
+        train_generator: Generator held by the train loader.
+        val_generator: Generator held by the val loader.
+    """
+    seed_everything(seed)
+    train_generator.manual_seed(seed)
+    val_generator.manual_seed(seed + VAL_GENERATOR_SEED_OFFSET)
 
 
 def print0(dist_ctx: DistContext, *args: Any, **kwargs: Any) -> None:
@@ -56,77 +80,61 @@ def print0(dist_ctx: DistContext, *args: Any, **kwargs: Any) -> None:
 
 def load_training_checkpoint(
     meta_model: MetaModel,
-    checkpoint_path: str,
-    device: torch.device | str,
+    checkpoint: dict,
     dist_ctx: DistContext,
     *,
     load_optimizer: bool = True,
 ) -> int:
-    """Load model weights and, when resuming, optimizer and scheduler state.
+    """Load model weights and, when resuming, optimizer and scheduler state from ``checkpoint``.
 
     ``load_optimizer=False`` keeps the freshly constructed optimizer and schedule
     (hi-res fine-tune from cooled weights).
     """
-    checkpoint = load_model_weights(meta_model, checkpoint_path, device)
-    raw_state_dict = checkpoint.get("model_state_dict", checkpoint)
+    load_model_weights(meta_model, checkpoint)
 
     if not load_optimizer:
         return 0
 
-    # Restore optimizer state. torch.load(map_location=device) already placed the
-    # state tensors on `device`, and the model was loaded in place (same Parameter
-    # objects the optimizer references), so the param<->state mapping stays valid.
-    # A checkpoint saved before the unused fusion residual was removed has four
-    # extra Adam slots in the middle of the non-LoRA group; drop those only.
-    if "optimizer_state_dict" in checkpoint:
-        optimizer_state, n_dropped = align_optimizer_state_dict(
-            checkpoint["optimizer_state_dict"],
-            meta_model.optimizer,
-            meta_model.model,
-            raw_state_dict,
-        )
-        if n_dropped:
-            print0(
-                dist_ctx, f"Dropped {n_dropped} optimizer states for the removed fusion residual"
-            )
-        meta_model.optimizer.load_state_dict(optimizer_state)
-
-    # Restore the LR scheduler so the schedule continues from the correct step
-    # instead of restarting its decay.
-    if checkpoint.get("scheduler_state_dict") is not None:
-        meta_model.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-    # Step checkpoints store how far warmup got. Older epoch checkpoints omit it;
-    # those are past warmup (it finishes inside epoch 0), so the helper marks it done.
+    # The state tensors are on the CPU; `optimizer.load_state_dict` casts them to each param's
+    # device. The model was loaded in place (same Parameter objects the optimizer references).
+    meta_model.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    meta_model.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
     restore_warmup_progress(meta_model, checkpoint)
-
-    if "global_step" in checkpoint:
-        meta_model.global_step = int(checkpoint["global_step"])
-
-    # Missing epoch_complete means an older epoch-boundary checkpoint: start the next epoch.
+    meta_model.global_step = int(checkpoint["global_step"])
     # A mid-epoch model_step* file sets epoch_complete false and continues this epoch.
-    meta_model.resuming_within_epoch = not bool(checkpoint.get("epoch_complete", True))
+    meta_model.resuming_within_epoch = not bool(checkpoint["epoch_complete"])
     return next_epoch_from_checkpoint(checkpoint)
 
 
+def _read_run_checkpoint(args: argparse.Namespace) -> dict | None:
+    """The ``--init-weights`` or ``--checkpoint`` file, read and key-checked; ``None`` if neither."""
+    if args.init_weights:
+        return read_checkpoint(args.init_weights, MODEL_CHECKPOINT_KEYS)
+    if args.checkpoint:
+        return read_checkpoint(args.checkpoint, RESUME_CHECKPOINT_KEYS)
+    return None
+
+
 def make_shuffled_loader(
-    dist_ctx: DistContext, dataset: ConcatDataset, **kwargs: Any
+    dist_ctx: DistContext, dataset: ConcatDataset, generator: torch.Generator, **kwargs: Any
 ) -> DataLoader:
     """Shuffled minibatches of ``batch_size``; under torchrun, this rank's shard.
 
-    Every rank uses rank 0's shuffle seed, so the global minibatches are the
-    ones a single-process ``shuffle=True`` loader draws.
+    Every rank adopts rank 0's generator state before each pass, so the global
+    minibatches are those of a single-process ``DataLoader(shuffle=True,
+    batch_size=batch_size, drop_last=True, generator=<generator in the same state>)``.
 
     Args:
         dist_ctx: Rank layout of this process.
         dataset: Dataset to draw minibatches from.
+        generator: Generator for the shuffle order and the worker base seed.
         **kwargs: Keyword arguments forwarded to ``DataLoader``.
 
     Returns:
         The shuffled loader, sharded across ranks when distributed.
     """
     if not dist_ctx.distributed:
-        return DataLoader(dataset, shuffle=True, **kwargs)
+        return DataLoader(dataset, shuffle=True, generator=generator, **kwargs)
     kwargs = dict(kwargs)
     batch_size = kwargs.pop("batch_size")
     kwargs.pop("drop_last")
@@ -135,9 +143,10 @@ def make_shuffled_loader(
         batch_size,
         dist_ctx.rank,
         dist_ctx.world_size,
-        broadcast_seed=broadcast_from_rank0,
+        generator=generator,
+        broadcast_state=broadcast_generator_from_rank0,
     )
-    return DataLoader(dataset, batch_sampler=sampler, **kwargs)
+    return DataLoader(dataset, batch_sampler=sampler, generator=generator, **kwargs)
 
 
 def _assemble_train_datasets(dataset_dict: dict[tuple[str, str], Any], data_cfg: Any) -> list[Any]:
@@ -205,12 +214,13 @@ def run(args: argparse.Namespace) -> None:
         print0(dist_ctx, f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
 
     seed = int(cfg.training.seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    train_generator, val_generator = torch.Generator(), torch.Generator()
+    seed_run(seed, train_generator, val_generator)
 
     # slurm/train.sbatch resumes the latest checkpoint through --checkpoint.
     checkpoint = args.checkpoint
+    # Read before any dataset work so an unloadable file fails in seconds.
+    checkpoint_data = _read_run_checkpoint(args)
 
     # torchrun decides: one process per GPU trains its shard of each minibatch.
     cfg.training.distributed = dist_ctx.distributed
@@ -246,11 +256,9 @@ def run(args: argparse.Namespace) -> None:
         "drop_last": True,
         "prefetch_factor": cfg.training.loader.prefetch_factor,
     }
-    loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
-    if dist_ctx.distributed:
-        loader_kwargs["worker_init_fn"] = make_rank_worker_init_fn(
-            dist_ctx.rank, loader_kwargs["worker_init_fn"]
-        )
+    loader_kwargs["worker_init_fn"] = make_worker_seeder(
+        dist_ctx.rank, make_worker_init_fn(cache_stats)
+    )
 
     # -- 3. Registry / model / evaluator --------------------------------------
     registry, schema = build_registry(
@@ -276,9 +284,13 @@ def run(args: argparse.Namespace) -> None:
             f"{len(concept_source_mask.source_ids)} sources",
         )
 
-    train_loader = make_shuffled_loader(dist_ctx, ConcatDataset(train_datasets), **loader_kwargs)
+    train_loader = make_shuffled_loader(
+        dist_ctx, ConcatDataset(train_datasets), generator=train_generator, **loader_kwargs
+    )
     loader_kwargs["prefetch_factor"] = cfg.training.loader.val_prefetch_factor
-    val_loader = make_shuffled_loader(dist_ctx, ConcatDataset(val_datasets), **loader_kwargs)
+    val_loader = make_shuffled_loader(
+        dist_ctx, ConcatDataset(val_datasets), generator=val_generator, **loader_kwargs
+    )
 
     print0(dist_ctx, f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
     concept_id2name = schema.channel_id2name()
@@ -302,7 +314,8 @@ def run(args: argparse.Namespace) -> None:
     start_epoch = 0
     init_weights = args.init_weights
     if init_weights:
-        load_training_checkpoint(meta_model, init_weights, device, dist_ctx, load_optimizer=False)
+        assert checkpoint_data is not None
+        load_training_checkpoint(meta_model, checkpoint_data, dist_ctx, load_optimizer=False)
         # Optimizer and warmup were built with the training config before the load.
         # Leave them alone: a cooled source has LR 0 and Adam moments we do not want.
         fresh_lrs = [group["lr"] for group in meta_model.optimizer.param_groups]
@@ -311,12 +324,11 @@ def run(args: argparse.Namespace) -> None:
             f"Loaded weights from {init_weights!r}; fresh optimizer lrs={fresh_lrs} "
             "(epoch 0, global_step 0)",
         )
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        seed_run(seed, train_generator, val_generator)
         print0(dist_ctx, f"Re-seeded RNG to {seed} for the new run's data order")
     elif checkpoint:
-        start_epoch = load_training_checkpoint(meta_model, checkpoint, device, dist_ctx)
+        assert checkpoint_data is not None
+        start_epoch = load_training_checkpoint(meta_model, checkpoint_data, dist_ctx)
         print0(dist_ctx, f"Loaded checkpoint {checkpoint!r}; resuming at epoch {start_epoch}")
         if start_epoch >= int(cfg.training.epochs):
             print0(
@@ -325,23 +337,20 @@ def run(args: argparse.Namespace) -> None:
                 "Exiting without further training.",
             )
             raise SystemExit(0)
-        # Offset the RNG by the number of already-trained epochs so the resumed run
-        # sees a different data-shuffling stream instead of replaying the epoch
-        # 0..N-1 orderings. The DataLoader's RandomSampler draws from the global
-        # torch generator (re-seeded to the seed at startup), and the training loop is
-        # iterated below, so re-seeding here changes the permutations for every
-        # resumed epoch. (Augmentations already vary per run via Albumentations'
-        # own entropy-seeded RNG.)
+        # Offset the seed by the progress so far, so the resumed run does not replay
+        # the orderings already trained on. The loaders have not iterated yet, so
+        # re-seeding their generators here sets every resumed epoch's permutation.
+        # (Augmentations vary per run via Albumentations' own entropy-seeded RNG.)
         if meta_model.resuming_within_epoch:
             resume_seed = seed + int(meta_model.global_step)
             seed_note = f"{meta_model.global_step} completed updates"
         else:
             resume_seed = seed + start_epoch
             seed_note = f"{start_epoch} trained epochs"
-        torch.manual_seed(resume_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(resume_seed)
+        seed_run(resume_seed, train_generator, val_generator)
         print0(dist_ctx, f"Re-seeded RNG to {resume_seed} (seed={seed} + {seed_note})")
+    # Release the host copy of the checkpoint before the loaders fork their workers.
+    del checkpoint_data
 
     evaluator = Evaluator(
         num_classes=registry.num_target_classes,

@@ -29,8 +29,12 @@ from mermaidseg.evaluation.hierarchical import HIER_HEADLINE_KEYS, HierarchicalS
 from mermaidseg.evaluation.metrics import ConceptLayout, MetricBundle, concept_block_from_binary
 from mermaidseg.evaluation.predictor import CBMPredictor, make_eval_transform
 from mermaidseg.evaluation.reporting import fmt, write_csv, write_json
+from mermaidseg.seeding import make_worker_seeder
 
 logger = logging.getLogger(__name__)
+
+# Seed of the eval loader's generator, from which its worker seeds derive.
+_LOADER_SEED = 0
 
 
 def _worker_init(_worker_id: int) -> None:
@@ -369,7 +373,8 @@ def run_point_evaluation(
         num_workers=num_workers,
         collate_fn=_collate,
         pin_memory=(predictor.device.type == "cuda"),
-        worker_init_fn=_worker_init if num_workers > 0 else None,
+        worker_init_fn=make_worker_seeder(0, _worker_init) if num_workers > 0 else None,
+        generator=torch.Generator().manual_seed(_LOADER_SEED),
         persistent_workers=num_workers > 0,
     )
 

@@ -161,3 +161,22 @@ def test_train_epoch_scores_every_nth_microbatch(
     # Six microbatches, indices 0..5; every 4th is scored.
     assert len(calls) == 2
     assert meta._train_microbatches_seen == 6
+
+
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_shard_step_autocasts_on_the_input_device_type(use_amp):
+    target, concepts = _lookups()
+    model = _TinyCBM()
+    seen: dict[str, object] = {}
+
+    def _record(_module, _args):
+        seen["enabled"] = torch.is_autocast_enabled("cpu")
+        seen["dtype"] = torch.get_autocast_dtype("cpu")
+
+    model.stem.register_forward_pre_hook(_record)
+    step = ShardStep(model, _TinyLoss(), None, target, concepts, use_amp, torch.bfloat16)
+    images, source_labels = _batch()
+    step(images, source_labels)
+    assert seen["enabled"] is use_amp
+    if use_amp:
+        assert seen["dtype"] == torch.bfloat16

@@ -108,6 +108,16 @@ def check_split_evals(split: str, evals: list[str]) -> None:
         )
 
 
+def eval_amp_dtype(training_config: str | Path, amp: bool) -> torch.dtype | None:
+    """Autocast dtype from ``training.mixed_precision_dtype`` when ``amp`` is set, else ``None``."""
+    if not amp:
+        return None
+    from mermaidseg.model.meta import _resolve_amp_dtype
+
+    section = load_section(training_config, "training")
+    return _resolve_amp_dtype(section["mixed_precision_dtype"])
+
+
 def run_removed_concepts(training_config: str | Path, taxonomy_csv: str | Path) -> list[str]:
     """Channels removed by ``training.concept_removal`` of ``training_config``, if any."""
     from mermaidseg.run_setup import concept_removal_list
@@ -237,7 +247,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-size", type=int, default=8, help="Image batch size")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--device", default=None)
-    p.add_argument("--amp", action="store_true", help="bf16 autocast for the encoder")
+    p.add_argument(
+        "--amp",
+        action="store_true",
+        help="autocast the forward pass in training.mixed_precision_dtype",
+    )
     p.add_argument(
         "--strict",
         action="store_true",
@@ -441,7 +455,8 @@ def main(argv: list[str] | None = None) -> None:
         concept_id2name=concept_path,
     )
     model = build_model(artifacts, device)
-    predictor = CBMPredictor(model, input_size=input_size, device=device, amp=args.amp)
+    amp_dtype = eval_amp_dtype(args.training_config, args.amp)
+    predictor = CBMPredictor(model, input_size=input_size, device=device, amp_dtype=amp_dtype)
     id2label = artifacts.id2label
     concept_names = [
         name for _, name in sorted(artifacts.concept_id2name.items(), key=lambda kv: int(kv[0]))
@@ -647,7 +662,7 @@ def main(argv: list[str] | None = None) -> None:
                     device=device,
                     batch_size=args.batch_size,
                     num_workers=args.num_workers,
-                    amp=args.amp,
+                    amp_dtype=amp_dtype,
                     schema_config=args.schema_config,
                     max_images_per_dataset=loss_max_images,
                     name=loss_key,

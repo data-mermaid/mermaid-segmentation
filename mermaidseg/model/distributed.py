@@ -8,15 +8,12 @@ averages the ranks' gradients, which is the gradient of the mean shard loss.
 
 from __future__ import annotations
 
-import functools
 import os
-import random
 import zlib
-from collections.abc import Callable, Iterator, Sized
+from collections.abc import Callable, Iterator, Mapping, Sequence, Sized
 from dataclasses import dataclass
 from datetime import timedelta
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data import BatchSampler, RandomSampler, Sampler
@@ -135,22 +132,22 @@ def _collective_device() -> torch.device:
     return torch.device("cpu")
 
 
-def broadcast_from_rank0(value: int) -> int:
-    """Rank 0's ``value`` on every rank."""
-    tensor = torch.tensor([int(value)], dtype=torch.int64, device=_collective_device())
-    dist.broadcast(tensor, src=0)
-    return int(tensor.item())
+def broadcast_generator_from_rank0(generator: torch.Generator) -> None:
+    """Set ``generator`` to rank 0's state on every rank."""
+    state = generator.get_state().to(_collective_device())
+    dist.broadcast(state, src=0)
+    generator.set_state(state.cpu())
 
 
 class ShardedBatchSampler(Sampler[list[int]]):
     """This rank's contiguous slice of each shuffled global batch.
 
-    Each pass draws one seed from the global torch RNG, as ``RandomSampler``
-    does without a generator, and at the same point of ``DataLoader``
-    iteration (the first index fetch, after the loader's ``_base_seed``). With
-    ``broadcast_seed`` every rank then uses rank 0's seed. The global batches
-    are those of ``DataLoader(shuffle=True, batch_size=batch_size,
-    drop_last=True)`` in a single process with the same RNG state.
+    Each pass shuffles with ``generator``, as ``RandomSampler`` does, at the same
+    point of ``DataLoader`` iteration (the first index fetch, after the loader
+    draws ``_base_seed`` from the same generator). With ``broadcast_state`` every
+    rank first adopts rank 0's generator state. The global batches are those of a
+    single-process ``DataLoader(shuffle=True, batch_size=batch_size,
+    drop_last=True, generator=<generator in the same state>)``.
     """
 
     def __init__(
@@ -160,7 +157,8 @@ class ShardedBatchSampler(Sampler[list[int]]):
         rank: int,
         world_size: int,
         *,
-        broadcast_seed: Callable[[int], int] | None = None,
+        generator: torch.Generator,
+        broadcast_state: Callable[[torch.Generator], None] | None = None,
     ) -> None:
         """Validate the rank layout and store the sampler settings.
 
@@ -169,7 +167,8 @@ class ShardedBatchSampler(Sampler[list[int]]):
             batch_size: Global batch size.
             rank: Rank of this process.
             world_size: Number of processes.
-            broadcast_seed: Optional function mapping this rank's seed to rank 0's seed.
+            generator: Generator the shuffle draws from; the loader's own generator.
+            broadcast_state: Optional function that sets the generator to rank 0's state.
 
         Raises:
             ValueError: If ``rank`` is outside ``0..world_size - 1``.
@@ -181,7 +180,8 @@ class ShardedBatchSampler(Sampler[list[int]]):
         self.per_rank = require_divisible_batch(self.batch_size, int(world_size))
         self.rank = int(rank)
         self.world_size = int(world_size)
-        self.broadcast_seed = broadcast_seed
+        self.generator = generator
+        self.broadcast_state = broadcast_state
 
     def __len__(self) -> int:
         """Return the number of global batches per pass."""
@@ -189,45 +189,16 @@ class ShardedBatchSampler(Sampler[list[int]]):
 
     def __iter__(self) -> Iterator[list[int]]:
         """Yield this rank's slice of each shuffled global batch."""
-        seed = int(torch.empty((), dtype=torch.int64).random_().item())
-        if self.broadcast_seed is not None:
-            seed = int(self.broadcast_seed(seed))
-        generator = torch.Generator()
-        generator.manual_seed(seed)
+        if self.broadcast_state is not None:
+            self.broadcast_state(self.generator)
         batches = BatchSampler(
-            RandomSampler(self.data_source, generator=generator),
+            RandomSampler(self.data_source, generator=self.generator),
             self.batch_size,
             drop_last=True,
         )
         start = self.rank * self.per_rank
         for batch in batches:
             yield batch[start : start + self.per_rank]
-
-
-def _init_rank_worker(rank: int, inner: Callable[[int], None] | None, worker_id: int) -> None:
-    """Run ``inner``, then reseed ``random``, numpy, and torch for this (rank, worker)."""
-    if inner is not None:
-        inner(worker_id)
-    state = np.random.SeedSequence([torch.initial_seed(), int(rank)]).generate_state(
-        4, dtype=np.uint32
-    )
-    torch.manual_seed((int(state[0]) << 32) | int(state[1]))
-    random.seed((int(state[2]) << 32) | int(state[3]))
-    np.random.seed(state)
-
-
-def make_rank_worker_init_fn(
-    rank: int, inner: Callable[[int], None] | None = None
-) -> Callable[[int], None]:
-    """Worker init that reseeds ``random``, numpy, and torch per (rank, worker).
-
-    Every rank's loader draws the same ``_base_seed`` from the shared global
-    RNG, so without this worker ``k`` would get the same seeds on every rank,
-    and the random fallback index for an empty crop would repeat across the
-    ranks' slices of one batch.
-    """
-    # A partial over a module-level function pickles, so spawn-started workers can load it.
-    return functools.partial(_init_rank_worker, rank, inner)
 
 
 def all_ranks_finite(loss: torch.Tensor) -> bool:
@@ -253,14 +224,37 @@ def _key_fingerprint(keys: list[str]) -> int:
     return zlib.crc32("\n".join(keys).encode()) + (len(keys) << 32)
 
 
-def reduce_components(values: dict[str, float]) -> dict[str, float]:
-    """Mean of each logged value over ranks, in float64.
+def stack_components(
+    values: Sequence[torch.Tensor | float], device: torch.device | None = None
+) -> torch.Tensor:
+    """Stack scalar components into one float64 vector, on ``device`` or the tensors' device."""
+    if device is None:
+        device = next((v.device for v in values if isinstance(v, torch.Tensor)), None)
+    return torch.stack(
+        [
+            torch.as_tensor(v, dtype=torch.float64, device=device).detach().reshape(())
+            for v in values
+        ]
+    )
+
+
+def components_to_floats(components: Mapping[str, torch.Tensor | float]) -> dict[str, float]:
+    """Host floats of scalar components, through a single device-to-host transfer."""
+    if not components:
+        return {}
+    return dict(zip(components, stack_components(list(components.values())).tolist(), strict=True))
+
+
+def reduce_components(values: Mapping[str, torch.Tensor | float]) -> dict[str, float]:
+    """Mean of each logged value over ranks, in float64, as host floats.
+
+    Takes scalar tensors or floats and moves them to the host in one transfer.
 
     Every rank must pass the same keys. A fingerprint of the sorted keys is
     compared first, so a mismatch raises instead of reducing misaligned values.
     """
     if not is_distributed():
-        return dict(values)
+        return components_to_floats(values)
     keys = sorted(values)
     device = _collective_device()
     fingerprint = _key_fingerprint(keys)
@@ -270,6 +264,6 @@ def reduce_components(values: dict[str, float]) -> dict[str, float]:
         raise RuntimeError(f"ranks logged different loss components; this rank has {keys}.")
     if not keys:
         return {}
-    stacked = torch.tensor([float(values[key]) for key in keys], dtype=torch.float64, device=device)
+    stacked = stack_components([values[key] for key in keys], device)
     reduced = all_reduce_mean(stacked).tolist()
     return dict(zip(keys, reduced, strict=True))

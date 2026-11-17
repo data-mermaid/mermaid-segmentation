@@ -11,7 +11,6 @@ from typing import Any
 import torch
 import yaml
 
-import mermaidseg.model.models as mm_models
 from mermaidseg.config import lookup_class, validate_section
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS, parse_concept_rank
 from mermaidseg.model.models import MODEL_CLASSES, ConceptBottleneckDPTLoRADINOv3
@@ -105,7 +104,7 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
     """Build the concept-bottleneck model and load its checkpoint weights."""
     num_classes = max(artifacts.id2label.keys()) + 1
     ckpt = torch.load(artifacts.checkpoint_path, map_location=device, weights_only=True)
-    state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+    state_dict = ckpt["model_state_dict"]
 
     num_concepts = _num_concepts_from_state_dict(state_dict) or len(artifacts.concept_id2name)
     if num_concepts <= 0:
@@ -127,11 +126,5 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
         detach_concepts=False,
         **model_kwargs,
     )
-    state_dict = mm_models.align_peft_checkpoint_state_dict(state_dict, model)
-    # Checkpoints from code that deletes the first DPT fusion layer's residual_layer1 lack its weights. That block
-    # never runs (layer 0 gets no residual), so its missing keys are harmless; any other mismatch still fails.
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    missing = [k for k in missing if "fusion_stage.layers.0.residual_layer1." not in k]
-    if missing or unexpected:
-        raise RuntimeError(f"state_dict mismatch: missing={missing} unexpected={unexpected}")
+    model.load_state_dict(state_dict, strict=True)
     return model.to(device).eval()

@@ -44,14 +44,18 @@ from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local
 from mermaidseg.evaluation.reporting import write_json
 from mermaidseg.io import setup_config
 from mermaidseg.model.data_parallel import apply_concept_bottleneck_loss
+from mermaidseg.model.distributed import components_to_floats
 from mermaidseg.run_setup import (
     DEFAULT_SCHEMA_CONFIG,
+    MODEL_CHECKPOINT_KEYS,
     build_meta_model,
     build_registry,
     load_model_weights,
     load_run_concept_source_mask,
+    read_checkpoint,
     resolve_repo_path,
 )
+from mermaidseg.seeding import make_worker_seeder
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +129,7 @@ def evaluate_val_loss(
     device: torch.device,
     batch_size: int = 8,
     num_workers: int = 8,
-    amp: bool = False,
+    amp_dtype: torch.dtype | None = None,
     schema_config: str | Path = DEFAULT_SCHEMA_CONFIG,
     max_images_per_dataset: int | None = 1000,
     per_pixel_loss_weight: float = 0.5,
@@ -185,9 +189,8 @@ def evaluate_val_loss(
             )
 
     meta = build_meta_model(cfg, registry, device)
-    load_model_weights(meta, checkpoint, device)
+    load_model_weights(meta, read_checkpoint(checkpoint, MODEL_CHECKPOINT_KEYS))
     meta.model.eval()
-    use_amp = amp and device.type == "cuda"
 
     per_dataset: dict[str, dict] = {}
     overall = _Accumulator()
@@ -204,10 +207,13 @@ def evaluate_val_loss(
             shuffle=False,
             num_workers=num_workers,
             pin_memory=device.type == "cuda",
-            worker_init_fn=make_worker_init_fn(cache_stats) if num_workers > 0 else None,
+            worker_init_fn=(
+                make_worker_seeder(0, make_worker_init_fn(cache_stats)) if num_workers > 0 else None
+            ),
+            generator=torch.Generator().manual_seed(seed),
         )
         acc = _Accumulator()
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch in tqdm(loader, desc=f"{name} {dataset_name}"):
                 images, source_labels = batch[0], batch[1]
                 if images.numel() == 0:
@@ -220,7 +226,9 @@ def evaluate_val_loss(
                     target_concepts = apply_concept_source_mask(
                         target_concepts, source_mask.keep, batch[2]
                     )
-                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                with torch.autocast(
+                    device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None
+                ):
                     outputs = meta.model(images)
                 loss, _, _, components = apply_concept_bottleneck_loss(
                     outputs,
@@ -229,7 +237,7 @@ def evaluate_val_loss(
                     target_labels,
                     target_concepts,
                 )
-                acc.add({TOTAL_KEY: loss.item(), **components})
+                acc.add(components_to_floats({TOTAL_KEY: loss, **components}))
         per_dataset[dataset_name] = acc.means()
         overall.merge(acc)
         logger.info(

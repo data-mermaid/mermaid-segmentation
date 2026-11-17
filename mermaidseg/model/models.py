@@ -2,9 +2,9 @@
 
 import math
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 import torch
 from peft import LoraConfig, get_peft_model
@@ -50,222 +50,6 @@ def _wrap_encoder_with_lora(
         bias=cast("Literal['none', 'all', 'lora_only']", lora_bias),
     )
     return get_peft_model(cast("PreTrainedModel", encoder), lora_config)
-
-
-# The coarsest fusion block is called with no skip, so this residual never runs.
-# Checkpoints saved before it was deleted still contain its weights and Adam slots.
-_UNUSED_FUSION_RESIDUAL = "fusion_stage.layers.0.residual_layer1."
-_FUSION_RESIDUAL_INSERT_BEFORE = "fusion_stage.layers.0.residual_layer2."
-_REMOVED_NORM_BUFFERS = (".running_mean", ".running_var", ".num_batches_tracked")
-
-
-def _remap_checkpoint_state_dict(
-    state_dict: dict[str, torch.Tensor],
-    model: torch.nn.Module,
-) -> dict[str, torch.Tensor]:
-    """Pick the PEFT key layout that overlaps the live module the most.
-
-    PEFT / transformers version skew can change the number of nested ``.model.``
-    segments under ``encoder.base_model``. The returned dict keeps every saved
-    tensor, including ones the live module no longer has.
-    """
-    target_keys = set(model.state_dict().keys())
-
-    def _legacy_encoder_prefix(key: str) -> str:
-        if key.startswith("encoder.model."):
-            return key.replace("encoder.model.", "encoder.", 1)
-        return key
-
-    def _collapse_peft_model(key: str) -> str:
-        return key.replace(".base_model.model.model.", ".base_model.model.", 1)
-
-    def _expand_peft_model(key: str) -> str:
-        marker = "encoder.base_model.model."
-        nested = "encoder.base_model.model.model."
-        if key.startswith(marker) and not key.startswith(nested):
-            return key.replace(marker, nested, 1)
-        return key
-
-    def _remap(fn: Callable[[str], str]) -> dict[str, torch.Tensor]:
-        return {fn(k): v for k, v in state_dict.items()}
-
-    variants = (
-        state_dict,
-        _remap(_legacy_encoder_prefix),
-        _remap(lambda k: _collapse_peft_model(_legacy_encoder_prefix(k))),
-        _remap(lambda k: _expand_peft_model(_legacy_encoder_prefix(k))),
-    )
-    return max(variants, key=lambda sd: len(set(sd.keys()) & target_keys))
-
-
-def align_peft_checkpoint_state_dict(
-    state_dict: dict[str, torch.Tensor],
-    model: torch.nn.Module,
-) -> dict[str, torch.Tensor]:
-    """Remap saved checkpoint keys to match ``model.state_dict()``.
-
-    Keys for the unused coarsest-fusion residual
-    (``fusion_stage.layers.0.residual_layer1``) are dropped so a checkpoint
-    saved before that module was removed still loads.
-    """
-    best_state_dict = _remap_checkpoint_state_dict(state_dict, model)
-    target_keys = set(model.state_dict().keys())
-    return {
-        key: value
-        for key, value in best_state_dict.items()
-        if _UNUSED_FUSION_RESIDUAL not in key
-        and (key in target_keys or not key.endswith(_REMOVED_NORM_BUFFERS))
-    }
-
-
-def _optimizer_group_names(
-    optimizer: torch.optim.Optimizer,
-    model: torch.nn.Module,
-) -> list[list[str]]:
-    """Parameter names in each live optimizer group, in group order."""
-    name_of = {id(param): name for name, param in model.named_parameters()}
-    groups: list[list[str]] = []
-    for group in optimizer.param_groups:
-        names: list[str] = []
-        for param in group["params"]:
-            try:
-                names.append(name_of[id(param)])
-            except KeyError as exc:
-                raise ValueError("Optimizer parameter is not registered on the model") from exc
-        groups.append(names)
-    return groups
-
-
-def _removed_residual_param_names(state_dict: dict[str, torch.Tensor]) -> list[str]:
-    """Parameter names of the deleted residual, in checkpoint registration order."""
-    return [
-        key
-        for key in state_dict
-        if _UNUSED_FUSION_RESIDUAL in key and not key.endswith(_REMOVED_NORM_BUFFERS)
-    ]
-
-
-def _group_size_error(saved: int, live: int, detail: str = "") -> ValueError:
-    message = (
-        "loaded state dict contains a parameter group that doesn't match "
-        f"the size of optimizer's group (saved {saved}, live {live})"
-    )
-    if detail:
-        message = f"{message}: {detail}"
-    return ValueError(message)
-
-
-def align_optimizer_state_dict(
-    optimizer_state: dict[str, Any],
-    optimizer: torch.optim.Optimizer,
-    model: torch.nn.Module,
-    checkpoint_state_dict: dict[str, torch.Tensor],
-) -> tuple[dict[str, Any], int]:
-    """Drop Adam slots for the removed coarsest-fusion residual.
-
-    The residual sat in the middle of a parameter group, between
-    ``layers.0.projection`` and ``layers.0.residual_layer2``. Slots that still
-    correspond to live parameters stay in that order, and the group's learning
-    rate and other hyperparameters are copied through unchanged.
-
-    Returns the state dict for ``optimizer.load_state_dict`` and how many
-    parameter slots were removed. A checkpoint that already matches the live
-    optimizer is returned unchanged with a count of zero.
-    """
-    saved_groups = optimizer_state["param_groups"]
-    live_groups = optimizer.param_groups
-    if len(saved_groups) != len(live_groups):
-        raise ValueError(
-            "loaded state dict has a different number of parameter groups "
-            f"(saved {len(saved_groups)}, live {len(live_groups)})"
-        )
-
-    live_names_per_group = _optimizer_group_names(optimizer, model)
-    if all(
-        len(saved["params"]) == len(live_names)
-        for saved, live_names in zip(saved_groups, live_names_per_group, strict=True)
-    ):
-        return optimizer_state, 0
-
-    removed_names = _removed_residual_param_names(
-        _remap_checkpoint_state_dict(checkpoint_state_dict, model)
-    )
-    new_groups: list[dict[str, Any]] = []
-    n_dropped = 0
-    for saved_group, live_group, live_names in zip(
-        saved_groups, live_groups, live_names_per_group, strict=True
-    ):
-        saved_ids = list(saved_group["params"])
-        if len(saved_ids) == len(live_names):
-            new_groups.append(saved_group)
-            continue
-        if len(saved_ids) < len(live_names):
-            raise _group_size_error(len(saved_ids), len(live_names))
-
-        insert_at = next(
-            (i for i, name in enumerate(live_names) if _FUSION_RESIDUAL_INSERT_BEFORE in name),
-            None,
-        )
-        if insert_at is None:
-            raise _group_size_error(
-                len(saved_ids),
-                len(live_names),
-                "could not find fusion_stage.layers.0.residual_layer2 "
-                "to place the removed residual",
-            )
-        old_names = live_names[:insert_at] + removed_names + live_names[insert_at:]
-        if len(old_names) != len(saved_ids):
-            raise _group_size_error(
-                len(saved_ids),
-                len(live_names),
-                f"reconstructed {len(old_names)} names after accounting for the removed residual",
-            )
-
-        kept_ids: list[int] = []
-        for param_id, name in zip(saved_ids, old_names, strict=True):
-            if _UNUSED_FUSION_RESIDUAL in name:
-                n_dropped += 1
-                continue
-            kept_ids.append(param_id)
-        if len(kept_ids) != len(live_group["params"]):
-            raise _group_size_error(len(saved_ids), len(live_group["params"]))
-
-        saved_slots = optimizer_state["state"]
-        for param_id, param, name in zip(kept_ids, live_group["params"], live_names, strict=True):
-            slot = saved_slots.get(param_id)
-            if not isinstance(slot, dict):
-                continue
-            moment = slot.get("exp_avg")
-            if isinstance(moment, torch.Tensor) and tuple(moment.shape) != tuple(param.shape):
-                raise _group_size_error(
-                    len(saved_ids),
-                    len(live_names),
-                    f"moment shape {tuple(moment.shape)} does not match {name} "
-                    f"shape {tuple(param.shape)}",
-                )
-
-        new_group = dict(saved_group)
-        new_group["params"] = kept_ids
-        param_names = new_group.get("param_names")
-        if param_names is not None:
-            if len(param_names) == len(old_names):
-                new_group["param_names"] = [
-                    name
-                    for name, old_name in zip(param_names, old_names, strict=True)
-                    if _UNUSED_FUSION_RESIDUAL not in old_name
-                ]
-            else:
-                new_group.pop("param_names")
-        new_groups.append(new_group)
-
-    kept_id_set = {param_id for group in new_groups for param_id in group["params"]}
-    saved_id_set = {param_id for group in saved_groups for param_id in group["params"]}
-    filtered_state = {
-        key: value
-        for key, value in optimizer_state["state"].items()
-        if key in kept_id_set or key not in saved_id_set
-    }
-    return {"state": filtered_state, "param_groups": new_groups}, n_dropped
 
 
 class DPTHead(torch.nn.Module):
@@ -401,6 +185,16 @@ class _DPTDINOv3Base(torch.nn.Module):
     The encoder is adapted with PEFT LoRA adapters.
     """
 
+    concept_proj: torch.nn.Conv2d
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Dtype of the concept head parameters, which the concept bottleneck runs in.
+
+        This is fp32 for training.
+        """
+        return self.concept_proj.weight.dtype
+
     def __init__(
         self,
         *,
@@ -449,6 +243,9 @@ class _DPTDINOv3Base(torch.nn.Module):
             lora_target_modules=lora_target_modules,
             lora_bias=lora_bias,
         )
+        # The pretrained encoder weights stay frozen; only the LoRA adapters train.
+        for name, param in self.encoder.named_parameters():
+            param.requires_grad = "lora_" in name
 
         self.patch_size = patch_size
         self.token_width = input_size[1] // patch_size
@@ -486,15 +283,6 @@ class _DPTDINOv3Base(torch.nn.Module):
             # Keep CLS (index 0), drop register tokens, keep patch tokens.
             selected.append(torch.cat([hs[:, :1], hs[:, self.num_prefix_tokens :]], dim=1))
         return selected
-
-    def freeze_encoder(self) -> None:
-        """Freeze the backbone.
-
-        The pretrained weights are frozen but the low-rank adapters stay
-        trainable (so gradients still flow through the encoder).
-        """
-        for name, param in self.encoder.named_parameters():
-            param.requires_grad = "lora_" in name
 
 
 class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
@@ -547,12 +335,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         concept_features = torch.nn.functional.interpolate(
             concept_features, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
-        if concept_features.device.type == "cuda":
-            with torch.autocast(device_type="cuda", enabled=False):
-                logits, concept_outputs, concept_logits = self._forward_concept_tail(
-                    concept_features
-                )
-        else:
+        with torch.autocast(device_type=concept_features.device.type, enabled=False):
             logits, concept_outputs, concept_logits = self._forward_concept_tail(concept_features)
         return ConceptBottleneckOutput(
             loss=None,
@@ -564,11 +347,11 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
     def _forward_concept_tail(
         self, concept_features: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run concept projection, activation, and class projection in fp32."""
-        concept_logits = self.concept_proj(concept_features.float())
+        """Run concept projection, activation, and class projection in ``self.dtype``."""
+        concept_logits = self.concept_proj(concept_features.to(self.dtype))
         concept_outputs = self.concept_outputs_activation(concept_logits)
         classifier_input = concept_outputs.detach() if self.detach_concepts else concept_outputs
-        logits = self.concept_classifier(classifier_input.float())
+        logits = self.concept_classifier(classifier_input.to(self.dtype))
         return logits, concept_outputs, concept_logits
 
     def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
@@ -581,10 +364,10 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
             concept_values = self.concept_value2id[concept]  # type: ignore[index]
             order_concept_length = len(list(concept_values.values())[0])
             chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
-            activated_parts.append(torch.softmax(chunk.float(), dim=1))
+            activated_parts.append(torch.softmax(chunk.to(self.dtype), dim=1))
             offset += order_concept_length
 
-        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...].float()))
+        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...].to(self.dtype)))
         return torch.cat(activated_parts, dim=1)
 
 

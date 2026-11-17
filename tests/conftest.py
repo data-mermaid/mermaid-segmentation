@@ -52,6 +52,7 @@ class FakeMetaModel:
         self.num_concepts = num_concepts
         self.conceptid2labelid = conceptid2labelid
         self.device = "cpu"
+        self.device_type = "cpu"
         self.global_step = 0
         self._warmup_iters_completed = 0
         self.model = nn.Linear(4, num_classes)
@@ -126,7 +127,6 @@ def cbm_test_config() -> ConfigDict:
             },
             "training": {
                 "training_mode": "concept-bottleneck",
-                "freeze_encoder": True,
                 "detach_concepts": True,
                 "distributed": False,
                 "world_size": 1,

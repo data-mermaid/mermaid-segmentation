@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 import yaml
-from torch.utils.data import Dataset
+from torch.utils.data import ConcatDataset, Dataset
 
 import mermaidseg.logger
 import mermaidseg.model.models
@@ -24,9 +24,17 @@ from mermaidseg import training
 from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
 from mermaidseg.io import ConfigDict, load_config, setup_config
-from mermaidseg.run_setup import resolve_repo_path
-from mermaidseg.training import _assemble_train_datasets
+from mermaidseg.model.distributed import DistContext
+from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint, resolve_repo_path
+from mermaidseg.training import (
+    VAL_GENERATOR_SEED_OFFSET,
+    _assemble_train_datasets,
+    load_training_checkpoint,
+    make_shuffled_loader,
+    seed_run,
+)
 from scripts.train import build_parser
+from tests.conftest import cbm_test_config
 
 
 def _datasets() -> dict[tuple[str, str], str]:
@@ -86,6 +94,44 @@ def test_trainval_config_trains_on_six_coralscapes_v2_copies():
     built = build_datasets(data_cfg, dataset_classes=classes, splits=["train"], verbose=False)
     train = _assemble_train_datasets(built, data_cfg)
     assert sum(ds is built[("coralscapes_v2", "train")] for ds in train) == 6
+
+
+# ---------- shuffle order ----------
+
+
+class _Indices(Dataset):
+    def __len__(self) -> int:
+        return 16
+
+    def __getitem__(self, index: int) -> int:
+        return index
+
+
+def _order(generator: torch.Generator) -> list[int]:
+    loader = make_shuffled_loader(
+        DistContext(), ConcatDataset([_Indices()]), batch_size=4, generator=generator
+    )
+    return [int(i) for batch in loader for i in batch]
+
+
+def test_seed_run_seeds_val_generator_at_the_offset():
+    train_generator, val_generator = torch.Generator(), torch.Generator()
+    seed_run(7, train_generator, val_generator)
+    assert train_generator.initial_seed() == 7
+    assert val_generator.initial_seed() == 7 + VAL_GENERATOR_SEED_OFFSET
+    assert VAL_GENERATOR_SEED_OFFSET != 0
+
+
+def test_seed_run_reseeds_a_built_loader_to_the_resume_order():
+    train_generator, val_generator = torch.Generator(), torch.Generator()
+    seed_run(7, train_generator, val_generator)
+    loader = make_shuffled_loader(
+        DistContext(), ConcatDataset([_Indices()]), batch_size=4, generator=train_generator
+    )
+    seed_run(9, train_generator, val_generator)
+    resumed = [int(i) for batch in loader for i in batch]
+    assert resumed == _order(torch.Generator().manual_seed(9))
+    assert resumed != _order(torch.Generator().manual_seed(7))
 
 
 # ---------- one-step smoke run ----------
@@ -326,6 +372,119 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     mapping_path = Path(wandb_run.params["training_concept_mapping_path"])
     assert mapping_path.is_absolute() and mapping_path.is_file()
     assert wandb_run.finished
+
+
+def _resume_checkpoint(meta) -> dict[str, Any]:
+    """A checkpoint with the keys ``Logger.save_model_checkpoint`` writes."""
+    return {
+        "config": {},
+        "model_state_dict": meta.model.state_dict(),
+        "optimizer_state_dict": meta.optimizer.state_dict(),
+        "epoch": 2,
+        "epoch_complete": False,
+        "global_step": 7,
+        "warmup_iters_completed": 5,
+        "timestamp": "20260101000000",
+        "metrics": {},
+        "scheduler_state_dict": meta.scheduler.state_dict(),
+    }
+
+
+def test_load_training_checkpoint_restores_the_resume_state(
+    minimal_config, make_meta_model, tmp_path
+):
+    meta = make_meta_model(minimal_config, run_name="resume-ok")
+    path = tmp_path / "ckpt.pt"
+    torch.save(_resume_checkpoint(meta), path)
+    start_epoch = load_training_checkpoint(
+        meta, read_checkpoint(path, RESUME_CHECKPOINT_KEYS), DistContext()
+    )
+    assert start_epoch == 2
+    assert meta.global_step == 7
+    assert meta._warmup_iters_completed == 5
+    assert meta.resuming_within_epoch is True
+
+
+def _warmup_config() -> ConfigDict:
+    minimal_config = cbm_test_config()
+    minimal_config.training.scheduler.update(
+        type="LinearLR",
+        start_factor=1.0,
+        end_factor=0.1,
+        total_iters=20,
+        warmup_iters=10,
+        warmup_start_factor=0.01,
+    )
+    return minimal_config
+
+
+def _lr_after_steps(meta, steps: int) -> list[float]:
+    """Run ``steps`` optimizer steps with the trainer's scheduler order; return each LR."""
+    lrs = []
+    for _ in range(steps):
+        meta.optimizer.step()
+        meta._step_warmup_scheduler()
+        meta._step_iteration_scheduler()
+        lrs.append(meta.optimizer.param_groups[0]["lr"])
+    return lrs
+
+
+def test_resumed_mid_warmup_lr_matches_the_uninterrupted_run(make_meta_model, tmp_path):
+    continuous = _lr_after_steps(make_meta_model(_warmup_config(), run_name="continuous"), 16)
+
+    first = make_meta_model(_warmup_config(), run_name="first-half")
+    _lr_after_steps(first, 5)
+    checkpoint = _resume_checkpoint(first)
+    checkpoint["warmup_iters_completed"] = first._warmup_iters_completed
+    path = tmp_path / "ckpt.pt"
+    torch.save(checkpoint, path)
+
+    resumed = make_meta_model(_warmup_config(), run_name="second-half")
+    load_training_checkpoint(resumed, read_checkpoint(path, RESUME_CHECKPOINT_KEYS), DistContext())
+    assert _lr_after_steps(resumed, 11) == pytest.approx(continuous[5:])
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "model_state_dict",
+        "optimizer_state_dict",
+        "scheduler_state_dict",
+        "warmup_iters_completed",
+        "global_step",
+        "epoch",
+        "epoch_complete",
+    ],
+)
+def test_read_checkpoint_requires_each_resume_key(
+    minimal_config, make_meta_model, tmp_path, missing
+):
+    meta = make_meta_model(minimal_config, run_name="resume-missing")
+    checkpoint = _resume_checkpoint(meta)
+    del checkpoint[missing]
+    path = tmp_path / "ckpt.pt"
+    torch.save(checkpoint, path)
+    with pytest.raises(RuntimeError, match=missing):
+        read_checkpoint(path, RESUME_CHECKPOINT_KEYS)
+
+
+def test_run_rejects_a_bad_checkpoint_before_building_datasets(monkeypatch, tmp_path):
+    def _unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("run() reached dataset setup with an unloadable checkpoint")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.delenv("WANDB_RUN_ID", raising=False)
+    fake_wandb = _fake_wandb(_FakeWandbRun())
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+    monkeypatch.setattr(mermaidseg.logger, "wandb", fake_wandb)
+    monkeypatch.setattr(training, "setup_local_cache", _unreachable)
+    monkeypatch.setattr(training, "build_datasets", _unreachable)
+    bad = tmp_path / "bad.pt"
+    bad.write_bytes(b"not a checkpoint")
+    args = _smoke_args(tmp_path, tmp_path / "out", tmp_path / "cache", checkpoint=bad)
+    with pytest.raises(RuntimeError, match="bad.pt"):
+        training.run(args)
 
 
 @_FORK_ONLY

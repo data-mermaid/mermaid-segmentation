@@ -5,7 +5,7 @@ import faulthandler
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any, cast
 
 import numpy as np
@@ -50,6 +50,17 @@ logger = logging.getLogger(__name__)
 _BatchLoader = DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
 
 _BATCH_LOSS_KEY = "__batch_loss__"
+
+
+def _sum_components(parts: Iterable[Mapping[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Key-wise float64 sum of scalar tensors; a key missing from a part adds nothing."""
+    totals: dict[str, torch.Tensor] = {}
+    for part in parts:
+        for key, value in part.items():
+            value = value.detach().double()
+            totals[key] = totals[key] + value if key in totals else value
+    return totals
+
 
 SLOW_FETCH_WARN_SEC = 60.0
 
@@ -97,46 +108,41 @@ def records_train_metrics(microbatch_index: int, every: int) -> bool:
     return int(microbatch_index) % max(1, int(every)) == 0
 
 
+def _cuda_bf16_supported(device: torch.device) -> bool:
+    # Native bf16 only (pre-Ampere GPUs emulate it slowly), on the model's device, not the current one.
+    with torch.cuda.device(device):
+        return torch.cuda.is_bf16_supported(including_emulation=False)
+
+
 def _resolve_amp_dtype(dtype_config: Any) -> torch.dtype:
-    """Map config strings to torch autocast dtypes."""
+    """Map a config value to the torch autocast dtype; only bfloat16 is supported."""
     if isinstance(dtype_config, torch.dtype):
         return dtype_config
 
     dtype_name = str(dtype_config).lower().replace("-", "").replace("_", "")
     if dtype_name in {"bf16", "bfloat16"}:
         return torch.bfloat16
-    if dtype_name in {"fp16", "float16", "half"}:
-        return torch.float16
-    raise ValueError(
-        f"Unsupported mixed_precision_dtype={dtype_config!r}; expected 'bfloat16' or 'float16'."
-    )
+    raise ValueError(f"Unsupported mixed_precision_dtype={dtype_config!r}; expected 'bfloat16'.")
 
 
 def next_epoch_from_checkpoint(checkpoint: dict[str, Any]) -> int:
     """Return the epoch index a resumed run should start at.
 
-    Epoch-boundary checkpoints, including every checkpoint written before step
-    checkpoints existed, omit ``epoch_complete`` or set it true. Those resume at
-    ``epoch + 1``. A mid-epoch ``model_step*`` checkpoint sets ``epoch_complete``
-    false and continues the saved epoch.
+    An epoch-boundary checkpoint (``epoch_complete`` true) resumes at ``epoch + 1``. A
+    mid-epoch ``model_step*`` checkpoint (``epoch_complete`` false) continues the saved epoch.
     """
-    saved = int(checkpoint.get("epoch", -1))
-    if bool(checkpoint.get("epoch_complete", True)):
-        return saved + 1
-    return max(saved, 0)
+    if checkpoint["epoch_complete"]:
+        return int(checkpoint["epoch"]) + 1
+    return int(checkpoint["epoch"])
 
 
 def restore_warmup_progress(meta_model: Any, checkpoint: dict[str, Any]) -> None:
-    """Restore how many warmup steps have already run.
-
-    New checkpoints store ``warmup_iters_completed``. Older ones do not; any of
-    those is an epoch boundary, and warmup finishes inside epoch 0, so mark it done.
-    """
-    if "warmup_iters_completed" in checkpoint:
-        meta_model._warmup_iters_completed = int(checkpoint["warmup_iters_completed"])
-        return
-    if getattr(meta_model, "warmup_iters", 0) > 0:
-        meta_model._warmup_iters_completed = meta_model.warmup_iters
+    """Restore how many warmup steps have already run."""
+    meta_model._warmup_iters_completed = int(checkpoint["warmup_iters_completed"])
+    # LinearLR is chainable: its next factor depends on last_epoch, which the optimizer's
+    # restored LR already reflects.
+    if meta_model.warmup_scheduler is not None:
+        meta_model.warmup_scheduler.last_epoch = meta_model._warmup_iters_completed
 
 
 class MetaModel:
@@ -197,7 +203,7 @@ class MetaModel:
         *,
         model_kwargs: ConfigDict,
         training_kwargs: ConfigDict,
-        device: str | torch.device = "cuda",
+        device: str | torch.device,
         source_to_target_lookup: torch.Tensor | None = None,
         source_to_concepts_lookup: torch.Tensor | None = None,
         conceptid2labelid: dict[int, int] | None = None,
@@ -250,7 +256,6 @@ class MetaModel:
                 "distributed: %s ranks; each rank computes its shard's loss.", self.world_size
             )
 
-        freeze_encoder = training_kwargs.pop("freeze_encoder")
         detach_concepts = training_kwargs.pop("detach_concepts")
 
         self.training_kwargs = training_kwargs
@@ -258,11 +263,18 @@ class MetaModel:
         mixed_precision_dtype = training_kwargs.pop("mixed_precision_dtype")
         self.max_grad_norm = float(training_kwargs.pop("max_grad_norm"))
         self.amp_dtype = _resolve_amp_dtype(mixed_precision_dtype)
-        self.use_amp = bool(mixed_precision) and torch.cuda.is_available()
-        if self.use_amp and self.amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
-            logger.warning("CUDA bf16 autocast is not supported on this GPU; disabling AMP.")
-            self.use_amp = False
-        self.scaler = torch.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == torch.float16)
+        self.use_amp = bool(mixed_precision)
+        self.device_type = torch.device(device).type
+        if (
+            self.use_amp
+            and self.device_type == "cuda"
+            and self.amp_dtype == torch.bfloat16
+            and not _cuda_bf16_supported(torch.device(device))
+        ):
+            raise RuntimeError(
+                "mixed_precision_dtype='bfloat16' is not supported on this GPU; "
+                "set training.mixed_precision to false."
+            )
         self.grad_accum_steps = max(1, int(training_kwargs.grad_accum_steps))
         # Training metrics only; validation scores every batch.
         self.train_metrics_every = max(1, int(training_kwargs.train_metrics_every))
@@ -294,10 +306,7 @@ class MetaModel:
         self.model = model_cls(**model_kwargs)
 
         self.model = self.model.to(device)
-        self.freeze_encoder = freeze_encoder
         self.detach_concepts = detach_concepts
-        if freeze_encoder and hasattr(self.model, "freeze_encoder"):
-            cast("Any", self.model).freeze_encoder()
 
         loss_cls = lookup_class(LOSS_CLASSES, "loss", training_kwargs.loss.pop("type"))
         loss_kwargs = dict(training_kwargs.loss)
@@ -326,7 +335,7 @@ class MetaModel:
         optimizer_cls = lookup_class(OPTIMIZER_CLASSES, "optimizer", optimizer_cfg.pop("type"))
         # Differential learning rates: LoRA adapter params vs. everything else
         # (DPT head + concept/class heads). Split by whether the param name contains
-        # "lora_" (matches how ``freeze_encoder`` partitions params in models.py).
+        # "lora_" (matches how the model freezes non-LoRA encoder params).
         lora_lr = optimizer_cfg.pop("lora_lr")
         dpt_lr = optimizer_cfg.pop("dpt_lr")
 
@@ -386,47 +395,35 @@ class MetaModel:
     def _accumulate_loss(self, loss: torch.Tensor) -> None:
         """Backward one microbatch, averaged in fp32 across the accumulation window.
 
-        ``GradScaler`` is enabled only for fp16. bf16 autocast leaves it disabled, so
-        this division is the only scale applied to the loss. Callers must pass a
-        finite loss; a non-finite window is discarded before this runs.
+        Callers must pass a finite loss; a non-finite window is discarded before
+        this runs.
         """
         if loss.dtype != torch.float32:
             loss = loss.float()
-        self.scaler.scale(loss / self.grad_accum_steps).backward()
+        (loss / self.grad_accum_steps).backward()
 
-    def _abort_accumulation(self, did_backward: bool) -> None:
-        """Drop a partial window so it cannot become a short optimizer step.
-
-        When fp16 scaling already ran, ``update()`` resets the scaler so the next
-        window may call ``scale().backward()`` again. Disabled scalers (bf16) no-op.
-        """
-        if did_backward and self.scaler.is_enabled():
-            self.scaler.update()
+    def _abort_accumulation(self) -> None:
+        """Drop a partial window so it cannot become a short optimizer step."""
         self.optimizer.zero_grad(set_to_none=True)
 
     def _apply_accumulated_step(self) -> bool:
         """Clip once, then step Adam/SGD on the averaged gradient.
 
-        Returns True when the optimizer step was applied (not skipped by the scaler
-        or a non-finite grad norm).
+        Returns True when the optimizer step was applied (not skipped by a
+        non-finite grad norm).
         """
-        scale_before = self.scaler.get_scale()
         if self.max_grad_norm > 0:
-            self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(self._trainable_params, self.max_grad_norm)
             if not torch.isfinite(grad_norm):
                 logger.warning(
                     "train_epoch: skipping optimizer step due to non-finite grad norm (value=%s)",
                     grad_norm.item(),
                 )
-                if self.scaler.is_enabled():
-                    self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
                 return False
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
-        return self.scaler.get_scale() >= scale_before
+        return True
 
     def _to_target_labels(self, source_labels: torch.Tensor) -> torch.Tensor:
         """Map source-space labels to target-space labels via the lookup tensor.
@@ -537,7 +534,7 @@ class MetaModel:
         """This rank's lookup, forward, and loss, wrapped in DDP, built on first use.
 
         Built lazily so it wraps weights loaded after
-        construction and the ``requires_grad`` set by ``freeze_encoder``.
+        construction and the ``requires_grad`` set at model construction.
         Rebuilt if ``model`` or a loss module has been replaced since.
         """
         ddp = self._ddp_step
@@ -570,11 +567,15 @@ class MetaModel:
         # A bucket view of the 1x1 DPT/concept conv grads is not stride-compatible
         # (see the reducer's "Grad strides do not match bucket view strides"
         # warning), so leave the grads in their own storage.
-        self._ddp_step = DistributedDataParallel(
-            step,
-            device_ids=[device.index] if device.type == "cuda" else None,
-            broadcast_buffers=False,
-        )
+        # Built outside inference mode: a first build inside validation_epoch would
+        # make the reducer's buckets inference tensors that the next backward
+        # cannot update in place.
+        with torch.inference_mode(False):
+            self._ddp_step = DistributedDataParallel(
+                step,
+                device_ids=[device.index] if device.type == "cuda" else None,
+                broadcast_buffers=False,
+            )
         return self._ddp_step
 
     def _grad_sync_context(self, sync: bool) -> contextlib.AbstractContextManager[Any]:
@@ -605,7 +606,7 @@ class MetaModel:
         source_labels: torch.Tensor | None = None,
         return_maps: bool = True,
         source_rows: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, dict[str, float]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, dict[str, torch.Tensor]]:
         """Perform batch prediction and compute the loss.
 
         Args:
@@ -633,7 +634,7 @@ class MetaModel:
         loss = None
         outputs = None
         concept_outputs = None
-        loss_components: dict[str, float] = {}
+        loss_components: dict[str, torch.Tensor] = {}
 
         if self.distributed:
             if source_labels is None:
@@ -669,7 +670,9 @@ class MetaModel:
             )
             return loss, None, None, loss_components
 
-        with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+        with torch.autocast(
+            device_type=self.device_type, dtype=self.amp_dtype, enabled=self.use_amp
+        ):
             segmentation_outputs = self.model(images)
 
         assert target_concepts is not None, (
@@ -723,31 +726,27 @@ class MetaModel:
                 ``global_step`` and the LR schedule have advanced.
 
         Returns:
-            A 3-tuple of ``(average_loss, metric_results, timing)``.
+            A 3-tuple of ``(average_loss, metric_results, timing)``. The data, forward
+            and backward totals in ``timing`` are host-side wall times: they do not
+            wait for queued GPU work, so asynchronous kernels are charged to whichever
+            phase next blocks on the device.
         """
-        if self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
-            cast("Any", self.model).freeze_encoder()
+        self.model.train()
 
         iterations_per_train_epoch = self.iterations_per_train_epoch
         if iterations_per_train_epoch <= 0:
             raise ValueError("iterations_per_train_epoch must be > 0.")
 
-        running_loss = 0.0
-        running_loss_components: dict[str, float] = {}
+        # Per-update losses and components stay on the device until they are logged
+        # or the epoch ends; the batch loss rides along under ``_BATCH_LOSS_KEY``.
+        running: dict[str, torch.Tensor] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
-        use_cuda = self.device != "cpu" and torch.cuda.is_available()
-        # The phase barriers only make the data/forward/backward totals exact.
-        # With distributed they would also stall the other GPUs, so those
-        # totals are host-side times there; perf/step_sec stays wall time.
-        sync_timing = use_cuda and not self.distributed
 
         data_time_total = 0.0
         forward_time_total = 0.0
         backward_time_total = 0.0
         num_samples = 0
 
-        if use_cuda:
-            torch.cuda.synchronize()
         batch_end = time.perf_counter()
 
         if self._train_loader is not train_loader:
@@ -785,9 +784,8 @@ class MetaModel:
             step_data_wait = 0.0
             self.optimizer.zero_grad(set_to_none=True)
             micro_losses: list[torch.Tensor] = []
-            micro_components: list[dict[str, float]] = []
+            micro_components: list[dict[str, torch.Tensor]] = []
             window_failed = False
-            did_backward = False
 
             for _micro in range(self.grad_accum_steps):
                 assert self._train_loader_iter is not None
@@ -808,8 +806,6 @@ class MetaModel:
                         int(self.global_step) + 1,
                     )
 
-                if sync_timing:
-                    torch.cuda.synchronize()
                 data_time_total += time.perf_counter() - batch_end
 
                 images, source_labels, *extra = data
@@ -856,8 +852,6 @@ class MetaModel:
                 # Distributed: gradients are all-reduced once, in the window's last backward.
                 sync_grads = _micro == self.grad_accum_steps - 1
                 with self._grad_sync_context(sync_grads):
-                    if sync_timing:
-                        torch.cuda.synchronize()
                     forward_start = time.perf_counter()
                     loss, outputs, concept_outputs, loss_components = self.batch_predict_loss(
                         images,
@@ -867,13 +861,13 @@ class MetaModel:
                         return_maps=record_metrics,
                         source_rows=source_rows,
                     )
-                    if sync_timing:
-                        torch.cuda.synchronize()
                     forward_time_total += time.perf_counter() - forward_start
                     assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
 
                     # Distributed: skip the window if any rank's shard loss is non-finite,
                     # as the single-process path does when the mean over shards is.
+                    # The per-microbatch finite check is a host sync that cannot move to a
+                    # logging interval: a non-finite window must not reach the optimizer.
                     finite = (
                         all_ranks_finite(loss) if self.distributed else bool(torch.isfinite(loss))
                     )
@@ -889,13 +883,8 @@ class MetaModel:
                         batch_end = time.perf_counter()
                         break
 
-                    if sync_timing:
-                        torch.cuda.synchronize()
                     backward_start = time.perf_counter()
                     self._accumulate_loss(loss)
-                    did_backward = True
-                    if sync_timing:
-                        torch.cuda.synchronize()
                     backward_time_total += time.perf_counter() - backward_start
 
                 micro_losses.append(loss.detach())
@@ -918,33 +907,19 @@ class MetaModel:
                     target_concepts,
                 )
 
-                if sync_timing:
-                    torch.cuda.synchronize()
                 batch_end = time.perf_counter()
 
             if window_failed or not micro_losses:
-                self._abort_accumulation(did_backward)
-                if sync_timing:
-                    torch.cuda.synchronize()
+                self._abort_accumulation()
                 batch_end = time.perf_counter()
                 continue
 
             n_micro = len(micro_losses)
-            batch_loss = sum(torch.stack(micro_losses).double().tolist()) / n_micro
-            mean_components: dict[str, float] = {}
-            for comps in micro_components:
-                for key, value in comps.items():
-                    mean_components[key] = mean_components.get(key, 0.0) + value
-            mean_components = {key: value / n_micro for key, value in mean_components.items()}
-            if self.distributed:
-                # Mean over ranks of the per-rank window means: the mean over shards.
-                mean_components = reduce_components(
-                    {_BATCH_LOSS_KEY: batch_loss, **mean_components}
-                )
-                batch_loss = mean_components.pop(_BATCH_LOSS_KEY)
+            window_sum = _sum_components(
+                [{_BATCH_LOSS_KEY: loss_i} for loss_i in micro_losses] + micro_components
+            )
+            window_mean = {key: value / n_micro for key, value in window_sum.items()}
 
-            if sync_timing:
-                torch.cuda.synchronize()
             backward_start = time.perf_counter()
             # Decay starts on the update after warmup finishes. Stepping both on the
             # warmup boundary would consume a decay step while the LR is still rising.
@@ -957,30 +932,31 @@ class MetaModel:
                 self._step_warmup_scheduler()
                 if warmup_done:
                     self._step_iteration_scheduler()
-            if sync_timing:
-                torch.cuda.synchronize()
             backward_time_total += time.perf_counter() - backward_start
 
             if not step_applied:
                 batch_end = time.perf_counter()
                 continue
 
-            running_loss += batch_loss
-            for key, value in mean_components.items():
-                running_loss_components[key] = running_loss_components.get(key, 0.0) + value
+            running = _sum_components([running, window_mean])
 
-            if run_logger is not None and self.global_step % max(log_interval, 1) == 0:
-                run_logger.log(
-                    {
-                        "train/batch_loss": batch_loss,
-                        **{f"train/batch_{key}": value for key, value in mean_components.items()},
-                        # Host wall time for this update, and the part of it spent
-                        # blocked on the train loader.
-                        "perf/step_sec": time.perf_counter() - step_start,
-                        "perf/data_wait_sec": step_data_wait,
-                    },
-                    step=self.global_step,
-                )
+            # Distributed: every rank joins the reduction, whether or not it has a logger.
+            if self.global_step % max(log_interval, 1) == 0 and (
+                run_logger is not None or self.distributed
+            ):
+                logged = reduce_components(window_mean)
+                if run_logger is not None:
+                    run_logger.log(
+                        {
+                            "train/batch_loss": logged.pop(_BATCH_LOSS_KEY),
+                            **{f"train/batch_{key}": value for key, value in logged.items()},
+                            # Host wall time for this update, and the part of it spent
+                            # blocked on the train loader.
+                            "perf/step_sec": time.perf_counter() - step_start,
+                            "perf/data_wait_sec": step_data_wait,
+                        },
+                        step=self.global_step,
+                    )
             if on_optimizer_step is not None:
                 on_optimizer_step(self)
             batch_end = time.perf_counter()
@@ -996,10 +972,12 @@ class MetaModel:
             metric_results.update(evaluator.compute_concept_metric_results())
 
         denom = n_updates if n_updates > 0 else 1
-        last_loss = running_loss / denom
-        avg_loss_components = {k: v / denom for k, v in running_loss_components.items()}
-        for k, v in avg_loss_components.items():
-            metric_results[f"loss/{k}"] = v
+        # Summed per-update means are linear in the rank mean, so one reduction here
+        # equals the mean over ranks of each update's mean.
+        epoch_totals = reduce_components(running)
+        last_loss = epoch_totals.pop(_BATCH_LOSS_KEY, 0.0) / denom
+        for k, v in epoch_totals.items():
+            metric_results[f"loss/{k}"] = v / denom
         timing = {
             "data_loading_sec": data_time_total,
             "forward_sec": forward_time_total,
@@ -1008,7 +986,7 @@ class MetaModel:
         }
         return last_loss, metric_results, timing
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def validation_epoch(
         self,
         val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
@@ -1016,12 +994,12 @@ class MetaModel:
         | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch."""
+        self.model.eval()
         iterations_per_val_epoch = self.iterations_per_val_epoch
         if iterations_per_val_epoch <= 0:
             raise ValueError("iterations_per_val_epoch must be > 0.")
 
-        running_loss = 0.0
-        running_loss_components: dict[str, float] = {}
+        running: dict[str, torch.Tensor] = {}
         metric_results: dict[str, float | NDArray[np.float64]] = {}
 
         if self._val_loader is not val_loader:
@@ -1061,21 +1039,16 @@ class MetaModel:
                 return_maps=evaluator is not None,
             )
             assert isinstance(loss, torch.Tensor), "Loss must be a torch.Tensor"
-            running_loss += loss.item()
-            for k, v in loss_components.items():
-                running_loss_components[k] = running_loss_components.get(k, 0.0) + v
+            running = _sum_components([running, {_BATCH_LOSS_KEY: loss}, loss_components])
             del loss
 
             self._record_batch_metrics(
                 evaluator, outputs, target_labels, concept_outputs, target_concepts
             )
 
-        if self.distributed:
-            # Mean over ranks of the per-rank sums: the per-batch mean over shards, summed.
-            running_loss_components = reduce_components(
-                {_BATCH_LOSS_KEY: running_loss, **running_loss_components}
-            )
-            running_loss = running_loss_components.pop(_BATCH_LOSS_KEY)
+        # Distributed: the mean over ranks of the per-rank sums is the per-batch mean over
+        # shards, summed.
+        epoch_totals = reduce_components(running)
 
         # Distributed: torchmetrics sums each metric's state over ranks in compute().
         if evaluator is not None:
@@ -1088,10 +1061,7 @@ class MetaModel:
 
             metric_results.update(evaluator.compute_concept_metric_results())
 
-        last_loss = running_loss / iterations_per_val_epoch
-        avg_loss_components = {
-            k: v / iterations_per_val_epoch for k, v in running_loss_components.items()
-        }
-        for k, v in avg_loss_components.items():
-            metric_results[f"loss/{k}"] = v
+        last_loss = epoch_totals.pop(_BATCH_LOSS_KEY, 0.0) / iterations_per_val_epoch
+        for k, v in epoch_totals.items():
+            metric_results[f"loss/{k}"] = v / iterations_per_val_epoch
         return last_loss, metric_results

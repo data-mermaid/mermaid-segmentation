@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 from unittest.mock import patch
 
@@ -61,33 +62,101 @@ def _images_labels(n: int) -> tuple[torch.Tensor, torch.Tensor]:
     return images, labels
 
 
-def test_next_epoch_from_checkpoint_keeps_old_epoch_boundaries():
-    assert next_epoch_from_checkpoint({"epoch": 3}) == 4
-    assert next_epoch_from_checkpoint({"epoch": 0, "epoch_complete": True}) == 1
-    assert next_epoch_from_checkpoint({"epoch": 0, "epoch_complete": False}) == 0
-    assert next_epoch_from_checkpoint({}) == 0
+@pytest.mark.parametrize(
+    ("epoch_complete", "expected"),
+    [(True, 4), (False, 3)],
+    ids=["epoch-boundary-starts-next-epoch", "mid-epoch-continues-same-epoch"],
+)
+def test_next_epoch_from_checkpoint(epoch_complete, expected):
+    assert next_epoch_from_checkpoint({"epoch": 3, "epoch_complete": epoch_complete}) == expected
 
 
-def test_restore_warmup_marks_old_checkpoints_complete():
+def test_restore_warmup_progress_sets_the_saved_count():
     class _Meta:
-        warmup_iters = 4000
         _warmup_iters_completed = 0
+        warmup_scheduler = None
 
     meta = _Meta()
-    restore_warmup_progress(meta, {})
-    assert meta._warmup_iters_completed == 4000
     restore_warmup_progress(meta, {"warmup_iters_completed": 10})
     assert meta._warmup_iters_completed == 10
 
 
-def test_bf16_does_not_enable_grad_scaler(minimal_config, make_meta_model):
+@pytest.mark.parametrize("name", ["float16", "fp16", "half"])
+def test_resolve_amp_dtype_rejects_fp16_aliases(name):
+    with pytest.raises(ValueError, match="mixed_precision_dtype"):
+        meta_module._resolve_amp_dtype(name)
+
+
+def test_resolve_amp_dtype_accepts_bfloat16():
+    assert meta_module._resolve_amp_dtype("bfloat16") is torch.bfloat16
+
+
+def _record_encoder_autocast(meta) -> dict[str, object]:
+    """Record the CPU autocast state seen inside the mocked encoder's forward."""
+    seen: dict[str, object] = {}
+
+    def _record(_module, _args):
+        seen["enabled"] = torch.is_autocast_enabled("cpu")
+        seen["dtype"] = torch.get_autocast_dtype("cpu")
+
+    encoder = next(m for m in meta.model.modules() if hasattr(m, "embed"))
+    encoder.register_forward_pre_hook(_record)
+    return seen
+
+
+def _train_one_step(meta) -> None:
+    images, labels = _images_labels(2)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+    meta.train_epoch(loader, evaluator=None, epoch=0)
+
+
+def test_cpu_train_step_runs_encoder_under_cpu_bf16_autocast(minimal_config, make_meta_model):
+    cfg = _standard_cfg(
+        minimal_config,
+        mixed_precision=True,
+        mixed_precision_dtype="bfloat16",
+        iterations_per_train_epoch=1,
+    )
+    meta = make_meta_model(cfg, run_name="cpu-amp")
+    seen = _record_encoder_autocast(meta)
+    _train_one_step(meta)
+    assert seen == {"enabled": True, "dtype": torch.bfloat16}
+
+
+def test_cpu_train_step_without_mixed_precision_does_not_autocast(minimal_config, make_meta_model):
+    cfg = _standard_cfg(minimal_config, mixed_precision=False, iterations_per_train_epoch=1)
+    meta = make_meta_model(cfg, run_name="cpu-no-amp")
+    seen = _record_encoder_autocast(meta)
+    _train_one_step(meta)
+    assert seen["enabled"] is False
+
+
+def test_cuda_bf16_check_targets_the_model_device_without_emulation(minimal_config, monkeypatch):
+    support_kwargs: list[dict] = []
+    entered_devices: list[torch.device] = []
+
+    def record_support(*args, **kwargs):
+        support_kwargs.append(kwargs)
+        return False
+
+    @contextlib.contextmanager
+    def record_device(device):
+        entered_devices.append(device)
+        yield
+
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", record_support)
+    monkeypatch.setattr(torch.cuda, "device", record_device)
     cfg = _standard_cfg(minimal_config, mixed_precision=True, mixed_precision_dtype="bfloat16")
-    meta = make_meta_model(cfg, run_name="bf16-scaler")
-    assert meta.amp_dtype == torch.bfloat16
-    assert meta.scaler.is_enabled() is False
-    # The constructor gate, isolated from the CPU "no CUDA" short-circuit.
-    enabled = torch.amp.GradScaler(enabled=True and meta.amp_dtype == torch.float16)
-    assert enabled.is_enabled() is False
+    with pytest.raises(RuntimeError, match="mixed_precision_dtype"):
+        meta_module.MetaModel(
+            run_name="no-bf16-device",
+            num_classes=4,
+            model_kwargs=cfg.model,
+            training_kwargs=cfg.training,
+            device=torch.device("cuda:1"),
+        )
+    assert support_kwargs == [{"including_emulation": False}]
+    assert entered_devices == [torch.device("cuda:1")]
 
 
 def test_accumulate_loss_averages_in_fp32(minimal_config, make_meta_model):
@@ -151,9 +220,10 @@ def test_microbatches_match_a_single_batch(minimal_config, make_meta_model):
         run_name="micro-batch",
     )
     micro.model.load_state_dict(full.model.state_dict())
-    # Dropout off, so both runs see the same forward.
-    full.model.eval()
-    micro.model.eval()
+    # train_epoch enters train mode, so switch dropout off to give both runs the same forward.
+    for module in (*full.model.modules(), *micro.model.modules()):
+        if isinstance(module, torch.nn.Dropout):
+            module.p = 0.0
     before = {name: param.detach().clone() for name, param in full.model.named_parameters()}
     full_grads = _capture_step_grads(full)
     micro_grads = _capture_step_grads(micro)
@@ -217,3 +287,111 @@ def test_meta_model_requires_training_kwargs(minimal_config):
         meta_module.MetaModel(
             run_name="no-training", num_classes=4, model_kwargs=minimal_config.model, device="cpu"
         )
+
+
+def _record_encoder_modes(meta) -> list[dict[str, bool]]:
+    """Record ``training`` and inference-mode state at each mocked-encoder forward."""
+    seen: list[dict[str, bool]] = []
+
+    def _record(module, _args):
+        seen.append({"training": module.training, "inference": torch.is_inference_mode_enabled()})
+
+    encoder = next(m for m in meta.model.modules() if hasattr(m, "embed"))
+    encoder.register_forward_pre_hook(_record)
+    return seen
+
+
+def _loader(n: int = 2) -> DataLoader:
+    images, labels = _images_labels(n)
+    return DataLoader(TensorDataset(images, labels), batch_size=2)
+
+
+def _loop_cfg(minimal_config):
+    return _standard_cfg(minimal_config, iterations_per_train_epoch=1, iterations_per_val_epoch=1)
+
+
+def test_validation_epoch_runs_forward_in_eval_under_inference_mode(
+    minimal_config, make_meta_model
+):
+    meta = make_meta_model(_loop_cfg(minimal_config), run_name="val-eval")
+    meta.model.train()
+    seen = _record_encoder_modes(meta)
+    meta.validation_epoch(_loader())
+    assert seen == [{"training": False, "inference": True}]
+
+
+def test_train_epoch_after_validation_returns_the_model_to_train_mode(
+    minimal_config, make_meta_model
+):
+    meta = make_meta_model(_loop_cfg(minimal_config), run_name="val-then-train")
+    meta.validation_epoch(_loader())
+    meta.model.eval()  # whatever left the model in eval, train_epoch must undo it
+    seen = _record_encoder_modes(meta)
+    meta.train_epoch(_loader(), evaluator=None, epoch=0)
+    assert seen == [{"training": True, "inference": False}]
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, object], int]] = []
+
+    def log(self, metrics: dict[str, object], step: int) -> None:
+        self.calls.append((metrics, step))
+
+
+def _record_micro_batches(meta) -> list[tuple[float, dict[str, float]]]:
+    """Record each microbatch's loss and components as floats, in call order."""
+    records: list[tuple[float, dict[str, float]]] = []
+    real = meta.batch_predict_loss
+
+    def _recording(*args, **kwargs):
+        loss, outputs, concepts, components = real(*args, **kwargs)
+        records.append((float(loss.detach()), {k: float(v) for k, v in components.items()}))
+        return loss, outputs, concepts, components
+
+    meta.batch_predict_loss = _recording
+    return records
+
+
+def _window_means(records, accum: int, update: int) -> tuple[float, dict[str, float]]:
+    window = records[update * accum : (update + 1) * accum]
+    keys = window[0][1].keys()
+    means = {k: sum(c[k] for _, c in window) / accum for k in keys}
+    return sum(loss for loss, _ in window) / accum, means
+
+
+def test_train_epoch_logs_float_window_means_only_at_the_log_interval(
+    minimal_config, make_meta_model
+):
+    cfg = _standard_cfg(minimal_config, iterations_per_train_epoch=4, grad_accum_steps=2)
+    meta = make_meta_model(cfg, run_name="log-interval")
+    records = _record_micro_batches(meta)
+    run_logger = _RecordingLogger()
+    images, labels = _images_labels(16)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+
+    meta.train_epoch(loader, run_logger=run_logger, log_interval=2, epoch=0)
+
+    assert [step for _, step in run_logger.calls] == [2, 4]
+    for metrics, step in run_logger.calls:
+        assert all(isinstance(v, float) for k, v in metrics.items() if k.startswith("train/"))
+        loss, means = _window_means(records, 2, step - 1)
+        assert metrics["train/batch_loss"] == pytest.approx(loss, rel=1e-6)
+        for key in ("classification", "concepts"):
+            assert metrics[f"train/batch_{key}"] == pytest.approx(means[key], rel=1e-6)
+
+
+def test_train_epoch_epoch_components_average_the_update_means(minimal_config, make_meta_model):
+    cfg = _standard_cfg(minimal_config, iterations_per_train_epoch=4, grad_accum_steps=2)
+    meta = make_meta_model(cfg, run_name="epoch-components")
+    records = _record_micro_batches(meta)
+    images, labels = _images_labels(16)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+
+    last_loss, metrics, _ = meta.train_epoch(loader, epoch=0)
+
+    per_update = [_window_means(records, 2, u) for u in range(4)]
+    assert last_loss == pytest.approx(sum(loss for loss, _ in per_update) / 4, rel=1e-6)
+    for key in ("classification", "concepts"):
+        expected = sum(means[key] for _, means in per_update) / 4
+        assert metrics[f"loss/{key}"] == pytest.approx(expected, rel=1e-6, abs=1e-9)

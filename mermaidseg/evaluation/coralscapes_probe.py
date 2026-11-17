@@ -166,7 +166,7 @@ def average_window_logits(
     return canvas / weight
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def reassemble_concept_logits(
     predictor: CBMPredictor, image_rgb: NDArray[np.uint8]
 ) -> torch.Tensor:

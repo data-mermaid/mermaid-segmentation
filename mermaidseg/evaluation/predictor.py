@@ -88,8 +88,8 @@ class CBMPredictor:
         self,
         model: torch.nn.Module,
         input_size: tuple[int, int],
-        device: torch.device | str = "cuda",
-        amp: bool = False,
+        device: torch.device | str,
+        amp_dtype: torch.dtype | None = None,
     ):
         """Wrap a model for inference.
 
@@ -97,7 +97,7 @@ class CBMPredictor:
             model: Concept-bottleneck model exposing ``concept_classifier``.
             input_size: ``(height, width)`` of the evaluation transform.
             device: Device the inputs are moved to.
-            amp: Whether to run the forward pass under bfloat16 autocast on CUDA.
+            amp_dtype: Autocast dtype for the forward pass, or ``None`` to run without autocast.
 
         Raises:
             ValueError: If ``model`` has no ``concept_classifier``.
@@ -106,7 +106,7 @@ class CBMPredictor:
         self.model: Any = model.eval()
         self.input_size = (int(input_size[0]), int(input_size[1]))
         self.device = torch.device(device)
-        self.amp = bool(amp)
+        self.amp_dtype = amp_dtype
         self.transform = make_eval_transform(self.input_size)
 
         if not hasattr(model, "concept_classifier"):
@@ -133,12 +133,14 @@ class CBMPredictor:
         return preprocess_image(image_rgb_uint8, make_eval_transform((out_h, out_w)))
 
     def _autocast(self) -> torch.autocast:
-        if self.amp and self.device.type == "cuda":
-            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-        return torch.autocast(device_type="cpu", enabled=False)
+        return torch.autocast(
+            device_type=self.device.type,
+            dtype=self.amp_dtype,
+            enabled=self.amp_dtype is not None,
+        )
 
     # -- forward passes --------------------------------------------------------
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward_probs(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return ``(class_probs, concept_probs)`` at input resolution.
 
@@ -152,7 +154,7 @@ class CBMPredictor:
         concept_probs = outputs.hidden_states.float()
         return class_probs, concept_probs
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward_features(self, images: torch.Tensor, kind: str = "concepts") -> torch.Tensor:
         """Return dense per-pixel features ``(B, D, h, w)`` at input resolution."""
         if kind not in FEATURE_KINDS:
@@ -196,7 +198,7 @@ class CBMPredictor:
             feat.float(), size=images.shape[-2:], mode="bilinear", align_corners=False
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward_concept_logits(self, images: torch.Tensor) -> torch.Tensor:
         """Return raw concept logits ``(B, K, h, w)`` at input resolution, fp32.
 

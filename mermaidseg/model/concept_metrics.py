@@ -71,20 +71,20 @@ def reduce_masked_loss(
     Returns:
         A scalar tensor equal to
         ``per_pixel_loss_weight * per_pixel_mean + per_image_loss_weight * per_image_mean``.
-        Callers must ensure ``mask`` has at least one valid element.
+        An empty ``mask`` gives 0 with zero gradients.
     """
     mask = mask.to(per_element.dtype)
     masked = per_element * mask
 
-    total_valid = mask.sum()
-    per_pixel_mean = masked.sum() / total_valid
+    # Clamped denominators keep an empty mask at 0 without a data-dependent host branch.
+    per_pixel_mean = masked.sum() / mask.sum().clamp(min=1)
 
     batch_size = per_element.shape[0]
     per_image_sum = masked.reshape(batch_size, -1).sum(dim=1)
     per_image_count = mask.reshape(batch_size, -1).sum(dim=1)
-    image_has_valid = per_image_count > 0
-    per_image_mean_values = per_image_sum / per_image_count.clamp(min=1)
-    per_image_mean = per_image_mean_values[image_has_valid].mean()
+    images_with_valid = per_image_count.gt(0).sum().clamp(min=1)
+    # An image with no valid element has a zero sum, so it adds nothing to the numerator.
+    per_image_mean = (per_image_sum / per_image_count.clamp(min=1)).sum() / images_with_valid
 
     return per_pixel_loss_weight * per_pixel_mean + per_image_loss_weight * per_image_mean
 
@@ -113,9 +113,6 @@ def calculate_taxonomic_rank_loss(
     target_idx, valid_mask = taxonomic_target_and_mask(concept_labels)
     if foreground_mask is not None:
         valid_mask = valid_mask & foreground_mask
-
-    if not valid_mask.any():
-        return torch.tensor(0.0, device=concept_outputs.device, dtype=concept_outputs.dtype)
 
     target_idx = target_idx.clamp(0, num_channels - 1)
     flat_target = target_idx.reshape(-1)
@@ -154,9 +151,6 @@ def calculate_multi_hot_concept_loss(
     concept_mask = concept_labels.gt(0)
     if foreground_mask is not None:
         concept_mask = concept_mask & foreground_mask.unsqueeze(1)
-
-    if concept_mask.sum() == 0:
-        return torch.tensor(0.0, device=concept_outputs.device, dtype=concept_outputs.dtype)
 
     targets = torch.clamp(concept_labels - 1, 0.01, 0.99)
     per_element_loss = F.binary_cross_entropy_with_logits(

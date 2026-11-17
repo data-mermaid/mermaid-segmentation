@@ -84,9 +84,6 @@ def _masked_cross_entropy(
     per_image_loss_weight: float,
 ) -> torch.Tensor:
     valid_mask = target_labels != ignore_index
-    if not valid_mask.any():
-        return outputs.sum() * 0.0
-
     per_pixel = F.cross_entropy(
         outputs,
         target_labels,
@@ -156,7 +153,7 @@ class ConceptBottleneckLoss(torch.nn.Module):
         target_labels: torch.Tensor,
         concept_logits: torch.Tensor,
         concept_labels: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Compute the classification loss plus the weighted concept loss.
 
         Args:
@@ -169,8 +166,9 @@ class ConceptBottleneckLoss(torch.nn.Module):
 
         Returns:
             A 2-tuple of (total_loss, loss_components) where total_loss is the
-            scalar tensor for backprop and loss_components is a dict of detached
-            component values for logging.
+            scalar tensor for backprop and loss_components holds detached 0-d
+            component tensors for logging, plus host-float per-channel
+            ``multi_hot/<name>`` losses when ``binary_concept_names`` is set.
         """
         class_loss_value = _masked_cross_entropy(
             outputs,
@@ -182,7 +180,9 @@ class ConceptBottleneckLoss(torch.nn.Module):
             per_image_loss_weight=self.per_image_loss_weight,
         )
 
-        loss_components: dict[str, float] = {"classification": class_loss_value.item()}
+        loss_components: dict[str, torch.Tensor | float] = {
+            "classification": class_loss_value.detach()
+        }
         concept_loss_value = torch.tensor(
             0.0, device=concept_logits.device, dtype=concept_logits.dtype
         )
@@ -216,10 +216,10 @@ class ConceptBottleneckLoss(torch.nn.Module):
                     per_image_loss_weight=self.per_image_loss_weight,
                     label_smoothing=self.taxonomic_label_smoothing,
                 ) / len(TAXONOMIC_CONCEPTS)
-            loss_components[name] = slice_loss.item()
+            loss_components[name] = slice_loss.detach()
             concept_loss_value = concept_loss_value + slice_loss
 
-        loss_components["concepts"] = concept_loss_value.item()
+        loss_components["concepts"] = concept_loss_value.detach()
         total_loss = class_loss_value + self.lambda_weight * concept_loss_value
         return total_loss, loss_components
 

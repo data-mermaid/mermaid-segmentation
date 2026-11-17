@@ -162,7 +162,6 @@ def train_model(
         metric_value: float | None = None
 
         if val_loader is not None:
-            meta_model.model.eval()
             val_start = time.time()
             val_loss, val_metric_results = meta_model.validation_epoch(val_loader, evaluator)
             epoch_loss_dict["validation/time_taken"] = time.time() - val_start
@@ -203,7 +202,7 @@ def train_model(
             train_timing["data_loading_sec"] / epoch_wall * 100
         )
 
-        if torch.cuda.is_available():
+        if meta_model.device_type == "cuda":
             epoch_loss_dict["train/gpu_peak_memory_mb"] = torch.cuda.max_memory_allocated() / 1e6
             torch.cuda.reset_peak_memory_stats()
 

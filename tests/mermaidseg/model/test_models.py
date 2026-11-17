@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import torch
 
 import mermaidseg.model.models as models_module
 from mermaidseg.model.models import ConceptBottleneckDPTLoRADINOv3
@@ -53,3 +54,31 @@ def test_from_pretrained_gets_only_the_encoder_name_and_hf_token(mock_dinov3_enc
     ConceptBottleneckDPTLoRADINOv3(**_model_kwargs())
 
     assert calls == [(("facebook/dinov3-vits16-pretrain-lvd1689m",), {"token": "hf-test-token"})]
+
+
+def test_cpu_bf16_autocast_keeps_logits_in_fp32(mock_dinov3_encoder):
+    mock_dinov3_encoder(models_module)
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs())
+    images = torch.randn(2, 3, *IMAGE_SIZE)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        out = model(images)
+    assert out.logits.dtype == torch.float32
+    assert out.concept_logits.dtype == torch.float32
+
+
+def test_only_lora_adapters_and_heads_are_trainable(mock_dinov3_encoder):
+    mock_dinov3_encoder(models_module)
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs())
+
+    names = [name for name, _ in model.named_parameters()]
+    lora = {n for n in names if "lora_" in n}
+    dpt_head = {n for n in names if n.startswith("dpt_head.")}
+    concept_proj = {n for n in names if n.startswith("concept_proj.")}
+    concept_classifier = {n for n in names if n.startswith("concept_classifier.")}
+    frozen_encoder = {n for n in names if n.startswith("encoder.") and "lora_" not in n}
+
+    for group in (lora, dpt_head, concept_proj, concept_classifier, frozen_encoder):
+        assert group
+    trainable = {n for n, p in model.named_parameters() if p.requires_grad}
+    assert trainable == lora | dpt_head | concept_proj | concept_classifier
+    assert not trainable & frozen_encoder
