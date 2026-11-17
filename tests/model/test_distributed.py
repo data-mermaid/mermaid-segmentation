@@ -23,12 +23,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 
 import mermaidseg.model.meta as meta_module
-from mermaidseg.model.data_parallel import (
-    DDPLossStep,
-    ShardStep,
-    average_component_dicts,
-    mean_shard_losses,
-)
+from mermaidseg.model.data_parallel import DDPLossStep, ShardStep
 from mermaidseg.model.distributed import (
     NCCL_TIMEOUT_ENV,
     ShardedBatchSampler,
@@ -242,18 +237,8 @@ def test_watch_for_stalls_disabled_never_arms(monkeypatch):
 
 def test_distributed_init_requires_a_process_group(minimal_config, make_meta_model):
     cfg = copy.deepcopy(minimal_config)
-    cfg.training.training_mode = "standard"
     cfg.training.distributed = True
     with pytest.raises(RuntimeError, match="process group"):
-        make_meta_model(cfg)
-
-
-def test_distributed_rejects_data_parallel(minimal_config, make_meta_model):
-    cfg = copy.deepcopy(minimal_config)
-    cfg.training.training_mode = "standard"
-    cfg.training.distributed = True
-    cfg.training.data_parallel = True
-    with pytest.raises(ValueError, match="mutually exclusive"):
         make_meta_model(cfg)
 
 
@@ -322,12 +307,12 @@ def test_on_main_process_runs_on_one_rank():
     assert counts == [1, 0, 0, 0]
 
 
-def test_reduce_components_equals_average_component_dicts():
+def test_reduce_components_is_the_mean_over_ranks():
     per_rank = [
         {f"k{i}": float(rank + 1 + i) for i in range(3)} | {"shared": float(rank)}
         for rank in range(_WORLD)
     ]
-    expected = average_component_dicts(per_rank)
+    expected = {key: sum(d[key] for d in per_rank) / _WORLD for key in per_rank[0]}
     reduced = _spawn(_reduce_components_worker, _WORLD)
     for payload in reduced:
         assert payload == pytest.approx(expected)
@@ -386,7 +371,6 @@ def _ddp_window_worker(
             _TinyCBM(),
             _TinyLoss(),
             None,
-            None,
             target,
             concepts,
             False,
@@ -443,7 +427,6 @@ def _serial_window(
         _TinyCBM(),
         _TinyLoss(),
         None,
-        None,
         target,
         concepts,
         False,
@@ -460,7 +443,7 @@ def _serial_window(
                 return_maps=False,
             )[0]
             shard_losses.append(loss)
-        (mean_shard_losses(shard_losses) / _ACCUM).backward()
+        (torch.stack(shard_losses).mean() / _ACCUM).backward()
     grads = {
         name: param.grad.detach().clone()
         for name, param in step.named_parameters()
@@ -488,7 +471,6 @@ def test_replica_window_matches_serial_microbatches():
     reference = ShardStep(
         _TinyCBM(),
         _TinyLoss(),
-        None,
         None,
         target,
         concepts,
@@ -530,7 +512,6 @@ def _nccl_window_worker(
         step = ShardStep(
             _TinyCBM(),
             _TinyLoss(),
-            None,
             None,
             target,
             concepts,
@@ -578,7 +559,6 @@ def test_four_gpu_window_matches_serial_microbatches_on_one_gpu():
         _TinyCBM(),
         _TinyLoss(),
         None,
-        None,
         target,
         concepts,
         False,
@@ -602,7 +582,6 @@ def _two_window_maps_worker(rank: int, world_size: int, port: int, queue) -> Non
         step = ShardStep(
             _TinyCBM(),
             _TinyLoss(),
-            None,
             None,
             target,
             concepts,
@@ -642,7 +621,7 @@ def test_two_ddp_windows_survive_returned_metric_maps():
 def test_ddp_loss_step_returns_only_the_scalar_loss():
     target, concepts = _lookups()
     step = DDPLossStep(
-        ShardStep(_TinyCBM(), _TinyLoss(), None, None, target, concepts, False, torch.bfloat16)
+        ShardStep(_TinyCBM(), _TinyLoss(), None, target, concepts, False, torch.bfloat16)
     )
     images, source_labels = _batch(batch_size=3)
     loss = step(images, source_labels, return_maps=True)

@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import boto3
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -45,7 +44,6 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
     annotations_path: str
     source_bucket: str
     source_s3_prefix: str
-    s3: boto3.client
     whitelist_sites: list[str] | None
     blacklist_sites: list[str] | None
 
@@ -72,7 +70,6 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
-        self.s3 = boto3.client("s3")
         self.whitelist_sites = whitelist_sites
         self.blacklist_sites = blacklist_sites
 
@@ -160,12 +157,12 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
 
     def read_image(self, image_id: str, site: str, **row_kwargs: Any) -> NDArray[Any]:
         key = f"{self.source_s3_prefix}/images/{site}/{image_id}.png"
-        return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(bucket=self.source_bucket, key=key).convert("RGB"))
 
     def read_label(self, image_id: str, site: str, **row_kwargs: Any) -> NDArray[Any]:
         """Read the dense uint8 label PNG (in the ``classes.json`` ID space)."""
         key = f"{self.source_s3_prefix}/labels/{site}/{image_id}.png"
-        arr = np.asarray(get_image_s3(s3=None, bucket=self.source_bucket, key=key))
+        arr = np.asarray(get_image_s3(bucket=self.source_bucket, key=key))
         if arr.ndim == 3:
             arr = arr[..., 0]
         return arr.astype(np.uint8, copy=False)

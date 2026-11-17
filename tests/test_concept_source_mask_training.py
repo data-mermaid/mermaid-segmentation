@@ -199,9 +199,16 @@ def _cbm_config() -> ConfigDict:
     return ConfigDict(
         {
             "model": {
-                "name": "ConceptBottleneckDINOv3",
+                "name": "ConceptBottleneckDPTLoRADINOv3",
                 "encoder_name": "facebook/dinov3-vits16-pretrain-lvd1689m",
                 "input_size": IMAGE_SIZE,
+                "concept_feature_dim": 8,
+                "neck_hidden_sizes": [8, 8, 8, 8],
+                "fusion_hidden_size": 8,
+                "lora_r": 2,
+                "lora_alpha": 4,
+                "lora_dropout": 0.0,
+                "lora_target_modules": ["q_proj"],
             },
             "training": {
                 "training_mode": "concept-bottleneck",
@@ -288,7 +295,7 @@ def test_shard_step_masks_its_shard(make_meta_model, cbm_schema):
     keep = _keep(cbm_schema)
     lookup = _lookup(cbm_schema)
     bleached = cbm_schema.channel_names.index("bleached")
-    step = ShardStep(meta.model, meta.loss, None, None, None, lookup, False, torch.bfloat16, keep)
+    step = ShardStep(meta.model, meta.loss, None, None, lookup, False, torch.bfloat16, keep)
     images = torch.randn(2, 3, *IMAGE_SIZE)
     labels = torch.ones(2, *IMAGE_SIZE, dtype=torch.long)
     *_, concepts, _ = step(images, labels, return_maps=True, source_rows=torch.tensor([1, 0]))

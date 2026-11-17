@@ -148,10 +148,8 @@ def evaluate_val_loss(
         resolution=resolution,
     )
     cfg.run_name = name
-    for key in ("taxonomic_loss", "distance_loss"):
-        cfg.training.pop(key, None)
+    cfg.training.pop("taxonomic_loss", None)
     cfg.training.distributed = False
-    cfg.training.data_parallel = False
     cfg.training.loss.per_pixel_loss_weight = per_pixel_loss_weight
     cfg.training.loss.per_image_loss_weight = per_image_loss_weight
     resolve_concept_mapping_path(cfg.training)
@@ -229,7 +227,7 @@ def evaluate_val_loss(
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                     outputs = meta.model(images)
                 loss, _, _, components = apply_concept_bottleneck_loss(
-                    outputs, meta.loss, None, None, target_labels, target_concepts
+                    outputs, meta.loss, None, target_labels, target_concepts
                 )
                 acc.add({TOTAL_KEY: loss.item(), **components})
         per_dataset[dataset_name] = acc.means()

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import boto3
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -31,7 +30,6 @@ class MermaidDataset(BaseCoralDataset):
     Attributes:
         annotations_path (str): Path to the Parquet file containing image annotations.
         source_bucket (str): S3 bucket name containing the dataset files.
-        s3 (boto3.client): Boto3 S3 client for accessing images.
     Args:
         annotations_path (str, optional): S3 path to the Parquet file with annotations.
         source_bucket (str, optional): S3 bucket name containing the dataset files.
@@ -47,7 +45,6 @@ class MermaidDataset(BaseCoralDataset):
     annotations_path: str
     source_bucket: str
     annotation_date_cutoff: pd.Timestamp
-    s3: boto3.client
 
     def __init__(
         self,
@@ -63,7 +60,6 @@ class MermaidDataset(BaseCoralDataset):
             if annotation_date_cutoff is not None
             else None
         )
-        self.s3 = boto3.client("s3")
 
         df_annotations, df_images = self.load_annotations(self.annotations_path)
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
@@ -96,4 +92,4 @@ class MermaidDataset(BaseCoralDataset):
 
     def read_image(self, image_id: str, **row_kwargs: Any) -> NDArray[Any]:
         key = f"mermaid/{image_id}.png"
-        return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(bucket=self.source_bucket, key=key).convert("RGB"))

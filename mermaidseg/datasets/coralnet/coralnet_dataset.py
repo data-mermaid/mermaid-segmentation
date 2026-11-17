@@ -30,7 +30,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import boto3
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -81,7 +80,6 @@ class CoralNetDataset(BaseCoralDataset):
             training manifest parquet.
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-source CoralNet image folders live.
-        s3 (boto3.client): Boto3 S3 client for accessing images.
     Args:
         manifest_path (str, optional): Key (relative to ``source_bucket``) of the training
             manifest parquet. If ``None`` (default), resolved from
@@ -107,7 +105,6 @@ class CoralNetDataset(BaseCoralDataset):
     source_ids: list[int | str]
     source_bucket: str
     source_s3_prefix: str
-    s3: boto3.client
     whitelist_sources: list[int | str] | None
     blacklist_sources: list[int | str] | None
     image_blacklist: str | list[int | str] | None
@@ -127,7 +124,6 @@ class CoralNetDataset(BaseCoralDataset):
         self.manifest_path = manifest_path or _resolve_default_manifest_path()
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
-        self.s3 = boto3.client("s3")
         self.whitelist_sources = whitelist_sources
         self.blacklist_sources = blacklist_sources
         self.image_blacklist = image_blacklist
@@ -266,5 +262,5 @@ class CoralNetDataset(BaseCoralDataset):
                 f"misaligned with the 2048-resized annotation coordinates)."
             )
         return np.array(
-            get_image_s3(s3=None, bucket=self.source_bucket, key=image_key).convert("RGB")
+            get_image_s3(bucket=self.source_bucket, key=image_key).convert("RGB")
         )

@@ -36,7 +36,6 @@ class ConceptSchema:
         path: str | Path = DEFAULT_CLASS_TO_CONCEPTS_CSV,
         *,
         sources: set[str],
-        binary_taxonomy_encoding: bool = True,
         removed_concepts: Iterable[str] = (),
     ) -> ConceptSchema:
         """Build a schema from CSV rows whose ``source_dataset_source`` is in ``sources``.
@@ -55,17 +54,13 @@ class ConceptSchema:
         if removed_concepts:
             from mermaidseg.dataset_reconciliation.concept_removal import apply_concept_removal
 
-            _, full_channels, _ = encode_concept_channels_from_df(
-                df_run, binary_taxonomy_encoding=binary_taxonomy_encoding
-            )
+            _, full_channels, _ = encode_concept_channels_from_df(df_run)
             not_channels = sorted(set(removed_concepts) - set(full_channels))
             if not_channels:
                 raise ValueError(f"removed concepts that are not channels of this run: {not_channels}")
             df_run = apply_concept_removal(df_run, removed_concepts)
 
-        encoded_df, channel_names, concept_value2id = encode_concept_channels_from_df(
-            df_run, binary_taxonomy_encoding=binary_taxonomy_encoding
-        )
+        encoded_df, channel_names, concept_value2id = encode_concept_channels_from_df(df_run)
 
         if removed_concepts:
             expected = [c for c in full_channels if c not in set(removed_concepts)]

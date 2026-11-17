@@ -118,7 +118,7 @@ launch_run() {
 
 # launch_branch RUN SRC INIT_FLAG DEPENDENCY [SBATCH_OPTS...] -- [TRAIN_ARGS...]
 # launch_run for a run that starts from checkpoint SRC (repo-relative) with
-# INIT_FLAG (--init-weights or --init-checkpoint). Without DEPENDENCY, the run
+# INIT_FLAG (--init-weights). Without DEPENDENCY, the run
 # waits until SRC is written; with one, the dependency guarantees SRC instead.
 launch_branch() {
     local run="$1" src="$2" init_flag="$3" dep="$4"

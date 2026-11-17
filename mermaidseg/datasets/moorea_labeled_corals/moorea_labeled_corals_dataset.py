@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import boto3
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -41,7 +40,6 @@ class MooreaLabeledCoralsDataset(BaseCoralDataset):
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-year
             ``images/<year>/<image_id><image_ext>`` folders live.
-        s3 (boto3.client): Boto3 S3 client for accessing images.
     Args:
         annotations_path (str, optional): Key (relative to ``source_bucket``)
             of the Parquet file with annotations.
@@ -58,7 +56,6 @@ class MooreaLabeledCoralsDataset(BaseCoralDataset):
     annotations_path: str
     source_bucket: str
     source_s3_prefix: str
-    s3: boto3.client
     whitelist_years: list[str] | None
     blacklist_years: list[str] | None
 
@@ -89,7 +86,6 @@ class MooreaLabeledCoralsDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
-        self.s3 = boto3.client("s3")
         self.whitelist_years = (
             [str(y) for y in whitelist_years] if whitelist_years is not None else None
         )
@@ -153,4 +149,4 @@ class MooreaLabeledCoralsDataset(BaseCoralDataset):
         **row_kwargs: Any,
     ) -> NDArray[Any]:
         key = f"{self.source_s3_prefix}/images/{year}/{image_id}{image_ext}"
-        return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(bucket=self.source_bucket, key=key).convert("RGB"))

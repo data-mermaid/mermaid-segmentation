@@ -7,12 +7,8 @@
 * rare taxon: macro accuracy per rank, split into head and tail taxa by support.
 
 :class:`HierarchicalMetrics` is a :class:`~mermaidseg.model.rank_outputs.RankOutputConsumer`
-that accumulates counts per batch, so memory does not grow with the dataset::
-
-    tree = build_taxonomy_tree("configs/class_to_concepts.csv")
-    metrics = HierarchicalMetrics(tree)
-    evaluator = Evaluator(..., rank_output_consumers=[metrics])
-    results = evaluator.evaluate_model(loader, meta_model)
+that accumulates counts per batch, so memory does not grow with the dataset
+(see :mod:`mermaidseg.evaluation.hierarchical`).
 
 With ``training_mode="concept-bottleneck"`` the model already applies a per-rank softmax, so
 the default ``score_transform="none"`` is correct. Use ``"softmax"`` for raw logits, or
@@ -134,8 +130,7 @@ class HierarchicalMetrics:
         self._distance: dict[str, torch.Tensor] = {}
         self._taxon_mask: dict[str, torch.Tensor] = {}
         self._taxon_or_none_mask: dict[str, torch.Tensor] = {}
-        #: Per-taxon rows from the most recent ``compute()``. Kept across ``reset()``,
-        #: because ``Evaluator`` resets consumers immediately after computing them.
+        #: Per-taxon rows from the most recent ``compute()``. Kept across ``reset()``.
         self.last_taxon_summary: dict[str, list[dict]] = {}
         self._device: torch.device | None = None
 

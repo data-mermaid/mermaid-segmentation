@@ -236,14 +236,6 @@ def build_rank_incidence(tree: TaxonomyTree, coarse: str, fine: str) -> np.ndarr
     return matrix
 
 
-def build_all_incidences(tree: TaxonomyTree) -> dict[tuple[str, str], np.ndarray]:
-    """Incidence matrices for every adjacent rank pair, coarse -> fine."""
-    return {
-        (coarse, fine): build_rank_incidence(tree, coarse, fine)
-        for coarse, fine in zip(tree.ranks, tree.ranks[1:], strict=False)
-    }
-
-
 def build_ancestor_sets(tree: TaxonomyTree, rank: str) -> list[dict[str, set[str]]]:
     """Ancestors of each taxon at ``rank``, one mapping per coarser rank.
 
@@ -331,32 +323,3 @@ def taxon_channel_mask(tree: TaxonomyTree, rank: str) -> np.ndarray:
         dtype=bool,
     )
 
-
-def summarise(tree: TaxonomyTree) -> str:
-    """Human-readable audit summary, for notebooks and run logs."""
-    lines = [
-        f"TaxonomyTree  ranks={' > '.join(tree.ranks)}  policy={tree.policy}",
-        "",
-        f"{'rank':10s} {'channels':>9s} {'with parent':>12s} {'orphans':>8s}",
-    ]
-    for i, rank in enumerate(tree.ranks):
-        n = len(tree.channels[rank])
-        if i == 0:
-            lines.append(f"{rank:10s} {n:9d} {'-':>12s} {'-':>8s}")
-            continue
-        mapping = tree.edges[(tree.ranks[i - 1], rank)]
-        real = [v for v in tree.channels[rank] if v not in (NOT_GIVEN, NONE_TAXON)]
-        with_parent = sum(1 for v in real if v in mapping)
-        lines.append(f"{rank:10s} {n:9d} {with_parent:12d} {len(real) - with_parent:8d}")
-
-    lines.append("")
-    if tree.ambiguities:
-        lines.append(f"AMBIGUOUS TAXA ({len(tree.ambiguities)}):")
-        for amb in tree.ambiguities:
-            lines.append(f"  - {amb}")
-    else:
-        lines.append("No ambiguous taxa: the structure is a genuine tree.")
-    if tree.excluded:
-        total = sum(len(v) for v in tree.excluded.values())
-        lines.append(f"EXCLUDED under policy='exclude': {total} taxa {dict(tree.excluded)}")
-    return "\n".join(lines)

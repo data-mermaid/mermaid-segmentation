@@ -6,16 +6,35 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
-import mlflow
 import pytest
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 from mermaidseg.io import ConfigDict
 
 NUM_CLASSES = 4
 IMAGE_SIZE = (56, 56)
+
+# Two values per taxonomic rank plus one binary concept: 2 * 6 + 1 channels.
+CBM_CONCEPT_VALUE2ID = {
+    **{rank: {"not_given": [0, 0], "a": [2, 1], "b": [1, 2]} for rank in TAXONOMIC_CONCEPTS},
+    "bleached": {"not_given": 0, False: 1, True: 2},
+}
+CBM_NUM_CONCEPTS = 2 * len(TAXONOMIC_CONCEPTS) + 1
+
+
+def cbm_concept_lookup() -> torch.Tensor:
+    """``(NUM_CLASSES, C)`` concept rows: label 1 is all ``a``, 2 all ``b``, 3 ``a`` unbleached."""
+    a, b = [2.0, 1.0], [1.0, 2.0]
+    rows = [
+        [0.0] * CBM_NUM_CONCEPTS,
+        a * len(TAXONOMIC_CONCEPTS) + [1.0],
+        b * len(TAXONOMIC_CONCEPTS) + [2.0],
+        a * len(TAXONOMIC_CONCEPTS) + [0.0],
+    ]
+    return torch.tensor(rows)
 
 
 class FakeMetaModel:
@@ -27,33 +46,15 @@ class FakeMetaModel:
         num_classes: int = 3,
         num_concepts: int | None = None,
         conceptid2labelid: dict[int, int] | None = None,
-        concept_matrix: Any | None = None,
     ):
         self.run_name = run_name
         self.num_classes = num_classes
         self.num_concepts = num_concepts
         self.conceptid2labelid = conceptid2labelid
-        self.concept_matrix = concept_matrix
         self.device = "cpu"
         self.model = nn.Linear(4, num_classes)
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1)
-
-
-@pytest.fixture(autouse=True)
-def _cleanup_mlflow_run():
-    """Ensure no active MLflow run leaks between tests."""
-    yield
-    if mlflow.active_run() is not None:
-        mlflow.end_run()
-
-
-@pytest.fixture()
-def tmp_mlflow_uri(tmp_path, monkeypatch):
-    """Set MLFLOW_TRACKING_URI to a temporary directory for an isolated file store."""
-    uri = str(tmp_path / "mlruns")
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", uri)
-    return uri
 
 
 @pytest.fixture()
@@ -74,7 +75,6 @@ def make_config():
         base: dict[str, Any] = {
             "logger": {
                 "experiment_name": "unit-tests",
-                "uri": None,
                 "save_local_checkpoints": True,
                 "save_local_models": True,
             },
@@ -104,16 +104,28 @@ def minimal_config():
     return ConfigDict(
         {
             "model": {
-                "name": "LinearDINOv3",
+                "name": "ConceptBottleneckDPTLoRADINOv3",
                 "encoder_name": "facebook/dinov3-vits16-pretrain-lvd1689m",
                 "input_size": IMAGE_SIZE,
+                "concept_feature_dim": 8,
+                "neck_hidden_sizes": [8, 8, 8, 8],
+                "fusion_hidden_size": 8,
+                "lora_r": 2,
+                "lora_alpha": 4,
+                "lora_dropout": 0.0,
+                "lora_target_modules": ["q_proj"],
             },
             "training": {
-                "training_mode": "standard",
+                "training_mode": "concept-bottleneck",
                 "epochs": 1,
                 "batch_size": 2,
                 "optimizer": {"type": "SGD", "lr": 0.01},
-                "loss": {"type": "CrossEntropyLoss"},
+                "loss": {
+                    "type": "ConceptBottleneckLoss",
+                    "ignore_index": 0,
+                    "per_pixel_loss_weight": 0.0,
+                    "per_image_loss_weight": 1.0,
+                },
             },
         }
     )
@@ -137,48 +149,38 @@ def tiny_loader(tiny_batch):
 
 @pytest.fixture()
 def mock_dinov3_encoder(monkeypatch):
-    """AutoModel.from_pretrained mock returning controlled hidden states.
+    """AutoModel.from_pretrained mock returning a tiny encoder with a LoRA target.
 
-    Returns a factory that patches AutoModel on a target module. Uses hidden_size=64 (small for fast
-    CI), patch_size=14, n_prefix_tokens=5 (CLS + 4 registers).
+    Returns a factory that patches AutoModel on a target module. Uses hidden_size=16,
+    patch_size=14, 4 layers and 5 prefix tokens (CLS + 4 registers). ``q_proj`` is the
+    module LoRA wraps.
     """
-    hidden_size = 64
+    hidden_size = 16
     patch_size = 14
-    n_prefix_tokens = 5
+    num_layers = 4
+    num_register_tokens = 4
 
-    def _make_mock(pattern="zeros"):
-        _hs = hidden_size
-        _ps = patch_size
-        _np = n_prefix_tokens
+    class _MockEncoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(
+                hidden_size=hidden_size,
+                patch_size=patch_size,
+                num_hidden_layers=num_layers,
+                num_register_tokens=num_register_tokens,
+            )
+            self.embed = nn.Linear(3, hidden_size)
+            self.q_proj = nn.Linear(hidden_size, hidden_size)
 
-        cfg = SimpleNamespace(hidden_size=_hs, patch_size=_ps)
+        def forward(self, pixel_values, **_):
+            patches = nn.functional.avg_pool2d(pixel_values, patch_size).flatten(2).transpose(1, 2)
+            tokens = self.embed(patches)
+            prefix = tokens.new_zeros(tokens.shape[0], 1 + num_register_tokens, tokens.shape[2])
+            states = self.q_proj(torch.cat([prefix, tokens], dim=1))
+            return SimpleNamespace(hidden_states=(states,) * (num_layers + 1))
 
-        class _MockEncoder(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.config = cfg
-
-            def forward(self, pixel_values, **_):
-                B, _C, H, W = pixel_values.shape
-                seq_len = _np + (H // _ps) * (W // _ps)
-                if pattern == "arange":
-                    states = (
-                        torch.arange(
-                            seq_len * _hs, dtype=pixel_values.dtype, device=pixel_values.device
-                        )
-                        .reshape(1, seq_len, _hs)
-                        .expand(B, -1, -1)
-                    )
-                else:
-                    states = torch.zeros(
-                        B, seq_len, _hs, device=pixel_values.device, dtype=pixel_values.dtype
-                    )
-                return SimpleNamespace(last_hidden_state=states)
-
-        return _MockEncoder()
-
-    def _apply_mock(target_module, pattern="zeros"):
-        mock_encoder = _make_mock(pattern)
+    def _apply_mock(target_module):
+        mock_encoder = _MockEncoder()
 
         def _from_pretrained(*_args, **_kwargs):
             return mock_encoder
@@ -193,9 +195,10 @@ def mock_dinov3_encoder(monkeypatch):
 
 @pytest.fixture()
 def make_meta_model(mock_dinov3_encoder):
-    """Factory that builds a real MetaModel with a mocked encoder.
+    """Factory that builds a real concept-bottleneck MetaModel with a mocked encoder.
 
-    Eliminates the repeated import-mock-instantiate boilerplate in integration tests.
+    The concept layout defaults to ``CBM_CONCEPT_VALUE2ID`` and ``cbm_concept_lookup``;
+    pass ``num_concepts``, ``concept_value2id`` and ``source_to_concepts_lookup`` to override.
     """
     from mermaidseg.model.meta import MetaModel
 
@@ -210,6 +213,9 @@ def make_meta_model(mock_dinov3_encoder):
         import mermaidseg.model.models
 
         mock_dinov3_encoder(mermaidseg.model.models)
+        extra_kwargs.setdefault("num_concepts", CBM_NUM_CONCEPTS)
+        extra_kwargs.setdefault("concept_value2id", CBM_CONCEPT_VALUE2ID)
+        extra_kwargs.setdefault("source_to_concepts_lookup", cbm_concept_lookup())
         return MetaModel(
             run_name=run_name,
             num_classes=num_classes,

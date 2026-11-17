@@ -101,49 +101,15 @@ def get_parser() -> argparse.ArgumentParser:
     """Create and configure an argument parser for semantic segmentation training."""
     parser = argparse.ArgumentParser(description="Semantic Segmentation Run")
 
-    # model and dataset
     parser.add_argument("--run-name", type=str)
-    parser.add_argument("--model", type=str, help="model name")
-
-    # training hyper params
     parser.add_argument("--batch-size", type=int, help="batch size")
-    parser.add_argument("--epochs", type=int, help="number of epochs to train")
-    parser.add_argument("--lr", type=float, help="learning rate")
-    parser.add_argument(
-        "--iterations-per-train-epoch", type=int, help="iterations per training epoch"
-    )
-    parser.add_argument(
-        "--iterations-per-val-epoch", type=int, help="iterations per validation epoch"
-    )
-
-    # checkpoint and log
-    parser.add_argument("--model-checkpoint", type=str, help="path to model checkpoint")
-
-    parser.add_argument("--log-epochs", type=int, help="log every log-epochs")
-
-    parser.add_argument("--config", type=str, help="path to config file")
     return parser
 
 
 def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> ConfigDict:
     """Update configuration with command-line overrides."""
     _set_config_value(config, ("run_name",), getattr(args, "run_name", None))
-    _set_config_value(config, ("model", "name"), getattr(args, "model", None))
-    _set_config_value(config, ("model", "checkpoint"), getattr(args, "model_checkpoint", None))
-    _set_config_value(config, ("training", "epochs"), getattr(args, "epochs", None))
-    _set_config_value(config, ("training", "optimizer", "lr"), getattr(args, "lr", None))
     _set_config_value(config, ("training", "batch_size"), getattr(args, "batch_size", None))
-    _set_config_value(
-        config,
-        ("training", "iterations_per_train_epoch"),
-        getattr(args, "iterations_per_train_epoch", None),
-    )
-    _set_config_value(
-        config,
-        ("training", "iterations_per_val_epoch"),
-        getattr(args, "iterations_per_val_epoch", None),
-    )
-    _set_config_value(config, ("logger", "log_epochs"), getattr(args, "log_epochs", None))
     return config
 
 

@@ -14,11 +14,8 @@ training:
     # Taxonomic KL coherence at a constant weight from the first update.
     taxonomic_loss:
         ambiguity_policy: permissive
-        partial_weight: 0.0
         kl_weight: 0.5
         kl_stop_grad_coarse: true
-        kl_pixels: all_valid
-        kl_boundary_px: 0
     # Final run: 300k optimizer updates on train+val (data_config_trainval.yaml), 4k linear
     # warmup, then LinearLR to 0 at update 300k. model_step{N} every 10k updates.
     epochs: 30

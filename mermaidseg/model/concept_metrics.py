@@ -43,11 +43,6 @@ def taxonomic_target_and_mask(
     return target_idx, valid_mask
 
 
-def taxonomic_valid_mask(concept_labels: torch.Tensor) -> torch.Tensor:
-    """Return a mask of pixels with a concrete taxonomic label."""
-    return taxonomic_target_and_mask(concept_labels)[1]
-
-
 def reduce_masked_loss(
     per_element: torch.Tensor,
     mask: torch.Tensor,
@@ -147,19 +142,14 @@ def calculate_taxonomic_rank_loss(
 def calculate_multi_hot_concept_loss(
     concept_outputs: torch.Tensor,
     concept_labels: torch.Tensor,
-    concept_loss: torch.nn.Module | None = None,
     *,
-    from_logits: bool = False,
     foreground_mask: torch.Tensor | None = None,
     per_pixel_loss_weight: float = 0.0,
     per_image_loss_weight: float = 1.0,
 ) -> torch.Tensor:
     """BCE loss for multi-hot concepts with 0=invalid, 1=False, 2=True encoding.
 
-    When ``from_logits`` is True, ``concept_outputs`` are raw logits scored with
-    ``binary_cross_entropy_with_logits`` and ``concept_loss`` is unused. Otherwise
-    ``concept_outputs`` are probabilities in ``[0, 1]`` and ``concept_loss`` (e.g. ``BCELoss``)
-    is required.
+    ``concept_outputs`` are raw logits scored with ``binary_cross_entropy_with_logits``.
     """
     concept_mask = concept_labels.gt(0)
     if foreground_mask is not None:
@@ -169,15 +159,9 @@ def calculate_multi_hot_concept_loss(
         return torch.tensor(0.0, device=concept_outputs.device, dtype=concept_outputs.dtype)
 
     targets = torch.clamp(concept_labels - 1, 0.01, 0.99)
-    if from_logits:
-        per_element_loss = F.binary_cross_entropy_with_logits(
-            concept_outputs, targets, reduction="none"
-        )
-    else:
-        if concept_loss is None:
-            raise ValueError("concept_loss is required when from_logits is False")
-        outputs = concept_outputs.clamp(1e-6, 1.0 - 1e-6)
-        per_element_loss = concept_loss(outputs, targets)
+    per_element_loss = F.binary_cross_entropy_with_logits(
+        concept_outputs, targets, reduction="none"
+    )
     return reduce_masked_loss(
         per_element_loss,
         concept_mask.detach(),

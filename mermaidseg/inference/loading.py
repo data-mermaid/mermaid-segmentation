@@ -13,21 +13,11 @@ import yaml
 
 import mermaidseg.model.models as mm_models
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS, parse_concept_rank
-from mermaidseg.model.models import (
-    ConceptBottleneckDINOv3,
-    ConceptBottleneckDPTDINOv3,
-    ConceptBottleneckDPTLoRADINOv3,
-)
+from mermaidseg.model.models import ConceptBottleneckDPTLoRADINOv3
 
-CBMModel = ConceptBottleneckDINOv3 | ConceptBottleneckDPTLoRADINOv3 | ConceptBottleneckDPTDINOv3
+CBMModel = ConceptBottleneckDPTLoRADINOv3
 
-SUPPORTED_CBM_MODELS: frozenset[str] = frozenset(
-    {
-        "ConceptBottleneckDINOv3",
-        "ConceptBottleneckDPTLoRADINOv3",
-        "ConceptBottleneckDPTDINOv3",
-    }
-)
+SUPPORTED_CBM_MODELS: frozenset[str] = frozenset({"ConceptBottleneckDPTLoRADINOv3"})
 
 
 @dataclass
@@ -113,7 +103,7 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
         raise ValueError("concept_id2name is required.")
 
     model_cfg = dict(artifacts.model_cfg)
-    model_name = model_cfg.pop("name", "ConceptBottleneckDINOv3")
+    model_name = model_cfg.pop("name", None)
     if model_name not in SUPPORTED_CBM_MODELS:
         raise ValueError(
             f"Unsupported model {model_name!r}; expected one of {sorted(SUPPORTED_CBM_MODELS)}"

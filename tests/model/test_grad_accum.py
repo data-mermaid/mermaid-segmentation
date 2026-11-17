@@ -15,13 +15,6 @@ from tests.conftest import IMAGE_SIZE
 
 def _standard_cfg(minimal_config, **training):
     cfg = copy.deepcopy(minimal_config)
-    cfg.training.training_mode = "standard"
-    cfg.training.loss = {
-        "type": "CrossEntropyLoss",
-        "ignore_index": 0,
-        "per_pixel_loss_weight": 0.0,
-        "per_image_loss_weight": 1.0,
-    }
     for key, value in training.items():
         cfg.training[key] = value
     return cfg
@@ -109,6 +102,9 @@ def test_microbatches_match_a_single_batch(minimal_config, make_meta_model):
         run_name="micro-batch",
     )
     micro.model.load_state_dict(full.model.state_dict())
+    # Dropout off, so both runs see the same forward.
+    full.model.eval()
+    micro.model.eval()
     before = {name: tensor.detach().clone() for name, tensor in full.model.named_parameters()}
 
     full.train_epoch(full_loader, evaluator=None, epoch=0)

@@ -50,7 +50,6 @@ def test_source_label_registry_normalizes_target_names_to_lowercase() -> None:
     registry = SourceLabelRegistry(
         [CoralscapesV2Stub()],
         target_label_subset=["Pocillopora", "Sand", "Background"],
-        fetch_remote=False,
     )
 
     assert registry.target_label2id == {"background": 1, "pocillopora": 2, "sand": 3}
@@ -75,7 +74,6 @@ def test_coralscapes_native_lookup_matches_sorted_registry_vocab() -> None:
     _, registry_datasets = prepare_splits_for_registry(dataset_dict)
     registry = SourceLabelRegistry(
         registry_datasets,
-        fetch_remote=False,
         compute_concepts=True,
         concept_schema=ConceptSchema.from_csv(sources={"coralscapes"}),
     )

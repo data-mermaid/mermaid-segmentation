@@ -40,7 +40,6 @@ def test_each_channel_matches_the_multi_hot_loss_on_that_channel():
         expected = calculate_multi_hot_concept_loss(
             logits[:, channel : channel + 1],
             labels[:, channel : channel + 1],
-            from_logits=True,
             **WEIGHTS,
         )
         assert losses[f"multi_hot/{name}"] == pytest.approx(expected.item(), rel=1e-5)

@@ -7,7 +7,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
-import torch
 
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from mermaidseg.datasets.utils import create_annotation_mask
@@ -262,31 +261,6 @@ def test_base_dataset_ann_positions_match_boolean_scan(minimal_dataset):
         pd.testing.assert_frame_equal(indexed.reset_index(drop=True), scanned.reset_index(drop=True))
 
 
-# --- BaseCoralDataset.collate_fn ---
-
-
-def test_collate_fn_filters_none_items(minimal_dataset, caplog):
-    img = torch.zeros(3, 4, 4)
-    msk = torch.zeros(4, 4, dtype=torch.long)
-    batch = [(img, msk), (None, None), (img, msk), (None, None)]
-
-    with caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"):
-        images, masks = minimal_dataset.collate_fn(batch)
-
-    assert images.shape[0] == 2
-    assert masks.shape[0] == 2
-    assert "skipped 2/4" in caplog.text
-
-
-def test_collate_fn_all_none_returns_empty_tensors(minimal_dataset, caplog):
-    with caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"):
-        images, masks = minimal_dataset.collate_fn([(None, None), (None, None)])
-
-    assert images.numel() == 0
-    assert masks.numel() == 0
-    assert "entire batch" in caplog.text
-
-
 # --- BaseCoralDataset.__getitem__ ---
 
 
@@ -323,7 +297,7 @@ def test_base_dataset_records_failure_context(single_image_annotations):
 
     with pytest.raises(RuntimeError):
         _ = ds[0]
-    failures = ds.load_failures_df()
+    failures = pd.DataFrame(ds._load_failures)
     assert len(failures) == 1
 
     row = failures.iloc[0]
@@ -336,26 +310,6 @@ def test_base_dataset_records_failure_context(single_image_annotations):
     assert not row["missing_annotations"]
     assert row["error_type"] == "RuntimeError"
     assert "simulated read failure" in row["error_message"]
-
-
-def test_base_dataset_saves_failure_report_as_parquet(single_image_annotations, tmp_path):
-    df_annotations, df_images = single_image_annotations
-    ds = _AlwaysFailDataset(
-        df_annotations=df_annotations,
-        df_images=df_images,
-        class_subset=["Coral"],
-    )
-
-    with pytest.raises(RuntimeError):
-        _ = ds[0]
-    output_path = tmp_path / "load_failures.parquet"
-    saved_path = ds.save_load_failures(output_path)
-
-    assert saved_path == output_path
-    assert output_path.exists()
-    saved_df = pd.read_parquet(output_path)
-    assert len(saved_df) == 1
-    assert saved_df.iloc[0]["image_id"] == "img1"
 
 
 # --- BaseCoralDataset empty-mask skip (train split only) ---

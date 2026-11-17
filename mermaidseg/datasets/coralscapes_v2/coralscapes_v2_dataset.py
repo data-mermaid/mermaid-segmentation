@@ -12,7 +12,6 @@ The published collapse back onto the original Coralscapes 39 classes is
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 import albumentations as A
@@ -273,10 +272,6 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         class_subset: Optional list of source-space (Coralscapes V2) class names to retain.
         hf_repo_id: HuggingFace dataset repo ID or local dataset directory (e.g. a sparsified
             copy from ``scripts/build_sparse_dense_datasets.py``) with the same columns.
-        hf_revision: Optional hub revision. Required with ``image_keep`` on a hub repo so the
-            allowlist cannot attach to a later version of the split.
-        image_keep: Optional parquet allowlist of training rows. Masks are not rewritten.
-        image_keep_n_rows: Split length the allowlist was built from, checked before selecting.
         source_id2name: Mapping from local source IDs (1..N) to Coralscapes V2 class names.
         source_name2id: Inverse of source_id2name.
         num_source_classes: ``len(source_id2name) + 1`` (incl. background).
@@ -299,30 +294,16 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
         hf_repo_id: str = CORALSCAPES_V2_HF_REPO,
-        hf_revision: str | None = None,
-        image_keep: str | None = None,
-        image_keep_n_rows: int | None = None,
     ):
         from datasets import concatenate_datasets, load_dataset
-
-        from mermaidseg.datasets.data_size import apply_hf_image_keep
 
         self.split = split
         self.transform = transform
         self.class_subset = class_subset
         self.hf_repo_id = hf_repo_id
-        self.hf_revision = hf_revision
-        self.image_keep = image_keep
-        self.image_keep_n_rows = image_keep_n_rows
         self._global_offset = 0
-        if image_keep is not None:
-            if image_keep_n_rows is None:
-                raise ValueError("image_keep requires image_keep_n_rows")
-            if hf_revision is None and not Path(hf_repo_id).is_dir():
-                raise ValueError("image_keep on a hub dataset requires hf_revision")
 
-        revision_kwargs = {"revision": hf_revision} if hf_revision else {}
-        hf_dataset = load_dataset(self.hf_repo_id, **revision_kwargs)
+        hf_dataset = load_dataset(self.hf_repo_id)
         if self.split is None:
             self.dataset = concatenate_datasets(
                 [
@@ -335,11 +316,6 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             self.dataset = hf_dataset[self.split]
         else:
             self.dataset = concatenate_datasets([hf_dataset[s] for s in self.split])
-
-        if image_keep is not None:
-            self.dataset = apply_hf_image_keep(
-                self.dataset, image_keep, self.SOURCE_NAME, image_keep_n_rows
-            )
 
         if self.class_subset is not None:
             ordered = list(self.class_subset)
@@ -403,8 +379,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         """Return ``(image, source_labels)`` for ``idx``.
 
         On any internal load/transform error we emit a warning to logger + stdout + stderr and
-        return ``(None, None)``. :meth:`collate_fn` filters out these placeholders, so a failed item
-        drops out of the batch instead of crashing the loader.
+        return ``(None, None)``.
         """
         try:
             return self._load_item(idx)
@@ -429,43 +404,3 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             mask = transformed["mask"]
 
         return image, mask
-
-    def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Filter out ``(None, None)`` items (failed loads) and stack into batched tensors.
-
-        :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this filter drops
-        them so a failed item simply leaves the batch instead of crashing the loader.
-        """
-        batch_size = len(batch)
-        filtered = [(img, msk) for img, msk in batch if img is not None and msk is not None]
-        n_skipped = batch_size - len(filtered)
-        if n_skipped > 0:
-            logger.warning(
-                "CoralscapesV2Dataset.collate_fn: skipped %d/%d items in batch due to load errors",
-                n_skipped,
-                batch_size,
-            )
-        if len(filtered) == 0:
-            logger.warning(
-                "CoralscapesV2Dataset.collate_fn: entire batch of %d items was empty, returning empty tensors",
-                batch_size,
-            )
-            return torch.tensor([]), torch.tensor([])
-
-        images, source_labels = zip(*filtered, strict=False)
-
-        if isinstance(images[0], torch.Tensor):
-            images = torch.stack(images)
-            source_labels = torch.stack(source_labels)
-        else:
-            images = torch.stack(
-                [torch.from_numpy(img) if isinstance(img, np.ndarray) else img for img in images]
-            )
-            source_labels = torch.stack(
-                [
-                    torch.from_numpy(mask) if isinstance(mask, np.ndarray) else mask
-                    for mask in source_labels
-                ]
-            )
-
-        return images, source_labels

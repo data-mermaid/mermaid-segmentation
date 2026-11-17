@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import boto3
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -114,7 +113,6 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix.rstrip("/")
-        self.s3 = boto3.client("s3")
         self.whitelist_sites = whitelist_sites
         self.blacklist_sites = blacklist_sites
         self.whitelist_subsets = whitelist_subsets
@@ -181,4 +179,4 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
         **row_kwargs: Any,
     ) -> NDArray[Any]:
         key = f"{self.source_s3_prefix}/images/{site}/{subset}/{image_id}{image_ext}"
-        return np.array(get_image_s3(s3=None, bucket=self.source_bucket, key=key).convert("RGB"))
+        return np.array(get_image_s3(bucket=self.source_bucket, key=key).convert("RGB"))

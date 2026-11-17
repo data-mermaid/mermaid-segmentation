@@ -1,16 +1,6 @@
-"""Taxonomy-aware losses over the per-rank softmax heads.
+"""Taxonomy-aware loss over the per-rank softmax heads.
 
-Marginal partial-label loss (:class:`TaxonomicPartialLoss`): for each adjacent rank pair
-``d -> r = d + 1``, every pixel labelled at rank ``d`` with class ``c`` gives head ``r`` the constraint
-that its probability mass lies inside the children of ``c``:
-
-    L^(d->r) = -log( sum_{j in desc_r(c)} p^(r)_j )
-             = logsumexp(logits_r) - logsumexp(logits_r[desc_r(c)])
-
-i.e. cross-entropy between head ``r``'s predictions summed up to rank ``d`` and the rank-``d`` label.
-A pixel labelled down to family gets kingdom->phylum, ..., order->family and family->genus terms.
-
-Both losses take their parent-child structure from the :class:`TaxonomyTree` the hierarchical
+The loss takes its parent-child structure from the :class:`TaxonomyTree` the hierarchical
 metrics use (``build_taxonomy_tree`` over ``class_to_concepts.csv``), so training and evaluation
 share one taxonomy.
 
@@ -25,7 +15,6 @@ from __future__ import annotations
 import logging
 
 import torch
-import torch.nn.functional as F
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.taxonomy_tree import (
@@ -33,7 +22,7 @@ from mermaidseg.dataset_reconciliation.taxonomy_tree import (
     TaxonomyTree,
     build_rank_incidence,
 )
-from mermaidseg.model.concept_metrics import reduce_masked_loss, taxonomic_target_and_mask
+from mermaidseg.model.concept_metrics import reduce_masked_loss
 
 logger = logging.getLogger(__name__)
 
@@ -51,29 +40,6 @@ def taxonomic_rank_slices(
         slices.append((rank, offset, class_names))
         offset += len(class_names)
     return slices
-
-
-def rank_targets(
-    concept_labels: torch.Tensor,
-    slices: list[tuple[str, int, list[str]]],
-) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
-    """Per-rank class targets and valid masks, and the deepest labelled rank per pixel.
-
-    ``concept_labels`` has shape ``(B, C, ...)``. The returned depth is the index into ``slices``
-    of the deepest labelled rank, or ``-1`` for void pixels with no taxonomic label at all.
-    """
-    targets, valid = [], []
-    for _, offset, names in slices:
-        target_idx, is_valid = taxonomic_target_and_mask(
-            concept_labels[:, offset : offset + len(names)]
-        )
-        targets.append(target_idx)
-        valid.append(is_valid)
-    stacked = torch.stack(valid)
-    rank_ids = torch.arange(len(slices), device=stacked.device)
-    rank_ids = rank_ids.view(-1, *[1] * (stacked.ndim - 1))
-    depth = torch.where(stacked, rank_ids, -1).amax(dim=0)
-    return targets, valid, depth
 
 
 def _tree_channel_index(taxonomy: TaxonomyTree, rank: str, names: list[str]) -> list[int]:
@@ -136,112 +102,6 @@ def grouped_log_softmax(logits: torch.Tensor, groups: torch.Tensor) -> torch.Ten
     return grouped.log() - shifted.sum(dim=1, keepdim=True).log()
 
 
-def boundary_band(target_labels: torch.Tensor, width: int) -> torch.Tensor:
-    """Pixels within ``width`` px of two different annotated (non-zero) labels."""
-    annotated = target_labels > 0
-    labels = target_labels.float()
-    kernel, pad = 2 * width + 1, width
-    highest = F.max_pool2d(
-        torch.where(annotated, labels, -1.0)[:, None], kernel, stride=1, padding=pad
-    )
-    lowest = -F.max_pool2d(
-        torch.where(annotated, -labels, -float("inf"))[:, None], kernel, stride=1, padding=pad
-    )
-    return (highest[:, 0] >= 0) & (highest[:, 0] != lowest[:, 0])
-
-
-class TaxonomicPartialLoss(torch.nn.Module):
-    """Marginal partial-label cross-entropy over adjacent ``(r - 1) -> r`` rank pairs.
-
-    Every pixel labelled at rank ``r - 1`` selects its children at rank ``r`` with a row lookup in
-    ``A_{r-1->r}``, independent of whether rank ``r`` is labelled. Each pair is reduced and logged
-    separately.
-    """
-
-    def __init__(
-        self,
-        taxonomy: TaxonomyTree,
-        concept_value2id: dict[str, dict[str, list[int]]],
-        per_pixel_loss_weight: float = 0.0,
-        per_image_loss_weight: float = 1.0,
-    ) -> None:
-        super().__init__()
-        self.per_pixel_loss_weight = per_pixel_loss_weight
-        self.per_image_loss_weight = per_image_loss_weight
-        self.slices = taxonomic_rank_slices(concept_value2id)
-
-        matrices = build_parent_matrices(taxonomy, concept_value2id)
-        self._warn_classes_without_descendants(matrices)
-        for (d, r), ancestor in matrices.items():
-            self.register_buffer(f"ancestor_{d}_{r}", ancestor.bool())
-
-    def _pair_name(self, d: int, r: int) -> str:
-        return f"partial/{self.slices[d][0]}->{self.slices[r][0]}"
-
-    def _warn_classes_without_descendants(
-        self,
-        matrices: dict[tuple[int, int], torch.Tensor],
-    ) -> None:
-        """Warn about coarse classes whose pixels are masked for lack of children."""
-        for (d, r), ancestor in matrices.items():
-            has_desc = ancestor.sum(dim=1) > 0
-            missing = [name for k, name in enumerate(self.slices[d][2]) if not has_desc[k]]
-            if missing:
-                logger.warning(
-                    "%s: no descendants for %s; those pixels are masked.",
-                    self._pair_name(d, r),
-                    missing,
-                )
-
-    def forward(
-        self,
-        concept_logits: torch.Tensor,
-        concept_labels: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Sum of the ``(d, r)`` partial terms, plus per-term and per-depth logging values.
-
-        Args:
-            concept_logits: Raw concept logits ``(B, C, H, W)``; taxonomic ranks come first.
-            concept_labels: Concept targets ``(B, C, H, W)`` in the taxonomic 0/1/2 encoding.
-        """
-        targets, valid, depth = rank_targets(concept_labels, self.slices)
-
-        loss_components: dict[str, float] = {}
-        num_labelled = (depth >= 0).sum().clamp(min=1)
-        for d, (rank, _, _) in enumerate(self.slices):
-            loss_components[f"depth_frac/{rank}"] = ((depth == d).sum() / num_labelled).item()
-
-        total = concept_logits.new_zeros(())
-        for r in range(1, len(self.slices)):
-            d = r - 1
-            ancestor = getattr(self, f"ancestor_{d}_{r}")
-            rows = targets[d]
-            mask = valid[d] & ancestor.any(dim=1)[rows]
-            loss_components[self._pair_name(d, r)] = 0.0
-            if not mask.any():
-                continue
-
-            _, offset_r, names_r = self.slices[r]
-            logits_r = concept_logits[:, offset_r : offset_r + len(names_r)]
-            pixel_logits = logits_r.permute(0, 2, 3, 1)[mask]  # (P, C_r)
-            in_subtree = ancestor[rows[mask]]  # (P, C_r)
-            lse_all = pixel_logits.logsumexp(dim=1)
-            lse_subtree = pixel_logits.masked_fill(~in_subtree, float("-inf")).logsumexp(dim=1)
-            pixel_loss = lse_all - lse_subtree
-
-            per_pixel = concept_logits.new_zeros(mask.shape)
-            per_pixel[mask] = pixel_loss
-            pair_loss = reduce_masked_loss(
-                per_pixel,
-                mask,
-                per_pixel_loss_weight=self.per_pixel_loss_weight,
-                per_image_loss_weight=self.per_image_loss_weight,
-            )
-            loss_components[self._pair_name(d, r)] = pair_loss.item()
-            total = total + pair_loss
-        return total, loss_components
-
-
 class TaxonomicCoherenceLoss(torch.nn.Module):
     """Label-free KL coherence loss between adjacent rank heads.
 
@@ -255,29 +115,17 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
     The data taxonomy is not a clean tree, so each pair is restricted to coarse classes with at
     least one child and fine classes with at least one parent, and both softmaxes are renormalised
     over those classes. A fine class with several parents splits its mass equally between them.
-
-    Args:
-        pixels: ``"all_valid"`` (every non-void pixel) or ``"not_fine_labelled"`` (only pixels
-            without a label at the pair's fine rank).
-        boundary_px: Exclude pixels within this many px of two different annotated labels.
+    Every pixel is selected.
     """
-
-    PIXEL_MODES = ("all_valid", "not_fine_labelled")
 
     def __init__(
         self,
         taxonomy: TaxonomyTree,
         concept_value2id: dict[str, dict[str, list[int]]],
         stop_grad_coarse: bool = True,
-        pixels: str = "all_valid",
-        boundary_px: int = 0,
     ) -> None:
         super().__init__()
-        if pixels not in self.PIXEL_MODES:
-            raise ValueError(f"kl_pixels must be one of {self.PIXEL_MODES}, got {pixels!r}")
         self.stop_grad_coarse = stop_grad_coarse
-        self.pixels = pixels
-        self.boundary_px = boundary_px
         self.slices = taxonomic_rank_slices(concept_value2id)
 
         matrices = build_parent_matrices(taxonomy, concept_value2id)
@@ -333,31 +181,19 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
     def forward(
         self,
         concept_logits: torch.Tensor,
-        concept_labels: torch.Tensor,
         target_labels: torch.Tensor,
-        void_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Sum of the adjacent-pair KL terms, plus per-pair logging values.
 
         Args:
             concept_logits: Raw concept logits ``(B, C, H, W)``; taxonomic ranks come first.
-            concept_labels: Concept targets ``(B, C, H, W)``; used only for ``not_fine_labelled``.
-            target_labels: Target-space labels ``(B, H, W)``; used only for the boundary band.
-            void_mask: Optional ``(B, H, W)`` mask of void pixels (padding, out of frame), which are
-                always excluded. ``None`` treats every pixel as valid.
+            target_labels: Target-space labels ``(B, H, W)``; gives the pixel mask's shape.
         """
-        valid = torch.ones_like(target_labels, dtype=torch.bool)
-        if void_mask is not None:
-            valid = valid & ~void_mask
-        if self.boundary_px > 0:
-            valid = valid & ~boundary_band(target_labels, self.boundary_px)
-        if self.pixels == "not_fine_labelled":
-            _, labelled, _ = rank_targets(concept_labels, self.slices)
+        mask = torch.ones_like(target_labels, dtype=torch.bool)
 
         loss_components: dict[str, float] = {}
         total = concept_logits.new_zeros(())
         for r in range(len(self.slices) - 1):
-            mask = valid if self.pixels == "all_valid" else valid & ~labelled[r + 1]
             if not mask.any():
                 loss_components[f"kl/{self._pair_name(r)}"] = 0.0
                 continue
@@ -378,90 +214,58 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
 
 
 class TaxonomicLoss(torch.nn.Module):
-    """Taxonomy-aware terms added on top of the per-rank cross-entropy of the concept loss.
+    """Taxonomy-aware term added on top of the per-rank cross-entropy of the concept loss.
 
-        L = mu * sum_r L_partial^(r-1->r) / num_ranks + lambda * sum_r L_KL^(r) / num_ranks
+        L = lambda * sum_r L_KL^(r) / num_ranks
 
-    Both terms are divided by the number of taxonomic ranks like the per-rank cross-entropy in
-    :class:`~mermaidseg.model.loss.ConceptBottleneckLoss`, so their weights are on the same scale.
-    Both weights are constant from the first update; the LR warmup and decay are the only schedule.
-    Each term is only built when its weight is positive.
+    The term is divided by the number of taxonomic ranks like the per-rank cross-entropy in
+    :class:`~mermaidseg.model.loss.ConceptBottleneckLoss`, so its weight is on the same scale.
+    The weight is constant from the first update; the LR warmup and decay are the only schedule.
+    The term is only built when its weight is positive.
 
     Args:
         taxonomy: Parent-child structure from ``build_taxonomy_tree`` over ``class_to_concepts.csv``,
             the same tree the hierarchical metrics use.
         concept_value2id: Concept name -> value -> channel mapping.
-        partial_weight: Weight ``mu`` of :class:`TaxonomicPartialLoss`. Defaults to 0 (off).
-        per_pixel_loss_weight: Partial-loss reduction, matching the concept loss's setting.
-        per_image_loss_weight: Partial-loss reduction, matching the concept loss's setting.
         kl_weight: Weight ``lambda`` of :class:`TaxonomicCoherenceLoss`. Defaults to 0 (off).
         kl_stop_grad_coarse: Detach the coarse head's distribution in each KL pair.
-        kl_pixels: ``"all_valid"`` or ``"not_fine_labelled"``.
-        kl_boundary_px: Exclude pixels within this many px of an annotated label boundary.
     """
 
     def __init__(
         self,
         taxonomy: TaxonomyTree,
         concept_value2id: dict[str, dict[str, list[int]]],
-        partial_weight: float = 0.0,
-        per_pixel_loss_weight: float = 0.0,
-        per_image_loss_weight: float = 1.0,
         kl_weight: float = 0.0,
         kl_stop_grad_coarse: bool = True,
-        kl_pixels: str = "all_valid",
-        kl_boundary_px: int = 0,
     ) -> None:
         super().__init__()
-        self.partial_weight = partial_weight
         self.kl_weight = kl_weight
         self.num_ranks = len(TAXONOMIC_CONCEPTS)
 
-        self.partial_loss = None
-        if partial_weight > 0:
-            self.partial_loss = TaxonomicPartialLoss(
-                taxonomy,
-                concept_value2id,
-                per_pixel_loss_weight=per_pixel_loss_weight,
-                per_image_loss_weight=per_image_loss_weight,
-            )
         self.coherence_loss = None
         if kl_weight > 0:
             self.coherence_loss = TaxonomicCoherenceLoss(
                 taxonomy,
                 concept_value2id,
                 stop_grad_coarse=kl_stop_grad_coarse,
-                pixels=kl_pixels,
-                boundary_px=kl_boundary_px,
             )
 
     def forward(
         self,
         concept_logits: torch.Tensor,
-        concept_labels: torch.Tensor,
         target_labels: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Weighted sum of the enabled taxonomic terms, plus their logging values.
+        """Weighted taxonomic term, plus its logging values.
 
         Args:
             concept_logits: Raw concept logits ``(B, C, H, W)``; taxonomic ranks come first.
-            concept_labels: Concept targets ``(B, C, H, W)`` in the taxonomic 0/1/2 encoding.
-            target_labels: Target-space labels ``(B, H, W)``; used only for the KL boundary band.
+            target_labels: Target-space labels ``(B, H, W)``; give the KL pixel mask's shape.
         """
         loss_components: dict[str, float] = {}
         total = concept_logits.new_zeros(())
 
-        if self.partial_loss is not None:
-            partial_value, partial_components = self.partial_loss(concept_logits, concept_labels)
-            partial_value = partial_value / self.num_ranks
-            loss_components.update(partial_components)
-            loss_components["partial"] = partial_value.item()
-            total = total + self.partial_weight * partial_value
-
         if self.coherence_loss is not None:
-            kl_value, kl_components = self.coherence_loss(
-                concept_logits, concept_labels, target_labels
-            )
+            kl_value, kl_components = self.coherence_loss(concept_logits, target_labels)
             kl_value = kl_value / self.num_ranks
             loss_components.update(kl_components)
             loss_components["kl"] = kl_value.item()

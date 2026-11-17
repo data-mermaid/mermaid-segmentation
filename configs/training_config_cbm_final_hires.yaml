@@ -14,11 +14,8 @@ training:
     # Taxonomic KL coherence at a constant weight from the first update.
     taxonomic_loss:
         ambiguity_policy: permissive
-        partial_weight: 0.0
         kl_weight: 0.5
         kl_stop_grad_coarse: true
-        kl_pixels: all_valid
-        kl_boundary_px: 0
     # Final 768px fine-tune on train+val: 50k optimizer updates from cbm_final/model_step300000
     # (--init-weights), 4k linear warmup, then LinearLR to 0. KL 0.5 as in the final run.
     # batch_size is the global minibatch; the launcher sets the DDP microbatch and accumulation.

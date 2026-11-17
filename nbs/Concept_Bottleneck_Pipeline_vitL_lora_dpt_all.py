@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 
 import torch
-import yaml
 import torch.distributed as dist
 from nb_setup import check_env_wandb
 from torch.utils.data import ConcatDataset, DataLoader
@@ -32,9 +31,7 @@ from mermaidseg.run_setup import (
     load_run_concept_source_mask,
 )
 
-# LoRA + DPT concept-bottleneck entrypoint. The encoder comes from the model config
-# (ViT-L by default; the ViT-size sweep passes S/B/L/H+ configs).
-CHECKPOINT = None  # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt_all/model_epoch34" # "model_checkpoints/mermaid_base_run_dinov3_lora_dpt/model_epoch13"
+# LoRA + DPT concept-bottleneck entrypoint. The encoder comes from the model config.
 
 
 def load_training_checkpoint(
@@ -43,15 +40,11 @@ def load_training_checkpoint(
     device: torch.device | str,
     *,
     load_optimizer: bool = True,
-    load_scheduler: bool = True,
 ) -> int:
     """Load model weights and, when resuming, optimizer and scheduler state.
 
     ``load_optimizer=False`` keeps the freshly constructed optimizer and schedule
-    (hi-res fine-tune from cooled weights). ``load_scheduler=False`` still restores
-    optimizer moments and leaves the epoch counter, ``global_step``, and scheduler
-    for the caller to restart (cooldown). Call ``meta_model.rebuild_scheduler()``
-    after that path so the new schedule binds to the restored learning rates.
+    (hi-res fine-tune from cooled weights).
     """
     checkpoint = load_model_weights(meta_model, checkpoint_path, device)
     raw_state_dict = checkpoint.get("model_state_dict", checkpoint)
@@ -74,9 +67,6 @@ def load_training_checkpoint(
         if n_dropped:
             print0(f"Dropped {n_dropped} optimizer states for the removed fusion residual")
         meta_model.optimizer.load_state_dict(optimizer_state)
-
-    if not load_scheduler:
-        return 0
 
     # Restore the LR scheduler so an epoch schedule continues from the correct step
     # instead of restarting its decay. `scheduler` may be None when no scheduler was
@@ -165,13 +155,6 @@ parser.add_argument(
 )
 parser.add_argument("--per-pixel-loss-weight", type=float, default=None)
 parser.add_argument("--per-image-loss-weight", type=float, default=None)
-parser.add_argument("--kl-weight", type=float, default=None, help="taxonomic KL coherence weight")
-parser.add_argument(
-    "--partial-weight", type=float, default=None, help="taxonomic partial-label CE weight"
-)
-parser.add_argument(
-    "--distance-weight", type=float, default=None, help="expected tree-distance loss weight"
-)
 parser.add_argument(
     "--grad-accum-steps",
     type=int,
@@ -190,16 +173,7 @@ parser.add_argument(
 parser.add_argument(
     "--checkpoint",
     default=None,
-    help="path to a checkpoint to resume from (overrides the CHECKPOINT constant)",
-)
-parser.add_argument(
-    "--init-checkpoint",
-    default=None,
-    help=(
-        "path to a checkpoint whose model and optimizer initialize a new run "
-        "(epoch 0, fresh scheduler). Mutually exclusive with --checkpoint "
-        "and --init-weights"
-    ),
+    help="path to a checkpoint to resume from",
 )
 parser.add_argument(
     "--init-weights",
@@ -207,42 +181,23 @@ parser.add_argument(
     help=(
         "path to a checkpoint whose model weights initialize a new run. The "
         "optimizer and warmup schedule stay as just constructed. Mutually "
-        "exclusive with --checkpoint and --init-checkpoint"
-    ),
-)
-parser.add_argument(
-    "--data-seed",
-    type=int,
-    default=None,
-    help="torch seed for data shuffling (default: 4). Cooldown jobs pass a different seed",
-)
-parser.add_argument(
-    "--set",
-    action="append",
-    default=[],
-    metavar="KEY=VALUE",
-    help=(
-        "override a config value, e.g. training.distance_loss.weight=0.1 or "
-        "'training.distance_loss={weight: 0.1}'; VALUE is parsed as YAML. Repeatable"
+        "exclusive with --checkpoint"
     ),
 )
 parser.set_defaults(run_name="mermaid_base_run_dinov3_lora_dpt_all")
 args = parser.parse_args()
 if args.preempt_checkpoint_every_steps < 0:
     parser.error("--preempt-checkpoint-every-steps must be >= 0")
-_init_flags = [args.checkpoint, args.init_checkpoint, args.init_weights]
-if sum(flag is not None for flag in _init_flags) > 1:
-    parser.error("pass only one of --checkpoint, --init-checkpoint, and --init-weights")
+if args.checkpoint is not None and args.init_weights is not None:
+    parser.error("pass only one of --checkpoint and --init-weights")
 
-SEED = 4 if args.data_seed is None else args.data_seed
+SEED = 4
 torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
 
-# CLI --checkpoint (slurm/train.sbatch resumes the latest checkpoint) takes
-# precedence over the hardcoded CHECKPOINT constant so runs can resume.
-if args.checkpoint:
-    CHECKPOINT = args.checkpoint
+# slurm/train.sbatch resumes the latest checkpoint through --checkpoint.
+CHECKPOINT = args.checkpoint
 
 cfg = setup_config(
     {
@@ -264,32 +219,8 @@ if args.per_image_loss_weight is not None:
     cfg.training.loss.per_image_loss_weight = args.per_image_loss_weight
 if args.grad_accum_steps is not None:
     cfg.training.grad_accum_steps = args.grad_accum_steps
-for override in args.set:
-    key, sep, value = override.partition("=")
-    if not sep or not key:
-        parser.error(f"--set expects KEY=VALUE, got {override!r}")
-    *parents, leaf = key.split(".")
-    section = cfg
-    for part in parents:
-        section[part] = section.get(part, {})  # ConfigDict wraps a new dict on assignment
-        section = section[part]
-    section[leaf] = yaml.safe_load(value)
-    print(f"config override: {key} = {section[leaf]!r}")
-if args.kl_weight is not None or args.partial_weight is not None:
-    taxonomic_cfg = cfg.training.get("taxonomic_loss") or {"ambiguity_policy": "permissive"}
-    if args.kl_weight is not None:
-        taxonomic_cfg["kl_weight"] = args.kl_weight
-    if args.partial_weight is not None:
-        taxonomic_cfg["partial_weight"] = args.partial_weight
-    cfg.training.taxonomic_loss = taxonomic_cfg
-if args.distance_weight is not None:
-    distance_cfg = cfg.training.get("distance_loss") or {"ambiguity_policy": "permissive"}
-    distance_cfg["weight"] = args.distance_weight
-    cfg.training.distance_loss = distance_cfg
 taxonomic_cfg = cfg.training.get("taxonomic_loss")
-if taxonomic_cfg is not None and not (
-    taxonomic_cfg.get("kl_weight", 0.0) > 0 or taxonomic_cfg.get("partial_weight", 0.0) > 0
-):
+if taxonomic_cfg is not None and not taxonomic_cfg.get("kl_weight", 0.0) > 0:
     cfg.training.pop("taxonomic_loss")
 
 # Encoder, iterations, batch size, and epochs come from the model and training configs.
@@ -390,12 +321,9 @@ if concept_source_mask is not None:
     meta_model.set_concept_source_mask(concept_source_mask.keep)
 
 start_epoch = 0
-init_checkpoint = args.init_checkpoint
 init_weights = args.init_weights
 if init_weights:
-    load_training_checkpoint(
-        meta_model, init_weights, device, load_optimizer=False, load_scheduler=False
-    )
+    load_training_checkpoint(meta_model, init_weights, device, load_optimizer=False)
     # Optimizer and warmup were built with the training config before the load.
     # Leave them alone: a cooled source has LR 0 and Adam moments we do not want.
     fresh_lrs = [group["lr"] for group in meta_model.optimizer.param_groups]
@@ -403,18 +331,6 @@ if init_weights:
         f"Loaded weights from {init_weights!r}; fresh optimizer lrs={fresh_lrs} "
         "(epoch 0, global_step 0)"
     )
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-    print0(f"Re-seeded RNG to {SEED} for the new run's data order")
-elif init_checkpoint:
-    load_training_checkpoint(meta_model, init_checkpoint, device, load_scheduler=False)
-    # Bind a fresh schedule to the restored peak LRs (do not continue the
-    # source run's scheduler). Epoch and global_step stay at 0.
-    meta_model.rebuild_scheduler()
-    print0(f"Loaded init checkpoint {init_checkpoint!r}; starting a new run at epoch 0")
-    # Re-seed after model init so the shuffle stream is exactly `SEED`, not that
-    # seed advanced by construction. Augmentations stay entropy-seeded.
     torch.manual_seed(SEED)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(SEED)
@@ -454,7 +370,7 @@ evaluator = Evaluator(
 )
 # -- 5. Train (run lifecycle managed by `with`) ---------------------------
 # Backend selection is config-driven (configs/logger_config.yaml sets
-# enable_mlflow: false, enable_wandb: true). Under torchrun only rank 0 has a
+# enable_wandb: true). Under torchrun only rank 0 has a
 # Logger; the other ranks train with logger=None and write nothing.
 if DIST.is_main:
     logger_context = Logger(
@@ -508,8 +424,6 @@ with logger_context as run_logger:
                     "init/start_epoch": 0,
                 }
             )
-        elif init_checkpoint:
-            run_logger.log_params({"init/checkpoint": init_checkpoint, "init/start_epoch": 0})
         elif CHECKPOINT:
             run_logger.log_params({"init/checkpoint": CHECKPOINT, "init/start_epoch": start_epoch})
         print(f"\nwandb run_id : {run_logger.wandb_run_id}")
@@ -556,7 +470,6 @@ with logger_context as run_logger:
                         meta,
                         epoch,
                         {},
-                        is_best=False,
                         checkpoint_name=f"model_step{step}",
                         epoch_complete=step >= total_updates,
                     )
@@ -570,7 +483,6 @@ with logger_context as run_logger:
                         meta,
                         epoch,
                         {},
-                        is_best=False,
                         checkpoint_name=name,
                         epoch_complete=step >= total_updates,
                         atomic=True,
@@ -609,7 +521,6 @@ with logger_context as run_logger:
                 meta_model,
                 epoch,
                 metrics[epoch].get("validation_metrics", {}),
-                is_best=False,
             )
     if not metrics_all:
         print0("No training epochs ran.")

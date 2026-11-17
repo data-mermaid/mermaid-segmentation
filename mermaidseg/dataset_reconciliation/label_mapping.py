@@ -10,28 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import requests
 import torch
-
-
-def fetch_mermaid_target_labels(
-    benthicattributes_url: str = "https://api.datamermaid.org/v1/benthicattributes/",
-) -> list[str]:
-    """Fetch the canonical MERMAID benthic-attribute label names.
-
-    Returns:
-        Alphabetically sorted list of unique benthic-attribute names.
-    """
-    response = requests.get(benthicattributes_url, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    records = list(data["results"])
-    while data.get("next"):
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        records.extend(data["results"])
-    return sorted({rec["name"] for rec in records if rec.get("name") is not None})
 
 
 def fetch_coralnet_to_mermaid() -> dict[str, str | None]:

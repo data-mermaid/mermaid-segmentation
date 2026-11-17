@@ -1,4 +1,4 @@
-"""Marginal partial-label and KL coherence losses on a toy order -> family -> genus taxonomy."""
+"""KL coherence loss on a toy order -> family -> genus taxonomy."""
 
 from __future__ import annotations
 
@@ -18,8 +18,6 @@ from mermaidseg.dataset_reconciliation.taxonomy_tree import TaxonomyTree, build_
 from mermaidseg.model.taxonomy_loss import (
     TaxonomicCoherenceLoss,
     TaxonomicLoss,
-    TaxonomicPartialLoss,
-    boundary_band,
     build_parent_matrices,
 )
 
@@ -73,11 +71,6 @@ def _tree(ranks: dict[str, list[str]], paths: list[tuple[str | None, ...]]) -> T
 RANKS = {"order": ORDERS, "family": FAMILIES, "genus": GENERA}
 
 
-@pytest.fixture
-def partial_loss() -> TaxonomicPartialLoss:
-    return TaxonomicPartialLoss(_tree(RANKS, PATHS), _concept_value2id(RANKS))
-
-
 def _pixels(paths: list[tuple[str | None, ...]], dtype=torch.float32):
     """One image with one pixel per path; logits are log of the spec probabilities."""
     labels = torch.tensor([_concept_row(RANKS, path) for path in paths]).T  # (C, W)
@@ -104,87 +97,6 @@ def test_ancestor_matrix_family_to_genus():
     )
     torch.testing.assert_close(ancestor[(1, 2)], expected)
     assert set(ancestor) == {(0, 1), (1, 2)}  # adjacent ranks only
-
-
-def test_spec_example_values(partial_loss):
-    logits, labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C, VOID])
-    total, components = partial_loss(logits, labels)
-
-    assert components["partial/family->genus"] == pytest.approx(-math.log(0.37), abs=1e-5)
-    assert components["partial/order->family"] == pytest.approx(-math.log(0.85), abs=1e-5)
-    assert "partial/order->genus" not in components  # adjacent ranks only
-    assert total.item() == pytest.approx(-math.log(0.37) - math.log(0.85), abs=1e-5)
-    assert components["depth_frac/genus"] == pytest.approx(1 / 3)
-    assert components["depth_frac/family"] == pytest.approx(1 / 3)
-    assert components["depth_frac/order"] == pytest.approx(1 / 3)
-
-
-def test_every_labelled_coarse_rank_gets_a_term(partial_loss):
-    # Fully labelled pixel: both adjacent pairs apply, the genus label does not switch them off.
-    total, components = partial_loss(*_pixels([PIXEL_A]))
-    assert components["partial/order->family"] == pytest.approx(-math.log(0.85), abs=1e-5)
-    assert components["partial/family->genus"] == pytest.approx(-math.log(0.37), abs=1e-5)
-    assert total.item() == pytest.approx(-math.log(0.85) - math.log(0.37), abs=1e-5)
-
-
-def test_void_pixels_contribute_nothing(partial_loss):
-    total, components = partial_loss(*_pixels([VOID]))
-    assert total.item() == 0.0
-    assert all(v == 0.0 for k, v in components.items() if k.startswith("partial/"))
-
-
-
-
-
-
-def test_void_pixel_does_not_change_loss(partial_loss):
-    with_void, _ = partial_loss(*_pixels([PIXEL_B, VOID]))
-    without_void, _ = partial_loss(*_pixels([PIXEL_B]))
-    assert with_void.item() == pytest.approx(without_void.item())
-
-
-def test_gradients_reach_heads_below_labelled_ranks(partial_loss):
-    logits, labels = _pixels([PIXEL_B, PIXEL_C])
-    logits.requires_grad_(True)
-    partial_loss(logits, labels)[0].backward()
-    grad = logits.grad[0, :, 0]  # (C, pixels)
-    n_order, n_family = len(ORDERS), len(FAMILIES)
-    assert torch.all(grad[:n_order, 0] == 0)  # pixel B: family and genus heads
-    assert torch.any(grad[n_order : n_order + n_family, 0] != 0)
-    assert torch.any(grad[n_order + n_family :, 0] != 0)
-    assert torch.all(grad[:n_order, 1] == 0)  # pixel C: family head only
-    assert torch.any(grad[n_order : n_order + n_family, 1] != 0)
-    assert torch.all(grad[n_order + n_family :, 1] == 0)
-
-
-def test_matches_naive_probability_sum(partial_loss):
-    torch.manual_seed(0)
-    _, labels = _pixels([PIXEL_B, PIXEL_C])
-    logits = torch.randn(1, labels.size(1), 1, 2)
-    ancestor = build_parent_matrices(_tree(RANKS, PATHS), _concept_value2id(RANKS))
-    family_probs = logits[0, 2:5, 0].softmax(dim=0)
-    genus_probs = logits[0, 5:, 0].softmax(dim=0)
-    # order->family: mean over B and C (both scleractinia); family->genus: B (acroporidae) only.
-    order_family = -(ancestor[(0, 1)] @ family_probs)[0].log().mean()
-    family_genus = -(ancestor[(1, 2)] @ genus_probs[:, 0])[0].log()
-    expected = order_family + family_genus
-    total, _ = partial_loss(logits, labels)
-    assert total.item() == pytest.approx(expected.item(), abs=1e-5)
-
-
-def test_gradcheck(partial_loss):
-    _, labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C, VOID])
-    logits = torch.randn(1, labels.size(1), 1, 4, dtype=torch.float64, requires_grad=True)
-    assert torch.autograd.gradcheck(lambda x: partial_loss(x, labels)[0], (logits,))
-
-
-def test_zero_when_fine_mass_inside_subtree(partial_loss):
-    logits, labels = _pixels([PIXEL_B, PIXEL_C])
-    logits[:, 5 + 3 : 5 + 5, :, 0] = -1e4  # pixel B: no mass on poritidae genera
-    logits[:, 5 + 5 :, :, :] = -1e4  # no mass on alcyoniidae genera
-    logits[:, 2 + 2, :, :] = -1e4  # no mass on alcyoniidae
-    total, _ = partial_loss(logits, labels)
-    assert total.item() == pytest.approx(0.0, abs=1e-6)
 
 
 def test_none_is_not_a_descendant_of_concrete_taxa():
@@ -223,32 +135,6 @@ def test_channels_missing_from_tree_raise():
         build_parent_matrices(_tree(RANKS, PATHS[:-1]), _concept_value2id(RANKS))  # no sinularia
 
 
-def test_class_without_descendants_is_masked_and_logged(caplog):
-    ranks = {"order": ORDERS, "family": FAMILIES + ["fungiidae"], "genus": GENERA}
-    paths = PATHS + [("scleractinia", "fungiidae", None)]
-    with caplog.at_level(logging.WARNING):
-        loss = TaxonomicPartialLoss(_tree(ranks, paths), _concept_value2id(ranks))
-    assert "fungiidae" in caplog.text
-
-    labels = torch.tensor(_concept_row(ranks, ("scleractinia", "fungiidae", None)))
-    labels = labels[None, :, None, None]
-    _, components = loss(torch.randn(labels.shape), labels)
-    assert components["partial/family->genus"] == 0.0
-    assert components["partial/order->family"] > 0.0  # the order label still applies
-
-
-def test_taxonomic_loss_scales_partial_term():
-    concept_logits, concept_labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C])
-    target_labels = torch.tensor([[[1, 2, 2]]])
-    loss = TaxonomicLoss(_tree(RANKS, PATHS), _concept_value2id(RANKS), partial_weight=2.0)
-    total, components = loss(concept_logits, concept_labels, target_labels)
-
-    partial = (-math.log(0.37) - math.log(0.85)) / len(TAXONOMIC_CONCEPTS)
-    assert loss.coherence_loss is None
-    assert components["partial"] == pytest.approx(partial, abs=1e-5)
-    assert total.item() == pytest.approx(2.0 * partial, abs=1e-5)
-
-
 # --- KL coherence loss -------------------------------------------------------------------------
 
 
@@ -261,9 +147,8 @@ def _logits(order, family, genus, num_pixels: int = 1, dtype=torch.float32) -> t
     return probs.log()[None, :, None, None].expand(1, -1, 1, num_pixels).clone()
 
 
-def _no_labels(num_pixels: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
-    concept_labels = torch.zeros(1, len(ORDERS) + len(FAMILIES) + len(GENERA), 1, num_pixels)
-    return concept_labels, torch.zeros(1, 1, num_pixels, dtype=torch.long)
+def _no_labels(num_pixels: int = 1) -> torch.Tensor:
+    return torch.zeros(1, 1, num_pixels, dtype=torch.long)
 
 
 KL_ORDER_FAMILY = 0.8 * math.log(0.8 / 0.85) + 0.2 * math.log(0.2 / 0.15)
@@ -274,7 +159,7 @@ KL_FAMILY_GENUS = sum(
 
 def test_kl_spec_example_values():
     logits = _logits(ORDER_PROBS, FAMILY_PROBS, GENUS_PROBS)
-    total, components = _coherence()(logits, *_no_labels())
+    total, components = _coherence()(logits, _no_labels())
     assert pytest.approx(0.0090, abs=1e-4) == KL_ORDER_FAMILY
     assert pytest.approx(0.1158, abs=1e-4) == KL_FAMILY_GENUS
     assert components["kl/order->family"] == pytest.approx(KL_ORDER_FAMILY, abs=1e-6)
@@ -284,27 +169,17 @@ def test_kl_spec_example_values():
 
 def test_kl_is_independent_of_labels():
     loss = _coherence()
-    logits, labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C, VOID])
+    logits, _ = _pixels([PIXEL_A, PIXEL_B, PIXEL_C, VOID])
     target_labels = torch.tensor([[[3, 1, 1, 0]]])
-    _, components = loss(logits, labels, target_labels)
-    per_pixel = [loss(logits[..., i : i + 1], *_no_labels())[0].item() for i in range(4)]
+    _, components = loss(logits, target_labels)
+    per_pixel = [loss(logits[..., i : i + 1], _no_labels())[0].item() for i in range(4)]
     assert per_pixel == pytest.approx([KL_ORDER_FAMILY + KL_FAMILY_GENUS] * 4, abs=1e-6)
     assert components["kl/family->genus"] == pytest.approx(KL_FAMILY_GENUS, abs=1e-6)
 
 
-def test_kl_void_pixels_contribute_nothing():
-    loss = _coherence()
-    logits = torch.cat(
-        [_logits(ORDER_PROBS, FAMILY_PROBS, GENUS_PROBS), torch.randn(1, 12, 1, 1)], dim=-1
-    )
-    void_mask = torch.tensor([[[False, True]]])
-    total, _ = loss(logits, *_no_labels(2), void_mask=void_mask)
-    assert total.item() == pytest.approx(KL_ORDER_FAMILY + KL_FAMILY_GENUS, abs=1e-6)
-
-
 def test_kl_gradients_follow_stop_grad():
     logits = _logits(ORDER_PROBS, FAMILY_PROBS, GENUS_PROBS).requires_grad_(True)
-    _coherence()(logits, *_no_labels())[0].backward()
+    _coherence()(logits, _no_labels())[0].backward()
     grad = logits.grad[0, :, 0, 0]
     assert torch.all(grad[:2] == 0)
     torch.testing.assert_close(
@@ -325,7 +200,7 @@ def test_kl_gradients_follow_stop_grad():
 
 def test_kl_zero_for_coherent_heads():
     logits = _logits([0.82, 0.18], [0.37, 0.45, 0.18], GENUS_PROBS)
-    _, components = _coherence()(logits, *_no_labels())
+    _, components = _coherence()(logits, _no_labels())
     assert components["kl/order->family"] == pytest.approx(0.0, abs=1e-6)
     assert components["kl/family->genus"] == pytest.approx(0.0, abs=1e-6)
 
@@ -341,7 +216,7 @@ def test_kl_matches_naive_probability_sum():
     for p, fine, parents in [(order, family, ancestor[(0, 1)]), (family, genus, ancestor[(1, 2)])]:
         q = parents @ fine
         expected += (p * (p.log() - q.log())).sum(dim=0).mean()
-    total, _ = _coherence()(logits, *_no_labels(3))
+    total, _ = _coherence()(logits, _no_labels(3))
     assert total.item() == pytest.approx(expected.item(), abs=1e-5)
 
 
@@ -349,27 +224,7 @@ def test_kl_gradcheck_without_stop_grad():
     loss = _coherence(stop_grad_coarse=False)
     labels = _no_labels(3)
     logits = torch.randn(1, 12, 1, 3, dtype=torch.float64, requires_grad=True)
-    assert torch.autograd.gradcheck(lambda x: loss(x, *labels)[0], (logits,))
-
-
-def test_kl_not_fine_labelled_selects_pixels_per_pair():
-    loss = _coherence(pixels="not_fine_labelled")
-    logits, labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C])
-    _, components = loss(logits, labels, torch.zeros(1, 1, 3, dtype=torch.long))
-    # order->family: only pixel C lacks a family label; family->genus: pixels B and C.
-    assert components["kl/order->family"] == pytest.approx(KL_ORDER_FAMILY, abs=1e-6)
-    assert components["kl/family->genus"] == pytest.approx(KL_FAMILY_GENUS, abs=1e-6)
-    _, components = loss(logits[..., :1], labels[..., :1], torch.zeros(1, 1, 1, dtype=torch.long))
-    assert components["kl/order->family"] == 0.0
-    assert components["kl/family->genus"] == 0.0
-
-
-def test_boundary_band():
-    target_labels = torch.tensor([[[1, 1, 0, 0, 2, 2, 2, 0, 0, 0]]])
-    band = boundary_band(target_labels, width=1)
-    assert band[0, 0].tolist() == [False] * 10
-    band = boundary_band(target_labels, width=2)  # only pixels 2 and 3 see both labels 1 and 2
-    assert band[0, 0].nonzero().flatten().tolist() == [2, 3]
+    assert torch.autograd.gradcheck(lambda x: loss(x, labels)[0], (logits,))
 
 
 def test_coherence_handles_taxonomy_defects(caplog):
@@ -392,15 +247,15 @@ def test_coherence_handles_taxonomy_defects(caplog):
     # Restricted & renormalised: p over {acroporidae, lithophyllaceae, corallinaceae} = [.5, .25, .25],
     # q = [p(acropora), p(lithophyllum)/2, p(lithophyllum)/2] = [.5, .25, .25] -> coherent.
     logits = torch.tensor([0.3, 0.4, 0.15, 0.15, 0.4, 0.4, 0.2]).log()[None, :, None, None]
-    total, _ = loss(logits, torch.zeros(1, 7, 1, 1), torch.zeros(1, 1, 1, dtype=torch.long))
+    total, _ = loss(logits, torch.zeros(1, 1, 1, dtype=torch.long))
     assert total.item() == pytest.approx(0.0, abs=1e-6)
 
 
 def test_kl_weight_is_constant():
     concept_logits = _logits(ORDER_PROBS, FAMILY_PROBS, GENUS_PROBS)
-    concept_labels, target_labels = _no_labels()
+    target_labels = _no_labels()
     loss = TaxonomicLoss(_tree(RANKS, PATHS), _concept_value2id(RANKS), kl_weight=0.5)
-    total, components = loss(concept_logits, concept_labels, target_labels)
+    total, components = loss(concept_logits, target_labels)
     assert "kl_weight" not in components
     assert components["kl"] > 0.0
     assert total.item() == pytest.approx(0.5 * components["kl"], abs=1e-6)
@@ -408,34 +263,19 @@ def test_kl_weight_is_constant():
 
 def test_taxonomic_loss_scales_kl_term():
     concept_logits = _logits(ORDER_PROBS, FAMILY_PROBS, GENUS_PROBS)
-    concept_labels, target_labels = _no_labels()
+    target_labels = _no_labels()
     loss = TaxonomicLoss(_tree(RANKS, PATHS), _concept_value2id(RANKS), kl_weight=0.5)
-    total, components = loss(concept_logits, concept_labels, target_labels)
+    total, components = loss(concept_logits, target_labels)
 
-    assert loss.partial_loss is None
     kl = (KL_ORDER_FAMILY + KL_FAMILY_GENUS) / len(TAXONOMIC_CONCEPTS)
     assert components["kl"] == pytest.approx(kl, abs=1e-6)
     assert total.item() == pytest.approx(0.5 * components["kl"], abs=1e-6)
 
 
-def test_taxonomic_loss_sums_both_terms():
-    concept_logits, concept_labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C])
-    target_labels = torch.tensor([[[1, 2, 2]]])
-    taxonomy, value2id = _tree(RANKS, PATHS), _concept_value2id(RANKS)
-    args = (concept_logits, concept_labels, target_labels)
-
-    partial, _ = TaxonomicLoss(taxonomy, value2id, partial_weight=2.0)(*args)
-    kl, _ = TaxonomicLoss(taxonomy, value2id, kl_weight=0.5)(*args)
-    both, components = TaxonomicLoss(taxonomy, value2id, partial_weight=2.0, kl_weight=0.5)(*args)
-
-    assert {"partial", "kl"} <= components.keys()
-    assert both.item() == pytest.approx(partial.item() + kl.item(), abs=1e-6)
-
-
 def test_taxonomic_loss_disabled_is_zero():
-    concept_logits, concept_labels = _pixels([PIXEL_A, PIXEL_B, PIXEL_C])
+    concept_logits, _ = _pixels([PIXEL_A, PIXEL_B, PIXEL_C])
     loss = TaxonomicLoss(_tree(RANKS, PATHS), _concept_value2id(RANKS))
-    total, components = loss(concept_logits, concept_labels, torch.tensor([[[1, 2, 2]]]))
+    total, components = loss(concept_logits, torch.tensor([[[1, 2, 2]]]))
 
-    assert loss.partial_loss is None and loss.coherence_loss is None
+    assert loss.coherence_loss is None
     assert total.item() == 0.0 and components == {}

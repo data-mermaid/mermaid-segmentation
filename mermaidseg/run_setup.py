@@ -113,7 +113,6 @@ def build_registry(
         target_labels=target_labels(training_cfg),
         target_label_subset=training_cfg.class_subset,
         compute_concepts=training_cfg.training_mode != "standard",
-        concept_mapping_path=mapping_path,
         concept_schema=schema,
         label_roll_up=training_cfg.get("label_roll_up", False),
     ).to(device)
@@ -138,8 +137,6 @@ def build_meta_model(
         training_kwargs=cfg.training.copy(),
         source_to_target_lookup=registry.source_to_target,
         source_to_concepts_lookup=registry.source_to_concepts,
-        concept_matrix=registry.concept_matrix,
-        conceptid2labelid=registry.conceptid2labelid(),
         concept_value2id=registry.concept_value2id,
     )
 

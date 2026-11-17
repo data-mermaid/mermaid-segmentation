@@ -25,8 +25,6 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       - name: Run unit tests
-        # --extra all installs the slim core's optional deps (mlflow, torchmetrics, ibis, bs4, …)
-        # for the training/ETL test modules. It deliberately excludes the `test-live` extra
-        # (playwright) — live tests need a browser (`playwright install`) and run outside CI, so we
-        # also deselect them with `not live`.
-        run: uv run --extra all --group tests pytest -m "not slow and not integration and not live" --cov=mermaidseg --cov-report=term-missing
+        # Live tests need S3 or CoralNet access and run outside CI, so we deselect them with
+        # `not live`.
+        run: uv run --group tests pytest -m "not slow and not integration and not live" --cov=mermaidseg --cov-report=term-missing

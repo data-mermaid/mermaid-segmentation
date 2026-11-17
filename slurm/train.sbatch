@@ -12,12 +12,11 @@
 
 # One training job of a run: nbs/Concept_Bottleneck_Pipeline_vitL_lora_dpt_all.py.
 #
-#   sbatch [sbatch options] slurm/train.sbatch RUN [--init-weights SRC | --init-checkpoint SRC]
+#   sbatch [sbatch options] slurm/train.sbatch RUN [--init-weights SRC]
 #          [--group GROUP] [-- PIPELINE_ARGS...]
 #
 # RUN            run name; checkpoints go to nbs/model_checkpoints/RUN.
-# --init-weights / --init-checkpoint
-#                starting point for a fresh run (path relative to the repo root or
+# --init-weights starting point for a fresh run (path relative to the repo root or
 #                absolute). Ignored once RUN has its own checkpoint.
 # --group        wandb run group (default: RUN).
 # PIPELINE_ARGS  passed through to the pipeline (configs, loss weights, resolution...).
@@ -33,14 +32,14 @@
 
 set -euo pipefail
 
-usage="usage: sbatch slurm/train.sbatch RUN [--init-weights SRC | --init-checkpoint SRC] [--group GROUP] [-- PIPELINE_ARGS...]"
+usage="usage: sbatch slurm/train.sbatch RUN [--init-weights SRC] [--group GROUP] [-- PIPELINE_ARGS...]"
 RUN="${1:?$usage}"
 shift
 INIT_ARGS=()
 GROUP="$RUN"
 while [[ $# -gt 0 && "$1" != "--" ]]; do
     case "$1" in
-        --init-weights | --init-checkpoint)
+        --init-weights)
             INIT_ARGS=("$1" "${2:?$usage}")
             shift 2
             ;;
