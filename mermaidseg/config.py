@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 RESERVED_DATA_KEYS = frozenset({"local_cache_dir", "local_cache_write_through"})
 
@@ -69,7 +70,6 @@ class OptimizerConfig(_Strict):
     """``training.optimizer``."""
 
     type: Literal["AdamW"]
-    lr: float
     weight_decay: float
     lora_lr: float
     dpt_lr: float
@@ -171,7 +171,7 @@ class DataConfig(_Strict):
     """The ``data`` section: reserved cache keys, ``default`` and one block per dataset.
 
     The dataset fields match ``mermaidseg.datasets.factory.DATASET_CLASSES``. An absent dataset is
-    not built.
+    not built. A test keeps the two in sync.
     """
 
     local_cache_write_through: bool
@@ -193,3 +193,28 @@ SECTION_MODELS: dict[str, type[BaseModel]] = {
     "training": TrainingConfig,
     "logger": LoggerConfig,
 }
+
+
+def validate_section(raw: Mapping[str, Any], section: str, source: str | Path) -> dict[str, Any]:
+    """Validate a parsed config file that holds one section, and return the section as plain data.
+
+    Keys the file leaves out of an optional block (a dataset, a split) stay absent.
+
+    Args:
+        raw: The parsed file: a mapping whose only key is ``section``.
+        section: The section name, a key of ``SECTION_MODELS``.
+        source: Where ``raw`` came from, for the error message.
+
+    Raises:
+        ValueError: If the only top-level key is not ``section``, or the section does not match
+            its schema. The message starts with ``source``.
+    """
+    if list(raw) != [section]:
+        raise ValueError(
+            f"{source}: expected the single top-level key {section!r}, got {sorted(raw)}"
+        )
+    try:
+        validated = SECTION_MODELS[section].model_validate(raw[section])
+    except ValidationError as exc:
+        raise ValueError(f"{source}: {exc}") from exc
+    return validated.model_dump(exclude_unset=True)

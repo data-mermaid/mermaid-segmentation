@@ -8,9 +8,8 @@ from typing import Any, cast
 
 import albumentations as A
 import yaml
-from pydantic import ValidationError
 
-from mermaidseg.config import RESERVED_DATA_KEYS, SECTION_MODELS, lookup_class
+from mermaidseg.config import RESERVED_DATA_KEYS, lookup_class, validate_section
 
 
 class ConfigDict(dict):
@@ -126,16 +125,7 @@ def load_section(config_path: str | Path, section: str) -> dict[str, Any]:
         ValueError: If the file's only top-level key is not ``section``, or the section does not
             match its schema in ``mermaidseg.config``. The message names the file.
     """
-    raw = _read_mapping(config_path)
-    if list(raw) != [section]:
-        raise ValueError(
-            f"{config_path}: expected the single top-level key {section!r}, got {sorted(raw)}"
-        )
-    try:
-        validated = SECTION_MODELS[section].model_validate(raw[section])
-    except ValidationError as exc:
-        raise ValueError(f"{config_path}: {exc}") from exc
-    return validated.model_dump(exclude_unset=True)
+    return validate_section(_read_mapping(config_path), section, config_path)
 
 
 def get_parser() -> argparse.ArgumentParser:

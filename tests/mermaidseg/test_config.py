@@ -10,7 +10,14 @@ import pytest
 import torch
 import yaml
 
-from mermaidseg.config import lookup_class, to_plain_dict
+from mermaidseg.config import (
+    RESERVED_DATA_KEYS,
+    DataConfig,
+    lookup_class,
+    to_plain_dict,
+    validate_section,
+)
+from mermaidseg.datasets.factory import DATASET_CLASSES
 from mermaidseg.io import setup_config
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -179,3 +186,56 @@ def test_resolved_committed_config_loads_under_weights_only_with_the_cutoff_as_t
         if split is not None and "annotation_date_cutoff" in split
     ]
     assert cutoffs and set(cutoffs) == {"2026-08-12"}
+
+
+def test_data_config_dataset_fields_match_the_dataset_registry():
+    fields = set(DataConfig.model_fields) - RESERVED_DATA_KEYS - {"default"}
+    assert fields == set(DATASET_CLASSES)
+
+
+_DATA_SECTION = {
+    "local_cache_write_through": False,
+    "mermaid": {"train": {"padding": 0}},
+}
+
+
+def test_validate_section_returns_plain_dict_without_unset_datasets():
+    result = validate_section({"data": _DATA_SECTION}, "data", "cfg.yaml")
+    assert result == {
+        "local_cache_write_through": False,
+        "mermaid": {"train": {"padding": 0}},
+    }
+    assert type(result) is dict
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"model": {}, "extra": 1},
+        {"training": {}},
+        {},
+    ],
+)
+def test_validate_section_rejects_any_top_level_keys_but_the_section(raw: dict[str, Any]):
+    with pytest.raises(ValueError, match=r"^cfg\.yaml: expected the single top-level key 'model'"):
+        validate_section(raw, "model", "cfg.yaml")
+
+
+def test_validate_section_names_the_source_on_an_unknown_key():
+    raw = {
+        "logger": {
+            "enable_wandb": False,
+            "wandb_project": "p",
+            "wandb_entity": None,
+            "train_log_interval": 1,
+            "bogus": 2,
+        }
+    }
+    with pytest.raises(ValueError, match=r"(?s)^cfg\.yaml: .*bogus"):
+        validate_section(raw, "logger", "cfg.yaml")
+
+
+def test_validate_section_rejects_a_missing_required_key():
+    raw = {"logger": {"enable_wandb": False}}
+    with pytest.raises(ValueError, match=r"(?s)^cfg\.yaml: .*wandb_project"):
+        validate_section(raw, "logger", "cfg.yaml")

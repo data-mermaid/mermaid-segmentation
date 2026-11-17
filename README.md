@@ -60,11 +60,12 @@ uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
 `--num-workers` is required. The config flags `--training-config`, `--model-config`,
 `--data-config`, `--concept-schema-config` and `--logger-config` take repo-relative paths under
 `configs/`, and `--resolution` sets the image size. Checkpoints go to
-`outputs/model_checkpoints/<run>/`; `--output-dir` changes `outputs`.
+`outputs/model_checkpoints/<run>/`; `--output-dir` changes `outputs`. Each run also writes its resolved config to `outputs/model_checkpoints/<run>/config.yaml`, as a record of the settings the run used. It is not meant to be passed back in as a run config.
 
 `slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px
 fine-tune. It submits through `slurm/train.sbatch`, with site settings from `.env` (see `.env.example`).
 It is idempotent and accepts `--dry-run`.
+Batch jobs write `.venv`, `outputs/` and `logs/` inside the checkout, so it must be on a filesystem the job can write, not AFS, because batch jobs have no AFS token. Set `MERMAIDSEG_ENV_FILE` to read the settings from an env file elsewhere.
 
 `scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
 few-shot probes and the validation loss).

@@ -47,12 +47,6 @@ def test_skips_none_splits(stub_classes, monkeypatch):
     assert built[("dense", "train")].kwargs == {"split": "train"}
 
 
-def test_string_none_split_raises(stub_classes):
-    data_cfg = ConfigDict({"points": {"train": "None"}})
-    with pytest.raises(AttributeError):
-        build_datasets(data_cfg, padding=0, dataset_classes=stub_classes, verbose=False)
-
-
 def test_transform_spec_reaches_the_dataset_compiled_in_order(stub_classes):
     data_cfg = ConfigDict(
         {

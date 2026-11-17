@@ -53,6 +53,7 @@ from typing import Any
 import torch
 import yaml
 
+from mermaidseg.config import RESERVED_DATA_KEYS
 from mermaidseg.dataset_reconciliation import ConceptSchema
 from mermaidseg.datasets import configured_source_names
 from mermaidseg.datasets.local_cache import setup_local_cache
@@ -72,7 +73,6 @@ ALL_EVALS = ["coralnet", "pacific", "coralscapes", "coralscapes39", "val_loss"]
 SPLITS = ["train", "val", "test"]
 TRAIN_SPLIT_EVALS = ["coralnet", "val_loss"]
 _CONFIGS = _REPO_ROOT / "configs"
-_RESERVED_DATA_KEYS = ("local_cache_dir", "local_cache_write_through")
 
 
 def _data_section(data_config: str | Path) -> dict:
@@ -143,7 +143,7 @@ def coralnet_loss_data_config(data: dict, split: str, image_keep: Path | None) -
     val.update(_val_transform(data, "coralnet"))
     if image_keep is not None:
         val["image_keep"] = str(Path(image_keep).resolve())
-    out = {k: data[k] for k in _RESERVED_DATA_KEYS if k in data}
+    out = {k: data[k] for k in RESERVED_DATA_KEYS if k in data}
     out["coralnet"] = {"val": val}
     return {"data": out}
 

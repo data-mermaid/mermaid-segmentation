@@ -241,6 +241,34 @@ def test_train_resumes_from_the_newest_checkpoint(job):
     assert _arg(argv, "--checkpoint") == str(newer)
 
 
+def test_train_exits_2_when_the_env_file_is_not_readable(job):
+    env_file = job.parent / "job.env"
+    env_file.unlink()
+    result, argv = _run_train(job, "RUN")
+    assert result.returncode == 2
+    assert f"env file {env_file} not readable; see .env.example" in result.stderr
+    assert argv == []
+
+
+def test_train_exits_2_when_submitted_from_outside_the_repo_root(job, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    env = {k: v for k, v in os.environ.items() if k not in _SITE_VARS}
+    env.update(SLURM_SUBMIT_DIR=str(elsewhere), MERMAIDSEG_ENV_FILE=str(tmp_path / "job.env"))
+    result = subprocess.run(
+        ["bash", str(job / "slurm" / "train.sbatch"), "RUN"],
+        cwd=elsewhere,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert (
+        f"submit from the repo root (slurm/common.sh not found under {elsewhere})" in result.stderr
+    )
+
+
 # ---------- configs ----------
 
 

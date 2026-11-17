@@ -144,7 +144,6 @@ def cbm_test_config() -> ConfigDict:
                 "iterations_per_val_epoch": 1,
                 "optimizer": {
                     "type": "AdamW",
-                    "lr": 1e-4,
                     "weight_decay": 0.0,
                     "lora_lr": 1e-5,
                     "dpt_lr": 5e-5,

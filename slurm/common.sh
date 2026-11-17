@@ -11,9 +11,14 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export REPO
 
 # A batch job has no AFS token, so MERMAIDSEG_ENV_FILE may point at an NFS copy.
+ENV_FILE="${MERMAIDSEG_ENV_FILE:-$REPO/.env}"
+if [[ ! -r "$ENV_FILE" ]]; then
+    echo "env file $ENV_FILE not readable; see .env.example" >&2
+    exit 2
+fi
 set -a
 # shellcheck disable=SC1090
-source "${MERMAIDSEG_ENV_FILE:-$REPO/.env}"
+source "$ENV_FILE"
 set +a
 
 SCRATCH="${MERMAIDSEG_SCRATCH:?set MERMAIDSEG_SCRATCH in .env}"
