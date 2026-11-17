@@ -24,21 +24,17 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 
 import mermaidseg.model.meta as meta_module
-from mermaidseg.datasets import make_worker_init_fn
 from mermaidseg.model.data_parallel import DDPLossStep, ShardStep
 from mermaidseg.model.distributed import (
     DistContext,
     ShardedBatchSampler,
     all_ranks_finite,
+    broadcast_generator_from_rank0,
     init_distributed_from_env,
-    make_rank_worker_init_fn,
     on_main_process,
     reduce_components,
     require_world_size,
 )
-from tests.mermaidseg.datasets import test_base_dataset as base
-
-spawn_cache_stats = base.spawn_cache_stats
 
 _NUM_SOURCE = 9
 _NUM_CONCEPTS = 5
@@ -257,36 +253,69 @@ def test_distributed_init_requires_a_process_group(minimal_config, make_meta_mod
 
 def test_sharded_sampler_matches_single_process_shuffle():
     dataset = _IndexDataset(96)
-    torch.manual_seed(7)
     expected = [
-        list(batch) for batch in DataLoader(dataset, shuffle=True, batch_size=12, drop_last=True)
+        list(batch)
+        for batch in DataLoader(
+            dataset,
+            shuffle=True,
+            batch_size=12,
+            drop_last=True,
+            generator=torch.Generator().manual_seed(7),
+        )
     ]
 
-    reconstructed: list[list[int]] = []
     rank_batches: list[list[list[int]]] = []
     for rank in range(_WORLD):
-        torch.manual_seed(7)
-        sampler = ShardedBatchSampler(dataset, 12, rank, _WORLD, broadcast_seed=lambda seed: seed)
-        rank_batches.append([list(batch) for batch in DataLoader(dataset, batch_sampler=sampler)])
-    for slices in zip(*rank_batches, strict=True):
-        reconstructed.append(sum(slices, []))
+        generator = torch.Generator().manual_seed(7)
+        sampler = ShardedBatchSampler(
+            dataset, 12, rank, _WORLD, generator=generator, broadcast_state=lambda _: None
+        )
+        loader = DataLoader(dataset, batch_sampler=sampler, generator=generator)
+        rank_batches.append([list(batch) for batch in loader])
+    reconstructed = [sum(slices, []) for slices in zip(*rank_batches, strict=True)]
     assert reconstructed == expected
 
 
-def test_sharded_sampler_slices_match_batch_sampler_with_injected_seed():
+def test_sharded_sampler_shuffles_from_the_broadcast_state():
     dataset = _IndexDataset(60)
-    seed = 12345
-    generator = torch.Generator().manual_seed(seed)
-    expected = list(BatchSampler(RandomSampler(dataset, generator=generator), 12, drop_last=True))
+    rank0_state = torch.Generator().manual_seed(12345).get_state()
+    expected = list(
+        BatchSampler(
+            RandomSampler(dataset, generator=torch.Generator().manual_seed(12345)),
+            12,
+            drop_last=True,
+        )
+    )
     iters = [
-        iter(ShardedBatchSampler(dataset, 12, rank, _WORLD, broadcast_seed=lambda _: seed))
+        iter(
+            ShardedBatchSampler(
+                dataset,
+                12,
+                rank,
+                _WORLD,
+                generator=torch.Generator().manual_seed(rank),
+                broadcast_state=lambda generator: generator.set_state(rank0_state),
+            )
+        )
         for rank in range(_WORLD)
     ]
-    reconstructed = []
-    for _ in expected:
-        reconstructed.append(sum((next(it) for it in iters), []))
+    reconstructed = [sum((next(it) for it in iters), []) for _ in expected]
     assert reconstructed == expected
-    assert all(len(batch) == 12 for batch in reconstructed)
+
+
+def _broadcast_generator_worker(rank: int, world_size: int, port: int, queue) -> None:
+    _init_gloo(rank, world_size, port)
+    try:
+        generator = torch.Generator().manual_seed(100 + rank)
+        broadcast_generator_from_rank0(generator)
+        queue.put((rank, torch.rand(3, generator=generator).tolist()))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_broadcast_generator_gives_every_rank_rank0_state():
+    expected = torch.rand(3, generator=torch.Generator().manual_seed(100)).tolist()
+    assert _spawn(_broadcast_generator_worker, 2) == [expected, expected]
 
 
 def _reduce_components_worker(rank: int, world_size: int, port: int, queue) -> None:
@@ -643,11 +672,3 @@ def test_ddp_loss_step_returns_only_the_scalar_loss():
     assert step.last is not None
     assert step.last[0] is loss
     assert step.last[1] is not None
-
-
-def test_rank_worker_init_runs_the_inner_init_in_a_spawned_worker(
-    monkeypatch, tmp_path, spawn_cache_stats
-):
-    init_fn = make_rank_worker_init_fn(1, make_worker_init_fn(spawn_cache_stats))
-    base.run_in_spawned_worker(init_fn, tmp_path / "cache", monkeypatch)
-    assert spawn_cache_stats.local_hits.value == 1

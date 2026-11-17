@@ -19,9 +19,8 @@ from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.distributed import (
     DistContext,
     ShardedBatchSampler,
-    broadcast_from_rank0,
+    broadcast_generator_from_rank0,
     init_distributed_from_env,
-    make_rank_worker_init_fn,
     on_main_process,
 )
 from mermaidseg.model.eval import Evaluator
@@ -38,8 +37,31 @@ from mermaidseg.run_setup import (
     resolve_repo_path,
     write_resolved_config,
 )
+from mermaidseg.seeding import make_worker_seeder, seed_everything
 
 # LoRA + DPT concept-bottleneck trainer that scripts/train.py calls. The encoder comes from the model config.
+
+
+# The val generator seed is the run seed plus this, so val and train shuffle independently.
+VAL_GENERATOR_SEED_OFFSET = 1_000_003
+
+
+def seed_run(seed: int, train_generator: torch.Generator, val_generator: torch.Generator) -> None:
+    """Seed the global RNGs and both loaders' generators for one run (or resume).
+
+    The loaders draw their shuffle order and worker seeds from these generators on
+    their first iteration, so re-seeding a built loader that has not started
+    iterating changes its whole data order.
+
+    Args:
+        seed: Run seed; the train generator gets it and the val generator gets
+            ``seed + VAL_GENERATOR_SEED_OFFSET``.
+        train_generator: Generator held by the train loader.
+        val_generator: Generator held by the val loader.
+    """
+    seed_everything(seed)
+    train_generator.manual_seed(seed)
+    val_generator.manual_seed(seed + VAL_GENERATOR_SEED_OFFSET)
 
 
 def print0(dist_ctx: DistContext, *args: Any, **kwargs: Any) -> None:
@@ -110,23 +132,25 @@ def load_training_checkpoint(
 
 
 def make_shuffled_loader(
-    dist_ctx: DistContext, dataset: ConcatDataset, **kwargs: Any
+    dist_ctx: DistContext, dataset: ConcatDataset, generator: torch.Generator, **kwargs: Any
 ) -> DataLoader:
     """Shuffled minibatches of ``batch_size``; under torchrun, this rank's shard.
 
-    Every rank uses rank 0's shuffle seed, so the global minibatches are the
-    ones a single-process ``shuffle=True`` loader draws.
+    Every rank adopts rank 0's generator state before each pass, so the global
+    minibatches are those of a single-process ``DataLoader(shuffle=True,
+    batch_size=batch_size, drop_last=True, generator=<generator in the same state>)``.
 
     Args:
         dist_ctx: Rank layout of this process.
         dataset: Dataset to draw minibatches from.
+        generator: Generator for the shuffle order and the worker base seed.
         **kwargs: Keyword arguments forwarded to ``DataLoader``.
 
     Returns:
         The shuffled loader, sharded across ranks when distributed.
     """
     if not dist_ctx.distributed:
-        return DataLoader(dataset, shuffle=True, **kwargs)
+        return DataLoader(dataset, shuffle=True, generator=generator, **kwargs)
     kwargs = dict(kwargs)
     batch_size = kwargs.pop("batch_size")
     kwargs.pop("drop_last")
@@ -135,9 +159,10 @@ def make_shuffled_loader(
         batch_size,
         dist_ctx.rank,
         dist_ctx.world_size,
-        broadcast_seed=broadcast_from_rank0,
+        generator=generator,
+        broadcast_state=broadcast_generator_from_rank0,
     )
-    return DataLoader(dataset, batch_sampler=sampler, **kwargs)
+    return DataLoader(dataset, batch_sampler=sampler, generator=generator, **kwargs)
 
 
 def _assemble_train_datasets(dataset_dict: dict[tuple[str, str], Any], data_cfg: Any) -> list[Any]:
@@ -199,9 +224,8 @@ def run(args: argparse.Namespace) -> None:
         print0(dist_ctx, f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
 
     seed = int(cfg.training.seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    train_generator, val_generator = torch.Generator(), torch.Generator()
+    seed_run(seed, train_generator, val_generator)
 
     # slurm/train.sbatch resumes the latest checkpoint through --checkpoint.
     checkpoint = args.checkpoint
@@ -240,11 +264,9 @@ def run(args: argparse.Namespace) -> None:
         "drop_last": True,
         "prefetch_factor": cfg.training.loader.prefetch_factor,
     }
-    loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
-    if dist_ctx.distributed:
-        loader_kwargs["worker_init_fn"] = make_rank_worker_init_fn(
-            dist_ctx.rank, loader_kwargs["worker_init_fn"]
-        )
+    loader_kwargs["worker_init_fn"] = make_worker_seeder(
+        dist_ctx.rank, make_worker_init_fn(cache_stats)
+    )
 
     # -- 3. Registry / model / evaluator --------------------------------------
     registry, schema = build_registry(
@@ -270,9 +292,13 @@ def run(args: argparse.Namespace) -> None:
             f"{len(concept_source_mask.source_ids)} sources",
         )
 
-    train_loader = make_shuffled_loader(dist_ctx, ConcatDataset(train_datasets), **loader_kwargs)
+    train_loader = make_shuffled_loader(
+        dist_ctx, ConcatDataset(train_datasets), generator=train_generator, **loader_kwargs
+    )
     loader_kwargs["prefetch_factor"] = cfg.training.loader.val_prefetch_factor
-    val_loader = make_shuffled_loader(dist_ctx, ConcatDataset(val_datasets), **loader_kwargs)
+    val_loader = make_shuffled_loader(
+        dist_ctx, ConcatDataset(val_datasets), generator=val_generator, **loader_kwargs
+    )
 
     print0(dist_ctx, f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
     concept_id2name = schema.channel_id2name()
@@ -305,9 +331,7 @@ def run(args: argparse.Namespace) -> None:
             f"Loaded weights from {init_weights!r}; fresh optimizer lrs={fresh_lrs} "
             "(epoch 0, global_step 0)",
         )
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        seed_run(seed, train_generator, val_generator)
         print0(dist_ctx, f"Re-seeded RNG to {seed} for the new run's data order")
     elif checkpoint:
         start_epoch = load_training_checkpoint(meta_model, checkpoint, device, dist_ctx)
@@ -319,22 +343,17 @@ def run(args: argparse.Namespace) -> None:
                 "Exiting without further training.",
             )
             raise SystemExit(0)
-        # Offset the RNG by the number of already-trained epochs so the resumed run
-        # sees a different data-shuffling stream instead of replaying the epoch
-        # 0..N-1 orderings. The DataLoader's RandomSampler draws from the global
-        # torch generator (re-seeded to the seed at startup), and the training loop is
-        # iterated below, so re-seeding here changes the permutations for every
-        # resumed epoch. (Augmentations already vary per run via Albumentations'
-        # own entropy-seeded RNG.)
+        # Offset the seed by the progress so far, so the resumed run does not replay
+        # the orderings already trained on. The loaders have not iterated yet, so
+        # re-seeding their generators here sets every resumed epoch's permutation.
+        # (Augmentations vary per run via Albumentations' own entropy-seeded RNG.)
         if meta_model.resuming_within_epoch:
             resume_seed = seed + int(meta_model.global_step)
             seed_note = f"{meta_model.global_step} completed updates"
         else:
             resume_seed = seed + start_epoch
             seed_note = f"{start_epoch} trained epochs"
-        torch.manual_seed(resume_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(resume_seed)
+        seed_run(resume_seed, train_generator, val_generator)
         print0(dist_ctx, f"Re-seeded RNG to {resume_seed} (seed={seed} + {seed_note})")
 
     evaluator = Evaluator(

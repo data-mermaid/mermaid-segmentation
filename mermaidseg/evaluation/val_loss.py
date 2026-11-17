@@ -52,6 +52,7 @@ from mermaidseg.run_setup import (
     load_run_concept_source_mask,
     resolve_repo_path,
 )
+from mermaidseg.seeding import make_worker_seeder
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +204,10 @@ def evaluate_val_loss(
             shuffle=False,
             num_workers=num_workers,
             pin_memory=device.type == "cuda",
-            worker_init_fn=make_worker_init_fn(cache_stats) if num_workers > 0 else None,
+            worker_init_fn=(
+                make_worker_seeder(0, make_worker_init_fn(cache_stats)) if num_workers > 0 else None
+            ),
+            generator=torch.Generator().manual_seed(seed),
         )
         acc = _Accumulator()
         with torch.inference_mode():

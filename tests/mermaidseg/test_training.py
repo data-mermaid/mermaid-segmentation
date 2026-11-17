@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 import yaml
-from torch.utils.data import Dataset
+from torch.utils.data import ConcatDataset, Dataset
 
 import mermaidseg.logger
 import mermaidseg.model.models
@@ -23,8 +23,14 @@ from mermaidseg import training
 from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
 from mermaidseg.io import ConfigDict, load_config, setup_config
+from mermaidseg.model.distributed import DistContext
 from mermaidseg.run_setup import resolve_repo_path
-from mermaidseg.training import _assemble_train_datasets
+from mermaidseg.training import (
+    VAL_GENERATOR_SEED_OFFSET,
+    _assemble_train_datasets,
+    make_shuffled_loader,
+    seed_run,
+)
 from scripts.train import build_parser
 
 
@@ -76,6 +82,44 @@ def test_trainval_config_trains_on_six_coralscapes_v2_copies():
     built = build_datasets(data_cfg, dataset_classes=classes, splits=["train"], verbose=False)
     train = _assemble_train_datasets(built, data_cfg)
     assert sum(ds is built[("coralscapes_v2", "train")] for ds in train) == 6
+
+
+# ---------- shuffle order ----------
+
+
+class _Indices(Dataset):
+    def __len__(self) -> int:
+        return 16
+
+    def __getitem__(self, index: int) -> int:
+        return index
+
+
+def _order(generator: torch.Generator) -> list[int]:
+    loader = make_shuffled_loader(
+        DistContext(), ConcatDataset([_Indices()]), batch_size=4, generator=generator
+    )
+    return [int(i) for batch in loader for i in batch]
+
+
+def test_seed_run_seeds_val_generator_at_the_offset():
+    train_generator, val_generator = torch.Generator(), torch.Generator()
+    seed_run(7, train_generator, val_generator)
+    assert train_generator.initial_seed() == 7
+    assert val_generator.initial_seed() == 7 + VAL_GENERATOR_SEED_OFFSET
+    assert VAL_GENERATOR_SEED_OFFSET != 0
+
+
+def test_seed_run_reseeds_a_built_loader_to_the_resume_order():
+    train_generator, val_generator = torch.Generator(), torch.Generator()
+    seed_run(7, train_generator, val_generator)
+    loader = make_shuffled_loader(
+        DistContext(), ConcatDataset([_Indices()]), batch_size=4, generator=train_generator
+    )
+    seed_run(9, train_generator, val_generator)
+    resumed = [int(i) for batch in loader for i in batch]
+    assert resumed == _order(torch.Generator().manual_seed(9))
+    assert resumed != _order(torch.Generator().manual_seed(7))
 
 
 # ---------- one-step smoke run ----------
