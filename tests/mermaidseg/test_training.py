@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import functools
 import json
 import multiprocessing
@@ -152,11 +153,11 @@ def _write_section(path: Path, section: str, values: dict[str, Any]) -> str:
     return str(path)
 
 
-def _smoke_configs(tmp_path: Path) -> list[str]:
+def _smoke_configs(tmp_path: Path, epochs: int = 1) -> list[str]:
     """Tiny training, model, data and logger YAMLs derived from the final run's configs."""
     training = load_config(resolve_repo_path("configs/training_config_cbm_final.yaml")).training
     training.update(
-        epochs=1,
+        epochs=epochs,
         iterations_per_train_epoch=1,
         iterations_per_val_epoch=1,
         batch_size=2,
@@ -164,7 +165,7 @@ def _smoke_configs(tmp_path: Path) -> list[str]:
         world_size=1,
         seed=7,
     )
-    training.scheduler.update(warmup_iters=0, total_iters=1)
+    training.scheduler.update(warmup_iters=0, total_iters=epochs)
     model = load_config(resolve_repo_path("configs/model_config_cbm_dpt_lora_vitl.yaml")).model
     model.update(
         concept_feature_dim=8,
@@ -220,16 +221,10 @@ def test_run_rejects_a_world_size_that_the_launcher_did_not_provide(monkeypatch,
         training.run(args)
 
 
-@pytest.mark.skipif(
-    multiprocessing.get_start_method() != "fork",
-    reason=(
-        "spawn-started DataLoader workers hang pytest at interpreter exit: torch_shm_manager "
-        "inherits the multiprocessing resource-tracker pipe (tracked follow-up)"
-    ),
-)
-def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
-    monkeypatch, tmp_path, mock_dinov3_encoder
-):
+def _install_smoke_fakes(
+    monkeypatch, tmp_path: Path, mock_dinov3_encoder
+) -> tuple[Path, _FakeWandbRun, list[Any]]:
+    """Patch wandb, the encoder, the cache and the datasets; return cwd, wandb run, cache roots."""
     workdir = tmp_path / "cwd"
     workdir.mkdir()
     monkeypatch.chdir(workdir)
@@ -257,10 +252,19 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
             verbose=False,
         ),
     )
+    return workdir, wandb_run, cache_roots
 
-    output_dir = tmp_path / "out"
-    cache_dir = tmp_path / "cache"
-    args = build_parser().parse_args(
+
+def _smoke_args(
+    tmp_path: Path,
+    output_dir: Path,
+    cache_dir: Path,
+    *,
+    epochs: int = 1,
+    checkpoint: Path | None = None,
+) -> argparse.Namespace:
+    cli = ["--checkpoint", str(checkpoint)] if checkpoint else []
+    return build_parser().parse_args(
         [
             "--run-name",
             SMOKE_RUN,
@@ -272,10 +276,31 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
             str(output_dir),
             "--cache-dir",
             str(cache_dir),
-            *_smoke_configs(tmp_path),
+            *cli,
+            *_smoke_configs(tmp_path, epochs),
         ]
     )
-    training.run(args)
+
+
+_FORK_ONLY = pytest.mark.skipif(
+    multiprocessing.get_start_method() != "fork",
+    reason=(
+        "spawn-started DataLoader workers hang pytest at interpreter exit: torch_shm_manager "
+        "inherits the multiprocessing resource-tracker pipe (tracked follow-up)"
+    ),
+)
+
+
+@_FORK_ONLY
+def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
+    monkeypatch, tmp_path, mock_dinov3_encoder
+):
+    workdir, wandb_run, cache_roots = _install_smoke_fakes(
+        monkeypatch, tmp_path, mock_dinov3_encoder
+    )
+    output_dir = tmp_path / "out"
+    cache_dir = tmp_path / "cache"
+    training.run(_smoke_args(tmp_path, output_dir, cache_dir))
 
     run_dir = output_dir / "model_checkpoints" / SMOKE_RUN
     assert (run_dir / "model_step1").is_file()
@@ -289,3 +314,29 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     mapping_path = Path(wandb_run.params["training_concept_mapping_path"])
     assert mapping_path.is_absolute() and mapping_path.is_file()
     assert wandb_run.finished
+
+
+@_FORK_ONLY
+def test_resumed_run_continues_the_global_step_from_its_checkpoint(
+    monkeypatch, tmp_path, mock_dinov3_encoder
+):
+    _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    output_dir = tmp_path / "out"
+    cache_dir = tmp_path / "cache"
+    run_dir = output_dir / "model_checkpoints" / SMOKE_RUN
+
+    training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    first_checkpoint = run_dir / "model_step1"
+    assert first_checkpoint.is_file()
+    assert not (run_dir / "model_step2").exists()
+    first_written = first_checkpoint.stat().st_mtime_ns
+
+    # Run 1 consumed epoch 0 of 1; a second epoch lets the resumed run take update 2.
+    training.run(
+        _smoke_args(tmp_path, output_dir, cache_dir, epochs=2, checkpoint=first_checkpoint)
+    )
+    # The checkpoint is this project's own, written by training.run() earlier in this test.
+    resumed = torch.load(run_dir / "model_step2", map_location="cpu", weights_only=False)
+    assert resumed["global_step"] == 2
+    # A run that restarted from step 0 would rewrite model_step1.
+    assert first_checkpoint.stat().st_mtime_ns == first_written
