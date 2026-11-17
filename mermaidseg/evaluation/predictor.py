@@ -140,7 +140,7 @@ class CBMPredictor:
         )
 
     # -- forward passes --------------------------------------------------------
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward_probs(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return ``(class_probs, concept_probs)`` at input resolution.
 
@@ -154,7 +154,7 @@ class CBMPredictor:
         concept_probs = outputs.hidden_states.float()
         return class_probs, concept_probs
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward_features(self, images: torch.Tensor, kind: str = "concepts") -> torch.Tensor:
         """Return dense per-pixel features ``(B, D, h, w)`` at input resolution."""
         if kind not in FEATURE_KINDS:
@@ -198,7 +198,7 @@ class CBMPredictor:
             feat.float(), size=images.shape[-2:], mode="bilinear", align_corners=False
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward_concept_logits(self, images: torch.Tensor) -> torch.Tensor:
         """Return raw concept logits ``(B, K, h, w)`` at input resolution, fp32.
 

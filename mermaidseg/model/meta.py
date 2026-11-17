@@ -718,6 +718,7 @@ class MetaModel:
         Returns:
             A 3-tuple of ``(average_loss, metric_results, timing)``.
         """
+        self.model.train()
         if self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
             cast("Any", self.model).freeze_encoder()
 
@@ -999,7 +1000,7 @@ class MetaModel:
         }
         return last_loss, metric_results, timing
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def validation_epoch(
         self,
         val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
@@ -1007,6 +1008,7 @@ class MetaModel:
         | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch."""
+        self.model.eval()
         iterations_per_val_epoch = self.iterations_per_val_epoch
         if iterations_per_val_epoch <= 0:
             raise ValueError("iterations_per_val_epoch must be > 0.")

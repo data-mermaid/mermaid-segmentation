@@ -42,3 +42,14 @@ def test_no_amp_dtype_runs_forward_without_autocast():
 def test_device_is_required():
     with pytest.raises(TypeError, match="device"):
         CBMPredictor(_StubModel(), (8, 8))  # type: ignore[call-arg]
+
+
+def test_forward_runs_in_eval_mode_under_inference_mode():
+    model = _StubModel()
+    seen: dict[str, bool] = {}
+    model.register_forward_pre_hook(
+        lambda m, _a: seen.update(training=m.training, inference=torch.is_inference_mode_enabled())
+    )
+    predictor = CBMPredictor(model, (8, 8), device="cpu")
+    predictor.forward_probs(torch.zeros(1, 3, 8, 8))
+    assert seen == {"training": False, "inference": True}

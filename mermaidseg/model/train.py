@@ -162,7 +162,6 @@ def train_model(
         metric_value: float | None = None
 
         if val_loader is not None:
-            meta_model.model.eval()
             val_start = time.time()
             val_loss, val_metric_results = meta_model.validation_epoch(val_loader, evaluator)
             epoch_loss_dict["validation/time_taken"] = time.time() - val_start

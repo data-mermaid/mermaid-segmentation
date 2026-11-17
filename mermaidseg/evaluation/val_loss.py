@@ -206,7 +206,7 @@ def evaluate_val_loss(
             worker_init_fn=make_worker_init_fn(cache_stats) if num_workers > 0 else None,
         )
         acc = _Accumulator()
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch in tqdm(loader, desc=f"{name} {dataset_name}"):
                 images, source_labels = batch[0], batch[1]
                 if images.numel() == 0:

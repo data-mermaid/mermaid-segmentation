@@ -214,9 +214,10 @@ def test_microbatches_match_a_single_batch(minimal_config, make_meta_model):
         run_name="micro-batch",
     )
     micro.model.load_state_dict(full.model.state_dict())
-    # Dropout off, so both runs see the same forward.
-    full.model.eval()
-    micro.model.eval()
+    # train_epoch enters train mode, so switch dropout off to give both runs the same forward.
+    for module in (*full.model.modules(), *micro.model.modules()):
+        if isinstance(module, torch.nn.Dropout):
+            module.p = 0.0
     before = {name: param.detach().clone() for name, param in full.model.named_parameters()}
     full_grads = _capture_step_grads(full)
     micro_grads = _capture_step_grads(micro)
@@ -280,3 +281,56 @@ def test_meta_model_requires_training_kwargs(minimal_config):
         meta_module.MetaModel(
             run_name="no-training", num_classes=4, model_kwargs=minimal_config.model, device="cpu"
         )
+
+
+def _record_encoder_modes(meta) -> list[dict[str, bool]]:
+    """Record ``training`` and inference-mode state at each mocked-encoder forward."""
+    seen: list[dict[str, bool]] = []
+
+    def _record(module, _args):
+        seen.append({"training": module.training, "inference": torch.is_inference_mode_enabled()})
+
+    encoder = next(m for m in meta.model.modules() if hasattr(m, "embed"))
+    encoder.register_forward_pre_hook(_record)
+    return seen
+
+
+def _loader(n: int = 2) -> DataLoader:
+    images, labels = _images_labels(n)
+    return DataLoader(TensorDataset(images, labels), batch_size=2)
+
+
+def _loop_cfg(minimal_config):
+    return _standard_cfg(minimal_config, iterations_per_train_epoch=1, iterations_per_val_epoch=1)
+
+
+def test_validation_epoch_runs_forward_in_eval_under_inference_mode(
+    minimal_config, make_meta_model
+):
+    meta = make_meta_model(_loop_cfg(minimal_config), run_name="val-eval")
+    meta.model.train()
+    seen = _record_encoder_modes(meta)
+    meta.validation_epoch(_loader())
+    assert seen == [{"training": False, "inference": True}]
+
+
+def test_train_epoch_after_validation_returns_the_model_to_train_mode(
+    minimal_config, make_meta_model
+):
+    meta = make_meta_model(_loop_cfg(minimal_config), run_name="val-then-train")
+    meta.validation_epoch(_loader())
+    meta.model.eval()  # whatever left the model in eval, train_epoch must undo it
+    seen = _record_encoder_modes(meta)
+    meta.train_epoch(_loader(), evaluator=None, epoch=0)
+    assert seen == [{"training": True, "inference": False}]
+
+
+def test_train_validate_train_with_a_real_evaluator_stays_finite(minimal_config, make_meta_model):
+    from mermaidseg.model.eval import Evaluator
+
+    meta = make_meta_model(_loop_cfg(minimal_config), run_name="evaluator-cycle")
+    evaluator = Evaluator(num_classes=meta.num_classes, device="cpu")
+    first, _, _ = meta.train_epoch(_loader(), evaluator, epoch=0)
+    val, _ = meta.validation_epoch(_loader(), evaluator)
+    second, _, _ = meta.train_epoch(_loader(), evaluator, epoch=1)
+    assert all(torch.isfinite(torch.tensor(v)) for v in (first, val, second))
