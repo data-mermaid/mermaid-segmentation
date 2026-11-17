@@ -153,7 +153,12 @@ def evaluate_val_loss(
     if cache_dir is not None:
         cfg.data.local_cache_dir = str(cache_dir)
     cache_stats = setup_local_cache(cfg.data)
-    dataset_dict = build_datasets(cfg.data, padding=cfg.training.padding, splits=["val"])
+    dataset_dict = build_datasets(
+        cfg.data,
+        padding=cfg.training.padding,
+        input_size=cfg.model.input_size,
+        splits=["val"],
+    )
     if not dataset_dict:
         raise ValueError(f"{data_config} has no val split")
     registry, schema = build_registry(

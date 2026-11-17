@@ -8,7 +8,7 @@ run needs, so an offline (AWS-free) training run never hits an unwarmed key.
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from typing import Any
 
 from mermaidseg.config import RESERVED_DATA_KEYS
@@ -20,7 +20,7 @@ from mermaidseg.datasets.mermaid import MermaidDataset
 from mermaidseg.datasets.moorea_labeled_corals import MooreaLabeledCoralsDataset
 from mermaidseg.datasets.pacific_labeled_corals import PacificLabeledCoralsDataset
 from mermaidseg.datasets.ucsd_mosaics import UCSDMosaicsDataset
-from mermaidseg.io import compile_transform
+from mermaidseg.io import build_eval_transform, compile_transform
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +90,29 @@ def configured_source_names(
     return sources
 
 
+def _with_transform(
+    name: str, split: str, kwargs: dict[str, Any], input_size: Sequence[int]
+) -> dict[str, Any]:
+    """Return ``kwargs`` with the split's compiled ``transform``.
+
+    Train compiles its YAML spec, or an empty one, so it always ends in Normalize. Val and test take the package eval transform
+    and reject a YAML ``transform``.
+    """
+    if split == "train":
+        return {**kwargs, "transform": compile_transform(kwargs.get("transform", {}))}
+    if "transform" in kwargs:
+        raise ValueError(
+            f"{name}.{split}: 'transform' is not configurable on val/test splits; "
+            "they resize to model.input_size and normalize"
+        )
+    return {**kwargs, "transform": build_eval_transform(input_size)}
+
+
 def build_datasets(
     data_cfg: Any,
     padding: int | None = None,
     *,
+    input_size: Sequence[int],
     dataset_classes: dict[str, type[Any]] | None = None,
     names: list[str] | None = None,
     splits: list[str] | None = None,
@@ -104,10 +123,12 @@ def build_datasets(
     Args:
         data_cfg: The ``data`` section of the run config (a mapping keyed by
             dataset name, each mapping split name -> split kwargs). A ``repeat``
-            key in a split is read by the trainer and never reaches the dataset. A
-            ``transform`` spec reaches it compiled by :func:`compile_transform`.
+            key in a split is read by the trainer and never reaches the dataset. A train
+            ``transform`` spec reaches it compiled by :func:`compile_transform`; val and test
+            splits take no ``transform`` and get :func:`build_eval_transform`.
         padding: Point-annotation padding passed to point-based datasets. Ignored
             for datasets in :data:`NO_PADDING_DATASETS`.
+        input_size: ``(height, width)`` of the val/test resize (``model.input_size``).
         dataset_classes: Override the ``name -> class`` registry (used in tests).
         names: If given, only build these dataset names.
         splits: If given, only build these split names (e.g. ``["train"]``).
@@ -118,7 +139,7 @@ def build_datasets(
 
     Raises:
         ValueError: If a key is neither a dataset nor a reserved key, or ``repeat`` is set on
-            a split other than train.
+            a split other than train, or a val/test split sets ``transform``.
     """
     dataset_classes = dataset_classes or DATASET_CLASSES
     _check_data_keys(data_cfg, {*dataset_classes, *RESERVED_DATA_KEYS})
@@ -140,8 +161,7 @@ def build_datasets(
                     f"'{_REPEAT_KEY}' is only valid on the train split; found on {name}.{split}"
                 )
             dataset_kwargs = {k: v for k, v in split_cfg.items() if k != _REPEAT_KEY}
-            if "transform" in dataset_kwargs:
-                dataset_kwargs["transform"] = compile_transform(dataset_kwargs["transform"])
+            dataset_kwargs = _with_transform(name, split, dataset_kwargs, input_size)
             if name in NO_PADDING_DATASETS:
                 ds = cls(**dataset_kwargs)
             else:

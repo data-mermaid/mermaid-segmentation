@@ -125,22 +125,12 @@ def run_removed_concepts(training_config: str | Path, taxonomy_csv: str | Path) 
     return concept_removal_list(load_section(training_config, "training"), taxonomy_csv)
 
 
-def _val_transform(data: dict, dataset: str) -> dict:
-    """The ``val`` transform of ``dataset``, else of the ``default`` block."""
-    for section in (data.get(dataset), data.get("default")):
-        val = section.get("val") if isinstance(section, dict) else None
-        if isinstance(val, dict) and "transform" in val:
-            return {"transform": val["transform"]}
-    raise ValueError(f"data config has no val transform for {dataset} or default")
-
-
 def coralnet_loss_data_config(data: dict, split: str, image_keep: Path | None) -> dict:
-    """A data config whose only split is ``coralnet.<split>``, as ``val`` with val transform."""
+    """A data config whose only split is ``coralnet.<split>``, as ``val``; the dataset build supplies the eval transform."""
     block = data["coralnet"][split]
     if not isinstance(block, dict):
         raise ValueError(f"data config has no coralnet.{split}")
     val = {k: v for k, v in block.items() if k != "transform"}
-    val.update(_val_transform(data, "coralnet"))
     if image_keep is not None:
         val["image_keep"] = str(Path(image_keep).resolve())
     out = {k: data[k] for k in RESERVED_DATA_KEYS if k in data}

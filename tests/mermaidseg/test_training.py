@@ -91,7 +91,13 @@ def test_trainval_config_trains_on_six_coralscapes_v2_copies():
         {"data": str(resolve_repo_path("configs/data_config_trainval.yaml"))}
     ).data
     classes = dict.fromkeys(DATASET_CLASSES, _Stub)
-    built = build_datasets(data_cfg, dataset_classes=classes, splits=["train"], verbose=False)
+    built = build_datasets(
+        data_cfg,
+        dataset_classes=classes,
+        splits=["train"],
+        verbose=False,
+        input_size=(256, 256),
+    )
     train = _assemble_train_datasets(built, data_cfg)
     assert sum(ds is built[("coralscapes_v2", "train")] for ds in train) == 6
 

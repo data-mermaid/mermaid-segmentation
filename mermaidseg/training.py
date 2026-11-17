@@ -232,7 +232,9 @@ def run(args: argparse.Namespace) -> None:
 
     # Shared build loop (also used by scripts/prefetch_cache.py) so the training job
     # and the cache-prefetch job always agree on which source objects are needed.
-    dataset_dict = build_datasets(cfg.data, padding=cfg.training.padding)
+    dataset_dict = build_datasets(
+        cfg.data, padding=cfg.training.padding, input_size=cfg.model.input_size
+    )
 
     loader_kwargs = {
         "batch_size": cfg.training.batch_size,

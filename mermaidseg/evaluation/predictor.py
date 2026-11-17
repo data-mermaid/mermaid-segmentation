@@ -23,23 +23,11 @@ import torch
 import torch.nn.functional as F
 from numpy.typing import NDArray
 
+from mermaidseg.io import build_eval_transform
+
 logger = logging.getLogger(__name__)
 
-IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
-IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
-
 FEATURE_KINDS = ("concepts", "dpt", "backbone")
-
-
-def make_eval_transform(input_size: tuple[int, int]) -> A.Compose:
-    """Albumentations transform matching the demo/val pipeline (Resize + Normalize)."""
-    height, width = int(input_size[0]), int(input_size[1])
-    return A.Compose(
-        [
-            A.Resize(height=height, width=width, p=1),
-            A.Normalize(mean=list(IMAGENET_MEAN), std=list(IMAGENET_STD)),
-        ]
-    )
 
 
 def long_edge_size(
@@ -107,7 +95,7 @@ class CBMPredictor:
         self.input_size = (int(input_size[0]), int(input_size[1]))
         self.device = torch.device(device)
         self.amp_dtype = amp_dtype
-        self.transform = make_eval_transform(self.input_size)
+        self.transform = build_eval_transform(self.input_size)
 
         if not hasattr(model, "concept_classifier"):
             raise ValueError("Model does not expose a `concept_classifier`; is this a CBM model?")
@@ -130,7 +118,7 @@ class CBMPredictor:
         """
         height, width = int(image_rgb_uint8.shape[0]), int(image_rgb_uint8.shape[1])
         out_h, out_w = long_edge_size(height, width, long_edge, multiple=self.patch_size)
-        return preprocess_image(image_rgb_uint8, make_eval_transform((out_h, out_w)))
+        return preprocess_image(image_rgb_uint8, build_eval_transform((out_h, out_w)))
 
     def _autocast(self) -> torch.autocast:
         return torch.autocast(

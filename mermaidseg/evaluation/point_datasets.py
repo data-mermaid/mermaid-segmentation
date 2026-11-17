@@ -27,8 +27,9 @@ from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup
 from mermaidseg.evaluation.hierarchical import HIER_HEADLINE_KEYS, HierarchicalScore
 from mermaidseg.evaluation.metrics import ConceptLayout, MetricBundle, concept_block_from_binary
-from mermaidseg.evaluation.predictor import CBMPredictor, make_eval_transform
+from mermaidseg.evaluation.predictor import CBMPredictor
 from mermaidseg.evaluation.reporting import fmt, write_csv, write_json
+from mermaidseg.io import build_eval_transform
 from mermaidseg.seeding import make_worker_seeder
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ class PointEvalDataset(Dataset):
         self.class_lookup = class_lookup
         self.concept_lookup = concept_lookup
         self.input_hw = (int(input_size[0]), int(input_size[1]))
-        self.transform = make_eval_transform(input_size)
+        self.transform = build_eval_transform(input_size)
 
         # Sort images by unit (then key) so units are contiguous -> timely prints.
         df_images = base_ds.df_images.copy()

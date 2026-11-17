@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -109,12 +110,12 @@ def test_train_split_allows_only_coralnet_and_loss(evaluate_script):
             check("train", ["coralnet", other])
 
 
-def test_train_loss_data_config_is_coralnet_train_with_the_val_transform(evaluate_script, tmp_path):
+def test_train_loss_data_config_is_coralnet_train_without_a_transform(evaluate_script, tmp_path):
     data = {
         "local_cache_dir": "/cache",
         "default": {
             "train": {"transform": {"RandomResizedCrop": {"size": [256, 256]}}},
-            "val": {"transform": {"Resize": {"width": 256, "height": 256}}},
+            "val": {},
         },
         "coralnet": {
             "train": {"whitelist_sources": [1, 2], "image_blacklist": "/bl.parquet"},
@@ -131,12 +132,18 @@ def test_train_loss_data_config_is_coralnet_train_with_the_val_transform(evaluat
                 "val": {
                     "whitelist_sources": [1, 2],
                     "image_blacklist": "/bl.parquet",
-                    "transform": {"Resize": {"width": 256, "height": 256}},
                     "image_keep": str(keep.resolve()),
                 }
             },
         }
     }
+
+
+def test_train_loss_data_config_accepts_the_real_data_config(evaluate_script):
+    path = Path(__file__).resolve().parents[2] / "configs" / "data_config.yaml"
+    data = yaml.safe_load(path.read_text())["data"]
+    out = evaluate_script.coralnet_loss_data_config(data, "train", None)
+    assert "transform" not in out["data"]["coralnet"]["val"]
 
 
 def test_sample_images_per_source_is_seeded_and_capped():
