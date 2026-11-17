@@ -153,7 +153,7 @@ def _smoke_configs(tmp_path: Path) -> list[str]:
         batch_size=2,
         checkpoint_every_steps=1,
         world_size=1,
-        seed=4,
+        seed=7,
     )
     training.scheduler.update(warmup_iters=0, total_iters=1)
     model = load_config(resolve_repo_path("configs/model_config_cbm_dpt_lora_vitl.yaml")).model
@@ -177,6 +177,38 @@ def _smoke_configs(tmp_path: Path) -> list[str]:
         "--logger-config",
         _write_section(tmp_path / "logger.yaml", "logger", _plain(logger)),
     ]
+
+
+def test_run_rejects_a_world_size_that_the_launcher_did_not_provide(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.delenv("WANDB_RUN_ID", raising=False)
+    fake_wandb = _fake_wandb(_FakeWandbRun())
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+    monkeypatch.setattr(mermaidseg.logger, "wandb", fake_wandb)
+
+    def _unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("run() built datasets before checking the world size")
+
+    monkeypatch.setattr(training, "build_datasets", _unreachable)
+    configs = _smoke_configs(tmp_path)
+    training_path = Path(configs[configs.index("--training-config") + 1])
+    section = yaml.safe_load(training_path.read_text())
+    section["training"]["world_size"] = 2
+    training_path.write_text(yaml.safe_dump(section))
+    args = build_parser().parse_args(
+        [
+            "--run-name",
+            SMOKE_RUN,
+            "--num-workers",
+            "1",
+            "--output-dir",
+            str(tmp_path / "out"),
+            *configs,
+        ]
+    )
+    with pytest.raises(RuntimeError, match="2 ranks"):
+        training.run(args)
 
 
 @pytest.mark.skipif(
@@ -244,7 +276,7 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert cache_roots == [str(cache_dir)]
     assert wandb_run.params["cli/num_workers"] == 1
     assert wandb_run.params["cli/output_dir"] == str(output_dir)
-    assert wandb_run.params["data/seed"] == 4
+    assert wandb_run.params["data/seed"] == 7
     mapping_path = Path(wandb_run.params["training_concept_mapping_path"])
     assert mapping_path.is_absolute() and mapping_path.is_file()
     assert wandb_run.finished

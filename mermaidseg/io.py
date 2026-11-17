@@ -219,7 +219,7 @@ def setup_config(
 
         {"data": "configs/data_config.yaml",
          "model": "configs/model_config_cbm_dpt_lora_vitl.yaml",
-         "training": "configs/training_config_cbm_100k.yaml",
+         "training": "configs/training_config_cbm_final.yaml",
          "logger": "configs/logger_config.yaml"}
 
     Each file is loaded under its section key (a file may already wrap its

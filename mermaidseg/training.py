@@ -38,7 +38,7 @@ from mermaidseg.run_setup import (
     resolve_repo_path,
 )
 
-# LoRA + DPT concept-bottleneck entrypoint. The encoder comes from the model config.
+# LoRA + DPT concept-bottleneck trainer that scripts/train.py calls. The encoder comes from the model config.
 
 
 def print0(dist_ctx: DistContext, *args: Any, **kwargs: Any) -> None:

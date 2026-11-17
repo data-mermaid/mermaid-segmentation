@@ -31,7 +31,7 @@ next to the checkpoint, which the training pipeline writes. Without them, the cl
 come from demo/id2label.json and the concepts from configs/class_to_concepts.csv over
 the datasets of configs/data_config.yaml.
 
-Example (cluster; slurm/eval.sbatch wraps this):
+Example (cluster):
     uv run python scripts/evaluate.py \
         --checkpoint outputs/model_checkpoints/cbm_lossw_pix0.5_img0.5/model_step100000 \
         --model-config configs/model_config_cbm_dpt_lora_vitl.yaml \
