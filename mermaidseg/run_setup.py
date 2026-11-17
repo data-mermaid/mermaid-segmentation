@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import yaml
 
+from mermaidseg.config import to_plain_dict
 from mermaidseg.dataset_reconciliation import (
     ConceptSchema,
     SourceLabelRegistry,
@@ -144,6 +146,8 @@ def load_model_weights(
     meta_model: MetaModel, checkpoint_path: str | Path, device: torch.device | str
 ) -> dict:
     """Load a checkpoint's model weights into ``meta_model``; returns the checkpoint dict."""
+    # weights_only=False: AGENTS.md 9.6 allows it for resuming this project's own training. Legacy
+    # checkpoints pickle an albumentations Compose in "config", which weights_only=True rejects.
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     raw_state_dict = checkpoint.get("model_state_dict", checkpoint)
     if not isinstance(raw_state_dict, dict):
@@ -151,6 +155,12 @@ def load_model_weights(
     state_dict = align_peft_checkpoint_state_dict(raw_state_dict, meta_model.model)
     meta_model.model.load_state_dict(state_dict)
     return checkpoint
+
+
+def write_resolved_config(cfg: Any, run_dir: str | Path) -> None:
+    """Write the resolved run config as ``config.yaml`` in ``run_dir``."""
+    text = yaml.safe_dump(to_plain_dict(cfg), sort_keys=False)
+    (Path(run_dir) / "config.yaml").write_text(text)
 
 
 def check_wandb_auth() -> None:

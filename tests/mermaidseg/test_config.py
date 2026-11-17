@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 import yaml
 
-from mermaidseg.config import lookup_class
+from mermaidseg.config import lookup_class, to_plain_dict
 from mermaidseg.io import setup_config
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -148,3 +149,33 @@ def test_lookup_class_rejects_an_unknown_name_listing_the_allowed_names_sorted()
         ValueError, match=r"^unknown optimizer 'SGD'; expected one of \['First', 'Second'\]$"
     ):
         lookup_class({"Second": _Second, "First": _First}, "optimizer", "SGD")
+
+
+@pytest.mark.parametrize(
+    ("data_file", "training_file"),
+    [
+        ("data_config_trainval.yaml", "training_config_cbm_final.yaml"),
+        ("data_config_trainval.yaml", "training_config_cbm_final_hires.yaml"),
+        ("data_config.yaml", "training_config_cbm_final.yaml"),
+    ],
+)
+def test_resolved_committed_config_loads_under_weights_only_with_the_cutoff_as_text(
+    tmp_path: Path, data_file: str, training_file: str
+):
+    cfg = setup_config(
+        {
+            "data": str(_CONFIGS / data_file),
+            "training": str(_CONFIGS / training_file),
+            "model": str(_CONFIGS / _FILES["model"]),
+            "logger": str(_CONFIGS / _FILES["logger"]),
+        }
+    )
+    path = tmp_path / "ckpt.pt"
+    torch.save({"config": to_plain_dict(cfg)}, path)
+    loaded = torch.load(path, weights_only=True)["config"]
+    cutoffs = [
+        split["annotation_date_cutoff"]
+        for split in loaded["data"]["mermaid"].values()
+        if split is not None and "annotation_date_cutoff" in split
+    ]
+    assert cutoffs and set(cutoffs) == {"2026-08-12"}

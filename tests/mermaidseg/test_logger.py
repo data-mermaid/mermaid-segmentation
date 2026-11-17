@@ -177,11 +177,30 @@ class TestSaveModelCheckpoint:
         )
         path = tmp_path / "model_checkpoints" / "step-ckpt" / "model_step25000"
         assert path.is_file()
-        ckpt = torch.load(path, weights_only=False)
+        ckpt = torch.load(path, weights_only=True)
         assert ckpt["global_step"] == 25000
         assert ckpt["warmup_iters_completed"] == 4000
         assert ckpt["epoch_complete"] is False
         assert ckpt["epoch"] == 0
+
+    def test_checkpoint_metrics_and_config_load_as_plain_python(self, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="plain-ckpt")
+        lgr = Logger(
+            config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1
+        )
+        metrics = {
+            "iou": np.array([0.5, 0.25]),
+            "acc": np.float32(0.75),
+            "loss": torch.tensor(0.125),
+            "step": 3,
+        }
+        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict=metrics)
+        path = tmp_path / "model_checkpoints" / "plain-ckpt" / "model_epoch1"
+        ckpt = torch.load(path, weights_only=True)
+        assert ckpt["metrics"] == {"iou": [0.5, 0.25], "acc": 0.75, "loss": 0.125, "step": 3}
+        assert type(ckpt["config"]) is dict
+        assert type(ckpt["config"]["training"]) is dict
+        assert ckpt["config"]["training"]["optimizer"] == {"type": "SGD", "lr": 0.01}
 
     def test_save_leaves_parameters_in_place(self, tmp_path, make_config):
         meta = FakeMetaModel(run_name="inplace-ckpt")
@@ -196,7 +215,7 @@ class TestSaveModelCheckpoint:
         assert meta.model.weight.data_ptr() == ptr
         assert meta.model.weight.device == device
         path = tmp_path / "model_checkpoints" / "inplace-ckpt" / "model_epoch1"
-        ckpt = torch.load(path, weights_only=False)
+        ckpt = torch.load(path, weights_only=True)
         saved = ckpt["model_state_dict"]["weight"]
         assert saved.device.type == "cpu"
         torch.testing.assert_close(saved, values)
@@ -217,7 +236,7 @@ class TestSaveModelCheckpoint:
         final = directory / "model_preempt1000"
         assert final.is_file()
         assert not (directory / "model_preempt1000.partial").exists()
-        ckpt = torch.load(final, weights_only=False)
+        ckpt = torch.load(final, weights_only=True)
         assert ckpt["global_step"] == 1000
         assert ckpt["epoch_complete"] is False
         assert ckpt["optimizer_state_dict"]
@@ -293,7 +312,7 @@ class TestSaveModelCheckpoint:
         meta.global_step = 25000
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
         ckpt_file = list((tmp_path / "model_checkpoints" / "sched-check").iterdir())[0]
-        checkpoint = torch.load(ckpt_file, weights_only=False)
+        checkpoint = torch.load(ckpt_file, weights_only=True)
         assert "scheduler_state_dict" in checkpoint
         assert checkpoint["global_step"] == 25000
 

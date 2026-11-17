@@ -18,6 +18,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from mermaidseg.config import to_plain_dict
 from mermaidseg.model.meta import MetaModel
 
 if TYPE_CHECKING:
@@ -62,6 +63,13 @@ def _safe_wandb_artifact_name(name: str) -> str:
     Allowed characters are alphanumerics, ``_``, ``-`` and ``.``.
     """
     return re.sub(r"[^a-zA-Z0-9_.\-]", "-", name)
+
+
+def _to_python(value: Any) -> Any:
+    """``value`` as Python floats and lists, which ``torch.load(weights_only=True)`` accepts."""
+    if isinstance(value, (np.ndarray, np.generic, torch.Tensor)):
+        return value.tolist()
+    return value
 
 
 class Logger:
@@ -300,7 +308,7 @@ class Logger:
         filename = checkpoint_name or f"model_epoch{epoch}"
 
         checkpoint: dict[str, Any] = {
-            "config": self.config,
+            "config": to_plain_dict(self.config),
             "model_state_dict": {
                 key: value.detach().cpu().clone()
                 for key, value in meta_model_run.model.state_dict().items()
@@ -311,12 +319,9 @@ class Logger:
             "global_step": int(meta_model_run.global_step),
             "warmup_iters_completed": int(meta_model_run._warmup_iters_completed),
             "timestamp": timestamp,
-            "metrics": metrics_dict,
+            "metrics": {key: _to_python(value) for key, value in metrics_dict.items()},
+            "scheduler_state_dict": meta_model_run.scheduler.state_dict(),
         }
-
-        scheduler = getattr(meta_model_run, "scheduler", None)
-        if scheduler is not None:
-            checkpoint["scheduler_state_dict"] = scheduler.state_dict()
 
         model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/{filename}"
 

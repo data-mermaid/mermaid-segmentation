@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 from collections.abc import Mapping
 from typing import Any, Literal, TypeVar
 
@@ -26,6 +27,20 @@ def lookup_class(classes: Mapping[str, _T], kind: str, name: str) -> _T:
     if name not in classes:
         raise ValueError(f"unknown {kind} {name!r}; expected one of {sorted(classes)}")
     return classes[name]
+
+
+def to_plain_dict(value: Any) -> Any:
+    """``value`` as plain containers and strings, recursively.
+
+    Mappings become ``dict``, sequences ``list``, and dates ISO strings. Plain containers load under ``torch.load(weights_only=True)`` and dump with ``yaml.safe_dump``.
+    """
+    if isinstance(value, Mapping):
+        return {key: to_plain_dict(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_plain_dict(item) for item in value]
+    if isinstance(value, datetime.date):  # also datetime.datetime
+        return value.isoformat()
+    return value
 
 
 class _Strict(BaseModel):

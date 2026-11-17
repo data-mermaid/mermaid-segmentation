@@ -36,6 +36,7 @@ from mermaidseg.run_setup import (
     load_model_weights,
     load_run_concept_source_mask,
     resolve_repo_path,
+    write_resolved_config,
 )
 
 # LoRA + DPT concept-bottleneck trainer that scripts/train.py calls. The encoder comes from the model config.
@@ -285,6 +286,7 @@ def run(args: argparse.Namespace) -> None:
         (run_dir / "id2label.json").write_text(
             json.dumps({"0": "ignore", **{str(k): v for k, v in registry.target_id2label.items()}})
         )
+        write_resolved_config(cfg_logger, run_dir)
         print(f"Wrote class and concept layouts ({len(concept_id2name)} channels) to {run_dir}")
 
     meta_model = build_meta_model(cfg, registry, device)

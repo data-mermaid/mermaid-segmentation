@@ -277,6 +277,13 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert (run_dir / "model_step1").is_file()
     assert (run_dir / "id2label.json").is_file()
     assert (run_dir / "concept_id2name.json").is_file()
+    resolved = yaml.safe_load((run_dir / "config.yaml").read_text())
+    assert resolved["run_name"] == SMOKE_RUN
+    assert resolved["training"]["concept_mapping_path"] == str(
+        resolve_repo_path("configs/class_to_concepts.csv")
+    )
+    checkpoint = torch.load(run_dir / "model_step1", weights_only=True)
+    assert checkpoint["config"] == resolved
     assert not (workdir / "model_checkpoints").exists()
     assert cache_roots == [str(cache_dir)]
     assert wandb_run.params["cli/num_workers"] == 1
