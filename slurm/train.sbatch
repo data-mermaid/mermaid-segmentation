@@ -57,7 +57,11 @@ done
 [[ "${1:-}" == "--" ]] && shift
 PIPELINE_ARGS=("$@")
 
-source "${SLURM_SUBMIT_DIR:?}/slurm/common.sh"
+if [[ ! -f "${SLURM_SUBMIT_DIR:?}/slurm/common.sh" ]]; then
+    echo "submit from the repo root (slurm/common.sh not found under $SLURM_SUBMIT_DIR)" >&2
+    exit 2
+fi
+source "$SLURM_SUBMIT_DIR/slurm/common.sh"
 
 : "${WANDB_API_KEY:?set WANDB_API_KEY in the secured env file (override path via MERMAIDSEG_ENV_FILE)}"
 
