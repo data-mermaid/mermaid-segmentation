@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import zlib
-from collections.abc import Callable, Iterator, Mapping, Sized
+from collections.abc import Callable, Iterator, Mapping, Sequence, Sized
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -19,7 +19,6 @@ import torch.distributed as dist
 from torch.utils.data import BatchSampler, RandomSampler, Sampler
 
 from mermaidseg.model.data_parallel import require_divisible_batch
-from mermaidseg.model.loss import components_to_floats, stack_components
 
 
 @dataclass(frozen=True)
@@ -223,6 +222,27 @@ def all_reduce_mean(tensor: torch.Tensor) -> torch.Tensor:
 
 def _key_fingerprint(keys: list[str]) -> int:
     return zlib.crc32("\n".join(keys).encode()) + (len(keys) << 32)
+
+
+def stack_components(
+    values: Sequence[torch.Tensor | float], device: torch.device | None = None
+) -> torch.Tensor:
+    """Stack scalar components into one float64 vector, on ``device`` or the tensors' device."""
+    if device is None:
+        device = next((v.device for v in values if isinstance(v, torch.Tensor)), None)
+    return torch.stack(
+        [
+            torch.as_tensor(v, dtype=torch.float64, device=device).detach().reshape(())
+            for v in values
+        ]
+    )
+
+
+def components_to_floats(components: Mapping[str, torch.Tensor | float]) -> dict[str, float]:
+    """Host floats of scalar components, through a single device-to-host transfer."""
+    if not components:
+        return {}
+    return dict(zip(components, stack_components(list(components.values())).tolist(), strict=True))
 
 
 def reduce_components(values: Mapping[str, torch.Tensor | float]) -> dict[str, float]:

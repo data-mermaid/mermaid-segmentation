@@ -44,7 +44,7 @@ from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local
 from mermaidseg.evaluation.reporting import write_json
 from mermaidseg.io import setup_config
 from mermaidseg.model.data_parallel import apply_concept_bottleneck_loss
-from mermaidseg.model.loss import components_to_floats
+from mermaidseg.model.distributed import components_to_floats
 from mermaidseg.run_setup import (
     DEFAULT_SCHEMA_CONFIG,
     MODEL_CHECKPOINT_KEYS,
