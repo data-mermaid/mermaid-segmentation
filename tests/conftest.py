@@ -127,7 +127,6 @@ def cbm_test_config() -> ConfigDict:
             },
             "training": {
                 "training_mode": "concept-bottleneck",
-                "freeze_encoder": True,
                 "detach_concepts": True,
                 "distributed": False,
                 "world_size": 1,

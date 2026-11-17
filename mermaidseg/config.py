@@ -98,7 +98,6 @@ class TrainingConfig(_Strict):
     """The ``training`` section."""
 
     training_mode: Literal["concept-bottleneck"]
-    freeze_encoder: bool
     detach_concepts: bool
     concept_mapping_path: str
     concept_removal: str

@@ -243,6 +243,9 @@ class _DPTDINOv3Base(torch.nn.Module):
             lora_target_modules=lora_target_modules,
             lora_bias=lora_bias,
         )
+        # The pretrained encoder weights stay frozen; only the LoRA adapters train.
+        for name, param in self.encoder.named_parameters():
+            param.requires_grad = "lora_" in name
 
         self.patch_size = patch_size
         self.token_width = input_size[1] // patch_size
@@ -280,15 +283,6 @@ class _DPTDINOv3Base(torch.nn.Module):
             # Keep CLS (index 0), drop register tokens, keep patch tokens.
             selected.append(torch.cat([hs[:, :1], hs[:, self.num_prefix_tokens :]], dim=1))
         return selected
-
-    def freeze_encoder(self) -> None:
-        """Freeze the backbone.
-
-        The pretrained weights are frozen but the low-rank adapters stay
-        trainable (so gradients still flow through the encoder).
-        """
-        for name, param in self.encoder.named_parameters():
-            param.requires_grad = "lora_" in name
 
 
 class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):

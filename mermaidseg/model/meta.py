@@ -246,7 +246,6 @@ class MetaModel:
                 "distributed: %s ranks; each rank computes its shard's loss.", self.world_size
             )
 
-        freeze_encoder = training_kwargs.pop("freeze_encoder")
         detach_concepts = training_kwargs.pop("detach_concepts")
 
         self.training_kwargs = training_kwargs
@@ -297,10 +296,7 @@ class MetaModel:
         self.model = model_cls(**model_kwargs)
 
         self.model = self.model.to(device)
-        self.freeze_encoder = freeze_encoder
         self.detach_concepts = detach_concepts
-        if freeze_encoder and hasattr(self.model, "freeze_encoder"):
-            cast("Any", self.model).freeze_encoder()
 
         loss_cls = lookup_class(LOSS_CLASSES, "loss", training_kwargs.loss.pop("type"))
         loss_kwargs = dict(training_kwargs.loss)
@@ -329,7 +325,7 @@ class MetaModel:
         optimizer_cls = lookup_class(OPTIMIZER_CLASSES, "optimizer", optimizer_cfg.pop("type"))
         # Differential learning rates: LoRA adapter params vs. everything else
         # (DPT head + concept/class heads). Split by whether the param name contains
-        # "lora_" (matches how ``freeze_encoder`` partitions params in models.py).
+        # "lora_" (matches how the model freezes non-LoRA encoder params).
         lora_lr = optimizer_cfg.pop("lora_lr")
         dpt_lr = optimizer_cfg.pop("dpt_lr")
 
@@ -528,7 +524,7 @@ class MetaModel:
         """This rank's lookup, forward, and loss, wrapped in DDP, built on first use.
 
         Built lazily so it wraps weights loaded after
-        construction and the ``requires_grad`` set by ``freeze_encoder``.
+        construction and the ``requires_grad`` set at model construction.
         Rebuilt if ``model`` or a loss module has been replaced since.
         """
         ddp = self._ddp_step
@@ -726,8 +722,6 @@ class MetaModel:
             phase next blocks on the device.
         """
         self.model.train()
-        if self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
-            cast("Any", self.model).freeze_encoder()
 
         iterations_per_train_epoch = self.iterations_per_train_epoch
         if iterations_per_train_epoch <= 0:
