@@ -186,7 +186,7 @@ class LocalS3Cache:
         A ``None`` or blank root disables the cache.
         """
         cache = cls.get()
-        if root is None or (isinstance(root, str) and root.strip() in ("", "null", "None")):
+        if root is None or (isinstance(root, str) and not root.strip()):
             cache._root = None
             cache._enabled = False
         else:
@@ -436,13 +436,9 @@ def setup_local_cache(
     if stats is None:
         stats = create_cache_stats()
 
-    root = getattr(data_cfg, "local_cache_dir", None)
-    if root is None and isinstance(data_cfg, dict):
-        root = data_cfg.get("local_cache_dir")
-
-    write_through = getattr(data_cfg, "local_cache_write_through", True)
-    if isinstance(data_cfg, dict):
-        write_through = data_cfg.get("local_cache_write_through", write_through)
+    # The schema leaves local_cache_dir optional: an absent key means no cache.
+    root = data_cfg.get("local_cache_dir")
+    write_through = data_cfg["local_cache_write_through"]
 
     cache = LocalS3Cache.configure(root, write_through=write_through, stats=stats)
     if cache.enabled:

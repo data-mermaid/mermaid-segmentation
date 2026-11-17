@@ -153,7 +153,6 @@ def main(argv: list[str] | None = None) -> int:
             "training": str(resolve_repo_path(args.training_config)),
         }
     )
-    padding = cfg.training.get("padding") if hasattr(cfg, "training") else None
 
     if args.cache_dir is not None:
         cfg.data.local_cache_dir = args.cache_dir
@@ -174,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Building datasets (this warms manifests / annotations / label maps) ...")
     datasets = build_datasets(
         cfg.data,
-        padding=padding,
+        padding=cfg.training.padding,
         names=args.datasets,
         splits=args.splits,
         verbose=True,

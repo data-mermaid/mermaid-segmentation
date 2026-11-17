@@ -91,9 +91,7 @@ class _Accumulator:
 
 def resolve_concept_mapping_path(training_cfg: Any) -> None:
     """Rewrite a relative ``concept_mapping_path`` to its path under the repository root."""
-    path = training_cfg.get("concept_mapping_path")
-    if path:
-        training_cfg.concept_mapping_path = str(resolve_repo_path(path))
+    training_cfg.concept_mapping_path = str(resolve_repo_path(training_cfg.concept_mapping_path))
 
 
 def _check_layout(checkpoint: Path, registry: Any, channel_names: list[str]) -> None:

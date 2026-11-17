@@ -286,7 +286,7 @@ def test_setup_local_cache_config_root_beats_env(tmp_path, monkeypatch):
     dir_a, dir_b = tmp_path / "a", tmp_path / "b"
     monkeypatch.setenv("MERMAIDSEG_LOCAL_CACHE_DIR", str(dir_a))
 
-    setup_local_cache({"local_cache_dir": str(dir_b)})
+    setup_local_cache({"local_cache_dir": str(dir_b), "local_cache_write_through": True})
 
     assert LocalS3Cache.get()._root == dir_b.resolve()
     assert os.environ["MERMAIDSEG_LOCAL_CACHE_DIR"] == str(dir_b.resolve())
@@ -294,7 +294,10 @@ def test_setup_local_cache_config_root_beats_env(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "data_cfg",
-    [{}, {"local_cache_dir": ""}, {"local_cache_dir": "null"}, {"local_cache_dir": "None"}],
+    [
+        {"local_cache_write_through": True},
+        {"local_cache_dir": "", "local_cache_write_through": True},
+    ],
 )
 def test_setup_local_cache_without_config_root_ignores_and_clears_env(
     data_cfg, tmp_path, monkeypatch

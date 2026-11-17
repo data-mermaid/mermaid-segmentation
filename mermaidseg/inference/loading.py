@@ -12,12 +12,11 @@ import torch
 import yaml
 
 import mermaidseg.model.models as mm_models
+from mermaidseg.config import lookup_class
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS, parse_concept_rank
-from mermaidseg.model.models import ConceptBottleneckDPTLoRADINOv3
+from mermaidseg.model.models import MODEL_CLASSES, ConceptBottleneckDPTLoRADINOv3
 
 CBMModel = ConceptBottleneckDPTLoRADINOv3
-
-SUPPORTED_CBM_MODELS: frozenset[str] = frozenset({"ConceptBottleneckDPTLoRADINOv3"})
 
 
 @dataclass
@@ -106,11 +105,7 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
         raise ValueError("concept_id2name is required.")
 
     model_cfg = dict(artifacts.model_cfg)
-    model_name = model_cfg.pop("name", None)
-    if model_name not in SUPPORTED_CBM_MODELS:
-        raise ValueError(
-            f"Unsupported model {model_name!r}; expected one of {sorted(SUPPORTED_CBM_MODELS)}"
-        )
+    model_cls = lookup_class(MODEL_CLASSES, "model", model_cfg.pop("name"))
     model_kwargs: dict[str, Any] = model_cfg
     if "input_size" in model_kwargs and isinstance(model_kwargs["input_size"], list):
         model_kwargs["input_size"] = tuple(model_kwargs["input_size"])
@@ -119,8 +114,13 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
         _derive_concept_value2id(artifacts.concept_id2name),
     )
 
-    model_cls = getattr(mm_models, model_name)
-    model = model_cls(num_classes=num_classes, num_concepts=num_concepts, **model_kwargs)
+    # detach_concepts only changes gradients, which inference never computes.
+    model = model_cls(
+        num_classes=num_classes,
+        num_concepts=num_concepts,
+        detach_concepts=False,
+        **model_kwargs,
+    )
     state_dict = mm_models.align_peft_checkpoint_state_dict(state_dict, model)
     # Checkpoints from code that deletes the first DPT fusion layer's residual_layer1 lack its weights. That block
     # never runs (layer 0 gets no residual), so its missing keys are harmless; any other mismatch still fails.

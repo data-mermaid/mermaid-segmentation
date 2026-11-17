@@ -14,8 +14,6 @@ from transformers.models.dpt.modeling_dpt import DPTNeck
 
 from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 
-DEFAULT_LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
-
 
 @dataclass
 class ConceptBottleneckOutput(SemanticSegmenterOutput):
@@ -295,9 +293,9 @@ class DPTHead(torch.nn.Module):
         out_channels: int,
         token_width: int,
         token_height: int,
-        neck_hidden_sizes: Sequence[int] = (256, 512, 1024, 1024),
-        fusion_hidden_size: int = 256,
-        reassemble_factors: Sequence[float] = (4, 2, 1, 0.5),
+        neck_hidden_sizes: Sequence[int],
+        fusion_hidden_size: int,
+        reassemble_factors: Sequence[float],
         dropout: float = 0.1,
     ):
         """Build the reassemble stage, fusion stage, and conv head from the arguments."""
@@ -413,16 +411,14 @@ class _DPTDINOv3Base(torch.nn.Module):
         fusion_hidden_size: int,
         reassemble_factors: Sequence[float],
         head_out_channels: int,
-        lora_r: int = 16,
-        lora_alpha: int = 32,
-        lora_dropout: float = 0.05,
-        lora_target_modules: Sequence[str] = DEFAULT_LORA_TARGET_MODULES,
-        lora_bias: str = "none",
-        **kwargs: Any,
+        lora_r: int,
+        lora_alpha: int,
+        lora_dropout: float,
+        lora_target_modules: Sequence[str],
+        lora_bias: str,
     ):
         super().__init__()
-        token = kwargs.pop("token", None) or os.environ.get("HF_TOKEN")
-        base_encoder = AutoModel.from_pretrained(encoder_name, token=token, **kwargs)
+        base_encoder = AutoModel.from_pretrained(encoder_name, token=os.environ.get("HF_TOKEN"))
 
         config = base_encoder.config
         hidden_size = config.hidden_size
@@ -511,10 +507,33 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         num_concepts: int,
         concept_value2id: dict[str, dict[str, list[int]]] | None,
         concept_feature_dim: int,
-        detach_concepts: bool = False,
-        **kwargs: Any,
+        detach_concepts: bool,
+        encoder_name: str,
+        input_size: tuple[int, int],
+        out_indices: Sequence[int] | None,
+        neck_hidden_sizes: Sequence[int],
+        fusion_hidden_size: int,
+        reassemble_factors: Sequence[float],
+        lora_r: int,
+        lora_alpha: int,
+        lora_dropout: float,
+        lora_target_modules: Sequence[str],
+        lora_bias: str,
     ):
-        super().__init__(head_out_channels=concept_feature_dim, **kwargs)
+        super().__init__(
+            head_out_channels=concept_feature_dim,
+            encoder_name=encoder_name,
+            input_size=input_size,
+            out_indices=out_indices,
+            neck_hidden_sizes=neck_hidden_sizes,
+            fusion_hidden_size=fusion_hidden_size,
+            reassemble_factors=reassemble_factors,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_target_modules=lora_target_modules,
+            lora_bias=lora_bias,
+        )
         self.concept_value2id = concept_value2id
         self.detach_concepts = detach_concepts
         self.concept_proj = torch.nn.Conv2d(concept_feature_dim, num_concepts, kernel_size=1)
@@ -574,22 +593,22 @@ class ConceptBottleneckDPTLoRADINOv3(_ConceptBottleneckDPTDINOv3):
 
     def __init__(
         self,
-        encoder_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m",
-        num_classes: int = 2,
-        num_concepts: int = 2,
-        input_size: tuple[int, int] = (512, 512),
-        concept_value2id: dict[str, dict[str, list[int]]] | None = None,
-        concept_feature_dim: int = 256,
-        out_indices: Sequence[int] | None = None,
-        neck_hidden_sizes: Sequence[int] = (256, 512, 1024, 1024),
-        fusion_hidden_size: int = 256,
-        reassemble_factors: Sequence[float] = (4, 2, 1, 0.5),
-        lora_r: int = 16,
-        lora_alpha: int = 32,
-        lora_dropout: float = 0.05,
-        lora_target_modules: Sequence[str] = DEFAULT_LORA_TARGET_MODULES,
-        lora_bias: str = "none",
-        **kwargs: Any,
+        encoder_name: str,
+        num_classes: int,
+        num_concepts: int,
+        input_size: tuple[int, int],
+        concept_value2id: dict[str, dict[str, list[int]]] | None,
+        concept_feature_dim: int,
+        detach_concepts: bool,
+        out_indices: Sequence[int] | None,
+        neck_hidden_sizes: Sequence[int],
+        fusion_hidden_size: int,
+        reassemble_factors: Sequence[float],
+        lora_r: int,
+        lora_alpha: int,
+        lora_dropout: float,
+        lora_target_modules: Sequence[str],
+        lora_bias: str,
     ):
         """Build the concept-bottleneck model with a LoRA-adapted DINOv3 encoder."""
         super().__init__(
@@ -597,6 +616,7 @@ class ConceptBottleneckDPTLoRADINOv3(_ConceptBottleneckDPTDINOv3):
             num_concepts=num_concepts,
             concept_value2id=concept_value2id,
             concept_feature_dim=concept_feature_dim,
+            detach_concepts=detach_concepts,
             encoder_name=encoder_name,
             input_size=input_size,
             out_indices=out_indices,
@@ -608,5 +628,9 @@ class ConceptBottleneckDPTLoRADINOv3(_ConceptBottleneckDPTDINOv3):
             lora_dropout=lora_dropout,
             lora_target_modules=lora_target_modules,
             lora_bias=lora_bias,
-            **kwargs,
         )
+
+
+MODEL_CLASSES: dict[str, type[ConceptBottleneckDPTLoRADINOv3]] = {
+    "ConceptBottleneckDPTLoRADINOv3": ConceptBottleneckDPTLoRADINOv3,
+}

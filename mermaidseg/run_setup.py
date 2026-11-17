@@ -25,7 +25,6 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
     ConceptSourceMask,
     load_concept_source_mask,
 )
-from mermaidseg.dataset_reconciliation.concepts import DEFAULT_CLASS_TO_CONCEPTS_CSV
 from mermaidseg.datasets import configured_source_names
 from mermaidseg.io import setup_config
 from mermaidseg.model.meta import MetaModel
@@ -36,23 +35,18 @@ DEFAULT_SCHEMA_CONFIG = REPO_ROOT / "configs" / "data_config.yaml"
 
 
 def concept_mapping_path(training_cfg: Any) -> str:
-    """The resolved ``concept_mapping_path`` of the training config, else class_to_concepts.csv."""
-    return str(
-        resolve_repo_path(training_cfg.get("concept_mapping_path") or DEFAULT_CLASS_TO_CONCEPTS_CSV)
-    )
+    """The resolved ``concept_mapping_path`` of the training config."""
+    return str(resolve_repo_path(training_cfg.concept_mapping_path))
 
 
-def target_labels(training_cfg: Any) -> list[str] | None:
-    """Target classes 1..M: the sorted, lower-cased ``class_subset`` (None without one)."""
-    subset = training_cfg.get("class_subset")
-    if subset is None:
-        return None
-    return sorted(dict.fromkeys(str(label).lower() for label in subset))
+def target_labels(training_cfg: Any) -> list[str]:
+    """Target classes 1..M: the sorted, lower-cased ``class_subset``."""
+    return sorted(dict.fromkeys(str(label).lower() for label in training_cfg.class_subset))
 
 
 def concept_removal_list(training_cfg: Any, mapping_path: str | Path) -> list[str]:
     """Channel names listed by ``training.concept_removal`` (a CSV path), or none."""
-    path = training_cfg.get("concept_removal")
+    path = training_cfg["concept_removal"]
     if not path:
         return []
     return load_concept_removal(resolve_repo_path(path), concepts_csv=mapping_path)
@@ -62,7 +56,7 @@ def load_run_concept_source_mask(
     training_cfg: Any, schema: ConceptSchema
 ) -> ConceptSourceMask | None:
     """The keep table of ``training.concept_source_mask`` (a CSV path), or ``None``."""
-    path = training_cfg.get("concept_source_mask")
+    path = training_cfg.concept_source_mask
     if not path:
         return None
     mapping_path = concept_mapping_path(training_cfg)
@@ -119,7 +113,7 @@ def build_registry(
         target_label_subset=training_cfg.class_subset,
         compute_concepts=training_cfg.training_mode != "standard",
         concept_schema=schema,
-        label_roll_up=training_cfg.get("label_roll_up", False),
+        label_roll_up=training_cfg.label_roll_up,
     ).to(device)
     attach_registry(registry, dataset_dict.values())
     if registry.num_concepts != schema.num_channels:

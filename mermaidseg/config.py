@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from collections.abc import Mapping
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
 RESERVED_DATA_KEYS = frozenset({"local_cache_dir", "local_cache_write_through"})
+
+_T = TypeVar("_T")
+
+
+def lookup_class(classes: Mapping[str, _T], kind: str, name: str) -> _T:
+    """The entry of ``classes`` that a config names.
+
+    Args:
+        classes: Allowlist from config name to class.
+        kind: What the name refers to, for the error message (``"model"``, ``"loss"``).
+        name: The name from the config.
+
+    Raises:
+        ValueError: If ``name`` is not in ``classes``.
+    """
+    if name not in classes:
+        raise ValueError(f"unknown {kind} {name!r}; expected one of {sorted(classes)}")
+    return classes[name]
 
 
 class _Strict(BaseModel):
@@ -117,7 +136,6 @@ class LoggerConfig(_Strict):
     """The ``logger`` section."""
 
     enable_wandb: bool
-    experiment_name: str
     wandb_project: str
     wandb_entity: str | None
     train_log_interval: int

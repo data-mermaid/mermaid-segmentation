@@ -10,7 +10,7 @@ import albumentations as A
 import yaml
 from pydantic import ValidationError
 
-from mermaidseg.config import RESERVED_DATA_KEYS, SECTION_MODELS
+from mermaidseg.config import RESERVED_DATA_KEYS, SECTION_MODELS, lookup_class
 
 
 class ConfigDict(dict):
@@ -197,12 +197,8 @@ def compile_transform(spec: Mapping[str, Mapping[str, Any]]) -> A.Compose:
         ValueError: If a name is not in :data:`AUGMENTATION_CLASSES`.
     """
     items = _order_transform_items(list(spec.items()))
-    for name, _ in items:
-        if name not in AUGMENTATION_CLASSES:
-            raise ValueError(
-                f"unknown augmentation {name!r}; expected one of {sorted(AUGMENTATION_CLASSES)}"
-            )
-    return A.Compose([AUGMENTATION_CLASSES[name](**params) for name, params in items])
+    classes = [lookup_class(AUGMENTATION_CLASSES, "augmentation", name) for name, _ in items]
+    return A.Compose([cls(**params) for cls, (_, params) in zip(classes, items, strict=True)])
 
 
 def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:

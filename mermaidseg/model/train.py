@@ -2,7 +2,6 @@
 
 import logging
 import time
-import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -143,9 +142,8 @@ def train_model(
             on_optimizer_step=on_optimizer_step,
         )
         _enforce_load_failure_rate(train_loader, failures_before, max_load_failure_rate, epoch)
-        # Monotonic global-step (iteration) axis for wandb; falls back to epoch when the
-        # meta-model does not track a global step (e.g. lightweight test doubles).
-        step = getattr(meta_model, "global_step", epoch)
+        # Monotonic global-step (iteration) axis for wandb.
+        step = meta_model.global_step
         logging.info("LOSS train %s", train_loss)
         logging.info("TRAIN METRICS: %s", train_metric_results)
         train_cache_stats = LocalS3Cache.get().snapshot_stats()
@@ -161,7 +159,6 @@ def train_model(
         metrics_epoch[epoch] = {"train_metrics": train_metric_results}
         _log_metric_dict(logger, "train", train_metric_results, step)
 
-        scheduler = getattr(meta_model, "scheduler", None)
         metric_value: float | None = None
 
         if val_loader is not None:
@@ -195,26 +192,7 @@ def train_model(
                 if logger is not None and save_best_checkpoint:
                     logger.save_model_checkpoint(meta_model, epoch, val_metric_results)
 
-        warmup_complete = (
-            getattr(meta_model, "warmup_iters", 0) == 0
-            or meta_model._warmup_iters_completed >= meta_model.warmup_iters
-        )
-        # Iteration schedules are stepped inside train_epoch. Stepping them again here would
-        # add an extra decay step after the epoch's last iteration.
-        step_every = getattr(meta_model, "scheduler_step_every", "epoch")
-        if scheduler is not None and warmup_complete and step_every != "iteration":
-            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                if metric_value is not None:
-                    scheduler.step(metric_value)
-                else:
-                    warnings.warn(
-                        "Skipping ReduceLROnPlateau step because no validation metric is available.",
-                        stacklevel=2,
-                    )
-            else:
-                scheduler.step()
-
-        if scheduler is not None and logger is not None:
+        if logger is not None:
             current_lr = meta_model.optimizer.param_groups[0]["lr"]
             logger.log({"train/lr": current_lr}, step=step)
 

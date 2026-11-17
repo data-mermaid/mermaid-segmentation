@@ -52,6 +52,8 @@ class FakeMetaModel:
         self.num_concepts = num_concepts
         self.conceptid2labelid = conceptid2labelid
         self.device = "cpu"
+        self.global_step = 0
+        self._warmup_iters_completed = 0
         self.model = nn.Linear(4, num_classes)
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1)
@@ -67,16 +69,17 @@ def fake_meta_model():
 def make_config():
     """Factory that builds a ConfigDict.
 
-    Override any nested value via keyword arguments, e.g. ``make_config(logger={"experiment_name":
-    "custom"})``.
+    Override any nested value via keyword arguments, e.g. ``make_config(logger={"enable_wandb":
+    True})``.
     """
 
     def _factory(**overrides: Any) -> ConfigDict:
         base: dict[str, Any] = {
             "logger": {
-                "experiment_name": "unit-tests",
-                "save_local_checkpoints": True,
-                "save_local_models": True,
+                "enable_wandb": False,
+                "wandb_project": "mermaidseg",
+                "wandb_entity": None,
+                "train_log_interval": 1,
             },
             "model": {
                 "name": "FakeLinear",
@@ -98,9 +101,12 @@ def make_config():
     return _factory
 
 
-@pytest.fixture()
-def minimal_config():
-    """Minimal ConfigDict for MetaModel instantiation with a mocked DINOv3 encoder."""
+def cbm_test_config() -> ConfigDict:
+    """Concept-bottleneck model and training sections with every key MetaModel reads.
+
+    LoRA and other parameters get distinct learning rates, and the schedule keeps them
+    constant (no warmup, LinearLR factors of 1).
+    """
     return ConfigDict(
         {
             "model": {
@@ -108,21 +114,52 @@ def minimal_config():
                 "encoder_name": "facebook/dinov3-vits16-pretrain-lvd1689m",
                 "input_size": IMAGE_SIZE,
                 "concept_feature_dim": 8,
+                "out_indices": None,
                 "neck_hidden_sizes": [8, 8, 8, 8],
                 "fusion_hidden_size": 8,
+                "reassemble_factors": [4, 2, 1, 0.5],
                 "lora_r": 2,
                 "lora_alpha": 4,
                 "lora_dropout": 0.0,
                 "lora_target_modules": ["q_proj"],
+                "lora_bias": "none",
             },
             "training": {
                 "training_mode": "concept-bottleneck",
+                "freeze_encoder": True,
+                "detach_concepts": True,
+                "distributed": False,
+                "world_size": 1,
+                "concept_mapping_path": "configs/class_to_concepts.csv",
                 "epochs": 1,
                 "batch_size": 2,
                 "stall_dump_sec": 180,
-                "optimizer": {"type": "SGD", "lr": 0.01},
+                "max_grad_norm": 1.0,
+                "mixed_precision": False,
+                "mixed_precision_dtype": "bfloat16",
+                "grad_accum_steps": 1,
+                "train_metrics_every": 1,
+                "iterations_per_train_epoch": 1,
+                "iterations_per_val_epoch": 1,
+                "optimizer": {
+                    "type": "AdamW",
+                    "lr": 1e-4,
+                    "weight_decay": 0.0,
+                    "lora_lr": 1e-5,
+                    "dpt_lr": 5e-5,
+                },
+                "scheduler": {
+                    "type": "LinearLR",
+                    "start_factor": 1.0,
+                    "end_factor": 1.0,
+                    "total_iters": 1,
+                    "step_every": "iteration",
+                    "warmup_iters": 0,
+                    "warmup_start_factor": 1.0,
+                },
                 "loss": {
                     "type": "ConceptBottleneckLoss",
+                    "lambda_weight": 1.0,
                     "ignore_index": 0,
                     "per_pixel_loss_weight": 0.0,
                     "per_image_loss_weight": 1.0,
@@ -130,6 +167,12 @@ def minimal_config():
             },
         }
     )
+
+
+@pytest.fixture()
+def minimal_config():
+    """Minimal ConfigDict for MetaModel instantiation with a mocked DINOv3 encoder."""
+    return cbm_test_config()
 
 
 @pytest.fixture()

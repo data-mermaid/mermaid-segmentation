@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 import yaml
 
+from mermaidseg.config import lookup_class
 from mermaidseg.io import setup_config
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -128,3 +129,22 @@ def test_string_none_split_raises(tmp_path: Path):
     paths = _mutated(tmp_path, "data", _set("mermaid", "val", value="None"))
     with pytest.raises(ValueError, match="mermaid.val"):
         setup_config(paths)
+
+
+class _First:
+    pass
+
+
+class _Second:
+    pass
+
+
+def test_lookup_class_returns_the_named_class():
+    assert lookup_class({"First": _First, "Second": _Second}, "model", "Second") is _Second
+
+
+def test_lookup_class_rejects_an_unknown_name_listing_the_allowed_names_sorted():
+    with pytest.raises(
+        ValueError, match=r"^unknown optimizer 'SGD'; expected one of \['First', 'Second'\]$"
+    ):
+        lookup_class({"Second": _Second, "First": _First}, "optimizer", "SGD")

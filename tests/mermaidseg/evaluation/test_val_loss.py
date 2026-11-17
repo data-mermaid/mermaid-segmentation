@@ -55,8 +55,10 @@ def test_concept_bottleneck_loss_reports_the_breakdown_only_when_named():
     logits, labels = _batch()
     outputs = torch.randn(3, 5, 4, 4)
     targets = torch.randint(0, 5, (3, 4, 4))
-    plain = ConceptBottleneckLoss({}, **WEIGHTS)
-    named = ConceptBottleneckLoss({}, binary_concept_names=NAMES, **WEIGHTS)
+    plain = ConceptBottleneckLoss({}, ignore_index=0, lambda_weight=1.0, **WEIGHTS)
+    named = ConceptBottleneckLoss(
+        {}, ignore_index=0, lambda_weight=1.0, binary_concept_names=NAMES, **WEIGHTS
+    )
     total_plain, plain_components = plain(outputs, targets, logits, labels)
     total_named, named_components = named(outputs, targets, logits, labels)
 
