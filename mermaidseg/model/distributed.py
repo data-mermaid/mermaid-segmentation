@@ -8,6 +8,7 @@ averages the ranks' gradients, which is the gradient of the mean shard loss.
 
 from __future__ import annotations
 
+import functools
 import os
 import random
 import zlib
@@ -203,6 +204,18 @@ class ShardedBatchSampler(Sampler[list[int]]):
             yield batch[start : start + self.per_rank]
 
 
+def _init_rank_worker(rank: int, inner: Callable[[int], None] | None, worker_id: int) -> None:
+    """Run ``inner``, then reseed ``random``, numpy, and torch for this (rank, worker)."""
+    if inner is not None:
+        inner(worker_id)
+    state = np.random.SeedSequence([torch.initial_seed(), int(rank)]).generate_state(
+        4, dtype=np.uint32
+    )
+    torch.manual_seed((int(state[0]) << 32) | int(state[1]))
+    random.seed((int(state[2]) << 32) | int(state[3]))
+    np.random.seed(state)
+
+
 def make_rank_worker_init_fn(
     rank: int, inner: Callable[[int], None] | None = None
 ) -> Callable[[int], None]:
@@ -213,18 +226,8 @@ def make_rank_worker_init_fn(
     and the random fallback index for an empty crop would repeat across the
     ranks' slices of one batch.
     """
-
-    def init_fn(worker_id: int) -> None:
-        if inner is not None:
-            inner(worker_id)
-        state = np.random.SeedSequence([torch.initial_seed(), int(rank)]).generate_state(
-            4, dtype=np.uint32
-        )
-        torch.manual_seed((int(state[0]) << 32) | int(state[1]))
-        random.seed((int(state[2]) << 32) | int(state[3]))
-        np.random.seed(state)
-
-    return init_fn
+    # A partial over a module-level function pickles, so spawn-started workers can load it.
+    return functools.partial(_init_rank_worker, rank, inner)
 
 
 def all_ranks_finite(loss: torch.Tensor) -> bool:
