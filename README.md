@@ -12,6 +12,7 @@ Prerequisites
 - AWS credentials configured with `mermaid-core` profile (for S3 access)
 - Hugging Face account and token (for DINOv3 models; see [Hugging Face Setup](#hugging-face-setup) below)
 - uv (recommended) or pip
+- CUDA GPU recommended
 
 **Quick setup with uv** (recommended):
 ```bash
@@ -49,6 +50,8 @@ uv sync --group dev          # tests + lint (contributor setup)
 # Combine extras and groups
 uv sync --extra all --group dev
 ```
+
+Core deliberately excludes training, ETL, notebook and demo dependencies — they live in extras (`pyproject.toml` documents each; `all` pulls the lot). Unset, `MLFLOW_TRACKING_URI` falls back to a local filesystem store.
 
 
 ### Hugging Face Setup
@@ -115,6 +118,20 @@ To train segmentation models using a specified config file one can use the `nbs/
 
 To evaluate any trained segmentation model, you can use the notebook `nbs/Model_Evaluation.ipynb` which contains both quantitative performance analyses through dataset level performance metrics and qualitative analyses by visualizing model results and corresponding class probabilities.
 
+### Training Entrypoints
+
+Three surfaces, all bottoming out in the same `MetaModel` + `train_model()` call:
+
+- **Notebooks** (`nbs/`) — `Base_Pipeline.ipynb` (standard), `Concept_Bottleneck_Pipeline.ipynb`, `Combined_Pipeline.ipynb`, `Model_Evaluation.ipynb`.
+- **CLI** — `scripts/train.py`, background-safe with file logging:
+  ```bash
+  uv run python scripts/train.py --dry-run       # 1 batch, ≤3 epochs
+  uv run python scripts/train.py \
+      --config-model configs/model_config.yaml \
+      --config-training configs/training_config.yaml
+  ```
+- **SageMaker** — `scripts/launch_training.py` reads `sagemaker/runs/*.yaml`, submits against the ECR image built from `docker/jobs/Dockerfile`, and selects the in-container script via `CONTAINER_ENTRYPOINT_SCRIPT`. One image serves both TrainingJobs and ProcessingJobs. See `docker/jobs/README.md`.
+
 ### Running Tests
 
 ```bash
@@ -135,6 +152,27 @@ uv run pytest -m "not integration"
 ```bash
 uv run pytest tests/test_logger.py -v
 ```
+
+`live` tests are deselected by default via the pyproject addopts. They hit S3 and coralnet.ucsd.edu; CI never runs them.
+
+**Run live tests** (needs S3 / CoralNet access + `playwright install chromium`):
+```bash
+uv run --extra test-live pytest -m live
+```
+
+### Common Commands
+
+```bash
+uv run --group lint ruff check .                # CI lints changed files only
+pre-commit run --all-files                      # ruff + ruff-format + nbqa-ruff + docformatter + uv-lock
+
+make check                                      # validate env vars, AWS session, MLflow version
+make sync                                       # re-sync uv env + Jupyter kernel from current branch
+make logs                                       # tail logs/train_*.log
+make sm-check / sm-dry-run / sm-launch          # SageMaker TrainingJob (see wiki/SageMaker-Jobs.md)
+```
+
+Console scripts (need `--extra coralnet`): `coralnet-etl`, `coralnet-refresh`, `coralnet-remediate`, `coralnet-resize`.
 
 
 ## Model Serialization Strategy
