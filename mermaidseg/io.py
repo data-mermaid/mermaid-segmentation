@@ -9,6 +9,8 @@ from typing import Any, cast
 import albumentations as A
 import yaml
 
+from mermaidseg.config import RESERVED_DATA_KEYS, lookup_class, validate_section
+
 
 class ConfigDict(dict):
     """Dictionary subclass with attribute-style access."""
@@ -98,15 +100,32 @@ def _set_config_value(config: ConfigDict, path: tuple[str, ...], value: Any) -> 
     section[path[-1]] = value
 
 
-def load_config(config_path: str | Path) -> ConfigDict:
-    """Load configuration from a YAML file."""
+def _read_mapping(config_path: str | Path) -> dict[str, Any]:
     with Path(config_path).open(encoding="utf-8") as file:
         loaded = yaml.safe_load(file) or {}
     if not isinstance(loaded, Mapping):
         raise ValueError(
             f"Configuration file {config_path} must contain a mapping at the top level."
         )
-    return ConfigDict(loaded)
+    return dict(loaded)
+
+
+def load_config(config_path: str | Path) -> ConfigDict:
+    """Load configuration from a YAML file."""
+    return ConfigDict(_read_mapping(config_path))
+
+
+def load_section(config_path: str | Path, section: str) -> dict[str, Any]:
+    """Load one config section from a YAML file wrapped in its section key, and validate it.
+
+    Returns the validated section as plain data. Keys a file leaves out of an optional block
+    (a dataset, a split) stay absent.
+
+    Raises:
+        ValueError: If the file's only top-level key is not ``section``, or the section does not
+            match its schema in ``mermaidseg.config``. The message names the file.
+    """
+    return validate_section(_read_mapping(config_path), section, config_path)
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -120,12 +139,20 @@ def get_parser() -> argparse.ArgumentParser:
 
 def update_config_with_args(config: ConfigDict, args: argparse.Namespace) -> ConfigDict:
     """Update configuration with command-line overrides."""
-    _set_config_value(config, ("run_name",), getattr(args, "run_name", None))
-    _set_config_value(config, ("training", "batch_size"), getattr(args, "batch_size", None))
+    _set_config_value(config, ("run_name",), args.run_name)
+    _set_config_value(config, ("training", "batch_size"), args.batch_size)
     return config
 
 
-_RESERVED_DATA_KEYS = frozenset({"local_cache_dir", "local_cache_write_through"})
+AUGMENTATION_CLASSES: dict[str, type[A.BasicTransform]] = {
+    "SmallestMaxSize": A.SmallestMaxSize,
+    "RandomResizedCrop": A.RandomResizedCrop,
+    "HorizontalFlip": A.HorizontalFlip,
+    "VerticalFlip": A.VerticalFlip,
+    "ColorJitter": A.ColorJitter,
+    "Normalize": A.Normalize,
+    "Resize": A.Resize,
+}
 _TRANSFORMS_BEFORE_NORMALIZE = frozenset({"ColorJitter"})
 
 
@@ -153,37 +180,34 @@ def _order_transform_items(items: list[tuple[str, Any]]) -> list[tuple[str, Any]
     return ordered
 
 
-def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:
-    """Normalize the split data config (configs/data_config.yaml).
+def compile_transform(spec: Mapping[str, Mapping[str, Any]]) -> A.Compose:
+    """Compile a split's ``transform`` spec (augmentation name -> kwargs) into a ``Compose``.
 
-    Expands the per-dataset ``default`` block into every dataset that does not override it, then
-    compiles each split's ``augmentation``/``transform`` spec into an ``albumentations.Compose``
-    object. Reserved keys (e.g. ``local_cache_dir``) under ``data`` are left untouched.
+    Raises:
+        ValueError: If a name is not in :data:`AUGMENTATION_CLASSES`.
+    """
+    items = _order_transform_items(list(spec.items()))
+    classes = [lookup_class(AUGMENTATION_CLASSES, "augmentation", name) for name, _ in items]
+    return A.Compose([cls(**params) for cls, (_, params) in zip(classes, items, strict=True)])
+
+
+def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:
+    """Expand the per-dataset ``default`` block of the data config (configs/data_config.yaml).
+
+    Every dataset gets the ``default`` splits, overridden by its own. Reserved keys (e.g.
+    ``local_cache_dir``) under ``data`` are left untouched. Transform specs stay plain data;
+    :func:`compile_transform` compiles them where datasets are built.
     """
     data_cfg = data_cfg_orig.copy()
     if "default" in data_cfg.data:
         default = data_cfg.data.pop("default", None)
         for dataset_name in list(data_cfg.data.keys()):
-            if dataset_name in _RESERVED_DATA_KEYS:
+            if dataset_name in RESERVED_DATA_KEYS:
                 continue
             dataset_tmp = data_cfg.data.get(dataset_name, None)
             data_cfg.data[dataset_name] = default.copy() if default is not None else {}
             if dataset_tmp is not None:
                 data_cfg.data[dataset_name].update(dataset_tmp)
-
-    for dataset_name in data_cfg.data:
-        if dataset_name in _RESERVED_DATA_KEYS:
-            continue
-        for split_name in data_cfg.data[dataset_name]:
-            split_cfg = data_cfg.data[dataset_name][split_name]
-            # Use whichever key is present (only one should appear): 'augmentation' or 'transform'
-            key = next((k for k in ("augmentation", "transform") if k in split_cfg), None)
-            if key:
-                transform_spec = split_cfg.pop(key)
-                transform_items = _order_transform_items(list(transform_spec.items()))
-                split_cfg.transform = A.Compose(
-                    [getattr(A, name)(**params) for name, params in transform_items]
-                )
 
     return data_cfg
 
@@ -191,9 +215,8 @@ def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:
 def apply_resolution(spec: Any, resolution: int) -> Any:
     """Set every ``RandomResizedCrop`` size and ``Resize`` width/height in a raw spec.
 
-    Walks the uncompiled YAML mapping in place, so it must run before
-    ``preprocess_data_config`` turns the transform specs into albumentations objects.
-    ``SmallestMaxSize`` and every other transform are left unchanged.
+    Walks the YAML mapping in place. ``SmallestMaxSize`` and every other transform are left
+    unchanged.
     """
     if isinstance(spec, Mapping):
         for key, value in spec.items():
@@ -222,43 +245,29 @@ def setup_config(
          "training": "configs/training_config_cbm_final.yaml",
          "logger": "configs/logger_config.yaml"}
 
-    Each file is loaded under its section key (a file may already wrap its
-    contents in that key, or not — both are accepted). The data config is
-    additionally normalized via ``preprocess_data_config`` (per-dataset default
-    expansion + albumentations transform compilation).
+    Each file wraps its contents in its section key and is validated against that section's
+    schema (:func:`load_section`). The data config is additionally normalized via
+    ``preprocess_data_config`` (per-dataset default expansion). The result is plain data.
 
     ``resolution`` sets the square train crop, the val/test resize
     (:func:`apply_resolution`), and ``model.input_size``.
+
+    Raises:
+        ValueError: If a file is unwrapped or does not match its schema.
     """
     cfg = ConfigDict()
     if "data" in config_path_dict:
-        data_cfg = load_config(cast("str | Path", config_path_dict["data"]))
+        data_section = load_section(cast("str | Path", config_path_dict["data"]), "data")
         if resolution is not None:
-            apply_resolution(data_cfg, int(resolution))
-        data_cfg = preprocess_data_config(data_cfg)
-        if "data" in data_cfg:
-            cfg.update(data_cfg)
-        else:
-            cfg.data = data_cfg
+            apply_resolution(data_section, int(resolution))
+        cfg.update(preprocess_data_config(ConfigDict({"data": data_section})))
     if "model" in config_path_dict:
-        model_cfg = load_config(cast("str | Path", config_path_dict["model"]))
-        if "model" in model_cfg:
-            cfg.update(model_cfg)
-        else:
-            cfg.model = model_cfg
+        cfg.model = load_section(cast("str | Path", config_path_dict["model"]), "model")
         if resolution is not None:
             cfg.model.input_size = [int(resolution), int(resolution)]
     if "training" in config_path_dict:
-        training_cfg = load_config(cast("str | Path", config_path_dict["training"]))
-        if "training" in training_cfg:
-            cfg.update(training_cfg)
-        else:
-            cfg.training = training_cfg
+        cfg.training = load_section(cast("str | Path", config_path_dict["training"]), "training")
     if "logger" in config_path_dict:
-        logger_cfg = load_config(cast("str | Path", config_path_dict["logger"]))
-        if "logger" in logger_cfg:
-            cfg.update(logger_cfg)
-        else:
-            cfg.logger = logger_cfg
+        cfg.logger = load_section(cast("str | Path", config_path_dict["logger"]), "logger")
 
     return cfg

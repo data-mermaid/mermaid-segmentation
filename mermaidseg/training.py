@@ -36,6 +36,7 @@ from mermaidseg.run_setup import (
     load_model_weights,
     load_run_concept_source_mask,
     resolve_repo_path,
+    write_resolved_config,
 )
 
 # LoRA + DPT concept-bottleneck trainer that scripts/train.py calls. The encoder comes from the model config.
@@ -90,12 +91,10 @@ def load_training_checkpoint(
             )
         meta_model.optimizer.load_state_dict(optimizer_state)
 
-    # Restore the LR scheduler so an epoch schedule continues from the correct step
-    # instead of restarting its decay. `scheduler` may be None when no scheduler was
-    # configured.
-    scheduler = getattr(meta_model, "scheduler", None)
-    if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    # Restore the LR scheduler so the schedule continues from the correct step
+    # instead of restarting its decay.
+    if checkpoint.get("scheduler_state_dict") is not None:
+        meta_model.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
     # Step checkpoints store how far warmup got. Older epoch checkpoints omit it;
     # those are past warmup (it finishes inside epoch 0), so the helper marks it done.
@@ -106,7 +105,7 @@ def load_training_checkpoint(
 
     # Missing epoch_complete means an older epoch-boundary checkpoint: start the next epoch.
     # A mid-epoch model_step* file sets epoch_complete false and continues this epoch.
-    meta_model.resuming_within_epoch = not bool(checkpoint.get("epoch_complete", True))  # type: ignore[attr-defined]  # set dynamically, read via getattr
+    meta_model.resuming_within_epoch = not bool(checkpoint.get("epoch_complete", True))
     return next_epoch_from_checkpoint(checkpoint)
 
 
@@ -221,8 +220,7 @@ def run(args: argparse.Namespace) -> None:
     # Leave the config value untouched when a flag is not given.
     if args.grad_accum_steps is not None:
         cfg.training.grad_accum_steps = args.grad_accum_steps
-    taxonomic_cfg = cfg.training.get("taxonomic_loss")
-    if taxonomic_cfg is not None and not taxonomic_cfg.get("kl_weight", 0.0) > 0:
+    if not cfg.training.taxonomic_loss.kl_weight > 0:
         cfg.training.pop("taxonomic_loss")
 
     # Encoder, iterations, batch size, and epochs come from the model and training configs.
@@ -294,6 +292,7 @@ def run(args: argparse.Namespace) -> None:
         (run_dir / "id2label.json").write_text(
             json.dumps({"0": "ignore", **{str(k): v for k, v in registry.target_id2label.items()}})
         )
+        write_resolved_config(cfg_logger, run_dir)
         print(f"Wrote class and concept layouts ({len(concept_id2name)} channels) to {run_dir}")
 
     meta_model = build_meta_model(cfg, registry, device)
@@ -333,7 +332,7 @@ def run(args: argparse.Namespace) -> None:
         # iterated below, so re-seeding here changes the permutations for every
         # resumed epoch. (Augmentations already vary per run via Albumentations'
         # own entropy-seeded RNG.)
-        if getattr(meta_model, "resuming_within_epoch", False):
+        if meta_model.resuming_within_epoch:
             resume_seed = seed + int(meta_model.global_step)
             seed_note = f"{meta_model.global_step} completed updates"
         else:
@@ -359,7 +358,6 @@ def run(args: argparse.Namespace) -> None:
         logger_context = Logger(
             config=cfg_logger,
             meta_model=meta_model,
-            log_epochs=cfg_logger.logger.get("log_epochs", 1),
             log_checkpoint=1,
             checkpoint_dir=args.output_dir,
             id2label={0: "ignore", **registry.target_id2label},
@@ -386,18 +384,14 @@ def run(args: argparse.Namespace) -> None:
                     "model/lora_alpha": cfg.model.lora_alpha,
                     "loss/per_pixel_loss_weight": cfg.training.loss.per_pixel_loss_weight,
                     "loss/per_image_loss_weight": cfg.training.loss.per_image_loss_weight,
-                    "loss/kl_weight": (cfg.training.get("taxonomic_loss") or {}).get(
-                        "kl_weight", 0.0
-                    ),
-                    "loss/partial_weight": (cfg.training.get("taxonomic_loss") or {}).get(
-                        "partial_weight", 0.0
-                    ),
-                    "loss/distance_weight": (cfg.training.get("distance_loss") or {}).get(
-                        "weight", 0.0
+                    "loss/kl_weight": (
+                        cfg.training.taxonomic_loss.kl_weight
+                        if "taxonomic_loss" in cfg.training
+                        else 0.0
                     ),
                     "data/resolution": args.resolution,
                     "train/batch_size": cfg.training.batch_size,
-                    "train/grad_accum_steps": int(cfg.training.get("grad_accum_steps", 1)),
+                    "train/grad_accum_steps": int(cfg.training.grad_accum_steps),
                     "train/world_size": dist_ctx.world_size,
                 }
             )
@@ -435,7 +429,7 @@ def run(args: argparse.Namespace) -> None:
             )
 
         metrics_all: dict[int, dict] = {}
-        checkpoint_every = int(cfg.training.get("checkpoint_every_steps", 0) or 0)
+        checkpoint_every = int(cfg.training.checkpoint_every_steps)
         preempt_every = int(args.preempt_checkpoint_every_steps or 0)
         total_updates = int(cfg.training.epochs) * int(cfg.training.iterations_per_train_epoch)
 
@@ -497,7 +491,7 @@ def run(args: argparse.Namespace) -> None:
                 end_epoch=epoch + 1,
                 metric_of_interest=cfg.training.metric_of_interest,
                 max_load_failure_rate=cfg.training.max_load_failure_rate,
-                train_log_interval=cfg.logger.get("train_log_interval", 1),
+                train_log_interval=cfg.logger.train_log_interval,
                 on_optimizer_step=(
                     _save_step_checkpoint
                     if (dist_ctx.distributed or run_logger is not None)

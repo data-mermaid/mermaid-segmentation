@@ -8,8 +8,10 @@ run needs, so an offline (AWS-free) training run never hits an unwarmed key.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from typing import Any
 
+from mermaidseg.config import RESERVED_DATA_KEYS
 from mermaidseg.datasets.benthos_yuval import BenthosYuvalCoralsDataset
 from mermaidseg.datasets.catlin_seaview import CatlinSeaviewDataset
 from mermaidseg.datasets.coralnet import CoralNetDataset
@@ -18,6 +20,7 @@ from mermaidseg.datasets.mermaid import MermaidDataset
 from mermaidseg.datasets.moorea_labeled_corals import MooreaLabeledCoralsDataset
 from mermaidseg.datasets.pacific_labeled_corals import PacificLabeledCoralsDataset
 from mermaidseg.datasets.ucsd_mosaics import UCSDMosaicsDataset
+from mermaidseg.io import compile_transform
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +42,15 @@ NO_PADDING_DATASETS: frozenset[str] = frozenset({"coralscapes_v2", "ucsd_mosaics
 
 
 def _is_skip(split_cfg: Any) -> bool:
-    """True when a split config means "skip this split".
+    """True when a split config is YAML ``null``, which means "skip this split"."""
+    return split_cfg is None
 
-    ``data_config.yaml`` uses a literal ``None`` which PyYAML may read as the
-    Python ``None`` or (in some contexts) the string ``"None"``; treat both as a
-    skip.
-    """
-    return split_cfg is None or split_cfg == "None"
+
+def _check_data_keys(data_cfg: Any, allowed: Collection[str]) -> None:
+    """Raise on a ``data`` key that is neither a dataset nor in ``allowed``."""
+    unknown = sorted(key for key in data_cfg if key not in allowed)
+    if unknown:
+        raise ValueError(f"unknown data keys {unknown}; expected one of {sorted(allowed)}")
 
 
 _CONCEPT_SPLITS = ("train", "val", "test")
@@ -66,8 +71,12 @@ def configured_source_names(
     A profile that sets a train split to ``None`` drops that dataset only when
     this function is called on the profile. Call it on the unmodified config to
     freeze the concept channels.
+
+    Raises:
+        ValueError: If a key is neither a dataset, ``default`` nor a reserved key.
     """
     dataset_classes = dataset_classes or DATASET_CLASSES
+    _check_data_keys(data_cfg, {*dataset_classes, *RESERVED_DATA_KEYS, "default"})
     sources: set[str] = set()
     for name, cls in dataset_classes.items():
         try:
@@ -95,7 +104,8 @@ def build_datasets(
     Args:
         data_cfg: The ``data`` section of the run config (a mapping keyed by
             dataset name, each mapping split name -> split kwargs). A ``repeat``
-            key in a split is read by the trainer and never reaches the dataset.
+            key in a split is read by the trainer and never reaches the dataset. A
+            ``transform`` spec reaches it compiled by :func:`compile_transform`.
         padding: Point-annotation padding passed to point-based datasets. Ignored
             for datasets in :data:`NO_PADDING_DATASETS`.
         dataset_classes: Override the ``name -> class`` registry (used in tests).
@@ -105,8 +115,13 @@ def build_datasets(
 
     Returns:
         Mapping ``(name, split) -> Dataset`` for every non-skipped split.
+
+    Raises:
+        ValueError: If a key is neither a dataset nor a reserved key, or ``repeat`` is set on
+            a split other than train.
     """
     dataset_classes = dataset_classes or DATASET_CLASSES
+    _check_data_keys(data_cfg, {*dataset_classes, *RESERVED_DATA_KEYS})
     result: dict[tuple[str, str], Any] = {}
 
     for name, cls in dataset_classes.items():
@@ -125,6 +140,8 @@ def build_datasets(
                     f"'{_REPEAT_KEY}' is only valid on the train split; found on {name}.{split}"
                 )
             dataset_kwargs = {k: v for k, v in split_cfg.items() if k != _REPEAT_KEY}
+            if "transform" in dataset_kwargs:
+                dataset_kwargs["transform"] = compile_transform(dataset_kwargs["transform"])
             if name in NO_PADDING_DATASETS:
                 ds = cls(**dataset_kwargs)
             else:

@@ -53,6 +53,7 @@ from typing import Any
 import torch
 import yaml
 
+from mermaidseg.config import RESERVED_DATA_KEYS
 from mermaidseg.dataset_reconciliation import ConceptSchema
 from mermaidseg.datasets import configured_source_names
 from mermaidseg.datasets.local_cache import setup_local_cache
@@ -61,6 +62,7 @@ from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.predictor import CBMPredictor
 from mermaidseg.evaluation.reporting import fmt, write_json
 from mermaidseg.inference.loading import build_model, load_artifacts
+from mermaidseg.io import load_section
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEMO_DIR = _REPO_ROOT / "demo"
@@ -71,17 +73,10 @@ ALL_EVALS = ["coralnet", "pacific", "coralscapes", "coralscapes39", "val_loss"]
 SPLITS = ["train", "val", "test"]
 TRAIN_SPLIT_EVALS = ["coralnet", "val_loss"]
 _CONFIGS = _REPO_ROOT / "configs"
-_RESERVED_DATA_KEYS = ("local_cache_dir", "local_cache_write_through")
-
-
-def _load_yaml(path: str | Path) -> dict:
-    with Path(path).open() as f:
-        return yaml.safe_load(f)
 
 
 def _data_section(data_config: str | Path) -> dict:
-    raw = _load_yaml(data_config)
-    return raw.get("data", raw)
+    return load_section(data_config, "data")
 
 
 def _split_field(data: dict, dataset: str, split: str, field: str) -> Any:
@@ -117,18 +112,15 @@ def run_removed_concepts(training_config: str | Path, taxonomy_csv: str | Path) 
     """Channels removed by ``training.concept_removal`` of ``training_config``, if any."""
     from mermaidseg.run_setup import concept_removal_list
 
-    raw = _load_yaml(training_config)
-    return concept_removal_list(raw.get("training", raw), taxonomy_csv)
+    return concept_removal_list(load_section(training_config, "training"), taxonomy_csv)
 
 
 def _val_transform(data: dict, dataset: str) -> dict:
     """The ``val`` transform of ``dataset``, else of the ``default`` block."""
     for section in (data.get(dataset), data.get("default")):
         val = section.get("val") if isinstance(section, dict) else None
-        if isinstance(val, dict):
-            for key in ("transform", "augmentation"):
-                if key in val:
-                    return {key: val[key]}
+        if isinstance(val, dict) and "transform" in val:
+            return {"transform": val["transform"]}
     raise ValueError(f"data config has no val transform for {dataset} or default")
 
 
@@ -137,22 +129,18 @@ def coralnet_loss_data_config(data: dict, split: str, image_keep: Path | None) -
     block = data["coralnet"][split]
     if not isinstance(block, dict):
         raise ValueError(f"data config has no coralnet.{split}")
-    val = {k: v for k, v in block.items() if k not in ("transform", "augmentation")}
+    val = {k: v for k, v in block.items() if k != "transform"}
     val.update(_val_transform(data, "coralnet"))
     if image_keep is not None:
         val["image_keep"] = str(Path(image_keep).resolve())
-    out = {k: data[k] for k in _RESERVED_DATA_KEYS if k in data}
+    out = {k: data[k] for k in RESERVED_DATA_KEYS if k in data}
     out["coralnet"] = {"val": val}
     return {"data": out}
 
 
 def _model_input_size(model_config: str | Path) -> tuple[int, int]:
-    cfg = _load_yaml(model_config)
-    model_cfg = cfg.get("model", cfg)
-    size = model_cfg.get("input_size", [512, 512])
-    if isinstance(size, (list, tuple)) and len(size) == 2:
-        return int(size[0]), int(size[1])
-    return 512, 512
+    height, width = load_section(model_config, "model")["input_size"]
+    return int(height), int(width)
 
 
 def resolve_layouts(

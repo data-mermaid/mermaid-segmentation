@@ -28,19 +28,6 @@ def _wandb_logger(lgr: Logger) -> MagicMock:
 class TestLoggerInit:
     """Test Logger initialization: config toggles."""
 
-    def test_save_local_checkpoints_mirrors_deprecated_alias(self, make_config, fake_meta_model):
-        config = make_config(logger={"save_local_checkpoints": False})
-        lgr = Logger(config=config, meta_model=fake_meta_model)
-        assert lgr.save_local_checkpoints is False
-        assert lgr.save_local_models is False
-
-    def test_save_local_models_alias_sets_checkpoint_flag(self, make_config, fake_meta_model):
-        config = make_config(logger={"save_local_checkpoints": None, "save_local_models": False})
-        with pytest.deprecated_call(match="save_local_models is deprecated"):
-            lgr = Logger(config=config, meta_model=fake_meta_model)
-        assert lgr.save_local_checkpoints is False
-        assert lgr.save_local_models is False
-
     def test_log_checkpoint_zero_rejected(self, make_config, fake_meta_model):
         with pytest.raises(ValueError, match="log_checkpoint must be > 0"):
             Logger(config=make_config(), meta_model=fake_meta_model, log_checkpoint=0)
@@ -165,9 +152,12 @@ class TestSaveModelCheckpoint:
 
     def test_local_checkpoint_skipped_when_disabled(self, tmp_path, make_config):
         meta = FakeMetaModel(run_name="ckpt-skip")
-        config = make_config(logger={"save_local_checkpoints": False})
         lgr = Logger(
-            config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
+            config=make_config(),
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+            log_checkpoint=50,
+            save_local_checkpoints=False,
         )
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.2})
         assert not (tmp_path / "model_checkpoints" / "ckpt-skip").exists()
@@ -187,11 +177,30 @@ class TestSaveModelCheckpoint:
         )
         path = tmp_path / "model_checkpoints" / "step-ckpt" / "model_step25000"
         assert path.is_file()
-        ckpt = torch.load(path, weights_only=False)
+        ckpt = torch.load(path, weights_only=True)
         assert ckpt["global_step"] == 25000
         assert ckpt["warmup_iters_completed"] == 4000
         assert ckpt["epoch_complete"] is False
         assert ckpt["epoch"] == 0
+
+    def test_checkpoint_metrics_and_config_load_as_plain_python(self, tmp_path, make_config):
+        meta = FakeMetaModel(run_name="plain-ckpt")
+        lgr = Logger(
+            config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1
+        )
+        metrics = {
+            "iou": np.array([0.5, 0.25]),
+            "acc": np.float32(0.75),
+            "loss": torch.tensor(0.125),
+            "step": 3,
+        }
+        lgr.save_model_checkpoint(meta, epoch=1, metrics_dict=metrics)
+        path = tmp_path / "model_checkpoints" / "plain-ckpt" / "model_epoch1"
+        ckpt = torch.load(path, weights_only=True)
+        assert ckpt["metrics"] == {"iou": [0.5, 0.25], "acc": 0.75, "loss": 0.125, "step": 3}
+        assert type(ckpt["config"]) is dict
+        assert type(ckpt["config"]["training"]) is dict
+        assert ckpt["config"]["training"]["optimizer"] == {"type": "SGD", "lr": 0.01}
 
     def test_save_leaves_parameters_in_place(self, tmp_path, make_config):
         meta = FakeMetaModel(run_name="inplace-ckpt")
@@ -206,7 +215,7 @@ class TestSaveModelCheckpoint:
         assert meta.model.weight.data_ptr() == ptr
         assert meta.model.weight.device == device
         path = tmp_path / "model_checkpoints" / "inplace-ckpt" / "model_epoch1"
-        ckpt = torch.load(path, weights_only=False)
+        ckpt = torch.load(path, weights_only=True)
         saved = ckpt["model_state_dict"]["weight"]
         assert saved.device.type == "cpu"
         torch.testing.assert_close(saved, values)
@@ -227,7 +236,7 @@ class TestSaveModelCheckpoint:
         final = directory / "model_preempt1000"
         assert final.is_file()
         assert not (directory / "model_preempt1000.partial").exists()
-        ckpt = torch.load(final, weights_only=False)
+        ckpt = torch.load(final, weights_only=True)
         assert ckpt["global_step"] == 1000
         assert ckpt["epoch_complete"] is False
         assert ckpt["optimizer_state_dict"]
@@ -274,7 +283,7 @@ class TestSaveModelCheckpoint:
 
     def test_wandb_does_not_write_local_checkpoint_when_local_disabled(self, tmp_path, make_config):
         meta = FakeMetaModel(run_name="wandb-no-local")
-        config = make_config(logger={"save_local_checkpoints": False, "enable_wandb": True})
+        config = make_config(logger={"enable_wandb": True})
         with (
             patch("mermaidseg.logger.WANDB_IMPORT_ERROR", None),
             patch("mermaidseg.logger.wandb") as mock_wandb,
@@ -286,6 +295,7 @@ class TestSaveModelCheckpoint:
                 meta_model=meta,
                 checkpoint_dir=str(tmp_path),
                 log_checkpoint=50,
+                save_local_checkpoints=False,
             )
             lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.2})
 
@@ -302,7 +312,7 @@ class TestSaveModelCheckpoint:
         meta.global_step = 25000
         lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
         ckpt_file = list((tmp_path / "model_checkpoints" / "sched-check").iterdir())[0]
-        checkpoint = torch.load(ckpt_file, weights_only=False)
+        checkpoint = torch.load(ckpt_file, weights_only=True)
         assert "scheduler_state_dict" in checkpoint
         assert checkpoint["global_step"] == 25000
 
@@ -331,7 +341,6 @@ class TestScenarios:
         lgr = Logger(
             config=make_config(logger={"enable_wandb": False}),
             meta_model=meta,
-            log_epochs=1,
             log_checkpoint=2,
             checkpoint_dir=str(tmp_path),
         )

@@ -1,7 +1,6 @@
 """Classification and concept-bottleneck losses."""
 
 from collections.abc import Iterator
-from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -116,14 +115,14 @@ class ConceptBottleneckLoss(torch.nn.Module):
     def __init__(
         self,
         concept_value2id: dict[str, dict[str, list[int]]],
+        *,
+        ignore_index: int,
+        lambda_weight: float,
+        per_pixel_loss_weight: float,
+        per_image_loss_weight: float,
         class_loss: type[torch.nn.Module] = torch.nn.CrossEntropyLoss,
-        ignore_index: int = 0,
-        lambda_weight: float = 1.0,
-        per_pixel_loss_weight: float = 0.0,
-        per_image_loss_weight: float = 1.0,
         taxonomic_label_smoothing: float = 0.01,
         binary_concept_names: list[str] | None = None,
-        **kwargs: Any,
     ) -> None:
         """Build the classification loss and store the concept-loss settings.
 
@@ -140,10 +139,9 @@ class ConceptBottleneckLoss(torch.nn.Module):
                 (sparsely annotated images are not down-weighted).
             taxonomic_label_smoothing: Label smoothing for the taxonomic rank losses.
             binary_concept_names: Names of the binary channels, for per-channel loss components.
-            **kwargs: Additional keyword arguments passed to the classification loss.
         """
         super().__init__()
-        self.class_loss = class_loss(ignore_index=ignore_index, **kwargs)
+        self.class_loss = class_loss(ignore_index=ignore_index)
         self.binary_concept_names = binary_concept_names
         self.ignore_index = ignore_index
         self.lambda_weight = lambda_weight
@@ -224,3 +222,8 @@ class ConceptBottleneckLoss(torch.nn.Module):
         loss_components["concepts"] = concept_loss_value.item()
         total_loss = class_loss_value + self.lambda_weight * concept_loss_value
         return total_loss, loss_components
+
+
+LOSS_CLASSES: dict[str, type[ConceptBottleneckLoss]] = {
+    "ConceptBottleneckLoss": ConceptBottleneckLoss,
+}

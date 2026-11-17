@@ -27,7 +27,7 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from mermaidseg.io import ConfigDict
 from mermaidseg.model.data_parallel import ShardStep, shard_targets
-from tests.conftest import IMAGE_SIZE
+from tests.conftest import IMAGE_SIZE, cbm_test_config
 from tests.test_concept_source_mask import CHANNELS, _schema
 
 BLEACHED = CHANNELS.index("bleached")
@@ -243,36 +243,10 @@ def test_other_datasets_get_row_zero(tmp_path):
 
 
 def _cbm_config() -> ConfigDict:
-    return ConfigDict(
-        {
-            "model": {
-                "name": "ConceptBottleneckDPTLoRADINOv3",
-                "encoder_name": "facebook/dinov3-vits16-pretrain-lvd1689m",
-                "input_size": IMAGE_SIZE,
-                "concept_feature_dim": 8,
-                "neck_hidden_sizes": [8, 8, 8, 8],
-                "fusion_hidden_size": 8,
-                "lora_r": 2,
-                "lora_alpha": 4,
-                "lora_dropout": 0.0,
-                "lora_target_modules": ["q_proj"],
-            },
-            "training": {
-                "training_mode": "concept-bottleneck",
-                "epochs": 1,
-                "stall_dump_sec": 180,
-                "batch_size": 2,
-                "optimizer": {"type": "SGD", "lr": 0.01},
-                "loss": {
-                    "type": "ConceptBottleneckLoss",
-                    "lambda_weight": 1,
-                    "ignore_index": 0,
-                    "per_pixel_loss_weight": 0.5,
-                    "per_image_loss_weight": 0.5,
-                },
-            },
-        }
-    )
+    cfg = cbm_test_config()
+    cfg.training.loss.per_pixel_loss_weight = 0.5
+    cfg.training.loss.per_image_loss_weight = 0.5
+    return cfg
 
 
 def _cbm_meta(make_meta_model, schema: ConceptSchema):

@@ -11,7 +11,6 @@ import os
 import re
 import tempfile
 import time
-import warnings
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, Self
 
@@ -19,6 +18,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from mermaidseg.config import to_plain_dict
 from mermaidseg.model.meta import MetaModel
 
 if TYPE_CHECKING:
@@ -65,6 +65,13 @@ def _safe_wandb_artifact_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.\-]", "-", name)
 
 
+def _to_python(value: Any) -> Any:
+    """``value`` as Python floats and lists, which ``torch.load(weights_only=True)`` accepts."""
+    if isinstance(value, (np.ndarray, np.generic, torch.Tensor)):
+        return value.tolist()
+    return value
+
+
 class Logger:
     """Logger for experiment tracking during training and evaluation.
 
@@ -72,28 +79,18 @@ class Logger:
     ``enable_wandb`` is set.
     """
 
-    @staticmethod
-    def _resolve_backend_flag(name: str, logger_cfg: Any, default: bool) -> bool:
-        """Resolve a backend enable flag from ``config.logger.<name>`` or a default."""
-        cfg_val = getattr(logger_cfg, name, None) if logger_cfg is not None else None
-        if cfg_val is None:
-            return default
-        return bool(cfg_val)
-
     def __init__(
         self,
         config: Any,
         meta_model: MetaModel,
-        log_epochs: int = 5,
         log_checkpoint: int = 50,
         checkpoint_dir: str = ".",
         id2label: dict | None = None,
         id2concept: dict | None = None,
-        save_local_checkpoints: bool | None = None,
+        save_local_checkpoints: bool = True,
     ) -> None:
         """Set up checkpoint settings and, if enabled, the wandb delegate."""
         self.config = config
-        self.log_epochs = log_epochs
         self.log_checkpoint = log_checkpoint
         if self.log_checkpoint <= 0:
             raise ValueError("log_checkpoint must be > 0")
@@ -102,29 +99,8 @@ class Logger:
         self._wandb_logger = None
         self.id2label = id2label
         self.id2concept = id2concept
-        logger_cfg = getattr(config, "logger", None)
-        experiment_name = getattr(logger_cfg, "experiment_name", None)
-
-        # Backend selection is config-driven (config.logger.enable_wandb).
-        enable_wandb = self._resolve_backend_flag("enable_wandb", logger_cfg, default=False)
-
-        # Keep one source of truth for local persistence.
-        if save_local_checkpoints is not None:
-            self.save_local_checkpoints = save_local_checkpoints
-        else:
-            cfg_local = getattr(logger_cfg, "save_local_checkpoints", None)
-            if cfg_local is None:
-                legacy_cfg = getattr(logger_cfg, "save_local_models", None)
-                if legacy_cfg is not None:
-                    warnings.warn(
-                        "config.logger.save_local_models is deprecated; use config.logger.save_local_checkpoints.",
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
-                cfg_local = legacy_cfg
-            self.save_local_checkpoints = cfg_local if cfg_local is not None else True
-
-        self.save_local_models = self.save_local_checkpoints
+        logger_cfg = config.logger
+        self.save_local_checkpoints = save_local_checkpoints
         self.wandb_run_id = None
 
         # Precompute run metadata (config artifact, flattened params, tags).
@@ -139,7 +115,6 @@ class Logger:
                 params = {
                     "num_classes": int(meta_model.num_classes),
                     "run_name": self.run_name,
-                    "log_epochs": log_epochs,
                     "log_checkpoint": log_checkpoint,
                 }
                 if hasattr(config, "model"):
@@ -167,21 +142,17 @@ class Logger:
                 logger.warning("Failed to prepare run metadata (config/params/tags): %s", e)
                 config_to_log = params = tags = None
 
-        if enable_wandb:
+        if logger_cfg.enable_wandb:
             if WANDB_IMPORT_ERROR is not None:
                 logger.warning("wandb is not installed. Wandb logging is disabled.")
             else:
                 try:
-                    wandb_project = getattr(logger_cfg, "wandb_project", None) or (
-                        experiment_name or "mermaidseg"
-                    )
-                    wandb_entity = getattr(logger_cfg, "wandb_entity", None)
                     self._wandb_logger = WandbLogger(
-                        project=wandb_project,
+                        project=logger_cfg.wandb_project,
                         run_name=self.run_name,
                         config=config,
                         num_classes=int(meta_model.num_classes),
-                        entity=wandb_entity,
+                        entity=logger_cfg.wandb_entity,
                     )
                     self.wandb_run_id = self._wandb_logger.wandb_run_id
                     if config_to_log is not None:
@@ -193,8 +164,8 @@ class Logger:
                         self._wandb_logger.log_concept_metadata(
                             id2label=self.id2label,
                             id2concept=self.id2concept,
-                            num_concepts=getattr(meta_model, "num_concepts", None),
-                            conceptid2labelid=getattr(meta_model, "conceptid2labelid", None),
+                            num_concepts=meta_model.num_concepts,
+                            conceptid2labelid=meta_model.conceptid2labelid,
                         )
                 except Exception as e:
                     logger.warning("Failed to initialize wandb logging: %s", e)
@@ -337,7 +308,7 @@ class Logger:
         filename = checkpoint_name or f"model_epoch{epoch}"
 
         checkpoint: dict[str, Any] = {
-            "config": self.config,
+            "config": to_plain_dict(self.config),
             "model_state_dict": {
                 key: value.detach().cpu().clone()
                 for key, value in meta_model_run.model.state_dict().items()
@@ -345,15 +316,12 @@ class Logger:
             "optimizer_state_dict": meta_model_run.optimizer.state_dict(),
             "epoch": epoch,
             "epoch_complete": bool(epoch_complete),
-            "global_step": int(getattr(meta_model_run, "global_step", 0)),
-            "warmup_iters_completed": int(getattr(meta_model_run, "_warmup_iters_completed", 0)),
+            "global_step": int(meta_model_run.global_step),
+            "warmup_iters_completed": int(meta_model_run._warmup_iters_completed),
             "timestamp": timestamp,
-            "metrics": metrics_dict,
+            "metrics": {key: _to_python(value) for key, value in metrics_dict.items()},
+            "scheduler_state_dict": meta_model_run.scheduler.state_dict(),
         }
-
-        scheduler = getattr(meta_model_run, "scheduler", None)
-        if scheduler is not None:
-            checkpoint["scheduler_state_dict"] = scheduler.state_dict()
 
         model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/{filename}"
 
@@ -463,7 +431,7 @@ class WandbLogger:
         self._log_json_artifact("config", config_to_log, artifact_type="config")
 
     def log_params(self, params: dict) -> None:
-        """Log flattened scalar params (run_name, log_epochs, model_*, training_*)."""
+        """Log flattened scalar params (run_name, model_*, training_*)."""
         if self.wandb_run is None:
             return
         try:

@@ -91,7 +91,7 @@ def build_final_data_config(text: str, *, header: str) -> str:
     if len(merged) != len(set(merged)):
         raise ValueError("merged CoralNet train whitelist has duplicate sources")
     coralnet = _WHITELIST.sub(f"whitelist_sources: {_flow_list(merged)}", coralnet, count=1)
-    coralnet = _CORALNET_VAL.sub("    val: None\n", coralnet, count=1)
+    coralnet = _CORALNET_VAL.sub("    val: null\n", coralnet, count=1)
     text = _replace_section(text, "coralnet", coralnet)
 
     _, _, coralscapes = _section(text, "coralscapes_v2")
@@ -102,7 +102,7 @@ def build_final_data_config(text: str, *, header: str) -> str:
     coralscapes = coralscapes.replace(
         "      split: train\n", "      split: [train, validation]\n", 1
     )
-    coralscapes = _CORALSCAPES_VAL.sub("    val: None\n", coralscapes, count=1)
+    coralscapes = _CORALSCAPES_VAL.sub("    val: null\n", coralscapes, count=1)
     text = _replace_section(text, "coralscapes_v2", coralscapes)
 
     if text.startswith("#"):
@@ -114,12 +114,12 @@ def build_final_data_config(text: str, *, header: str) -> str:
 def _check(path: Path) -> None:
     loaded = yaml.safe_load(path.read_text())
     coralnet = loaded["data"]["coralnet"]
-    if coralnet["val"] not in (None, "None"):
+    if coralnet["val"] is not None:
         raise ValueError(f"{path.name}: coralnet.val was not cleared")
     coralscapes = loaded["data"]["coralscapes_v2"]
     if coralscapes["train"]["split"] != ["train", "validation"]:
         raise ValueError(f"{path.name}: coralscapes_v2 train split was not merged")
-    if coralscapes["val"] not in (None, "None"):
+    if coralscapes["val"] is not None:
         raise ValueError(f"{path.name}: coralscapes_v2.val was not cleared")
     if coralscapes["test"]["split"] != "test":
         raise ValueError(f"{path.name}: coralscapes_v2 test split changed")

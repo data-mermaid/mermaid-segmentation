@@ -19,13 +19,9 @@ from torch.utils.data import DataLoader
 from torch.utils.data.dataloader import _BaseDataLoaderIter
 from tqdm import tqdm
 
-import mermaidseg.model.loss
-import mermaidseg.model.models
+from mermaidseg.config import lookup_class
 from mermaidseg.dataset_reconciliation.concept_source_mask import apply_concept_source_mask
-from mermaidseg.dataset_reconciliation.concepts import (
-    DEFAULT_CLASS_TO_CONCEPTS_CSV,
-    source_labels_to_concepts,
-)
+from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
 from mermaidseg.dataset_reconciliation.label_mapping import (
     source_labels_to_target_labels,
 )
@@ -45,6 +41,8 @@ from mermaidseg.model.distributed import (
     reduce_components,
     require_world_size,
 )
+from mermaidseg.model.loss import LOSS_CLASSES
+from mermaidseg.model.models import MODEL_CLASSES
 from mermaidseg.model.taxonomy_loss import TaxonomicLoss
 
 logger = logging.getLogger(__name__)
@@ -54,6 +52,11 @@ _BatchLoader = DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Te
 _BATCH_LOSS_KEY = "__batch_loss__"
 
 SLOW_FETCH_WARN_SEC = 60.0
+
+OPTIMIZER_CLASSES: dict[str, type[torch.optim.Optimizer]] = {"AdamW": torch.optim.AdamW}
+SCHEDULER_CLASSES: dict[str, type[torch.optim.lr_scheduler.LRScheduler]] = {
+    "LinearLR": torch.optim.lr_scheduler.LinearLR,
+}
 
 
 def stall_dump_seconds(training_kwargs: ConfigDict) -> float:
@@ -94,10 +97,8 @@ def records_train_metrics(microbatch_index: int, every: int) -> bool:
     return int(microbatch_index) % max(1, int(every)) == 0
 
 
-def _resolve_amp_dtype(dtype_config: Any | None) -> torch.dtype:
+def _resolve_amp_dtype(dtype_config: Any) -> torch.dtype:
     """Map config strings to torch autocast dtypes."""
-    if dtype_config is None:
-        return torch.float16
     if isinstance(dtype_config, torch.dtype):
         return dtype_config
 
@@ -153,22 +154,23 @@ class MetaModel:
 
     Attributes:
         run_name: Identifier for the current run/experiment.
-        model_name: Name of the model architecture (looked up in `mermaidseg.model.models`).
+        model_name: Name of the model architecture (a key of ``MODEL_CLASSES``).
         num_classes: Number of segmentation output (target) classes.
         device: Device the model and tensors live on.
         model_kwargs: Model-specific config passed to the architecture.
         training_kwargs: Training hyperparameters
             (epochs, iterations_per_train_epoch, iterations_per_val_epoch, optimizer, scheduler, loss).
         model: The instantiated model.
-        loss: Loss function; None until `training_kwargs` provides one.
+        loss: Loss function.
         optimizer: Optimiser instance.
-        scheduler: Optional LR scheduler.
+        scheduler: LR scheduler.
         source_to_target_lookup: 1-D long tensor of shape ``(N+1,)``
             mapping global source IDs to target label IDs. ``None`` enables identity passthrough
             (synthetic / single-source pipelines whose source space already matches target space).
         source_to_concepts_lookup: Float tensor of shape ``(N+1, C)``.
         conceptid2labelid: Maps concept IDs to target label IDs.
         concept_value2id: Maps concept names and values to IDs.
+        resuming_within_epoch: True after loading a mid-epoch step checkpoint.
     """
 
     run_name: str
@@ -178,22 +180,24 @@ class MetaModel:
     model_kwargs: ConfigDict
     training_kwargs: ConfigDict
     model: torch.nn.Module | transformers.PreTrainedModel
-    loss: torch.nn.Module | None
+    loss: torch.nn.Module
     optimizer: torch.optim.Optimizer
-    scheduler: torch.optim.lr_scheduler.LRScheduler | None
+    scheduler: torch.optim.lr_scheduler.LRScheduler
     source_to_target_lookup: torch.Tensor | None
     source_to_concepts_lookup: torch.Tensor | None
     conceptid2labelid: dict[int, int] | None
     concept_value2id: dict[str, dict[str, list[int]]] | None
+    resuming_within_epoch: bool
 
     def __init__(
         self,
         run_name: str,
         num_classes: int,
         num_concepts: int | None = None,
-        model_kwargs: ConfigDict | None = None,
+        *,
+        model_kwargs: ConfigDict,
+        training_kwargs: ConfigDict,
         device: str | torch.device = "cuda",
-        training_kwargs: ConfigDict | None = None,
         source_to_target_lookup: torch.Tensor | None = None,
         source_to_concepts_lookup: torch.Tensor | None = None,
         conceptid2labelid: dict[int, int] | None = None,
@@ -206,8 +210,8 @@ class MetaModel:
             num_classes: Number of segmentation output (target) classes.
             num_concepts: Number of concept channels.
             model_kwargs: Model-specific config passed to the architecture.
-            device: Device the model and tensors live on.
             training_kwargs: Training hyperparameters.
+            device: Device the model and tensors live on.
             source_to_target_lookup: Source-to-target label lookup, or ``None`` for identity.
             source_to_concepts_lookup: Source-to-concept lookup.
             conceptid2labelid: Maps concept IDs to target label IDs.
@@ -218,32 +222,19 @@ class MetaModel:
         self.num_concepts = num_concepts
         self.device = device
         self.global_step = 0
+        self.resuming_within_epoch = False
 
-        if model_kwargs is None:
-            model_kwargs = ConfigDict({})
-        if training_kwargs is None:
-            training_kwargs = ConfigDict(
-                {
-                    "epochs": 50,
-                    "optimizer": {
-                        "type": "AdamW",
-                        "lr": 0.001,
-                        "weight_decay": 0.01,
-                    },
-                }
-            )
-
-        self.model_name = model_kwargs.pop("name", None)
+        self.model_name = model_kwargs.pop("name")
         self.model_kwargs = model_kwargs
 
-        self.training_mode = training_kwargs.pop("training_mode", None)
+        self.training_mode = training_kwargs.pop("training_mode")
         assert self.training_mode == "concept-bottleneck", (
             f"Invalid training_mode: {self.training_mode}"
         )
         self._metric_shards: list[MetricShard] | None = None
         # One process per GPU (torchrun). The process group must already exist;
         # each rank's loader yields that rank's shard of the global microbatch.
-        self.distributed = bool(training_kwargs.pop("distributed", False))
+        self.distributed = bool(training_kwargs.pop("distributed"))
         self._ddp_step: DistributedDataParallel | None = None
         # Keep table of training.concept_source_mask, set by set_concept_source_mask.
         self.concept_source_keep: torch.Tensor | None = None
@@ -259,28 +250,27 @@ class MetaModel:
                 "distributed: %s ranks; each rank computes its shard's loss.", self.world_size
             )
 
-        freeze_encoder = training_kwargs.pop("freeze_encoder", True)
-        detach_concepts = training_kwargs.pop("detach_concepts", True)
+        freeze_encoder = training_kwargs.pop("freeze_encoder")
+        detach_concepts = training_kwargs.pop("detach_concepts")
 
         self.training_kwargs = training_kwargs
-        mixed_precision = training_kwargs.pop("mixed_precision", False)
-        mixed_precision_dtype = training_kwargs.pop("mixed_precision_dtype", None)
-        max_grad_norm = training_kwargs.pop("max_grad_norm", 1.0)
-        self.max_grad_norm = float(max_grad_norm) if max_grad_norm is not None else None
+        mixed_precision = training_kwargs.pop("mixed_precision")
+        mixed_precision_dtype = training_kwargs.pop("mixed_precision_dtype")
+        self.max_grad_norm = float(training_kwargs.pop("max_grad_norm"))
         self.amp_dtype = _resolve_amp_dtype(mixed_precision_dtype)
         self.use_amp = bool(mixed_precision) and torch.cuda.is_available()
         if self.use_amp and self.amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
             logger.warning("CUDA bf16 autocast is not supported on this GPU; disabling AMP.")
             self.use_amp = False
         self.scaler = torch.amp.GradScaler(enabled=self.use_amp and self.amp_dtype == torch.float16)
-        self.grad_accum_steps = max(1, int(training_kwargs.get("grad_accum_steps", 1)))
+        self.grad_accum_steps = max(1, int(training_kwargs.grad_accum_steps))
         # Training metrics only; validation scores every batch.
-        self.train_metrics_every = max(1, int(training_kwargs.get("train_metrics_every", 1)))
+        self.train_metrics_every = max(1, int(training_kwargs.train_metrics_every))
         self._train_microbatches_seen = 0
-        self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
+        self.iterations_per_train_epoch = int(training_kwargs.iterations_per_train_epoch)
         self._train_loader_iter: _BaseDataLoaderIter | None = None
         self._train_loader: _BatchLoader | None = None
-        self.iterations_per_val_epoch = training_kwargs.get("iterations_per_val_epoch")
+        self.iterations_per_val_epoch = int(training_kwargs.iterations_per_val_epoch)
         self._val_loader_iter: _BaseDataLoaderIter | None = None
         self._val_loader: _BatchLoader | None = None
         self.source_to_target_lookup = (
@@ -296,11 +286,10 @@ class MetaModel:
         self.conceptid2labelid = conceptid2labelid
         self.concept_value2id = concept_value2id
 
-        model_cls = getattr(mermaidseg.model.models, self.model_name)
-        model_kwargs.setdefault("num_classes", self.num_classes)
-        model_kwargs.setdefault("num_concepts", self.num_concepts)
-        model_kwargs.setdefault("concept_value2id", self.concept_value2id)
-        model_kwargs.pop("detach_concepts", None)
+        model_cls = lookup_class(MODEL_CLASSES, "model", self.model_name)
+        model_kwargs["num_classes"] = self.num_classes
+        model_kwargs["num_concepts"] = self.num_concepts
+        model_kwargs["concept_value2id"] = self.concept_value2id
         model_kwargs["detach_concepts"] = detach_concepts
         self.model = model_cls(**model_kwargs)
 
@@ -310,22 +299,22 @@ class MetaModel:
         if freeze_encoder and hasattr(self.model, "freeze_encoder"):
             cast("Any", self.model).freeze_encoder()
 
-        if "loss" in training_kwargs:
-            loss_cls = getattr(mermaidseg.model.loss, training_kwargs.loss.pop("type", None))
-            loss_kwargs = dict(training_kwargs.loss)
-            if self.concept_value2id is not None:
-                loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
-            self.loss = loss_cls(**loss_kwargs)
+        loss_cls = lookup_class(LOSS_CLASSES, "loss", training_kwargs.loss.pop("type"))
+        loss_kwargs = dict(training_kwargs.loss)
+        if self.concept_value2id is not None:
+            loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
+        self.loss = loss_cls(**loss_kwargs)
 
-        # Optional taxonomic KL coherence term added to the concept loss.
+        # Taxonomic KL coherence term added to the concept loss. The trainer drops the
+        # section when its kl_weight is not positive.
         self.taxonomic_loss = None
         taxonomic_cfg = training_kwargs.get("taxonomic_loss")
         if taxonomic_cfg is not None:
             taxonomic_kwargs = dict(taxonomic_cfg)
-            # Same tree as the hierarchical metrics: class_to_concepts.csv, permissive by default.
+            # Same tree as the hierarchical metrics.
             taxonomy = build_taxonomy_tree(
-                training_kwargs.get("concept_mapping_path") or DEFAULT_CLASS_TO_CONCEPTS_CSV,
-                ambiguity_policy=taxonomic_kwargs.pop("ambiguity_policy", "permissive"),
+                training_kwargs.concept_mapping_path,
+                ambiguity_policy=taxonomic_kwargs.pop("ambiguity_policy"),
             )
             self.taxonomic_loss = TaxonomicLoss(
                 taxonomy,
@@ -334,65 +323,44 @@ class MetaModel:
             ).to(device)
 
         optimizer_cfg = dict(training_kwargs.optimizer)
-        optimizer_cls = getattr(torch.optim, optimizer_cfg.pop("type", None))
-        # Optional differential learning rates: LoRA adapter params vs. everything else
+        optimizer_cls = lookup_class(OPTIMIZER_CLASSES, "optimizer", optimizer_cfg.pop("type"))
+        # Differential learning rates: LoRA adapter params vs. everything else
         # (DPT head + concept/class heads). Split by whether the param name contains
         # "lora_" (matches how ``freeze_encoder`` partitions params in models.py).
-        lora_lr = optimizer_cfg.pop("lora_lr", None)
-        dpt_lr = optimizer_cfg.pop("dpt_lr", None)
-        default_lr = optimizer_cfg.get("lr")
+        lora_lr = optimizer_cfg.pop("lora_lr")
+        dpt_lr = optimizer_cfg.pop("dpt_lr")
 
         named_trainable = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
         self._trainable_params = [p for _, p in named_trainable]  # kept for grad clipping
 
-        if lora_lr is not None or dpt_lr is not None:
-            lora_params = [p for n, p in named_trainable if "lora_" in n]
-            other_params = [p for n, p in named_trainable if "lora_" not in n]
-            groups = []
-            if lora_params:
-                groups.append(
-                    {"params": lora_params, "lr": lora_lr if lora_lr is not None else default_lr}
-                )
-            if other_params:
-                groups.append(
-                    {"params": other_params, "lr": dpt_lr if dpt_lr is not None else default_lr}
-                )
-            self.optimizer = optimizer_cls(groups, **optimizer_cfg)
-        else:
-            self.optimizer = optimizer_cls(params=self._trainable_params, **optimizer_cfg)
+        lora_params = [p for n, p in named_trainable if "lora_" in n]
+        other_params = [p for n, p in named_trainable if "lora_" not in n]
+        groups = []
+        if lora_params:
+            groups.append({"params": lora_params, "lr": lora_lr})
+        if other_params:
+            groups.append({"params": other_params, "lr": dpt_lr})
+        self.optimizer = optimizer_cls(groups, **optimizer_cfg)
 
         self._configure_schedulers()
 
     def _configure_schedulers(self) -> None:
-        """Build the epoch/iteration scheduler and the optional per-iteration warmup.
+        """Build the per-iteration scheduler and the optional per-iteration warmup.
 
-        ``scheduler.step_every`` is ``epoch`` (default; stepped once in ``train_model``) or
-        ``iteration`` (stepped after every optimizer step). Warmup keys are not forwarded to
-        the PyTorch scheduler constructor.
+        ``scheduler.step_every`` must be ``iteration``: the schedule steps after every optimizer
+        step. Warmup keys are not forwarded to the PyTorch scheduler constructor.
         """
-        training_kwargs = self.training_kwargs
-        if "scheduler" not in training_kwargs:
-            self.scheduler = None
-            self.scheduler_step_every = "epoch"
-            self.warmup_iters = 0
-            self.warmup_scheduler = None
-            self._warmup_iters_completed = 0
-            return
-
-        scheduler_cfg = dict(training_kwargs.scheduler)
-        warmup_iters = int(scheduler_cfg.pop("warmup_iters", 2000))
-        warmup_start_factor = float(scheduler_cfg.pop("warmup_start_factor", 0.01))
-        step_every = str(scheduler_cfg.pop("step_every", "epoch"))
-        if step_every not in {"epoch", "iteration"}:
-            raise ValueError(
-                f"scheduler.step_every must be 'epoch' or 'iteration', got {step_every!r}"
-            )
-        scheduler_type = scheduler_cfg.pop("type", None)
-        scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_type)
+        scheduler_cfg = dict(self.training_kwargs.scheduler)
+        warmup_iters = int(scheduler_cfg.pop("warmup_iters"))
+        warmup_start_factor = float(scheduler_cfg.pop("warmup_start_factor"))
+        step_every = str(scheduler_cfg.pop("step_every"))
+        if step_every != "iteration":
+            raise ValueError(f"scheduler.step_every must be 'iteration', got {step_every!r}")
+        scheduler_cls = lookup_class(SCHEDULER_CLASSES, "scheduler", scheduler_cfg.pop("type"))
         self.scheduler = scheduler_cls(self.optimizer, **scheduler_cfg)
-        self.scheduler_step_every = step_every
         self.warmup_iters = warmup_iters
         self._warmup_iters_completed = 0
+        self.warmup_scheduler: torch.optim.lr_scheduler.LinearLR | None
         if warmup_iters > 0:
             self.warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
                 self.optimizer,
@@ -411,8 +379,6 @@ class MetaModel:
 
     def _step_iteration_scheduler(self) -> None:
         """Step an iteration-level schedule once per optimizer step, after warmup."""
-        if self.scheduler is None or self.scheduler_step_every != "iteration":
-            return
         if self.warmup_iters > 0 and self._warmup_iters_completed < self.warmup_iters:
             return
         self.scheduler.step()
@@ -445,7 +411,7 @@ class MetaModel:
         or a non-finite grad norm).
         """
         scale_before = self.scaler.get_scale()
-        if self.max_grad_norm is not None and self.max_grad_norm > 0:
+        if self.max_grad_norm > 0:
             self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(self._trainable_params, self.max_grad_norm)
             if not torch.isfinite(grad_norm):
@@ -584,8 +550,6 @@ class MetaModel:
                 and step.concept_keep is self.concept_source_keep
             ):
                 return ddp
-        if self.loss is None:
-            raise RuntimeError("distributed requires a loss.")
         if self.source_to_concepts_lookup is None:
             raise RuntimeError("distributed requires concept labels.")
         step = DDPLossStep(
@@ -711,7 +675,6 @@ class MetaModel:
         assert target_concepts is not None, (
             "target_concepts must be provided in 'concept-bottleneck' mode"
         )
-        assert self.loss is not None
         loss, outputs, concept_outputs, loss_components = apply_concept_bottleneck_loss(
             segmentation_outputs,
             self.loss,
@@ -766,8 +729,6 @@ class MetaModel:
             cast("Any", self.model).freeze_encoder()
 
         iterations_per_train_epoch = self.iterations_per_train_epoch
-        if iterations_per_train_epoch is None:
-            iterations_per_train_epoch = len(train_loader)
         if iterations_per_train_epoch <= 0:
             raise ValueError("iterations_per_train_epoch must be > 0.")
 
@@ -1056,8 +1017,6 @@ class MetaModel:
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch."""
         iterations_per_val_epoch = self.iterations_per_val_epoch
-        if iterations_per_val_epoch is None:
-            iterations_per_val_epoch = len(val_loader)
         if iterations_per_val_epoch <= 0:
             raise ValueError("iterations_per_val_epoch must be > 0.")
 
