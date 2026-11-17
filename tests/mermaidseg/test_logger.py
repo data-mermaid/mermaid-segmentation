@@ -13,8 +13,7 @@ from mermaidseg.logger import (
     WandbLogger,
     prune_rolling_checkpoints,
 )
-
-from .conftest import FakeMetaModel
+from tests.conftest import FakeMetaModel
 
 
 def _wandb_logger(lgr: Logger) -> MagicMock:
