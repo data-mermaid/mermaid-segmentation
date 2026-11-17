@@ -57,6 +57,7 @@ def coralnet_image_sources(data_config: Path) -> pd.Series:
 
 
 def main() -> None:
+    """Parse arguments and build the concept removal file."""
     rule = CoverageRule()
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter

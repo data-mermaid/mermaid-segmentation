@@ -98,6 +98,7 @@ def only_false_pairs(counts: pd.DataFrame) -> pd.DataFrame:
 
 
 def file_sha1(path: str | Path) -> str:
+    """Return the hex SHA-1 digest of a file's bytes."""
     return hashlib.sha1(Path(path).read_bytes()).hexdigest()
 
 
@@ -125,9 +126,11 @@ class ConceptSourceMask:
 
     @property
     def num_masked(self) -> int:
+        """Number of masked source x channel entries."""
         return int((~self.keep).sum())
 
     def row_by_source(self) -> dict[str, int]:
+        """Map each source id to its keep-table row."""
         return {source: i + 1 for i, source in enumerate(self.source_ids)}
 
     def rows_for(self, source_ids: Iterable[Any]) -> np.ndarray:
@@ -143,7 +146,7 @@ def load_concept_source_mask(
     concepts_csv: str | Path | None = None,
     removed_concepts: Iterable[str] = (),
 ) -> ConceptSourceMask:
-    """Read a mask CSV written by ``scripts/build_concept_source_mask.py`` into a keep table.
+    """Read a mask CSV from ``scripts/build_concept_source_mask.py`` into a keep table.
 
     Checks, before training starts:
     - every concept is a binary channel of ``schema``; concepts in ``removed_concepts`` (removed
@@ -222,7 +225,7 @@ def apply_concept_source_mask(
 
 
 class _ConstantSourceRow(Dataset):
-    """Adds a constant keep-table row to a dataset that does not subclass ``BaseCoralDataset``."""
+    """Adds a constant keep-table row to a dataset that is not a ``BaseCoralDataset``."""
 
     def __init__(self, dataset: Dataset, row: int = 0) -> None:
         self.dataset = dataset

@@ -1,8 +1,11 @@
+"""Train the concept-bottleneck segmentation pipeline (ViT-L, LoRA, DPT head)."""
+
 import contextlib
 import copy
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -84,7 +87,7 @@ def load_training_checkpoint(
 
     # Missing epoch_complete means an older epoch-boundary checkpoint: start the next epoch.
     # A mid-epoch model_step* file sets epoch_complete false and continues this epoch.
-    meta_model.resuming_within_epoch = not bool(checkpoint.get("epoch_complete", True))
+    meta_model.resuming_within_epoch = not bool(checkpoint.get("epoch_complete", True))  # type: ignore[attr-defined]  # set dynamically, read via getattr
     return next_epoch_from_checkpoint(checkpoint)
 
 
@@ -100,7 +103,8 @@ check_env_wandb()
 DIST = init_distributed_from_env()
 
 
-def print0(*args, **kwargs) -> None:
+def print0(*args: Any, **kwargs: Any) -> None:
+    """Print only on the main rank."""
     if DIST.is_main:
         print(*args, **kwargs)
 
@@ -252,8 +256,8 @@ if NUM_WORKERS > 0:
         )
 
 
-def make_shuffled_loader(dataset: ConcatDataset, **kwargs) -> DataLoader:
-    """Shuffled minibatches of ``batch_size``; under torchrun, this rank's shard of each.
+def make_shuffled_loader(dataset: ConcatDataset, **kwargs: Any) -> DataLoader:
+    """Shuffled minibatches of ``batch_size``; under torchrun, this rank's shard.
 
     Every rank uses rank 0's shuffle seed, so the global minibatches are the
     ones a single-process ``shuffle=True`` loader draws.
@@ -372,6 +376,7 @@ evaluator = Evaluator(
 # Backend selection is config-driven (configs/logger_config.yaml sets
 # enable_wandb: true). Under torchrun only rank 0 has a
 # Logger; the other ranks train with logger=None and write nothing.
+logger_context: contextlib.AbstractContextManager[Logger | None]
 if DIST.is_main:
     logger_context = Logger(
         config=cfg_logger,
@@ -453,7 +458,7 @@ with logger_context as run_logger:
 
     for epoch in range(start_epoch, cfg.training.epochs):
 
-        def _save_step_checkpoint(meta, epoch=epoch):
+        def _save_step_checkpoint(meta: MetaModel, epoch: int = epoch) -> None:
             step = int(meta.global_step)
             # Same predicate on every rank: global_step is updated together.
             # Steps that do not write return immediately, with no barrier.
@@ -463,6 +468,7 @@ with logger_context as run_logger:
                 return
 
             def _write() -> None:
+                assert run_logger is not None  # on_main_process runs only where the Logger exists
                 # Interval checkpoints (eval cadence). Unchanged when preempt_every is 0,
                 # which is the default.
                 if write_interval:

@@ -8,6 +8,7 @@ precomputed ``(N+1, C)`` float tensor (with row 0 as the all-zeros background ro
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 import requests
@@ -111,14 +112,14 @@ def initialize_benthic_hierarchy(
         benthic_attributes.extend(data["results"])
 
     hierarchy_id_dict: dict[int, int | None] = {}
-    id2name_dict: dict[int, str] = {}
+    id2name_dict: dict[int | None, str] = {}
     for attr in benthic_attributes:
         node_id = attr["id"]
         parent_id = attr["parent"]
         hierarchy_id_dict[node_id] = parent_id
         id2name_dict[node_id] = attr["name"]
     return {
-        id2name_dict.get(node_id): id2name_dict.get(parent_id)
+        cast("str", id2name_dict.get(node_id)): id2name_dict.get(parent_id)
         for node_id, parent_id in hierarchy_id_dict.items()
     }
 
@@ -151,7 +152,7 @@ def generate_taxonomic_binary_id_mapping(
 
 def generate_binary_concept_id_mapping(
     df: pd.DataFrame, taxonomic_col: str
-) -> dict[str | int] | None:
+) -> dict[str | bool, int] | None:
     """Generate a mapping for one hot (not really) encoded concepts.
 
     "not given" is always mapped to 0.

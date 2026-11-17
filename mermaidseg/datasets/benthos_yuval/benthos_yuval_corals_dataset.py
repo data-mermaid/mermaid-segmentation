@@ -63,7 +63,8 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         whitelist_sites: list[str] | None = None,
         blacklist_sites: list[str] | None = None,
         **base_kwargs: Any,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         if whitelist_sites is not None and blacklist_sites is not None:
             raise ValueError("Cannot specify both whitelist_sites and blacklist_sites.")
 
@@ -152,10 +153,12 @@ class BenthosYuvalCoralsDataset(BaseCoralDataset):
         self._classes_global_to_local = self._build_classes_global_to_local()
 
     def set_global_offset(self, offset: int) -> None:
+        """Set the global offset and rebuild the classes.json lookup."""
         super().set_global_offset(offset)
         self._classes_global_to_local = self._build_classes_global_to_local()
 
-    def read_image(self, image_id: str, site: str, **row_kwargs: Any) -> NDArray[Any]:
+    def read_image(self, image_id: str, site: str, **row_kwargs: Any) -> NDArray[Any]:  # type: ignore[override]  # row columns are required named parameters
+        """Read the source image for one row of ``df_images`` as an RGB array."""
         key = f"{self.source_s3_prefix}/images/{site}/{image_id}.png"
         return np.array(get_image_s3(bucket=self.source_bucket, key=key).convert("RGB"))
 

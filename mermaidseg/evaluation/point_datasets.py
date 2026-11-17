@@ -50,6 +50,17 @@ class PointEvalDataset(Dataset):
         class_lookup: ClassLookup,
         concept_lookup: ConceptLookup,
     ):
+        """Sort images by unit and pre-group annotations per image.
+
+        Args:
+            base_ds: Point-annotated source dataset exposing ``df_images``,
+                ``df_annotations`` and ``read_image``.
+            unit_col: Image column that defines the evaluation unit.
+            key_cols: Image columns that identify one image's annotations.
+            input_size: ``(height, width)`` the images are resized to.
+            class_lookup: Source label to target class id lookup.
+            concept_lookup: Source label to concept row lookup.
+        """
         self.base = base_ds
         self.unit_col = unit_col
         self.key_cols = list(key_cols)
@@ -76,13 +87,16 @@ class PointEvalDataset(Dataset):
             self._groups[key_t] = (rows, cols, names, g.index.to_numpy())
 
     def __len__(self) -> int:
+        """Return the number of images."""
         return len(self.df_images)
 
     def unit_image_counts(self) -> dict[str, int]:
+        """Return the number of images in each unit."""
         counts = self.df_images[self.unit_col].astype(str).value_counts().to_dict()
         return {str(k): int(v) for k, v in counts.items()}
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
+        """Return one image with its annotation points; ``ok`` is False on a load failure."""
         row = self.df_images.iloc[idx]
         unit = str(row[self.unit_col])
         key_t = tuple(row[c] for c in self.key_cols)

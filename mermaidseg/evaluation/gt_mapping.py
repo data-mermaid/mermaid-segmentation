@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -44,9 +45,10 @@ logger = logging.getLogger(__name__)
 _PLACEHOLDER_TAXA = {"not_given", "not given", "", "nan"}
 
 
-def _source_to_target_map(source_name: str) -> dict[str, str]:
+def _source_to_target_map(source_name: str) -> dict[str, str | None]:
     """Return the static/config ``source_label -> MERMAID target`` map for a source."""
     source_name = source_name.lower()
+    raw: Mapping[str, str | None]
     if source_name == "coralnet":
         raw = fetch_coralnet_to_mermaid()
     elif source_name == "pacific_labeled_corals":
@@ -117,11 +119,18 @@ class ClassLookup:
     """Maps source label names to MERMAID target class ids (0 = ignore)."""
 
     def __init__(self, name_to_class_id: dict[str, int], id2label: dict[int, str]):
+        """Store the lookup tables.
+
+        Args:
+            name_to_class_id: Lower-cased source label name to target class id.
+            id2label: Target class id to label name.
+        """
         self.name_to_class_id = name_to_class_id
         self.id2label = id2label
         self.unmapped: set[str] = set()
 
     def class_id(self, source_label_name: str) -> int:
+        """Return the target class id of a source label; unmapped labels give 0 (recorded)."""
         key = str(source_label_name).lower()
         cid = self.name_to_class_id.get(key)
         if cid is None:
@@ -235,6 +244,13 @@ class ConceptLookup:
         num_channels: int,
         name_to_scope: dict[str, tuple[bool, bool]] | None = None,
     ):
+        """Store the lookup tables.
+
+        Args:
+            name_to_row: Lower-cased source label name to concept row.
+            num_channels: Number of concept channels in a row.
+            name_to_scope: Lower-cased source label name to ``(live, coral)`` flags.
+        """
         self.name_to_row = name_to_row
         self.num_channels = num_channels
         self.name_to_scope = name_to_scope or {}
@@ -242,6 +258,7 @@ class ConceptLookup:
         self.unmapped: set[str] = set()
 
     def row(self, source_label_name: str) -> NDArray[np.int8]:
+        """Return the concept row of a source label; unmapped labels give zeros (recorded)."""
         key = str(source_label_name).lower()
         r = self.name_to_row.get(key)
         if r is None:
@@ -250,6 +267,7 @@ class ConceptLookup:
         return r
 
     def scopes(self, source_label_name: str) -> tuple[bool, bool]:
+        """Return the ``(live, coral)`` flags of a source label."""
         return self.name_to_scope.get(str(source_label_name).lower(), (True, False))
 
 

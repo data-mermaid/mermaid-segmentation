@@ -15,6 +15,7 @@ the pooled accumulator.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -40,11 +41,26 @@ class ClassConfusion:
     """
 
     def __init__(self, num_classes: int, ignore_index: int | None = 0):
+        """Create an empty confusion matrix.
+
+        Args:
+            num_classes: Size of the class label space.
+            ignore_index: Ground-truth value excluded from accumulation, or ``None``.
+        """
         self.num_classes = int(num_classes)
         self.ignore_index = ignore_index
         self.cm = np.zeros((self.num_classes, self.num_classes), dtype=np.int64)
 
     def update(self, gt: NDArray[np.integer], pred: NDArray[np.integer]) -> None:
+        """Accumulate flattened ground-truth and predicted class ids.
+
+        Args:
+            gt: Ground-truth class ids.
+            pred: Predicted class ids, same number of elements as ``gt``.
+
+        Raises:
+            ValueError: If ``gt`` and ``pred`` differ in size.
+        """
         gt = np.asarray(gt).reshape(-1).astype(np.int64)
         pred = np.asarray(pred).reshape(-1).astype(np.int64)
         if gt.shape != pred.shape:
@@ -64,23 +80,32 @@ class ClassConfusion:
         )
 
     def merge(self, other: ClassConfusion) -> None:
+        """Add another accumulator's counts into this one.
+
+        Raises:
+            ValueError: If the class counts differ.
+        """
         if other.num_classes != self.num_classes:
             raise ValueError("Cannot merge ClassConfusion with different num_classes")
         self.cm += other.cm
 
     def clone(self) -> ClassConfusion:
+        """Return an independent copy."""
         out = ClassConfusion(self.num_classes, self.ignore_index)
         out.cm = self.cm.copy()
         return out
 
     @property
     def total(self) -> int:
+        """Number of accumulated (scored) samples."""
         return int(self.cm.sum())
 
     def accuracy(self) -> float:
+        """Return overall accuracy, NaN when empty."""
         return _safe_div(np.trace(self.cm), self.cm.sum())
 
     def per_class_iou(self) -> NDArray[np.float64]:
+        """Return the IoU of every class, NaN where the union is empty."""
         tp = np.diag(self.cm).astype(np.float64)
         gt = self.cm.sum(axis=1).astype(np.float64)
         pred = self.cm.sum(axis=0).astype(np.float64)
@@ -97,6 +122,11 @@ class ClassConfusion:
         return ids
 
     def miou(self, class_ids: list[int] | None = None) -> float:
+        """Return the mean IoU over the evaluated classes, ignoring NaN entries.
+
+        Args:
+            class_ids: Classes to average. Defaults to all classes except ``ignore_index``.
+        """
         iou = self.per_class_iou()
         ids = self._eval_class_ids(class_ids)
         vals = np.array([iou[c] for c in ids], dtype=np.float64)
@@ -106,6 +136,12 @@ class ClassConfusion:
     def to_dict(
         self, id2name: dict[int, str] | None = None, class_ids: list[int] | None = None
     ) -> dict:
+        """Summarise accuracy, mIoU and per-class counts as a plain dict.
+
+        Args:
+            id2name: Class id to display name. Ids not present use ``str(id)``.
+            class_ids: Classes to report. Defaults to all classes except ``ignore_index``.
+        """
         iou = self.per_class_iou()
         ids = self._eval_class_ids(class_ids)
         per_class = {}
@@ -155,11 +191,17 @@ class TaxonomicRankAccuracy:
     channel_indices: list[int]
     none_local_index: int | None = None
     values: list[str] | None = None
-    confusion: NDArray[np.int64] | None = None
-    confusion_living: NDArray[np.int64] | None = None
-    confusion_coral: NDArray[np.int64] | None = None
+    # ``None`` defaults are replaced by zero matrices in ``__post_init__``.
+    confusion: NDArray[np.int64] = None  # type: ignore[assignment]
+    confusion_living: NDArray[np.int64] = None  # type: ignore[assignment]
+    confusion_coral: NDArray[np.int64] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
+        """Replace missing confusion matrices with zeros and validate shapes.
+
+        Raises:
+            ValueError: If a matrix or ``values`` does not match the channel count.
+        """
         n = len(self.channel_indices)
         for name in ("confusion", "confusion_living", "confusion_coral"):
             cm = getattr(self, name)
@@ -177,7 +219,7 @@ class TaxonomicRankAccuracy:
         live: NDArray[np.bool_] | None = None,
         coral: NDArray[np.bool_] | None = None,
     ) -> None:
-        """Accumulate points; ``live`` / ``coral`` are per-point flags aligned with ``gt_rows``."""
+        """Accumulate points; ``live`` / ``coral`` are per-point flags aligned to ``gt_rows``."""
         if not self.channel_indices:
             return
         g = np.asarray(gt_rows)[:, self.channel_indices]
@@ -209,6 +251,11 @@ class TaxonomicRankAccuracy:
         self.confusion_coral += np.bincount(flat[in_coral], minlength=n * n).reshape(n, n)
 
     def merge(self, other: TaxonomicRankAccuracy) -> None:
+        """Add another accumulator's counts into this one.
+
+        Raises:
+            ValueError: If the channel layouts differ.
+        """
         if other.channel_indices != self.channel_indices:
             raise ValueError(f"Cannot merge {self.rank} accumulators with different channels")
         self.confusion += other.confusion
@@ -216,6 +263,7 @@ class TaxonomicRankAccuracy:
         self.confusion_coral += other.confusion_coral
 
     def clone(self) -> TaxonomicRankAccuracy:
+        """Return an independent copy."""
         return TaxonomicRankAccuracy(
             rank=self.rank,
             channel_indices=list(self.channel_indices),
@@ -228,14 +276,17 @@ class TaxonomicRankAccuracy:
 
     @property
     def total_all(self) -> int:
+        """Number of points in the ``all`` scope."""
         return int(self.confusion.sum())
 
     @property
     def total_living(self) -> int:
+        """Number of points in the ``living`` scope."""
         return int(self.confusion_living.sum())
 
     @property
     def total_coral(self) -> int:
+        """Number of points in the ``coral`` scope."""
         return int(self.confusion_coral.sum())
 
     @staticmethod
@@ -244,19 +295,22 @@ class TaxonomicRankAccuracy:
 
     @property
     def acc_all(self) -> float:
+        """Accuracy in the ``all`` scope."""
         return self._accuracy(self.confusion)
 
     @property
     def acc_living(self) -> float:
+        """Accuracy in the ``living`` scope."""
         return self._accuracy(self.confusion_living)
 
     @property
     def acc_coral(self) -> float:
+        """Accuracy in the ``coral`` scope."""
         return self._accuracy(self.confusion_coral)
 
     @staticmethod
     def _per_taxon_f1(cm: NDArray[np.int64]) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
-        """Per-taxon F1 and GT support; ``2TP + FP + FN`` equals GT count + predicted count."""
+        """Per-taxon F1 and GT support; ``2TP + FP + FN`` is GT count + predicted count."""
         tp = np.diag(cm).astype(np.float64)
         support = cm.sum(axis=1)
         denom = (support + cm.sum(axis=0)).astype(np.float64)
@@ -273,30 +327,39 @@ class TaxonomicRankAccuracy:
 
     @property
     def macro_f1_all(self) -> float:
+        """Macro F1 in the ``all`` scope."""
         return self._macro(*self._per_taxon_f1(self.confusion))[0]
 
     @property
     def macro_f1_living(self) -> float:
+        """Macro F1 in the ``living`` scope."""
         return self._macro(*self._per_taxon_f1(self.confusion_living))[0]
 
     @property
     def macro_f1_coral(self) -> float:
+        """Macro F1 in the ``coral`` scope."""
         return self._macro(*self._per_taxon_f1(self.confusion_coral))[0]
 
     @property
     def f1_none(self) -> float:
+        """One-vs-rest F1 of ``rank__none``, NaN without that channel."""
         if self.none_local_index is None:
             return float("nan")
         return float(self._per_taxon_f1(self.confusion)[0][self.none_local_index])
 
     def to_dict(self, include_detail: bool = False) -> dict:
+        """Summarise the per-scope accuracies and macro F1 as a plain dict.
+
+        Args:
+            include_detail: Also include per-taxon support and F1 under ``per_taxon``.
+        """
         f1_all, support_all = self._per_taxon_f1(self.confusion)
         f1_living, support_living = self._per_taxon_f1(self.confusion_living)
         f1_coral, support_coral = self._per_taxon_f1(self.confusion_coral)
         macro_all, n_taxa_all = self._macro(f1_all, support_all)
         macro_living, n_taxa_living = self._macro(f1_living, support_living)
         macro_coral, n_taxa_coral = self._macro(f1_coral, support_coral)
-        out = {
+        out: dict[str, Any] = {
             "acc_all": self.acc_all,
             "acc_living": self.acc_living,
             "acc_coral": self.acc_coral,
@@ -351,6 +414,16 @@ class BinaryConceptStats:
     """
 
     def __init__(self, names: list[str], channel_indices: list[int], threshold: float = 0.5):
+        """Create zeroed counters for the given binary concepts.
+
+        Args:
+            names: Concept names, aligned with ``channel_indices``.
+            channel_indices: Channel of each concept in the ground-truth/probability arrays.
+            threshold: Probabilities strictly above this are predicted positive.
+
+        Raises:
+            ValueError: If ``names`` and ``channel_indices`` differ in length.
+        """
         if len(names) != len(channel_indices):
             raise ValueError("names and channel_indices must align")
         self.names = list(names)
@@ -366,6 +439,15 @@ class BinaryConceptStats:
         self.n_not_given = np.zeros(n, dtype=np.int64)
 
     def update(self, gt_rows: NDArray[np.integer], pred_probs: NDArray[np.floating]) -> None:
+        """Accumulate points.
+
+        Args:
+            gt_rows: Ground-truth concept codes, shape ``(points, channels)``.
+            pred_probs: Predicted probabilities, same shape as ``gt_rows``.
+
+        Raises:
+            ValueError: If a ground-truth code is outside ``{0, 1, 2}``.
+        """
         if not self.channel_indices:
             return
         g = np.asarray(gt_rows)[:, self.channel_indices]
@@ -386,6 +468,11 @@ class BinaryConceptStats:
         self.n_not_given += (g == 0).sum(axis=0).astype(np.int64)
 
     def merge(self, other: BinaryConceptStats) -> None:
+        """Add another accumulator's counts into this one.
+
+        Raises:
+            ValueError: If the concept names differ.
+        """
         if other.names != self.names:
             raise ValueError("Cannot merge BinaryConceptStats with different concepts")
         self.tp += other.tp
@@ -395,6 +482,7 @@ class BinaryConceptStats:
         self.n_not_given += other.n_not_given
 
     def clone(self) -> BinaryConceptStats:
+        """Return an independent copy."""
         out = BinaryConceptStats(self.names, self.channel_indices, self.threshold)
         out.tp = self.tp.copy()
         out.fp = self.fp.copy()
@@ -404,6 +492,7 @@ class BinaryConceptStats:
         return out
 
     def per_concept(self) -> dict[str, dict]:
+        """Return accuracy, precision, recall, F1 and raw counts for each concept."""
         out: dict[str, dict] = {}
         for i, name in enumerate(self.names):
             tp, fp, fn, tn = (int(self.tp[i]), int(self.fp[i]), int(self.fn[i]), int(self.tn[i]))
@@ -431,6 +520,7 @@ class BinaryConceptStats:
         return out
 
     def to_dict(self) -> dict:
+        """Summarise macro accuracy/F1 together with the per-concept stats."""
         per = self.per_concept()
         accs = [v["accuracy"] for v in per.values() if v["n_valid"] > 0]
         f1s = [v["f1"] for v in per.values() if (2 * v["tp"] + v["fp"] + v["fn"]) > 0]
@@ -487,6 +577,11 @@ class BinaryConceptScore:
     """
 
     def __init__(self, threshold: float = 0.5):
+        """Create zeroed counters.
+
+        Args:
+            threshold: Probabilities strictly above this are predicted positive.
+        """
         self.threshold = float(threshold)
         self.tp = 0
         self.fp = 0
@@ -501,6 +596,17 @@ class BinaryConceptScore:
         probabilities: NDArray[np.floating],
         unannotated: NDArray[np.bool_] | None = None,
     ) -> None:
+        """Accumulate pixels.
+
+        Args:
+            codes: Ground-truth concept codes in ``{0, 1, 2}``.
+            probabilities: Predicted probabilities, same size as ``codes``.
+            unannotated: Mask of unannotated pixels, which must carry code 0.
+
+        Raises:
+            ValueError: On shape mismatch, an invalid code, or an unannotated pixel with a
+                non-zero code.
+        """
         gt = np.asarray(codes).reshape(-1)
         prob = np.asarray(probabilities).reshape(-1)
         if gt.shape != prob.shape:
@@ -534,6 +640,7 @@ class BinaryConceptScore:
         self.n_unannotated += int(unlabeled.sum())
 
     def to_dict(self) -> dict:
+        """Return the confusion counts and derived metrics for this concept."""
         tp, fp, fn, tn = self.tp, self.fp, self.fn, self.tn
         n_true = tp + fn
         n_false = fp + tn
@@ -567,6 +674,7 @@ class ConceptLayout:
 
     @classmethod
     def from_concept_names(cls, concept_names: list[str]) -> ConceptLayout:
+        """Group ``rank__value`` names by taxonomic rank and collect the binary concepts."""
         taxo: list[tuple[str, list[int], int | None]] = []
         for rank in TAXONOMIC_CONCEPTS:
             prefix = f"{rank}__"
@@ -600,6 +708,7 @@ class MetricBundle:
 
     @classmethod
     def create(cls, num_classes: int, layout: ConceptLayout, ignore_index: int = 0) -> MetricBundle:
+        """Build an empty bundle for a class space and a concept layout."""
         taxo = [
             TaxonomicRankAccuracy(
                 rank=rank,
@@ -626,6 +735,16 @@ class MetricBundle:
         live: NDArray[np.bool_] | None = None,
         coral: NDArray[np.bool_] | None = None,
     ) -> None:
+        """Accumulate points into the class and concept accumulators.
+
+        Args:
+            gt_class: Ground-truth class ids.
+            pred_class: Predicted class ids.
+            gt_rows: Ground-truth concept codes, shape ``(points, channels)``.
+            pred_probs: Predicted concept probabilities, same shape as ``gt_rows``.
+            live: Per-point flag marking living points.
+            coral: Per-point flag marking coral points.
+        """
         self.class_confusion.update(gt_class, pred_class)
         for t in self.taxo:
             t.update(gt_rows, pred_probs, live=live, coral=coral)
@@ -634,6 +753,7 @@ class MetricBundle:
         self.num_points += int(np.asarray(gt_class).reshape(-1).shape[0])
 
     def merge(self, other: MetricBundle) -> None:
+        """Add another bundle's counts into this one."""
         self.class_confusion.merge(other.class_confusion)
         for a, b in zip(self.taxo, other.taxo, strict=True):
             a.merge(b)
@@ -642,6 +762,7 @@ class MetricBundle:
         self.num_points += other.num_points
 
     def clone(self) -> MetricBundle:
+        """Return an independent copy."""
         return MetricBundle(
             class_confusion=self.class_confusion.clone(),
             taxo=[t.clone() for t in self.taxo],
@@ -655,6 +776,13 @@ class MetricBundle:
         include_class_detail: bool = False,
         include_taxon_detail: bool = False,
     ) -> dict:
+        """Summarise class, taxonomic and binary metrics as a plain dict.
+
+        Args:
+            class_id2name: Class id to display name for the class detail.
+            include_class_detail: Add per-class IoU and counts under ``class_detail``.
+            include_taxon_detail: Add per-taxon detail to each taxonomic rank.
+        """
         out = {
             "num_points": self.num_points,
             "class_accuracy": self.class_confusion.accuracy(),

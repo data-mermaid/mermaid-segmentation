@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 
 
 class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
-    """A PyTorch Dataset wrapping the HuggingFace
-    `josauder/UCSD-mosaics-mirror <https://huggingface.co/datasets/josauder/UCSD-mosaics-mirror>`_
-    dataset (Edwards et al. 2017 mosaics, Alonso et al. 2019 patch split,
+    """Wrap the HuggingFace UCSD mosaics dataset.
+
+    Source: `josauder/UCSD-mosaics-mirror <https://huggingface.co/datasets/josauder/UCSD-mosaics-mirror>`_
+    (Edwards et al. 2017 mosaics, Alonso et al. 2019 patch split,
     Raine et al. 2024 GT-Clean cleanup).
 
     Each item is ``(image, source_labels)`` where ``source_labels`` is an
@@ -101,7 +102,8 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         class_subset: list[str] | None = None,
         transform: A.BasicTransform | None = None,
         hf_repo_id: str = HF_REPO_ID,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         from datasets import concatenate_datasets, get_dataset_split_names, load_dataset
         from huggingface_hub import hf_hub_download
 
@@ -121,6 +123,7 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.class_subset = class_subset
         self._global_offset = 0
 
+        classes_path: Path | str
         local_dir = Path(self.hf_repo_id)
         if local_dir.is_dir():
             classes_path = local_dir / "classes.json"
@@ -228,12 +231,15 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     @property
     def global_offset(self) -> int:
+        """Current global offset assigned by the registry."""
         return self._global_offset
 
     def __len__(self) -> int:
+        """Return the number of rows in the underlying dataset."""
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def __getitem__(self, idx: int) -> tuple[Any, Any]:
+        """Return ``(image, source_labels)``, or ``(None, None)`` if loading fails."""
         try:
             row = self.dataset[idx]
             image = np.array(row["image"])

@@ -29,7 +29,7 @@ import logging
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -59,7 +59,7 @@ TOTAL_KEY = "loss"
 
 
 def binary_concept_names(concept_value2id: dict[str, Any], channel_names: list[str]) -> list[str]:
-    """Names of the binary channels, which follow the taxonomic ranks (as in ``iter_concept_slices``)."""
+    """Names of the binary channels, which follow the taxonomic ranks (as in the slices)."""
     offset = 0
     for rank in TAXONOMIC_CONCEPTS:
         if rank in concept_value2id:
@@ -75,6 +75,7 @@ class _Accumulator:
         self.counts: dict[str, int] = defaultdict(int)
 
     def add(self, components: dict[str, float]) -> None:
+        """Add one batch's components."""
         for key, value in components.items():
             self.sums[key] += float(value)
             self.counts[key] += 1
@@ -141,7 +142,7 @@ def evaluate_val_loss(
     name: str = "val_loss",
     apply_source_mask: bool = False,
 ) -> dict:
-    """Validation loss components of ``checkpoint``; also written to ``<output_dir>/<name>/``."""
+    """Validation loss components of ``checkpoint``, also written to ``<output_dir>/<name>/``."""
     t0 = time.time()
     cfg = setup_config(
         {"data": str(data_config), "training": str(training_config), "model": str(model_config)},
@@ -164,7 +165,7 @@ def evaluate_val_loss(
     channel_names = [name for _, name in sorted(schema.channel_id2name().items())]
     _check_layout(Path(checkpoint), registry, channel_names)
     cfg.training.loss.binary_concept_names = binary_concept_names(
-        registry.concept_value2id, channel_names
+        cast("dict[str, Any]", registry.concept_value2id), channel_names
     )
 
     source_mask = None
@@ -200,10 +201,10 @@ def evaluate_val_loss(
         indices = torch.randperm(len(dataset), generator=torch.Generator().manual_seed(seed))
         if max_images_per_dataset is not None:
             indices = indices[:max_images_per_dataset]
-        indices = sorted(indices.tolist())
-        n_images[dataset_name] = len(indices)
+        image_indices: list[int] = sorted(indices.tolist())
+        n_images[dataset_name] = len(image_indices)
         loader = DataLoader(
-            Subset(dataset, indices),
+            Subset(dataset, image_indices),
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
@@ -227,7 +228,11 @@ def evaluate_val_loss(
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                     outputs = meta.model(images)
                 loss, _, _, components = apply_concept_bottleneck_loss(
-                    outputs, meta.loss, None, target_labels, target_concepts
+                    outputs,
+                    cast("torch.nn.Module", meta.loss),
+                    None,
+                    target_labels,
+                    target_concepts,
                 )
                 acc.add({TOTAL_KEY: loss.item(), **components})
         per_dataset[dataset_name] = acc.means()
@@ -237,7 +242,7 @@ def evaluate_val_loss(
             name,
             dataset_name,
             per_dataset[dataset_name].get(TOTAL_KEY, float("nan")),
-            len(indices),
+            len(image_indices),
         )
 
     del meta

@@ -45,7 +45,9 @@ import json
 import logging
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import torch
 import yaml
@@ -81,7 +83,7 @@ def _data_section(data_config: str | Path) -> dict:
     return raw.get("data", raw)
 
 
-def _split_field(data: dict, dataset: str, split: str, field: str):
+def _split_field(data: dict, dataset: str, split: str, field: str) -> Any:
     ds = data.get(dataset)
     if not isinstance(ds, dict):
         return None
@@ -92,7 +94,7 @@ def _split_field(data: dict, dataset: str, split: str, field: str):
 
 
 def _coralnet_sources(data: dict, split: str) -> list[int]:
-    """Whitelisted CoralNet sources for ``split``; without a whitelist every source would be scored."""
+    """Whitelisted CoralNet sources for ``split``; without one every source would be scored."""
     sources = _split_field(data, "coralnet", split, "whitelist_sources")
     if not sources:
         raise ValueError(f"data config has no coralnet.{split}.whitelist_sources")
@@ -130,7 +132,7 @@ def _val_transform(data: dict, dataset: str) -> dict:
 
 
 def coralnet_loss_data_config(data: dict, split: str, image_keep: Path | None) -> dict:
-    """A data config whose only split is ``coralnet.<split>``, as ``val`` with the val transform."""
+    """A data config whose only split is ``coralnet.<split>``, as ``val`` with val transform."""
     block = data["coralnet"][split]
     if not isinstance(block, dict):
         raise ValueError(f"data config has no coralnet.{split}")
@@ -178,6 +180,7 @@ def resolve_layouts(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser."""
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -401,6 +404,7 @@ def _write_summary(output_dir: Path, summary: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the selected evaluations and write their outputs and summary."""
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.INFO,
@@ -514,8 +518,8 @@ def main(argv: list[str] | None = None) -> None:
         summary["sample_seed"] = args.sample_seed
         summary["sample"] = str(sample_path)
 
-    def _run(keys: list[str], fn) -> None:
-        """Run one eval returning ``{key: result}``; record errors so others still proceed."""
+    def _run(keys: list[str], fn: Callable[[], dict[str, Any]]) -> None:
+        """Run one eval returning ``{key: result}``; errors are recorded, others proceed."""
         try:
             summary.update(fn())
         except Exception as e:  # noqa: BLE001

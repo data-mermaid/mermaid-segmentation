@@ -63,10 +63,10 @@ def reduce_masked_loss(
       valid elements are excluded rather than counted as zero loss.
 
     Args:
-        per_element (torch.Tensor): Unreduced loss with shape ``(B, ...)``.
-        mask (torch.Tensor): Boolean/float mask with the same shape as ``per_element``.
-        per_pixel_loss_weight (float): Weight applied to the batch-wide per-pixel mean.
-        per_image_loss_weight (float): Weight applied to the per-image mean.
+        per_element: Unreduced loss with shape ``(B, ...)``.
+        mask: Boolean/float mask with the same shape as ``per_element``.
+        per_pixel_loss_weight: Weight applied to the batch-wide per-pixel mean.
+        per_image_loss_weight: Weight applied to the per-image mean.
 
     Returns:
         A scalar tensor equal to

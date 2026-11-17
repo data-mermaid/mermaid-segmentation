@@ -39,6 +39,25 @@ def evaluate_pacific(
     max_images_per_unit: int | None = None,
     removed_concepts: Sequence[str] = (),
 ) -> dict:
+    """Evaluate the model on Pacific Labeled Corals, per site and pooled.
+
+    Args:
+        predictor: Inference wrapper around the model.
+        whitelist_subsets: Dataset subsets to evaluate, or ``None`` for the default.
+        whitelist_sites: Sites to evaluate, or ``None`` for all.
+        id2label: Target class id to label name.
+        concept_names: Model concept channel names.
+        taxonomy_csv: Taxonomy CSV the checkpoint was trained with.
+        hierarchy: Benthic hierarchy for label roll-up, or ``None`` to disable it.
+        output_dir: Directory receiving the per-unit and summary outputs.
+        batch_size: Images per forward batch.
+        num_workers: DataLoader workers.
+        max_images_per_unit: Cap on images per site.
+        removed_concepts: Concepts removed from the taxonomy during training.
+
+    Returns:
+        The evaluation result dict.
+    """
     logger.info(
         "Building Pacific Labeled Corals dataset (subsets=%s sites=%s) ...",
         whitelist_subsets,

@@ -109,7 +109,7 @@ def select_registry_representatives(
     *,
     prefer_split: str = "train",
 ) -> list[Any]:
-    """One dataset per SOURCE_NAME for ``SourceLabelRegistry`` (train if present, else any)."""
+    """One dataset per SOURCE_NAME for ``SourceLabelRegistry`` (train, else any)."""
     representatives: list[Any] = []
     for _source_name, entries in group_splits(dataset_dict).items():
         by_split = {split: ds for _, split, ds in entries}

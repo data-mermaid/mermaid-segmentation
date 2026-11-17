@@ -135,6 +135,7 @@ def write_trainval_data_config() -> None:
 
 
 def main() -> None:
+    """Write the train+val data config."""
     write_trainval_data_config()
 
 

@@ -1,3 +1,5 @@
+"""Metric accumulation for segmentation and concept predictions."""
+
 import torch
 from torchmetrics.classification import Accuracy
 from torchmetrics.metric import Metric
@@ -16,9 +18,9 @@ class Evaluator:
     ``MetaModel`` updates the metrics with target-space labels each batch.
 
     Attributes:
-        metric_dict (dict[str, Metric]): Metrics to accumulate and compute.
-        device (str | torch.device): Device metrics tensors are moved to.
-        num_classes (int): Number of output (target) classes.
+        metric_dict: Metrics to accumulate and compute.
+        device: Device metrics tensors are moved to.
+        num_classes: Number of output (target) classes.
     """
 
     metric_dict: dict[str, Metric]
@@ -28,8 +30,16 @@ class Evaluator:
         num_classes: int,
         device: str | torch.device = "cuda",
         calculate_concept_metrics: bool = False,
-        concept_value2id: dict[str, dict[str, int]] | None = None,
-    ):
+        concept_value2id: dict[str, dict[str, list[int]]] | None = None,
+    ) -> None:
+        """Build the accuracy metrics on the target device.
+
+        Args:
+            num_classes: Number of output (target) classes.
+            device: Device metrics tensors are moved to.
+            calculate_concept_metrics: Whether to build per-concept accuracy metrics.
+            concept_value2id: Concept name to value-to-id mapping, required for concept metrics.
+        """
         self.device = device
         self.num_classes = num_classes
         self.concept_value2id = concept_value2id
@@ -81,6 +91,7 @@ class Evaluator:
             self._binary_accuracy_metrics = {}
 
     def compute_concept_metric_results(self) -> dict[str, float]:
+        """Compute and reset the concept metrics, returning results by metric name."""
         return self._compute_concept_metric_results()
 
     def _compute_concept_metric_results(self) -> dict[str, float]:
@@ -105,7 +116,9 @@ class Evaluator:
 
         return metric_results
 
-    def evaluate_concepts(self, concept_outputs, concept_labels):
+    def evaluate_concepts(
+        self, concept_outputs: torch.Tensor, concept_labels: torch.Tensor
+    ) -> None:
         """Update concept accuracy metrics for taxonomic and binary concepts."""
         if self.concept_value2id is None:
             return

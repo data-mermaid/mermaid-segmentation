@@ -25,8 +25,7 @@ from mermaidseg.datasets.utils import get_image_s3
 
 
 class MooreaLabeledCoralsDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading Moorea Labeled Corals annotated coral reef images from a
-    Parquet file stored on S3.
+    """Load Moorea Labeled Corals annotated coral reef images from a Parquet file on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in the Moorea Labeled Corals source
@@ -80,7 +79,8 @@ class MooreaLabeledCoralsDataset(BaseCoralDataset):
         whitelist_years: list[str] | None = None,
         blacklist_years: list[str] | None = None,
         **base_kwargs: Any,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         if whitelist_years is not None and blacklist_years is not None:
             raise ValueError("Cannot specify both whitelist_years and blacklist_years.")
 
@@ -142,12 +142,13 @@ class MooreaLabeledCoralsDataset(BaseCoralDataset):
             .reset_index(drop=True)
         )
 
-    def read_image(
+    def read_image(  # type: ignore[override]  # row columns are required named parameters
         self,
         image_id: str,
         year: str,
         image_ext: str,
         **row_kwargs: Any,
     ) -> NDArray[Any]:
+        """Read the source image for one row of ``df_images`` as an RGB array."""
         key = f"{self.source_s3_prefix}/images/{year}/{image_id}{image_ext}"
         return np.array(get_image_s3(bucket=self.source_bucket, key=key).convert("RGB"))

@@ -21,13 +21,3 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
-  - repo: https://github.com/nbQA-dev/nbQA
-    rev: 1.9.1
-    hooks:
-      - id: nbqa-ruff
-        args: [--fix]
-  - repo: https://github.com/PyCQA/docformatter
-    rev: v1.7.8
-    hooks:
-      - id: docformatter
-        args: [--black, --in-place]

@@ -1,3 +1,5 @@
+"""Classification and concept-bottleneck losses."""
+
 from collections.abc import Iterator
 from typing import Any
 
@@ -13,11 +15,11 @@ from mermaidseg.model.concept_metrics import (
 
 
 def iter_concept_slices(
-    concept_value2id: dict[str, dict[str, int]],
+    concept_value2id: dict[str, dict[str, list[int]]],
     concept_labels: torch.Tensor,
     concept_outputs: torch.Tensor,
 ) -> Iterator[tuple[str, torch.Tensor, torch.Tensor]]:
-    """Yield (name, labels_slice, outputs_slice) for each taxonomic rank and the binary tail."""
+    """Yield (name, labels_slice, outputs_slice) per taxonomic rank and for the binary tail."""
     offset = 0
     for concept in TAXONOMIC_CONCEPTS:
         if concept not in concept_value2id:
@@ -103,31 +105,18 @@ def _masked_cross_entropy(
 
 
 class ConceptBottleneckLoss(torch.nn.Module):
-    """ConceptBottleneckLoss combines a classification loss with a concept prediction loss.
+    """Combine a classification loss with a concept prediction loss.
 
     It computes the total loss as the sum of the classification loss and a weighted concept loss.
     The concept loss operates on the model's raw concept *logits* (pre-activation): taxonomic
     groups use cross-entropy and the binary tail uses ``binary_cross_entropy_with_logits``. This
     is numerically stable under mixed precision, unlike running BCE on post-sigmoid activations.
-
-    Attributes:
-        class_loss (torch.nn.Module): The loss function used for classification. Defaults to
-            `torch.nn.CrossEntropyLoss`.
-        ignore_index (int): Specifies a target value that is ignored and does not contribute to the input gradient
-            for the classification loss. Defaults to -1.
-        lambda_weight (float): The weight applied to the concept loss when computing the total loss. Defaults to 1.0.
-        per_pixel_loss_weight (float): Weight on the batch-wide per-pixel mean of the loss, where all
-            valid pixels are averaged equally (densely annotated images dominate). Defaults to 0.0.
-        per_image_loss_weight (float): Weight on the per-image mean of the loss, where each image is
-            first averaged over its valid pixels and then images are averaged equally (sparsely
-            annotated images are not down-weighted). Defaults to 1.0.
-        kwargs: Additional keyword arguments that are passed to the classification loss.
     """
 
     def __init__(
         self,
-        concept_value2id: dict[str, dict[str, int]],
-        class_loss: torch.nn.Module = torch.nn.CrossEntropyLoss,
+        concept_value2id: dict[str, dict[str, list[int]]],
+        class_loss: type[torch.nn.Module] = torch.nn.CrossEntropyLoss,
         ignore_index: int = 0,
         lambda_weight: float = 1.0,
         per_pixel_loss_weight: float = 0.0,
@@ -136,6 +125,23 @@ class ConceptBottleneckLoss(torch.nn.Module):
         binary_concept_names: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
+        """Build the classification loss and store the concept-loss settings.
+
+        Args:
+            concept_value2id: Concept name to value-to-id mapping.
+            class_loss: Loss class used for classification.
+            ignore_index: Target value that is ignored and does not contribute to the input
+                gradient for the classification loss.
+            lambda_weight: Weight applied to the concept loss in the total loss.
+            per_pixel_loss_weight: Weight on the batch-wide per-pixel mean of the loss, where all
+                valid pixels are averaged equally (densely annotated images dominate).
+            per_image_loss_weight: Weight on the per-image mean of the loss, where each image is
+                first averaged over its valid pixels and then images are averaged equally
+                (sparsely annotated images are not down-weighted).
+            taxonomic_label_smoothing: Label smoothing for the taxonomic rank losses.
+            binary_concept_names: Names of the binary channels, for per-channel loss components.
+            **kwargs: Additional keyword arguments passed to the classification loss.
+        """
         super().__init__()
         self.class_loss = class_loss(ignore_index=ignore_index, **kwargs)
         self.binary_concept_names = binary_concept_names
@@ -153,16 +159,15 @@ class ConceptBottleneckLoss(torch.nn.Module):
         concept_logits: torch.Tensor,
         concept_labels: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Computes the total loss as the sum of the classification loss and a weighted concept
-        loss.
+        """Compute the classification loss plus the weighted concept loss.
 
         Args:
-            outputs (torch.Tensor): The model's output logits for classification.
-            target_labels (torch.Tensor): The target-space ground truth labels for classification.
-            concept_logits (torch.Tensor): The model's raw concept logits (pre-activation).
+            outputs: The model's output logits for classification.
+            target_labels: The target-space ground truth labels for classification.
+            concept_logits: The model's raw concept logits (pre-activation).
                 Taxonomic ranks are scored with cross-entropy and the binary tail with
                 ``binary_cross_entropy_with_logits`` for numerical stability.
-            concept_labels (torch.Tensor): The ground truth labels for concept prediction.
+            concept_labels: The ground truth labels for concept prediction.
 
         Returns:
             A 2-tuple of (total_loss, loss_components) where total_loss is the

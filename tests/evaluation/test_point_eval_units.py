@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import math
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -118,7 +119,7 @@ def _run(tmp_path: Path, units: list[str], batch_size: int = 2) -> dict:
         base_ds=FakeDataset(units),
         unit_col="source_id",
         key_cols=["image_id"],
-        predictor=StubPredictor(len(names)),
+        predictor=cast(CBMPredictor, StubPredictor(len(names))),
         class_lookup=class_lookup,
         concept_lookup=concept_lookup,
         concept_names=names,

@@ -1,12 +1,14 @@
+"""DINOv3 + DPT segmentation models, with optional LoRA adapters and a concept bottleneck."""
+
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, cast
 
 import torch
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModel, DPTConfig
+from transformers import AutoModel, DPTConfig, PreTrainedModel
 from transformers.modeling_outputs import SemanticSegmenterOutput
 from transformers.models.dpt.modeling_dpt import DPTNeck
 
@@ -47,9 +49,9 @@ def _wrap_encoder_with_lora(
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
         target_modules=list(lora_target_modules),
-        bias=lora_bias,
+        bias=cast("Literal['none', 'all', 'lora_only']", lora_bias),
     )
-    return get_peft_model(encoder, lora_config)
+    return get_peft_model(cast("PreTrainedModel", encoder), lora_config)
 
 
 # The coarsest fusion block is called with no skip, so this residual never runs.
@@ -86,7 +88,7 @@ def _remap_checkpoint_state_dict(
             return key.replace(marker, nested, 1)
         return key
 
-    def _remap(fn) -> dict[str, torch.Tensor]:
+    def _remap(fn: Callable[[str], str]) -> dict[str, torch.Tensor]:
         return {fn(k): v for k, v in state_dict.items()}
 
     variants = (
@@ -258,12 +260,12 @@ def align_optimizer_state_dict(
                 new_group.pop("param_names")
         new_groups.append(new_group)
 
-    kept_ids = {param_id for group in new_groups for param_id in group["params"]}
-    saved_ids = {param_id for group in saved_groups for param_id in group["params"]}
+    kept_id_set = {param_id for group in new_groups for param_id in group["params"]}
+    saved_id_set = {param_id for group in saved_groups for param_id in group["params"]}
     filtered_state = {
         key: value
         for key, value in optimizer_state["state"].items()
-        if key in kept_ids or key not in saved_ids
+        if key in kept_id_set or key not in saved_id_set
     }
     return {"state": filtered_state, "param_groups": new_groups}, n_dropped
 
@@ -298,6 +300,7 @@ class DPTHead(torch.nn.Module):
         reassemble_factors: Sequence[float] = (4, 2, 1, 0.5),
         dropout: float = 0.1,
     ):
+        """Build the reassemble stage, fusion stage, and conv head from the arguments."""
         super().__init__()
         self.token_width = token_width
         self.token_height = token_height
@@ -506,7 +509,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         *,
         num_classes: int,
         num_concepts: int,
-        concept_value2id: dict[str, dict[str, int]] | None,
+        concept_value2id: dict[str, dict[str, list[int]]] | None,
         concept_feature_dim: int,
         detach_concepts: bool = False,
         **kwargs: Any,
@@ -534,8 +537,8 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
             logits, concept_outputs, concept_logits = self._forward_concept_tail(concept_features)
         return ConceptBottleneckOutput(
             loss=None,
-            logits=logits,
-            hidden_states=concept_outputs,
+            logits=cast("torch.FloatTensor", logits),
+            hidden_states=cast("tuple[torch.FloatTensor, ...]", concept_outputs),
             concept_logits=concept_logits,
         )
 
@@ -550,11 +553,13 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         return logits, concept_outputs, concept_logits
 
     def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
+        """Apply per-rank softmax to taxonomic channels and sigmoid to the binary tail."""
         offset = 0
         activated_parts = []
 
         for concept in TAXONOMIC_CONCEPTS:
-            concept_values = self.concept_value2id[concept]
+            # concept_value2id is None only for a model built without concept metadata.
+            concept_values = self.concept_value2id[concept]  # type: ignore[index]
             order_concept_length = len(list(concept_values.values())[0])
             chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
             activated_parts.append(torch.softmax(chunk.float(), dim=1))
@@ -573,7 +578,7 @@ class ConceptBottleneckDPTLoRADINOv3(_ConceptBottleneckDPTDINOv3):
         num_classes: int = 2,
         num_concepts: int = 2,
         input_size: tuple[int, int] = (512, 512),
-        concept_value2id: dict[str, dict[str, int]] | None = None,
+        concept_value2id: dict[str, dict[str, list[int]]] | None = None,
         concept_feature_dim: int = 256,
         out_indices: Sequence[int] | None = None,
         neck_hidden_sizes: Sequence[int] = (256, 512, 1024, 1024),
@@ -586,6 +591,7 @@ class ConceptBottleneckDPTLoRADINOv3(_ConceptBottleneckDPTDINOv3):
         lora_bias: str = "none",
         **kwargs: Any,
     ):
+        """Build the concept-bottleneck model with a LoRA-adapted DINOv3 encoder."""
         super().__init__(
             num_classes=num_classes,
             num_concepts=num_concepts,

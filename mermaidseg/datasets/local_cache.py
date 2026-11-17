@@ -14,6 +14,7 @@ import logging
 import multiprocessing as mp
 import os
 import stat
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,7 +49,7 @@ STAGE_NAMES: tuple[str, ...] = ("image_load", "annotation", "mask", "transform")
 
 @dataclass(frozen=True)
 class CacheStats:
-    """Snapshot of cache hit/miss counters (and optional load-stage timers) for one phase."""
+    """Cache hit/miss counters and optional load-stage timers for one phase."""
 
     local_hits: int
     s3_fetches: int
@@ -72,6 +73,7 @@ class CacheStatsHandles:
 
     @classmethod
     def create(cls) -> CacheStatsHandles:
+        """Create a fresh set of shared counters."""
         return cls(
             local_hits=mp.Value("Q", 0),
             s3_fetches=mp.Value("Q", 0),
@@ -127,7 +129,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
 
 
 @contextmanager
-def _file_lock(lock_path: Path):
+def _file_lock(lock_path: Path) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -143,6 +145,7 @@ class LocalS3Cache:
     _instance: LocalS3Cache | None = None
 
     def __init__(self) -> None:
+        """Initialize an unconfigured cache with no root, stats, or S3 client."""
         self._root: Path | None = None
         self._write_through = True
         self._enabled = False
@@ -159,6 +162,7 @@ class LocalS3Cache:
 
     @classmethod
     def get(cls) -> LocalS3Cache:
+        """Return the process-wide cache instance, creating it on first use."""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
@@ -177,6 +181,10 @@ class LocalS3Cache:
         stats: CacheStatsHandles | None = None,
         offline: bool | None = None,
     ) -> LocalS3Cache:
+        """Configure the singleton cache root, write-through, stats, and offline mode.
+
+        A ``None`` or blank root disables the cache.
+        """
         cache = cls.get()
         if root is None or (isinstance(root, str) and root.strip() in ("", "null", "None")):
             cache._root = None
@@ -192,6 +200,7 @@ class LocalS3Cache:
 
     @classmethod
     def configure_from_env(cls) -> LocalS3Cache:
+        """Enable the cache at the directory named by the environment, if set."""
         root = os.environ.get(_ENV_CACHE_DIR)
         cache = cls.get()
         if root:
@@ -201,6 +210,7 @@ class LocalS3Cache:
 
     @property
     def enabled(self) -> bool:
+        """Whether a cache root directory is configured."""
         return self._enabled
 
     @property
@@ -209,9 +219,15 @@ class LocalS3Cache:
         return self._offline
 
     def attach_stats(self, stats: CacheStatsHandles) -> None:
+        """Attach shared counters for cross-worker statistics."""
         self._stats = stats
 
     def local_path(self, bucket: str, key: str) -> Path:
+        """Return the on-disk path for an S3 object.
+
+        Raises:
+            RuntimeError: If no cache root directory is configured.
+        """
         if self._root is None:
             raise RuntimeError("LocalS3Cache is not configured with a root directory.")
         return self._root / bucket / key
@@ -233,13 +249,13 @@ class LocalS3Cache:
         self._stage_accum[name] = self._stage_accum.get(name, 0.0) + seconds
 
     def record_retries(self, n: int) -> None:
-        """Accumulate the number of empty/failed-load retries (process-local, no lock)."""
+        """Accumulate empty/failed-load retries (process-local, no lock)."""
         if self._stats is None or n <= 0:
             return
         self._retry_accum += n
 
     def record_sample(self) -> None:
-        """Count one produced sample and periodically flush accumulators to shared counters."""
+        """Count one produced sample and periodically flush to the shared counters."""
         if self._stats is None:
             return
         self._sample_accum += 1
@@ -247,7 +263,7 @@ class LocalS3Cache:
             self._flush_stage_stats()
 
     def _flush_stage_stats(self) -> None:
-        """Flush process-local load-stage accumulators into the shared multiprocessing counters."""
+        """Flush process-local load-stage accumulators into the shared counters."""
         if self._stats is None:
             return
         for name, value in self._stage_accum.items():
@@ -268,6 +284,7 @@ class LocalS3Cache:
             self._sample_accum = 0
 
     def snapshot_stats(self) -> CacheStats:
+        """Return and reset the shared counters accumulated since the last snapshot."""
         if self._stats is None:
             return CacheStats(local_hits=0, s3_fetches=0)
         # Flush this process's own accumulators first (covers the num_workers=0 path, where loading
@@ -374,7 +391,7 @@ class LocalS3Cache:
         return pd.read_parquet(f"s3://{bucket}/{key}")
 
     def read_parquet_ref(self, ref: str, default_bucket: str) -> pd.DataFrame:
-        """Read a Parquet file from a storage reference (S3 URI, relative key, or local path)."""
+        """Read a Parquet file from a storage ref (S3 URI, key, or local path)."""
         parsed = parse_storage_ref(ref, default_bucket)
         if parsed is None:
             return pd.read_parquet(ref)

@@ -24,7 +24,7 @@ from mermaidseg.model.taxonomy_loss import (
 ORDERS = ["scleractinia", "alcyonacea"]
 FAMILIES = ["acroporidae", "poritidae", "alcyoniidae"]
 GENERA = ["acropora", "montipora", "isopora", "porites", "goniopora", "sarcophyton", "sinularia"]
-PATHS = [
+PATHS: list[tuple[str | None, ...]] = [
     ("scleractinia", "acroporidae", "acropora"),
     ("scleractinia", "acroporidae", "montipora"),
     ("scleractinia", "acroporidae", "isopora"),

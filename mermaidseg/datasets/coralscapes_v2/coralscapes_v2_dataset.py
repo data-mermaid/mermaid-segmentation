@@ -253,9 +253,9 @@ def coralscapes_v2_to_legacy_lut() -> NDArray[np.uint8]:
 
 
 class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
-    """A PyTorch Dataset wrapping the HuggingFace
-    `Coralscapes V2 <https://huggingface.co/datasets/josauder/coralscapesV2>`_
-    dataset.
+    """Wrap the HuggingFace Coralscapes V2 dataset.
+
+    Source: `Coralscapes V2 <https://huggingface.co/datasets/josauder/coralscapesV2>`_.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is the native Coralscapes V2 1..95 integer mask (or shifted
@@ -294,7 +294,8 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
         hf_repo_id: str = CORALSCAPES_V2_HF_REPO,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         from datasets import concatenate_datasets, load_dataset
 
         self.split = split
@@ -370,12 +371,14 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     @property
     def global_offset(self) -> int:
+        """Current global offset assigned by the registry."""
         return self._global_offset
 
     def __len__(self) -> int:
+        """Return the number of rows in the underlying dataset."""
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def __getitem__(self, idx: int) -> tuple[Any, Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
         On any internal load/transform error we emit a warning to logger + stdout + stderr and
@@ -389,7 +392,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             )
             return None, None
 
-    def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def _load_item(self, idx: int) -> tuple[Any, Any]:
         # Fetch the HF row once: ``datasets`` eagerly decodes every Image column on each row access,
         # so indexing twice would decode both the image and the label PNG twice.
         row = self.dataset[idx]

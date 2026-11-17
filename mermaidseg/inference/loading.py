@@ -22,6 +22,8 @@ SUPPORTED_CBM_MODELS: frozenset[str] = frozenset({"ConceptBottleneckDPTLoRADINOv
 
 @dataclass
 class DemoArtifacts:
+    """Config, label maps, and checkpoint path needed to build the demo model."""
+
     model_cfg: dict[str, Any]
     id2label: dict[int, str]
     concept_id2name: dict[int, str]
@@ -92,6 +94,7 @@ def _derive_concept_value2id(
 
 
 def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMModel:
+    """Build the concept-bottleneck model and load its checkpoint weights."""
     num_classes = max(artifacts.id2label.keys()) + 1
     ckpt = torch.load(artifacts.checkpoint_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt

@@ -41,7 +41,6 @@ lint = [
 dev = [
     {include-group = "tests"},
     {include-group = "lint"},
-    "docformatter>=1.7.7",
 ]
 
 [tool.setuptools]

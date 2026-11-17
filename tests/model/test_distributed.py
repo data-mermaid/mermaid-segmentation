@@ -13,6 +13,7 @@ import os
 import socket
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -445,7 +446,7 @@ def _serial_window(
             shard_losses.append(loss)
         (torch.stack(shard_losses).mean() / _ACCUM).backward()
     grads = {
-        name: param.grad.detach().clone()
+        name: cast(torch.Tensor, param.grad).detach().clone()
         for name, param in step.named_parameters()
         if param.requires_grad
     }

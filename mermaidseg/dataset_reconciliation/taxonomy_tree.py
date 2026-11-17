@@ -60,6 +60,7 @@ class AmbiguityReport:
     sources: tuple[str, ...]
 
     def __str__(self) -> str:
+        """Describe the taxon, its parents, and the contributing sources."""
         return (
             f"{self.fine_rank}='{self.taxon}' has {len(self.parents)} "
             f"{self.coarse_rank} parents {self.parents} (sources: {', '.join(self.sources)})"

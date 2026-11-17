@@ -60,6 +60,7 @@ def _git_commit() -> str | None:
 
 
 def main() -> None:
+    """Parse arguments and build the concept source mask file."""
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

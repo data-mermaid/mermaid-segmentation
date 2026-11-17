@@ -24,6 +24,7 @@ def _json_default(obj: Any) -> Any:
 
 
 def write_json(path: str | Path, obj: Any) -> None:
+    """Write ``obj`` as indented JSON, atomically via a temporary file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -35,6 +36,13 @@ def write_json(path: str | Path, obj: Any) -> None:
 def write_csv(
     path: str | Path, rows: list[dict[str, Any]], columns: list[str] | None = None
 ) -> None:
+    """Write dict rows as CSV; an empty ``rows`` produces an empty file.
+
+    Args:
+        path: Output file.
+        rows: One dict per CSV row.
+        columns: Column order. Defaults to the keys of the first row; extra keys are dropped.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:

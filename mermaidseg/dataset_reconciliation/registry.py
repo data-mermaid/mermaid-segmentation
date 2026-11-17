@@ -18,7 +18,8 @@ After construction, each registered dataset has had
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -58,7 +59,7 @@ _BUILTIN_DEFAULT_FETCHERS = {
 }
 
 
-_REMOTE_FETCHERS = {
+_REMOTE_FETCHERS: dict[str, Callable[..., Mapping[str, str | None]]] = {
     "coralnet": fetch_coralnet_to_mermaid,
     "catlin_seaview": fetch_catlin_seaview_to_mermaid,
     "moorea_labeled_corals": fetch_moorea_labeled_corals_to_mermaid,
@@ -68,7 +69,19 @@ _REMOTE_FETCHERS = {
 }
 
 
-def roll_up_label(label: str, benthic_hierarchy: dict[str, str], subset: set[str]) -> str | None:
+def roll_up_label(
+    label: str | None, benthic_hierarchy: dict[str, str | None], subset: set[str]
+) -> str | None:
+    """Return ``label`` if it is in ``subset``, else its nearest ancestor in ``subset``.
+
+    Args:
+        label: Target label name, or ``None`` for an unmapped label.
+        benthic_hierarchy: Lower-cased name -> parent-name mapping, ``None`` at the roots.
+        subset: Names that may be returned.
+
+    Returns:
+        The label or ancestor in ``subset``, or ``None`` if there is none.
+    """
     if label in subset:
         return label
     if label in benthic_hierarchy:
@@ -105,11 +118,11 @@ class SourceLabelRegistry:
     target_label2id: dict[str, int]
     target_id2label: dict[int, str]
     num_target_classes: int
-    source_to_target: torch.LongTensor
+    source_to_target: torch.Tensor
     source_to_concepts: torch.Tensor | None
     global_id2source: dict[int, tuple[str, str]]
     dataset_offsets: dict[str, int]
-    concept_value2id: dict[str, int] | None
+    concept_value2id: dict[str, dict[str, list[int]]] | None
 
     def __init__(
         self,
@@ -120,6 +133,22 @@ class SourceLabelRegistry:
         target_label_subset: list[str] | set[str] | None = None,
         concept_schema: ConceptSchema | None = None,
     ):
+        """Assign global offsets and build the source-to-target (and concept) lookups.
+
+        Args:
+            datasets: Source datasets to register.
+            target_labels: Ordered target label names, derived from the datasets if ``None``.
+            compute_concepts: Whether to build ``source_to_concepts``.
+            label_roll_up: Whether unmapped targets roll up to the nearest ancestor in
+                ``target_label_subset``.
+            target_label_subset: Target label names to retain.
+            concept_schema: Concept schema, required with ``compute_concepts``.
+
+        Raises:
+            ValueError: If there are no datasets, a dataset lacks or repeats ``SOURCE_NAME``,
+                ``label_roll_up`` has no ``target_label_subset``, or ``compute_concepts`` has
+                no ``concept_schema``.
+        """
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
 
@@ -198,7 +227,9 @@ class SourceLabelRegistry:
             for local_id, source_name in sorted(ds.source_id2name.items()):
                 target_name = resolved_maps[ds.SOURCE_NAME].get(source_name.lower())
                 if label_roll_up:
-                    target_name = roll_up_label(target_name, benthic_hierarchy, subset)
+                    target_name = roll_up_label(
+                        target_name, benthic_hierarchy, cast("set[str]", subset)
+                    )
                 if target_name is None:
                     key = (ds.SOURCE_NAME, source_name.lower())
                     if key not in warned_unmapped:
@@ -217,7 +248,7 @@ class SourceLabelRegistry:
         self.source_to_concepts = None
         self.concept_id2name: dict[int, str] | None = None
         self.concept_name2id: dict[str, int] | None = None
-        self.concept_value2id: dict[str, dict[str, int]] | None = None
+        self.concept_value2id: dict[str, dict[str, list[int]]] | None = None
         if compute_concepts:
             if concept_schema is None:
                 raise ValueError("compute_concepts=True requires concept_schema")
@@ -227,7 +258,7 @@ class SourceLabelRegistry:
             ds.set_global_offset(self.dataset_offsets[ds.SOURCE_NAME])
 
     def _resolve_source_to_target_maps(self) -> dict[str, dict[str, str]]:
-        """Resolve a ``SOURCE_NAME -> {source_name: target_name}`` map for every dataset."""
+        """Resolve a ``SOURCE_NAME -> {source_name: target_name}`` map per dataset."""
         resolved: dict[str, dict[str, str]] = {}
         for ds in self.datasets:
             name = ds.SOURCE_NAME
@@ -249,7 +280,7 @@ class SourceLabelRegistry:
             for src_name, m in resolved.items()
         }
 
-    def _build_concepts(self, concept_schema: ConceptSchema):
+    def _build_concepts(self, concept_schema: ConceptSchema) -> None:
         self.concept_value2id = concept_schema.concept_value2id
         self.concept_id2name = concept_schema.channel_id2name()
         self.concept_name2id = {v: k for k, v in self.concept_id2name.items()}
@@ -257,6 +288,7 @@ class SourceLabelRegistry:
 
     @property
     def num_concepts(self) -> int:
+        """Number of concept channels, 0 without concepts."""
         if self.source_to_concepts is None:
             return 0
         return int(self.source_to_concepts.shape[1])

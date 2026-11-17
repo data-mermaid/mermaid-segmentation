@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import torch
 
@@ -34,7 +36,7 @@ def test_dpt_head_runs_on_nonsquare_grid_when_told_the_shape():
 
 
 def _small_head(**overrides) -> DPTHead:
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "hidden_size": 16,
         "out_channels": 4,
         "token_width": 8,

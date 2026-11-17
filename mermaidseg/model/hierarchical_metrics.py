@@ -18,7 +18,7 @@ the default ``score_transform="none"`` is correct. Use ``"softmax"`` for raw log
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -84,7 +84,7 @@ def _to_probabilities(scores: torch.Tensor, transform: ScoreTransform) -> torch.
 
 
 class HierarchicalMetrics:
-    """Accumulates the hierarchical metrics over an evaluation run.
+    """Accumulate the hierarchical metrics over an evaluation run.
 
     Args:
         tree: Taxonomy to score against. Under ``policy="permissive"`` a multi-parent taxon
@@ -108,7 +108,8 @@ class HierarchicalMetrics:
         tail_quantile: float = 0.5,
         head_quantile: float = 0.8,
         min_support: int = 1,
-    ):
+    ) -> None:
+        """Set up empty accumulators; see the class docstring for the arguments."""
         self.tree = tree
         self.ranks = tuple(ranks) if ranks is not None else tuple(tree.ranks)
         self.n_bins = int(n_bins)
@@ -357,8 +358,9 @@ class HierarchicalMetrics:
         return out
 
     def _taxon_summary(self, rank: str) -> list[dict]:
-        """One row per channel seen in GT or prediction (labelled pixels only), sorted by GT
-        support.
+        """Summarize each channel seen in GT or prediction, sorted by GT support.
+
+        Only labelled pixels count. Returns one row per channel.
         """
         confusion = self._confusion[rank].cpu().numpy()
         conf_sum = self._pred_conf_sum[rank].cpu().numpy()
@@ -386,9 +388,10 @@ class HierarchicalMetrics:
         return sorted(rows, key=lambda r: (-r["gt_px"], -r["pred_px"]))
 
     def _compute_consistency(self) -> dict[str, float]:
-        """Consistency with truncated lineages dropped (the main score) and, under
-        ``.../truncated_as_inconsistent``, counted as inconsistent, plus the pixel counts behind
-        both.
+        """Compute lineage consistency, with and without truncated lineages.
+
+        The main score drops truncated lineages. Under ``.../truncated_as_inconsistent``
+        they count as inconsistent. The pixel counts behind both are included.
         """
         out: dict[str, float] = {}
         total = dict.fromkeys(("ok", "n", "trunc", "none_none", "no_parent"), 0)
@@ -448,9 +451,10 @@ class HierarchicalMetrics:
         return out
 
     def _compute_calibration(self) -> dict[str, float]:
-        """ECE over all labelled pixels (``ece/<rank>``) and split by GT type
-        (``ece/<rank>/taxon_gt``, ``ece/<rank>/none_gt``), each with its mean confidence, accuracy
-        and pixel count.
+        """Compute ECE over all labelled pixels and split by GT type.
+
+        Keys are ``ece/<rank>``, ``ece/<rank>/taxon_gt``, and ``ece/<rank>/none_gt``,
+        each with its mean confidence, accuracy and pixel count.
         """
         out: dict[str, float] = {}
         eces: dict[str, list[float]] = {s: [] for s in CALIBRATION_SUBSETS}
@@ -522,8 +526,9 @@ class HierarchicalMetrics:
     # ---------------------------------------------------------------- reporting
 
     def per_taxon_table(self, rank: str) -> list[tuple[str, int, float]]:
-        """``(taxon, support, accuracy)`` for every taxon seen at ``rank``, by descending
-        support.
+        """List ``(taxon, support, accuracy)`` for every taxon seen at ``rank``.
+
+        Rows are ordered by descending support.
         """
         if rank not in self._support:
             return []
@@ -631,9 +636,10 @@ def format_severity_table(results: Mapping[str, float], ranks: Sequence[str]) ->
         counts = [results.get(f"{prefix}{name}") for name in ERROR_SPLIT]
         if any(c is None for c in counts):
             continue
-        total = sum(counts)
+        present = cast("list[float]", counts)
+        total = sum(present)
         lines.append(
-            f"  {rank:<9} {total:>12,.0f} " + " ".join(f"{c / total:>13.2%}" for c in counts)
+            f"  {rank:<9} {total:>12,.0f} " + " ".join(f"{c / total:>13.2%}" for c in present)
         )
     return "\n".join(lines)
 

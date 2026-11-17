@@ -98,6 +98,7 @@ def test_coralscapes_native_lookup_matches_sorted_registry_vocab() -> None:
     human_row = schema.row_for("coralscapes", "human")
     background_row = schema.row_for("coralscapes", "background")
 
+    assert registry.source_to_concepts is not None
     assert int(registry.source_to_concepts[human_gid, channel_names.index("human")]) == 2
     assert int(registry.source_to_concepts[human_gid, channel_names.index("anthropogenic")]) == 2
     assert int(registry.source_to_concepts[background_gid, channel_names.index("background")]) == 2

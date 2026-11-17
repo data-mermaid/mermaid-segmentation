@@ -14,7 +14,7 @@ import torch
 
 
 def fetch_coralnet_to_mermaid() -> dict[str, str | None]:
-    """Load the CoralNet provider label -> MERMAID benthic-attribute mapping from local config.
+    """Load the CoralNet provider label -> MERMAID benthic-attribute map from local config.
 
     Returns a dict keyed by stringified CoralNet provider label; values are the mapped MERMAID
     benthic-attribute name(s) (or ``None`` if the CoralNet label is not yet mapped).
@@ -210,7 +210,7 @@ def fetch_catlin_seaview_to_mermaid() -> dict[str, str]:
 
 
 def fetch_moorea_labeled_corals_to_mermaid() -> dict[str, str]:
-    """Return the static Moorea Labeled Corals label-name -> MERMAID benthic-attribute mapping.
+    """Return the static Moorea Labeled Corals label-name -> MERMAID benthic-attribute map.
 
     Keyed by the original Moorea label name (e.g. ``"acrop"`` or ``"turf"``); values are the mapped
     MERMAID benthic-attribute name(s). Labels absent from this map collapse to background at
@@ -251,7 +251,7 @@ def fetch_moorea_labeled_corals_to_mermaid() -> dict[str, str]:
 
 
 def fetch_pacific_labeled_corals_to_mermaid() -> dict[str, str]:
-    """Return the static Pacific Labeled Corals label-name -> MERMAID benthic-attribute mapping.
+    """Return the static Pacific Labeled Corals label-name -> MERMAID benthic-attribute map.
 
     Keyed by the original Pacific label name from the per-site ``labelmap.txt`` (e.g. ``"acropora"``
     or ``"cca"``); values are the mapped MERMAID benthic-attribute name(s). Labels absent from this

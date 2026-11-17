@@ -1,7 +1,10 @@
+"""Training loop that logs losses and metrics per epoch and checkpoints the best model."""
+
 import logging
 import time
 import warnings
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import torch
@@ -51,7 +54,8 @@ def _enforce_load_failure_rate(
     size = len(dataset) if dataset is not None else 0
     if size <= 0:
         return
-    epoch_failures = _loader_load_failure_count(loader) - failures_before
+    # A tracked loader whose second count read fails yields None here and raises TypeError.
+    epoch_failures = _loader_load_failure_count(loader) - failures_before  # type: ignore[operator]
     rate = epoch_failures / size
     if rate > max_rate:
         raise RuntimeError(
@@ -77,40 +81,36 @@ def train_model(
     train_log_interval: int = 1,
     on_optimizer_step: Callable[[MetaModel], None] | None = None,
     save_best_checkpoint: bool = True,
-):
+) -> dict[int, dict[str, Any]]:
     """Train a model, logging losses and metrics per epoch.
 
     Args:
-        meta_model (MetaModel): The meta-model to be trained, which includes the model,
+        meta_model: The meta-model to be trained, which includes the model,
             optimizer, scheduler, and training configurations.
-        evaluator (Evaluator): An evaluator object used to compute metrics during
+        evaluator: An evaluator object used to compute metrics during
             evaluation phases.
-        train_loader (DataLoader): DataLoader for the training dataset. It should yield
+        train_loader: DataLoader for the training dataset. It should yield
             either tuples of tensors or dictionaries of tensors.
-        val_loader (Optional[DataLoader], optional): DataLoader for the validation dataset.
-            Defaults to None. If provided, the model will be evaluated on the validation
-            set after each epoch.
-        logger (Optional[Logger], optional): Logger object for logging metrics and saving
-            model checkpoints. Defaults to None.
-        start_epoch (int, optional): The starting epoch for training. Defaults to -1, which
-            will be set to 0 if not specified.
-        end_epoch (int, optional): The ending epoch for training. Defaults to -1, which
-            will be set based on the meta-model's training configuration if not specified.
-        metric_of_interest (str, optional): Metric used for checkpointing. Must resolve to ``loss`` or ``accuracy`` (classification accuracy).
-            Defaults to "accuracy".
-        max_load_failure_rate (float | None, optional): If set, raise once the per-epoch
+        val_loader: DataLoader for the validation dataset. If provided, the model is
+            evaluated on the validation set after each epoch.
+        logger: Logger object for logging metrics and saving model checkpoints.
+        start_epoch: The starting epoch for training. ``-1`` is treated as 0.
+        end_epoch: The ending epoch for training. ``-1`` is set from the meta-model's
+            training configuration.
+        metric_of_interest: Metric used for checkpointing. Must resolve to ``loss`` or
+            ``accuracy`` (classification accuracy).
+        max_load_failure_rate: If set, raise once the per-epoch
             dataset load-failure rate exceeds this fraction (e.g. 0.05 = 5%), to fail fast on
             systemic data problems instead of silently training on a shrunken dataset. Set to
             ``None`` to disable. Only enforced when the loader's dataset tracks load failures.
-            Defaults to 0.05.
-        train_log_interval (int, optional): Log per-batch train losses to the logger every
-            ``train_log_interval`` iterations (1 = every batch). Defaults to 1.
+        train_log_interval: Log per-batch train losses to the logger every
+            ``train_log_interval`` iterations (1 = every batch).
         on_optimizer_step: Called from ``train_epoch`` after each successful optimizer update.
         save_best_checkpoint: When True, write ``model_epoch{N}`` whenever the validation
             metric improves. Step-checkpointed runs pass False so only ``model_step*`` is saved.
 
     Returns:
-        dict[int, dict]: Per-epoch metrics keyed by epoch number, containing
+        Per-epoch metrics keyed by epoch number, containing
             ``train_metrics``, ``validation_metrics`` (if ``val_loader`` is provided), and
             ``loss``. The ``loss`` sub-dict includes training loss plus timing metrics
             kept locally for debugging.
@@ -124,7 +124,7 @@ def train_model(
         start_epoch = 0
     if end_epoch == -1:
         end_epoch = start_epoch + meta_model.training_kwargs.epochs
-    metrics_epoch = {}
+    metrics_epoch: dict[int, dict[str, Any]] = {}
     training_start = time.perf_counter()
 
     for epoch in range(start_epoch, end_epoch):

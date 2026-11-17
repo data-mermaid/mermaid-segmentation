@@ -11,6 +11,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,7 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-def _launch(repo: Path, name: str, *args: str, queued: list[str] = ()) -> tuple[str, list]:
+def _launch(repo: Path, name: str, *args: str, queued: Sequence[str] = ()) -> tuple[str, list]:
     env = {k: v for k, v in os.environ.items() if k not in ("DS_ROOT", "SPARSE_ROOT", "EVAL_ROOT")}
     env["PATH"] = f"{repo.parent / 'bin'}:{env['PATH']}"
     queue_file = repo.parent / "queue.txt"
@@ -71,7 +72,7 @@ def _arg(job: list[str], flag: str) -> str | None:
     return job[job.index(flag) + 1] if flag in job else None
 
 
-def _runs(jobs: list[list[str]]) -> dict[str, list[str]]:
+def _runs(jobs: list[list[str]]) -> dict[str | None, list[str]]:
     """Jobs by name; every launcher submits one job per run."""
     runs = {_opt(job, "job-name"): job for job in jobs}
     assert len(runs) == len(jobs), "a run was submitted more than once"

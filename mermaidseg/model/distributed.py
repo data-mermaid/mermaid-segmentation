@@ -36,14 +36,17 @@ class DistContext:
 
     @property
     def is_main(self) -> bool:
+        """Whether this process is rank 0."""
         return self.rank == 0
 
     @property
     def distributed(self) -> bool:
+        """Whether the run has more than one process."""
         return self.world_size > 1
 
 
 def is_distributed() -> bool:
+    """Return whether a process group is initialized."""
     return dist.is_available() and dist.is_initialized()
 
 
@@ -59,15 +62,16 @@ def current_context() -> DistContext:
 
 
 def is_main_process() -> bool:
+    """Return whether this process is rank 0."""
     return current_context().is_main
 
 
 def on_main_process(fn: Callable[[], None]) -> None:
-    """Run ``fn`` on rank 0. Other ranks wait so they do not enter the next collective.
+    """Run ``fn`` on rank 0.
 
-    The first barrier is after the step's collectives have finished. Rank 0 then
-    runs ``fn`` (a checkpoint write) while the others wait on the second barrier,
-    instead of starting the next forward.
+    Other ranks wait so they do not enter the next collective. The first barrier is after
+    the step's collectives have finished. Rank 0 then runs ``fn`` (a checkpoint write)
+    while the others wait on the second barrier, instead of starting the next forward.
     """
     if is_distributed():
         dist.barrier()
@@ -152,6 +156,18 @@ class ShardedBatchSampler(Sampler[list[int]]):
         *,
         broadcast_seed: Callable[[int], int] | None = None,
     ) -> None:
+        """Validate the rank layout and store the sampler settings.
+
+        Args:
+            data_source: Dataset to sample from.
+            batch_size: Global batch size.
+            rank: Rank of this process.
+            world_size: Number of processes.
+            broadcast_seed: Optional function mapping this rank's seed to rank 0's seed.
+
+        Raises:
+            ValueError: If ``rank`` is outside ``0..world_size - 1``.
+        """
         if not 0 <= int(rank) < int(world_size):
             raise ValueError(f"rank {rank} is outside 0..{int(world_size) - 1}.")
         self.data_source = data_source
@@ -162,9 +178,11 @@ class ShardedBatchSampler(Sampler[list[int]]):
         self.broadcast_seed = broadcast_seed
 
     def __len__(self) -> int:
+        """Return the number of global batches per pass."""
         return len(self.data_source) // self.batch_size
 
     def __iter__(self) -> Iterator[list[int]]:
+        """Yield this rank's slice of each shuffled global batch."""
         seed = int(torch.empty((), dtype=torch.int64).random_().item())
         if self.broadcast_seed is not None:
             seed = int(self.broadcast_seed(seed))

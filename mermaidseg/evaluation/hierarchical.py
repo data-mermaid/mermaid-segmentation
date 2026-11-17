@@ -73,6 +73,16 @@ class HierarchicalScore:
         taxonomy_csv: str | Path,
         removed_concepts: Iterable[str] = (),
     ):
+        """Validate the taxonomy against the model channels and build the metrics.
+
+        Args:
+            concept_names: Model concept channel names, in channel order.
+            taxonomy_csv: Taxonomy CSV the checkpoint was trained with.
+            removed_concepts: Concepts removed from the taxonomy during training.
+
+        Raises:
+            ValueError: If a rank's channels are not contiguous or differ from the taxonomy.
+        """
         layout = ConceptLayout.from_concept_names(concept_names)
         tree_removed = list(removed_concepts)
         tree = _run_taxonomy_tree(taxonomy_csv, tree_removed)
@@ -122,7 +132,7 @@ class HierarchicalScore:
 
     @torch.no_grad()
     def update(self, probs: torch.Tensor, targets: torch.Tensor) -> None:
-        """Add ``N`` points: ``probs`` ``(K, N)`` and ``targets`` ``(R, N)`` on one device."""
+        """Add ``N`` points: ``probs`` ``(K, N)`` and ``targets`` ``(R, N)``, on one device."""
         n = probs.shape[1]
         batches: dict[str, RankBatch] = {}
         for rank, sl, target in zip(self.ranks, self._slices, targets, strict=True):
@@ -138,4 +148,5 @@ class HierarchicalScore:
         self.metrics.update(batches)
 
     def to_dict(self) -> dict[str, float]:
+        """Return the accumulated hierarchical metrics."""
         return self.metrics.compute()

@@ -1,3 +1,5 @@
+"""MetaModel: model, loss, optimizer and train/validation primitives for concept-bottleneck runs."""
+
 import contextlib
 import faulthandler
 import logging
@@ -5,7 +7,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -15,6 +17,7 @@ import transformers
 from numpy.typing import NDArray
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
+from torch.utils.data.dataloader import _BaseDataLoaderIter
 from tqdm import tqdm
 
 import mermaidseg.model.loss
@@ -46,6 +49,8 @@ from mermaidseg.model.distributed import (
 from mermaidseg.model.taxonomy_loss import TaxonomicLoss
 
 logger = logging.getLogger(__name__)
+
+_BatchLoader = DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]]
 
 _BATCH_LOSS_KEY = "__batch_loss__"
 
@@ -148,23 +153,23 @@ class MetaModel:
     ``source_to_concepts_lookup``.
 
     Attributes:
-        run_name (str): Identifier for the current run/experiment.
-        model_name (str): Name of the model architecture (looked up in `mermaidseg.model.models`).
-        num_classes (int): Number of segmentation output (target) classes.
-        device (str | torch.device): Device the model and tensors live on.
-        model_kwargs (ConfigDict): Model-specific config passed to the architecture.
-        training_kwargs (ConfigDict): Training hyperparameters
+        run_name: Identifier for the current run/experiment.
+        model_name: Name of the model architecture (looked up in `mermaidseg.model.models`).
+        num_classes: Number of segmentation output (target) classes.
+        device: Device the model and tensors live on.
+        model_kwargs: Model-specific config passed to the architecture.
+        training_kwargs: Training hyperparameters
             (epochs, iterations_per_train_epoch, iterations_per_val_epoch, optimizer, scheduler, loss).
-        model (torch.nn.Module | transformers.PreTrainedModel): The instantiated model.
-        loss (torch.nn.Module | None): Loss function; None until `training_kwargs` provides one.
-        optimizer (torch.optim.Optimizer): Optimiser instance.
-        scheduler (torch.optim.lr_scheduler.LRScheduler | None): Optional LR scheduler.
-        source_to_target_lookup (torch.Tensor | None): 1-D long tensor of shape ``(N+1,)``
+        model: The instantiated model.
+        loss: Loss function; None until `training_kwargs` provides one.
+        optimizer: Optimiser instance.
+        scheduler: Optional LR scheduler.
+        source_to_target_lookup: 1-D long tensor of shape ``(N+1,)``
             mapping global source IDs to target label IDs. ``None`` enables identity passthrough
             (synthetic / single-source pipelines whose source space already matches target space).
-        source_to_concepts_lookup (torch.Tensor | None): Float tensor of shape ``(N+1, C)``.
-        conceptid2labelid (dict[int, int] | None): Maps concept IDs to target label IDs.
-        concept_value2id (dict[str, dict[str, int]] | None): Maps concept names and values to IDs.
+        source_to_concepts_lookup: Float tensor of shape ``(N+1, C)``.
+        conceptid2labelid: Maps concept IDs to target label IDs.
+        concept_value2id: Maps concept names and values to IDs.
     """
 
     run_name: str
@@ -180,7 +185,7 @@ class MetaModel:
     source_to_target_lookup: torch.Tensor | None
     source_to_concepts_lookup: torch.Tensor | None
     conceptid2labelid: dict[int, int] | None
-    concept_value2id: dict[str, dict[str, int]] | None
+    concept_value2id: dict[str, dict[str, list[int]]] | None
 
     def __init__(
         self,
@@ -193,8 +198,22 @@ class MetaModel:
         source_to_target_lookup: torch.Tensor | None = None,
         source_to_concepts_lookup: torch.Tensor | None = None,
         conceptid2labelid: dict[int, int] | None = None,
-        concept_value2id: dict[str, dict[str, int]] | None = None,
+        concept_value2id: dict[str, dict[str, list[int]]] | None = None,
     ):
+        """Build the model, loss, optimizer, scheduler, and label lookups.
+
+        Args:
+            run_name: Identifier for the current run/experiment.
+            num_classes: Number of segmentation output (target) classes.
+            num_concepts: Number of concept channels.
+            model_kwargs: Model-specific config passed to the architecture.
+            device: Device the model and tensors live on.
+            training_kwargs: Training hyperparameters.
+            source_to_target_lookup: Source-to-target label lookup, or ``None`` for identity.
+            source_to_concepts_lookup: Source-to-concept lookup.
+            conceptid2labelid: Maps concept IDs to target label IDs.
+            concept_value2id: Maps concept names and values to IDs.
+        """
         self.run_name = run_name
         self.num_classes = num_classes
         self.num_concepts = num_concepts
@@ -222,7 +241,7 @@ class MetaModel:
         assert self.training_mode == "concept-bottleneck", (
             f"Invalid training_mode: {self.training_mode}"
         )
-        self._metric_shards = None
+        self._metric_shards: list[MetricShard] | None = None
         # One process per GPU (torchrun). The process group must already exist;
         # each rank's loader yields that rank's shard of the global microbatch.
         self.distributed = bool(training_kwargs.pop("distributed", False))
@@ -260,11 +279,11 @@ class MetaModel:
         self.train_metrics_every = max(1, int(training_kwargs.get("train_metrics_every", 1)))
         self._train_microbatches_seen = 0
         self.iterations_per_train_epoch = training_kwargs.get("iterations_per_train_epoch")
-        self._train_loader_iter = None
-        self._train_loader = None
+        self._train_loader_iter: _BaseDataLoaderIter | None = None
+        self._train_loader: _BatchLoader | None = None
         self.iterations_per_val_epoch = training_kwargs.get("iterations_per_val_epoch")
-        self._val_loader_iter = None
-        self._val_loader = None
+        self._val_loader_iter: _BaseDataLoaderIter | None = None
+        self._val_loader: _BatchLoader | None = None
         self.source_to_target_lookup = (
             source_to_target_lookup.to(device).long()
             if source_to_target_lookup is not None
@@ -290,7 +309,7 @@ class MetaModel:
         self.freeze_encoder = freeze_encoder
         self.detach_concepts = detach_concepts
         if freeze_encoder and hasattr(self.model, "freeze_encoder"):
-            self.model.freeze_encoder()
+            cast("Any", self.model).freeze_encoder()
 
         if "loss" in training_kwargs:
             loss_cls = getattr(mermaidseg.model.loss, training_kwargs.loss.pop("type", None))
@@ -310,7 +329,9 @@ class MetaModel:
                 ambiguity_policy=taxonomic_kwargs.pop("ambiguity_policy", "permissive"),
             )
             self.taxonomic_loss = TaxonomicLoss(
-                taxonomy, self.concept_value2id, **taxonomic_kwargs
+                taxonomy,
+                cast("dict[str, dict[str, list[int]]]", self.concept_value2id),
+                **taxonomic_kwargs,
             ).to(device)
 
         optimizer_cfg = dict(training_kwargs.optimizer)
@@ -696,7 +717,7 @@ class MetaModel:
             segmentation_outputs,
             self.loss,
             self.taxonomic_loss,
-            target_labels,
+            cast("torch.Tensor", target_labels),
             target_concepts,
         )
 
@@ -743,7 +764,7 @@ class MetaModel:
             A 3-tuple of ``(average_loss, metric_results, timing)``.
         """
         if self.freeze_encoder and hasattr(self.model, "freeze_encoder"):
-            self.model.freeze_encoder()
+            cast("Any", self.model).freeze_encoder()
 
         iterations_per_train_epoch = self.iterations_per_train_epoch
         if iterations_per_train_epoch is None:
@@ -867,7 +888,9 @@ class MetaModel:
                     target_concepts = self._to_concept_labels(source_labels)
                     if source_rows is not None:
                         target_concepts = apply_concept_source_mask(
-                            target_concepts, self.concept_source_keep, source_rows
+                            target_concepts,
+                            cast("torch.Tensor", self.concept_source_keep),
+                            source_rows,
                         )
 
                 # Distributed: gradients are all-reduced once, in the window's last backward.
@@ -1004,11 +1027,10 @@ class MetaModel:
 
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
+                metric_array = evaluator.metric_dict[metric_name].compute().cpu().numpy()
                 metric_results[metric_name] = (
-                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
+                    metric_array.item() if metric_array.ndim == 0 else metric_array
                 )
-                if metric_results[metric_name].ndim == 0:
-                    metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
 
             metric_results.update(evaluator.compute_concept_metric_results())
@@ -1100,11 +1122,10 @@ class MetaModel:
         # Distributed: torchmetrics sums each metric's state over ranks in compute().
         if evaluator is not None:
             for metric_name in evaluator.metric_dict:
+                metric_array = evaluator.metric_dict[metric_name].compute().cpu().numpy()
                 metric_results[metric_name] = (
-                    evaluator.metric_dict[metric_name].compute().cpu().numpy()
+                    metric_array.item() if metric_array.ndim == 0 else metric_array
                 )
-                if metric_results[metric_name].ndim == 0:
-                    metric_results[metric_name] = metric_results[metric_name].item()
                 evaluator.metric_dict[metric_name].reset()
 
             metric_results.update(evaluator.compute_concept_metric_results())

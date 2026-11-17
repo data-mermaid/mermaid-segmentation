@@ -67,9 +67,9 @@ CORALSCAPES_ID2NAME: dict[int, str] = {
 
 
 class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
-    """A PyTorch Dataset wrapping the HuggingFace
-    `EPFL-ECEO/coralscapes <https://huggingface.co/datasets/EPFL-ECEO/coralscapes>`_
-    dataset.
+    """Wrap the HuggingFace Coralscapes dataset.
+
+    Source: `EPFL-ECEO/coralscapes <https://huggingface.co/datasets/EPFL-ECEO/coralscapes>`_.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is the native Coralscapes 1..39 integer mask (or shifted
@@ -102,7 +102,8 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         split: str | None = None,
         transform: A.BasicTransform | None = None,
         class_subset: list[str] | None = None,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         from datasets import concatenate_datasets, load_dataset
 
         self.split = split
@@ -175,12 +176,14 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     @property
     def global_offset(self) -> int:
+        """Current global offset assigned by the registry."""
         return self._global_offset
 
     def __len__(self) -> int:
+        """Return the number of rows in the underlying dataset."""
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def __getitem__(self, idx: int) -> tuple[Any, Any]:
         """Return ``(image, source_labels)`` for ``idx``.
 
         On any internal load/transform error we emit a warning to logger + stdout + stderr and
@@ -193,7 +196,7 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             emit_dataset_warning(f"CoralscapesDataset: skipping idx={idx}: {type(e).__name__}: {e}")
             return None, None
 
-    def _load_item(self, idx: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+    def _load_item(self, idx: int) -> tuple[Any, Any]:
         # Fetch the HF row once: ``datasets`` eagerly decodes every Image column on each row access,
         # so indexing twice would decode both the image and the label PNG twice.
         row = self.dataset[idx]
@@ -210,7 +213,7 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return image, mask
 
     def collate_fn(self, batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Filter out ``(None, None)`` items (failed loads) and stack into batched tensors.
+        """Drop ``(None, None)`` items (failed loads) and stack the rest into tensors.
 
         :meth:`__getitem__` returns ``(None, None)`` for items it fails to load; this filter drops
         them so a failed item simply leaves the batch instead of crashing the loader.
@@ -231,6 +234,8 @@ class CoralscapesDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             )
             return torch.tensor([]), torch.tensor([])
 
+        images: Any
+        source_labels: Any
         images, source_labels = zip(*filtered, strict=False)
 
         if isinstance(images[0], torch.Tensor):

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Canonical dataset registry (name -> class). Order is deterministic so runs and
 # prefetch produce identical iteration order.
-DATASET_CLASSES: dict[str, type] = {
+DATASET_CLASSES: dict[str, type[Any]] = {
     "pacific_labeled_corals": PacificLabeledCoralsDataset,
     "moorea_labeled_corals": MooreaLabeledCoralsDataset,
     "catlin_seaview": CatlinSeaviewDataset,
@@ -54,7 +54,7 @@ _CONCEPT_SPLITS = ("train", "val", "test")
 def configured_source_names(
     data_cfg: Any,
     *,
-    dataset_classes: dict[str, type] | None = None,
+    dataset_classes: dict[str, type[Any]] | None = None,
 ) -> set[str]:
     """``SOURCE_NAME``s with a non-skipped train, val, or test block.
 
@@ -82,7 +82,7 @@ def build_datasets(
     data_cfg: Any,
     padding: int | None = None,
     *,
-    dataset_classes: dict[str, type] | None = None,
+    dataset_classes: dict[str, type[Any]] | None = None,
     names: list[str] | None = None,
     splits: list[str] | None = None,
     verbose: bool = True,

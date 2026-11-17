@@ -23,6 +23,7 @@ import logging
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 from mermaidseg.datasets import build_datasets, setup_local_cache
 from mermaidseg.datasets.local_cache import LocalS3Cache
@@ -85,7 +86,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _warm_dataset(ds, workers: int, fail_fast: bool) -> tuple[int, list[str]]:
+def _warm_dataset(ds: Any, workers: int, fail_fast: bool) -> tuple[int, list[str]]:
     """Read every image (and dense label, if any) of ``ds`` through the cache.
 
     Returns ``(num_attempted, failures)`` where ``failures`` is a truncated list
@@ -135,6 +136,7 @@ def _download_hf_models(repos: list[str]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Warm the local S3 cache for the configured datasets and return the exit code."""
     args = _parse_args(argv)
 
     cfg = setup_config({"data": args.data_config, "training": args.training_config})

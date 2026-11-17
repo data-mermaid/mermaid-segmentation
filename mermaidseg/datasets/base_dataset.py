@@ -13,7 +13,7 @@ import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import albumentations as A
 import numpy as np
@@ -123,7 +123,8 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         padding: int | None = None,
         class_subset: list[str] | None = None,
         image_keep: str | Path | None = None,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         self.split = split
         self.transform = transform
         self.padding = padding
@@ -213,6 +214,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return self._global_offset
 
     def __len__(self) -> int:
+        """Return the number of images."""
         return self.df_images.shape[0]
 
     def read_image(self, **row_kwargs: Any) -> NDArray[Any]:
@@ -247,6 +249,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         return idx
 
     def _safe_getitem(self, idx: int, attempts: int) -> tuple[torch.Tensor | NDArray[Any], Any]:
+        """Load ``idx``, retrying another random index on failure or an empty mask."""
         n = len(self)
         if n == 0:
             raise RuntimeError(f"{self.__class__.__name__}: dataset is empty")
@@ -294,7 +297,10 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         if getattr(self, "_return_source_row", False):
             # Here, not in __getitem__: after a retry, ``idx`` is the image actually returned.
             rows = self._source_rows
-            return image, mask, int(rows.loc[idx]) if rows is not None else 0
+            return cast(
+                "tuple[torch.Tensor | NDArray[Any], Any]",
+                (image, mask, int(rows.loc[idx]) if rows is not None else 0),
+            )
         return image, mask
 
     def set_source_rows(self, rows: pd.Series | None) -> None:
@@ -335,7 +341,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         # mask)`` pass but avoids allocating/scanning the full-resolution mask again.
         local_mask = create_annotation_mask(
             annotations,
-            image.shape,
+            cast("tuple[int, int]", image.shape),
             self.source_name2id,
             padding=self.padding,
             offset=self._global_offset,

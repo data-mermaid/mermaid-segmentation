@@ -878,18 +878,6 @@ wheels = [
 ]
 
 [[package]]
-name = "docformatter"
-version = "1.7.8"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "charset-normalizer" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6a/e1/f6fb315205e0a8f62ddbd52029b3d39cb5bada768af317193460f0454f6b/docformatter-1.7.8.tar.gz", hash = "sha256:6589b62a8f38c62c4c8c84cb1afa296af007c88c959e4c9d25c74c1f933c4dbf", size = 37754, upload-time = "2026-04-28T20:34:49.39Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/09/9b/9d2f60e967243aa0d1c6366f4f5feb0740393b5da7dbc66802034afc6331/docformatter-1.7.8-py3-none-any.whl", hash = "sha256:8e518948bacb8d8df5d5f625060e214a200f0a908d8e6797c9ebbdd2cdd17467", size = 59445, upload-time = "2026-04-28T20:34:50.393Z" },
-]
-
-[[package]]
 name = "docker"
 version = "7.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1907,7 +1895,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "docformatter" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -1948,7 +1935,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "docformatter", specifier = ">=1.7.7" },
     { name = "mypy", specifier = ">=2.4.1" },
     { name = "pre-commit", specifier = ">=3.0" },
     { name = "pytest", specifier = ">=8.0" },

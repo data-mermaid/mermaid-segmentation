@@ -23,8 +23,7 @@ from mermaidseg.datasets.utils import get_image_s3
 
 
 class CatlinSeaviewDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading Catlin Seaview annotated coral reef images from a Parquet file
-    stored on S3.
+    """Load Catlin Seaview annotated coral reef images from a Parquet file on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in the Catlin Seaview source label
@@ -76,7 +75,8 @@ class CatlinSeaviewDataset(BaseCoralDataset):
         whitelist_regions: list[str] | None = None,
         blacklist_regions: list[str] | None = None,
         **base_kwargs: Any,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         if whitelist_regions is not None and blacklist_regions is not None:
             raise ValueError("Cannot specify both whitelist_regions and blacklist_regions.")
 
@@ -133,6 +133,7 @@ class CatlinSeaviewDataset(BaseCoralDataset):
             .reset_index(drop=True)
         )
 
-    def read_image(self, image_id: str, region: str, **row_kwargs: Any) -> NDArray[Any]:
+    def read_image(self, image_id: str, region: str, **row_kwargs: Any) -> NDArray[Any]:  # type: ignore[override]  # row columns are required named parameters
+        """Read the source image for one row of ``df_images`` as an RGB array."""
         key = f"{self.source_s3_prefix}/images/{region}/{image_id}.jpg"
         return np.array(get_image_s3(bucket=self.source_bucket, key=key).convert("RGB"))

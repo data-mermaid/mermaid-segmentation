@@ -67,8 +67,7 @@ def _resolve_default_manifest_path() -> str:
 
 
 class CoralNetDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading CoralNet annotated coral reef images from a Parquet file stored
-    on S3.
+    """Load CoralNet annotated coral reef images from a Parquet file on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in CoralNet's own provider-ID label
@@ -121,7 +120,8 @@ class CoralNetDataset(BaseCoralDataset):
         image_blacklist: str | list[int | str] | None = None,
         annotation_overrides: str | None = None,
         **base_kwargs: Any,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         self.manifest_path = manifest_path or _resolve_default_manifest_path()
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
@@ -197,7 +197,7 @@ class CoralNetDataset(BaseCoralDataset):
         return df_annotations, df_images
 
     def _read_parquet_ref(self, ref: str) -> pd.DataFrame:
-        """Read a dedup parquet: a repo-relative path if that file exists, else a storage ref."""
+        """Read a dedup parquet from a repo path if it exists, else a storage ref."""
         repo_path = _REPO_ROOT / ref
         if not Path(ref).is_absolute() and repo_path.is_file():
             return pd.read_parquet(repo_path)
@@ -207,14 +207,16 @@ class CoralNetDataset(BaseCoralDataset):
         if isinstance(self.image_blacklist, str):
             df = self._read_parquet_ref(self.image_blacklist)
             return set(df["image_id"].astype(str))
+        assert self.image_blacklist is not None  # callers check before loading
         return {str(x) for x in self.image_blacklist}
 
     def _apply_annotation_overrides(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
-        """Replace the points of every image in ``annotation_overrides`` with the listed ones.
+        """Replace each image's points with those in ``annotation_overrides``.
 
         ``image_key`` and ``source_id`` are taken from the image's manifest rows, so overrides
         for images missing from the manifest are dropped.
         """
+        assert self.annotation_overrides is not None  # callers check before applying
         overrides = self._read_parquet_ref(self.annotation_overrides)[
             ["image_id", "row", "col", "coralnet_id"]
         ]
@@ -245,13 +247,14 @@ class CoralNetDataset(BaseCoralDataset):
             .reset_index(drop=True)
         )
 
-    def read_image(
+    def read_image(  # type: ignore[override]  # row columns are required named parameters
         self,
         image_id: str,
         source_id: str,
         image_key: str | None = None,
         **row_kwargs: Any,
     ) -> NDArray[Any]:
+        """Read the source image for one row of ``df_images`` as an RGB array."""
         # ``image_key`` (resized vs original) comes from the training manifest via df_images.
         # When the manifest has no entry we deliberately do NOT fall back to the original
         # full-resolution image: its pixels would be misaligned with the 2048-resized annotation

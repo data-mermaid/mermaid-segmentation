@@ -42,8 +42,9 @@ import hashlib
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -79,7 +80,7 @@ _SVM_STRIP_ROWS = 128
 _ALLOWED_CONCEPT_CELLS = ("true", "false", "not_given")
 
 
-def _to_label(arr_like) -> NDArray[np.uint8]:
+def _to_label(arr_like: Any) -> NDArray[np.uint8]:
     arr = np.asarray(arr_like)
     if arr.ndim == 3:
         arr = arr[..., 0]
@@ -169,7 +170,7 @@ def average_window_logits(
 def reassemble_concept_logits(
     predictor: CBMPredictor, image_rgb: NDArray[np.uint8]
 ) -> torch.Tensor:
-    """Run the three Coralscapes windows and return averaged concept logits ``(K, 1024, 2048)``."""
+    """Run the three Coralscapes windows; return averaged concept logits ``(K, 1024, 2048)``."""
     _require_rgb(image_rgb, "Coralscapes image")
     crops: list[torch.Tensor] = []
     boxes: list[tuple[int, int, int, int]] = []
@@ -259,9 +260,22 @@ class LocalMirrorSource:
     """Cityscapes-style mirror (leftImg8bit + gtFine/*_labelIds.png)."""
 
     def __init__(self, root: str | Path):
+        """Point the source at a mirror directory.
+
+        Args:
+            root: Mirror root holding ``leftImg8bit`` and ``gtFine``.
+        """
         self.root = Path(root)
 
     def train_image_label(self, entry: dict) -> tuple[NDArray[np.uint8], NDArray[np.uint8]]:
+        """Load the train image and label of a probe-set entry.
+
+        Args:
+            entry: Probe image entry with ``site``, ``stem`` and ``label_md5``.
+
+        Returns:
+            The RGB image and the label map.
+        """
         site, stem = entry["site"], entry["stem"]
         from PIL import Image
 
@@ -284,7 +298,8 @@ class LocalMirrorSource:
     def _label_paths(self, split: str) -> list[Path]:
         return sorted((self.root / "gtFine" / split).glob("*/*_gtFine_labelIds.png"))
 
-    def iter_split(self, split: str):
+    def iter_split(self, split: str) -> Iterator[tuple[str, NDArray[np.uint8], NDArray[np.uint8]]]:
+        """Yield ``(image_key, image, label)`` for every image of a split."""
         from PIL import Image
 
         for p in self._label_paths(split):
@@ -299,6 +314,7 @@ class LocalMirrorSource:
             yield f"{site}/{stem}", img, _to_label(Image.open(p))
 
     def num_split(self, split: str) -> int:
+        """Return the number of images in a split."""
         return len(self._label_paths(split))
 
 
@@ -306,6 +322,11 @@ class HFSource:
     """HuggingFace ``josauder/coralscapesV2`` dataset (default config)."""
 
     def __init__(self, repo: str = "josauder/coralscapesV2"):
+        """Load the dataset from the HuggingFace hub.
+
+        Args:
+            repo: HuggingFace dataset repository id.
+        """
         from datasets import load_dataset
 
         logger.info("Loading HF dataset %s ...", repo)
@@ -322,8 +343,20 @@ class HFSource:
         self._md5_index = idx
 
     def train_image_label(self, entry: dict) -> tuple[NDArray[np.uint8], NDArray[np.uint8]]:
+        """Find a probe-set entry in the train split by label md5 and load it.
+
+        Args:
+            entry: Probe image entry with ``site``, ``stem`` and ``label_md5``.
+
+        Returns:
+            The RGB image and the label map.
+
+        Raises:
+            KeyError: If no train label matches the md5.
+        """
         if self._md5_index is None:
             self._build_index()
+        assert self._md5_index is not None  # set by _build_index
         i = self._md5_index.get(entry["label_md5"])
         if i is None:
             raise KeyError(
@@ -333,7 +366,8 @@ class HFSource:
         item = self.ds["train"][i]
         return np.asarray(item["image"].convert("RGB"), dtype=np.uint8), _to_label(item["label"])
 
-    def iter_split(self, split: str):
+    def iter_split(self, split: str) -> Iterator[tuple[str, NDArray[np.uint8], NDArray[np.uint8]]]:
+        """Yield ``(image_key, image, label)`` for every image of a split."""
         ds = self.ds[_HF_SPLIT_NAMES[split]]
         for i in range(len(ds)):
             item = ds[i]
@@ -344,10 +378,12 @@ class HFSource:
             )
 
     def num_split(self, split: str) -> int:
+        """Return the number of images in a split."""
         return len(self.ds[_HF_SPLIT_NAMES[split]])
 
 
-def build_source(coralscapes_root: str | Path | None, hf_repo: str):
+def build_source(coralscapes_root: str | Path | None, hf_repo: str) -> LocalMirrorSource | HFSource:
+    """Return the local mirror if ``coralscapes_root`` is given, else the HuggingFace dataset."""
     if coralscapes_root is not None:
         logger.info("Using local CoralscapesV2 mirror at %s", coralscapes_root)
         return LocalMirrorSource(coralscapes_root)
@@ -381,7 +417,7 @@ def _sample_activated(
 
 
 def _extract_probe_features(
-    predictor: CBMPredictor, source, images: list[dict]
+    predictor: CBMPredictor, source: LocalMirrorSource | HFSource, images: list[dict]
 ) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
     feats: list[NDArray[np.float32]] = []
     labels: list[int] = []
@@ -404,7 +440,9 @@ def _extract_probe_features(
     return np.concatenate(feats, axis=0), np.asarray(labels, dtype=np.int64)
 
 
-def _fit_linear_svm(X: NDArray[np.float32], y: NDArray[np.int64], svm_c: float):
+def _fit_linear_svm(
+    X: NDArray[np.float32], y: NDArray[np.int64], svm_c: float
+) -> tuple[Any, Any, float]:
     from sklearn.preprocessing import StandardScaler
     from sklearn.svm import LinearSVC
 
@@ -417,7 +455,7 @@ def _fit_linear_svm(X: NDArray[np.float32], y: NDArray[np.int64], svm_c: float):
 
 
 def _folded_linear(
-    scaler, svm, device: torch.device
+    scaler: Any, svm: Any, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fold StandardScaler into the SVM linear layer: scores = X @ Weff.T + beff."""
     coef = torch.tensor(svm.coef_, dtype=torch.float32, device=device)  # (ncls, D)
@@ -478,7 +516,7 @@ def _evaluate_split(
     *,
     split: str,
     predictor: CBMPredictor,
-    source,
+    source: LocalMirrorSource | HFSource,
     weff: torch.Tensor,
     beff: torch.Tensor,
     classes: torch.Tensor,
@@ -765,7 +803,7 @@ def union_probe_images(probes: Mapping[int, dict]) -> list[dict]:
 
 
 def _extract_legacy_probe_features(
-    predictor: CBMPredictor, source, images: list[dict]
+    predictor: CBMPredictor, source: LocalMirrorSource | HFSource, images: list[dict]
 ) -> dict[int, tuple[NDArray[np.float32], NDArray[np.int64]]]:
     """Sample every k's pixels from one activated map per train image."""
     feats: dict[int, list[NDArray[np.float32]]] = defaultdict(list)
@@ -843,7 +881,7 @@ def _evaluate_legacy_split(
     *,
     split: str,
     predictor: CBMPredictor,
-    source,
+    source: LocalMirrorSource | HFSource,
     lut: NDArray[np.uint8],
     heads: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     probe_infos: dict[int, dict],

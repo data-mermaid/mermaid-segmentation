@@ -1,8 +1,10 @@
+"""Configuration loading, merging, and command-line overrides for training runs."""
+
 import argparse
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import albumentations as A
 import yaml
@@ -11,7 +13,8 @@ import yaml
 class ConfigDict(dict):
     """Dictionary subclass with attribute-style access."""
 
-    def __init__(self, dictionary: Mapping[str, Any] | None = None, **kwargs: Any):
+    def __init__(self, dictionary: Mapping[str, Any] | None = None, **kwargs: Any) -> None:
+        """Initialize from an optional mapping and keywords, wrapping nested dicts."""
         super().__init__()
         if dictionary is not None:
             self.update(dictionary)
@@ -31,18 +34,26 @@ class ConfigDict(dict):
         return value
 
     def __setitem__(self, key: str, value: Any) -> None:
+        """Set an item, wrapping mappings as ``ConfigDict``."""
         super().__setitem__(key, self._wrap(value))
 
     def __getattr__(self, attr: str) -> Any:
+        """Return the item named ``attr``.
+
+        Raises:
+            AttributeError: If the key is missing.
+        """
         try:
             return self[attr]
         except KeyError as exc:
             raise AttributeError(attr) from exc
 
     def __setattr__(self, key: str, value: Any) -> None:
+        """Set the item named ``key``."""
         self[key] = value
 
     def update(self, *args: Any, **kwargs: Any) -> None:
+        """Merge mappings and keyword entries, recursively merging nested mappings."""
         for mapping in args:
             for key, value in dict(mapping).items():
                 current = self.get(key)
@@ -62,6 +73,7 @@ class ConfigDict(dict):
                 self[key] = value
 
     def copy(self) -> "ConfigDict":
+        """Return a deep copy."""
         return ConfigDict(deepcopy(dict(self)))
 
 
@@ -118,7 +130,7 @@ _TRANSFORMS_BEFORE_NORMALIZE = frozenset({"ColorJitter"})
 
 
 def _order_transform_items(items: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
-    """Place color jitter-style transforms before ``Normalize`` when config merge appends them."""
+    """Place color-jitter transforms before ``Normalize`` when a merge appends them."""
     normalize_idx = next((i for i, (name, _) in enumerate(items) if name == "Normalize"), None)
     if normalize_idx is None:
         return items
@@ -141,7 +153,7 @@ def _order_transform_items(items: list[tuple[str, Any]]) -> list[tuple[str, Any]
     return ordered
 
 
-def preprocess_data_config(data_cfg_orig):
+def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:
     """Normalize the split data config (configs/data_config.yaml).
 
     Expands the per-dataset ``default`` block into every dataset that does not override it, then
@@ -177,7 +189,7 @@ def preprocess_data_config(data_cfg_orig):
 
 
 def apply_resolution(spec: Any, resolution: int) -> Any:
-    """Set every ``RandomResizedCrop`` size and ``Resize`` width/height in a raw data spec.
+    """Set every ``RandomResizedCrop`` size and ``Resize`` width/height in a raw spec.
 
     Walks the uncompiled YAML mapping in place, so it must run before
     ``preprocess_data_config`` turns the transform specs into albumentations objects.
@@ -186,10 +198,10 @@ def apply_resolution(spec: Any, resolution: int) -> Any:
     if isinstance(spec, Mapping):
         for key, value in spec.items():
             if key == "RandomResizedCrop" and isinstance(value, Mapping):
-                value["size"] = [resolution, resolution]
+                cast("MutableMapping[str, Any]", value)["size"] = [resolution, resolution]
             elif key == "Resize" and isinstance(value, Mapping):
-                value["width"] = resolution
-                value["height"] = resolution
+                cast("MutableMapping[str, Any]", value)["width"] = resolution
+                cast("MutableMapping[str, Any]", value)["height"] = resolution
             else:
                 apply_resolution(value, resolution)
     elif isinstance(spec, list):
@@ -220,7 +232,7 @@ def setup_config(
     """
     cfg = ConfigDict()
     if "data" in config_path_dict:
-        data_cfg = load_config(config_path_dict["data"])
+        data_cfg = load_config(cast("str | Path", config_path_dict["data"]))
         if resolution is not None:
             apply_resolution(data_cfg, int(resolution))
         data_cfg = preprocess_data_config(data_cfg)
@@ -229,7 +241,7 @@ def setup_config(
         else:
             cfg.data = data_cfg
     if "model" in config_path_dict:
-        model_cfg = load_config(config_path_dict["model"])
+        model_cfg = load_config(cast("str | Path", config_path_dict["model"]))
         if "model" in model_cfg:
             cfg.update(model_cfg)
         else:
@@ -237,13 +249,13 @@ def setup_config(
         if resolution is not None:
             cfg.model.input_size = [int(resolution), int(resolution)]
     if "training" in config_path_dict:
-        training_cfg = load_config(config_path_dict["training"])
+        training_cfg = load_config(cast("str | Path", config_path_dict["training"]))
         if "training" in training_cfg:
             cfg.update(training_cfg)
         else:
             cfg.training = training_cfg
     if "logger" in config_path_dict:
-        logger_cfg = load_config(config_path_dict["logger"])
+        logger_cfg = load_config(cast("str | Path", config_path_dict["logger"]))
         if "logger" in logger_cfg:
             cfg.update(logger_cfg)
         else:

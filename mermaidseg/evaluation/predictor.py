@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from typing import Any, cast
 
 import albumentations as A
 import numpy as np
@@ -90,7 +91,19 @@ class CBMPredictor:
         device: torch.device | str = "cuda",
         amp: bool = False,
     ):
-        self.model = model.eval()
+        """Wrap a model for inference.
+
+        Args:
+            model: Concept-bottleneck model exposing ``concept_classifier``.
+            input_size: ``(height, width)`` of the evaluation transform.
+            device: Device the inputs are moved to.
+            amp: Whether to run the forward pass under bfloat16 autocast on CUDA.
+
+        Raises:
+            ValueError: If ``model`` has no ``concept_classifier``.
+        """
+        # Duck-typed: CBM variants expose attributes (_encode, dpt_head) that nn.Module hides.
+        self.model: Any = model.eval()
         self.input_size = (int(input_size[0]), int(input_size[1]))
         self.device = torch.device(device)
         self.amp = bool(amp)
@@ -98,12 +111,14 @@ class CBMPredictor:
 
         if not hasattr(model, "concept_classifier"):
             raise ValueError("Model does not expose a `concept_classifier`; is this a CBM model?")
-        self.num_concepts = int(model.concept_classifier.in_channels)
-        self.num_classes = int(model.concept_classifier.out_channels)
+        classifier = cast("Any", model.concept_classifier)
+        self.num_concepts = int(classifier.in_channels)
+        self.num_classes = int(classifier.out_channels)
         self.patch_size = int(getattr(model, "patch_size", 16))
 
     # -- preprocessing ---------------------------------------------------------
     def preprocess(self, image_rgb_uint8: NDArray[np.uint8]) -> torch.Tensor:
+        """Resize and normalize an RGB image to the model input size."""
         return preprocess_image(image_rgb_uint8, self.transform)
 
     def preprocess_long_edge(
@@ -117,7 +132,7 @@ class CBMPredictor:
         out_h, out_w = long_edge_size(height, width, long_edge, multiple=self.patch_size)
         return preprocess_image(image_rgb_uint8, make_eval_transform((out_h, out_w)))
 
-    def _autocast(self):
+    def _autocast(self) -> torch.autocast:
         if self.amp and self.device.type == "cuda":
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         return torch.autocast(device_type="cpu", enabled=False)

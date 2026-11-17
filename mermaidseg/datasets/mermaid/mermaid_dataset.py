@@ -19,8 +19,7 @@ from mermaidseg.datasets.utils import get_image_s3
 
 
 class MermaidDataset(BaseCoralDataset):
-    """A PyTorch Dataset for loading MERMAID annotated coral reef images from a Parquet file stored
-    on S3.
+    """Load MERMAID annotated coral reef images from a Parquet file on S3.
 
     Each item returned is a tuple ``(image, source_labels)`` where
     ``source_labels`` is an integer mask in the MERMAID benthic-attribute label
@@ -53,7 +52,8 @@ class MermaidDataset(BaseCoralDataset):
         source_bucket: str = "coral-reef-training",
         annotation_date_cutoff: str | None = None,
         **base_kwargs: Any,
-    ):
+    ) -> None:
+        """Initialize the dataset; arguments are described in the class docstring."""
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
         self.annotation_date_cutoff = (
@@ -91,6 +91,7 @@ class MermaidDataset(BaseCoralDataset):
             .reset_index(drop=True)
         )
 
-    def read_image(self, image_id: str, **row_kwargs: Any) -> NDArray[Any]:
+    def read_image(self, image_id: str, **row_kwargs: Any) -> NDArray[Any]:  # type: ignore[override]  # row columns are required named parameters
+        """Read the source image for one row of ``df_images`` as an RGB array."""
         key = f"mermaid/{image_id}.png"
         return np.array(get_image_s3(bucket=self.source_bucket, key=key).convert("RGB"))

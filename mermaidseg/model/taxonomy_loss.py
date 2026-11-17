@@ -125,6 +125,13 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
         concept_value2id: dict[str, dict[str, list[int]]],
         stop_grad_coarse: bool = True,
     ) -> None:
+        """Build the parent matrices and class-group buffers for each adjacent rank pair.
+
+        Args:
+            taxonomy: Parent-child structure shared with the hierarchical metrics.
+            concept_value2id: Concept name -> value -> channel mapping.
+            stop_grad_coarse: Detach the coarse head's distribution in each KL pair.
+        """
         super().__init__()
         self.stop_grad_coarse = stop_grad_coarse
         self.slices = taxonomic_rank_slices(concept_value2id)
@@ -172,7 +179,7 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
         r: int,
         keep: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Logits of rank ``r``, restricted to the ``keep`` classes (a copy only when needed)."""
+        """Logits of rank ``r``, restricted to the ``keep`` classes (copied only if needed)."""
         _, offset, names = self.slices[r]
         logits = concept_logits[:, offset : offset + len(names)]
         if keep is None or keep.numel() == len(names):
@@ -228,7 +235,7 @@ class TaxonomicLoss(torch.nn.Module):
         taxonomy: Parent-child structure from ``build_taxonomy_tree`` over ``class_to_concepts.csv``,
             the same tree the hierarchical metrics use.
         concept_value2id: Concept name -> value -> channel mapping.
-        kl_weight: Weight ``lambda`` of :class:`TaxonomicCoherenceLoss`. Defaults to 0 (off).
+        kl_weight: Weight ``lambda`` of :class:`TaxonomicCoherenceLoss`. Zero turns the term off.
         kl_stop_grad_coarse: Detach the coarse head's distribution in each KL pair.
     """
 
@@ -239,6 +246,7 @@ class TaxonomicLoss(torch.nn.Module):
         kl_weight: float = 0.0,
         kl_stop_grad_coarse: bool = True,
     ) -> None:
+        """Build the coherence loss when ``kl_weight`` is positive."""
         super().__init__()
         self.kl_weight = kl_weight
         self.num_ranks = len(TAXONOMIC_CONCEPTS)

@@ -1,4 +1,6 @@
-"""Serialization strategy:
+"""Experiment tracking and checkpoint persistence for training and evaluation runs.
+
+Serialization strategy:
 - Training checkpoints: torch.save (pickle) — full state for resume.
 """
 
@@ -10,13 +12,17 @@ import re
 import tempfile
 import time
 import warnings
-from typing import Any
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 from mermaidseg.model.meta import MetaModel
+
+if TYPE_CHECKING:
+    from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +32,7 @@ try:
 
     WANDB_IMPORT_ERROR = None
 except ImportError as err:
-    wandb = None
+    wandb = None  # type: ignore[assignment]  # optional dependency guard
     WANDB_IMPORT_ERROR = err
 
 
@@ -52,7 +58,10 @@ def prune_rolling_checkpoints(
 
 
 def _safe_wandb_artifact_name(name: str) -> str:
-    """Sanitize a string into a valid wandb artifact name (alnum, ``_``, ``-``, ``.``)."""
+    """Sanitize a string into a valid wandb artifact name.
+
+    Allowed characters are alphanumerics, ``_``, ``-`` and ``.``.
+    """
     return re.sub(r"[^a-zA-Z0-9_.\-]", "-", name)
 
 
@@ -64,8 +73,8 @@ class Logger:
     """
 
     @staticmethod
-    def _resolve_backend_flag(name, logger_cfg, default):
-        """Resolve a backend enable flag from ``config.logger.<name>``, else ``default``."""
+    def _resolve_backend_flag(name: str, logger_cfg: Any, default: bool) -> bool:
+        """Resolve a backend enable flag from ``config.logger.<name>`` or a default."""
         cfg_val = getattr(logger_cfg, name, None) if logger_cfg is not None else None
         if cfg_val is None:
             return default
@@ -73,15 +82,16 @@ class Logger:
 
     def __init__(
         self,
-        config,
-        meta_model,
-        log_epochs=5,
-        log_checkpoint=50,
-        checkpoint_dir=".",
-        id2label=None,
-        id2concept=None,
-        save_local_checkpoints=None,
-    ):
+        config: Any,
+        meta_model: MetaModel,
+        log_epochs: int = 5,
+        log_checkpoint: int = 50,
+        checkpoint_dir: str = ".",
+        id2label: dict | None = None,
+        id2concept: dict | None = None,
+        save_local_checkpoints: bool | None = None,
+    ) -> None:
+        """Set up checkpoint settings and, if enabled, the wandb delegate."""
         self.config = config
         self.log_epochs = log_epochs
         self.log_checkpoint = log_checkpoint
@@ -176,6 +186,7 @@ class Logger:
                     self.wandb_run_id = self._wandb_logger.wandb_run_id
                     if config_to_log is not None:
                         logger.info("Logging config to wandb...")
+                        assert params is not None and tags is not None  # set with config_to_log
                         self._wandb_logger.log_config(config_to_log)
                         self._wandb_logger.log_params(params)
                         self._wandb_logger.set_tags(tags)
@@ -213,7 +224,7 @@ class Logger:
                 result[k] = float(v)
         return result
 
-    def log_reconciliation(self, registry) -> None:
+    def log_reconciliation(self, registry: "SourceLabelRegistry") -> None:
         """Log the joint :class:`SourceLabelRegistry` artifacts to wandb.
 
         Saves ``global_id2source``, ``target_id2label``, ``source_to_target`` and (when present)
@@ -263,8 +274,8 @@ class Logger:
         """True when a ``WandbLogger`` delegate is active."""
         return self._wandb_logger is not None
 
-    def log(self, log_dict, step):
-        # Array-valued per-class/per-concept metrics are expanded into named scalars.
+    def log(self, log_dict: dict, step: int) -> None:
+        """Log metrics, expanding array values into named scalars."""
         metrics_to_log = self._unpack_metrics(log_dict)
 
         if self._wandb_logger is not None:
@@ -305,7 +316,7 @@ class Logger:
         checkpoint_name: str | None = None,
         epoch_complete: bool = True,
         atomic: bool = False,
-    ):
+    ) -> None:
         """Save a model checkpoint locally.
 
         Local persistence is controlled by ``save_local_checkpoints``. Checkpoints are not
@@ -340,8 +351,9 @@ class Logger:
             "metrics": metrics_dict,
         }
 
-        if getattr(meta_model_run, "scheduler", None) is not None:
-            checkpoint["scheduler_state_dict"] = meta_model_run.scheduler.state_dict()
+        scheduler = getattr(meta_model_run, "scheduler", None)
+        if scheduler is not None:
+            checkpoint["scheduler_state_dict"] = scheduler.state_dict()
 
         model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/{filename}"
 
@@ -364,7 +376,7 @@ class Logger:
         else:
             logger.info("Local checkpoint saving disabled, skipping disk write")
 
-    def end_run(self):
+    def end_run(self) -> None:
         """End the wandb delegate's run, if active.
 
         Should be called at the end of training to ensure proper cleanup.
@@ -372,28 +384,40 @@ class Logger:
         if self._wandb_logger is not None:
             self._wandb_logger.end_run()
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
+        """Return this logger for use as a context manager."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> Literal[False]:
+        """End the run on context exit without suppressing exceptions."""
         self.end_run()
         return False
 
 
 class WandbLogger:
-    """Standalone wandb logger, used as the ``Logger`` delegate for wandb-backed runs."""
+    """Standalone wandb logger used as the ``Logger`` delegate."""
 
     def __init__(
         self,
         project: str,
         run_name: str,
-        config,
+        config: Any,
         num_classes: int,
         *,
         entity: str | None = None,
         run_id: str | None = None,
-        resume: str = "allow",
-    ):
+        resume: Literal["allow", "never", "must", "auto"] = "allow",
+    ) -> None:
+        """Start a wandb run, resuming a run id from the argument or ``WANDB_RUN_ID``.
+
+        Raises:
+            ImportError: If wandb is not installed.
+        """
         if WANDB_IMPORT_ERROR is not None:
             raise ImportError(
                 "wandb is required for WandbLogger but is not installed. Install with: pip install wandb"
@@ -435,11 +459,11 @@ class WandbLogger:
             logger.warning("Failed to log %s to wandb: %s", name, e)
 
     def log_config(self, config_to_log: dict) -> None:
-        """Log the full training config as a JSON artifact (mirrors config/config.json)."""
+        """Log the full training config as a JSON artifact."""
         self._log_json_artifact("config", config_to_log, artifact_type="config")
 
     def log_params(self, params: dict) -> None:
-        """Log flattened scalar params (run_name, log_epochs, model_*, training_*, ...)."""
+        """Log flattened scalar params (run_name, log_epochs, model_*, training_*)."""
         if self.wandb_run is None:
             return
         try:
@@ -448,7 +472,7 @@ class WandbLogger:
             logger.warning("Failed to log params to wandb: %s", e)
 
     def set_tags(self, tags: dict[str, str]) -> None:
-        """Set run tags (model_type/framework, ...) as both config keys and wandb tags."""
+        """Set run tags (model_type/framework) as config keys and wandb tags."""
         if self.wandb_run is None:
             return
         try:
@@ -486,7 +510,7 @@ class WandbLogger:
                 "conceptid2labelid", conceptid2labelid, artifact_type="metadata"
             )
 
-    def log_dataloader_params(self, loader, prefix: str = "dataloader") -> None:
+    def log_dataloader_params(self, loader: DataLoader, prefix: str = "dataloader") -> None:
         """Log DataLoader configuration as wandb config keys."""
         if self.wandb_run is None:
             return
@@ -504,7 +528,7 @@ class WandbLogger:
         except Exception as e:
             logger.warning("Failed to log dataloader params to wandb: %s", e)
 
-    def log(self, log_dict, step):
+    def log(self, log_dict: dict, step: int) -> None:
         """Log metrics to the active wandb run."""
         if self.wandb_run is None:
             return
@@ -513,7 +537,7 @@ class WandbLogger:
         except Exception as e:
             logger.warning("Failed to log metrics to wandb: %s", e)
 
-    def end_run(self):
+    def end_run(self) -> None:
         """Finish the active wandb run."""
         if self.wandb_run is None:
             return

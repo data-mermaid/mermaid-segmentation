@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 
@@ -20,7 +21,7 @@ SOURCE_NAME = "coralnet"
 
 
 def sample_images_per_source(df_images: pd.DataFrame, n: int, seed: int = 0) -> pd.DataFrame:
-    """At most ``n`` images of each ``source_id``, drawn with ``seed``; smaller sources keep all."""
+    """At most ``n`` images per ``source_id``, drawn with ``seed``; small sources keep all."""
     if n < 1:
         raise ValueError(f"images per source must be positive, got {n}")
     parts = [
@@ -41,9 +42,9 @@ def write_coralnet_sample(
     images_per_source: int,
     seed: int = 0,
 ) -> Path:
-    """Write an ``image_keep`` parquet of a seeded per-source image sample of these sources."""
+    """Write an ``image_keep`` parquet of a seeded per-source image sample."""
     base = CoralNetDataset(
-        whitelist_sources=whitelist_sources,
+        whitelist_sources=cast("list[int | str] | None", whitelist_sources),
         image_blacklist=image_blacklist,
         annotation_overrides=annotation_overrides,
         transform=None,
@@ -90,6 +91,28 @@ def evaluate_coralnet(
     max_images_per_unit: int | None = None,
     removed_concepts: Sequence[str] = (),
 ) -> dict:
+    """Evaluate the model on CoralNet sources, per source id and pooled.
+
+    Args:
+        predictor: Inference wrapper around the model.
+        whitelist_sources: CoralNet source ids to evaluate, or ``None`` for the split default.
+        image_blacklist: Images to exclude.
+        annotation_overrides: Path to annotation overrides.
+        image_keep: Parquet of images to keep.
+        id2label: Target class id to label name.
+        concept_names: Model concept channel names.
+        taxonomy_csv: Taxonomy CSV the checkpoint was trained with.
+        hierarchy: Benthic hierarchy for label roll-up, or ``None`` to disable it.
+        output_dir: Directory receiving the per-unit and summary outputs.
+        split: Dataset split to evaluate.
+        batch_size: Images per forward batch.
+        num_workers: DataLoader workers.
+        max_images_per_unit: Cap on images per source.
+        removed_concepts: Concepts removed from the taxonomy during training.
+
+    Returns:
+        The evaluation result dict, with ``whitelist_sources`` (and ``image_keep``) added.
+    """
     logger.info(
         "Building CoralNet %s dataset (whitelist_sources=%s, "
         "image_blacklist=%s, annotation_overrides=%s, image_keep=%s) ...",
@@ -100,7 +123,7 @@ def evaluate_coralnet(
         image_keep,
     )
     base = CoralNetDataset(
-        whitelist_sources=whitelist_sources,
+        whitelist_sources=cast("list[int | str] | None", whitelist_sources),
         image_blacklist=image_blacklist,
         annotation_overrides=annotation_overrides,
         image_keep=image_keep,

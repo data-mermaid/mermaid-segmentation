@@ -26,7 +26,7 @@ def _normalize_value(value: object) -> str:
 
 
 def _normalize_key(series: pd.Series) -> pd.Series:
-    """String keys so ``109``, ``\"109\"`` and ``109.0`` name the same image."""
+    """Return string keys so ``109``, ``"109"`` and ``109.0`` name the same image."""
     if series.isna().any():
         raise ValueError("an image key column has missing values")
     return series.map(_normalize_value)

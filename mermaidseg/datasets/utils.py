@@ -1,8 +1,11 @@
+"""Shared helpers for dataset loading and annotation masks."""
+
 import logging
 import sys
 
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 from mermaidseg.datasets.local_cache import LocalS3Cache
 
@@ -64,16 +67,16 @@ def get_image_s3(
     bucket: str,
     key: str,
     thumbnail: bool = False,
-):
-    """Fetches an image from local cache or S3 and returns it as a PIL Image.
+) -> Image.Image:
+    """Fetch an image from the local cache or S3 as a PIL image.
 
     Args:
-        bucket (str): The name of the S3 bucket.
-        key (str): The key (path) of the image in the S3 bucket.
-        thumbnail (bool, optional): If True, fetches the thumbnail version of the image by modifying the key. Defaults to False.
+        bucket: The name of the S3 bucket.
+        key: The key (path) of the image in the S3 bucket.
+        thumbnail: If True, fetch the thumbnail version by modifying the key.
 
     Returns:
-        PIL.Image.Image: The image loaded from cache or S3 as a PIL Image object.
+        The image loaded from the cache or S3.
     """
     cache = LocalS3Cache.get()
     return cache.read_pil_image(bucket, key, thumbnail=thumbnail)
@@ -86,24 +89,24 @@ def create_annotation_mask(
     padding: int | None = None,
     offset: int = 0,
 ) -> np.ndarray:
-    """Creates a source-space annotation mask for a given image.
+    """Create a source-space annotation mask for a given image.
 
     Args:
-        annotations (pd.DataFrame): DataFrame with 'row', 'col', and
+        annotations: DataFrame with 'row', 'col', and
             'source_label_name' columns. ``source_label_name`` holds labels in
             the source dataset's own label space.
-        shape (tuple[int, int]): Output mask shape (height, width).
-        source_name2id (dict[str, int]): Mapping from source-space label names
+        shape: Output mask shape (height, width).
+        source_name2id: Mapping from source-space label names
             to integer class IDs (1..N; 0 is reserved for background).
-        padding (int | None, optional): Half-size of a square pad region around each point annotation.
-            If None or 0, only the exact annotation pixel is set. Defaults to None.
-        offset (int, optional): Global source-label offset added to every foreground
+        padding: Half-size of a square pad region around each point annotation.
+            If None or 0, only the exact annotation pixel is set.
+        offset: Global source-label offset added to every foreground
             label id (background stays 0). Folding it in here is equivalent to a
             ``np.where(mask > 0, mask + offset, mask)`` pass but avoids a second full-resolution
-            scan. Defaults to 0.
+            scan.
 
     Returns:
-        np.ndarray: Integer annotation mask with shape (height, width). Values
+        Integer annotation mask with shape (height, width). Values
         are 0 (background) or (offset-shifted) local source-class IDs (1..N).
     """
     # TODO: Make padding percentage-based so it scales with image resolution

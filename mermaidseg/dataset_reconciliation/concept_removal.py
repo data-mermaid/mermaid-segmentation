@@ -49,6 +49,8 @@ REMOVAL_COLUMNS = [
 
 @dataclass(frozen=True)
 class CoverageRule:
+    """Thresholds a concept channel must meet to be kept."""
+
     min_images: int = 100
     min_noncoralnet_images: int = 50
     min_annotations: int = 500
@@ -56,6 +58,7 @@ class CoverageRule:
     min_coralnet_sources: int = 3
 
     def as_dict(self) -> dict[str, int]:
+        """Return the thresholds as a dict."""
         return asdict(self)
 
 
@@ -106,7 +109,7 @@ def concept_coverage(
     source = np.where(is_cn, "coralnet:" + counts["source"].astype(str), "").astype(object)
 
     def groups_with_channel(groups: np.ndarray, rows: np.ndarray) -> np.ndarray:
-        """Number of distinct ``groups`` (among ``rows``) with at least one True point per channel."""
+        """Distinct ``groups`` (among ``rows``) with at least one True point, per channel."""
         if not rows.any():
             return np.zeros(schema.num_channels, dtype=np.int64)
         g = pd.factorize(groups[rows])[0]

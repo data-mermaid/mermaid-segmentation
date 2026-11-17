@@ -7,6 +7,7 @@ its own shard (:class:`ShardStep`), wrapped for DDP by :class:`DDPLossStep`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -28,17 +29,29 @@ def require_divisible_batch(batch_size: int, n_gpus: int = DATA_PARALLEL_GPUS) -
 
 
 def apply_concept_bottleneck_loss(
-    segmentation_outputs: object,
+    segmentation_outputs: Any,
     loss_fn: nn.Module,
     taxonomic_loss: nn.Module | None,
     target_labels: torch.Tensor,
     target_concepts: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
-    """Concept and taxonomy terms for one concept-bottleneck batch.
+    """Compute concept and taxonomy loss terms for one concept-bottleneck batch.
 
     This is the loss body of ``MetaModel.batch_predict_loss``. The single-GPU
     path and each distributed shard both call it, outside autocast, on
     fp32 logits.
+
+    Args:
+        segmentation_outputs: Model output with ``logits``, ``concept_logits``,
+            and ``hidden_states``.
+        loss_fn: Loss returning ``(loss, components)``.
+        taxonomic_loss: Optional taxonomy loss added to the total.
+        target_labels: Target label map.
+        target_concepts: Target concept map.
+
+    Returns:
+        The total loss, fp32 logits, detached concept hidden states, and the
+        loss components for logging.
     """
     concept_outputs = segmentation_outputs.hidden_states.detach()
     concept_logits = segmentation_outputs.concept_logits.float()
@@ -58,11 +71,24 @@ def shard_targets(
     concept_keep: torch.Tensor | None = None,
     source_rows: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Target labels and concept maps for one shard, built on that shard's device.
+    """Build target labels and concept maps for one shard on that shard's device.
 
     Same lookups as ``MetaModel._to_target_labels`` and ``_to_concept_labels``.
     A ``None`` target lookup is the identity, as in ``MetaModel``. With ``concept_keep`` and
     ``source_rows``, masked source x concept targets are set to 0 (``training.concept_source_mask``).
+
+    Args:
+        source_labels: Source label map.
+        target_lookup: Source-to-target label lookup, or ``None`` for identity.
+        concept_lookup: Source-to-concept lookup.
+        concept_keep: Optional source x concept keep mask.
+        source_rows: Per-image source rows, required with ``concept_keep``.
+
+    Returns:
+        The target labels and the target concepts.
+
+    Raises:
+        RuntimeError: If ``concept_keep`` is set and ``source_rows`` is ``None``.
     """
     if target_lookup is None:
         target_labels = source_labels
@@ -105,6 +131,18 @@ class ShardStep(nn.Module):
         amp_dtype: torch.dtype,
         concept_keep: torch.Tensor | None = None,
     ) -> None:
+        """Register the model, losses, and lookup buffers.
+
+        Args:
+            model: Segmentation model.
+            loss_fn: Concept-bottleneck loss.
+            taxonomic_loss: Optional taxonomy loss.
+            target_lookup: Source-to-target label lookup, or ``None`` for identity.
+            concept_lookup: Source-to-concept lookup.
+            use_amp: Whether the forward runs under autocast.
+            amp_dtype: Autocast dtype.
+            concept_keep: Optional source x concept keep mask.
+        """
         super().__init__()
         self.model = model
         self.loss_fn = loss_fn
@@ -129,11 +167,23 @@ class ShardStep(nn.Module):
         torch.Tensor | None,
         dict[str, float],
     ]:
+        """Run lookup, forward, and loss on this shard.
+
+        Args:
+            images: Image batch for this shard.
+            source_labels: Source label map for this shard.
+            return_maps: Whether to return the detached prediction and target maps.
+            source_rows: Per-image source rows for the concept-source mask.
+
+        Returns:
+            The loss, then outputs, concept outputs, target labels, and target
+            concepts (all ``None`` without ``return_maps``), then the loss components.
+        """
         target_labels, target_concepts = shard_targets(
             source_labels,
-            self.target_lookup,
-            self.concept_lookup,
-            self.concept_keep,
+            cast("torch.Tensor | None", self.target_lookup),
+            cast("torch.Tensor", self.concept_lookup),
+            cast("torch.Tensor | None", self.concept_keep),
             source_rows,
         )
         with torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp):
@@ -170,6 +220,11 @@ class DDPLossStep(nn.Module):
     """
 
     def __init__(self, step: ShardStep) -> None:
+        """Wrap a shard step.
+
+        Args:
+            step: Step whose last result is stored on ``last``.
+        """
         super().__init__()
         self.step = step
         self.last: (
@@ -191,6 +246,17 @@ class DDPLossStep(nn.Module):
         return_maps: bool = True,
         source_rows: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Run the shard step, keep its full result on ``last``, and return the loss.
+
+        Args:
+            images: Image batch for this shard.
+            source_labels: Source label map for this shard.
+            return_maps: Whether the step returns detached maps.
+            source_rows: Per-image source rows for the concept-source mask.
+
+        Returns:
+            The scalar loss.
+        """
         self.last = self.step(
             images, source_labels, return_maps=bool(return_maps), source_rows=source_rows
         )
