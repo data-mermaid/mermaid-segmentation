@@ -60,7 +60,7 @@ uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
 `--num-workers` is required. The config flags `--training-config`, `--model-config`,
 `--data-config`, `--concept-schema-config` and `--logger-config` take repo-relative paths under
 `configs/`, and `--resolution` sets the image size. Checkpoints go to
-`outputs/model_checkpoints/<run>/`; `--output-dir` changes `outputs`.
+`outputs/model_checkpoints/<run>/`; `--output-dir` changes `outputs`. Each run also writes its resolved config to `outputs/model_checkpoints/<run>/config.yaml`, as a record of the settings the run used. It is not meant to be passed back in as a run config.
 
 `slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px
 fine-tune. It submits through `slurm/train.sbatch`, with site settings from `.env` (see `.env.example`).
