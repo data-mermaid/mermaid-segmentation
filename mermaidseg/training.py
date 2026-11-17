@@ -349,6 +349,8 @@ def run(args: argparse.Namespace) -> None:
             seed_note = f"{start_epoch} trained epochs"
         seed_run(resume_seed, train_generator, val_generator)
         print0(dist_ctx, f"Re-seeded RNG to {resume_seed} (seed={seed} + {seed_note})")
+    # Release the host copy of the checkpoint before the loaders fork their workers.
+    del checkpoint_data
 
     evaluator = Evaluator(
         num_classes=registry.num_target_classes,

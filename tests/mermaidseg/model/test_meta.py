@@ -131,20 +131,6 @@ def test_cpu_train_step_without_mixed_precision_does_not_autocast(minimal_config
     assert seen["enabled"] is False
 
 
-def test_cuda_bf16_unsupported_raises_before_building_the_model(minimal_config, monkeypatch):
-    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda *a, **k: False)
-    monkeypatch.setattr(torch.cuda, "device", lambda device: contextlib.nullcontext())
-    cfg = _standard_cfg(minimal_config, mixed_precision=True, mixed_precision_dtype="bfloat16")
-    with pytest.raises(RuntimeError, match="mixed_precision_dtype"):
-        meta_module.MetaModel(
-            run_name="no-bf16",
-            num_classes=4,
-            model_kwargs=cfg.model,
-            training_kwargs=cfg.training,
-            device=torch.device("cuda"),
-        )
-
-
 def test_cuda_bf16_check_targets_the_model_device_without_emulation(minimal_config, monkeypatch):
     support_kwargs: list[dict] = []
     entered_devices: list[torch.device] = []

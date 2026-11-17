@@ -447,14 +447,16 @@ def test_resumed_mid_warmup_lr_matches_the_uninterrupted_run(make_meta_model, tm
 @pytest.mark.parametrize(
     "missing",
     [
+        "model_state_dict",
         "optimizer_state_dict",
         "scheduler_state_dict",
-        "global_step",
-        "epoch_complete",
         "warmup_iters_completed",
+        "global_step",
+        "epoch",
+        "epoch_complete",
     ],
 )
-def test_load_training_checkpoint_requires_each_resume_key(
+def test_read_checkpoint_requires_each_resume_key(
     minimal_config, make_meta_model, tmp_path, missing
 ):
     meta = make_meta_model(minimal_config, run_name="resume-missing")
