@@ -65,6 +65,7 @@ uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
 `slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px
 fine-tune. It submits through `slurm/train.sbatch`, with site settings from `.env` (see `.env.example`).
 It is idempotent and accepts `--dry-run`.
+Batch jobs write `.venv`, `outputs/` and `logs/` inside the checkout, so it must be on a filesystem the job can write, not AFS, because batch jobs have no AFS token. Set `MERMAIDSEG_ENV_FILE` to read the settings from an env file elsewhere.
 
 `scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
 few-shot probes and the validation loss).
