@@ -48,6 +48,7 @@ training:
     stall_dump_sec: 180  # seconds one update may run before all stacks are dumped; <= 0 disables
     world_size: 1  # ranks (GPUs); WORLD_SIZE must equal it
     grad_accum_steps: 1
+    train_metrics_every: 1
     checkpoint_every_steps: 10000
     class_subset: ['Acanthastrea', 'Acropora', 'Agaricia agaricites', 'Algae covered substrate', 'Alveopora',
                     'Astrea', 'Astreopora', 'Background', 'Bare substrate', 'Coscinaraea', 'Crustose coralline algae',

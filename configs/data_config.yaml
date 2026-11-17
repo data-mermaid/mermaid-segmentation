@@ -113,11 +113,7 @@ data:
   mermaid:
     train:
       annotation_date_cutoff: 2026-08-12
-    val: None # We currently have no validation data for the mermaid dataset, so we set this to None to avoid speculation.
-
-  coralscapes:
-    train: None
-    val: None
+    val: null # We currently have no validation data for the mermaid dataset, so we set this to null to avoid speculation.
 
   coralscapes_v2:
     train:
@@ -160,25 +156,25 @@ data:
           std: [0.229, 0.224, 0.225]
 
   benthos_yuval:
-    train: None
+    train: null
     val:
       whitelist_sites: ["RS24", "CR_DoubleWreck"]
 
   catlin_seaview:
     train:
       whitelist_regions: ["ATL", "IND_CHA", "IND_MDV", "PAC_AUS", "PAC_IDN_PHL", "PAC_SLB", "PAC_TLS" ,"PAC_TWN" ,"PAC_USA"]
-    val: None
+    val: null
 
   moorea_labeled_corals:
     train:
       whitelist_years: ["2008","2009","2010"]
-    val: None
+    val: null
 
   pacific_labeled_corals:
-    train: None
+    train: null
     val:
       whitelist_subsets: ["reference", "evaluation"]
   ucsd_mosaics:
     train:
       whitelist_sites: ["fr3", "fr5", "fr7", "fr9", "pal132", "pal239", "pal36", "pal69", "palstrawn", "palwave13", "palwave14", "palwave37", "palwave38", "palwave39", "palwave4", "palwave40"]
-    val: None
+    val: null

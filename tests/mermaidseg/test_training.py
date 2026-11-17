@@ -22,7 +22,7 @@ import mermaidseg.model.models
 from mermaidseg import training
 from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
-from mermaidseg.io import ConfigDict, load_config
+from mermaidseg.io import ConfigDict, load_config, setup_config
 from mermaidseg.run_setup import resolve_repo_path
 from mermaidseg.training import _assemble_train_datasets
 from scripts.train import build_parser
@@ -69,7 +69,9 @@ def test_train_datasets_without_repeat_are_not_repeated():
 
 
 def test_trainval_config_trains_on_six_coralscapes_v2_copies():
-    data_cfg = load_config(resolve_repo_path("configs/data_config_trainval.yaml"))["data"]
+    data_cfg = setup_config(
+        {"data": str(resolve_repo_path("configs/data_config_trainval.yaml"))}
+    ).data
     classes = dict.fromkeys(DATASET_CLASSES, _Stub)
     built = build_datasets(data_cfg, dataset_classes=classes, splits=["train"], verbose=False)
     train = _assemble_train_datasets(built, data_cfg)
@@ -166,7 +168,10 @@ def _smoke_configs(tmp_path: Path) -> list[str]:
         lora_target_modules=["q_proj"],
     )
     logger = load_config(resolve_repo_path("configs/logger_config.yaml")).logger
-    data = {"coralscapes_v2": {"train": {"split": "train"}, "val": {"split": "val"}}}
+    data = {
+        "local_cache_write_through": True,
+        "coralscapes_v2": {"train": {"split": "train"}, "val": {"split": "val"}},
+    }
     return [
         "--training-config",
         _write_section(tmp_path / "training.yaml", "training", _plain(training)),
