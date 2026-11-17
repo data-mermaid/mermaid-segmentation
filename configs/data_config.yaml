@@ -122,6 +122,7 @@ data:
 
   coralscapes_v2:
     train:
+      repeat: 6
       split: train
       transform:
         RandomResizedCrop:

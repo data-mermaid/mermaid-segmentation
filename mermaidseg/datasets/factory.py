@@ -50,6 +50,9 @@ def _is_skip(split_cfg: Any) -> bool:
 
 _CONCEPT_SPLITS = ("train", "val", "test")
 
+# Trainer-only split key: how many times the train split is repeated per epoch.
+_REPEAT_KEY = "repeat"
+
 
 def configured_source_names(
     data_cfg: Any,
@@ -91,7 +94,8 @@ def build_datasets(
 
     Args:
         data_cfg: The ``data`` section of the run config (a mapping keyed by
-            dataset name, each mapping split name -> split kwargs).
+            dataset name, each mapping split name -> split kwargs). A ``repeat``
+            key in a split is read by the trainer and never reaches the dataset.
         padding: Point-annotation padding passed to point-based datasets. Ignored
             for datasets in :data:`NO_PADDING_DATASETS`.
         dataset_classes: Override the ``name -> class`` registry (used in tests).
@@ -116,10 +120,15 @@ def build_datasets(
                 continue
             if _is_skip(split_cfg):
                 continue
+            if _REPEAT_KEY in split_cfg and split != "train":
+                raise ValueError(
+                    f"'{_REPEAT_KEY}' is only valid on the train split; found on {name}.{split}"
+                )
+            dataset_kwargs = {k: v for k, v in split_cfg.items() if k != _REPEAT_KEY}
             if name in NO_PADDING_DATASETS:
-                ds = cls(**split_cfg)
+                ds = cls(**dataset_kwargs)
             else:
-                ds = cls(**split_cfg, padding=padding)
+                ds = cls(**dataset_kwargs, padding=padding)
             result[(name, split)] = ds
             if verbose:
                 print(f"{name:>24s} - {split:<5s}: {len(ds):>7d} samples")

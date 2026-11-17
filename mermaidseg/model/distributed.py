@@ -20,10 +20,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import BatchSampler, RandomSampler, Sampler
 
-from mermaidseg.model.data_parallel import DATA_PARALLEL_GPUS, require_divisible_batch
-
-NCCL_TIMEOUT_ENV = "MERMAIDSEG_NCCL_TIMEOUT_MIN"
-DEFAULT_NCCL_TIMEOUT_MIN = 30.0
+from mermaidseg.model.data_parallel import require_divisible_batch
 
 
 @dataclass(frozen=True)
@@ -81,45 +78,53 @@ def on_main_process(fn: Callable[[], None]) -> None:
         dist.barrier()
 
 
-def require_world_size(world_size: int, expected: int = DATA_PARALLEL_GPUS) -> None:
+def require_world_size(world_size: int, expected: int) -> None:
     """Raise unless the job runs ``expected`` ranks.
 
-    The 768px minibatch is split into one shard per rank, and the KL term is
+    The minibatch is split into one shard per rank, and the KL term is
     normalized per shard. Another rank count would change the shard size.
+
+    Args:
+        world_size: Rank count of this job.
+        expected: Rank count the run config requires.
+
+    Raises:
+        RuntimeError: If the counts differ.
     """
     if int(world_size) != int(expected):
         raise RuntimeError(f"distributed expects {expected} ranks, found {world_size}.")
 
 
-def collective_timeout_from_env() -> timedelta:
-    """How long a collective may wait for a slow rank before the job is killed.
-
-    ``MERMAIDSEG_NCCL_TIMEOUT_MIN`` (minutes, default 30). PyTorch's own default
-    is 10 minutes, shorter than the occasional DataLoader stall on network storage.
-    """
-    raw = os.environ.get(NCCL_TIMEOUT_ENV, "").strip()
-    minutes = DEFAULT_NCCL_TIMEOUT_MIN if not raw else float(raw)
-    if minutes <= 0:
-        raise ValueError(f"{NCCL_TIMEOUT_ENV} must be > 0 minutes, got {raw!r}.")
-    return timedelta(minutes=minutes)
-
-
-def init_distributed_from_env(expected_world_size: int = DATA_PARALLEL_GPUS) -> DistContext:
+def init_distributed_from_env(expected_world_size: int, nccl_timeout_min: float) -> DistContext:
     """Join the torchrun process group (NCCL) and bind this process to its GPU.
 
-    Returns rank 0 of 1 when ``WORLD_SIZE`` is unset or 1.
+    ``WORLD_SIZE`` (unset means 1) must equal ``expected_world_size``, including
+    single-GPU runs. Returns rank 0 of 1 when it is 1.
+
+    Args:
+        expected_world_size: Rank count from ``training.world_size``.
+        nccl_timeout_min: Minutes a collective may wait for a slow rank before the
+            job is killed. PyTorch's own default is 10, shorter than the occasional
+            DataLoader stall on network storage.
+
+    Returns:
+        This process's rank layout.
+
+    Raises:
+        RuntimeError: If ``WORLD_SIZE`` differs from ``expected_world_size``, or a
+            multi-rank job has no CUDA.
     """
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    require_world_size(world_size, expected_world_size)
     if world_size <= 1:
         return DistContext()
-    require_world_size(world_size, expected_world_size)
     if not torch.cuda.is_available():
         raise RuntimeError("distributed training requires CUDA.")
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     if not is_distributed():
-        dist.init_process_group(backend="nccl", timeout=collective_timeout_from_env())
+        dist.init_process_group(backend="nccl", timeout=timedelta(minutes=nccl_timeout_min))
     return DistContext(rank=rank, world_size=world_size, local_rank=local_rank)
 
 

@@ -14,4 +14,3 @@ def test_relative_path_resolves_to_the_repo_not_the_current_directory(monkeypatc
     assert resolve_repo_path("configs/class_to_concepts.csv") == (
         REPO_ROOT / "configs" / "class_to_concepts.csv"
     )
-

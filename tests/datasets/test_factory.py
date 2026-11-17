@@ -69,3 +69,15 @@ def test_missing_section_is_skipped(stub_classes):
     data_cfg = ConfigDict({"points": {"train": {"a": 1}}})  # no "dense" section
     built = build_datasets(data_cfg, padding=0, dataset_classes=stub_classes, verbose=False)
     assert set(built) == {("points", "train")}
+
+
+def test_repeat_key_is_not_passed_to_the_dataset_constructor(stub_classes):
+    data_cfg = ConfigDict({"points": {"train": {"whitelist": [1], "repeat": 5}}})
+    built = build_datasets(data_cfg, padding=7, dataset_classes=stub_classes, verbose=False)
+    assert built[("points", "train")].kwargs == {"whitelist": [1], "padding": 7}
+
+
+def test_repeat_on_a_non_train_split_is_rejected(stub_classes):
+    data_cfg = ConfigDict({"points": {"val": {"whitelist": [1], "repeat": 2}}})
+    with pytest.raises(ValueError, match="repeat"):
+        build_datasets(data_cfg, padding=0, dataset_classes=stub_classes, verbose=False)

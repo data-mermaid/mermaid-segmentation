@@ -24,12 +24,13 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 
 import mermaidseg.model.meta as meta_module
+from mermaidseg.io import ConfigDict
 from mermaidseg.model.data_parallel import DDPLossStep, ShardStep
 from mermaidseg.model.distributed import (
-    NCCL_TIMEOUT_ENV,
+    DistContext,
     ShardedBatchSampler,
     all_ranks_finite,
-    collective_timeout_from_env,
+    init_distributed_from_env,
     on_main_process,
     reduce_components,
     require_world_size,
@@ -151,43 +152,55 @@ def _spawn(worker, world_size: int, extra: tuple = ()) -> list:
     return [payload for _, payload in results]
 
 
-def test_require_world_size_is_four():
-    require_world_size(4)
+def test_require_world_size_matches_expected():
+    require_world_size(4, 4)
     for world_size in (1, 2, 3, 8):
         with pytest.raises(RuntimeError, match="4 ranks"):
-            require_world_size(world_size)
+            require_world_size(world_size, 4)
 
 
-def test_collective_timeout_defaults_to_30_minutes(monkeypatch):
-    monkeypatch.delenv(NCCL_TIMEOUT_ENV, raising=False)
-    assert collective_timeout_from_env() == timedelta(minutes=30)
-    monkeypatch.setenv(NCCL_TIMEOUT_ENV, "  ")
-    assert collective_timeout_from_env() == timedelta(minutes=30)
+def test_init_distributed_requires_world_size_env_to_match_expected(monkeypatch):
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    with pytest.raises(RuntimeError, match="4 ranks"):
+        init_distributed_from_env(expected_world_size=4, nccl_timeout_min=30)
 
 
-def test_collective_timeout_reads_minutes_from_env(monkeypatch):
-    monkeypatch.setenv(NCCL_TIMEOUT_ENV, "45")
-    assert collective_timeout_from_env() == timedelta(minutes=45)
-    monkeypatch.setenv(NCCL_TIMEOUT_ENV, "2.5")
-    assert collective_timeout_from_env() == timedelta(seconds=150)
+def test_init_distributed_single_process_when_one_rank_expected(monkeypatch):
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    ctx = init_distributed_from_env(expected_world_size=1, nccl_timeout_min=30)
+    assert ctx == DistContext()
+    assert not ctx.distributed
 
 
-@pytest.mark.parametrize("value", ["0", "-5"])
-def test_collective_timeout_rejects_non_positive(monkeypatch, value):
-    monkeypatch.setenv(NCCL_TIMEOUT_ENV, value)
-    with pytest.raises(ValueError, match=NCCL_TIMEOUT_ENV):
-        collective_timeout_from_env()
+def test_init_distributed_rejects_mismatched_world_size_before_any_group_starts(monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    started: list[object] = []
+    monkeypatch.setattr(dist, "init_process_group", lambda *a, **k: started.append(k))
+    with pytest.raises(RuntimeError, match="4 ranks"):
+        init_distributed_from_env(expected_world_size=4, nccl_timeout_min=30)
+    assert started == []
 
 
-def test_stall_dump_seconds_from_env(monkeypatch):
-    monkeypatch.delenv(meta_module.STALL_DUMP_ENV, raising=False)
-    assert meta_module.stall_dump_seconds_from_env() == 180.0
-    monkeypatch.setenv(meta_module.STALL_DUMP_ENV, "45")
-    assert meta_module.stall_dump_seconds_from_env() == 45.0
-    monkeypatch.setenv(meta_module.STALL_DUMP_ENV, "0")
-    assert meta_module.stall_dump_seconds_from_env() == 0.0
-    monkeypatch.setenv(meta_module.STALL_DUMP_ENV, "-1")
-    assert meta_module.stall_dump_seconds_from_env() == 0.0
+@pytest.mark.parametrize(
+    ("minutes", "expected"), [(45.0, timedelta(minutes=45)), (2.5, timedelta(seconds=150))]
+)
+def test_init_distributed_passes_nccl_timeout_minutes(monkeypatch, minutes, expected):
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda index: None)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(dist, "init_process_group", lambda **kwargs: seen.update(kwargs))
+    ctx = init_distributed_from_env(expected_world_size=2, nccl_timeout_min=minutes)
+    assert seen == {"backend": "nccl", "timeout": expected}
+    assert (ctx.rank, ctx.world_size, ctx.local_rank) == (1, 2, 1)
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(180, 180.0), (45, 45.0), (0, 0.0), (-1, 0.0)])
+def test_stall_dump_seconds_reads_training_config(raw, expected):
+    assert meta_module.stall_dump_seconds(ConfigDict({"stall_dump_sec": raw})) == expected
 
 
 class _FakeFaulthandler:

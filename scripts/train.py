@@ -48,8 +48,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=256,
         help="square train crop and val resize in pixels; also sets model.input_size",
     )
-    parser.add_argument("--per-pixel-loss-weight", type=float, default=None)
-    parser.add_argument("--per-image-loss-weight", type=float, default=None)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        required=True,
+        help="DataLoader workers per process (per rank under torchrun); must be >= 1",
+    )
+    parser.add_argument(
+        "--nccl-timeout-min",
+        type=float,
+        default=30.0,
+        help="minutes a collective may wait for a slow rank before the job is killed (> 0)",
+    )
     parser.add_argument(
         "--grad-accum-steps",
         type=int,
@@ -89,6 +99,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.preempt_checkpoint_every_steps < 0:
         parser.error("--preempt-checkpoint-every-steps must be >= 0")
+    if args.num_workers < 1:
+        parser.error("--num-workers must be >= 1")
+    if args.nccl_timeout_min <= 0:
+        parser.error("--nccl-timeout-min must be > 0")
     if args.checkpoint is not None and args.init_weights is not None:
         parser.error("pass only one of --checkpoint and --init-weights")
     run(args)

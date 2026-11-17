@@ -141,6 +141,28 @@ def make_shuffled_loader(
     return DataLoader(dataset, batch_sampler=sampler, **kwargs)
 
 
+def _assemble_train_datasets(dataset_dict: dict[tuple[str, str], Any], data_cfg: Any) -> list[Any]:
+    """Every train dataset, then each extra copy that ``repeat`` asks for.
+
+    ``repeat: N`` on a train split is the total number of copies of that dataset in
+    the result: the first sits among the train datasets and ``N - 1`` more are
+    appended after all of them. A missing ``repeat`` means 1.
+
+    Args:
+        dataset_dict: Built datasets keyed by ``(name, split)``.
+        data_cfg: The ``data`` section of the run config.
+
+    Returns:
+        The train datasets in concatenation order.
+    """
+    train_items = [(name, ds) for (name, split), ds in dataset_dict.items() if split == "train"]
+    datasets = [ds for _, ds in train_items]
+    for name, ds in train_items:
+        repeat = int(data_cfg[name]["train"].get("repeat", 1))
+        datasets.extend([ds] * (repeat - 1))
+    return datasets
+
+
 def run(args: argparse.Namespace) -> None:
     """Run one training job from parsed command-line arguments.
 
@@ -154,37 +176,7 @@ def run(args: argparse.Namespace) -> None:
     # miss instead of silently falling back to S3.
     check_env_wandb()
 
-    # Under torchrun (WORLD_SIZE > 1) this process trains one GPU's shard of each
-    # minibatch. Only rank 0 logs to wandb, writes checkpoints, and prints.
-    dist_ctx = init_distributed_from_env()
-
-    if dist_ctx.distributed:
-        device = torch.device("cuda", dist_ctx.local_rank)
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    for i in range(torch.cuda.device_count()):
-        print0(dist_ctx, f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
-
-    # Match the SLURM CPU allocation when running under Slurm (falls back to 50 for
-    # local runs). MERMAIDSEG_NUM_WORKERS / MERMAIDSEG_PREFETCH_FACTOR override both
-    # (slurm/train.sbatch sets MERMAIDSEG_NUM_WORKERS). Under torchrun these are per rank.
-    NUM_WORKERS = int(
-        os.environ.get("MERMAIDSEG_NUM_WORKERS", os.environ.get("SLURM_CPUS_PER_TASK", "50"))
-    )
-    PREFETCH_FACTOR = int(os.environ.get("MERMAIDSEG_PREFETCH_FACTOR", "3"))
-    PERSISTENT_WORKERS = NUM_WORKERS > 0
-
     # -- 1. Config -------------------------------------------------------------
-    # CLI overrides used by the slurm/launch_*.sh experiment launchers.
-
-    SEED = 4
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-
-    # slurm/train.sbatch resumes the latest checkpoint through --checkpoint.
-    CHECKPOINT = args.checkpoint
-
     cfg = setup_config(
         {
             "data": str(resolve_repo_path(args.data_config)),
@@ -195,16 +187,35 @@ def run(args: argparse.Namespace) -> None:
         resolution=args.resolution,
     )
     cfg = update_config_with_args(cfg, args)
+
+    # Under torchrun (WORLD_SIZE > 1) this process trains one GPU's shard of each
+    # minibatch. Only rank 0 logs to wandb, writes checkpoints, and prints.
+    dist_ctx = init_distributed_from_env(cfg.training.world_size, args.nccl_timeout_min)
+
+    if dist_ctx.distributed:
+        device = torch.device("cuda", dist_ctx.local_rank)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    for i in range(torch.cuda.device_count()):
+        print0(dist_ctx, f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
+
+    # Under torchrun the worker count is per rank.
+    persistent_workers = args.num_workers > 0
+
+    seed = int(cfg.training.seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # slurm/train.sbatch resumes the latest checkpoint through --checkpoint.
+    checkpoint = args.checkpoint
+
     # torchrun decides: one process per GPU trains its shard of each minibatch.
     cfg.training.distributed = dist_ctx.distributed
     # MetaModel opens the taxonomy CSV from this value, so it must not depend on the cwd.
     cfg.training.concept_mapping_path = concept_mapping_path(cfg.training)
 
     # Leave the config value untouched when a flag is not given.
-    if args.per_pixel_loss_weight is not None:
-        cfg.training.loss.per_pixel_loss_weight = args.per_pixel_loss_weight
-    if args.per_image_loss_weight is not None:
-        cfg.training.loss.per_image_loss_weight = args.per_image_loss_weight
     if args.grad_accum_steps is not None:
         cfg.training.grad_accum_steps = args.grad_accum_steps
     taxonomic_cfg = cfg.training.get("taxonomic_loss")
@@ -213,9 +224,8 @@ def run(args: argparse.Namespace) -> None:
 
     # Encoder, iterations, batch size, and epochs come from the model and training configs.
 
-    # Set experiment on the config the Logger actually reads.
+    # Snapshot before MetaModel construction so the Logger records the config as loaded.
     cfg_logger = copy.deepcopy(cfg)
-    cfg_logger.logger.experiment_name = "mermaid"
 
     # -- 2. Datasets -----------------------------------------------------------
     cache_stats = setup_local_cache(cfg.data)
@@ -226,13 +236,13 @@ def run(args: argparse.Namespace) -> None:
 
     loader_kwargs = {
         "batch_size": cfg.training.batch_size,
-        "num_workers": NUM_WORKERS,
+        "num_workers": args.num_workers,
         "pin_memory": True,
-        "persistent_workers": PERSISTENT_WORKERS,
+        "persistent_workers": persistent_workers,
         "drop_last": True,
-        "prefetch_factor": PREFETCH_FACTOR,
+        "prefetch_factor": cfg.training.loader.prefetch_factor,
     }
-    if NUM_WORKERS > 0:
+    if args.num_workers > 0:
         loader_kwargs["worker_init_fn"] = make_worker_init_fn(cache_stats)
         if dist_ctx.distributed:
             loader_kwargs["worker_init_fn"] = make_rank_worker_init_fn(
@@ -248,12 +258,7 @@ def run(args: argparse.Namespace) -> None:
     )
     print0(dist_ctx, f"Froze concept channels to the datasets of {args.concept_schema_config}")
 
-    # repeat coralscapes_v2 train dataset 5 times
-    train_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "train"] + [
-        ds
-        for (name, split), ds in dataset_dict.items()
-        if name == "coralscapes_v2" and split == "train"
-    ] * 5
+    train_datasets = _assemble_train_datasets(dataset_dict, cfg.data)
     val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
 
     # training.concept_source_mask: zero the targets of source x binary concept pairs listed in the
@@ -269,7 +274,7 @@ def run(args: argparse.Namespace) -> None:
         )
 
     train_loader = make_shuffled_loader(dist_ctx, ConcatDataset(train_datasets), **loader_kwargs)
-    loader_kwargs["prefetch_factor"] = 2
+    loader_kwargs["prefetch_factor"] = cfg.training.loader.val_prefetch_factor
     val_loader = make_shuffled_loader(dist_ctx, ConcatDataset(val_datasets), **loader_kwargs)
 
     print0(dist_ctx, f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
@@ -302,13 +307,13 @@ def run(args: argparse.Namespace) -> None:
             f"Loaded weights from {init_weights!r}; fresh optimizer lrs={fresh_lrs} "
             "(epoch 0, global_step 0)",
         )
-        torch.manual_seed(SEED)
+        torch.manual_seed(seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(SEED)
-        print0(dist_ctx, f"Re-seeded RNG to {SEED} for the new run's data order")
-    elif CHECKPOINT:
-        start_epoch = load_training_checkpoint(meta_model, CHECKPOINT, device, dist_ctx)
-        print0(dist_ctx, f"Loaded checkpoint {CHECKPOINT!r}; resuming at epoch {start_epoch}")
+            torch.cuda.manual_seed_all(seed)
+        print0(dist_ctx, f"Re-seeded RNG to {seed} for the new run's data order")
+    elif checkpoint:
+        start_epoch = load_training_checkpoint(meta_model, checkpoint, device, dist_ctx)
+        print0(dist_ctx, f"Loaded checkpoint {checkpoint!r}; resuming at epoch {start_epoch}")
         if start_epoch >= int(cfg.training.epochs):
             print0(
                 dist_ctx,
@@ -319,20 +324,20 @@ def run(args: argparse.Namespace) -> None:
         # Offset the RNG by the number of already-trained epochs so the resumed run
         # sees a different data-shuffling stream instead of replaying the epoch
         # 0..N-1 orderings. The DataLoader's RandomSampler draws from the global
-        # torch generator (re-seeded to SEED at startup), and the training loop is
+        # torch generator (re-seeded to the seed at startup), and the training loop is
         # iterated below, so re-seeding here changes the permutations for every
         # resumed epoch. (Augmentations already vary per run via Albumentations'
         # own entropy-seeded RNG.)
         if getattr(meta_model, "resuming_within_epoch", False):
-            resume_seed = SEED + int(meta_model.global_step)
+            resume_seed = seed + int(meta_model.global_step)
             seed_note = f"{meta_model.global_step} completed updates"
         else:
-            resume_seed = SEED + start_epoch
+            resume_seed = seed + start_epoch
             seed_note = f"{start_epoch} trained epochs"
         torch.manual_seed(resume_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(resume_seed)
-        print0(dist_ctx, f"Re-seeded RNG to {resume_seed} (SEED={SEED} + {seed_note})")
+        print0(dist_ctx, f"Re-seeded RNG to {resume_seed} (seed={seed} + {seed_note})")
 
     evaluator = Evaluator(
         num_classes=registry.num_target_classes,
@@ -391,6 +396,7 @@ def run(args: argparse.Namespace) -> None:
                     "train/world_size": dist_ctx.world_size,
                 }
             )
+            run_logger.log_params({f"cli/{k}": v for k, v in vars(args).items()})
             if init_weights:
                 run_logger.log_params(
                     {
@@ -399,9 +405,9 @@ def run(args: argparse.Namespace) -> None:
                         "init/start_epoch": 0,
                     }
                 )
-            elif CHECKPOINT:
+            elif checkpoint:
                 run_logger.log_params(
-                    {"init/checkpoint": CHECKPOINT, "init/start_epoch": start_epoch}
+                    {"init/checkpoint": checkpoint, "init/start_epoch": start_epoch}
                 )
             print(f"\nwandb run_id : {run_logger.wandb_run_id}")
             print(f"wandb run URL: {run_logger.run_url}\n")
@@ -418,7 +424,7 @@ def run(args: argparse.Namespace) -> None:
                     "data/train_size": train_size,
                     "data/val_size": val_size,
                     "data/total_size": sum(len(d) for d in dataset_dict.values()),
-                    "data/seed": SEED,
+                    "data/seed": seed,
                     "data/dataset_name": "ALL",
                 }
             )
@@ -454,7 +460,7 @@ def run(args: argparse.Namespace) -> None:
                             epoch_complete=step >= total_updates,
                         )
                     # One rolling file for preemption. epoch_complete stays false until the
-                    # run is finished, so a resume reseeds with SEED + global_step and
+                    # run is finished, so a resume reseeds with seed + global_step and
                     # continues this epoch. Older model_preempt* files are deleted after
                     # the rename; model_step* and model_epoch* are not.
                     if write_preempt:
@@ -484,7 +490,8 @@ def run(args: argparse.Namespace) -> None:
                 logger=run_logger,
                 start_epoch=epoch,
                 end_epoch=epoch + 1,
-                metric_of_interest="accuracy",
+                metric_of_interest=cfg.training.metric_of_interest,
+                max_load_failure_rate=cfg.training.max_load_failure_rate,
                 train_log_interval=cfg.logger.get("train_log_interval", 1),
                 on_optimizer_step=(
                     _save_step_checkpoint
