@@ -63,8 +63,13 @@ def fake_tracker(monkeypatch: pytest.MonkeyPatch) -> list[FakeTracker]:
     """Route ``make_tracker``'s ``wandb`` entry to ``FakeTracker``; return the built trackers."""
     built: list[FakeTracker] = []
 
-    def _build(**kwargs: Any) -> FakeTracker:
-        tracker = FakeTracker(**kwargs)
+    def _build(logger_cfg: Any, run_name: str, config: Any) -> FakeTracker:
+        tracker = FakeTracker(
+            project=logger_cfg.wandb_project,
+            entity=logger_cfg.wandb_entity,
+            run_name=run_name,
+            config=config,
+        )
         built.append(tracker)
         return tracker
 
@@ -364,7 +369,7 @@ class TestLoggerInit:
         ]
 
     def test_tracker_construction_error_propagates(self, make_config, monkeypatch):
-        def _fail(**kwargs: Any) -> None:
+        def _fail(logger_cfg: Any, run_name: str, config: Any) -> None:
             raise RuntimeError("tracker down")
 
         monkeypatch.setitem(mermaidseg.logger.TRACKER_CLASSES, "wandb", _fail)

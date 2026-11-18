@@ -131,6 +131,16 @@ class WandbTracker:
             resume="allow" if run_id is not None else None,
         )
 
+    @classmethod
+    def from_config(cls, logger_cfg: Any, run_name: str, config: Any) -> Self:
+        """Start a run in ``logger_cfg.wandb_project`` and ``logger_cfg.wandb_entity``."""
+        return cls(
+            project=logger_cfg.wandb_project,
+            entity=logger_cfg.wandb_entity,
+            run_name=run_name,
+            config=config,
+        )
+
     @property
     def run_id(self) -> str | None:
         """The wandb run id."""
@@ -231,6 +241,11 @@ class MlflowTracker:
         mlflow.set_experiment(experiment_name)
         self._run = mlflow.start_run(run_name=run_name)
 
+    @classmethod
+    def from_config(cls, logger_cfg: Any, run_name: str, config: Any) -> Self:
+        """Start a run in ``logger_cfg.experiment_name``; MLflow ignores ``config``."""
+        return cls(experiment_name=logger_cfg.experiment_name, run_name=run_name)
+
     @property
     def run_id(self) -> str | None:
         """The MLflow run id."""
@@ -280,22 +295,10 @@ class MlflowTracker:
             logger.warning("Failed to end MLflow run: %s", e)
 
 
-TRACKER_CLASSES: dict[str, Callable[..., Tracker]] = {
-    "wandb": WandbTracker,
-    "mlflow": MlflowTracker,
+TRACKER_CLASSES: dict[str, Callable[[Any, str, Any], Tracker]] = {
+    "wandb": WandbTracker.from_config,
+    "mlflow": MlflowTracker.from_config,
 }
-
-
-def _tracker_kwargs(logger_cfg: Any, run_name: str, config: Any) -> dict[str, Any]:
-    """Constructor arguments of the backend that ``logger_cfg.tracker`` names."""
-    if logger_cfg.tracker == "wandb":
-        return {
-            "project": logger_cfg.wandb_project,
-            "entity": logger_cfg.wandb_entity,
-            "run_name": run_name,
-            "config": config,
-        }
-    return {"experiment_name": logger_cfg.experiment_name, "run_name": run_name}
 
 
 def make_tracker(logger_cfg: Any, run_name: str, config: Any) -> Tracker:
@@ -309,8 +312,8 @@ def make_tracker(logger_cfg: Any, run_name: str, config: Any) -> Tracker:
     Raises:
         ValueError: If ``logger_cfg.tracker`` is not in ``TRACKER_CLASSES``.
     """
-    tracker_class = lookup_class(TRACKER_CLASSES, "tracker", logger_cfg.tracker)
-    return tracker_class(**_tracker_kwargs(logger_cfg, run_name, config))
+    factory = lookup_class(TRACKER_CLASSES, "tracker", logger_cfg.tracker)
+    return factory(logger_cfg, run_name, config)
 
 
 class Logger:
