@@ -68,7 +68,7 @@ scripts/train.py
   -> scripts/export.py (mermaidseg/export.py)
   -> bundle: weights.safetensors + model.json
   -> mermaidseg/inference/ (load_bundle, preprocess, CBMPredictor)
-       used by scripts/evaluate.py and by the mermaid-inference service
+       used by scripts/evaluate.py
 ```
 
 `scripts/train.py` is the only training entrypoint. Each compute substrate has a thin launcher that runs it with the same config: your shell (local), `slurm/launch_final.sh` (Slurm) and `scripts/sagemaker/` (SageMaker). `AGENTS.md` section 1 has the directory map.
@@ -125,7 +125,7 @@ uv run python scripts/export.py --checkpoint outputs/model_checkpoints/<run>/<ch
 uv run python scripts/evaluate.py --bundle /path/to/bundle --output-dir /path/to/results
 ```
 
-The bundle holds `model.json` and `weights.safetensors`. These two file names are the contract with `mermaid-inference`.
+The bundle holds `model.json` and `weights.safetensors`, the two file names `load_bundle` (`mermaidseg/inference/bundle.py`) reads.
 
 `scripts/export.py` refuses:
 - a checkpoint with no recorded lineage
@@ -208,9 +208,9 @@ SageMaker `make` targets (see [SageMaker](#sagemaker)):
 
 The project uses two formats.
 
-**Checkpoints.** Training and resume checkpoints are `torch.save` pickles. They hold the full state (model, optimizer and scheduler) that a resume needs. The code loads them with `weights_only=True` (`read_checkpoint` in `mermaidseg/run_setup.py`). `AGENTS.md` 9.6 allows `weights_only=False` only for a resume checkpoint that this project's own training wrote, with a comment at the call site. No call site uses it. Load every other checkpoint with `weights_only=True`.
+**Checkpoints.** Training and resume checkpoints are `torch.save` pickles. They hold the full state (model, optimizer and scheduler) that a resume needs. The code loads them with `weights_only=True` (`read_checkpoint` in `mermaidseg/run_setup.py`). `AGENTS.md` 9.6 allows `weights_only=False` only for a resume checkpoint that this project's own training wrote, with a comment at the call site. No production call site uses it. Load every other checkpoint with `weights_only=True`.
 
-**Bundle.** The deployable bundle is SafeTensors plus `model.json` (`export_bundle` in `mermaidseg/export.py`, `load_bundle` in `mermaidseg/inference/bundle.py`). `model.json` carries the architecture, label and concept maps, preprocessing and lineage, so a bundle describes itself. The names `weights.safetensors` and `model.json` are a contract with `mermaid-inference`. Do not change them without coordinating with that project.
+**Bundle.** The deployable bundle is SafeTensors plus `model.json` (`export_bundle` in `mermaidseg/export.py`, `load_bundle` in `mermaidseg/inference/bundle.py`). `model.json` carries the architecture, label and concept maps, preprocessing and lineage, so a bundle describes itself.
 
 ### Concept Bottleneck Models
 
