@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "mermaidseg"
 version = "0.1.0"
 description = "A package for the segmentation of MERMAID coral data."
-requires-python = ">=3.11"
+requires-python = ">=3.11.5"
 dependencies = [
     "albumentations",
     "boto3",

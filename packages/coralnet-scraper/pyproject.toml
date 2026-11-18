@@ -6,13 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "coralnet-scraper"
 version = "0.1.0"
 description = "Downloads public CoralNet sources (images, labelsets, annotations) to S3."
-requires-python = ">=3.11"
+requires-python = ">=3.11.5"
 dependencies = [
-    "beautifulsoup4>=4.15.0",
-    "boto3>=1.43.3",
-    "pandas>=2.3.3",
-    "requests>=2.33.1",
-    "tqdm>=4.67.3",
+    "beautifulsoup4",
+    "boto3",
+    "pandas",
+    "requests",
+    "tqdm",
 ]
 
 [project.scripts]
