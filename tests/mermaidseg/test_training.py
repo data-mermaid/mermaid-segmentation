@@ -179,7 +179,7 @@ class _FakeWandbRun:
     def __init__(self) -> None:
         self.params: dict[str, Any] = {}
         self.config = SimpleNamespace(update=lambda d, **_: self.params.update(d))
-        self.finished = False
+        self.exit_code: int | None = None
 
     def log(self, log_dict: dict, step: int) -> None:
         pass
@@ -187,8 +187,8 @@ class _FakeWandbRun:
     def log_artifact(self, artifact: Any) -> None:
         pass
 
-    def finish(self) -> None:
-        self.finished = True
+    def finish(self, exit_code: int | None = None) -> None:
+        self.exit_code = exit_code
 
 
 def _fake_wandb(run: _FakeWandbRun) -> types.ModuleType:
@@ -390,7 +390,7 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
         "lineage/data_config_sha1",
     }
     assert wandb_run.params["training_concept_mapping_path"] == "configs/class_to_concepts.csv"
-    assert wandb_run.finished
+    assert wandb_run.exit_code == 0
 
 
 def _resume_checkpoint(meta) -> dict[str, Any]:
