@@ -69,6 +69,23 @@ fine-tune. It submits through `slurm/train.sbatch`, with site settings from `.en
 It is idempotent and accepts `--dry-run`.
 Batch jobs write `.venv`, `outputs/` and `logs/` inside the checkout, so it must be on a filesystem the job can write, not AFS, because batch jobs have no AFS token. Set `MERMAIDSEG_ENV_FILE` to read the settings from an env file elsewhere.
 
+### Train on SageMaker (backup)
+
+SageMaker runs the same `scripts/train.py` with the same arguments as `slurm/launch_final.sh`. Use it when Slurm is not available. Jobs are on-demand and do not resume: relaunch a failed job from scratch.
+
+1. Set the SageMaker variables in `.env` (see `.env.example`) and load it: the Makefile reads them from the environment.
+2. Run the `sagemaker-image` GitHub workflow on `main` (Actions, Run workflow). It builds the image; see [docker/jobs/README.md](docker/jobs/README.md). The job runs the code and `configs/` baked into the image: `training-latest` is `main` at the last workflow run on `main`. Only the run YAML travels with the job. Merge config and code changes, and rerun the workflow, before you launch.
+3. Run `make sm-validate` to check the run YAML offline. It checks only your local checkout, not the image.
+4. Run `make sm-launch` to submit `cbm_final` (`sagemaker/runs/cbm_final.yaml`). `make sm-dry-run` shows the request without submitting.
+5. When `cbm_final` finishes, submit the 768 px fine-tune with the first job's name:
+   `make sm-launch SM_RUN_CONFIG=sagemaker/runs/cbm_final_res768.yaml INIT_FROM_JOB=<cbm_final job name>`
+
+Checkpoints sync to `s3://$SM_STAGING_BUCKET/runs/<job>/checkpoints/model_checkpoints/<run>/` (`model_step*`, `model.json`, `config.yaml`). Download them from there for export. The `git_sha` in `model.json` and the saved `config.yaml` record what the job ran.
+
+Monitor a job with `make sm-jobs`, `sm-status`, `sm-logs`, `sm-errors` and `sm-metrics`. These targets need the AWS CLI. All but `sm-jobs` need `JOB=<training-job-name>`, from `make sm-jobs` or the launcher's output. The first lines of the job log show the disk space for `/opt/ml/cache` and `/opt/ml/checkpoints`; on the first run, check where the cache lands.
+
+Both run YAMLs set `max_runtime_hours` above the 5-day default of the account Service Quota "Longest run time for a training job": 480 h for `cbm_final` and 168 h for `cbm_final_res768`. Raise the quota to at least 480 h first.
+
 ### Export a model
 
 Export a finished run as a bundle, then evaluate the bundle:
