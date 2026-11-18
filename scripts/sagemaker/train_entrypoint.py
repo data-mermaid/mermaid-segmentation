@@ -85,13 +85,17 @@ def resolve_secrets(environ: MutableMapping[str, str], client: Any) -> None:
         client: A boto3 Secrets Manager client.
 
     Raises:
-        Exception: Whatever ``client.get_secret_value`` raises; a run that needs a key must
-            not start without it.
+        Exception: Whatever ``client.get_secret_value`` raises, with a note naming the id
+            variable and the secret id; a run that needs a key must not start without it.
     """
     for id_var, var in SECRET_ENV.items():
         secret_id = environ.get(id_var)
         if secret_id:
-            environ[var] = client.get_secret_value(SecretId=secret_id)["SecretString"]
+            try:
+                environ[var] = client.get_secret_value(SecretId=secret_id)["SecretString"]
+            except Exception as exc:
+                exc.add_note(f"fetching {id_var}={secret_id}")
+                raise
 
 
 def num_workers(cpus: int, ngpu: int) -> int:
@@ -268,7 +272,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     os.environ.update(env)
     os.chdir(REPO_ROOT)
     print(f"[sagemaker] {shlex.join(command)}", flush=True)
-    # exec, so the SIGTERM of StopTrainingJob reaches the trainer itself.
+    # exec replaces this process, so tini (PID 1) delivers StopTrainingJob's SIGTERM
+    # straight to the trainer (or torchrun).
     return os.execvp(command[0], command)
 
 
