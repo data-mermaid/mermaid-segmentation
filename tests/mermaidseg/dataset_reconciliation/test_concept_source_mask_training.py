@@ -28,7 +28,7 @@ from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from mermaidseg.io import ConfigDict
 from mermaidseg.model.data_parallel import ShardStep, shard_targets
 from tests.conftest import IMAGE_SIZE, cbm_test_config
-from tests.test_concept_source_mask import CHANNELS, _schema
+from tests.mermaidseg.dataset_reconciliation.test_concept_source_mask import CHANNELS, _schema
 
 BLEACHED = CHANNELS.index("bleached")
 

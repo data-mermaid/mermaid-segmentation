@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-_REPO = Path(__file__).resolve().parents[1]
+_REPO = Path(__file__).resolve().parents[2]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
 _TAXONOMY = ["kingdom", "phylum", "order", "family", "genus", "species"]
 

@@ -14,6 +14,19 @@ from mermaidseg.inference.bundle import load_bundle
 from mermaidseg.io import REPO_ROOT
 from tests.mermaidseg.inference import _tiny
 
+DATA = {
+    "coralnet": {
+        "train": {"whitelist_sources": [1, 2]},
+        "val": {"whitelist_sources": [3], "image_blacklist": "/bl.parquet"},
+        "test": {
+            "whitelist_sources": [4, 5],
+            "image_blacklist": "/bl.parquet",
+            "annotation_overrides": "/ov.parquet",
+        },
+    },
+    "benthos_yuval": {"train": None, "val": {"whitelist_sites": ["RS24"]}},
+}
+
 DELETED_FLAGS = [
     "--checkpoint",
     "--model-config",
@@ -133,3 +146,67 @@ def test_main_passes_the_bundles_concept_mapping_path_resolved_against_the_repo_
 def test_removed_concepts_are_empty_without_a_concept_removal_file():
     config = _tiny.resolved_config()
     assert evaluate_script.run_removed_concepts(config, "unused.csv") == []
+
+
+def test_split_field():
+    f = evaluate_script._split_field
+    assert f(DATA, "coralnet", "val", "whitelist_sources") == [3]
+    assert f(DATA, "coralnet", "test", "whitelist_sources") == [4, 5]
+    assert f(DATA, "coralnet", "test", "annotation_overrides") == "/ov.parquet"
+    assert f(DATA, "coralnet", "val", "annotation_overrides") is None
+    assert f(DATA, "benthos_yuval", "val", "whitelist_sites") == ["RS24"]
+    assert f(DATA, "benthos_yuval", "train", "whitelist_sites") is None
+    assert f(DATA, "missing", "val", "whitelist_sources") is None
+
+
+def test_coralnet_split_without_sources_fails_early():
+    data = {"coralnet": {"val": {"whitelist_sources": [3]}}}
+    with pytest.raises(ValueError, match=r"no coralnet\.test\.whitelist_sources"):
+        evaluate_script._coralnet_sources(data, "test")
+
+
+def test_train_split_reads_the_train_sources():
+    assert "train" in evaluate_script.SPLITS
+    assert evaluate_script._coralnet_sources(DATA, "train") == [1, 2]
+
+
+def test_train_split_allows_only_coralnet_and_loss():
+    check = evaluate_script.check_split_evals
+    check("train", ["coralnet", "val_loss"])
+    check("val", list(evaluate_script.ALL_EVALS))
+    for other in ("pacific", "coralscapes", "coralscapes39"):
+        with pytest.raises(ValueError, match="--split train supports only"):
+            check("train", ["coralnet", other])
+
+
+def test_train_loss_data_config_is_coralnet_train_without_a_transform(tmp_path):
+    data = {
+        "local_cache_dir": "/cache",
+        "default": {
+            "train": {"transform": {"RandomResizedCrop": {"size": [256, 256]}}},
+            "val": {},
+        },
+        "coralnet": {
+            "train": {
+                "whitelist_sources": [1, 2],
+                "image_blacklist": "/bl.parquet",
+                "transform": {"Resize": {"height": 8}},
+            },
+            "val": None,
+        },
+        "mermaid": {"train": {"annotation_date_cutoff": "2026-08-12"}},
+    }
+    keep = tmp_path / "keep.parquet"
+    out = evaluate_script.coralnet_loss_data_config(data, "train", keep)
+    assert out == {
+        "data": {
+            "local_cache_dir": "/cache",
+            "coralnet": {
+                "val": {
+                    "whitelist_sources": [1, 2],
+                    "image_blacklist": "/bl.parquet",
+                    "image_keep": str(keep.resolve()),
+                }
+            },
+        }
+    }
