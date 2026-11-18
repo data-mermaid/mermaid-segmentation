@@ -84,7 +84,7 @@ The bundle holds `model.json` and `weights.safetensors`. These two files are the
 Export needs a run trained with this version or later: older runs have no `model.json`, and their checkpoints record no lineage.
 
 `scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
-few-shot probes and the validation loss). It evaluates an exported bundle: input size, normalization, label maps and run settings come from the bundle. It takes only `--bundle`; the old `--checkpoint`, `--model-config`, `--training-config`, `--resolution`, `--id2label`, `--concept-id2name` and `--taxonomy-csv` flags are gone.
+few-shot probes and the validation loss). It evaluates an exported bundle: input size, normalization, label maps and run settings come from the bundle. The model comes only from `--bundle`; the old `--checkpoint`, `--model-config`, `--training-config`, `--resolution`, `--id2label`, `--concept-id2name` and `--taxonomy-csv` flags are gone.
 
 ### Running Tests
 
