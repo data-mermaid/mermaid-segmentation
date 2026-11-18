@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 import cv2
 import numpy as np
 import pytest
@@ -34,10 +36,11 @@ def test_imagenet_constants_hold_the_published_values():
     assert IMAGENET_STD == (0.229, 0.224, 0.225)
 
 
-def test_preprocess_requires_mean_and_std():
-    image = np.zeros((8, 8, 3), dtype=np.uint8)
-    with pytest.raises(TypeError):
-        preprocess(image, (8, 8))  # type: ignore[call-arg]
+@pytest.mark.parametrize("name", ["mean", "std"])
+def test_preprocess_requires_mean_and_std_as_keyword_only(name):
+    parameter = inspect.signature(preprocess).parameters[name]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
 
 
 @pytest.mark.parametrize("shape", [(8, 8), (8, 8, 4), (1, 8, 8, 3)])
