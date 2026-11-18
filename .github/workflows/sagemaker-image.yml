@@ -1,9 +1,11 @@
 name: sagemaker-image
 
-# Builds and pushes the SageMaker training image to ECR. It builds from the committed tree of the
-# ref the workflow runs on, so lineage records git_dirty=False. Every ref pushes training-<sha>;
-# only main also moves training-latest. Needs the repo variable
-# AWS_ECR_PUSH_ROLE_ARN: an OIDC role trusted for this repo (defined in the mermaid-api IaC).
+# Builds and pushes the SageMaker training image to ECR from the committed tree of main, so
+# lineage records git_dirty=False. Each run pushes training-<sha> and moves training-latest.
+# The job runs in the sagemaker-image environment, whose deployment-branch policy (set in repo
+# settings) allows only main. The push role in AWS_ECR_PUSH_ROLE_ARN (repo variable; OIDC role
+# defined in the mermaid-api IaC) should trust only that environment. The ref check in the tags
+# step is a second guard: a non-main ref never moves training-latest.
 
 on:
   workflow_dispatch:
@@ -18,6 +20,7 @@ concurrency:
 jobs:
   build-push:
     name: Build and push image
+    environment: sagemaker-image
     runs-on: ubuntu-latest
     permissions:
       contents: read
