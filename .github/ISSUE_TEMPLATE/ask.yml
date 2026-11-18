@@ -77,7 +77,7 @@ body:
     attributes:
       label: Solution Architecture
       description: Describe or link to the solution architecture documentation.
-      placeholder: Link to docs/solution-architecture.md or describe the proposed approach
+      placeholder: Describe the proposed approach
 
   - type: textarea
     id: data-requirements
