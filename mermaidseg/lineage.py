@@ -78,11 +78,13 @@ def collect_lineage(*, resolved_config: dict, seed: int, data_version: dict) -> 
     """Everything needed to trace a run back to its code, environment, config and data.
 
     ``git_dirty`` counts tracked changes only; None (git unavailable) is as untrusted as True.
-    A non-empty ``MERMAIDSEG_GIT_SHA`` is the revision of a CI-built image: it is recorded as
-    ``git_sha`` with ``git_dirty`` False (the tree is committed by construction) and git is not run.
+    Inside a checkout (``REPO_ROOT/.git`` exists as a directory or a worktree file) git gives the
+    revision and dirty state. Without ``.git``, a non-empty ``MERMAIDSEG_GIT_SHA`` is the revision of
+    a CI-built image: it is recorded as ``git_sha`` with ``git_dirty`` False (the tree is committed by
+    construction) and git is not run.
     """
     build_sha = os.environ.get(BUILD_GIT_SHA_ENV)
-    if build_sha:
+    if build_sha and not (Path(REPO_ROOT) / ".git").exists():
         git_sha: str | None = build_sha
         git_dirty: bool | None = False
     else:
