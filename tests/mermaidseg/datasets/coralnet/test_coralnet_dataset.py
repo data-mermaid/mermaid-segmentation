@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import shutil
 
 import pandas as pd
 import pytest
@@ -13,14 +14,16 @@ from mermaidseg.datasets.coralnet import coralnet_dataset as cnd
 from mermaidseg.datasets.local_cache import LocalS3Cache
 
 BUCKET = "bucket"
-MANIFEST = "manifest.parquet"
+RUN = "20260623_nogit"
+MANIFEST = f"etl-outputs/coralnet/{RUN}/coralnet_training_manifest_{RUN}.parquet"
+ID2NAME_KEY = f"etl-outputs/coralnet/{RUN}/coralnet_id2name_{RUN}.json"
 
 
 @pytest.fixture
 def cache(tmp_path):
     root = tmp_path / "cache"
-    (root / BUCKET / cnd._CORALNET_ID2NAME_KEY).parent.mkdir(parents=True)
-    (root / BUCKET / cnd._CORALNET_ID2NAME_KEY).write_text(
+    (root / BUCKET / MANIFEST).parent.mkdir(parents=True)
+    (root / BUCKET / ID2NAME_KEY).write_text(
         json.dumps({"1": "Acropora", "2": "Hard coral", "3": "Sand"})
     )
     # Image 10 (source 1) and image 20 (source 2) are copies of one photo; image 11 is unique.
@@ -40,6 +43,22 @@ def cache(tmp_path):
     LocalS3Cache.configure(root, offline=True)
     yield tmp_path
     LocalS3Cache.reset_singleton()
+
+
+def test_custom_manifest_reads_id2name_named_after_its_directory(cache):
+    run_dir = cache / "cache" / BUCKET / "x" / "runA"
+    run_dir.mkdir(parents=True)
+    shutil.copy(cache / "cache" / BUCKET / MANIFEST, run_dir / "m.parquet")
+    (run_dir / "coralnet_id2name_runA.json").write_text(
+        json.dumps({"1": "Porites", "2": "Algae", "3": "Rubble"})
+    )
+    ds = CoralNetDataset(manifest_path="x/runA/m.parquet", source_bucket=BUCKET)
+    assert sorted(ds.df_annotations["coralnet_name"].unique()) == ["Algae", "Porites", "Rubble"]
+
+
+def test_manifest_without_directory_is_rejected(cache):
+    with pytest.raises(ValueError, match="run directory"):
+        CoralNetDataset(manifest_path="m.parquet", source_bucket=BUCKET)
 
 
 def _make(**kwargs) -> CoralNetDataset:

@@ -9,24 +9,30 @@ benthic attribute target space is performed externally via
 
 The training manifest (``coralnet_training_manifest_<run>.parquet``) carries
 per-annotation rows with ``(row, col, coralnet_id)`` in the **resized**
-coordinate space (longest edge clamped to 2048; see
-``mermaidseg.datasets.coralnet.preprocessing.resize``) plus the resolved
+coordinate space (longest edge clamped to 2048; resizing
+lives in ``coralnet_dataset.resize``) plus the resolved
 ``image_s3_key`` for each image (resized copy when the image was resized,
 otherwise the original). Pin a specific build via
 ``MERMAID_CORALNET_MANIFEST_PATH`` or ``MERMAID_CORALNET_MANIFEST_VERSION``.
+
+The ``coralnet-dataset`` package (``packages/coralnet-dataset``) produces both
+the manifest and the per-run label-name file ``coralnet_id2name_<run>.json``.
+The JSON sits beside the manifest, in a run directory named ``<run>``, so a
+custom ``MERMAID_CORALNET_MANIFEST_PATH`` needs its sibling id2name JSON in
+that same directory.
 Images with no ``image_s3_key`` are skipped (never loaded at the wrong
 resolution); the dataset recovers by serving a different image.
 
 Duplicate images (the same photo uploaded to several sources) are removed with
 ``image_blacklist`` and their merged annotations applied with
-``annotation_overrides``; both are produced by ``mermaidseg.datasets.coralnet.dedup``
-and versioned in ``configs/coralnet/``.
+``annotation_overrides``; both are versioned in ``configs/coralnet/``.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import posixpath
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +50,24 @@ _DEFAULT_RUN = "20260623_nogit"
 _DEFAULT_MANIFEST_PATH = (
     f"etl-outputs/coralnet/{_DEFAULT_RUN}/coralnet_training_manifest_{_DEFAULT_RUN}.parquet"
 )
-_CORALNET_ID2NAME_KEY = "coralnet-public-images/temporary/coralnet_id2name.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _id2name_key(manifest_path: str) -> str:
+    """Return the S3 key of the id2name JSON that sits beside a manifest.
+
+    The key is ``<dir>/coralnet_id2name_<basename(dir)>.json``.
+
+    Raises:
+        ValueError: If ``manifest_path`` has no directory component.
+    """
+    run_dir = posixpath.dirname(manifest_path)
+    if not run_dir:
+        raise ValueError(
+            f"manifest_path {manifest_path!r} must sit in a run directory "
+            "(<run>/<manifest>.parquet) so its id2name JSON can be located."
+        )
+    return posixpath.join(run_dir, f"coralnet_id2name_{posixpath.basename(run_dir)}.json")
 
 
 def _resolve_default_manifest_path() -> str:
@@ -77,6 +99,7 @@ class CoralNetDataset(BaseCoralDataset):
     Attributes:
         manifest_path (str): Key (relative to ``source_bucket``) of the self-contained
             training manifest parquet.
+        id2name_key (str): Key of the ``coralnet_id2name_<run>.json`` beside the manifest.
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-source CoralNet image folders live.
 
@@ -102,6 +125,7 @@ class CoralNetDataset(BaseCoralDataset):
     SOURCE_NAME = "coralnet"
 
     manifest_path: str
+    id2name_key: str
     source_ids: list[int | str]
     source_bucket: str
     source_s3_prefix: str
@@ -123,6 +147,7 @@ class CoralNetDataset(BaseCoralDataset):
     ) -> None:
         """Initialize the dataset; arguments are described in the class docstring."""
         self.manifest_path = manifest_path or _resolve_default_manifest_path()
+        self.id2name_key = _id2name_key(self.manifest_path)
         self.source_bucket = source_bucket
         self.source_s3_prefix = source_s3_prefix
         self.whitelist_sources = whitelist_sources
@@ -164,17 +189,14 @@ class CoralNetDataset(BaseCoralDataset):
 
         The manifest carries per-annotation rows plus the resolved ``image_s3_key``
         for each image. ``source_label_name`` is derived from ``coralnet_id`` via
-        ``coralnet_id2name.json`` (the manifest's ``source_label_name`` column
+        the ``coralnet_id2name_<run>.json`` beside the manifest (the manifest's ``source_label_name`` column
         holds numeric IDs and is overwritten). No CoralNet -> MERMAID translation
         happens here; that mapping is owned by
         :mod:`mermaidseg.dataset_reconciliation.label_mapping` and is applied
         at training time on the GPU via a long-tensor lookup.
         """
         df = LocalS3Cache.get().read_parquet(self.source_bucket, self.manifest_path)
-        coralnet_id2name = LocalS3Cache.get().read_json(
-            self.source_bucket,
-            _CORALNET_ID2NAME_KEY,
-        )
+        coralnet_id2name = LocalS3Cache.get().read_json(self.source_bucket, self.id2name_key)
 
         df["coralnet_name"] = df["coralnet_id"].map(lambda x: coralnet_id2name.get(str(x)))
         df["source_label_name"] = df["coralnet_name"].astype(str).str.lower()
@@ -230,7 +252,7 @@ class CoralNetDataset(BaseCoralDataset):
             logger.warning("annotation_overrides: %d images are not in the manifest", n_missing)
         overrides = overrides.merge(images, on="image_id")
 
-        coralnet_id2name = LocalS3Cache.get().read_json(self.source_bucket, _CORALNET_ID2NAME_KEY)
+        coralnet_id2name = LocalS3Cache.get().read_json(self.source_bucket, self.id2name_key)
         overrides["coralnet_name"] = overrides["coralnet_id"].map(
             lambda x: coralnet_id2name.get(str(x))
         )
