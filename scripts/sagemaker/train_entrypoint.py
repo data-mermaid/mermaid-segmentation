@@ -18,6 +18,7 @@ import argparse
 import os
 import re
 import shlex
+import shutil
 import sys
 from collections.abc import Mapping, MutableMapping, Sequence
 from pathlib import Path
@@ -216,6 +217,17 @@ def _require_init_file(train: TrainConfig) -> None:
         raise ValueError(f"init weights {expected} not found; {INIT_DIR} holds {found}")
 
 
+def _disk_report(path: Path) -> str:
+    """One log line with a directory's capacity, free space, and filesystem device id."""
+    usage = shutil.disk_usage(path)
+    device = os.stat(path).st_dev
+    gib = 1024**3
+    return (
+        f"[sagemaker] disk {path}: total={usage.total / gib:.1f}GiB "
+        f"free={usage.free / gib:.1f}GiB dev={device}"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the trainer for the run YAML in the config channel.
 
@@ -250,6 +262,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     if ngpu > 1:
         Path(env["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"]).parent.mkdir(parents=True, exist_ok=True)
+    # Differing dev ids show the cache is off the ML volume (e.g. the container's writable layer).
+    for directory in (CACHE_DIR, OUTPUT_DIR):
+        print(_disk_report(directory), flush=True)
     os.environ.update(env)
     os.chdir(REPO_ROOT)
     print(f"[sagemaker] {shlex.join(command)}", flush=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from botocore.exceptions import ClientError
@@ -258,6 +259,7 @@ def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final"):
     (tmp_path / "run.yaml").write_text((_RUNS / f"{run}.yaml").read_text())
     monkeypatch.setattr(entrypoint, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(entrypoint, "OUTPUT_DIR", tmp_path / "out")
+    (tmp_path / "out").mkdir()  # SageMaker always creates the checkpoint dir
     monkeypatch.setattr(entrypoint, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr("torch.cuda.device_count", lambda: ngpu)
     monkeypatch.setattr(os, "cpu_count", lambda: 48)
@@ -297,6 +299,30 @@ def test_main_creates_no_nccl_trace_dir_for_one_gpu(tmp_path, monkeypatch):
     entrypoint.main([])
 
     assert not (tmp_path / "out" / "nccl_trace").exists()
+
+
+def test_main_logs_disk_usage_of_cache_and_output_dirs_before_exec(tmp_path, monkeypatch, capsys):
+    _stub_main(tmp_path, monkeypatch, ngpu=4)
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+    gib = 1024**3
+    monkeypatch.setattr(
+        "shutil.disk_usage",
+        lambda path: SimpleNamespace(total=100 * gib, used=60 * gib, free=40 * gib),
+    )
+
+    entrypoint.main([])
+
+    lines = capsys.readouterr().out.splitlines()
+    cache_line = next(
+        i for i, ln in enumerate(lines) if "total=" in ln and str(tmp_path / "cache") in ln
+    )
+    out_line = next(
+        i for i, ln in enumerate(lines) if "total=" in ln and str(tmp_path / "out") in ln
+    )
+    exec_line = next(i for i, ln in enumerate(lines) if "train.py" in ln)
+    assert "total=100.0GiB free=40.0GiB" in lines[cache_line]
+    assert "dev=" in lines[out_line]
+    assert max(cache_line, out_line) < exec_line
 
 
 def test_main_passes_the_init_channel_file_as_init_weights(tmp_path, monkeypatch):
