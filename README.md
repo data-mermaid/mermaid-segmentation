@@ -97,10 +97,11 @@ uv run python scripts/evaluate.py --bundle /path/to/bundle --output-dir /path/to
 ```
 
 The bundle holds `model.json` and `weights.safetensors`. These two files are the contract with `mermaid-inference`.
-`scripts/export.py` refuses a run from a dirty or unknown git tree, a non-empty output directory, a missing parent directory, and a checkpoint whose config differs from the run's `model.json`.
+`scripts/export.py` refuses a checkpoint with no recorded lineage, a checkpoint whose lineage records a dirty or unknown git tree (each checkpoint records the lineage of the session that wrote it), a checkpoint whose config differs from its recorded lineage, a non-empty output directory, and a missing parent directory.
+Export needs a run trained with this version or later: older runs have no `model.json`, and their checkpoints record no lineage.
 
 `scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
-few-shot probes and the validation loss). It evaluates an exported bundle: input size, normalization, label maps and run settings come from the bundle.
+few-shot probes and the validation loss). It evaluates an exported bundle: input size, normalization, label maps and run settings come from the bundle. The model comes only from `--bundle`; the old `--checkpoint`, `--model-config`, `--training-config`, `--resolution`, `--id2label`, `--concept-id2name` and `--taxonomy-csv` flags are gone.
 
 ### Running Tests
 

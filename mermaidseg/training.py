@@ -15,7 +15,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 from mermaidseg.config import to_plain_dict
 from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local_cache
-from mermaidseg.inference.bundle import write_sidecar
+from mermaidseg.export import write_sidecar
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import resolve_repo_path, setup_config, update_config_with_args
 from mermaidseg.lineage import collect_lineage, data_version
@@ -330,6 +330,7 @@ def run(args: argparse.Namespace) -> None:
         meta_model.set_concept_source_mask(concept_source_mask.keep)
 
     sidecar: dict[str, Any] = {}
+    lineage: dict[str, Any] | None = None
     if dist_ctx.is_main:
         lineage = collect_lineage(
             resolved_config=to_plain_dict(cfg_logger),
@@ -412,6 +413,7 @@ def run(args: argparse.Namespace) -> None:
             checkpoint_dir=args.output_dir,
             id2label={0: "ignore", **registry.target_id2label},
             save_local_checkpoints=True,
+            lineage=lineage,
         )
     else:
         logger_context = contextlib.nullcontext(None)

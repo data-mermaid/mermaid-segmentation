@@ -15,7 +15,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import mermaidseg.model.meta as meta_module
 import mermaidseg.model.models as models_module
-from mermaidseg.inference.bundle import MODEL_JSON, write_sidecar
+from mermaidseg.export import write_sidecar
+from mermaidseg.inference.bundle import MODEL_JSON
 from mermaidseg.io import REPO_ROOT, ConfigDict
 from mermaidseg.model.meta import next_epoch_from_checkpoint, restore_warmup_progress
 from mermaidseg.model.models import MODEL_CLASSES
@@ -466,7 +467,7 @@ def test_sidecar_architecture_kwargs_rebuild_the_model_from_json(
         lineage={},
     )
     architecture = json.loads((tmp_path / MODEL_JSON).read_text())["architecture"]
-    kwargs = {k: v for k, v in architecture["kwargs"].items() if k != "encoder_name"}
+    kwargs = dict(architecture["kwargs"])
 
     model = MODEL_CLASSES[architecture["class"]](
         base_encoder=mock_dinov3_encoder(models_module), **kwargs

@@ -10,7 +10,7 @@ import albumentations as A
 import yaml
 
 from mermaidseg.config import RESERVED_DATA_KEYS, lookup_class, validate_section
-from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
+from mermaidseg.inference.preprocess import CV2_INTERPOLATION, IMAGENET_MEAN, IMAGENET_STD
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -189,7 +189,9 @@ def compile_transform(spec: Mapping[str, Mapping[str, Any]]) -> A.Compose:
 def build_eval_transform(input_size: Sequence[int]) -> A.Compose:
     """Return the val/test transform: ``Resize`` to ``input_size`` (height, width), then Normalize."""
     height, width = int(input_size[0]), int(input_size[1])
-    return A.Compose([A.Resize(height=height, width=width, p=1), _normalize()])
+    return A.Compose(
+        [A.Resize(height=height, width=width, interpolation=CV2_INTERPOLATION, p=1), _normalize()]
+    )
 
 
 def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:

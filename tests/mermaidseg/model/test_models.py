@@ -40,9 +40,7 @@ def test_unknown_model_kwarg_raises(mock_dinov3_encoder):
         ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(encoder, foo=1))
 
 
-def test_load_pretrained_encoder_passes_only_the_encoder_name_and_hf_token(
-    mock_dinov3_encoder, monkeypatch
-):
+def test_load_pretrained_encoder_requests_float32_and_hf_token(mock_dinov3_encoder, monkeypatch):
     encoder = mock_dinov3_encoder(models_module)
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
@@ -54,7 +52,7 @@ def test_load_pretrained_encoder_passes_only_the_encoder_name_and_hf_token(
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")
 
     assert models_module.load_pretrained_encoder("some/encoder") is encoder
-    assert calls == [(("some/encoder",), {"token": "hf-test-token"})]
+    assert calls == [(("some/encoder",), {"token": "hf-test-token", "dtype": torch.float32})]
 
 
 def test_model_built_with_an_injected_encoder_never_calls_the_hub(mock_dinov3_encoder, monkeypatch):

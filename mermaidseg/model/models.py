@@ -29,8 +29,10 @@ class ConceptBottleneckOutput(SemanticSegmenterOutput):
 
 
 def load_pretrained_encoder(encoder_name: str) -> PreTrainedModel:
-    """Load the pretrained base encoder from the HF hub, the one place the hub is called."""
-    return AutoModel.from_pretrained(encoder_name, token=os.environ.get("HF_TOKEN"))
+    """Load the pretrained base encoder from the HF hub in float32, the one place the hub is called."""
+    return AutoModel.from_pretrained(
+        encoder_name, token=os.environ.get("HF_TOKEN"), dtype=torch.float32
+    )
 
 
 def _wrap_encoder_with_lora(

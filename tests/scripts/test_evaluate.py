@@ -9,7 +9,9 @@ import pytest
 import torch
 
 import scripts.evaluate as evaluate_script
-from mermaidseg.inference.bundle import export_bundle, load_bundle
+from mermaidseg.export import export_bundle
+from mermaidseg.inference.bundle import load_bundle
+from mermaidseg.io import REPO_ROOT
 from tests.mermaidseg.inference import _tiny
 
 DELETED_FLAGS = [
@@ -19,6 +21,7 @@ DELETED_FLAGS = [
     "--concept-id2name",
     "--training-config",
     "--resolution",
+    "--taxonomy-csv",
 ]
 
 
@@ -89,6 +92,42 @@ def test_amp_dtype_is_resolved_from_the_bundle_config(
 def test_concept_names_are_the_bundles_in_channel_order(bundle_dir: Path):
     bundle = load_bundle(bundle_dir, "cpu")
     assert evaluate_script.concept_names_of(bundle) == _tiny.CONCEPT_NAMES
+
+
+def test_main_passes_the_bundles_concept_mapping_path_resolved_against_the_repo_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from mermaidseg.evaluation import coralscapes_probe
+
+    mapping = "configs/not_the_default_mapping.csv"
+    config = _tiny.resolved_config()
+    config["training"] = {**config["training"], "concept_mapping_path": mapping}
+    lineage = {"git_sha": "abc123", "git_dirty": False, "resolved_config": config}
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", config=config, checkpoint_lineage=lineage)
+    bundle = export_bundle(checkpoint, tmp_path / "bundle")
+    seen: dict[str, Any] = {}
+
+    def _probe(*, taxonomy_csv, **_):
+        seen["taxonomy_csv"] = taxonomy_csv
+        return {}
+
+    monkeypatch.setattr(coralscapes_probe, "evaluate_coralscapes_probe", _probe)
+    monkeypatch.setattr(evaluate_script, "run_removed_concepts", lambda *_: [])
+    # The tiny bundle has no reported binary concept channels; the eval stage is under test.
+    monkeypatch.setattr(evaluate_script, "REPORTED_BINARY_CONCEPTS", [])
+    evaluate_script.main(
+        [
+            "--bundle",
+            str(bundle),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--evals",
+            "coralscapes",
+            "--device",
+            "cpu",
+        ]
+    )
+    assert seen["taxonomy_csv"] == REPO_ROOT / mapping
 
 
 def test_removed_concepts_are_empty_without_a_concept_removal_file():

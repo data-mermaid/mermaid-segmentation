@@ -183,6 +183,27 @@ class TestSaveModelCheckpoint:
         assert ckpt["epoch_complete"] is False
         assert ckpt["epoch"] == 0
 
+    def test_checkpoint_carries_the_loggers_lineage_only_when_set(self, tmp_path, make_config):
+        lineage = {"git_sha": "abc", "git_dirty": False}
+        for name, kwargs in (("with-lineage", {"lineage": lineage}), ("no-lineage", {})):
+            meta = FakeMetaModel(run_name=name)
+            lgr = Logger(
+                config=make_config(),
+                meta_model=meta,
+                checkpoint_dir=str(tmp_path),
+                log_checkpoint=1,
+                **kwargs,
+            )
+            lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.1})
+        saved = {
+            name: torch.load(
+                tmp_path / "model_checkpoints" / name / "model_epoch1", weights_only=True
+            )
+            for name in ("with-lineage", "no-lineage")
+        }
+        assert saved["with-lineage"]["lineage"] == lineage
+        assert "lineage" not in saved["no-lineage"]
+
     def test_checkpoint_metrics_and_config_load_as_plain_python(self, tmp_path, make_config):
         meta = FakeMetaModel(run_name="plain-ckpt")
         lgr = Logger(

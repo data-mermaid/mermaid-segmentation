@@ -55,7 +55,7 @@ from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.reporting import fmt, write_json
 from mermaidseg.inference.bundle import MODEL_JSON, ModelBundle, load_bundle
 from mermaidseg.inference.predictor import CBMPredictor
-from mermaidseg.io import load_section
+from mermaidseg.io import load_section, resolve_repo_path
 from mermaidseg.model.meta import resolve_amp_dtype
 from mermaidseg.run_setup import concept_removal_list
 
@@ -107,6 +107,11 @@ def eval_amp_dtype(run_config: dict, amp: bool) -> torch.dtype | None:
     if not amp:
         return None
     return resolve_amp_dtype(run_config["training"]["mixed_precision_dtype"])
+
+
+def concept_mapping_path_of(run_config: dict) -> Path:
+    """The run's ``training.concept_mapping_path``, resolved against the repository root."""
+    return resolve_repo_path(run_config["training"]["concept_mapping_path"])
 
 
 def run_removed_concepts(run_config: dict, taxonomy_csv: str | Path) -> list[str]:
@@ -195,7 +200,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Assets.
-    p.add_argument("--taxonomy-csv", type=Path, default=_CONFIGS / "class_to_concepts.csv")
     p.add_argument(
         "--probe-points",
         type=Path,
@@ -389,9 +393,10 @@ def main(argv: list[str] | None = None) -> None:
             f"which the bundle's concept_id2name ({len(concept_names)} entries) does not have."
         )
 
+    concept_mapping_path = concept_mapping_path_of(bundle.config)
     removed_concepts: list[str] = []
     if any(e in evals for e in ("coralnet", "pacific", "coralscapes")):
-        removed_concepts = run_removed_concepts(bundle.config, args.taxonomy_csv)
+        removed_concepts = run_removed_concepts(bundle.config, concept_mapping_path)
         logger.info("Concept removal of the bundle's run: %d channels", len(removed_concepts))
 
     # Benthic hierarchy for CoralNet/Pacific class roll-up.
@@ -456,7 +461,7 @@ def main(argv: list[str] | None = None) -> None:
                     image_keep=sample_path,
                     id2label=id2label,
                     concept_names=concept_names,
-                    taxonomy_csv=args.taxonomy_csv,
+                    taxonomy_csv=concept_mapping_path,
                     hierarchy=hierarchy,
                     output_dir=output_dir,
                     split=split,
@@ -484,7 +489,7 @@ def main(argv: list[str] | None = None) -> None:
                     ),
                     id2label=id2label,
                     concept_names=concept_names,
-                    taxonomy_csv=args.taxonomy_csv,
+                    taxonomy_csv=concept_mapping_path,
                     hierarchy=hierarchy,
                     output_dir=output_dir,
                     batch_size=args.batch_size,
@@ -508,7 +513,7 @@ def main(argv: list[str] | None = None) -> None:
                     coralscapes_root=args.coralscapes_root,
                     output_dir=output_dir,
                     concept_names=concept_names,
-                    taxonomy_csv=args.taxonomy_csv,
+                    taxonomy_csv=concept_mapping_path,
                     splits=[split],
                     svm_c=args.svm_c,
                     max_test_images=args.max_test_images,

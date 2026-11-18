@@ -23,6 +23,7 @@ import mermaidseg.model.models
 from mermaidseg import training
 from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
+from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import ConfigDict, load_config, resolve_repo_path, setup_config
 from mermaidseg.model.distributed import DistContext
 from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
@@ -370,11 +371,16 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert sidecar["concept_id2name"]
     assert sidecar["lineage"]["seed"] == 7
     assert sidecar["architecture"]["encoder_config"]["hidden_size"] == 16
+    assert sidecar["preprocessing"]["mean"] == list(IMAGENET_MEAN)
+    assert sidecar["preprocessing"]["std"] == list(IMAGENET_STD)
     resolved = yaml.safe_load((run_dir / "config.yaml").read_text())
     assert resolved["run_name"] == SMOKE_RUN
+    assert resolved["model"]["input_size"] == [SMOKE_RESOLUTION, SMOKE_RESOLUTION]
+    assert sidecar["preprocessing"]["size_hw"] == resolved["model"]["input_size"]
     assert resolved["training"]["concept_mapping_path"] == "configs/class_to_concepts.csv"
     checkpoint = torch.load(run_dir / "model_step1", weights_only=True)
     assert checkpoint["config"] == resolved
+    assert checkpoint["lineage"]["seed"] == 7
     assert not (workdir / "model_checkpoints").exists()
     assert cache_roots == [str(cache_dir)]
     assert wandb_run.params["cli/num_workers"] == 1

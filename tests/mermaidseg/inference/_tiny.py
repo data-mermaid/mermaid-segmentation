@@ -14,7 +14,7 @@ import torch
 from transformers import AutoConfig, AutoModel
 
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
-from mermaidseg.inference.bundle import write_sidecar
+from mermaidseg.export import write_sidecar
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.model.models import MODEL_CLASSES
 
@@ -26,6 +26,7 @@ CLASS_NAMES = ["ignore", "acropora", "porites", "sand", "algae"]
 CONCEPT_NAMES = [f"{rank}__v{i}" for rank in TAXONOMIC_CONCEPTS for i in range(RANK_WIDTH)] + [
     "live",
     "sand",
+    "bleached",
 ]
 ENV_ENCODER_KEYS = ("transformers_version", "_name_or_path")
 
@@ -38,10 +39,14 @@ def concept_id2name() -> dict[int, str]:
     return {i + 1: name for i, name in enumerate(CONCEPT_NAMES)}
 
 
-def concept_value2id() -> dict[str, dict[str, list[int]]]:
+def concept_value2id() -> dict[str, dict[Any, Any]]:
+    """Taxonomic ranks plus a binary ``bleached`` concept keyed by ``bool``, as in training."""
     return {
-        rank: {"not_given": [0] * RANK_WIDTH, "v0": [2, 1], "v1": [1, 2]}
-        for rank in TAXONOMIC_CONCEPTS
+        **{
+            rank: {"not_given": [0] * RANK_WIDTH, "v0": [2, 1], "v1": [1, 2]}
+            for rank in TAXONOMIC_CONCEPTS
+        },
+        "bleached": {"not_given": 0, False: 1, True: 2},
     }
 
 
@@ -98,7 +103,11 @@ def resolved_config() -> dict[str, Any]:
         "run_name": RUN_NAME,
         "seed": 0,
         "model": {"input_size": list(INPUT_SIZE)},
-        "training": {"mixed_precision_dtype": "bfloat16", "concept_removal": None},
+        "training": {
+            "mixed_precision_dtype": "bfloat16",
+            "concept_removal": None,
+            "concept_mapping_path": "configs/class_to_concepts.csv",
+        },
     }
 
 
@@ -109,8 +118,12 @@ def write_run(
     config: dict[str, Any] | None = None,
     mean: Sequence[float] = IMAGENET_MEAN,
     std: Sequence[float] = IMAGENET_STD,
+    checkpoint_lineage: dict[str, Any] | None = None,
 ) -> tuple[Path, torch.nn.Module]:
-    """Write ``model.json`` and ``model_step1`` into ``run_dir``; return the checkpoint and model."""
+    """Write ``model.json`` and ``model_step1`` into ``run_dir``; return the checkpoint and model.
+
+    The checkpoint carries the sidecar's lineage unless ``checkpoint_lineage`` replaces it.
+    """
     model = build_trained_model()
     encoder: Any = model.encoder
     encoder_config = {
@@ -119,6 +132,11 @@ def write_run(
         if k not in ENV_ENCODER_KEYS
     }
     run_dir.mkdir(parents=True, exist_ok=True)
+    lineage = {
+        "git_sha": "abc123",
+        "git_dirty": git_dirty,
+        "resolved_config": resolved_config(),
+    }
     write_sidecar(
         run_dir,
         run_name=RUN_NAME,
@@ -130,11 +148,7 @@ def write_run(
         input_size=INPUT_SIZE,
         mean=mean,
         std=std,
-        lineage={
-            "git_sha": "abc123",
-            "git_dirty": git_dirty,
-            "resolved_config": resolved_config(),
-        },
+        lineage=lineage,
     )
     checkpoint = run_dir / "model_step1"
     torch.save(
@@ -143,6 +157,9 @@ def write_run(
             "model_state_dict": model.state_dict(),
             "epoch": 3,
             "global_step": 42,
+            "lineage": copy.deepcopy(
+                checkpoint_lineage if checkpoint_lineage is not None else lineage
+            ),
         },
         checkpoint,
     )
