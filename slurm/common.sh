@@ -47,7 +47,6 @@ unset AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_
 export MERMAIDSEG_S3_OFFLINE=1
 
 export WANDB_DIR="$REPO/wandb"
-export WANDB_PROJECT=${WANDB_PROJECT:-mermaidseg}
 
 cd "$REPO"
 uv sync --locked --extra slurm
