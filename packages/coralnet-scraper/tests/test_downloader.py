@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 import requests
 from bs4 import BeautifulSoup
+
 from coralnet_scraper import downloader as downloader_mod
 from coralnet_scraper import s3_io
 from coralnet_scraper.downloader import (
@@ -695,8 +696,7 @@ def test_get_images_parallel_single_page_no_fanout():
 def test_get_images_parallel_preserves_page_order():
     """Images from page 1 appear before page 2, page 2 before page 3 in the output.
 
-    Page order matters because the ETL joins on Name; stable ordering makes the output
-    deterministic and diffable across runs.
+    Stable ordering makes the output deterministic and diffable across runs.
     """
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True

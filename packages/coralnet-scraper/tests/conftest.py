@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from botocore.exceptions import ClientError
+
 from coralnet_scraper.downloader import CoralNetDownloader
 
 

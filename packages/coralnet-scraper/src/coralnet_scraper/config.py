@@ -14,7 +14,11 @@ ENV_SCRAPER_WORKERS = "MERMAID_CORALNET_SCRAPER_WORKERS"
 
 
 def get_bucket() -> str:
-    """Return the destination bucket; there is no default."""
+    """Return the destination bucket name; there is no default.
+
+    Raises:
+        ValueError: If ``MERMAID_CORALNET_BUCKET`` is unset or empty.
+    """
     bucket = os.getenv(ENV_BUCKET)
     if not bucket:
         raise ValueError(f"{ENV_BUCKET} must be set to a non-empty S3 bucket name")
@@ -22,7 +26,11 @@ def get_bucket() -> str:
 
 
 def get_prefix() -> str:
-    """Return the destination key prefix without surrounding slashes; it must not be empty."""
+    """Return the destination key prefix without surrounding slashes.
+
+    Raises:
+        ValueError: If the prefix is empty after stripping slashes.
+    """
     prefix = os.getenv(ENV_PREFIX, DEFAULT_PREFIX).strip("/")
     if not prefix:
         raise ValueError(f"{ENV_PREFIX} must contain a non-empty key prefix")
@@ -39,6 +47,18 @@ def validate_workers(workers: int) -> int:
 
 
 def get_scraper_workers(default: int = DEFAULT_SCRAPER_WORKERS) -> int:
+    """Return the scraper worker count from the environment, or ``default`` when it is unset.
+
+    Args:
+        default: Worker count used when ``MERMAID_CORALNET_SCRAPER_WORKERS`` is not set.
+
+    Returns:
+        The environment value, validated to be at least 1, or ``default`` unchanged when the
+        variable is unset.
+
+    Raises:
+        ValueError: If the environment value is not an integer of at least 1.
+    """
     raw = os.getenv(ENV_SCRAPER_WORKERS)
     if raw is None:
         return default

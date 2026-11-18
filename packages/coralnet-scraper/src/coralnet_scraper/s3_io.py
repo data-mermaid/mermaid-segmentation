@@ -12,15 +12,18 @@ _MISSING_KEY_CODES = ("404", "NoSuchKey")
 
 
 def source_prefix(base_prefix: str, source_id: int) -> str:
+    """Return the key prefix ``<base_prefix>/s<source_id>/`` for one source."""
     bp = base_prefix.strip("/")
     return f"{bp}/s{source_id}/"
 
 
 def object_key_annotation_csv(base_prefix: str, source_id: int) -> str:
+    """Return the S3 key of a source's ``annotations.csv``."""
     return f"{source_prefix(base_prefix, source_id)}annotations.csv"
 
 
 def annotations_csv_exists(client: Any, bucket: str, base_prefix: str, source_id: int) -> bool:
+    """Return whether a source's ``annotations.csv`` object exists in ``bucket``."""
     prefix = object_key_annotation_csv(base_prefix, source_id)
     resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
     return "Contents" in resp
@@ -33,6 +36,7 @@ def upload_csv_body(
     key: str,
     csv_text: str,
 ) -> None:
+    """Upload ``csv_text`` to ``key`` in ``bucket`` with a ``text/csv`` content type."""
     client.put_object(Bucket=bucket, Key=key, Body=csv_text, ContentType="text/csv")
 
 

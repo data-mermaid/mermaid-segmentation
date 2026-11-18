@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import cast
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
@@ -19,6 +20,7 @@ def parse_source_access(html: str) -> tuple[bool, str | None]:
 
 
 def _image_status_detail_table(soup: BeautifulSoup) -> Tag | None:
+    """Return the ``Image Status`` table of a source overview page, or None when absent."""
     header = soup.find("h4", string="Image Status")
     if not header:
         return None
@@ -113,7 +115,7 @@ def extract_csrf_token(html: str) -> str | None:
     """Extract ``csrfmiddlewaretoken`` from any page containing a hidden input."""
     soup = BeautifulSoup(html, "html.parser")
     csrf = soup.find("input", {"name": "csrfmiddlewaretoken"})
-    return csrf["value"] if csrf else None
+    return cast("str | None", csrf["value"]) if csrf else None
 
 
 def parse_export_annotations_prep_form(html: str) -> str | None:
@@ -123,4 +125,4 @@ def parse_export_annotations_prep_form(html: str) -> str | None:
     if not form:
         return None
     csrf = form.find("input", {"name": "csrfmiddlewaretoken"})
-    return csrf["value"] if csrf else None
+    return cast("str | None", csrf["value"]) if csrf else None

@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -25,15 +25,24 @@ def discover_public_source_ids(
     listing_url: str = "https://coralnet.ucsd.edu/source/about/",
     timeout: float = 50.0,
 ) -> list[int]:
+    """Return the sorted ids of the public CoralNet sources linked from the listing page.
+
+    Args:
+        listing_url: Page that links to every public source.
+        timeout: Request timeout in seconds.
+
+    Raises:
+        requests.HTTPError: If the listing page returns an error status.
+    """
     resp = requests.get(listing_url, timeout=timeout)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-    anchors = soup.find_all("a", href=True)
+    hrefs = [cast(str, a["href"]) for a in soup.find_all("a", href=True)]
     links = sorted(
         {
-            urljoin(listing_url, a["href"])
-            for a in anchors
-            if urlparse(urljoin(listing_url, a["href"])).scheme in ("http", "https")
+            urljoin(listing_url, href)
+            for href in hrefs
+            if urlparse(urljoin(listing_url, href)).scheme in ("http", "https")
         }
     )
     source_links = [lk for lk in links if "/source/" in lk]
@@ -41,7 +50,11 @@ def discover_public_source_ids(
 
 
 def load_coralnet_credentials() -> tuple[str, str]:
-    """Prefer env CORALNET_USERNAME / CORALNET_PASSWORD."""
+    """Return the CoralNet ``(username, password)``.
+
+    Reads ``CORALNET_USERNAME`` and ``CORALNET_PASSWORD`` when both are set, otherwise prompts
+    on the terminal.
+    """
     env_u = os.environ.get("CORALNET_USERNAME") or ""
     env_p = os.environ.get("CORALNET_PASSWORD") or ""
     if env_u.strip() and env_p:
@@ -59,7 +72,10 @@ def should_skip_download(
     s3_client: Any,
     force: bool,
 ) -> bool:
-    """Return True when the batch loop should not call download for this source."""
+    """Return whether the batch loop should skip ``source_id``.
+
+    A source is skipped when its ``annotations.csv`` is already on S3, unless ``force`` is set.
+    """
     if force:
         return False
     if annotations_csv_exists(s3_client, bucket, s3_prefix, source_id):
@@ -78,7 +94,20 @@ def run_batch_download(
     force: bool = False,
     delay_seconds: float = 0.0,
 ) -> dict[int, DownloadResult]:
-    """Download each source when not skipped; returns per-source results."""
+    """Download each source that is not skipped.
+
+    Args:
+        source_ids: CoralNet source ids to process.
+        downloader: Client that provides ``download_source``.
+        bucket: Destination S3 bucket.
+        s3_prefix: Destination key prefix.
+        s3_client: S3 client used for the skip check.
+        force: Download every source, even when its annotations already exist.
+        delay_seconds: Pause after each download.
+
+    Returns:
+        A result per downloaded source, keyed by source id; skipped sources are absent.
+    """
     results: dict[int, DownloadResult] = {}
     for sid in tqdm(list(source_ids), desc="CoralNet sources"):
         if should_skip_download(

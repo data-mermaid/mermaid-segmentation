@@ -14,7 +14,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Queue
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import boto3
 import pandas as pd
@@ -39,11 +39,11 @@ logger = logging.getLogger(__name__)
 
 _PAGE_GET_TIMEOUT = 90  # simple page GETs; CoralNet can be slow under load
 _EXPORT_PREP_TIMEOUT_MIN = 300
-_EXPORT_PREP_TIMEOUT_MAX = 7200  # 2 hours max (was 3600)
+_EXPORT_PREP_TIMEOUT_MAX = 7200  # 2 hours
 _EXPORT_SERVE_TIMEOUT_MIN = 120
 _EXPORT_SERVE_TIMEOUT_MAX = 1800
-_EXPORT_PREP_RETRIES = 5  # increased from 3
-_EXPORT_PREP_RETRY_SLEEP_S = 60  # doubled from 30s for longer waits between retries
+_EXPORT_PREP_RETRIES = 5
+_EXPORT_PREP_RETRY_SLEEP_S = 60  # base sleep between export_prep retries; scaled by attempt
 _PAGINATED_EXPORT_THRESHOLD = 5000  # sources above this use per-page export
 _PAGE_EXPORT_TIMEOUT = 180  # CoralNet session setup can take >60s even for 20 images
 _PAGE_RETRIES = 3
@@ -72,7 +72,7 @@ def _extract_page_image_ids(soup: BeautifulSoup) -> tuple[int, ...]:
         link = wrapper.find("a")
         if not link:
             continue
-        match = _IMAGE_HREF_PK.search(link.get("href", ""))
+        match = _IMAGE_HREF_PK.search(cast(str, link.get("href", "")))
         if match:
             seen.setdefault(int(match.group(1)), None)
     return tuple(seen)
@@ -96,8 +96,9 @@ class _PageWorkItem:
 
 
 def _merge_with_existing(new_df: pd.DataFrame, existing_df: pd.DataFrame | None) -> pd.DataFrame:
-    """Concat ``existing_df`` (if any) with ``new_df`` and dedup on (Name, Row,
-    Column).
+    """Concatenate ``existing_df`` (if any) with ``new_df``, deduplicating on (Name, Row, Column).
+
+    Rows from ``new_df`` win on conflict.
     """
     if existing_df is None:
         return new_df
@@ -106,6 +107,7 @@ def _merge_with_existing(new_df: pd.DataFrame, existing_df: pd.DataFrame | None)
 
 
 def _upload_csv(s3_client: Any, bucket: str, key: str, df: pd.DataFrame) -> None:
+    """Serialize ``df`` as CSV without the index and upload it to ``key`` in ``bucket``."""
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     s3_io.upload_csv_body(s3_client, bucket=bucket, key=key, csv_text=buf.getvalue())
@@ -205,7 +207,19 @@ class CoralNetDownloader:
     CORALNET_URL = "https://coralnet.ucsd.edu"
     LOGIN_URL = "https://coralnet.ucsd.edu/accounts/login/"
 
-    def __init__(self, username: str, password: str, *, max_workers: int | None = None):
+    def __init__(self, username: str, password: str, *, max_workers: int | None = None) -> None:
+        """Create the client and its HTTP and S3 sessions; no network call is made.
+
+        Args:
+            username: CoralNet account name.
+            password: CoralNet account password.
+            max_workers: Concurrent image download workers; ``None`` reads the environment
+                or falls back to the CPU-based default.
+
+        Raises:
+            ValueError: If ``max_workers`` or the environment value is not an integer of at
+                least 1.
+        """
         self.username = username
         self.password = password
         self.max_workers = (
@@ -229,9 +243,11 @@ class CoralNetDownloader:
         self.s3 = boto3.client("s3", config=BotoConfig(max_pool_connections=self.max_workers + 4))
 
     def _source_main_url(self, source_id: int) -> str:
+        """Return the URL of a source's overview page."""
         return f"{self.CORALNET_URL}/source/{source_id}/"
 
     def _get_source_overview_html(self, source_id: int) -> str:
+        """Fetch the overview page of a source and return its HTML."""
         url = self._source_main_url(source_id)
         response = self.session.get(url, timeout=_PAGE_GET_TIMEOUT)
         response.raise_for_status()
@@ -281,6 +297,11 @@ class CoralNetDownloader:
         return True
 
     def login(self) -> bool:
+        """Log the main session in to CoralNet.
+
+        Returns:
+            True on success; False when the login fails, after logging the error.
+        """
         try:
             self._perform_login(self.session)
             self.logged_in = True
@@ -306,6 +327,7 @@ class CoralNetDownloader:
             return False
 
     def check_permissions(self, source_id: int) -> bool:
+        """Return whether the logged-in account can open the source's overview page."""
         try:
             html = self._get_source_overview_html(source_id)
             accessible, err = parse_source_access(html)
@@ -328,6 +350,18 @@ class CoralNetDownloader:
         *,
         overview_html: str | None = None,
     ) -> tuple[bool, int]:
+        """Upload the source's classifier history as ``metadata.csv``.
+
+        Args:
+            source_id: CoralNet source id.
+            bucket_name: Destination S3 bucket.
+            s3_prefix: Destination key prefix.
+            overview_html: Already-fetched overview page; fetched when ``None``.
+
+        Returns:
+            ``(ok, total_images)`` where ``total_images`` is the website image count, or 0
+            when the step fails.
+        """
         try:
             html = (
                 overview_html
@@ -362,6 +396,16 @@ class CoralNetDownloader:
     def download_labelset(
         self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images"
     ) -> bool:
+        """Upload the source's labelset as ``labelset.csv``.
+
+        Args:
+            source_id: CoralNet source id.
+            bucket_name: Destination S3 bucket.
+            s3_prefix: Destination key prefix.
+
+        Returns:
+            True on success or when the source has no labels; False on failure.
+        """
         try:
             url = f"{self.CORALNET_URL}/source/{source_id}/labelset/"
             response = self.session.get(url, timeout=_PAGE_GET_TIMEOUT)
@@ -381,7 +425,7 @@ class CoralNetDownloader:
                     continue
                 link = cells[0].find("a")
                 if link and link.get("href"):
-                    label_ids.append(link["href"].split("/")[-2])
+                    label_ids.append(cast(str, link["href"]).split("/")[-2])
                     names.append(link.get_text().strip())
                     short_codes.append(cells[1].get_text().strip() if len(cells) > 1 else "")
             if not label_ids:
@@ -408,10 +452,20 @@ class CoralNetDownloader:
         *,
         total_images_hint: int | None = None,
     ) -> bool:
-        """Export and download annotations CSV; upload to S3.
+        """Export the source's annotations and upload them as ``annotations.csv``.
 
-        Note: Does not check for existing annotations.csv on S3. If called during remediation,
-        the remediation classifier already determined fresh annotations are needed.
+        Does not check for an existing ``annotations.csv`` on S3. Sources above
+        :data:`_PAGINATED_EXPORT_THRESHOLD` images use :meth:`download_annotations_paginated`.
+
+        Args:
+            source_id: CoralNet source id.
+            bucket_name: Destination S3 bucket.
+            s3_prefix: Destination key prefix.
+            total_images_hint: Website image count used to size timeouts; fetched from the
+                overview page when ``None`` or negative.
+
+        Returns:
+            True on success; False on failure, after logging the error.
         """
         try:
             total_images = total_images_hint
@@ -472,7 +526,7 @@ class CoralNetDownloader:
                         attempt_timeout: int = attempt_timeout,
                         result_queue: Queue = result_queue,
                         exception_queue: Queue = exception_queue,
-                    ):
+                    ) -> None:
                         try:
                             resp = self.session.post(
                                 export_request_url,
@@ -577,6 +631,11 @@ class CoralNetDownloader:
         pages so a crash mid-export does not lose all in-memory progress.
 
         Args:
+            source_id: CoralNet source id.
+            bucket_name: Destination S3 bucket.
+            s3_prefix: Destination key prefix.
+            total_images_website: Website image count; an existing CSV that already covers it
+                is left as is.
             page_workers: Concurrent ``export_prep``/``serve`` workers in phase
                 2. Defaults to :data:`_PAGE_PARALLEL_WORKERS`. Pass ``1`` for
                 deterministic ordering (used by tests).
@@ -635,10 +694,13 @@ class CoralNetDownloader:
     ) -> tuple[pd.DataFrame | None, bool]:
         """Load an existing ``annotations.csv`` from S3 if present.
 
-        Returns ``(df, is_complete)``. ``df`` is ``None`` when the object does not
-        exist; ``is_complete`` is ``True`` only when the existing CSV's unique-image
-        count already meets ``total_images_website``, signalling the caller can skip re-
-        export. Non-404 ``ClientError``s propagate.
+        Returns:
+            ``(df, is_complete)``. ``df`` is ``None`` when the object does not exist;
+            ``is_complete`` is True only when the existing CSV's unique-image count already
+            meets ``total_images_website``, so the caller can skip the export.
+
+        Raises:
+            botocore.exceptions.ClientError: For any error other than a missing key.
         """
         existing_df = s3_io.read_csv_s3(self.s3, bucket_name, annotations_key)
         if existing_df is None:
@@ -674,10 +736,12 @@ class CoralNetDownloader:
         page_num = 0
         while current_url is not None:
             page_num += 1
+
+            def fetch_page(url: str = current_url) -> requests.Response:
+                return self._raise_for_status(self.session.get(url, timeout=_PAGE_EXPORT_TIMEOUT))
+
             page_response = _with_retry(
-                lambda url=current_url: self._raise_for_status(
-                    self.session.get(url, timeout=_PAGE_EXPORT_TIMEOUT)
-                ),
+                fetch_page,
                 source_id=source_id,
                 page_num=page_num,
                 kind="browse",
@@ -690,7 +754,7 @@ class CoralNetDownloader:
                     f"Could not find export form / CSRF on page {page_num} of source {source_id}"
                 )
             next_anchor = soup.find("a", title="Next page")
-            next_rel: str | None = next_anchor.get("href") if next_anchor else None
+            next_rel = cast("str | None", next_anchor.get("href")) if next_anchor else None
             image_ids = _extract_page_image_ids(soup)
             if not image_ids:
                 raise RuntimeError(
@@ -701,7 +765,7 @@ class CoralNetDownloader:
                 _PageWorkItem(
                     page_num=page_num,
                     page_url=current_url,
-                    csrf=csrf_input["value"],
+                    csrf=cast(str, csrf_input["value"]),
                     images_on_page=len(image_ids),
                     image_ids=image_ids,
                 )
@@ -721,6 +785,7 @@ class CoralNetDownloader:
 
     @staticmethod
     def _raise_for_status(resp: requests.Response) -> requests.Response:
+        """Raise on an HTTP error status, otherwise return ``resp``."""
         resp.raise_for_status()
         return resp
 
@@ -757,7 +822,7 @@ class CoralNetDownloader:
                     f"Worker session: no CSRF on browse page {item.page_num} of source {source_id}"
                 )
             form_data = {
-                "csrfmiddlewaretoken": csrf_input["value"],
+                "csrfmiddlewaretoken": cast(str, csrf_input["value"]),
                 "browse_action": "export_annotations",
                 "image_form_type": "search",
                 "image_select_type": "selected",
@@ -856,6 +921,12 @@ class CoralNetDownloader:
         return chunks_by_page
 
     def get_images_on_page(self, browse_url: str) -> tuple[dict[str, str], str | None]:
+        """Fetch one browse page.
+
+        Returns:
+            ``(images, next_rel)``: image name to image-page link, and the "Next page" link
+            or None on the last page.
+        """
         images: dict[str, str] = {}
         response = self.session.get(browse_url, timeout=_PAGE_GET_TIMEOUT)
         response.raise_for_status()
@@ -864,12 +935,12 @@ class CoralNetDownloader:
             link = wrapper.find("a")
             img = wrapper.find("img")
             if link and img:
-                name = img.get("title", "")
-                href = link.get("href", "")
+                name = cast(str, img.get("title", ""))
+                href = cast(str, link.get("href", ""))
                 if name and href:
                     images[name] = href
         next_page_element = soup.find("a", title="Next page")
-        next_rel = next_page_element.get("href") if next_page_element else None
+        next_rel = cast("str | None", next_page_element.get("href")) if next_page_element else None
         return images, next_rel
 
     def get_images(
@@ -914,7 +985,11 @@ class CoralNetDownloader:
             can_parallel = browse_workers > 1 and total_images_hint is not None
             page1_size = len(page1_imgs)
 
-            if can_parallel and page1_size > 0 and total_images_hint > page1_size:
+            if (
+                can_parallel
+                and total_images_hint is not None
+                and 0 < page1_size < total_images_hint
+            ):
                 # Ceil-divide without importing math.
                 n_pages = -(-total_images_hint // page1_size)
                 sep = "&" if "?" in base_url else "?"
@@ -1024,6 +1099,11 @@ class CoralNetDownloader:
         return s
 
     def _resolve_one_image_url(self, rel: str) -> str | None:
+        """Return the original-image URL found on the image page at the relative link ``rel``.
+
+        Raises:
+            ValueError: If the page has no original-image container, e.g. a private source.
+        """
         session = self._get_thread_session()
         url = urllib.parse.urljoin(self.CORALNET_URL + "/", rel)
         r = session.get(url, timeout=_PAGE_GET_TIMEOUT)
@@ -1034,9 +1114,14 @@ class CoralNetDownloader:
             raise ValueError(
                 f"CoralNet image {url}: couldn't find original image container (private source?)."
             )
-        return originals[0].attrs.get("src")
+        return cast("str | None", originals[0].attrs.get("src"))
 
     def get_image_urls(self, image_page_urls: list[str]) -> list[str | None]:
+        """Resolve image-page links to original-image URLs, in input order.
+
+        With several workers a failed lookup yields None for that entry; with a single
+        worker the first failure raises.
+        """
         n = len(image_page_urls)
         workers = min(self.max_workers, n) if n > 0 else 1
         if workers <= 1:
@@ -1069,6 +1154,11 @@ class CoralNetDownloader:
     def download_image_to_s3(
         self, url: str, bucket_name: str, s3_key: str, timeout: int = 30
     ) -> tuple[str, bool]:
+        """Stream the image at ``url`` to ``s3_key`` unless that object already exists.
+
+        Returns:
+            ``(s3_key, ok)``; ``ok`` is False when the download or upload failed.
+        """
         try:
             try:
                 self.s3.head_object(Bucket=bucket_name, Key=s3_key)
@@ -1092,6 +1182,14 @@ class CoralNetDownloader:
         bucket_name: str,
         s3_prefix: str = "coralnet-public-images",
     ) -> None:
+        """Upload every row of ``images_df`` that has an ``Image URL`` to S3 in parallel.
+
+        Args:
+            images_df: Frame with ``Image Page`` and ``Image URL`` columns.
+            source_id: CoralNet source id.
+            bucket_name: Destination S3 bucket.
+            s3_prefix: Destination key prefix.
+        """
         chunk = images_df[images_df["Image URL"].notna()]
         if chunk.empty:
             logger.warning("No valid Image URL rows for source %s", source_id)
@@ -1142,6 +1240,23 @@ class CoralNetDownloader:
         download_annotations: bool = True,
         download_images: bool = True,
     ) -> DownloadResult:
+        """Download one source's artifacts to S3.
+
+        Logs in when needed, then uploads metadata, labelset, annotations and images for the
+        enabled steps. Sources with no confirmed images or no images are skipped.
+
+        Args:
+            source_id: CoralNet source id.
+            bucket_name: Destination S3 bucket.
+            s3_prefix: Destination key prefix.
+            download_metadata: Upload ``metadata.csv``.
+            download_labelset: Upload ``labelset.csv``.
+            download_annotations: Upload ``annotations.csv``; a failure ends the download.
+            download_images: Upload the image list and the images.
+
+        Returns:
+            The outcome, with failure codes in ``errors``.
+        """
         errs: list[str] = []
         sid = source_id
         logger.info("Downloading CoralNet source %s", sid)
@@ -1229,6 +1344,7 @@ class CoralNetDownloader:
         return DownloadResult(ok=not errs, skipped_empty=False, errors=errs)
 
     def cleanup(self) -> None:
+        """Close the main session and mark it logged out."""
         if self.session:
             self.session.close()
         self.logged_in = False

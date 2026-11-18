@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 import pytest
+
 from coralnet_scraper import config
 
 _DEFAULT_PREFIX = "coralnet-public-images"

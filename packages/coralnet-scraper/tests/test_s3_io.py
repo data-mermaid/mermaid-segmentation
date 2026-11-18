@@ -8,8 +8,9 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 from botocore.exceptions import ClientError
-from coralnet_scraper import s3_io
 from pandas.testing import assert_frame_equal
+
+from coralnet_scraper import s3_io
 
 
 def _client_error(code: str) -> ClientError:

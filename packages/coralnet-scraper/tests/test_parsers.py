@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from coralnet_scraper.parsers import (
     parse_export_annotations_prep_form,
     parse_image_status_counts,
