@@ -22,6 +22,11 @@ from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
+# Statuses of read_jpeg_size_from_s3 that carry (width, height); every other status has none.
+STATUSES_WITH_DIMENSIONS: Final[frozenset[str]] = frozenset(
+    {"ok", "sof_not_found_extended", "pil_fallback"}
+)
+
 # SOF markers that carry width/height: SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15.
 # SOF4 (0xC4) is DHT, SOF8 (0xC8) is JPG, SOF12 (0xCC) is DAC — none carry dimensions.
 _SOF_BYTES: Final[frozenset[int]] = frozenset(

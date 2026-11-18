@@ -1,6 +1,6 @@
 """Merge per-source CoralNet CSV pairs into a single annotations parquet.
 
-For every source flagged ``is_complete`` in the audit DataFrame:
+For every requested source:
     1. Read ``annotations.csv`` (Name, Row, Column, Label ID, Status, ...)
     2. Read ``image_list.csv`` (Name, Image Page, ...)
     3. Strip the " - Confirmed" suffix from image_list ``Name`` values.
@@ -22,7 +22,9 @@ from typing import Any
 import pandas as pd
 from tqdm import tqdm
 
-from .config import DEFAULT_WORKERS, get_bucket, get_prefix
+from coralnet_scraper.s3_io import object_key_annotation_csv, object_key_image_list_csv
+
+from .config import DEFAULT_WORKERS
 from .io import (
     CsvReader,
     make_csv_reader_ibis,
@@ -51,6 +53,30 @@ def _get_thread_reader() -> CsvReader:
     return _thread_local.csv_reader
 
 
+def list_source_folders(client: Any, bucket: str, prefix: str) -> list[int]:
+    """Return the numeric source IDs of the ``s<N>/`` folders directly under ``prefix``.
+
+    Folders that are not ``s`` followed by digits (e.g. ``temporary/``, ``resized/``) are ignored.
+
+    Args:
+        client: boto3 S3 client.
+        bucket: S3 bucket name.
+        prefix: Key prefix holding the per-source folders.
+
+    Returns:
+        Source IDs in ascending order.
+    """
+    full_prefix = f"{prefix}/" if not prefix.endswith("/") else prefix
+    paginator = client.get_paginator("list_objects_v2")
+    source_ids: list[int] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=full_prefix, Delimiter="/"):
+        for common in page.get("CommonPrefixes", []):
+            folder = common["Prefix"].replace(full_prefix, "").rstrip("/")
+            if folder.startswith("s") and folder[1:].isdigit():
+                source_ids.append(int(folder[1:]))
+    return sorted(source_ids)
+
+
 def _derive_image_id(image_page: pd.Series) -> pd.Series:
     """Extract CoralNet image ID from the ``Image Page`` URL fragment.
 
@@ -65,8 +91,13 @@ def _derive_image_id(image_page: pd.Series) -> pd.Series:
 
 
 def _load_source(csv_reader: CsvReader, bucket: str, prefix: str, source_id: int) -> pd.DataFrame:
-    annotations_key = f"{prefix}/s{source_id}/annotations.csv"
-    image_list_key = f"{prefix}/s{source_id}/image_list.csv"
+    """Merge one source's ``annotations.csv`` and ``image_list.csv`` into Confirmed rows.
+
+    Raises:
+        _SourceLoadError: If either CSV is missing, unreadable or lacks a required column.
+    """
+    annotations_key = object_key_annotation_csv(prefix, source_id)
+    image_list_key = object_key_image_list_csv(prefix, source_id)
 
     try:
         df_annotations = csv_reader(bucket, annotations_key)
@@ -168,6 +199,7 @@ def _load_source(csv_reader: CsvReader, bucket: str, prefix: str, source_id: int
 
 
 def _load_source_worker(args: tuple[int, str, str]) -> tuple[int, pd.DataFrame | None, str | None]:
+    """Load one source on a worker thread, returning the error text instead of raising."""
     source_id, bucket, prefix = args
     reader = _get_thread_reader()
     try:
@@ -180,20 +212,22 @@ def _load_source_worker(args: tuple[int, str, str]) -> tuple[int, pd.DataFrame |
 
 
 def build_annotations(
-    audit_df: pd.DataFrame,
-    bucket: str | None = None,
-    prefix: str | None = None,
+    source_ids: list[int],
+    bucket: str,
+    prefix: str,
     *,
     workers: int = DEFAULT_WORKERS,
     s3_client: Any | None = None,
     csv_reader: CsvReader | None = None,
 ) -> pd.DataFrame:
-    """Merge per-source CSV pairs for every ``is_complete`` source into one DataFrame.
+    """Merge the per-source CSV pairs of ``source_ids`` into one DataFrame.
+
+    A source whose CSVs are missing or unreadable is logged and skipped.
 
     Args:
-        audit_df: Output of :func:`audit_sources`. Only sources where
-            ``is_complete`` is True are included.
-        bucket / prefix: S3 location. Defaults from env vars.
+        source_ids: CoralNet source IDs to read.
+        bucket: S3 bucket.
+        prefix: Key prefix holding the ``s<N>/`` folders.
         workers: ThreadPoolExecutor size. Forced to 1 when ``s3_client`` or
             ``csv_reader`` is injected (tests).
         s3_client: Pre-built boto3 client (tests). Implies a boto3-backed reader.
@@ -205,22 +239,14 @@ def build_annotations(
     Returns:
         DataFrame conforming to :data:`ANNOTATIONS_SCHEMA`, sorted by primary key.
     """
-    bucket = bucket or get_bucket()
-    prefix = prefix or get_prefix()
-
-    if "is_complete" not in audit_df.columns or "source_id" not in audit_df.columns:
-        raise ValueError("audit_df must contain 'source_id' and 'is_complete' columns")
-
     injection_active = s3_client is not None or csv_reader is not None
     if csv_reader is None:
         csv_reader = make_csv_reader_s3(s3_client) if s3_client is not None else None
 
-    ok = audit_df.loc[audit_df["is_complete"].astype(bool), "source_id"].astype(int).tolist()
+    ok = list(source_ids)
     if not ok:
-        logger.warning("No sources flagged is_complete in audit_df; returning empty frame.")
-        return pd.DataFrame(
-            {field.name: pd.Series(dtype=str(field.type)) for field in ANNOTATIONS_SCHEMA}
-        )
+        logger.warning("No sources requested; returning empty frame.")
+        return ANNOTATIONS_SCHEMA.empty_table().to_pandas()
 
     logger.info("Building annotations parquet from %d sources (workers=%d)", len(ok), workers)
 
@@ -259,9 +285,7 @@ def build_annotations(
 
     if not frames:
         logger.warning("No annotation frames produced; returning empty.")
-        return pd.DataFrame(
-            {field.name: pd.Series(dtype=str(field.type)) for field in ANNOTATIONS_SCHEMA}
-        )
+        return ANNOTATIONS_SCHEMA.empty_table().to_pandas()
 
     merged = pd.concat(frames, ignore_index=True)
     merged = merged.sort_values(list(ANNOTATIONS_PRIMARY_KEY), kind="mergesort").reset_index(

@@ -1,22 +1,20 @@
-"""Shared fixtures for CoralNet ETL tests.
+"""Shared fixtures for the CoralNet dataset tests.
 
-Provides a hand-rolled in-memory ``FakeS3`` that implements the boto3 client surface the ETL touches
-(``head_object``, ``get_object`` with ``Range``, ``list_objects_v2``, ``get_paginator``). Keeps the
-test suite free of network and AWS deps.
+Provides a hand-rolled in-memory ``FakeS3`` that implements the boto3 client surface the package
+touches (``get_object`` with ``Range``, ``head_object``, ``put_object``, ``upload_file``,
+``list_objects_v2``, ``get_paginator``).
+Keeps the test suite free of network and AWS deps.
 """
 
 from __future__ import annotations
 
 import io
 import struct
-import threading
 from dataclasses import dataclass, field
 
 import pytest
 from botocore.exceptions import ClientError
 from PIL import Image
-
-from mermaidseg.datasets.coralnet.scraper.downloader import CoralNetDownloader
 
 
 def _make_jpeg_bytes(width: int, height: int, *, sof_marker: int = 0xC0, padding: int = 0) -> bytes:
@@ -82,20 +80,12 @@ def _client_error(code: str, op: str) -> ClientError:
     return ClientError({"Error": {"Code": code, "Message": code}}, op)
 
 
-class _FakeS3ExceptionsShim:
-    ClientError = ClientError
-
-
 @dataclass
 class FakeS3:
-    """In-memory S3 client surface used by the ETL.
+    """In-memory S3 client surface used by the dataset build.
 
     Populate ``objects`` with ``{(bucket, key): bytes}`` to control what gets returned. ``Range``
     semantics follow ``bytes=start-end`` (inclusive).
-
-    Implements a small subset of boto3 used by CoralNet scraping (``put_object``,
-    ``upload_fileobj``, ``delete_object``, ``exceptions.ClientError``) in addition to the ETL read
-    paths.
     """
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
@@ -104,7 +94,7 @@ class FakeS3:
         self.objects[(bucket, key)] = data
 
     def put_object(self, *, Bucket: str, Key: str, Body, ContentType: str | None = None):
-        """Scraper uploads CSV bodies."""
+        """Resize uploads image bodies."""
         del ContentType  # parity with boto
         if isinstance(Body, str):
             raw: bytes = Body.encode("utf-8")
@@ -116,20 +106,14 @@ class FakeS3:
                 raw = raw.encode("utf-8")
         self.objects[(Bucket, Key)] = raw
 
-    def upload_fileobj(self, fileobj, bucket, key, ExtraArgs=None):
-        """Scraper uploads image streams."""
-        data = fileobj.read()
-        self.objects[(bucket, key)] = data
-
-    def delete_object(self, *, Bucket: str, Key: str) -> dict:
-        """Prefix cleanup and tests."""
-        self.objects.pop((Bucket, Key), None)
-        return {}
-
     def head_object(self, *, Bucket: str, Key: str):
         if (Bucket, Key) not in self.objects:
             raise _client_error("404", "HeadObject")
         return {"ContentLength": len(self.objects[(Bucket, Key)])}
+
+    def upload_file(self, Filename: str, Bucket: str, Key: str) -> None:
+        with open(Filename, "rb") as f:
+            self.objects[(Bucket, Key)] = f.read()
 
     def get_object(self, *, Bucket: str, Key: str, Range: str | None = None):
         if (Bucket, Key) not in self.objects:
@@ -173,12 +157,6 @@ class FakeS3:
             raise NotImplementedError(name)
         return _Paginator(self)
 
-    def upload_file(self, *args, **kwargs) -> None:  # pragma: no cover - not exercised
-        raise NotImplementedError
-
-
-FakeS3.exceptions = _FakeS3ExceptionsShim
-
 
 class _Paginator:
     def __init__(self, client: FakeS3):
@@ -199,21 +177,6 @@ def _csv_bytes(headers: list[str], rows: list[list]) -> bytes:
 @pytest.fixture
 def fake_s3() -> FakeS3:
     return FakeS3()
-
-
-@pytest.fixture
-def pandas_csv_reader():
-    """Build a :data:`CsvReader` over a FakeS3 fixture.
-
-    Tests inject this in place of the production ibis-on-DuckDB reader so the code-path matches what
-    the ETL uses end-to-end without depending on a real DuckDB connection or AWS.
-    """
-    from mermaidseg.datasets.coralnet.etl.io import make_csv_reader_s3
-
-    def _factory(fake_s3: FakeS3):
-        return make_csv_reader_s3(fake_s3)
-
-    return _factory
 
 
 @pytest.fixture
@@ -356,38 +319,3 @@ def corrupted_header_jpeg_bytes() -> bytes:
 def empty_bytes() -> bytes:
     """Empty file (0 bytes)."""
     return b""
-
-
-@pytest.fixture
-def bytes_io():
-    """Lazy BytesIO factory for tests that need a streaming buffer."""
-    return io.BytesIO
-
-
-@pytest.fixture
-def paginated_downloader(fake_s3) -> CoralNetDownloader:
-    """A :class:`CoralNetDownloader` wired for offline paginated-export tests.
-
-    - ``logged_in = True`` (skip real login)
-    - ``s3 = fake_s3`` (in-memory S3)
-    - Phase-2 worker session creation short-circuited to return ``dl.session``
-      so a single ``patch.object(dl.session, ...)`` intercepts both phases.
-
-    Mock-sequence consequence of the worker short-circuit: each browse page is
-    fetched TWICE in the mocked ``dl.session.get`` sequence — once during the
-    phase-1 walk (to discover ``Next page`` links) and once again inside the
-    phase-2 worker (to refresh the CSRF token bound to the worker's session).
-    Tests must size ``get_responses`` as ``len(pages) * 2 + len(pages)``
-    (page walk + per-page CSRF refresh + per-page serve response).
-
-    Production gives each worker its own logged-in ``requests.Session`` (see
-    :meth:`CoralNetDownloader._new_logged_in_session`) to avoid the CoralNet
-    server-side session race; that behaviour is exercised by
-    ``test_get_export_session_creates_independent_logged_in_session_per_thread``.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    dl.s3 = fake_s3
-    dl._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
-    dl._export_thread_local = threading.local()
-    return dl

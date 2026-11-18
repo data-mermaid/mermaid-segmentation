@@ -1,62 +1,67 @@
-"""Configuration constants and env-var resolution for the CoralNet ETL.
-
-All defaults can be overridden via environment variables so the ETL can be pointed at staging/dev
-buckets or run with a different worker count without code changes.
-"""
+"""Configuration constants and environment-variable resolution for the CoralNet dataset build."""
 
 from __future__ import annotations
 
 import os
 
-DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
-DEFAULT_PREFIX = "coralnet-public-images"
+from coralnet_scraper.config import get_bucket, get_prefix, validate_workers
+
+__all__ = [
+    "DEFAULT_OUTPUT_S3_PREFIX",
+    "DEFAULT_RESIZED_PREFIX",
+    "DEFAULT_WORKERS",
+    "ENV_RESIZED_PREFIX",
+    "ENV_WORKERS",
+    "RESIZE_THRESHOLD",
+    "get_bucket",
+    "get_prefix",
+    "get_resized_prefix",
+    "get_workers",
+]
+
 DEFAULT_OUTPUT_S3_PREFIX = "etl-outputs/coralnet"
+DEFAULT_RESIZED_PREFIX = "dev/images"
 DEFAULT_WORKERS = 16
-DEFAULT_IMAGE_WORKERS = 32
-# I/O-bound: scale beyond cpu_count since threads wait on network, not CPU
-DEFAULT_SCRAPER_WORKERS = min(32, max(8, (os.cpu_count() or 4) * 4))
-DEFAULT_JPEG_FIRST_CHUNK = 65_536
-DEFAULT_JPEG_MAX_CHUNK = 1_048_576
-DEFAULT_CHECKPOINT_EVERY = 50_000
-DEFAULT_RESIZE_THRESHOLD = 2048
+# Longest edge in pixels; larger images are resized down to it.
+RESIZE_THRESHOLD = 2048
 
-ENV_BUCKET = "MERMAID_CORALNET_BUCKET"
-ENV_PREFIX = "MERMAID_CORALNET_PREFIX"
-ENV_OUTPUT_PREFIX = "MERMAID_CORALNET_OUTPUT_PREFIX"
+ENV_RESIZED_PREFIX = "MERMAID_CORALNET_RESIZED_PREFIX"
 ENV_WORKERS = "MERMAID_CORALNET_ETL_WORKERS"
-ENV_SCRAPER_WORKERS = "MERMAID_CORALNET_SCRAPER_WORKERS"
-ENV_VERSION_OVERRIDE = "MERMAID_CORALNET_VERSION_OVERRIDE"
-ENV_ANNOTATIONS_PATH = "MERMAID_CORALNET_ANNOTATIONS_PATH"
-ENV_ANNOTATIONS_VERSION = "MERMAID_CORALNET_ANNOTATIONS_VERSION"
 
 
-def get_bucket() -> str:
-    return os.getenv(ENV_BUCKET, DEFAULT_BUCKET)
+def get_resized_prefix() -> str:
+    """Return the key prefix that holds ``resized/``, without surrounding slashes.
 
-
-def get_prefix() -> str:
-    return os.getenv(ENV_PREFIX, DEFAULT_PREFIX)
-
-
-def get_output_s3_prefix() -> str:
-    return os.getenv(ENV_OUTPUT_PREFIX, DEFAULT_OUTPUT_S3_PREFIX)
+    Raises:
+        ValueError: If the prefix is empty after stripping slashes.
+    """
+    prefix = os.getenv(ENV_RESIZED_PREFIX, DEFAULT_RESIZED_PREFIX).strip("/")
+    if not prefix:
+        raise ValueError(f"{ENV_RESIZED_PREFIX} must contain a non-empty key prefix")
+    return prefix
 
 
 def get_workers(default: int = DEFAULT_WORKERS) -> int:
+    """Return the S3 worker count from the environment, or ``default`` when it is unset.
+
+    Args:
+        default: Worker count used when ``MERMAID_CORALNET_ETL_WORKERS`` is not set.
+
+    Returns:
+        The environment value, validated to be at least 1, or ``default`` when the variable is
+        unset.
+
+    Raises:
+        ValueError: If the environment value is not an integer of at least 1.
+    """
     raw = os.getenv(ENV_WORKERS)
     if raw is None:
         return default
     try:
-        return max(1, int(raw))
+        workers = int(raw)
     except ValueError:
-        return default
-
-
-def get_scraper_workers(default: int = DEFAULT_SCRAPER_WORKERS) -> int:
-    raw = os.getenv(ENV_SCRAPER_WORKERS)
-    if raw is None:
-        return default
+        raise ValueError(f"{ENV_WORKERS} must be an integer, got {raw!r}") from None
     try:
-        return max(1, int(raw))
+        return validate_workers(workers)
     except ValueError:
-        return default
+        raise ValueError(f"{ENV_WORKERS} must be >= 1, got {raw!r}") from None

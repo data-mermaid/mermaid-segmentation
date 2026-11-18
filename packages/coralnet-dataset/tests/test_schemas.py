@@ -5,12 +5,9 @@ from __future__ import annotations
 import pandas as pd
 import pyarrow as pa
 import pytest
-
-from mermaidseg.datasets.coralnet.etl.schemas import (
+from coralnet_dataset.schemas import (
     ANNOTATIONS_SCHEMA,
-    AUDIT_SCHEMA,
     IMAGES_SCHEMA,
-    OUTPUT_SCHEMAS,
     SchemaValidationError,
     validate,
 )
@@ -21,25 +18,19 @@ def _empty_df(schema: pa.Schema) -> pd.DataFrame:
 
 
 @pytest.mark.parametrize(
-    "schema_name",
-    sorted(OUTPUT_SCHEMAS.keys()),
+    "schema",
+    [ANNOTATIONS_SCHEMA, IMAGES_SCHEMA],
+    ids=["annotations", "images"],
 )
-def test_validate_passes_when_all_columns_present(schema_name):
-    schema = OUTPUT_SCHEMAS[schema_name]
+def test_validate_passes_when_all_columns_present(schema):
     df = _empty_df(schema)
     validate(df, schema)  # must not raise
 
 
 def test_validate_raises_on_missing_column():
-    df = _empty_df(AUDIT_SCHEMA).drop(columns=["is_complete"])
-    with pytest.raises(SchemaValidationError, match="is_complete"):
-        validate(df, AUDIT_SCHEMA)
-
-
-def test_output_schemas_keyed_by_short_name():
-    assert OUTPUT_SCHEMAS["audit"] is AUDIT_SCHEMA
-    assert OUTPUT_SCHEMAS["annotations"] is ANNOTATIONS_SCHEMA
-    assert OUTPUT_SCHEMAS["images"] is IMAGES_SCHEMA
+    df = _empty_df(IMAGES_SCHEMA).drop(columns=["needs_resize"])
+    with pytest.raises(SchemaValidationError, match="needs_resize"):
+        validate(df, IMAGES_SCHEMA)
 
 
 def test_annotations_schema_has_status_column():
@@ -53,13 +44,3 @@ def test_images_schema_has_needs_resize_flag():
     assert "needs_resize" in names
     field = IMAGES_SCHEMA.field("needs_resize")
     assert pa.types.is_boolean(field.type)
-
-
-def test_audit_schema_carries_is_complete_and_image_count_match():
-    names = [f.name for f in AUDIT_SCHEMA]
-    assert {"is_complete", "image_count_match"}.issubset(names)
-
-
-def test_audit_schema_has_image_list_coverage_flag():
-    names = {field.name for field in AUDIT_SCHEMA}
-    assert "image_list_covers_annotations" in names

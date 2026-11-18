@@ -7,10 +7,9 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
-
-from mermaidseg.datasets.coralnet.etl.images import _next_part_index, build_images
-from mermaidseg.datasets.coralnet.etl.io import write_parquet_deterministic
-from mermaidseg.datasets.coralnet.etl.schemas import (
+from coralnet_dataset.images import build_images
+from coralnet_dataset.io import write_parquet_deterministic
+from coralnet_dataset.schemas import (
     IMAGES_PRIMARY_KEY,
     IMAGES_SCHEMA,
 )
@@ -121,8 +120,15 @@ def test_build_images_round_trips_through_parquet(
     assert len(round) == len(img_df)
 
 
-def test_next_part_index_uses_filename_max_not_loaded_count(tmp_path):
-    cp = tmp_path / "images.parquet"
-    (tmp_path / "images.part_00000.parquet").write_bytes(b"not parquet")
-    (tmp_path / "images.part_00001.parquet").write_bytes(b"not parquet")
-    assert _next_part_index(cp) == 2
+def test_build_images_on_empty_annotations_writes_empty_parquet(fake_s3, tmp_path):
+    ann_df = pd.DataFrame(
+        {"source_id": pd.Series(dtype="int32"), "image_id": pd.Series(dtype="string")}
+    )
+
+    img_df = build_images(ann_df, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
+
+    assert img_df.empty
+    assert list(img_df.columns) == [f.name for f in IMAGES_SCHEMA]
+    out = tmp_path / "images.parquet"
+    write_parquet_deterministic(img_df, out, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY)
+    assert pq.read_schema(out).names == [f.name for f in IMAGES_SCHEMA]
