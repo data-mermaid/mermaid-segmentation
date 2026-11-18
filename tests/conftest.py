@@ -203,10 +203,14 @@ def mock_dinov3_encoder(monkeypatch):
     num_layers = 4
     num_register_tokens = 4
 
+    class _MockEncoderConfig(SimpleNamespace):
+        def to_dict(self) -> dict[str, Any]:
+            return dict(vars(self))
+
     class _MockEncoder(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.config = SimpleNamespace(
+            self.config = _MockEncoderConfig(
                 hidden_size=hidden_size,
                 patch_size=patch_size,
                 num_hidden_layers=num_layers,

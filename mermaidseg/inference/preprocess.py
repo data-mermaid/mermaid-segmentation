@@ -17,6 +17,10 @@ from numpy.typing import NDArray
 
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
+CHANNEL_ORDER = "RGB"
+INTERPOLATION = "bilinear"
+# The OpenCV flag for INTERPOLATION.
+_CV2_INTERPOLATION = cv2.INTER_LINEAR
 
 
 def resize_rgb(image_rgb_uint8: NDArray[np.uint8], size_hw: Sequence[int]) -> NDArray[np.uint8]:
@@ -24,7 +28,7 @@ def resize_rgb(image_rgb_uint8: NDArray[np.uint8], size_hw: Sequence[int]) -> ND
     height, width = int(size_hw[0]), int(size_hw[1])
     if image_rgb_uint8.shape[:2] == (height, width):
         return image_rgb_uint8
-    resized = cv2.resize(image_rgb_uint8, (width, height), interpolation=cv2.INTER_LINEAR)
+    resized = cv2.resize(image_rgb_uint8, (width, height), interpolation=_CV2_INTERPOLATION)
     return cast("NDArray[np.uint8]", resized)
 
 

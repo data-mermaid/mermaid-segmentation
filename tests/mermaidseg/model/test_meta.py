@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,9 +12,12 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 import mermaidseg.model.meta as meta_module
+import mermaidseg.model.models as models_module
+from mermaidseg.inference.bundle import MODEL_JSON, write_sidecar
 from mermaidseg.io import ConfigDict
 from mermaidseg.model.meta import next_epoch_from_checkpoint, restore_warmup_progress
-from tests.conftest import IMAGE_SIZE
+from mermaidseg.model.models import MODEL_CLASSES
+from tests.conftest import IMAGE_SIZE, NUM_CLASSES
 
 
 @pytest.mark.parametrize(("raw", "expected"), [(180, 180.0), (45, 45.0), (0, 0.0), (-1, 0.0)])
@@ -400,3 +404,31 @@ def test_update_evaluator_feeds_metrics_the_argmax_of_class_logits(minimal_confi
     meta._update_evaluator(evaluator, logits, torch.zeros(1, 1, 2, dtype=torch.long), None, None)
 
     assert [p.tolist() for p in recorder.preds] == [[[[1, 2]]]]
+
+
+def test_sidecar_architecture_kwargs_rebuild_the_model_from_json(
+    minimal_config, make_meta_model, mock_dinov3_encoder, tmp_path
+):
+    meta = make_meta_model(minimal_config)
+    write_sidecar(
+        tmp_path,
+        run_name="run",
+        model_class=meta.model_name,
+        model_kwargs=meta.model_kwargs,
+        encoder_config={},
+        id2label={0: "ignore"},
+        concept_id2name={0: "c"},
+        input_size=IMAGE_SIZE,
+        mean=(0.5, 0.5, 0.5),
+        std=(0.25, 0.25, 0.25),
+        lineage={},
+    )
+    architecture = json.loads((tmp_path / MODEL_JSON).read_text())["architecture"]
+    kwargs = {k: v for k, v in architecture["kwargs"].items() if k != "encoder_name"}
+
+    model = MODEL_CLASSES[architecture["class"]](
+        base_encoder=mock_dinov3_encoder(models_module), **kwargs
+    )
+
+    out = model(torch.randn(1, 3, *IMAGE_SIZE))
+    assert out.logits.shape[1] == NUM_CLASSES

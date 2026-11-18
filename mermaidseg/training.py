@@ -12,9 +12,13 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import ConcatDataset, DataLoader
 
+from mermaidseg.config import to_plain_dict
 from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local_cache
+from mermaidseg.inference.bundle import write_sidecar
+from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import setup_config, update_config_with_args
+from mermaidseg.lineage import collect_lineage, data_version
 from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.distributed import (
     DistContext,
@@ -166,6 +170,30 @@ def _assemble_train_datasets(dataset_dict: dict[tuple[str, str], Any], data_cfg:
     return datasets
 
 
+# Environment-only config keys; lineage.versions records the transformers version.
+_ENV_ENCODER_CONFIG_KEYS = ("transformers_version", "_name_or_path")
+
+
+def _encoder_config(model: torch.nn.Module) -> dict[str, Any]:
+    """Architecture config of the pretrained encoder under the PEFT wrapper of ``model.encoder``."""
+    encoder: Any = model.encoder  # type: ignore[attr-defined]
+    config = encoder.get_base_model().config.to_dict()
+    return {k: v for k, v in config.items() if k not in _ENV_ENCODER_CONFIG_KEYS}
+
+
+def _lineage_params(lineage: dict[str, Any]) -> dict[str, Any]:
+    """Flat ``lineage/...`` wandb params from a lineage dict."""
+    version = lineage["data_version"]
+    params = {
+        "lineage/git_sha": lineage["git_sha"],
+        "lineage/git_dirty": lineage["git_dirty"],
+        "lineage/uv_lock_sha256": lineage["uv_lock_sha256"],
+        "lineage/data_config_sha1": version["data_config_sha1"],
+    }
+    params.update({f"lineage/manifests/{k}": v for k, v in version["manifests"].items()})
+    return params
+
+
 def run(args: argparse.Namespace) -> None:
     """Run one training job from parsed command-line arguments.
 
@@ -283,22 +311,37 @@ def run(args: argparse.Namespace) -> None:
 
     print0(dist_ctx, f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
     concept_id2name = schema.channel_id2name()
+    run_dir = Path(args.output_dir) / "model_checkpoints" / cfg.run_name
     if dist_ctx.is_main:
-        # scripts/evaluate.py reads the class and concept layouts next to the checkpoint.
-        run_dir = Path(args.output_dir) / "model_checkpoints" / cfg.run_name
         run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "concept_id2name.json").write_text(
-            json.dumps({str(k): v for k, v in concept_id2name.items()})
-        )
-        (run_dir / "id2label.json").write_text(
-            json.dumps({"0": "ignore", **{str(k): v for k, v in registry.target_id2label.items()}})
-        )
         write_resolved_config(cfg_logger, run_dir)
-        print(f"Wrote class and concept layouts ({len(concept_id2name)} channels) to {run_dir}")
 
     meta_model = build_meta_model(cfg, registry, device)
     if concept_source_mask is not None:
         meta_model.set_concept_source_mask(concept_source_mask.keep)
+
+    sidecar: dict[str, Any] = {}
+    if dist_ctx.is_main:
+        lineage = collect_lineage(
+            resolved_config=to_plain_dict(cfg_logger),
+            seed=seed,
+            data_version=data_version(to_plain_dict(cfg_logger.data), dataset_dict),
+        )
+        sidecar_path = write_sidecar(
+            run_dir,
+            run_name=cfg.run_name,
+            model_class=meta_model.model_name,
+            model_kwargs=meta_model.model_kwargs,
+            encoder_config=_encoder_config(meta_model.model),
+            id2label={0: "ignore", **registry.target_id2label},
+            concept_id2name=concept_id2name,
+            input_size=cfg.model.input_size,
+            mean=IMAGENET_MEAN,
+            std=IMAGENET_STD,
+            lineage=lineage,
+        )
+        sidecar = json.loads(sidecar_path.read_text())
+        print(f"Wrote {sidecar_path} ({len(concept_id2name)} concept channels)")
 
     start_epoch = 0
     init_weights = args.init_weights
@@ -365,10 +408,8 @@ def run(args: argparse.Namespace) -> None:
                 "wandb logging was not started — check WANDB_API_KEY and "
                 "config.logger.enable_wandb (see warnings above)"
             )
-            run_logger.log_dict(
-                {str(k): v for k, v in concept_id2name.items()},
-                "metadata/concept_id2name.json",
-            )
+            run_logger.log_dict(sidecar, "metadata/model.json")
+            run_logger.log_params(_lineage_params(sidecar["lineage"]))
             run_logger.log_params(
                 {
                     "model/encoder_name": cfg.model.encoder_name,
