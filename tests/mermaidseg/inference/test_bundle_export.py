@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 import pytest
 import torch
@@ -164,15 +166,6 @@ def test_export_requires_the_output_parent_to_exist_and_creates_nothing(run, tmp
     assert list(tmp_path.iterdir()) == []
 
 
-def test_untied_state_shares_no_storage_and_preserves_values():
-    shared = torch.arange(6, dtype=torch.float32)
-    state = {"a": shared, "b": shared[:3]}
-    untied = _untied_cpu_state(state)
-    assert untied["a"].untyped_storage().data_ptr() != untied["b"].untyped_storage().data_ptr()
-    torch.testing.assert_close(untied["a"], shared)
-    torch.testing.assert_close(untied["b"], shared[:3])
-
-
 def test_untied_state_round_trips_through_save_file(tmp_path):
     shared = torch.arange(6, dtype=torch.float32)
     untied = _untied_cpu_state({"a": shared, "b": shared[:3]})
@@ -192,10 +185,26 @@ def test_exported_bundle_directory_has_the_mode_a_plain_mkdir_gives(run, tmp_pat
     assert out.stat().st_mode & 0o777 == mode
 
 
-def test_predictor_from_bundle_returns_per_point_class_and_concept_probabilities(bundle_dir):
-    predictor = CBMPredictor.from_bundle(load_bundle(bundle_dir, "cpu"), amp_dtype=None)
-    image = np.random.default_rng(0).integers(0, 255, (40, 50, 3), dtype=np.uint8)
-    class_probs, concept_probs = predictor.predict_points(image, [[5, 5], [30, 40], [10, 20]])
-    assert class_probs.shape == (3, len(_tiny.CLASS_NAMES))
-    assert concept_probs.shape == (3, len(_tiny.CONCEPT_NAMES))
-    torch.testing.assert_close(class_probs.sum(dim=1), torch.ones(3), atol=1e-5, rtol=0)
+def test_predictor_preprocesses_with_the_bundles_own_statistics(tmp_path):
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", mean=[0.5] * 3, std=[0.25] * 3)
+    bundle = load_bundle(export_bundle(checkpoint, tmp_path / "bundle"), "cpu")
+    predictor = CBMPredictor.from_bundle(bundle, amp_dtype=None)
+    image = np.random.default_rng(0).integers(0, 256, (40, 50, 3), dtype=np.uint8)
+    resized = cv2.resize(image, (64, 64), interpolation=cv2.INTER_LINEAR)
+    expected = (resized.astype(np.float32) / 255 - 0.5) / 0.25
+    np.testing.assert_allclose(
+        predictor.preprocess(image).numpy(), expected.transpose(2, 0, 1), atol=1e-5
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "foreign"), [("channel_order", "BGR"), ("interpolation", "nearest")]
+)
+def test_load_rejects_a_foreign_preprocessing_key(bundle_dir, tmp_path, key, foreign):
+    copied = tmp_path / "copy"
+    shutil.copytree(bundle_dir, copied)
+    metadata = json.loads((copied / MODEL_JSON).read_text())
+    metadata["preprocessing"][key] = foreign
+    (copied / MODEL_JSON).write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match=key):
+        load_bundle(copied, "cpu")

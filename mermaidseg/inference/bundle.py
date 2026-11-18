@@ -275,6 +275,12 @@ def _check_metadata(metadata: dict, path: Path) -> None:
     for key, expected in (("schema_version", SCHEMA_VERSION), ("task", TASK)):
         if metadata.get(key) != expected:
             raise ValueError(f"{path}: {key} {metadata.get(key)!r} is not supported ({expected!r})")
+    preprocessing = metadata["preprocessing"]
+    for key, expected in (("channel_order", CHANNEL_ORDER), ("interpolation", INTERPOLATION)):
+        if preprocessing.get(key) != expected:
+            raise ValueError(
+                f"{path}: preprocessing.{key} {preprocessing.get(key)!r} is not supported ({expected!r})"
+            )
 
 
 def _build_encoder(encoder_config: dict) -> PreTrainedModel:
@@ -293,7 +299,8 @@ def load_bundle(path: str | Path, device: torch.device | str) -> ModelBundle:
     The model reads only the taxonomic string keys and the widths of their value lists.
 
     Raises:
-        ValueError: ``schema_version`` or ``task`` is not supported.
+        ValueError: ``schema_version``, ``task``, ``preprocessing.channel_order`` or
+            ``preprocessing.interpolation`` is not supported.
         RuntimeError: The weights do not match the architecture's state dict.
     """
     path = Path(path)

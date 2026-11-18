@@ -6,6 +6,7 @@ The encoder is built from a random ``transformers`` config, so no test reaches t
 from __future__ import annotations
 
 import copy
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +103,12 @@ def resolved_config() -> dict[str, Any]:
 
 
 def write_run(
-    run_dir: Path, *, git_dirty: bool | None = False, config: dict[str, Any] | None = None
+    run_dir: Path,
+    *,
+    git_dirty: bool | None = False,
+    config: dict[str, Any] | None = None,
+    mean: Sequence[float] = IMAGENET_MEAN,
+    std: Sequence[float] = IMAGENET_STD,
 ) -> tuple[Path, torch.nn.Module]:
     """Write ``model.json`` and ``model_step1`` into ``run_dir``; return the checkpoint and model."""
     model = build_trained_model()
@@ -122,8 +128,8 @@ def write_run(
         id2label=id2label(),
         concept_id2name=concept_id2name(),
         input_size=INPUT_SIZE,
-        mean=IMAGENET_MEAN,
-        std=IMAGENET_STD,
+        mean=mean,
+        std=std,
         lineage={
             "git_sha": "abc123",
             "git_dirty": git_dirty,

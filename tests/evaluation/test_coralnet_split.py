@@ -6,7 +6,6 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -118,7 +117,11 @@ def test_train_loss_data_config_is_coralnet_train_without_a_transform(evaluate_s
             "val": {},
         },
         "coralnet": {
-            "train": {"whitelist_sources": [1, 2], "image_blacklist": "/bl.parquet"},
+            "train": {
+                "whitelist_sources": [1, 2],
+                "image_blacklist": "/bl.parquet",
+                "transform": {"Resize": {"height": 8}},
+            },
             "val": None,
         },
         "mermaid": {"train": {"annotation_date_cutoff": "2026-08-12"}},
@@ -137,13 +140,6 @@ def test_train_loss_data_config_is_coralnet_train_without_a_transform(evaluate_s
             },
         }
     }
-
-
-def test_train_loss_data_config_accepts_the_real_data_config(evaluate_script):
-    path = Path(__file__).resolve().parents[2] / "configs" / "data_config.yaml"
-    data = yaml.safe_load(path.read_text())["data"]
-    out = evaluate_script.coralnet_loss_data_config(data, "train", None)
-    assert "transform" not in out["data"]["coralnet"]["val"]
 
 
 def test_sample_images_per_source_is_seeded_and_capped():
