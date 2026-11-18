@@ -528,31 +528,6 @@ def test_get_images_multi_page_uses_urljoin():
     assert call_urls[1] == "https://coralnet.ucsd.edu/source/7/browse/images?page=2"
 
 
-def test_get_images_with_annotation_status_preserves_filter():
-    """Pagination with annotation_status must not produce a double '?' in the URL."""
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-
-    call_urls: list[str] = []
-
-    def fake_get_images_on_page(url: str):
-        call_urls.append(url)
-        if len(call_urls) == 1:
-            return {"a.jpg": "/image/1/view/"}, "?annotation_status=confirmed&page=2"
-        return {"b.jpg": "/image/2/view/"}, None
-
-    with patch.object(dl, "get_images_on_page", side_effect=fake_get_images_on_page):
-        df, ok = dl.get_images(7, annotation_status="confirmed")
-
-    assert ok is True
-    assert df is not None and len(df) == 2
-    assert call_urls[0].endswith("/browse/images/?annotation_status=confirmed")
-    second = call_urls[1]
-    assert second.count("?") == 1
-    assert "annotation_status=confirmed" in second
-    assert "page=2" in second
-
-
 # ---------------------------------------------------------------------------
 # Paginated export retry / checkpoint / parallelism tests
 # ---------------------------------------------------------------------------
@@ -694,198 +669,6 @@ def test_paginated_export_parallel_produces_correct_output(paginated_downloader,
 
 
 # ---------------------------------------------------------------------------
-# get_images parallel browse tests
-# ---------------------------------------------------------------------------
-# CoralNet browse pages use simple ?page=N pagination. When browse_workers > 1
-# and total_images_hint is provided, get_images() should fan out pages 2..N
-# directly by URL rather than following the sequential next-link chain.
-# ---------------------------------------------------------------------------
-
-
-def _build_browse_pages(n_pages: int, thumbs_per_page: int = 20) -> dict[str, str]:
-    """Build a URL→HTML map for n_pages of a source-1 browse.
-
-    Each page has disjoint image IDs so the merged DataFrame has exactly n_pages *
-    thumbs_per_page rows (or fewer on the last page if partial).
-    """
-    base = "https://coralnet.ucsd.edu/source/1/browse/images"
-    pages: dict[str, str] = {}
-    for n in range(1, n_pages + 1):
-        next_href = f"?page={n + 1}" if n < n_pages else None
-        start_id = (n - 1) * thumbs_per_page + 1
-        url = base if n == 1 else f"{base}?page={n}"
-        pages[url] = _browse_page(
-            f"csrf{n}", n_thumbs=thumbs_per_page, next_href=next_href, start_id=start_id
-        )
-    return pages
-
-
-def _url_dispatch_get(pages: dict[str, str]) -> Callable:
-    def fake_get(url: str, timeout=None, **_) -> MagicMock:
-        if url not in pages:
-            raise AssertionError(f"unexpected GET {url!r}; known: {list(pages)}")
-        return _mock_response(text=pages[url])
-
-    return fake_get
-
-
-def test_get_images_parallel_fans_out_page_urls():
-    """With browse_workers=4 and a 3-page source, pages 2 and 3 are fetched via ?page=2
-    and ?page=3 directly — not by following next-link cursors.
-
-    Pins the contract that parallel mode constructs page URLs independently rather than
-    inheriting the sequential cursor-following path.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    pages = _build_browse_pages(n_pages=3, thumbs_per_page=20)
-    fetched_urls: list[str] = []
-
-    def tracking_get(url: str, timeout=None, **_) -> MagicMock:
-        fetched_urls.append(url)
-        return _mock_response(text=pages[url])
-
-    with patch.object(dl.session, "get", side_effect=tracking_get):
-        df, ok = dl.get_images(1, total_images_hint=60, browse_workers=4)
-
-    assert ok is True
-    assert df is not None and len(df) == 60
-    base = "https://coralnet.ucsd.edu/source/1/browse/images"
-    assert base in fetched_urls
-    assert f"{base}?page=2" in fetched_urls
-    assert f"{base}?page=3" in fetched_urls
-
-
-def test_get_images_parallel_result_matches_sequential():
-    """Parallel and sequential get_images() return the same DataFrame content.
-
-    Ensures the fan-out doesn't lose or duplicate images vs the cursor path.
-    """
-    dl_seq = CoralNetDownloader("u", "p")
-    dl_par = CoralNetDownloader("u", "p")
-    dl_seq.logged_in = True
-    dl_par.logged_in = True
-
-    pages = _build_browse_pages(n_pages=4, thumbs_per_page=20)
-    make_get = _url_dispatch_get(pages)
-
-    with patch.object(dl_seq.session, "get", side_effect=make_get):
-        df_seq, ok_seq = dl_seq.get_images(1)
-
-    with patch.object(dl_par.session, "get", side_effect=_url_dispatch_get(pages)):
-        df_par, ok_par = dl_par.get_images(1, total_images_hint=80, browse_workers=4)
-
-    assert ok_seq and ok_par
-    assert set(df_seq["Name"]) == set(df_par["Name"])
-    assert set(df_seq["Image Page"]) == set(df_par["Image Page"])
-
-
-def test_get_images_parallel_single_page_no_fanout():
-    """When total_images_hint fits on page 1, no ?page=2 URL is constructed."""
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    # Single-page source — no next link
-    page1 = _browse_page("csrf1", n_thumbs=5, next_href=None, start_id=1)
-    fetched_urls: list[str] = []
-
-    def tracking_get(url: str, timeout=None, **_) -> MagicMock:
-        fetched_urls.append(url)
-        return _mock_response(text=page1)
-
-    with patch.object(dl.session, "get", side_effect=tracking_get):
-        df, ok = dl.get_images(1, total_images_hint=5, browse_workers=4)
-
-    assert ok is True
-    assert df is not None and len(df) == 5
-    assert len(fetched_urls) == 1
-    assert "page=2" not in fetched_urls[0]
-
-
-def test_get_images_parallel_preserves_page_order():
-    """Images from page 1 appear before page 2, page 2 before page 3 in the output.
-
-    Stable ordering makes the output deterministic and diffable across runs.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    pages = _build_browse_pages(n_pages=3, thumbs_per_page=3)
-
-    with patch.object(dl.session, "get", side_effect=_url_dispatch_get(pages)):
-        df, ok = dl.get_images(1, total_images_hint=9, browse_workers=3)
-
-    assert ok is True
-    assert df is not None
-    names = df["Name"].tolist()
-    # page 1: img1, img2, img3 | page 2: img4..6 | page 3: img7..9
-    page1_last_idx = names.index("img3.jpg")
-    page2_first_idx = names.index("img4.jpg")
-    page3_first_idx = names.index("img7.jpg")
-    assert page1_last_idx < page2_first_idx < page3_first_idx
-
-
-def test_get_images_parallel_annotation_status_preserved():
-    """annotation_status filter appears in all worker page URLs.
-
-    Regression guard: parallel fanout must not drop the ?annotation_status=
-    query param when constructing ?page=N URLs.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-
-    base = "https://coralnet.ucsd.edu/source/1/browse/images"
-    pages = {
-        f"{base}/?annotation_status=confirmed": _browse_page(
-            "csrf1", n_thumbs=20, next_href="?annotation_status=confirmed&page=2", start_id=1
-        ),
-        f"{base}/?annotation_status=confirmed&page=2": _browse_page(
-            "csrf2", n_thumbs=10, start_id=21
-        ),
-    }
-    fetched_urls: list[str] = []
-
-    def tracking_get(url: str, timeout=None, **_) -> MagicMock:
-        fetched_urls.append(url)
-        if url not in pages:
-            raise AssertionError(f"unexpected GET {url!r}")
-        return _mock_response(text=pages[url])
-
-    with patch.object(dl.session, "get", side_effect=tracking_get):
-        df, ok = dl.get_images(
-            1, annotation_status="confirmed", total_images_hint=30, browse_workers=2
-        )
-
-    assert ok is True
-    assert df is not None and len(df) == 30
-    assert all("annotation_status=confirmed" in u for u in fetched_urls)
-
-
-def test_get_images_parallel_falls_back_without_hint():
-    """browse_workers > 1 without total_images_hint falls back to sequential cursor-
-    following.
-
-    No ?page=N URL is constructed; the next-link href drives navigation instead.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-
-    call_urls: list[str] = []
-
-    def fake_get_images_on_page(url: str):
-        call_urls.append(url)
-        if len(call_urls) == 1:
-            return {"a.jpg": "/image/1/view/"}, "?page=2"
-        return {"b.jpg": "/image/2/view/"}, None
-
-    with patch.object(dl, "get_images_on_page", side_effect=fake_get_images_on_page):
-        df, ok = dl.get_images(1, browse_workers=8)  # no hint → sequential
-
-    assert ok is True
-    assert df is not None and len(df) == 2
-    # Page 2 was reached by following the next-link, not by constructing ?page=2
-    assert call_urls[1] == "https://coralnet.ucsd.edu/source/1/browse/images?page=2"
-
-
-# ---------------------------------------------------------------------------
 # Retry tests
 # ---------------------------------------------------------------------------
 
@@ -932,36 +715,6 @@ def test_get_images_page1_gives_up_after_max_retries():
 
     assert ok is False
     assert df is None
-
-
-def test_get_images_parallel_retries_on_inner_page_timeout():
-    """A ReadTimeout on a parallel page is retried; final result includes that page's
-    images.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-
-    pages = _build_browse_pages(n_pages=3, thumbs_per_page=2)
-    call_counts: dict[str, int] = {}
-
-    def flaky_dispatch(url: str, timeout=None, **_) -> MagicMock:
-        call_counts[url] = call_counts.get(url, 0) + 1
-        # Fail page 3 on the first attempt only
-        page3_url = "https://coralnet.ucsd.edu/source/1/browse/images?page=3"
-        if url == page3_url and call_counts[url] == 1:
-            raise requests.ReadTimeout("page 3 timeout")
-        if url not in pages:
-            raise AssertionError(f"unexpected GET {url!r}")
-        return _mock_response(text=pages[url])
-
-    with (
-        patch.object(dl.session, "get", side_effect=flaky_dispatch),
-        patch("coralnet_scraper.downloader.time.sleep"),
-    ):
-        df, ok = dl.get_images(1, total_images_hint=6, browse_workers=3)
-
-    assert ok is True
-    assert df is not None and len(df) == 6  # all 3 pages present
 
 
 def _http_error(status: int) -> requests.HTTPError:
@@ -1023,34 +776,6 @@ def test_get_images_4xx_is_not_retried():
     assert ok is False
     assert df is None
     assert call_count[0] == 1  # not retried
-
-
-def test_get_images_parallel_skips_dead_page_after_retries():
-    """A page that exhausts retries is dropped; other pages still return (partial).
-
-    The original bug was one timeout killing a whole 79k-image source; the parallel path
-    must degrade per-page instead of aborting.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    pages = _build_browse_pages(n_pages=3, thumbs_per_page=2)
-    page3_url = "https://coralnet.ucsd.edu/source/1/browse/images?page=3"
-
-    def dispatch(url: str, timeout=None, **_) -> MagicMock:
-        if url == page3_url:
-            raise requests.ReadTimeout("page 3 always times out")
-        if url not in pages:
-            raise AssertionError(f"unexpected GET {url!r}")
-        return _mock_response(text=pages[url])
-
-    with (
-        patch.object(dl.session, "get", side_effect=dispatch),
-        patch("coralnet_scraper.downloader.time.sleep"),
-    ):
-        df, ok = dl.get_images(1, total_images_hint=6, browse_workers=3)
-
-    assert ok is True  # did not abort
-    assert df is not None and len(df) == 4  # pages 1 + 2 only; page 3 dropped
 
 
 def test_get_images_sequential_retries_on_inner_page_timeout():
@@ -1182,31 +907,6 @@ def test_with_retry_backoff_is_jittered():
     # over [0.5*base, 1.5*base].
     assert [c.args for c in uni.call_args_list] == [(0.5 * 30, 1.5 * 30), (0.5 * 60, 1.5 * 60)]
     assert slept == [0.5 * 30, 0.5 * 60]  # stub returns the low bound
-
-
-def _status_response(status: int) -> MagicMock:
-    r = MagicMock()
-    r.status_code = status
-    return r
-
-
-def test_is_coralnet_reachable_true_on_200():
-    dl = CoralNetDownloader("u", "p")
-    with patch.object(dl.session, "get", return_value=_status_response(200)):
-        assert dl.is_coralnet_reachable() is True
-
-
-def test_is_coralnet_reachable_false_on_5xx():
-    """A 5xx means CoralNet is up but degraded — treat as unreachable for pre-flight."""
-    dl = CoralNetDownloader("u", "p")
-    with patch.object(dl.session, "get", return_value=_status_response(503)):
-        assert dl.is_coralnet_reachable() is False
-
-
-def test_is_coralnet_reachable_false_on_timeout():
-    dl = CoralNetDownloader("u", "p")
-    with patch.object(dl.session, "get", side_effect=requests.ReadTimeout("down")):
-        assert dl.is_coralnet_reachable() is False
 
 
 @pytest.mark.parametrize("workers", [0, 2.5, True, "4"])

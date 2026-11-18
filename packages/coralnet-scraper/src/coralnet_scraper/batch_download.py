@@ -19,30 +19,25 @@ from coralnet_scraper.s3_io import annotations_csv_exists
 
 logger = logging.getLogger(__name__)
 
+_SOURCE_LISTING_URL = "https://coralnet.ucsd.edu/source/about/"  # links every public source
+_LISTING_TIMEOUT_S = 50.0
 
-def discover_public_source_ids(
-    *,
-    listing_url: str = "https://coralnet.ucsd.edu/source/about/",
-    timeout: float = 50.0,
-) -> list[int]:
+
+def discover_public_source_ids() -> list[int]:
     """Return the sorted ids of the public CoralNet sources linked from the listing page.
-
-    Args:
-        listing_url: Page that links to every public source.
-        timeout: Request timeout in seconds.
 
     Raises:
         requests.HTTPError: If the listing page returns an error status.
     """
-    resp = requests.get(listing_url, timeout=timeout)
+    resp = requests.get(_SOURCE_LISTING_URL, timeout=_LISTING_TIMEOUT_S)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     hrefs = [cast(str, a["href"]) for a in soup.find_all("a", href=True)]
     links = sorted(
         {
-            urljoin(listing_url, href)
+            urljoin(_SOURCE_LISTING_URL, href)
             for href in hrefs
-            if urlparse(urljoin(listing_url, href)).scheme in ("http", "https")
+            if urlparse(urljoin(_SOURCE_LISTING_URL, href)).scheme in ("http", "https")
         }
     )
     source_links = [lk for lk in links if "/source/" in lk]
