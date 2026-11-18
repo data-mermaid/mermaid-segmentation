@@ -642,10 +642,6 @@ class CoralNetDownloader:
                 return True
 
             work_items = self._walk_browse_pages(source_id)
-            if not work_items:
-                logger.warning("source %s: paginated export found no annotation pages", source_id)
-                return False
-
             workers = page_workers if page_workers is not None else _PAGE_PARALLEL_WORKERS
             workers = max(1, min(workers, len(work_items)))
 

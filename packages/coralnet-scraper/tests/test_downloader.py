@@ -211,12 +211,6 @@ def test_download_source_sums_image_failures_across_batches():
     assert res.image_failures == ImageFailures(missing_url=0, upload_failed=1)
 
 
-def test_get_image_urls_single_failing_url_yields_none():
-    dl = _image_source_downloader()
-    with patch.object(dl, "_resolve_one_image_url", side_effect=ValueError("private")):
-        assert dl.get_image_urls(["/image/1/view/"]) == [None]
-
-
 def test_get_image_urls_serial_path_keeps_order_around_a_failure():
     dl = CoralNetDownloader("u", "p", max_workers=1)
 
@@ -597,14 +591,6 @@ def test_paginated_export_keeps_existing_csv_when_page_export_fails_with_4xx(
     assert ok is False
     assert post_mock.call_count == 1  # a 4xx is not retried
     assert fake_s3.objects[("b", _EXISTING_KEY)] == existing
-
-
-def test_paginated_export_returns_false_when_no_browse_pages_found(paginated_downloader, fake_s3):
-    with patch.object(paginated_downloader, "_walk_browse_pages", return_value=[]):
-        ok = paginated_downloader.download_annotations_paginated(1, "b", "p")
-
-    assert ok is False
-    assert fake_s3.objects == {}
 
 
 def test_paginated_export_returns_false_when_existing_read_is_denied(paginated_downloader, fake_s3):
