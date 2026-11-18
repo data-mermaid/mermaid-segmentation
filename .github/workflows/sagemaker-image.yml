@@ -1,0 +1,73 @@
+name: sagemaker-image
+
+# Builds and pushes the SageMaker training image to ECR from the committed tree of main, so
+# lineage records git_dirty=False. Each run pushes training-<sha> and moves training-latest.
+# The job runs in the sagemaker-image environment, whose deployment-branch policy (set in repo
+# settings) allows only main. The push role in AWS_ECR_PUSH_ROLE_ARN (repo variable; OIDC role
+# defined in the mermaid-api IaC) should trust only that environment, so its sub claim must be
+# repo:data-mermaid/mermaid-segmentation:environment:sagemaker-image. The ref check in the tags
+# step is a second guard: a non-main ref never moves training-latest.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    name: Build and push image
+    environment: sagemaker-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_PUSH_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@7290e214a610b32bc0eef81748948b6d466a8783 # v2.2.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - id: tags
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+        run: |
+          repo="${REGISTRY}/mermaid-segmentation-jobs"
+          {
+            echo "tags<<EOF"
+            echo "${repo}:training-${SHA}"
+            if [ "${REF}" = "refs/heads/main" ]; then
+              echo "${repo}:training-latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/jobs/Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          tags: ${{ steps.tags.outputs.tags }}

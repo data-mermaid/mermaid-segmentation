@@ -21,6 +21,9 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 - `scripts/`: entrypoints for training (`scripts/train.py`), bundle export, evaluation, cache prefetch and the
   data-config, concept-removal and concept-source-mask builders.
 - `slurm/`: Slurm launchers and `train.sbatch`.
+- `scripts/sagemaker/`: the SageMaker launcher (`python -m scripts.sagemaker.launch`) and the in-container entrypoint.
+- `sagemaker/runs/`: SageMaker run YAMLs.
+- `docker/`: the SageMaker job image; deployable images are built only by the CI workflow.
 - `tests/`: the pytest suite, laid out as 7.4 sets.
 - `pyproject.toml`: dependencies, extras, ruff and pytest settings.
 

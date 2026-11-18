@@ -1,0 +1,16 @@
+# cbm_final on SageMaker; mirrors the cbm_final run of slurm/launch_final.sh.
+job:
+  name_prefix: mermaidseg-cbm-final
+  image: mermaid-segmentation-jobs:training-latest
+  instance_type: ml.g6e.8xlarge
+  volume_gb: 500
+  max_runtime_hours: 480
+train:
+  run_name: cbm_final
+  group: cbm_final
+  init_weights: null
+  args:
+    - --training-config
+    - configs/training_config_cbm_final.yaml
+    - --data-config
+    - configs/data_config_trainval.yaml
