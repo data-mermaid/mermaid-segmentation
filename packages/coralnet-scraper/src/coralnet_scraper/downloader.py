@@ -13,7 +13,6 @@ import urllib.parse
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
 from queue import Queue
 from typing import Any, TypeVar
 
@@ -24,11 +23,10 @@ from botocore.config import Config as BotoConfig
 from bs4 import BeautifulSoup
 from tqdm.auto import tqdm
 
-from mermaidseg.datasets.coralnet.etl.config import get_scraper_workers
-from mermaidseg.datasets.coralnet.etl.io import read_csv_s3
-from mermaidseg.datasets.coralnet.scraper import s3_io
-from mermaidseg.datasets.coralnet.scraper.models import DownloadResult, SourceProbe
-from mermaidseg.datasets.coralnet.scraper.parsers import (
+from coralnet_scraper import s3_io
+from coralnet_scraper.config import get_scraper_workers, validate_workers
+from coralnet_scraper.models import DownloadResult
+from coralnet_scraper.parsers import (
     classifier_plot_data_from_source_html,
     extract_csrf_token,
     parse_export_annotations_prep_form,
@@ -99,7 +97,8 @@ class _PageWorkItem:
 
 def _merge_with_existing(new_df: pd.DataFrame, existing_df: pd.DataFrame | None) -> pd.DataFrame:
     """Concat ``existing_df`` (if any) with ``new_df`` and dedup on (Name, Row,
-    Column)."""
+    Column).
+    """
     if existing_df is None:
         return new_df
     combined = pd.concat([existing_df, new_df], ignore_index=True)
@@ -209,7 +208,9 @@ class CoralNetDownloader:
     def __init__(self, username: str, password: str, *, max_workers: int | None = None):
         self.username = username
         self.password = password
-        self.max_workers = max_workers if max_workers is not None else get_scraper_workers()
+        self.max_workers = (
+            validate_workers(max_workers) if max_workers is not None else get_scraper_workers()
+        )
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -235,42 +236,6 @@ class CoralNetDownloader:
         response = self.session.get(url, timeout=_PAGE_GET_TIMEOUT)
         response.raise_for_status()
         return response.text
-
-    def probe_source(self, source_id: int) -> SourceProbe:
-        """HTTP GET overview page; extract accessibility + total images (no S3
-        writes)."""
-        url = self._source_main_url(source_id)
-        try:
-            html = self._get_source_overview_html(source_id)
-        except Exception as e:  # noqa: BLE001
-            return SourceProbe(
-                source_id=source_id,
-                source_url=url,
-                accessible=False,
-                error=f"{type(e).__name__}: {e}",
-                total_images_website=0,
-            )
-        accessible, err = parse_source_access(html)
-        if not accessible:
-            return SourceProbe(
-                source_id=source_id,
-                source_url=url,
-                accessible=False,
-                error=err,
-                total_images_website=0,
-            )
-        counts = parse_image_status_counts(html)
-        tw = counts.total_images if counts.total_images is not None else 0
-        return SourceProbe(
-            source_id=source_id,
-            source_url=url,
-            accessible=True,
-            error=None,
-            total_images_website=tw,
-            n_confirmed_website=counts.confirmed,
-            n_unconfirmed_website=counts.unconfirmed,
-            n_unclassified_website=counts.unclassified,
-        )
 
     def _perform_login(self, session: requests.Session) -> bool:
         """Execute the CoralNet login flow on ``session`` (independent cookie jar).
@@ -675,7 +640,7 @@ class CoralNetDownloader:
         count already meets ``total_images_website``, signalling the caller can skip re-
         export. Non-404 ``ClientError``s propagate.
         """
-        existing_df = read_csv_s3(self.s3, bucket_name, annotations_key)
+        existing_df = s3_io.read_csv_s3(self.s3, bucket_name, annotations_key)
         if existing_df is None:
             return None, False
         n_existing_images = existing_df["Name"].nunique()
@@ -1101,26 +1066,6 @@ class CoralNetDownloader:
             logger.warning("Image URL resolution: %d/%d failed", errors, n)
         return results
 
-    @staticmethod
-    def download_image(url: str, path: str, timeout: int = 30) -> tuple[str, bool]:
-        dest = Path(path)
-        if dest.exists():
-            return path, True
-        try:
-            response = requests.get(url, timeout=timeout, stream=True)
-            response.raise_for_status()
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with dest.open("wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            if dest.exists() and dest.stat().st_size > 0:
-                return path, True
-            return path, False
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to download local file %s: %s", url, e)
-            return path, False
-
     def download_image_to_s3(
         self, url: str, bucket_name: str, s3_key: str, timeout: int = 30
     ) -> tuple[str, bool]:
@@ -1186,75 +1131,6 @@ class CoralNetDownloader:
             source_id,
         )
 
-    @staticmethod
-    def _local_image_path(dest_dir: Path, image_page: str) -> Path:
-        name = image_page.replace("/image/", "").replace("/view/", "")
-        return dest_dir / f"{name}.jpg"
-
-    def download_images_local(
-        self,
-        images_df: pd.DataFrame,
-        dest_dir: str | Path,
-    ) -> tuple[int, int]:
-        """Write JPEGs under ``dest_dir``; returns ``(successful, total)``."""
-        out = Path(dest_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        chunk = images_df[images_df["Image URL"].notna()]
-        if chunk.empty:
-            logger.warning("No valid Image URL rows for local download")
-            return 0, 0
-        successful = 0
-        futures: list[Any] = []
-        workers = self.max_workers
-        logger.info("Local image download: %d URLs, %d workers", len(chunk), workers)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            for _, row in chunk.iterrows():
-                url = row["Image URL"]
-                path = self._local_image_path(out, row["Image Page"])
-                futures.append(executor.submit(self.download_image, url, str(path)))
-            total = len(futures)
-            for i, fu in enumerate(concurrent.futures.as_completed(futures), 1):
-                try:
-                    _path, ok = fu.result()
-                    if ok:
-                        successful += 1
-                except Exception as e:  # noqa: BLE001
-                    logger.error("local image worker error: %s", e)
-                if i % 50 == 0 or i == total:
-                    logger.info("Local image download progress: %s/%s", i, total)
-        logger.info("Downloaded %s/%s images to %s", successful, total, out)
-        return successful, total
-
-    def download_source_images_local(
-        self,
-        source_id: int,
-        dest_dir: str | Path,
-        *,
-        confirmed_only: bool = True,
-        save_image_list_csv: bool = True,
-    ) -> tuple[int, int, Path]:
-        """Browse CoralNet, resolve original JPEG URLs, and save under ``dest_dir``."""
-        if not self.logged_in and not self.check_permissions(source_id):  # noqa: SIM102
-            if not self.login() or not self.check_permissions(source_id):
-                raise RuntimeError(f"cannot access CoralNet source {source_id}")
-        dest = Path(dest_dir)
-        images_dir = dest / "images"
-        status = "confirmed" if confirmed_only else None
-        images_df, ok = self.get_images(source_id, annotation_status=status)
-        if not ok or images_df is None or images_df.empty:
-            raise RuntimeError(f"no browse images for source {source_id}")
-
-        images_df = images_df.reset_index(drop=True).copy()
-        images_df["Image URL"] = self.get_image_urls(images_df["Image Page"].tolist())
-        if save_image_list_csv:
-            list_path = dest / "image_list.csv"
-            list_path.parent.mkdir(parents=True, exist_ok=True)
-            images_df.to_csv(list_path, index=False)
-            logger.info("Wrote %s", list_path)
-
-        n_ok, n_total = self.download_images_local(images_df, images_dir)
-        return n_ok, n_total, images_dir
-
     def download_source(
         self,
         source_id: int,
@@ -1265,16 +1141,12 @@ class CoralNetDownloader:
         download_labelset: bool = True,
         download_annotations: bool = True,
         download_images: bool = True,
-        clean_prefix_before: bool = False,
     ) -> DownloadResult:
         errs: list[str] = []
         sid = source_id
         logger.info("Downloading CoralNet source %s", sid)
         if not self.logged_in and not self.login():
             return DownloadResult(False, skipped_empty=False, errors=["login failed"])
-        if clean_prefix_before:
-            n_del = s3_io.delete_source_prefix(self.s3, bucket_name, s3_prefix, sid)
-            logger.info("Removed %s S3 keys under s%s/", n_del, sid)
         if not self.check_permissions(sid):
             return DownloadResult(
                 False, skipped_empty=False, errors=[f"cannot access source {sid}"]

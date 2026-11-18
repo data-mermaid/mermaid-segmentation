@@ -35,6 +35,9 @@ ENV UV_PYTHON=3.12 \
 
 # Dependencies first (cached until the lock changes). `--locked` fails if uv.lock is stale.
 COPY pyproject.toml uv.lock .python-version ./
+# The lock lists the coralnet-scraper workspace member; uv reads its pyproject to validate the
+# lock. The member itself is not installed.
+COPY packages/coralnet-scraper/pyproject.toml ./packages/coralnet-scraper/pyproject.toml
 RUN uv sync --locked --no-dev --extra sagemaker --no-install-project
 
 # Project itself (editable so scripts/ stays importable).

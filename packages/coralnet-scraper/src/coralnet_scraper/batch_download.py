@@ -10,13 +10,12 @@ from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from tqdm.auto import tqdm
 
-from mermaidseg.datasets.coralnet.scraper.models import DownloadResult
-from mermaidseg.datasets.coralnet.scraper.s3_io import annotations_csv_exists
+from coralnet_scraper.models import DownloadResult
+from coralnet_scraper.s3_io import annotations_csv_exists
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +58,12 @@ def should_skip_download(
     s3_prefix: str,
     s3_client: Any,
     force: bool,
-    legacy_skip_annotations: bool,
-    complete_source_ids: set[int] | None,
 ) -> bool:
     """Return True when the batch loop should not call download for this source."""
     if force:
         return False
-    if complete_source_ids is not None and int(source_id) in complete_source_ids:
-        return True
-    if legacy_skip_annotations and annotations_csv_exists(s3_client, bucket, s3_prefix, source_id):
-        logger.info("Skip source %s: annotations.csv already on S3 (legacy skip)", source_id)
+    if annotations_csv_exists(s3_client, bucket, s3_prefix, source_id):
+        logger.info("Skip source %s: annotations.csv already on S3", source_id)
         return True
     return False
 
@@ -81,8 +76,6 @@ def run_batch_download(
     s3_prefix: str,
     s3_client: Any,
     force: bool = False,
-    legacy_skip_annotations: bool = True,
-    complete_source_ids: set[int] | None = None,
     delay_seconds: float = 0.0,
 ) -> dict[int, DownloadResult]:
     """Download each source when not skipped; returns per-source results."""
@@ -94,23 +87,12 @@ def run_batch_download(
             s3_prefix=s3_prefix,
             s3_client=s3_client,
             force=force,
-            legacy_skip_annotations=legacy_skip_annotations,
-            complete_source_ids=complete_source_ids,
         ):
             continue
-        res = downloader.download_source(
-            sid, bucket_name=bucket, s3_prefix=s3_prefix, clean_prefix_before=False
-        )
+        res = downloader.download_source(sid, bucket_name=bucket, s3_prefix=s3_prefix)
         if res.skipped_no_confirmed:
             logger.info("Skip source %s: zero confirmed images on website", sid)
         results[sid] = res
         if delay_seconds > 0:
             time.sleep(delay_seconds)
     return results
-
-
-def complete_source_ids_from_audit_parquet(path: os.PathLike[str] | str) -> set[int]:
-    """Load ``source_id`` values that are marked complete in an audit parquet."""
-    df = pd.read_parquet(path)
-    mask = df["is_complete"].astype(bool)
-    return {int(x) for x in df.loc[mask, "source_id"].tolist()}

@@ -1,8 +1,14 @@
-"""Thin S3 helpers for CoralNet scraper (bucketing conventions match ETL)."""
+"""Thin S3 helpers for the CoralNet scraper."""
 
 from __future__ import annotations
 
+import io
 from typing import Any
+
+import pandas as pd
+from botocore.exceptions import ClientError
+
+_MISSING_KEY_CODES = ("404", "NoSuchKey")
 
 
 def source_prefix(base_prefix: str, source_id: int) -> str:
@@ -30,13 +36,15 @@ def upload_csv_body(
     client.put_object(Bucket=bucket, Key=key, Body=csv_text, ContentType="text/csv")
 
 
-def delete_source_prefix(client: Any, bucket: str, base_prefix: str, source_id: int) -> int:
-    """Delete all keys under ``s<source_id>/``; returns approximate object count."""
-    prefix = source_prefix(base_prefix, source_id)
-    deleted = 0
-    paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            client.delete_object(Bucket=bucket, Key=obj["Key"])
-            deleted += 1
-    return deleted
+def read_csv_s3(client: Any, bucket: str, key: str, **read_csv_kwargs: Any) -> pd.DataFrame | None:
+    """Read a CSV from S3 into a DataFrame, or return None when the key is missing.
+
+    Other ClientErrors propagate.
+    """
+    try:
+        response = client.get_object(Bucket=bucket, Key=key)
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _MISSING_KEY_CODES:
+            return None
+        raise
+    return pd.read_csv(io.BytesIO(response["Body"].read()), **read_csv_kwargs)

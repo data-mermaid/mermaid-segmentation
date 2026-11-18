@@ -1,4 +1,4 @@
-"""Offline tests for CoralNet scraper parsers, classification, and batch slicing."""
+"""Offline tests for CoralNetDownloader."""
 
 from __future__ import annotations
 
@@ -13,12 +13,9 @@ import pandas as pd
 import pytest
 import requests
 from bs4 import BeautifulSoup
-
-from mermaidseg.datasets.coralnet.scraper import batch_download as bd
-from mermaidseg.datasets.coralnet.scraper import downloader as downloader_mod
-from mermaidseg.datasets.coralnet.scraper import s3_io
-from mermaidseg.datasets.coralnet.scraper.classify import classify_remediation_action
-from mermaidseg.datasets.coralnet.scraper.downloader import (
+from coralnet_scraper import downloader as downloader_mod
+from coralnet_scraper import s3_io
+from coralnet_scraper.downloader import (
     _PAGINATED_EXPORT_THRESHOLD,
     CoralNetDownloader,
     _extract_page_image_ids,
@@ -26,13 +23,6 @@ from mermaidseg.datasets.coralnet.scraper.downloader import (
     export_prep_timeout_seconds,
     export_serve_timeout_seconds,
     half_open_batches,
-)
-from mermaidseg.datasets.coralnet.scraper.models import RemediationAction, SourceProbe
-from mermaidseg.datasets.coralnet.scraper.parsers import (
-    parse_export_annotations_prep_form,
-    parse_image_status_counts,
-    parse_source_access,
-    parse_total_images_from_source_html,
 )
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "coralnet_html"
@@ -83,210 +73,12 @@ def test_download_annotations_retries_export_prep_on_timeout():
     with (
         patch.object(dl.session, "get", side_effect=[browse_resp, get_serve]),
         patch.object(dl.session, "post", mock_post),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         ok = dl.download_annotations(1, "b", "p", total_images_hint=500)
 
     assert ok is True
     assert mock_post.call_count == 2
-
-
-def test_parse_total_images_from_fixture():
-    html = _fixture("source_ok.html")
-    assert parse_total_images_from_source_html(html) == 1234
-
-
-def test_parse_image_status_fixture_only_total_missing_confirmed():
-    html = _fixture("source_ok.html")
-    c = parse_image_status_counts(html)
-    assert c.table_found is True
-    assert c.total_images == 1234
-    assert c.confirmed is None
-    assert c.unclassified is None
-
-
-def test_parse_image_status_zero_confirmed_like_public_source():
-    html = _fixture("source_zero_confirmed.html")
-    c = parse_image_status_counts(html)
-    assert c.table_found is True
-    assert c.unclassified == 40
-    assert c.unconfirmed == 0
-    assert c.confirmed == 0
-    assert c.total_images == 40
-
-
-def test_classify_skip_no_confirmed_when_site_reports_zero_confirmed():
-    probe = SourceProbe(
-        5961,
-        "url",
-        True,
-        None,
-        total_images_website=40,
-        n_confirmed_website=0,
-        n_unconfirmed_website=0,
-        n_unclassified_website=40,
-    )
-    act = classify_remediation_action(
-        probe=probe,
-        has_images_folder=False,
-        has_annotations_csv=False,
-        has_image_list_csv=False,
-        n_images_s3=0,
-        n_images_csv=0,
-        n_annotations=0,
-        annotations_csv_read_failed=False,
-        annotations_empty=True,
-        image_count_match=False,
-    )
-    assert act == RemediationAction.SKIP_NO_CONFIRMED_ANNOTATIONS
-
-
-@pytest.mark.parametrize(
-    ("fixture", "exp_ok"),
-    [
-        ("source_ok.html", True),
-        ("source_not_found.html", False),
-        ("source_denied.html", False),
-    ],
-)
-def test_parse_source_access_fixtures(fixture, exp_ok):
-    html = _fixture(fixture)
-    ok, err = parse_source_access(html)
-    assert ok is exp_ok
-    if exp_ok:
-        assert err is None
-    else:
-        assert err is not None
-
-
-def test_parse_export_annotations_prep_form():
-    html = (
-        '<form id="export-annotations-prep-form">'
-        '<input type="hidden" name="csrfmiddlewaretoken" value="tok123"/></form>'
-    )
-    assert parse_export_annotations_prep_form(html) == "tok123"
-
-
-def test_classify_manual_when_website_fewer_than_s3_images():
-    probe = SourceProbe(1, "https://example/s1/", True, None, total_images_website=5)
-    act = classify_remediation_action(
-        probe=probe,
-        has_images_folder=True,
-        has_annotations_csv=True,
-        has_image_list_csv=True,
-        n_images_s3=50,
-        n_images_csv=50,
-        n_annotations=100,
-        annotations_csv_read_failed=False,
-        annotations_empty=False,
-        image_count_match=False,
-    )
-    assert act == RemediationAction.MANUAL_REVIEW
-
-
-def test_classify_redownload_csv_when_annotation_read_failed_and_site_has_images():
-    probe = SourceProbe(1, "url", True, None, total_images_website=10)
-    act = classify_remediation_action(
-        probe=probe,
-        has_images_folder=True,
-        has_annotations_csv=True,
-        has_image_list_csv=True,
-        n_images_s3=5,
-        n_images_csv=5,
-        n_annotations=0,
-        annotations_csv_read_failed=True,
-        annotations_empty=False,
-        image_count_match=False,
-    )
-    assert act == RemediationAction.REDOWNLOAD_CSV
-
-
-def test_classify_skip_not_accessible():
-    probe = SourceProbe(1, "url", False, "Permission denied", total_images_website=0)
-    act = classify_remediation_action(
-        probe=probe,
-        has_images_folder=True,
-        has_annotations_csv=True,
-        has_image_list_csv=True,
-        n_images_s3=10,
-        n_images_csv=10,
-        n_annotations=50,
-        annotations_csv_read_failed=False,
-        annotations_empty=False,
-        image_count_match=True,
-    )
-    assert act == RemediationAction.SKIP_NOT_ACCESSIBLE
-
-
-def test_classify_skip_empty_website():
-    probe = SourceProbe(2, "url", True, None, total_images_website=0)
-    act = classify_remediation_action(
-        probe=probe,
-        has_images_folder=True,
-        has_annotations_csv=True,
-        has_image_list_csv=True,
-        n_images_s3=0,
-        n_images_csv=0,
-        n_annotations=0,
-        annotations_csv_read_failed=False,
-        annotations_empty=True,
-        image_count_match=True,
-    )
-    assert act == RemediationAction.SKIP_EMPTY_WEBSITE
-
-
-def test_classify_full_redownload_when_missing_structure():
-    probe = SourceProbe(3, "url", True, None, total_images_website=20)
-    act = classify_remediation_action(
-        probe=probe,
-        has_images_folder=False,
-        has_annotations_csv=False,
-        has_image_list_csv=False,
-        n_images_s3=0,
-        n_images_csv=0,
-        n_annotations=0,
-        annotations_csv_read_failed=False,
-        annotations_empty=True,
-        image_count_match=False,
-    )
-    assert act == RemediationAction.FULL_REDOWNLOAD
-
-
-def test_classify_redownload_images_when_csvs_ok_but_gap():
-    probe = SourceProbe(4, "url", True, None, total_images_website=100)
-    act = classify_remediation_action(
-        probe=probe,
-        has_images_folder=True,
-        has_annotations_csv=True,
-        has_image_list_csv=True,
-        n_images_s3=80,
-        n_images_csv=80,
-        n_annotations=200,
-        annotations_csv_read_failed=False,
-        annotations_empty=False,
-        image_count_match=False,
-    )
-    assert act == RemediationAction.REDOWNLOAD_IMAGES
-
-
-def test_classify_redownload_csv_when_image_list_truncated():
-    # Regression: sources where image_list.csv is shorter than annotated images were
-    # previously falling through to MANUAL_REVIEW (issue #130).
-    probe = SourceProbe(295, "url", True, None, total_images_website=79_064)
-    act = classify_remediation_action(
-        probe=probe,
-        has_images_folder=True,
-        has_annotations_csv=True,
-        has_image_list_csv=True,
-        n_images_s3=79_062,
-        n_images_csv=1_064,
-        n_annotations=79_064,
-        annotations_csv_read_failed=False,
-        annotations_empty=False,
-        image_count_match=False,
-        image_list_covers_annotations=False,
-    )
-    assert act == RemediationAction.REDOWNLOAD_CSV
 
 
 def test_download_source_skips_zero_confirmed_on_website():
@@ -308,54 +100,6 @@ def test_download_source_skips_zero_confirmed_on_website():
     mock_label.assert_not_called()
     mock_ann.assert_not_called()
 
-
-def test_should_skip_force_never_when_enabled(fake_s3):
-    assert (
-        bd.should_skip_download(
-            source_id=1,
-            bucket="b",
-            s3_prefix="p",
-            s3_client=fake_s3,
-            force=True,
-            legacy_skip_annotations=True,
-            complete_source_ids=None,
-        )
-        is False
-    )
-
-
-def test_should_skip_when_complete_set_contains_id(fake_s3):
-    fake_s3.put_object(Bucket="b", Key=s3_io.object_key_annotation_csv("p", 1), Body=b"a,b\n")
-    assert (
-        bd.should_skip_download(
-            source_id=1,
-            bucket="b",
-            s3_prefix="p",
-            s3_client=fake_s3,
-            force=False,
-            legacy_skip_annotations=False,
-            complete_source_ids={1},
-        )
-        is True
-    )
-
-
-def test_should_legacy_skip_when_annotations_exist(fake_s3):
-    fake_s3.put_object(Bucket="b", Key=s3_io.object_key_annotation_csv("p", 99), Body=b"a\n")
-    assert bd.should_skip_download(
-        source_id=99,
-        bucket="b",
-        s3_prefix="p",
-        s3_client=fake_s3,
-        force=False,
-        legacy_skip_annotations=True,
-        complete_source_ids=None,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Paginated export tests
-# ---------------------------------------------------------------------------
 
 _BROWSE_HTML_PAGE = """\
 <html>
@@ -479,7 +223,7 @@ def _mock_paginated_session(
     with (
         patch.object(dl.session, "get", side_effect=get),
         patch.object(dl.session, "post", side_effect=post) as post_mock,
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         yield post_mock
 
@@ -516,7 +260,7 @@ def test_download_annotations_bulk_for_small_source():
     with (
         patch.object(dl.session, "get", side_effect=[browse_resp, serve_resp]),
         patch.object(dl.session, "post", return_value=post_resp),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         ok = dl.download_annotations(1, "b", "p", total_images_hint=_PAGINATED_EXPORT_THRESHOLD)
 
@@ -527,7 +271,8 @@ def test_paginated_export_skips_when_existing_annotations_are_complete(
     paginated_downloader, fake_s3
 ):
     """No pages are fetched when existing annotations.csv already covers all website
-    images."""
+    images.
+    """
     dl = paginated_downloader
 
     existing_csv = _ann_csv([("img1.jpg", 1, 1, 10), ("img2.jpg", 2, 2, 20)])
@@ -602,7 +347,8 @@ def test_paginated_export_three_pages_concatenated(paginated_downloader, fake_s3
 
 def test_paginated_export_merges_with_existing_annotations(paginated_downloader, fake_s3):
     """When annotations.csv already exists on S3, new rows are merged and
-    deduplicated."""
+    deduplicated.
+    """
     dl = paginated_downloader
 
     existing_csv = _ann_csv(
@@ -1051,7 +797,7 @@ def test_get_images_retries_on_page1_timeout():
 
     with (
         patch.object(dl, "get_images_on_page", side_effect=flaky_get_images_on_page),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         df, ok = dl.get_images(1)
 
@@ -1062,7 +808,8 @@ def test_get_images_retries_on_page1_timeout():
 
 def test_get_images_page1_gives_up_after_max_retries():
     """After _PAGE_RETRIES failed attempts on page 1, get_images returns (None,
-    False)."""
+    False).
+    """
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
 
@@ -1071,7 +818,7 @@ def test_get_images_page1_gives_up_after_max_retries():
 
     with (
         patch.object(dl, "get_images_on_page", side_effect=always_timeout),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         df, ok = dl.get_images(1)
 
@@ -1081,7 +828,8 @@ def test_get_images_page1_gives_up_after_max_retries():
 
 def test_get_images_parallel_retries_on_inner_page_timeout():
     """A ReadTimeout on a parallel page is retried; final result includes that page's
-    images."""
+    images.
+    """
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
 
@@ -1100,7 +848,7 @@ def test_get_images_parallel_retries_on_inner_page_timeout():
 
     with (
         patch.object(dl.session, "get", side_effect=flaky_dispatch),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         df, ok = dl.get_images(1, total_images_hint=6, browse_workers=3)
 
@@ -1139,7 +887,7 @@ def test_get_images_retries_on_5xx_then_succeeds():
 
     with (
         patch.object(dl, "get_images_on_page", side_effect=flaky),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         df, ok = dl.get_images(1)
 
@@ -1160,7 +908,7 @@ def test_get_images_4xx_is_not_retried():
 
     with (
         patch.object(dl, "get_images_on_page", side_effect=always_404),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         df, ok = dl.get_images(1)
 
@@ -1189,7 +937,7 @@ def test_get_images_parallel_skips_dead_page_after_retries():
 
     with (
         patch.object(dl.session, "get", side_effect=dispatch),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         df, ok = dl.get_images(1, total_images_hint=6, browse_workers=3)
 
@@ -1216,7 +964,7 @@ def test_get_images_sequential_retries_on_inner_page_timeout():
 
     with (
         patch.object(dl, "get_images_on_page", side_effect=flaky_get_images_on_page),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         df, ok = dl.get_images(1)  # no hint → sequential
 
@@ -1253,7 +1001,7 @@ def test_login_retries_transient_timeout_then_succeeds():
     with (
         patch.object(dl.session, "get", side_effect=flaky_get),
         patch.object(dl.session, "post", return_value=post_resp),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         ok = dl.login()
 
@@ -1264,7 +1012,8 @@ def test_login_retries_transient_timeout_then_succeeds():
 
 def test_login_gives_up_after_repeated_timeouts():
     """If the login GET keeps timing out, login() returns False after retries (so the
-    shard exits cleanly instead of hammering CoralNet per-source)."""
+    shard exits cleanly instead of hammering CoralNet per-source).
+    """
     dl = CoralNetDownloader("u", "p")
     get_calls = [0]
 
@@ -1274,7 +1023,7 @@ def test_login_gives_up_after_repeated_timeouts():
 
     with (
         patch.object(dl.session, "get", side_effect=always_timeout),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         ok = dl.login()
 
@@ -1297,7 +1046,7 @@ def test_login_does_not_retry_invalid_credentials():
     with (
         patch.object(dl.session, "get", return_value=_mock_response(text=_login_get_html())),
         patch.object(dl.session, "post", side_effect=fake_post),
-        patch("mermaidseg.datasets.coralnet.scraper.downloader.time.sleep"),
+        patch("coralnet_scraper.downloader.time.sleep"),
     ):
         ok = dl.login()
 
@@ -1307,7 +1056,8 @@ def test_login_does_not_retry_invalid_credentials():
 
 def test_with_retry_backoff_is_jittered():
     """Backoff is randomized within [0.5x, 1.5x] of the exponential base so that
-    concurrent shards desync instead of retrying in lockstep (thundering herd)."""
+    concurrent shards desync instead of retrying in lockstep (thundering herd).
+    """
     slept: list[float] = []
 
     def always_timeout():
@@ -1349,3 +1099,9 @@ def test_is_coralnet_reachable_false_on_timeout():
     dl = CoralNetDownloader("u", "p")
     with patch.object(dl.session, "get", side_effect=requests.ReadTimeout("down")):
         assert dl.is_coralnet_reachable() is False
+
+
+@pytest.mark.parametrize("workers", [0, 2.5, True, "4"])
+def test_constructor_rejects_invalid_max_workers(workers):
+    with pytest.raises(ValueError, match="workers"):
+        CoralNetDownloader("u", "p", max_workers=workers)
