@@ -189,7 +189,7 @@ class TestWandbTracker:
 
     def test_missing_wandb_names_the_install_command(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "wandb", None)
-        with pytest.raises(ImportError, match=r"uv sync --extra slurm"):
+        with pytest.raises(ImportError, match=r"uv sync --extra wandb"):
             _wandb_tracker()
 
 
@@ -268,7 +268,7 @@ class TestMlflowTracker:
             "MLFLOW_TRACKING_URI", "arn:aws:sagemaker:us-east-1:000000000000:mlflow-app/app"
         )
         monkeypatch.setitem(sys.modules, "sagemaker_mlflow", None)
-        with pytest.raises(ImportError, match=r"uv sync --extra sagemaker"):
+        with pytest.raises(ImportError, match=r"uv sync --extra mlflow"):
             MlflowTracker(experiment_name="seg-exp", run_name="run-b")
 
 

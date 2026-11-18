@@ -130,7 +130,7 @@ class WandbTracker:
             import wandb
         except ImportError as err:
             raise ImportError(
-                "wandb is required for tracker 'wandb'. Install it with: uv sync --extra slurm"
+                "wandb is required for tracker 'wandb'. Install it with: uv sync --extra wandb"
             ) from err
         if not wandb.api.api_key:
             raise RuntimeError(
@@ -245,14 +245,14 @@ class MlflowTracker:
             except ImportError as err:
                 raise ImportError(
                     "MLFLOW_TRACKING_URI is a SageMaker ARN, which needs sagemaker-mlflow. "
-                    "Install it with: uv sync --extra sagemaker"
+                    "Install it with: uv sync --extra mlflow"
                 ) from err
         try:
             import mlflow
             import mlflow.pytorch
         except ImportError as err:
             raise ImportError(
-                "mlflow is required for tracker 'mlflow'. Install it with: uv sync --extra sagemaker"
+                "mlflow is required for tracker 'mlflow'. Install it with: uv sync --extra mlflow"
             ) from err
         self._mlflow = mlflow
         self._tracking_uri = tracking_uri
