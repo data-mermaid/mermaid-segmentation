@@ -57,6 +57,10 @@ uv sync --locked --extra slurm --group dev
 
 `packages/coralnet-scraper/` is a separate uv workspace member that downloads public CoralNet sources to S3. A root `uv sync` does not install it. See [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md).
 
+### CoralNet dataset build
+
+`packages/coralnet-dataset/` is a separate uv workspace member that builds the CoralNet training manifest, resized images and label names from a scrape. A root `uv sync` does not install it. See [packages/coralnet-dataset/README.md](packages/coralnet-dataset/README.md).
+
 ### Hugging Face Setup
 
 DINOv3 models (for example `facebook/dinov3-vitb16-pretrain-lvd1689m`) are gated on Hugging Face and need authentication:

@@ -5,7 +5,7 @@ Downloads public CoralNet sources (images, labelsets, annotations) to S3. Import
 ## Scope
 
 - **Owns:** recreating the raw CoralNet dataset in S3, one folder per public source.
-- **Does not own:** turning a scrape into the training manifest that `CoralNetDataset` reads. That step is not part of this package.
+- **Does not own:** turning a scrape into the training manifest that `CoralNetDataset` reads. That is [`coralnet-dataset`](../coralnet-dataset/README.md).
 - **Boundary:** `mermaidseg` does not depend on or import this package, and the package does not import `mermaidseg`. the root `tests/test_package_boundaries.py` enforces both (run with the root suite). A root `uv sync` does not install it.
 
 ## S3 layout
