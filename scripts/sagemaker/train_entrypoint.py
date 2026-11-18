@@ -9,7 +9,7 @@ with ``python -m torch.distributed.run`` in front when the instance has more tha
 Secrets named by ``WANDB_API_KEY_SECRET_ID`` / ``HF_TOKEN_SECRET_ID`` are fetched from
 Secrets Manager and exported as ``WANDB_API_KEY`` / ``HF_TOKEN``.
 
-    python -m scripts.sagemaker.train_entrypoint [--print-command]
+    python -m scripts.sagemaker.train_entrypoint
 """
 
 from __future__ import annotations
@@ -200,14 +200,20 @@ def trainer_env(
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    """Parse the entrypoint's command line."""
+    """Parse the entrypoint's command line, which takes no options."""
     parser = argparse.ArgumentParser(description="Run the trainer for a SageMaker TrainingJob.")
-    parser.add_argument(
-        "--print-command",
-        action="store_true",
-        help="print the trainer command and exit, without fetching secrets or running it",
-    )
     return parser.parse_args(argv)
+
+
+def _require_init_file(train: TrainConfig) -> None:
+    """Raise ValueError when ``train.init_weights`` is set but absent from the init channel."""
+    if train.init_weights is None:
+        return
+    # A single-object S3Prefix channel lands as INIT_DIR/<basename of the object>.
+    expected = INIT_DIR / Path(train.init_weights).name
+    if not expected.exists():
+        found = sorted(path.name for path in INIT_DIR.iterdir()) if INIT_DIR.is_dir() else []
+        raise ValueError(f"init weights {expected} not found; {INIT_DIR} holds {found}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -217,27 +223,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         argv: Command-line arguments; ``sys.argv[1:]`` when None.
 
     Returns:
-        0 after ``--print-command``. Otherwise the process is replaced by the trainer.
+        Nothing in practice: the process is replaced by the trainer.
 
     Raises:
-        ValueError: If the build git SHA variable is empty or unset and the trainer would run.
+        ValueError: If the build git SHA variable is empty or unset, or ``train.init_weights``
+            is set and its file is not in the init channel.
     """
-    args = _parse_args(argv)
+    _parse_args(argv)
     train = load_run_config(find_run_yaml(CONFIG_DIR)).train
 
     import torch
 
     ngpu = torch.cuda.device_count()
     command = build_trainer_argv(train, ngpu, os.cpu_count() or 0, sys.executable)
-    if args.print_command:
-        print(shlex.join(command))
-        return 0
 
     if not os.environ.get(BUILD_GIT_SHA_ENV):
         raise ValueError(
             f"{BUILD_GIT_SHA_ENV} is not set: the image has no .git, so lineage would record "
             "an unknown or dirty tree and export would refuse the finished run"
         )
+    _require_init_file(train)
     env = trainer_env(os.environ, os.environ.get("MERMAIDSEG_JOB_NAME"), train, ngpu)
     import boto3
 

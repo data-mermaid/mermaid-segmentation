@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import shlex
-import sys
 from pathlib import Path
 
 import pytest
@@ -255,25 +253,9 @@ def test_find_run_yaml_returns_the_only_one(tmp_path):
 # ---------- main ----------
 
 
-def test_print_command_prints_the_argv_without_exec(tmp_path, monkeypatch, capsys):
-    (tmp_path / "run.yaml").write_text((_RUNS / "cbm_final.yaml").read_text())
-    monkeypatch.setattr(entrypoint, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
-    monkeypatch.setattr(os, "cpu_count", lambda: 32)
-    monkeypatch.setattr(os, "execvp", lambda *a: pytest.fail("must not exec"))
-    monkeypatch.setattr(entrypoint, "resolve_secrets", lambda *a: pytest.fail("no secrets"))
-
-    assert entrypoint.main(["--print-command"]) == 0
-
-    expected = build_trainer_argv(
-        load_run_config(_RUNS / "cbm_final.yaml").train, ngpu=1, cpus=32, python=sys.executable
-    )
-    assert capsys.readouterr().out == shlex.join(expected) + "\n"
-
-
-def _stub_main(tmp_path, monkeypatch, ngpu):
+def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final"):
     """Point main at a run YAML and stub every effect; return the execvp calls."""
-    (tmp_path / "run.yaml").write_text((_RUNS / "cbm_final.yaml").read_text())
+    (tmp_path / "run.yaml").write_text((_RUNS / f"{run}.yaml").read_text())
     monkeypatch.setattr(entrypoint, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(entrypoint, "OUTPUT_DIR", tmp_path / "out")
     monkeypatch.setattr(entrypoint, "CACHE_DIR", tmp_path / "cache")
@@ -315,3 +297,32 @@ def test_main_creates_no_nccl_trace_dir_for_one_gpu(tmp_path, monkeypatch):
     entrypoint.main([])
 
     assert not (tmp_path / "out" / "nccl_trace").exists()
+
+
+def test_main_passes_the_init_channel_file_as_init_weights(tmp_path, monkeypatch):
+    execs = _stub_main(tmp_path, monkeypatch, ngpu=4, run="cbm_final_res768")
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+    init_dir = tmp_path / "init"
+    init_dir.mkdir()
+    (init_dir / "model_step300000").touch()
+    monkeypatch.setattr(entrypoint, "INIT_DIR", init_dir)
+
+    entrypoint.main([])
+
+    assert len(execs) == 1
+    argv = execs[0]
+    assert argv[argv.index("--init-weights") + 1] == str(init_dir / "model_step300000")
+
+
+def test_main_without_the_init_file_raises_listing_the_init_channel(tmp_path, monkeypatch):
+    execs = _stub_main(tmp_path, monkeypatch, ngpu=4, run="cbm_final_res768")
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+    init_dir = tmp_path / "init"
+    (init_dir / "model_checkpoints").mkdir(parents=True)
+    (init_dir / "other.pt").touch()
+    monkeypatch.setattr(entrypoint, "INIT_DIR", init_dir)
+
+    with pytest.raises(ValueError, match=r"model_step300000.*'model_checkpoints', 'other\.pt'"):
+        entrypoint.main([])
+
+    assert execs == []
