@@ -12,9 +12,11 @@ import yaml
 
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import (
+    REPO_ROOT,
     apply_resolution,
     build_eval_transform,
     compile_transform,
+    resolve_repo_path,
     setup_config,
 )
 
@@ -96,3 +98,12 @@ def test_eval_transform_resizes_to_the_input_size_then_normalizes():
     resize, normalize = build_eval_transform((32, 48)).transforms
     assert (type(resize), resize.height, resize.width) == (A.Resize, 32, 48)
     assert isinstance(normalize, A.Normalize)
+
+
+def test_relative_path_resolves_to_the_repo_not_the_current_directory(monkeypatch, tmp_path: Path):
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "class_to_concepts.csv").write_text("decoy\n")
+    monkeypatch.chdir(tmp_path)
+    assert resolve_repo_path("configs/class_to_concepts.csv") == (
+        REPO_ROOT / "configs" / "class_to_concepts.csv"
+    )

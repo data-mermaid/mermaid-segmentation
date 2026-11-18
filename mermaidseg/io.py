@@ -12,6 +12,19 @@ import yaml
 from mermaidseg.config import RESERVED_DATA_KEYS, lookup_class, validate_section
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def resolve_repo_path(path: str | Path) -> Path:
+    """An absolute path as given; a relative path resolved against the repository root.
+
+    The current directory never matters, so entrypoints run from anywhere.
+    """
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / path
+
 
 class ConfigDict(dict):
     """Dictionary subclass with attribute-style access."""

@@ -28,10 +28,9 @@ from mermaidseg.dataset_reconciliation.split_wiring import (
     prepare_splits_for_registry,
 )
 from mermaidseg.datasets import configured_source_names
-from mermaidseg.io import setup_config
+from mermaidseg.io import REPO_ROOT, resolve_repo_path, setup_config
 from mermaidseg.model.meta import MetaModel
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCHEMA_CONFIG = REPO_ROOT / "configs" / "data_config.yaml"
 
 
@@ -67,17 +66,6 @@ def load_run_concept_source_mask(
         concepts_csv=mapping_path,
         removed_concepts=concept_removal_list(training_cfg, mapping_path),
     )
-
-
-def resolve_repo_path(path: str | Path) -> Path:
-    """An absolute path as given; a relative path resolved against the repository root.
-
-    The current directory never matters, so entrypoints run from anywhere.
-    """
-    path = Path(path)
-    if path.is_absolute():
-        return path
-    return REPO_ROOT / path
 
 
 def build_registry(
@@ -125,9 +113,16 @@ def build_registry(
 
 
 def build_meta_model(
-    cfg: Any, registry: SourceLabelRegistry, device: torch.device | str
+    cfg: Any,
+    registry: SourceLabelRegistry,
+    device: torch.device | str,
+    *,
+    model: torch.nn.Module | None = None,
 ) -> MetaModel:
-    """MetaModel for ``cfg`` (model and training sections) over ``registry``."""
+    """MetaModel for ``cfg`` (model and training sections) over ``registry``.
+
+    A prebuilt ``model`` is used as is; otherwise the model is built from ``cfg.model``.
+    """
     return MetaModel(
         run_name=cfg.run_name,
         num_classes=registry.num_target_classes,
@@ -138,6 +133,7 @@ def build_meta_model(
         source_to_target_lookup=registry.source_to_target,
         source_to_concepts_lookup=registry.source_to_concepts,
         concept_value2id=registry.concept_value2id,
+        model=model,
     )
 
 

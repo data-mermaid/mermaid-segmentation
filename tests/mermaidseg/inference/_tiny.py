@@ -93,7 +93,12 @@ def build_trained_model() -> torch.nn.Module:
 
 
 def resolved_config() -> dict[str, Any]:
-    return {"run_name": RUN_NAME, "seed": 0, "model": {"input_size": list(INPUT_SIZE)}}
+    return {
+        "run_name": RUN_NAME,
+        "seed": 0,
+        "model": {"input_size": list(INPUT_SIZE)},
+        "training": {"mixed_precision_dtype": "bfloat16", "concept_removal": None},
+    }
 
 
 def write_run(

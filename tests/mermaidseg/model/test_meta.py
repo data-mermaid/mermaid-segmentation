@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,7 +15,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import mermaidseg.model.meta as meta_module
 import mermaidseg.model.models as models_module
 from mermaidseg.inference.bundle import MODEL_JSON, write_sidecar
-from mermaidseg.io import ConfigDict
+from mermaidseg.io import REPO_ROOT, ConfigDict
 from mermaidseg.model.meta import next_epoch_from_checkpoint, restore_warmup_progress
 from mermaidseg.model.models import MODEL_CLASSES
 from tests.conftest import IMAGE_SIZE, NUM_CLASSES
@@ -27,7 +28,7 @@ def test_stall_dump_seconds_reads_training_config(raw, expected):
 
 def test_resolve_amp_dtype_rejects_a_missing_dtype():
     with pytest.raises(ValueError, match="mixed_precision_dtype"):
-        meta_module._resolve_amp_dtype(None)
+        meta_module.resolve_amp_dtype(None)
 
 
 def test_meta_model_requires_max_grad_norm(minimal_config, make_meta_model):
@@ -88,11 +89,11 @@ def test_restore_warmup_progress_sets_the_saved_count():
 @pytest.mark.parametrize("name", ["float16", "fp16", "half"])
 def test_resolve_amp_dtype_rejects_fp16_aliases(name):
     with pytest.raises(ValueError, match="mixed_precision_dtype"):
-        meta_module._resolve_amp_dtype(name)
+        meta_module.resolve_amp_dtype(name)
 
 
 def test_resolve_amp_dtype_accepts_bfloat16():
-    assert meta_module._resolve_amp_dtype("bfloat16") is torch.bfloat16
+    assert meta_module.resolve_amp_dtype("bfloat16") is torch.bfloat16
 
 
 def _record_encoder_autocast(meta) -> dict[str, object]:
@@ -278,6 +279,31 @@ def test_meta_model_requires_training_kwargs(minimal_config):
         )
 
 
+class _TreeBuildStop(Exception):
+    """Ends MetaModel construction once the taxonomy path has been captured."""
+
+
+def test_taxonomic_loss_reads_the_mapping_from_the_repo_not_the_current_directory(
+    minimal_config, make_meta_model, monkeypatch, tmp_path
+):
+    cfg = _standard_cfg(
+        minimal_config,
+        taxonomic_loss={"ambiguity_policy": "permissive", "kl_weight": 1.0},
+    )
+    cfg.training.concept_mapping_path = "configs/class_to_concepts.csv"
+    seen: list[Path] = []
+
+    def _record(path, **_kwargs):
+        seen.append(path)
+        raise _TreeBuildStop
+
+    monkeypatch.setattr(meta_module, "build_taxonomy_tree", _record)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(_TreeBuildStop):
+        make_meta_model(cfg)
+    assert seen == [REPO_ROOT / "configs" / "class_to_concepts.csv"]
+
+
 def _record_encoder_modes(meta) -> list[dict[str, bool]]:
     """Record ``training`` and inference-mode state at each mocked-encoder forward."""
     seen: list[dict[str, bool]] = []
@@ -432,3 +458,31 @@ def test_sidecar_architecture_kwargs_rebuild_the_model_from_json(
 
     out = model(torch.randn(1, 3, *IMAGE_SIZE))
     assert out.logits.shape[1] == NUM_CLASSES
+
+
+def test_meta_model_loads_the_encoder_named_in_the_model_config(
+    minimal_config, make_meta_model, monkeypatch
+):
+    real = meta_module.load_pretrained_encoder
+    calls: list[str] = []
+
+    def _record(name):
+        calls.append(name)
+        return real(name)
+
+    monkeypatch.setattr(meta_module, "load_pretrained_encoder", _record)
+    make_meta_model(minimal_config)
+    assert calls == [minimal_config.model["encoder_name"]]
+
+
+def test_meta_model_uses_a_prebuilt_model_without_loading_an_encoder(
+    minimal_config, make_meta_model, monkeypatch
+):
+    prebuilt = make_meta_model(copy.deepcopy(minimal_config), run_name="donor").model
+
+    def _forbidden(_name):
+        raise AssertionError("load_pretrained_encoder must not run for a prebuilt model")
+
+    monkeypatch.setattr(meta_module, "load_pretrained_encoder", _forbidden)
+    meta = make_meta_model(minimal_config, run_name="prebuilt", model=prebuilt)
+    assert meta.model is prebuilt

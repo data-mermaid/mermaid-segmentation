@@ -23,9 +23,8 @@ import mermaidseg.model.models
 from mermaidseg import training
 from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
-from mermaidseg.io import ConfigDict, load_config, setup_config
+from mermaidseg.io import ConfigDict, load_config, resolve_repo_path, setup_config
 from mermaidseg.model.distributed import DistContext
-from mermaidseg.run_setup import resolve_repo_path
 from mermaidseg.training import (
     VAL_GENERATOR_SEED_OFFSET,
     _assemble_train_datasets,
@@ -372,9 +371,7 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert sidecar["architecture"]["encoder_config"]["hidden_size"] == 16
     resolved = yaml.safe_load((run_dir / "config.yaml").read_text())
     assert resolved["run_name"] == SMOKE_RUN
-    assert resolved["training"]["concept_mapping_path"] == str(
-        resolve_repo_path("configs/class_to_concepts.csv")
-    )
+    assert resolved["training"]["concept_mapping_path"] == "configs/class_to_concepts.csv"
     checkpoint = torch.load(run_dir / "model_step1", weights_only=True)
     assert checkpoint["config"] == resolved
     assert not (workdir / "model_checkpoints").exists()
@@ -388,8 +385,7 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
         "lineage/uv_lock_sha256",
         "lineage/data_config_sha1",
     }
-    mapping_path = Path(wandb_run.params["training_concept_mapping_path"])
-    assert mapping_path.is_absolute() and mapping_path.is_file()
+    assert wandb_run.params["training_concept_mapping_path"] == "configs/class_to_concepts.csv"
     assert wandb_run.finished
 
 

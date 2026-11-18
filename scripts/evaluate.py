@@ -1,6 +1,6 @@
 """Unified validation suite for the concept-bottleneck coral model.
 
-Runs, on one checkpoint at one prediction resolution:
+Runs, on one exported model bundle at the bundle's input size:
 
 1. ``coralnet``       CoralNet ``--split`` sources (per source id + pooled)
 2. ``pacific``        Pacific Labeled Corals validation regions (per region + pooled)
@@ -22,20 +22,15 @@ hierarchical metrics (consistency, mistake severity, ECE), with ``bleached`` and
 ``anthropogenic`` called out. Each section is written to ``summary.json`` and
 ``summary.md`` and to its own subdirectory, e.g. ``coralnet_val/``.
 
-Images are predicted at ``--resolution`` (default: the model config ``input_size``).
-CoralscapesV2 images (1024x2048) are predicted as three 1024x1024 windows, averaged
+``--bundle`` is the only model input: the weights, class and concept layouts, input size,
+normalisation and the run settings (autocast dtype, removed concepts, loss config) all come
+from the bundle's ``model.json``. CoralscapesV2 images (1024x2048) are predicted as three 1024x1024 windows, averaged
 in concept logit space, then scored at the original resolution.
-
-The class and concept layouts default to ``id2label.json`` and ``concept_id2name.json``
-next to the checkpoint, which the training pipeline writes. Without them, the classes
-come from demo/id2label.json and the concepts from configs/class_to_concepts.csv over
-the datasets of configs/data_config.yaml.
 
 Example (cluster):
     uv run python scripts/evaluate.py \
-        --checkpoint outputs/model_checkpoints/cbm_lossw_pix0.5_img0.5/model_step100000 \
-        --model-config configs/model_config_cbm_dpt_lora_vitl.yaml \
-        --resolution 512 --output-dir eval_out/run --cache-dir /path/to/cache \
+        --bundle outputs/bundles/cbm_lossw_pix0.5_img0.5 \
+        --output-dir eval_out/run --cache-dir /path/to/cache \
         --batch-size 8 --num-workers 16 --amp
 """
 
@@ -54,19 +49,17 @@ import torch
 import yaml
 
 from mermaidseg.config import RESERVED_DATA_KEYS
-from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.datasets import configured_source_names
 from mermaidseg.datasets.local_cache import setup_local_cache
 from mermaidseg.evaluation.gt_mapping import load_benthic_hierarchy
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.reporting import fmt, write_json
-from mermaidseg.inference.loading import build_model, load_artifacts
+from mermaidseg.inference.bundle import MODEL_JSON, ModelBundle, load_bundle
 from mermaidseg.inference.predictor import CBMPredictor
-from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import load_section
+from mermaidseg.model.meta import resolve_amp_dtype
+from mermaidseg.run_setup import concept_removal_list
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_DEMO_DIR = _REPO_ROOT / "demo"
 
 logger = logging.getLogger("evaluate")
 
@@ -109,21 +102,21 @@ def check_split_evals(split: str, evals: list[str]) -> None:
         )
 
 
-def eval_amp_dtype(training_config: str | Path, amp: bool) -> torch.dtype | None:
-    """Autocast dtype from ``training.mixed_precision_dtype`` when ``amp`` is set, else ``None``."""
+def eval_amp_dtype(run_config: dict, amp: bool) -> torch.dtype | None:
+    """Autocast dtype from the run's ``training.mixed_precision_dtype`` when ``amp`` is set, else ``None``."""
     if not amp:
         return None
-    from mermaidseg.model.meta import _resolve_amp_dtype
-
-    section = load_section(training_config, "training")
-    return _resolve_amp_dtype(section["mixed_precision_dtype"])
+    return resolve_amp_dtype(run_config["training"]["mixed_precision_dtype"])
 
 
-def run_removed_concepts(training_config: str | Path, taxonomy_csv: str | Path) -> list[str]:
-    """Channels removed by ``training.concept_removal`` of ``training_config``, if any."""
-    from mermaidseg.run_setup import concept_removal_list
+def run_removed_concepts(run_config: dict, taxonomy_csv: str | Path) -> list[str]:
+    """Channels removed by the run's ``training.concept_removal``, if any."""
+    return concept_removal_list(run_config["training"], taxonomy_csv)
 
-    return concept_removal_list(load_section(training_config, "training"), taxonomy_csv)
+
+def concept_names_of(bundle: ModelBundle) -> list[str]:
+    """The bundle's concept channel names in channel order."""
+    return [name for _, name in sorted(bundle.concept_id2name.items())]
 
 
 def coralnet_loss_data_config(data: dict, split: str, image_keep: Path | None) -> dict:
@@ -139,72 +132,23 @@ def coralnet_loss_data_config(data: dict, split: str, image_keep: Path | None) -
     return {"data": out}
 
 
-def _model_input_size(model_config: str | Path) -> tuple[int, int]:
-    height, width = load_section(model_config, "model")["input_size"]
-    return int(height), int(width)
-
-
-def resolve_layouts(
-    checkpoint: Path,
-    id2label: Path | None,
-    concept_id2name: Path | None,
-    *,
-    output_dir: Path,
-    taxonomy_csv: Path,
-    schema_config: Path,
-) -> tuple[Path, Path]:
-    """Class and concept layout files for ``checkpoint`` (see the module docstring)."""
-    run_dir = checkpoint.parent
-    if id2label is None:
-        id2label = run_dir / "id2label.json"
-        if not id2label.is_file():
-            id2label = _DEMO_DIR / "id2label.json"
-    if concept_id2name is None:
-        concept_id2name = run_dir / "concept_id2name.json"
-        if not concept_id2name.is_file():
-            sources = configured_source_names(_data_section(schema_config))
-            schema = ConceptSchema.from_csv(taxonomy_csv, sources=sources)
-            concept_id2name = output_dir / "concept_id2name.json"
-            write_json(concept_id2name, {str(k): v for k, v in schema.channel_id2name().items()})
-    return id2label, concept_id2name
-
-
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--checkpoint", required=True, type=Path, help="Model checkpoint path")
-    p.add_argument("--cache-dir", default=None, help="local S3 cache root (default: disabled)")
     p.add_argument(
-        "--model-config", type=Path, default=_CONFIGS / "model_config_cbm_dpt_lora_vitl.yaml"
-    )
-    p.add_argument(
-        "--resolution",
-        type=int,
-        default=None,
-        help="Square prediction resolution in pixels (default: the model config input_size)",
-    )
-    p.add_argument(
-        "--id2label", type=Path, default=None, help="Default: id2label.json next to the checkpoint"
-    )
-    p.add_argument(
-        "--concept-id2name",
+        "--bundle",
+        required=True,
         type=Path,
-        default=None,
-        help="Default: concept_id2name.json next to the checkpoint",
+        help="Exported model bundle directory (model.json + weights.safetensors)",
     )
+    p.add_argument("--cache-dir", default=None, help="local S3 cache root (default: disabled)")
     p.add_argument(
         "--data-config",
         type=Path,
         default=_CONFIGS / "data_config.yaml",
         help="Sources and splits of every eval, and the val splits of val_loss",
-    )
-    p.add_argument(
-        "--training-config",
-        type=Path,
-        default=_CONFIGS / "training_config_cbm_final.yaml",
-        help="val_loss: class subset, padding and loss settings of the training run",
     )
     p.add_argument(
         "--schema-config",
@@ -241,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--amp",
         action="store_true",
-        help="autocast the forward pass in training.mixed_precision_dtype",
+        help="autocast the forward pass in the run's training.mixed_precision_dtype",
     )
     p.add_argument(
         "--strict",
@@ -411,13 +355,6 @@ def main(argv: list[str] | None = None) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    input_size = (
-        (args.resolution, args.resolution)
-        if args.resolution is not None
-        else _model_input_size(args.model_config)
-    )
-    logger.info("Device: %s | evals: %s | resolution: %s", device, evals, input_size)
-
     # --- Local S3 cache -----------------------------------------------------
     data = _data_section(args.data_config)
     if args.cache_dir is not None:
@@ -425,65 +362,37 @@ def main(argv: list[str] | None = None) -> None:
     setup_local_cache(data)
 
     # --- Model --------------------------------------------------------------
-    id2label_path, concept_path = resolve_layouts(
-        Path(args.checkpoint),
-        args.id2label,
-        args.concept_id2name,
-        output_dir=output_dir,
-        taxonomy_csv=args.taxonomy_csv,
-        schema_config=args.schema_config,
-    )
+    logger.info("Loading bundle %s ...", args.bundle)
+    bundle = load_bundle(args.bundle, device)
+    input_size = bundle.input_size
+    amp_dtype = eval_amp_dtype(bundle.config, args.amp)
+    predictor = CBMPredictor.from_bundle(bundle, amp_dtype=amp_dtype)
+    id2label = bundle.id2label
+    concept_names = concept_names_of(bundle)
     logger.info(
-        "Loading model artifacts (checkpoint=%s, id2label=%s, concept_id2name=%s) ...",
-        args.checkpoint,
-        id2label_path,
-        concept_path,
-    )
-    artifacts = load_artifacts(
-        checkpoint=args.checkpoint,
-        model_config=args.model_config,
-        id2label=id2label_path,
-        concept_id2name=concept_path,
-    )
-    model = build_model(artifacts, device)
-    amp_dtype = eval_amp_dtype(args.training_config, args.amp)
-    predictor = CBMPredictor(
-        model,
-        input_size=input_size,
-        mean=IMAGENET_MEAN,
-        std=IMAGENET_STD,
-        device=device,
-        amp_dtype=amp_dtype,
-    )
-    id2label = artifacts.id2label
-    concept_names = [
-        name for _, name in sorted(artifacts.concept_id2name.items(), key=lambda kv: int(kv[0]))
-    ]
-    logger.info(
-        "Model: input_size=%s num_classes=%d num_concepts=%d (concept_names=%d)",
+        "Device: %s | evals: %s | input_size: %s | num_classes=%d num_concepts=%d",
+        device,
+        evals,
         input_size,
         predictor.num_classes,
         predictor.num_concepts,
-        len(concept_names),
     )
     if len(concept_names) != predictor.num_concepts:
         raise ValueError(
-            f"{concept_path} has {len(concept_names)} entries but the model has "
-            f"{predictor.num_concepts} concept channels. Provide a matching --concept-id2name."
+            f"{args.bundle / MODEL_JSON} has {len(concept_names)} concept names but the model has "
+            f"{predictor.num_concepts} concept channels."
         )
     missing = [c for c in REPORTED_BINARY_CONCEPTS if c not in concept_names]
     if any(e in evals for e in ("coralnet", "pacific", "coralscapes")) and missing:
         raise RuntimeError(
             f"coralnet, pacific and coralscapes evals require concept channels named exactly {missing}, "
-            f"which concept_id2name ({len(concept_names)} entries) does not have."
+            f"which the bundle's concept_id2name ({len(concept_names)} entries) does not have."
         )
 
     removed_concepts: list[str] = []
     if any(e in evals for e in ("coralnet", "pacific", "coralscapes")):
-        removed_concepts = run_removed_concepts(args.training_config, args.taxonomy_csv)
-        logger.info(
-            "Concept removal of %s: %d channels", args.training_config, len(removed_concepts)
-        )
+        removed_concepts = run_removed_concepts(bundle.config, args.taxonomy_csv)
+        logger.info("Concept removal of the bundle's run: %d channels", len(removed_concepts))
 
     # Benthic hierarchy for CoralNet/Pacific class roll-up.
     hierarchy = None
@@ -495,8 +404,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     summary: dict = {
-        "checkpoint": str(args.checkpoint),
-        "model_config": str(args.model_config),
+        "bundle": str(args.bundle),
         "input_size": list(input_size),
         "split": args.split,
         "evals": evals,
@@ -649,11 +557,8 @@ def main(argv: list[str] | None = None) -> None:
             [loss_key],
             lambda: {
                 loss_key: evaluate_val_loss(
-                    checkpoint=args.checkpoint,
-                    model_config=args.model_config,
+                    bundle=bundle,
                     data_config=loss_data_config,
-                    training_config=args.training_config,
-                    resolution=input_size[0],
                     output_dir=output_dir,
                     device=device,
                     batch_size=args.batch_size,

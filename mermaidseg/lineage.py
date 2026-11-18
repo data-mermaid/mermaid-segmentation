@@ -10,7 +10,7 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
-from mermaidseg.run_setup import REPO_ROOT
+from mermaidseg.io import REPO_ROOT
 
 GIT_TIMEOUT_SEC = 10
 UV_LOCK = "uv.lock"

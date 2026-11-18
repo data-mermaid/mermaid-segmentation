@@ -17,7 +17,7 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_
 from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local_cache
 from mermaidseg.inference.bundle import write_sidecar
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
-from mermaidseg.io import setup_config, update_config_with_args
+from mermaidseg.io import resolve_repo_path, setup_config, update_config_with_args
 from mermaidseg.lineage import collect_lineage, data_version
 from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.distributed import (
@@ -34,10 +34,8 @@ from mermaidseg.run_setup import (
     build_meta_model,
     build_registry,
     check_env_wandb,
-    concept_mapping_path,
     load_model_weights,
     load_run_concept_source_mask,
-    resolve_repo_path,
     write_resolved_config,
 )
 from mermaidseg.seeding import make_worker_seeder, seed_everything
@@ -239,8 +237,6 @@ def run(args: argparse.Namespace) -> None:
 
     # torchrun decides: one process per GPU trains its shard of each minibatch.
     cfg.training.distributed = dist_ctx.distributed
-    # MetaModel opens the taxonomy CSV from this value, so it must not depend on the cwd.
-    cfg.training.concept_mapping_path = concept_mapping_path(cfg.training)
 
     # Leave the config value untouched when a flag is not given.
     if args.grad_accum_steps is not None:

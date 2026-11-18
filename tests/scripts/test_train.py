@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 import scripts.train as train_script
-from mermaidseg.run_setup import resolve_repo_path
+from mermaidseg.io import resolve_repo_path
 from scripts.train import build_parser
 from tests.slurm import test_launchers as launchers
 

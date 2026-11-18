@@ -28,8 +28,7 @@ from typing import Any
 
 from mermaidseg.datasets import build_datasets, setup_local_cache
 from mermaidseg.datasets.local_cache import LocalS3Cache
-from mermaidseg.io import setup_config
-from mermaidseg.run_setup import resolve_repo_path
+from mermaidseg.io import resolve_repo_path, setup_config
 
 logging.basicConfig(
     level=logging.INFO,
