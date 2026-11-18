@@ -95,7 +95,7 @@ class CBMPredictor:
     # -- preprocessing ---------------------------------------------------------
     def preprocess(self, image_rgb_uint8: NDArray[np.uint8]) -> torch.Tensor:
         """Resize and normalize an RGB image to the model input size."""
-        return preprocess(image_rgb_uint8, self.input_size, self.mean, self.std)
+        return preprocess(image_rgb_uint8, self.input_size, mean=self.mean, std=self.std)
 
     def _autocast(self) -> torch.autocast:
         return torch.autocast(

@@ -20,7 +20,7 @@ IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 CHANNEL_ORDER = "RGB"
 INTERPOLATION = "bilinear"
 # The OpenCV flag for INTERPOLATION.
-_CV2_INTERPOLATION = cv2.INTER_LINEAR
+CV2_INTERPOLATION = cv2.INTER_LINEAR
 
 
 def resize_rgb(image_rgb_uint8: NDArray[np.uint8], size_hw: Sequence[int]) -> NDArray[np.uint8]:
@@ -28,15 +28,16 @@ def resize_rgb(image_rgb_uint8: NDArray[np.uint8], size_hw: Sequence[int]) -> ND
     height, width = int(size_hw[0]), int(size_hw[1])
     if image_rgb_uint8.shape[:2] == (height, width):
         return image_rgb_uint8
-    resized = cv2.resize(image_rgb_uint8, (width, height), interpolation=_CV2_INTERPOLATION)
+    resized = cv2.resize(image_rgb_uint8, (width, height), interpolation=CV2_INTERPOLATION)
     return cast("NDArray[np.uint8]", resized)
 
 
 def preprocess(
     image_rgb_uint8: NDArray[np.uint8],
     size_hw: Sequence[int],
-    mean: Sequence[float] = IMAGENET_MEAN,
-    std: Sequence[float] = IMAGENET_STD,
+    *,
+    mean: Sequence[float],
+    std: Sequence[float],
 ) -> torch.Tensor:
     """Resize + normalize an HxWx3 uint8 RGB image to a ``(3, h, w)`` float32 tensor.
 

@@ -116,7 +116,7 @@ class PointEvalDataset(Dataset):
             if image.ndim == 2:
                 image = np.stack([image] * 3, axis=-1)
             h, w = image.shape[:2]
-            img_tensor = preprocess(image, self.input_hw, self.mean, self.std)
+            img_tensor = preprocess(image, self.input_hw, mean=self.mean, std=self.std)
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to load image (unit=%s key=%s): %s", unit, key_t, e)
             th, tw = self.input_hw
