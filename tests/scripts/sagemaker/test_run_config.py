@@ -50,6 +50,9 @@ def test_committed_run_yamls_load(name):
         _variant("job", "volume_gb", drop=True),
         _variant("train", "args", drop=True),
         _variant("train", "init_weights", drop=True),
+        _variant("job", "volume_gb", 0),
+        _variant("job", "max_runtime_hours", -1),
+        _variant("train", "args", "--batch-size 8"),
     ],
     ids=[
         "unknown-job-key",
@@ -58,10 +61,20 @@ def test_committed_run_yamls_load(name):
         "missing-job-field",
         "missing-train-field",
         "init-weights-absent",
+        "zero-volume",
+        "negative-runtime",
+        "args-not-a-list",
     ],
 )
 def test_invalid_run_yaml_raises_naming_the_file(tmp_path, data):
     path = tmp_path / "run.yaml"
     path.write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match=str(path)):
+        load_run_config(path)
+
+
+def test_empty_run_yaml_raises_naming_the_file(tmp_path):
+    path = tmp_path / "run.yaml"
+    path.write_text("")
     with pytest.raises(ValueError, match=str(path)):
         load_run_config(path)

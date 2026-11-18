@@ -69,6 +69,10 @@ def test_trainer_argv_matches_the_slurm_launcher(repo, job, name, ngpu):
 
     # SageMaker alone swaps the tracker, so only it passes a logger config.
     assert _without_owned(ours, "--logger-config") == _without_owned(slurm_argv)
+    # The Slurm harness runs 1 GPU and 32 CPUs; the values the substrate owns agree there.
+    same_host = build_trainer_argv(config.train, ngpu=1, cpus=32, python="py")
+    for flag in ("--nccl-timeout-min", "--num-workers"):
+        assert launchers._arg(same_host, flag) == launchers._arg(slurm_argv, flag) is not None
     ours_init = launchers._arg(ours, "--init-weights")
     if slurm_init is None:
         assert ours_init is None
@@ -196,9 +200,10 @@ def test_resolve_secrets_skips_unset_ids():
     assert client.requested == []
 
 
-def test_resolve_secrets_propagates_a_failed_fetch():
-    with pytest.raises(ClientError):
+def test_resolve_secrets_propagates_a_failed_fetch_naming_the_secret():
+    with pytest.raises(ClientError) as exc_info:
         resolve_secrets({"HF_TOKEN_SECRET_ID": "missing"}, _FakeSecrets({}))
+    assert "fetching HF_TOKEN_SECRET_ID=missing" in exc_info.value.__notes__
 
 
 # ---------- trainer_env ----------
@@ -242,6 +247,15 @@ def test_find_run_yaml_returns_the_only_one(tmp_path):
 # ---------- main ----------
 
 
+_MAIN_WRITTEN_VARS = (
+    "HF_TOKEN",
+    "OMP_NUM_THREADS",
+    "TORCH_NCCL_TRACE_BUFFER_SIZE",
+    "TORCH_NCCL_DUMP_ON_TIMEOUT",
+    "TORCH_NCCL_DEBUG_INFO_TEMP_FILE",
+)
+
+
 def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final"):
     """Point main at a run YAML and stub every effect; return the execvp calls."""
     (tmp_path / "run.yaml").write_text((_RUNS / f"{run}.yaml").read_text())
@@ -252,6 +266,9 @@ def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final"):
     monkeypatch.setattr("torch.cuda.device_count", lambda: ngpu)
     monkeypatch.setattr(os, "cpu_count", lambda: 48)
     monkeypatch.setattr(os, "chdir", lambda *a: None)
+    # main writes these into the real environment; delenv makes teardown restore them.
+    for var in _MAIN_WRITTEN_VARS:
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr("boto3.client", lambda *a, **k: object())
     monkeypatch.setattr(entrypoint, "resolve_secrets", lambda *a: None)
     execs: list[list[str]] = []
@@ -259,9 +276,13 @@ def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final"):
     return execs
 
 
-def test_main_without_git_sha_raises_before_secrets_or_exec(tmp_path, monkeypatch):
+@pytest.mark.parametrize("sha", [None, ""], ids=["unset", "empty"])
+def test_main_without_git_sha_raises_before_secrets_or_exec(tmp_path, monkeypatch, sha):
     execs = _stub_main(tmp_path, monkeypatch, ngpu=1)
-    monkeypatch.delenv(BUILD_GIT_SHA_ENV, raising=False)
+    if sha is None:
+        monkeypatch.delenv(BUILD_GIT_SHA_ENV, raising=False)
+    else:
+        monkeypatch.setenv(BUILD_GIT_SHA_ENV, sha)
     monkeypatch.setattr("boto3.client", lambda *a, **k: pytest.fail("no secrets fetch"))
 
     with pytest.raises(ValueError, match=BUILD_GIT_SHA_ENV):
@@ -336,6 +357,44 @@ def test_main_without_the_init_file_raises_listing_the_init_channel(tmp_path, mo
     monkeypatch.setattr(entrypoint, "INIT_DIR", init_dir)
 
     with pytest.raises(ValueError, match=r"model_step300000.*'model_checkpoints', 'other\.pt'"):
+        entrypoint.main([])
+
+    assert execs == []
+
+
+def _wire_real_secrets(monkeypatch, client):
+    monkeypatch.setattr(entrypoint, "resolve_secrets", resolve_secrets)
+    monkeypatch.setattr("boto3.client", lambda *a, **k: client)
+    monkeypatch.setenv("HF_TOKEN_SECRET_ID", "h-id")
+
+
+def test_main_exports_the_fetched_secret_at_exec_without_leaking_it(tmp_path, monkeypatch, capsys):
+    execs = _stub_main(tmp_path, monkeypatch, ngpu=1)
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+    _wire_real_secrets(monkeypatch, _FakeSecrets({"h-id": "hf-sekret"}))
+    seen: dict[str, str | None] = {}
+
+    def fake_execvp(file, argv):
+        execs.append(argv)
+        seen["HF_TOKEN"] = os.environ.get("HF_TOKEN")
+        return 0
+
+    monkeypatch.setattr(os, "execvp", fake_execvp)
+
+    entrypoint.main([])
+
+    assert seen == {"HF_TOKEN": "hf-sekret"}
+    assert len(execs) == 1
+    assert not any("hf-sekret" in arg for arg in execs[0])
+    assert "hf-sekret" not in capsys.readouterr().out
+
+
+def test_main_propagates_a_failed_secret_fetch_without_exec(tmp_path, monkeypatch):
+    execs = _stub_main(tmp_path, monkeypatch, ngpu=1)
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+    _wire_real_secrets(monkeypatch, _FakeSecrets({}))
+
+    with pytest.raises(ClientError):
         entrypoint.main([])
 
     assert execs == []

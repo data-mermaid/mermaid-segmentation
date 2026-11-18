@@ -8,19 +8,20 @@
 #
 # See docker/jobs/README.md.
 
-ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04@sha256:5f0d2d827f6436b3cb7468fd8acbdc8c1d41261614e579ae49afe6141da51133
 FROM ${BASE_IMAGE}
 
-# Pinned uv. Update together with the uv used to refresh uv.lock.
-COPY --from=ghcr.io/astral-sh/uv:0.11.13 /uv /uvx /usr/local/bin/
+# Pinned uv. The digest is bumped by Dependabot; update the tag together with the uv used to
+# refresh uv.lock.
+COPY --from=ghcr.io/astral-sh/uv:0.11.13@sha256:841c8e6fe30a8b07b4478d12d0c608cba6de66102d29d65d1cc423af86051563 /uv /uvx /usr/local/bin/
 
-# Secrets (HF_TOKEN, WANDB_API_KEY) are never baked into the image or set in the job Environment:
+# Secrets (HF_TOKEN) are never baked into the image or set in the job Environment:
 # the entrypoint fetches them at run time from Secrets Manager (see docker/jobs/README.md).
 
 # No git: the image has no .git and the commit arrives as MERMAIDSEG_GIT_SHA.
 # libglib2.0-0 is kept as a conservative runtime dependency of the OpenCV wheel.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates build-essential libglib2.0-0 && \
+    apt-get install -y --no-install-recommends ca-certificates libglib2.0-0 tini && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/ml/code
@@ -54,4 +55,6 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONFAULTHANDLER=1 \
     AWS_DEFAULT_REGION=us-east-1
 
-ENTRYPOINT ["/opt/ml/code/entrypoint.sh"]
+# tini is PID 1 so StopTrainingJob's SIGTERM reaches the trainer (a PID-1 process with no handler
+# ignores SIGTERM).
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/ml/code/entrypoint.sh"]

@@ -3,13 +3,17 @@
 Validates the run YAML offline, then builds the CreateTrainingJob request, uploads the YAML
 as the job's ``config`` channel and submits the job. It does not wait for the job.
 
+Before it uploads or submits anything, a real launch pins ``job.image`` to its ECR digest and,
+for a run with ``--init-from-job``, checks that the source job is ``Completed`` and that the
+init checkpoint exists in the staging bucket. Any failure exits before an upload.
+
     python -m scripts.sagemaker.launch --run-config PATH [--init-from-job JOB]
         [--check | --dry-run]
 
 ``--check`` validates only and needs no environment. ``--dry-run`` also builds and prints the
-request without calling AWS. Account values, including the MLflow tracking server ARN
-(``SM_MLFLOW_TRACKING_ARN``, passed to the job as ``MLFLOW_TRACKING_URI``), come from the
-environment (see ``REQUIRED_ENV``).
+request without calling AWS; it prints the image as a tag URI. Account values, including the
+MLflow tracking server ARN (``SM_MLFLOW_TRACKING_ARN``, passed to the job as
+``MLFLOW_TRACKING_URI``), come from the environment (see ``REQUIRED_ENV``).
 """
 
 from __future__ import annotations
@@ -168,6 +172,64 @@ def _image_uri(registry: str, image: str) -> str:
     return f"{registry}/{image}"
 
 
+def _pin_image(ecr: Any, registry: str, image: str) -> str:
+    """Return the training image URI pinned to its ECR digest.
+
+    Args:
+        ecr: An ECR client.
+        registry: The ``SM_ECR_REGISTRY`` value.
+        image: ``job.image``; a ``repo@sha256:...`` value is used as given, with no ECR call.
+
+    Raises:
+        ValueError: If ``image`` is a full ECR URI or ECR cannot resolve its tag.
+    """
+    from botocore.exceptions import ClientError
+
+    uri = _image_uri(registry, image)
+    if "@" in image:
+        return uri
+    repo, _, tag = image.partition(":")
+    try:
+        details = ecr.describe_images(repositoryName=repo, imageIds=[{"imageTag": tag}])
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        raise ValueError(f"cannot resolve job.image {image!r} in ECR: {code}") from exc
+    digest = details["imageDetails"][0]["imageDigest"]
+    print(f"Image: {repo}:{tag} -> {digest}")
+    return f"{registry}/{repo}@{digest}"
+
+
+def _init_checkpoint_key(init_from_job: str, init_weights: str) -> str:
+    """Return the staging-bucket key of a source job's checkpoint."""
+    return f"runs/{init_from_job}/checkpoints/{init_weights}"
+
+
+def _check_init_source(
+    sagemaker: Any, s3: Any, bucket: str, init_from_job: str, init_weights: str
+) -> None:
+    """Check that the source job completed and its init checkpoint is readable.
+
+    Raises:
+        ValueError: Naming the job and its status, or the checkpoint's s3:// URI and the S3
+            error code, when a check fails.
+    """
+    from botocore.exceptions import ClientError
+
+    try:
+        status = sagemaker.describe_training_job(TrainingJobName=init_from_job)["TrainingJobStatus"]
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        raise ValueError(f"cannot describe --init-from-job {init_from_job!r}: {code}") from exc
+    if status != "Completed":
+        raise ValueError(f"--init-from-job {init_from_job!r} is {status}, not Completed")
+    key = _init_checkpoint_key(init_from_job, init_weights)
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        raise ValueError(f"init checkpoint s3://{bucket}/{key} is not readable: {code}") from exc
+
+
 def _s3_channel(name: str, uri: str) -> dict[str, Any]:
     """Return a fully replicated S3Prefix input channel."""
     return {
@@ -202,7 +264,8 @@ def build_request(
     runs = f"s3://{env['SM_STAGING_BUCKET']}/runs"
     channels = [_s3_channel("config", f"{runs}/{job_name}/config/")]
     if cfg.train.init_weights is not None:
-        init_uri = f"{runs}/{init_from_job}/checkpoints/{cfg.train.init_weights}"
+        key = _init_checkpoint_key(str(init_from_job), cfg.train.init_weights)
+        init_uri = f"s3://{env['SM_STAGING_BUCKET']}/{key}"
         channels.append(_s3_channel("init", init_uri))
     return {
         "TrainingJobName": job_name,
@@ -247,15 +310,35 @@ def _cloudwatch_url(job_name: str) -> str:
     )
 
 
-def _submit(run_config: Path, request: Mapping[str, Any], bucket: str) -> None:
-    """Upload the run YAML to the job's config prefix, then create the TrainingJob."""
+def _submit(
+    run_config: Path,
+    request: Mapping[str, Any],
+    cfg: RunConfig,
+    env: Mapping[str, str],
+    init_from_job: str | None,
+) -> None:
+    """Check the image and init source, upload the run YAML, then create the TrainingJob.
+
+    Raises:
+        ValueError: If the image or the init source check fails; nothing is uploaded then.
+    """
     import boto3
 
+    bucket = env["SM_STAGING_BUCKET"]
     job_name = request["TrainingJobName"]
     s3 = boto3.client("s3", region_name=REGION)
-    s3.upload_file(str(run_config), bucket, f"runs/{job_name}/config/{run_config.name}")
     sagemaker = boto3.client("sagemaker", region_name=REGION)
-    sagemaker.create_training_job(**request)
+    image = _pin_image(
+        boto3.client("ecr", region_name=REGION), env["SM_ECR_REGISTRY"], cfg.job.image
+    )
+    if init_from_job is not None and cfg.train.init_weights is not None:
+        _check_init_source(sagemaker, s3, bucket, init_from_job, cfg.train.init_weights)
+    pinned = {
+        **request,
+        "AlgorithmSpecification": {**request["AlgorithmSpecification"], "TrainingImage": image},
+    }
+    s3.upload_file(str(run_config), bucket, f"runs/{job_name}/config/{run_config.name}")
+    sagemaker.create_training_job(**pinned)
     print(f"Submitted TrainingJob {job_name}")
     print(f"Console:    {_console_url(job_name)}")
     print(f"CloudWatch: {_cloudwatch_url(job_name)}")
@@ -303,7 +386,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dry_run:
         print(json.dumps(request, indent=2))
         return 0
-    _submit(args.run_config, request, env["SM_STAGING_BUCKET"])
+    try:
+        _submit(args.run_config, request, cfg, env, args.init_from_job)
+    except ValueError as exc:
+        sys.exit(f"ERROR: {exc}")
     return 0
 
 
