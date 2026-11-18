@@ -12,6 +12,8 @@ Container definition for SageMaker training jobs launched by
 | `entrypoint.sh` | Shim: runs `python -m scripts.sagemaker.train_entrypoint` from `/opt/ml/code` |
 | `local_smoke.sh` | Local build and offline check (`make sm-smoke`) |
 
+On StopTrainingJob or MaxRuntime, SageMaker sends SIGTERM to the trainer. A single-GPU job ends its MLflow run as failed and flushes queued metrics before it exits. A multi-GPU job (torchrun) usually does not: rank 0 is typically blocked in a collective when the other ranks die, so torchrun kills it after 30 s and the MLflow run can be left RUNNING.
+
 ## Build
 
 Images are built only by the `sagemaker-image` workflow, from a committed tree on `main`: Actions,

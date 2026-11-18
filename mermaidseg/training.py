@@ -222,6 +222,10 @@ def _sigterm_raises_system_exit(enabled: bool) -> Iterator[None]:
         return
 
     def _raise_exit(signum: int, frame: Any) -> None:
+        # A group-wide SIGTERM also kills the DataLoader workers; torch's SIGCHLD handler would
+        # then raise inside the unwinding tracker flush. A repeated SIGTERM must not cut it short.
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         raise SystemExit(SIGTERM_EXIT_CODE)
 
     previous = signal.signal(signal.SIGTERM, _raise_exit)
@@ -444,7 +448,9 @@ def run(args: argparse.Namespace) -> None:
     else:
         logger_context = contextlib.nullcontext(None)
     # SIGTERM (SageMaker stop, Slurm) must unwind `logger_context` so the tracker run is ended
-    # as failed. Only rank 0 owns a tracker run.
+    # as failed. Only rank 0 owns a tracker run. This holds for single-process runs; under
+    # torchrun (multi-GPU) rank 0 is typically blocked in a collective when its peers die, so
+    # its handler never runs and torchrun SIGKILLs it after 30 s, leaving the run RUNNING.
     with _sigterm_raises_system_exit(dist_ctx.is_main), logger_context as run_logger:
         if run_logger is not None:
             run_logger.log_dict(sidecar, "metadata/model.json")
