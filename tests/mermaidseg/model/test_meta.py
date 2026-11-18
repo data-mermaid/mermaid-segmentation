@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 from pathlib import Path
@@ -136,17 +137,32 @@ def test_cpu_train_step_without_mixed_precision_does_not_autocast(minimal_config
     assert seen["enabled"] is False
 
 
-def test_cuda_bf16_unsupported_raises_before_building_the_model(minimal_config, monkeypatch):
-    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda *a, **k: False)
+def test_cuda_bf16_check_targets_the_model_device_without_emulation(minimal_config, monkeypatch):
+    support_kwargs: list[dict] = []
+    entered_devices: list[torch.device] = []
+
+    def record_support(*args, **kwargs):
+        support_kwargs.append(kwargs)
+        return False
+
+    @contextlib.contextmanager
+    def record_device(device):
+        entered_devices.append(device)
+        yield
+
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", record_support)
+    monkeypatch.setattr(torch.cuda, "device", record_device)
     cfg = _standard_cfg(minimal_config, mixed_precision=True, mixed_precision_dtype="bfloat16")
     with pytest.raises(RuntimeError, match="mixed_precision_dtype"):
         meta_module.MetaModel(
-            run_name="no-bf16",
+            run_name="no-bf16-device",
             num_classes=4,
             model_kwargs=cfg.model,
             training_kwargs=cfg.training,
-            device=torch.device("cuda"),
+            device=torch.device("cuda:1"),
         )
+    assert support_kwargs == [{"including_emulation": False}]
+    assert entered_devices == [torch.device("cuda:1")]
 
 
 def test_accumulate_loss_averages_in_fp32(minimal_config, make_meta_model):

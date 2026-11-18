@@ -109,6 +109,12 @@ def records_train_metrics(microbatch_index: int, every: int) -> bool:
     return int(microbatch_index) % max(1, int(every)) == 0
 
 
+def _cuda_bf16_supported(device: torch.device) -> bool:
+    # Native bf16 only (pre-Ampere GPUs emulate it slowly), on the model's device, not the current one.
+    with torch.cuda.device(device):
+        return torch.cuda.is_bf16_supported(including_emulation=False)
+
+
 def resolve_amp_dtype(dtype_config: Any) -> torch.dtype:
     """Map a config value to the torch autocast dtype; only bfloat16 is supported."""
     if isinstance(dtype_config, torch.dtype):
@@ -266,7 +272,7 @@ class MetaModel:
             self.use_amp
             and self.device_type == "cuda"
             and self.amp_dtype == torch.bfloat16
-            and not torch.cuda.is_bf16_supported()
+            and not _cuda_bf16_supported(torch.device(device))
         ):
             raise RuntimeError(
                 "mixed_precision_dtype='bfloat16' is not supported on this GPU; "

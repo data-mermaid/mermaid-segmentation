@@ -25,6 +25,7 @@ from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
 from mermaidseg.io import ConfigDict, load_config, resolve_repo_path, setup_config
 from mermaidseg.model.distributed import DistContext
+from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
 from mermaidseg.training import (
     VAL_GENERATOR_SEED_OFFSET,
     _assemble_train_datasets,
@@ -411,7 +412,9 @@ def test_load_training_checkpoint_restores_the_resume_state(
     meta = make_meta_model(minimal_config, run_name="resume-ok")
     path = tmp_path / "ckpt.pt"
     torch.save(_resume_checkpoint(meta), path)
-    start_epoch = load_training_checkpoint(meta, str(path), "cpu", DistContext())
+    start_epoch = load_training_checkpoint(
+        meta, read_checkpoint(path, RESUME_CHECKPOINT_KEYS), DistContext()
+    )
     assert start_epoch == 2
     assert meta.global_step == 7
     assert meta._warmup_iters_completed == 5
@@ -453,21 +456,23 @@ def test_resumed_mid_warmup_lr_matches_the_uninterrupted_run(make_meta_model, tm
     torch.save(checkpoint, path)
 
     resumed = make_meta_model(_warmup_config(), run_name="second-half")
-    load_training_checkpoint(resumed, str(path), "cpu", DistContext())
+    load_training_checkpoint(resumed, read_checkpoint(path, RESUME_CHECKPOINT_KEYS), DistContext())
     assert _lr_after_steps(resumed, 11) == pytest.approx(continuous[5:])
 
 
 @pytest.mark.parametrize(
     "missing",
     [
+        "model_state_dict",
         "optimizer_state_dict",
         "scheduler_state_dict",
-        "global_step",
-        "epoch_complete",
         "warmup_iters_completed",
+        "global_step",
+        "epoch",
+        "epoch_complete",
     ],
 )
-def test_load_training_checkpoint_requires_each_resume_key(
+def test_read_checkpoint_requires_each_resume_key(
     minimal_config, make_meta_model, tmp_path, missing
 ):
     meta = make_meta_model(minimal_config, run_name="resume-missing")
@@ -475,8 +480,27 @@ def test_load_training_checkpoint_requires_each_resume_key(
     del checkpoint[missing]
     path = tmp_path / "ckpt.pt"
     torch.save(checkpoint, path)
-    with pytest.raises(KeyError, match=missing):
-        load_training_checkpoint(meta, str(path), "cpu", DistContext())
+    with pytest.raises(RuntimeError, match=missing):
+        read_checkpoint(path, RESUME_CHECKPOINT_KEYS)
+
+
+def test_run_rejects_a_bad_checkpoint_before_building_datasets(monkeypatch, tmp_path):
+    def _unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("run() reached dataset setup with an unloadable checkpoint")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.delenv("WANDB_RUN_ID", raising=False)
+    fake_wandb = _fake_wandb(_FakeWandbRun())
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+    monkeypatch.setattr(mermaidseg.logger, "wandb", fake_wandb)
+    monkeypatch.setattr(training, "setup_local_cache", _unreachable)
+    monkeypatch.setattr(training, "build_datasets", _unreachable)
+    bad = tmp_path / "bad.pt"
+    bad.write_bytes(b"not a checkpoint")
+    args = _smoke_args(tmp_path, tmp_path / "out", tmp_path / "cache", checkpoint=bad)
+    with pytest.raises(RuntimeError, match="bad.pt"):
+        training.run(args)
 
 
 @_FORK_ONLY

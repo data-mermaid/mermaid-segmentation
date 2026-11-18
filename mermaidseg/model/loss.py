@@ -1,6 +1,6 @@
 """Classification and concept-bottleneck losses."""
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator
 
 import torch
 import torch.nn.functional as F
@@ -11,27 +11,6 @@ from mermaidseg.model.concept_metrics import (
     calculate_taxonomic_rank_loss,
     reduce_masked_loss,
 )
-
-
-def stack_components(
-    values: Sequence[torch.Tensor | float], device: torch.device | None = None
-) -> torch.Tensor:
-    """Stack scalar components into one float64 vector, on ``device`` or the tensors' device."""
-    if device is None:
-        device = next((v.device for v in values if isinstance(v, torch.Tensor)), None)
-    return torch.stack(
-        [
-            torch.as_tensor(v, dtype=torch.float64, device=device).detach().reshape(())
-            for v in values
-        ]
-    )
-
-
-def components_to_floats(components: Mapping[str, torch.Tensor | float]) -> dict[str, float]:
-    """Host floats of scalar components, through a single device-to-host transfer."""
-    if not components:
-        return {}
-    return dict(zip(components, stack_components(list(components.values())).tolist(), strict=True))
 
 
 def iter_concept_slices(

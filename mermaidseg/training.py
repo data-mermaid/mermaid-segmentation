@@ -31,11 +31,14 @@ from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
 from mermaidseg.model.train import train_model
 from mermaidseg.run_setup import (
+    MODEL_CHECKPOINT_KEYS,
+    RESUME_CHECKPOINT_KEYS,
     build_meta_model,
     build_registry,
     check_env_wandb,
     load_model_weights,
     load_run_concept_source_mask,
+    read_checkpoint,
     write_resolved_config,
 )
 from mermaidseg.seeding import make_worker_seeder, seed_everything
@@ -79,24 +82,23 @@ def print0(dist_ctx: DistContext, *args: Any, **kwargs: Any) -> None:
 
 def load_training_checkpoint(
     meta_model: MetaModel,
-    checkpoint_path: str,
-    device: torch.device | str,
+    checkpoint: dict,
     dist_ctx: DistContext,
     *,
     load_optimizer: bool = True,
 ) -> int:
-    """Load model weights and, when resuming, optimizer and scheduler state.
+    """Load model weights and, when resuming, optimizer and scheduler state from ``checkpoint``.
 
     ``load_optimizer=False`` keeps the freshly constructed optimizer and schedule
     (hi-res fine-tune from cooled weights).
     """
-    checkpoint = load_model_weights(meta_model, checkpoint_path, device)
+    load_model_weights(meta_model, checkpoint)
 
     if not load_optimizer:
         return 0
 
-    # torch.load(map_location=device) already placed the state tensors on `device`, and the model
-    # was loaded in place (same Parameter objects the optimizer references).
+    # The state tensors are on the CPU; `optimizer.load_state_dict` casts them to each param's
+    # device. The model was loaded in place (same Parameter objects the optimizer references).
     meta_model.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     meta_model.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
     restore_warmup_progress(meta_model, checkpoint)
@@ -104,6 +106,15 @@ def load_training_checkpoint(
     # A mid-epoch model_step* file sets epoch_complete false and continues this epoch.
     meta_model.resuming_within_epoch = not bool(checkpoint["epoch_complete"])
     return next_epoch_from_checkpoint(checkpoint)
+
+
+def _read_run_checkpoint(args: argparse.Namespace) -> dict | None:
+    """The ``--init-weights`` or ``--checkpoint`` file, read and key-checked; ``None`` if neither."""
+    if args.init_weights:
+        return read_checkpoint(args.init_weights, MODEL_CHECKPOINT_KEYS)
+    if args.checkpoint:
+        return read_checkpoint(args.checkpoint, RESUME_CHECKPOINT_KEYS)
+    return None
 
 
 def make_shuffled_loader(
@@ -234,6 +245,8 @@ def run(args: argparse.Namespace) -> None:
 
     # slurm/train.sbatch resumes the latest checkpoint through --checkpoint.
     checkpoint = args.checkpoint
+    # Read before any dataset work so an unloadable file fails in seconds.
+    checkpoint_data = _read_run_checkpoint(args)
 
     # torchrun decides: one process per GPU trains its shard of each minibatch.
     cfg.training.distributed = dist_ctx.distributed
@@ -342,7 +355,8 @@ def run(args: argparse.Namespace) -> None:
     start_epoch = 0
     init_weights = args.init_weights
     if init_weights:
-        load_training_checkpoint(meta_model, init_weights, device, dist_ctx, load_optimizer=False)
+        assert checkpoint_data is not None
+        load_training_checkpoint(meta_model, checkpoint_data, dist_ctx, load_optimizer=False)
         # Optimizer and warmup were built with the training config before the load.
         # Leave them alone: a cooled source has LR 0 and Adam moments we do not want.
         fresh_lrs = [group["lr"] for group in meta_model.optimizer.param_groups]
@@ -354,7 +368,8 @@ def run(args: argparse.Namespace) -> None:
         seed_run(seed, train_generator, val_generator)
         print0(dist_ctx, f"Re-seeded RNG to {seed} for the new run's data order")
     elif checkpoint:
-        start_epoch = load_training_checkpoint(meta_model, checkpoint, device, dist_ctx)
+        assert checkpoint_data is not None
+        start_epoch = load_training_checkpoint(meta_model, checkpoint_data, dist_ctx)
         print0(dist_ctx, f"Loaded checkpoint {checkpoint!r}; resuming at epoch {start_epoch}")
         if start_epoch >= int(cfg.training.epochs):
             print0(
@@ -375,6 +390,8 @@ def run(args: argparse.Namespace) -> None:
             seed_note = f"{start_epoch} trained epochs"
         seed_run(resume_seed, train_generator, val_generator)
         print0(dist_ctx, f"Re-seeded RNG to {resume_seed} (seed={seed} + {seed_note})")
+    # Release the host copy of the checkpoint before the loaders fork their workers.
+    del checkpoint_data
 
     evaluator = Evaluator(
         num_classes=registry.num_target_classes,
