@@ -96,6 +96,25 @@ class Tracker(Protocol):
         ...
 
 
+METRIC_WARNING_INTERVAL = 100
+
+
+def _warn_metrics_failure(backend: str, failures: int, error: Exception) -> None:
+    """Warn on the 1st ``log_metrics`` failure and on every 100th after it.
+
+    ``failures`` is the running count including this one. A tracker outage with a
+    per-batch log interval would otherwise write one identical warning per batch.
+    """
+    if failures == 1 or failures % METRIC_WARNING_INTERVAL == 0:
+        logger.warning("Failed to log metrics to %s (failure %d): %s", backend, failures, error)
+
+
+def _warn_metrics_failure_total(backend: str, failures: int) -> None:
+    """Warn with the total of failed ``log_metrics`` calls when it is non-zero."""
+    if failures:
+        logger.warning("%d log_metrics calls to %s failed during the run", failures, backend)
+
+
 class WandbTracker:
     """Tracker that logs to one wandb run."""
 
@@ -130,6 +149,7 @@ class WandbTracker:
             id=run_id,
             resume="allow" if run_id is not None else None,
         )
+        self._metric_failures = 0
 
     @classmethod
     def from_config(cls, logger_cfg: Any, run_name: str, config: Any) -> Self:
@@ -163,7 +183,8 @@ class WandbTracker:
         try:
             self._run.log(metrics, step=step)
         except Exception as e:
-            logger.warning("Failed to log metrics to wandb: %s", e)
+            self._metric_failures += 1
+            _warn_metrics_failure("wandb", self._metric_failures, e)
 
     def log_dict(self, data: dict[str, Any], artifact_path: str) -> None:
         """Log ``data`` as a JSON-file artifact named after the basename of ``artifact_path``.
@@ -190,6 +211,7 @@ class WandbTracker:
             logger.info("Ended wandb run")
         except Exception as e:
             logger.warning("Failed to end wandb run: %s", e)
+        _warn_metrics_failure_total("wandb", self._metric_failures)
 
 
 def _mlflow_key(key: str) -> str:
@@ -237,9 +259,11 @@ class MlflowTracker:
         # Autologging re-logs committed metrics, a UniqueViolation on SageMaker's metric table.
         mlflow.pytorch.autolog(disable=True)
         mlflow.set_tracking_uri(tracking_uri)
+        # Connectivity probe: fails fast, before a run is created on an unreachable server.
         mlflow.search_experiments(max_results=1)
         mlflow.set_experiment(experiment_name)
         self._run = mlflow.start_run(run_name=run_name)
+        self._metric_failures = 0
 
     @classmethod
     def from_config(cls, logger_cfg: Any, run_name: str, config: Any) -> Self:
@@ -259,7 +283,11 @@ class MlflowTracker:
         )
 
     def log_params(self, params: dict[str, Any]) -> None:
-        """Log params under sanitized keys; MLflow stores each value as its ``str``."""
+        """Log params under sanitized keys; MLflow stores each value as its ``str``.
+
+        The write is asynchronous (``synchronous=False``): a failed server write is not
+        raised here. It surfaces only as mlflow's own ERROR log lines and at ``end_run``.
+        """
         try:
             self._mlflow.log_params(
                 {_mlflow_key(k): v for k, v in params.items()}, synchronous=False
@@ -268,13 +296,18 @@ class MlflowTracker:
             logger.warning("Failed to log params to MLflow: %s", e)
 
     def log_metrics(self, metrics: dict[str, float], step: int) -> None:
-        """Log metrics under sanitized keys at ``step``."""
+        """Log metrics under sanitized keys at ``step``.
+
+        The write is asynchronous (``synchronous=False``): a failed server write is not
+        raised here. It surfaces only as mlflow's own ERROR log lines and at ``end_run``.
+        """
         try:
             self._mlflow.log_metrics(
                 {_mlflow_key(k): v for k, v in metrics.items()}, step=step, synchronous=False
             )
         except Exception as e:
-            logger.warning("Failed to log metrics to MLflow: %s", e)
+            self._metric_failures += 1
+            _warn_metrics_failure("MLflow", self._metric_failures, e)
 
     def log_dict(self, data: dict[str, Any], artifact_path: str) -> None:
         """Log ``data`` as the JSON artifact ``artifact_path`` of the run."""
@@ -293,6 +326,7 @@ class MlflowTracker:
             logger.info("Ended MLflow run")
         except Exception as e:
             logger.warning("Failed to end MLflow run: %s", e)
+        _warn_metrics_failure_total("MLflow", self._metric_failures)
 
 
 TRACKER_CLASSES: dict[str, Callable[[Any, str, Any], Tracker]] = {
