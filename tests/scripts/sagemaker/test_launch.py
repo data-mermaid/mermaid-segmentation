@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 import scripts.sagemaker.launch as launch
 from scripts.sagemaker.run_config import RunConfig, load_run_config
@@ -207,47 +208,200 @@ def test_dry_run_prints_the_request_without_boto3(fake_env, monkeypatch, capsys)
     assert printed["RoleArn"] == "arn:fake:role"
 
 
+_DIGEST = "sha256:" + "a" * 64
+_IMAGE_REPO = "mermaid-segmentation-jobs"
+
+
+def _client_error(code: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": "boom"}}, "Operation")
+
+
+class _FakeECR:
+    def __init__(self, calls: list[str], error: Exception | None = None) -> None:
+        self.calls = calls
+        self.error = error
+        self.requests: list[dict[str, Any]] = []
+
+    def describe_images(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append("ecr.describe_images")
+        self.requests.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return {"imageDetails": [{"imageDigest": _DIGEST}]}
+
+
 class _FakeS3:
-    def __init__(self) -> None:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
         self.uploads: list[tuple[str, str, str]] = []
+        self.heads: list[dict[str, Any]] = []
+        self.head_error: Exception | None = None
+        self.upload_error: Exception | None = None
+
+    def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append("s3.head_object")
+        self.heads.append(kwargs)
+        if self.head_error is not None:
+            raise self.head_error
+        return {}
 
     def upload_file(self, filename: str, bucket: str, key: str) -> None:
+        self.calls.append("s3.upload_file")
+        if self.upload_error is not None:
+            raise self.upload_error
         self.uploads.append((filename, bucket, key))
 
 
 class _FakeSageMaker:
-    def __init__(self, s3: _FakeS3) -> None:
+    def __init__(self, calls: list[str], s3: _FakeS3) -> None:
+        self.calls = calls
         self.s3 = s3
+        self.source_status = "Completed"
+        self.described: list[str] = []
         self.created: list[dict[str, Any]] = []
+
+    def describe_training_job(self, TrainingJobName: str) -> dict[str, str]:
+        self.calls.append("sagemaker.describe_training_job")
+        self.described.append(TrainingJobName)
+        return {"TrainingJobStatus": self.source_status}
 
     def create_training_job(self, **kwargs: Any) -> dict[str, str]:
         assert self.s3.uploads, "config must be uploaded before the job is created"
+        self.calls.append("sagemaker.create_training_job")
         self.created.append(kwargs)
         return {"TrainingJobArn": "arn:fake:job"}
 
 
-def test_submit_uploads_the_yaml_then_creates_the_job(fake_env, monkeypatch, capsys):
-    s3 = _FakeS3()
-    sm = _FakeSageMaker(s3)
-    clients = {"s3": s3, "sagemaker": sm}
-    regions: list[str] = []
+class _Aws:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.ecr = _FakeECR(self.calls)
+        self.s3 = _FakeS3(self.calls)
+        self.sm = _FakeSageMaker(self.calls, self.s3)
+        self.regions: list[str] = []
+
+
+@pytest.fixture
+def aws(fake_env, monkeypatch):
+    harness = _Aws()
+    clients = {"ecr": harness.ecr, "s3": harness.s3, "sagemaker": harness.sm}
 
     def fake_client(service: str, region_name: str) -> object:
-        regions.append(region_name)
+        harness.regions.append(region_name)
         return clients[service]
 
     monkeypatch.setattr("boto3.client", fake_client)
     monkeypatch.setattr(launch, "make_run_id", lambda prefix: "fixed-job")
+    return harness
 
+
+def _pinned_request(path: Path, init_from_job: str | None) -> dict[str, Any]:
+    request = launch.build_request(load_run_config(path), "fixed-job", _FAKE_ENV, init_from_job)
+    request["AlgorithmSpecification"]["TrainingImage"] = (
+        f"{_FAKE_ENV['SM_ECR_REGISTRY']}/{_IMAGE_REPO}@{_DIGEST}"
+    )
+    return request
+
+
+def _assert_nothing_written(aws: _Aws) -> None:
+    assert "s3.upload_file" not in aws.calls
+    assert "sagemaker.create_training_job" not in aws.calls
+
+
+def test_submit_pins_the_image_by_digest_then_uploads_then_creates(aws, capsys):
     assert launch.main(["--run-config", str(_CBM)]) == 0
 
-    assert s3.uploads == [(str(_CBM), "fake-bucket", "runs/fixed-job/config/cbm_final.yaml")]
-    assert sm.created == [launch.build_request(load_run_config(_CBM), "fixed-job", _FAKE_ENV, None)]
-    assert set(regions) == {"us-east-1"}
+    assert aws.ecr.requests == [
+        {"repositoryName": _IMAGE_REPO, "imageIds": [{"imageTag": "training-latest"}]}
+    ]
+    assert aws.s3.uploads == [(str(_CBM), "fake-bucket", "runs/fixed-job/config/cbm_final.yaml")]
+    assert aws.sm.created == [_pinned_request(_CBM, None)]
+    assert aws.calls == ["ecr.describe_images", "s3.upload_file", "sagemaker.create_training_job"]
+    assert set(aws.regions) == {"us-east-1"}
     out = capsys.readouterr().out
+    assert f"Image: {_IMAGE_REPO}:training-latest -> {_DIGEST}\n" in out
     assert "fixed-job" in out
     assert "console.aws.amazon.com/sagemaker" in out
     assert "console.aws.amazon.com/cloudwatch" in out
+
+
+def test_digest_form_image_passes_through_without_an_ecr_call(aws, tmp_path):
+    cfg = load_run_config(_CBM)
+    job = cfg.job.model_copy(update={"image": f"{_IMAGE_REPO}@{_DIGEST}"})
+    path = _write(tmp_path, cfg.model_copy(update={"job": job}))
+
+    assert launch.main(["--run-config", str(path)]) == 0
+
+    assert aws.ecr.requests == []
+    image = aws.sm.created[0]["AlgorithmSpecification"]["TrainingImage"]
+    assert image == f"{_FAKE_ENV['SM_ECR_REGISTRY']}/{_IMAGE_REPO}@{_DIGEST}"
+
+
+def test_unknown_image_tag_exits_naming_the_image_before_any_write(aws):
+    aws.ecr.error = _client_error("ImageNotFoundException")
+
+    with pytest.raises(SystemExit, match=r"^ERROR: .*mermaid-segmentation-jobs:training-latest"):
+        launch.main(["--run-config", str(_CBM)])
+
+    _assert_nothing_written(aws)
+
+
+def test_res768_with_a_completed_source_creates_the_job_with_the_init_channel(aws):
+    args = ["--run-config", str(_RES768), "--init-from-job", _SOURCE_JOB]
+
+    assert launch.main(args) == 0
+
+    assert aws.sm.described == [_SOURCE_JOB]
+    assert aws.s3.heads == [
+        {
+            "Bucket": "fake-bucket",
+            "Key": f"runs/{_SOURCE_JOB}/checkpoints/model_checkpoints/cbm_final/model_step300000",
+        }
+    ]
+    assert aws.calls == [
+        "ecr.describe_images",
+        "sagemaker.describe_training_job",
+        "s3.head_object",
+        "s3.upload_file",
+        "sagemaker.create_training_job",
+    ]
+    assert aws.sm.created == [_pinned_request(_RES768, _SOURCE_JOB)]
+
+
+@pytest.mark.parametrize("status", ["InProgress", "Failed"])
+def test_source_job_not_completed_exits_naming_job_and_status(aws, status):
+    aws.sm.source_status = status
+    args = ["--run-config", str(_RES768), "--init-from-job", _SOURCE_JOB]
+
+    with pytest.raises(SystemExit, match=rf"^ERROR: .*{_SOURCE_JOB}.*{status}"):
+        launch.main(args)
+
+    _assert_nothing_written(aws)
+    assert "s3.head_object" not in aws.calls
+
+
+@pytest.mark.parametrize("code", ["404", "403"])
+def test_unreadable_init_checkpoint_exits_naming_uri_and_code(aws, code):
+    aws.s3.head_error = _client_error(code)
+    args = ["--run-config", str(_RES768), "--init-from-job", _SOURCE_JOB]
+    uri = (
+        f"s3://fake-bucket/runs/{_SOURCE_JOB}/checkpoints/"
+        "model_checkpoints/cbm_final/model_step300000"
+    )
+
+    with pytest.raises(SystemExit, match=rf"^ERROR: .*{re.escape(uri)}.*{code}"):
+        launch.main(args)
+
+    _assert_nothing_written(aws)
+
+
+def test_failed_upload_does_not_create_the_job(aws):
+    aws.s3.upload_error = RuntimeError("upload failed")
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        launch.main(["--run-config", str(_CBM)])
+
+    assert "sagemaker.create_training_job" not in aws.calls
 
 
 # ---------- make_run_id ----------
