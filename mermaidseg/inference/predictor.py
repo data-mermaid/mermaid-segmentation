@@ -17,7 +17,7 @@ so serving can load it.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -25,6 +25,9 @@ import torch.nn.functional as F
 from numpy.typing import NDArray
 
 from mermaidseg.inference.preprocess import preprocess
+
+if TYPE_CHECKING:
+    from mermaidseg.inference.bundle import ModelBundle
 
 
 def class_probabilities(logits: torch.Tensor) -> torch.Tensor:
@@ -76,6 +79,18 @@ class CBMPredictor:
         classifier = cast("Any", model.concept_classifier)
         self.num_concepts = int(classifier.in_channels)
         self.num_classes = int(classifier.out_channels)
+
+    @classmethod
+    def from_bundle(cls, bundle: ModelBundle, *, amp_dtype: torch.dtype | None) -> CBMPredictor:
+        """Build a predictor from a loaded bundle's model, preprocessing and device."""
+        return cls(
+            bundle.model,
+            input_size=bundle.input_size,
+            mean=bundle.mean,
+            std=bundle.std,
+            device=bundle.device,
+            amp_dtype=amp_dtype,
+        )
 
     # -- preprocessing ---------------------------------------------------------
     def preprocess(self, image_rgb_uint8: NDArray[np.uint8]) -> torch.Tensor:

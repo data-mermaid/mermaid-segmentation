@@ -27,6 +27,7 @@ dependencies = [
     "peft>=0.19.1",
     "wandb>=0.25.0",
     "pydantic>=2.13.3",
+    "safetensors>=0.7.0",
 ]
 
 [dependency-groups]
