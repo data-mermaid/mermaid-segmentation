@@ -100,12 +100,15 @@ Batch jobs write `.venv`, `outputs/` and `logs/` inside the checkout. The checko
 
 SageMaker is the backup to Slurm. It runs the same `scripts/train.py` with the same arguments as `slurm/launch_final.sh`. Jobs are on-demand and do not resume: relaunch a failed job from scratch.
 
-1. Set the SageMaker variables in `.env` (see `.env.example`) and load it. The Makefile reads them from the environment.
-2. Run the `sagemaker-image` GitHub workflow on `main` (Actions, Run workflow). It builds the image; see [docker/jobs/README.md](docker/jobs/README.md). The job runs the code and `configs/` baked into the image. `training-latest` is `main` at the last workflow run on `main`. Only the run YAML travels with the job. Merge config and code changes, and rerun the workflow, before you launch.
-3. Run `make sm-validate` to check the run YAML offline. It checks only your local checkout, not the image.
+1. Set the SageMaker variables in `.env` (see `.env.example`) and load it: the Makefile reads them from the environment.
+2. Run the `sagemaker-image` GitHub workflow (Actions, Run workflow). Only `main` can run it. It builds the image, pushes `training-<sha>` and moves `training-latest`; see [docker/jobs/README.md](docker/jobs/README.md). The job runs the code and `configs/` baked into the image: `training-latest` is `main` at the last workflow run. Only the run YAML travels with the job. Merge config and code changes, and rerun the workflow, before you launch.
+3. Run `make sm-validate` to check the run YAML offline. It checks only your local checkout, not the image. The 768 px YAML sets `train.init_weights`, so it also needs `INIT_FROM_JOB`: `make sm-validate SM_RUN_CONFIG=sagemaker/runs/cbm_final_res768.yaml INIT_FROM_JOB=<cbm_final job name>`.
 4. Run `make sm-launch` to submit `cbm_final` (`sagemaker/runs/cbm_final.yaml`). `make sm-dry-run` shows the request without submitting.
 5. When `cbm_final` finishes, submit the 768 px fine-tune with the first job's name:
    `make sm-launch SM_RUN_CONFIG=sagemaker/runs/cbm_final_res768.yaml INIT_FROM_JOB=<cbm_final job name>`
+   The launcher first requires the source job to be `Completed` and its init checkpoint to be readable in S3, and refuses to launch otherwise.
+
+At launch, the launcher resolves `job.image` (`repo:tag`) to its ECR digest, submits `repo@sha256:...` and prints it. A job keeps running that exact image even if `training-latest` later moves. A `job.image` already in digest form is used as is. `--check` and `--dry-run` make no AWS call; a dry run shows the tag.
 
 Checkpoints sync to `s3://$SM_STAGING_BUCKET/runs/<job>/checkpoints/model_checkpoints/<run>/` (`model_step*`, `model.json`, `config.yaml`). Download them from there for export. The `git_sha` in `model.json` and the saved `config.yaml` record what the job ran.
 
