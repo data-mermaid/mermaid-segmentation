@@ -132,8 +132,8 @@ def _normalized(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
 
-def _require_clean_tree(sidecar: dict) -> None:
-    if sidecar.get("lineage", {}).get("git_dirty") is not False:
+def _require_clean_tree(lineage: dict) -> None:
+    if lineage.get("git_dirty") is not False:
         raise ValueError(
             "the run's git tree was dirty or unknown; deployment artifacts must come from a clean tree"
         )
@@ -157,10 +157,10 @@ def _require_matching_config(
     if left == right:
         return
     if not isinstance(left, dict) or not isinstance(right, dict):
-        raise ValueError(f"{checkpoint} config does not match the sidecar's resolved_config")
+        raise ValueError(f"{checkpoint} config does not match its lineage's resolved_config")
     key = next(k for k in [*left, *right] if left.get(k) != right.get(k))
     raise ValueError(
-        f"{checkpoint} config differs from the sidecar's resolved_config at key {key!r}"
+        f"{checkpoint} config differs from its lineage's resolved_config at key {key!r}"
     )
 
 
@@ -196,31 +196,32 @@ def _write_bundle_dir(
 def export_bundle(checkpoint: Path, out_dir: Path) -> Path:
     """Export ``checkpoint`` into a bundle directory at ``out_dir`` and return it.
 
-    The sidecar ``model.json`` beside the checkpoint supplies the architecture and lineage.
+    The sidecar ``model.json`` beside the checkpoint supplies the architecture, label maps
+    and preprocessing; the lineage is the checkpoint's own, from the session that wrote it.
 
     Raises:
         FileNotFoundError: The sidecar is missing or ``out_dir``'s parent does not exist.
-        RuntimeError: The checkpoint cannot be loaded or lacks a required key; the message
-            names its path.
-        ValueError: The run's tree was dirty or unknown, ``out_dir`` is not empty, or the
-            checkpoint's config differs from the sidecar's ``lineage.resolved_config``.
+        RuntimeError: The checkpoint cannot be loaded or lacks a required key, ``lineage``
+            included; the message names its path.
+        ValueError: The checkpoint's tree was dirty or unknown, ``out_dir`` is not empty, or
+            the checkpoint's config differs from its ``lineage.resolved_config``.
     """
     checkpoint, out_dir = Path(checkpoint), Path(out_dir)
     sidecar_path = checkpoint.parent / MODEL_JSON
     if not sidecar_path.is_file():
         raise FileNotFoundError(f"sidecar not found: {sidecar_path}")
     sidecar = json.loads(sidecar_path.read_text())
-    _require_clean_tree(sidecar)
     _require_empty_out_dir(out_dir)
     _require_parent_exists(out_dir)
     ckpt = read_checkpoint(
-        checkpoint, required_keys=("config", "model_state_dict", "epoch", "global_step")
+        checkpoint,
+        required_keys=("config", "model_state_dict", "epoch", "global_step", "lineage"),
     )
-    _require_matching_config(
-        ckpt["config"], sidecar.get("lineage", {}).get("resolved_config"), checkpoint
-    )
+    _require_clean_tree(ckpt["lineage"])
+    _require_matching_config(ckpt["config"], ckpt["lineage"].get("resolved_config"), checkpoint)
     metadata = {
         **sidecar,
+        "lineage": ckpt["lineage"],
         "weights": WEIGHTS,
         "checkpoint": {"epoch": ckpt["epoch"], "global_step": ckpt["global_step"]},
     }

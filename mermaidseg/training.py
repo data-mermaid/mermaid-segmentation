@@ -330,6 +330,7 @@ def run(args: argparse.Namespace) -> None:
         meta_model.set_concept_source_mask(concept_source_mask.keep)
 
     sidecar: dict[str, Any] = {}
+    lineage: dict[str, Any] | None = None
     if dist_ctx.is_main:
         lineage = collect_lineage(
             resolved_config=to_plain_dict(cfg_logger),
@@ -412,6 +413,7 @@ def run(args: argparse.Namespace) -> None:
             checkpoint_dir=args.output_dir,
             id2label={0: "ignore", **registry.target_id2label},
             save_local_checkpoints=True,
+            lineage=lineage,
         )
     else:
         logger_context = contextlib.nullcontext(None)

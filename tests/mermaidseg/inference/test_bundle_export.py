@@ -45,6 +45,38 @@ def test_exported_metadata_extends_the_sidecar_with_weights_and_checkpoint(run, 
     }
 
 
+def test_exported_lineage_is_the_checkpoints_not_the_sidecars(tmp_path):
+    own = {**_tiny.resolved_config()}
+    lineage = {"git_sha": "from-checkpoint", "git_dirty": False, "resolved_config": own}
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
+    export_bundle(checkpoint, tmp_path / "out")
+    exported = json.loads((tmp_path / "out" / MODEL_JSON).read_text())
+    sidecar = json.loads((checkpoint.parent / MODEL_JSON).read_text())
+    assert sidecar["lineage"]["git_sha"] == "abc123"
+    assert exported["lineage"] == lineage
+
+
+def test_export_refuses_a_dirty_checkpoint_after_the_sidecar_was_refreshed_clean(tmp_path):
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", git_dirty=True)
+    sidecar_path = checkpoint.parent / MODEL_JSON
+    sidecar = json.loads(sidecar_path.read_text())
+    sidecar["lineage"]["git_dirty"] = False
+    sidecar_path.write_text(json.dumps(sidecar))
+    with pytest.raises(ValueError, match="clean tree"):
+        export_bundle(checkpoint, tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_export_of_a_checkpoint_without_lineage_raises_naming_its_path(tmp_path):
+    checkpoint, _ = _tiny.write_run(tmp_path / "run")
+    contents = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    del contents["lineage"]
+    torch.save(contents, checkpoint)
+    with pytest.raises(RuntimeError, match="lineage") as excinfo:
+        export_bundle(checkpoint, tmp_path / "out")
+    assert str(checkpoint) in str(excinfo.value)
+
+
 def test_loaded_bundle_exposes_the_sidecar_contract(bundle_dir):
     bundle = load_bundle(bundle_dir, "cpu")
     assert bundle.path == bundle_dir
@@ -106,7 +138,9 @@ def test_export_accepts_an_existing_empty_output_directory(run, tmp_path):
     assert sorted(p.name for p in out.iterdir()) == sorted([MODEL_JSON, WEIGHTS])
 
 
-def test_export_refuses_a_checkpoint_whose_config_differs_naming_the_key(tmp_path):
+def test_export_refuses_a_checkpoint_whose_config_differs_from_its_lineage_naming_the_key(
+    tmp_path,
+):
     other = {**_tiny.resolved_config(), "seed": 1}
     checkpoint, _ = _tiny.write_run(tmp_path / "run", config=other)
     with pytest.raises(ValueError, match="seed"):

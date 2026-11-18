@@ -375,6 +375,7 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert resolved["training"]["concept_mapping_path"] == "configs/class_to_concepts.csv"
     checkpoint = torch.load(run_dir / "model_step1", weights_only=True)
     assert checkpoint["config"] == resolved
+    assert checkpoint["lineage"]["seed"] == 7
     assert not (workdir / "model_checkpoints").exists()
     assert cache_roots == [str(cache_dir)]
     assert wandb_run.params["cli/num_workers"] == 1

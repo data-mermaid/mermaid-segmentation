@@ -109,8 +109,12 @@ def write_run(
     config: dict[str, Any] | None = None,
     mean: Sequence[float] = IMAGENET_MEAN,
     std: Sequence[float] = IMAGENET_STD,
+    checkpoint_lineage: dict[str, Any] | None = None,
 ) -> tuple[Path, torch.nn.Module]:
-    """Write ``model.json`` and ``model_step1`` into ``run_dir``; return the checkpoint and model."""
+    """Write ``model.json`` and ``model_step1`` into ``run_dir``; return the checkpoint and model.
+
+    The checkpoint carries the sidecar's lineage unless ``checkpoint_lineage`` replaces it.
+    """
     model = build_trained_model()
     encoder: Any = model.encoder
     encoder_config = {
@@ -119,6 +123,11 @@ def write_run(
         if k not in ENV_ENCODER_KEYS
     }
     run_dir.mkdir(parents=True, exist_ok=True)
+    lineage = {
+        "git_sha": "abc123",
+        "git_dirty": git_dirty,
+        "resolved_config": resolved_config(),
+    }
     write_sidecar(
         run_dir,
         run_name=RUN_NAME,
@@ -130,11 +139,7 @@ def write_run(
         input_size=INPUT_SIZE,
         mean=mean,
         std=std,
-        lineage={
-            "git_sha": "abc123",
-            "git_dirty": git_dirty,
-            "resolved_config": resolved_config(),
-        },
+        lineage=lineage,
     )
     checkpoint = run_dir / "model_step1"
     torch.save(
@@ -143,6 +148,9 @@ def write_run(
             "model_state_dict": model.state_dict(),
             "epoch": 3,
             "global_step": 42,
+            "lineage": copy.deepcopy(
+                checkpoint_lineage if checkpoint_lineage is not None else lineage
+            ),
         },
         checkpoint,
     )
