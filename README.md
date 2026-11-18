@@ -28,9 +28,18 @@ echo "AWS_PROFILE=mermaid-core" >> .env
 hf auth login
 # Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
 
-# Install the locked dependencies
-uv sync --locked
+# Install the locked dependencies, with the tracker extra for your run (see below)
+uv sync --locked --extra slurm
 ```
+
+The core install has no experiment tracker. Add the extra for the backend your run logs to:
+
+| Extra | Installs | Use |
+|---|---|---|
+| `slurm` | wandb | Local and Slurm runs (the default logger config) |
+| `sagemaker` | mlflow, sagemaker-mlflow | SageMaker runs; the training image installs it |
+
+A run whose tracker is not installed stops at start with an `ImportError` that names the extra. See [Experiment tracking](#experiment-tracking).
 
 Contributors add a dependency group:
 
@@ -41,7 +50,7 @@ Contributors add a dependency group:
 | `dev` | `tests` and `lint` |
 
 ```bash
-uv sync --locked --group dev
+uv sync --locked --extra slurm --group dev
 ```
 
 ### Hugging Face Setup
@@ -62,7 +71,7 @@ scripts/train.py
   -> mermaidseg/training.py
        configs validated by mermaidseg/config.py (strict pydantic models)
        labels and concepts from mermaidseg/dataset_reconciliation/
-       MetaModel (mermaidseg/model/meta.py), wandb Logger (mermaidseg/logger.py)
+       MetaModel (mermaidseg/model/meta.py), Logger over a wandb or MLflow tracker (mermaidseg/logger.py)
   -> outputs/model_checkpoints/<run>/
        model_step* checkpoints (with lineage), config.yaml, model.json
   -> scripts/export.py (mermaidseg/export.py)
@@ -89,6 +98,17 @@ Checkpoints go to `outputs/model_checkpoints/<run>/`. `--output-dir` changes `ou
 
 - `config.yaml`: the resolved config, as a record of the settings the run used. Do not pass it back in as a run config.
 - `model.json`, written when the run starts: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version and resolved config).
+
+#### Experiment tracking
+
+`mermaidseg/logger.py` logs through one interface with two backends. The `tracker` key of the logger config (`wandb` or `mlflow`) picks the backend; any other name raises `ValueError`.
+
+| Backend | Logger config | Extra | Environment |
+|---|---|---|---|
+| wandb | `configs/logger_config.yaml` (the `--logger-config` default; Slurm and local) | `slurm` | `WANDB_API_KEY`, or a prior `wandb login`; checked when the tracker starts |
+| MLflow | `configs/logger_config_sagemaker.yaml` (passed by the SageMaker run YAMLs) | `sagemaker` | `MLFLOW_TRACKING_URI`; the run raises if it is unset. The SageMaker launcher sets it from `SM_MLFLOW_TRACKING_ARN` |
+
+A run that crashes is recorded as `FAILED` in MLflow and with `exit_code` 1 in wandb.
 
 #### Slurm
 
@@ -141,13 +161,13 @@ Export needs a run trained with this version or later. Older runs have no `model
 ### Running Tests
 
 ```bash
-uv sync --locked --group tests
+uv sync --locked --group tests --extra slurm --extra sagemaker
 ```
 
-CI runs this selection (`.github/workflows/tests.yml`). Use it before you open a PR:
+CI installs both tracker extras; without the `sagemaker` extra the MLflow tracker tests skip. It runs this selection (`.github/workflows/tests.yml`). Use it before you open a PR:
 
 ```bash
-uv run --group tests pytest -m "not slow and not integration and not live"
+uv run --group tests --extra slurm --extra sagemaker pytest -m "not slow and not integration and not live"
 ```
 
 `pyproject.toml` defines these markers:

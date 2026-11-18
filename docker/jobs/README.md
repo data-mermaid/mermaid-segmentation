@@ -8,7 +8,7 @@ Container definition for SageMaker training jobs launched by
 
 | File | What |
 | ---- | ---- |
-| `Dockerfile` | GPU image: CUDA 12.6 base, Python 3.12 and packages from `uv.lock` via `uv sync --locked`; runs the entrypoint under `tini` (PID 1) so StopTrainingJob's SIGTERM reaches the trainer |
+| `Dockerfile` | GPU image: CUDA 12.6 base, Python 3.12 and packages from `uv.lock` via `uv sync --locked --extra sagemaker`; runs the entrypoint under `tini` (PID 1) so StopTrainingJob's SIGTERM reaches the trainer |
 | `entrypoint.sh` | Shim: runs `python -m scripts.sagemaker.train_entrypoint` from `/opt/ml/code` |
 | `local_smoke.sh` | Local build and offline check (`make sm-smoke`) |
 
