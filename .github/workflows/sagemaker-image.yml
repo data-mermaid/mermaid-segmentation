@@ -4,7 +4,8 @@ name: sagemaker-image
 # lineage records git_dirty=False. Each run pushes training-<sha> and moves training-latest.
 # The job runs in the sagemaker-image environment, whose deployment-branch policy (set in repo
 # settings) allows only main. The push role in AWS_ECR_PUSH_ROLE_ARN (repo variable; OIDC role
-# defined in the mermaid-api IaC) should trust only that environment. The ref check in the tags
+# defined in the mermaid-api IaC) should trust only that environment, so its sub claim must be
+# repo:data-mermaid/mermaid-segmentation:environment:sagemaker-image. The ref check in the tags
 # step is a second guard: a non-main ref never moves training-latest.
 
 on:

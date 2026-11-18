@@ -29,10 +29,10 @@ inside the image.
 
 ## Prerequisites
 
-- The job execution role needs `secretsmanager:GetSecretValue` on the secrets named by
-  `HF_TOKEN_SECRET_ID` and `WANDB_API_KEY_SECRET_ID`. The job role must be granted it on those two secrets; the mermaid-api IaC does not grant it.
+- The job execution role must be granted `secretsmanager:GetSecretValue` on the secrets named by
+  `HF_TOKEN_SECRET_ID` and `WANDB_API_KEY_SECRET_ID`; the mermaid-api IaC does not grant it today.
 - Store both secrets as plain-text `SecretString`, not JSON key/value: the entrypoint exports the raw string.
-- The repo variable `AWS_ECR_PUSH_ROLE_ARN` holds the OIDC push role defined in the mermaid-api IaC. With it unset, the credentials step fails and no image is pushed.
+- The repo variable `AWS_ECR_PUSH_ROLE_ARN` holds the OIDC push role defined in the mermaid-api IaC. With it unset, the credentials step fails and no image is pushed. The job runs in the `sagemaker-image` environment, so the role's trust policy must match `sub` = `repo:data-mermaid/mermaid-segmentation:environment:sagemaker-image`. A trust policy that matches a ref-based `sub` (`...:ref:refs/heads/main`) fails with AccessDenied at the credentials step.
 - The `sagemaker-image` GitHub environment exists, with a deployment-branch policy that allows only `main`.
 - The launcher caller needs `sagemaker:CreateTrainingJob`, `sagemaker:DescribeTrainingJob`, `iam:PassRole` on the job role, `ecr:DescribeImages` on `mermaid-segmentation-jobs`, `s3:PutObject` on `runs/*/config/` and `s3:GetObject` on `runs/*/checkpoints/*` in the staging bucket.
 - The job execution role needs S3 read on the training-data buckets the trainer streams from (there is no prewarmed cache) and on the staging bucket (the config prefix, and the source job's checkpoints for the 768 px init). It needs S3 write on its own job prefix (`runs/<job>/output/` and `runs/<job>/checkpoints/`).
