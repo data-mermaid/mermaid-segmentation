@@ -46,6 +46,9 @@ from mermaidseg.datasets.factory import configured_source_names  # noqa: E402
 from mermaidseg.io import setup_config  # noqa: E402
 from mermaidseg.run_setup import DEFAULT_SCHEMA_CONFIG  # noqa: E402
 
+# Val/test transform size for scripts that only read annotations; the transformed pixels are unused.
+_UNUSED_INPUT_SIZE = (256, 256)
+
 
 def coralnet_image_sources(data_config: Path, cache_dir: str | None = None) -> pd.Series:
     """CoralNet train ``image_id`` -> ``source_id`` for ``data_config``."""
@@ -53,7 +56,9 @@ def coralnet_image_sources(data_config: Path, cache_dir: str | None = None) -> p
     if cache_dir is not None:
         cfg.data.local_cache_dir = cache_dir
     setup_local_cache(cfg.data)
-    ds = build_datasets(cfg.data, names=["coralnet"], splits=["train"])[("coralnet", "train")]
+    ds = build_datasets(
+        cfg.data, input_size=_UNUSED_INPUT_SIZE, names=["coralnet"], splits=["train"]
+    )[("coralnet", "train")]
     images = ds.df_images[["image_id", "source_id"]].astype(str).drop_duplicates("image_id")
     return images.set_index("image_id")["source_id"]
 

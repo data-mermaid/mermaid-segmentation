@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from mermaidseg.evaluation.val_loss import (
     _Accumulator,
+    _bundle_config,
     _check_layout,
     binary_concept_names,
-    resolve_concept_mapping_path,
 )
-from mermaidseg.run_setup import REPO_ROOT
 
 NAMES = ["bleached", "anthropogenic", "sand"]
 
@@ -34,31 +32,47 @@ def test_accumulator_averages_each_key_over_the_batches_it_appears_in():
     assert first.means() == pytest.approx({"loss": 3.0, "multi_hot/bleached": 0.3})
 
 
-def test_concept_mapping_path_resolves_to_the_repo_file_from_any_directory(monkeypatch, tmp_path):
-    from mermaidseg.io import ConfigDict
-
-    (tmp_path / "configs").mkdir()
-    (tmp_path / "configs" / "class_to_concepts.csv").write_text("decoy\n")
-    monkeypatch.chdir(tmp_path)
-    cfg = ConfigDict({"concept_mapping_path": "configs/class_to_concepts.csv"})
-    resolve_concept_mapping_path(cfg)
-    assert cfg.concept_mapping_path == str(REPO_ROOT / "configs" / "class_to_concepts.csv")
+def _bundle(id2label: dict[int, str], concept_id2name: dict[int, str]) -> SimpleNamespace:
+    return SimpleNamespace(id2label=id2label, concept_id2name=concept_id2name)
 
 
-def test_layout_check_uses_the_files_next_to_the_checkpoint(tmp_path: Path):
-    checkpoint = tmp_path / "run" / "model_step100000"
-    checkpoint.parent.mkdir()
+def test_layout_check_accepts_a_bundle_that_matches_the_registry():
+    bundle = _bundle({0: "ignore", 1: "acropora", 2: "sand"}, dict(enumerate(NAMES, start=1)))
     registry = SimpleNamespace(target_id2label={1: "acropora", 2: "sand"})
-    _check_layout(checkpoint, registry, NAMES)  # no files: nothing to compare
+    _check_layout(bundle, registry, NAMES)
 
-    (checkpoint.parent / "id2label.json").write_text(
-        json.dumps({"0": "ignore", "1": "acropora", "2": "sand"})
+
+def test_layout_check_names_a_differing_class():
+    bundle = _bundle({0: "ignore", 1: "acropora", 2: "sand"}, dict(enumerate(NAMES, start=1)))
+    registry = SimpleNamespace(target_id2label={1: "acropora", 2: "rubble"})
+    with pytest.raises(ValueError, match="rubble"):
+        _check_layout(bundle, registry, NAMES)
+
+
+def test_layout_check_names_a_differing_concept():
+    bundle = _bundle({0: "ignore", 1: "sand"}, dict(enumerate(NAMES, start=1)))
+    registry = SimpleNamespace(target_id2label={1: "sand"})
+    with pytest.raises(ValueError, match="'anthropogenic'"):
+        _check_layout(bundle, registry, ["bleached", "other", "sand"])
+
+
+def test_bundle_config_takes_run_sections_from_the_bundle_and_data_from_the_file(tmp_path):
+    data_yaml = tmp_path / "data.yaml"
+    data_yaml.write_text(
+        yaml.safe_dump({"data": {"local_cache_write_through": False, "local_cache_dir": "x"}})
     )
-    (checkpoint.parent / "concept_id2name.json").write_text(
-        json.dumps({str(i): name for i, name in enumerate(NAMES)})
-    )
-    _check_layout(checkpoint, registry, NAMES)
-    with pytest.raises(ValueError, match="concept channels differ"):
-        _check_layout(checkpoint, registry, NAMES[::-1])
-    with pytest.raises(ValueError, match="target classes differ"):
-        _check_layout(checkpoint, SimpleNamespace(target_id2label={1: "sand"}), NAMES)
+    run = {
+        "model": {"name": "dpt", "input_size": [8, 8]},
+        "training": {"batch_size": 2, "taxonomic_loss": {"kl_weight": 1.0}, "loss": {"a": 1}},
+    }
+    bundle = SimpleNamespace(config=run, input_size=(32, 64))
+    cfg = _bundle_config(data_yaml, bundle)
+    assert cfg.model.name == "dpt"
+    assert cfg.model.input_size == [32, 64]
+    assert cfg.training.batch_size == 2
+    assert cfg.data.local_cache_dir == "x"
+    cfg.training.pop("taxonomic_loss")
+    cfg.training.loss.a = 9
+    assert "taxonomic_loss" in run["training"]
+    assert run["training"]["loss"] == {"a": 1}
+    assert run["model"]["input_size"] == [8, 8]

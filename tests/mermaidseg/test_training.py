@@ -23,12 +23,14 @@ import mermaidseg.model.models
 from mermaidseg import training
 from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
-from mermaidseg.io import ConfigDict, load_config, setup_config
+from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
+from mermaidseg.io import ConfigDict, load_config, resolve_repo_path, setup_config
 from mermaidseg.model.distributed import DistContext
-from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint, resolve_repo_path
+from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
 from mermaidseg.training import (
     VAL_GENERATOR_SEED_OFFSET,
     _assemble_train_datasets,
+    _lineage_params,
     load_training_checkpoint,
     make_shuffled_loader,
     seed_run,
@@ -91,7 +93,13 @@ def test_trainval_config_trains_on_six_coralscapes_v2_copies():
         {"data": str(resolve_repo_path("configs/data_config_trainval.yaml"))}
     ).data
     classes = dict.fromkeys(DATASET_CLASSES, _Stub)
-    built = build_datasets(data_cfg, dataset_classes=classes, splits=["train"], verbose=False)
+    built = build_datasets(
+        data_cfg,
+        dataset_classes=classes,
+        splits=["train"],
+        verbose=False,
+        input_size=(256, 256),
+    )
     train = _assemble_train_datasets(built, data_cfg)
     assert sum(ds is built[("coralscapes_v2", "train")] for ds in train) == 6
 
@@ -355,22 +363,36 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
 
     run_dir = output_dir / "model_checkpoints" / SMOKE_RUN
     assert (run_dir / "model_step1").is_file()
-    assert (run_dir / "id2label.json").is_file()
-    assert (run_dir / "concept_id2name.json").is_file()
+    assert not (run_dir / "id2label.json").exists()
+    assert not (run_dir / "concept_id2name.json").exists()
+    sidecar = json.loads((run_dir / "model.json").read_text())
+    assert sidecar["id2label"]["0"] == "ignore"
+    assert "sand" in sidecar["id2label"].values()
+    assert sidecar["concept_id2name"]
+    assert sidecar["lineage"]["seed"] == 7
+    assert sidecar["architecture"]["encoder_config"]["hidden_size"] == 16
+    assert sidecar["preprocessing"]["mean"] == list(IMAGENET_MEAN)
+    assert sidecar["preprocessing"]["std"] == list(IMAGENET_STD)
     resolved = yaml.safe_load((run_dir / "config.yaml").read_text())
     assert resolved["run_name"] == SMOKE_RUN
-    assert resolved["training"]["concept_mapping_path"] == str(
-        resolve_repo_path("configs/class_to_concepts.csv")
-    )
+    assert resolved["model"]["input_size"] == [SMOKE_RESOLUTION, SMOKE_RESOLUTION]
+    assert sidecar["preprocessing"]["size_hw"] == resolved["model"]["input_size"]
+    assert resolved["training"]["concept_mapping_path"] == "configs/class_to_concepts.csv"
     checkpoint = torch.load(run_dir / "model_step1", weights_only=True)
     assert checkpoint["config"] == resolved
+    assert checkpoint["lineage"]["seed"] == 7
     assert not (workdir / "model_checkpoints").exists()
     assert cache_roots == [str(cache_dir)]
     assert wandb_run.params["cli/num_workers"] == 1
     assert wandb_run.params["cli/output_dir"] == str(output_dir)
     assert wandb_run.params["data/seed"] == 7
-    mapping_path = Path(wandb_run.params["training_concept_mapping_path"])
-    assert mapping_path.is_absolute() and mapping_path.is_file()
+    assert {k for k in wandb_run.params if k.startswith("lineage/")} >= {
+        "lineage/git_sha",
+        "lineage/git_dirty",
+        "lineage/uv_lock_sha256",
+        "lineage/data_config_sha1",
+    }
+    assert wandb_run.params["training_concept_mapping_path"] == "configs/class_to_concepts.csv"
     assert wandb_run.finished
 
 
@@ -511,3 +533,23 @@ def test_resumed_run_continues_the_global_step_from_its_checkpoint(
     assert resumed["global_step"] == 2
     # A run that restarted from step 0 would rewrite model_step1.
     assert first_checkpoint.stat().st_mtime_ns == first_written
+
+
+def test_lineage_params_flatten_the_lineage_dict():
+    lineage = {
+        "git_sha": "abc123",
+        "git_dirty": False,
+        "uv_lock_sha256": "deadbeef",
+        "data_version": {
+            "data_config_sha1": "c0ffee",
+            "manifests": {"coralnet.train": "m/train.parquet", "coralnet.val": "m/val.parquet"},
+        },
+    }
+    assert _lineage_params(lineage) == {
+        "lineage/git_sha": "abc123",
+        "lineage/git_dirty": False,
+        "lineage/uv_lock_sha256": "deadbeef",
+        "lineage/data_config_sha1": "c0ffee",
+        "lineage/manifests/coralnet.train": "m/train.parquet",
+        "lineage/manifests/coralnet.val": "m/val.parquet",
+    }

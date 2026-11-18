@@ -88,9 +88,15 @@ class Logger:
         id2label: dict | None = None,
         id2concept: dict | None = None,
         save_local_checkpoints: bool = True,
+        lineage: dict | None = None,
     ) -> None:
-        """Set up checkpoint settings and, if enabled, the wandb delegate."""
+        """Set up checkpoint settings and, if enabled, the wandb delegate.
+
+        ``lineage``, when set, is stored in every checkpoint so an export reads the
+        lineage of the session that wrote it.
+        """
         self.config = config
+        self.lineage = lineage
         self.log_checkpoint = log_checkpoint
         if self.log_checkpoint <= 0:
             raise ValueError("log_checkpoint must be > 0")
@@ -322,6 +328,9 @@ class Logger:
             "metrics": {key: _to_python(value) for key, value in metrics_dict.items()},
             "scheduler_state_dict": meta_model_run.scheduler.state_dict(),
         }
+
+        if self.lineage is not None:
+            checkpoint["lineage"] = self.lineage
 
         model_path = f"{self.checkpoint_dir}/model_checkpoints/{meta_model_run.run_name}/{filename}"
 

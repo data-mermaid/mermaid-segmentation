@@ -17,7 +17,7 @@ from mermaidseg.datasets.pacific_labeled_corals.pacific_labeled_corals_dataset i
 from mermaidseg.evaluation.gt_mapping import build_class_lookup, build_concept_lookup
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.point_datasets import run_point_evaluation
-from mermaidseg.evaluation.predictor import CBMPredictor
+from mermaidseg.inference.predictor import CBMPredictor
 
 logger = logging.getLogger(__name__)
 

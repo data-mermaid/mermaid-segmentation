@@ -28,8 +28,7 @@ from typing import Any
 
 from mermaidseg.datasets import build_datasets, setup_local_cache
 from mermaidseg.datasets.local_cache import LocalS3Cache
-from mermaidseg.io import setup_config
-from mermaidseg.run_setup import resolve_repo_path
+from mermaidseg.io import resolve_repo_path, setup_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +39,9 @@ logger = logging.getLogger("prefetch_cache")
 # Cap the number of individual load failures we keep per dataset (avoid unbounded
 # memory when a whole source is misconfigured).
 _MAX_FAILURES_KEPT = 50
+
+# Val/test transform size while warming the cache; the transformed pixels are discarded.
+_WARM_INPUT_SIZE = (256, 256)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -174,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     datasets = build_datasets(
         cfg.data,
         padding=cfg.training.padding,
+        input_size=_WARM_INPUT_SIZE,
         names=args.datasets,
         splits=args.splits,
         verbose=True,

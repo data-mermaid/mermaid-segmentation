@@ -5,7 +5,7 @@ from collections.abc import Iterator
 import torch
 import torch.nn.functional as F
 
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.model.concept_metrics import (
     calculate_multi_hot_concept_loss,
     calculate_taxonomic_rank_loss,

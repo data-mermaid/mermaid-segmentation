@@ -64,8 +64,8 @@ from mermaidseg.evaluation.metrics import (
     BinaryConceptScore,
     ClassConfusion,
 )
-from mermaidseg.evaluation.predictor import CBMPredictor
 from mermaidseg.evaluation.reporting import fmt, write_json
+from mermaidseg.inference.predictor import CBMPredictor
 
 logger = logging.getLogger(__name__)
 
@@ -635,7 +635,6 @@ def evaluate_coralscapes_probe(
     *,
     predictor: CBMPredictor,
     probe_json: str | Path,
-    feature_kinds: list[str],
     coralscapes_root: str | Path | None,
     output_dir: str | Path,
     concept_names: list[str],
@@ -664,12 +663,6 @@ def evaluate_coralscapes_probe(
         probe.get("points_per_class_target"),
     )
 
-    if feature_kinds != ["concepts"]:
-        raise RuntimeError(
-            "Strided Coralscapes eval only supports feature kind 'concepts'. "
-            "Concept logits are averaged across the three windows, then activated. "
-            f"Got {feature_kinds!r}."
-        )
     unknown = [split for split in splits if split not in SPLITS]
     if unknown:
         raise ValueError(f"unknown Coralscapes splits {unknown}; expected a subset of {SPLITS}")
@@ -954,7 +947,6 @@ def evaluate_coralscapes39_probe(
     *,
     predictor: CBMPredictor,
     probe_jsons: Sequence[str | Path],
-    feature_kinds: list[str],
     coralscapes_root: str | Path | None,
     output_dir: str | Path,
     splits: Sequence[str] = ("test",),
@@ -975,11 +967,6 @@ def evaluate_coralscapes39_probe(
         len(probes),
         ", ".join(str(k) for k in sorted(probes)),
     )
-    if feature_kinds != ["concepts"]:
-        raise RuntimeError(
-            "Strided Coralscapes eval only supports feature kind 'concepts'. "
-            f"Got {feature_kinds!r}."
-        )
     unknown = [split for split in splits if split not in SPLITS]
     if unknown:
         raise ValueError(f"unknown Coralscapes splits {unknown}; expected a subset of {SPLITS}")

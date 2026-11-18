@@ -23,7 +23,7 @@ from mermaidseg.evaluation.point_datasets import (
     unit_scalar_keys,
     unit_scalars,
 )
-from mermaidseg.evaluation.predictor import CBMPredictor
+from mermaidseg.inference.predictor import CBMPredictor
 
 _REPO = Path(__file__).resolve().parents[2]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
@@ -91,13 +91,17 @@ class StubPredictor:
     """Predictions are a deterministic function of the image, independent of batching."""
 
     input_size = (SIZE, SIZE)
+    mean = (0.5,) * 3
+    std = (0.25,) * 3
     device = torch.device("cpu")
     sample_at_points = staticmethod(CBMPredictor.sample_at_points)
 
     def __init__(self, num_concepts: int):
         self.num_concepts = num_concepts
+        self.seen_images: list[torch.Tensor] = []
 
     def forward_probs(self, images: torch.Tensor):
+        self.seen_images.append(images)
         class_maps, concept_maps = [], []
         for image in images:
             seed = int(round(float(image.sum()) * 1000)) % (2**31)
@@ -255,3 +259,30 @@ def test_per_unit_csv_has_new_columns(both, tmp_path_factory):
         "hier/consistency/overall",
     ):
         assert column in header
+
+
+def test_images_are_normalised_with_the_predictors_mean_and_std(tmp_path):
+    names = _concept_names()
+    predictor = StubPredictor(len(names))
+    id2label = {i: f"c{i}" for i in range(NUM_CLASSES)}
+    run_point_evaluation(
+        eval_name="coralnet_val",
+        base_ds=FakeDataset(["10"]),
+        unit_col="source_id",
+        key_cols=["image_id"],
+        predictor=cast(CBMPredictor, predictor),
+        class_lookup=ClassLookup(dict.fromkeys(LABELS, 1), id2label),
+        concept_lookup=build_concept_lookup("coralnet", LABELS, names, _CSV),
+        concept_names=names,
+        id2label=id2label,
+        output_dir=tmp_path,
+        binary_concepts=REPORTED_BINARY_CONCEPTS,
+        taxonomy_csv=_CSV,
+        batch_size=1,
+        num_workers=0,
+    )
+    batch = torch.cat(predictor.seen_images)
+    raw = torch.tensor([100, 101, 102], dtype=torch.float32) / 255
+    expected = (raw - 0.5) / 0.25
+    for image, value in zip(batch, expected, strict=True):
+        torch.testing.assert_close(image, torch.full_like(image, float(value)))

@@ -1,7 +1,8 @@
-"""Validation loss of a checkpoint on the val splits of a data config.
+"""Validation loss of an exported bundle on the val splits of a data config.
 
-Rebuilds the training-time registry and model (``mermaidseg.run_setup``) on the ``val``
-split of every dataset in the data config, at the evaluation resolution, and averages
+Rebuilds the training-time registry (``mermaidseg.run_setup``) on the ``val`` split of every
+dataset in the data config, at the bundle's input size, around the bundle's model, with the
+training and model sections of the bundle's run config, and averages
 the ``ConceptBottleneckLoss`` components over batches:
 
     classification              target-class cross-entropy
@@ -24,10 +25,10 @@ source x concept targets as in the training loss (used for the CoralNet train so
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -35,25 +36,22 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     apply_concept_source_mask,
     attach_source_rows,
 )
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local_cache
 from mermaidseg.evaluation.reporting import write_json
-from mermaidseg.io import setup_config
+from mermaidseg.inference.bundle import ModelBundle
+from mermaidseg.io import ConfigDict, setup_config
 from mermaidseg.model.data_parallel import apply_concept_bottleneck_loss
 from mermaidseg.model.distributed import components_to_floats
 from mermaidseg.run_setup import (
     DEFAULT_SCHEMA_CONFIG,
-    MODEL_CHECKPOINT_KEYS,
     build_meta_model,
     build_registry,
-    load_model_weights,
     load_run_concept_source_mask,
-    read_checkpoint,
-    resolve_repo_path,
 )
 from mermaidseg.seeding import make_worker_seeder
 
@@ -93,38 +91,46 @@ class _Accumulator:
         return {key: self.sums[key] / self.counts[key] for key in sorted(self.sums)}
 
 
-def resolve_concept_mapping_path(training_cfg: Any) -> None:
-    """Rewrite a relative ``concept_mapping_path`` to its path under the repository root."""
-    training_cfg.concept_mapping_path = str(resolve_repo_path(training_cfg.concept_mapping_path))
+def _first_difference(expected: Sequence[str], actual: Sequence[str]) -> str:
+    """Describe the first position where two name lists differ."""
+    for i, (left, right) in enumerate(zip(expected, actual, strict=False)):
+        if left != right:
+            return f"position {i}: bundle {left!r} vs registry {right!r}"
+    return f"lengths: bundle {len(expected)} vs registry {len(actual)}"
 
 
-def _check_layout(checkpoint: Path, registry: Any, channel_names: list[str]) -> None:
-    """Compare against the layouts the training run wrote next to its checkpoints."""
-    run_dir = Path(checkpoint).parent
-    id2label_path = run_dir / "id2label.json"
-    if id2label_path.is_file():
-        saved = {int(k): v for k, v in json.loads(id2label_path.read_text()).items() if int(k) > 0}
-        if saved != dict(registry.target_id2label):
-            raise ValueError(f"target classes differ from {id2label_path}")
-    concept_path = run_dir / "concept_id2name.json"
-    if concept_path.is_file():
-        saved_names = [
-            name
-            for _, name in sorted(
-                json.loads(concept_path.read_text()).items(), key=lambda kv: int(kv[0])
-            )
-        ]
-        if saved_names != channel_names:
-            raise ValueError(f"concept channels differ from {concept_path}")
+def _check_layout(bundle: ModelBundle, registry: Any, channel_names: list[str]) -> None:
+    """Raise ValueError naming the first class or concept the bundle and registry disagree on."""
+    classes = {k: v for k, v in bundle.id2label.items() if k > 0}
+    target = dict(registry.target_id2label)
+    if classes != target:
+        ids = sorted(classes.keys() | target.keys())
+        differing = next(i for i in ids if classes.get(i) != target.get(i))
+        raise ValueError(
+            f"target classes differ from the bundle at id {differing}: "
+            f"bundle {classes.get(differing)!r} vs registry {target.get(differing)!r}"
+        )
+    names = [name for _, name in sorted(bundle.concept_id2name.items())]
+    if names != channel_names:
+        raise ValueError(
+            f"concept channels differ from the bundle at {_first_difference(names, channel_names)}"
+        )
+
+
+def _bundle_config(data_config: str | Path, bundle: ModelBundle) -> ConfigDict:
+    """Run config: the data section from ``data_config``, model and training from ``bundle``."""
+    cfg = setup_config({"data": str(data_config)}, resolution=bundle.input_size[0])
+    run = ConfigDict(bundle.config)
+    cfg.model = run.model.copy()
+    cfg.model.input_size = list(bundle.input_size)
+    cfg.training = run.training.copy()
+    return cfg
 
 
 def evaluate_val_loss(
     *,
-    checkpoint: str | Path,
-    model_config: str | Path,
+    bundle: ModelBundle,
     data_config: str | Path,
-    training_config: str | Path,
-    resolution: int,
     output_dir: str | Path,
     device: torch.device,
     batch_size: int = 8,
@@ -139,30 +145,32 @@ def evaluate_val_loss(
     apply_source_mask: bool = False,
     cache_dir: str | Path | None = None,
 ) -> dict:
-    """Validation loss components of ``checkpoint``, also written to ``<output_dir>/<name>/``."""
+    """Validation loss components of the loaded ``bundle``, also written to ``<output_dir>/<name>/``."""
     t0 = time.time()
-    cfg = setup_config(
-        {"data": str(data_config), "training": str(training_config), "model": str(model_config)},
-        resolution=resolution,
-    )
+    cfg = _bundle_config(data_config, bundle)
+    resolution = bundle.input_size[0]
     cfg.run_name = name
     cfg.training.pop("taxonomic_loss", None)
     cfg.training.distributed = False
     cfg.training.loss.per_pixel_loss_weight = per_pixel_loss_weight
     cfg.training.loss.per_image_loss_weight = per_image_loss_weight
-    resolve_concept_mapping_path(cfg.training)
 
     if cache_dir is not None:
         cfg.data.local_cache_dir = str(cache_dir)
     cache_stats = setup_local_cache(cfg.data)
-    dataset_dict = build_datasets(cfg.data, padding=cfg.training.padding, splits=["val"])
+    dataset_dict = build_datasets(
+        cfg.data,
+        padding=cfg.training.padding,
+        input_size=cfg.model.input_size,
+        splits=["val"],
+    )
     if not dataset_dict:
         raise ValueError(f"{data_config} has no val split")
     registry, schema = build_registry(
         dataset_dict, cfg.training, schema_config=schema_config, device=device
     )
     channel_names = [name for _, name in sorted(schema.channel_id2name().items())]
-    _check_layout(Path(checkpoint), registry, channel_names)
+    _check_layout(bundle, registry, channel_names)
     cfg.training.loss.binary_concept_names = binary_concept_names(
         cast("dict[str, Any]", registry.concept_value2id), channel_names
     )
@@ -171,7 +179,7 @@ def evaluate_val_loss(
     if apply_source_mask:
         source_mask = load_run_concept_source_mask(cfg.training, schema)
         if source_mask is None:
-            logger.info("[%s] training config has no concept_source_mask; targets unmasked", name)
+            logger.info("[%s] the bundle config has no concept_source_mask; targets unmasked", name)
         else:
             logger.info(
                 "[%s] concept source mask %s: %d %s source x concept pairs",
@@ -188,8 +196,7 @@ def evaluate_val_loss(
                 )
             )
 
-    meta = build_meta_model(cfg, registry, device)
-    load_model_weights(meta, read_checkpoint(checkpoint, MODEL_CHECKPOINT_KEYS))
+    meta = build_meta_model(cfg, registry, device, model=bundle.model)
     meta.model.eval()
 
     per_dataset: dict[str, dict] = {}
@@ -258,7 +265,7 @@ def evaluate_val_loss(
         "n_images": n_images,
         "settings": {
             "data_config": str(data_config),
-            "training_config": str(training_config),
+            "bundle": str(bundle.path),
             "resolution": resolution,
             "max_images_per_dataset": max_images_per_dataset,
             "per_pixel_loss_weight": per_pixel_loss_weight,

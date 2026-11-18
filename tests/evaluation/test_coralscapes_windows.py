@@ -45,23 +45,6 @@ def test_uncovered_pixel_raises():
         average_window_logits(logits, [(0, 0, 4, 4)], height=8, width=8)
 
 
-def test_non_concept_feature_kind_raises(tmp_path: Path):
-    probe = tmp_path / "probe.json"
-    probe.write_text(
-        '{"images": [], "num_images": 0, "total_points": 0, "points_per_class_target": 10}'
-    )
-    with pytest.raises(RuntimeError, match="only supports feature kind"):
-        evaluate_coralscapes_probe(
-            predictor=None,  # type: ignore[arg-type]
-            probe_json=probe,
-            feature_kinds=["dpt"],
-            coralscapes_root=None,
-            output_dir=tmp_path / "out",
-            concept_names=["bleached"],
-            taxonomy_csv=_CSV,
-        )
-
-
 def test_unknown_split_raises(tmp_path: Path):
     probe = tmp_path / "probe.json"
     probe.write_text(
@@ -71,7 +54,6 @@ def test_unknown_split_raises(tmp_path: Path):
         evaluate_coralscapes_probe(
             predictor=None,  # type: ignore[arg-type]
             probe_json=probe,
-            feature_kinds=["concepts"],
             coralscapes_root=None,
             output_dir=tmp_path / "out",
             concept_names=["bleached", "anthropogenic"],

@@ -26,7 +26,8 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     source_labels_to_target_labels,
 )
 from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
-from mermaidseg.io import ConfigDict
+from mermaidseg.inference.predictor import class_predictions
+from mermaidseg.io import ConfigDict, resolve_repo_path
 from mermaidseg.model.data_parallel import (
     DDPLossStep,
     MetricShard,
@@ -42,7 +43,7 @@ from mermaidseg.model.distributed import (
     require_world_size,
 )
 from mermaidseg.model.loss import LOSS_CLASSES
-from mermaidseg.model.models import MODEL_CLASSES
+from mermaidseg.model.models import MODEL_CLASSES, load_pretrained_encoder
 from mermaidseg.model.taxonomy_loss import TaxonomicLoss
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ def _cuda_bf16_supported(device: torch.device) -> bool:
         return torch.cuda.is_bf16_supported(including_emulation=False)
 
 
-def _resolve_amp_dtype(dtype_config: Any) -> torch.dtype:
+def resolve_amp_dtype(dtype_config: Any) -> torch.dtype:
     """Map a config value to the torch autocast dtype; only bfloat16 is supported."""
     if isinstance(dtype_config, torch.dtype):
         return dtype_config
@@ -208,6 +209,7 @@ class MetaModel:
         source_to_concepts_lookup: torch.Tensor | None = None,
         conceptid2labelid: dict[int, int] | None = None,
         concept_value2id: dict[str, dict[str, list[int]]] | None = None,
+        model: torch.nn.Module | None = None,
     ):
         """Build the model, loss, optimizer, scheduler, and label lookups.
 
@@ -222,6 +224,7 @@ class MetaModel:
             source_to_concepts_lookup: Source-to-concept lookup.
             conceptid2labelid: Maps concept IDs to target label IDs.
             concept_value2id: Maps concept names and values to IDs.
+            model: A prebuilt model to use as is; no encoder is loaded and no model is built.
         """
         self.run_name = run_name
         self.num_classes = num_classes
@@ -262,7 +265,7 @@ class MetaModel:
         mixed_precision = training_kwargs.pop("mixed_precision")
         mixed_precision_dtype = training_kwargs.pop("mixed_precision_dtype")
         self.max_grad_norm = float(training_kwargs.pop("max_grad_norm"))
-        self.amp_dtype = _resolve_amp_dtype(mixed_precision_dtype)
+        self.amp_dtype = resolve_amp_dtype(mixed_precision_dtype)
         self.use_amp = bool(mixed_precision)
         self.device_type = torch.device(device).type
         if (
@@ -298,12 +301,20 @@ class MetaModel:
         self.conceptid2labelid = conceptid2labelid
         self.concept_value2id = concept_value2id
 
-        model_cls = lookup_class(MODEL_CLASSES, "model", self.model_name)
         model_kwargs["num_classes"] = self.num_classes
         model_kwargs["num_concepts"] = self.num_concepts
         model_kwargs["concept_value2id"] = self.concept_value2id
         model_kwargs["detach_concepts"] = detach_concepts
-        self.model = model_cls(**model_kwargs)
+        if model is not None:
+            self.model = model
+        else:
+            model_cls = lookup_class(MODEL_CLASSES, "model", self.model_name)
+            # The encoder is built here; the model class takes it, not its hub name.
+            constructor_kwargs = {k: v for k, v in model_kwargs.items() if k != "encoder_name"}
+            self.model = model_cls(
+                base_encoder=load_pretrained_encoder(model_kwargs["encoder_name"]),
+                **constructor_kwargs,
+            )
 
         self.model = self.model.to(device)
         self.detach_concepts = detach_concepts
@@ -322,7 +333,7 @@ class MetaModel:
             taxonomic_kwargs = dict(taxonomic_cfg)
             # Same tree as the hierarchical metrics.
             taxonomy = build_taxonomy_tree(
-                training_kwargs.concept_mapping_path,
+                resolve_repo_path(training_kwargs.concept_mapping_path),
                 ambiguity_policy=taxonomic_kwargs.pop("ambiguity_policy"),
             )
             self.taxonomic_loss = TaxonomicLoss(
@@ -475,7 +486,7 @@ class MetaModel:
         if target_concepts is not None:
             target_concepts = target_concepts.to(device)
 
-        preds = outputs.argmax(dim=1) if outputs.ndim > 3 else outputs
+        preds = class_predictions(outputs) if outputs.ndim > 3 else outputs
         for metric in evaluator.metric_dict.values():
             metric.update(preds, target_labels)
         evaluator.evaluate_concepts(concept_outputs, target_concepts)

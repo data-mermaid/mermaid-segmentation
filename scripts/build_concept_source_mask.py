@@ -38,6 +38,8 @@ from mermaidseg.io import setup_config
 from mermaidseg.run_setup import DEFAULT_SCHEMA_CONFIG
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# Val/test transform size for scripts that only read annotations; the transformed pixels are unused.
+_UNUSED_INPUT_SIZE = (256, 256)
 
 
 def _rel(path: Path) -> str:
@@ -86,7 +88,9 @@ def main() -> None:
     if args.cache_dir is not None:
         cfg.data.local_cache_dir = args.cache_dir
     setup_local_cache(cfg.data)
-    ds = build_datasets(cfg.data, names=["coralnet"], splits=[args.split])[("coralnet", args.split)]
+    ds = build_datasets(
+        cfg.data, input_size=_UNUSED_INPUT_SIZE, names=["coralnet"], splits=[args.split]
+    )[("coralnet", args.split)]
 
     schema_sources = configured_source_names(setup_config({"data": str(args.schema_config)}).data)
     schema = ConceptSchema.from_csv(args.concepts, sources=schema_sources)

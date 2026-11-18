@@ -9,10 +9,10 @@ import pandas as pd
 import pytest
 import torch
 
-from mermaidseg.dataset_reconciliation import ConceptSchema
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
-    TAXONOMIC_CONCEPTS,
 )
 from mermaidseg.dataset_reconciliation.taxonomy_tree import TaxonomyTree, build_taxonomy_tree
 from mermaidseg.model.taxonomy_loss import (

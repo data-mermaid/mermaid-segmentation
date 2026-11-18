@@ -19,7 +19,6 @@ from __future__ import annotations
 __all__ = [
     "metrics",
     "hierarchical",
-    "predictor",
     "gt_mapping",
     "point_datasets",
     "coralnet_eval",

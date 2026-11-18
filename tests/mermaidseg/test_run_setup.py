@@ -1,4 +1,4 @@
-"""Repository path resolution and the wandb login check."""
+"""The wandb login check and run-setup helpers."""
 
 from __future__ import annotations
 
@@ -16,22 +16,11 @@ import yaml
 from mermaidseg.io import ConfigDict
 from mermaidseg.run_setup import (
     MODEL_CHECKPOINT_KEYS,
-    REPO_ROOT,
     check_wandb_auth,
     load_model_weights,
     read_checkpoint,
-    resolve_repo_path,
     write_resolved_config,
 )
-
-
-def test_relative_path_resolves_to_the_repo_not_the_current_directory(monkeypatch, tmp_path: Path):
-    (tmp_path / "configs").mkdir()
-    (tmp_path / "configs" / "class_to_concepts.csv").write_text("decoy\n")
-    monkeypatch.chdir(tmp_path)
-    assert resolve_repo_path("configs/class_to_concepts.csv") == (
-        REPO_ROOT / "configs" / "class_to_concepts.csv"
-    )
 
 
 def _fake_wandb(monkeypatch: pytest.MonkeyPatch, api_key: str) -> None:

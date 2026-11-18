@@ -12,7 +12,7 @@ from transformers import AutoModel, DPTConfig, PreTrainedModel
 from transformers.modeling_outputs import SemanticSegmenterOutput
 from transformers.models.dpt.modeling_dpt import DPTNeck
 
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 
 
 @dataclass
@@ -26,6 +26,13 @@ class ConceptBottleneckOutput(SemanticSegmenterOutput):
     """
 
     concept_logits: torch.Tensor | None = None
+
+
+def load_pretrained_encoder(encoder_name: str) -> PreTrainedModel:
+    """Load the pretrained base encoder from the HF hub in float32, the one place the hub is called."""
+    return AutoModel.from_pretrained(
+        encoder_name, token=os.environ.get("HF_TOKEN"), dtype=torch.float32
+    )
 
 
 def _wrap_encoder_with_lora(
@@ -198,7 +205,7 @@ class _DPTDINOv3Base(torch.nn.Module):
     def __init__(
         self,
         *,
-        encoder_name: str,
+        base_encoder: PreTrainedModel,
         input_size: tuple[int, int],
         out_indices: Sequence[int] | None,
         neck_hidden_sizes: Sequence[int],
@@ -212,8 +219,6 @@ class _DPTDINOv3Base(torch.nn.Module):
         lora_bias: str,
     ):
         super().__init__()
-        base_encoder = AutoModel.from_pretrained(encoder_name, token=os.environ.get("HF_TOKEN"))
-
         config = base_encoder.config
         hidden_size = config.hidden_size
         patch_size = config.patch_size
@@ -296,7 +301,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         concept_value2id: dict[str, dict[str, list[int]]] | None,
         concept_feature_dim: int,
         detach_concepts: bool,
-        encoder_name: str,
+        base_encoder: PreTrainedModel,
         input_size: tuple[int, int],
         out_indices: Sequence[int] | None,
         neck_hidden_sizes: Sequence[int],
@@ -310,7 +315,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
     ):
         super().__init__(
             head_out_channels=concept_feature_dim,
-            encoder_name=encoder_name,
+            base_encoder=base_encoder,
             input_size=input_size,
             out_indices=out_indices,
             neck_hidden_sizes=neck_hidden_sizes,
@@ -376,7 +381,8 @@ class ConceptBottleneckDPTLoRADINOv3(_ConceptBottleneckDPTDINOv3):
 
     def __init__(
         self,
-        encoder_name: str,
+        *,
+        base_encoder: PreTrainedModel,
         num_classes: int,
         num_concepts: int,
         input_size: tuple[int, int],
@@ -400,7 +406,7 @@ class ConceptBottleneckDPTLoRADINOv3(_ConceptBottleneckDPTDINOv3):
             concept_value2id=concept_value2id,
             concept_feature_dim=concept_feature_dim,
             detach_concepts=detach_concepts,
-            encoder_name=encoder_name,
+            base_encoder=base_encoder,
             input_size=input_size,
             out_indices=out_indices,
             neck_hidden_sizes=neck_hidden_sizes,

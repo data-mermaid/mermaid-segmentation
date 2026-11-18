@@ -25,8 +25,8 @@ import torch
 import yaml
 from torch.utils.data import Dataset
 
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 
 logger = logging.getLogger(__name__)
 

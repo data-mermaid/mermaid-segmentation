@@ -109,15 +109,19 @@ def test_train_split_allows_only_coralnet_and_loss(evaluate_script):
             check("train", ["coralnet", other])
 
 
-def test_train_loss_data_config_is_coralnet_train_with_the_val_transform(evaluate_script, tmp_path):
+def test_train_loss_data_config_is_coralnet_train_without_a_transform(evaluate_script, tmp_path):
     data = {
         "local_cache_dir": "/cache",
         "default": {
             "train": {"transform": {"RandomResizedCrop": {"size": [256, 256]}}},
-            "val": {"transform": {"Resize": {"width": 256, "height": 256}}},
+            "val": {},
         },
         "coralnet": {
-            "train": {"whitelist_sources": [1, 2], "image_blacklist": "/bl.parquet"},
+            "train": {
+                "whitelist_sources": [1, 2],
+                "image_blacklist": "/bl.parquet",
+                "transform": {"Resize": {"height": 8}},
+            },
             "val": None,
         },
         "mermaid": {"train": {"annotation_date_cutoff": "2026-08-12"}},
@@ -131,7 +135,6 @@ def test_train_loss_data_config_is_coralnet_train_with_the_val_transform(evaluat
                 "val": {
                     "whitelist_sources": [1, 2],
                     "image_blacklist": "/bl.parquet",
-                    "transform": {"Resize": {"width": 256, "height": 256}},
                     "image_keep": str(keep.resolve()),
                 }
             },

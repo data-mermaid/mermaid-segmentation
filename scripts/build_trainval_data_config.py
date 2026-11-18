@@ -31,9 +31,7 @@ _CORALNET_VAL = re.compile(
     r"      image_blacklist: [^\n]*\n"
     r"      annotation_overrides: [^\n]*\n"
 )
-_CORALSCAPES_VAL = re.compile(
-    r"    val:\n      split: validation\n      transform:\n(?:        [^\n]*\n)+"
-)
+_CORALSCAPES_VAL = re.compile(r"    val:\n      split: validation\n")
 _LIST_INDENT = " " * 26
 
 

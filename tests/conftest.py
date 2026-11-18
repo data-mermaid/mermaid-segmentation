@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.io import ConfigDict
 
 NUM_CLASSES = 4
@@ -203,10 +203,14 @@ def mock_dinov3_encoder(monkeypatch):
     num_layers = 4
     num_register_tokens = 4
 
+    class _MockEncoderConfig(SimpleNamespace):
+        def to_dict(self) -> dict[str, Any]:
+            return dict(vars(self))
+
     class _MockEncoder(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.config = SimpleNamespace(
+            self.config = _MockEncoderConfig(
                 hidden_size=hidden_size,
                 patch_size=patch_size,
                 num_hidden_layers=num_layers,

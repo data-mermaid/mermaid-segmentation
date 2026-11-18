@@ -25,9 +25,9 @@ import pandas as pd
 import scipy.sparse as sp
 import yaml
 
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import file_sha1, meta_path
-from mermaidseg.dataset_reconciliation.concepts import TAXONOMIC_CONCEPTS
 
 DENSE_DATASETS = frozenset({"coralscapes_v2", "ucsd_mosaics", "benthos_yuval"})
 CORALNET = "coralnet"

@@ -1,7 +1,7 @@
 """Configuration loading, merging, and command-line overrides for training runs."""
 
 import argparse
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Mapping, MutableMapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
@@ -10,6 +10,20 @@ import albumentations as A
 import yaml
 
 from mermaidseg.config import RESERVED_DATA_KEYS, lookup_class, validate_section
+from mermaidseg.inference.preprocess import CV2_INTERPOLATION, IMAGENET_MEAN, IMAGENET_STD
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def resolve_repo_path(path: str | Path) -> Path:
+    """An absolute path as given; a relative path resolved against the repository root.
+
+    The current directory never matters, so entrypoints run from anywhere.
+    """
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / path
 
 
 class ConfigDict(dict):
@@ -150,45 +164,34 @@ AUGMENTATION_CLASSES: dict[str, type[A.BasicTransform]] = {
     "HorizontalFlip": A.HorizontalFlip,
     "VerticalFlip": A.VerticalFlip,
     "ColorJitter": A.ColorJitter,
-    "Normalize": A.Normalize,
-    "Resize": A.Resize,
 }
-_TRANSFORMS_BEFORE_NORMALIZE = frozenset({"ColorJitter"})
 
 
-def _order_transform_items(items: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
-    """Place color-jitter transforms before ``Normalize`` when a merge appends them."""
-    normalize_idx = next((i for i, (name, _) in enumerate(items) if name == "Normalize"), None)
-    if normalize_idx is None:
-        return items
-
-    deferred = [
-        (name, params)
-        for i, (name, params) in enumerate(items)
-        if i > normalize_idx and name in _TRANSFORMS_BEFORE_NORMALIZE
-    ]
-    if not deferred:
-        return items
-
-    ordered: list[tuple[str, Any]] = []
-    for name, params in items:
-        if name in _TRANSFORMS_BEFORE_NORMALIZE and (name, params) in deferred:
-            continue
-        if name == "Normalize":
-            ordered.extend(deferred)
-        ordered.append((name, params))
-    return ordered
+def _normalize() -> A.Normalize:
+    return A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
 
 
 def compile_transform(spec: Mapping[str, Mapping[str, Any]]) -> A.Compose:
-    """Compile a split's ``transform`` spec (augmentation name -> kwargs) into a ``Compose``.
+    """Compile a train split's ``transform`` spec (augmentation name -> kwargs) into a ``Compose``.
+
+    ``Normalize`` with the ImageNet statistics is always appended last; a spec cannot set it.
 
     Raises:
         ValueError: If a name is not in :data:`AUGMENTATION_CLASSES`.
     """
-    items = _order_transform_items(list(spec.items()))
-    classes = [lookup_class(AUGMENTATION_CLASSES, "augmentation", name) for name, _ in items]
-    return A.Compose([cls(**params) for cls, (_, params) in zip(classes, items, strict=True)])
+    transforms = [
+        lookup_class(AUGMENTATION_CLASSES, "augmentation", name)(**params)
+        for name, params in spec.items()
+    ]
+    return A.Compose([*transforms, _normalize()])
+
+
+def build_eval_transform(input_size: Sequence[int]) -> A.Compose:
+    """Return the val/test transform: ``Resize`` to ``input_size`` (height, width), then Normalize."""
+    height, width = int(input_size[0]), int(input_size[1])
+    return A.Compose(
+        [A.Resize(height=height, width=width, interpolation=CV2_INTERPOLATION, p=1), _normalize()]
+    )
 
 
 def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:
@@ -213,18 +216,15 @@ def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:
 
 
 def apply_resolution(spec: Any, resolution: int) -> Any:
-    """Set every ``RandomResizedCrop`` size and ``Resize`` width/height in a raw spec.
+    """Set every ``RandomResizedCrop`` size in a raw spec.
 
-    Walks the YAML mapping in place. ``SmallestMaxSize`` and every other transform are left
-    unchanged.
+    Walks the YAML mapping in place. Every other transform is left unchanged; val/test sizes
+    come from ``model.input_size``.
     """
     if isinstance(spec, Mapping):
         for key, value in spec.items():
             if key == "RandomResizedCrop" and isinstance(value, Mapping):
                 cast("MutableMapping[str, Any]", value)["size"] = [resolution, resolution]
-            elif key == "Resize" and isinstance(value, Mapping):
-                cast("MutableMapping[str, Any]", value)["width"] = resolution
-                cast("MutableMapping[str, Any]", value)["height"] = resolution
             else:
                 apply_resolution(value, resolution)
     elif isinstance(spec, list):
@@ -249,8 +249,8 @@ def setup_config(
     schema (:func:`load_section`). The data config is additionally normalized via
     ``preprocess_data_config`` (per-dataset default expansion). The result is plain data.
 
-    ``resolution`` sets the square train crop, the val/test resize
-    (:func:`apply_resolution`), and ``model.input_size``.
+    ``resolution`` sets the square train crop (:func:`apply_resolution`) and ``model.input_size``,
+    which sizes the val/test resize (:func:`build_eval_transform`).
 
     Raises:
         ValueError: If a file is unwrapped or does not match its schema.
