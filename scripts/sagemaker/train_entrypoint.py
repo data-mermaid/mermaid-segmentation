@@ -6,8 +6,8 @@ with the same trainer command the Slurm job runs:
     python scripts/train.py --run-name RUN ... <train.args>
 
 with ``python -m torch.distributed.run`` in front when the instance has more than one GPU.
-Secrets named by ``WANDB_API_KEY_SECRET_ID`` / ``HF_TOKEN_SECRET_ID`` are fetched from
-Secrets Manager and exported as ``WANDB_API_KEY`` / ``HF_TOKEN``.
+The secret named by ``HF_TOKEN_SECRET_ID`` is fetched from Secrets Manager and exported as
+``HF_TOKEN``.
 
     python -m scripts.sagemaker.train_entrypoint
 """
@@ -16,11 +16,10 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shlex
 import shutil
 import sys
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +47,6 @@ OWNED_FLAGS = (
 
 # Secret-id variable -> the variable the trainer reads.
 SECRET_ENV = {
-    "WANDB_API_KEY_SECRET_ID": "WANDB_API_KEY",
     "HF_TOKEN_SECRET_ID": "HF_TOKEN",
 }
 
@@ -167,31 +165,17 @@ def build_trainer_argv(train: TrainConfig, ngpu: int, cpus: int, python: str) ->
     return [python, *pipeline]
 
 
-def trainer_env(
-    environ: Mapping[str, str], job_name: str | None, train: TrainConfig, ngpu: int
-) -> dict[str, str]:
+def trainer_env(train: TrainConfig, ngpu: int) -> dict[str, str]:
     """Return the variables to add to the trainer's environment.
 
     Args:
-        environ: The current environment.
-        job_name: The TrainingJob name (``MERMAIDSEG_JOB_NAME``).
         train: The run YAML's ``train`` block.
         ngpu: GPUs on the instance.
 
     Returns:
-        The wandb run id, group and project, plus the NCCL settings for more than one GPU.
-
-    Raises:
-        ValueError: If ``job_name`` is missing or empty.
+        The NCCL and OpenMP settings for more than one GPU; empty for one.
     """
-    if not job_name:
-        raise ValueError("MERMAIDSEG_JOB_NAME is not set")
-    env = {
-        # wandb run ids allow only alphanumerics, '_' and '-'.
-        "WANDB_RUN_ID": re.sub(r"[^A-Za-z0-9_-]", "-", job_name),
-        "WANDB_RUN_GROUP": train.group,
-        "WANDB_PROJECT": environ.get("WANDB_PROJECT") or "mermaidseg",
-    }
+    env: dict[str, str] = {}
     if ngpu > 1:
         env["OMP_NUM_THREADS"] = "1"
         # On a timeout, the NCCL flight recorder logs each rank's last collectives.
@@ -259,7 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "an unknown or dirty tree and export would refuse the finished run"
         )
     _require_init_file(train)
-    env = trainer_env(os.environ, os.environ.get("MERMAIDSEG_JOB_NAME"), train, ngpu)
+    env = trainer_env(train, ngpu)
     import boto3
 
     resolve_secrets(os.environ, boto3.client("secretsmanager"))

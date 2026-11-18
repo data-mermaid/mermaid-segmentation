@@ -3,8 +3,9 @@
 # local builds (docker/jobs/local_smoke.sh) are smoke-only and never pushed.
 #
 # Base: nvidia/cuda 12.6 + cuDNN runtime. Python 3.12 and every package come from uv.lock via
-# `uv sync --locked`, the same stack Slurm runs (torch from the lock bundles its CUDA 12.6
-# libraries), so Python is installed by uv rather than taken from the base image.
+# `uv sync --locked --extra mlflow`, the same torch stack Slurm runs (torch from the lock
+# bundles its CUDA 12.6 libraries; Slurm installs the `wandb` extra instead), so
+# Python is installed by uv rather than taken from the base image.
 #
 # See docker/jobs/README.md.
 
@@ -15,7 +16,7 @@ FROM ${BASE_IMAGE}
 # refresh uv.lock.
 COPY --from=ghcr.io/astral-sh/uv:0.11.13@sha256:841c8e6fe30a8b07b4478d12d0c608cba6de66102d29d65d1cc423af86051563 /uv /uvx /usr/local/bin/
 
-# Secrets (HF_TOKEN, WANDB_API_KEY) are never baked into the image or set in the job Environment:
+# Secrets (HF_TOKEN) are never baked into the image or set in the job Environment:
 # the entrypoint fetches them at run time from Secrets Manager (see docker/jobs/README.md).
 
 # No git: the image has no .git and the commit arrives as MERMAIDSEG_GIT_SHA.
@@ -34,13 +35,13 @@ ENV UV_PYTHON=3.12 \
 
 # Dependencies first (cached until the lock changes). `--locked` fails if uv.lock is stale.
 COPY pyproject.toml uv.lock .python-version ./
-RUN uv sync --locked --no-dev --no-install-project
+RUN uv sync --locked --no-dev --extra mlflow --no-install-project
 
 # Project itself (editable so scripts/ stays importable).
 COPY mermaidseg ./mermaidseg
 COPY scripts ./scripts
 COPY configs ./configs
-RUN uv sync --locked --no-dev
+RUN uv sync --locked --no-dev --extra mlflow
 
 # The image has no .git; CI passes the commit so lineage records the mermaidseg SHA. No default:
 # a build without GIT_SHA yields an image whose entrypoint refuses to start a run.

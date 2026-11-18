@@ -19,7 +19,7 @@ _VALID: dict[str, dict[str, object]] = {
         "volume_gb": 100,
         "max_runtime_hours": 1,
     },
-    "train": {"run_name": "r", "group": "g", "init_weights": None, "args": []},
+    "train": {"run_name": "r", "init_weights": None, "args": []},
 }
 
 

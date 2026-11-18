@@ -5,9 +5,9 @@ from __future__ import annotations
 import datetime
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Annotated, Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
 RESERVED_DATA_KEYS = frozenset({"local_cache_dir", "local_cache_write_through"})
 
@@ -146,13 +146,27 @@ class ModelConfig(_Strict):
     lora_bias: str
 
 
-class LoggerConfig(_Strict):
-    """The ``logger`` section."""
+class WandbLoggerConfig(_Strict):
+    """The ``logger`` section for ``tracker: wandb``."""
 
-    enable_wandb: bool
+    tracker: Literal["wandb"]
     wandb_project: str
     wandb_entity: str | None
     train_log_interval: int
+
+
+class MlflowLoggerConfig(_Strict):
+    """The ``logger`` section for ``tracker: mlflow``."""
+
+    tracker: Literal["mlflow"]
+    experiment_name: str
+    train_log_interval: int
+
+
+class LoggerConfig(
+    RootModel[Annotated[WandbLoggerConfig | MlflowLoggerConfig, Field(discriminator="tracker")]]
+):
+    """The ``logger`` section: the keys of the backend that ``tracker`` names."""
 
 
 class SplitsConfig(_Strict):

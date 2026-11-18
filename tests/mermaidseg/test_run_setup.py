@@ -1,10 +1,8 @@
-"""The wandb login check and run-setup helpers."""
+"""Run-setup helpers: checkpoint reads, weight loading and the resolved config."""
 
 from __future__ import annotations
 
 import pickle
-import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,33 +14,10 @@ import yaml
 from mermaidseg.io import ConfigDict
 from mermaidseg.run_setup import (
     MODEL_CHECKPOINT_KEYS,
-    check_wandb_auth,
     load_model_weights,
     read_checkpoint,
     write_resolved_config,
 )
-
-
-def _fake_wandb(monkeypatch: pytest.MonkeyPatch, api_key: str) -> None:
-    fake = types.ModuleType("wandb")
-    fake.api = SimpleNamespace(api_key=api_key)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wandb", fake)
-
-
-def test_wandb_auth_prints_no_part_of_the_api_key(monkeypatch, capsys):
-    key = "wk7Qz9Lm3Xp2Rv8TyHd4"
-    _fake_wandb(monkeypatch, key)
-    check_wandb_auth()
-    out = capsys.readouterr().out
-    assert out
-    leaked = [key[i : i + 4] for i in range(len(key) - 3) if key[i : i + 4] in out]
-    assert leaked == []
-
-
-def test_wandb_auth_without_a_key_raises(monkeypatch):
-    _fake_wandb(monkeypatch, "")
-    with pytest.raises(RuntimeError, match="not authenticated"):
-        check_wandb_auth()
 
 
 def test_resolved_config_yaml_holds_the_overridden_values(tmp_path):

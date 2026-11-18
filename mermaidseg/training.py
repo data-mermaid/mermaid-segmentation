@@ -5,6 +5,8 @@ import contextlib
 import copy
 import json
 import os
+import signal
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +37,7 @@ from mermaidseg.run_setup import (
     RESUME_CHECKPOINT_KEYS,
     build_meta_model,
     build_registry,
-    check_env_wandb,
+    check_env,
     load_model_weights,
     load_run_concept_source_mask,
     read_checkpoint,
@@ -191,7 +193,7 @@ def _encoder_config(model: torch.nn.Module) -> dict[str, Any]:
 
 
 def _lineage_params(lineage: dict[str, Any]) -> dict[str, Any]:
-    """Flat ``lineage/...`` wandb params from a lineage dict."""
+    """Flat ``lineage/...`` tracker params from a lineage dict."""
     version = lineage["data_version"]
     params = {
         "lineage/git_sha": lineage["git_sha"],
@@ -203,6 +205,36 @@ def _lineage_params(lineage: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
+# Exit status of a process ended by SIGTERM (128 + signal number).
+SIGTERM_EXIT_CODE = 128 + signal.SIGTERM
+
+
+@contextlib.contextmanager
+def _sigterm_raises_system_exit(enabled: bool) -> Iterator[None]:
+    """Turn SIGTERM into ``SystemExit(143)`` inside the block when ``enabled``.
+
+    Python's default SIGTERM action ends the process without unwinding, so an enclosing
+    ``with`` block never exits. Raising lets it unwind. The previous handler is restored
+    on leaving.
+    """
+    if not enabled:
+        yield
+        return
+
+    def _raise_exit(signum: int, frame: Any) -> None:
+        # A group-wide SIGTERM also kills the DataLoader workers; torch's SIGCHLD handler would
+        # then raise inside the unwinding tracker flush. A repeated SIGTERM must not cut it short.
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise SystemExit(SIGTERM_EXIT_CODE)
+
+    previous = signal.signal(signal.SIGTERM, _raise_exit)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def run(args: argparse.Namespace) -> None:
     """Run one training job from parsed command-line arguments.
 
@@ -210,11 +242,10 @@ def run(args: argparse.Namespace) -> None:
         args: Parsed arguments from ``scripts/train.py``.
     """
     # -- 0. Environment --------------------------------------------------------
-    # wandb-backed, AWS-free run: data is served from the pre-warmed local cache
-    # (scripts/prefetch_cache.py) and metrics go to wandb. No MLflow / SageMaker
-    # / AWS SSO is required. Set MERMAIDSEG_S3_OFFLINE=1 to fail loudly on any cache
-    # miss instead of silently falling back to S3.
-    check_env_wandb()
+    # Data is served from the pre-warmed local cache (scripts/prefetch_cache.py) and
+    # metrics go to the tracker that the logger config names. Set MERMAIDSEG_S3_OFFLINE=1
+    # to fail loudly on any cache miss instead of silently falling back to S3.
+    check_env()
 
     # -- 1. Config -------------------------------------------------------------
     cfg = setup_config(
@@ -229,7 +260,7 @@ def run(args: argparse.Namespace) -> None:
     cfg = update_config_with_args(cfg, args)
 
     # Under torchrun (WORLD_SIZE > 1) this process trains one GPU's shard of each
-    # minibatch. Only rank 0 logs to wandb, writes checkpoints, and prints.
+    # minibatch. Only rank 0 logs to the tracker, writes checkpoints, and prints.
     dist_ctx = init_distributed_from_env(cfg.training.world_size, args.nccl_timeout_min)
 
     if dist_ctx.distributed:
@@ -401,8 +432,7 @@ def run(args: argparse.Namespace) -> None:
         concept_value2id=registry.concept_value2id,
     )
     # -- 5. Train (run lifecycle managed by `with`) ---------------------------
-    # Backend selection is config-driven (configs/logger_config.yaml sets
-    # enable_wandb: true). Under torchrun only rank 0 has a
+    # The logger config's `tracker` key selects the backend. Under torchrun only rank 0 has a
     # Logger; the other ranks train with logger=None and write nothing.
     logger_context: contextlib.AbstractContextManager[Logger | None]
     if dist_ctx.is_main:
@@ -417,12 +447,12 @@ def run(args: argparse.Namespace) -> None:
         )
     else:
         logger_context = contextlib.nullcontext(None)
-    with logger_context as run_logger:
+    # SIGTERM (SageMaker stop, Slurm) must unwind `logger_context` so the tracker run is ended
+    # as failed. Only rank 0 owns a tracker run. This holds for single-process runs; under
+    # torchrun (multi-GPU) rank 0 is typically blocked in a collective when its peers die, so
+    # its handler never runs and torchrun SIGKILLs it after 30 s, leaving the run RUNNING.
+    with _sigterm_raises_system_exit(dist_ctx.is_main), logger_context as run_logger:
         if run_logger is not None:
-            assert run_logger.enable_wandb, (
-                "wandb logging was not started — check WANDB_API_KEY and "
-                "config.logger.enable_wandb (see warnings above)"
-            )
             run_logger.log_dict(sidecar, "metadata/model.json")
             run_logger.log_params(_lineage_params(sidecar["lineage"]))
             run_logger.log_params(
@@ -458,8 +488,8 @@ def run(args: argparse.Namespace) -> None:
                 run_logger.log_params(
                     {"init/checkpoint": checkpoint, "init/start_epoch": start_epoch}
                 )
-            print(f"\nwandb run_id : {run_logger.wandb_run_id}")
-            print(f"wandb run URL: {run_logger.run_url}\n")
+            print(f"\ntracker run id : {run_logger.run_id}")
+            print(f"tracker run URL: {run_logger.run_url}\n")
 
             # Reuse the logger helpers instead of hand-rolling concept extraction.
             run_logger.log_dataloader_params(train_loader, prefix="train_loader")
@@ -575,7 +605,7 @@ def run(args: argparse.Namespace) -> None:
                 metrics_all[final_epoch].get("validation_metrics"),
             )
         if run_logger is not None:
-            print(f"wandb run URL: {run_logger.run_url}")
+            print(f"tracker run URL: {run_logger.run_url}")
 
     if dist_ctx.distributed:
         dist.destroy_process_group()

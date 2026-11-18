@@ -37,7 +37,6 @@ class TrainConfig(BaseModel):
 
     Attributes:
         run_name: Trainer run name (``--run-name``).
-        group: wandb run group.
         init_weights: Starting weights for a fresh run, relative to the source job's
             checkpoint prefix, or None to start from scratch. The key is required.
         args: Arguments passed through to ``scripts/train.py`` (the Slurm PIPELINE_ARGS).
@@ -46,7 +45,6 @@ class TrainConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_name: str
-    group: str
     init_weights: str | None
     args: list[str]
 

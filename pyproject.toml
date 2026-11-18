@@ -18,17 +18,21 @@ dependencies = [
     "transformers",
     "datasets>=3.0",
     "s3fs",
-    "mlflow",
+    "scikit-learn",
     "pyyaml",
     "tqdm",
     "torchmetrics",
     "huggingface-hub>=0.36.2",
     "opencv-python-headless>=4.11.0.86",
     "peft>=0.19.1",
-    "wandb>=0.25.0",
     "pydantic>=2.13.3",
     "safetensors>=0.7.0",
 ]
+
+[project.optional-dependencies]
+# Named after the tracker they install: Slurm uses wandb, the SageMaker image uses mlflow.
+wandb = ["wandb>=0.25.0"]
+mlflow = ["mlflow", "sagemaker-mlflow"]
 
 [dependency-groups]
 tests = [

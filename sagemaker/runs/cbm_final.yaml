@@ -7,10 +7,11 @@ job:
   max_runtime_hours: 480
 train:
   run_name: cbm_final
-  group: cbm_final
   init_weights: null
   args:
     - --training-config
     - configs/training_config_cbm_final.yaml
     - --data-config
     - configs/data_config_trainval.yaml
+    - --logger-config
+    - configs/logger_config_sagemaker.yaml

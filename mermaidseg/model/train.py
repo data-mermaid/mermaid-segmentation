@@ -142,7 +142,7 @@ def train_model(
             on_optimizer_step=on_optimizer_step,
         )
         _enforce_load_failure_rate(train_loader, failures_before, max_load_failure_rate, epoch)
-        # Monotonic global-step (iteration) axis for wandb.
+        # Monotonic global-step (iteration) axis for the experiment tracker.
         step = meta_model.global_step
         logging.info("LOSS train %s", train_loss)
         logging.info("TRAIN METRICS: %s", train_metric_results)
@@ -209,7 +209,7 @@ def train_model(
         if epoch == end_epoch - 1:
             epoch_loss_dict["train/total_training_sec"] = time.perf_counter() - training_start
 
-        # Surface the epoch index on the iteration axis so it is available in wandb.
+        # Surface the epoch index on the iteration axis so it is available in the experiment tracker.
         epoch_loss_dict["epoch"] = float(epoch)
         if logger is not None:
             logger.log(epoch_loss_dict, step=step)

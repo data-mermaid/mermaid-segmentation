@@ -1,6 +1,6 @@
 logger:
-  enable_wandb: true
+  tracker: wandb
   wandb_project: "mermaidseg"
   wandb_entity: null
-  # Log per-batch train losses to wandb every N iterations (1 = every batch).
+  # Log per-batch train losses to the tracker every N iterations (1 = every batch).
   train_log_interval: 1

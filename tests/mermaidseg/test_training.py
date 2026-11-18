@@ -6,7 +6,11 @@ import argparse
 import functools
 import json
 import multiprocessing
+import os
+import signal
+import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,9 +20,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 import yaml
-from torch.utils.data import ConcatDataset, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
-import mermaidseg.logger
 import mermaidseg.model.models
 from mermaidseg import training
 from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
@@ -31,6 +34,7 @@ from mermaidseg.training import (
     VAL_GENERATOR_SEED_OFFSET,
     _assemble_train_datasets,
     _lineage_params,
+    _sigterm_raises_system_exit,
     load_training_checkpoint,
     make_shuffled_loader,
     seed_run,
@@ -180,7 +184,7 @@ class _FakeWandbRun:
     def __init__(self) -> None:
         self.params: dict[str, Any] = {}
         self.config = SimpleNamespace(update=lambda d, **_: self.params.update(d))
-        self.finished = False
+        self.exit_code: int | None = None
 
     def log(self, log_dict: dict, step: int) -> None:
         pass
@@ -188,8 +192,8 @@ class _FakeWandbRun:
     def log_artifact(self, artifact: Any) -> None:
         pass
 
-    def finish(self) -> None:
-        self.finished = True
+    def finish(self, exit_code: int | None = None) -> None:
+        self.exit_code = exit_code
 
 
 def _fake_wandb(run: _FakeWandbRun) -> types.ModuleType:
@@ -254,7 +258,6 @@ def test_run_rejects_a_world_size_that_the_launcher_did_not_provide(monkeypatch,
     monkeypatch.delenv("WANDB_RUN_ID", raising=False)
     fake_wandb = _fake_wandb(_FakeWandbRun())
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    monkeypatch.setattr(mermaidseg.logger, "wandb", fake_wandb)
 
     def _unreachable(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("run() built datasets before checking the world size")
@@ -294,7 +297,6 @@ def _install_smoke_fakes(
     wandb_run = _FakeWandbRun()
     fake_wandb = _fake_wandb(wandb_run)
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    monkeypatch.setattr(mermaidseg.logger, "wandb", fake_wandb)
     cache_roots: list[Any] = []
 
     def _record_cache(data_cfg: Any) -> Any:
@@ -359,7 +361,9 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     )
     output_dir = tmp_path / "out"
     cache_dir = tmp_path / "cache"
+    sigterm_before = signal.getsignal(signal.SIGTERM)
     training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    assert signal.getsignal(signal.SIGTERM) is sigterm_before
 
     run_dir = output_dir / "model_checkpoints" / SMOKE_RUN
     assert (run_dir / "model_step1").is_file()
@@ -393,7 +397,114 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
         "lineage/data_config_sha1",
     }
     assert wandb_run.params["training_concept_mapping_path"] == "configs/class_to_concepts.csv"
-    assert wandb_run.finished
+    assert wandb_run.exit_code == 0
+
+
+def _raise_boom(**_: Any) -> None:
+    raise RuntimeError("boom")
+
+
+def _send_sigterm(**_: Any) -> None:
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _guard_sigterm(signum: int, frame: Any) -> None:
+    raise AssertionError("SIGTERM reached the guard handler")
+
+
+@_FORK_ONLY
+@pytest.mark.parametrize(
+    ("train_step", "expected_exit"),
+    [
+        pytest.param(_raise_boom, RuntimeError, id="exception"),
+        pytest.param(_send_sigterm, SystemExit, id="sigterm"),
+    ],
+)
+def test_run_ends_the_tracker_run_as_failed_when_training_dies_mid_run(
+    monkeypatch, tmp_path, mock_dinov3_encoder, train_step, expected_exit
+):
+    _, wandb_run, _ = _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    monkeypatch.setattr(training, "train_model", train_step)
+    # Without run()'s handler, a self-sent SIGTERM would otherwise kill pytest.
+    original_sigterm = signal.signal(signal.SIGTERM, _guard_sigterm)
+    original_sigchld = signal.getsignal(signal.SIGCHLD)
+    try:
+        with pytest.raises(expected_exit) as raised:
+            training.run(_smoke_args(tmp_path, tmp_path / "out", tmp_path / "cache"))
+        assert signal.getsignal(signal.SIGTERM) is _guard_sigterm
+    finally:
+        signal.signal(signal.SIGTERM, original_sigterm)
+        signal.signal(signal.SIGCHLD, original_sigchld)
+
+    if expected_exit is SystemExit:
+        assert raised.value.code == 143
+    assert wandb_run.exit_code == 1
+
+
+class _EndlessSlowDataset(Dataset):
+    def __len__(self) -> int:
+        return 10**6
+
+    def __getitem__(self, index: int) -> torch.Tensor:
+        time.sleep(0.01)
+        return torch.zeros(4)
+
+
+class _RecordingExit:
+    """Stand-in for a tracker's end_run: Python work in ``__exit__`` that reports how it ended."""
+
+    def __init__(self, conn: Any) -> None:
+        self.conn = conn
+
+    def __enter__(self) -> _RecordingExit:
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        try:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                sum(range(1000))
+        except Exception as error:
+            self.conn.send(f"{type(error).__name__}: {error}")
+        else:
+            self.conn.send("completed")
+
+
+def _iterate_until_group_sigterm(conn: Any) -> None:
+    # Own process group, so the group-wide SIGTERM cannot reach pytest.
+    os.setpgid(0, 0)
+    loader = DataLoader(
+        _EndlessSlowDataset(),
+        batch_size=2,
+        num_workers=2,
+        persistent_workers=True,
+        multiprocessing_context="fork",
+    )
+    with _sigterm_raises_system_exit(True), _RecordingExit(conn):
+        for index, _ in enumerate(loader):
+            if index == 5:
+                # Sent by another process, as Slurm and torchrun do, so the workers die too.
+                subprocess.Popen(["/bin/kill", "-TERM", "--", f"-{os.getpgrp()}"])
+
+
+@_FORK_ONLY
+def test_group_sigterm_lets_the_enclosing_exit_finish_despite_dying_dataloader_workers():
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    scenario = context.Process(target=_iterate_until_group_sigterm, args=(sender,))
+    scenario.start()
+    sender.close()
+    try:
+        assert receiver.poll(60), "the scenario never reached its __exit__"
+        outcome = receiver.recv()
+        scenario.join(60)
+    finally:
+        if scenario.is_alive():
+            os.killpg(scenario.pid, signal.SIGKILL)
+            scenario.join()
+
+    assert outcome == "completed"
+    assert scenario.exitcode == 143
 
 
 def _resume_checkpoint(meta) -> dict[str, Any]:
@@ -499,7 +610,6 @@ def test_run_rejects_a_bad_checkpoint_before_building_datasets(monkeypatch, tmp_
     monkeypatch.delenv("WANDB_RUN_ID", raising=False)
     fake_wandb = _fake_wandb(_FakeWandbRun())
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    monkeypatch.setattr(mermaidseg.logger, "wandb", fake_wandb)
     monkeypatch.setattr(training, "setup_local_cache", _unreachable)
     monkeypatch.setattr(training, "build_datasets", _unreachable)
     bad = tmp_path / "bad.pt"
