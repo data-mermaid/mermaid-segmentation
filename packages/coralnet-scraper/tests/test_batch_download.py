@@ -82,3 +82,17 @@ def test_run_batch_download_records_a_raising_skip_check(fake_s3):
     assert downloader.download_source.call_count == 2
     assert results[2].ok is False
     assert results[2].errors == ["RuntimeError"]
+
+
+def test_run_batch_download_force_downloads_a_source_with_existing_annotations(fake_s3):
+    fake_s3.put_object(Bucket="b", Key="p/s1/annotations.csv", Body=b"a\n")
+    downloader = MagicMock()
+    result = MagicMock(skipped_no_confirmed=False)
+    downloader.download_source.return_value = result
+
+    results = bd.run_batch_download(
+        [1], downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3, force=True
+    )
+
+    downloader.download_source.assert_called_once_with(1, bucket_name="b", s3_prefix="p")
+    assert results == {1: result}

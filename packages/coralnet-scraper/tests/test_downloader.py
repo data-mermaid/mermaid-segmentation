@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 import requests
+from botocore.exceptions import ClientError
 from bs4 import BeautifulSoup
 
 from coralnet_scraper import downloader as downloader_mod
@@ -574,6 +575,81 @@ def test_paginated_export_merges_with_existing_annotations(paginated_downloader,
     assert overlap_row["Label ID"].iloc[0] == 200
 
 
+_EXISTING_KEY = s3_io.object_key_annotation_csv("p", 1)
+
+
+def test_paginated_export_keeps_existing_csv_when_page_export_fails_with_4xx(
+    paginated_downloader, fake_s3
+):
+    dl = paginated_downloader
+    existing = _ann_csv([("old.jpg", 1, 1, 99)]).encode()
+    fake_s3.put_object(Bucket="b", Key=_EXISTING_KEY, Body=existing)
+    page_html = _browse_page("csrf1", n_thumbs=2)
+    forbidden = requests.HTTPError("403", response=MagicMock(status_code=403))
+
+    with _mock_paginated_session(
+        dl,
+        get=[_mock_response(text=page_html), _mock_response(text=page_html)],
+        post=[forbidden],
+    ) as post_mock:
+        ok = dl.download_annotations_paginated(1, "b", "p", page_workers=1)
+
+    assert ok is False
+    assert post_mock.call_count == 1  # a 4xx is not retried
+    assert fake_s3.objects[("b", _EXISTING_KEY)] == existing
+
+
+def test_paginated_export_returns_false_when_no_browse_pages_found(paginated_downloader, fake_s3):
+    with patch.object(paginated_downloader, "_walk_browse_pages", return_value=[]):
+        ok = paginated_downloader.download_annotations_paginated(1, "b", "p")
+
+    assert ok is False
+    assert fake_s3.objects == {}
+
+
+def test_paginated_export_returns_false_when_existing_read_is_denied(paginated_downloader, fake_s3):
+    denied = ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "GetObject")
+    with (
+        patch.object(fake_s3, "get_object", side_effect=denied),
+        patch.object(paginated_downloader, "_walk_browse_pages") as walk,
+    ):
+        ok = paginated_downloader.download_annotations_paginated(1, "b", "p")
+
+    assert ok is False
+    walk.assert_not_called()
+    assert fake_s3.objects == {}
+
+
+def test_paginated_export_runs_when_existing_csv_covers_fewer_images_than_website(
+    paginated_downloader, fake_s3
+):
+    dl = paginated_downloader
+    existing = _ann_csv([("old.jpg", 1, 1, 99), ("old.jpg", 2, 2, 98)])
+    fake_s3.put_object(Bucket="b", Key=_EXISTING_KEY, Body=existing.encode())
+    page_html = _browse_page("csrf1", n_thumbs=1)
+    new_ann = _ann_csv([("new.jpg", 9, 9, 300), ("old.jpg", 1, 1, 99)])
+
+    with _mock_paginated_session(
+        dl,
+        get=[
+            _mock_response(text=page_html),
+            _mock_response(text=page_html),
+            _mock_response(text=new_ann),
+        ],
+        post=[_mock_response(json_data={"session_data_timestamp": "t1"})],
+    ) as post_mock:
+        ok = dl.download_annotations_paginated(1, "b", "p", total_images_website=2, page_workers=1)
+
+    assert ok is True
+    assert post_mock.call_count == 1
+    df = pd.read_csv(io.BytesIO(fake_s3.objects[("b", _EXISTING_KEY)]))
+    assert sorted(zip(df["Name"], df["Row"], df["Column"], strict=True)) == [
+        ("new.jpg", 9, 9),
+        ("old.jpg", 1, 1),
+        ("old.jpg", 2, 2),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # get_images pagination tests (offline)
 # ---------------------------------------------------------------------------
@@ -993,3 +1069,90 @@ def test_with_retry_backoff_is_jittered():
 def test_constructor_rejects_invalid_max_workers(workers):
     with pytest.raises(ValueError, match="workers"):
         CoralNetDownloader("u", "p", max_workers=workers)
+
+
+def _failing_step_downloader(**overrides) -> tuple[CoralNetDownloader, dict[str, MagicMock]]:
+    """A downloader whose steps succeed except those overridden; returns it with its mocks."""
+    dl = CoralNetDownloader("u", "p", max_workers=2)
+    dl.logged_in = True
+    dl.s3 = MagicMock()
+    images = pd.DataFrame({"Image Page": ["/image/1/view/"]})
+    defaults = {
+        "check_permissions": True,
+        "download_metadata": (True, 2),
+        "download_labelset": True,
+        "download_annotations": True,
+        "get_images": (images, True),
+    }
+    mocks = {
+        name: MagicMock(return_value=overrides.get(name, default))
+        for name, default in defaults.items()
+    }
+    for name, mock in mocks.items():
+        setattr(dl, name, mock)
+    dl._get_source_overview_html = MagicMock(  # type: ignore[method-assign]
+        return_value=_fixture("source_ok.html"),
+        **({"side_effect": overrides["overview"]} if "overview" in overrides else {}),
+    )
+    dl.get_image_urls = MagicMock(return_value=["http://x/1"])  # type: ignore[method-assign]
+    dl.download_image_to_s3 = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda u, b, k: (k, True)
+    )
+    return dl, mocks
+
+
+def test_download_source_returns_login_failed_when_login_fails():
+    dl, mocks = _failing_step_downloader()
+    dl.logged_in = False
+    with patch.object(dl, "login", return_value=False):
+        res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert res.errors == ["login failed"]
+    mocks["check_permissions"].assert_not_called()
+
+
+def test_download_source_returns_cannot_access_when_permissions_denied():
+    dl, mocks = _failing_step_downloader(check_permissions=False)
+    res = dl.download_source(7, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert res.errors == ["cannot access source 7"]
+    mocks["download_metadata"].assert_not_called()
+
+
+def test_download_source_reports_overview_fetch_failure():
+    dl, mocks = _failing_step_downloader(overview=requests.ConnectionError("down"))
+    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert len(res.errors) == 1
+    assert res.errors[0].startswith("overview fetch failed:")
+    mocks["download_metadata"].assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("step", "failure", "code"),
+    [
+        ("download_metadata", (False, 2), "metadata_download_failed"),
+        ("download_labelset", False, "labelset_failed"),
+        ("get_images", (None, False), "image_list_failed"),
+    ],
+)
+def test_download_source_records_a_failed_step_and_still_runs_the_rest(step, failure, code):
+    dl, mocks = _failing_step_downloader(**{step: failure})
+    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert code in res.errors
+    mocks["download_annotations"].assert_called_once()
+    mocks["get_images"].assert_called_once()
+
+
+def test_download_source_stops_after_annotations_fail():
+    dl, mocks = _failing_step_downloader(download_annotations=False)
+    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert res.errors[-1] == "annotations_failed"
+    mocks["get_images"].assert_not_called()
