@@ -6,6 +6,8 @@ import argparse
 import functools
 import json
 import multiprocessing
+import os
+import signal
 import sys
 import types
 from pathlib import Path
@@ -356,7 +358,9 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     )
     output_dir = tmp_path / "out"
     cache_dir = tmp_path / "cache"
+    sigterm_before = signal.getsignal(signal.SIGTERM)
     training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    assert signal.getsignal(signal.SIGTERM) is sigterm_before
 
     run_dir = output_dir / "model_checkpoints" / SMOKE_RUN
     assert (run_dir / "model_step1").is_file()
@@ -391,6 +395,38 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     }
     assert wandb_run.params["training_concept_mapping_path"] == "configs/class_to_concepts.csv"
     assert wandb_run.exit_code == 0
+
+
+def _raise_boom(**_: Any) -> None:
+    raise RuntimeError("boom")
+
+
+def _send_sigterm(**_: Any) -> None:
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+@_FORK_ONLY
+@pytest.mark.parametrize(
+    ("train_step", "expected_exit"),
+    [
+        pytest.param(_raise_boom, RuntimeError, id="exception"),
+        pytest.param(_send_sigterm, SystemExit, id="sigterm"),
+    ],
+)
+def test_run_ends_the_tracker_run_as_failed_when_training_dies_mid_run(
+    monkeypatch, tmp_path, mock_dinov3_encoder, train_step, expected_exit
+):
+    _, wandb_run, _ = _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    monkeypatch.setattr(training, "train_model", train_step)
+    sigterm_before = signal.getsignal(signal.SIGTERM)
+
+    with pytest.raises(expected_exit) as raised:
+        training.run(_smoke_args(tmp_path, tmp_path / "out", tmp_path / "cache"))
+
+    if expected_exit is SystemExit:
+        assert raised.value.code == 143
+    assert wandb_run.exit_code == 1
+    assert signal.getsignal(signal.SIGTERM) is sigterm_before
 
 
 def _resume_checkpoint(meta) -> dict[str, Any]:
