@@ -449,7 +449,9 @@ class CoralNetDownloader:
                 overview page when ``None`` or negative.
 
         Returns:
-            True on success; False on failure, after logging the error.
+            True on success; False on failure, after logging the error. The exported body
+            must parse as a CSV with a ``Name`` column; an empty body, an HTML error page, or
+            any other export without one fails and uploads nothing.
         """
         try:
             total_images = total_images_hint
@@ -576,6 +578,11 @@ class CoralNetDownloader:
             dl = self.session.get(serve_url, timeout=serve_timeout)
             dl.raise_for_status()
             df_annotations = pd.read_csv(io.StringIO(dl.text))
+            if "Name" not in df_annotations.columns:
+                raise RuntimeError(
+                    f"Source {source_id}: export/serve response is not an annotations CSV "
+                    "(no 'Name' column)"
+                )
             buf = io.StringIO()
             df_annotations.to_csv(buf, index=False)
             key = f"{s3_prefix}/s{source_id}/annotations.csv"
@@ -1047,17 +1054,24 @@ class CoralNetDownloader:
     def get_image_urls(self, image_page_urls: list[str]) -> list[str | None]:
         """Resolve image-page links to original-image URLs, in input order.
 
-        With several workers a failed lookup yields None for that entry; with a single
-        worker the first failure raises.
+        A failed lookup always yields None for that entry, with one worker or several.
         """
         n = len(image_page_urls)
         workers = min(self.max_workers, n) if n > 0 else 1
-        if workers <= 1:
-            return [self._resolve_one_image_url(rel) for rel in image_page_urls]
-
-        logger.info("Resolving %d image URLs with %d workers", n, workers)
         results: list[str | None] = [None] * n
         errors = 0
+        if workers <= 1:
+            for i, rel in enumerate(image_page_urls):
+                try:
+                    results[i] = self._resolve_one_image_url(rel)
+                except Exception as e:  # noqa: BLE001
+                    errors += 1
+                    logger.warning("Failed to resolve image URL %s: %s", rel, e)
+            if errors:
+                logger.warning("Image URL resolution: %d/%d failed", errors, n)
+            return results
+
+        logger.info("Resolving %d image URLs with %d workers", n, workers)
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_idx = {
                 executor.submit(self._resolve_one_image_url, rel): i

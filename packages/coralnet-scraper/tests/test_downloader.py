@@ -210,6 +210,44 @@ def test_download_source_sums_image_failures_across_batches():
     assert res.image_failures == ImageFailures(missing_url=0, upload_failed=1)
 
 
+def test_get_image_urls_single_failing_url_yields_none():
+    dl = _image_source_downloader()
+    with patch.object(dl, "_resolve_one_image_url", side_effect=ValueError("private")):
+        assert dl.get_image_urls(["/image/1/view/"]) == [None]
+
+
+def test_get_image_urls_serial_path_keeps_order_around_a_failure():
+    dl = CoralNetDownloader("u", "p", max_workers=1)
+
+    def resolve(rel: str) -> str:
+        if rel == "/image/2/view/":
+            raise ValueError("private")
+        return "http://x" + rel
+
+    with patch.object(dl, "_resolve_one_image_url", side_effect=resolve):
+        urls = dl.get_image_urls(["/image/1/view/", "/image/2/view/", "/image/3/view/"])
+    assert urls == ["http://x/image/1/view/", None, "http://x/image/3/view/"]
+
+
+def test_download_source_reports_missing_url_when_single_image_lookup_raises():
+    dl = _image_source_downloader()
+    images = pd.DataFrame({"Image Page": ["/image/1/view/"]})
+    with (
+        patch.object(dl, "check_permissions", return_value=True),
+        patch.object(dl, "_get_source_overview_html", return_value=_fixture("source_ok.html")),
+        patch.object(dl, "download_metadata", return_value=(True, 1)),
+        patch.object(dl, "download_labelset", return_value=True),
+        patch.object(dl, "download_annotations", return_value=True),
+        patch.object(dl, "get_images", return_value=(images, True)),
+        patch.object(dl, "_resolve_one_image_url", side_effect=ValueError("private")),
+        patch.object(s3_io, "upload_csv_body"),
+        patch.object(dl, "download_image_to_s3", side_effect=lambda u, b, k: (k, True)),
+    ):
+        res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+    assert res.errors == ["images_missing_url"]
+    assert res.image_failures == ImageFailures(missing_url=1, upload_failed=0)
+
+
 _BROWSE_HTML_PAGE = """\
 <html>
 <form id="export-annotations-prep-form">
@@ -352,28 +390,70 @@ def test_download_annotations_dispatches_to_paginated_for_large_source(fake_s3):
     )
 
 
-def test_download_annotations_bulk_for_small_source():
-    """Sources at or below threshold must use the existing bulk path."""
+_BULK_BROWSE_HTML = (
+    '<form id="export-annotations-prep-form">'
+    '<input type="hidden" name="csrfmiddlewaretoken" value="tok"/></form>'
+)
+_BULK_KEY = ("b", "p/s1/annotations.csv")
+
+
+def _run_bulk_download(
+    fake_s3, *, browse_html: str, serve_text: str = ""
+) -> tuple[bool, MagicMock]:
+    """Run the bulk annotations path on a small source; return (ok, export_prep POST mock)."""
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
-    dl.s3 = MagicMock()
-
-    browse_html = (
-        '<form id="export-annotations-prep-form">'
-        '<input type="hidden" name="csrfmiddlewaretoken" value="tok"/></form>'
-    )
+    dl.s3 = fake_s3
     browse_resp = _mock_response(text=browse_html)
     post_resp = _mock_response(json_data={"session_data_timestamp": "t1"})
-    serve_resp = _mock_response(text="Name,Row,Column,Label ID\na.jpg,1,2,3\n")
-
+    serve_resp = _mock_response(text=serve_text)
     with (
         patch.object(dl.session, "get", side_effect=[browse_resp, serve_resp]),
-        patch.object(dl.session, "post", return_value=post_resp),
+        patch.object(dl.session, "post", return_value=post_resp) as post_mock,
         patch("coralnet_scraper.downloader.time.sleep"),
     ):
         ok = dl.download_annotations(1, "b", "p", total_images_hint=_PAGINATED_EXPORT_THRESHOLD)
+    return ok, post_mock
+
+
+def test_download_annotations_bulk_for_small_source(fake_s3):
+    """Sources at or below threshold must use the existing bulk path."""
+    ok, _ = _run_bulk_download(
+        fake_s3,
+        browse_html=_BULK_BROWSE_HTML,
+        serve_text="Name,Row,Column,Label ID\na.jpg,1,2,3\nb.jpg,4,5,6\n",
+    )
 
     assert ok is True
+    uploaded = pd.read_csv(io.BytesIO(fake_s3.objects[_BULK_KEY]))
+    assert list(uploaded.columns) == ["Name", "Row", "Column", "Label ID"]
+    assert uploaded.to_numpy().tolist() == [["a.jpg", 1, 2, 3], ["b.jpg", 4, 5, 6]]
+
+
+def test_download_annotations_bulk_without_export_form_uploads_nothing(fake_s3):
+    ok, post_mock = _run_bulk_download(fake_s3, browse_html="<html><body>login</body></html>")
+
+    assert ok is False
+    assert _BULK_KEY not in fake_s3.objects
+    post_mock.assert_not_called()
+
+
+def test_download_annotations_bulk_html_export_uploads_nothing(fake_s3):
+    ok, _ = _run_bulk_download(
+        fake_s3,
+        browse_html=_BULK_BROWSE_HTML,
+        serve_text="<html><body>Error</body></html>",
+    )
+
+    assert ok is False
+    assert _BULK_KEY not in fake_s3.objects
+
+
+def test_download_annotations_bulk_empty_export_uploads_nothing(fake_s3):
+    ok, _ = _run_bulk_download(fake_s3, browse_html=_BULK_BROWSE_HTML, serve_text="")
+
+    assert ok is False
+    assert _BULK_KEY not in fake_s3.objects
 
 
 def test_paginated_export_skips_when_existing_annotations_are_complete(
