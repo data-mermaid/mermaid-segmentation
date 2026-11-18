@@ -29,20 +29,18 @@ _RUNS = Path(__file__).resolve().parents[3] / "sagemaker" / "runs"
 
 
 def _train(init_weights: str | None = None, args: list[str] | None = None) -> TrainConfig:
-    return TrainConfig(
-        run_name="r", group="g", init_weights=init_weights, args=args or ["--batch-size", "8"]
-    )
+    return TrainConfig(run_name="r", init_weights=init_weights, args=args or ["--batch-size", "8"])
 
 
-def _without_owned(argv: list[str]) -> list[str]:
-    """Trainer argv from scripts/train.py on, with substrate-owned flag/value pairs removed."""
+def _without_owned(argv: list[str], *extra_flags: str) -> list[str]:
+    """Trainer argv from scripts/train.py on, with owned and extra flag/value pairs removed."""
     tokens = argv[argv.index("scripts/train.py") :]
     kept: list[str] = []
     skip = False
     for token in tokens:
         if skip:
             skip = False
-        elif token in OWNED_FLAGS:
+        elif token in (*OWNED_FLAGS, *extra_flags):
             skip = True
         else:
             kept.append(token)
@@ -69,7 +67,8 @@ def test_trainer_argv_matches_the_slurm_launcher(repo, job, name, ngpu):
     config = load_run_config(_RUNS / f"{name}.yaml")
     ours = build_trainer_argv(config.train, ngpu=ngpu, cpus=48, python="py")
 
-    assert _without_owned(ours) == _without_owned(slurm_argv)
+    # SageMaker alone swaps the tracker, so only it passes a logger config.
+    assert _without_owned(ours, "--logger-config") == _without_owned(slurm_argv)
     ours_init = launchers._arg(ours, "--init-weights")
     if slurm_init is None:
         assert ours_init is None
@@ -183,10 +182,9 @@ class _FakeSecrets:
         return {"SecretString": self.secrets[SecretId]}
 
 
-def test_resolve_secrets_sets_both_variables():
-    environ = {"WANDB_API_KEY_SECRET_ID": "w-id", "HF_TOKEN_SECRET_ID": "h-id"}
-    resolve_secrets(environ, _FakeSecrets({"w-id": "wandb-value", "h-id": "hf-value"}))
-    assert environ["WANDB_API_KEY"] == "wandb-value"
+def test_resolve_secrets_sets_hf_token():
+    environ = {"HF_TOKEN_SECRET_ID": "h-id"}
+    resolve_secrets(environ, _FakeSecrets({"h-id": "hf-value"}))
     assert environ["HF_TOKEN"] == "hf-value"
 
 
@@ -200,38 +198,28 @@ def test_resolve_secrets_skips_unset_ids():
 
 def test_resolve_secrets_propagates_a_failed_fetch():
     with pytest.raises(ClientError):
-        resolve_secrets({"WANDB_API_KEY_SECRET_ID": "missing"}, _FakeSecrets({}))
+        resolve_secrets({"HF_TOKEN_SECRET_ID": "missing"}, _FakeSecrets({}))
 
 
 # ---------- trainer_env ----------
 
 
-def test_trainer_env_single_gpu():
-    env = trainer_env({}, "mermaidseg-cbm.final:1", _train(), ngpu=1)
-    assert env == {
-        "WANDB_RUN_ID": "mermaidseg-cbm-final-1",
-        "WANDB_RUN_GROUP": "g",
-        "WANDB_PROJECT": "mermaidseg",
-    }
-
-
-def test_trainer_env_keeps_a_set_wandb_project():
-    env = trainer_env({"WANDB_PROJECT": "other"}, "job", _train(), ngpu=1)
-    assert env["WANDB_PROJECT"] == "other"
+def test_trainer_env_single_gpu_adds_nothing():
+    assert trainer_env(_train(), ngpu=1) == {}
 
 
 def test_trainer_env_adds_nccl_settings_for_several_gpus():
-    env = trainer_env({}, "job", _train(), ngpu=4)
+    env = trainer_env(_train(), ngpu=4)
+    assert set(env) == {
+        "OMP_NUM_THREADS",
+        "TORCH_NCCL_TRACE_BUFFER_SIZE",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT",
+        "TORCH_NCCL_DEBUG_INFO_TEMP_FILE",
+    }
     assert env["OMP_NUM_THREADS"] == "1"
     assert env["TORCH_NCCL_TRACE_BUFFER_SIZE"] == "2000"
     assert env["TORCH_NCCL_DUMP_ON_TIMEOUT"] == "1"
     assert env["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] == "/opt/ml/checkpoints/nccl_trace/r_rank_"
-
-
-@pytest.mark.parametrize("job_name", [None, ""])
-def test_trainer_env_without_job_name_raises(job_name):
-    with pytest.raises(ValueError, match="MERMAIDSEG_JOB_NAME"):
-        trainer_env({}, job_name, _train(), ngpu=1)
 
 
 # ---------- find_run_yaml ----------
@@ -264,7 +252,6 @@ def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final"):
     monkeypatch.setattr("torch.cuda.device_count", lambda: ngpu)
     monkeypatch.setattr(os, "cpu_count", lambda: 48)
     monkeypatch.setattr(os, "chdir", lambda *a: None)
-    monkeypatch.setenv("MERMAIDSEG_JOB_NAME", "job")
     monkeypatch.setattr("boto3.client", lambda *a, **k: object())
     monkeypatch.setattr(entrypoint, "resolve_secrets", lambda *a: None)
     execs: list[list[str]] = []

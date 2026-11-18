@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import scripts.sagemaker.launch as launch
+from mermaidseg.io import load_section, resolve_repo_path
 from scripts.sagemaker.run_config import RunConfig, load_run_config
 
 _RUNS = Path(__file__).resolve().parents[3] / "sagemaker" / "runs"
@@ -22,14 +23,14 @@ _ENV_VARS = (
     "SM_STAGING_BUCKET",
     "SM_ECR_REGISTRY",
     "HF_TOKEN_SECRET_ID",
-    "WANDB_API_KEY_SECRET_ID",
+    "SM_MLFLOW_TRACKING_ARN",
 )
 _FAKE_ENV = {
     "SM_ROLE_ARN": "arn:fake:role",
     "SM_STAGING_BUCKET": "fake-bucket",
     "SM_ECR_REGISTRY": "123.dkr.ecr.fake.amazonaws.com",
     "HF_TOKEN_SECRET_ID": "fake/hf",
-    "WANDB_API_KEY_SECRET_ID": "fake/wandb",
+    "SM_MLFLOW_TRACKING_ARN": "arn:fake:mlflow-app/app-x",
 }
 
 
@@ -66,6 +67,13 @@ def _write(tmp_path: Path, cfg: RunConfig) -> Path:
 def test_committed_run_yamls_pass_check_without_env(no_sm_env, capsys, path, extra):
     assert launch.main(["--run-config", str(path), "--check", *extra]) == 0
     assert capsys.readouterr().out == f"OK: {path}\n"
+
+
+@pytest.mark.parametrize("path", sorted(_RUNS.glob("*.yaml")), ids=lambda p: p.stem)
+def test_committed_run_yamls_select_the_mlflow_tracker(path):
+    namespace = launch._parse_trainer_args(load_run_config(path))
+    section = load_section(resolve_repo_path(namespace.logger_config), "logger")
+    assert section["tracker"] == "mlflow"
 
 
 def test_check_failure_exits_with_error_message(no_sm_env):
@@ -165,9 +173,8 @@ def test_build_request_for_res768():
             },
         ],
         "Environment": {
-            "MERMAIDSEG_JOB_NAME": "mermaidseg-cbm-final-res768-job",
             "HF_TOKEN_SECRET_ID": "fake/hf",
-            "WANDB_API_KEY_SECRET_ID": "fake/wandb",
+            "MLFLOW_TRACKING_URI": "arn:fake:mlflow-app/app-x",
         },
     }
 

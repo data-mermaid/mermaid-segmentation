@@ -7,7 +7,9 @@ as the job's ``config`` channel and submits the job. It does not wait for the jo
         [--check | --dry-run]
 
 ``--check`` validates only and needs no environment. ``--dry-run`` also builds and prints the
-request without calling AWS. Account values come from the environment (see ``REQUIRED_ENV``).
+request without calling AWS. Account values, including the MLflow tracking server ARN
+(``SM_MLFLOW_TRACKING_ARN``, passed to the job as ``MLFLOW_TRACKING_URI``), come from the
+environment (see ``REQUIRED_ENV``).
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ REQUIRED_ENV = (
     "SM_STAGING_BUCKET",
     "SM_ECR_REGISTRY",
     "HF_TOKEN_SECRET_ID",
-    "WANDB_API_KEY_SECRET_ID",
+    "SM_MLFLOW_TRACKING_ARN",
 )
 
 # Any count that leaves workers per rank; validation only parses the resulting argv.
@@ -223,9 +225,8 @@ def build_request(
         "InputDataConfig": channels,
         # Secret ids only: the entrypoint fetches the values, so the job never exposes them.
         "Environment": {
-            "MERMAIDSEG_JOB_NAME": job_name,
             "HF_TOKEN_SECRET_ID": env["HF_TOKEN_SECRET_ID"],
-            "WANDB_API_KEY_SECRET_ID": env["WANDB_API_KEY_SECRET_ID"],
+            "MLFLOW_TRACKING_URI": env["SM_MLFLOW_TRACKING_ARN"],
         },
     }
 

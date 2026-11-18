@@ -3,10 +3,10 @@
 
 # --- SageMaker TrainingJob: backup to Slurm; same trainer command ---
 # Images come only from the sagemaker-image CI workflow. Account values (role, bucket,
-# registry, secret ids, profile) come from the git-ignored .env, never from this file.
+# registry, secret ids, MLflow ARN, profile) come from the git-ignored .env, never from this file.
 SM_RUN_CONFIG ?= sagemaker/runs/cbm_final.yaml
 SM_ENV_VARS = SM_ROLE_ARN SM_STAGING_BUCKET SM_ECR_REGISTRY HF_TOKEN_SECRET_ID \
-	WANDB_API_KEY_SECRET_ID SM_AWS_PROFILE
+	SM_MLFLOW_TRACKING_ARN SM_AWS_PROFILE
 SM_AWS_ENV = AWS_PROFILE=$(SM_AWS_PROFILE) AWS_DEFAULT_REGION=us-east-1
 # Pass INIT_FROM_JOB=<training-job-name> for a run YAML that sets train.init_weights.
 SM_LAUNCH = uv run python -m scripts.sagemaker.launch --run-config $(SM_RUN_CONFIG) \

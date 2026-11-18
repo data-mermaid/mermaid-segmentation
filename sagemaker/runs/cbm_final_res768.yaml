@@ -7,7 +7,6 @@ job:
   max_runtime_hours: 168
 train:
   run_name: cbm_final_res768
-  group: cbm_final
   init_weights: model_checkpoints/cbm_final/model_step300000
   args:
     - --training-config
@@ -20,3 +19,5 @@ train:
     - "8"
     - --grad-accum-steps
     - "4"
+    - --logger-config
+    - configs/logger_config_sagemaker.yaml
