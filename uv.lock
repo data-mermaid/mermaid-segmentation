@@ -1876,7 +1876,6 @@ dependencies = [
     { name = "datasets" },
     { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and sys_platform == 'darwin'" },
     { name = "huggingface-hub", version = "1.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or sys_platform != 'darwin'" },
-    { name = "mlflow" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
     { name = "pandas" },
@@ -1887,11 +1886,20 @@ dependencies = [
     { name = "requests" },
     { name = "s3fs" },
     { name = "safetensors" },
+    { name = "scikit-learn" },
     { name = "torch" },
     { name = "torchmetrics" },
     { name = "tqdm" },
     { name = "transformers", version = "4.57.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and sys_platform == 'darwin'" },
     { name = "transformers", version = "5.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or sys_platform != 'darwin'" },
+]
+
+[package.optional-dependencies]
+sagemaker = [
+    { name = "mlflow" },
+    { name = "sagemaker-mlflow" },
+]
+slurm = [
     { name = "wandb" },
 ]
 
@@ -1919,7 +1927,7 @@ requires-dist = [
     { name = "boto3" },
     { name = "datasets", specifier = ">=3.0" },
     { name = "huggingface-hub", specifier = ">=0.36.2" },
-    { name = "mlflow" },
+    { name = "mlflow", marker = "extra == 'sagemaker'" },
     { name = "numpy", specifier = ">=1.24,<2" },
     { name = "opencv-python-headless", specifier = ">=4.11.0.86" },
     { name = "pandas" },
@@ -1930,12 +1938,15 @@ requires-dist = [
     { name = "requests" },
     { name = "s3fs" },
     { name = "safetensors", specifier = ">=0.7.0" },
+    { name = "sagemaker-mlflow", marker = "extra == 'sagemaker'" },
+    { name = "scikit-learn" },
     { name = "torch", specifier = ">=2.4,<2.8" },
     { name = "torchmetrics" },
     { name = "tqdm" },
     { name = "transformers" },
-    { name = "wandb", specifier = ">=0.25.0" },
+    { name = "wandb", marker = "extra == 'slurm'", specifier = ">=0.25.0" },
 ]
+provides-extras = ["slurm", "sagemaker"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3424,6 +3435,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/d8/0c8a7dc9b41dcac53c4cbf9df2b9c83e0e0097203de8b37a712b345c0be5/safetensors-0.7.0-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:b0f6d66c1c538d5a94a73aa9ddca8ccc4227e6c9ff555322ea40bdd142391dd4", size = 677368, upload-time = "2025-11-19T15:18:41.627Z" },
     { url = "https://files.pythonhosted.org/packages/05/e5/cb4b713c8a93469e3c5be7c3f8d77d307e65fe89673e731f5c2bfd0a9237/safetensors-0.7.0-cp38-abi3-win32.whl", hash = "sha256:c74af94bf3ac15ac4d0f2a7c7b4663a15f8c2ab15ed0fc7531ca61d0835eccba", size = 326423, upload-time = "2025-11-19T15:18:45.74Z" },
     { url = "https://files.pythonhosted.org/packages/5d/e6/ec8471c8072382cb91233ba7267fd931219753bb43814cbc71757bfd4dab/safetensors-0.7.0-cp38-abi3-win_amd64.whl", hash = "sha256:d1239932053f56f3456f32eb9625590cc7582e905021f94636202a864d470755", size = 341380, upload-time = "2025-11-19T15:18:44.427Z" },
+]
+
+[[package]]
+name = "sagemaker-mlflow"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "boto3" },
+    { name = "mlflow-skinny" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d5/e6/c147424bb1b1d16963037940949533dc893b511cf5919ecbc82388dfcf0d/sagemaker_mlflow-0.5.0.tar.gz", hash = "sha256:6786b9aa738bf0ec551dc99bd44069ac39ad202fa234f99b2fc914556f1af2f2", size = 22371, upload-time = "2026-06-27T00:06:19.285Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/50/4d0a43a18e0596f2fd1a506a4467577c45d2697b245cb5f61e8704209c29/sagemaker_mlflow-0.5.0-py3-none-any.whl", hash = "sha256:f55dc39c6ed345d4359c7d5cddd99fb59c852609c463a397d18e8bbaba672dac", size = 31159, upload-time = "2026-06-27T00:06:18.253Z" },
 ]
 
 [[package]]

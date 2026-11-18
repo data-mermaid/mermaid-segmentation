@@ -50,6 +50,6 @@ export WANDB_DIR="$REPO/wandb"
 export WANDB_PROJECT=${WANDB_PROJECT:-mermaidseg}
 
 cd "$REPO"
-uv sync --locked
+uv sync --locked --extra slurm
 PY="$REPO/.venv/bin/python"
 export PY

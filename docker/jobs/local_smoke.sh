@@ -27,6 +27,8 @@ if ! docker run --rm --workdir /opt/ml/code --entrypoint python "${IMAGE}" -c "
 import mermaidseg.training
 import mermaidseg.run_setup
 import mermaidseg.inference
+import mlflow
+import sagemaker_mlflow
 import scripts.sagemaker.train_entrypoint
 print('[smoke] import chain OK')
 " > "$LOG" 2>&1; then
