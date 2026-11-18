@@ -75,6 +75,30 @@ def test_unavailable_git_leaves_sha_and_dirty_none(monkeypatch, failure):
     assert result["git_dirty"] is None
 
 
+@pytest.fixture(autouse=True)
+def _no_build_sha(monkeypatch):
+    monkeypatch.delenv("MERMAIDSEG_GIT_SHA", raising=False)
+
+
+def test_build_sha_is_recorded_clean_without_calling_git(monkeypatch):
+    def run(*_args, **_kwargs):
+        raise AssertionError("git must not be invoked when MERMAIDSEG_GIT_SHA is set")
+
+    monkeypatch.setenv("MERMAIDSEG_GIT_SHA", "abc123")
+    monkeypatch.setattr(lineage.subprocess, "run", run)
+    result = _collect()
+    assert result["git_sha"] == "abc123"
+    assert result["git_dirty"] is False
+
+
+def test_empty_build_sha_falls_back_to_git(monkeypatch, git_repo):
+    monkeypatch.setenv("MERMAIDSEG_GIT_SHA", "")
+    (git_repo / "tracked.txt").write_text("two\n")
+    result = _collect()
+    assert result["git_sha"] == _git(git_repo, "rev-parse", "HEAD").strip()
+    assert result["git_dirty"] is True
+
+
 def test_uv_lock_sha256_hashes_the_lock_file(monkeypatch, tmp_path: Path):
     (tmp_path / "uv.lock").write_bytes(b"locked\n")
     monkeypatch.setattr(lineage, "REPO_ROOT", tmp_path)

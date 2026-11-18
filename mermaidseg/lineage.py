@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Mapping
 from importlib.metadata import version
@@ -13,6 +14,8 @@ from typing import Any
 from mermaidseg.io import REPO_ROOT
 
 GIT_TIMEOUT_SEC = 10
+# CI builds container images from a committed tree and passes the commit here; the image has no .git.
+BUILD_GIT_SHA_ENV = "MERMAIDSEG_GIT_SHA"
 UV_LOCK = "uv.lock"
 VERSIONED_PACKAGES = ("torch", "transformers", "peft")
 
@@ -75,10 +78,18 @@ def collect_lineage(*, resolved_config: dict, seed: int, data_version: dict) -> 
     """Everything needed to trace a run back to its code, environment, config and data.
 
     ``git_dirty`` counts tracked changes only; None (git unavailable) is as untrusted as True.
+    A non-empty ``MERMAIDSEG_GIT_SHA`` is the revision of a CI-built image: it is recorded as
+    ``git_sha`` with ``git_dirty`` False (the tree is committed by construction) and git is not run.
     """
+    build_sha = os.environ.get(BUILD_GIT_SHA_ENV)
+    if build_sha:
+        git_sha: str | None = build_sha
+        git_dirty: bool | None = False
+    else:
+        git_sha, git_dirty = _git_sha(), _git_dirty()
     return {
-        "git_sha": _git_sha(),
-        "git_dirty": _git_dirty(),
+        "git_sha": git_sha,
+        "git_dirty": git_dirty,
         "uv_lock_sha256": _uv_lock_sha256(),
         "seed": seed,
         "data_version": data_version,
