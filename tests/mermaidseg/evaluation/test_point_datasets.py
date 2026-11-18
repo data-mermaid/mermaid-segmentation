@@ -25,7 +25,7 @@ from mermaidseg.evaluation.point_datasets import (
 )
 from mermaidseg.inference.predictor import CBMPredictor
 
-_REPO = Path(__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[3]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
 LABELS = [
     "sand",

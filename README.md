@@ -8,14 +8,13 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 ### Installation
 
 Prerequisites
-- Python 3.11+
-- AWS credentials configured with `mermaid-core` profile (for S3 access)
-- Hugging Face account and token (for DINOv3 models; see [Hugging Face Setup](#hugging-face-setup) below)
-- uv (recommended) or pip
+- [uv](https://docs.astral.sh/uv/)
+- Python 3.11 or later (`requires-python` in `pyproject.toml`). `.python-version` pins 3.12, which uv uses by default.
+- AWS credentials configured with the `mermaid-core` profile, for S3 access
+- A Hugging Face account and token, for DINOv3 models (see [Hugging Face Setup](#hugging-face-setup))
 
-**Quick setup with uv** (recommended):
 ```bash
-git clone https://github.com/your-org/mermaid-segmentation.git
+git clone https://github.com/data-mermaid/mermaid-segmentation.git
 cd mermaid-segmentation
 
 # Install uv if needed
@@ -29,49 +28,77 @@ echo "AWS_PROFILE=mermaid-core" >> .env
 hf auth login
 # Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
 
-# Install core dependencies
-uv sync
+# Install the locked dependencies
+uv sync --locked
 ```
 
-**Install the contributor dependency group** as needed:
+Contributors add a dependency group:
+
+| Group | Contents |
+|---|---|
+| `tests` | pytest and pytest-cov |
+| `lint` | ruff, pre-commit and mypy |
+| `dev` | `tests` and `lint` |
+
 ```bash
-uv sync --group dev         # tests + lint (contributor setup)
+uv sync --locked --group dev
 ```
-
 
 ### Hugging Face Setup
 
-DINOv3 models (e.g. `facebook/dinov3-vitb16-pretrain-lvd1689m`) are gated on Hugging Face and require authentication:
+DINOv3 models (for example `facebook/dinov3-vitb16-pretrain-lvd1689m`) are gated on Hugging Face and need authentication:
 
-1. **Request access**: Visit the [model page](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m), sign in, and accept the license to request access.
-2. **Authenticate** using one of these methods:
+1. **Request access**: Open the [model page](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m), sign in, and accept the license.
+2. **Authenticate** with one of these methods:
    - **CLI login** (recommended): Run `hf auth login` and paste your token when prompted.
-   - **Environment variable**: Add `HF_TOKEN=hf_xxxxxxxxxxxx` to your `.env` file (create from `.env.example`). Create a token at [hf.co/settings/tokens](https://hf.co/settings/tokens).
+   - **Environment variable**: Add `HF_TOKEN=hf_xxxxxxxxxxxx` to your `.env` file (create it from `.env.example`). Create a token at [hf.co/settings/tokens](https://hf.co/settings/tokens).
 
-If using `.env` with direnv, ensure you run `direnv allow` and restart your shell so it picks up the token.
+If you use `.env` with direnv, run `direnv allow` and restart your shell so it picks up the token.
+
+### Architecture overview
+
+```text
+scripts/train.py
+  -> mermaidseg/training.py
+       configs validated by mermaidseg/config.py (strict pydantic models)
+       labels and concepts from mermaidseg/dataset_reconciliation/
+       MetaModel (mermaidseg/model/meta.py), wandb Logger (mermaidseg/logger.py)
+  -> outputs/model_checkpoints/<run>/
+       model_step* checkpoints (with lineage), config.yaml, model.json
+  -> scripts/export.py (mermaidseg/export.py)
+  -> bundle: weights.safetensors + model.json
+  -> mermaidseg/inference/ (load_bundle, preprocess, CBMPredictor)
+       used by scripts/evaluate.py
+```
+
+`scripts/train.py` is the only training entrypoint. Each compute substrate has a thin launcher that runs it with the same config: your shell (local), `slurm/launch_final.sh` (Slurm) and `scripts/sagemaker/` (SageMaker). `AGENTS.md` section 1 has the directory map.
 
 ### Segmentation Models
+
+#### Local
+
 Train a concept-bottleneck model from the repository root:
 
 ```bash
 uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
 ```
 
-`--num-workers` is required. The config flags `--training-config`, `--model-config`,
-`--data-config`, `--concept-schema-config` and `--logger-config` take repo-relative paths under
-`configs/`. `--resolution` sets the train crop size and the model input size; val and test images
-resize to the model input size. Checkpoints go to
-`outputs/model_checkpoints/<run>/`; `--output-dir` changes `outputs`. Each run also writes its resolved config to `outputs/model_checkpoints/<run>/config.yaml`, as a record of the settings the run used. It is not meant to be passed back in as a run config.
-At the start, each run also writes `outputs/model_checkpoints/<run>/model.json`: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version and resolved config).
+`--num-workers` is required. The flags `--training-config`, `--model-config`, `--data-config`, `--concept-schema-config` and `--logger-config` take repo-relative paths under `configs/`. `--resolution` sets the train crop size and the model input size. Val and test images resize to the model input size.
 
-`slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px
-fine-tune. It submits through `slurm/train.sbatch`, with site settings from `.env` (see `.env.example`).
-It is idempotent and accepts `--dry-run`.
-Batch jobs write `.venv`, `outputs/` and `logs/` inside the checkout, so it must be on a filesystem the job can write, not AFS, because batch jobs have no AFS token. Set `MERMAIDSEG_ENV_FILE` to read the settings from an env file elsewhere.
+Checkpoints go to `outputs/model_checkpoints/<run>/`. `--output-dir` changes `outputs`. Each run writes two files there:
 
-### Train on SageMaker (backup)
+- `config.yaml`: the resolved config, as a record of the settings the run used. Do not pass it back in as a run config.
+- `model.json`, written when the run starts: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version and resolved config).
 
-SageMaker runs the same `scripts/train.py` with the same arguments as `slurm/launch_final.sh`. Use it when Slurm is not available. Jobs are on-demand and do not resume: relaunch a failed job from scratch.
+#### Slurm
+
+`slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px fine-tune. It submits through `slurm/train.sbatch`, with site settings from `.env` (see `.env.example`). It is idempotent and accepts `--dry-run`.
+
+Batch jobs write `.venv`, `outputs/` and `logs/` inside the checkout. The checkout must be on a filesystem the job can write to. AFS does not work, because batch jobs have no AFS token. To read the settings from an env file elsewhere, set `MERMAIDSEG_ENV_FILE`.
+
+#### SageMaker
+
+SageMaker is the backup to Slurm. It runs the same `scripts/train.py` with the same arguments as `slurm/launch_final.sh`. Jobs are on-demand and do not resume: relaunch a failed job from scratch.
 
 1. Set the SageMaker variables in `.env` (see `.env.example`) and load it: the Makefile reads them from the environment.
 2. Run the `sagemaker-image` GitHub workflow (Actions, Run workflow). Only `main` can run it. It builds the image, pushes `training-<sha>` and moves `training-latest`; see [docker/jobs/README.md](docker/jobs/README.md). The job runs the code and `configs/` baked into the image: `training-latest` is `main` at the last workflow run. Only the run YAML travels with the job. Merge config and code changes, and rerun the workflow, before you launch.
@@ -85,7 +112,7 @@ At launch, the launcher resolves `job.image` (`repo:tag`) to its ECR digest, sub
 
 Checkpoints sync to `s3://$SM_STAGING_BUCKET/runs/<job>/checkpoints/model_checkpoints/<run>/` (`model_step*`, `model.json`, `config.yaml`). Download them from there for export. The `git_sha` in `model.json` and the saved `config.yaml` record what the job ran.
 
-Monitor a job with `make sm-jobs`, `sm-status`, `sm-logs`, `sm-errors` and `sm-metrics`. These targets need the AWS CLI. All but `sm-jobs` need `JOB=<training-job-name>`, from `make sm-jobs` or the launcher's output. The first lines of the job log show the disk space for `/opt/ml/cache` and `/opt/ml/checkpoints`; on the first run, check where the cache lands.
+Monitor a job with `make sm-jobs`, `sm-status`, `sm-logs`, `sm-errors` and `sm-metrics`. These targets need the AWS CLI. All except `sm-jobs` need `JOB=<training-job-name>`, from `make sm-jobs` or the launcher's output. The first lines of the job log show the disk space for `/opt/ml/cache` and `/opt/ml/checkpoints`. On the first run, check where the cache lands.
 
 Both run YAMLs set `max_runtime_hours` above the 5-day default of the account Service Quota "Longest run time for a training job": 480 h for `cbm_final` and 168 h for `cbm_final_res768`. Raise the quota to at least 480 h first.
 
@@ -94,43 +121,96 @@ Both run YAMLs set `max_runtime_hours` above the 5-day default of the account Se
 Export a finished run as a bundle, then evaluate the bundle:
 
 ```bash
-uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
 uv run python scripts/export.py --checkpoint outputs/model_checkpoints/<run>/<checkpoint> --output-dir /path/to/bundle
 uv run python scripts/evaluate.py --bundle /path/to/bundle --output-dir /path/to/results
 ```
 
-The bundle holds `model.json` and `weights.safetensors`. These two files are the contract with `mermaid-inference`.
-`scripts/export.py` refuses a checkpoint with no recorded lineage, a checkpoint whose lineage records a dirty or unknown git tree (each checkpoint records the lineage of the session that wrote it), a checkpoint whose config differs from its recorded lineage, a non-empty output directory, and a missing parent directory.
-Export needs a run trained with this version or later: older runs have no `model.json`, and their checkpoints record no lineage.
+The bundle holds `model.json` and `weights.safetensors`, the two file names `load_bundle` (`mermaidseg/inference/bundle.py`) reads.
 
-`scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
-few-shot probes and the validation loss). It evaluates an exported bundle: input size, normalization, label maps and run settings come from the bundle. The model comes only from `--bundle`; the old `--checkpoint`, `--model-config`, `--training-config`, `--resolution`, `--id2label`, `--concept-id2name` and `--taxonomy-csv` flags are gone.
+`scripts/export.py` refuses:
+- a checkpoint with no recorded lineage
+- a checkpoint whose lineage records a dirty or unknown git tree (each checkpoint records the lineage of the session that wrote it)
+- a checkpoint whose config differs from its recorded lineage
+- a non-empty output directory
+- a missing parent directory
+
+Export needs a run trained with this version or later. Older runs have no `model.json`, and their checkpoints record no lineage.
+
+`scripts/evaluate.py` is the validation suite: CoralNet, Pacific Labeled Corals, CoralscapesV2 few-shot probes and the validation loss. It evaluates an exported bundle. Input size, normalization, label maps and run settings come from the bundle. The model comes only from `--bundle`; the old `--checkpoint`, `--model-config`, `--training-config`, `--resolution`, `--id2label`, `--concept-id2name` and `--taxonomy-csv` flags are gone.
 
 ### Running Tests
 
 ```bash
-uv sync --group tests
+uv sync --locked --group tests
 ```
 
-**Run all tests:**
+CI runs this selection (`.github/workflows/tests.yml`). Use it before you open a PR:
+
 ```bash
-uv run pytest
+uv run --group tests pytest -m "not slow and not integration and not live"
 ```
 
-**Run only unit tests (skip integration tests):**
+`pyproject.toml` defines these markers:
+
+| Marker | Meaning |
+|---|---|
+| `live` | Needs S3 or CoralNet access. Deselected by default through `addopts`. |
+| `slow` | Slow tests. |
+| `integration` | Integration tests. |
+| `smoke` | Fast offline smoke tests of the training pipeline wiring. |
+
+Tests that need a GPU skip when none is available.
+
+A test for `<path>/<name>.py` lives at `tests/<path>/test_<name>.py`. For example, the tests for `mermaidseg/logger.py` are in `tests/mermaidseg/test_logger.py`:
+
 ```bash
-uv run pytest -m "not integration"
+uv run pytest tests/mermaidseg/test_logger.py -v
 ```
 
-**Run specific test file:**
+To run the `live` tests, select them with `-m live`.
+
+### Common Commands
+
 ```bash
-uv run pytest tests/test_logger.py -v
+uv lock --check                        # lockfile matches pyproject.toml
+uv run --group lint ruff check         # lint
+uv run --group lint ruff format --check
+uv run --group lint mypy               # type check
+uv run --group lint pre-commit run --all-files
+bash slurm/launch_final.sh --dry-run   # print the sbatch commands; needs the Slurm variables in .env
 ```
 
+CI runs the first four commands (`.github/workflows/lint.yml`).
+
+Warm the local S3 cache before an offline run. This is the only step that needs AWS credentials. `--cache-dir` has no default and the script has nowhere to write without it:
+
+```bash
+uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
+```
+
+`--data-config` and `--training-config` default to `configs/data_config.yaml` and `configs/training_config_cbm_final.yaml`. Run the script with `--help` for the other options.
+
+SageMaker `make` targets (see [SageMaker](#sagemaker)):
+
+| Target | What it does |
+|---|---|
+| `make sm-validate` | Checks the run YAML offline. |
+| `make sm-dry-run` | Shows the job request without submitting. |
+| `make sm-launch` | Submits the job. |
+| `make sm-smoke` | Runs `docker/jobs/local_smoke.sh`. |
+| `make sm-jobs` | Lists the 10 most recent training jobs. |
+| `make sm-status` | Shows one job's status and failure reason. |
+| `make sm-logs` | Follows one job's logs. |
+| `make sm-errors` | Shows error lines from one job's logs. |
+| `make sm-metrics` | Shows peak disk, RAM, GPU memory and CPU of one job. |
 
 ## Model Serialization Strategy
 
-Training checkpoints use `torch.save` (pickle): the full state (model + optimizer + scheduler) is needed to resume. Load only checkpoints you trust, because pickle can execute code on load.
+The project uses two formats.
+
+**Checkpoints.** Training and resume checkpoints are `torch.save` pickles. They hold the full state (model, optimizer and scheduler) that a resume needs. The code loads them with `weights_only=True` (`read_checkpoint` in `mermaidseg/run_setup.py`). `AGENTS.md` 9.6 allows `weights_only=False` only for a resume checkpoint that this project's own training wrote, with a comment at the call site. No production call site uses it. Load every other checkpoint with `weights_only=True`.
+
+**Bundle.** The deployable bundle is SafeTensors plus `model.json` (`export_bundle` in `mermaidseg/export.py`, `load_bundle` in `mermaidseg/inference/bundle.py`). `model.json` carries the architecture, label and concept maps, preprocessing and lineage, so a bundle describes itself.
 
 ### Concept Bottleneck Models
 

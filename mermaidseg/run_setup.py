@@ -181,8 +181,8 @@ def check_wandb_auth() -> None:
     """Confirm wandb is authenticated in this environment.
 
     Checks for a resolved API key (via ``WANDB_API_KEY``, ``wandb login``, or
-    ``~/.netrc``) without starting a run. Call before
-    ``Logger(..., enable_wandb=True)`` so a missing login surfaces immediately
+    ``~/.netrc``) without starting a run. ``check_env_wandb`` calls it at the start of a
+    training run, before the ``Logger`` is created, so a missing login surfaces immediately
     instead of mid-training.
 
     Raises:

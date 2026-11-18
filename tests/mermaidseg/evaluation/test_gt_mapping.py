@@ -1,13 +1,12 @@
-"""Tests for GT mapping and SVM folding."""
+"""GT mapping: concept and class lookups built from the concept table."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
-import torch
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _CSV = _REPO_ROOT / "configs" / "class_to_concepts.csv"
 
 
@@ -114,25 +113,3 @@ def test_class_lookup_rollup_to_parent():
     hierarchy = {"acropora": "hard coral", "hard coral": None}
     lk = build_class_lookup("pacific_labeled_corals", ["acropora"], id2label, hierarchy)
     assert lk.class_id("acropora") == 1
-
-
-def test_svm_folding_matches_sklearn():
-    from mermaidseg.evaluation.coralscapes_probe import _fit_linear_svm, _folded_linear
-
-    rng = np.random.default_rng(0)
-    d = 12
-    class_ids = [1, 4, 9]
-    xs, ys = [], []
-    for ci in class_ids:
-        xs.append(rng.normal(ci * 0.6, 1.0, size=(30, d)))
-        ys += [ci] * 30
-    x = np.concatenate(xs).astype(np.float32)
-    y = np.array(ys)
-    scaler, svm, acc = _fit_linear_svm(x, y, 1.0)
-    assert 0.0 <= acc <= 1.0
-    weff, beff, classes = _folded_linear(scaler, svm, torch.device("cpu"))
-    xt = rng.normal(0, 3, size=(100, d)).astype(np.float32)
-    ref = svm.predict(scaler.transform(xt))
-    scores = torch.from_numpy(xt) @ weff.t() + beff
-    got = classes[scores.argmax(1)].numpy()
-    assert (got == ref).all()

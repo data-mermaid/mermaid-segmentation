@@ -14,7 +14,7 @@ from mermaidseg.datasets.factory import configured_source_names
 from mermaidseg.evaluation.gt_mapping import build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
 
-_REPO = Path(__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[3]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
 
 
