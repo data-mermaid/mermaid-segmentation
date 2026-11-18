@@ -5,7 +5,9 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from coralnet_scraper import scrape_coralnet_s3 as cli
+from coralnet_scraper.models import DownloadResult
 
 _MOD = "coralnet_scraper.scrape_coralnet_s3"
 
@@ -42,7 +44,7 @@ def test_main_passes_configured_bucket_and_prefix(monkeypatch):
     assert run.call_args.args[0] == [1, 2]
 
 
-def _run_main(monkeypatch, argv):
+def _run_main(monkeypatch, argv, results=None, expected_code=0):
     """Run ``main`` with only the network pieces patched; return (downloader_cls, run_batch)."""
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", "my-bucket")
     downloader = MagicMock(max_workers=4)
@@ -52,9 +54,9 @@ def _run_main(monkeypatch, argv):
         patch(f"{_MOD}.CoralNetDownloader", return_value=downloader) as downloader_cls,
         patch(f"{_MOD}.boto3.client"),
         patch(f"{_MOD}.discover_public_source_ids", return_value=[1]),
-        patch(f"{_MOD}.run_batch_download") as run,
+        patch(f"{_MOD}.run_batch_download", return_value=results or {}) as run,
     ):
-        assert cli.main(argv) == 0
+        assert cli.main(argv) == expected_code
     return downloader_cls, run
 
 
@@ -72,3 +74,22 @@ def test_main_passes_delay_seconds(monkeypatch):
 def test_main_passes_scraper_workers_to_downloader(monkeypatch):
     downloader_cls, _ = _run_main(monkeypatch, ["--scraper-workers", "5"])
     assert downloader_cls.call_args.kwargs["max_workers"] == 5
+
+
+@pytest.mark.parametrize(
+    ("results", "code"),
+    [
+        ({1: DownloadResult(ok=True), 2: DownloadResult(ok=False)}, 1),
+        ({1: DownloadResult(ok=True), 2: DownloadResult(ok=True, skipped_no_confirmed=True)}, 0),
+        ({}, 0),
+    ],
+)
+def test_main_exit_code_reflects_download_results(monkeypatch, results, code):
+    _run_main(monkeypatch, [], results=results, expected_code=code)
+
+
+def test_main_logs_failed_source_ids(monkeypatch, caplog):
+    results = {1: DownloadResult(ok=True), 2: DownloadResult(ok=False), 3: DownloadResult(ok=False)}
+    _run_main(monkeypatch, [], results=results, expected_code=1)
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("2" in m and "3" in m for m in errors)

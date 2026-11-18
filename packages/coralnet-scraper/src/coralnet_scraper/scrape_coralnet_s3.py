@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the scraper command line.
+
+    Args:
+        argv: Command-line arguments; ``None`` reads them from ``sys.argv``.
+
+    Returns:
+        Process exit code: 0 when every source downloads (or none are attempted), 1 when
+        the CoralNet login fails or any source download fails.
+    """
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--force",
@@ -57,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     s3 = boto3.client("s3")
     ids = discover_public_source_ids()
     logger.info("Discovered %d public CoralNet source ids", len(ids))
-    run_batch_download(
+    results = run_batch_download(
         ids,
         downloader=downloader,
         bucket=bucket,
@@ -66,6 +75,10 @@ def main(argv: list[str] | None = None) -> int:
         force=bool(args.force),
         delay_seconds=float(args.delay_seconds),
     )
+    failed = sorted(sid for sid, result in results.items() if not result.ok)
+    if failed:
+        logger.error("Failed to download %d source(s): %s", len(failed), failed)
+        return 1
     return 0
 
 
