@@ -11,6 +11,7 @@ import torch
 import scripts.evaluate as evaluate_script
 from mermaidseg.export import export_bundle
 from mermaidseg.inference.bundle import load_bundle
+from mermaidseg.io import REPO_ROOT
 from tests.mermaidseg.inference import _tiny
 
 DELETED_FLAGS = [
@@ -20,6 +21,7 @@ DELETED_FLAGS = [
     "--concept-id2name",
     "--training-config",
     "--resolution",
+    "--taxonomy-csv",
 ]
 
 
@@ -90,6 +92,13 @@ def test_amp_dtype_is_resolved_from_the_bundle_config(
 def test_concept_names_are_the_bundles_in_channel_order(bundle_dir: Path):
     bundle = load_bundle(bundle_dir, "cpu")
     assert evaluate_script.concept_names_of(bundle) == _tiny.CONCEPT_NAMES
+
+
+def test_concept_mapping_path_is_the_bundles_resolved_against_the_repo_root(bundle_dir: Path):
+    bundle = load_bundle(bundle_dir, "cpu")
+    assert evaluate_script.concept_mapping_path_of(bundle.config) == (
+        REPO_ROOT / "configs" / "class_to_concepts.csv"
+    )
 
 
 def test_removed_concepts_are_empty_without_a_concept_removal_file():

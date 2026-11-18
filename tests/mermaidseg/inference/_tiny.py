@@ -98,7 +98,11 @@ def resolved_config() -> dict[str, Any]:
         "run_name": RUN_NAME,
         "seed": 0,
         "model": {"input_size": list(INPUT_SIZE)},
-        "training": {"mixed_precision_dtype": "bfloat16", "concept_removal": None},
+        "training": {
+            "mixed_precision_dtype": "bfloat16",
+            "concept_removal": None,
+            "concept_mapping_path": "configs/class_to_concepts.csv",
+        },
     }
 
 
