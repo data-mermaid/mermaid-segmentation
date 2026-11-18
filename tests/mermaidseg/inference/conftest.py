@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from mermaidseg.inference.bundle import export_bundle
+from mermaidseg.export import export_bundle
 from tests.mermaidseg.inference import _tiny
 
 

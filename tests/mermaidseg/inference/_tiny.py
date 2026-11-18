@@ -14,7 +14,7 @@ import torch
 from transformers import AutoConfig, AutoModel
 
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
-from mermaidseg.inference.bundle import write_sidecar
+from mermaidseg.export import write_sidecar
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.model.models import MODEL_CLASSES
 

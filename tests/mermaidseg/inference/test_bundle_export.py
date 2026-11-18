@@ -14,13 +14,8 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from mermaidseg.inference.bundle import (
-    MODEL_JSON,
-    WEIGHTS,
-    _untied_cpu_state,
-    export_bundle,
-    load_bundle,
-)
+from mermaidseg.export import _untied_cpu_state, export_bundle
+from mermaidseg.inference.bundle import MODEL_JSON, WEIGHTS, load_bundle
 from mermaidseg.inference.predictor import CBMPredictor
 from tests.mermaidseg.inference import _tiny
 
@@ -128,10 +123,21 @@ def test_export_without_a_sidecar_raises_naming_its_path(run, tmp_path):
         export_bundle(checkpoint, tmp_path / "out")
 
 
+def test_export_of_a_checkpoint_missing_the_weights_raises_naming_its_path(tmp_path):
+    checkpoint, _ = _tiny.write_run(tmp_path / "run")
+    contents = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    del contents["model_state_dict"]
+    torch.save(contents, checkpoint)
+    with pytest.raises(RuntimeError, match="model_state_dict") as excinfo:
+        export_bundle(checkpoint, tmp_path / "out")
+    assert str(checkpoint) in str(excinfo.value)
+    assert not (tmp_path / "out").exists()
+
+
 def test_a_failed_write_leaves_neither_output_nor_partial_directory(run, tmp_path):
     out = tmp_path / "out"
     with (
-        patch("mermaidseg.inference.bundle.save_file", side_effect=OSError("disk full")),
+        patch("mermaidseg.export.save_file", side_effect=OSError("disk full")),
         pytest.raises(OSError, match="disk full"),
     ):
         export_bundle(run[0], out)
@@ -150,7 +156,7 @@ def test_a_preexisting_partial_sibling_survives_a_failed_export(run, tmp_path):
     out = tmp_path / "out"
     foreign = _precious_partial(out)
     with (
-        patch("mermaidseg.inference.bundle.save_file", side_effect=OSError("disk full")),
+        patch("mermaidseg.export.save_file", side_effect=OSError("disk full")),
         pytest.raises(OSError, match="disk full"),
     ):
         export_bundle(run[0], out)

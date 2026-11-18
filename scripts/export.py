@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from mermaidseg.inference.bundle import export_bundle
+from mermaidseg.export import export_bundle
 
 
 def main(argv: list[str] | None = None) -> None:

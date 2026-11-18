@@ -8,8 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from mermaidseg.inference import bundle
-from mermaidseg.inference.bundle import MODEL_JSON, write_sidecar
+from mermaidseg import export
+from mermaidseg.export import write_sidecar
+from mermaidseg.inference.bundle import MODEL_JSON
 from mermaidseg.training import _encoder_config
 
 
@@ -104,7 +105,7 @@ def test_a_failed_replace_leaves_the_old_file_intact(monkeypatch, tmp_path: Path
     def broken_replace(*_args):
         raise OSError("disk gone")
 
-    monkeypatch.setattr(bundle.os, "replace", broken_replace)
+    monkeypatch.setattr(export.os, "replace", broken_replace)
     with pytest.raises(OSError, match="disk gone"):
         write_sidecar(tmp_path, **_sidecar_kwargs(lineage={"seed": 99}))
     assert (tmp_path / MODEL_JSON).read_text() == before

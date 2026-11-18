@@ -9,7 +9,8 @@ import pytest
 import torch
 
 import scripts.evaluate as evaluate_script
-from mermaidseg.inference.bundle import export_bundle, load_bundle
+from mermaidseg.export import export_bundle
+from mermaidseg.inference.bundle import load_bundle
 from tests.mermaidseg.inference import _tiny
 
 DELETED_FLAGS = [
