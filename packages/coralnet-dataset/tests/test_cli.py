@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from io import BytesIO
 from pathlib import Path
 
@@ -425,3 +426,73 @@ def test_upload_writes_a_new_key(monkeypatch, fake_s3, sample_csv_factory, popul
         fake_s3.objects[(_BUCKET, _upload_key("auto"))]
         == (tmp_path / "auto" / "coralnet_annotations_auto.parquet").read_bytes()
     )
+    json_key = "etl-outputs/coralnet/auto/coralnet_id2name_auto.json"
+    assert (
+        fake_s3.objects[(_BUCKET, json_key)]
+        == (tmp_path / "auto" / "coralnet_id2name_auto.json").read_bytes()
+    )
+
+
+def test_build_annotations_logs_exclusion_summary_and_exits_1(
+    monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, caplog
+):
+    for sid, missing in (
+        (1, None),
+        (2, "image_list.csv"),
+        (3, "labelset.csv"),
+        (4, "labelset.csv"),
+    ):
+        files = sample_csv_factory(source_id=sid, n_images=1, n_points_per_image=1)
+        if missing:
+            files.pop(missing)
+        populate(fake_s3, _BUCKET, _PREFIX, sid, files)
+    _patch_to_fake_s3(monkeypatch, fake_s3)
+
+    rc = cli.main(["build-annotations", *_common(tmp_path)])
+
+    assert rc == 1
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert errors == [
+        "3 source(s) excluded",
+        "image_list_missing: [2]",
+        "labelset_missing: [3, 4]",
+    ]
+
+
+def test_cli_all_with_an_excluded_source_writes_every_output(
+    monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
+):
+    populate(
+        fake_s3,
+        _BUCKET,
+        _PREFIX,
+        1,
+        sample_csv_factory(source_id=1, n_images=1, n_points_per_image=1),
+    )
+    broken = sample_csv_factory(source_id=2, n_images=1, n_points_per_image=1)
+    broken.pop("labelset.csv")
+    populate(fake_s3, _BUCKET, _PREFIX, 2, broken)
+    fake_s3.put(_BUCKET, f"{_PREFIX}/s1/images/10000.jpg", _real_jpeg(800, 600))
+    _patch_to_fake_s3(monkeypatch, fake_s3)
+
+    rc = cli.main(["all", *_common(tmp_path)])
+
+    assert rc == 1
+    out_dir = tmp_path / "v1"
+    for name in (
+        "coralnet_annotations_v1.parquet",
+        "coralnet_images_v1.parquet",
+        "coralnet_training_manifest_v1.parquet",
+    ):
+        assert (out_dir / name).exists(), name
+    assert json.loads((out_dir / "coralnet_id2name_v1.json").read_text()) == {
+        "1000": "label_0",
+        "1001": "label_1",
+        "1002": "label_2",
+        "1003": "label_3",
+        "1004": "label_4",
+        "1005": "label_5",
+        "1006": "label_6",
+    }
+    manifest = pd.read_parquet(out_dir / "coralnet_training_manifest_v1.parquet")
+    assert manifest["source_id"].unique().tolist() == [1]

@@ -9,6 +9,7 @@ Subcommands run one stage each (``build-annotations``, ``build-images``, ``resiz
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from dataclasses import dataclass
@@ -67,9 +68,9 @@ class _Run:
     prefix: str
     resized_prefix: str
 
-    def path(self, kind: str) -> Path:
-        """Return the local path of this run's ``coralnet_<kind>_<version>.parquet``."""
-        return self.out_dir / f"coralnet_{kind}_{self.version}.parquet"
+    def path(self, kind: str, suffix: str = "parquet") -> Path:
+        """Return the local path of this run's ``coralnet_<kind>_<version>.<suffix>``."""
+        return self.out_dir / f"coralnet_{kind}_{self.version}.{suffix}"
 
 
 def _resolve_workers(flag: int | None) -> int:
@@ -140,23 +141,52 @@ def _maybe_upload(run: _Run, local_path: Path) -> None:
     upload_to_s3(client, local_path, target)
 
 
+def _summarize_exclusions(exclusions: dict[str, list[int]]) -> list[str]:
+    """Return the exclusion summary lines, or an empty list when no source was excluded.
+
+    The first line is the number of excluded sources. One line follows per kind, kinds sorted,
+    listing that kind's source ids sorted, e.g. ``labelset_missing: [3, 4]``.
+    """
+    if not exclusions:
+        return []
+    n_excluded = sum(len(ids) for ids in exclusions.values())
+    lines = [f"{n_excluded} source(s) excluded"]
+    lines += [f"{kind}: {sorted(exclusions[kind])}" for kind in sorted(exclusions)]
+    return lines
+
+
+def _write_id2name(id2name: dict[str, str], out_path: Path) -> None:
+    """Write ``id2name`` as JSON with sorted keys, so equal maps give equal bytes."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(id2name, sort_keys=True, indent=2) + "\n")
+
+
 def _step_build_annotations(run: _Run, source_ids: list[int] | None) -> int:
-    """Write the annotations parquet; return 1 when no source produced annotation rows."""
+    """Write the annotations parquet and the id2name JSON.
+
+    Returns:
+        1 when a source was excluded or no source produced annotation rows, else 0.
+    """
     if source_ids is None:
         source_ids = list_source_folders(make_s3_client(), run.bucket, run.prefix)
-    annotations_df = build_annotations(
-        source_ids, bucket=run.bucket, prefix=run.prefix, workers=run.workers
-    )
+    build = build_annotations(source_ids, bucket=run.bucket, prefix=run.prefix, workers=run.workers)
     out_path = run.path("annotations")
     write_parquet_deterministic(
-        annotations_df, out_path, ANNOTATIONS_SCHEMA, ANNOTATIONS_PRIMARY_KEY
+        build.annotations, out_path, ANNOTATIONS_SCHEMA, ANNOTATIONS_PRIMARY_KEY
     )
-    logger.info("Wrote annotations parquet: %s (%d rows)", out_path, len(annotations_df))
+    logger.info("Wrote annotations parquet: %s (%d rows)", out_path, len(build.annotations))
+    json_path = run.path("id2name", suffix="json")
+    _write_id2name(build.id2name, json_path)
+    logger.info("Wrote id2name: %s (%d labels)", json_path, len(build.id2name))
     _maybe_upload(run, out_path)
-    if annotations_df.empty:
+    _maybe_upload(run, json_path)
+    summary = _summarize_exclusions(build.exclusions)
+    for line in summary:
+        logger.error("%s", line)
+    if build.annotations.empty:
         logger.error("No annotation rows built from s3://%s/%s/", run.bucket, run.prefix)
         return 1
-    return 0
+    return 1 if summary else 0
 
 
 def _log_header_statuses(images_df: pd.DataFrame) -> bool:
