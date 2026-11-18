@@ -30,6 +30,11 @@ def test_round_trip_reproduces_the_trained_model_outputs(run, bundle_dir):
     torch.testing.assert_close(actual.hidden_states, expected.hidden_states, atol=1e-5, rtol=0)
 
 
+def test_loaded_bundle_reads_the_binary_concepts_bool_keys_as_strings(bundle_dir):
+    loaded = load_bundle(bundle_dir, "cpu").model
+    assert loaded.concept_value2id["bleached"] == {"not_given": 0, "False": 1, "True": 2}
+
+
 def test_bundle_directory_holds_only_the_sidecar_and_weights(bundle_dir):
     assert sorted(p.name for p in bundle_dir.iterdir()) == [MODEL_JSON, WEIGHTS]
     assert [p.name for p in bundle_dir.parent.iterdir()] == [bundle_dir.name]

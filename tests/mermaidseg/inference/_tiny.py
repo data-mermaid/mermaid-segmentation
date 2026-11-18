@@ -26,6 +26,7 @@ CLASS_NAMES = ["ignore", "acropora", "porites", "sand", "algae"]
 CONCEPT_NAMES = [f"{rank}__v{i}" for rank in TAXONOMIC_CONCEPTS for i in range(RANK_WIDTH)] + [
     "live",
     "sand",
+    "bleached",
 ]
 ENV_ENCODER_KEYS = ("transformers_version", "_name_or_path")
 
@@ -38,10 +39,14 @@ def concept_id2name() -> dict[int, str]:
     return {i + 1: name for i, name in enumerate(CONCEPT_NAMES)}
 
 
-def concept_value2id() -> dict[str, dict[str, list[int]]]:
+def concept_value2id() -> dict[str, dict[Any, Any]]:
+    """Taxonomic ranks plus a binary ``bleached`` concept keyed by ``bool``, as in training."""
     return {
-        rank: {"not_given": [0] * RANK_WIDTH, "v0": [2, 1], "v1": [1, 2]}
-        for rank in TAXONOMIC_CONCEPTS
+        **{
+            rank: {"not_given": [0] * RANK_WIDTH, "v0": [2, 1], "v1": [1, 2]}
+            for rank in TAXONOMIC_CONCEPTS
+        },
+        "bleached": {"not_given": 0, False: 1, True: 2},
     }
 
 
