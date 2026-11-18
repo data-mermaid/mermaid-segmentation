@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 import types
@@ -63,8 +64,13 @@ def fake_tracker(monkeypatch: pytest.MonkeyPatch) -> list[FakeTracker]:
     """Route ``make_tracker``'s ``wandb`` entry to ``FakeTracker``; return the built trackers."""
     built: list[FakeTracker] = []
 
-    def _build(**kwargs: Any) -> FakeTracker:
-        tracker = FakeTracker(**kwargs)
+    def _build(logger_cfg: Any, run_name: str, config: Any) -> FakeTracker:
+        tracker = FakeTracker(
+            project=logger_cfg.wandb_project,
+            entity=logger_cfg.wandb_entity,
+            run_name=run_name,
+            config=config,
+        )
         built.append(tracker)
         return tracker
 
@@ -183,7 +189,7 @@ class TestWandbTracker:
 
     def test_missing_wandb_names_the_install_command(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "wandb", None)
-        with pytest.raises(ImportError, match=r"uv sync --extra slurm"):
+        with pytest.raises(ImportError, match=r"uv sync --extra wandb"):
             _wandb_tracker()
 
 
@@ -262,8 +268,100 @@ class TestMlflowTracker:
             "MLFLOW_TRACKING_URI", "arn:aws:sagemaker:us-east-1:000000000000:mlflow-app/app"
         )
         monkeypatch.setitem(sys.modules, "sagemaker_mlflow", None)
-        with pytest.raises(ImportError, match=r"uv sync --extra sagemaker"):
+        with pytest.raises(ImportError, match=r"uv sync --extra mlflow"):
             MlflowTracker(experiment_name="seg-exp", run_name="run-b")
+
+
+def _raise_connection_error(*args: Any, **kwargs: Any) -> None:
+    raise ConnectionError("tracker down")
+
+
+@pytest.fixture(params=["wandb", "mlflow"])
+def failing_metrics_tracker(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """A started tracker of each backend whose ``log_metrics`` backend call raises."""
+    if request.param == "wandb":
+        stub_wandb = request.getfixturevalue("stub_wandb")
+        monkeypatch.setattr(stub_wandb.run, "log", _raise_connection_error)
+        return _wandb_tracker()
+    request.getfixturevalue("mlflow_store")
+    import mlflow
+
+    tracker = MlflowTracker(experiment_name="seg-exp", run_name="run-b")
+    monkeypatch.setattr(mlflow, "log_metrics", _raise_connection_error)
+    return tracker
+
+
+def _metric_failure_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "Failed to log metrics" in r.getMessage()
+    ]
+
+
+class TestMetricFailureRateLimit:
+    @pytest.mark.parametrize(("failures", "warnings"), [(1, 1), (99, 1), (100, 2), (201, 3)])
+    def test_warns_on_the_first_and_every_hundredth_failure(
+        self, failing_metrics_tracker, caplog, failures, warnings
+    ):
+        caplog.set_level(logging.WARNING)
+        for step in range(failures):
+            failing_metrics_tracker.log_metrics({"loss": 0.5}, step=step)
+        assert len(_metric_failure_warnings(caplog)) == warnings
+
+    def test_warnings_carry_the_running_count_and_end_run_the_total(
+        self, failing_metrics_tracker, caplog
+    ):
+        caplog.set_level(logging.WARNING)
+        for step in range(201):
+            failing_metrics_tracker.log_metrics({"loss": 0.5}, step=step)
+        for message, count in zip(_metric_failure_warnings(caplog), (1, 100, 200), strict=True):
+            assert f"(failure {count})" in message
+
+        caplog.clear()
+        failing_metrics_tracker.end_run(failed=False)
+        totals = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(totals) == 1
+        assert "201" in totals[0]
+
+    def test_end_run_without_metric_failures_logs_no_warning(self, stub_wandb, caplog):
+        caplog.set_level(logging.WARNING)
+        tracker = _wandb_tracker()
+        tracker.log_metrics({"loss": 0.5}, step=1)
+        tracker.end_run(failed=False)
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+class TestMlflowFailureModes:
+    def test_unreachable_server_raises_before_a_run_starts(self, tmp_path, monkeypatch):
+        mlflow = pytest.importorskip("mlflow")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:1")
+        monkeypatch.setenv("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
+        monkeypatch.setenv("MLFLOW_HTTP_REQUEST_TIMEOUT", "1")
+        with pytest.raises(Exception):  # noqa: B017, PT011
+            MlflowTracker(experiment_name="exp", run_name="run")
+        assert mlflow.active_run() is None
+
+    @pytest.mark.parametrize(
+        ("method", "args", "mlflow_function"),
+        [
+            ("log_params", ({"lr": 0.1},), "log_params"),
+            ("log_dict", ({"a": 1}, "metadata/a.json"), "log_dict"),
+            ("end_run", (False,), "end_run"),
+        ],
+    )
+    def test_a_failing_backend_call_is_warned_not_raised(
+        self, mlflow_store, monkeypatch, caplog, method, args, mlflow_function
+    ):
+        mlflow = pytest.importorskip("mlflow")
+        caplog.set_level(logging.WARNING)
+        tracker = MlflowTracker(experiment_name="seg-exp", run_name="run-b")
+        with monkeypatch.context() as patch:
+            patch.setattr(mlflow, mlflow_function, _raise_connection_error)
+            getattr(tracker, method)(*args)
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+        mlflow.end_run()
 
 
 @pytest.mark.parametrize(
@@ -364,7 +462,7 @@ class TestLoggerInit:
         ]
 
     def test_tracker_construction_error_propagates(self, make_config, monkeypatch):
-        def _fail(**kwargs: Any) -> None:
+        def _fail(logger_cfg: Any, run_name: str, config: Any) -> None:
             raise RuntimeError("tracker down")
 
         monkeypatch.setitem(mermaidseg.logger.TRACKER_CLASSES, "wandb", _fail)

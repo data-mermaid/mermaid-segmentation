@@ -27,7 +27,7 @@ jobs:
       - name: Run unit tests
         # Live tests need S3 or CoralNet access and run outside CI, so we deselect them with
         # `not live`.
-        run: uv run --group tests --extra slurm --extra sagemaker pytest -m "not slow and not integration and not live" --cov=mermaidseg --cov-report=term-missing
+        run: uv run --group tests --extra wandb --extra mlflow pytest -m "not slow and not integration and not live" --cov=mermaidseg --cov-report=term-missing
       - name: Run coralnet-scraper unit tests
         if: ${{ !cancelled() }}
         run: uv run --package coralnet-scraper --group tests pytest packages/coralnet-scraper/tests

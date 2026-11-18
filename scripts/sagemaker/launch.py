@@ -286,10 +286,15 @@ def build_request(
             "LocalPath": str(train_entrypoint.OUTPUT_DIR),
         },
         "InputDataConfig": channels,
-        # Secret ids only: the entrypoint fetches the values, so the job never exposes them.
+        # Secret ids and non-secret settings only: the entrypoint fetches secret values,
+        # so a secret value never goes here.
+        # MLflow timeout and retries are below the client defaults (120 s, 7 retries) so an
+        # unreachable tracking server fails fast instead of stalling a billed job.
         "Environment": {
             "HF_TOKEN_SECRET_ID": env["HF_TOKEN_SECRET_ID"],
             "MLFLOW_TRACKING_URI": env["SM_MLFLOW_TRACKING_ARN"],
+            "MLFLOW_HTTP_REQUEST_TIMEOUT": "30",
+            "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "3",
         },
     }
 

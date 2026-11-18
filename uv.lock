@@ -1890,11 +1890,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-sagemaker = [
+mlflow = [
     { name = "mlflow" },
     { name = "sagemaker-mlflow" },
 ]
-slurm = [
+wandb = [
     { name = "wandb" },
 ]
 
@@ -1922,7 +1922,7 @@ requires-dist = [
     { name = "boto3" },
     { name = "datasets", specifier = ">=3.0" },
     { name = "huggingface-hub", specifier = ">=0.36.2" },
-    { name = "mlflow", marker = "extra == 'sagemaker'" },
+    { name = "mlflow", marker = "extra == 'mlflow'" },
     { name = "numpy", specifier = ">=1.24,<2" },
     { name = "opencv-python-headless", specifier = ">=4.11.0.86" },
     { name = "pandas" },
@@ -1933,15 +1933,15 @@ requires-dist = [
     { name = "requests" },
     { name = "s3fs" },
     { name = "safetensors", specifier = ">=0.7.0" },
-    { name = "sagemaker-mlflow", marker = "extra == 'sagemaker'" },
+    { name = "sagemaker-mlflow", marker = "extra == 'mlflow'" },
     { name = "scikit-learn" },
     { name = "torch", specifier = ">=2.4,<2.8" },
     { name = "torchmetrics" },
     { name = "tqdm" },
     { name = "transformers" },
-    { name = "wandb", marker = "extra == 'slurm'", specifier = ">=0.25.0" },
+    { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.25.0" },
 ]
-provides-extras = ["slurm", "sagemaker"]
+provides-extras = ["wandb", "mlflow"]
 
 [package.metadata.requires-dev]
 dev = [

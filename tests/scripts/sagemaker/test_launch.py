@@ -176,6 +176,8 @@ def test_build_request_for_res768():
         "Environment": {
             "HF_TOKEN_SECRET_ID": "fake/hf",
             "MLFLOW_TRACKING_URI": "arn:fake:mlflow-app/app-x",
+            "MLFLOW_HTTP_REQUEST_TIMEOUT": "30",
+            "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "3",
         },
     }
 
