@@ -107,18 +107,24 @@ def run_batch_download(
 
     Returns:
         A result per downloaded source, keyed by source id; skipped sources are absent.
+        A source whose skip check or download raises gets a failed result whose error code is
+        the exception class name, and the run goes on.
     """
     results: dict[int, DownloadResult] = {}
     for sid in tqdm(list(source_ids), desc="CoralNet sources"):
-        if should_skip_download(
-            source_id=sid,
-            bucket=bucket,
-            s3_prefix=s3_prefix,
-            s3_client=s3_client,
-            force=force,
-        ):
-            continue
-        res = downloader.download_source(sid, bucket_name=bucket, s3_prefix=s3_prefix)
+        try:
+            if should_skip_download(
+                source_id=sid,
+                bucket=bucket,
+                s3_prefix=s3_prefix,
+                s3_client=s3_client,
+                force=force,
+            ):
+                continue
+            res = downloader.download_source(sid, bucket_name=bucket, s3_prefix=s3_prefix)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Source %s failed: %s", sid, e)
+            res = DownloadResult(ok=False, errors=[type(e).__name__])
         if res.skipped_no_confirmed:
             logger.info("Skip source %s: zero confirmed images on website", sid)
         results[sid] = res

@@ -25,6 +25,7 @@ from coralnet_scraper.downloader import (
     export_serve_timeout_seconds,
     half_open_batches,
 )
+from coralnet_scraper.models import ImageFailures
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "coralnet_html"
 
@@ -100,6 +101,113 @@ def test_download_source_skips_zero_confirmed_on_website():
     mock_meta.assert_not_called()
     mock_label.assert_not_called()
     mock_ann.assert_not_called()
+
+
+def _image_source_downloader() -> CoralNetDownloader:
+    dl = CoralNetDownloader("u", "p", max_workers=2)
+    dl.logged_in = True
+    dl.s3 = MagicMock()
+    return dl
+
+
+def _download_source_with_images(
+    dl: CoralNetDownloader, upload_ok: bool, urls: list[object] | None = None
+):
+    images = pd.DataFrame({"Image Page": ["/image/1/view/", "/image/2/view/"]})
+    image_urls = ["http://x/1", "http://x/2"] if urls is None else urls
+    with (
+        patch.object(dl, "check_permissions", return_value=True),
+        patch.object(dl, "_get_source_overview_html", return_value=_fixture("source_ok.html")),
+        patch.object(dl, "download_metadata", return_value=(True, 2)),
+        patch.object(dl, "download_labelset", return_value=True),
+        patch.object(dl, "download_annotations", return_value=True),
+        patch.object(dl, "get_images", return_value=(images, True)),
+        patch.object(dl, "get_image_urls", return_value=image_urls),
+        patch.object(s3_io, "upload_csv_body"),
+        patch.object(dl, "download_image_to_s3", side_effect=lambda u, b, k: (k, upload_ok)),
+    ):
+        return dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+
+def test_download_source_fails_when_every_image_upload_fails():
+    res = _download_source_with_images(_image_source_downloader(), upload_ok=False)
+    assert res.ok is False
+    assert res.errors == ["images_upload_failed"]
+    assert res.image_failures == ImageFailures(missing_url=0, upload_failed=2)
+
+
+def test_download_source_reports_only_missing_urls():
+    res = _download_source_with_images(
+        _image_source_downloader(), upload_ok=True, urls=["http://x/1", pd.NA]
+    )
+    assert res.ok is False
+    assert res.errors == ["images_missing_url"]
+    assert res.image_failures == ImageFailures(missing_url=1, upload_failed=0)
+
+
+def test_download_source_ok_when_every_image_uploads():
+    res = _download_source_with_images(_image_source_downloader(), upload_ok=True)
+    assert res.ok is True
+    assert res.errors == []
+    assert res.image_failures == ImageFailures()
+
+
+def test_download_images_separates_missing_url_from_upload_failures():
+    dl = _image_source_downloader()
+    # Rows: 1 uploads, 2 fails to upload, 3 raises in the worker, 4 has no URL.
+    df = pd.DataFrame(
+        {
+            "Image Page": [f"/image/{i}/view/" for i in (1, 2, 3, 4)],
+            "Image URL": ["http://x/1", "http://x/2", "http://x/3", pd.NA],
+        }
+    )
+
+    def fake_upload(url: str, bucket: str, key: str) -> tuple[str, bool]:
+        if url.endswith("/3"):
+            raise RuntimeError("boom")
+        return key, url.endswith("/1")
+
+    with patch.object(dl, "download_image_to_s3", side_effect=fake_upload):
+        result = dl.download_images(df, 1, bucket_name="b")
+    assert result == ImageFailures(missing_url=1, upload_failed=2)
+
+
+def test_download_images_counts_every_row_missing_when_no_url_is_set():
+    dl = _image_source_downloader()
+    df = pd.DataFrame(
+        {"Image Page": [f"/image/{i}/view/" for i in (1, 2, 3)], "Image URL": [pd.NA] * 3}
+    )
+    assert dl.download_images(df, 1, bucket_name="b") == ImageFailures(
+        missing_url=3, upload_failed=0
+    )
+
+
+def test_download_source_sums_image_failures_across_batches():
+    dl = _image_source_downloader()
+    images = pd.DataFrame({"Image Page": ["/image/1/view/", "/image/2/view/"]})
+
+    def fake_upload(url: str, bucket: str, key: str) -> tuple[str, bool]:
+        return key, not url.endswith("/1")  # only the first batch's image fails
+
+    with (
+        patch.object(dl, "check_permissions", return_value=True),
+        patch.object(dl, "_get_source_overview_html", return_value=_fixture("source_ok.html")),
+        patch.object(dl, "download_metadata", return_value=(True, 2)),
+        patch.object(dl, "download_labelset", return_value=True),
+        patch.object(dl, "download_annotations", return_value=True),
+        patch.object(dl, "get_images", return_value=(images, True)),
+        patch.object(
+            dl,
+            "get_image_urls",
+            side_effect=lambda pages: ["http://x/" + p.split("/")[2] for p in pages],
+        ),
+        patch.object(s3_io, "upload_csv_body"),
+        patch.object(dl, "download_image_to_s3", side_effect=fake_upload),
+        patch.object(downloader_mod, "half_open_batches", return_value=[(0, 1), (1, 2)]),
+    ):
+        res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+    assert res.errors == ["images_upload_failed"]
+    assert res.image_failures == ImageFailures(missing_url=0, upload_failed=1)
 
 
 _BROWSE_HTML_PAGE = """\

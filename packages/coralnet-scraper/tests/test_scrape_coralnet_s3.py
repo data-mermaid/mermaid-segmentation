@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from coralnet_scraper import scrape_coralnet_s3 as cli
-from coralnet_scraper.models import DownloadResult
+from coralnet_scraper.models import DownloadResult, ImageFailures
 
 _MOD = "coralnet_scraper.scrape_coralnet_s3"
 
@@ -88,8 +88,65 @@ def test_main_exit_code_reflects_download_results(monkeypatch, results, code):
     _run_main(monkeypatch, [], results=results, expected_code=code)
 
 
-def test_main_logs_failed_source_ids(monkeypatch, caplog):
-    results = {1: DownloadResult(ok=True), 2: DownloadResult(ok=False), 3: DownloadResult(ok=False)}
-    _run_main(monkeypatch, [], results=results, expected_code=1)
+_MIXED_RESULTS = {
+    101: DownloadResult(ok=True),
+    202: DownloadResult(
+        ok=False,
+        errors=["images_missing_url"],
+        image_failures=ImageFailures(missing_url=14),
+    ),
+    303: DownloadResult(
+        ok=False,
+        errors=["images_missing_url", "images_upload_failed"],
+        image_failures=ImageFailures(missing_url=2, upload_failed=5),
+    ),
+    404: DownloadResult(ok=False, errors=["ValueError"]),
+}
+_MIXED_LINES = [
+    "Failed to download 3 source(s)",
+    "ValueError: [404]",
+    "images_missing_url: 202 (14 images), 303 (2 images)",
+    "images_upload_failed: 303 (5 images)",
+]
+
+
+def test_summarize_failures_groups_by_error_kind():
+    assert cli._summarize_failures(_MIXED_RESULTS) == _MIXED_LINES
+
+
+def test_summarize_failures_lists_failure_without_error_code_as_no_error_code():
+    results = {
+        7: DownloadResult(ok=False),
+        3: DownloadResult(ok=False, errors=["annotations_failed"]),
+    }
+    assert cli._summarize_failures(results) == [
+        "Failed to download 2 source(s)",
+        "annotations_failed: [3]",
+        "no_error_code: [7]",
+    ]
+
+
+def test_summarize_failures_is_empty_when_nothing_failed():
+    assert cli._summarize_failures({1: DownloadResult(ok=True)}) == []
+
+
+def test_main_logs_failure_summary_and_returns_1(monkeypatch, caplog):
+    _run_main(monkeypatch, [], results=_MIXED_RESULTS, expected_code=1)
     errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
-    assert any("2" in m and "3" in m for m in errors)
+    assert errors == _MIXED_LINES
+
+
+def test_main_returns_1_without_discovery_when_login_fails(monkeypatch):
+    monkeypatch.setenv("MERMAID_CORALNET_BUCKET", "my-bucket")
+    downloader = MagicMock(max_workers=4)
+    downloader.login.return_value = False
+    with (
+        patch(f"{_MOD}.load_coralnet_credentials", return_value=("u", "p")),
+        patch(f"{_MOD}.CoralNetDownloader", return_value=downloader),
+        patch(f"{_MOD}.boto3.client"),
+        patch(f"{_MOD}.discover_public_source_ids") as discover,
+        patch(f"{_MOD}.run_batch_download") as run,
+    ):
+        assert cli.main([]) == 1
+    discover.assert_not_called()
+    run.assert_not_called()

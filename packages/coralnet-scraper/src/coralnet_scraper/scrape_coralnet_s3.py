@@ -19,8 +19,45 @@ from coralnet_scraper.batch_download import (
 )
 from coralnet_scraper.config import ENV_SCRAPER_WORKERS, get_bucket, get_prefix
 from coralnet_scraper.downloader import CoralNetDownloader
+from coralnet_scraper.models import DownloadResult
 
 logger = logging.getLogger(__name__)
+
+
+_NO_ERROR_CODE = "no_error_code"
+
+_IMAGE_COUNT_ATTR = {
+    "images_missing_url": "missing_url",
+    "images_upload_failed": "upload_failed",
+}
+
+
+def _summarize_failures(results: dict[int, DownloadResult]) -> list[str]:
+    """Return the failure summary lines, or an empty list when no source failed.
+
+    The first line is the number of failed sources. One line follows per error kind, kinds
+    sorted, listing the failed source ids sorted. A failed source with no error codes is
+    listed under ``no_error_code``. Image kinds read
+    ``kind: 202 (14 images), 303 (2 images)``; other kinds read ``kind: [101, 404]``.
+    """
+    failed = {sid: res for sid, res in results.items() if not res.ok}
+    if not failed:
+        return []
+    by_kind: dict[str, list[int]] = {}
+    for sid in sorted(failed):
+        for kind in failed[sid].errors or [_NO_ERROR_CODE]:
+            by_kind.setdefault(kind, []).append(sid)
+    lines = [f"Failed to download {len(failed)} source(s)"]
+    for kind in sorted(by_kind):
+        attr = _IMAGE_COUNT_ATTR.get(kind)
+        if attr is None:
+            lines.append(f"{kind}: {by_kind[kind]}")
+            continue
+        items = [
+            f"{sid} ({getattr(failed[sid].image_failures, attr)} images)" for sid in by_kind[kind]
+        ]
+        lines.append(f"{kind}: {', '.join(items)}")
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -31,7 +68,9 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns:
         Process exit code: 0 when every source downloads (or none are attempted), 1 when
-        the CoralNet login fails or any source download fails.
+        the CoralNet login fails or any source download fails. A failed run logs one error
+        line with the failed-source count, then one per error kind (``no_error_code`` for a
+        failed source that reports none).
     """
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -75,11 +114,10 @@ def main(argv: list[str] | None = None) -> int:
         force=bool(args.force),
         delay_seconds=float(args.delay_seconds),
     )
-    failed = sorted(sid for sid, result in results.items() if not result.ok)
-    if failed:
-        logger.error("Failed to download %d source(s): %s", len(failed), failed)
-        return 1
-    return 0
+    summary = _summarize_failures(results)
+    for line in summary:
+        logger.error("%s", line)
+    return 1 if summary else 0
 
 
 if __name__ == "__main__":

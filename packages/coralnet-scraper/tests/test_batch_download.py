@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from coralnet_scraper import batch_download as bd
 
@@ -43,3 +43,42 @@ def test_run_batch_download_downloads_only_sources_without_annotations(fake_s3):
 
     downloader.download_source.assert_called_once_with(2, bucket_name="b", s3_prefix="p")
     assert results == {2: result}
+
+
+def _run(fake_s3, downloader):
+    return bd.run_batch_download(
+        [1, 2, 3], downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3
+    )
+
+
+def test_run_batch_download_continues_after_a_source_raises(fake_s3):
+    ok = MagicMock(skipped_no_confirmed=False)
+    downloader = MagicMock()
+    downloader.download_source.side_effect = [ok, ValueError("boom"), ok]
+
+    results = _run(fake_s3, downloader)
+
+    assert downloader.download_source.call_count == 3
+    assert results[1] is ok
+    assert results[3] is ok
+    assert results[2].ok is False
+    assert results[2].errors == ["ValueError"]
+
+
+def test_run_batch_download_records_a_raising_skip_check(fake_s3):
+    downloader = MagicMock()
+    ok = MagicMock(skipped_no_confirmed=False)
+    downloader.download_source.return_value = ok
+    real = bd.should_skip_download
+
+    def flaky(*, source_id, **kwargs):
+        if source_id == 2:
+            raise RuntimeError("s3 down")
+        return real(source_id=source_id, **kwargs)
+
+    with patch.object(bd, "should_skip_download", side_effect=flaky):
+        results = _run(fake_s3, downloader)
+
+    assert downloader.download_source.call_count == 2
+    assert results[2].ok is False
+    assert results[2].errors == ["RuntimeError"]

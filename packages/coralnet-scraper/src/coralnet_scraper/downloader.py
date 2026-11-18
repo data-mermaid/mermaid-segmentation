@@ -25,7 +25,7 @@ from tqdm.auto import tqdm
 
 from coralnet_scraper import s3_io
 from coralnet_scraper.config import get_scraper_workers, validate_workers
-from coralnet_scraper.models import DownloadResult
+from coralnet_scraper.models import DownloadResult, ImageFailures
 from coralnet_scraper.parsers import (
     classifier_plot_data_from_source_html,
     extract_csrf_token,
@@ -1181,7 +1181,7 @@ class CoralNetDownloader:
         source_id: int,
         bucket_name: str,
         s3_prefix: str = "coralnet-public-images",
-    ) -> None:
+    ) -> ImageFailures:
         """Upload every row of ``images_df`` that has an ``Image URL`` to S3 in parallel.
 
         Args:
@@ -1189,11 +1189,16 @@ class CoralNetDownloader:
             source_id: CoralNet source id.
             bucket_name: Destination S3 bucket.
             s3_prefix: Destination key prefix.
+
+        Returns:
+            Failure counts: rows with no ``Image URL`` as ``missing_url``; uploads that
+            reported failure or whose worker raised as ``upload_failed``.
         """
         chunk = images_df[images_df["Image URL"].notna()]
+        missing_url = len(images_df) - len(chunk)
         if chunk.empty:
             logger.warning("No valid Image URL rows for source %s", source_id)
-            return
+            return ImageFailures(missing_url=missing_url)
         successful = 0
         futures: list[Any] = []
         workers = self.max_workers
@@ -1228,6 +1233,7 @@ class CoralNetDownloader:
             len(futures),
             source_id,
         )
+        return ImageFailures(missing_url=missing_url, upload_failed=len(futures) - successful)
 
     def download_source(
         self,
@@ -1252,12 +1258,16 @@ class CoralNetDownloader:
             download_metadata: Upload ``metadata.csv``.
             download_labelset: Upload ``labelset.csv``.
             download_annotations: Upload ``annotations.csv``; a failure ends the download.
-            download_images: Upload the image list and the images.
+            download_images: Upload the image list and the images; any image that fails
+                (no URL, or upload failure) adds ``images_missing_url`` or
+                ``images_upload_failed`` to the errors.
 
         Returns:
-            The outcome, with failure codes in ``errors``.
+            The outcome, with failure codes in ``errors`` and per-kind image counts in
+            ``image_failures``.
         """
         errs: list[str] = []
+        image_failures = ImageFailures()
         sid = source_id
         logger.info("Downloading CoralNet source %s", sid)
         if not self.logged_in and not self.login():
@@ -1336,12 +1346,31 @@ class CoralNetDownloader:
                     images_df.iloc[start:end, url_col_idx] = image_urls
 
                     subset = images_df.iloc[start:end].copy()
-                    self.download_images(subset, sid, bucket_name=bucket_name, s3_prefix=s3_prefix)
+                    batch = self.download_images(
+                        subset, sid, bucket_name=bucket_name, s3_prefix=s3_prefix
+                    )
+                    image_failures = ImageFailures(
+                        missing_url=image_failures.missing_url + batch.missing_url,
+                        upload_failed=image_failures.upload_failed + batch.upload_failed,
+                    )
+                if image_failures.missing_url > 0:
+                    errs.append("images_missing_url")
+                if image_failures.upload_failed > 0:
+                    errs.append("images_upload_failed")
+                if image_failures != ImageFailures():
+                    logger.warning(
+                        "Source %s image failures: %d missing URL, %d upload failed",
+                        sid,
+                        image_failures.missing_url,
+                        image_failures.upload_failed,
+                    )
             else:
                 errs.append("image_list_failed")
                 logger.warning("No browse images table for source %s", sid)
 
-        return DownloadResult(ok=not errs, skipped_empty=False, errors=errs)
+        return DownloadResult(
+            ok=not errs, skipped_empty=False, errors=errs, image_failures=image_failures
+        )
 
     def cleanup(self) -> None:
         """Close the main session and mark it logged out."""
