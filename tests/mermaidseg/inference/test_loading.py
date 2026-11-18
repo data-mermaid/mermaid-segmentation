@@ -81,12 +81,13 @@ def test_build_model_rejects_a_state_dict_missing_a_model_key(tmp_path, monkeypa
             self.linear = torch.nn.Linear(2, 2)
 
     monkeypatch.setitem(loading.MODEL_CLASSES, "stub", _Model)
+    monkeypatch.setattr(loading, "load_pretrained_encoder", lambda _name: object())
     state = _Model().state_dict()
     del state["linear.bias"]
     checkpoint = tmp_path / "ckpt.pt"
     torch.save({"model_state_dict": state}, checkpoint)
     artifacts = DemoArtifacts(
-        model_cfg={"name": "stub"},
+        model_cfg={"name": "stub", "encoder_name": "stub/encoder"},
         id2label={0: "ignore", 1: "sand"},
         concept_id2name={0: "genus:Acropora"},
         checkpoint_path=str(checkpoint),

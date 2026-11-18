@@ -27,9 +27,9 @@ from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup
 from mermaidseg.evaluation.hierarchical import HIER_HEADLINE_KEYS, HierarchicalScore
 from mermaidseg.evaluation.metrics import ConceptLayout, MetricBundle, concept_block_from_binary
-from mermaidseg.evaluation.predictor import CBMPredictor
 from mermaidseg.evaluation.reporting import fmt, write_csv, write_json
-from mermaidseg.io import build_eval_transform
+from mermaidseg.inference.predictor import CBMPredictor
+from mermaidseg.inference.preprocess import preprocess
 from mermaidseg.seeding import make_worker_seeder
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,8 @@ class PointEvalDataset(Dataset):
         unit_col: str,
         key_cols: list[str],
         input_size: tuple[int, int],
+        mean: Sequence[float],
+        std: Sequence[float],
         class_lookup: ClassLookup,
         concept_lookup: ConceptLookup,
     ):
@@ -63,6 +65,8 @@ class PointEvalDataset(Dataset):
             unit_col: Image column that defines the evaluation unit.
             key_cols: Image columns that identify one image's annotations.
             input_size: ``(height, width)`` the images are resized to.
+            mean: Per-channel normalisation mean.
+            std: Per-channel normalisation standard deviation.
             class_lookup: Source label to target class id lookup.
             concept_lookup: Source label to concept row lookup.
         """
@@ -72,7 +76,8 @@ class PointEvalDataset(Dataset):
         self.class_lookup = class_lookup
         self.concept_lookup = concept_lookup
         self.input_hw = (int(input_size[0]), int(input_size[1]))
-        self.transform = build_eval_transform(input_size)
+        self.mean = tuple(mean)
+        self.std = tuple(std)
 
         # Sort images by unit (then key) so units are contiguous -> timely prints.
         df_images = base_ds.df_images.copy()
@@ -111,12 +116,7 @@ class PointEvalDataset(Dataset):
             if image.ndim == 2:
                 image = np.stack([image] * 3, axis=-1)
             h, w = image.shape[:2]
-            img_tensor = (
-                torch.from_numpy(self.transform(image=image)["image"])
-                .permute(2, 0, 1)
-                .contiguous()
-                .float()
-            )
+            img_tensor = preprocess(image, self.input_hw, self.mean, self.std)
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to load image (unit=%s key=%s): %s", unit, key_t, e)
             th, tw = self.input_hw
@@ -316,6 +316,8 @@ def run_point_evaluation(
         unit_col=unit_col,
         key_cols=key_cols,
         input_size=predictor.input_size,
+        mean=predictor.mean,
+        std=predictor.std,
         class_lookup=class_lookup,
         concept_lookup=concept_lookup,
     )

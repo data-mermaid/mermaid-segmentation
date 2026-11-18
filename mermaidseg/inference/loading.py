@@ -13,7 +13,11 @@ import yaml
 
 from mermaidseg.config import lookup_class, validate_section
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS, parse_concept_rank
-from mermaidseg.model.models import MODEL_CLASSES, ConceptBottleneckDPTLoRADINOv3
+from mermaidseg.model.models import (
+    MODEL_CLASSES,
+    ConceptBottleneckDPTLoRADINOv3,
+    load_pretrained_encoder,
+)
 
 CBMModel = ConceptBottleneckDPTLoRADINOv3
 
@@ -120,7 +124,9 @@ def build_model(artifacts: DemoArtifacts, device: torch.device | str) -> CBMMode
     model_kwargs["concept_value2id"] = _derive_concept_value2id(artifacts.concept_id2name)
 
     # detach_concepts only changes gradients, which inference never computes.
+    encoder_name = model_kwargs.pop("encoder_name")
     model = model_cls(
+        base_encoder=load_pretrained_encoder(encoder_name),
         num_classes=num_classes,
         num_concepts=num_concepts,
         detach_concepts=False,

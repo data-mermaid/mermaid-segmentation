@@ -23,7 +23,8 @@ from mermaidseg.evaluation.point_datasets import (
     unit_scalar_keys,
     unit_scalars,
 )
-from mermaidseg.evaluation.predictor import CBMPredictor
+from mermaidseg.inference.predictor import CBMPredictor
+from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 
 _REPO = Path(__file__).resolve().parents[2]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
@@ -91,6 +92,8 @@ class StubPredictor:
     """Predictions are a deterministic function of the image, independent of batching."""
 
     input_size = (SIZE, SIZE)
+    mean = IMAGENET_MEAN
+    std = IMAGENET_STD
     device = torch.device("cpu")
     sample_at_points = staticmethod(CBMPredictor.sample_at_points)
 

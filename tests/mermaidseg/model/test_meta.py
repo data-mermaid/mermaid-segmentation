@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -379,3 +380,23 @@ def test_train_epoch_epoch_components_average_the_update_means(minimal_config, m
     for key in ("classification", "concepts"):
         expected = sum(means[key] for _, means in per_update) / 4
         assert metrics[f"loss/{key}"] == pytest.approx(expected, rel=1e-6, abs=1e-9)
+
+
+def test_update_evaluator_feeds_metrics_the_argmax_of_class_logits(minimal_config, make_meta_model):
+    class _Recorder:
+        def __init__(self) -> None:
+            self.preds: list[torch.Tensor] = []
+
+        def update(self, preds: torch.Tensor, _target: torch.Tensor) -> None:
+            self.preds.append(preds)
+
+    recorder = _Recorder()
+    evaluator = SimpleNamespace(
+        device="cpu", metric_dict={"m": recorder}, evaluate_concepts=lambda *_a: None
+    )
+    meta = make_meta_model(minimal_config)
+    logits = torch.tensor([[[[1.0, 5.0]], [[3.0, 2.0]], [[0.0, 9.0]]]])  # (1, 3, 1, 2)
+
+    meta._update_evaluator(evaluator, logits, torch.zeros(1, 1, 2, dtype=torch.long), None, None)
+
+    assert [p.tolist() for p in recorder.preds] == [[[[1, 2]]]]

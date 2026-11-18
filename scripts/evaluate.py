@@ -59,9 +59,10 @@ from mermaidseg.datasets import configured_source_names
 from mermaidseg.datasets.local_cache import setup_local_cache
 from mermaidseg.evaluation.gt_mapping import load_benthic_hierarchy
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
-from mermaidseg.evaluation.predictor import CBMPredictor
 from mermaidseg.evaluation.reporting import fmt, write_json
 from mermaidseg.inference.loading import build_model, load_artifacts
+from mermaidseg.inference.predictor import CBMPredictor
+from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import load_section
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -446,7 +447,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     model = build_model(artifacts, device)
     amp_dtype = eval_amp_dtype(args.training_config, args.amp)
-    predictor = CBMPredictor(model, input_size=input_size, device=device, amp_dtype=amp_dtype)
+    predictor = CBMPredictor(
+        model,
+        input_size=input_size,
+        mean=IMAGENET_MEAN,
+        std=IMAGENET_STD,
+        device=device,
+        amp_dtype=amp_dtype,
+    )
     id2label = artifacts.id2label
     concept_names = [
         name for _, name in sorted(artifacts.concept_id2name.items(), key=lambda kv: int(kv[0]))
@@ -589,7 +597,6 @@ def main(argv: list[str] | None = None) -> None:
                 for s, result in evaluate_coralscapes_probe(
                     predictor=predictor,
                     probe_json=args.probe_points,
-                    feature_kinds=["concepts"],
                     coralscapes_root=args.coralscapes_root,
                     output_dir=output_dir,
                     concept_names=concept_names,
@@ -612,7 +619,6 @@ def main(argv: list[str] | None = None) -> None:
                 for s, result in evaluate_coralscapes39_probe(
                     predictor=predictor,
                     probe_jsons=[args.coralscapes39_probe],
-                    feature_kinds=["concepts"],
                     coralscapes_root=args.coralscapes_root,
                     output_dir=output_dir,
                     splits=[split],

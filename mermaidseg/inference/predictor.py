@@ -1,72 +1,40 @@
-"""CBM inference helpers for the evaluation suite.
+"""CBM predictor shared by the evaluation suite and serving.
 
 Wraps a loaded concept-bottleneck model with:
 
-- preprocessing that matches the training/demo val transform (Resize to the
-  model ``input_size`` + ImageNet normalize),
+- preprocessing that matches the training/val transform (Resize to the model ``input_size`` +
+  normalize), through ``mermaidseg.inference.preprocess``,
 - batched forward returning class + concept probabilities at input resolution,
-- per-pixel feature extraction for linear probing (concepts / DPT / backbone),
-- exact source-resolution point sampling via ``grid_sample`` (equivalent to a
-  bilinear upsample of the input-resolution map followed by indexing, but
-  without materialising the huge full-resolution map).
+- exact source-resolution point sampling via ``grid_sample`` (equivalent to a bilinear upsample
+  of the input-resolution map followed by indexing, without materialising the full-resolution
+  map).
+
+``class_probabilities`` and ``class_predictions`` are the postprocessing that in-training
+validation and inference share. This module imports only torch, numpy and the preprocess module
+so serving can load it.
 """
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from typing import Any, cast
 
-import albumentations as A
 import numpy as np
 import torch
 import torch.nn.functional as F
 from numpy.typing import NDArray
 
-from mermaidseg.io import build_eval_transform
-
-logger = logging.getLogger(__name__)
-
-FEATURE_KINDS = ("concepts", "dpt", "backbone")
+from mermaidseg.inference.preprocess import preprocess
 
 
-def long_edge_size(
-    height: int,
-    width: int,
-    long_edge: int,
-    *,
-    multiple: int = 1,
-) -> tuple[int, int]:
-    """Return ``(height, width)`` with the long side fixed at ``long_edge``.
-
-    The short side keeps the source aspect ratio and is rounded to ``multiple``
-    so a ViT patch grid stays exact. ``long_edge`` must itself be a positive
-    multiple of ``multiple``. Square inputs stay square.
-    """
-    height = int(height)
-    width = int(width)
-    long_edge = int(long_edge)
-    multiple = int(multiple)
-    if height <= 0 or width <= 0:
-        raise ValueError(f"image size must be positive, got {(height, width)}")
-    if multiple <= 0:
-        raise ValueError(f"multiple must be positive, got {multiple}")
-    if long_edge <= 0 or long_edge % multiple != 0:
-        raise ValueError(f"long_edge must be a positive multiple of {multiple}, got {long_edge}")
-
-    def snap(value: float) -> int:
-        snapped = int(round(value / multiple)) * multiple
-        return max(multiple, snapped)
-
-    if height >= width:
-        return long_edge, snap(width * (long_edge / height))
-    return snap(height * (long_edge / width)), long_edge
+def class_probabilities(logits: torch.Tensor) -> torch.Tensor:
+    """Softmax of ``(B, C, h, w)`` class logits over the class dimension, in float32."""
+    return torch.softmax(logits.float(), dim=1)
 
 
-def preprocess_image(image_rgb_uint8: NDArray[np.uint8], transform: A.Compose) -> torch.Tensor:
-    """Resize + normalize an HxWx3 uint8 RGB image to a (3, h, w) float tensor."""
-    normalized = transform(image=image_rgb_uint8)["image"]
-    return torch.from_numpy(normalized).permute(2, 0, 1).contiguous().float()
+def class_predictions(logits: torch.Tensor) -> torch.Tensor:
+    """Argmax of ``(B, C, h, w)`` class logits over the class dimension: ``(B, h, w)`` ids."""
+    return logits.argmax(dim=1)
 
 
 class CBMPredictor:
@@ -75,50 +43,44 @@ class CBMPredictor:
     def __init__(
         self,
         model: torch.nn.Module,
+        *,
         input_size: tuple[int, int],
+        mean: Sequence[float],
+        std: Sequence[float],
         device: torch.device | str,
-        amp_dtype: torch.dtype | None = None,
+        amp_dtype: torch.dtype | None,
     ):
         """Wrap a model for inference.
 
         Args:
             model: Concept-bottleneck model exposing ``concept_classifier``.
-            input_size: ``(height, width)`` of the evaluation transform.
+            input_size: ``(height, width)`` the images are resized to.
+            mean: Per-channel normalisation mean.
+            std: Per-channel normalisation standard deviation.
             device: Device the inputs are moved to.
             amp_dtype: Autocast dtype for the forward pass, or ``None`` to run without autocast.
 
         Raises:
             ValueError: If ``model`` has no ``concept_classifier``.
         """
-        # Duck-typed: CBM variants expose attributes (_encode, dpt_head) that nn.Module hides.
+        # Duck-typed: CBM variants expose attributes (concept_outputs_activation) that nn.Module hides.
         self.model: Any = model.eval()
         self.input_size = (int(input_size[0]), int(input_size[1]))
+        self.mean = tuple(float(v) for v in mean)
+        self.std = tuple(float(v) for v in std)
         self.device = torch.device(device)
         self.amp_dtype = amp_dtype
-        self.transform = build_eval_transform(self.input_size)
 
         if not hasattr(model, "concept_classifier"):
             raise ValueError("Model does not expose a `concept_classifier`; is this a CBM model?")
         classifier = cast("Any", model.concept_classifier)
         self.num_concepts = int(classifier.in_channels)
         self.num_classes = int(classifier.out_channels)
-        self.patch_size = int(getattr(model, "patch_size", 16))
 
     # -- preprocessing ---------------------------------------------------------
     def preprocess(self, image_rgb_uint8: NDArray[np.uint8]) -> torch.Tensor:
         """Resize and normalize an RGB image to the model input size."""
-        return preprocess_image(image_rgb_uint8, self.transform)
-
-    def preprocess_long_edge(
-        self, image_rgb_uint8: NDArray[np.uint8], long_edge: int
-    ) -> torch.Tensor:
-        """Resize so the long side is ``long_edge``, then ImageNet-normalize.
-
-        The short side keeps aspect ratio and is rounded to ``patch_size``.
-        """
-        height, width = int(image_rgb_uint8.shape[0]), int(image_rgb_uint8.shape[1])
-        out_h, out_w = long_edge_size(height, width, long_edge, multiple=self.patch_size)
-        return preprocess_image(image_rgb_uint8, build_eval_transform((out_h, out_w)))
+        return preprocess(image_rgb_uint8, self.input_size, self.mean, self.std)
 
     def _autocast(self) -> torch.autocast:
         return torch.autocast(
@@ -138,53 +100,32 @@ class CBMPredictor:
         images = images.to(self.device, non_blocking=True)
         with self._autocast():
             outputs = self.model(images)
-        class_probs = torch.softmax(outputs.logits.float(), dim=1)
-        concept_probs = outputs.hidden_states.float()
-        return class_probs, concept_probs
+        return class_probabilities(outputs.logits), outputs.hidden_states.float()
 
     @torch.inference_mode()
-    def forward_features(self, images: torch.Tensor, kind: str = "concepts") -> torch.Tensor:
-        """Return dense per-pixel features ``(B, D, h, w)`` at input resolution."""
-        if kind not in FEATURE_KINDS:
-            raise ValueError(f"Unknown feature kind {kind!r}; expected one of {FEATURE_KINDS}")
-        images = images.to(self.device, non_blocking=True)
+    def predict_points(
+        self,
+        image_rgb_uint8: NDArray[np.uint8],
+        points_rowcol: Sequence[Sequence[float]] | NDArray[np.number],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return per-point ``(class_probs (N, C), concept_probs (N, K))`` on CPU.
 
-        if kind == "concepts":
-            with self._autocast():
-                outputs = self.model(images)
-            return outputs.hidden_states.float()
+        ``points_rowcol`` is ``(N, 2)`` ``(row, col)`` pixel coordinates in the source image.
+        Values equal bilinearly upsampling the input-resolution maps to the source size and
+        indexing there.
 
-        if not (hasattr(self.model, "_encode") and hasattr(self.model, "dpt_head")):
-            raise NotImplementedError(
-                f"Feature kind {kind!r} requires a DPT-based CBM model with `_encode`/`dpt_head`."
-            )
-
-        with self._autocast():
-            hidden_states = self.model._encode(images)
-
-        if kind == "dpt":
-            token_height = images.shape[-2] // self.patch_size
-            token_width = images.shape[-1] // self.patch_size
-            feat = self.model.dpt_head(hidden_states, token_height, token_width)
-            return F.interpolate(
-                feat.float(), size=images.shape[-2:], mode="bilinear", align_corners=False
-            )
-
-        # kind == "backbone": last selected hidden state, patch tokens only.
-        hs = hidden_states[-1]  # (B, 1 + P, C) -- CLS at index 0, register tokens already dropped
-        patch = hs[:, 1:, :]
-        b, num_patches, channels = patch.shape
-        th = images.shape[-2] // self.patch_size
-        tw = images.shape[-1] // self.patch_size
-        if th * tw != num_patches:
-            raise ValueError(
-                f"Cannot reshape {num_patches} patch tokens into {th}x{tw} grid "
-                f"(input {tuple(images.shape[-2:])}, patch_size {self.patch_size})."
-            )
-        feat = patch.transpose(1, 2).reshape(b, channels, th, tw)
-        return F.interpolate(
-            feat.float(), size=images.shape[-2:], mode="bilinear", align_corners=False
-        )
+        Raises:
+            ValueError: If ``points_rowcol`` is not ``(N, 2)``.
+        """
+        points = np.asarray(points_rowcol)
+        if points.ndim != 2 or points.shape[1] != 2:
+            raise ValueError(f"points_rowcol must be (N, 2) (row, col); got shape {points.shape}")
+        height, width = image_rgb_uint8.shape[:2]
+        class_probs, concept_probs = self.forward_probs(self.preprocess(image_rgb_uint8)[None])
+        rows, cols = points[:, 0], points[:, 1]
+        point_class = self.sample_at_points(class_probs[0], rows, cols, height, width)
+        point_concept = self.sample_at_points(concept_probs[0], rows, cols, height, width)
+        return point_class.T.cpu(), point_concept.T.cpu()
 
     @torch.inference_mode()
     def forward_concept_logits(self, images: torch.Tensor) -> torch.Tensor:
@@ -267,16 +208,3 @@ class CBMPredictor:
             padding_mode="border",
         )  # (1, C, N, 1)
         return sampled[0, :, :, 0]
-
-    @staticmethod
-    def upsample_scores(scores: torch.Tensor, height: int, width: int) -> torch.Tensor:
-        """Bilinearly upsample a ``(K, h, w)`` score map to ``(K, height, width)``."""
-        if scores.dim() != 3:
-            raise ValueError(f"scores must be (K, h, w); got {tuple(scores.shape)}")
-        out = F.interpolate(
-            scores.unsqueeze(0).float(),
-            size=(int(height), int(width)),
-            mode="bilinear",
-            align_corners=False,
-        )
-        return out[0]

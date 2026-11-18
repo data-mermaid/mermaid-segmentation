@@ -26,6 +26,7 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     source_labels_to_target_labels,
 )
 from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
+from mermaidseg.inference.predictor import class_predictions
 from mermaidseg.io import ConfigDict
 from mermaidseg.model.data_parallel import (
     DDPLossStep,
@@ -42,7 +43,7 @@ from mermaidseg.model.distributed import (
     require_world_size,
 )
 from mermaidseg.model.loss import LOSS_CLASSES
-from mermaidseg.model.models import MODEL_CLASSES
+from mermaidseg.model.models import MODEL_CLASSES, load_pretrained_encoder
 from mermaidseg.model.taxonomy_loss import TaxonomicLoss
 
 logger = logging.getLogger(__name__)
@@ -297,7 +298,12 @@ class MetaModel:
         model_kwargs["num_concepts"] = self.num_concepts
         model_kwargs["concept_value2id"] = self.concept_value2id
         model_kwargs["detach_concepts"] = detach_concepts
-        self.model = model_cls(**model_kwargs)
+        # The encoder is built here; the model class takes it, not its hub name.
+        constructor_kwargs = {k: v for k, v in model_kwargs.items() if k != "encoder_name"}
+        self.model = model_cls(
+            base_encoder=load_pretrained_encoder(model_kwargs["encoder_name"]),
+            **constructor_kwargs,
+        )
 
         self.model = self.model.to(device)
         self.detach_concepts = detach_concepts
@@ -469,7 +475,7 @@ class MetaModel:
         if target_concepts is not None:
             target_concepts = target_concepts.to(device)
 
-        preds = outputs.argmax(dim=1) if outputs.ndim > 3 else outputs
+        preds = class_predictions(outputs) if outputs.ndim > 3 else outputs
         for metric in evaluator.metric_dict.values():
             metric.update(preds, target_labels)
         evaluator.evaluate_concepts(concept_outputs, target_concepts)

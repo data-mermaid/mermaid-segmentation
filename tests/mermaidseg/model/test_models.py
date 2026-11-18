@@ -12,9 +12,9 @@ from mermaidseg.model.models import ConceptBottleneckDPTLoRADINOv3
 from tests.conftest import CBM_CONCEPT_VALUE2ID, CBM_NUM_CONCEPTS, IMAGE_SIZE
 
 
-def _model_kwargs(**extra: Any) -> dict[str, Any]:
+def _model_kwargs(base_encoder: Any, **extra: Any) -> dict[str, Any]:
     return {
-        "encoder_name": "facebook/dinov3-vits16-pretrain-lvd1689m",
+        "base_encoder": base_encoder,
         "num_classes": 4,
         "num_concepts": CBM_NUM_CONCEPTS,
         "input_size": IMAGE_SIZE,
@@ -35,12 +35,14 @@ def _model_kwargs(**extra: Any) -> dict[str, Any]:
 
 
 def test_unknown_model_kwarg_raises(mock_dinov3_encoder):
-    mock_dinov3_encoder(models_module)
+    encoder = mock_dinov3_encoder(models_module)
     with pytest.raises(TypeError, match="foo"):
-        ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(foo=1))
+        ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(encoder, foo=1))
 
 
-def test_from_pretrained_gets_only_the_encoder_name_and_hf_token(mock_dinov3_encoder, monkeypatch):
+def test_load_pretrained_encoder_passes_only_the_encoder_name_and_hf_token(
+    mock_dinov3_encoder, monkeypatch
+):
     encoder = mock_dinov3_encoder(models_module)
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
@@ -51,14 +53,26 @@ def test_from_pretrained_gets_only_the_encoder_name_and_hf_token(mock_dinov3_enc
     monkeypatch.setattr(models_module.AutoModel, "from_pretrained", _from_pretrained)
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")
 
-    ConceptBottleneckDPTLoRADINOv3(**_model_kwargs())
+    assert models_module.load_pretrained_encoder("some/encoder") is encoder
+    assert calls == [(("some/encoder",), {"token": "hf-test-token"})]
 
-    assert calls == [(("facebook/dinov3-vits16-pretrain-lvd1689m",), {"token": "hf-test-token"})]
+
+def test_model_built_with_an_injected_encoder_never_calls_the_hub(mock_dinov3_encoder, monkeypatch):
+    encoder = mock_dinov3_encoder(models_module)
+
+    def _hub_call(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the model class must not load an encoder from the hub")
+
+    monkeypatch.setattr(models_module.AutoModel, "from_pretrained", _hub_call)
+
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(encoder))
+
+    assert model.patch_size == encoder.config.patch_size
 
 
 def test_cpu_bf16_autocast_keeps_logits_in_fp32(mock_dinov3_encoder):
-    mock_dinov3_encoder(models_module)
-    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs())
+    encoder = mock_dinov3_encoder(models_module)
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(encoder))
     images = torch.randn(2, 3, *IMAGE_SIZE)
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         out = model(images)
@@ -67,8 +81,8 @@ def test_cpu_bf16_autocast_keeps_logits_in_fp32(mock_dinov3_encoder):
 
 
 def test_only_lora_adapters_and_heads_are_trainable(mock_dinov3_encoder):
-    mock_dinov3_encoder(models_module)
-    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs())
+    encoder = mock_dinov3_encoder(models_module)
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(encoder))
 
     names = [name for name, _ in model.named_parameters()]
     lora = {n for n in names if "lora_" in n}
