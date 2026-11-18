@@ -7,9 +7,10 @@ from io import BytesIO
 import ibis
 import pandas as pd
 import pytest
+from PIL import Image
+
 from coralnet_dataset.manifest import build_training_manifest, resized_existence_table
 from coralnet_dataset.resize import resize_image_to_threshold
-from PIL import Image
 
 
 def test_training_manifest_scales_coords_and_excludes():

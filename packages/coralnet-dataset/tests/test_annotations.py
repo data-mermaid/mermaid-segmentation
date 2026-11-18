@@ -7,6 +7,7 @@ import threading
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
+
 from coralnet_dataset.annotations import (
     _derive_image_id,
     build_annotations,

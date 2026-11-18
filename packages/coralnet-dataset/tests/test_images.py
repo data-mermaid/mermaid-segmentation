@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
+
 from coralnet_dataset.images import build_images
 from coralnet_dataset.io import write_parquet_deterministic
 from coralnet_dataset.schemas import (

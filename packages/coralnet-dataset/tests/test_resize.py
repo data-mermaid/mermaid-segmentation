@@ -6,13 +6,14 @@ from io import BytesIO
 from unittest.mock import MagicMock, Mock
 
 import pandas as pd
+from PIL import Image
+
 from coralnet_dataset.resize import (
     resize_and_upload_all_images,
     resize_and_upload_image,
     resize_image_to_threshold,
     scan_for_missing_resized_images,
 )
-from PIL import Image
 
 
 def test_resize_image_maintains_aspect_ratio():

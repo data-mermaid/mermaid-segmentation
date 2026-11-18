@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pyarrow as pa
 import pytest
+
 from coralnet_dataset.schemas import (
     ANNOTATIONS_SCHEMA,
     IMAGES_SCHEMA,

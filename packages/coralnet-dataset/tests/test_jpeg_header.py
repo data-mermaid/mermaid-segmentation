@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from coralnet_dataset.jpeg_header import (
     _find_sof_dimensions,
     read_jpeg_size_from_s3,

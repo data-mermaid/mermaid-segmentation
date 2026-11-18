@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from PIL import Image
+
 from coralnet_dataset import cli
 from coralnet_dataset.io import make_csv_reader_s3, write_parquet_deterministic
 from coralnet_dataset.schemas import (
@@ -16,7 +18,6 @@ from coralnet_dataset.schemas import (
     IMAGES_PRIMARY_KEY,
     IMAGES_SCHEMA,
 )
-from PIL import Image
 
 _BUCKET = "b"
 _PREFIX = "coralnet-public-images"

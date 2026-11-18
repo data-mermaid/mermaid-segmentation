@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from coralnet_dataset import config
 
 

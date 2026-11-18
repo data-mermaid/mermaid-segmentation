@@ -31,3 +31,6 @@ jobs:
       - name: Run coralnet-scraper unit tests
         if: ${{ !cancelled() }}
         run: uv run --package coralnet-scraper --group tests pytest packages/coralnet-scraper/tests
+      - name: Run coralnet-dataset unit tests
+        if: ${{ !cancelled() }}
+        run: uv run --package coralnet-dataset --group tests pytest packages/coralnet-dataset/tests
