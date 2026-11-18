@@ -59,16 +59,31 @@ uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
 
 `--num-workers` is required. The config flags `--training-config`, `--model-config`,
 `--data-config`, `--concept-schema-config` and `--logger-config` take repo-relative paths under
-`configs/`, and `--resolution` sets the image size. Checkpoints go to
+`configs/`. `--resolution` sets the train crop size and the model input size; val and test images
+resize to the model input size. Checkpoints go to
 `outputs/model_checkpoints/<run>/`; `--output-dir` changes `outputs`. Each run also writes its resolved config to `outputs/model_checkpoints/<run>/config.yaml`, as a record of the settings the run used. It is not meant to be passed back in as a run config.
+At the start, each run also writes `outputs/model_checkpoints/<run>/model.json`: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version and resolved config).
 
 `slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px
 fine-tune. It submits through `slurm/train.sbatch`, with site settings from `.env` (see `.env.example`).
 It is idempotent and accepts `--dry-run`.
 Batch jobs write `.venv`, `outputs/` and `logs/` inside the checkout, so it must be on a filesystem the job can write, not AFS, because batch jobs have no AFS token. Set `MERMAIDSEG_ENV_FILE` to read the settings from an env file elsewhere.
 
+### Export a model
+
+Export a finished run as a bundle, then evaluate the bundle:
+
+```bash
+uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
+uv run python scripts/export.py --checkpoint outputs/model_checkpoints/<run>/<checkpoint> --output-dir /path/to/bundle
+uv run python scripts/evaluate.py --bundle /path/to/bundle --output-dir /path/to/results
+```
+
+The bundle holds `model.json` and `weights.safetensors`. These two files are the contract with `mermaid-inference`.
+`scripts/export.py` refuses a run from a dirty or unknown git tree, a non-empty output directory, a missing parent directory, and a checkpoint whose config differs from the run's `model.json`.
+
 `scripts/evaluate.py` is the validation suite (CoralNet, Pacific Labeled Corals, CoralscapesV2
-few-shot probes and the validation loss).
+few-shot probes and the validation loss). It evaluates an exported bundle: input size, normalization, label maps and run settings come from the bundle.
 
 ### Running Tests
 
