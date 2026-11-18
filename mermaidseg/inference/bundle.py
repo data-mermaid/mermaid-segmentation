@@ -65,7 +65,7 @@ class ModelBundle:
 
 
 def _check_metadata(metadata: dict, path: Path) -> None:
-    for key, expected in (("schema_version", SCHEMA_VERSION), ("task", TASK)):
+    for key, expected in (("schema_version", SCHEMA_VERSION), ("task", TASK), ("weights", WEIGHTS)):
         if metadata.get(key) != expected:
             raise ValueError(f"{path}: {key} {metadata.get(key)!r} is not supported ({expected!r})")
     preprocessing = metadata["preprocessing"]
@@ -92,7 +92,7 @@ def load_bundle(path: str | Path, device: torch.device | str) -> ModelBundle:
     The model reads only the taxonomic string keys and the widths of their value lists.
 
     Raises:
-        ValueError: ``schema_version``, ``task``, ``preprocessing.channel_order`` or
+        ValueError: ``schema_version``, ``task``, ``weights``, ``preprocessing.channel_order`` or
             ``preprocessing.interpolation`` is not supported.
         RuntimeError: The weights do not match the architecture's state dict.
     """
@@ -105,6 +105,6 @@ def load_bundle(path: str | Path, device: torch.device | str) -> ModelBundle:
     model = MODEL_CLASSES[architecture["class"]](
         base_encoder=_build_encoder(architecture["encoder_config"]), **kwargs
     )
-    model.load_state_dict(load_file(path / metadata["weights"]), strict=True)
+    model.load_state_dict(load_file(path / WEIGHTS), strict=True)
     device = torch.device(device)
     return ModelBundle(path=path, metadata=metadata, model=model.to(device).eval(), device=device)

@@ -114,6 +114,25 @@ def test_load_refuses_a_foreign_schema_version_or_task(bundle_dir, tmp_path, key
         load_bundle(foreign, "cpu")
 
 
+_MISSING = object()
+
+
+@pytest.mark.parametrize(
+    "weights", ["../weights.safetensors", "/etc/weights.safetensors", _MISSING]
+)
+def test_load_refuses_a_weights_path_other_than_the_bundle_weights(bundle_dir, tmp_path, weights):
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    metadata = json.loads((bundle_dir / MODEL_JSON).read_text())
+    if weights is _MISSING:
+        del metadata["weights"]
+    else:
+        metadata["weights"] = weights
+    (foreign / MODEL_JSON).write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="weights"):
+        load_bundle(foreign, "cpu")
+
+
 @pytest.mark.parametrize("git_dirty", [True, None])
 def test_export_refuses_a_run_from_a_dirty_or_unknown_tree(tmp_path, git_dirty):
     checkpoint, _ = _tiny.write_run(tmp_path / "run", git_dirty=git_dirty)
