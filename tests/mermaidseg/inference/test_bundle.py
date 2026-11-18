@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,17 @@ def _read(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def test_sidecar_records_encoder_name_outside_kwargs_without_mutating_the_caller(tmp_path: Path):
+    kwargs = _sidecar_kwargs()
+    before = copy.deepcopy(kwargs["model_kwargs"])
+
+    architecture = _read(write_sidecar(tmp_path, **kwargs))["architecture"]
+
+    assert architecture["encoder_name"] == "enc"
+    assert "encoder_name" not in architecture["kwargs"]
+    assert kwargs["model_kwargs"] == before
+
+
 def test_sidecar_layout(tmp_path: Path):
     path = write_sidecar(tmp_path, **_sidecar_kwargs())
     assert path == tmp_path / MODEL_JSON
@@ -48,8 +60,8 @@ def test_sidecar_layout(tmp_path: Path):
         "run_name": "run-a",
         "architecture": {
             "class": "ConceptBottleneckDPTLoRADINOv3",
+            "encoder_name": "enc",
             "kwargs": {
-                "encoder_name": "enc",
                 "input_size": [56, 56],
                 "num_classes": 3,
                 "concept_value2id": {"order": {"not_given": [0, 0]}, "bleached": {"False": 1}},

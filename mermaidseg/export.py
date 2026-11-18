@@ -47,6 +47,7 @@ def _build_sidecar(
     std: Sequence[float],
     lineage: dict,
 ) -> dict:
+    kwargs = {k: v for k, v in model_kwargs.items() if k != "encoder_name"}
     return _jsonable(
         {
             "schema_version": SCHEMA_VERSION,
@@ -54,7 +55,8 @@ def _build_sidecar(
             "run_name": run_name,
             "architecture": {
                 "class": model_class,
-                "kwargs": model_kwargs,
+                "encoder_name": model_kwargs["encoder_name"],
+                "kwargs": kwargs,
                 "encoder_config": encoder_config,
             },
             "id2label": id2label,

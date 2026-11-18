@@ -19,6 +19,8 @@ from mermaidseg.model.models import MODEL_CLASSES
 
 MODEL_JSON = "model.json"
 WEIGHTS = "weights.safetensors"
+# Renaming the model class or any ``architecture.kwargs`` key, or changing their meaning, requires
+# a SCHEMA_VERSION bump: delivered bundles are rebuilt from these names.
 SCHEMA_VERSION = 1
 TASK = "segmentation_cbm"
 
@@ -100,7 +102,7 @@ def load_bundle(path: str | Path, device: torch.device | str) -> ModelBundle:
     metadata = json.loads((path / MODEL_JSON).read_text())
     _check_metadata(metadata, path)
     architecture = metadata["architecture"]
-    kwargs = {k: v for k, v in architecture["kwargs"].items() if k != "encoder_name"}
+    kwargs = dict(architecture["kwargs"])
     kwargs["input_size"] = tuple(kwargs["input_size"])
     model = MODEL_CLASSES[architecture["class"]](
         base_encoder=_build_encoder(architecture["encoder_config"]), **kwargs

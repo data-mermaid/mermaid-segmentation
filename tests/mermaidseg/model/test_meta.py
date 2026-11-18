@@ -467,7 +467,7 @@ def test_sidecar_architecture_kwargs_rebuild_the_model_from_json(
         lineage={},
     )
     architecture = json.loads((tmp_path / MODEL_JSON).read_text())["architecture"]
-    kwargs = {k: v for k, v in architecture["kwargs"].items() if k != "encoder_name"}
+    kwargs = dict(architecture["kwargs"])
 
     model = MODEL_CLASSES[architecture["class"]](
         base_encoder=mock_dinov3_encoder(models_module), **kwargs
