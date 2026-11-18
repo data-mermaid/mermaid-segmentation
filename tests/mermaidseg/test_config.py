@@ -108,7 +108,7 @@ def test_unknown_key_raises_naming_the_file(tmp_path: Path, section: str, keys: 
         ("training", ("train_metrics_every",)),
         ("training", ("scheduler", "warmup_iters")),
         ("model", ("lora_r",)),
-        ("logger", ("enable_wandb",)),
+        ("logger", ("tracker",)),
     ],
 )
 def test_missing_key_raises(tmp_path: Path, section: str, keys: tuple[str, ...]):
@@ -125,12 +125,35 @@ def test_missing_key_raises(tmp_path: Path, section: str, keys: tuple[str, ...])
         ("training", ("optimizer", "type")),
         ("training", ("scheduler", "type")),
         ("training", ("training_mode",)),
+        ("logger", ("tracker",)),
     ],
 )
 def test_unknown_name_raises(tmp_path: Path, section: str, keys: tuple[str, ...]):
     paths = _mutated(tmp_path, section, _set(*keys, value="Unknown"))
     with pytest.raises(ValueError, match="Unknown"):
         setup_config(paths)
+
+
+@pytest.mark.parametrize(
+    ("file", "tracker"),
+    [("logger_config.yaml", "wandb"), ("logger_config_sagemaker.yaml", "mlflow")],
+)
+def test_committed_logger_configs_validate(file: str, tracker: str):
+    cfg = setup_config({"logger": str(_CONFIGS / file)})
+    assert cfg.logger.tracker == tracker
+
+
+def test_wandb_key_under_the_mlflow_tracker_raises_naming_the_file():
+    raw = {
+        "logger": {
+            "tracker": "mlflow",
+            "experiment_name": "e",
+            "train_log_interval": 1,
+            "wandb_project": "p",
+        }
+    }
+    with pytest.raises(ValueError, match=r"(?s)^cfg\.yaml: .*wandb_project"):
+        validate_section(raw, "logger", "cfg.yaml")
 
 
 def test_string_none_split_raises(tmp_path: Path):
@@ -224,7 +247,7 @@ def test_validate_section_rejects_any_top_level_keys_but_the_section(raw: dict[s
 def test_validate_section_names_the_source_on_an_unknown_key():
     raw = {
         "logger": {
-            "enable_wandb": False,
+            "tracker": "wandb",
             "wandb_project": "p",
             "wandb_entity": None,
             "train_log_interval": 1,
@@ -236,6 +259,6 @@ def test_validate_section_names_the_source_on_an_unknown_key():
 
 
 def test_validate_section_rejects_a_missing_required_key():
-    raw = {"logger": {"enable_wandb": False}}
+    raw = {"logger": {"tracker": "wandb"}}
     with pytest.raises(ValueError, match=r"(?s)^cfg\.yaml: .*wandb_project"):
         validate_section(raw, "logger", "cfg.yaml")

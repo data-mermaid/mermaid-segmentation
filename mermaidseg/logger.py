@@ -1,39 +1,33 @@
 """Experiment tracking and checkpoint persistence for training and evaluation runs.
 
+The ``logger.tracker`` config key names the tracking backend (``TRACKER_CLASSES``). Each
+backend imports its library lazily, so the package imports without the tracker extras.
+
 Serialization strategy:
 - Training checkpoints: torch.save (pickle) — full state for resume.
 """
 
-import copy
 import json
 import logging
 import os
 import re
 import tempfile
 import time
+from collections.abc import Callable
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from mermaidseg.config import to_plain_dict
+from mermaidseg.config import lookup_class, to_plain_dict
 from mermaidseg.model.meta import MetaModel
 
 if TYPE_CHECKING:
     from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
 
 logger = logging.getLogger(__name__)
-
-
-try:
-    import wandb
-
-    WANDB_IMPORT_ERROR = None
-except ImportError as err:
-    wandb = None  # type: ignore[assignment]  # optional dependency guard
-    WANDB_IMPORT_ERROR = err
 
 
 def prune_rolling_checkpoints(
@@ -72,11 +66,258 @@ def _to_python(value: Any) -> Any:
     return value
 
 
+class Tracker(Protocol):
+    """An experiment-tracking backend: the calls ``Logger`` makes on one run."""
+
+    @property
+    def run_id(self) -> str | None:
+        """The backend's id of the active run."""
+        ...
+
+    @property
+    def run_url(self) -> str | None:
+        """A browser URL for the active run, when the backend has one."""
+        ...
+
+    def log_params(self, params: dict[str, Any]) -> None:
+        """Log flat run parameters."""
+        ...
+
+    def log_metrics(self, metrics: dict[str, float], step: int) -> None:
+        """Log scalar metrics at ``step``."""
+        ...
+
+    def log_dict(self, data: dict[str, Any], artifact_path: str) -> None:
+        """Log ``data`` as a JSON artifact at ``artifact_path``."""
+        ...
+
+    def end_run(self, failed: bool) -> None:
+        """End the active run, marked failed when ``failed``."""
+        ...
+
+
+class WandbTracker:
+    """Tracker that logs to one wandb run."""
+
+    def __init__(self, project: str, entity: str | None, run_name: str, config: Any) -> None:
+        """Start a wandb run, resuming the run id in ``WANDB_RUN_ID`` when it is set.
+
+        Raises:
+            ImportError: If wandb is not installed.
+            RuntimeError: If no wandb API key resolves (``WANDB_API_KEY``, ``wandb login`` or
+                ``~/.netrc``).
+        """
+        try:
+            import wandb
+        except ImportError as err:
+            raise ImportError(
+                "wandb is required for tracker 'wandb'. Install it with: uv sync --extra slurm"
+            ) from err
+        if not wandb.api.api_key:
+            raise RuntimeError(
+                "wandb is not authenticated. Run `wandb login` in a terminal, "
+                "set WANDB_API_KEY, or call wandb.login(key=...) in a notebook cell."
+            )
+        self._wandb = wandb
+        # slurm/train.sbatch sets WANDB_RUN_ID so every resubmitted job of a run
+        # appends to the same wandb run. Without it, each process starts a new run.
+        run_id = os.environ.get("WANDB_RUN_ID", "").strip() or None
+        self._run = wandb.init(
+            project=project,
+            entity=entity,
+            name=run_name,
+            config=config,
+            id=run_id,
+            resume="allow" if run_id is not None else None,
+        )
+
+    @property
+    def run_id(self) -> str | None:
+        """The wandb run id."""
+        return self._run.id
+
+    @property
+    def run_url(self) -> str | None:
+        """The wandb run page."""
+        return self._run.url
+
+    def log_params(self, params: dict[str, Any]) -> None:
+        """Log params as wandb config keys."""
+        try:
+            self._run.config.update(params, allow_val_change=True)
+        except Exception as e:
+            logger.warning("Failed to log params to wandb: %s", e)
+
+    def log_metrics(self, metrics: dict[str, float], step: int) -> None:
+        """Log metrics to the wandb run at ``step``."""
+        try:
+            self._run.log(metrics, step=step)
+        except Exception as e:
+            logger.warning("Failed to log metrics to wandb: %s", e)
+
+    def log_dict(self, data: dict[str, Any], artifact_path: str) -> None:
+        """Log ``data`` as a JSON-file artifact named after the basename of ``artifact_path``.
+
+        ``"metadata/concept_id2name.json"`` becomes the artifact ``concept_id2name``.
+        """
+        name = os.path.splitext(os.path.basename(artifact_path))[0]
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                filename = f"{name}.json"
+                local_path = os.path.join(tmpdir, filename)
+                with open(local_path, "w") as f:
+                    json.dump(data, f, indent=2, default=str)
+                artifact = self._wandb.Artifact(_safe_wandb_artifact_name(name), type="metadata")
+                artifact.add_file(local_path, name=filename)
+                self._run.log_artifact(artifact)
+        except Exception as e:
+            logger.warning("Failed to log %s to wandb: %s", name, e)
+
+    def end_run(self, failed: bool) -> None:
+        """Finish the wandb run with exit code 1 when ``failed``, else 0."""
+        try:
+            self._run.finish(exit_code=1 if failed else 0)
+            logger.info("Ended wandb run")
+        except Exception as e:
+            logger.warning("Failed to end wandb run: %s", e)
+
+
+def _mlflow_key(key: str) -> str:
+    """``key`` with every character MLflow rejects in a metric or param name replaced by ``_``."""
+    return re.sub(r"[^\w/.\- :]", "_", key)
+
+
+def _mlflow_run_url(tracking_uri: str, experiment_id: str, run_id: str) -> str | None:
+    """The MLflow UI page of a run on an http(s) tracking server, else ``None``."""
+    if not tracking_uri.startswith(("http://", "https://")):
+        return None
+    return f"{tracking_uri.rstrip('/')}/#/experiments/{experiment_id}/runs/{run_id}"
+
+
+class MlflowTracker:
+    """Tracker that logs to one MLflow run on the server in ``MLFLOW_TRACKING_URI``."""
+
+    def __init__(self, experiment_name: str, run_name: str) -> None:
+        """Connect to the tracking server and start a run in ``experiment_name``.
+
+        Raises:
+            RuntimeError: If ``MLFLOW_TRACKING_URI`` is unset.
+            ImportError: If mlflow, or sagemaker-mlflow for an ``arn:`` URI, is not installed.
+        """
+        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "").strip()
+        if not tracking_uri:
+            raise RuntimeError("tracker 'mlflow' needs MLFLOW_TRACKING_URI to be set")
+        if tracking_uri.startswith("arn:"):
+            try:
+                import sagemaker_mlflow  # noqa: F401  # registers the arn: URI scheme
+            except ImportError as err:
+                raise ImportError(
+                    "MLFLOW_TRACKING_URI is a SageMaker ARN, which needs sagemaker-mlflow. "
+                    "Install it with: uv sync --extra sagemaker"
+                ) from err
+        try:
+            import mlflow
+            import mlflow.pytorch
+        except ImportError as err:
+            raise ImportError(
+                "mlflow is required for tracker 'mlflow'. Install it with: uv sync --extra sagemaker"
+            ) from err
+        self._mlflow = mlflow
+        self._tracking_uri = tracking_uri
+        # Autologging re-logs committed metrics, a UniqueViolation on SageMaker's metric table.
+        mlflow.pytorch.autolog(disable=True)
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.search_experiments(max_results=1)
+        mlflow.set_experiment(experiment_name)
+        self._run = mlflow.start_run(run_name=run_name)
+
+    @property
+    def run_id(self) -> str | None:
+        """The MLflow run id."""
+        return self._run.info.run_id
+
+    @property
+    def run_url(self) -> str | None:
+        """The MLflow UI page of the run, or ``None`` for a non-http tracking URI."""
+        return _mlflow_run_url(
+            self._tracking_uri, self._run.info.experiment_id, self._run.info.run_id
+        )
+
+    def log_params(self, params: dict[str, Any]) -> None:
+        """Log params under sanitized keys; MLflow stores each value as its ``str``."""
+        try:
+            self._mlflow.log_params(
+                {_mlflow_key(k): v for k, v in params.items()}, synchronous=False
+            )
+        except Exception as e:
+            logger.warning("Failed to log params to MLflow: %s", e)
+
+    def log_metrics(self, metrics: dict[str, float], step: int) -> None:
+        """Log metrics under sanitized keys at ``step``."""
+        try:
+            self._mlflow.log_metrics(
+                {_mlflow_key(k): v for k, v in metrics.items()}, step=step, synchronous=False
+            )
+        except Exception as e:
+            logger.warning("Failed to log metrics to MLflow: %s", e)
+
+    def log_dict(self, data: dict[str, Any], artifact_path: str) -> None:
+        """Log ``data`` as the JSON artifact ``artifact_path`` of the run."""
+        try:
+            self._mlflow.log_dict(data, artifact_path)
+        except Exception as e:
+            logger.warning("Failed to log %s to MLflow: %s", artifact_path, e)
+
+    def end_run(self, failed: bool) -> None:
+        """End the MLflow run as FAILED when ``failed``, else FINISHED.
+
+        Ending the run flushes the asynchronous param and metric queue.
+        """
+        try:
+            self._mlflow.end_run(status="FAILED" if failed else "FINISHED")
+            logger.info("Ended MLflow run")
+        except Exception as e:
+            logger.warning("Failed to end MLflow run: %s", e)
+
+
+TRACKER_CLASSES: dict[str, Callable[..., Tracker]] = {
+    "wandb": WandbTracker,
+    "mlflow": MlflowTracker,
+}
+
+
+def _tracker_kwargs(logger_cfg: Any, run_name: str, config: Any) -> dict[str, Any]:
+    """Constructor arguments of the backend that ``logger_cfg.tracker`` names."""
+    if logger_cfg.tracker == "wandb":
+        return {
+            "project": logger_cfg.wandb_project,
+            "entity": logger_cfg.wandb_entity,
+            "run_name": run_name,
+            "config": config,
+        }
+    return {"experiment_name": logger_cfg.experiment_name, "run_name": run_name}
+
+
+def make_tracker(logger_cfg: Any, run_name: str, config: Any) -> Tracker:
+    """Start a run on the backend that ``logger_cfg.tracker`` names.
+
+    Args:
+        logger_cfg: The validated ``logger`` config section.
+        run_name: Name of the run.
+        config: The full run config, which wandb records on the run.
+
+    Raises:
+        ValueError: If ``logger_cfg.tracker`` is not in ``TRACKER_CLASSES``.
+    """
+    tracker_class = lookup_class(TRACKER_CLASSES, "tracker", logger_cfg.tracker)
+    return tracker_class(**_tracker_kwargs(logger_cfg, run_name, config))
+
+
 class Logger:
     """Logger for experiment tracking during training and evaluation.
 
-    Logs to wandb via the ``WandbLogger`` delegate (``self._wandb_logger``) when
-    ``enable_wandb`` is set.
+    Logs to the ``Tracker`` that ``config.logger.tracker`` names (``self.tracker``) and saves
+    checkpoints locally.
     """
 
     def __init__(
@@ -90,10 +331,14 @@ class Logger:
         save_local_checkpoints: bool = True,
         lineage: dict | None = None,
     ) -> None:
-        """Set up checkpoint settings and, if enabled, the wandb delegate.
+        """Set up checkpoint settings, start the tracker run and log the run metadata.
 
         ``lineage``, when set, is stored in every checkpoint so an export reads the
         lineage of the session that wrote it.
+
+        Raises:
+            ValueError: If ``log_checkpoint`` is not positive.
+            Exception: Whatever the tracker raises when its run cannot start.
         """
         self.config = config
         self.lineage = lineage
@@ -102,79 +347,25 @@ class Logger:
             raise ValueError("log_checkpoint must be > 0")
         self.checkpoint_dir = checkpoint_dir
         self.run_name = meta_model.run_name
-        self._wandb_logger = None
         self.id2label = id2label
         self.id2concept = id2concept
-        logger_cfg = config.logger
         self.save_local_checkpoints = save_local_checkpoints
-        self.wandb_run_id = None
+        self.tracker = make_tracker(config.logger, self.run_name, config)
+        self._log_run_metadata(meta_model)
 
-        # Precompute run metadata (config artifact, flattened params, tags).
-        config_to_log = None
-        params = None
-        tags = None
-        if config is not None:
-            try:
-                config_to_log = copy.deepcopy(config)
-                config_to_log["num_classes"] = int(meta_model.num_classes)
-
-                params = {
-                    "num_classes": int(meta_model.num_classes),
-                    "run_name": self.run_name,
-                    "log_checkpoint": log_checkpoint,
-                }
-                if hasattr(config, "model"):
-                    params.update(
-                        {
-                            f"model_{k}": v
-                            for k, v in dict(config.model).items()
-                            if isinstance(v, str | int | float | bool)
-                        }
-                    )
-                if hasattr(config, "training"):
-                    params.update(
-                        {
-                            f"training_{k}": v
-                            for k, v in dict(config.training).items()
-                            if isinstance(v, str | int | float | bool)
-                        }
-                    )
-
-                tags = {
-                    "model_type": meta_model.__class__.__name__,
-                    "framework": "pytorch",
-                }
-            except Exception as e:
-                logger.warning("Failed to prepare run metadata (config/params/tags): %s", e)
-                config_to_log = params = tags = None
-
-        if logger_cfg.enable_wandb:
-            if WANDB_IMPORT_ERROR is not None:
-                logger.warning("wandb is not installed. Wandb logging is disabled.")
-            else:
-                try:
-                    self._wandb_logger = WandbLogger(
-                        project=logger_cfg.wandb_project,
-                        run_name=self.run_name,
-                        config=config,
-                        num_classes=int(meta_model.num_classes),
-                        entity=logger_cfg.wandb_entity,
-                    )
-                    self.wandb_run_id = self._wandb_logger.wandb_run_id
-                    if config_to_log is not None:
-                        logger.info("Logging config to wandb...")
-                        assert params is not None and tags is not None  # set with config_to_log
-                        self._wandb_logger.log_config(config_to_log)
-                        self._wandb_logger.log_params(params)
-                        self._wandb_logger.set_tags(tags)
-                        self._wandb_logger.log_concept_metadata(
-                            id2label=self.id2label,
-                            id2concept=self.id2concept,
-                            num_concepts=meta_model.num_concepts,
-                            conceptid2labelid=meta_model.conceptid2labelid,
-                        )
-                except Exception as e:
-                    logger.warning("Failed to initialize wandb logging: %s", e)
+    def _log_run_metadata(self, meta_model: MetaModel) -> None:
+        """Log the config artifact, the flattened run params and ``id2label`` to the tracker."""
+        try:
+            config_to_log = to_plain_dict(self.config)
+            config_to_log["num_classes"] = int(meta_model.num_classes)
+            params = _run_params(self.config, meta_model, self.log_checkpoint)
+        except Exception as e:
+            logger.warning("Failed to prepare run metadata (config/params): %s", e)
+            return
+        self.tracker.log_dict(config_to_log, "config/config.json")
+        self.tracker.log_params(params)
+        if self.id2label:
+            self.tracker.log_dict(self.id2label, "metadata/id2label.json")
 
     def _unpack_metrics(self, metrics_dict: dict) -> dict[str, float]:
         """Unpack array-valued metrics into per-class/concept named scalars.
@@ -202,13 +393,11 @@ class Logger:
         return result
 
     def log_reconciliation(self, registry: "SourceLabelRegistry") -> None:
-        """Log the joint :class:`SourceLabelRegistry` artifacts to wandb.
+        """Log the joint :class:`SourceLabelRegistry` artifacts to the tracker.
 
         Saves ``global_id2source``, ``target_id2label``, ``source_to_target`` and (when present)
         ``concept_id2name`` so runs are self-describing.
         """
-        if self._wandb_logger is None:
-            return
         try:
             self.log_dict(
                 {str(k): list(v) for k, v in registry.global_id2source.items()},
@@ -242,48 +431,40 @@ class Logger:
             logger.warning("Failed to log SourceLabelRegistry: %s", e)
 
     def log_dataloader_params(self, loader: DataLoader, prefix: str = "dataloader") -> None:
-        """Log DataLoader configuration as params to wandb."""
-        if self._wandb_logger is not None:
-            self._wandb_logger.log_dataloader_params(loader, prefix=prefix)
-
-    @property
-    def enable_wandb(self) -> bool:
-        """True when a ``WandbLogger`` delegate is active."""
-        return self._wandb_logger is not None
+        """Log DataLoader configuration as tracker params."""
+        self.log_params(
+            {
+                f"{prefix}_num_workers": loader.num_workers,
+                f"{prefix}_pin_memory": loader.pin_memory,
+                f"{prefix}_batch_size": loader.batch_size,
+                f"{prefix}_persistent_workers": getattr(loader, "persistent_workers", False),
+                f"{prefix}_prefetch_factor": getattr(loader, "prefetch_factor", None),
+            }
+        )
 
     def log(self, log_dict: dict, step: int) -> None:
         """Log metrics, expanding array values into named scalars."""
-        metrics_to_log = self._unpack_metrics(log_dict)
-
-        if self._wandb_logger is not None:
-            self._wandb_logger.log(metrics_to_log, step=step)
+        self.tracker.log_metrics(self._unpack_metrics(log_dict), step=step)
 
     def log_params(self, params: dict) -> None:
-        """Log flat scalar params to wandb."""
+        """Log flat scalar params to the tracker."""
         if not params:
             return
-        if self._wandb_logger is not None:
-            self._wandb_logger.log_params(params)
+        self.tracker.log_params(params)
 
     def log_dict(self, data: dict, artifact_path: str) -> None:
-        """Log a JSON-serializable dict as a wandb artifact.
+        """Log a JSON-serializable dict as the tracker artifact ``artifact_path``."""
+        self.tracker.log_dict(data, artifact_path)
 
-        The basename of ``artifact_path`` (e.g. ``"metadata/concept_id2name.json"``),
-        without the ``.json`` suffix, becomes the artifact name.
-        """
-        if self._wandb_logger is not None:
-            name = os.path.splitext(os.path.basename(artifact_path))[0]
-            self._wandb_logger._log_json_artifact(name, data, artifact_type="metadata")
+    @property
+    def run_id(self) -> str | None:
+        """The tracker's id of the active run."""
+        return self.tracker.run_id
 
     @property
     def run_url(self) -> str | None:
-        """Best-effort clickable URL for the active wandb run."""
-        if self._wandb_logger is not None and self._wandb_logger.wandb_run is not None:
-            try:
-                return self._wandb_logger.wandb_run.url
-            except Exception:
-                return None
-        return None
+        """A browser URL for the active run, when the tracker has one."""
+        return self.tracker.run_url
 
     def save_model_checkpoint(
         self,
@@ -297,7 +478,7 @@ class Logger:
         """Save a model checkpoint locally.
 
         Local persistence is controlled by ``save_local_checkpoints``. Checkpoints are not
-        uploaded to wandb.
+        uploaded to the tracker.
 
         Checkpoint files are named ``model_epoch{epoch}`` unless ``checkpoint_name`` is set
         (for example ``model_step25000``). ``epoch_complete`` is false for a mid-epoch step
@@ -353,13 +534,12 @@ class Logger:
         else:
             logger.info("Local checkpoint saving disabled, skipping disk write")
 
-    def end_run(self) -> None:
-        """End the wandb delegate's run, if active.
+    def end_run(self, failed: bool) -> None:
+        """End the tracker run, marked failed when ``failed``.
 
         Should be called at the end of training to ensure proper cleanup.
         """
-        if self._wandb_logger is not None:
-            self._wandb_logger.end_run()
+        self.tracker.end_run(failed)
 
     def __enter__(self) -> Self:
         """Return this logger for use as a context manager."""
@@ -371,155 +551,29 @@ class Logger:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> Literal[False]:
-        """End the run on context exit without suppressing exceptions."""
-        self.end_run()
+        """End the run on context exit, failed when an exception is leaving; never suppress it."""
+        self.end_run(exc_type is not None)
         return False
 
 
-class WandbLogger:
-    """Standalone wandb logger used as the ``Logger`` delegate."""
-
-    def __init__(
-        self,
-        project: str,
-        run_name: str,
-        config: Any,
-        num_classes: int,
-        *,
-        entity: str | None = None,
-        run_id: str | None = None,
-        resume: Literal["allow", "never", "must", "auto"] = "allow",
-    ) -> None:
-        """Start a wandb run, resuming a run id from the argument or ``WANDB_RUN_ID``.
-
-        Raises:
-            ImportError: If wandb is not installed.
-        """
-        if WANDB_IMPORT_ERROR is not None:
-            raise ImportError(
-                "wandb is required for WandbLogger but is not installed. Install with: pip install wandb"
-            ) from WANDB_IMPORT_ERROR
-
-        # slurm/train.sbatch sets WANDB_RUN_ID so every resubmitted job of a run
-        # appends to the same wandb run. Without it, each process starts a new run.
-        if run_id is None:
-            env_run_id = os.environ.get("WANDB_RUN_ID", "").strip()
-            if env_run_id:
-                run_id = env_run_id
-                resume = "allow"
-
-        self.wandb_run = wandb.init(
-            project=project,
-            entity=entity,
-            name=run_name,
-            config=config,
-            id=run_id,
-            resume=resume if run_id is not None else None,
-        )
-        self.wandb_run.config.update({"num_classes": num_classes}, allow_val_change=True)
-        self.wandb_run_id = self.wandb_run.id if self.wandb_run is not None else None
-
-    def _log_json_artifact(self, name: str, data: dict, artifact_type: str = "metadata") -> None:
-        """Log a dict as a JSON-file wandb artifact."""
-        if self.wandb_run is None:
-            return
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                filename = f"{name}.json"
-                local_path = os.path.join(tmpdir, filename)
-                with open(local_path, "w") as f:
-                    json.dump(data, f, indent=2, default=str)
-                artifact = wandb.Artifact(_safe_wandb_artifact_name(name), type=artifact_type)
-                artifact.add_file(local_path, name=filename)
-                self.wandb_run.log_artifact(artifact)
-        except Exception as e:
-            logger.warning("Failed to log %s to wandb: %s", name, e)
-
-    def log_config(self, config_to_log: dict) -> None:
-        """Log the full training config as a JSON artifact."""
-        self._log_json_artifact("config", config_to_log, artifact_type="config")
-
-    def log_params(self, params: dict) -> None:
-        """Log flattened scalar params (run_name, model_*, training_*)."""
-        if self.wandb_run is None:
-            return
-        try:
-            self.wandb_run.config.update(params, allow_val_change=True)
-        except Exception as e:
-            logger.warning("Failed to log params to wandb: %s", e)
-
-    def set_tags(self, tags: dict[str, str]) -> None:
-        """Set run tags (model_type/framework) as config keys and wandb tags."""
-        if self.wandb_run is None:
-            return
-        try:
-            self.wandb_run.config.update(tags, allow_val_change=True)
-            existing = list(self.wandb_run.tags or [])
-            new_tags = [f"{k}:{v}" for k, v in tags.items() if f"{k}:{v}" not in existing]
-            if new_tags:
-                self.wandb_run.tags = existing + new_tags
-        except Exception as e:
-            logger.warning("Failed to set tags on wandb: %s", e)
-
-    def log_concept_metadata(
-        self,
-        id2label: dict | None = None,
-        id2concept: dict | None = None,
-        num_concepts: int | None = None,
-        conceptid2labelid: dict | None = None,
-    ) -> None:
-        """Log concept-related metadata artifacts when available."""
-        if self.wandb_run is None:
-            return
-        if id2label:
-            self._log_json_artifact("id2label", id2label, artifact_type="metadata")
-        if id2concept:
-            self._log_json_artifact("id2concept", id2concept, artifact_type="metadata")
-        if num_concepts is not None:
-            try:
-                self.wandb_run.config.update(
-                    {"num_concepts": int(num_concepts)}, allow_val_change=True
-                )
-            except Exception as e:
-                logger.warning("Failed to log num_concepts to wandb: %s", e)
-        if conceptid2labelid is not None:
-            self._log_json_artifact(
-                "conceptid2labelid", conceptid2labelid, artifact_type="metadata"
-            )
-
-    def log_dataloader_params(self, loader: DataLoader, prefix: str = "dataloader") -> None:
-        """Log DataLoader configuration as wandb config keys."""
-        if self.wandb_run is None:
-            return
-        try:
-            self.wandb_run.config.update(
+def _run_params(config: Any, meta_model: MetaModel, log_checkpoint: int) -> dict[str, Any]:
+    """Flat run params: class count, run name, scalar model/training keys and model type."""
+    params: dict[str, Any] = {
+        "num_classes": int(meta_model.num_classes),
+        "run_name": meta_model.run_name,
+        "log_checkpoint": log_checkpoint,
+    }
+    for section in ("model", "training"):
+        if hasattr(config, section):
+            params.update(
                 {
-                    f"{prefix}_num_workers": loader.num_workers,
-                    f"{prefix}_pin_memory": loader.pin_memory,
-                    f"{prefix}_batch_size": loader.batch_size,
-                    f"{prefix}_persistent_workers": getattr(loader, "persistent_workers", False),
-                    f"{prefix}_prefetch_factor": getattr(loader, "prefetch_factor", None),
-                },
-                allow_val_change=True,
+                    f"{section}_{k}": v
+                    for k, v in dict(config[section]).items()
+                    if isinstance(v, str | int | float | bool)
+                }
             )
-        except Exception as e:
-            logger.warning("Failed to log dataloader params to wandb: %s", e)
-
-    def log(self, log_dict: dict, step: int) -> None:
-        """Log metrics to the active wandb run."""
-        if self.wandb_run is None:
-            return
-        try:
-            self.wandb_run.log(log_dict, step=step)
-        except Exception as e:
-            logger.warning("Failed to log metrics to wandb: %s", e)
-
-    def end_run(self) -> None:
-        """Finish the active wandb run."""
-        if self.wandb_run is None:
-            return
-        try:
-            self.wandb_run.finish()
-            logger.info("Ended wandb run")
-        except Exception as e:
-            logger.warning("Failed to end wandb run: %s", e)
+    params["model_type"] = meta_model.__class__.__name__
+    params["framework"] = "pytorch"
+    if meta_model.num_concepts is not None:
+        params["num_concepts"] = int(meta_model.num_concepts)
+    return params

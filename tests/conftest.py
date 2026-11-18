@@ -70,14 +70,14 @@ def fake_meta_model():
 def make_config():
     """Factory that builds a ConfigDict.
 
-    Override any nested value via keyword arguments, e.g. ``make_config(logger={"enable_wandb":
-    True})``.
+    Override any nested value via keyword arguments, e.g. ``make_config(logger={"wandb_project":
+    "other"})``.
     """
 
     def _factory(**overrides: Any) -> ConfigDict:
         base: dict[str, Any] = {
             "logger": {
-                "enable_wandb": False,
+                "tracker": "wandb",
                 "wandb_project": "mermaidseg",
                 "wandb_entity": None,
                 "train_log_interval": 1,

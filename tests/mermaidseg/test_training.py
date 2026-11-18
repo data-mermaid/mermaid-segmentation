@@ -18,7 +18,6 @@ import torch
 import yaml
 from torch.utils.data import ConcatDataset, Dataset
 
-import mermaidseg.logger
 import mermaidseg.model.models
 from mermaidseg import training
 from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
@@ -254,7 +253,6 @@ def test_run_rejects_a_world_size_that_the_launcher_did_not_provide(monkeypatch,
     monkeypatch.delenv("WANDB_RUN_ID", raising=False)
     fake_wandb = _fake_wandb(_FakeWandbRun())
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    monkeypatch.setattr(mermaidseg.logger, "wandb", fake_wandb)
 
     def _unreachable(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("run() built datasets before checking the world size")
@@ -294,7 +292,6 @@ def _install_smoke_fakes(
     wandb_run = _FakeWandbRun()
     fake_wandb = _fake_wandb(wandb_run)
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    monkeypatch.setattr(mermaidseg.logger, "wandb", fake_wandb)
     cache_roots: list[Any] = []
 
     def _record_cache(data_cfg: Any) -> Any:
@@ -499,7 +496,6 @@ def test_run_rejects_a_bad_checkpoint_before_building_datasets(monkeypatch, tmp_
     monkeypatch.delenv("WANDB_RUN_ID", raising=False)
     fake_wandb = _fake_wandb(_FakeWandbRun())
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    monkeypatch.setattr(mermaidseg.logger, "wandb", fake_wandb)
     monkeypatch.setattr(training, "setup_local_cache", _unreachable)
     monkeypatch.setattr(training, "build_datasets", _unreachable)
     bad = tmp_path / "bad.pt"

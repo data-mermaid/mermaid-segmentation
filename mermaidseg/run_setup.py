@@ -177,44 +177,11 @@ def write_resolved_config(cfg: Any, run_dir: str | Path) -> None:
     (Path(run_dir) / "config.yaml").write_text(text)
 
 
-def check_wandb_auth() -> None:
-    """Confirm wandb is authenticated in this environment.
-
-    Checks for a resolved API key (via ``WANDB_API_KEY``, ``wandb login``, or
-    ``~/.netrc``) without starting a run. ``check_env_wandb`` calls it at the start of a
-    training run, before the ``Logger`` is created, so a missing login surfaces immediately
-    instead of mid-training.
-
-    Raises:
-        RuntimeError: If no wandb API key can be resolved.
-    """
-    import wandb
-
-    api_key = wandb.api.api_key
-    if not api_key:
-        raise RuntimeError(
-            "wandb is not authenticated. Run `wandb login` in a terminal, "
-            "set WANDB_API_KEY, or call wandb.login(key=...) in a notebook cell."
-        )
-    print("wandb authenticated")
-
-
-def check_env_wandb() -> None:
-    """Validate the environment for wandb-backed, AWS-free training runs.
-
-    Prints the resolved wandb / HF / cache-offline settings and confirms wandb
-    authentication (via ``check_wandb_auth``).
-
-    Raises:
-        RuntimeError: If wandb cannot resolve an API key.
-    """
-    print(f"WANDB_PROJECT       : {os.getenv('WANDB_PROJECT', '(not set — using config default)')}")
-    print(f"WANDB_ENTITY        : {os.getenv('WANDB_ENTITY', '(not set — using default entity)')}")
-    print(f"WANDB_DIR           : {os.getenv('WANDB_DIR', '(not set — using ./wandb)')}")
+def check_env() -> None:
+    """Print the HF token and cache-offline settings of this environment."""
     print(f"HF_TOKEN            : {'set' if os.getenv('HF_TOKEN') else '(not set)'}")
     offline = os.getenv("MERMAIDSEG_S3_OFFLINE")
     print(
         "MERMAIDSEG_S3_OFFLINE: "
         + (f"{offline} (cache misses will raise)" if offline else "(not set — S3 fallback enabled)")
     )
-    check_wandb_auth()

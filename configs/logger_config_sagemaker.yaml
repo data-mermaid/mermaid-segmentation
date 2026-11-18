@@ -1,0 +1,5 @@
+logger:
+  tracker: mlflow
+  experiment_name: "mermaidseg"
+  # Log per-batch train losses to the tracker every N iterations (1 = every batch).
+  train_log_interval: 1
