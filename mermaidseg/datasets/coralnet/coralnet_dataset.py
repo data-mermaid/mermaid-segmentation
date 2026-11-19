@@ -176,10 +176,10 @@ class CoralNetDataset(BaseCoralDataset):
         if self.whitelist_sources is not None and self.blacklist_sources is not None:
             raise ValueError("Cannot specify both whitelist and blacklist sources.")
 
-        self.split = base_kwargs.get("split")
+        split = base_kwargs.get("split")
         df_annotations, df_images = self.load_annotations()
         if self.annotation_overrides is not None:
-            df_annotations = self._apply_annotation_overrides(df_annotations)
+            df_annotations = self._apply_annotation_overrides(df_annotations, split)
 
         present = set(df_annotations["source_id"].unique())
         if self.whitelist_sources is not None:
@@ -190,7 +190,10 @@ class CoralNetDataset(BaseCoralDataset):
                     f"{self.manifest_path!r}."
                 )
             df_annotations = self._drop_annotations(
-                df_annotations, df_annotations["source_id"].isin(wanted), "whitelist_sources"
+                df_annotations,
+                df_annotations["source_id"].isin(wanted),
+                "whitelist_sources",
+                split,
             )
         if self.blacklist_sources is not None:
             unwanted = _as_int_id_set(self.blacklist_sources, "blacklist_sources")
@@ -201,13 +204,17 @@ class CoralNetDataset(BaseCoralDataset):
                     self.manifest_path,
                 )
             df_annotations = self._drop_annotations(
-                df_annotations, ~df_annotations["source_id"].isin(unwanted), "blacklist_sources"
+                df_annotations,
+                ~df_annotations["source_id"].isin(unwanted),
+                "blacklist_sources",
+                split,
             )
         if self.image_blacklist is not None:
             df_annotations = self._drop_annotations(
                 df_annotations,
                 ~df_annotations["image_id"].astype(str).isin(self._load_image_blacklist()),
                 "image_blacklist",
+                split,
             )
         if (
             self.whitelist_sources is not None
@@ -220,20 +227,20 @@ class CoralNetDataset(BaseCoralDataset):
 
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
 
-    def _log_dropped(self, name: str, dropped: int, total: int) -> None:
+    def _log_dropped(self, name: str, dropped: int, total: int, split: str | None) -> None:
         logger.info(
             "CoralNetDataset(split=%r): %s dropped %d of %d annotations",
-            self.split,
+            split,
             name,
             dropped,
             total,
         )
 
     def _drop_annotations(
-        self, df_annotations: pd.DataFrame, keep: pd.Series, name: str
+        self, df_annotations: pd.DataFrame, keep: pd.Series, name: str, split: str | None
     ) -> pd.DataFrame:
         """Keep the rows where ``keep`` is true and log how many the filter ``name`` dropped."""
-        self._log_dropped(name, int((~keep).sum()), len(df_annotations))
+        self._log_dropped(name, int((~keep).sum()), len(df_annotations), split)
         return df_annotations[keep]
 
     def load_annotations(self) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -289,7 +296,9 @@ class CoralNetDataset(BaseCoralDataset):
         assert self.image_blacklist is not None  # callers check before loading
         return {str(x) for x in self.image_blacklist}
 
-    def _apply_annotation_overrides(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
+    def _apply_annotation_overrides(
+        self, df_annotations: pd.DataFrame, split: str | None
+    ) -> pd.DataFrame:
         """Replace each image's points with those in ``annotation_overrides``.
 
         ``image_key`` and ``source_id`` are taken from the image's manifest rows, so overrides
@@ -314,12 +323,13 @@ class CoralNetDataset(BaseCoralDataset):
         overrides["coralnet_name"] = overrides["coralnet_id"].map(
             lambda x: coralnet_id2name.get(str(x))
         )
+        _warn_unnamed_ids(overrides["coralnet_id"], overrides["coralnet_name"])
         overrides["source_label_name"] = overrides["coralnet_name"].astype(str).str.lower()
         key_cols = ("source_id", "image_id", "row", "col", "coralnet_id")
         overrides = overrides.astype({c: df_annotations[c].dtype for c in key_cols})
         kept = df_annotations[~image_ids.isin(set(overrides["image_id"].astype(str)))]
         self._log_dropped(
-            "annotation_overrides", len(df_annotations) - len(kept), len(df_annotations)
+            "annotation_overrides", len(df_annotations) - len(kept), len(df_annotations), split
         )
         return pd.concat([kept, overrides[df_annotations.columns]], ignore_index=True)
 

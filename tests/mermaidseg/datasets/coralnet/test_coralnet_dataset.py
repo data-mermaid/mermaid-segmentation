@@ -286,8 +286,56 @@ def test_coralnet_id_missing_from_id2name_warns_with_the_count(cache, caplog):
     assert "99" in caplog.text
 
 
-def test_whitelist_logs_how_many_annotations_it_dropped(cache, caplog):
-    with caplog.at_level("INFO", logger=cnd.logger.name):
-        _make(whitelist_sources=[1])
+def _overrides_for_image_10(cache) -> dict:
+    path = cache / "overrides.parquet"
+    pd.DataFrame(
+        {"source_id": [1], "image_id": ["10"], "row": [1], "col": [1], "coralnet_id": [1]}
+    ).to_parquet(path)
+    return {"annotation_overrides": str(path)}
 
-    assert "dropped 2 of 5 annotations" in caplog.text
+
+@pytest.mark.parametrize(
+    ("make_kwargs", "expected"),
+    [
+        (lambda cache: {"whitelist_sources": [1]}, "whitelist_sources dropped 2 of 5 annotations"),
+        (lambda cache: {"blacklist_sources": [1]}, "blacklist_sources dropped 3 of 5 annotations"),
+        (lambda cache: {"image_blacklist": ["11"]}, "image_blacklist dropped 1 of 5 annotations"),
+        (_overrides_for_image_10, "annotation_overrides dropped 2 of 5 annotations"),
+    ],
+    ids=["whitelist", "blacklist", "image_blacklist", "overrides"],
+)
+def test_each_filter_logs_its_name_and_how_many_annotations_it_dropped(
+    cache, caplog, make_kwargs, expected
+):
+    kwargs = make_kwargs(cache)
+
+    with caplog.at_level("INFO", logger=cnd.logger.name):
+        _make(**kwargs)
+
+    assert expected in caplog.text
+
+
+def _write_overrides(cache, coralnet_id) -> str:
+    path = cache / "overrides.parquet"
+    pd.DataFrame(
+        {"source_id": [1], "image_id": ["10"], "row": [1], "col": [1], "coralnet_id": coralnet_id}
+    ).to_parquet(path)
+    return str(path)
+
+
+def test_override_coralnet_id_missing_from_id2name_warns_with_the_count(cache, caplog):
+    path = _write_overrides(cache, [99])
+
+    with caplog.at_level("WARNING", logger=cnd.logger.name):
+        _make(annotation_overrides=path)
+
+    assert "1 annotations" in caplog.text
+    assert "99" in caplog.text
+
+
+@pytest.mark.parametrize("coralnet_id", [[None], [2.5]])
+def test_null_or_non_integral_override_ids_raise_naming_the_column(cache, coralnet_id):
+    path = _write_overrides(cache, coralnet_id)
+
+    with pytest.raises(ValueError, match="coralnet_id"):
+        _make(annotation_overrides=path)
