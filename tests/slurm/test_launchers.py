@@ -11,6 +11,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -53,6 +54,7 @@ def _run_launcher(
     queued: Sequence[str] = (),
     env_overrides: dict[str, str] | None = None,
     unset: Sequence[str] = (),
+    dry_run: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     env = {k: v for k, v in os.environ.items() if k not in _SITE_VARS}
     env.update(_SITE_ENV)
@@ -68,7 +70,12 @@ def _run_launcher(
     queue_file.write_text("".join(f"{job}\n" for job in queued))
     env["QUEUE_FILE"] = str(queue_file)
     return subprocess.run(
-        ["bash", str(repo / "slurm" / f"launch_{name}.sh"), "--dry-run", *args],
+        [
+            "bash",
+            str(repo / "slurm" / f"launch_{name}.sh"),
+            *(["--dry-run"] if dry_run else []),
+            *args,
+        ],
         cwd=repo,
         env=env,
         check=False,
@@ -141,7 +148,9 @@ def job(tmp_path: Path) -> Path:
     venv_python.write_text("#!/bin/bash\n")
     bin_dir = tmp_path / "jobbin"
     bin_dir.mkdir()
-    (bin_dir / "srun").write_text('#!/bin/bash\nprintf \'%s\\n\' "$@" > "$SRUN_ARGV_FILE"\n')
+    (bin_dir / "srun").write_text(
+        '#!/bin/bash\nprintf \'%s\\n\' "$@" > "$SRUN_ARGV_FILE"\nenv > "$SRUN_ARGV_FILE.env"\n'
+    )
     (bin_dir / "uv").write_text("#!/bin/bash\nexit 0\n")
     (bin_dir / "nvidia-smi").write_text("#!/bin/bash\nexit 0\n")
     for stub in bin_dir.iterdir():
@@ -155,10 +164,26 @@ def job(tmp_path: Path) -> Path:
     return root
 
 
-def _run_train(job: Path, *args: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+# Variables train.sbatch sets for the trainer; a caller's own values must not leak in.
+_TRAINER_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "TORCH_NCCL_TRACE_BUFFER_SIZE",
+    "TORCH_NCCL_DUMP_ON_TIMEOUT",
+    "TORCH_NCCL_DEBUG_INFO_TEMP_FILE",
+    "WANDB_RUN_ID",
+    "WANDB_RUN_GROUP",
+    "MERMAIDSEG_WANDB_ID_PREFIX",
+)
+
+
+def _run_train(
+    job: Path, *args: str, env_overrides: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     tmp_path = job.parent
     argv_file = tmp_path / "srun_argv.txt"
-    env = {k: v for k, v in os.environ.items() if k not in _SITE_VARS}
+    env = {
+        k: v for k, v in os.environ.items() if k not in _SITE_VARS and k not in _TRAINER_ENV_VARS
+    }
     env.update(
         PATH=f"{tmp_path / 'jobbin'}:{env['PATH']}",
         SLURM_SUBMIT_DIR=str(job),
@@ -168,6 +193,7 @@ def _run_train(job: Path, *args: str) -> tuple[subprocess.CompletedProcess[str],
         SLURM_JOB_ID=f"test-{tmp_path.name}",
         SRUN_ARGV_FILE=str(argv_file),
     )
+    env.update(env_overrides or {})
     result = subprocess.run(
         ["bash", str(job / "slurm" / "train.sbatch"), *args],
         cwd=job,
@@ -178,6 +204,12 @@ def _run_train(job: Path, *args: str) -> tuple[subprocess.CompletedProcess[str],
     )
     argv = argv_file.read_text().splitlines() if argv_file.exists() else []
     return result, argv
+
+
+def _srun_env(job: Path) -> dict[str, str]:
+    """The environment the fake srun was started with."""
+    lines = (job.parent / "srun_argv.txt.env").read_text().splitlines()
+    return dict(line.split("=", 1) for line in lines if "=" in line)
 
 
 def test_train_from_scratch_runs_the_pipeline_and_marks_done(job):
@@ -233,6 +265,145 @@ def test_train_exits_2_when_submitted_from_outside_the_repo_root(job, tmp_path):
     assert result.returncode == 2
     assert (
         f"submit from the repo root (slurm/common.sh not found under {elsewhere})" in result.stderr
+    )
+
+
+def _checkpoint_dir(job: Path) -> Path:
+    return job / "outputs" / "model_checkpoints" / "RUN"
+
+
+def test_train_resume_skips_a_partial_checkpoint_even_when_it_is_the_newest(job):
+    complete, partial = (
+        _checkpoint_dir(job) / "model_step2000",
+        _checkpoint_dir(job) / ("model_step4000.partial"),
+    )
+    complete.touch()
+    partial.touch()
+    os.utime(complete, (1_000_000, 1_000_000))
+    os.utime(partial, (2_000_000, 2_000_000))
+    result, argv = _run_train(job, "RUN")
+    assert result.returncode == 0, result.stderr
+    assert _arg(argv, "--checkpoint") == str(complete)
+
+
+def test_train_with_only_a_partial_checkpoint_starts_from_scratch(job):
+    (_checkpoint_dir(job) / "model_step4000.partial").touch()
+    result, argv = _run_train(job, "RUN")
+    assert result.returncode == 0, result.stderr
+    assert "starting RUN from scratch" in result.stdout
+    assert "--checkpoint" not in argv
+
+
+def test_train_exits_1_when_the_init_weights_source_does_not_exist(job):
+    result, argv = _run_train(job, "RUN", "--init-weights", "outputs/missing/model_step1")
+    assert result.returncode == 1
+    assert f"initial checkpoint {job}/outputs/missing/model_step1 does not exist" in result.stderr
+    assert argv == []
+    assert not (_checkpoint_dir(job) / ".done").exists()
+
+
+def test_train_resolves_a_relative_init_weights_source_against_the_repo(job):
+    source = job / "outputs" / "model_checkpoints" / "SRC" / "model_step1"
+    source.parent.mkdir()
+    source.touch()
+    result, argv = _run_train(
+        job, "RUN", "--init-weights", "outputs/model_checkpoints/SRC/model_step1"
+    )
+    assert result.returncode == 0, result.stderr
+    assert _arg(argv, "--init-weights") == str(source)
+    assert "--checkpoint" not in argv
+
+
+def test_train_passes_an_absolute_init_weights_source_through(job, tmp_path):
+    source = tmp_path / "elsewhere.pt"
+    source.touch()
+    result, argv = _run_train(job, "RUN", "--init-weights", str(source))
+    assert result.returncode == 0, result.stderr
+    assert _arg(argv, "--init-weights") == str(source)
+
+
+def test_train_ignores_init_weights_once_the_run_has_a_checkpoint(job):
+    own = _checkpoint_dir(job) / "model_step2000"
+    own.touch()
+    source = job / "init.pt"
+    source.touch()
+    result, argv = _run_train(job, "RUN", "--init-weights", str(source))
+    assert result.returncode == 0, result.stderr
+    assert _arg(argv, "--checkpoint") == str(own)
+    assert "--init-weights" not in argv
+
+
+def test_train_exits_0_without_training_when_the_run_is_already_done(job):
+    (_checkpoint_dir(job) / ".done").touch()
+    result, argv = _run_train(job, "RUN")
+    assert result.returncode == 0, result.stderr
+    assert "RUN already finished" in result.stdout
+    assert argv == []
+
+
+def test_train_groups_the_wandb_run_under_its_own_name_by_default(job):
+    result, _ = _run_train(job, "RUN")
+    assert result.returncode == 0, result.stderr
+    env = _srun_env(job)
+    assert env["WANDB_RUN_GROUP"] == "RUN"
+    assert env["WANDB_RUN_ID"] == "r1-RUN"
+
+
+def test_train_group_flag_sets_the_wandb_group_but_not_the_run_id(job):
+    result, _ = _run_train(job, "RUN", "--group", "shared-group")
+    assert result.returncode == 0, result.stderr
+    env = _srun_env(job)
+    assert env["WANDB_RUN_GROUP"] == "shared-group"
+    assert env["WANDB_RUN_ID"] == "r1-RUN"
+
+
+def test_train_wandb_id_prefix_from_the_env_file_starts_a_fresh_wandb_run(job):
+    env_file = job.parent / "job.env"
+    env_file.write_text(env_file.read_text() + "MERMAIDSEG_WANDB_ID_PREFIX=r7\n")
+    result, _ = _run_train(job, "RUN")
+    assert result.returncode == 0, result.stderr
+    assert _srun_env(job)["WANDB_RUN_ID"] == "r7-RUN"
+
+
+def test_train_rejects_an_unknown_option_with_usage(job):
+    result, argv = _run_train(job, "RUN", "--bogus")
+    assert result.returncode == 2
+    assert "usage: sbatch slurm/train.sbatch" in result.stderr
+    assert argv == []
+
+
+def test_train_single_gpu_runs_without_torchrun_or_nccl_settings(job):
+    result, argv = _run_train(job, "RUN")
+    assert result.returncode == 0, result.stderr
+    assert "torch.distributed.run" not in argv
+    env = _srun_env(job)
+    assert not [name for name in env if name.startswith("TORCH_NCCL") or name == "OMP_NUM_THREADS"]
+
+
+def test_train_several_gpus_run_under_torchrun_with_the_workers_split_over_ranks(job):
+    result, argv = _run_train(job, "RUN", env_overrides={"CUDA_VISIBLE_DEVICES": "0,1,2,3"})
+    assert result.returncode == 0, result.stderr
+    python = str(job / ".venv" / "bin" / "python")
+    assert argv[:6] == [
+        python,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nproc_per_node=4",
+        "scripts/train.py",
+    ]
+    assert _arg(argv, "--num-workers") == "7"
+
+
+def test_train_several_gpus_export_the_nccl_and_omp_settings(job):
+    result, _ = _run_train(job, "RUN", env_overrides={"CUDA_VISIBLE_DEVICES": "0,1"})
+    assert result.returncode == 0, result.stderr
+    env = _srun_env(job)
+    assert env["OMP_NUM_THREADS"] == "1"
+    assert env["TORCH_NCCL_TRACE_BUFFER_SIZE"] == "2000"
+    assert env["TORCH_NCCL_DUMP_ON_TIMEOUT"] == "1"
+    assert env["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] == (
+        f"{job}/logs/nccl_trace_RUN_test-{job.parent.name}_rank_"
     )
 
 
@@ -322,3 +493,90 @@ def test_768_batch_and_accum_must_multiply_to_32(repo):
     )
     assert result.returncode == 2
     assert "not 32" in result.stderr
+
+
+# ---------- lib_launch.sh ----------
+
+_HIRES = "cbm_final_res768"
+_HIRES_SOURCE = "outputs/model_checkpoints/cbm_final/model_step300000"
+
+
+def _age_checkpoint(repo: Path, minutes: float) -> Path:
+    """Create the 768 run's source checkpoint, last written ``minutes`` ago."""
+    path = repo / _HIRES_SOURCE
+    path.parent.mkdir(parents=True)
+    path.touch()
+    stamp = time.time() - minutes * 60
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_a_queued_run_is_reported_and_not_submitted_again(repo):
+    out, jobs = _launch(repo, "final", queued=["cbm_final"])
+    assert "queued  : cbm_final" in out
+    assert "cbm_final" not in _runs(jobs)
+
+
+def test_only_an_exact_job_name_counts_as_queued(repo):
+    out, jobs = _launch(repo, "final", queued=["cbm_final_extra", "xcbm_final"])
+    assert "queued  :" not in out
+    assert "cbm_final" in _runs(jobs)
+
+
+def test_a_queued_branch_run_is_reported_queued_not_waiting(repo):
+    out, jobs = _launch(repo, "final", _HIRES, queued=[_HIRES])
+    assert f"queued  : {_HIRES}" in out
+    assert "waiting" not in out
+    assert jobs == []
+
+
+def test_a_branch_run_waits_for_a_source_checkpoint_that_does_not_exist(repo):
+    out, jobs = _launch(repo, "final", _HIRES)
+    assert f"waiting : {_HIRES} (needs {_HIRES_SOURCE})" in out
+    assert jobs == []
+
+
+def test_a_branch_run_waits_while_its_source_checkpoint_was_written_under_10_minutes_ago(repo):
+    _age_checkpoint(repo, minutes=9)
+    out, jobs = _launch(repo, "final", _HIRES)
+    assert f"waiting : {_HIRES}" in out
+    assert jobs == []
+
+
+def test_a_branch_run_starts_once_its_source_checkpoint_is_over_10_minutes_old(repo):
+    _age_checkpoint(repo, minutes=11)
+    _, jobs = _launch(repo, "final", _HIRES)
+    job = _runs(jobs)[_HIRES]
+    assert _arg(job, "--init-weights") == _HIRES_SOURCE
+    assert _opt(job, "dependency") is None
+
+
+def test_an_unknown_launcher_option_exits_2_with_the_usage(repo):
+    result = _run_launcher(repo, "final", "--no-such-option")
+    assert result.returncode == 2
+    assert "unknown option: --no-such-option" in result.stderr
+    assert "usage: slurm/launch_final.sh" in result.stderr
+    assert "would submit" not in result.stdout
+
+
+def _install_numbering_sbatch(repo: Path) -> None:
+    """An sbatch that prints ``<id>;<cluster>`` as ``--parsable`` does, ids from 5001."""
+    sbatch = repo.parent / "bin" / "sbatch"
+    sbatch.write_text(
+        "#!/bin/bash\n"
+        'count_file="$(dirname "$0")/sbatch_count"\n'
+        'n=$(($(cat "$count_file" 2>/dev/null || echo 0) + 1))\n'
+        'echo "$n" > "$count_file"\n'
+        'echo "$((5000 + n));cluster-a"\n'
+    )
+
+
+def test_the_job_id_of_a_real_submission_gates_the_dependent_run(repo):
+    _install_numbering_sbatch(repo)
+    result = _run_launcher(repo, "final", dry_run=False)
+    assert result.returncode == 0, result.stderr
+    submitted = re.findall(r"^  submitted (\d+): sbatch (.*)$", result.stdout, re.MULTILINE)
+    assert [job_id for job_id, _ in submitted] == ["5001", "5002"]
+    hires = shlex.split(submitted[1][1])
+    assert _opt(hires, "dependency") == "afterok:5001"
+    assert "submitted 2 job(s)" in result.stdout

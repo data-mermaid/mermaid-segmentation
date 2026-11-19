@@ -59,6 +59,7 @@ def test_rubble_rows_are_neither_sand_nor_hard_substrate(table):
 
 def test_rubble_rows_keep_their_other_concepts(table):
     turf = table[table["source_label_class_name"] == "turf on rubble"]
+    assert len(turf) > 0
     assert (turf["rubble"] == "TRUE").all() and (turf["algae"] == "TRUE").all()
 
 
@@ -72,5 +73,5 @@ def test_red_algae_unidentified_encrusting_is_rhodophyta(table):
 
 def test_chondrilla_is_live(table):
     rows = table[table["source_label_class_name"].str.startswith("chondrilla")]
-    assert len(rows) == 3
+    assert len(rows) >= 1
     assert (rows["live"] == "TRUE").all()

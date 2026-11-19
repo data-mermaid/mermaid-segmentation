@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import types
@@ -25,6 +26,7 @@ from mermaidseg.logger import (
     WandbTracker,
     _mlflow_key,
     _mlflow_run_url,
+    _safe_wandb_artifact_name,
     make_tracker,
     prune_rolling_checkpoints,
 )
@@ -181,6 +183,53 @@ class TestWandbTracker:
         assert stub_wandb.init_kwargs["id"] == "r1-cbm_lossw_pix0.5_img0.5"
         assert stub_wandb.init_kwargs["resume"] == "allow"
 
+    @pytest.mark.parametrize("value", ["", "   ", "\t\n"])
+    def test_a_blank_wandb_run_id_env_starts_a_new_run(self, stub_wandb, monkeypatch, value):
+        monkeypatch.setenv("WANDB_RUN_ID", value)
+        _wandb_tracker()
+        assert stub_wandb.init_kwargs["id"] is None
+        assert stub_wandb.init_kwargs["resume"] is None
+
+    def test_wandb_run_id_env_is_stripped(self, stub_wandb, monkeypatch):
+        monkeypatch.setenv("WANDB_RUN_ID", "  run-1 \n")
+        _wandb_tracker()
+        assert stub_wandb.init_kwargs["id"] == "run-1"
+        assert stub_wandb.init_kwargs["resume"] == "allow"
+
+    def test_log_dict_names_the_artifact_after_the_sanitized_basename(self, stub_wandb):
+        tracker = _wandb_tracker()
+        tracker.log_dict({"a": 1}, "metadata/my model (v1).json")
+        assert [(a.name, a.type, a.files) for a in stub_wandb.run.artifacts] == [
+            ("my-model--v1-", "metadata", {"my model (v1).json": {"a": 1}})
+        ]
+
+    @pytest.mark.parametrize(
+        ("method", "args", "broken", "warning"),
+        [
+            ("log_params", ({"lr": 0.1},), ("config", "update"), "Failed to log params to wandb"),
+            (
+                "log_dict",
+                ({"a": 1}, "metadata/model.json"),
+                (None, "log_artifact"),
+                "Failed to log model to wandb",
+            ),
+            ("end_run", (False,), (None, "finish"), "Failed to end wandb run"),
+        ],
+    )
+    def test_a_failing_backend_call_is_warned_not_raised(
+        self, stub_wandb, monkeypatch, caplog, method, args, broken, warning
+    ):
+        caplog.set_level(logging.WARNING)
+        tracker = _wandb_tracker()
+        owner_name, attribute = broken
+        owner = getattr(stub_wandb.run, owner_name) if owner_name else stub_wandb.run
+        monkeypatch.setattr(owner, attribute, _raise_connection_error)
+        getattr(tracker, method)(*args)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert warning in warnings[0]
+        assert "tracker down" in warnings[0]
+
     def test_missing_api_key_raises_before_starting_a_run(self, stub_wandb):
         stub_wandb.api = SimpleNamespace(api_key=None)
         with pytest.raises(RuntimeError, match="not authenticated"):
@@ -334,6 +383,18 @@ class TestMlflowFailureModes:
             MlflowTracker(experiment_name="exp", run_name="run")
         assert mlflow.active_run() is None
 
+    def test_a_failing_connectivity_probe_stops_before_an_experiment_or_run_is_created(
+        self, mlflow_store, monkeypatch
+    ):
+        mlflow = pytest.importorskip("mlflow")
+        created: list[str] = []
+        monkeypatch.setattr(mlflow, "search_experiments", _raise_connection_error)
+        monkeypatch.setattr(mlflow, "set_experiment", lambda *a, **k: created.append("experiment"))
+        monkeypatch.setattr(mlflow, "start_run", lambda *a, **k: created.append("run"))
+        with pytest.raises(ConnectionError, match="tracker down"):
+            MlflowTracker(experiment_name="exp", run_name="run")
+        assert created == []
+
     @pytest.mark.parametrize(
         ("method", "args", "mlflow_function"),
         [
@@ -376,6 +437,18 @@ def test_mlflow_key_replaces_disallowed_characters(key: str, expected: str):
 )
 def test_mlflow_run_url_only_for_http_servers(uri: str, expected: str | None):
     assert _mlflow_run_url(uri, "7", "abc") == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("concept_id2name", "concept_id2name"),
+        ("v1.2-final_x", "v1.2-final_x"),
+        ("a b(c)/d:e", "a-b-c--d-e"),
+    ],
+)
+def test_safe_wandb_artifact_name_keeps_only_allowed_characters(name: str, expected: str):
+    assert _safe_wandb_artifact_name(name) == expected
 
 
 # ===================================================================
@@ -449,6 +522,23 @@ class TestLoggerInit:
             ("metadata/id2label.json", {0: "ignore", 1: "coral"}),
         ]
 
+    @pytest.mark.parametrize("id2label", [None, {}])
+    def test_an_empty_id2label_is_not_logged(self, make_config, fake_tracker, id2label):
+        _, tracker = _logger(make_config, id2label=id2label)
+        assert [path for path, _ in tracker.dicts] == ["config/config.json"]
+
+    def test_unpreparable_run_metadata_is_warned_and_leaves_the_tracker_unlogged(
+        self, make_config, fake_tracker, caplog
+    ):
+        caplog.set_level(logging.WARNING)
+        meta = FakeMetaModel()
+        meta.num_classes = None  # type: ignore[assignment]
+        _, tracker = _logger(make_config, meta, id2label={0: "ignore"})
+        assert (tracker.dicts, tracker.params) == ([], [])
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "Failed to prepare run metadata" in warnings[0]
+
     def test_tracker_construction_error_propagates(self, make_config, monkeypatch):
         def _fail(logger_cfg: Any, run_name: str, config: Any) -> None:
             raise RuntimeError("tracker down")
@@ -475,6 +565,24 @@ class TestLoggerLog:
         lgr, tracker = _logger(make_config)
         lgr.log({"dice": np.array([0.5, 0.25])}, step=1)
         assert tracker.metrics == [({"dice/class_0": 0.5, "dice/class_1": 0.25}, 1)]
+
+    def test_ndarray_concept_metrics_without_id2concept_use_concept_index(
+        self, make_config, fake_tracker
+    ):
+        lgr, tracker = _logger(make_config, id2label={0: "coral", 1: "sand"})
+        lgr.log({"val_Concept_accuracy": np.array([0.75, 0.5])}, step=1)
+        assert tracker.metrics == [
+            ({"val_Concept_accuracy/concept_0": 0.75, "val_Concept_accuracy/concept_1": 0.5}, 1)
+        ]
+
+    def test_ndarray_concept_metrics_name_unmapped_indices_by_index(
+        self, make_config, fake_tracker
+    ):
+        lgr, tracker = _logger(make_config, id2concept={0: "hard"})
+        lgr.log({"concept_accuracy": np.array([0.75, 0.5])}, step=1)
+        assert tracker.metrics == [
+            ({"concept_accuracy/hard": 0.75, "concept_accuracy/concept_1": 0.5}, 1)
+        ]
 
     def test_ndarray_concept_metrics_use_id2concept(self, make_config, fake_tracker):
         lgr, tracker = _logger(
@@ -504,6 +612,12 @@ class TestLoggerDispatch:
             }
         ]
 
+    def test_log_params_with_no_params_does_not_reach_the_tracker(self, make_config, fake_tracker):
+        lgr, tracker = _logger(make_config)
+        tracker.params.clear()
+        lgr.log_params({})
+        assert tracker.params == []
+
     def test_log_reconciliation_logs_each_map_and_the_class_counts(self, make_config, fake_tracker):
         lgr, tracker = _logger(make_config)
         tracker.params.clear()
@@ -527,6 +641,52 @@ class TestLoggerDispatch:
             ("metadata/concept_id2name.json", {"0": "hard"}),
         ]
         assert tracker.params == [{"num_target_classes": 2, "num_global_source_classes": 3}]
+
+
+class _MoveRecordingLinear(torch.nn.Linear):
+    """A ``Linear`` that records every ``.to()``, ``.cpu()`` or ``.cuda()`` applied to it."""
+
+    moves: list[str]
+
+    def _apply(self, fn, recurse=True):  # type: ignore[no-untyped-def]
+        self.moves.append("moved")
+        return super()._apply(fn, recurse)
+
+
+def _meta_with_move_recording_model(run_name: str) -> FakeMetaModel:
+    meta = FakeMetaModel(run_name=run_name)
+    model = _MoveRecordingLinear(4, meta.num_classes)
+    model.moves = []
+    meta.model = model
+    meta.optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    meta.scheduler = torch.optim.lr_scheduler.StepLR(meta.optimizer, step_size=1)
+    return meta
+
+
+def _spy_torch_save(monkeypatch: pytest.MonkeyPatch) -> list[tuple[dict, str]]:
+    """Record the (object, target path) of every ``torch.save`` while still writing the file."""
+    calls: list[tuple[dict, str]] = []
+    real_save = torch.save
+
+    def _save(obj: dict, f: Any, *args: Any, **kwargs: Any) -> None:
+        calls.append((obj, str(f)))
+        real_save(obj, f, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "save", _save)
+    return calls
+
+
+def _spy_os_replace(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Record every ``os.replace`` (source, destination) while still renaming."""
+    calls: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def _replace(src: Any, dst: Any) -> None:
+        calls.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _replace)
+    return calls
 
 
 class TestSaveModelCheckpoint:
@@ -609,28 +769,52 @@ class TestSaveModelCheckpoint:
         assert type(ckpt["config"]["training"]) is dict
         assert ckpt["config"]["training"]["optimizer"] == {"type": "SGD", "lr": 0.01}
 
-    def test_save_leaves_parameters_in_place(self, tmp_path, make_config, fake_tracker):
-        meta = FakeMetaModel(run_name="inplace-ckpt")
+    def test_save_leaves_parameters_in_place(
+        self, tmp_path, make_config, fake_tracker, monkeypatch
+    ):
+        meta = _meta_with_move_recording_model("inplace-ckpt")
         weight = meta.model.weight
         ptr = weight.data_ptr()
-        device = weight.device
         values = weight.detach().clone()
-        config = make_config()
-        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1)
+        lgr = Logger(
+            config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1
+        )
+        meta.model.moves.clear()
+        saved = _spy_torch_save(monkeypatch)
         lgr.save_model_checkpoint(meta, epoch=1, metrics_dict={"loss": 0.1})
 
+        assert meta.model.moves == []
+        assert meta.model.weight is weight
         assert meta.model.weight.data_ptr() == ptr
-        assert meta.model.weight.device == device
+        checkpoint = saved[0][0]
+        for key, live in meta.model.state_dict().items():
+            assert checkpoint["model_state_dict"][key].data_ptr() != live.data_ptr()
         path = tmp_path / "model_checkpoints" / "inplace-ckpt" / "model_epoch1"
         ckpt = torch.load(path, weights_only=True)
-        saved = ckpt["model_state_dict"]["weight"]
-        assert saved.device.type == "cpu"
-        torch.testing.assert_close(saved, values)
+        saved_weight = ckpt["model_state_dict"]["weight"]
+        assert saved_weight.device.type == "cpu"
+        torch.testing.assert_close(saved_weight, values)
 
-    def test_atomic_checkpoint_leaves_no_partial(self, tmp_path, make_config, fake_tracker):
+    def test_interval_checkpoint_is_written_directly_to_its_final_path(
+        self, tmp_path, make_config, fake_tracker, monkeypatch
+    ):
+        meta = FakeMetaModel(run_name="direct-ckpt")
+        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        saved = _spy_torch_save(monkeypatch)
+        replaced = _spy_os_replace(monkeypatch)
+        lgr.save_model_checkpoint(meta, epoch=0, metrics_dict={}, checkpoint_name="model_step5")
+        final = tmp_path / "model_checkpoints" / "direct-ckpt" / "model_step5"
+        assert [target for _, target in saved] == [str(final)]
+        assert replaced == []
+
+    def test_atomic_checkpoint_leaves_no_partial(
+        self, tmp_path, make_config, fake_tracker, monkeypatch
+    ):
         meta = FakeMetaModel(run_name="atomic-ckpt")
         meta.global_step = 1000
         lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        saved = _spy_torch_save(monkeypatch)
+        replaced = _spy_os_replace(monkeypatch)
         lgr.save_model_checkpoint(
             meta,
             epoch=0,
@@ -641,6 +825,9 @@ class TestSaveModelCheckpoint:
         )
         directory = tmp_path / "model_checkpoints" / "atomic-ckpt"
         final = directory / "model_preempt1000"
+        partial = directory / "model_preempt1000.partial"
+        assert [target for _, target in saved] == [str(partial)]
+        assert replaced == [(str(partial), str(final))]
         assert final.is_file()
         assert not (directory / "model_preempt1000.partial").exists()
         ckpt = torch.load(final, weights_only=True)

@@ -115,3 +115,95 @@ def test_sample_at_points_equals_interpolate_and_index():
     ref = up[:, rows, cols]
     got = CBMPredictor.sample_at_points(maps, rows, cols, height, width)
     assert torch.allclose(ref, got, atol=1e-5)
+
+
+class _LogitModel(nn.Module):
+    """CBM-shaped stub whose forward output carries ``concept_logits``."""
+
+    def __init__(self, logits: torch.Tensor) -> None:
+        super().__init__()
+        self.concept_classifier = nn.Conv2d(3, 2, 1)
+        self._logits = logits
+
+    def forward(self, x: torch.Tensor) -> SimpleNamespace:
+        return SimpleNamespace(logits=x, hidden_states=x, concept_logits=self._logits)
+
+
+def test_forward_concept_logits_returns_the_models_concept_logits_in_float32():
+    raw = torch.tensor([[[[1.5]], [[-2.0]]]], dtype=torch.bfloat16)  # (1, 2, 1, 1)
+    out = _predictor(_LogitModel(raw)).forward_concept_logits(torch.zeros(1, 3, 8, 8))
+    assert out.dtype == torch.float32
+    assert out.tolist() == [[[[1.5]], [[-2.0]]]]
+
+
+def test_forward_concept_logits_runs_under_the_configured_autocast():
+    class Recording(_LogitModel):
+        enabled: bool | None = None
+
+        def forward(self, x):
+            self.enabled = torch.is_autocast_enabled("cpu")
+            return super().forward(x)
+
+    model = Recording(torch.zeros(1, 2, 1, 1))
+    _predictor(model, torch.bfloat16).forward_concept_logits(torch.zeros(1, 3, 8, 8))
+    assert model.enabled is True
+
+
+def test_forward_concept_logits_raises_when_the_output_has_no_such_field():
+    # _StubModel's output carries only ``logits`` and ``hidden_states``.
+    with pytest.raises(RuntimeError, match="did not return concept_logits"):
+        _predictor(_StubModel()).forward_concept_logits(torch.zeros(1, 3, 8, 8))
+
+
+def _activating(activation) -> CBMPredictor:
+    model = _StubModel()
+    model.concept_outputs_activation = activation  # type: ignore[assignment]
+    return _predictor(model)
+
+
+def test_activate_concept_logits_applies_the_activation_to_a_batched_copy_and_unbatches():
+    seen: list[tuple[int, ...]] = []
+
+    def sigmoid(x: torch.Tensor) -> torch.Tensor:
+        seen.append(tuple(x.shape))
+        return torch.sigmoid(x)
+
+    out = _activating(sigmoid).activate_concept_logits(torch.zeros(2, 3, 4))
+    assert seen == [(1, 2, 3, 4)]
+    assert out.shape == (2, 3, 4)
+    assert torch.all(out == 0.5)
+
+
+def test_activate_concept_logits_rejects_logits_that_are_not_k_h_w():
+    with pytest.raises(ValueError, match=r"must be \(K, H, W\)"):
+        _activating(torch.sigmoid).activate_concept_logits(torch.zeros(1, 2, 3, 4))
+
+
+def test_activate_concept_logits_requires_the_model_to_define_an_activation():
+    with pytest.raises(RuntimeError, match="no concept_outputs_activation"):
+        _predictor(_StubModel()).activate_concept_logits(torch.zeros(2, 3, 4))
+
+
+@pytest.mark.parametrize(
+    ("activation", "match"),
+    [
+        (lambda x: x[0], r"must return \(1, K, H, W\)"),
+        (lambda x: x.repeat(2, 1, 1, 1), r"must return \(1, K, H, W\)"),
+        (lambda x: x[:, :1], "changed shape"),
+    ],
+    ids=["three_dimensional", "batch_of_two", "channels_dropped"],
+)
+def test_activate_concept_logits_rejects_an_activation_that_changes_the_shape(activation, match):
+    with pytest.raises(RuntimeError, match=match):
+        _activating(activation).activate_concept_logits(torch.zeros(2, 3, 4))
+
+
+def test_a_model_without_a_concept_classifier_is_rejected():
+    with pytest.raises(ValueError, match="concept_classifier"):
+        _predictor(nn.Identity())
+
+
+@pytest.mark.parametrize("shape", [(5, 5), (1, 2, 5, 5)])
+def test_sample_at_points_rejects_maps_that_are_not_c_h_w(shape):
+    with pytest.raises(ValueError, match=r"must be \(C, h, w\)"):
+        CBMPredictor.sample_at_points(torch.zeros(shape), [0], [0], 5, 5)
