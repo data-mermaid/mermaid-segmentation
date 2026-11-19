@@ -4,13 +4,8 @@ Codebase for the training, evaluation and usage of image segmentation models of 
 The codebase contains data loaders, augmentations, preprocessors, models, training & evaluation scripts.
 
 - [Usage](#usage)
-  - [Installation](#installation)
-  - [CoralNet scraper](#coralnet-scraper)
-  - [CoralNet dataset build](#coralnet-dataset-build)
-  - [Hugging Face Setup](#hugging-face-setup)
+  - [Quick start](#quick-start)
   - [Architecture overview](#architecture-overview)
-  - [Segmentation Models](#segmentation-models)
-  - [Export a model](#export-a-model)
   - [Running Tests](#running-tests)
   - [Common Commands](#common-commands)
 - [Model Serialization Strategy](#model-serialization-strategy)
@@ -19,72 +14,19 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 
 ## Usage
 
-### Installation
+The step-by-step procedures are in [docs/runbooks/](docs/runbooks/README.md): setup, data, training on Slurm and SageMaker, export and evaluation.
 
-Prerequisites
-- [uv](https://docs.astral.sh/uv/)
-- Python 3.11.5 or later (`requires-python` in `pyproject.toml`). `.python-version` pins 3.12, which uv uses by default.
-- AWS credentials configured with the `mermaid-core` profile, for S3 access
-- The AWS CLI, for `aws configure` and the `make sm-*` monitoring targets (`sm-jobs`, `sm-status`, `sm-logs`, `sm-errors`, `sm-metrics`).
-- Docker with buildx, for `make sm-smoke`
-- A Hugging Face account and token, for DINOv3 models (see [Hugging Face Setup](#hugging-face-setup))
+### Quick start
 
 ```bash
 git clone https://github.com/data-mermaid/mermaid-segmentation.git
 cd mermaid-segmentation
-
-# Install uv if needed
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Configure AWS access
-aws configure --profile mermaid-core
-echo "AWS_PROFILE=mermaid-core" >> .env
-
-# Install the locked dependencies, with the tracker extra for your run (see below)
 uv sync --locked --extra wandb
-
-# Configure Hugging Face (required for DINOv3 models)
-uv run hf auth login
-# Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
 ```
 
-Python code does not read `.env`. Load it into the shell with `set -a; source .env; set +a` (the form `.env.example` uses), or use direnv with a `.envrc` that contains `dotenv`.
+You also need AWS credentials for S3 and a Hugging Face token for the gated DINOv3 models. [Set up a development environment](docs/runbooks/set-up-dev-environment.md) has the full steps.
 
-The core install has no experiment tracker. Add the extra for the backend your run logs to:
-
-| Extra | Installs | Use |
-|---|---|---|
-| `wandb` | wandb | Local and Slurm runs (the default logger config) |
-| `mlflow` | mlflow, sagemaker-mlflow | SageMaker runs; the training image installs it |
-
-A run whose tracker is not installed stops with an `ImportError` that names the extra when the tracker starts, after dataset and model setup. See [Experiment tracking](#experiment-tracking).
-
-`uv sync` installs the `dev` group (`tests` and `lint`) by default; `--no-dev` leaves it out.
-
-| Group | Contents |
-|---|---|
-| `tests` | pytest and pytest-cov |
-| `lint` | ruff, pre-commit and mypy |
-| `dev` | `tests` and `lint` |
-
-### CoralNet scraper
-
-`packages/coralnet-scraper/` is a separate uv workspace member that downloads public CoralNet sources to S3. A root `uv sync` does not install it. See [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md). To recreate or update the CoralNet data end to end, follow [docs/coralnet-data-runbook.md](docs/coralnet-data-runbook.md).
-
-### CoralNet dataset build
-
-`packages/coralnet-dataset/` is a separate uv workspace member that builds the CoralNet training manifest, resized images and label names from a scrape. A root `uv sync` does not install it. See [packages/coralnet-dataset/README.md](packages/coralnet-dataset/README.md), and [docs/coralnet-data-runbook.md](docs/coralnet-data-runbook.md) for the end-to-end steps.
-
-### Hugging Face Setup
-
-DINOv3 models (for example `facebook/dinov3-vitl16-pretrain-lvd1689m`) are gated on Hugging Face and need authentication:
-
-1. **Request access**: Open the [model page](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m), sign in, and accept the license.
-2. **Authenticate** with one of these methods:
-   - **CLI login** (recommended): Run `uv run hf auth login` and paste your token when prompted.
-   - **Environment variable**: Add `HF_TOKEN=hf_xxxxxxxxxxxx` to your `.env` file (create it from `.env.example`). Create a token at [hf.co/settings/tokens](https://hf.co/settings/tokens).
-
-If you use `.env` with direnv, add a `.envrc` that contains `dotenv`, run `direnv allow`, and restart your shell so it picks up the token.
+Python code does not read `.env`. Load it into the shell with `set -a; source .env; set +a`, or use direnv.
 
 ### Architecture overview
 
@@ -104,92 +46,6 @@ scripts/train.py
 ```
 
 `scripts/train.py` is the only training entrypoint. Each compute substrate has a thin launcher that runs it with the same config: your shell (local), `slurm/launch_final.sh` (Slurm) and `scripts/sagemaker/` (SageMaker). `AGENTS.md` section 1 has the directory map.
-
-### Segmentation Models
-
-#### Local
-
-Train a concept-bottleneck model from the repository root:
-
-```bash
-uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
-```
-
-`--num-workers` is required. The flags `--training-config`, `--model-config`, `--data-config`, `--concept-schema-config` and `--logger-config` take a path relative to the repo root, or an absolute path; the defaults are in `configs/`. `--resolution` sets the train crop size and the model input size. Val and test images resize to the model input size.
-
-Checkpoints go to `outputs/model_checkpoints/<run>/`. `--output-dir` changes `outputs`. Each run writes two files there:
-
-- `config.yaml`: the resolved config, as a record of the settings the run used. Do not pass it back in as a run config.
-- `model.json`, written when the run starts: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version, resolved config, and torch, transformers and peft versions).
-
-Run `scripts/train.py --help` for resume (`--checkpoint`) and init (`--init-weights`) and the other flags.
-
-#### Experiment tracking
-
-`mermaidseg/logger.py` logs through one interface with two backends. The `tracker` key of the logger config (`wandb` or `mlflow`) picks the backend; any other name raises `ValueError`.
-
-| Backend | Logger config | Extra | Environment |
-|---|---|---|---|
-| wandb | `configs/logger_config.yaml` (the `--logger-config` default; Slurm and local) | `wandb` | Local: `WANDB_API_KEY`, or a prior `wandb login`. Slurm: `WANDB_API_KEY` in the env file, required. Checked when the tracker starts |
-| MLflow | `configs/logger_config_sagemaker.yaml` (passed by the SageMaker run YAMLs) | `mlflow` | `MLFLOW_TRACKING_URI`; the run raises if it is unset. The SageMaker launcher sets it from `SM_MLFLOW_TRACKING_ARN` |
-
-A run that crashes after its tracker starts is recorded as `FAILED` in MLflow and with `exit_code` 1 in wandb. A multi-GPU (torchrun) SageMaker job that is stopped can leave the MLflow run `RUNNING`; see [docker/jobs/README.md](docker/jobs/README.md).
-
-#### Slurm
-
-`slurm/launch_final.sh` submits the final model: training on train + val, then its 768 px fine-tune. It submits through `slurm/train.sbatch`, with site settings from `.env` (see `.env.example`). It is idempotent and accepts `--dry-run`.
-
-Batch jobs write `.venv`, `outputs/`, `logs/` and `wandb/` inside the checkout. The checkout must be on a filesystem the job can write to. AFS does not work, because batch jobs have no AFS token. To read the settings from an env file elsewhere, set `MERMAIDSEG_ENV_FILE`.
-
-Jobs run offline (`MERMAIDSEG_S3_OFFLINE=1`, AWS variables unset), so warm the cache at `MERMAIDSEG_CACHE_DIR` with `scripts/prefetch_cache.py` first (see [Common Commands](#common-commands)).
-
-#### SageMaker
-
-SageMaker is the backup to Slurm. It runs the same `scripts/train.py` with the same training arguments as `slurm/launch_final.sh`, except that the run YAMLs log to MLflow (`--logger-config configs/logger_config_sagemaker.yaml`). Jobs are on-demand and do not resume: relaunch a failed job from scratch.
-
-1. Set the SageMaker variables in `.env` (see `.env.example`) and load it: the Makefile reads them from the environment. `SM_MLFLOW_TRACKING_ARN` is the ARN of the MLflow App the job logs to.
-2. Run the `sagemaker-image` GitHub workflow (Actions, Run workflow). The `sagemaker-image` environment's branch policy (repo settings) allows only `main`. The job runs the code and `configs/` baked into the image, so merge and rerun the workflow before you launch. See [docker/jobs/README.md](docker/jobs/README.md) for the tags and the image.
-3. Run `make sm-validate` to check the run YAML offline. It checks only your local checkout, not the image. The 768 px YAML sets `train.init_weights`, so it also needs `INIT_FROM_JOB`: `make sm-validate SM_RUN_CONFIG=sagemaker/runs/cbm_final_res768.yaml INIT_FROM_JOB=<cbm_final job name>`.
-4. Run `make sm-launch` to submit `cbm_final` (`sagemaker/runs/cbm_final.yaml`). `make sm-dry-run` shows the request without submitting.
-5. When `cbm_final` finishes, submit the 768 px fine-tune with the first job's name:
-   `make sm-launch SM_RUN_CONFIG=sagemaker/runs/cbm_final_res768.yaml INIT_FROM_JOB=<cbm_final job name>`
-   The launcher first requires the source job to be `Completed` and its init checkpoint to be readable in S3, and refuses to launch otherwise.
-
-At launch, the launcher resolves `job.image` (`repo:tag`) to its ECR digest, submits `repo@sha256:...` and prints it. A job keeps running that exact image even if `training-latest` later moves. A `job.image` already in digest form is used as is. `--check` and `--dry-run` make no AWS call; a dry run shows the tag.
-
-Checkpoints sync to `s3://$SM_STAGING_BUCKET/runs/<job>/checkpoints/model_checkpoints/<run>/` (`model_step*`, `model.json`, `config.yaml`). Download them from there for export. The `git_sha` in `model.json` and the saved `config.yaml` record what the job ran.
-
-Monitor a job with `make sm-jobs`, `sm-status`, `sm-logs`, `sm-errors` and `sm-metrics`. These targets need the AWS CLI. All except `sm-jobs` need `JOB=<training-job-name>`, from `make sm-jobs` or the launcher's output. The first lines of the job log show the disk space for `/opt/ml/cache` and `/opt/ml/checkpoints`. On the first run, check where the cache lands.
-
-Raise the training-job max-runtime quota to at least 480 h first; see [docker/jobs/README.md](docker/jobs/README.md) Prerequisites.
-
-### Export a model
-
-Export a finished run as a bundle, then evaluate the bundle:
-
-```bash
-uv run python scripts/export.py --checkpoint outputs/model_checkpoints/<run>/<checkpoint> --output-dir /path/to/bundle
-uv run python scripts/evaluate.py --bundle /path/to/bundle --output-dir /path/to/results
-```
-
-The bundle holds `model.json` and `weights.safetensors`, the two file names `load_bundle` (`mermaidseg/inference/bundle.py`) reads.
-
-`scripts/export.py` refuses:
-- a checkpoint with no `model.json` beside it
-- a checkpoint that cannot be loaded or lacks a required key
-- a checkpoint with no recorded lineage
-- a checkpoint whose lineage records a dirty or unknown git tree (each checkpoint records the lineage of the session that wrote it)
-- a checkpoint whose config differs from its recorded lineage
-- a non-empty output directory
-- a missing parent directory
-
-Export needs `model.json` beside the checkpoint and a lineage recorded in the checkpoint; `scripts/train.py` writes both.
-
-`scripts/evaluate.py` is the validation suite: CoralNet, Pacific Labeled Corals, CoralscapesV2 few-shot probes and the validation loss. It evaluates an exported bundle. Input size, normalization, label maps and run settings come from the bundle. The model comes only from `--bundle`.
-
-- The CoralscapesV2 probes need `--probe-points` and `--coralscapes39-probe`. The repo ships no probe files, and the defaults of both flags point at `configs/eval/`, which does not exist.
-- Without `--strict`, a failed eval is only logged and the script exits 0.
-- The benthic hierarchy comes from the MERMAID API unless `--benthic-hierarchy-json` is given.
 
 ### Running Tests
 
@@ -232,32 +88,11 @@ uv run --group lint ruff check         # lint
 uv run --group lint ruff format --check
 uv run --group lint mypy               # type check
 uv run --group lint pre-commit run --all-files
-bash slurm/launch_final.sh --dry-run   # print the sbatch commands; needs the Slurm variables in .env
 ```
 
 CI runs the equivalent of the first four commands (`.github/workflows/lint.yml`) when Python files, `pyproject.toml` or `uv.lock` change.
 
-Warm the local S3 cache before an offline run. For an offline run (Slurm, or local with `MERMAIDSEG_S3_OFFLINE=1`) this is the only step that needs AWS credentials. `--cache-dir` has no default and the script has nowhere to write without it:
-
-```bash
-uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
-```
-
-`--data-config` and `--training-config` default to `configs/data_config.yaml` and `configs/training_config_cbm_final.yaml`. Run the script with `--help` for the other options.
-
-SageMaker `make` targets (see [SageMaker](#sagemaker)):
-
-| Target | What it does |
-|---|---|
-| `make sm-validate` | Checks the run YAML offline. |
-| `make sm-dry-run` | Shows the job request without submitting. Needs the SageMaker variables in the environment. |
-| `make sm-launch` | Submits the job. |
-| `make sm-smoke` | Runs `docker/jobs/local_smoke.sh`. |
-| `make sm-jobs` | Lists the 10 most recent training jobs. |
-| `make sm-status` | Shows one job's status and failure reason. |
-| `make sm-logs` | Follows one job's logs. |
-| `make sm-errors` | Shows error lines from one job's logs. |
-| `make sm-metrics` | Shows peak disk, RAM, GPU memory and CPU of one job. |
+The commands that fill the data cache, launch training and follow SageMaker jobs (`make sm-*`) are in the [runbooks](docs/runbooks/README.md).
 
 ## Model Serialization Strategy
 
@@ -275,7 +110,16 @@ Non-taxonomic concept metrics in `mermaidseg/model/eval.py` are multiclass `Accu
 
 | Document | Covers |
 |---|---|
-| [docs/coralnet-data-runbook.md](docs/coralnet-data-runbook.md) | Recreating or updating the CoralNet data end to end |
+| [docs/runbooks/README.md](docs/runbooks/README.md) | Index of the runbooks |
+| [docs/runbooks/set-up-dev-environment.md](docs/runbooks/set-up-dev-environment.md) | Setting up a development environment |
+| [docs/runbooks/set-up-slurm.md](docs/runbooks/set-up-slurm.md) | Setting up the Slurm cluster |
+| [docs/runbooks/training-datasets.md](docs/runbooks/training-datasets.md) | Where each dataset comes from, and adding a dataset |
+| [docs/runbooks/coralnet-data.md](docs/runbooks/coralnet-data.md) | Recreating or updating the CoralNet data end to end |
+| [docs/runbooks/derived-configs.md](docs/runbooks/derived-configs.md) | Regenerating the train + val data config, concept removal list and concept source mask |
+| [docs/runbooks/train-on-slurm.md](docs/runbooks/train-on-slurm.md) | Training on Slurm |
+| [docs/runbooks/train-on-sagemaker.md](docs/runbooks/train-on-sagemaker.md) | Training on SageMaker |
+| [docs/runbooks/export-a-model.md](docs/runbooks/export-a-model.md) | Exporting a checkpoint to a bundle |
+| [docs/runbooks/evaluate-a-model.md](docs/runbooks/evaluate-a-model.md) | Evaluating a bundle |
 | [docs/agents-md-sources.md](docs/agents-md-sources.md) | The source of each `AGENTS.md` rule |
 | [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md) | The CoralNet scraper |
 | [packages/coralnet-dataset/README.md](packages/coralnet-dataset/README.md) | The CoralNet dataset build |
