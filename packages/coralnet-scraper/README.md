@@ -45,7 +45,7 @@ Flags:
 | `--delay-seconds` | `0.0` | Pause after each source not skipped by the resume check. |
 | `--scraper-workers` | auto | Concurrent image download and upload workers. Overrides `MERMAID_CORALNET_SCRAPER_WORKERS`. |
 | `--source-ids` | all public sources | Comma-separated CoralNet source ids. The run processes only these, in the given order, after source discovery. An id that is not in the public listing is still attempted. |
-| `--requests-per-second` | no limit | Maximum request rate, a positive number. The limit applies to the first attempt of each CoralNet request and is shared by all threads. Retries wait for their backoff or the server's `Retry-After` and do not count against the limit. Image downloads from S3 pre-signed URLs are never limited. Overrides `MERMAID_CORALNET_REQUESTS_PER_SECOND`. |
+| `--requests-per-second` | no limit | Maximum request rate, a finite positive number. The limit applies to the first attempt of each CoralNet request and is shared by all threads. Retries wait for their backoff or the server's `Retry-After` and do not count against the limit. Image downloads from S3 pre-signed URLs are never limited. Overrides `MERMAID_CORALNET_REQUESTS_PER_SECOND`. |
 | `--export-workers` | `3` | Concurrent page exports for sources with more than 5000 images. Overrides `MERMAID_CORALNET_EXPORT_WORKERS`. |
 | `-v`, `--verbose` | off | Debug logging. |
 
@@ -55,7 +55,7 @@ An exception inside one source, in the skip check or the download, is logged and
 
 A source fails when:
 
-- any of its images had no image URL (`images_missing_url`) or failed to upload (`images_upload_failed`);
+- any of its images had no image URL (`images_missing_url`) or failed to upload (`images_upload_failed`). These still fail the source and set exit code 1, but do not count toward the [circuit breaker](#retries-and-circuit-breaker);
 - the metadata, labelset, annotations, or image list step failed, or the source could not be accessed;
 - CoralNet login failed for the source (`login failed`);
 - the source overview page could not be fetched (`overview fetch failed: <exception class>: <message>`);
@@ -68,12 +68,12 @@ Exit code:
 | Code | When |
 |---|---|
 | 0 | Every source downloads or is skipped. A source with zero Confirmed images, or with zero images, counts as skipped. |
-| 1 | The CoralNet login fails, any source fails, the [circuit breaker](#retries-and-circuit-breaker) stops the run, the [run report](#run-report) cannot be written to S3 (after the transport figures and failure summary are logged, the run logs `Could not write run report s3://<bucket>/<key>`), or the run stops on an uncaught error (invalid configuration, source discovery failure). |
+| 1 | The CoralNet login fails, any source fails, the [circuit breaker](#retries-and-circuit-breaker) stops the run, the [run report](#run-report) cannot be written to S3, even when every source succeeded (after the transport figures and failure summary are logged, the run logs `Could not write run report s3://<bucket>/<key>`), or the run stops on an uncaught error (invalid configuration, source discovery failure). |
 
 ### Retries and circuit breaker
 
-- **Retries.** A GET request is retried up to 5 times on timeouts, dropped connections, and HTTP 429, 500, 502, 503 and 504. The wait grows exponentially with jitter and honours the `Retry-After` header. A request that could not connect is retried whatever its method, because it was never sent.
-- **Circuit breaker.** After 5 consecutive failed sources the run stops. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped by the resume check neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
+- **Retries.** A GET request is retried up to 5 times on timeouts, dropped connections, and HTTP 429, 500, 502, 503 and 504 that occur before the response headers arrive. A connection dropped while the body is being read is not retried. The wait grows exponentially with jitter and honours the `Retry-After` header. A request that could not connect is retried whatever its method, because it was never sent.
+- **Circuit breaker.** After 5 consecutive failed sources the run stops. A source whose only errors are `images_missing_url` or `images_upload_failed` does not count toward the streak and resets it. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped by the resume check neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
 
 ### Run report
 
@@ -103,7 +103,7 @@ set -a; source .env; set +a
 | `MERMAID_CORALNET_BUCKET` | yes | none | Destination bucket. An unset or empty value raises `ValueError`. |
 | `MERMAID_CORALNET_PREFIX` | no | `coralnet-public-images` | Key prefix. Surrounding slashes are stripped; an empty prefix raises `ValueError`. |
 | `MERMAID_CORALNET_SCRAPER_WORKERS` | no | `min(32, max(8, 4 * CPU count))` | Image worker count. Must be an integer of at least 1. |
-| `MERMAID_CORALNET_REQUESTS_PER_SECOND` | no | no limit | Maximum request rate. Must be a positive number; 0, a negative number or a non-numeric value raises `ValueError`. |
+| `MERMAID_CORALNET_REQUESTS_PER_SECOND` | no | no limit | Maximum request rate. Must be a finite positive number; 0, a negative number, infinity or a non-numeric value raises `ValueError`. |
 | `MERMAID_CORALNET_EXPORT_WORKERS` | no | `3` | Page export worker count. Must be an integer of at least 1. |
 | `MERMAID_CORALNET_USER_AGENT` | no | `mermaid-coralnet-scraper (+https://github.com/data-mermaid/mermaid-segmentation)` | `User-Agent` header of every request. |
 | `CORALNET_USERNAME` | no | prompt | CoralNet login. Used only when `CORALNET_PASSWORD` is also set. |
