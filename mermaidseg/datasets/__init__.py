@@ -12,7 +12,6 @@ from mermaidseg.datasets.base_dataset import (
 from mermaidseg.datasets.benthos_yuval import BenthosYuvalCoralsDataset
 from mermaidseg.datasets.catlin_seaview import CatlinSeaviewDataset
 from mermaidseg.datasets.coralnet import CoralNetDataset
-from mermaidseg.datasets.coralscapes import CoralscapesDataset
 from mermaidseg.datasets.coralscapes_v2 import CoralscapesV2Dataset
 from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets, configured_source_names
 from mermaidseg.datasets.local_cache import setup_local_cache
@@ -27,7 +26,6 @@ __all__ = [
     "BenthosYuvalCoralsDataset",
     "CatlinSeaviewDataset",
     "CoralNetDataset",
-    "CoralscapesDataset",
     "CoralscapesV2Dataset",
     "MermaidDataset",
     "MooreaLabeledCoralsDataset",
