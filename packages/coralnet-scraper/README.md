@@ -5,9 +5,9 @@ Downloads public CoralNet sources (images, labelsets, annotations) to S3. Import
 ## Scope
 
 - **Owns:** recreating the raw CoralNet dataset in S3, one folder per public source.
-- **Does not own:** turning a scrape into the training manifest that `CoralNetDataset` reads. That is [`coralnet-dataset`](../coralnet-dataset/README.md).
+- **Does not own:** turning a scrape into the training manifest that `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`) reads. That is [`coralnet-dataset`](../coralnet-dataset/README.md).
 - **End to end:** to recreate or update the CoralNet data, scrape through training, follow the [CoralNet data runbook](../../docs/coralnet-data-runbook.md).
-- **Boundary:** `mermaidseg` does not depend on or import this package, and the package does not import `mermaidseg`. the root `tests/test_package_boundaries.py` enforces both (run with the root suite). A root `uv sync` does not install it.
+- **Boundary:** `mermaidseg` does not depend on or import this package, and the package does not import `mermaidseg`. The root `tests/test_package_boundaries.py` enforces both (run with the root suite). A root `uv sync` does not install it.
 
 ## S3 layout
 
@@ -48,6 +48,8 @@ A source fails when:
 
 - any of its images had no image URL (`images_missing_url`) or failed to upload (`images_upload_failed`);
 - the metadata, labelset, annotations, or image list step failed, or the source could not be accessed;
+- CoralNet login failed for the source (`login failed`);
+- the source overview page could not be fetched (`overview fetch failed: <exception class>: <message>`);
 - an exception was raised for it, as above.
 
 At the end the run logs a summary at error level: the number of failed sources, then one line per error kind with the sorted source ids. Image kinds give the image count per source, for example `images_missing_url: 202 (14 images)`. A failed source with no error code is listed under `no_error_code`.
@@ -82,10 +84,10 @@ S3 access uses the default boto3 credential chain, for example `AWS_PROFILE`.
 ### Resume and `--force`
 
 - A source is skipped when `<prefix>/s<id>/annotations.csv` exists in S3. The check is made before any download.
-- A source runs metadata, labelset, annotations, image list, then images. A failure in the metadata or labelset step does not stop the run, so `annotations.csv` is still uploaded. A source that failed with `annotations.csv` already uploaded is skipped on the next run unless `--force` is set. That covers `metadata_download_failed`, `labelset_failed`, `image_list_failed`, `images_missing_url`, `images_upload_failed`, and a source that stopped after the annotations upload. Find these sources in the failure summary logged at the end of the run. `--force` is the only way to retry them, and it reprocesses every source.
+- A source runs metadata, labelset, annotations, image list, then images. A failure in the metadata or labelset step does not stop the run, so `annotations.csv` is still uploaded. A source that failed with `annotations.csv` already uploaded is skipped on the next run unless `--force` is set. That covers `metadata_download_failed`, `labelset_failed`, `image_list_failed`, `images_missing_url`, `images_upload_failed`, and a source that stopped after the annotations upload. Find these sources in the failure summary logged at the end of the run. To retry one of them, delete its `annotations.csv` from S3. `--force` retries every source.
 - Sources with zero Confirmed images, or zero images, on CoralNet are skipped, and nothing is written for them.
 - `--force` downloads every source. Image objects already in S3 are not uploaded again.
-- A source with more than 5000 images is exported in pages. It loads an existing `annotations.csv` and merges new rows into it, and uploads a partial file every 50 pages. A source whose export fails (`annotations_failed`) or is interrupted after the first checkpoint leaves that partial `annotations.csv`, which the resume rule skips until `--force`.
+- A source with more than 5000 images is exported in pages. It loads an existing `annotations.csv` and merges new rows into it, and uploads a partial file every 50 pages. A source whose export fails (`annotations_failed`) or is interrupted after the first checkpoint leaves that partial `annotations.csv`, which the resume rule skips until `--force`. If the existing file already covers as many images as CoralNet reports, the export is skipped, even with `--force`, so new annotations on existing images are not picked up.
 
 ## Tests
 
