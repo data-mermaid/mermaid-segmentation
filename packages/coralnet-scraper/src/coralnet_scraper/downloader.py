@@ -48,7 +48,6 @@ _PAGINATED_EXPORT_THRESHOLD = 5000  # sources above this use per-page export
 _PAGE_EXPORT_TIMEOUT = 180  # CoralNet session setup can take >60s even for 20 images
 _PAGE_RETRIES = 3
 _PAGE_RETRY_BACKOFF_S = 30  # sleep between retries, doubles each attempt
-_REACHABILITY_TIMEOUT = 30  # pre-flight "is CoralNet up?" probe; fail fast if not
 _PAGE_DELAY_SECONDS = 2.0  # politeness delay between page export requests
 _PAGE_PARALLEL_WORKERS = 3  # concurrent export_prep/serve requests in paginated export
 _CHECKPOINT_EVERY_PAGES = 50  # upload partial annotations.csv every N completed pages
@@ -311,21 +310,6 @@ class CoralNetDownloader:
             logger.exception("CoralNet login failed for %s", self.username)
             return False
 
-    def is_coralnet_reachable(self, *, timeout: float = _REACHABILITY_TIMEOUT) -> bool:
-        """Cheap pre-flight check that CoralNet is actually serving HTTP.
-
-        CoralNet has site-wide dips where it accepts TCP connections but never returns a
-        response. A single short GET distinguishes "down/degraded" (timeout or 5xx) from
-        "up" so a job can bail early instead of burning the full login-retry budget —
-        and, more importantly, so we don't pile load onto a site that's already
-        struggling.
-        """
-        try:
-            r = self.session.get(self.LOGIN_URL, timeout=timeout)
-            return r.status_code < 500
-        except requests.RequestException:
-            return False
-
     def check_permissions(self, source_id: int) -> bool:
         """Return whether the logged-in account can open the source's overview page."""
         try:
@@ -465,7 +449,9 @@ class CoralNetDownloader:
                 overview page when ``None`` or negative.
 
         Returns:
-            True on success; False on failure, after logging the error.
+            True on success; False on failure, after logging the error. The exported body
+            must parse as a CSV with a ``Name`` column; an empty body, an HTML error page, or
+            any other export without one fails and uploads nothing.
         """
         try:
             total_images = total_images_hint
@@ -592,6 +578,11 @@ class CoralNetDownloader:
             dl = self.session.get(serve_url, timeout=serve_timeout)
             dl.raise_for_status()
             df_annotations = pd.read_csv(io.StringIO(dl.text))
+            if "Name" not in df_annotations.columns:
+                raise RuntimeError(
+                    f"Source {source_id}: export/serve response is not an annotations CSV "
+                    "(no 'Name' column)"
+                )
             buf = io.StringIO()
             df_annotations.to_csv(buf, index=False)
             key = s3_io.object_key_annotation_csv(s3_prefix, source_id)
@@ -651,10 +642,6 @@ class CoralNetDownloader:
                 return True
 
             work_items = self._walk_browse_pages(source_id)
-            if not work_items:
-                logger.warning("source %s: paginated export found no annotation pages", source_id)
-                return False
-
             workers = page_workers if page_workers is not None else _PAGE_PARALLEL_WORKERS
             workers = max(1, min(workers, len(work_items)))
 
@@ -943,28 +930,17 @@ class CoralNetDownloader:
         next_rel = cast("str | None", next_page_element.get("href")) if next_page_element else None
         return images, next_rel
 
-    def get_images(
-        self,
-        source_id: int,
-        *,
-        annotation_status: str | None = None,
-        total_images_hint: int | None = None,
-        browse_workers: int = 1,
-    ) -> tuple[pd.DataFrame | None, bool]:
+    def get_images(self, source_id: int) -> tuple[pd.DataFrame | None, bool]:
         """Walk CoralNet browse pages and return a DataFrame of all images.
 
-        When ``total_images_hint`` is provided and ``browse_workers > 1``, pages
-        2..N are fetched in parallel via ``?page=N`` URLs rather than sequentially
-        following next-link cursors. Page 1 is always fetched first to establish
-        the actual page size; subsequent pages are constructed as
-        ``base_url?page=N`` (or ``base_url&page=N`` when annotation_status is set).
+        Fetches page 1, then follows next-page links sequentially, retrying each page.
+        Pages merge in order and the first-seen href wins for a duplicate name.
 
-        Falls back to sequential cursor-following when ``total_images_hint`` is
-        absent or ``browse_workers == 1``.
+        Returns:
+            ``(df, True)`` with columns ``Name`` and ``Image Page``, or ``(None, False)``
+            when any page fails after retries.
         """
         base_url = f"{self.CORALNET_URL}/source/{source_id}/browse/images"
-        if annotation_status:
-            base_url = f"{base_url}/?annotation_status={annotation_status}"
 
         def fetch(url: str, page_num: int) -> tuple[dict[str, str], str | None]:
             return _with_retry(
@@ -979,60 +955,15 @@ class CoralNetDownloader:
             page1_imgs, next_rel = fetch(base_url, 1)
             p_bar.update(1)
 
-            # Ordered list of per-page dicts; page 1 is always first.
             ordered_pages: list[dict[str, str]] = [page1_imgs]
-
-            can_parallel = browse_workers > 1 and total_images_hint is not None
-            page1_size = len(page1_imgs)
-
-            if (
-                can_parallel
-                and total_images_hint is not None
-                and 0 < page1_size < total_images_hint
-            ):
-                # Ceil-divide without importing math.
-                n_pages = -(-total_images_hint // page1_size)
-                sep = "&" if "?" in base_url else "?"
-
-                workers = min(browse_workers, n_pages - 1)
-                page_results: dict[int, dict[str, str]] = {}
-                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                    futs = {
-                        ex.submit(fetch, f"{base_url}{sep}page={n}", n): n
-                        for n in range(2, n_pages + 1)
-                    }
-                    for fut in concurrent.futures.as_completed(futs):
-                        n = futs[fut]
-                        try:
-                            page_results[n], _ = fut.result()
-                        except requests.RequestException:
-                            # One dead page must not abort the whole source; leave it
-                            # out and let the caller's coverage guard reject a short list.
-                            logger.warning(
-                                "source %s page=%s failed after retries; skipping", source_id, n
-                            )
-                        p_bar.update(1)
-                missing = (n_pages - 1) - len(page_results)
-                if missing:
-                    logger.warning(
-                        "source %s: %d/%d browse pages failed; result is partial",
-                        source_id,
-                        missing,
-                        n_pages - 1,
-                    )
-                for n in range(2, n_pages + 1):
-                    ordered_pages.append(page_results.get(n, {}))
-            else:
-                current_url: str | None = (
-                    urllib.parse.urljoin(base_url, next_rel) if next_rel else None
-                )
-                seq_page = 2
-                while current_url is not None:
-                    imgs, next_rel = fetch(current_url, seq_page)
-                    ordered_pages.append(imgs)
-                    p_bar.update(1)
-                    seq_page += 1
-                    current_url = urllib.parse.urljoin(current_url, next_rel) if next_rel else None
+            current_url: str | None = urllib.parse.urljoin(base_url, next_rel) if next_rel else None
+            seq_page = 2
+            while current_url is not None:
+                imgs, next_rel = fetch(current_url, seq_page)
+                ordered_pages.append(imgs)
+                p_bar.update(1)
+                seq_page += 1
+                current_url = urllib.parse.urljoin(current_url, next_rel) if next_rel else None
 
             # Merge in page order; first-seen wins for any duplicate name.
             merged: dict[str, str] = {}
@@ -1119,17 +1050,24 @@ class CoralNetDownloader:
     def get_image_urls(self, image_page_urls: list[str]) -> list[str | None]:
         """Resolve image-page links to original-image URLs, in input order.
 
-        With several workers a failed lookup yields None for that entry; with a single
-        worker the first failure raises.
+        A failed lookup always yields None for that entry, with one worker or several.
         """
         n = len(image_page_urls)
         workers = min(self.max_workers, n) if n > 0 else 1
-        if workers <= 1:
-            return [self._resolve_one_image_url(rel) for rel in image_page_urls]
-
-        logger.info("Resolving %d image URLs with %d workers", n, workers)
         results: list[str | None] = [None] * n
         errors = 0
+        if workers <= 1:
+            for i, rel in enumerate(image_page_urls):
+                try:
+                    results[i] = self._resolve_one_image_url(rel)
+                except Exception as e:  # noqa: BLE001
+                    errors += 1
+                    logger.warning("Failed to resolve image URL %s: %s", rel, e)
+            if errors:
+                logger.warning("Image URL resolution: %d/%d failed", errors, n)
+            return results
+
+        logger.info("Resolving %d image URLs with %d workers", n, workers)
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_idx = {
                 executor.submit(self._resolve_one_image_url, rel): i
@@ -1239,48 +1177,36 @@ class CoralNetDownloader:
         source_id: int,
         bucket_name: str,
         s3_prefix: str = "coralnet-public-images",
-        *,
-        download_metadata: bool = True,
-        download_labelset: bool = True,
-        download_annotations: bool = True,
-        download_images: bool = True,
     ) -> DownloadResult:
         """Download one source's artifacts to S3.
 
-        Logs in when needed, then uploads metadata, labelset, annotations and images for the
-        enabled steps. Sources with no confirmed images or no images are skipped.
+        Logs in when needed, then uploads metadata, labelset, annotations and images. Sources
+        with no confirmed images or no images are skipped. A failed annotations download ends
+        the download.
 
         Args:
             source_id: CoralNet source id.
             bucket_name: Destination S3 bucket.
             s3_prefix: Destination key prefix.
-            download_metadata: Upload ``metadata.csv``.
-            download_labelset: Upload ``labelset.csv``.
-            download_annotations: Upload ``annotations.csv``; a failure ends the download.
-            download_images: Upload the image list and the images; any image that fails
-                (no URL, or upload failure) adds ``images_missing_url`` or
-                ``images_upload_failed`` to the errors.
 
         Returns:
             The outcome, with failure codes in ``errors`` and per-kind image counts in
-            ``image_failures``.
+            ``image_failures``. An image that fails (no URL, or upload failure) adds
+            ``images_missing_url`` or ``images_upload_failed`` to the errors.
         """
         errs: list[str] = []
         image_failures = ImageFailures()
         sid = source_id
         logger.info("Downloading CoralNet source %s", sid)
         if not self.logged_in and not self.login():
-            return DownloadResult(False, skipped_empty=False, errors=["login failed"])
+            return DownloadResult(False, errors=["login failed"])
         if not self.check_permissions(sid):
-            return DownloadResult(
-                False, skipped_empty=False, errors=[f"cannot access source {sid}"]
-            )
+            return DownloadResult(False, errors=[f"cannot access source {sid}"])
         try:
             overview_html = self._get_source_overview_html(sid)
         except Exception as e:  # noqa: BLE001
             return DownloadResult(
                 False,
-                skipped_empty=False,
                 errors=[f"overview fetch failed: {type(e).__name__}: {e}"],
             )
 
@@ -1295,84 +1221,72 @@ class CoralNetDownloader:
         total_images_hint = counts.total_images if counts.total_images is not None else -1
         if total_images_hint == 0:
             logger.info("Source %s reports zero images; skipping remainder", sid)
-            return DownloadResult(ok=True, skipped_empty=True, errors=errs)
+            return DownloadResult(ok=True, errors=errs)
 
-        if download_metadata:
-            metadata_ok, total_images_hint = self.download_metadata(
-                sid,
-                bucket_name=bucket_name,
-                s3_prefix=s3_prefix,
-                overview_html=overview_html,
-            )
-            if not metadata_ok:
-                errs.append("metadata_download_failed")
+        metadata_ok, total_images_hint = self.download_metadata(
+            sid,
+            bucket_name=bucket_name,
+            s3_prefix=s3_prefix,
+            overview_html=overview_html,
+        )
+        if not metadata_ok:
+            errs.append("metadata_download_failed")
 
-        if download_labelset and not self.download_labelset(
-            sid, bucket_name=bucket_name, s3_prefix=s3_prefix
-        ):
+        if not self.download_labelset(sid, bucket_name=bucket_name, s3_prefix=s3_prefix):
             errs.append("labelset_failed")
 
-        if download_annotations and not self.download_annotations(
+        if not self.download_annotations(
             sid,
             bucket_name=bucket_name,
             s3_prefix=s3_prefix,
             total_images_hint=total_images_hint if total_images_hint > 0 else None,
         ):
             errs.append("annotations_failed")
-            return DownloadResult(ok=False, skipped_empty=False, errors=errs)
+            return DownloadResult(ok=False, errors=errs)
 
-        if download_images:
-            images_df, images_success = self.get_images(sid)
-            batch_size = 1000
-            if images_success and images_df is not None and len(images_df) > 0:
-                images_df = images_df.reset_index(drop=True).copy()
-                images_df["Image URL"] = pd.NA
-                buf = io.StringIO()
-                images_df.to_csv(buf, index=False)
-                list_key = s3_io.object_key_image_list_csv(s3_prefix, sid)
-                s3_io.upload_csv_body(
-                    self.s3,
-                    bucket=bucket_name,
-                    key=list_key,
-                    csv_text=buf.getvalue(),
+        images_df, images_success = self.get_images(sid)
+        batch_size = 1000
+        if images_success and images_df is not None and len(images_df) > 0:
+            images_df = images_df.reset_index(drop=True).copy()
+            images_df["Image URL"] = pd.NA
+            buf = io.StringIO()
+            images_df.to_csv(buf, index=False)
+            list_key = s3_io.object_key_image_list_csv(s3_prefix, sid)
+            s3_io.upload_csv_body(
+                self.s3,
+                bucket=bucket_name,
+                key=list_key,
+                csv_text=buf.getvalue(),
+            )
+            logger.info("Image list CSV s3://%s/%s", bucket_name, list_key)
+
+            url_col_idx = images_df.columns.get_loc("Image URL")
+            for start, end in half_open_batches(len(images_df), batch_size):
+                urls = images_df.iloc[start:end]["Image Page"].tolist()
+                image_urls = self.get_image_urls(urls)
+                images_df.iloc[start:end, url_col_idx] = image_urls
+
+                subset = images_df.iloc[start:end].copy()
+                batch = self.download_images(
+                    subset, sid, bucket_name=bucket_name, s3_prefix=s3_prefix
                 )
-                logger.info("Image list CSV s3://%s/%s", bucket_name, list_key)
+                image_failures = ImageFailures(
+                    missing_url=image_failures.missing_url + batch.missing_url,
+                    upload_failed=image_failures.upload_failed + batch.upload_failed,
+                )
+            if image_failures.missing_url > 0:
+                errs.append("images_missing_url")
+            if image_failures.upload_failed > 0:
+                errs.append("images_upload_failed")
+            if image_failures != ImageFailures():
+                logger.warning(
+                    "Source %s image failures: %d missing URL, %d upload failed",
+                    sid,
+                    image_failures.missing_url,
+                    image_failures.upload_failed,
+                )
+        else:
+            errs.append("image_list_failed")
+            logger.warning("No browse images table for source %s", sid)
 
-                url_col_idx = images_df.columns.get_loc("Image URL")
-                for start, end in half_open_batches(len(images_df), batch_size):
-                    urls = images_df.iloc[start:end]["Image Page"].tolist()
-                    image_urls = self.get_image_urls(urls)
-                    images_df.iloc[start:end, url_col_idx] = image_urls
-
-                    subset = images_df.iloc[start:end].copy()
-                    batch = self.download_images(
-                        subset, sid, bucket_name=bucket_name, s3_prefix=s3_prefix
-                    )
-                    image_failures = ImageFailures(
-                        missing_url=image_failures.missing_url + batch.missing_url,
-                        upload_failed=image_failures.upload_failed + batch.upload_failed,
-                    )
-                if image_failures.missing_url > 0:
-                    errs.append("images_missing_url")
-                if image_failures.upload_failed > 0:
-                    errs.append("images_upload_failed")
-                if image_failures != ImageFailures():
-                    logger.warning(
-                        "Source %s image failures: %d missing URL, %d upload failed",
-                        sid,
-                        image_failures.missing_url,
-                        image_failures.upload_failed,
-                    )
-            else:
-                errs.append("image_list_failed")
-                logger.warning("No browse images table for source %s", sid)
-
-        return DownloadResult(
-            ok=not errs, skipped_empty=False, errors=errs, image_failures=image_failures
-        )
-
-    def cleanup(self) -> None:
-        """Close the main session and mark it logged out."""
-        if self.session:
-            self.session.close()
-        self.logged_in = False
+        return DownloadResult(ok=not errs, errors=errs, image_failures=image_failures)

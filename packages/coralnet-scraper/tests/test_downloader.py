@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 import requests
+from botocore.exceptions import ClientError
 from bs4 import BeautifulSoup
 
 from coralnet_scraper import downloader as downloader_mod
@@ -210,6 +211,38 @@ def test_download_source_sums_image_failures_across_batches():
     assert res.image_failures == ImageFailures(missing_url=0, upload_failed=1)
 
 
+def test_get_image_urls_serial_path_keeps_order_around_a_failure():
+    dl = CoralNetDownloader("u", "p", max_workers=1)
+
+    def resolve(rel: str) -> str:
+        if rel == "/image/2/view/":
+            raise ValueError("private")
+        return "http://x" + rel
+
+    with patch.object(dl, "_resolve_one_image_url", side_effect=resolve):
+        urls = dl.get_image_urls(["/image/1/view/", "/image/2/view/", "/image/3/view/"])
+    assert urls == ["http://x/image/1/view/", None, "http://x/image/3/view/"]
+
+
+def test_download_source_reports_missing_url_when_single_image_lookup_raises():
+    dl = _image_source_downloader()
+    images = pd.DataFrame({"Image Page": ["/image/1/view/"]})
+    with (
+        patch.object(dl, "check_permissions", return_value=True),
+        patch.object(dl, "_get_source_overview_html", return_value=_fixture("source_ok.html")),
+        patch.object(dl, "download_metadata", return_value=(True, 1)),
+        patch.object(dl, "download_labelset", return_value=True),
+        patch.object(dl, "download_annotations", return_value=True),
+        patch.object(dl, "get_images", return_value=(images, True)),
+        patch.object(dl, "_resolve_one_image_url", side_effect=ValueError("private")),
+        patch.object(s3_io, "upload_csv_body"),
+        patch.object(dl, "download_image_to_s3", side_effect=lambda u, b, k: (k, True)),
+    ):
+        res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+    assert res.errors == ["images_missing_url"]
+    assert res.image_failures == ImageFailures(missing_url=1, upload_failed=0)
+
+
 _BROWSE_HTML_PAGE = """\
 <html>
 <form id="export-annotations-prep-form">
@@ -352,28 +385,70 @@ def test_download_annotations_dispatches_to_paginated_for_large_source(fake_s3):
     )
 
 
-def test_download_annotations_bulk_for_small_source():
-    """Sources at or below threshold must use the existing bulk path."""
+_BULK_BROWSE_HTML = (
+    '<form id="export-annotations-prep-form">'
+    '<input type="hidden" name="csrfmiddlewaretoken" value="tok"/></form>'
+)
+_BULK_KEY = ("b", "p/s1/annotations.csv")
+
+
+def _run_bulk_download(
+    fake_s3, *, browse_html: str, serve_text: str = ""
+) -> tuple[bool, MagicMock]:
+    """Run the bulk annotations path on a small source; return (ok, export_prep POST mock)."""
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
-    dl.s3 = MagicMock()
-
-    browse_html = (
-        '<form id="export-annotations-prep-form">'
-        '<input type="hidden" name="csrfmiddlewaretoken" value="tok"/></form>'
-    )
+    dl.s3 = fake_s3
     browse_resp = _mock_response(text=browse_html)
     post_resp = _mock_response(json_data={"session_data_timestamp": "t1"})
-    serve_resp = _mock_response(text="Name,Row,Column,Label ID\na.jpg,1,2,3\n")
-
+    serve_resp = _mock_response(text=serve_text)
     with (
         patch.object(dl.session, "get", side_effect=[browse_resp, serve_resp]),
-        patch.object(dl.session, "post", return_value=post_resp),
+        patch.object(dl.session, "post", return_value=post_resp) as post_mock,
         patch("coralnet_scraper.downloader.time.sleep"),
     ):
         ok = dl.download_annotations(1, "b", "p", total_images_hint=_PAGINATED_EXPORT_THRESHOLD)
+    return ok, post_mock
+
+
+def test_download_annotations_bulk_for_small_source(fake_s3):
+    """Sources at or below threshold must use the existing bulk path."""
+    ok, _ = _run_bulk_download(
+        fake_s3,
+        browse_html=_BULK_BROWSE_HTML,
+        serve_text="Name,Row,Column,Label ID\na.jpg,1,2,3\nb.jpg,4,5,6\n",
+    )
 
     assert ok is True
+    uploaded = pd.read_csv(io.BytesIO(fake_s3.objects[_BULK_KEY]))
+    assert list(uploaded.columns) == ["Name", "Row", "Column", "Label ID"]
+    assert uploaded.to_numpy().tolist() == [["a.jpg", 1, 2, 3], ["b.jpg", 4, 5, 6]]
+
+
+def test_download_annotations_bulk_without_export_form_uploads_nothing(fake_s3):
+    ok, post_mock = _run_bulk_download(fake_s3, browse_html="<html><body>login</body></html>")
+
+    assert ok is False
+    assert _BULK_KEY not in fake_s3.objects
+    post_mock.assert_not_called()
+
+
+def test_download_annotations_bulk_html_export_uploads_nothing(fake_s3):
+    ok, _ = _run_bulk_download(
+        fake_s3,
+        browse_html=_BULK_BROWSE_HTML,
+        serve_text="<html><body>Error</body></html>",
+    )
+
+    assert ok is False
+    assert _BULK_KEY not in fake_s3.objects
+
+
+def test_download_annotations_bulk_empty_export_uploads_nothing(fake_s3):
+    ok, _ = _run_bulk_download(fake_s3, browse_html=_BULK_BROWSE_HTML, serve_text="")
+
+    assert ok is False
+    assert _BULK_KEY not in fake_s3.objects
 
 
 def test_paginated_export_skips_when_existing_annotations_are_complete(
@@ -494,6 +569,73 @@ def test_paginated_export_merges_with_existing_annotations(paginated_downloader,
     assert overlap_row["Label ID"].iloc[0] == 200
 
 
+_EXISTING_KEY = s3_io.object_key_annotation_csv("p", 1)
+
+
+def test_paginated_export_keeps_existing_csv_when_page_export_fails_with_4xx(
+    paginated_downloader, fake_s3
+):
+    dl = paginated_downloader
+    existing = _ann_csv([("old.jpg", 1, 1, 99)]).encode()
+    fake_s3.put_object(Bucket="b", Key=_EXISTING_KEY, Body=existing)
+    page_html = _browse_page("csrf1", n_thumbs=2)
+    forbidden = requests.HTTPError("403", response=MagicMock(status_code=403))
+
+    with _mock_paginated_session(
+        dl,
+        get=[_mock_response(text=page_html), _mock_response(text=page_html)],
+        post=[forbidden],
+    ) as post_mock:
+        ok = dl.download_annotations_paginated(1, "b", "p", page_workers=1)
+
+    assert ok is False
+    assert post_mock.call_count == 1  # a 4xx is not retried
+    assert fake_s3.objects[("b", _EXISTING_KEY)] == existing
+
+
+def test_paginated_export_returns_false_when_existing_read_is_denied(paginated_downloader, fake_s3):
+    denied = ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "GetObject")
+    with (
+        patch.object(fake_s3, "get_object", side_effect=denied),
+        patch.object(paginated_downloader, "_walk_browse_pages") as walk,
+    ):
+        ok = paginated_downloader.download_annotations_paginated(1, "b", "p")
+
+    assert ok is False
+    walk.assert_not_called()
+    assert fake_s3.objects == {}
+
+
+def test_paginated_export_runs_when_existing_csv_covers_fewer_images_than_website(
+    paginated_downloader, fake_s3
+):
+    dl = paginated_downloader
+    existing = _ann_csv([("old.jpg", 1, 1, 99), ("old.jpg", 2, 2, 98)])
+    fake_s3.put_object(Bucket="b", Key=_EXISTING_KEY, Body=existing.encode())
+    page_html = _browse_page("csrf1", n_thumbs=1)
+    new_ann = _ann_csv([("new.jpg", 9, 9, 300), ("old.jpg", 1, 1, 99)])
+
+    with _mock_paginated_session(
+        dl,
+        get=[
+            _mock_response(text=page_html),
+            _mock_response(text=page_html),
+            _mock_response(text=new_ann),
+        ],
+        post=[_mock_response(json_data={"session_data_timestamp": "t1"})],
+    ) as post_mock:
+        ok = dl.download_annotations_paginated(1, "b", "p", total_images_website=2, page_workers=1)
+
+    assert ok is True
+    assert post_mock.call_count == 1
+    df = pd.read_csv(io.BytesIO(fake_s3.objects[("b", _EXISTING_KEY)]))
+    assert sorted(zip(df["Name"], df["Row"], df["Column"], strict=True)) == [
+        ("new.jpg", 9, 9),
+        ("old.jpg", 1, 1),
+        ("old.jpg", 2, 2),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # get_images pagination tests (offline)
 # ---------------------------------------------------------------------------
@@ -526,31 +668,6 @@ def test_get_images_multi_page_uses_urljoin():
     assert sorted(df["Image Page"].tolist()) == ["/image/1/view/", "/image/2/view/"]
     assert call_urls[0] == "https://coralnet.ucsd.edu/source/7/browse/images"
     assert call_urls[1] == "https://coralnet.ucsd.edu/source/7/browse/images?page=2"
-
-
-def test_get_images_with_annotation_status_preserves_filter():
-    """Pagination with annotation_status must not produce a double '?' in the URL."""
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-
-    call_urls: list[str] = []
-
-    def fake_get_images_on_page(url: str):
-        call_urls.append(url)
-        if len(call_urls) == 1:
-            return {"a.jpg": "/image/1/view/"}, "?annotation_status=confirmed&page=2"
-        return {"b.jpg": "/image/2/view/"}, None
-
-    with patch.object(dl, "get_images_on_page", side_effect=fake_get_images_on_page):
-        df, ok = dl.get_images(7, annotation_status="confirmed")
-
-    assert ok is True
-    assert df is not None and len(df) == 2
-    assert call_urls[0].endswith("/browse/images/?annotation_status=confirmed")
-    second = call_urls[1]
-    assert second.count("?") == 1
-    assert "annotation_status=confirmed" in second
-    assert "page=2" in second
 
 
 # ---------------------------------------------------------------------------
@@ -694,198 +811,6 @@ def test_paginated_export_parallel_produces_correct_output(paginated_downloader,
 
 
 # ---------------------------------------------------------------------------
-# get_images parallel browse tests
-# ---------------------------------------------------------------------------
-# CoralNet browse pages use simple ?page=N pagination. When browse_workers > 1
-# and total_images_hint is provided, get_images() should fan out pages 2..N
-# directly by URL rather than following the sequential next-link chain.
-# ---------------------------------------------------------------------------
-
-
-def _build_browse_pages(n_pages: int, thumbs_per_page: int = 20) -> dict[str, str]:
-    """Build a URL→HTML map for n_pages of a source-1 browse.
-
-    Each page has disjoint image IDs so the merged DataFrame has exactly n_pages *
-    thumbs_per_page rows (or fewer on the last page if partial).
-    """
-    base = "https://coralnet.ucsd.edu/source/1/browse/images"
-    pages: dict[str, str] = {}
-    for n in range(1, n_pages + 1):
-        next_href = f"?page={n + 1}" if n < n_pages else None
-        start_id = (n - 1) * thumbs_per_page + 1
-        url = base if n == 1 else f"{base}?page={n}"
-        pages[url] = _browse_page(
-            f"csrf{n}", n_thumbs=thumbs_per_page, next_href=next_href, start_id=start_id
-        )
-    return pages
-
-
-def _url_dispatch_get(pages: dict[str, str]) -> Callable:
-    def fake_get(url: str, timeout=None, **_) -> MagicMock:
-        if url not in pages:
-            raise AssertionError(f"unexpected GET {url!r}; known: {list(pages)}")
-        return _mock_response(text=pages[url])
-
-    return fake_get
-
-
-def test_get_images_parallel_fans_out_page_urls():
-    """With browse_workers=4 and a 3-page source, pages 2 and 3 are fetched via ?page=2
-    and ?page=3 directly — not by following next-link cursors.
-
-    Pins the contract that parallel mode constructs page URLs independently rather than
-    inheriting the sequential cursor-following path.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    pages = _build_browse_pages(n_pages=3, thumbs_per_page=20)
-    fetched_urls: list[str] = []
-
-    def tracking_get(url: str, timeout=None, **_) -> MagicMock:
-        fetched_urls.append(url)
-        return _mock_response(text=pages[url])
-
-    with patch.object(dl.session, "get", side_effect=tracking_get):
-        df, ok = dl.get_images(1, total_images_hint=60, browse_workers=4)
-
-    assert ok is True
-    assert df is not None and len(df) == 60
-    base = "https://coralnet.ucsd.edu/source/1/browse/images"
-    assert base in fetched_urls
-    assert f"{base}?page=2" in fetched_urls
-    assert f"{base}?page=3" in fetched_urls
-
-
-def test_get_images_parallel_result_matches_sequential():
-    """Parallel and sequential get_images() return the same DataFrame content.
-
-    Ensures the fan-out doesn't lose or duplicate images vs the cursor path.
-    """
-    dl_seq = CoralNetDownloader("u", "p")
-    dl_par = CoralNetDownloader("u", "p")
-    dl_seq.logged_in = True
-    dl_par.logged_in = True
-
-    pages = _build_browse_pages(n_pages=4, thumbs_per_page=20)
-    make_get = _url_dispatch_get(pages)
-
-    with patch.object(dl_seq.session, "get", side_effect=make_get):
-        df_seq, ok_seq = dl_seq.get_images(1)
-
-    with patch.object(dl_par.session, "get", side_effect=_url_dispatch_get(pages)):
-        df_par, ok_par = dl_par.get_images(1, total_images_hint=80, browse_workers=4)
-
-    assert ok_seq and ok_par
-    assert set(df_seq["Name"]) == set(df_par["Name"])
-    assert set(df_seq["Image Page"]) == set(df_par["Image Page"])
-
-
-def test_get_images_parallel_single_page_no_fanout():
-    """When total_images_hint fits on page 1, no ?page=2 URL is constructed."""
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    # Single-page source — no next link
-    page1 = _browse_page("csrf1", n_thumbs=5, next_href=None, start_id=1)
-    fetched_urls: list[str] = []
-
-    def tracking_get(url: str, timeout=None, **_) -> MagicMock:
-        fetched_urls.append(url)
-        return _mock_response(text=page1)
-
-    with patch.object(dl.session, "get", side_effect=tracking_get):
-        df, ok = dl.get_images(1, total_images_hint=5, browse_workers=4)
-
-    assert ok is True
-    assert df is not None and len(df) == 5
-    assert len(fetched_urls) == 1
-    assert "page=2" not in fetched_urls[0]
-
-
-def test_get_images_parallel_preserves_page_order():
-    """Images from page 1 appear before page 2, page 2 before page 3 in the output.
-
-    Stable ordering makes the output deterministic and diffable across runs.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    pages = _build_browse_pages(n_pages=3, thumbs_per_page=3)
-
-    with patch.object(dl.session, "get", side_effect=_url_dispatch_get(pages)):
-        df, ok = dl.get_images(1, total_images_hint=9, browse_workers=3)
-
-    assert ok is True
-    assert df is not None
-    names = df["Name"].tolist()
-    # page 1: img1, img2, img3 | page 2: img4..6 | page 3: img7..9
-    page1_last_idx = names.index("img3.jpg")
-    page2_first_idx = names.index("img4.jpg")
-    page3_first_idx = names.index("img7.jpg")
-    assert page1_last_idx < page2_first_idx < page3_first_idx
-
-
-def test_get_images_parallel_annotation_status_preserved():
-    """annotation_status filter appears in all worker page URLs.
-
-    Regression guard: parallel fanout must not drop the ?annotation_status=
-    query param when constructing ?page=N URLs.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-
-    base = "https://coralnet.ucsd.edu/source/1/browse/images"
-    pages = {
-        f"{base}/?annotation_status=confirmed": _browse_page(
-            "csrf1", n_thumbs=20, next_href="?annotation_status=confirmed&page=2", start_id=1
-        ),
-        f"{base}/?annotation_status=confirmed&page=2": _browse_page(
-            "csrf2", n_thumbs=10, start_id=21
-        ),
-    }
-    fetched_urls: list[str] = []
-
-    def tracking_get(url: str, timeout=None, **_) -> MagicMock:
-        fetched_urls.append(url)
-        if url not in pages:
-            raise AssertionError(f"unexpected GET {url!r}")
-        return _mock_response(text=pages[url])
-
-    with patch.object(dl.session, "get", side_effect=tracking_get):
-        df, ok = dl.get_images(
-            1, annotation_status="confirmed", total_images_hint=30, browse_workers=2
-        )
-
-    assert ok is True
-    assert df is not None and len(df) == 30
-    assert all("annotation_status=confirmed" in u for u in fetched_urls)
-
-
-def test_get_images_parallel_falls_back_without_hint():
-    """browse_workers > 1 without total_images_hint falls back to sequential cursor-
-    following.
-
-    No ?page=N URL is constructed; the next-link href drives navigation instead.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-
-    call_urls: list[str] = []
-
-    def fake_get_images_on_page(url: str):
-        call_urls.append(url)
-        if len(call_urls) == 1:
-            return {"a.jpg": "/image/1/view/"}, "?page=2"
-        return {"b.jpg": "/image/2/view/"}, None
-
-    with patch.object(dl, "get_images_on_page", side_effect=fake_get_images_on_page):
-        df, ok = dl.get_images(1, browse_workers=8)  # no hint → sequential
-
-    assert ok is True
-    assert df is not None and len(df) == 2
-    # Page 2 was reached by following the next-link, not by constructing ?page=2
-    assert call_urls[1] == "https://coralnet.ucsd.edu/source/1/browse/images?page=2"
-
-
-# ---------------------------------------------------------------------------
 # Retry tests
 # ---------------------------------------------------------------------------
 
@@ -932,36 +857,6 @@ def test_get_images_page1_gives_up_after_max_retries():
 
     assert ok is False
     assert df is None
-
-
-def test_get_images_parallel_retries_on_inner_page_timeout():
-    """A ReadTimeout on a parallel page is retried; final result includes that page's
-    images.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-
-    pages = _build_browse_pages(n_pages=3, thumbs_per_page=2)
-    call_counts: dict[str, int] = {}
-
-    def flaky_dispatch(url: str, timeout=None, **_) -> MagicMock:
-        call_counts[url] = call_counts.get(url, 0) + 1
-        # Fail page 3 on the first attempt only
-        page3_url = "https://coralnet.ucsd.edu/source/1/browse/images?page=3"
-        if url == page3_url and call_counts[url] == 1:
-            raise requests.ReadTimeout("page 3 timeout")
-        if url not in pages:
-            raise AssertionError(f"unexpected GET {url!r}")
-        return _mock_response(text=pages[url])
-
-    with (
-        patch.object(dl.session, "get", side_effect=flaky_dispatch),
-        patch("coralnet_scraper.downloader.time.sleep"),
-    ):
-        df, ok = dl.get_images(1, total_images_hint=6, browse_workers=3)
-
-    assert ok is True
-    assert df is not None and len(df) == 6  # all 3 pages present
 
 
 def _http_error(status: int) -> requests.HTTPError:
@@ -1023,34 +918,6 @@ def test_get_images_4xx_is_not_retried():
     assert ok is False
     assert df is None
     assert call_count[0] == 1  # not retried
-
-
-def test_get_images_parallel_skips_dead_page_after_retries():
-    """A page that exhausts retries is dropped; other pages still return (partial).
-
-    The original bug was one timeout killing a whole 79k-image source; the parallel path
-    must degrade per-page instead of aborting.
-    """
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-    pages = _build_browse_pages(n_pages=3, thumbs_per_page=2)
-    page3_url = "https://coralnet.ucsd.edu/source/1/browse/images?page=3"
-
-    def dispatch(url: str, timeout=None, **_) -> MagicMock:
-        if url == page3_url:
-            raise requests.ReadTimeout("page 3 always times out")
-        if url not in pages:
-            raise AssertionError(f"unexpected GET {url!r}")
-        return _mock_response(text=pages[url])
-
-    with (
-        patch.object(dl.session, "get", side_effect=dispatch),
-        patch("coralnet_scraper.downloader.time.sleep"),
-    ):
-        df, ok = dl.get_images(1, total_images_hint=6, browse_workers=3)
-
-    assert ok is True  # did not abort
-    assert df is not None and len(df) == 4  # pages 1 + 2 only; page 3 dropped
 
 
 def test_get_images_sequential_retries_on_inner_page_timeout():
@@ -1184,32 +1051,94 @@ def test_with_retry_backoff_is_jittered():
     assert slept == [0.5 * 30, 0.5 * 60]  # stub returns the low bound
 
 
-def _status_response(status: int) -> MagicMock:
-    r = MagicMock()
-    r.status_code = status
-    return r
-
-
-def test_is_coralnet_reachable_true_on_200():
-    dl = CoralNetDownloader("u", "p")
-    with patch.object(dl.session, "get", return_value=_status_response(200)):
-        assert dl.is_coralnet_reachable() is True
-
-
-def test_is_coralnet_reachable_false_on_5xx():
-    """A 5xx means CoralNet is up but degraded — treat as unreachable for pre-flight."""
-    dl = CoralNetDownloader("u", "p")
-    with patch.object(dl.session, "get", return_value=_status_response(503)):
-        assert dl.is_coralnet_reachable() is False
-
-
-def test_is_coralnet_reachable_false_on_timeout():
-    dl = CoralNetDownloader("u", "p")
-    with patch.object(dl.session, "get", side_effect=requests.ReadTimeout("down")):
-        assert dl.is_coralnet_reachable() is False
-
-
 @pytest.mark.parametrize("workers", [0, 2.5, True, "4"])
 def test_constructor_rejects_invalid_max_workers(workers):
     with pytest.raises(ValueError, match="workers"):
         CoralNetDownloader("u", "p", max_workers=workers)
+
+
+def _failing_step_downloader(**overrides) -> tuple[CoralNetDownloader, dict[str, MagicMock]]:
+    """A downloader whose steps succeed except those overridden; returns it with its mocks."""
+    dl = CoralNetDownloader("u", "p", max_workers=2)
+    dl.logged_in = True
+    dl.s3 = MagicMock()
+    images = pd.DataFrame({"Image Page": ["/image/1/view/"]})
+    defaults = {
+        "check_permissions": True,
+        "download_metadata": (True, 2),
+        "download_labelset": True,
+        "download_annotations": True,
+        "get_images": (images, True),
+    }
+    mocks = {
+        name: MagicMock(return_value=overrides.get(name, default))
+        for name, default in defaults.items()
+    }
+    for name, mock in mocks.items():
+        setattr(dl, name, mock)
+    dl._get_source_overview_html = MagicMock(  # type: ignore[method-assign]
+        return_value=_fixture("source_ok.html"),
+        **({"side_effect": overrides["overview"]} if "overview" in overrides else {}),
+    )
+    dl.get_image_urls = MagicMock(return_value=["http://x/1"])  # type: ignore[method-assign]
+    dl.download_image_to_s3 = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda u, b, k: (k, True)
+    )
+    return dl, mocks
+
+
+def test_download_source_returns_login_failed_when_login_fails():
+    dl, mocks = _failing_step_downloader()
+    dl.logged_in = False
+    with patch.object(dl, "login", return_value=False):
+        res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert res.errors == ["login failed"]
+    mocks["check_permissions"].assert_not_called()
+
+
+def test_download_source_returns_cannot_access_when_permissions_denied():
+    dl, mocks = _failing_step_downloader(check_permissions=False)
+    res = dl.download_source(7, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert res.errors == ["cannot access source 7"]
+    mocks["download_metadata"].assert_not_called()
+
+
+def test_download_source_reports_overview_fetch_failure():
+    dl, mocks = _failing_step_downloader(overview=requests.ConnectionError("down"))
+    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert len(res.errors) == 1
+    assert res.errors[0].startswith("overview fetch failed:")
+    mocks["download_metadata"].assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("step", "failure", "code"),
+    [
+        ("download_metadata", (False, 2), "metadata_download_failed"),
+        ("download_labelset", False, "labelset_failed"),
+        ("get_images", (None, False), "image_list_failed"),
+    ],
+)
+def test_download_source_records_a_failed_step_and_still_runs_the_rest(step, failure, code):
+    dl, mocks = _failing_step_downloader(**{step: failure})
+    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert code in res.errors
+    mocks["download_annotations"].assert_called_once()
+    mocks["get_images"].assert_called_once()
+
+
+def test_download_source_stops_after_annotations_fail():
+    dl, mocks = _failing_step_downloader(download_annotations=False)
+    res = dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert res.ok is False
+    assert res.errors[-1] == "annotations_failed"
+    mocks["get_images"].assert_not_called()

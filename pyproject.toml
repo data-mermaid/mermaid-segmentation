@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "mermaidseg"
 version = "0.1.0"
 description = "A package for the segmentation of MERMAID coral data."
-requires-python = ">=3.11"
+requires-python = ">=3.11.5"
 dependencies = [
     "albumentations",
     "boto3",
@@ -30,9 +30,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Experiment trackers, installed per substrate: Slurm logs to wandb, SageMaker to MLflow.
-slurm = ["wandb>=0.25.0"]
-sagemaker = ["mlflow", "sagemaker-mlflow"]
+# Named after the tracker they install: Slurm uses wandb, the SageMaker image uses mlflow.
+wandb = ["wandb>=0.25.0"]
+mlflow = ["mlflow", "sagemaker-mlflow"]
 
 [dependency-groups]
 tests = [

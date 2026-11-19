@@ -6,15 +6,15 @@ build-backend = "setuptools.build_meta"
 name = "coralnet-dataset"
 version = "0.1.0"
 description = "Builds the CoralNet annotation, image and training-manifest parquets from the scraped S3 sources."
-requires-python = ">=3.11"
+requires-python = ">=3.11.5"
 dependencies = [
     "coralnet-scraper",
-    "boto3>=1.43.3",
-    "ibis-framework[duckdb]>=12.0.0",
-    "pandas>=2.3.3",
-    "pillow>=12.2.0",
-    "pyarrow>=23.0.1",
-    "tqdm>=4.67.3",
+    "boto3",
+    "ibis-framework[duckdb]",
+    "pandas",
+    "pillow",
+    "pyarrow",
+    "tqdm",
 ]
 
 [project.scripts]

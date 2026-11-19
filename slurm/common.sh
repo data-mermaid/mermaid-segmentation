@@ -49,6 +49,6 @@ export MERMAIDSEG_S3_OFFLINE=1
 export WANDB_DIR="$REPO/wandb"
 
 cd "$REPO"
-uv sync --locked --extra slurm
+uv sync --locked --extra wandb
 PY="$REPO/.venv/bin/python"
 export PY

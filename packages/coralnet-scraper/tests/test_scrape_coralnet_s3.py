@@ -150,3 +150,30 @@ def test_main_returns_1_without_discovery_when_login_fails(monkeypatch):
         assert cli.main([]) == 1
     discover.assert_not_called()
     run.assert_not_called()
+
+
+def test_main_with_real_batch_runner_logs_raising_source_under_exception_name(
+    monkeypatch, caplog, fake_s3
+):
+    monkeypatch.setenv("MERMAID_CORALNET_BUCKET", "my-bucket")
+    downloader = MagicMock(max_workers=4)
+    downloader.login.return_value = True
+
+    def download_source(sid, **_kwargs):
+        if sid == 202:
+            raise ValueError("boom")
+        return DownloadResult(ok=True)
+
+    downloader.download_source.side_effect = download_source
+    with (
+        patch(f"{_MOD}.load_coralnet_credentials", return_value=("u", "p")),
+        patch(f"{_MOD}.CoralNetDownloader", return_value=downloader),
+        patch(f"{_MOD}.boto3.client", return_value=fake_s3),
+        patch(f"{_MOD}.discover_public_source_ids", return_value=[101, 202]),
+    ):
+        assert cli.main([]) == 1
+
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert "Failed to download 1 source(s)" in errors
+    assert "ValueError: [202]" in errors
+    assert downloader.download_source.call_count == 2

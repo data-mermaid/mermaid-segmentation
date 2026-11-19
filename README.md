@@ -9,7 +9,7 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 
 Prerequisites
 - [uv](https://docs.astral.sh/uv/)
-- Python 3.11 or later (`requires-python` in `pyproject.toml`). `.python-version` pins 3.12, which uv uses by default.
+- Python 3.11.5 or later (`requires-python` in `pyproject.toml`). `.python-version` pins 3.12, which uv uses by default.
 - AWS credentials configured with the `mermaid-core` profile, for S3 access
 - A Hugging Face account and token, for DINOv3 models (see [Hugging Face Setup](#hugging-face-setup))
 
@@ -29,15 +29,15 @@ hf auth login
 # Or add your token to .env: echo "HF_TOKEN=hf_xxxxxxxxxxxx" >> .env
 
 # Install the locked dependencies, with the tracker extra for your run (see below)
-uv sync --locked --extra slurm
+uv sync --locked --extra wandb
 ```
 
 The core install has no experiment tracker. Add the extra for the backend your run logs to:
 
 | Extra | Installs | Use |
 |---|---|---|
-| `slurm` | wandb | Local and Slurm runs (the default logger config) |
-| `sagemaker` | mlflow, sagemaker-mlflow | SageMaker runs; the training image installs it |
+| `wandb` | wandb | Local and Slurm runs (the default logger config) |
+| `mlflow` | mlflow, sagemaker-mlflow | SageMaker runs; the training image installs it |
 
 A run whose tracker is not installed stops at start with an `ImportError` that names the extra. See [Experiment tracking](#experiment-tracking).
 
@@ -50,7 +50,7 @@ Contributors add a dependency group:
 | `dev` | `tests` and `lint` |
 
 ```bash
-uv sync --locked --extra slurm --group dev
+uv sync --locked --extra wandb --group dev
 ```
 
 ### CoralNet scraper
@@ -85,7 +85,7 @@ scripts/train.py
   -> scripts/export.py (mermaidseg/export.py)
   -> bundle: weights.safetensors + model.json
   -> mermaidseg/inference/ (load_bundle, preprocess, CBMPredictor)
-       used by scripts/evaluate.py and by the mermaid-inference service
+       used by scripts/evaluate.py
 ```
 
 `scripts/train.py` is the only training entrypoint. Each compute substrate has a thin launcher that runs it with the same config: your shell (local), `slurm/launch_final.sh` (Slurm) and `scripts/sagemaker/` (SageMaker). `AGENTS.md` section 1 has the directory map.
@@ -113,8 +113,8 @@ Checkpoints go to `outputs/model_checkpoints/<run>/`. `--output-dir` changes `ou
 
 | Backend | Logger config | Extra | Environment |
 |---|---|---|---|
-| wandb | `configs/logger_config.yaml` (the `--logger-config` default; Slurm and local) | `slurm` | `WANDB_API_KEY`, or a prior `wandb login`; checked when the tracker starts |
-| MLflow | `configs/logger_config_sagemaker.yaml` (passed by the SageMaker run YAMLs) | `sagemaker` | `MLFLOW_TRACKING_URI`; the run raises if it is unset. The SageMaker launcher sets it from `SM_MLFLOW_TRACKING_ARN` |
+| wandb | `configs/logger_config.yaml` (the `--logger-config` default; Slurm and local) | `wandb` | `WANDB_API_KEY`, or a prior `wandb login`; checked when the tracker starts |
+| MLflow | `configs/logger_config_sagemaker.yaml` (passed by the SageMaker run YAMLs) | `mlflow` | `MLFLOW_TRACKING_URI`; the run raises if it is unset. The SageMaker launcher sets it from `SM_MLFLOW_TRACKING_ARN` |
 
 A run that crashes is recorded as `FAILED` in MLflow and with `exit_code` 1 in wandb.
 
@@ -128,7 +128,7 @@ Batch jobs write `.venv`, `outputs/` and `logs/` inside the checkout. The checko
 
 SageMaker is the backup to Slurm. It runs the same `scripts/train.py` with the same arguments as `slurm/launch_final.sh`. Jobs are on-demand and do not resume: relaunch a failed job from scratch.
 
-1. Set the SageMaker variables in `.env` (see `.env.example`) and load it: the Makefile reads them from the environment. `SM_MLFLOW_TRACKING_ARN` is the ARN of the MLflow tracking server the job logs to.
+1. Set the SageMaker variables in `.env` (see `.env.example`) and load it: the Makefile reads them from the environment. `SM_MLFLOW_TRACKING_ARN` is the ARN of the MLflow App the job logs to.
 2. Run the `sagemaker-image` GitHub workflow (Actions, Run workflow). Only `main` can run it. It builds the image, pushes `training-<sha>` and moves `training-latest`; see [docker/jobs/README.md](docker/jobs/README.md). The job runs the code and `configs/` baked into the image: `training-latest` is `main` at the last workflow run. Only the run YAML travels with the job. Merge config and code changes, and rerun the workflow, before you launch.
 3. Run `make sm-validate` to check the run YAML offline. It checks only your local checkout, not the image. The 768 px YAML sets `train.init_weights`, so it also needs `INIT_FROM_JOB`: `make sm-validate SM_RUN_CONFIG=sagemaker/runs/cbm_final_res768.yaml INIT_FROM_JOB=<cbm_final job name>`.
 4. Run `make sm-launch` to submit `cbm_final` (`sagemaker/runs/cbm_final.yaml`). `make sm-dry-run` shows the request without submitting.
@@ -153,7 +153,7 @@ uv run python scripts/export.py --checkpoint outputs/model_checkpoints/<run>/<ch
 uv run python scripts/evaluate.py --bundle /path/to/bundle --output-dir /path/to/results
 ```
 
-The bundle holds `model.json` and `weights.safetensors`. These two file names are the contract with `mermaid-inference`.
+The bundle holds `model.json` and `weights.safetensors`, the two file names `load_bundle` (`mermaidseg/inference/bundle.py`) reads.
 
 `scripts/export.py` refuses:
 - a checkpoint with no recorded lineage
@@ -169,13 +169,13 @@ Export needs a run trained with this version or later. Older runs have no `model
 ### Running Tests
 
 ```bash
-uv sync --locked --group tests --extra slurm --extra sagemaker
+uv sync --locked --group tests --extra wandb --extra mlflow
 ```
 
-CI installs both tracker extras; without the `sagemaker` extra the MLflow tracker tests skip. It runs this selection (`.github/workflows/tests.yml`). Use it before you open a PR:
+CI installs both tracker extras; without the `mlflow` extra the MLflow tracker tests skip. It runs this selection (`.github/workflows/tests.yml`). Use it before you open a PR:
 
 ```bash
-uv run --group tests --extra slurm --extra sagemaker pytest -m "not slow and not integration and not live"
+uv run --group tests --extra wandb --extra mlflow pytest -m "not slow and not integration and not live"
 ```
 
 `pyproject.toml` defines these markers:
@@ -236,9 +236,9 @@ SageMaker `make` targets (see [SageMaker](#sagemaker)):
 
 The project uses two formats.
 
-**Checkpoints.** Training and resume checkpoints are `torch.save` pickles. They hold the full state (model, optimizer and scheduler) that a resume needs. The code loads them with `weights_only=True` (`read_checkpoint` in `mermaidseg/run_setup.py`). `AGENTS.md` 9.6 allows `weights_only=False` only for a resume checkpoint that this project's own training wrote, with a comment at the call site. No call site uses it. Load every other checkpoint with `weights_only=True`.
+**Checkpoints.** Training and resume checkpoints are `torch.save` pickles. They hold the full state (model, optimizer and scheduler) that a resume needs. The code loads them with `weights_only=True` (`read_checkpoint` in `mermaidseg/run_setup.py`). `AGENTS.md` 9.6 allows `weights_only=False` only for a resume checkpoint that this project's own training wrote, with a comment at the call site. No production call site uses it. Load every other checkpoint with `weights_only=True`.
 
-**Bundle.** The deployable bundle is SafeTensors plus `model.json` (`export_bundle` in `mermaidseg/export.py`, `load_bundle` in `mermaidseg/inference/bundle.py`). `model.json` carries the architecture, label and concept maps, preprocessing and lineage, so a bundle describes itself. The names `weights.safetensors` and `model.json` are a contract with `mermaid-inference`. Do not change them without coordinating with that project.
+**Bundle.** The deployable bundle is SafeTensors plus `model.json` (`export_bundle` in `mermaidseg/export.py`, `load_bundle` in `mermaidseg/inference/bundle.py`). `model.json` carries the architecture, label and concept maps, preprocessing and lineage, so a bundle describes itself.
 
 ### Concept Bottleneck Models
 

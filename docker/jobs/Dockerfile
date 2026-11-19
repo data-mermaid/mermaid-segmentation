@@ -3,8 +3,8 @@
 # local builds (docker/jobs/local_smoke.sh) are smoke-only and never pushed.
 #
 # Base: nvidia/cuda 12.6 + cuDNN runtime. Python 3.12 and every package come from uv.lock via
-# `uv sync --locked --extra sagemaker`, the same torch stack Slurm runs (torch from the lock
-# bundles its CUDA 12.6 libraries; Slurm installs the `slurm` extra instead), so
+# `uv sync --locked --extra mlflow`, the same torch stack Slurm runs (torch from the lock
+# bundles its CUDA 12.6 libraries; Slurm installs the `wandb` extra instead), so
 # Python is installed by uv rather than taken from the base image.
 #
 # See docker/jobs/README.md.
@@ -39,13 +39,13 @@ COPY pyproject.toml uv.lock .python-version ./
 # pyprojects to validate the lock. The members themselves are not installed.
 COPY packages/coralnet-scraper/pyproject.toml ./packages/coralnet-scraper/pyproject.toml
 COPY packages/coralnet-dataset/pyproject.toml ./packages/coralnet-dataset/pyproject.toml
-RUN uv sync --locked --no-dev --extra sagemaker --no-install-project
+RUN uv sync --locked --no-dev --extra mlflow --no-install-project
 
 # Project itself (editable so scripts/ stays importable).
 COPY mermaidseg ./mermaidseg
 COPY scripts ./scripts
 COPY configs ./configs
-RUN uv sync --locked --no-dev --extra sagemaker
+RUN uv sync --locked --no-dev --extra mlflow
 
 # The image has no .git; CI passes the commit so lineage records the mermaidseg SHA. No default:
 # a build without GIT_SHA yields an image whose entrypoint refuses to start a run.

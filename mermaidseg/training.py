@@ -5,6 +5,8 @@ import contextlib
 import copy
 import json
 import os
+import signal
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -201,6 +203,36 @@ def _lineage_params(lineage: dict[str, Any]) -> dict[str, Any]:
     }
     params.update({f"lineage/manifests/{k}": v for k, v in version["manifests"].items()})
     return params
+
+
+# Exit status of a process ended by SIGTERM (128 + signal number).
+SIGTERM_EXIT_CODE = 128 + signal.SIGTERM
+
+
+@contextlib.contextmanager
+def _sigterm_raises_system_exit(enabled: bool) -> Iterator[None]:
+    """Turn SIGTERM into ``SystemExit(143)`` inside the block when ``enabled``.
+
+    Python's default SIGTERM action ends the process without unwinding, so an enclosing
+    ``with`` block never exits. Raising lets it unwind. The previous handler is restored
+    on leaving.
+    """
+    if not enabled:
+        yield
+        return
+
+    def _raise_exit(signum: int, frame: Any) -> None:
+        # A group-wide SIGTERM also kills the DataLoader workers; torch's SIGCHLD handler would
+        # then raise inside the unwinding tracker flush. A repeated SIGTERM must not cut it short.
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise SystemExit(SIGTERM_EXIT_CODE)
+
+    previous = signal.signal(signal.SIGTERM, _raise_exit)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -415,7 +447,11 @@ def run(args: argparse.Namespace) -> None:
         )
     else:
         logger_context = contextlib.nullcontext(None)
-    with logger_context as run_logger:
+    # SIGTERM (SageMaker stop, Slurm) must unwind `logger_context` so the tracker run is ended
+    # as failed. Only rank 0 owns a tracker run. This holds for single-process runs; under
+    # torchrun (multi-GPU) rank 0 is typically blocked in a collective when its peers die, so
+    # its handler never runs and torchrun SIGKILLs it after 30 s, leaving the run RUNNING.
+    with _sigterm_raises_system_exit(dist_ctx.is_main), logger_context as run_logger:
         if run_logger is not None:
             run_logger.log_dict(sidecar, "metadata/model.json")
             run_logger.log_params(_lineage_params(sidecar["lineage"]))
