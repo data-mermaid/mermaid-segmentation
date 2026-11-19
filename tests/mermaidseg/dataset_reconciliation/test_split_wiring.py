@@ -20,11 +20,10 @@ from mermaidseg.dataset_reconciliation.split_wiring import (
 from mermaidseg.datasets.benthos_yuval.benthos_yuval_corals_dataset import (
     BenthosYuvalCoralsDataset,
 )
-from mermaidseg.datasets.coralscapes.coralscapes_dataset import (
-    CORALSCAPES_ID2NAME,
-    CoralscapesDataset,
+from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import (
+    CORALSCAPES_V2_ID2NAME,
+    CoralscapesV2Dataset,
 )
-from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CoralscapesV2Dataset
 from mermaidseg.datasets.ucsd_mosaics.ucsd_mosaics_dataset import UCSDMosaicsDataset
 
 
@@ -92,9 +91,9 @@ def test_attach_registry_rejects_a_dataset_whose_source_is_not_registered() -> N
         attach_registry(registry, [_SourceStub("catlin_seaview", ["sand"])])
 
 
-def _make_coralscapes_stub(*, source_id2name: dict[int, str]) -> CoralscapesDataset:
-    """CoralscapesDataset shell without loading the HuggingFace corpus."""
-    ds = CoralscapesDataset.__new__(CoralscapesDataset)
+def _make_coralscapes_v2_stub(*, source_id2name: dict[int, str]) -> CoralscapesV2Dataset:
+    """CoralscapesV2Dataset shell without loading the HuggingFace corpus."""
+    ds = CoralscapesV2Dataset.__new__(CoralscapesV2Dataset)
     ds.split = "train"
     ds.transform = None
     ds.class_subset = None
@@ -106,39 +105,39 @@ def _make_coralscapes_stub(*, source_id2name: dict[int, str]) -> CoralscapesData
     return ds
 
 
-def test_coralscapes_concepts_follow_the_registry_lookup() -> None:
-    """Concept rows are reached through the global ids a Coralscapes (v1) split emits."""
-    native_order = {i: CORALSCAPES_ID2NAME[i] for i in sorted(CORALSCAPES_ID2NAME)}
-    train = _make_coralscapes_stub(source_id2name=native_order)
-    val = _make_coralscapes_stub(source_id2name=native_order)
-    dataset_dict = {("coralscapes", "train"): train, ("coralscapes", "val"): val}
+def test_coralscapes_v2_concepts_follow_the_registry_lookup() -> None:
+    """Concept rows are reached through the global ids a Coralscapes V2 split emits."""
+    native_order = {i: CORALSCAPES_V2_ID2NAME[i] for i in sorted(CORALSCAPES_V2_ID2NAME)}
+    train = _make_coralscapes_v2_stub(source_id2name=native_order)
+    val = _make_coralscapes_v2_stub(source_id2name=native_order)
+    dataset_dict = {("coralscapes_v2", "train"): train, ("coralscapes_v2", "val"): val}
 
     _, registry_datasets = prepare_splits_for_registry(dataset_dict)
     registry = SourceLabelRegistry(
         registry_datasets,
         compute_concepts=True,
-        concept_schema=ConceptSchema.from_csv(sources={"coralscapes"}),
+        concept_schema=ConceptSchema.from_csv(sources={"coralscapes_v2"}),
     )
     attach_registry(registry, dataset_dict.values())
 
     human_native_id = next(
-        native_id for native_id, name in CORALSCAPES_ID2NAME.items() if name == "human"
+        native_id for native_id, name in CORALSCAPES_V2_ID2NAME.items() if name == "human"
     )
     background_native_id = next(
-        native_id for native_id, name in CORALSCAPES_ID2NAME.items() if name == "background"
+        native_id for native_id, name in CORALSCAPES_V2_ID2NAME.items() if name == "background"
     )
 
     # After attach_registry, the lookup already emits global ids (offset folded in).
-    offset = registry.dataset_offsets["coralscapes"]
+    offset = registry.dataset_offsets["coralscapes_v2"]
     human_gid = int(train._native_to_local[human_native_id])
     background_gid = int(train._native_to_local[background_native_id])
     assert train.source_id2name[human_gid - offset] == "human"
     assert train.source_id2name[background_gid - offset] == "background"
 
-    schema = ConceptSchema.from_csv(sources={"coralscapes"})
+    schema = ConceptSchema.from_csv(sources={"coralscapes_v2"})
     channel_names = list(schema.channel_names)
-    human_row = schema.row_for("coralscapes", "human")
-    background_row = schema.row_for("coralscapes", "background")
+    human_row = schema.row_for("coralscapes_v2", "human")
+    background_row = schema.row_for("coralscapes_v2", "background")
 
     assert registry.source_to_concepts is not None
 

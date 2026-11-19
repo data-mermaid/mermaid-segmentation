@@ -1,6 +1,6 @@
 """Benthos Yuval PyTorch dataset (dense segmentation tiles).
 
-Reads tiles produced by ``verify_raw_data_and_add_to_s3.py`` and emits ``(image, source_labels)``
+Reads tiles produced by the ``external-datasets`` CLI and emits ``(image, source_labels)``
 pairs in the Benthos Yuval source-label space. See ``README.md`` for dataset details.
 """
 
