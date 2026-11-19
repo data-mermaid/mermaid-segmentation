@@ -37,3 +37,28 @@ def test_read_csv_s3_propagates_other_client_errors():
     client.get_object.side_effect = _client_error("AccessDenied")
     with pytest.raises(ClientError):
         s3_io.read_csv_s3(client, "bkt", "k.csv")
+
+
+@pytest.mark.parametrize(
+    ("func", "args", "expected"),
+    [
+        (
+            s3_io.object_key_image_list_csv,
+            ("coralnet-public-images", 7),
+            "coralnet-public-images/s7/image_list.csv",
+        ),
+        (
+            s3_io.object_key_labelset_csv,
+            ("coralnet-public-images", 7),
+            "coralnet-public-images/s7/labelset.csv",
+        ),
+        (
+            s3_io.object_key_metadata_csv,
+            ("coralnet-public-images", 7),
+            "coralnet-public-images/s7/metadata.csv",
+        ),
+        (s3_io.object_key_image, ("p", 7, "123"), "p/s7/images/123.jpg"),
+    ],
+)
+def test_object_key_helpers(func, args, expected):
+    assert func(*args) == expected

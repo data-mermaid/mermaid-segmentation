@@ -24,7 +24,7 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 - `scripts/sagemaker/`: the SageMaker launcher (`python -m scripts.sagemaker.launch`) and the in-container entrypoint.
 - `sagemaker/runs/`: SageMaker run YAMLs.
 - `docker/`: the SageMaker job image; deployable images are built only by the CI workflow.
-- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `mermaidseg` does not import it.
+- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/coralnet-dataset/` builds the training manifest from that scrape. `mermaidseg` imports neither.
 - `tests/`: the pytest suite, laid out as 7.4 sets.
 - `pyproject.toml`: dependencies, extras, ruff and pytest settings.
 
@@ -195,6 +195,7 @@ Where a doc disagrees with this file or the code, this file and the code win.
 |---|---|
 | Setup, training entrypoints, test commands | `README.md`: Installation, Segmentation Models, Running Tests |
 | The CoralNet scraper: S3 layout, environment variables, running and testing it | `packages/coralnet-scraper/README.md` |
+| The CoralNet dataset build: outputs, completeness checks, environment variables, running and testing it | `packages/coralnet-dataset/README.md` |
 | Lint, test and dependency settings; CI checks | `pyproject.toml`; `.github/workflows/` |
 | Source and history of each rule, for editing this file | `docs/agents-md-sources.md` |
 

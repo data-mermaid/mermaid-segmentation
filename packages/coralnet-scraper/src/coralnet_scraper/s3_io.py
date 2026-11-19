@@ -22,6 +22,26 @@ def object_key_annotation_csv(base_prefix: str, source_id: int) -> str:
     return f"{source_prefix(base_prefix, source_id)}annotations.csv"
 
 
+def object_key_image_list_csv(base_prefix: str, source_id: int) -> str:
+    """Return the S3 key of a source's ``image_list.csv``."""
+    return f"{source_prefix(base_prefix, source_id)}image_list.csv"
+
+
+def object_key_labelset_csv(base_prefix: str, source_id: int) -> str:
+    """Return the S3 key of a source's ``labelset.csv``."""
+    return f"{source_prefix(base_prefix, source_id)}labelset.csv"
+
+
+def object_key_metadata_csv(base_prefix: str, source_id: int) -> str:
+    """Return the S3 key of a source's ``metadata.csv``."""
+    return f"{source_prefix(base_prefix, source_id)}metadata.csv"
+
+
+def object_key_image(base_prefix: str, source_id: int, image_id: str) -> str:
+    """Return the S3 key of one source image, ``images/<image_id>.jpg``."""
+    return f"{source_prefix(base_prefix, source_id)}images/{image_id}.jpg"
+
+
 def annotations_csv_exists(client: Any, bucket: str, base_prefix: str, source_id: int) -> bool:
     """Return whether a source's ``annotations.csv`` object exists in ``bucket``."""
     prefix = object_key_annotation_csv(base_prefix, source_id)

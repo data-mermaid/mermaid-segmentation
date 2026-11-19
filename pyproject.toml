@@ -71,15 +71,15 @@ ignore = ["E501"]
 convention = "google"
 
 [tool.ruff.lint.isort]
-known-first-party = ["mermaidseg", "coralnet_scraper"]
+known-first-party = ["mermaidseg", "coralnet_scraper", "coralnet_dataset"]
 
 [tool.ruff.format]
 quote-style = "double"
 
 [tool.mypy]
 python_version = "3.11"
-files = ["mermaidseg", "scripts", "tests", "packages/coralnet-scraper/src"]
-mypy_path = ["packages/coralnet-scraper/src"]
+files = ["mermaidseg", "scripts", "tests", "packages/coralnet-scraper/src", "packages/coralnet-dataset/src"]
+mypy_path = ["packages/coralnet-scraper/src", "packages/coralnet-dataset/src"]
 ignore_missing_imports = true
 follow_imports = "silent"
 explicit_package_bases = true

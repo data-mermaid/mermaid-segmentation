@@ -1,4 +1,4 @@
-"""mermaidseg and the CoralNet scraper must not import each other."""
+"""mermaidseg, the CoralNet scraper and the CoralNet dataset package must not import each other."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRAPER_SRC = _ROOT / "packages" / "coralnet-scraper" / "src"
+_DATASET_SRC = _ROOT / "packages" / "coralnet-dataset" / "src"
 
 
 def _imported_top_levels(path: Path) -> set[str]:
@@ -37,8 +38,17 @@ def _violations(source_dirs: list[Path], forbidden: str) -> list[str]:
     [
         ([_SCRAPER_SRC], "mermaidseg"),
         ([_ROOT / "mermaidseg", _ROOT / "scripts"], "coralnet_scraper"),
+        ([_DATASET_SRC], "mermaidseg"),
+        ([_ROOT / "mermaidseg", _ROOT / "scripts"], "coralnet_dataset"),
+        ([_SCRAPER_SRC], "coralnet_dataset"),
     ],
-    ids=["scraper-must-not-import-mermaidseg", "mermaidseg-must-not-import-scraper"],
+    ids=[
+        "scraper-must-not-import-mermaidseg",
+        "mermaidseg-must-not-import-scraper",
+        "dataset-must-not-import-mermaidseg",
+        "mermaidseg-must-not-import-dataset",
+        "scraper-must-not-import-dataset",
+    ],
 )
 def test_no_forbidden_imports(source_dirs, forbidden):
     assert _violations(source_dirs, forbidden) == []

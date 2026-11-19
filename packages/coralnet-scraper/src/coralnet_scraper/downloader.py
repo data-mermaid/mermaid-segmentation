@@ -367,7 +367,7 @@ class CoralNetDownloader:
             )
             csv_buffer = io.StringIO()
             meta_df.to_csv(csv_buffer, index=False)
-            key = f"{s3_prefix}/s{source_id}/metadata.csv"
+            key = s3_io.object_key_metadata_csv(s3_prefix, source_id)
             s3_io.upload_csv_body(
                 self.s3, bucket=bucket_name, key=key, csv_text=csv_buffer.getvalue()
             )
@@ -420,7 +420,7 @@ class CoralNetDownloader:
             )
             buf = io.StringIO()
             labelset_df.to_csv(buf, index=False)
-            key = f"{s3_prefix}/s{source_id}/labelset.csv"
+            key = s3_io.object_key_labelset_csv(s3_prefix, source_id)
             s3_io.upload_csv_body(self.s3, bucket=bucket_name, key=key, csv_text=buf.getvalue())
             logger.info("Labelset saved s3://%s/%s", bucket_name, key)
             return True
@@ -585,7 +585,7 @@ class CoralNetDownloader:
                 )
             buf = io.StringIO()
             df_annotations.to_csv(buf, index=False)
-            key = f"{s3_prefix}/s{source_id}/annotations.csv"
+            key = s3_io.object_key_annotation_csv(s3_prefix, source_id)
             s3_io.upload_csv_body(self.s3, bucket=bucket_name, key=key, csv_text=buf.getvalue())
             logger.info("Annotations saved s3://%s/%s", bucket_name, key)
             return True
@@ -1147,8 +1147,7 @@ class CoralNetDownloader:
             for _, row in chunk.iterrows():
                 name = row["Image Page"].replace("/image/", "").replace("/view/", "")
                 url = row["Image URL"]
-                clean_name = f"{name}.jpg"
-                sk = f"{s3_prefix}/s{source_id}/images/{clean_name}"
+                sk = s3_io.object_key_image(s3_prefix, source_id, name)
                 futures.append(executor.submit(self.download_image_to_s3, url, bucket_name, sk))
             total = len(futures)
             for i, fu in enumerate(concurrent.futures.as_completed(futures), 1):
@@ -1252,7 +1251,7 @@ class CoralNetDownloader:
             images_df["Image URL"] = pd.NA
             buf = io.StringIO()
             images_df.to_csv(buf, index=False)
-            list_key = f"{s3_prefix}/s{sid}/image_list.csv"
+            list_key = s3_io.object_key_image_list_csv(s3_prefix, sid)
             s3_io.upload_csv_body(
                 self.s3,
                 bucket=bucket_name,
