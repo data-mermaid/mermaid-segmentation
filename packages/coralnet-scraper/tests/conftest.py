@@ -6,7 +6,6 @@ touches. Keeps the test suite free of network and AWS deps.
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 
 import pytest
@@ -150,5 +149,4 @@ def paginated_downloader(fake_s3) -> CoralNetDownloader:
     dl.logged_in = True
     dl.s3 = fake_s3
     dl._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
-    dl._export_thread_local = threading.local()
     return dl

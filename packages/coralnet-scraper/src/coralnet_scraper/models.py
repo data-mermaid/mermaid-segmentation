@@ -33,7 +33,3 @@ class DownloadResult:
     skipped_no_confirmed: bool = False
     errors: list[str] = field(default_factory=list)
     image_failures: ImageFailures = field(default_factory=ImageFailures)
-
-    def __bool__(self) -> bool:
-        """Return ``ok``, so a result is truthy exactly when the download succeeded."""
-        return self.ok

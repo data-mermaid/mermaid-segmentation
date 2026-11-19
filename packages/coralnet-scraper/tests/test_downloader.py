@@ -259,6 +259,35 @@ def _browse_page(
     return _BROWSE_HTML_PAGE.format(csrf=csrf, thumbs=thumbs, next_link=next_link)
 
 
+def test_thread_sessions_are_not_shared_between_downloaders():
+    """Each downloader's per-thread session carries its own downloader's cookies."""
+    first = CoralNetDownloader("u", "p")
+    second = CoralNetDownloader("u", "p")
+    first.session.cookies.set("sessionid", "first-id")
+    second.session.cookies.set("sessionid", "second-id")
+
+    first_session = first._get_thread_session()
+    second_session = second._get_thread_session()
+
+    assert first_session.cookies.get("sessionid") == "first-id"
+    assert second_session.cookies.get("sessionid") == "second-id"
+    assert first_session is not second_session
+    assert first._get_thread_session() is first_session
+
+
+def test_export_sessions_are_not_shared_between_downloaders():
+    """Each downloader's export session comes from its own login, not another's cache."""
+    first = CoralNetDownloader("u", "p")
+    second = CoralNetDownloader("u", "p")
+    first_sentinel = requests.Session()
+    second_sentinel = requests.Session()
+    first._new_logged_in_session = lambda: first_sentinel  # type: ignore[method-assign]
+    second._new_logged_in_session = lambda: second_sentinel  # type: ignore[method-assign]
+
+    assert first._get_export_session() is first_sentinel
+    assert second._get_export_session() is second_sentinel
+
+
 def test_get_export_session_creates_independent_logged_in_session_per_thread():
     """Each phase-2 worker thread gets its own ``requests.Session`` from a fresh login.
 
@@ -275,7 +304,6 @@ def test_get_export_session_creates_independent_logged_in_session_per_thread():
         return requests.Session()
 
     dl._new_logged_in_session = fake_new_session  # type: ignore[method-assign]
-    dl._export_thread_local = threading.local()
 
     # Each worker calls _get_export_session twice; both calls must return the
     # same Session (cached per-thread), but distinct threads must get distinct
