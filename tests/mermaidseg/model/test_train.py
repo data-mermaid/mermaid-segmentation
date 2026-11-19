@@ -2,41 +2,86 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
+import torch.distributed as dist
 
-from mermaidseg.model.train import (
-    _enforce_load_failure_rate,
-    _loader_load_failure_count,
-    _log_metric_dict,
+from mermaidseg.datasets.local_cache import LocalS3Cache, create_cache_stats
+from mermaidseg.model.train import _enforce_load_failure_rate, _log_metric_dict
+from tests.mermaidseg.conftest import init_gloo, spawn_gloo
+
+pytestmark = pytest.mark.usefixtures("reset_local_cache")
+
+
+def _track_failures(count: int) -> None:
+    cache = LocalS3Cache.get()
+    cache.attach_stats(create_cache_stats())
+    for _ in range(count):
+        cache.record_load_failure()
+
+
+def test_raises_when_epoch_rate_exceeds_max() -> None:
+    _track_failures(6)
+    with pytest.raises(RuntimeError, match="3/10"):
+        _enforce_load_failure_rate(3, 7, 0.2, epoch=0)
+
+
+def test_rate_at_max_does_not_raise_and_uses_epoch_delta() -> None:
+    _track_failures(4)
+    # Delta 1 over 10 attempts is exactly 0.1; the cumulative 4 over 13 would raise.
+    _enforce_load_failure_rate(3, 9, 0.1, epoch=0)
+
+
+def test_disabled_guard_does_not_raise() -> None:
+    _track_failures(9)
+    _enforce_load_failure_rate(0, 1, None, epoch=0)
+
+
+def test_untracked_failures_do_not_raise() -> None:
+    LocalS3Cache.get().record_load_failure()
+    _enforce_load_failure_rate(None, 7, 0.0, epoch=0)
+
+
+def test_zero_attempts_does_not_raise() -> None:
+    _track_failures(0)
+    _enforce_load_failure_rate(0, 0, 0.0, epoch=0)
+
+
+def _guard_worker(
+    rank: int,
+    world_size: int,
+    init_method: str,
+    queue: Any,
+    deltas: tuple[int, ...],
+    num_loaded_samples: int,
+    max_rate: float,
+) -> None:
+    init_gloo(rank, world_size, init_method)
+    try:
+        _track_failures(deltas[rank])
+        try:
+            _enforce_load_failure_rate(0, num_loaded_samples, max_rate, epoch=0)
+            outcome = "ok"
+        except RuntimeError:
+            outcome = "raised"
+        queue.put((rank, outcome))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_failures_on_one_rank_raise_on_every_rank() -> None:
+    assert spawn_gloo(_guard_worker, 2, ((3, 0), 7, 0.2)) == ["raised", "raised"]
+
+
+@pytest.mark.parametrize(
+    ("max_rate", "expected"),
+    [(0.15, ["raised", "raised"]), (0.25, ["ok", "ok"])],
 )
-
-
-class _TrackedDataset:
-    def __init__(self, size: int, failures: int) -> None:
-        self.size = size
-        self.failures = failures
-
-    def __len__(self) -> int:
-        return self.size
-
-    def num_load_failures(self) -> int:
-        return self.failures
-
-
-class _Loader:
-    def __init__(self, dataset: object) -> None:
-        self.dataset = dataset
-
-
-class _BrokenDataset:
-    def num_load_failures(self) -> int:
-        raise OSError("failure report unreadable")
-
-
-class _UntrackedDataset:
-    def __len__(self) -> int:
-        return 10
+def test_rate_is_summed_failures_over_summed_attempts(max_rate: float, expected: list[str]) -> None:
+    # 2 failures over 8 samples + 2 failures = 0.2, whatever each rank's local share.
+    assert spawn_gloo(_guard_worker, 2, ((1, 1), 8, max_rate)) == expected
 
 
 class _RecordingLogger:
@@ -45,58 +90,6 @@ class _RecordingLogger:
 
     def log(self, metrics: dict[str, object], step: int) -> None:
         self.calls.append((metrics, step))
-
-
-class TestLoaderLoadFailureCount:
-    def test_reads_the_cumulative_count_as_an_int(self):
-        assert _loader_load_failure_count(_Loader(_TrackedDataset(size=10, failures=3))) == 3
-
-    @pytest.mark.parametrize(
-        "loader",
-        [object(), _Loader(None), _Loader(_UntrackedDataset()), _Loader(_BrokenDataset())],
-        ids=["no_dataset_attr", "dataset_none", "untracked", "count_raises"],
-    )
-    def test_is_none_when_the_count_is_unavailable(self, loader):
-        assert _loader_load_failure_count(loader) is None
-
-
-class TestEnforceLoadFailureRate:
-    @pytest.mark.parametrize(
-        ("failures_now", "raises"),
-        [(15, False), (16, True)],
-        ids=["at_the_rate", "just_over"],
-    )
-    def test_raises_only_when_the_epoch_rate_exceeds_the_limit(self, failures_now, raises):
-        # 10 failures predate the epoch; the limit is 5 of 100 samples.
-        loader = _Loader(_TrackedDataset(size=100, failures=failures_now))
-
-        if not raises:
-            _enforce_load_failure_rate(loader, 10, 0.05, epoch=3)
-            return
-        with pytest.raises(RuntimeError) as excinfo:
-            _enforce_load_failure_rate(loader, 10, 0.05, epoch=3, split="validation")
-        message = str(excinfo.value)
-        assert "Epoch 3: validation load-failure rate 6.0% (6/100)" in message
-        assert "max_load_failure_rate=5.0%" in message
-
-    def test_split_defaults_to_train(self):
-        loader = _Loader(_TrackedDataset(size=10, failures=10))
-
-        with pytest.raises(RuntimeError, match="Epoch 0: train load-failure rate 100.0% .10/10."):
-            _enforce_load_failure_rate(loader, 0, 0.5, epoch=0)
-
-    @pytest.mark.parametrize(
-        ("loader", "failures_before", "max_rate"),
-        [
-            (_Loader(_TrackedDataset(size=10, failures=10)), 0, None),
-            (_Loader(_TrackedDataset(size=10, failures=10)), None, 0.0),
-            (_Loader(_TrackedDataset(size=0, failures=10)), 0, 0.0),
-            (_Loader(None), 0, 0.0),
-        ],
-        ids=["disabled", "untracked", "empty_dataset", "no_dataset"],
-    )
-    def test_is_a_no_op_when_it_cannot_judge_a_rate(self, loader, failures_before, max_rate):
-        _enforce_load_failure_rate(loader, failures_before, max_rate, epoch=0)
 
 
 class TestLogMetricDict:

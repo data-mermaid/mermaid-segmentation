@@ -70,6 +70,7 @@ class CacheStatsHandles:
     stage_sec: dict[str, Any]  # name -> mp.Value("d")
     samples: Any  # mp.Value
     retries: Any  # mp.Value
+    load_failures: Any  # mp.Value("Q")
 
     @classmethod
     def create(cls) -> CacheStatsHandles:
@@ -80,6 +81,7 @@ class CacheStatsHandles:
             stage_sec={name: mp.Value("d", 0.0) for name in STAGE_NAMES},
             samples=mp.Value("Q", 0),
             retries=mp.Value("Q", 0),
+            load_failures=mp.Value("Q", 0),
         )
 
 
@@ -286,8 +288,27 @@ class LocalS3Cache:
                 self._stats.samples.value += self._sample_accum
             self._sample_accum = 0
 
+    def record_load_failure(self) -> None:
+        """Count one dataset load failure in the shared stats; no-op without stats."""
+        if self._stats is None:
+            return
+        # Immediate, not batched like the stage stats: failures are rare and a worker's unflushed
+        # accumulation would be lost when the worker exits.
+        with self._stats.load_failures.get_lock():
+            self._stats.load_failures.value += 1
+
+    def load_failure_count(self) -> int | None:
+        """Return the cumulative load failures across processes, or None without stats."""
+        if self._stats is None:
+            return None
+        with self._stats.load_failures.get_lock():
+            return int(self._stats.load_failures.value)
+
     def snapshot_stats(self) -> CacheStats:
-        """Return and reset the shared counters accumulated since the last snapshot."""
+        """Return and reset the shared counters accumulated since the last snapshot.
+
+        ``load_failures`` is cumulative and is not reset; read it with ``load_failure_count``.
+        """
         if self._stats is None:
             return CacheStats(local_hits=0, s3_fetches=0)
         # Flush this process's own accumulators first (covers the num_workers=0 path, where loading
