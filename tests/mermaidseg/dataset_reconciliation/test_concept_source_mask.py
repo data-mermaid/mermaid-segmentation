@@ -110,7 +110,7 @@ def test_loading_a_mask_without_its_sidecar_raises_file_not_found(tmp_path):
 def test_loading_a_mask_missing_a_required_column_raises(tmp_path):
     path = tmp_path / "mask.csv"
     pd.DataFrame({"source_id": ["1"]}).to_csv(path, index=False)
-    meta_path(path).write_text(yaml.safe_dump({"dataset": "coralnet"}))
+    meta_path(path).write_text(yaml.safe_dump({"dataset": "coralnet", "source_ids": ["1"]}))
 
     with pytest.raises(ValueError, match=r"missing columns \['concept'\]"):
         load_concept_source_mask(path, _schema())
@@ -131,7 +131,9 @@ def test_non_numeric_source_ids_follow_the_numeric_ones_in_the_keep_table(tmp_pa
     pd.DataFrame(
         {"source_id": ["b", "12", "7"], "concept": ["bleached"] * 3, "n_false": [1, 1, 1]}
     ).to_csv(path, index=False)
-    meta_path(path).write_text(yaml.safe_dump({"dataset": "coralnet"}))
+    meta_path(path).write_text(
+        yaml.safe_dump({"dataset": "coralnet", "source_ids": ["b", "12", "7"]})
+    )
 
     mask = load_concept_source_mask(path, _schema())
 
