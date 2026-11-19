@@ -187,9 +187,10 @@ Export needs `model.json` beside the checkpoint and a lineage recorded in the ch
 
 `scripts/evaluate.py` is the validation suite: CoralNet, Pacific Labeled Corals, CoralscapesV2 few-shot probes and the validation loss. It evaluates an exported bundle. Input size, normalization, label maps and run settings come from the bundle. The model comes only from `--bundle`.
 
-- The CoralscapesV2 probes need `--probe-points` and `--coralscapes39-probe`. The repo ships no probe files, and the defaults of both flags point at `configs/eval/`, which does not exist.
 - Without `--strict`, a failed eval is only logged and the script exits 0.
 - The benthic hierarchy comes from the MERMAID API unless `--benthic-hierarchy-json` is given.
+
+The CoralscapesV2 probe point sets are in `configs/eval/`; `scripts/build_coralscapes_v2_probe_points.py` rebuilds them from a local mirror of `josauder/coralscapesV2`.
 
 ### Running Tests
 
