@@ -19,7 +19,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from .config import DEFAULT_WORKERS, RESIZE_THRESHOLD
-from .inspect import ImageInspection, inspect_image
+from .inspect import ImageInspection, IssueType, decode_image
 
 logger = logging.getLogger(__name__)
 
@@ -47,36 +47,39 @@ def make_resize_s3_client(*, max_pool_connections: int = 10) -> Any:
 
 
 def resize_image_to_threshold(
-    image_bytes: io.BytesIO,
+    img: Image.Image,
+    original_bytes: io.BytesIO,
+    *,
+    original_size: tuple[int, int],
 ) -> io.BytesIO:
-    """Resize an image so its longest edge equals ``RESIZE_THRESHOLD``, keeping the aspect ratio.
+    """Resize a decoded image so its longest edge equals ``RESIZE_THRESHOLD``, keeping the aspect ratio.
 
-    An image whose longest edge is at most ``RESIZE_THRESHOLD`` keeps its size; it is still re-encoded
-    when it is not a JPEG in a JPEG-encodable mode.
+    An image whose original longest edge is at most ``RESIZE_THRESHOLD`` keeps its size; it is still
+    re-encoded when it is not a JPEG in a JPEG-encodable mode.
 
     Args:
-        image_bytes: BytesIO with the image data.
+        img: The decoded image (see :func:`coralnet_dataset.inspect.decode_image`); a JPEG may have
+            been decoded at a reduced scale, so ``img.size`` can be smaller than the original.
+        original_bytes: The encoded original, returned as is when no change is needed.
+        original_size: ``(width, height)`` of the original; the resize target derives from it, not
+            from ``img.size``.
 
     Returns:
         BytesIO with the resized JPEG, or the original bytes when no change is needed.
     """
-    image_bytes.seek(0)  # callers may have already read this buffer (e.g. during inspection)
-    img: Image.Image = Image.open(image_bytes)
-    img.load()
-
-    width, height = img.size
-    longest_edge = max(width, height)
-    needs_resize = longest_edge > RESIZE_THRESHOLD
+    original_width, original_height = original_size
+    needs_resize = max(original_size) > RESIZE_THRESHOLD
     # JPEG can only encode RGB or grayscale; alpha/palette modes (RGBA, LA, P) must be converted.
     needs_convert = img.mode not in ("RGB", "L")
 
     if not needs_resize and not needs_convert and img.format == "JPEG":
-        image_bytes.seek(0)
-        return image_bytes
+        original_bytes.seek(0)
+        return original_bytes
 
     if needs_resize:
-        scale = RESIZE_THRESHOLD / longest_edge
-        img = img.resize((int(width * scale), int(height * scale)), Image.Resampling.LANCZOS)
+        scale = RESIZE_THRESHOLD / max(original_size)
+        target = (int(original_width * scale), int(original_height * scale))
+        img = img.resize(target, Image.Resampling.LANCZOS)
 
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
@@ -163,18 +166,18 @@ def _validate_and_download(
     source_id: int,
     image_id: str,
     s3_client: Any,
-) -> tuple[io.BytesIO | None, ImageInspection]:
-    """Download an image and inspect it.
+) -> tuple[io.BytesIO | None, Image.Image | None, ImageInspection]:
+    """Download an image and decode it once, at reduced JPEG scale where possible.
 
     Returns:
-        ``(image_bytes, inspection)``; ``image_bytes`` is None when the inspection failed.
+        ``(image_bytes, image, inspection)``; the first two are None when the inspection failed.
 
     Raises:
         Exception: Any S3 download error propagates so the caller reports a retryable failure.
     """
     response = s3_client.get_object(Bucket=bucket, Key=original_key)
     image_bytes = io.BytesIO(response["Body"].read())
-    inspection = inspect_image(image_bytes)
+    image, inspection = decode_image(image_bytes, max_edge=RESIZE_THRESHOLD)
     if not inspection.is_valid:
         logger.warning(
             "Validation failed for %s/%s: %s — %s",
@@ -183,7 +186,14 @@ def _validate_and_download(
             inspection.issue_type.value,
             inspection.error_message,
         )
-    return (image_bytes if inspection.is_valid else None, inspection)
+    return (image_bytes if inspection.is_valid else None, image, inspection)
+
+
+def _skip_reason(inspection: ImageInspection) -> str:
+    """Return the skip reason for a failed inspection."""
+    if inspection.issue_type == IssueType.OVERSIZED:
+        return "oversized"
+    return f"corrupted_{inspection.issue_type.value}"
 
 
 def _result_row(
@@ -220,7 +230,7 @@ def resize_and_upload_image(
 
     Returns:
         A result row (see :func:`_result_row`) with status ``completed``, ``skipped`` (with a
-        ``corrupted_<issue>`` skip reason, for an image that fails inspection) or ``failed`` (for a
+        ``oversized`` or ``corrupted_<issue>`` skip reason, for an image that fails inspection) or ``failed`` (for a
         download, resize or upload error, which is retryable).
     """
     source_id = todo_item["source_id"]
@@ -230,7 +240,7 @@ def resize_and_upload_image(
 
     try:
         logger.debug("Downloading and validating %s", original_key)
-        original_bytes, inspection = _validate_and_download(
+        original_bytes, image, inspection = _validate_and_download(
             bucket=bucket,
             original_key=original_key,
             source_id=source_id,
@@ -238,16 +248,15 @@ def resize_and_upload_image(
             s3_client=s3_client,
         )
 
-        if original_bytes is None:
-            return _result_row(
-                source_id,
-                image_id,
-                "skipped",
-                skip_reason=f"corrupted_{inspection.issue_type.value}",
-            )
+        if original_bytes is None or image is None:
+            return _result_row(source_id, image_id, "skipped", skip_reason=_skip_reason(inspection))
 
         logger.debug("Resizing %s/%s", source_id, image_id)
-        resized_bytes = resize_image_to_threshold(original_bytes)
+        resized_bytes = resize_image_to_threshold(
+            image, original_bytes, original_size=(inspection.width, inspection.height)
+        )
+        # Release the decoded pixels before the upload holds the connection.
+        del image
 
         logger.debug("Uploading to %s", output_key)
         s3_client.put_object(
@@ -301,11 +310,13 @@ def resize_and_upload_all_images(
             for future in tqdm(as_completed(futures), total=len(futures), desc="Resizing images")
         ]
 
-    num_resized, num_corrupted, num_failed = _count_results(results)
+    num_resized, num_skipped, num_failed = _count_results(results)
+    num_oversized = sum(r["skip_reason"] == "oversized" for r in results)
     logger.info(
-        "Resizing complete: %d resized, %d corrupted, %d failed",
+        "Resizing complete: %d resized, %d oversized, %d corrupted, %d failed",
         num_resized,
-        num_corrupted,
+        num_oversized,
+        num_skipped - num_oversized,
         num_failed,
     )
-    return num_resized, num_corrupted, num_failed
+    return num_resized, num_skipped, num_failed
