@@ -4,7 +4,7 @@ Builds the CoralNet training dataset from a scrape on S3. Import package: `coral
 
 ## Scope
 
-- **Owns:** turning a scrape into the training manifest, the resized images and the id2name JSON that `CoralNetDataset` reads.
+- **Owns:** turning a scrape into the training manifest, the resized images and the id2name JSON that `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`) reads.
 - **Does not own:** downloading CoralNet. That is [`coralnet-scraper`](../coralnet-scraper/README.md).
 - **End to end:** to recreate or update the CoralNet data, scrape through training, follow the [CoralNet data runbook](../../docs/coralnet-data-runbook.md).
 - **Boundary:** the package imports the `coralnet_scraper` configuration and S3 key layout. It does not import `mermaidseg`, and `mermaidseg` does not import it. The root `tests/test_package_boundaries.py` enforces both (run with the root suite). A root `uv sync` does not install it.
@@ -23,7 +23,7 @@ Files are written locally to `outputs/coralnet-dataset/<version>/` (change the b
 |---|---|---|
 | `coralnet_annotations_<version>.parquet` | `build-annotations` | Confirmed point annotations of the included sources: `source_id`, `image_id`, `row`, `col`, `coralnet_id`, `status`. |
 | `coralnet_id2name_<version>.json` | `build-annotations` | Label ID (as a string) to label name, merged from the included sources' `labelset.csv`. |
-| `coralnet_images_<version>.parquet` | `build-images` | One row per annotated image, from its JPEG header: `s3_key`, `width`, `height`, `longest_edge`, `file_size`, `needs_resize`, `header_status`, `error_message`. |
+| `coralnet_images_<version>.parquet` | `build-images` | One row per annotated image, from its JPEG header: `source_id`, `image_id`, `s3_key`, `width`, `height`, `longest_edge`, `file_size`, `needs_resize`, `header_status`, `error_message`. |
 | `coralnet_training_manifest_<version>.parquet` | `build-manifest` | One row per annotation, ready for training. |
 
 With `--upload-to-s3`, each file is also uploaded to `s3://<bucket>/etl-outputs/coralnet/<version>/<file>`. An upload whose key already exists raises `RuntimeError` and stops the command, whether or not `--version-tag` is given. Pass `--overwrite` to replace existing keys.
@@ -34,7 +34,7 @@ With `--upload-to-s3`, each file is also uploaded to `s3://<bucket>/etl-outputs/
 s3://<bucket>/<resized prefix>/resized/s<source_id>/images/<image_id>.jpg
 ```
 
-The objects on S3 are the resize state. A rerun lists `<resized prefix>/resized/` and resizes only the images that have no object there.
+The objects on S3 are the resize state. A rerun lists `<resized prefix>/resized/` and resizes only the images that need a resize and have no object there.
 
 The training manifest has these columns. `CoralNetDataset` reads `source_id`, `image_id`, `row`, `col`, `coralnet_id` and `image_s3_key`:
 
@@ -73,7 +73,7 @@ Common flags, on every subcommand:
 | Flag | Default | Effect |
 |---|---|---|
 | `--version-tag` | `YYYYMMDD_<sha>` | Run version tag. It names the run only. |
-| `--overwrite` | off | Let an upload replace an existing key under `etl-outputs/coralnet/<version>/`. Without it, an upload to an existing key raises `RuntimeError`. |
+| `--overwrite` | off | Let an upload replace an existing key under `etl-outputs/coralnet/<version>/`. Without it, an upload to an existing key raises `RuntimeError`. A training run that pins this tag then reads different data. |
 | `--output-dir` | `outputs/coralnet-dataset` | Local base directory. Files go under `<output-dir>/<version>/`. |
 | `--upload-to-s3` | off | Upload each output file to `etl-outputs/coralnet/<version>/`. |
 | `--workers` | `MERMAID_CORALNET_ETL_WORKERS`, else 16 | Concurrent S3 workers. Must be at least 1. |

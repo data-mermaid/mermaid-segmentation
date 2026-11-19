@@ -26,7 +26,7 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 - `docker/`: the SageMaker job image; deployable images are built only by the CI workflow.
 - `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/coralnet-dataset/` builds the training manifest from that scrape. `mermaidseg` imports neither.
 - `tests/`: the pytest suite, laid out as 7.4 sets.
-- `pyproject.toml`: dependencies, extras, ruff and pytest settings.
+- `pyproject.toml`: dependencies, extras, dependency groups, and ruff, mypy and pytest settings.
 
 ## 2. Working agreement
 
@@ -81,8 +81,9 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 7. Every forward pass outside training runs under `model.eval()` and `torch.inference_mode()`.
 8. No NumPy or Python-side computation inside `forward` or the per-step training loop, and no
    `.item()` or `.cpu()` host syncs there except at logging intervals.
-9. One seeding function seeds Python, NumPy and torch, and seeds DataLoader workers through
-   `worker_init_fn` and a seeded `generator`.
+9. Seed through one module, `mermaidseg/seeding.py`: `seed_everything` seeds Python, NumPy and
+   torch, and every DataLoader takes `make_worker_seeder` as `worker_init_fn` and a seeded
+   `generator`.
 10. Don't promise bitwise reproducibility across PyTorch releases, platforms, or CPU and GPU.
 11. Load state dicts with `strict=True`, unless the mismatch is intended and the call site says why.
 
@@ -134,15 +135,17 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
    Extend that file if it exists. If you change tests whose file is elsewhere, move that file to
    the mirrored path in the same change. Reuse existing `conftest.py` fixtures and helpers. One
    behavior per test, smallest setup that triggers it. No flaky tests: they are worse than none.
-5. Run the tests relevant to the change. Before proposing a PR, run the selection CI runs:
-   `-m "not slow and not integration and not live"`.
+5. Run the tests relevant to the change. Before proposing a PR, run what CI runs:
+   `uv run --group tests --extra wandb --extra mlflow pytest -m "not slow and not integration and not live"`,
+   and each changed package's suite (see its README).
 
 ## 8. Style and formatting
 
 1. All CI checks must pass. They are defined in `.github/workflows/`.
-2. Always add type annotations when modifying code; CI rejects unannotated functions in changed files.
+2. Always add type annotations when modifying code; CI runs mypy with `disallow_untyped_defs`
+   on `mermaidseg/`, `scripts/` and the package sources.
 3. Docstrings must be Google style (do not duplicate type annotations and defaults). CI checks
-   changed files.
+   them with ruff outside the test directories.
 4. Comments and docstrings that only make sense to the current PR's author or reviewer (for example
    `# per reviewer comment on PR #NNNN`, `# as discussed in review`) state the *reason* so they
    stand alone, or are dropped. No debug printouts.
@@ -196,7 +199,8 @@ Where a doc disagrees with this file or the code, this file and the code win.
 | Setup, training entrypoints, test commands | `README.md`: Installation, Segmentation Models, Running Tests |
 | The CoralNet scraper: S3 layout, environment variables, running and testing it | `packages/coralnet-scraper/README.md` |
 | The CoralNet dataset build: outputs, completeness checks, environment variables, running and testing it | `packages/coralnet-dataset/README.md` |
-| Lint, test and dependency settings; CI checks | `pyproject.toml`; `.github/workflows/` |
+| Recreate or update the CoralNet data end to end | `docs/coralnet-data-runbook.md` |
+| Lint, type-check, test and dependency settings; CI checks; pre-commit hooks | `pyproject.toml`; `.github/workflows/`; `.pre-commit-config.yaml` |
 | Source and history of each rule, for editing this file | `docs/agents-md-sources.md` |
 
 <!-- Adapted from huggingface/{diffusers,transformers,peft,pytorch-image-models,lerobot} and

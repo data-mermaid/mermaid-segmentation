@@ -1,12 +1,12 @@
 # Contributing to MermaidSeg
 
-Thank you for contributing. This document covers the technical checklist for getting set up and submitting changes. For onboarding, team process, and workflow guides, see the [project Wiki](https://github.com/data-mermaid/mermaid-segmentation/wiki).
+This document lists ways to contribute. For setup and commands see [README.md](README.md); for code rules see [AGENTS.md](AGENTS.md). For onboarding, team process, and workflow guides, see the [project Wiki](https://github.com/data-mermaid/mermaid-segmentation/wiki).
 
 ## Ways to contribute
 
 All contributions are valued, not just code. You can help by:
 
-- **Reporting bugs** — open a Bug issue with a minimal reproducer
+- **Reporting bugs** — open an issue with a minimal reproducer
 - **Improving documentation** — fix a confusing explanation, add an example, correct a broken step
 - **Writing or improving tests** — test coverage helps everyone work with more confidence
 - **Reviewing pull requests** — a second pair of eyes catches things the author misses
