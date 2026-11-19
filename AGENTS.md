@@ -196,10 +196,11 @@ Where a doc disagrees with this file or the code, this file and the code win.
 
 | Need | Where |
 |---|---|
-| Setup, training entrypoints, test commands | `README.md`: Installation, Segmentation Models, Running Tests |
+| Test and lint commands, architecture overview | `README.md`: Running Tests, Common Commands, Architecture overview |
+| Setup, data, training (Slurm, SageMaker), export and evaluation procedures | `docs/runbooks/` |
 | The CoralNet scraper: S3 layout, environment variables, running and testing it | `packages/coralnet-scraper/README.md` |
 | The CoralNet dataset build: outputs, completeness checks, environment variables, running and testing it | `packages/coralnet-dataset/README.md` |
-| Recreate or update the CoralNet data end to end | `docs/coralnet-data-runbook.md` |
+| Recreate or update the CoralNet data end to end | `docs/runbooks/coralnet-data.md` |
 | Lint, type-check, test and dependency settings; CI checks; pre-commit hooks | `pyproject.toml`; `.github/workflows/`; `.pre-commit-config.yaml` |
 | Source and history of each rule, for editing this file | `docs/agents-md-sources.md` |
 
