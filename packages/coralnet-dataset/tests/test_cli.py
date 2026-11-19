@@ -392,7 +392,7 @@ def _run_upload(monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, ex
     return cli.main([*argv, *extra])
 
 
-def test_upload_refuses_to_overwrite_without_explicit_tag(
+def test_upload_refuses_to_overwrite_an_existing_key_with_default_tag(
     monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
 ):
     fake_s3.put(_BUCKET, _upload_key("auto"), b"old")
@@ -403,13 +403,31 @@ def test_upload_refuses_to_overwrite_without_explicit_tag(
     assert fake_s3.objects[(_BUCKET, _upload_key("auto"))] == b"old"
 
 
-def test_upload_overwrites_with_explicit_tag(
+def test_upload_refuses_to_overwrite_with_explicit_tag_without_overwrite_flag(
+    monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
+):
+    fake_s3.put(_BUCKET, _upload_key("v1"), b"old")
+
+    with pytest.raises(RuntimeError, match=rf"{_upload_key('v1')}.*--overwrite"):
+        _run_upload(
+            monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, ["--version-tag", "v1"]
+        )
+
+    assert fake_s3.objects[(_BUCKET, _upload_key("v1"))] == b"old"
+
+
+def test_upload_overwrites_an_existing_key_with_overwrite_flag(
     monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
 ):
     fake_s3.put(_BUCKET, _upload_key("v1"), b"old")
 
     rc = _run_upload(
-        monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, ["--version-tag", "v1"]
+        monkeypatch,
+        fake_s3,
+        sample_csv_factory,
+        populate,
+        tmp_path,
+        ["--version-tag", "v1", "--overwrite"],
     )
 
     assert rc == 0

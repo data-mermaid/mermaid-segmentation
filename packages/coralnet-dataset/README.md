@@ -26,7 +26,7 @@ Files are written locally to `outputs/coralnet-dataset/<version>/` (change the b
 | `coralnet_images_<version>.parquet` | `build-images` | One row per annotated image, from its JPEG header: `s3_key`, `width`, `height`, `longest_edge`, `file_size`, `needs_resize`, `header_status`, `error_message`. |
 | `coralnet_training_manifest_<version>.parquet` | `build-manifest` | One row per annotation, ready for training. |
 
-With `--upload-to-s3`, each file is also uploaded to `s3://<bucket>/etl-outputs/coralnet/<version>/<file>`. An upload whose key already exists raises `RuntimeError` and stops the command, unless `--version-tag` is given. An explicit `--version-tag` overwrites.
+With `--upload-to-s3`, each file is also uploaded to `s3://<bucket>/etl-outputs/coralnet/<version>/<file>`. An upload whose key already exists raises `RuntimeError` and stops the command, whether or not `--version-tag` is given. Pass `--overwrite` to replace existing keys.
 
 `resize` writes to S3 only, with or without `--upload-to-s3`. An image needs a resize when its longest edge is more than 2048 pixels. The resized copy has a longest edge of 2048, keeps the aspect ratio, and is a JPEG at quality 95:
 
@@ -72,7 +72,8 @@ Common flags, on every subcommand:
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--version-tag` | `YYYYMMDD_<sha>` | Run version tag. Also lets an upload overwrite existing keys. |
+| `--version-tag` | `YYYYMMDD_<sha>` | Run version tag. It names the run only. |
+| `--overwrite` | off | Let an upload replace an existing key under `etl-outputs/coralnet/<version>/`. Without it, an upload to an existing key raises `RuntimeError`. |
 | `--output-dir` | `outputs/coralnet-dataset` | Local base directory. Files go under `<output-dir>/<version>/`. |
 | `--upload-to-s3` | off | Upload each output file to `etl-outputs/coralnet/<version>/`. |
 | `--workers` | `MERMAID_CORALNET_ETL_WORKERS`, else 16 | Concurrent S3 workers. Must be at least 1. |

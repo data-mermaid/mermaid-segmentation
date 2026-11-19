@@ -62,8 +62,8 @@ class _Run:
     out_dir: Path
     workers: int
     upload: bool
-    # True when --version-tag was passed, which allows overwriting that tag's uploads.
-    explicit_version: bool
+    # True when --overwrite was passed, which allows replacing existing S3 objects.
+    overwrite: bool
     bucket: str
     prefix: str
     resized_prefix: str
@@ -91,7 +91,7 @@ def _resolve_run(args: argparse.Namespace) -> _Run:
         out_dir=Path(args.output_dir) / version,
         workers=_resolve_workers(args.workers),
         upload=args.upload_to_s3,
-        explicit_version=args.version_tag is not None,
+        overwrite=args.overwrite,
         bucket=get_bucket(),
         prefix=get_prefix(),
         resized_prefix=get_resized_prefix(),
@@ -125,16 +125,15 @@ def _maybe_upload(run: _Run, local_path: Path) -> None:
     """Upload ``local_path`` to ``etl-outputs/coralnet/<version>/`` when ``--upload-to-s3``.
 
     Raises:
-        RuntimeError: If the target key exists and ``--version-tag`` was not passed.
+        RuntimeError: If the target key exists and ``--overwrite`` was not passed.
     """
     if not run.upload:
         return
     key = f"{DEFAULT_OUTPUT_S3_PREFIX}/{run.version}/{local_path.name}"
     client = make_s3_client()
-    if not run.explicit_version and _s3_object_exists(client, run.bucket, key):
+    if not run.overwrite and _s3_object_exists(client, run.bucket, key):
         raise RuntimeError(
-            f"s3://{run.bucket}/{key} already exists; pass --version-tag {run.version} to "
-            "overwrite it"
+            f"s3://{run.bucket}/{key} already exists; pass --overwrite to replace it"
         )
     target = f"s3://{run.bucket}/{key}"
     logger.info("Uploading %s -> %s", local_path, target)
@@ -313,6 +312,11 @@ def _cmd_all(args: argparse.Namespace) -> int:
 def _add_common_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--version-tag", default=None, help="Override version tag (default: YYYYMMDD_<sha>)"
+    )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace files that already exist under etl-outputs/coralnet/<version>/",
     )
     p.add_argument(
         "--output-dir",

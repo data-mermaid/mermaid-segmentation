@@ -54,7 +54,7 @@ uv run --package coralnet-dataset coralnet-dataset all --version-tag <run> --upl
 
 To run the steps one at a time, pass the same `--version-tag` to each. Each invocation computes its own default tag, so without it the outputs land in different run directories. The step order and the flags of each step are in [Run](../packages/coralnet-dataset/README.md#run).
 
-Use a tag that is not on S3 yet. An explicit `--version-tag` lets the upload overwrite that tag's files. Without `--version-tag`, an upload to an existing key stops the command with `RuntimeError`.
+Use a tag that is not on S3 yet. An upload to an existing key stops the command with `RuntimeError`, with or without `--version-tag`. Only `--overwrite` lets the upload replace existing files.
 
 ### Check the build
 
@@ -100,7 +100,7 @@ uv run --package coralnet-dataset coralnet-dataset all --version-tag <new-run> -
 
 `build-annotations` and `build-images` read every source and every annotated image again. `resize` resizes only the images that have no resized object on S3.
 
-Do not reuse an old tag. With `--version-tag`, the upload overwrites the files of that tag, and any training run that pins the old build then reads different data.
+Do not reuse an old tag. A reused tag stops with `RuntimeError` unless you pass `--overwrite`. With `--overwrite`, the upload replaces the files of that tag, and any training run that pins the old build then reads different data.
 
 ## Use the new build in training
 
