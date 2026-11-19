@@ -52,6 +52,11 @@ def test_read_csv_s3_propagates_other_client_errors():
             ("coralnet-public-images", 7),
             "coralnet-public-images/s7/labelset.csv",
         ),
+        (
+            s3_io.object_key_metadata_csv,
+            ("coralnet-public-images", 7),
+            "coralnet-public-images/s7/metadata.csv",
+        ),
         (s3_io.object_key_image, ("p", 7, "123"), "p/s7/images/123.jpg"),
     ],
 )

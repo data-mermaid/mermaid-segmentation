@@ -32,6 +32,11 @@ def object_key_labelset_csv(base_prefix: str, source_id: int) -> str:
     return f"{source_prefix(base_prefix, source_id)}labelset.csv"
 
 
+def object_key_metadata_csv(base_prefix: str, source_id: int) -> str:
+    """Return the S3 key of a source's ``metadata.csv``."""
+    return f"{source_prefix(base_prefix, source_id)}metadata.csv"
+
+
 def object_key_image(base_prefix: str, source_id: int, image_id: str) -> str:
     """Return the S3 key of one source image, ``images/<image_id>.jpg``."""
     return f"{source_prefix(base_prefix, source_id)}images/{image_id}.jpg"

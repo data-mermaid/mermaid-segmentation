@@ -367,7 +367,7 @@ class CoralNetDownloader:
             )
             csv_buffer = io.StringIO()
             meta_df.to_csv(csv_buffer, index=False)
-            key = f"{s3_prefix}/s{source_id}/metadata.csv"
+            key = s3_io.object_key_metadata_csv(s3_prefix, source_id)
             s3_io.upload_csv_body(
                 self.s3, bucket=bucket_name, key=key, csv_text=csv_buffer.getvalue()
             )
