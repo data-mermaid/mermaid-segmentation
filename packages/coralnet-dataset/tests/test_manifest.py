@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 
 from coralnet_dataset.manifest import build_training_manifest, resized_existence_table
-from coralnet_dataset.resize import resize_image_to_threshold
+from coralnet_dataset.resize import _resized_s3_key_for, resize_image_to_threshold
 
 
 def test_training_manifest_scales_coords_and_excludes():
@@ -153,3 +153,47 @@ def test_resized_existence_table_parses_resized_keys_only():
         ["dev/images/resized/s5/images/9.jpg", "dev/images/resized/other.txt"]
     )
     assert table.to_dict("records") == [{"source_id": 5, "image_id": "9", "status": "completed"}]
+
+
+def test_resized_key_layout_round_trips_builder_parser_and_manifest():
+    """The resize worker's key builder, the key parser and the manifest's rebuilt key
+    agree on one layout; expected values are literals so any single format drift fails."""
+    pairs = [(3, "9"), (12, "abc_12"), (12, "a.b")]
+    keys = [_resized_s3_key_for("dev/images", sid, iid) for sid, iid in pairs]
+
+    resized = resized_existence_table(keys)
+    assert list(zip(resized["source_id"], resized["image_id"], strict=True)) == pairs
+
+    images = pd.DataFrame(
+        {
+            "source_id": [sid for sid, _ in pairs],
+            "image_id": [iid for _, iid in pairs],
+            "s3_key": [f"orig/s{sid}/{iid}.jpg" for sid, iid in pairs],
+            "width": [4000] * 3,
+            "height": [3000] * 3,
+            "needs_resize": [True] * 3,
+        }
+    )
+    annotations = pd.DataFrame(
+        {
+            "source_id": [sid for sid, _ in pairs],
+            "image_id": [iid for _, iid in pairs],
+            "row": [10] * 3,
+            "col": [10] * 3,
+            "coralnet_id": [82] * 3,
+        }
+    )
+    out = build_training_manifest(
+        annotations=ibis.memtable(annotations),
+        images=ibis.memtable(images),
+        resized=ibis.memtable(resized),
+        output_prefix="dev/images",
+    ).to_pandas()
+
+    got = {(int(r.source_id), r.image_id): r for r in out.itertuples()}
+    assert {k: v.image_s3_key for k, v in got.items()} == {
+        (3, "9"): "dev/images/resized/s3/images/9.jpg",
+        (12, "abc_12"): "dev/images/resized/s12/images/abc_12.jpg",
+        (12, "a.b"): "dev/images/resized/s12/images/a.b.jpg",
+    }
+    assert all(bool(v.uses_resized_image) for v in got.values())
