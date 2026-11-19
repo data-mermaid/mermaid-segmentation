@@ -24,5 +24,6 @@ __all__ = [
     "coralnet_eval",
     "pacific_eval",
     "coralscapes_probe",
+    "coralscapes_probe_points",
     "val_loss",
 ]

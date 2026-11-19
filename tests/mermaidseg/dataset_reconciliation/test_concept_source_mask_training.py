@@ -31,12 +31,23 @@ from tests.mermaidseg.dataset_reconciliation.test_concept_source_mask import CHA
 BLEACHED = CHANNELS.index("bleached")
 
 
-def _write_mask(tmp_path, rows: list[tuple[str, str]], concepts_csv=None) -> Any:
+def _write_mask(
+    tmp_path,
+    rows: list[tuple[str, str]],
+    concepts_csv=None,
+    source_ids: list[str] | None = None,
+    write_source_ids: bool = True,
+) -> Any:
+    """Write a mask CSV and sidecar; ``source_ids`` (the counted sources) default to the rows'."""
     path = tmp_path / "mask.csv"
     pd.DataFrame(rows, columns=["source_id", "concept"]).assign(
         n_true=0, n_false=1, n_not_given=0
     ).to_csv(path, index=False)
-    meta = {"dataset": "coralnet", "rule": "only_false"}
+    meta: dict[str, Any] = {"dataset": "coralnet", "rule": "only_false"}
+    if write_source_ids:
+        meta["source_ids"] = (
+            source_ids if source_ids is not None else sorted({source for source, _ in rows})
+        )
     if concepts_csv is not None:
         meta["concepts_csv_sha1"] = file_sha1(concepts_csv)
     meta_path(path).write_text(yaml.safe_dump(meta))
@@ -81,6 +92,12 @@ def test_mask_checks_the_concept_table_sha1(tmp_path):
     table.write_text("a,b\n1,3\n")
     with pytest.raises(ValueError, match="sha1"):
         load_concept_source_mask(path, _schema(), concepts_csv=table)
+
+
+def test_mask_requires_the_counted_sources_in_the_sidecar(tmp_path):
+    path = _write_mask(tmp_path, [("1", "bleached")], write_source_ids=False)
+    with pytest.raises(ValueError, match="source_ids"):
+        load_concept_source_mask(path, _schema())
 
 
 def test_apply_zeroes_only_masked_channels():
@@ -146,6 +163,22 @@ def test_source_row_follows_the_retried_image(tmp_path):
     assert ds[1][2] == mask.row_by_source()["7"]
     # idx 0 has no labels after the crop, so the train split retries on image 1 (source 7).
     assert ds[0][2] == mask.row_by_source()["7"]
+
+
+def test_counted_source_without_masked_pairs_gets_row_zero(tmp_path):
+    ds = _coralnet_dataset()
+    mask = load_concept_source_mask(
+        _write_mask(tmp_path, [("5", "bleached")], source_ids=["5", "7"]), _schema()
+    )
+    attach_source_rows([ds], mask)
+    assert ds[1][2] == 0  # source 7 was counted and has nothing to mask
+
+
+def test_source_the_mask_never_counted_is_refused(tmp_path):
+    ds = _coralnet_dataset()
+    mask = load_concept_source_mask(_write_mask(tmp_path, [("5", "bleached")]), _schema())
+    with pytest.raises(ValueError, match=r"1 coralnet source.*\b7\b"):
+        attach_source_rows([ds], mask)
 
 
 def test_other_datasets_get_row_zero(tmp_path):
