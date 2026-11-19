@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "class": "ConceptBottleneckDPTLoRADINOv3",
+  "architecture_keys": ["class", "encoder_config", "encoder_name", "kwargs"],
+  "kwargs_keys": [
+    "concept_feature_dim",
+    "concept_value2id",
+    "detach_concepts",
+    "fusion_hidden_size",
+    "input_size",
+    "lora_alpha",
+    "lora_bias",
+    "lora_dropout",
+    "lora_r",
+    "lora_target_modules",
+    "neck_hidden_sizes",
+    "num_classes",
+    "num_concepts",
+    "out_indices",
+    "reassemble_factors"
+  ]
+}
