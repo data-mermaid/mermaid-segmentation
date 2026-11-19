@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 import torch
 import yaml
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 
 from mermaidseg.dataset_reconciliation.concept_removal import (
     CoverageRule,
@@ -25,90 +25,10 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
     meta_path,
 )
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
-from mermaidseg.io import ConfigDict
-from mermaidseg.model.data_parallel import ShardStep, shard_targets
-from tests.conftest import IMAGE_SIZE, cbm_test_config
+from tests.mermaidseg.conftest import concept_table
 from tests.mermaidseg.dataset_reconciliation.test_concept_source_mask import CHANNELS, _schema
 
 BLEACHED = CHANNELS.index("bleached")
-
-
-def _table() -> pd.DataFrame:
-    """A concept table with every taxonomic rank (the CBM model and the encoder need them all)."""
-    rows = [
-        # label, kingdom, phylum, class, order, family, genus, bleached, branching, tubular
-        (
-            "acropora",
-            "animalia",
-            "cnidaria",
-            "hexacorallia",
-            "scleractinia",
-            "acroporidae",
-            "acropora",
-            "FALSE",
-            "TRUE",
-            "FALSE",
-        ),
-        (
-            "porites",
-            "animalia",
-            "cnidaria",
-            "hexacorallia",
-            "scleractinia",
-            "poritidae",
-            "porites",
-            "FALSE",
-            "FALSE",
-            "TRUE",
-        ),
-        (
-            "bleached acropora",
-            "animalia",
-            "cnidaria",
-            "hexacorallia",
-            "scleractinia",
-            "acroporidae",
-            "acropora",
-            "TRUE",
-            "TRUE",
-            "FALSE",
-        ),
-        ("sand", "none", "none", "none", "none", "none", "none", "FALSE", "FALSE", "FALSE"),
-        ("unknown", *["not_given"] * 9),
-    ]
-    cols = [
-        "kingdom",
-        "phylum",
-        "class",
-        "order",
-        "family",
-        "genus",
-        "bleached",
-        "branching",
-        "tubular",
-    ]
-    df = pd.DataFrame(rows, columns=["source_label_class_name", *cols])
-    df.insert(1, "source_dataset_source", "coralnet")
-    return df
-
-
-@pytest.fixture(scope="module")
-def table_csv(tmp_path_factory):
-    path = tmp_path_factory.mktemp("concepts") / "class_to_concepts.csv"
-    _table().to_csv(path, index=False)
-    return path
-
-
-@pytest.fixture(scope="module")
-def cbm_schema(table_csv) -> ConceptSchema:
-    return ConceptSchema.from_csv(table_csv, sources={"coralnet"})
-
-
-def _lookup(schema: ConceptSchema) -> torch.Tensor:
-    """Global source-label id -> concept row: 0 background, 1 acropora, 2 porites."""
-    rows = [np.zeros(schema.num_channels, np.float32)]
-    rows += [schema.row_for("coralnet", name) for name in ("acropora", "porites")]
-    return torch.from_numpy(np.stack(rows))
 
 
 def _write_mask(
@@ -275,84 +195,6 @@ def test_other_datasets_get_row_zero(tmp_path):
 # ---------- train step ----------
 
 
-def _cbm_config() -> ConfigDict:
-    cfg = cbm_test_config()
-    cfg.training.loss.per_pixel_loss_weight = 0.5
-    cfg.training.loss.per_image_loss_weight = 0.5
-    return cfg
-
-
-def _cbm_meta(make_meta_model, schema: ConceptSchema):
-    return make_meta_model(
-        _cbm_config(),
-        run_name="cbm-mask",
-        num_classes=3,
-        num_concepts=schema.num_channels,
-        concept_value2id=schema.concept_value2id,
-        source_to_concepts_lookup=_lookup(schema),
-    )
-
-
-def _keep(schema: ConceptSchema) -> torch.Tensor:
-    keep = torch.ones(2, schema.num_channels, dtype=torch.bool)
-    keep[1, schema.channel_names.index("bleached")] = False
-    return keep
-
-
-def test_train_epoch_masks_concept_targets(make_meta_model, monkeypatch, cbm_schema):
-    meta = _cbm_meta(make_meta_model, cbm_schema)
-    meta.set_concept_source_mask(_keep(cbm_schema))
-    bleached = cbm_schema.channel_names.index("bleached")
-    seen: list[torch.Tensor] = []
-    original = meta.batch_predict_loss
-
-    def spy(images, target_labels=None, target_concepts=None, *args, **kwargs):
-        seen.append(target_concepts.detach().clone())
-        return original(images, target_labels, target_concepts, *args, **kwargs)
-
-    monkeypatch.setattr(meta, "batch_predict_loss", spy)
-    images = torch.randn(2, 3, *IMAGE_SIZE)
-    labels = torch.ones(
-        2, *IMAGE_SIZE, dtype=torch.long
-    )  # acropora: bleached False, branching True
-    rows = torch.tensor([1, 0])
-    loss, _, _ = meta.train_epoch(
-        DataLoader(TensorDataset(images, labels, rows), batch_size=2), epoch=0
-    )
-    assert np.isfinite(loss)
-    (targets,) = seen
-    assert (targets[0, bleached] == 0).all()  # sample 0's source is masked for bleached
-    assert (targets[1, bleached] == 1).all()  # sample 1 (row 0) keeps its False target
-    unmasked = [i for i in range(cbm_schema.num_channels) if i != bleached]
-    assert torch.equal(targets[0, unmasked], targets[1, unmasked])
-
-
-def test_train_epoch_requires_source_rows_when_masking(make_meta_model, cbm_schema):
-    meta = _cbm_meta(make_meta_model, cbm_schema)
-    meta.set_concept_source_mask(_keep(cbm_schema))
-    loader = DataLoader(
-        TensorDataset(torch.randn(2, 3, *IMAGE_SIZE), torch.ones(2, *IMAGE_SIZE, dtype=torch.long)),
-        batch_size=2,
-    )
-    with pytest.raises(RuntimeError, match="no source rows"):
-        meta.train_epoch(loader, epoch=0)
-
-
-def test_shard_step_masks_its_shard(make_meta_model, cbm_schema):
-    """The data_parallel / distributed per-GPU step masks with the rows it is given."""
-    meta = _cbm_meta(make_meta_model, cbm_schema)
-    keep = _keep(cbm_schema)
-    lookup = _lookup(cbm_schema)
-    bleached = cbm_schema.channel_names.index("bleached")
-    step = ShardStep(meta.model, meta.loss, None, None, lookup, False, torch.bfloat16, keep)
-    images = torch.randn(2, 3, *IMAGE_SIZE)
-    labels = torch.ones(2, *IMAGE_SIZE, dtype=torch.long)
-    *_, concepts, _ = step(images, labels, return_maps=True, source_rows=torch.tensor([1, 0]))
-    assert (concepts[0, bleached] == 0).all() and (concepts[1, bleached] == 1).all()
-    with pytest.raises(RuntimeError, match="no source rows"):
-        shard_targets(labels, None, lookup, keep, None)
-
-
 # ---------- concept removal ----------
 
 
@@ -377,7 +219,7 @@ def test_schema_removal_rejects_bad_names(table_csv):
     with pytest.raises(ValueError, match="not channels"):
         ConceptSchema.from_csv(table_csv, sources={"coralnet"}, removed_concepts=["genus__nope"])
     with pytest.raises(ValueError, match="none"):
-        apply_concept_removal(_table(), ["genus__none"])
+        apply_concept_removal(concept_table(), ["genus__none"])
 
 
 def test_coverage_rules():

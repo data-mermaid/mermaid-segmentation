@@ -19,6 +19,8 @@ from mermaidseg.model.data_parallel import (
     require_divisible_batch,
     shard_targets,
 )
+from tests.conftest import IMAGE_SIZE
+from tests.mermaidseg.conftest import cbm_meta, concept_keep, source_lookup
 
 _NUM_SOURCE = 9
 _NUM_CONCEPTS = 5
@@ -173,3 +175,18 @@ def test_shard_step_autocasts_on_the_input_device_type(use_amp):
     assert seen["enabled"] is use_amp
     if use_amp:
         assert seen["dtype"] == torch.bfloat16
+
+
+def test_shard_step_masks_its_shard(make_meta_model, cbm_schema):
+    """The data_parallel / distributed per-GPU step masks with the rows it is given."""
+    meta = cbm_meta(make_meta_model, cbm_schema)
+    keep = concept_keep(cbm_schema)
+    lookup = source_lookup(cbm_schema)
+    bleached = cbm_schema.channel_names.index("bleached")
+    step = ShardStep(meta.model, meta.loss, None, None, lookup, False, torch.bfloat16, keep)
+    images = torch.randn(2, 3, *IMAGE_SIZE)
+    labels = torch.ones(2, *IMAGE_SIZE, dtype=torch.long)
+    *_, concepts, _ = step(images, labels, return_maps=True, source_rows=torch.tensor([1, 0]))
+    assert (concepts[0, bleached] == 0).all() and (concepts[1, bleached] == 1).all()
+    with pytest.raises(RuntimeError, match="no source rows"):
+        shard_targets(labels, None, lookup, keep, None)

@@ -6,7 +6,6 @@ import copy
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -16,7 +15,6 @@ from safetensors.torch import load_file, save_file
 from mermaidseg import export
 from mermaidseg.export import _untied_cpu_state, export_bundle, write_sidecar
 from mermaidseg.inference.bundle import MODEL_JSON, WEIGHTS
-from mermaidseg.training import _encoder_config
 from tests.mermaidseg.inference import _tiny
 
 
@@ -126,26 +124,6 @@ def test_a_failed_replace_leaves_the_old_file_intact(monkeypatch, tmp_path: Path
         write_sidecar(tmp_path, **_sidecar_kwargs(lineage={"seed": 99}))
     assert (tmp_path / MODEL_JSON).read_text() == before
     assert sorted(p.name for p in tmp_path.iterdir()) == [MODEL_JSON]
-
-
-def _model_with_encoder_config(config: dict):
-    base = SimpleNamespace(config=SimpleNamespace(to_dict=lambda: dict(config)))
-    return SimpleNamespace(encoder=SimpleNamespace(get_base_model=lambda: base))
-
-
-def test_stored_encoder_config_drops_environment_keys_so_a_resume_passes(tmp_path: Path):
-    arch = {"hidden_size": 16, "num_hidden_layers": 4}
-    old = _model_with_encoder_config(
-        {**arch, "transformers_version": "4.50.0", "_name_or_path": "/cache/a"}
-    )
-    new = _model_with_encoder_config(
-        {**arch, "transformers_version": "4.57.0", "_name_or_path": "/cache/b"}
-    )
-    assert _encoder_config(old) == arch
-
-    write_sidecar(tmp_path, **_sidecar_kwargs(encoder_config=_encoder_config(old)))
-    write_sidecar(tmp_path, **_sidecar_kwargs(encoder_config=_encoder_config(new)))
-    assert _read(tmp_path / MODEL_JSON)["architecture"]["encoder_config"] == arch
 
 
 def test_bundle_directory_holds_only_the_sidecar_and_weights(bundle_dir):

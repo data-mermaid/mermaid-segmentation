@@ -239,6 +239,8 @@ class CoralNetDownloader:
         )
         self.session.mount("https://", adapter)
         self.logged_in = False
+        self._thread_local = threading.local()
+        self._export_thread_local = threading.local()
         self.s3 = boto3.client("s3", config=BotoConfig(max_pool_connections=self.max_workers + 4))
 
     def _source_main_url(self, source_id: int) -> str:
@@ -978,9 +980,6 @@ class CoralNetDownloader:
             return None, False
         finally:
             p_bar.close()
-
-    _thread_local = threading.local()
-    _export_thread_local = threading.local()
 
     def _get_thread_session(self) -> requests.Session:
         """Per-thread session with cookies copied from the main session.

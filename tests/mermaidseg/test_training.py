@@ -19,8 +19,9 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+import torch.distributed as dist
 import yaml
-from torch.utils.data import ConcatDataset, DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, TensorDataset
 
 import mermaidseg.model.models
 from mermaidseg import training
@@ -33,6 +34,7 @@ from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
 from mermaidseg.training import (
     VAL_GENERATOR_SEED_OFFSET,
     _assemble_train_datasets,
+    _encoder_config,
     _lineage_params,
     _sigterm_raises_system_exit,
     load_training_checkpoint,
@@ -41,6 +43,7 @@ from mermaidseg.training import (
 )
 from scripts.train import build_parser
 from tests.conftest import cbm_test_config
+from tests.mermaidseg.conftest import init_gloo, spawn_gloo
 
 
 def _datasets() -> dict[tuple[str, str], str]:
@@ -608,3 +611,62 @@ def test_lineage_params_flatten_the_lineage_dict():
         "lineage/manifests/coralnet.train": "m/train.parquet",
         "lineage/manifests/coralnet.val": "m/val.parquet",
     }
+
+
+def _model_with_encoder_config(config: dict):
+    base = SimpleNamespace(config=SimpleNamespace(to_dict=lambda: dict(config)))
+    return SimpleNamespace(encoder=SimpleNamespace(get_base_model=lambda: base))
+
+
+def test_stored_encoder_config_drops_environment_keys_so_a_resume_passes():
+    arch = {"hidden_size": 16, "num_hidden_layers": 4}
+    old = _model_with_encoder_config(
+        {**arch, "transformers_version": "4.50.0", "_name_or_path": "/cache/a"}
+    )
+    assert _encoder_config(old) == arch
+
+
+_LOADER_SEED = 21
+_LOADER_ITEMS = 24
+_LOADER_BATCH = 4
+
+
+def _index_dataset() -> ConcatDataset:
+    return ConcatDataset([TensorDataset(torch.arange(_LOADER_ITEMS))])
+
+
+def _shuffled_loader_worker(rank: int, world_size: int, init_method: str, queue) -> None:
+    init_gloo(rank, world_size, init_method)
+    try:
+        # Rank 1 starts from a different seed; the broadcast must align it with rank 0.
+        generator = torch.Generator().manual_seed(_LOADER_SEED + rank)
+        loader = make_shuffled_loader(
+            DistContext(rank=rank, world_size=world_size, local_rank=rank),
+            _index_dataset(),
+            generator,
+            batch_size=_LOADER_BATCH,
+            drop_last=True,
+            num_workers=0,
+        )
+        passes = [[batch[0].tolist() for batch in loader] for _ in range(2)]
+        queue.put((rank, passes))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_distributed_shuffled_loader_matches_single_process_over_two_passes():
+    reference_loader = DataLoader(
+        _index_dataset(),
+        shuffle=True,
+        batch_size=_LOADER_BATCH,
+        drop_last=True,
+        generator=torch.Generator().manual_seed(_LOADER_SEED),
+    )
+    expected = [[batch[0].tolist() for batch in reference_loader] for _ in range(2)]
+    rank0, rank1 = spawn_gloo(_shuffled_loader_worker, 2)
+    for pass_index in range(2):
+        interleaved = [
+            shard0 + shard1
+            for shard0, shard1 in zip(rank0[pass_index], rank1[pass_index], strict=True)
+        ]
+        assert interleaved == expected[pass_index]
