@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coralnet-scraper"
+version = "0.1.0"
+description = "Downloads public CoralNet sources (images, labelsets, annotations) to S3."
+requires-python = ">=3.11.5"
+dependencies = [
+    "beautifulsoup4",
+    "boto3",
+    "pandas",
+    "requests",
+    "tqdm",
+]
+
+[project.scripts]
+coralnet-scrape = "coralnet_scraper.scrape_coralnet_s3:main"
+
+[dependency-groups]
+tests = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]

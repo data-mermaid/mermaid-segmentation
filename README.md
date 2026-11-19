@@ -9,7 +9,7 @@ The codebase contains data loaders, augmentations, preprocessors, models, traini
 
 Prerequisites
 - [uv](https://docs.astral.sh/uv/)
-- Python 3.11 or later (`requires-python` in `pyproject.toml`). `.python-version` pins 3.12, which uv uses by default.
+- Python 3.11.5 or later (`requires-python` in `pyproject.toml`). `.python-version` pins 3.12, which uv uses by default.
 - AWS credentials configured with the `mermaid-core` profile, for S3 access
 - A Hugging Face account and token, for DINOv3 models (see [Hugging Face Setup](#hugging-face-setup))
 
@@ -52,6 +52,10 @@ Contributors add a dependency group:
 ```bash
 uv sync --locked --extra wandb --group dev
 ```
+
+### CoralNet scraper
+
+`packages/coralnet-scraper/` is a separate uv workspace member that downloads public CoralNet sources to S3. A root `uv sync` does not install it. See [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md).
 
 ### Hugging Face Setup
 
