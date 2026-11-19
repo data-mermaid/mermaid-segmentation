@@ -142,6 +142,7 @@ def test_inspect_image_non_oserror_failure_is_unknown(monkeypatch):
         # A square (max_edge, max_edge) box would leave 1000x200 undrafted.
         ((1000, 200), (250, 50)),
         ((1000, 1000), (250, 250)),
+        ((200, 1000), (50, 250)),
     ],
 )
 def test_decode_image_drafts_a_jpeg_by_its_longest_edge(original, expected):

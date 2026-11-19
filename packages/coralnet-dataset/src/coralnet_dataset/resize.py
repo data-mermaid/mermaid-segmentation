@@ -10,7 +10,7 @@ import io
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import boto3
 import pandas as pd
@@ -160,20 +160,29 @@ def scan_for_missing_resized_images(
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=SCAN_OUTPUT_COLUMNS)
 
 
+class _DecodedOriginal(NamedTuple):
+    """A downloaded original: its encoded bytes, the decoded image and the original size."""
+
+    original_bytes: io.BytesIO
+    image: Image.Image
+    original_size: tuple[int, int]
+
+
 def _validate_and_download(
     bucket: str,
     original_key: str,
     source_id: int,
     image_id: str,
     s3_client: Any,
-) -> tuple[io.BytesIO | None, Image.Image | None, ImageInspection]:
+) -> tuple[_DecodedOriginal | None, ImageInspection]:
     """Download an image and decode it once, at reduced JPEG scale where possible.
 
     Returns:
-        ``(image_bytes, image, inspection)``; the first two are None when the inspection failed.
+        ``(decoded, inspection)``; ``decoded`` is None when the inspection failed.
 
     Raises:
         Exception: Any S3 download error propagates so the caller reports a retryable failure.
+        TypeError: A valid inspection lacks the original size.
     """
     response = s3_client.get_object(Bucket=bucket, Key=original_key)
     image_bytes = io.BytesIO(response["Body"].read())
@@ -186,13 +195,16 @@ def _validate_and_download(
             inspection.issue_type.value,
             inspection.error_message,
         )
-    return (image_bytes if inspection.is_valid else None, image, inspection)
+        return None, inspection
+    if image is None or inspection.width is None or inspection.height is None:
+        raise TypeError("A valid inspection must carry the decoded image and its original size")
+    return _DecodedOriginal(image_bytes, image, (inspection.width, inspection.height)), inspection
 
 
 def _skip_reason(inspection: ImageInspection) -> str:
     """Return the skip reason for a failed inspection."""
     if inspection.issue_type == IssueType.OVERSIZED:
-        return "oversized"
+        return IssueType.OVERSIZED.value
     return f"corrupted_{inspection.issue_type.value}"
 
 
@@ -240,7 +252,7 @@ def resize_and_upload_image(
 
     try:
         logger.debug("Downloading and validating %s", original_key)
-        original_bytes, image, inspection = _validate_and_download(
+        decoded, inspection = _validate_and_download(
             bucket=bucket,
             original_key=original_key,
             source_id=source_id,
@@ -248,18 +260,15 @@ def resize_and_upload_image(
             s3_client=s3_client,
         )
 
-        if original_bytes is None or image is None:
+        if decoded is None:
             return _result_row(source_id, image_id, "skipped", skip_reason=_skip_reason(inspection))
 
         logger.debug("Resizing %s/%s", source_id, image_id)
-        width, height = inspection.width, inspection.height
-        # A valid inspection always records the original size.
-        assert width is not None and height is not None
         resized_bytes = resize_image_to_threshold(
-            image, original_bytes, original_size=(width, height)
+            decoded.image, decoded.original_bytes, original_size=decoded.original_size
         )
         # Release the decoded pixels before the upload holds the connection.
-        del image
+        del decoded
 
         logger.debug("Uploading to %s", output_key)
         s3_client.put_object(
@@ -279,7 +288,7 @@ def resize_and_upload_image(
 
 
 def _count_results(results: list[dict[str, Any]]) -> tuple[int, int, int]:
-    """Count ``(resized, corrupted, failed)`` from worker result rows."""
+    """Count ``(resized, skipped, failed)`` from worker result rows."""
     statuses = [r["status"] for r in results]
     return statuses.count("completed"), statuses.count("skipped"), statuses.count("failed")
 
@@ -301,7 +310,7 @@ def resize_and_upload_all_images(
             ``workers`` (see :func:`make_resize_s3_client`).
 
     Returns:
-        ``(resized, corrupted, failed)`` image counts.
+        ``(resized, skipped, failed)`` image counts; skipped covers oversized and corrupted images.
     """
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
@@ -314,7 +323,7 @@ def resize_and_upload_all_images(
         ]
 
     num_resized, num_skipped, num_failed = _count_results(results)
-    num_oversized = sum(r["skip_reason"] == "oversized" for r in results)
+    num_oversized = sum(r["skip_reason"] == IssueType.OVERSIZED.value for r in results)
     logger.info(
         "Resizing complete: %d resized, %d oversized, %d corrupted, %d failed",
         num_resized,

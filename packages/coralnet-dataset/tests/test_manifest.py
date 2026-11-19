@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 from PIL import Image
 
+from coralnet_dataset.config import RESIZE_THRESHOLD
 from coralnet_dataset.inspect import decode_image
 from coralnet_dataset.manifest import build_training_manifest, resized_existence_table
 from coralnet_dataset.resize import _resized_s3_key_for, resize_image_to_threshold
@@ -117,6 +118,7 @@ def _build_one_image_manifest(orig_w, orig_h, row, col):
     [
         (4000, 2000),  # landscape, resized
         (2000, 4000),  # portrait, resized
+        (6000, 4001),  # draft rounds to 3000x2001; the target derives from the original size
         (3000, 3000),  # square, resized (non-power-of-2 ratio)
         (2049, 2049),  # just over threshold
         (800, 600),  # sub-threshold, not resized
@@ -134,7 +136,7 @@ def test_training_manifest_load_dims_and_coords_match_real_resize(orig_w, orig_h
     buf = BytesIO()
     Image.new("RGB", (orig_w, orig_h)).save(buf, format="JPEG")
     buf.seek(0)
-    decoded, inspection = decode_image(buf)
+    decoded, inspection = decode_image(buf, max_edge=RESIZE_THRESHOLD)
     resized = Image.open(
         resize_image_to_threshold(decoded, buf, original_size=(inspection.width, inspection.height))
     )
