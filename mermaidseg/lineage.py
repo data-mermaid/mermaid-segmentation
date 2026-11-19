@@ -101,11 +101,20 @@ def collect_lineage(*, resolved_config: dict, seed: int, data_version: dict) -> 
 
 
 def inherit_lineage(lineage: dict, source: dict | None) -> dict:
-    """Lineage of a session that started from a checkpoint whose lineage is ``source``.
+    """Lineage of a session that started from a checkpoint with lineage ``source``.
 
-    ``source`` is None when the checkpoint has no lineage. The result is a new dict: ``source``
-    is stored verbatim under ``parent``, and ``git_dirty`` is True if either side is True, else
-    None when either side is unknown (including a missing ``source``), else False.
+    The source's ``git_dirty`` is already its own inherited verdict, so a dirty ancestor
+    propagates across any number of resumes.
+
+    Args:
+        lineage: Lineage of the new session.
+        source: Lineage stored in the checkpoint, or None when the checkpoint has none.
+
+    Returns:
+        A new dict with the fields of ``lineage`` plus ``parent`` and a combined ``git_dirty``.
+        ``parent`` is None when ``source`` is None, else a dict holding only the source's
+        ``git_sha`` and ``git_dirty``. ``git_dirty`` is True if either side is True, else None
+        if either side is unknown (including a missing ``source``), else False.
     """
     own_dirty = lineage.get("git_dirty")
     source_dirty = None if source is None else source.get("git_dirty")
@@ -115,4 +124,9 @@ def inherit_lineage(lineage: dict, source: dict | None) -> dict:
         git_dirty = None
     else:
         git_dirty = False
-    return {**lineage, "git_dirty": git_dirty, "parent": source}
+    parent = (
+        None
+        if source is None
+        else {"git_sha": source.get("git_sha"), "git_dirty": source.get("git_dirty")}
+    )
+    return {**lineage, "git_dirty": git_dirty, "parent": parent}

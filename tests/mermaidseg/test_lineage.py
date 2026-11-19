@@ -170,14 +170,19 @@ def test_inherit_lineage_combines_git_dirty_of_own_and_source(own, source, expec
     assert inherit_lineage({"git_dirty": own}, source)["git_dirty"] is expected
 
 
-def test_inherit_lineage_nests_the_source_and_keeps_the_own_fields_without_mutating():
+def test_inherit_lineage_keeps_only_the_source_sha_and_dirty_flag_without_mutating():
     own = {"git_dirty": False, "git_sha": "abc", "seed": 7, "resolved_config": {"a": 1}}
-    source = {"git_dirty": False, "git_sha": "old", "parent": {"git_dirty": True}}
+    source = {
+        "git_dirty": False,
+        "git_sha": "old",
+        "parent": {"git_dirty": True},
+        "resolved_config": {"b": 2},
+    }
     own_before, source_before = copy.deepcopy(own), copy.deepcopy(source)
 
     result = inherit_lineage(own, source)
 
-    assert result["parent"] == source_before
+    assert result["parent"] == {"git_sha": "old", "git_dirty": False}
     assert {k: result[k] for k in ("git_sha", "seed", "resolved_config")} == {
         "git_sha": "abc",
         "seed": 7,

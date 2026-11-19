@@ -614,7 +614,7 @@ def _patch_git_dirty(monkeypatch: pytest.MonkeyPatch, git_dirty: bool | None) ->
 
 
 @_FORK_ONLY
-def test_resumed_run_inherits_the_dirty_lineage_of_its_checkpoint(
+def test_resumed_runs_propagate_a_dirty_ancestor_through_a_shallow_parent(
     monkeypatch, tmp_path, mock_dinov3_encoder
 ):
     _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
@@ -636,7 +636,18 @@ def test_resumed_run_inherits_the_dirty_lineage_of_its_checkpoint(
     sidecar = json.loads((run_dir / "model.json").read_text())["lineage"]
     for lineage in (resumed, sidecar):
         assert lineage["git_dirty"] is True
-        assert lineage["parent"] == first_lineage
+        assert lineage["parent"] == {
+            "git_sha": first_lineage["git_sha"],
+            "git_dirty": first_lineage["git_dirty"],
+        }
+
+    # A clean third run still inherits the dirty verdict from its parent's own inherited flag.
+    training.run(
+        _smoke_args(tmp_path, output_dir, cache_dir, epochs=3, checkpoint=run_dir / "model_step2")
+    )
+    third = torch.load(run_dir / "model_step3", map_location="cpu", weights_only=True)["lineage"]
+    assert third["git_dirty"] is True
+    assert third["parent"] == {"git_sha": resumed["git_sha"], "git_dirty": True}
 
 
 def test_init_weights_run_from_a_checkpoint_without_lineage_is_untrusted(
@@ -650,6 +661,22 @@ def test_init_weights_run_from_a_checkpoint_without_lineage_is_untrusted(
     lineage = json.loads((result.run_dir / "model.json").read_text())["lineage"]
     assert lineage["git_dirty"] is None
     assert "parent" in lineage and lineage["parent"] is None
+
+
+def test_init_weights_run_from_a_clean_checkpoint_records_a_shallow_parent(
+    run_scenario, marked_checkpoint
+):
+    saved = torch.load(marked_checkpoint.path, weights_only=True)
+    saved["lineage"] = {"git_sha": "abc123", "git_dirty": False, "seed": 1}
+    source_path = run_scenario.scratch_dir() / "with_lineage.pt"
+    torch.save(saved, source_path)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _patch_git_dirty(monkeypatch, False)
+        result = run_scenario(cli=["--init-weights", str(source_path)])
+
+    lineage = json.loads((result.run_dir / "model.json").read_text())["lineage"]
+    assert lineage["git_dirty"] is False
+    assert lineage["parent"] == {"git_sha": "abc123", "git_dirty": False}
 
 
 def test_lineage_params_flatten_the_lineage_dict():
