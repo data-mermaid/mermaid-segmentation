@@ -39,31 +39,24 @@ To read CoralscapesV2 from a local copy, pass the directory as `hf_repo_id`. `sc
 
 Catlin Seaview, Moorea Labeled Corals, Pacific Labeled Corals and Benthos are already in S3. Load one again only if its S3 copy is lost, or the original source publishes a new version.
 
-Each dataset had an ingestion script that checked the raw download and wrote the parquet and images to S3. The scripts are not on `main`. They are in commit `88f7bac^`, with a README for each dataset that lists the files to download:
+The `external-datasets` package checks the raw download and writes the parquet, the images and the metadata to S3. Its [README](../../packages/external-datasets/README.md) gives the output contract and every flag. The README of each dataset lists the raw files to download:
 
-| Dataset | Ingestion script in `88f7bac^` |
-|---|---|
-| Catlin Seaview | `mermaidseg/datasets/catlin_seaview/download_raw_data_and_add_to_s3.py` |
-| Moorea Labeled Corals | `mermaidseg/datasets/moorea_labeled_corals/verify_raw_data_and_add_to_s3.py` |
-| Pacific Labeled Corals | `mermaidseg/datasets/pacific_labeled_corals/verify_raw_data_and_add_to_s3.py` |
-| Benthos | `mermaidseg/datasets/benthos_yuval/verify_raw_data_and_add_to_s3.py` |
+| Dataset | Subcommand | Raw files |
+|---|---|---|
+| Catlin Seaview | `catlin_seaview` | The run downloads them. See [the README](../../mermaidseg/datasets/catlin_seaview/README.md#how-to-rebuild) |
+| Moorea Labeled Corals | `moorea_labeled_corals` | [Download by hand](../../mermaidseg/datasets/moorea_labeled_corals/README.md#how-to-rebuild) |
+| Pacific Labeled Corals | `pacific_labeled_corals` | [Download by hand](../../mermaidseg/datasets/pacific_labeled_corals/README.md#how-to-rebuild) |
+| Benthos | `benthos_yuval` | [Download by hand](../../mermaidseg/datasets/benthos_yuval/README.md#how-to-rebuild) |
 
-1. Read the dataset's README from that commit, for example:
-
-   ```bash
-   git show 88f7bac^:mermaidseg/datasets/catlin_seaview/README.md
-   ```
-
-2. Download the raw data that the README lists.
-3. Extract the ingestion script to a file outside the repository, read it, and run it against the download:
+1. Download the raw files that the dataset's README lists. Catlin Seaview needs no download.
+2. Do a dry run. It writes nothing to S3, and it stops if the parquet or a JSON file is already there. For Catlin Seaview, leave out `--data-dir`, and the run downloads the raw files:
 
    ```bash
-   git show 88f7bac^:mermaidseg/datasets/catlin_seaview/download_raw_data_and_add_to_s3.py > /tmp/ingest_catlin.py
+   uv run --package external-datasets external-datasets <subcommand> --data-dir <raw dir> --dry-run
    ```
 
+3. Run the same command without `--dry-run`. To replace a dataset that is already in S3, add `--overwrite`.
 4. Fill the offline data cache again. See [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
-
-The scripts were written for the code at that commit. Check them against the current dataset class before you run one.
 
 ## Update the MERMAID data
 
@@ -89,5 +82,4 @@ To train on newer MERMAID annotations:
 
 ## Known gaps
 
-- The ingestion scripts for the external datasets are only in git history. See [Load an external dataset into S3](#load-an-external-dataset-into-s3).
 - The MERMAID parquet changes in place. A run that uses the same cutoff reads the same annotations only if no annotation older than the cutoff changes after the run.

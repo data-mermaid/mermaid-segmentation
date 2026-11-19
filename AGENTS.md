@@ -24,7 +24,7 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 - `scripts/sagemaker/`: the SageMaker launcher (`python -m scripts.sagemaker.launch`) and the in-container entrypoint.
 - `sagemaker/runs/`: SageMaker run YAMLs.
 - `docker/`: the SageMaker job image; deployable images are built only by the CI workflow.
-- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/coralnet-dataset/` builds the training manifest from that scrape. `mermaidseg` imports neither.
+- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/coralnet-dataset/` builds the training manifest from that scrape; `packages/external-datasets/` loads the Catlin, Moorea, Pacific and Benthos raw releases into S3. `mermaidseg` imports none of the packages.
 - `tests/`: the pytest suite, laid out as 7.4 sets.
 - `pyproject.toml`: dependencies, extras, dependency groups, and ruff, mypy and pytest settings.
 
@@ -200,6 +200,7 @@ Where a doc disagrees with this file or the code, this file and the code win.
 | Setup, data, training (Slurm, SageMaker), export and evaluation procedures | `docs/runbooks/` |
 | The CoralNet scraper: S3 layout, environment variables, running and testing it | `packages/coralnet-scraper/README.md` |
 | The CoralNet dataset build: outputs, completeness checks, environment variables, running and testing it | `packages/coralnet-dataset/README.md` |
+| The external datasets (Catlin, Moorea, Pacific, Benthos): output contract, CLI, running and testing | `packages/external-datasets/README.md` |
 | Recreate or update the CoralNet data end to end | `docs/runbooks/coralnet-data.md` |
 | Lint, type-check, test and dependency settings; CI checks; pre-commit hooks | `pyproject.toml`; `.github/workflows/`; `.pre-commit-config.yaml` |
 | Source and history of each rule, for editing this file | `docs/agents-md-sources.md` |
