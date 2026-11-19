@@ -25,6 +25,7 @@ def test_evaluate_coralnet_forwards_dedup_fields(monkeypatch):
 
     kwargs = {
         "predictor": None,
+        "manifest_path": "etl/runA/m.parquet",
         "whitelist_sources": [5, 4],
         "image_blacklist": "/bl.parquet",
         "annotation_overrides": "/ov.parquet",
@@ -35,6 +36,7 @@ def test_evaluate_coralnet_forwards_dedup_fields(monkeypatch):
         "output_dir": "out",
     }
     result = coralnet_eval.evaluate_coralnet(**kwargs)
+    assert seen["manifest_path"] == "etl/runA/m.parquet"
     assert seen["whitelist_sources"] == [5, 4]  # forwarded as given, reported sorted
     assert seen["image_blacklist"] == "/bl.parquet"
     assert seen["annotation_overrides"] == "/ov.parquet"
@@ -49,6 +51,28 @@ def test_evaluate_coralnet_forwards_dedup_fields(monkeypatch):
     assert seen["split"] == "train"
     assert seen["image_keep"] == "/keep.parquet"
     assert result["image_keep"] == "/keep.parquet"
+
+
+def test_write_coralnet_sample_forwards_manifest_path(monkeypatch, tmp_path):
+    import pandas as pd
+
+    from mermaidseg.evaluation import coralnet_eval
+
+    seen = {}
+
+    class FakeDataset:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.df_images = pd.DataFrame({"source_id": [1], "image_id": ["a"]})
+
+    monkeypatch.setattr(coralnet_eval, "CoralNetDataset", FakeDataset)
+    coralnet_eval.write_coralnet_sample(
+        path=tmp_path / "s.parquet",
+        manifest_path="etl/runA/m.parquet",
+        whitelist_sources=[1],
+        images_per_source=1,
+    )
+    assert seen["manifest_path"] == "etl/runA/m.parquet"
 
 
 def test_sample_images_per_source_is_seeded_and_capped():
@@ -97,6 +121,7 @@ def test_write_coralnet_sample_writes_the_seeded_per_source_sample_as_strings(
 
     returned = coralnet_eval.write_coralnet_sample(
         path=path,
+        manifest_path="etl/runA/m.parquet",
         whitelist_sources=[2, 1],
         image_blacklist="/bl.parquet",
         annotation_overrides="/ov.parquet",
@@ -106,6 +131,7 @@ def test_write_coralnet_sample_writes_the_seeded_per_source_sample_as_strings(
 
     assert returned == path
     assert seen == {
+        "manifest_path": "etl/runA/m.parquet",
         "whitelist_sources": [2, 1],
         "image_blacklist": "/bl.parquet",
         "annotation_overrides": "/ov.parquet",

@@ -135,12 +135,17 @@ S3 access uses the default boto3 credential chain, for example `AWS_PROFILE`.
 
 ## Use a build in training
 
-`CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`) reads the manifest from its `source_bucket`. Set one of these to select a build; the path wins:
+`CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`) reads the manifest from its `source_bucket`. The data config selects the build. Every CoralNet split in `configs/data_config.yaml` must set `coralnet.<split>.manifest_path` to the manifest key:
 
-- `MERMAID_CORALNET_MANIFEST_VERSION=<version>` reads `etl-outputs/coralnet/<version>/coralnet_training_manifest_<version>.parquet`.
-- `MERMAID_CORALNET_MANIFEST_PATH=<key>` reads that key.
+```yaml
+coralnet:
+  train:
+    manifest_path: etl-outputs/coralnet/<run>/coralnet_training_manifest_<run>.parquet
+```
 
-With neither set, it reads a pinned default build. It reads the label names from `coralnet_id2name_<run>.json` in the same directory as the manifest, where `<run>` is the directory name. A custom path must keep that layout.
+There is no default build. If a split has no `manifest_path`, building the dataset fails.
+
+The dataset reads the label names from `coralnet_id2name_<run>.json` in the same directory as the manifest, where `<run>` is the directory name. A custom path must keep that layout.
 
 `image_s3_key` and the id2name JSON are keys in `MERMAID_CORALNET_BUCKET`, so a build is readable only when that bucket is the dataset's `source_bucket` (the `CoralNetDataset` default).
 

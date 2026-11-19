@@ -28,6 +28,7 @@ _WHITELIST = re.compile(r"whitelist_sources: \[[^\]]*\]")
 _CORALNET_VAL = re.compile(
     r"    val:\n"
     r"      whitelist_sources: \[[^\]]*\]\n"
+    r"      manifest_path: [^\n]*\n"
     r"      image_blacklist: [^\n]*\n"
     r"      annotation_overrides: [^\n]*\n"
 )

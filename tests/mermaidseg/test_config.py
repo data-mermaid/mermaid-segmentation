@@ -18,7 +18,7 @@ from mermaidseg.config import (
     validate_section,
 )
 from mermaidseg.datasets.factory import DATASET_CLASSES
-from mermaidseg.io import setup_config
+from mermaidseg.io import load_section, setup_config
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIGS = _REPO / "configs"
@@ -156,6 +156,16 @@ def test_resolved_committed_config_loads_under_weights_only_with_the_cutoff_as_t
         if split is not None and "annotation_date_cutoff" in split
     ]
     assert cutoffs and set(cutoffs) == {"2026-08-12"}
+
+
+@pytest.mark.parametrize("data_file", ["data_config.yaml", "data_config_trainval.yaml"])
+def test_committed_coralnet_splits_name_a_manifest(data_file: str):
+    cfg = load_section(_CONFIGS / data_file, "data")
+    splits = {name: s for name, s in cfg["coralnet"].items() if s is not None}
+    assert splits
+    for name, split in splits.items():
+        manifest = split.get("manifest_path")
+        assert isinstance(manifest, str) and manifest, name
 
 
 def test_data_config_dataset_fields_match_the_dataset_registry():

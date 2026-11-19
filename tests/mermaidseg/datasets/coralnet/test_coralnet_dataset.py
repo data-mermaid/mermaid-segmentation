@@ -131,25 +131,9 @@ def test_parquet_refs_resolve_against_repo_root(cache, monkeypatch):
     assert sorted(ds.df_images["image_id"]) == ["10", "20"]
 
 
-def test_default_fallback_when_no_env(monkeypatch):
-    monkeypatch.delenv("MERMAID_CORALNET_MANIFEST_PATH", raising=False)
-    monkeypatch.delenv("MERMAID_CORALNET_MANIFEST_VERSION", raising=False)
-    assert cnd._resolve_default_manifest_path() == cnd._DEFAULT_MANIFEST_PATH
-
-
-def test_version_env_builds_versioned_filename(monkeypatch):
-    monkeypatch.delenv("MERMAID_CORALNET_MANIFEST_PATH", raising=False)
-    monkeypatch.setenv("MERMAID_CORALNET_MANIFEST_VERSION", "20260515_deadbeef")
-    assert (
-        cnd._resolve_default_manifest_path()
-        == "etl-outputs/coralnet/20260515_deadbeef/coralnet_training_manifest_20260515_deadbeef.parquet"
-    )
-
-
-def test_explicit_path_env_wins(monkeypatch):
-    monkeypatch.setenv("MERMAID_CORALNET_MANIFEST_PATH", "custom/path.parquet")
-    monkeypatch.setenv("MERMAID_CORALNET_MANIFEST_VERSION", "ignored")
-    assert cnd._resolve_default_manifest_path() == "custom/path.parquet"
+def test_manifest_path_is_required(cache):
+    with pytest.raises(TypeError, match="manifest_path"):
+        CoralNetDataset(source_bucket=BUCKET)
 
 
 def test_whitelist_and_blacklist_sources_together_raise(cache):

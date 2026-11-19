@@ -29,6 +29,7 @@ _CORALNET = """\
       whitelist_sources: [{train}]
     val:
       whitelist_sources: [{val}]
+      manifest_path: etl/runA/m.parquet
       image_blacklist: null
       annotation_overrides: null
     test:
