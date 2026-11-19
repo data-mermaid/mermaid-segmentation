@@ -23,6 +23,7 @@ coralnet-dataset = "coralnet_dataset.cli:main"
 [dependency-groups]
 tests = [
     "pytest>=8.0",
+    "pytest-socket>=0.7",
 ]
 
 [tool.uv.sources]
@@ -33,4 +34,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-markers", "--strict-config", "-ra"]
+addopts = ["--strict-markers", "--strict-config", "-ra", "--allow-hosts=127.0.0.1,::1"]

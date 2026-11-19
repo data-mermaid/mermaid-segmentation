@@ -27,6 +27,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, TensorDataset
 
 import mermaidseg.model.models
 from mermaidseg import training
+from mermaidseg.dataset_reconciliation import registry as registry_module
 from mermaidseg.datasets.factory import build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
@@ -290,6 +291,12 @@ def _install_smoke_fakes(
             dataset_classes={"coralscapes_v2": _SmokeCoralscapesV2},
             verbose=False,
         ),
+    )
+    # label_roll_up builds the hierarchy through the registry's own binding; keep it offline.
+    monkeypatch.setattr(
+        registry_module,
+        "initialize_benthic_hierarchy",
+        lambda: {"Acropora": "Hard coral", "Hard coral": None},
     )
     return workdir, wandb_run, cache_roots
 

@@ -39,6 +39,7 @@ mlflow = ["mlflow", "sagemaker-mlflow"]
 tests = [
     "pytest>=8.0",
     "pytest-cov>=4.0",
+    "pytest-socket>=0.7",
 ]
 lint = [
     "ruff>=0.15.8",
@@ -99,6 +100,8 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "-ra",
+    "--allow-hosts=127.0.0.1,::1",
+    "--allow-unix-socket",
     "-m",
     "not live",
 ]
