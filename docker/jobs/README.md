@@ -1,7 +1,7 @@
 # docker/jobs/
 
 Container definition for SageMaker training jobs launched by
-`make sm-launch` (see the root README's SageMaker section). SageMaker is the backup to Slurm; both run
+`make sm-launch` (see [Train on SageMaker](../../docs/runbooks/train-on-sagemaker.md)). SageMaker is the backup to Slurm; both run
 `scripts/train.py`.
 
 ## Files
