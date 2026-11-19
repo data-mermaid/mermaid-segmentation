@@ -65,7 +65,7 @@ def spawn_gloo(worker, world_size: int, extra: tuple = ()) -> list:
     try:
         for process in processes:
             process.start()
-        results = []
+        results: list[tuple[int, object]] = []
         deadline = time.monotonic() + _GLOO_RESULT_TIMEOUT_S
         while len(results) < world_size:
             try:
