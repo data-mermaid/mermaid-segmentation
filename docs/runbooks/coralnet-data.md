@@ -10,6 +10,7 @@ The package READMEs are the reference for flags, environment variables, exclusio
 - [Before you start](#before-you-start)
 - [Recreate the data from scratch](#recreate-the-data-from-scratch)
 - [Update the data](#update-the-data)
+- [Tune the request rate](#tune-the-request-rate)
 - [Use the new build in training](#use-the-new-build-in-training)
 - [When something fails](#when-something-fails)
 - [Known gaps](#known-gaps)
@@ -26,6 +27,8 @@ The package READMEs are the reference for flags, environment variables, exclusio
 
   See the scraper's [environment variables](../../packages/coralnet-scraper/README.md#environment-variables) and the build's [environment variables](../../packages/coralnet-dataset/README.md#environment-variables).
 - **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the `source_bucket` of `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`). See [Use a build in training](../../packages/coralnet-dataset/README.md#use-a-build-in-training).
+
+- **Request rate.** The scraper sends requests without a rate limit unless you set one. To choose a limit, see [Tune the request rate](#tune-the-request-rate).
 
 Run every command from the repository root.
 
@@ -95,6 +98,28 @@ uv run --package coralnet-dataset coralnet-dataset all --version-tag <new-run> -
 `build-annotations` and `build-images` read every source and every annotated image again. `resize` resizes only the images that have no resized object on S3.
 
 Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
+
+## Tune the request rate
+
+Find the highest request rate at which CoralNet answers without 429s, retries or transport failures. The scraper has no rate limit by default.
+
+1. Pick about 10 public sources of mid size (a few hundred to a few thousand images each) as a test set. Run the scraper on them into a scratch prefix with the default settings (no rate limit, default workers):
+
+   ```bash
+   MERMAID_CORALNET_PREFIX=scratch/rate-tuning uv run --package coralnet-scraper coralnet-scrape --source-ids <id>,<id>,...
+   ```
+
+   The run includes image traffic because the scratch prefix is empty. Before each further iteration, delete the scratch prefix from the bucket: the resume rule skips sources already on S3, so deleting it makes each run download the same sources again.
+2. Read the [run report](../../packages/coralnet-scraper/README.md#run-report) at `s3://<bucket>/scratch/rate-tuning/_runs/<run id>.json`. Note the `429` and 5xx counts, the `timeout` and `connection` counts under `transport.retries`, the failed sources, and `transport.mean_rate_per_s`.
+3. If there is any 429, if retried requests exceed 1% of `transport.requests`, or if any source failed for a transport reason, set `--requests-per-second` to half the observed `transport.mean_rate_per_s`, which counts retries too. If timeouts dominate, also halve `--scraper-workers`. Repeat from step 1.
+4. Stop at the first setting with no 429, retries under 1% of requests and no transport failures. Record it in the table below, and set the values in `.env`: `MERMAID_CORALNET_REQUESTS_PER_SECOND`, `MERMAID_CORALNET_SCRAPER_WORKERS` and, if you changed it, `MERMAID_CORALNET_EXPORT_WORKERS`.
+5. Run this procedure again if a later run reports 429s or the circuit breaker stops it.
+
+Results:
+
+| Date | Requests per second | Scraper workers | Export workers | Run report path | Outcome |
+|---|---|---|---|---|---|
+| | | | | | |
 
 ## Use the new build in training
 

@@ -11,7 +11,7 @@ Downloads public CoralNet sources (images, labelsets, annotations) to S3. Import
 
 ## S3 layout
 
-Everything is written under `s3://<bucket>/<prefix>/s<source_id>/`:
+Each source is written under `s3://<bucket>/<prefix>/s<source_id>/`:
 
 | Object | Content |
 |---|---|
@@ -20,6 +20,12 @@ Everything is written under `s3://<bucket>/<prefix>/s<source_id>/`:
 | `annotations.csv` | CoralNet annotation export of the whole source. |
 | `image_list.csv` | One row per image from the browse pages; the `Image URL` column is empty. |
 | `images/<image_id>.jpg` | One object per image, keyed by the numeric CoralNet image id. |
+
+Each run also writes one run-level object under `s3://<bucket>/<prefix>/_runs/`:
+
+| Object | Content |
+|---|---|
+| `_runs/<UTC time>-<short id>.json` | The [run report](#run-report) of one run. |
 
 `<bucket>` and `<prefix>` come from the environment variables below.
 
@@ -38,6 +44,9 @@ Flags:
 | `--force` | off | Process every source, including those already on S3. |
 | `--delay-seconds` | `0.0` | Pause after each source not skipped by the resume check. |
 | `--scraper-workers` | auto | Concurrent image download and upload workers. Overrides `MERMAID_CORALNET_SCRAPER_WORKERS`. |
+| `--source-ids` | all public sources | Comma-separated CoralNet source ids. The run processes only these, in the given order, after source discovery. An id that is not in the public listing is still attempted. |
+| `--requests-per-second` | no limit | Maximum request rate, a positive number. The limit applies to the first attempt of each CoralNet request and is shared by all threads. Retries wait for their backoff or the server's `Retry-After` and do not count against the limit. Image downloads from S3 pre-signed URLs are never limited. Overrides `MERMAID_CORALNET_REQUESTS_PER_SECOND`. |
+| `--export-workers` | `3` | Concurrent page exports for sources with more than 5000 images. Overrides `MERMAID_CORALNET_EXPORT_WORKERS`. |
 | `-v`, `--verbose` | off | Debug logging. |
 
 The command logs in to CoralNet, discovers the public source ids from `https://coralnet.ucsd.edu/source/about/`, and downloads each source. A failed login ends the run with exit code 1.
@@ -59,7 +68,27 @@ Exit code:
 | Code | When |
 |---|---|
 | 0 | Every source downloads or is skipped. A source with zero Confirmed images, or with zero images, counts as skipped. |
-| 1 | The CoralNet login fails, any source fails, or the run stops on an uncaught error (invalid configuration, source discovery failure). |
+| 1 | The CoralNet login fails, any source fails, the [circuit breaker](#retries-and-circuit-breaker) stops the run, the [run report](#run-report) cannot be written to S3 (after the transport figures and failure summary are logged, the run logs `Could not write run report s3://<bucket>/<key>`), or the run stops on an uncaught error (invalid configuration, source discovery failure). |
+
+### Retries and circuit breaker
+
+- **Retries.** A GET request is retried up to 5 times on timeouts, dropped connections, and HTTP 429, 500, 502, 503 and 504. The wait grows exponentially with jitter and honours the `Retry-After` header. A request that could not connect is retried whatever its method, because it was never sent.
+- **Circuit breaker.** After 5 consecutive failed sources the run stops. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped by the resume check neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
+
+### Run report
+
+After the batch loop finishes or the circuit breaker stops it, the run writes a JSON report to `s3://<bucket>/<prefix>/_runs/<UTC time>-<short id>.json`. A failed login or failed source discovery ends the run before this point, so it writes no report.
+
+| Field | Content |
+|---|---|
+| `settings` | `scraper_workers`, `export_workers`, `requests_per_second` (`null` = no limit), `source_ids` (`null` = every public source). |
+| `started_at`, `finished_at` | Run start and end, ISO 8601 UTC. |
+| `duration_s` | Run time in seconds. |
+| `sources` | Per attempted source id: `{"ok": bool, "errors": [codes]}`. Sources skipped by the resume check are absent. |
+| `stopped` | `null`, or why the run stopped early: `circuit_open`. |
+| `transport` | `requests`: requests sent, retries included. `mean_rate_per_s`: `requests` divided by the run time. `retries`: retries by cause: `"429"`, each 5xx code, `"timeout"`, `"connection"`. `final_status`: final responses per status code. |
+
+The run log prints the same transport figures at the end. To choose a request rate from these figures, follow [Tune the request rate](../../docs/runbooks/coralnet-data.md#tune-the-request-rate).
 
 ### Environment variables
 
@@ -74,8 +103,13 @@ set -a; source .env; set +a
 | `MERMAID_CORALNET_BUCKET` | yes | none | Destination bucket. An unset or empty value raises `ValueError`. |
 | `MERMAID_CORALNET_PREFIX` | no | `coralnet-public-images` | Key prefix. Surrounding slashes are stripped; an empty prefix raises `ValueError`. |
 | `MERMAID_CORALNET_SCRAPER_WORKERS` | no | `min(32, max(8, 4 * CPU count))` | Image worker count. Must be an integer of at least 1. |
+| `MERMAID_CORALNET_REQUESTS_PER_SECOND` | no | no limit | Maximum request rate. Must be a positive number; 0, a negative number or a non-numeric value raises `ValueError`. |
+| `MERMAID_CORALNET_EXPORT_WORKERS` | no | `3` | Page export worker count. Must be an integer of at least 1. |
+| `MERMAID_CORALNET_USER_AGENT` | no | `mermaid-coralnet-scraper (+https://github.com/data-mermaid/mermaid-segmentation)` | `User-Agent` header of every request. |
 | `CORALNET_USERNAME` | no | prompt | CoralNet login. Used only when `CORALNET_PASSWORD` is also set. |
 | `CORALNET_PASSWORD` | no | prompt | CoralNet password. |
+
+A flag overrides its environment variable.
 
 Without both credential variables the command prompts for the username and password on the terminal.
 

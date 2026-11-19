@@ -12,6 +12,7 @@ dependencies = [
     "boto3",
     "pandas",
     "requests",
+    "requests-ratelimiter",
     "tqdm",
 ]
 

@@ -70,3 +70,37 @@ def test_validate_workers_rejects_non_integer(workers):
 
 def test_validate_workers_accepts_one():
     assert config.validate_workers(1) == 1
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, None), ("2.5", 2.5)])
+def test_get_requests_per_second_reads_the_env(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("MERMAID_CORALNET_REQUESTS_PER_SECOND", raising=False)
+    else:
+        monkeypatch.setenv("MERMAID_CORALNET_REQUESTS_PER_SECOND", value)
+    assert config.get_requests_per_second() == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_get_requests_per_second_rejects_non_positive_or_non_numeric(monkeypatch, value):
+    monkeypatch.setenv("MERMAID_CORALNET_REQUESTS_PER_SECOND", value)
+    with pytest.raises(
+        ValueError, match="MERMAID_CORALNET_REQUESTS_PER_SECOND|requests per second"
+    ):
+        config.get_requests_per_second()
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, 3), ("4", 4)])
+def test_get_export_workers_reads_the_env(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("MERMAID_CORALNET_EXPORT_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("MERMAID_CORALNET_EXPORT_WORKERS", value)
+    assert config.get_export_workers() == expected
+
+
+@pytest.mark.parametrize("value", ["0", "x"])
+def test_get_export_workers_rejects_invalid(monkeypatch, value):
+    monkeypatch.setenv("MERMAID_CORALNET_EXPORT_WORKERS", value)
+    with pytest.raises(ValueError, match="MERMAID_CORALNET_EXPORT_WORKERS|workers"):
+        config.get_export_workers()
