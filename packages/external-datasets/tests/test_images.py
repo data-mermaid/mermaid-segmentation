@@ -66,3 +66,14 @@ def test_jpeg_is_drafted_to_one_eighth_and_png_is_not(tmp_path, draft_calls, siz
 
     assert find_undecodable([jpg, png], workers=1) == []
     assert draft_calls == [("RGB", expected_box)]
+
+
+def test_decompression_bomb_is_reported_as_undecodable(tmp_path, monkeypatch):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    path = tmp_path / "bomb.jpg"
+    path.write_bytes(_jpeg_bytes((64, 64)))
+
+    bad = find_undecodable([path], workers=1)
+
+    assert [p for p, _ in bad] == [path]
+    assert bad[0][1].startswith("DecompressionBombError")

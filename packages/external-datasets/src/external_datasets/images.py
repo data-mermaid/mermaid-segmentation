@@ -22,7 +22,7 @@ def _decode_error(path: Path) -> str | None:
                     (max(1, width // _DRAFT_SCALE), max(1, height // _DRAFT_SCALE)),
                 )
             img.load()
-    except (OSError, ValueError, SyntaxError) as exc:
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
         return f"{type(exc).__name__}: {exc}"
     return None
 
