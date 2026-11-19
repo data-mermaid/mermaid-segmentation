@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import weakref
 from io import BytesIO
 from unittest.mock import MagicMock
 
@@ -10,13 +12,21 @@ import pytest
 from botocore.exceptions import ClientError
 from PIL import Image
 
+from coralnet_dataset import resize as resize_module
+from coralnet_dataset.inspect import decode_image
 from coralnet_dataset.resize import (
+    RESIZE_THRESHOLD,
     _validate_and_download,
     resize_and_upload_all_images,
     resize_and_upload_image,
     resize_image_to_threshold,
     scan_for_missing_resized_images,
 )
+
+
+def _resize(data: BytesIO) -> BytesIO:
+    img, inspection = decode_image(data)
+    return resize_image_to_threshold(img, data, original_size=(inspection.width, inspection.height))
 
 
 def test_resize_image_maintains_aspect_ratio():
@@ -27,7 +37,7 @@ def test_resize_image_maintains_aspect_ratio():
     img.save(img_bytes, format="JPEG")
     img_bytes.seek(0)
 
-    resized_bytes = resize_image_to_threshold(img_bytes)
+    resized_bytes = _resize(img_bytes)
     resized_img = Image.open(resized_bytes)
     resized_img.load()
 
@@ -44,7 +54,7 @@ def test_resize_image_no_resize_if_below_threshold():
     img.save(img_bytes, format="JPEG")
     original = img_bytes.getvalue()
 
-    resized_bytes = resize_image_to_threshold(BytesIO(original))
+    resized_bytes = _resize(BytesIO(original))
 
     assert resized_bytes.getvalue() == original
 
@@ -55,7 +65,7 @@ def test_resize_image_scales_a_portrait_image_by_its_height():
     img_bytes = BytesIO()
     img.save(img_bytes, format="JPEG")
 
-    resized = Image.open(resize_image_to_threshold(img_bytes))
+    resized = Image.open(_resize(img_bytes))
 
     assert resized.size == (512, 2048)
 
@@ -65,7 +75,7 @@ def test_resize_converts_cmyk_jpeg_below_threshold():
     img_bytes = BytesIO()
     Image.new("CMYK", (800, 400), color=(0, 255, 255, 0)).save(img_bytes, format="JPEG")
 
-    resized = Image.open(resize_image_to_threshold(img_bytes))
+    resized = Image.open(_resize(img_bytes))
 
     assert (resized.format, resized.mode, resized.size) == ("JPEG", "RGB", (800, 400))
 
@@ -75,7 +85,7 @@ def test_resize_re_encodes_an_rgb_png_below_threshold():
     img_bytes = BytesIO()
     Image.new("RGB", (800, 400), color="blue").save(img_bytes, format="PNG")
 
-    resized = Image.open(resize_image_to_threshold(img_bytes))
+    resized = Image.open(_resize(img_bytes))
 
     assert (resized.format, resized.mode, resized.size) == ("JPEG", "RGB", (800, 400))
 
@@ -88,7 +98,7 @@ def test_resize_converts_rgba_below_threshold():
     img.save(img_bytes, format="PNG")
     img_bytes.seek(0)
 
-    resized_bytes = resize_image_to_threshold(img_bytes)
+    resized_bytes = _resize(img_bytes)
     resized_img = Image.open(resized_bytes)
     resized_img.load()
 
@@ -96,6 +106,62 @@ def test_resize_converts_rgba_below_threshold():
     assert resized_img.mode == "RGB"
     assert resized_img.width == 800
     assert resized_img.height == 400
+
+
+@pytest.mark.parametrize(
+    ("original", "expected"),
+    [
+        # Draft is exact (2048x512); the original size still forces a re-encode.
+        ((4096, 1024), (2048, 512)),
+        # Draft rounds up to 3000x2001; int(4001 * 2048 / 6000) = 1365, not 1366.
+        ((6000, 4001), (2048, 1365)),
+        ((1024, 4096), (512, 2048)),
+        # Draft rounds up to 2001x3000; int(4001 * 2048 / 6000) = 1365.
+        ((4001, 6000), (1365, 2048)),
+    ],
+)
+def test_resize_image_resizes_a_drafted_jpeg_from_its_original_size(original, expected):
+    data = BytesIO()
+    Image.new("RGB", original, color="red").save(data, format="JPEG")
+    original_bytes = data.getvalue()
+    img, inspection = decode_image(data, max_edge=RESIZE_THRESHOLD)
+
+    out = resize_image_to_threshold(img, data, original_size=(inspection.width, inspection.height))
+
+    assert Image.open(out).size == expected
+    assert out.getvalue() != original_bytes
+
+
+def test_resize_image_returns_the_original_bytes_of_a_jpeg_at_the_threshold():
+    """A JPEG whose longest edge equals the threshold is not resized or re-encoded."""
+    data = BytesIO()
+    Image.new("RGB", (RESIZE_THRESHOLD, 1000), color="red").save(data, format="JPEG")
+    original = data.getvalue()
+    img, inspection = decode_image(data, max_edge=RESIZE_THRESHOLD)
+
+    out = resize_image_to_threshold(img, data, original_size=(inspection.width, inspection.height))
+
+    assert out.getvalue() == original
+
+
+def test_resize_and_upload_image_skips_an_oversized_image(monkeypatch):
+    """A decompression bomb is skipped as oversized and nothing is uploaded."""
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+    data = BytesIO()
+    Image.new("RGB", (64, 48)).save(data, format="PNG")
+    s3 = MagicMock()
+    s3.get_object.return_value = {"Body": BytesIO(data.getvalue())}
+    todo_item = {
+        "source_id": 1,
+        "image_id": "big",
+        "original_s3_key": "orig/big.png",
+        "output_s3_key": "out/big.jpg",
+    }
+
+    result = resize_and_upload_image(todo_item=todo_item, bucket="b", s3_client=s3)
+
+    assert (result["status"], result["skip_reason"]) == ("skipped", "oversized")
+    s3.put_object.assert_not_called()
 
 
 def _images_frame() -> pd.DataFrame:
@@ -201,9 +267,14 @@ class _PutFailsFakeS3:
         return self._fake.put_object(**kwargs)
 
 
-def test_resize_all_images_counts_completed_corrupted_and_failed(
-    fake_s3, valid_rgb_jpeg_bytes, truncated_jpeg_bytes
+def test_resize_all_images_counts_completed_oversized_corrupted_and_failed(
+    fake_s3, valid_rgb_jpeg_bytes, truncated_jpeg_bytes, monkeypatch, caplog
 ):
+    # ok/bad/upload are 2048x1536 (3.1M px), under the limit; the 4000x2500 PNG is over 2x it.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 4_000_000)
+    big = BytesIO()
+    Image.new("RGB", (4000, 2500)).save(big, format="PNG")
+    fake_s3.put("b", "orig/big.jpg", big.getvalue())
     fake_s3.put("b", "orig/ok.jpg", valid_rgb_jpeg_bytes)
     fake_s3.put("b", "orig/bad.jpg", truncated_jpeg_bytes)
     fake_s3.put("b", "orig/upload.jpg", valid_rgb_jpeg_bytes)
@@ -216,15 +287,52 @@ def test_resize_all_images_counts_completed_corrupted_and_failed(
                 "original_s3_key": f"orig/{name}.jpg",
                 "output_s3_key": f"out/{name}.jpg",
             }
-            for name in ("ok", "bad", "upload")
+            for name in ("ok", "bad", "big", "upload")
         ]
     )
 
-    counts = resize_and_upload_all_images(df_todo=todo_df, bucket="b", workers=2, s3_client=client)
+    with caplog.at_level(logging.INFO, logger=resize_module.logger.name):
+        counts = resize_and_upload_all_images(
+            df_todo=todo_df, bucket="b", workers=2, s3_client=client
+        )
 
-    assert counts == (1, 1, 1)
+    assert counts == (1, 2, 1)
+    assert "1 oversized, 1 corrupted" in caplog.text
     assert ("b", "out/ok.jpg") in fake_s3.objects
     assert ("b", "out/bad.jpg") not in fake_s3.objects
+
+
+def test_resize_and_upload_image_releases_the_decoded_image_before_the_upload(monkeypatch, fake_s3):
+    """Relies on CPython refcounting: the image is freed as soon as its last reference goes."""
+    data = BytesIO()
+    Image.new("RGB", (4096, 1024), color="red").save(data, format="JPEG")
+    fake_s3.put("b", "orig/x.jpg", data.getvalue())
+    decoded_refs: list[weakref.ref] = []
+
+    def tracking_decode(*args, **kwargs):
+        img, inspection = decode_image(*args, **kwargs)
+        decoded_refs.append(weakref.ref(img))
+        return img, inspection
+
+    monkeypatch.setattr(resize_module, "decode_image", tracking_decode)
+    s3 = MagicMock()
+    s3.get_object.side_effect = fake_s3.get_object
+
+    def put_object(**kwargs):
+        assert decoded_refs[0]() is None
+
+    s3.put_object.side_effect = put_object
+    todo_item = {
+        "source_id": 1,
+        "image_id": "x",
+        "original_s3_key": "orig/x.jpg",
+        "output_s3_key": "out/x.jpg",
+    }
+
+    result = resize_and_upload_image(todo_item=todo_item, bucket="b", s3_client=s3)
+
+    assert result["status"] == "completed"
+    s3.put_object.assert_called_once()
 
 
 def test_validate_and_download_propagates_a_download_failure(fake_s3):

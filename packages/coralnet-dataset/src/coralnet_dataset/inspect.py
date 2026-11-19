@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 from enum import StrEnum
 from typing import NamedTuple
 
@@ -25,6 +26,7 @@ class IssueType(StrEnum):
     DECODE_FAILURE = "decode_failure"
     TRUNCATED = "truncated"
     ZERO_SIZE = "zero_size"
+    OVERSIZED = "oversized"
     UNKNOWN = "unknown"
 
 
@@ -40,17 +42,40 @@ class ImageInspection(NamedTuple):
     error_message: str | None
 
 
+def _draft_to_max_edge(img: Image.Image, max_edge: int) -> None:
+    """Ask the JPEG decoder to decode at a reduced scale that keeps the longest edge >= max_edge.
+
+    The box is scaled by ``max_edge / longest edge`` so wide images reduce along their longest edge.
+    """
+    width, height = img.size
+    longest = max(width, height)
+    if img.format != "JPEG" or longest <= max_edge:
+        return
+    scale = max_edge / longest
+    img.draft(img.mode, (math.ceil(width * scale), math.ceil(height * scale)))
+
+
 def inspect_image(image_bytes: io.BytesIO | None) -> ImageInspection:
-    """Inspect image bytes for format, channels, and corruption.
+    """Inspect image bytes for format, channels, and corruption."""
+    return decode_image(image_bytes)[1]
+
+
+def decode_image(
+    image_bytes: io.BytesIO | None, *, max_edge: int | None = None
+) -> tuple[Image.Image | None, ImageInspection]:
+    """Decode image bytes once, inspecting format, channels, and corruption.
 
     Args:
         image_bytes: Seeked BytesIO with image data
+        max_edge: When set, a JPEG whose longest edge exceeds it is decoded at a reduced scale, so
+            the returned image can be smaller than the original but is at least ``max_edge`` on its
+            longest edge. The inspection always reports the original size.
 
     Returns:
-        ImageInspection with is_valid flag and detailed issue info
+        ``(image, inspection)``; ``image`` is the loaded image when valid, otherwise None.
     """
     if image_bytes is None or image_bytes.getbuffer().nbytes == 0:
-        return ImageInspection(
+        return None, ImageInspection(
             is_valid=False,
             issue_type=IssueType.ZERO_SIZE,
             format=None,
@@ -64,18 +89,20 @@ def inspect_image(image_bytes: io.BytesIO | None) -> ImageInspection:
         image_bytes.seek(0)
         img = Image.open(image_bytes)
 
+        format_str = img.format or "UNKNOWN"
+        width, height = img.size  # original size, read from the header before any draft
+        if max_edge is not None:
+            _draft_to_max_edge(img, max_edge)
+
         # Attempt full decode to catch corrupted data
         img.load()
-
-        format_str = img.format or "UNKNOWN"
-        width, height = img.size
         num_channels = len(img.getbands())
 
         # Validate channel count: 1 (grayscale L), 3 (RGB), or 4 (RGBA). Grayscale and RGBA are
         # accepted because the resize step converts them to RGB before JPEG encoding; rejecting
         # them would discard recoverable images.
         if num_channels not in (1, 3, 4):
-            return ImageInspection(
+            return None, ImageInspection(
                 is_valid=False,
                 issue_type=IssueType.INVALID_CHANNELS,
                 format=format_str,
@@ -85,7 +112,7 @@ def inspect_image(image_bytes: io.BytesIO | None) -> ImageInspection:
                 error_message=f"Expected 1 (L), 3 (RGB), or 4 (RGBA) channels, got {num_channels}",
             )
 
-        return ImageInspection(
+        return img, ImageInspection(
             is_valid=True,
             issue_type=IssueType.VALID,
             format=format_str,
@@ -95,8 +122,19 @@ def inspect_image(image_bytes: io.BytesIO | None) -> ImageInspection:
             error_message=None,
         )
 
+    except Image.DecompressionBombError as e:
+        return None, ImageInspection(
+            is_valid=False,
+            issue_type=IssueType.OVERSIZED,
+            format=None,
+            channels=None,
+            width=None,
+            height=None,
+            error_message=f"{type(e).__name__}: {e}",
+        )
+
     except Image.UnidentifiedImageError as e:
-        return ImageInspection(
+        return None, ImageInspection(
             is_valid=False,
             issue_type=IssueType.UNSUPPORTED_FORMAT,
             format=None,
@@ -114,7 +152,7 @@ def inspect_image(image_bytes: io.BytesIO | None) -> ImageInspection:
         else:
             issue = IssueType.DECODE_FAILURE
 
-        return ImageInspection(
+        return None, ImageInspection(
             is_valid=False,
             issue_type=issue,
             format=None,
@@ -125,7 +163,7 @@ def inspect_image(image_bytes: io.BytesIO | None) -> ImageInspection:
         )
 
     except Exception as e:
-        return ImageInspection(
+        return None, ImageInspection(
             is_valid=False,
             issue_type=IssueType.UNKNOWN,
             format=None,
