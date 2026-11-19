@@ -18,6 +18,7 @@ After construction, each registered dataset has had
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
@@ -39,6 +40,8 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     fetch_pacific_labeled_corals_to_mermaid,
     fetch_ucsd_mosaics_to_mermaid,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _identity_source_to_target(dataset: Any) -> dict[str, str]:
@@ -244,6 +247,7 @@ class SourceLabelRegistry:
                     continue
                 target_id = self.target_label2id.get(target_name, 0)
                 source_to_target_np[local_id + offset] = target_id
+        self._log_target_coverage(source_to_target_np)
         self.source_to_target = torch.from_numpy(source_to_target_np).long()
         self.source_to_concepts = None
         self.concept_id2name: dict[int, str] | None = None
@@ -256,6 +260,34 @@ class SourceLabelRegistry:
 
         for ds in self.datasets:
             ds.set_global_offset(self.dataset_offsets[ds.SOURCE_NAME])
+
+    def _log_target_coverage(self, source_to_target_np: np.ndarray) -> None:
+        """Log, per source, how many source labels (and annotations) reach a target class.
+
+        Warns when none do: a label-key mismatch otherwise sends every pixel of that source to
+        background with no error.
+        """
+        for ds in self.datasets:
+            offset = self.dataset_offsets[ds.SOURCE_NAME]
+            local_ids = sorted(ds.source_id2name)
+            if not local_ids:
+                continue
+            mapped = [source_to_target_np[i + offset] != 0 for i in local_ids]
+            n_mapped = sum(mapped)
+            msg = f"{ds.SOURCE_NAME}: {n_mapped} of {len(local_ids)} source labels"
+            annotations = getattr(ds, "df_annotations", None)
+            if annotations is not None and len(annotations):
+                counts = annotations["source_label_name"].value_counts()
+                mapped_names = {
+                    ds.source_id2name[i] for i, ok in zip(local_ids, mapped, strict=True) if ok
+                }
+                share = counts[counts.index.isin(mapped_names)].sum() / len(annotations)
+                msg += f", {share:.1%} of annotations,"
+            msg += " map to a target class"
+            if n_mapped:
+                logger.info(msg)
+            else:
+                logger.warning(msg + "; check source label keys against the mapping.")
 
     def _resolve_source_to_target_maps(self) -> dict[str, dict[str, str]]:
         """Resolve a ``SOURCE_NAME -> {source_name: target_name}`` map per dataset."""
