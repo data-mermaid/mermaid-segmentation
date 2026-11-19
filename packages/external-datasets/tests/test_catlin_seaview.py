@@ -102,7 +102,7 @@ def test_ca1_two_regions_publish_parquet_images_and_classes(tmp_path, fake_s3):
             "(Gonzalez-Rivero et al., 2019)"
         ),
         "raw_data_url": "http://data.qld.edu.au/public/Q1281",
-        "license": "Not confirmed; see UQ eSpace record UQ:734799 (doi:10.14264/uql.2019.930)",
+        "license": "CC BY-NC-SA 4.0",
     }
     assert manifest["s3"]["image_key_template"] == "ds/images/{region}/{image_id}.jpg"
     assert manifest["ingestion"]["images_uploaded"]["ATL"] == 2

@@ -23,7 +23,7 @@ The release has 11,387 images. The per-region image counts above sum to 11,357.
 
 ## Licence
 
-Not confirmed. See the UQ eSpace record UQ:734799 (doi:10.14264/uql.2019.930).
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0). See the UQ eSpace record UQ:734799 (doi:10.14264/uql.2019.930).
 
 ## Where the class reads from
 

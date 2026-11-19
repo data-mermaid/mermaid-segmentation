@@ -61,7 +61,7 @@ SOURCE = Source(
         "(Gonzalez-Rivero et al., 2019)"
     ),
     raw_data_url=BASE_URL,
-    license="Not confirmed; see UQ eSpace record UQ:734799 (doi:10.14264/uql.2019.930)",
+    license="CC BY-NC-SA 4.0",
 )
 
 
