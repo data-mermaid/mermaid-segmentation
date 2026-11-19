@@ -90,6 +90,12 @@ def test_get_requests_per_second_rejects_non_positive_or_non_numeric(monkeypatch
         config.get_requests_per_second()
 
 
+@pytest.mark.parametrize("rate", [float("inf"), float("nan"), 0.0, -1.0])
+def test_validate_requests_per_second_rejects_a_non_finite_or_non_positive_rate(rate):
+    with pytest.raises(ValueError, match="finite number > 0"):
+        config.validate_requests_per_second(rate)
+
+
 @pytest.mark.parametrize(("value", "expected"), [(None, 3), ("4", 4)])
 def test_get_export_workers_reads_the_env(monkeypatch, value, expected):
     if value is None:

@@ -24,6 +24,7 @@ from coralnet_scraper.batch_download import (
     run_batch_download,
 )
 from coralnet_scraper.config import (
+    DEFAULT_EXPORT_WORKERS,
     ENV_EXPORT_WORKERS,
     ENV_REQUESTS_PER_SECOND,
     ENV_SCRAPER_WORKERS,
@@ -137,7 +138,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--export-workers",
         type=int,
         default=None,
-        help=f"Concurrent page exports of a paginated export (default: 3 or {ENV_EXPORT_WORKERS})",
+        help=(
+            "Concurrent page exports of a paginated export "
+            f"(default: {DEFAULT_EXPORT_WORKERS} or {ENV_EXPORT_WORKERS})"
+        ),
     )
     p.add_argument(
         "--requests-per-second",
