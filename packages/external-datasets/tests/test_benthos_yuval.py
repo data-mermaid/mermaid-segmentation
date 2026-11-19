@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from external_datasets import benthos_yuval, images
 
@@ -197,6 +197,17 @@ def test_run_lifts_pixel_limit_only_while_decoding_mosaics(tmp_path, fake_s3, mo
     root = _write_raw(tmp_path / "raw", rs24_mask=np.full((2, 2), 1, dtype=np.uint8))
 
     assert benthos_yuval.run(_args(tmp_path, root), fake_s3) == 0
+    assert Image.MAX_IMAGE_PIXELS == 1
+
+
+def test_run_restores_pixel_limit_when_decoding_a_mosaic_fails(tmp_path, fake_s3, monkeypatch):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    root = _write_raw(tmp_path / "raw", rs24_mask=np.full((2, 2), 1, dtype=np.uint8))
+    (root / "RS24.png").write_bytes(b"not a png")
+
+    with pytest.raises(UnidentifiedImageError):
+        benthos_yuval.run(_args(tmp_path, root), fake_s3)
+
     assert Image.MAX_IMAGE_PIXELS == 1
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from botocore.exceptions import ClientError
 
 from external_datasets.publish import (
     S3Target,
@@ -151,3 +152,26 @@ def test_preflight_raises_when_any_published_name_exists(fake_s3, key):
     fake_s3.put(B, key, b"old")
     with pytest.raises(FileExistsError, match=key):
         preflight(fake_s3, _target(), "demo", overwrite=False)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda client, target: ensure_absent(client, target, ["a.json"], overwrite=False),
+        lambda client, target: put_json(client, target, "a.json", {"a": 1}, overwrite=False),
+    ],
+    ids=["ensure_absent", "put_json"],
+)
+def test_head_error_other_than_missing_propagates_and_writes_nothing(fake_s3, monkeypatch, call):
+    denied = ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "HeadObject")
+
+    def head_object(**kwargs):
+        raise denied
+
+    monkeypatch.setattr(fake_s3, "head_object", head_object)
+
+    with pytest.raises(ClientError) as excinfo:
+        call(fake_s3, _target())
+
+    assert excinfo.value.response["Error"]["Code"] == "AccessDenied"
+    assert fake_s3.objects == {}
