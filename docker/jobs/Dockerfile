@@ -14,6 +14,7 @@ FROM ${BASE_IMAGE}
 
 # Pinned uv. The digest is bumped by Dependabot; update the tag together with the uv used to
 # refresh uv.lock.
+# The `version` in the setup-uv steps of .github/workflows/*.yml moves with this tag.
 COPY --from=ghcr.io/astral-sh/uv:0.11.13@sha256:841c8e6fe30a8b07b4478d12d0c608cba6de66102d29d65d1cc423af86051563 /uv /uvx /usr/local/bin/
 
 # Secrets (HF_TOKEN) are never baked into the image or set in the job Environment:
