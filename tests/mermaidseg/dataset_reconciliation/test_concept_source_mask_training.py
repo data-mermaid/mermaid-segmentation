@@ -221,6 +221,7 @@ def test_coverage_rules():
     assert cov.loc["genus__porites", "n_annotations"] == 450 + 2 * 50  # each mask counts 50
     assert cov.loc["genus__porites", "n_images"] == 92
     assert cov.loc["genus__porites", "fails_images"]  # 92 < 100 and only 2 non-CoralNet images
+    assert cov.loc["genus__porites", "removed"]
     assert not cov.loc["genus__porites", "fails_sources"]  # a non-CoralNet dataset has it
     bleached = cov.loc["bleached"]
     assert (
@@ -229,3 +230,22 @@ def test_coverage_rules():
         and bleached["fails_images"]
     )
     assert cov.loc["branching", "n_images"] == 130  # acropora + bleached acropora images
+
+
+@pytest.mark.parametrize(("n_points", "removed"), [(499, True), (500, False)])
+def test_annotation_rule_removes_a_concept_below_the_point_threshold(n_points, removed):
+    # One image in one CoralNet source passes the lowered image and source rules.
+    rule = CoverageRule(
+        min_images=1, min_noncoralnet_images=1, min_annotations=500, min_coralnet_sources=1
+    )
+    counts = pd.DataFrame(
+        [("coralnet", "a0", "acropora", n_points, "1")],
+        columns=["dataset", "image_id", "label", "n", "source"],
+    )
+
+    row = concept_coverage(counts, _schema(), rule).loc["genus__acropora"]
+
+    assert row["n_annotations"] == n_points
+    assert not row["fails_images"] and not row["fails_sources"]
+    assert row["fails_annotations"] == removed
+    assert row["removed"] == removed

@@ -173,3 +173,42 @@ def test_build_order_follows_the_registry_not_the_config(stub_classes, monkeypat
         data_cfg, padding=0, dataset_classes=stub_classes, verbose=False, input_size=SIZE
     )
     assert list(built) == [("points", "train"), ("dense", "train")]
+
+
+def test_configured_source_names_counts_only_datasets_with_a_live_split():
+    class _Live(_RecordingDataset):
+        SOURCE_NAME = "live_source"
+
+    class _Partial(_RecordingDataset):
+        SOURCE_NAME = "partial_source"
+
+    class _AllSkipped(_RecordingDataset):
+        SOURCE_NAME = "skipped_source"
+
+    class _NullSection(_RecordingDataset):
+        SOURCE_NAME = "null_source"
+
+    class _Absent(_RecordingDataset):
+        SOURCE_NAME = "absent_source"
+
+    classes = {
+        "live": _Live,
+        "partial": _Partial,
+        "all_skipped": _AllSkipped,
+        "null_section": _NullSection,
+        "absent": _Absent,
+    }
+    data_cfg = ConfigDict(
+        {
+            "live": {"train": {"a": 1}, "val": {"a": 1}},
+            "partial": {"train": None, "val": None, "test": {"a": 1}},
+            "all_skipped": {"train": None, "val": None, "test": None},
+            "null_section": None,
+            "local_cache_dir": "/cache",
+        }
+    )
+
+    assert configured_source_names(data_cfg, dataset_classes=classes) == {
+        "live_source",
+        "partial_source",
+    }
