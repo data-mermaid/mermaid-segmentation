@@ -91,6 +91,14 @@ def _coralnet_sources(data: dict, split: str) -> list[int]:
     return sources
 
 
+def _coralnet_manifest(data: dict, split: str) -> str:
+    """Training manifest S3 key for ``split``; the dataset has no default to fall back on."""
+    manifest = _split_field(data, "coralnet", split, "manifest_path")
+    if not manifest:
+        raise ValueError(f"data config has no coralnet.{split}.manifest_path")
+    return manifest
+
+
 def check_split_evals(split: str, evals: list[str]) -> None:
     """``--split train`` only has CoralNet sources and the loss to score."""
     if split != "train":
@@ -426,6 +434,7 @@ def main(argv: list[str] | None = None) -> None:
 
         sample_path = write_coralnet_sample(
             path=output_dir / f"coralnet_{split}_sample.parquet",
+            manifest_path=_coralnet_manifest(data, split),
             whitelist_sources=_coralnet_sources(data, split),
             image_blacklist=_split_field(data, "coralnet", split, "image_blacklist"),
             annotation_overrides=_split_field(data, "coralnet", split, "annotation_overrides"),
@@ -453,6 +462,7 @@ def main(argv: list[str] | None = None) -> None:
             lambda: {
                 f"coralnet_{split}": evaluate_coralnet(
                     predictor=predictor,
+                    manifest_path=_coralnet_manifest(data, split),
                     whitelist_sources=_coralnet_sources(data, split),
                     image_blacklist=_split_field(data, "coralnet", split, "image_blacklist"),
                     annotation_overrides=_split_field(

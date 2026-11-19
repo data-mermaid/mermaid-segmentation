@@ -130,6 +130,23 @@ def test_coralnet_split_without_sources_fails_early():
         evaluate_script._coralnet_sources(data, "test")
 
 
+def test_coralnet_manifest_returns_the_configured_key():
+    data = {"coralnet": {"val": {"manifest_path": "etl/runA/m.parquet"}}}
+    assert evaluate_script._coralnet_manifest(data, "val") == "etl/runA/m.parquet"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"coralnet": {"val": {"whitelist_sources": [3]}}},
+        {"coralnet": {"val": None}},
+    ],
+)
+def test_coralnet_split_without_manifest_fails_early(data):
+    with pytest.raises(ValueError, match=r"coralnet\.val\.manifest_path"):
+        evaluate_script._coralnet_manifest(data, "val")
+
+
 def test_train_split_reads_the_train_sources():
     assert "train" in evaluate_script.SPLITS
     assert evaluate_script._coralnet_sources(DATA, "train") == [1, 2]
