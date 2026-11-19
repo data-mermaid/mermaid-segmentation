@@ -114,7 +114,7 @@ A new build changes model outputs, so item 7 of the working agreement in [AGENTS
 
 Each CoralNet split has a `whitelist_sources` list, and `CoralNetDataset` keeps only the sources on that list. A new source is not in any split until you add its id to a list:
 
-1. Add the id to a split's `whitelist_sources` in `configs/data_config.yaml`.
+1. Add the id to a split's `whitelist_sources` in `configs/data_config.yaml`. The id must already be in the manifest chosen under [Select the build](#select-the-build). Otherwise `CoralNetDataset` raises a `ValueError` that names it.
 2. Regenerate the derived configs, starting with `configs/data_config_trainval.yaml`. See [Regenerate the derived configs](derived-configs.md).
 
 ### Map new labels
