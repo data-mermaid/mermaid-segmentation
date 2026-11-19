@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -138,6 +139,7 @@ def test_exported_metadata_extends_the_sidecar_with_weights_and_checkpoint(run, 
         **sidecar,
         "weights": "weights.safetensors",
         "checkpoint": {"epoch": 3, "global_step": 42},
+        "weights_sha256": hashlib.sha256((bundle_dir / WEIGHTS).read_bytes()).hexdigest(),
     }
 
 
