@@ -112,9 +112,6 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
     source_name2id: dict[str, int]
     num_source_classes: int
     _global_offset: int
-    _load_failures: list[dict[str, Any]]
-    _annotation_count_by_image: dict[str, int]
-    _annotation_labels_by_image: dict[str, str]
     _ann_positions: dict[Any, NDArray[np.intp]]
 
     def __init__(
@@ -162,18 +159,11 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         self.source_name2id = {v: k for k, v in self.source_id2name.items()}
         self.num_source_classes = len(self.source_id2name) + 1  # +1 for background
 
-        self._annotation_count_by_image = self.df_annotations["image_id"].value_counts().to_dict()
-        self._annotation_labels_by_image = (
-            self.df_annotations.groupby("image_id")["source_label_name"]
-            .apply(lambda values: ",".join(sorted({str(v) for v in values if pd.notna(v)})))
-            .to_dict()
-        )
         # Positional (iloc) index of annotation rows per image_id so __getitem__ can look up an
         # image's annotations in O(1) instead of scanning the whole annotations table each call.
         # ``groupby(...).indices`` returns ascending positional indices per group, so the selected
         # rows and their order match the previous boolean-mask selection exactly.
         self._ann_positions = self.df_annotations.groupby("image_id", sort=False).indices
-        self._load_failures = []
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
         """Re-derive ``df_images`` after filtering ``df_annotations``.
@@ -266,7 +256,8 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             except Exception:
                 image_id = None
                 row_kwargs = {}
-            self._record_load_failure(image_id=image_id, row_kwargs=row_kwargs, error=e)
+            # Workers hold private dataset copies; the shared counter is what reaches the parent.
+            LocalS3Cache.get().record_load_failure()
 
             source_info = {k: v for k, v in row_kwargs.items() if k != "image_id"}
             emit_dataset_warning(
@@ -365,29 +356,3 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
         cache.record_stage("transform", t4 - t3)
 
         return image, local_mask
-
-    def _record_load_failure(
-        self, image_id: Any, row_kwargs: dict[str, Any], error: Exception
-    ) -> None:
-        record = {
-            "timestamp_utc": pd.Timestamp.utcnow().isoformat(),
-            "dataset_class": self.__class__.__name__,
-            "split": self.split,
-            "image_id": image_id,
-            "region_id": row_kwargs.get("region_id"),
-            "region_name": row_kwargs.get("region_name"),
-            "source_id": row_kwargs.get("source_id"),
-            "annotation_count": int(self._annotation_count_by_image.get(image_id, 0)),
-            "annotation_labels": self._annotation_labels_by_image.get(image_id, ""),
-            "missing_annotations": image_id not in self._annotation_count_by_image,
-            "error_type": type(error).__name__,
-            "error_message": str(error),
-            "annotations_path": getattr(self, "annotations_path", None)
-            or getattr(self, "manifest_path", None),
-            "source_bucket": getattr(self, "source_bucket", None),
-        }
-        self._load_failures.append(record)
-
-    def num_load_failures(self) -> int:
-        """Return the number of recorded data-loading failures."""
-        return len(self._load_failures)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +32,14 @@ def run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, torch.nn.Module
 @pytest.fixture(scope="module")
 def bundle_dir(run: tuple[Path, torch.nn.Module], tmp_path_factory: pytest.TempPathFactory) -> Path:
     return export_bundle(run[0], tmp_path_factory.mktemp("out") / "bundle")
+
+
+@pytest.fixture
+def reset_local_cache() -> Iterator[None]:
+    """Give the test a fresh ``LocalS3Cache`` singleton and drop it afterwards."""
+    LocalS3Cache.reset_singleton()
+    yield
+    LocalS3Cache.reset_singleton()
 
 
 def init_gloo(rank: int, world_size: int, init_method: str) -> None:

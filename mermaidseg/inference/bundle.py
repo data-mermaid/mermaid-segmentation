@@ -24,6 +24,8 @@ WEIGHTS_SHA256 = "weights_sha256"
 _HASH_CHUNK_BYTES = 1024 * 1024
 # Renaming the model class or any ``architecture.kwargs`` key, or changing their meaning, requires
 # a SCHEMA_VERSION bump: delivered bundles are rebuilt from these names.
+# tests/mermaidseg/test_model_json_contract.py enforces this against
+# tests/mermaidseg/fixtures/model_json_architecture/v{SCHEMA_VERSION}.json.
 SCHEMA_VERSION = 1
 TASK = "segmentation_cbm"
 

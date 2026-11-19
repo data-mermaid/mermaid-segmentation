@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.datasets.utils import emit_cache_stats, emit_load_stage_stats
 from mermaidseg.logger import Logger
+from mermaidseg.model.distributed import all_reduce_sum
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel
 from mermaidseg.model.metric_policy import (
@@ -22,46 +23,53 @@ from mermaidseg.model.metric_policy import (
 )
 
 
-def _loader_load_failure_count(loader: object) -> int | None:
-    """Return the cumulative load-failure count of a loader's dataset, or None if untracked."""
-    dataset = getattr(loader, "dataset", None)
-    if dataset is None or not hasattr(dataset, "num_load_failures"):
-        return None
-    try:
-        return int(dataset.num_load_failures())
-    except Exception:
-        return None
-
-
 def _enforce_load_failure_rate(
-    loader: object,
     failures_before: int | None,
+    num_loaded_samples: int,
     max_rate: float | None,
     epoch: int,
     split: str = "train",
 ) -> None:
-    """Raise if this epoch's dataset load-failure rate exceeds ``max_rate``.
+    """Raise on every rank if this epoch's dataset load-failure rate exceeds ``max_rate``.
 
-    A high rate over a single pass signals a systemic data problem (bad credentials, missing files,
-    truncated image lists) rather than a few corrupt samples, so we fail fast instead of silently
-    training on a shrunken/biased dataset. No-op when disabled or when the dataset does not track
-    load failures.
+    A high rate signals a systemic data problem (bad credentials, missing files, truncated image
+    lists) rather than a few corrupt samples, so we fail fast instead of silently training on a
+    shrunken/biased dataset. The rate is failed load attempts over all load attempts this epoch,
+    summed over ranks: ``failures / (num_loaded_samples + failures)``. Every rank sees the same
+    rate and raises together instead of leaving the others in the next collective, so this is a
+    collective call that every rank must make.
+
+    The rate is approximate at the epoch boundary: loader workers prefetch, so a few batches
+    loaded during validation or before the next epoch's first read can land in the neighbouring
+    epoch's window (both loaders share one failure counter).
+
+    Args:
+        failures_before: ``LocalS3Cache`` failure count read before the epoch, or None if untracked.
+        num_loaded_samples: Samples the loaders delivered this epoch, summed over ranks.
+        max_rate: Largest tolerated failure rate, or None to disable the guard.
+        epoch: Epoch number, for the error message.
+        split: Split name, for the error message.
+
+    Raises:
+        RuntimeError: If the epoch's failure rate is above ``max_rate``.
     """
-    if max_rate is None or failures_before is None:
+    if max_rate is None:
         return
-    dataset = getattr(loader, "dataset", None)
-    size = len(dataset) if dataset is not None else 0
-    if size <= 0:
+    failures_after = LocalS3Cache.get().load_failure_count()
+    delta = (
+        0 if failures_before is None or failures_after is None else failures_after - failures_before
+    )
+    epoch_failures = int(all_reduce_sum(torch.tensor([delta], dtype=torch.int64)).item())
+    attempts = num_loaded_samples + epoch_failures
+    if attempts == 0:
         return
-    # A tracked loader whose second count read fails yields None here and raises TypeError.
-    epoch_failures = _loader_load_failure_count(loader) - failures_before  # type: ignore[operator]
-    rate = epoch_failures / size
+    rate = epoch_failures / attempts
     if rate > max_rate:
         raise RuntimeError(
-            f"Epoch {epoch}: {split} load-failure rate {rate:.1%} ({epoch_failures}/{size}) "
+            f"Epoch {epoch}: {split} load-failure rate {rate:.1%} ({epoch_failures}/{attempts}) "
             f"exceeds max_load_failure_rate={max_rate:.1%}. This usually indicates a systemic "
             f"data problem (credentials, missing files, truncated image lists) rather than a few "
-            f"corrupt samples. Inspect the dataset load-failure report; pass "
+            f"corrupt samples. Inspect the dataset warnings the loader workers emitted; pass "
             f"max_load_failure_rate=None to disable this guard."
         )
 
@@ -101,7 +109,8 @@ def train_model(
         max_load_failure_rate: If set, raise once the per-epoch
             dataset load-failure rate exceeds this fraction (e.g. 0.05 = 5%), to fail fast on
             systemic data problems instead of silently training on a shrunken dataset. Set to
-            ``None`` to disable. Only enforced when the loader's dataset tracks load failures.
+            ``None`` to disable. Only enforced when the shared load stats are attached (see
+            ``setup_local_cache``); otherwise there is no failure count to read.
         train_log_interval: Log per-batch train losses to the logger every
             ``train_log_interval`` iterations (1 = every batch).
         on_optimizer_step: Called from ``train_epoch`` after each successful optimizer update.
@@ -132,7 +141,7 @@ def train_model(
         logging.info("EPOCH: %d", epoch)
 
         meta_model.model.train(True)
-        failures_before = _loader_load_failure_count(train_loader)
+        failures_before = LocalS3Cache.get().load_failure_count()
         train_loss, train_metric_results, train_timing = meta_model.train_epoch(
             train_loader,
             evaluator,
@@ -141,7 +150,9 @@ def train_model(
             epoch=epoch,
             on_optimizer_step=on_optimizer_step,
         )
-        _enforce_load_failure_rate(train_loader, failures_before, max_load_failure_rate, epoch)
+        _enforce_load_failure_rate(
+            failures_before, int(train_timing["num_loaded_samples"]), max_load_failure_rate, epoch
+        )
         # Monotonic global-step (iteration) axis for the experiment tracker.
         step = meta_model.global_step
         logging.info("LOSS train %s", train_loss)

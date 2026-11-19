@@ -17,6 +17,16 @@ from botocore.exceptions import ClientError
 from PIL import Image
 
 
+@pytest.fixture(autouse=True)
+def _fake_aws_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give boto3 static credentials so it never queries the EC2 metadata endpoint."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+
 def _make_jpeg_bytes(width: int, height: int, *, sof_marker: int = 0xC0, padding: int = 0) -> bytes:
     """Synthesise a minimal JPEG byte sequence with a valid SOF marker.
 

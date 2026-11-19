@@ -27,6 +27,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, TensorDataset
 
 import mermaidseg.model.models
 from mermaidseg import training
+from mermaidseg.dataset_reconciliation import registry as registry_module
 from mermaidseg.datasets.factory import build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
@@ -290,6 +291,12 @@ def _install_smoke_fakes(
             dataset_classes={"coralscapes_v2": _SmokeCoralscapesV2},
             verbose=False,
         ),
+    )
+    # label_roll_up builds the hierarchy through the registry's own binding; keep it offline.
+    monkeypatch.setattr(
+        registry_module,
+        "initialize_benthic_hierarchy",
+        lambda: {"Acropora": "Hard coral", "Hard coral": None},
     )
     return workdir, wandb_run, cache_roots
 
@@ -687,6 +694,7 @@ def test_lineage_params_flatten_the_lineage_dict():
         "data_version": {
             "data_config_sha1": "c0ffee",
             "manifests": {"coralnet.train": "m/train.parquet", "coralnet.val": "m/val.parquet"},
+            "manifest_sha256": {"coralnet.train": "aa11", "coralnet.val": "bb22"},
         },
     }
     assert _lineage_params(lineage) == {
@@ -696,6 +704,27 @@ def test_lineage_params_flatten_the_lineage_dict():
         "lineage/data_config_sha1": "c0ffee",
         "lineage/manifests/coralnet.train": "m/train.parquet",
         "lineage/manifests/coralnet.val": "m/val.parquet",
+        "lineage/manifest_sha256/coralnet.train": "aa11",
+        "lineage/manifest_sha256/coralnet.val": "bb22",
+    }
+
+
+def test_lineage_params_flatten_a_data_version_without_manifest_sha256():
+    lineage = {
+        "git_sha": "abc123",
+        "git_dirty": False,
+        "uv_lock_sha256": "deadbeef",
+        "data_version": {
+            "data_config_sha1": "c0ffee",
+            "manifests": {"coralnet.train": "m/train.parquet"},
+        },
+    }
+    assert _lineage_params(lineage) == {
+        "lineage/git_sha": "abc123",
+        "lineage/git_dirty": False,
+        "lineage/uv_lock_sha256": "deadbeef",
+        "lineage/data_config_sha1": "c0ffee",
+        "lineage/manifests/coralnet.train": "m/train.parquet",
     }
 
 

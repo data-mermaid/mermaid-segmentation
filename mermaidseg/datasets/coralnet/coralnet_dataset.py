@@ -29,6 +29,8 @@ Duplicate images (the same photo uploaded to several sources) are removed with
 
 from __future__ import annotations
 
+import hashlib
+import io
 import logging
 import posixpath
 from pathlib import Path
@@ -75,6 +77,8 @@ class CoralNetDataset(BaseCoralDataset):
     Attributes:
         manifest_path (str): Key (relative to ``source_bucket``) of the self-contained
             training manifest parquet.
+        manifest_sha256 (str): SHA-256 hex digest of the manifest bytes parsed by
+            ``load_annotations``.
         id2name_key (str): Key of the ``coralnet_id2name_<run>.json`` beside the manifest.
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-source CoralNet image folders live.
@@ -100,6 +104,7 @@ class CoralNetDataset(BaseCoralDataset):
     SOURCE_NAME = "coralnet"
 
     manifest_path: str
+    manifest_sha256: str
     id2name_key: str
     source_ids: list[int | str]
     source_bucket: str
@@ -170,7 +175,9 @@ class CoralNetDataset(BaseCoralDataset):
         :mod:`mermaidseg.dataset_reconciliation.label_mapping` and is applied
         at training time on the GPU via a long-tensor lookup.
         """
-        df = LocalS3Cache.get().read_parquet(self.source_bucket, self.manifest_path)
+        data = LocalS3Cache.get().read_bytes(self.source_bucket, self.manifest_path)
+        self.manifest_sha256 = hashlib.sha256(data).hexdigest()
+        df = pd.read_parquet(io.BytesIO(data))
         coralnet_id2name = LocalS3Cache.get().read_json(self.source_bucket, self.id2name_key)
 
         df["coralnet_name"] = df["coralnet_id"].map(lambda x: coralnet_id2name.get(str(x)))

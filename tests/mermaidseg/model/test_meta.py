@@ -306,6 +306,31 @@ def test_nonfinite_microbatch_drops_the_window(minimal_config, make_meta_model):
         assert torch.equal(after[name], tensor)
 
 
+def test_nonfinite_window_counts_loaded_samples_but_not_trained_samples(
+    minimal_config, make_meta_model
+):
+    cfg = _standard_cfg(minimal_config, iterations_per_train_epoch=2, grad_accum_steps=1)
+    meta = make_meta_model(cfg, run_name="loaded-samples")
+    calls = {"n": 0}
+    real = meta.batch_predict_loss
+
+    def _poison(*args, **kwargs):
+        calls["n"] += 1
+        loss, outputs, concepts, components = real(*args, **kwargs)
+        if calls["n"] == 2:
+            loss = torch.tensor(float("nan"))
+        return loss, outputs, concepts, components
+
+    meta.batch_predict_loss = _poison
+    images, labels = _images_labels(4)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+    _, _, timing = meta.train_epoch(loader, evaluator=None, epoch=0)
+
+    # Two updates of batch 2: the second window is skipped, so only the first reaches backward.
+    assert timing["num_loaded_samples"] == 4
+    assert timing["num_samples"] == 2
+
+
 @pytest.mark.parametrize(
     ("epoch", "global_step"),
     [(0, 2), (1, 6)],

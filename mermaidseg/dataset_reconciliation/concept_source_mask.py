@@ -250,7 +250,7 @@ class _ConstantSourceRow(Dataset):
         return (*self.dataset[idx], self.row)
 
     def __getattr__(self, name: str) -> Any:
-        # Forward attribute lookups (SOURCE_NAME, num_load_failures, ...) to the wrapped dataset.
+        # Forward attribute lookups (SOURCE_NAME, split, ...) to the wrapped dataset.
         if name == "dataset":
             raise AttributeError(name)
         return getattr(self.dataset, name)

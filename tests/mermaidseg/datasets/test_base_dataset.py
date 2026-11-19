@@ -8,9 +8,11 @@ import albumentations as A
 import numpy as np
 import pandas as pd
 import pytest
+from torch.utils.data import DataLoader
 
 from mermaidseg.datasets import make_worker_init_fn
 from mermaidseg.datasets.base_dataset import BaseCoralDataset
+from mermaidseg.datasets.local_cache import LocalS3Cache, setup_local_cache
 from tests.mermaidseg.conftest import run_in_spawned_worker
 
 
@@ -20,6 +22,44 @@ def test_worker_init_counts_a_spawned_workers_cache_hit_in_the_parent(
     init_fn = make_worker_init_fn(spawn_cache_stats)
     run_in_spawned_worker(init_fn, tmp_path / "cache", monkeypatch)
     assert spawn_cache_stats.local_hits.value == 1
+
+
+@pytest.mark.usefixtures("reset_local_cache")
+def test_load_failures_in_workers_are_counted_in_the_parent(monkeypatch, spawn_cache_stats):
+    monkeypatch.delenv("MERMAIDSEG_LOCAL_CACHE_DIR", raising=False)
+    setup_local_cache({"local_cache_write_through": False}, stats=spawn_cache_stats)
+    n = 4
+    image_ids = [f"img{i}" for i in range(n)]
+    df_annotations = pd.DataFrame(
+        {
+            "image_id": image_ids,
+            "region_id": [1] * n,
+            "region_name": ["r"] * n,
+            "source_label_name": ["Coral"] * n,
+            "row": [5] * n,
+            "col": [5] * n,
+        }
+    )
+    df_images = df_annotations[["image_id", "region_id", "region_name"]]
+    ds = _OneBadIndexDataset(
+        df_annotations=df_annotations,
+        df_images=df_images,
+        class_subset=["Coral"],
+        split="val",
+    )
+    loader = DataLoader(
+        ds,
+        batch_size=1,
+        num_workers=2,
+        multiprocessing_context="spawn",
+        worker_init_fn=make_worker_init_fn(spawn_cache_stats),
+        # No tensor collation: shared-memory tensors from spawn workers hang pytest's exit on macOS.
+        collate_fn=list,
+    )
+
+    assert len(list(loader)) == n
+    # idx 0 is requested once per pass and fails once.
+    assert LocalS3Cache.get().load_failure_count() == 1
 
 
 @pytest.fixture
@@ -121,6 +161,15 @@ def _make_two_image_annotations(
     return df_annotations, df_images
 
 
+class _OneBadIndexDataset(_SyntheticDataset):
+    """Fails to load idx 0 only; every other index loads."""
+
+    def _load_item(self, idx: int) -> tuple[Any, Any]:
+        if idx == 0:
+            raise RuntimeError("simulated read failure")
+        return super()._load_item(idx)
+
+
 class _CropOutDataset(_SyntheticDataset):
     """Simulates RandomResizedCrop wiping labels on idx 0 only."""
 
@@ -177,9 +226,11 @@ def test_base_dataset_set_global_offset_shifts_emitted_mask():
 # --- BaseCoralDataset.__getitem__ ---
 
 
-def test_base_dataset_all_items_failing_raises_logs_and_records_context(
-    single_image_annotations, caplog
+@pytest.mark.usefixtures("reset_local_cache")
+def test_base_dataset_all_items_failing_raises_logs_and_counts_failure(
+    single_image_annotations, caplog, spawn_cache_stats
 ):
+    LocalS3Cache.get().attach_stats(spawn_cache_stats)
     df_annotations, df_images = single_image_annotations
     ds = _AlwaysFailDataset(
         df_annotations=df_annotations,
@@ -199,19 +250,7 @@ def test_base_dataset_all_items_failing_raises_logs_and_records_context(
     assert "img1" in caplog.text
     assert "RuntimeError" in caplog.text
 
-    failures = pd.DataFrame(ds._load_failures)
-    assert len(failures) == 1
-
-    row = failures.iloc[0]
-    assert row["dataset_class"] == "_AlwaysFailDataset"
-    assert row["split"] == "train"
-    assert row["image_id"] == "img1"
-    assert row["region_name"] == "r1"
-    assert row["annotation_count"] == 1
-    assert row["annotation_labels"] == "Coral"
-    assert not row["missing_annotations"]
-    assert row["error_type"] == "RuntimeError"
-    assert "simulated read failure" in row["error_message"]
+    assert LocalS3Cache.get().load_failure_count() == 1
 
 
 # --- BaseCoralDataset empty-mask skip (train split only) ---

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
+# Set before torch/albumentations import so spawned workers inherit it and skip the PyPI check.
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +19,14 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.io import ConfigDict
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Let ``live`` and ``integration`` tests reach the network; everything else is socket-guarded."""
+    for item in items:
+        if item.get_closest_marker("live") or item.get_closest_marker("integration"):
+            item.add_marker(pytest.mark.enable_socket)
+
 
 NUM_CLASSES = 4
 IMAGE_SIZE = (56, 56)

@@ -202,6 +202,9 @@ def _lineage_params(lineage: dict[str, Any]) -> dict[str, Any]:
         "lineage/data_config_sha1": version["data_config_sha1"],
     }
     params.update({f"lineage/manifests/{k}": v for k, v in version["manifests"].items()})
+    params.update(
+        {f"lineage/manifest_sha256/{k}": v for k, v in version.get("manifest_sha256", {}).items()}
+    )
     return params
 
 
