@@ -25,7 +25,7 @@ def map_taxonomy_to_dense(binary_taxonomy: torch.Tensor) -> torch.Tensor:
 
 
 def map_taxonomy_predictions_to_dense(pred_taxonomy: torch.Tensor) -> torch.Tensor:
-    """Map predicted taxonomic scores to dense IDs via argmax + 2."""
+    """Map predicted taxonomic scores to dense IDs via argmax + 1."""
     return pred_taxonomy.argmax(dim=1) + 1
 
 
@@ -93,13 +93,11 @@ def calculate_taxonomic_rank_loss(
     concept_outputs: torch.Tensor,
     concept_labels: torch.Tensor,
     *,
-    from_logits: bool = False,
-    foreground_mask: torch.Tensor | None = None,
     per_pixel_loss_weight: float = 0.0,
     per_image_loss_weight: float = 1.0,
     label_smoothing: float = 0.0,
 ) -> torch.Tensor:
-    """Cross-entropy / NLL on the active taxonomic class; masked where not_given or none."""
+    """Cross-entropy on raw logits for the active taxonomic class; masked where not_given or none."""
     num_channels = concept_outputs.size(1)
     if num_channels == 0:
         return torch.tensor(0.0, device=concept_outputs.device, dtype=concept_outputs.dtype)
@@ -111,21 +109,14 @@ def calculate_taxonomic_rank_loss(
         )
 
     target_idx, valid_mask = taxonomic_target_and_mask(concept_labels)
-    if foreground_mask is not None:
-        valid_mask = valid_mask & foreground_mask
 
     target_idx = target_idx.clamp(0, num_channels - 1)
     flat_target = target_idx.reshape(-1)
 
-    if from_logits:
-        flat_logits = concept_outputs.permute(0, 2, 3, 1).reshape(-1, num_channels)
-        per_pixel = F.cross_entropy(
-            flat_logits, flat_target, reduction="none", label_smoothing=label_smoothing
-        )
-    else:
-        log_probs = torch.log(concept_outputs.clamp(min=1e-6))
-        flat_log_probs = log_probs.permute(0, 2, 3, 1).reshape(-1, num_channels)
-        per_pixel = F.nll_loss(flat_log_probs, flat_target, reduction="none")
+    flat_logits = concept_outputs.permute(0, 2, 3, 1).reshape(-1, num_channels)
+    per_pixel = F.cross_entropy(
+        flat_logits, flat_target, reduction="none", label_smoothing=label_smoothing
+    )
 
     per_pixel = per_pixel.reshape(valid_mask.shape)
     return reduce_masked_loss(
@@ -140,7 +131,6 @@ def calculate_multi_hot_concept_loss(
     concept_outputs: torch.Tensor,
     concept_labels: torch.Tensor,
     *,
-    foreground_mask: torch.Tensor | None = None,
     per_pixel_loss_weight: float = 0.0,
     per_image_loss_weight: float = 1.0,
 ) -> torch.Tensor:
@@ -149,8 +139,6 @@ def calculate_multi_hot_concept_loss(
     ``concept_outputs`` are raw logits scored with ``binary_cross_entropy_with_logits``.
     """
     concept_mask = concept_labels.gt(0)
-    if foreground_mask is not None:
-        concept_mask = concept_mask & foreground_mask.unsqueeze(1)
 
     targets = torch.clamp(concept_labels - 1, 0.01, 0.99)
     per_element_loss = F.binary_cross_entropy_with_logits(

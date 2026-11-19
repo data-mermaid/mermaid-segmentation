@@ -211,7 +211,6 @@ class ConceptBottleneckLoss(torch.nn.Module):
                 slice_loss = calculate_taxonomic_rank_loss(
                     outputs_slice,
                     labels_slice,
-                    from_logits=True,
                     per_pixel_loss_weight=self.per_pixel_loss_weight,
                     per_image_loss_weight=self.per_image_loss_weight,
                     label_smoothing=self.taxonomic_label_smoothing,

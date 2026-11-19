@@ -31,7 +31,7 @@ def test_taxonomic_rank_loss_of_a_partial_mask_blends_the_masked_means():
     labels[0, :, 0, :] = torch.tensor([[1.0, 1.0], [2.0, 2.0]])
     labels[1, :, 0, 0] = torch.tensor([1.0, 2.0])
 
-    loss = calculate_taxonomic_rank_loss(logits, labels, from_logits=True, **WEIGHTS)
+    loss = calculate_taxonomic_rank_loss(logits, labels, **WEIGHTS)
 
     assert loss.item() == pytest.approx(0.5 * (5 / 3) * LN2 + 0.5 * 1.75 * LN2, rel=1e-6)
 
