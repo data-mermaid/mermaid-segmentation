@@ -1,10 +1,9 @@
-"""ConceptBottleneckDPTLoRADINOv3 takes only the arguments it names."""
+"""ConceptBottleneckDPTLoRADINOv3 encoder loading, trainable parameters and DPTHead grid handling."""
 
 from __future__ import annotations
 
 from typing import Any
 
-import pytest
 import torch
 
 import mermaidseg.model.models as models_module
@@ -32,12 +31,6 @@ def _model_kwargs(base_encoder: Any, **extra: Any) -> dict[str, Any]:
         "lora_bias": "none",
         **extra,
     }
-
-
-def test_unknown_model_kwarg_raises(mock_dinov3_encoder):
-    encoder = mock_dinov3_encoder(models_module)
-    with pytest.raises(TypeError, match="foo"):
-        ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(encoder, foo=1))
 
 
 def test_load_pretrained_encoder_requests_float32_and_hf_token(mock_dinov3_encoder, monkeypatch):

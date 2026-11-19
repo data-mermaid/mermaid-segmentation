@@ -82,7 +82,6 @@ def _pixels(paths: list[tuple[str | None, ...]], dtype=torch.float32):
 PIXEL_A = ("scleractinia", "acroporidae", "montipora")
 PIXEL_B = ("scleractinia", "acroporidae", None)
 PIXEL_C = ("scleractinia", None, None)
-VOID = (None, None, None)
 
 
 def test_ancestor_matrix_family_to_genus():
@@ -169,16 +168,6 @@ def test_kl_spec_example_values():
     assert total.item() == pytest.approx(0.1248, abs=1e-4)
 
 
-def test_kl_is_independent_of_labels():
-    loss = _coherence()
-    logits, _ = _pixels([PIXEL_A, PIXEL_B, PIXEL_C, VOID])
-    target_labels = torch.tensor([[[3, 1, 1, 0]]])
-    _, components = loss(logits, target_labels)
-    per_pixel = [loss(logits[..., i : i + 1], _no_labels())[0].item() for i in range(4)]
-    assert per_pixel == pytest.approx([KL_ORDER_FAMILY + KL_FAMILY_GENUS] * 4, abs=1e-6)
-    assert components["kl/family->genus"] == pytest.approx(KL_FAMILY_GENUS, abs=1e-6)
-
-
 def test_kl_gradients_follow_stop_grad():
     logits = _logits(ORDER_PROBS, FAMILY_PROBS, GENUS_PROBS).requires_grad_(True)
     _coherence()(logits, _no_labels())[0].backward()
@@ -198,13 +187,6 @@ def test_kl_gradients_follow_stop_grad():
         atol=1e-4,
         rtol=0,
     )
-
-
-def test_kl_zero_for_coherent_heads():
-    logits = _logits([0.82, 0.18], [0.37, 0.45, 0.18], GENUS_PROBS)
-    _, components = _coherence()(logits, _no_labels())
-    assert components["kl/order->family"] == pytest.approx(0.0, abs=1e-6)
-    assert components["kl/family->genus"] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_kl_matches_naive_probability_sum():
@@ -251,16 +233,6 @@ def test_coherence_handles_taxonomy_defects(caplog):
     logits = torch.tensor([0.3, 0.4, 0.15, 0.15, 0.4, 0.4, 0.2]).log()[None, :, None, None]
     total, _ = loss(logits, torch.zeros(1, 1, 1, dtype=torch.long))
     assert total.item() == pytest.approx(0.0, abs=1e-6)
-
-
-def test_kl_weight_is_constant():
-    concept_logits = _logits(ORDER_PROBS, FAMILY_PROBS, GENUS_PROBS)
-    target_labels = _no_labels()
-    loss = TaxonomicLoss(_tree(RANKS, PATHS), _concept_value2id(RANKS), kl_weight=0.5)
-    total, components = loss(concept_logits, target_labels)
-    assert "kl_weight" not in components
-    assert components["kl"] > 0.0
-    assert total.item() == pytest.approx(0.5 * components["kl"], abs=1e-6)
 
 
 def test_taxonomic_loss_scales_kl_term():

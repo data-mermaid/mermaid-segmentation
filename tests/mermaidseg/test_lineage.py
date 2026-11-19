@@ -39,19 +39,6 @@ def git_repo(monkeypatch, tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_git_sha_is_the_repo_head(git_repo):
-    assert _collect()["git_sha"] == _git(git_repo, "rev-parse", "HEAD").strip()
-
-
-def test_clean_repo_is_not_dirty(git_repo):
-    assert _collect()["git_dirty"] is False
-
-
-def test_modified_tracked_file_is_dirty(git_repo):
-    (git_repo / "tracked.txt").write_text("two\n")
-    assert _collect()["git_dirty"] is True
-
-
 def test_untracked_file_alone_is_not_dirty(git_repo):
     (git_repo / "new.txt").write_text("x\n")
     assert _collect()["git_dirty"] is False

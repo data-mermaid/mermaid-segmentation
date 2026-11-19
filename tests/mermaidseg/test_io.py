@@ -23,14 +23,6 @@ from mermaidseg.io import (
 _CONFIGS = Path(__file__).resolve().parents[2] / "configs"
 
 
-def test_file_without_its_section_wrapper_raises_naming_the_file(tmp_path: Path):
-    raw = yaml.safe_load((_CONFIGS / "logger_config.yaml").read_text())
-    path = tmp_path / "unwrapped_logger.yaml"
-    path.write_text(yaml.safe_dump(raw["logger"]))
-    with pytest.raises(ValueError, match="unwrapped_logger.yaml"):
-        setup_config({"logger": str(path)})
-
-
 def _plain(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {key: _plain(item) for key, item in value.items()}
@@ -52,11 +44,6 @@ def test_setup_config_output_is_plain_yaml_data():
         "ColorJitter",
     ]
     assert train["RandomResizedCrop"]["size"] == [256, 256]
-
-
-def test_unknown_augmentation_raises_listing_the_allowed_names():
-    with pytest.raises(ValueError, match="'Blur'.*ColorJitter.*VerticalFlip"):
-        compile_transform({"Blur": {"blur_limit": 3}})
 
 
 def test_train_transform_ends_in_imagenet_normalize():

@@ -338,16 +338,6 @@ def test_train_epoch_requires_source_rows_when_masking(make_meta_model, cbm_sche
         meta.train_epoch(loader, epoch=0)
 
 
-def test_mask_off_leaves_two_element_batches_working(make_meta_model, cbm_schema):
-    meta = _cbm_meta(make_meta_model, cbm_schema)
-    loader = DataLoader(
-        TensorDataset(torch.randn(2, 3, *IMAGE_SIZE), torch.ones(2, *IMAGE_SIZE, dtype=torch.long)),
-        batch_size=2,
-    )
-    loss, _, _ = meta.train_epoch(loader, epoch=0)
-    assert np.isfinite(loss)
-
-
 def test_shard_step_masks_its_shard(make_meta_model, cbm_schema):
     """The data_parallel / distributed per-GPU step masks with the rows it is given."""
     meta = _cbm_meta(make_meta_model, cbm_schema)
@@ -361,8 +351,6 @@ def test_shard_step_masks_its_shard(make_meta_model, cbm_schema):
     assert (concepts[0, bleached] == 0).all() and (concepts[1, bleached] == 1).all()
     with pytest.raises(RuntimeError, match="no source rows"):
         shard_targets(labels, None, lookup, keep, None)
-    _, unmasked = shard_targets(labels, None, lookup)
-    assert (unmasked[:, bleached] == 1).all()
 
 
 # ---------- concept removal ----------

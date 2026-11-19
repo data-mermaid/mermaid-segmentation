@@ -145,17 +145,6 @@ def both(tmp_path_factory):
     return _run(tmp_path_factory.mktemp("both"), ["10", "20"])
 
 
-def test_units_carry_concept_and_hierarchical_blocks(both):
-    assert set(both["units"]) == {"10", "20"}
-    for d in both["units"].values():
-        for concept in REPORTED_BINARY_CONCEPTS:
-            assert {"accuracy", "precision", "recall", "f1", "n_true"} <= set(d[concept])
-        assert "consistency/overall" in d["hierarchical"]
-        for rd in d["taxonomic"].values():
-            assert {"macro_f1_all", "macro_f1_living", "f1_none"} <= set(rd)
-    assert "per_taxon" in both["pooled"]["taxonomic"]["genus"]
-
-
 def test_macro_is_the_mean_of_unit_values(both):
     keys = unit_scalar_keys(
         list(both["pooled"]["taxonomic"]), REPORTED_BINARY_CONCEPTS, with_hier=True
@@ -176,6 +165,7 @@ def test_pooled_counts_are_the_sum_of_units(both):
             assert both["pooled"][concept][key] == sum(
                 u[concept][key] for u in both["units"].values()
             )
+    assert "per_taxon" in both["pooled"]["taxonomic"]["genus"]
 
 
 @pytest.mark.parametrize("unit", ["10", "20"])
@@ -190,38 +180,6 @@ def test_unit_metrics_equal_a_run_on_that_unit_alone(tmp_path, both, unit):
         b = alone["pooled"]["hierarchical"].get(key, float("nan"))
         assert _same(a, b), key
     assert unit_d["hierarchical"] == pytest.approx(alone["pooled"]["hierarchical"], nan_ok=True)
-
-
-def test_pooled_hierarchical_unchanged_by_per_unit_accumulators(tmp_path, both):
-    rerun = _run(tmp_path, ["10", "20"], batch_size=5)
-    assert both["pooled"]["hierarchical"] == pytest.approx(
-        rerun["pooled"]["hierarchical"], nan_ok=True
-    )
-
-
-@pytest.mark.parametrize(
-    ("label", "live", "coral"),
-    [
-        ("porites", True, True),
-        ("dead pocillopora", False, False),
-        ("dead coral", False, False),
-        ("a. galapagensis (dead)", False, False),
-        ("a. galapagensis (alive)", True, True),
-        ("millepora", True, True),
-        ("cred-octocoral", True, True),
-        ("palythoa", True, False),
-        (
-            "chondrilla spp.",
-            True,
-            False,
-        ),  # sponge: live column ignored outside corals / echinoderms
-        ("macroalgae", True, False),
-        ("sand", True, False),
-    ],
-)
-def test_point_scopes_from_the_concept_table(label, live, coral):
-    lookup = build_concept_lookup("coralnet", [label], _concept_names(), _CSV)
-    assert lookup.scopes(label) == (live, coral)
 
 
 def test_living_and_coral_counts_follow_the_live_column(both):

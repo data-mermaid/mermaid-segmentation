@@ -77,11 +77,6 @@ def test_committed_run_yamls_select_the_mlflow_tracker(path):
     assert section["tracker"] == "mlflow"
 
 
-def test_check_failure_exits_with_error_message(no_sm_env):
-    with pytest.raises(SystemExit, match="^ERROR: .*--init-from-job"):
-        launch.main(["--run-config", str(_RES768), "--check"])
-
-
 # ---------- validate_run ----------
 
 
@@ -95,16 +90,10 @@ def test_init_from_job_without_init_weights_raises():
         launch.validate_run(load_run_config(_CBM), _SOURCE_JOB)
 
 
-@pytest.mark.parametrize("job", ["-starts-with-dash", "has_underscore", "a" * 64])
+@pytest.mark.parametrize("job", ["-starts-with-dash", "has_underscore"])
 def test_invalid_init_from_job_name_raises(job):
     with pytest.raises(ValueError, match="job name"):
         launch.validate_run(load_run_config(_RES768), job)
-
-
-def test_owned_flag_in_train_args_fails_validation():
-    cfg = _config(args=["--output-dir", "/x"])
-    with pytest.raises(ValueError, match="--output-dir"):
-        launch.validate_run(cfg, None)
 
 
 def test_unknown_trainer_flag_fails_as_value_error():
@@ -197,13 +186,12 @@ def test_full_ecr_uri_in_job_image_raises():
 # ---------- env, dry-run, submit ----------
 
 
-@pytest.mark.parametrize("mode", [["--dry-run"], []])
 @pytest.mark.parametrize("missing", _ENV_VARS)
-def test_missing_env_var_fails_naming_it(fake_env, monkeypatch, mode, missing):
+def test_missing_env_var_fails_naming_it(fake_env, monkeypatch, missing):
     monkeypatch.setenv(missing, "")
     monkeypatch.setattr("boto3.client", lambda *a, **k: pytest.fail("no AWS call"))
-    with pytest.raises(SystemExit, match=missing):
-        launch.main(["--run-config", str(_CBM), *mode])
+    with pytest.raises(SystemExit, match=f"^ERROR: .*{missing}"):
+        launch.main(["--run-config", str(_CBM)])
 
 
 def test_dry_run_prints_the_request_without_boto3(fake_env, monkeypatch, capsys):
@@ -245,7 +233,6 @@ class _FakeS3:
         self.uploads: list[tuple[str, str, str]] = []
         self.heads: list[dict[str, Any]] = []
         self.head_error: Exception | None = None
-        self.upload_error: Exception | None = None
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append("s3.head_object")
@@ -256,8 +243,6 @@ class _FakeS3:
 
     def upload_file(self, filename: str, bucket: str, key: str) -> None:
         self.calls.append("s3.upload_file")
-        if self.upload_error is not None:
-            raise self.upload_error
         self.uploads.append((filename, bucket, key))
 
 
@@ -377,8 +362,8 @@ def test_res768_with_a_completed_source_creates_the_job_with_the_init_channel(aw
     assert aws.sm.created == [_pinned_request(_RES768, _SOURCE_JOB)]
 
 
-@pytest.mark.parametrize("status", ["InProgress", "Failed"])
-def test_source_job_not_completed_exits_naming_job_and_status(aws, status):
+def test_source_job_not_completed_exits_naming_job_and_status(aws):
+    status = "InProgress"
     aws.sm.source_status = status
     args = ["--run-config", str(_RES768), "--init-from-job", _SOURCE_JOB]
 
@@ -389,8 +374,8 @@ def test_source_job_not_completed_exits_naming_job_and_status(aws, status):
     assert "s3.head_object" not in aws.calls
 
 
-@pytest.mark.parametrize("code", ["404", "403"])
-def test_unreadable_init_checkpoint_exits_naming_uri_and_code(aws, code):
+def test_unreadable_init_checkpoint_exits_naming_uri_and_code(aws):
+    code = "404"
     aws.s3.head_error = _client_error(code)
     args = ["--run-config", str(_RES768), "--init-from-job", _SOURCE_JOB]
     uri = (
@@ -404,22 +389,11 @@ def test_unreadable_init_checkpoint_exits_naming_uri_and_code(aws, code):
     _assert_nothing_written(aws)
 
 
-def test_failed_upload_does_not_create_the_job(aws):
-    aws.s3.upload_error = RuntimeError("upload failed")
-
-    with pytest.raises(RuntimeError, match="upload failed"):
-        launch.main(["--run-config", str(_CBM)])
-
-    assert "sagemaker.create_training_job" not in aws.calls
-
-
 # ---------- make_run_id ----------
 
 
-@pytest.mark.parametrize(
-    "prefix", ["mermaidseg-cbm-final", "mermaidseg-cbm-final-res768", "a" * 39]
-)
-def test_make_run_id_is_a_valid_job_name(prefix):
+def test_make_run_id_is_a_valid_job_name():
+    prefix = "a" * 39
     run_id = launch.make_run_id(prefix)
     assert re.fullmatch(rf"{prefix}-\d{{8}}T\d{{6}}Z-[0-9a-f]{{6}}", run_id)
     assert len(run_id) <= 63

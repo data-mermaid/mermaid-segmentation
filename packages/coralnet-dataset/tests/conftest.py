@@ -313,9 +313,3 @@ def corrupted_header_jpeg_bytes() -> bytes:
     # Corrupt header bytes (not SOI/EOI, but SOF area)
     corrupted[10:20] = b"\x00" * 10
     return bytes(corrupted)
-
-
-@pytest.fixture
-def empty_bytes() -> bytes:
-    """Empty file (0 bytes)."""
-    return b""

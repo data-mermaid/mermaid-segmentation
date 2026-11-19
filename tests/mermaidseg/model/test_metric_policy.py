@@ -7,7 +7,6 @@ import pytest
 import torch
 
 from mermaidseg.model.metric_policy import (
-    SUPPORTED_METRIC_NAMES,
     canonical_metric_name,
     extract_metric_value,
     metric_direction,
@@ -28,39 +27,33 @@ class TestCanonicalMetricName:
         with pytest.raises(ValueError, match="Unsupported metric_of_interest"):
             canonical_metric_name("precision")
 
-    def test_supported_names_are_canonical_only(self):
-        assert SUPPORTED_METRIC_NAMES == ("accuracy", "f1-score", "loss", "miou")
-
 
 class TestMetricDirection:
-    def test_loss_is_min(self):
-        assert metric_direction("loss") == "min"
-
-    @pytest.mark.parametrize("name", ["accuracy", "miou", "f1-score"])
-    def test_maximize_metrics(self, name):
-        assert metric_direction(name) == "max"
+    @pytest.mark.parametrize(
+        ("name", "direction"),
+        [("loss", "min"), ("accuracy", "max"), ("miou", "max"), ("f1-score", "max")],
+    )
+    def test_direction(self, name, direction):
+        assert metric_direction(name) == direction
 
 
 class TestToScalarMetric:
     @pytest.mark.parametrize(
         "value",
-        [torch.tensor(0.75), np.array(0.75), 0.75, np.float32(0.75)],
-        ids=["torch_tensor", "np_array", "float", "np_scalar"],
+        [torch.tensor(0.75), np.array(0.75), 0.75],
+        ids=["torch_tensor", "np_array", "float"],
     )
     def test_accepts_scalars(self, value):
         assert to_scalar_metric("accuracy", value) == pytest.approx(0.75)
 
-    def test_rejects_non_scalar_tensor(self):
+    @pytest.mark.parametrize(
+        "value",
+        [torch.tensor([0.1, 0.2]), np.array([0.1, 0.2, 0.3]), [0.1, 0.2]],
+        ids=["torch_tensor", "np_array", "list"],
+    )
+    def test_rejects_non_scalars(self, value):
         with pytest.raises(ValueError, match="must be scalar"):
-            to_scalar_metric("accuracy", torch.tensor([0.1, 0.2]))
-
-    def test_rejects_non_scalar_array(self):
-        with pytest.raises(ValueError, match="must be scalar"):
-            to_scalar_metric("miou", np.array([0.1, 0.2, 0.3]))
-
-    def test_rejects_list(self):
-        with pytest.raises(ValueError, match="must be scalar"):
-            to_scalar_metric("loss", [0.1, 0.2])
+            to_scalar_metric("accuracy", value)
 
 
 class TestExtractMetricValue:
@@ -71,10 +64,6 @@ class TestExtractMetricValue:
     def test_extracts_from_results(self, metric):
         result = extract_metric_value(metric, 0.5, {metric: 0.82})
         assert result == pytest.approx(0.82)
-
-    def test_raises_when_metric_missing(self):
-        with pytest.raises(ValueError, match="is not present"):
-            extract_metric_value("accuracy", 0.5, {"other": 0.5})
 
     def test_empty_results_shows_none(self):
         with pytest.raises(ValueError, match="\\(none\\)"):

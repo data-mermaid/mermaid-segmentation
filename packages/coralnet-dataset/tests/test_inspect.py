@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import pytest
+
 from coralnet_dataset.inspect import IssueType, inspect_image
 
 
@@ -67,19 +69,11 @@ def test_inspect_image_corrupted_header(corrupted_header_jpeg_bytes):
     )
 
 
-def test_inspect_image_empty(empty_bytes):
-    """Inspection fails for empty file."""
-    image_bytes = BytesIO(empty_bytes)
+@pytest.mark.parametrize("image_bytes", [None, BytesIO(b"")], ids=["none", "empty"])
+def test_inspect_image_empty(image_bytes):
+    """Inspection fails for missing or empty data."""
     inspection = inspect_image(image_bytes)
 
     assert inspection.is_valid is False
     assert inspection.issue_type == IssueType.ZERO_SIZE
     assert "Empty" in inspection.error_message
-
-
-def test_inspect_image_none():
-    """Inspection fails for None input."""
-    inspection = inspect_image(None)
-
-    assert inspection.is_valid is False
-    assert inspection.issue_type == IssueType.ZERO_SIZE

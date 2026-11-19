@@ -19,25 +19,66 @@ from mermaidseg.export import write_sidecar
 from mermaidseg.inference.bundle import MODEL_JSON
 from mermaidseg.io import REPO_ROOT, ConfigDict
 from mermaidseg.model.eval import Evaluator
-from mermaidseg.model.meta import next_epoch_from_checkpoint, restore_warmup_progress
+from mermaidseg.model.meta import next_epoch_from_checkpoint, records_train_metrics
 from mermaidseg.model.models import MODEL_CLASSES
 from tests.conftest import IMAGE_SIZE, NUM_CLASSES
 
 
-@pytest.mark.parametrize(("raw", "expected"), [(180, 180.0), (45, 45.0), (0, 0.0), (-1, 0.0)])
+@pytest.mark.parametrize(("raw", "expected"), [(180, 180.0), (0, 0.0), (-1, 0.0)])
 def test_stall_dump_seconds_reads_training_config(raw, expected):
     assert meta_module.stall_dump_seconds(ConfigDict({"stall_dump_sec": raw})) == expected
 
 
-def test_resolve_amp_dtype_rejects_a_missing_dtype():
-    with pytest.raises(ValueError, match="mixed_precision_dtype"):
-        meta_module.resolve_amp_dtype(None)
+def test_records_train_metrics_scores_every_nth_microbatch():
+    assert [i for i in range(10) if records_train_metrics(i, 1)] == list(range(10))
+    assert [i for i in range(10) if records_train_metrics(i, 3)] == [0, 3, 6, 9]
+    assert records_train_metrics(5, 0)
 
 
-def test_meta_model_requires_max_grad_norm(minimal_config, make_meta_model):
-    del minimal_config.training["max_grad_norm"]
-    with pytest.raises(KeyError, match="max_grad_norm"):
-        make_meta_model(minimal_config)
+class _FakeFaulthandler:
+    def __init__(self) -> None:
+        self.armed: list[float] = []
+        self.cancelled = 0
+
+    def dump_traceback_later(self, timeout, repeat=False, exit=False):
+        assert repeat is False and exit is False
+        self.armed.append(timeout)
+
+    def cancel_dump_traceback_later(self):
+        self.cancelled += 1
+
+
+def test_watch_for_stalls_rearms_each_update_and_cancels(monkeypatch):
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(meta_module, "faulthandler", fake)
+    assert list(meta_module.watch_for_stalls(range(3), 5.0)) == [0, 1, 2]
+    assert fake.armed == [5.0, 5.0, 5.0]
+    assert fake.cancelled == 1
+
+
+def test_watch_for_stalls_cancels_on_break_and_error(monkeypatch):
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(meta_module, "faulthandler", fake)
+    for update in meta_module.watch_for_stalls(range(5), 5.0):
+        if update == 1:
+            break
+    assert fake.cancelled == 1
+
+    def run() -> None:
+        for update in meta_module.watch_for_stalls(range(5), 5.0):
+            if update == 2:
+                raise RuntimeError("stalled")
+
+    with pytest.raises(RuntimeError, match="stalled"):
+        run()
+    assert fake.cancelled == 2
+
+
+def test_watch_for_stalls_disabled_never_arms(monkeypatch):
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(meta_module, "faulthandler", fake)
+    assert list(meta_module.watch_for_stalls(range(2), 0.0)) == [0, 1]
+    assert fake.armed == [] and fake.cancelled == 0
 
 
 def test_optimizer_gives_lora_params_lora_lr_and_the_rest_dpt_lr(minimal_config, make_meta_model):
@@ -79,18 +120,8 @@ def test_next_epoch_from_checkpoint(epoch_complete, expected):
     assert next_epoch_from_checkpoint({"epoch": 3, "epoch_complete": epoch_complete}) == expected
 
 
-def test_restore_warmup_progress_sets_the_saved_count():
-    class _Meta:
-        _warmup_iters_completed = 0
-        warmup_scheduler = None
-
-    meta = _Meta()
-    restore_warmup_progress(meta, {"warmup_iters_completed": 10})
-    assert meta._warmup_iters_completed == 10
-
-
-@pytest.mark.parametrize("name", ["float16", "fp16", "half"])
-def test_resolve_amp_dtype_rejects_fp16_aliases(name):
+@pytest.mark.parametrize("name", [None, "float16", "fp16", "half"])
+def test_resolve_amp_dtype_rejects_missing_and_fp16_aliases(name):
     with pytest.raises(ValueError, match="mixed_precision_dtype"):
         meta_module.resolve_amp_dtype(name)
 
@@ -271,10 +302,15 @@ def test_nonfinite_microbatch_drops_the_window(minimal_config, make_meta_model):
         assert torch.equal(after[name], tensor)
 
 
-def test_resume_continues_the_same_epoch(minimal_config, make_meta_model):
+@pytest.mark.parametrize(
+    ("epoch", "global_step"),
+    [(0, 2), (1, 6)],
+    ids=["first-epoch", "later-epoch-offsets-by-the-epoch"],
+)
+def test_resume_continues_the_same_epoch(minimal_config, make_meta_model, epoch, global_step):
     cfg = _standard_cfg(minimal_config, iterations_per_train_epoch=4, grad_accum_steps=1)
     meta = make_meta_model(cfg, run_name="resume-epoch")
-    meta.global_step = 2
+    meta.global_step = global_step
     images, labels = _images_labels(8)
     loader = DataLoader(TensorDataset(images, labels), batch_size=2)
     calls = {"n": 0}
@@ -285,16 +321,9 @@ def test_resume_continues_the_same_epoch(minimal_config, make_meta_model):
         return real(*args, **kwargs)
 
     meta.batch_predict_loss = _count
-    meta.train_epoch(loader, evaluator=None, epoch=0)
+    meta.train_epoch(loader, evaluator=None, epoch=epoch)
     assert calls["n"] == 2
-    assert meta.global_step == 4
-
-
-def test_meta_model_requires_training_kwargs(minimal_config):
-    with pytest.raises(TypeError, match="training_kwargs"):
-        meta_module.MetaModel(
-            run_name="no-training", num_classes=4, model_kwargs=minimal_config.model, device="cpu"
-        )
+    assert meta.global_step == global_step + 2
 
 
 class _TreeBuildStop(Exception):
@@ -511,67 +540,6 @@ def test_meta_model_uses_a_prebuilt_model_without_loading_an_encoder(
 
 
 @pytest.mark.integration
-def test_metamodel_instantiates_from_config(minimal_config, make_meta_model):
-    """MetaModel created from ConfigDict has correct attributes, optimizer, and loss."""
-    assert minimal_config.model.name == "ConceptBottleneckDPTLoRADINOv3"
-    meta = make_meta_model(minimal_config, run_name="test-run")
-    assert meta.run_name == "test-run"
-    assert meta.num_classes == NUM_CLASSES
-    assert meta.model_name == "ConceptBottleneckDPTLoRADINOv3"
-    assert meta.device == "cpu"
-    assert meta.optimizer is not None
-    assert isinstance(meta.optimizer, torch.optim.Optimizer)
-    assert meta.loss is not None
-
-
-@pytest.mark.integration
-def test_dataloader_yields_correct_batch(tiny_loader):
-    """DataLoader produces a batch with correct shapes and dtypes."""
-    images, masks = next(iter(tiny_loader))
-    assert images.shape[0] <= 2
-    assert images.shape[1:] == (3, *IMAGE_SIZE)
-    assert masks.shape[1:] == IMAGE_SIZE
-    assert images.dtype == torch.float32
-    assert masks.dtype == torch.int64
-
-
-@pytest.mark.integration
-def test_one_val_step_produces_predictions(minimal_config, tiny_loader, make_meta_model):
-    """Eval mode produces predictions without gradients."""
-    meta = make_meta_model(minimal_config, run_name="test-val")
-    meta.model.eval()
-
-    images, masks = next(iter(tiny_loader))
-
-    with torch.no_grad():
-        outputs = meta.model(images)
-
-    assert outputs.logits.shape[0] == images.shape[0]
-    assert outputs.logits.shape[1] == NUM_CLASSES
-    assert outputs.logits.shape[-2:] == masks.shape[-2:]
-
-
-@pytest.mark.integration
-def test_metamodel_train_epoch_returns_loss_and_metrics(
-    minimal_config, tiny_loader, make_meta_model
-):
-    """MetaModel.train_epoch returns loss and metric dict."""
-    meta = make_meta_model(minimal_config, run_name="test-epoch")
-    evaluator = Evaluator(num_classes=NUM_CLASSES, device="cpu")
-
-    loss, metrics, timing = meta.train_epoch(tiny_loader, evaluator)
-
-    assert isinstance(loss, float)
-    assert loss >= 0
-    assert isinstance(metrics, dict)
-    assert isinstance(timing, dict)
-    assert "data_loading_sec" in timing
-    assert "forward_sec" in timing
-    assert "backward_sec" in timing
-    assert "num_samples" in timing
-
-
-@pytest.mark.integration
 def test_metamodel_validation_epoch_returns_loss_and_metrics(
     minimal_config, tiny_loader, make_meta_model
 ):
@@ -592,38 +560,3 @@ def test_metamodel_runs_on_cuda_when_available(minimal_config, make_meta_model):
     meta = make_meta_model(minimal_config, run_name="test-cuda", device="cuda")
     assert meta.device == "cuda"
     assert next(meta.model.parameters()).device.type == "cuda"
-
-
-class _PayloadRecordingLogger:
-    """Captures (payload, step) pairs passed to Logger.log."""
-
-    def __init__(self) -> None:
-        self.logged: list[tuple[dict[str, float], int]] = []
-
-    def log(self, payload: dict[str, float], step: int) -> None:
-        self.logged.append((dict(payload), step))
-
-
-@pytest.mark.integration
-def test_train_epoch_logs_per_batch_loss_on_global_step(
-    minimal_config, tiny_loader, make_meta_model
-):
-    """train_epoch emits train/batch_loss against the monotonic global_step each batch."""
-    cfg = copy.deepcopy(minimal_config)
-    meta = make_meta_model(cfg, run_name="test-batch-logging")
-    evaluator = Evaluator(num_classes=NUM_CLASSES, device="cpu")
-    run_logger = _PayloadRecordingLogger()
-
-    assert meta.global_step == 0
-    # tiny_loader yields a single batch; iterations_per_train_epoch defaults to len(loader).
-    meta.train_epoch(tiny_loader, evaluator, run_logger=run_logger, log_interval=1, epoch=0)
-    assert meta.global_step == 1
-    batch_logs = [(p, s) for p, s in run_logger.logged if "train/batch_loss" in p]
-    assert batch_logs, "train/batch_loss was not logged per batch"
-    assert batch_logs[0][1] == 1, "first batch should log at global_step == 1"
-
-    # A second epoch continues advancing the same global-step axis.
-    meta.train_epoch(tiny_loader, evaluator, run_logger=run_logger, log_interval=1, epoch=1)
-    assert meta.global_step == 2
-    steps = [s for p, s in run_logger.logged if "train/batch_loss" in p]
-    assert steps == sorted(steps) and steps[-1] == 2

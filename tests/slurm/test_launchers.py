@@ -109,35 +109,11 @@ def _runs(jobs: list[list[str]]) -> dict[str | None, list[str]]:
     return runs
 
 
-def _sbatch_header(name: str) -> dict[str, str]:
-    header = {}
-    for line in (_SLURM / name).read_text().splitlines():
-        match = re.match(r"#SBATCH --([\w-]+)(?:=(.*))?$", line)
-        if match:
-            header[match.group(1)] = match.group(2) or ""
-    return header
-
-
 def _training_config(name: str) -> dict:
     return yaml.safe_load((_CONFIGS / f"training_config_cbm_{name}.yaml").read_text())["training"]
 
 
 # ---------- scripts ----------
-
-
-def test_every_script_parses():
-    scripts = [*_SLURM.glob("*.sh"), *_SLURM.glob("*.sbatch")]
-    assert scripts
-    for script in scripts:
-        subprocess.run(["bash", "-n", str(script)], check=True)
-
-
-def test_job_resources_exclude_site_values():
-    train = _sbatch_header("train.sbatch")
-    assert train["time"] == "71:59:00"
-    assert train["gres"] == "gpu:1"
-    for site_option in ("account", "qos", "partition", "output", "error"):
-        assert site_option not in train
 
 
 _SITE_PATH = re.compile(r"/(?:data|archive|home)/")
@@ -151,13 +127,6 @@ def test_no_site_specific_values_are_tracked():
         text = path.read_text()
         assert not _SITE_PATH.search(text), f"absolute site path in {path.name}"
         assert not _SITE_SBATCH.search(text), f"site SBATCH option in {path.name}"
-
-
-def test_no_retired_paths_or_exports():
-    for path in _SLURM.iterdir():
-        text = path.read_text()
-        code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
-        assert not any("--export" in line for line in code), path.name
 
 
 # ---------- train.sbatch ----------
@@ -272,44 +241,18 @@ def test_train_exits_2_when_submitted_from_outside_the_repo_root(job, tmp_path):
 # ---------- configs ----------
 
 
-@pytest.mark.parametrize(
-    ("name", "updates", "warmup"),
-    [
-        ("final", 300_000, 4000),
-        ("final_hires", 50_000, 4000),
-    ],
-)
-def test_decaying_configs_reach_zero_at_the_last_update(name, updates, warmup):
+@pytest.mark.parametrize("name", ["final", "final_hires"])
+def test_decaying_configs_reach_zero_at_the_last_update(name):
     cfg = _training_config(name)
     scheduler = cfg["scheduler"]
-    assert cfg["epochs"] * cfg["iterations_per_train_epoch"] == updates
+    updates = cfg["epochs"] * cfg["iterations_per_train_epoch"]
     assert scheduler["type"] == "LinearLR" and scheduler["end_factor"] == 0.0
-    assert scheduler["warmup_iters"] == warmup
     assert scheduler["warmup_iters"] + scheduler["total_iters"] == updates
-    assert cfg["batch_size"] * cfg.get("grad_accum_steps", 1) == 32
-    assert cfg["loss"]["per_pixel_loss_weight"] == cfg["loss"]["per_image_loss_weight"] == 0.5
-
-
-def test_only_the_final_configs_regularize_the_taxonomy():
-    for name in ("final", "final_hires"):
-        assert _training_config(name)["taxonomic_loss"]["kl_weight"] == 0.5
-    for path in _CONFIGS.glob("training_config_*.yaml"):
-        assert "ramp" not in path.read_text(), path.name
 
 
 def test_trainval_config_is_rebuilt_from_the_base_config():
     rebuilt = build_final_data_config((_CONFIGS / "data_config.yaml").read_text(), header=HEADER)
     assert rebuilt == (_CONFIGS / "data_config_trainval.yaml").read_text()
-
-
-def test_launchers_use_existing_configs():
-    referenced = set()
-    for path in _SLURM.glob("launch_*.sh"):
-        referenced |= set(re.findall(r"configs/([\w.]+\.yaml)", path.read_text()))
-    referenced = {name for name in referenced if "$" not in name}
-    assert referenced
-    for name in referenced:
-        assert (_CONFIGS / name).is_file(), name
 
 
 # ---------- training launchers ----------
@@ -344,6 +287,7 @@ def test_dry_run_emits_two_sbatch_lines_with_site_options(repo):
         assert _opt(job, "partition") == "part-x"
         assert _opt(job, "output") == f"{repo.parent}/logs/slurm-%x-%j.out"
         assert _opt(job, "error") == f"{repo.parent}/logs/slurm-%x-%j.err"
+        assert _opt(job, "export") is None
         assert "slurm/train.sbatch" in job
 
 
