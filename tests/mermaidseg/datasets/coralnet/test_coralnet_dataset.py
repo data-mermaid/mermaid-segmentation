@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 
@@ -55,6 +56,12 @@ def test_custom_manifest_reads_id2name_named_after_its_directory(cache):
     )
     ds = CoralNetDataset(manifest_path="x/runA/m.parquet", source_bucket=BUCKET)
     assert sorted(ds.df_annotations["coralnet_name"].unique()) == ["Algae", "Porites", "Rubble"]
+
+
+def test_manifest_sha256_is_the_hash_of_the_manifest_bytes_parsed(cache):
+    ds = CoralNetDataset(manifest_path=MANIFEST, source_bucket=BUCKET)
+    expected = hashlib.sha256((cache / "cache" / BUCKET / MANIFEST).read_bytes()).hexdigest()
+    assert ds.manifest_sha256 == expected
 
 
 def test_manifest_without_directory_is_rejected(cache):

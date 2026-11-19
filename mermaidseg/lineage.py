@@ -54,14 +54,15 @@ def _uv_lock_sha256() -> str | None:
 
 
 def data_version(cfg_data_plain: dict, datasets: Mapping[tuple[str, str], Any]) -> dict:
-    """Hash of the data config plus the manifest path of each dataset that has one.
+    """Hash of the data config plus the manifest path and sha256 of each dataset that has one.
 
     Args:
         cfg_data_plain: The ``data`` config section as plain containers.
         datasets: Built datasets keyed by ``(name, split)``.
 
     Returns:
-        ``{"data_config_sha1": ..., "manifests": {"<name>.<split>": manifest_path}}``.
+        ``{"data_config_sha1": ..., "manifests": {"<name>.<split>": manifest_path},
+        "manifest_sha256": {"<name>.<split>": sha256}}``.
     """
     config_json = json.dumps(cfg_data_plain, sort_keys=True, default=str)
     return {
@@ -70,6 +71,11 @@ def data_version(cfg_data_plain: dict, datasets: Mapping[tuple[str, str], Any]) 
             f"{name}.{split}": ds.manifest_path
             for (name, split), ds in datasets.items()
             if hasattr(ds, "manifest_path")
+        },
+        "manifest_sha256": {
+            f"{name}.{split}": ds.manifest_sha256
+            for (name, split), ds in datasets.items()
+            if hasattr(ds, "manifest_sha256")
         },
     }
 
