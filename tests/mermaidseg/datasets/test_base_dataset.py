@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import albumentations as A
 import numpy as np
 import pandas as pd
 import pytest
@@ -194,6 +195,15 @@ def test_base_dataset_set_global_offset_validates_negative(minimal_dataset):
         minimal_dataset.set_global_offset(-1)
 
 
+def test_base_dataset_set_global_offset_accepts_zero_to_reset(minimal_dataset):
+    minimal_dataset.set_global_offset(5)
+    assert minimal_dataset.global_offset == 5
+
+    minimal_dataset.set_global_offset(0)
+
+    assert minimal_dataset.global_offset == 0
+
+
 def test_base_dataset_set_global_offset_shifts_emitted_mask():
     """Folded offset in ``_load_item`` must match the previous ``np.where`` post-pass."""
     df_annotations, df_images = _make_two_image_annotations(
@@ -233,7 +243,7 @@ def test_base_dataset_all_items_failing_raises_logs_and_counts_failure(
     # raises rather than returning a ``(None, None)`` placeholder.
     with (
         caplog.at_level("WARNING", logger="mermaidseg.datasets.base_dataset"),
-        pytest.raises(RuntimeError),
+        pytest.raises(RuntimeError, match="all 1 items failed"),
     ):
         _ = ds[0]
 
@@ -295,3 +305,197 @@ def test_train_raises_when_all_items_are_empty():
 
     with pytest.raises(RuntimeError, match="empty \\(no labels\\)"):
         _ = ds[0]
+
+
+# --- construction: source-label space, class_subset, image_keep ---
+
+
+def _annotations(labels: list[str], **extra: Any) -> pd.DataFrame:
+    """One point per label, each on its own image ``img<i>``."""
+    n = len(labels)
+    return pd.DataFrame(
+        {
+            "image_id": [f"img{i}" for i in range(n)],
+            "source_label_name": labels,
+            "row": [5] * n,
+            "col": [5] * n,
+            **extra,
+        }
+    )
+
+
+def test_source_ids_follow_label_frequency_not_alphabet_or_first_appearance():
+    df_annotations = _annotations(["Rubble", "Sand", "Sand", "Coral", "Sand", "Rubble"])
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_annotations[["image_id"]].drop_duplicates().reset_index(drop=True),
+    )
+
+    assert ds.source_id2name == {1: "Sand", 2: "Rubble", 3: "Coral"}
+    assert ds.source_name2id == {"Sand": 1, "Rubble": 2, "Coral": 3}
+    assert ds.num_source_classes == 4
+
+
+def test_class_subset_drops_other_classes_and_their_images():
+    df_annotations = _annotations(["Coral", "Sand", "Coral"], region_id=[1, 2, 3])
+    df_annotations["region_name"] = ["r1", "r2", "r3"]
+    df_images = df_annotations[["image_id", "region_id", "region_name"]]
+
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations, df_images=df_images, class_subset=["Coral"]
+    )
+
+    assert ds.df_annotations["source_label_name"].tolist() == ["Coral", "Coral"]
+    assert ds.df_images["image_id"].tolist() == ["img0", "img2"]
+    assert len(ds) == 2
+    assert ds.source_id2name == {1: "Coral"}
+    assert ds.num_source_classes == 2
+
+
+def test_class_subset_with_source_id_columns_rederives_images_by_source_and_image():
+    df_annotations = _annotations(["Coral", "Sand", "Coral"], source_id=[10, 10, 20])
+    df_images = df_annotations[["source_id", "image_id"]]
+
+    ds = _SyntheticDataset(
+        df_annotations=df_annotations, df_images=df_images, class_subset=["Sand"]
+    )
+
+    assert ds.df_images.to_dict("list") == {"source_id": [10], "image_id": ["img1"]}
+
+
+def test_class_subset_without_a_known_images_schema_raises():
+    df_annotations = _annotations(["Coral", "Sand"])
+
+    with pytest.raises(ValueError, match="cannot auto-detect"):
+        _SyntheticDataset(
+            df_annotations=df_annotations,
+            df_images=df_annotations[["image_id"]],
+            class_subset=["Coral"],
+        )
+
+
+def test_missing_source_label_name_column_raises():
+    df_annotations = _annotations(["Coral"]).rename(columns={"source_label_name": "label"})
+
+    with pytest.raises(ValueError, match="source_label_name"):
+        _SyntheticDataset(df_annotations=df_annotations, df_images=df_annotations[["image_id"]])
+
+
+class _NamedDataset(_SyntheticDataset):
+    SOURCE_NAME = "named"
+
+
+def test_image_keep_restricts_annotations_and_images_to_the_allowlist(tmp_path):
+    df_annotations = _annotations(["Coral", "Sand", "Coral"])
+    keep = tmp_path / "keep.parquet"
+    pd.DataFrame({"dataset": ["named", "named"], "image_id": ["img0", "img2"]}).to_parquet(keep)
+
+    ds = _NamedDataset(
+        df_annotations=df_annotations,
+        df_images=df_annotations[["image_id"]],
+        image_keep=keep,
+    )
+
+    assert ds.df_images["image_id"].tolist() == ["img0", "img2"]
+    assert ds.df_annotations["image_id"].tolist() == ["img0", "img2"]
+    assert ds.source_id2name == {1: "Coral"}  # Sand was only on the dropped image
+
+
+def test_image_keep_for_another_dataset_raises(tmp_path):
+    df_annotations = _annotations(["Coral"])
+    keep = tmp_path / "keep.parquet"
+    pd.DataFrame({"dataset": ["other"], "image_id": ["img0"]}).to_parquet(keep)
+
+    with pytest.raises(ValueError, match="expected named"):
+        _NamedDataset(
+            df_annotations=df_annotations,
+            df_images=df_annotations[["image_id"]],
+            image_keep=keep,
+        )
+
+
+# --- empty dataset and source rows ---
+
+
+def test_empty_dataset_raises_on_access():
+    df_annotations = _annotations([])
+    ds = _SyntheticDataset(df_annotations=df_annotations, df_images=df_annotations[["image_id"]])
+
+    assert len(ds) == 0
+    with pytest.raises(RuntimeError, match="dataset is empty"):
+        _ = ds[0]
+
+
+def test_set_source_rows_must_be_indexed_like_df_images():
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=["Coral"], img1_labels=["Coral"]
+    )
+    ds = _SyntheticDataset(df_annotations=df_annotations, df_images=df_images)
+
+    with pytest.raises(ValueError, match="indexed like df_images"):
+        ds.set_source_rows(pd.Series([1, 2], index=[5, 6]))
+
+
+def test_source_rows_are_appended_to_each_sample():
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=["Coral"], img1_labels=["Coral"]
+    )
+    ds = _SyntheticDataset(df_annotations=df_annotations, df_images=df_images, split="val")
+
+    ds.set_source_rows(pd.Series([4, 9], index=df_images.index))
+
+    assert [ds[0][2], ds[1][2]] == [4, 9]
+
+
+def test_set_source_rows_none_returns_row_zero_for_every_sample():
+    df_annotations, df_images = _make_two_image_annotations(
+        img0_labels=["Coral"], img1_labels=["Coral"]
+    )
+    ds = _SyntheticDataset(df_annotations=df_annotations, df_images=df_images, split="val")
+
+    ds.set_source_rows(None)
+
+    image, mask, row = ds[1]
+    assert row == 0
+    assert mask[5, 5] == 1
+
+
+# --- _load_item: padding and transform ---
+
+
+def _single_point_dataset(row: int, col: int, **kwargs: Any) -> _SyntheticDataset:
+    df_annotations = _annotations(["Coral"]).assign(row=row, col=col)
+    return _SyntheticDataset(
+        df_annotations=df_annotations,
+        df_images=df_annotations[["image_id"]],
+        split="val",
+        **kwargs,
+    )
+
+
+def test_padding_is_forwarded_to_the_mask():
+    image, mask = _single_point_dataset(10, 10, padding=2)[0]
+
+    assert image.shape == (20, 20, 3)
+    expected = np.zeros((20, 20), dtype=np.int32)
+    expected[8:12, 8:12] = 1
+    np.testing.assert_array_equal(mask, expected)
+
+
+def test_without_padding_only_the_annotated_pixel_is_set():
+    _, mask = _single_point_dataset(10, 10)[0]
+
+    assert mask.sum() == 1 and mask[10, 10] == 1
+
+
+def test_transform_is_applied_to_image_and_mask_and_image_goes_channels_first():
+    # A non-square, non-integer-flip resize: height x2, width x3, nearest for the mask.
+    transform = A.Resize(height=40, width=60)
+
+    image, mask = _single_point_dataset(5, 5, transform=transform)[0]
+
+    assert image.shape == (3, 40, 60)
+    assert mask.shape == (40, 60)
+    expected = np.zeros((40, 60), dtype=np.int32)
+    expected[10:12, 15:18] = 1
+    np.testing.assert_array_equal(mask, expected)

@@ -23,6 +23,10 @@ class TestCanonicalMetricName:
         assert canonical_metric_name("LOSS") == "loss"
         assert canonical_metric_name("Accuracy") == "accuracy"
 
+    @pytest.mark.parametrize("name", [" miou ", "\tF1-Score\n"])
+    def test_strips_surrounding_whitespace(self, name):
+        assert canonical_metric_name(name) == name.strip().lower()
+
     def test_rejects_unknown_metric(self):
         with pytest.raises(ValueError, match="Unsupported metric_of_interest"):
             canonical_metric_name("precision")
@@ -64,6 +68,14 @@ class TestExtractMetricValue:
     def test_extracts_from_results(self, metric):
         result = extract_metric_value(metric, 0.5, {metric: 0.82})
         assert result == pytest.approx(0.82)
+
+    @pytest.mark.parametrize("metric", [" Loss ", "LOSS"])
+    def test_loss_key_is_stripped_and_case_insensitive(self, metric):
+        assert extract_metric_value(metric, 0.85, {}) == pytest.approx(0.85)
+
+    @pytest.mark.parametrize("metric", ["MIoU", " miou "])
+    def test_results_key_is_stripped_and_case_insensitive(self, metric):
+        assert extract_metric_value(metric, 0.5, {"miou": 0.31}) == pytest.approx(0.31)
 
     def test_empty_results_shows_none(self):
         with pytest.raises(ValueError, match="\\(none\\)"):

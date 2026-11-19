@@ -17,6 +17,16 @@ from botocore.exceptions import ClientError
 from PIL import Image
 
 
+@pytest.fixture(autouse=True)
+def _fake_aws_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give boto3 static credentials so it never queries the EC2 metadata endpoint."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+
 def _make_jpeg_bytes(width: int, height: int, *, sof_marker: int = 0xC0, padding: int = 0) -> bytes:
     """Synthesise a minimal JPEG byte sequence with a valid SOF marker.
 
@@ -130,27 +140,23 @@ class FakeS3:
             content_range = f"bytes {start}-{end}/{len(full)}"
         return _StubResponse(body=data, content_length=len(data), content_range=content_range)
 
-    def list_objects_v2(
-        self, *, Bucket: str, Prefix: str = "", MaxKeys: int | None = None, Delimiter: str = ""
-    ):
+    def list_objects_v2(self, *, Bucket: str, Prefix: str = "", Delimiter: str = ""):
+        """Mirror S3: ``Contents`` and ``CommonPrefixes`` are absent when empty."""
         keys = [k for (b, k) in self.objects if b == Bucket and k.startswith(Prefix)]
-        if Delimiter:
-            common_prefixes: set[str] = set()
-            contents = []
-            for k in keys:
-                rest = k[len(Prefix) :]
-                if Delimiter in rest:
-                    common_prefixes.add(Prefix + rest.split(Delimiter, 1)[0] + Delimiter)
-                else:
-                    contents.append({"Key": k})
-            return {
-                "CommonPrefixes": [{"Prefix": p} for p in sorted(common_prefixes)],
-                "Contents": contents,
-                "KeyCount": len(common_prefixes) + len(contents),
-            }
-        if MaxKeys is not None:
-            keys = keys[:MaxKeys]
-        return {"Contents": [{"Key": k} for k in keys], "KeyCount": len(keys)}
+        common_prefixes: set[str] = set()
+        contents = []
+        for k in keys:
+            rest = k[len(Prefix) :]
+            if Delimiter and Delimiter in rest:
+                common_prefixes.add(Prefix + rest.split(Delimiter, 1)[0] + Delimiter)
+            else:
+                contents.append({"Key": k})
+        response: dict = {"KeyCount": len(common_prefixes) + len(contents)}
+        if common_prefixes:
+            response["CommonPrefixes"] = [{"Prefix": p} for p in sorted(common_prefixes)]
+        if contents:
+            response["Contents"] = contents
+        return response
 
     def get_paginator(self, name: str):
         if name != "list_objects_v2":
@@ -216,7 +222,6 @@ def sample_csv_factory():
         n_images: int = 3,
         n_points_per_image: int = 5,
         labelset: bool = True,
-        metadata: bool = True,
     ) -> dict[str, bytes]:
         ann_headers = ["Name", "Row", "Column", "Label ID", "Status"]
         img_headers = ["Name", "Image Page"]
@@ -236,11 +241,6 @@ def sample_csv_factory():
             files["labelset.csv"] = _csv_bytes(
                 ["Label ID", "Name"], [[1000 + i, f"label_{i}"] for i in range(7)]
             )
-        if metadata:
-            files["metadata.csv"] = _csv_bytes(
-                ["Name", "Date"],
-                [[f"img_{source_id}_{i}.jpg", "2024-01-01"] for i in range(n_images)],
-            )
         return files
 
     return _factory
@@ -252,8 +252,6 @@ def populate_source(
     base = f"{prefix}/s{source_id}/"
     for name, body in files.items():
         s3.put(bucket, base + name, body)
-    # Provide at least one image so the images-folder check passes.
-    s3.put(bucket, base + "images/img_marker.jpg", b"\xff\xd8\xff\xd9")
 
 
 @pytest.fixture
@@ -305,11 +303,11 @@ def truncated_jpeg_bytes() -> bytes:
 
 
 @pytest.fixture
-def corrupted_header_jpeg_bytes() -> bytes:
-    """JPEG with corrupted header markers."""
-    # Start with valid JPEG but corrupt the SOI marker and data
-    jpeg_data = _make_jpeg_bytes(2048, 1536)
-    corrupted = bytearray(jpeg_data)
-    # Corrupt header bytes (not SOI/EOI, but SOF area)
-    corrupted[10:20] = b"\x00" * 10
-    return bytes(corrupted)
+def corrupted_sof_jpeg_bytes() -> bytes:
+    """Decodable JPEG (with scan data) whose SOF0 marker bytes are zeroed."""
+    img = Image.new("RGB", (64, 48), color=(255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    data = buf.getvalue()
+    sof = data.index(b"\xff\xc0")
+    return data[:sof] + b"\x00\x00" + data[sof + 2 :]

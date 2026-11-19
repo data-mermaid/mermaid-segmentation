@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
+from torch import nn
+from torch.utils.data import TensorDataset
 
+from mermaidseg.evaluation import val_loss
 from mermaidseg.evaluation.val_loss import (
     _Accumulator,
     _bundle_config,
     _check_layout,
     binary_concept_names,
+    evaluate_val_loss,
 )
+from mermaidseg.io import ConfigDict
 
 NAMES = ["bleached", "anthropogenic", "sand"]
 
@@ -76,3 +83,155 @@ def test_bundle_config_takes_run_sections_from_the_bundle_and_data_from_the_file
     assert "taxonomic_loss" in run["training"]
     assert run["training"]["loss"] == {"a": 1}
     assert run["model"]["input_size"] == [8, 8]
+
+
+def test_layout_check_reports_a_length_difference_when_one_list_extends_the_other():
+    bundle = _bundle({0: "ignore", 1: "sand"}, dict(enumerate(NAMES, start=1)))
+    registry = SimpleNamespace(target_id2label={1: "sand"})
+    with pytest.raises(ValueError, match="lengths: bundle 3 vs registry 4"):
+        _check_layout(bundle, registry, [*NAMES, "extra"])
+
+
+class _Harness:
+    """Stubs of the collaborators that read configs and datasets; the loop and outputs are real."""
+
+    def __init__(self, monkeypatch, datasets: dict):
+        self.cfg = ConfigDict(
+            {
+                "data": {},
+                "model": {"input_size": [8, 8]},
+                "training": {"padding": 0, "taxonomic_loss": {"w": 1}, "loss": {}},
+            }
+        )
+        self.datasets = datasets
+        self.meta_cfg = None
+        registry = SimpleNamespace(
+            target_id2label={1: "sand"}, concept_value2id={"bleached": {"not_given": 0}}
+        )
+        schema = SimpleNamespace(channel_id2name=lambda: {1: "bleached"})
+        meta = SimpleNamespace(
+            model=nn.Identity(),
+            loss=object(),
+            _to_target_labels=lambda labels: labels,
+            _to_concept_labels=lambda labels: labels,
+        )
+
+        def build_meta_model(cfg, _registry, _device, model):
+            self.meta_cfg = cfg
+            return meta
+
+        def loss(outputs, _loss_fn, _none, _target_labels, _target_concepts):
+            value = outputs.mean()
+            return value, None, None, {"classification": value * 2}
+
+        monkeypatch.setattr(val_loss, "_bundle_config", lambda *_a: self.cfg)
+        monkeypatch.setattr(val_loss, "setup_local_cache", lambda _data: None)
+        monkeypatch.setattr(val_loss, "build_datasets", lambda *_a, **_k: self.datasets)
+        monkeypatch.setattr(val_loss, "build_registry", lambda *_a, **_k: (registry, schema))
+        monkeypatch.setattr(val_loss, "build_meta_model", build_meta_model)
+        monkeypatch.setattr(val_loss, "apply_concept_bottleneck_loss", loss)
+        self.bundle = SimpleNamespace(
+            id2label={0: "ignore", 1: "sand"},
+            concept_id2name={1: "bleached"},
+            input_size=(8, 8),
+            path="bundle/path",
+            model=nn.Identity(),
+        )
+
+    def run(self, tmp_path, **kwargs):
+        return evaluate_val_loss(
+            bundle=self.bundle,  # type: ignore[arg-type]
+            data_config="data.yaml",
+            output_dir=tmp_path,
+            device=torch.device("cpu"),
+            batch_size=1,
+            num_workers=0,
+            **kwargs,
+        )
+
+
+def _images(*values: float) -> TensorDataset:
+    """One 3x2x2 image per value, filled with it, with a 2x2 label map."""
+    images = torch.stack([torch.full((3, 2, 2), v) for v in values])
+    return TensorDataset(images, torch.zeros(len(values), 2, 2))
+
+
+def test_val_loss_is_averaged_per_dataset_and_pooled_over_all_batches(tmp_path, monkeypatch):
+    harness = _Harness(
+        monkeypatch, {("b_ds", "val"): _images(8.0), ("a_ds", "val"): _images(1.0, 3.0)}
+    )
+    result = harness.run(tmp_path, max_images_per_dataset=None)
+    assert result["per_dataset"] == {
+        "a_ds": {"classification": 4.0, "loss": 2.0},
+        "b_ds": {"classification": 16.0, "loss": 8.0},
+    }
+    # Pooled over the three batches, not the mean of the two dataset means (5.0).
+    assert result["overall"] == {"classification": 8.0, "loss": 4.0}
+    assert result["n_images"] == {"a_ds": 2, "b_ds": 1}
+    assert list(result["per_dataset"]) == ["a_ds", "b_ds"]
+    on_disk = json.loads((tmp_path / "val_loss" / "metrics.json").read_text())
+    assert on_disk["overall"] == result["overall"]
+    assert on_disk["n_images"] == {"a_ds": 2, "b_ds": 1}
+
+
+def test_val_loss_scores_a_seeded_ascending_subset_of_each_dataset(tmp_path, monkeypatch):
+    seen: list[float] = []
+
+    def loss(outputs, *_rest):
+        seen.append(float(outputs.mean()))
+        return outputs.mean(), None, None, {}
+
+    harness = _Harness(monkeypatch, {("ds", "val"): _images(*map(float, range(8)))})
+    monkeypatch.setattr(val_loss, "apply_concept_bottleneck_loss", loss)
+    result = harness.run(tmp_path, max_images_per_dataset=4, seed=3)
+    assert result["n_images"] == {"ds": 4}
+    assert seen == sorted(seen)
+    assert len(set(seen)) == 4
+    first = list(seen)
+    seen.clear()
+    harness.run(tmp_path, max_images_per_dataset=4, seed=3)
+    assert seen == first
+    subsets = set()
+    for other in range(5):
+        seen.clear()
+        harness.run(tmp_path, max_images_per_dataset=4, seed=other)
+        subsets.add(tuple(seen))
+    assert len(subsets) > 1
+
+
+def test_val_loss_overrides_the_run_config_for_scoring(tmp_path, monkeypatch):
+    harness = _Harness(monkeypatch, {("ds", "val"): _images(1.0)})
+    result = harness.run(
+        tmp_path,
+        name="scored",
+        cache_dir="/cache",
+        per_pixel_loss_weight=0.25,
+        per_image_loss_weight=0.75,
+        seed=5,
+    )
+    cfg = harness.meta_cfg
+    assert cfg.run_name == "scored"
+    assert "taxonomic_loss" not in cfg.training
+    assert cfg.training.distributed is False
+    assert (cfg.training.loss.per_pixel_loss_weight, cfg.training.loss.per_image_loss_weight) == (
+        0.25,
+        0.75,
+    )
+    assert cfg.training.loss.binary_concept_names == ["bleached"]
+    assert cfg.data.local_cache_dir == "/cache"
+    assert result["settings"] == {
+        "data_config": "data.yaml",
+        "bundle": "bundle/path",
+        "resolution": 8,
+        "max_images_per_dataset": 1000,
+        "per_pixel_loss_weight": 0.25,
+        "per_image_loss_weight": 0.75,
+        "seed": 5,
+        "concept_source_mask": None,
+    }
+    assert (tmp_path / "scored" / "metrics.json").is_file()
+
+
+def test_val_loss_raises_when_the_data_config_has_no_val_split(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="data.yaml has no val split"):
+        _Harness(monkeypatch, {}).run(tmp_path)

@@ -777,7 +777,7 @@ class MetaModel:
                 iterations_per_train_epoch,
             )
             start_update = 0
-        n_updates = iterations_per_train_epoch - start_update
+        applied_updates = 0
 
         rank = current_context().rank
         stall_dump_sec = stall_dump_seconds(self.training_kwargs)
@@ -955,6 +955,7 @@ class MetaModel:
                 continue
 
             running = _sum_components([running, window_mean])
+            applied_updates += 1
 
             # Distributed: every rank joins the reduction, whether or not it has a logger.
             if self.global_step % max(log_interval, 1) == 0 and (
@@ -987,7 +988,8 @@ class MetaModel:
 
             metric_results.update(evaluator.compute_concept_metric_results())
 
-        denom = n_updates if n_updates > 0 else 1
+        # Skipped updates add nothing to ``running``, so they stay out of the mean.
+        denom = applied_updates if applied_updates > 0 else 1
         # Summed per-update means are linear in the rank mean, so one reduction here
         # equals the mean over ranks of each update's mean.
         epoch_totals = reduce_components(running)

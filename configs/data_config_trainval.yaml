@@ -87,6 +87,7 @@ data:
                           5582, 5593, 5603, 5760, 5949, 5977, 5980, 5981, 6053, 6068, 6235,
                           6297, 6366, 6470, 6487, 6522, 6573, 6577, 6620, 6680, 6681, 6682,
                           6683, 6714, 6968, 7040, 7121, 7209, 7321, 7580, 7584]
+      manifest_path: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
       image_blacklist: configs/coralnet/image_blacklist.parquet
       annotation_overrides: configs/coralnet/annotation_overrides.parquet
     val: null
@@ -103,6 +104,7 @@ data:
                           6369, 6370, 6371, 6391, 6405, 6453, 6494, 6551, 6673, 6690, 6693, 6694,
                           6702, 6704, 6712, 7049, 7077, 7078, 7079, 7080, 7085, 7086, 7087, 7088,
                           7116, 7259, 7358, 7391, 7614, 7663]
+      manifest_path: etl-outputs/coralnet/20260623_nogit/coralnet_training_manifest_20260623_nogit.parquet
       image_blacklist: configs/coralnet/image_blacklist.parquet
       annotation_overrides: configs/coralnet/annotation_overrides.parquet
   mermaid:

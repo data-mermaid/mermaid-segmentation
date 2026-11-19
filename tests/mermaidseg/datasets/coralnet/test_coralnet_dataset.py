@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import importlib
+import hashlib
 import json
 import shutil
 
+import numpy as np
 import pandas as pd
 import pytest
+from PIL import Image
 
 from mermaidseg.datasets.coralnet import CoralNetDataset
 from mermaidseg.datasets.coralnet import coralnet_dataset as cnd
@@ -54,6 +56,12 @@ def test_custom_manifest_reads_id2name_named_after_its_directory(cache):
     )
     ds = CoralNetDataset(manifest_path="x/runA/m.parquet", source_bucket=BUCKET)
     assert sorted(ds.df_annotations["coralnet_name"].unique()) == ["Algae", "Porites", "Rubble"]
+
+
+def test_manifest_sha256_is_the_hash_of_the_manifest_bytes_parsed(cache):
+    ds = CoralNetDataset(manifest_path=MANIFEST, source_bucket=BUCKET)
+    expected = hashlib.sha256((cache / "cache" / BUCKET / MANIFEST).read_bytes()).hexdigest()
+    assert ds.manifest_sha256 == expected
 
 
 def test_manifest_without_directory_is_rejected(cache):
@@ -130,37 +138,56 @@ def test_parquet_refs_resolve_against_repo_root(cache, monkeypatch):
     assert sorted(ds.df_images["image_id"]) == ["10", "20"]
 
 
-@pytest.fixture
-def fresh_module(monkeypatch):
-    """Reload the dataset module after env tweaks so the literal default is re-evaluated."""
-
-    def _reload():
-        import mermaidseg.datasets.coralnet.coralnet_dataset as module
-
-        return importlib.reload(module)
-
-    return _reload
+def test_manifest_path_is_required(cache):
+    with pytest.raises(TypeError, match="manifest_path"):
+        CoralNetDataset(source_bucket=BUCKET)
 
 
-def test_default_fallback_when_no_env(monkeypatch, fresh_module):
-    monkeypatch.delenv("MERMAID_CORALNET_MANIFEST_PATH", raising=False)
-    monkeypatch.delenv("MERMAID_CORALNET_MANIFEST_VERSION", raising=False)
-    mod = fresh_module()
-    assert mod._resolve_default_manifest_path() == mod._DEFAULT_MANIFEST_PATH
+def test_whitelist_and_blacklist_sources_together_raise(cache):
+    with pytest.raises(ValueError, match="both whitelist and blacklist"):
+        _make(whitelist_sources=[1], blacklist_sources=[2])
 
 
-def test_version_env_builds_versioned_filename(monkeypatch, fresh_module):
-    monkeypatch.delenv("MERMAID_CORALNET_MANIFEST_PATH", raising=False)
-    monkeypatch.setenv("MERMAID_CORALNET_MANIFEST_VERSION", "20260515_deadbeef")
-    mod = fresh_module()
-    assert (
-        mod._resolve_default_manifest_path()
-        == "etl-outputs/coralnet/20260515_deadbeef/coralnet_training_manifest_20260515_deadbeef.parquet"
-    )
+def test_blacklist_sources_drops_those_sources_and_their_images(cache):
+    ds = _make(blacklist_sources=[1])
+
+    assert sorted(ds.df_images["image_id"]) == ["20"]
+    assert set(ds.df_annotations["source_id"]) == {2}
 
 
-def test_explicit_path_env_wins(monkeypatch, fresh_module):
-    monkeypatch.setenv("MERMAID_CORALNET_MANIFEST_PATH", "custom/path.parquet")
-    monkeypatch.setenv("MERMAID_CORALNET_MANIFEST_VERSION", "ignored")
-    mod = fresh_module()
-    assert mod._resolve_default_manifest_path() == "custom/path.parquet"
+def test_annotation_overrides_for_images_missing_from_the_manifest_are_dropped(cache, caplog):
+    path = cache / "overrides.parquet"
+    pd.DataFrame(
+        {
+            "source_id": [1, 1],
+            "image_id": ["10", "99"],
+            "row": [1, 2],
+            "col": [1, 2],
+            "coralnet_id": [1, 1],
+        }
+    ).to_parquet(path)
+
+    with caplog.at_level("WARNING", logger=cnd.logger.name):
+        ds = _make(annotation_overrides=str(path))
+
+    assert "99" not in set(ds.df_annotations["image_id"])
+    assert sorted(ds.df_images["image_id"]) == ["10", "11", "20"]
+    img10 = ds.df_annotations[ds.df_annotations["image_id"] == "10"]
+    assert img10[["row", "col"]].to_numpy().tolist() == [[1, 1]]
+    assert "1 images are not in the manifest" in caplog.text
+
+
+def test_read_image_returns_the_rgb_array_for_the_manifest_key(cache):
+    path = cache / "cache" / BUCKET / "k10"
+    Image.new("L", (4, 3), 7).save(path, format="PNG")
+
+    image = _make().read_image(image_id="10", source_id=1, image_key="k10")
+
+    assert image.shape == (3, 4, 3)
+    assert np.all(image == 7)
+
+
+@pytest.mark.parametrize("image_key", [None, "", float("nan")])
+def test_read_image_without_a_manifest_key_raises_key_error(cache, image_key):
+    with pytest.raises(KeyError, match="No manifest entry for source_id=1 image_id=10"):
+        _make().read_image(image_id="10", source_id=1, image_key=image_key)

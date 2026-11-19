@@ -10,10 +10,13 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 from botocore.exceptions import ClientError
+from PIL import Image
 
+from mermaidseg.datasets import local_cache as local_cache_module
 from mermaidseg.datasets.local_cache import (
     DataLoadError,
     LocalS3Cache,
+    _env_flag,
     create_cache_stats,
     parse_storage_ref,
     setup_local_cache,
@@ -35,22 +38,48 @@ def _mock_s3(data: bytes = b"image-bytes") -> MagicMock:
     return client
 
 
-def test_parse_storage_ref_s3_uri():
-    assert parse_storage_ref("s3://my-bucket/path/to/file.parquet", "default") == (
-        "my-bucket",
-        "path/to/file.parquet",
-    )
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, False),
+        ("", False),
+        ("  ", False),
+        ("0", False),
+        ("false", False),
+        ("FALSE", False),
+        ("no", False),
+        ("off", False),
+        (" Off ", False),
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+    ],
+)
+def test_env_flag_is_false_for_unset_blank_and_falsy_words(monkeypatch, value, expected):
+    monkeypatch.delenv("MERMAIDSEG_TEST_FLAG", raising=False)
+    if value is not None:
+        monkeypatch.setenv("MERMAIDSEG_TEST_FLAG", value)
+
+    assert _env_flag("MERMAIDSEG_TEST_FLAG") is expected
 
 
-def test_parse_storage_ref_relative_key():
-    assert parse_storage_ref("mermaid/foo.parquet", "coral-reef-training") == (
-        "coral-reef-training",
-        "mermaid/foo.parquet",
-    )
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("s3://my-bucket/path/to/file.parquet", ("my-bucket", "path/to/file.parquet")),
+        ("mermaid/foo.parquet", ("coral-reef-training", "mermaid/foo.parquet")),
+        ("/leading/slash/is/absolute", None),
+    ],
+)
+def test_parse_storage_ref_splits_s3_uris_keys_and_local_paths(ref, expected):
+    assert parse_storage_ref(ref, "coral-reef-training") == expected
 
 
-def test_parse_storage_ref_absolute_local():
-    assert parse_storage_ref("/tmp/local.parquet", "bucket") is None
+@pytest.mark.parametrize("ref", ["s3://bucket-only", "s3://bucket/", "s3:///key-only", "s3://"])
+def test_parse_storage_ref_rejects_an_s3_uri_missing_bucket_or_key(ref):
+    with pytest.raises(ValueError, match="Invalid S3 URI"):
+        parse_storage_ref(ref, "default")
 
 
 def test_s3_miss_write_through(tmp_path):
@@ -158,6 +187,11 @@ def test_load_stage_stats_flush_and_snapshot(tmp_path):
     cache._flush_every = 1
     cache.record_sample()
 
+    # The periodic flush alone reaches the shared counters, before any snapshot.
+    assert stats.samples.value == 1
+    assert stats.retries.value == 2
+    assert stats.stage_sec["image_load"].value == pytest.approx(0.25)
+
     snapshot = cache.snapshot_stats()
     assert snapshot.samples == 1
     assert snapshot.retries == 2
@@ -168,6 +202,85 @@ def test_load_stage_stats_flush_and_snapshot(tmp_path):
     assert reset.samples == 0
     assert reset.retries == 0
     assert reset.stage_sec["image_load"] == 0.0
+
+
+def test_record_sample_flushes_only_once_flush_every_samples_are_counted(tmp_path):
+    stats = create_cache_stats()
+    cache = LocalS3Cache.configure(tmp_path, stats=stats)
+    cache._flush_every = 3
+
+    cache.record_sample()
+    cache.record_sample()
+    assert stats.samples.value == 0
+
+    cache.record_sample()
+    assert stats.samples.value == 3
+
+
+def test_record_retries_ignores_zero_and_negative_counts(tmp_path):
+    stats = create_cache_stats()
+    cache = LocalS3Cache.configure(tmp_path, stats=stats)
+
+    cache.record_retries(0)
+    cache.record_retries(-3)
+
+    assert cache.snapshot_stats().retries == 0
+
+
+def test_local_path_without_a_root_raises():
+    cache = LocalS3Cache.configure(None)
+
+    with pytest.raises(RuntimeError, match="not configured"):
+        cache.local_path("bucket", "key")
+
+
+def _png_bytes() -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (3, 2), (1, 2, 3)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_read_pil_image_decodes_the_object(tmp_path):
+    cache = LocalS3Cache.configure(tmp_path)
+    mock_s3 = _mock_s3(_png_bytes())
+    cache.set_s3_client(mock_s3)
+
+    image = cache.read_pil_image("bucket", "dir/a.png")
+
+    mock_s3.get_object.assert_called_once_with(Bucket="bucket", Key="dir/a.png")
+    assert image.size == (3, 2)
+
+
+def test_read_pil_image_thumbnail_rewrites_the_png_key(tmp_path):
+    cache = LocalS3Cache.configure(tmp_path)
+    mock_s3 = _mock_s3(_png_bytes())
+    cache.set_s3_client(mock_s3)
+
+    cache.read_pil_image("bucket", "dir/a.png", thumbnail=True)
+
+    mock_s3.get_object.assert_called_once_with(Bucket="bucket", Key="dir/a_thumbnail.png")
+
+
+def test_read_pil_image_wraps_a_client_error_in_data_load_error(tmp_path):
+    cache = LocalS3Cache.configure(tmp_path)
+    mock_s3 = MagicMock()
+    mock_s3.get_object.side_effect = ClientError(
+        {"Error": {"Code": "NoSuchKey", "Message": "gone"}}, "GetObject"
+    )
+    cache.set_s3_client(mock_s3)
+
+    with pytest.raises(DataLoadError, match="NoSuchKey") as excinfo:
+        cache.read_pil_image("bucket", "a.png")
+
+    assert isinstance(excinfo.value.__cause__, ClientError)
+
+
+def test_read_pil_image_wraps_corrupt_bytes_in_data_load_error(tmp_path):
+    cache = LocalS3Cache.configure(tmp_path)
+    cache.set_s3_client(_mock_s3(b"not an image"))
+
+    with pytest.raises(DataLoadError, match="cannot open image"):
+        cache.read_pil_image("bucket", "a.png")
 
 
 def test_read_parquet_round_trip(tmp_path):
@@ -297,3 +410,23 @@ def test_setup_local_cache_without_config_root_ignores_and_clears_env(
 
     assert LocalS3Cache.get().enabled is False
     assert "MERMAIDSEG_LOCAL_CACHE_DIR" not in os.environ
+
+
+def test_read_parquet_with_cache_disabled_offline_raises_without_reading(monkeypatch):
+    cache = LocalS3Cache.configure(None, offline=True)
+    monkeypatch.setattr(
+        local_cache_module.pd, "read_parquet", MagicMock(side_effect=AssertionError("read"))
+    )
+
+    with pytest.raises(DataLoadError, match="local cache is disabled"):
+        cache.read_parquet("bucket", "data.parquet")
+
+
+def test_read_parquet_with_cache_disabled_online_reads_the_s3_uri(monkeypatch):
+    cache = LocalS3Cache.configure(None, offline=False)
+    frame = pd.DataFrame({"a": [1]})
+    reader = MagicMock(return_value=frame)
+    monkeypatch.setattr(local_cache_module.pd, "read_parquet", reader)
+
+    assert cache.read_parquet("bucket", "dir/data.parquet") is frame
+    reader.assert_called_once_with("s3://bucket/dir/data.parquet")

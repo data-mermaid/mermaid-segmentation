@@ -1,14 +1,15 @@
-"""Tests for the epoch load-failure guard of ``mermaidseg.model.train``."""
+"""Load-failure guard and metric logging helpers of the training loop."""
 
 from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pytest
 import torch.distributed as dist
 
 from mermaidseg.datasets.local_cache import LocalS3Cache, create_cache_stats
-from mermaidseg.model.train import _enforce_load_failure_rate
+from mermaidseg.model.train import _enforce_load_failure_rate, _log_metric_dict
 from tests.mermaidseg.conftest import init_gloo, spawn_gloo
 
 pytestmark = pytest.mark.usefixtures("reset_local_cache")
@@ -81,3 +82,31 @@ def test_failures_on_one_rank_raise_on_every_rank() -> None:
 def test_rate_is_summed_failures_over_summed_attempts(max_rate: float, expected: list[str]) -> None:
     # 2 failures over 8 samples + 2 failures = 0.2, whatever each rank's local share.
     assert spawn_gloo(_guard_worker, 2, ((1, 1), 8, max_rate)) == expected
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, object], int]] = []
+
+    def log(self, metrics: dict[str, object], step: int) -> None:
+        self.calls.append((metrics, step))
+
+
+class TestLogMetricDict:
+    def test_logs_each_metric_under_the_prefix_at_the_step(self):
+        logger = _RecordingLogger()
+        miou = np.array([0.5, 0.25])
+
+        _log_metric_dict(logger, "validation", {"accuracy": 0.75, "miou": miou}, step=40)
+
+        assert logger.calls == [({"validation/accuracy": 0.75, "validation/miou": miou}, 40)]
+
+    def test_logs_nothing_for_empty_metrics(self):
+        logger = _RecordingLogger()
+
+        _log_metric_dict(logger, "train", {}, step=1)
+
+        assert logger.calls == []
+
+    def test_accepts_no_logger(self):
+        _log_metric_dict(None, "train", {"accuracy": 0.5}, step=1)

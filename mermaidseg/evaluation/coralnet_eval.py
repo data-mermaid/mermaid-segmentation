@@ -36,14 +36,19 @@ def sample_images_per_source(df_images: pd.DataFrame, n: int, seed: int = 0) -> 
 def write_coralnet_sample(
     *,
     path: str | Path,
+    manifest_path: str,
     whitelist_sources: list[int] | None,
     image_blacklist: str | list[int | str] | None = None,
     annotation_overrides: str | None = None,
     images_per_source: int,
     seed: int = 0,
 ) -> Path:
-    """Write an ``image_keep`` parquet of a seeded per-source image sample."""
+    """Write an ``image_keep`` parquet of a seeded per-source image sample.
+
+    ``manifest_path`` is the training manifest key the sample is drawn from.
+    """
     base = CoralNetDataset(
+        manifest_path=manifest_path,
         whitelist_sources=cast("list[int | str] | None", whitelist_sources),
         image_blacklist=image_blacklist,
         annotation_overrides=annotation_overrides,
@@ -76,6 +81,7 @@ def write_coralnet_sample(
 def evaluate_coralnet(
     *,
     predictor: CBMPredictor,
+    manifest_path: str,
     whitelist_sources: list[int] | None,
     image_blacklist: str | list[int | str] | None = None,
     annotation_overrides: str | None = None,
@@ -95,6 +101,7 @@ def evaluate_coralnet(
 
     Args:
         predictor: Inference wrapper around the model.
+        manifest_path: S3 key of the CoralNet training manifest parquet.
         whitelist_sources: CoralNet source ids to evaluate, or ``None`` for the split default.
         image_blacklist: Images to exclude.
         annotation_overrides: Path to annotation overrides.
@@ -114,15 +121,17 @@ def evaluate_coralnet(
         The evaluation result dict, with ``whitelist_sources`` (and ``image_keep``) added.
     """
     logger.info(
-        "Building CoralNet %s dataset (whitelist_sources=%s, "
+        "Building CoralNet %s dataset (manifest_path=%s, whitelist_sources=%s, "
         "image_blacklist=%s, annotation_overrides=%s, image_keep=%s) ...",
         split,
+        manifest_path,
         whitelist_sources,
         image_blacklist,
         annotation_overrides,
         image_keep,
     )
     base = CoralNetDataset(
+        manifest_path=manifest_path,
         whitelist_sources=cast("list[int | str] | None", whitelist_sources),
         image_blacklist=image_blacklist,
         annotation_overrides=annotation_overrides,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import mermaidseg.model.meta as meta_module
 import mermaidseg.model.models as models_module
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.export import write_sidecar
 from mermaidseg.inference.bundle import MODEL_JSON
 from mermaidseg.io import REPO_ROOT, ConfigDict
@@ -566,18 +568,36 @@ def test_meta_model_uses_a_prebuilt_model_without_loading_an_encoder(
 # Run with -m integration, deselect with -m "not integration".
 
 
-@pytest.mark.integration
-def test_metamodel_validation_epoch_returns_loss_and_metrics(
-    minimal_config, tiny_loader, make_meta_model
-):
-    """MetaModel.validation_epoch returns loss and metric dict in eval mode."""
-    meta = make_meta_model(minimal_config, run_name="test-val-epoch")
+def _label_batches(*labels: int) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """One single-image batch per label, each a 1 x 2 map of that source label."""
+    return [(torch.zeros(1, 3, 1, 2), torch.full((1, 1, 2), label)) for label in labels]
+
+
+def test_validation_epoch_averages_the_batch_losses_and_their_components(fixed_meta_model):
+    """Two batches over fixed class logits (0, ln 3, 0, 0), every concept logit 0.
+
+    Batch 1 is labelled class 1, scoring ln 2 (probability 3/6); batch 2 is class 2, scoring
+    ln 6 (1/6) and predicted wrong. Each of the six taxonomic ranks scores ln 2 and enters
+    divided by 6; the binary channel scores ln 2, so the concept loss is 2 ln 2 on both batches.
+    """
+    ln2, ln6 = math.log(2.0), math.log(6.0)
+    meta = fixed_meta_model(
+        class_logits=[0.0, math.log(3.0), 0.0, 0.0], training={"iterations_per_val_epoch": 2}
+    )
     evaluator = Evaluator(num_classes=NUM_CLASSES, device="cpu")
 
-    val_loss, val_metrics = meta.validation_epoch(tiny_loader, evaluator)
+    val_loss, metrics = meta.validation_epoch(_label_batches(1, 2), evaluator)
 
-    assert isinstance(val_loss, float)
-    assert isinstance(val_metrics, dict)
+    assert val_loss == pytest.approx(((ln2 + 2 * ln2) + (ln6 + 2 * ln2)) / 2, rel=1e-5)
+    assert metrics == {
+        "accuracy": pytest.approx(0.5),
+        "loss/classification": pytest.approx((ln2 + ln6) / 2, rel=1e-5),
+        **dict.fromkeys(
+            (f"loss/{rank}" for rank in TAXONOMIC_CONCEPTS), pytest.approx(ln2 / 6, rel=1e-5)
+        ),
+        "loss/multi_hot": pytest.approx(ln2, rel=1e-5),
+        "loss/concepts": pytest.approx(2 * ln2, rel=1e-5),
+    }
 
 
 @pytest.mark.integration
@@ -626,3 +646,307 @@ def test_train_epoch_requires_source_rows_when_masking(make_meta_model, cbm_sche
     )
     with pytest.raises(RuntimeError, match="no source rows"):
         meta.train_epoch(loader, epoch=0)
+
+
+def _meta_stepping(meta, grad: list[float], max_grad_norm: float) -> torch.nn.Parameter:
+    """Make ``meta`` step one parameter [1, 1] holding ``grad`` with plain SGD at lr 1."""
+    param = torch.nn.Parameter(torch.ones(2))
+    param.grad = torch.tensor(grad)
+    meta._trainable_params = [param]
+    meta.optimizer = torch.optim.SGD([param], lr=1.0)
+    meta.max_grad_norm = max_grad_norm
+    return param
+
+
+@pytest.mark.parametrize(
+    ("max_grad_norm", "expected"),
+    [
+        pytest.param(1.0, [0.4, 0.2], id="norm_5_clipped_to_1"),
+        pytest.param(10.0, [-2.0, -3.0], id="norm_below_the_limit_untouched"),
+        pytest.param(0.0, [-2.0, -3.0], id="zero_disables_clipping"),
+        pytest.param(-1.0, [-2.0, -3.0], id="negative_disables_clipping"),
+    ],
+)
+def test_apply_accumulated_step_clips_the_gradient_norm_then_steps(
+    fixed_meta_model, max_grad_norm, expected
+):
+    meta = fixed_meta_model()
+    param = _meta_stepping(meta, [3.0, 4.0], max_grad_norm)
+
+    assert meta._apply_accumulated_step() is True
+
+    # SGD from [1, 1]: the (3, 4) gradient has norm 5, so a limit of 1 scales it to (0.6, 0.8).
+    assert param.tolist() == pytest.approx(expected)
+    assert param.grad is None
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan")])
+def test_apply_accumulated_step_skips_a_non_finite_gradient_norm(fixed_meta_model, bad):
+    meta = fixed_meta_model()
+    param = _meta_stepping(meta, [bad, 1.0], max_grad_norm=1.0)
+
+    assert meta._apply_accumulated_step() is False
+
+    assert param.tolist() == [1.0, 1.0]
+    assert param.grad is None
+
+
+@pytest.mark.parametrize(
+    ("epoch", "global_step", "expected_updates", "warns"),
+    [
+        pytest.param(0, 9, 4, True, id="past_the_epoch_end"),
+        pytest.param(3, 2, 4, True, id="before_the_epoch_start"),
+        pytest.param(0, 4, 0, False, id="at_the_epoch_end_is_a_finished_epoch"),
+    ],
+)
+def test_resume_offset_outside_the_epoch_restarts_it_at_zero(
+    fixed_meta_model, caplog, epoch, global_step, expected_updates, warns
+):
+    meta = fixed_meta_model(training={"iterations_per_train_epoch": 4})
+    meta.global_step = global_step
+    updates: list[int] = []
+
+    with caplog.at_level("WARNING", logger=meta_module.logger.name):
+        meta.train_epoch(
+            _label_batches(1),
+            epoch=epoch,
+            on_optimizer_step=lambda m: updates.append(m.global_step),
+        )
+
+    assert updates == list(range(global_step + 1, global_step + 1 + expected_updates))
+    assert any("resume offset" in record.getMessage() for record in caplog.records) is warns
+
+
+def test_warmup_raises_the_lr_before_the_decay_schedule_starts(fixed_meta_model):
+    """Warmup 0.5 -> 1.0 over 2 updates, then decay 1.0 -> 0.5 over 2 updates, base lr 1.
+
+    The first two updates only warm up (0.75, 1.0); decay starts on the update after, so
+    the boundary update does not consume a decay step.
+    """
+    meta = fixed_meta_model(
+        training={
+            "iterations_per_train_epoch": 4,
+            "optimizer": {"dpt_lr": 1.0},
+            "scheduler": {
+                "start_factor": 1.0,
+                "end_factor": 0.5,
+                "total_iters": 2,
+                "warmup_iters": 2,
+                "warmup_start_factor": 0.5,
+            },
+        }
+    )
+    lrs: list[float] = []
+
+    meta.train_epoch(
+        _label_batches(1),
+        epoch=0,
+        on_optimizer_step=lambda m: lrs.append(m.optimizer.param_groups[0]["lr"]),
+    )
+
+    assert lrs == pytest.approx([0.75, 1.0, 0.75, 0.5])
+
+
+def test_an_empty_batch_is_skipped_without_a_forward_or_an_update(fixed_meta_model):
+    meta = fixed_meta_model(training={"iterations_per_train_epoch": 2})
+    empty = (torch.zeros(0, 3, 1, 2), torch.zeros(0, 1, 2, dtype=torch.long))
+    forwards: list[int] = []
+    real = meta.batch_predict_loss
+
+    def _count(*args, **kwargs):
+        forwards.append(1)
+        return real(*args, **kwargs)
+
+    meta.batch_predict_loss = _count
+    updates: list[int] = []
+
+    meta.train_epoch(
+        [empty, *_label_batches(1)],
+        epoch=0,
+        on_optimizer_step=lambda m: updates.append(m.global_step),
+    )
+
+    assert len(forwards) == 1
+    assert updates == [1]
+
+
+def test_epoch_means_average_the_applied_updates_only(fixed_meta_model):
+    """Three updates, the middle one an empty batch: the means cover the two applied updates.
+
+    Class logits (0, ln 3, 0, 0): a class-1 batch scores 3 ln 2 in total (classification ln 2),
+    a class-2 batch ln 6 + 2 ln 2 (classification ln 6); every concept term is the same on both.
+    """
+    ln2, ln6 = math.log(2.0), math.log(6.0)
+    meta = fixed_meta_model(
+        class_logits=[0.0, math.log(3.0), 0.0, 0.0], training={"iterations_per_train_epoch": 3}
+    )
+    empty = (torch.zeros(0, 3, 1, 2), torch.zeros(0, 1, 2, dtype=torch.long))
+    first, second = _label_batches(1, 2)
+
+    last_loss, metrics, _ = meta.train_epoch([first, empty, second], epoch=0)
+
+    # The first update moves the offset, which shifts the sigmoid concept channel slightly.
+    assert last_loss == pytest.approx(((3 * ln2) + (ln6 + 2 * ln2)) / 2, rel=1e-4)
+    assert metrics["loss/classification"] == pytest.approx((ln2 + ln6) / 2, rel=1e-4)
+    assert metrics["loss/concepts"] == pytest.approx(2 * ln2, rel=1e-4)
+    assert metrics["loss/multi_hot"] == pytest.approx(ln2, rel=1e-4)
+
+
+def test_epoch_with_every_update_skipped_reports_a_zero_loss_and_no_components(fixed_meta_model):
+    meta = fixed_meta_model(training={"iterations_per_train_epoch": 2})
+    empty = (torch.zeros(0, 3, 1, 2), torch.zeros(0, 1, 2, dtype=torch.long))
+
+    last_loss, metrics, _ = meta.train_epoch([empty], epoch=0)
+
+    assert last_loss == 0.0
+    assert metrics == {}
+    assert meta.global_step == 0
+
+
+def test_on_optimizer_step_fires_after_each_applied_update_and_not_for_a_skipped_window(
+    fixed_meta_model,
+):
+    meta = fixed_meta_model(training={"iterations_per_train_epoch": 3})
+    real = meta.batch_predict_loss
+    calls = {"n": 0}
+
+    def _poison_second(*args, **kwargs):
+        calls["n"] += 1
+        loss, outputs, concepts, components = real(*args, **kwargs)
+        if calls["n"] == 2:
+            loss = torch.tensor(float("nan"))
+        return loss, outputs, concepts, components
+
+    meta.batch_predict_loss = _poison_second
+    seen: list[tuple[bool, int]] = []
+
+    meta.train_epoch(
+        _label_batches(1),
+        epoch=0,
+        on_optimizer_step=lambda m: seen.append((m is meta, m.global_step)),
+    )
+
+    # Updates 1 and 3 are applied; update 2 is dropped as non-finite.
+    assert seen == [(True, 1), (True, 2)]
+
+
+def test_a_non_finite_grad_norm_skips_the_update_and_its_callback(fixed_meta_model):
+    meta = fixed_meta_model(training={"iterations_per_train_epoch": 2})
+    bomb = torch.nn.Parameter(torch.ones(()))
+    bomb.register_hook(lambda grad: grad * float("inf"))  # 0 * inf: a NaN gradient, finite loss
+    meta._trainable_params.append(bomb)
+    real = meta.batch_predict_loss
+    calls = {"n": 0}
+
+    def _first_window_gets_a_nan_gradient(*args, **kwargs):
+        calls["n"] += 1
+        loss, outputs, concepts, components = real(*args, **kwargs)
+        if calls["n"] == 1:
+            loss = loss + bomb * 0.0
+        else:
+            bomb.grad = None  # not an optimizer parameter, so nothing else clears it
+        return loss, outputs, concepts, components
+
+    meta.batch_predict_loss = _first_window_gets_a_nan_gradient
+    seen: list[int] = []
+
+    last_loss, _, _ = meta.train_epoch(
+        _label_batches(1), epoch=0, on_optimizer_step=lambda m: seen.append(m.global_step)
+    )
+
+    assert seen == [1]
+    assert meta.global_step == 1
+    # The epoch mean covers the one applied window. Zero class logits give ln 4 = 2 ln 2 for
+    # classification, plus 2 ln 2 for the concept terms.
+    assert last_loss == pytest.approx(4 * math.log(2.0), rel=1e-4)
+
+
+def test_concept_labels_need_a_concept_lookup(fixed_meta_model):
+    meta = fixed_meta_model(source_to_concepts_lookup=None)
+
+    with pytest.raises(RuntimeError, match="source_to_concepts_lookup is not set"):
+        meta._to_concept_labels(torch.ones(1, 1, 2, dtype=torch.long))
+
+
+@pytest.mark.parametrize(
+    "swapped",
+    [
+        pytest.param(lambda meta: ("model", copy.deepcopy(meta.model)), id="model"),
+        pytest.param(lambda meta: ("loss", copy.deepcopy(meta.loss)), id="loss"),
+        pytest.param(lambda meta: ("taxonomic_loss", torch.nn.Identity()), id="taxonomic_loss"),
+        pytest.param(
+            lambda meta: ("concept_source_keep", torch.ones(4, 13, dtype=torch.bool)),
+            id="concept_source_keep",
+        ),
+    ],
+)
+def test_ddp_step_is_built_once_and_rebuilt_when_a_part_is_replaced(
+    fixed_meta_model, single_rank_group, swapped
+):
+    meta = fixed_meta_model(training={"distributed": True, "world_size": 1})
+    first = meta._get_ddp_step()
+    assert meta._get_ddp_step() is first
+
+    name, replacement = swapped(meta)
+    setattr(meta, name, replacement)
+    rebuilt = meta._get_ddp_step()
+
+    assert rebuilt is not first
+    assert meta._get_ddp_step() is rebuilt
+
+
+class _RecordingMetric:
+    def __init__(self) -> None:
+        self.preds: list[list[int]] = []
+
+    def update(self, preds: torch.Tensor, _target: torch.Tensor) -> None:
+        self.preds.append(preds.flatten().tolist())
+
+
+def test_consume_metric_shards_scores_each_shard_in_order_and_releases_its_maps(fixed_meta_model):
+    metric = _RecordingMetric()
+    evaluator = SimpleNamespace(
+        device="cpu", metric_dict={"m": metric}, evaluate_concepts=lambda *_a: None
+    )
+    meta = fixed_meta_model()
+    # Class scores per pixel: shard one predicts [1, 2], shard two [0, 0].
+    shard_one = meta_module.MetricShard(
+        outputs=torch.tensor([[[[0.0, 0.0]], [[1.0, 0.0]], [[0.0, 1.0]]]]),
+        concept_outputs=None,
+        target_labels=torch.ones(1, 1, 2, dtype=torch.long),
+        target_concepts=None,
+    )
+    shard_two = meta_module.MetricShard(
+        outputs=torch.tensor([[[[1.0, 1.0]], [[0.0, 0.0]], [[0.0, 0.0]]]]),
+        concept_outputs=None,
+        target_labels=torch.ones(1, 1, 2, dtype=torch.long),
+        target_concepts=None,
+    )
+    meta._metric_shards = [shard_one, shard_two]
+
+    assert meta._consume_metric_shards(evaluator) is True
+
+    assert metric.preds == [[1, 2], [0, 0]]
+    assert meta._metric_shards is None
+    for shard in (shard_one, shard_two):
+        assert shard.outputs is None
+        assert shard.target_labels is None
+
+
+@pytest.mark.parametrize("shards", [None, []], ids=["none", "empty"])
+def test_consume_metric_shards_reports_a_non_distributed_step(fixed_meta_model, shards):
+    meta = fixed_meta_model()
+    meta._metric_shards = shards
+
+    assert meta._consume_metric_shards(SimpleNamespace()) is False
+    assert meta._metric_shards is None
+
+
+@pytest.mark.parametrize("name", ["bf16", "BF-16", "BFloat_16", "BF16"])
+def test_resolve_amp_dtype_normalises_case_and_separators(name):
+    assert meta_module.resolve_amp_dtype(name) is torch.bfloat16
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_resolve_amp_dtype_passes_a_torch_dtype_through(dtype):
+    assert meta_module.resolve_amp_dtype(dtype) is dtype

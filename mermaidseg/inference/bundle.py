@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,8 @@ from mermaidseg.model.models import MODEL_CLASSES
 
 MODEL_JSON = "model.json"
 WEIGHTS = "weights.safetensors"
+WEIGHTS_SHA256 = "weights_sha256"
+_HASH_CHUNK_BYTES = 1024 * 1024
 # Renaming the model class or any ``architecture.kwargs`` key, or changing their meaning, requires
 # a SCHEMA_VERSION bump: delivered bundles are rebuilt from these names.
 SCHEMA_VERSION = 1
@@ -78,6 +81,30 @@ def _check_metadata(metadata: dict, path: Path) -> None:
             )
 
 
+def sha256_file(path: Path) -> str:
+    """Hex SHA-256 of the file at ``path``, read in 1 MiB chunks."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _check_weights_checksum(metadata: dict, path: Path) -> None:
+    expected = metadata.get(WEIGHTS_SHA256)
+    if expected is None:
+        raise ValueError(
+            f"{path}: {MODEL_JSON} records no {WEIGHTS_SHA256}; "
+            "re-export the bundle from its checkpoint"
+        )
+    actual = sha256_file(path / WEIGHTS)
+    if actual != expected:
+        raise ValueError(
+            f"{path}: {WEIGHTS} does not match the recorded {WEIGHTS_SHA256} "
+            f"({actual} != {expected})"
+        )
+
+
 def _build_encoder(encoder_config: dict) -> PreTrainedModel:
     """A randomly initialised float32 encoder from its recorded config; never touches the hub."""
     rest = dict(encoder_config)
@@ -95,12 +122,14 @@ def load_bundle(path: str | Path, device: torch.device | str) -> ModelBundle:
 
     Raises:
         ValueError: ``schema_version``, ``task``, ``weights``, ``preprocessing.channel_order`` or
-            ``preprocessing.interpolation`` is not supported.
+            ``preprocessing.interpolation`` is not supported, ``weights_sha256`` is missing
+            (re-export the bundle), or ``weights.safetensors`` does not match it.
         RuntimeError: The weights do not match the architecture's state dict.
     """
     path = Path(path)
     metadata = json.loads((path / MODEL_JSON).read_text())
     _check_metadata(metadata, path)
+    _check_weights_checksum(metadata, path)
     architecture = metadata["architecture"]
     kwargs = dict(architecture["kwargs"])
     kwargs["input_size"] = tuple(kwargs["input_size"])

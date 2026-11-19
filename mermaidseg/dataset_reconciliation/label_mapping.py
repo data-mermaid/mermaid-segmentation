@@ -16,7 +16,7 @@ import torch
 def fetch_coralnet_to_mermaid() -> dict[str, str | None]:
     """Load the CoralNet provider label -> MERMAID benthic-attribute map from local config.
 
-    Returns a dict keyed by stringified CoralNet provider label; values are the mapped MERMAID
+    Returns a dict keyed by lowercased CoralNet label name; values are the mapped MERMAID
     benthic-attribute name(s) (or ``None`` if the CoralNet label is not yet mapped).
     """
     coralnet_to_mermaid_mapping_temporary_path = (
@@ -281,23 +281,13 @@ def fetch_pacific_labeled_corals_to_mermaid() -> dict[str, str]:
     }
 
 
-def fetch_ucsd_mosaics_to_mermaid(
-    mapping_endpoint: str = "https://api.datamermaid.org/v1/classification/labelmappings/?provider=UCSD%20Mosaics",
-) -> dict[str, str]:
-    """Fetch the UCSD Mosaics label-name -> MERMAID benthic-attribute name mapping.
+def fetch_ucsd_mosaics_to_mermaid() -> dict[str, str]:
+    """Return the static UCSD Mosaics label-name -> MERMAID benthic-attribute map.
 
-    Pages through the MERMAID
-    API label-mappings endpoint filtered to ``provider=UCSD Mosaics`` and
-    returns a dict keyed by the UCSD Mosaics ``provider_id`` (which holds the
-    original class name from ``classes.json``, e.g. ``"Acropora (branching)"``
-    or ``"Porites rus"``) with values equal to the MERMAID benthic-attribute
-    name (or ``None`` if the UCSD label is not yet mapped, in which case it
-    collapses to background at training time).
-
-    Note: the UCSD Mosaics provider mapping has not yet been populated on the
-    MERMAID side at the time of writing -- this fetcher will return an empty
-    dict in that case, which causes every UCSD Mosaics source label to fall
-    back to background through :class:`SourceLabelRegistry`.
+    Keyed by the original class name from ``classes.json`` (lowercased, e.g.
+    ``"acropora (branching)"`` or ``"porites rus"``); values are the mapped MERMAID
+    benthic-attribute name(s). Labels absent from this map collapse to background at
+    training time via :class:`SourceLabelRegistry`.
     """
     return {
         "acropora (branching)": "acropora",
