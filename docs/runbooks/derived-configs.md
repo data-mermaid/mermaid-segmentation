@@ -91,7 +91,7 @@ A change to the derived configs changes model outputs. Run the evaluation and pu
 
 ## Known gaps
 
-`scripts/build_concept_removal.py` needs the label counts from `scripts/train_label_counts.py`. That script, and `scripts/dataset_table_stats.py` that it imports, are not on `main`. They are in commit `88f7bac^`. Until they are restored, extract both to run step 1:
+`scripts/build_concept_removal.py` needs the label counts from `scripts/train_label_counts.py`. That script, and `scripts/dataset_table_stats.py` that it imports, are not on `main`. They are in commit `88f7bac^`. Restoring them is tracked in [issue #246](https://github.com/data-mermaid/mermaid-segmentation/issues/246). Until then, extract both to run step 1:
 
 ```bash
 git show 88f7bac^:scripts/train_label_counts.py > scripts/train_label_counts.py

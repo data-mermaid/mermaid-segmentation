@@ -62,7 +62,7 @@ The `external-datasets` package checks the raw download and writes the parquet, 
 
 `mermaid_confirmed_annotations.parquet` grows as MERMAID users confirm annotations. This repository does not write it. The dataset reads its images from the keys in that parquet.
 
-`annotation_date_cutoff` in the data config freezes the MERMAID training data. The dataset uses only annotations with `updated_on` on or before that date. The class default and the current config value are `2026-08-12`, the date when MERMAID annotations were last audited for this project (the `MermaidDataset` docstring in `mermaidseg/datasets/mermaid/mermaid_dataset.py`).
+`annotation_date_cutoff` in the data config freezes the MERMAID training data. The dataset uses only annotations with `updated_on` on or before that date. `MermaidDataset` has no default for it, so the argument is required. `configs/data_config.yaml` and the generated `configs/data_config_trainval.yaml` both set it to `2026-08-12`, the date when MERMAID annotations were last audited for this project.
 
 To train on newer MERMAID annotations:
 
