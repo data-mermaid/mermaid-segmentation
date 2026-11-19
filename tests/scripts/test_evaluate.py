@@ -13,6 +13,7 @@ import torch
 import yaml
 
 import scripts.evaluate as evaluate_script
+from mermaidseg.evaluation.coralscapes_probe import load_legacy_probes
 from mermaidseg.export import export_bundle
 from mermaidseg.inference.bundle import load_bundle
 from mermaidseg.io import REPO_ROOT
@@ -786,3 +787,24 @@ def test_main_does_not_require_the_reported_binary_concepts_for_the_other_evals(
     _main(bundle_dir, tmp_path, data_config, "--evals", name)
 
     calls.one(name)
+
+
+def _parse_defaults() -> Any:
+    return evaluate_script.build_parser().parse_args(["--bundle", "b", "--output-dir", "out"])
+
+
+def test_default_probe_points_file_loads():
+    path = Path(_parse_defaults().probe_points)
+
+    probe = json.loads(path.read_text())
+
+    assert probe["num_classes"] == 95
+    assert probe["images"]
+
+
+def test_default_coralscapes39_probe_file_loads():
+    path = _parse_defaults().coralscapes39_probe
+
+    probes = load_legacy_probes([path])
+
+    assert 50 in probes

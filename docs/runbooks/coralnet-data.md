@@ -24,8 +24,8 @@ The package READMEs are the reference for flags, environment variables, exclusio
   set -a; source .env; set +a
   ```
 
-  See the scraper's [environment variables](../packages/coralnet-scraper/README.md#environment-variables) and the build's [environment variables](../packages/coralnet-dataset/README.md#environment-variables).
-- **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the `source_bucket` of `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`). See [Use a build in training](../packages/coralnet-dataset/README.md#use-a-build-in-training).
+  See the scraper's [environment variables](../../packages/coralnet-scraper/README.md#environment-variables) and the build's [environment variables](../../packages/coralnet-dataset/README.md#environment-variables).
+- **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the `source_bucket` of `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`). See [Use a build in training](../../packages/coralnet-dataset/README.md#use-a-build-in-training).
 
 Run every command from the repository root.
 
@@ -42,7 +42,7 @@ Run every command from the repository root.
 2. Read the failure summary at the end of the log. It lists the failed sources by error kind.
 3. Check the exit code. 0 means every source downloaded or was skipped. 1 means a login failure, a failed source, or an uncaught error.
 
-See [Run](../packages/coralnet-scraper/README.md#run) for the flags, the failure kinds and the exit codes. If a source failed, go to [When something fails](#when-something-fails).
+See [Run](../../packages/coralnet-scraper/README.md#run) for the flags, the failure kinds and the exit codes. If a source failed, go to [When something fails](#when-something-fails).
 
 ### Build the dataset
 
@@ -52,9 +52,9 @@ Pick a version tag for the run, for example `20261118_coralnet`. Then run all fo
 uv run --package coralnet-dataset coralnet-dataset all --version-tag <run> --upload-to-s3
 ```
 
-To run the steps one at a time, pass the same `--version-tag` to each. Each invocation computes its own default tag, so without it the outputs land in different run directories. The step order and the flags of each step are in [Run](../packages/coralnet-dataset/README.md#run).
+To run the steps one at a time, pass the same `--version-tag` to each. Each invocation computes its own default tag, so without it the outputs land in different run directories. The step order and the flags of each step are in [Run](../../packages/coralnet-dataset/README.md#run).
 
-Use an unused tag; see [Run](../packages/coralnet-dataset/README.md#run).
+Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
 
 ### Check the build
 
@@ -66,7 +66,7 @@ Use an unused tag; see [Run](../packages/coralnet-dataset/README.md#run).
    - `coralnet_images_<run>.parquet`
    - `coralnet_training_manifest_<run>.parquet`
 
-The resized images are not in that directory. `resize` writes them under `<resized prefix>/resized/`, which every run shares. See [Outputs](../packages/coralnet-dataset/README.md#outputs) and [Check a build for completeness](../packages/coralnet-dataset/README.md#check-a-build-for-completeness).
+The resized images are not in that directory. `resize` writes them under `<resized prefix>/resized/`, which every run shares. See [Outputs](../../packages/coralnet-dataset/README.md#outputs) and [Check a build for completeness](../../packages/coralnet-dataset/README.md#check-a-build-for-completeness).
 
 ## Update the data
 
@@ -82,7 +82,7 @@ The scraper skips existing sources, so it does not see changes to them. To pick 
 uv run --package coralnet-scraper coralnet-scrape --force
 ```
 
-`--force` reprocesses every source, not only the changed ones; see [Resume and `--force`](../packages/coralnet-scraper/README.md#resume-and---force) for what it exports again and what it keeps.
+`--force` reprocesses every source, not only the changed ones; see [Resume and `--force`](../../packages/coralnet-scraper/README.md#resume-and---force) for what it exports again and what it keeps.
 
 ### Rebuild under a new version tag
 
@@ -94,30 +94,26 @@ uv run --package coralnet-dataset coralnet-dataset all --version-tag <new-run> -
 
 `build-annotations` and `build-images` read every source and every annotated image again. `resize` resizes only the images that have no resized object on S3.
 
-Use an unused tag; see [Run](../packages/coralnet-dataset/README.md#run).
+Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
 
 ## Use the new build in training
 
 ### Select the build
 
-Set `MERMAID_CORALNET_MANIFEST_VERSION=<run>` or `MERMAID_CORALNET_MANIFEST_PATH=<key>` in the environment of the training run. See [Use a build in training](../packages/coralnet-dataset/README.md#use-a-build-in-training).
+Set `MERMAID_CORALNET_MANIFEST_VERSION=<run>` or `MERMAID_CORALNET_MANIFEST_PATH=<key>` in the environment of the training run. See [Use a build in training](../../packages/coralnet-dataset/README.md#use-a-build-in-training).
 
 ### Make the build the default
 
 With neither variable set, `CoralNetDataset` reads the build named by `_DEFAULT_RUN` in `mermaidseg/datasets/coralnet/coralnet_dataset.py`. To make the new build the default, set `_DEFAULT_RUN` to its tag.
 
-A new default build changes model outputs, so item 7 of the working agreement in [AGENTS.md](../AGENTS.md#2-working-agreement) applies. Run the evaluation, and put the metrics and the baseline they compare against in the PR.
+A new default build changes model outputs, so item 7 of the working agreement in [AGENTS.md](../../AGENTS.md#2-working-agreement) applies. Run the evaluation, and put the metrics and the baseline they compare against in the PR.
 
 ### Add new sources to the splits
 
 Each CoralNet split has a `whitelist_sources` list, and `CoralNetDataset` keeps only the sources on that list. A new source is not in any split until you add its id to a list:
 
 1. Add the id to a split's `whitelist_sources` in `configs/data_config.yaml`.
-2. Regenerate `configs/data_config_trainval.yaml`, which is derived from it:
-
-   ```bash
-   uv run python scripts/build_trainval_data_config.py
-   ```
+2. Regenerate the derived configs, starting with `configs/data_config_trainval.yaml`. See [Regenerate the derived configs](derived-configs.md).
 
 ### Map new labels
 
@@ -125,7 +121,7 @@ A label name in the build's `coralnet_id2name_<run>.json` trains as background w
 
 ### Duplicates in new sources
 
-`configs/coralnet/image_blacklist.parquet` and `configs/coralnet/annotation_overrides.parquet` cover only the sources they were built from. Duplicate images in new sources are not removed. See the build's [Known gaps](../packages/coralnet-dataset/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
+`configs/coralnet/image_blacklist.parquet` and `configs/coralnet/annotation_overrides.parquet` cover only the sources they were built from. Duplicate images in new sources are not removed. See the build's [Known gaps](../../packages/coralnet-dataset/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
 
 ### Warm the offline cache again
 
@@ -135,7 +131,7 @@ An offline run (`MERMAIDSEG_S3_OFFLINE=1`) fails on any cache miss. The new mani
 MERMAID_CORALNET_MANIFEST_VERSION=<run> uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
 ```
 
-`--data-config` defaults to `configs/data_config.yaml`. Run the script with `--help` for the other options.
+`--data-config` defaults to `configs/data_config.yaml`. For the Slurm command, with `HF_HOME` and the final runs' data config, see [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
 
 ## When something fails
 
@@ -161,4 +157,4 @@ A partial `annotations.csv` from an interrupted paginated export is not detectab
 
 ## Known gaps
 
-See the build's [Known gaps](../packages/coralnet-dataset/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
+See the build's [Known gaps](../../packages/coralnet-dataset/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).

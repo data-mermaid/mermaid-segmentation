@@ -19,7 +19,7 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 - `mermaidseg/`: the package. All training (`training.py`), evaluation and inference logic. `mermaidseg/inference/` is the serving surface: preprocessing, predictor and model bundle.
 - `configs/`: committed YAML configs and the concept, mask and label-mapping inputs they reference.
 - `scripts/`: entrypoints for training (`scripts/train.py`), bundle export, evaluation, cache prefetch and the
-  data-config, concept-removal and concept-source-mask builders.
+  data-config, concept-removal, concept-source-mask and CoralscapesV2 probe-point builders.
 - `slurm/`: Slurm launchers and `train.sbatch`.
 - `scripts/sagemaker/`: the SageMaker launcher (`python -m scripts.sagemaker.launch`) and the in-container entrypoint.
 - `sagemaker/runs/`: SageMaker run YAMLs.
@@ -196,10 +196,11 @@ Where a doc disagrees with this file or the code, this file and the code win.
 
 | Need | Where |
 |---|---|
-| Setup, training entrypoints, test commands | `README.md`: Installation, Segmentation Models, Running Tests |
+| Test and lint commands, architecture overview | `README.md`: Running Tests, Common Commands, Architecture overview |
+| Setup, data, training (Slurm, SageMaker), export and evaluation procedures | `docs/runbooks/` |
 | The CoralNet scraper: S3 layout, environment variables, running and testing it | `packages/coralnet-scraper/README.md` |
 | The CoralNet dataset build: outputs, completeness checks, environment variables, running and testing it | `packages/coralnet-dataset/README.md` |
-| Recreate or update the CoralNet data end to end | `docs/coralnet-data-runbook.md` |
+| Recreate or update the CoralNet data end to end | `docs/runbooks/coralnet-data.md` |
 | Lint, type-check, test and dependency settings; CI checks; pre-commit hooks | `pyproject.toml`; `.github/workflows/`; `.pre-commit-config.yaml` |
 | Source and history of each rule, for editing this file | `docs/agents-md-sources.md` |
 

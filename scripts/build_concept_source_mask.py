@@ -2,13 +2,16 @@
 """Write the CoralNet source x binary concept pairs to mask in training.
 
 A pair is masked when the source has False points for the concept and no True points
-(``only_false``). Points come from the CoralNet train split of ``--data-config``, built exactly as
+(``only_false``). Points come from the CoralNet train split of ``--data-config`` (default: the
+final-run mixture ``configs/data_config_trainval.yaml``), built exactly as
 training builds it (source whitelist, image blacklist, annotation overrides); concept values come
 from the frozen concept schema training uses (``--concepts`` restricted to the datasets of
 ``--schema-config``). No images are read.
 
 Outputs ``--out`` (one row per masked pair: source_id, concept, n_true, n_false, n_not_given) and a
-``.meta.yaml`` sidecar recording the inputs and their sha1s.
+``.meta.yaml`` sidecar recording the inputs, their sha1s and the counted sources (``source_ids``).
+Training refuses a CoralNet source that is not in ``source_ids``, so rebuild the mask whenever the
+CoralNet train sources of the run's data config change.
 
     python scripts/build_concept_source_mask.py \
         --out configs/concept_source_masks/coralnet_only_false.csv
@@ -26,6 +29,7 @@ import yaml
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     MASK_COLUMNS,
+    _source_sort_key,
     file_sha1,
     meta_path,
     only_false_pairs,
@@ -66,7 +70,9 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--data-config", type=Path, default=REPO_ROOT / "configs/data_config.yaml")
+    p.add_argument(
+        "--data-config", type=Path, default=REPO_ROOT / "configs/data_config_trainval.yaml"
+    )
     p.add_argument("--concepts", type=Path, default=Path(DEFAULT_CLASS_TO_CONCEPTS_CSV))
     p.add_argument("--schema-config", type=Path, default=Path(DEFAULT_SCHEMA_CONFIG))
     p.add_argument("--split", default="train")
@@ -122,6 +128,7 @@ def main() -> None:
         "n_points": len(ds.df_annotations),
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "git_commit": _git_commit(),
+        "source_ids": sorted({str(s) for s in counts["source_id"]}, key=_source_sort_key),
     }
     meta_path(args.out).write_text(yaml.safe_dump(meta, sort_keys=False))
 

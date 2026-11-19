@@ -1,0 +1,93 @@
+# Get the training datasets
+
+This runbook says where each dataset in `configs/data_config.yaml` comes from, how to load it into the place that training reads, and how to add a new dataset. CoralNet has its own runbook: [Recreate and update the CoralNet data](coralnet-data.md).
+
+- [Where each dataset lives](#where-each-dataset-lives)
+- [Get the Hugging Face datasets](#get-the-hugging-face-datasets)
+- [Load an external dataset into S3](#load-an-external-dataset-into-s3)
+- [Update the MERMAID data](#update-the-mermaid-data)
+- [Add a new dataset](#add-a-new-dataset)
+- [Known gaps](#known-gaps)
+
+## Where each dataset lives
+
+Each dataset class reads its data from one place. The defaults are in the class's constructor in `mermaidseg/datasets/<name>/`.
+
+| Dataset | Read from | Original source |
+|---|---|---|
+| `coralnet` | `s3://dev-datamermaid-sm-sources/coralnet-public-images/` and the CoralNet build | [CoralNet](https://coralnet.ucsd.edu/). See [coralnet-data.md](coralnet-data.md) |
+| `mermaid` | `s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet` | The MERMAID platform. See [Update the MERMAID data](#update-the-mermaid-data) |
+| `coralscapes_v2` | Hugging Face `josauder/coralscapesV2` | Same |
+| `ucsd_mosaics` | Hugging Face `josauder/UCSD-mosaics-mirror` | Edwards et al. 2017, Alonso et al. 2019 and Raine et al. 2024 |
+| `catlin_seaview` | `s3://dev-datamermaid-sm-sources/external_validation_datasets/catlin_seaview/` | [data.qld.edu.au/public/Q1281](http://data.qld.edu.au/public/Q1281/) (González-Rivero et al., 2019) |
+| `moorea_labeled_corals` | `s3://dev-datamermaid-sm-sources/external_validation_datasets/moorea_labeled_corals/` | EDI package [knb-lter-mcr.5006](https://portal.edirepository.org/nis/mapbrowse?scope=knb-lter-mcr&identifier=5006). Needs a login |
+| `pacific_labeled_corals` | `s3://dev-datamermaid-sm-sources/external_validation_datasets/pacific_labeled_corals/` | Dryad [doi:10.5061/dryad.m5pr3](https://datadryad.org/dataset/doi:10.5061/dryad.m5pr3) |
+| `benthos_yuval` | `s3://dev-datamermaid-sm-sources/external_validation_datasets/benthos_yuval/` | Dryad [doi:10.5061/dryad.8cz8w9gm3](https://datadryad.org/dataset/doi:10.5061/dryad.8cz8w9gm3) |
+
+The data config selects the subset of each dataset that a split uses, for example `whitelist_regions` for Catlin Seaview or `whitelist_sites` for Benthos. A split set to `null` is skipped.
+
+## Get the Hugging Face datasets
+
+`coralscapes_v2` and `ucsd_mosaics` download from Hugging Face the first time a dataset object is built. They go into `HF_HOME`, not into the local S3 cache. You do not load them into S3.
+
+- For a local run, the download happens at the start of the run.
+- For an offline Slurm run, `scripts/prefetch_cache.py` downloads them. Run it with `HF_HOME` set to the cache that batch jobs use. See [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
+
+To read CoralscapesV2 from a local copy, pass the directory as `hf_repo_id`. `scripts/evaluate.py` takes `--coralscapes-root` for the same purpose.
+
+## Load an external dataset into S3
+
+Catlin Seaview, Moorea Labeled Corals, Pacific Labeled Corals and Benthos are already in S3. Load one again only if its S3 copy is lost, or the original source publishes a new version.
+
+Each dataset had an ingestion script that checked the raw download and wrote the parquet and images to S3. The scripts are not on `main`. They are in commit `88f7bac^`, with a README for each dataset that lists the files to download:
+
+| Dataset | Ingestion script in `88f7bac^` |
+|---|---|
+| Catlin Seaview | `mermaidseg/datasets/catlin_seaview/download_raw_data_and_add_to_s3.py` |
+| Moorea Labeled Corals | `mermaidseg/datasets/moorea_labeled_corals/verify_raw_data_and_add_to_s3.py` |
+| Pacific Labeled Corals | `mermaidseg/datasets/pacific_labeled_corals/verify_raw_data_and_add_to_s3.py` |
+| Benthos | `mermaidseg/datasets/benthos_yuval/verify_raw_data_and_add_to_s3.py` |
+
+1. Read the dataset's README from that commit, for example:
+
+   ```bash
+   git show 88f7bac^:mermaidseg/datasets/catlin_seaview/README.md
+   ```
+
+2. Download the raw data that the README lists.
+3. Extract the ingestion script to a file outside the repository, read it, and run it against the download:
+
+   ```bash
+   git show 88f7bac^:mermaidseg/datasets/catlin_seaview/download_raw_data_and_add_to_s3.py > /tmp/ingest_catlin.py
+   ```
+
+4. Fill the offline data cache again. See [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
+
+The scripts were written for the code at that commit. Check them against the current dataset class before you run one.
+
+## Update the MERMAID data
+
+`mermaid_confirmed_annotations.parquet` grows as MERMAID users confirm annotations. This repository does not write it. The dataset reads its images from the keys in that parquet.
+
+`annotation_date_cutoff` in the data config freezes the MERMAID training data. The dataset uses only annotations with `updated_on` on or before that date. The class default and the current config value are `2026-08-12`, the date when MERMAID annotations were last audited for this project (the `MermaidDataset` docstring in `mermaidseg/datasets/mermaid/mermaid_dataset.py`).
+
+To train on newer MERMAID annotations:
+
+1. Set `annotation_date_cutoff` under `mermaid.train` in `configs/data_config.yaml`.
+2. Regenerate the derived configs. See [Regenerate the derived configs](derived-configs.md).
+3. Fill the offline data cache again.
+
+## Add a new dataset
+
+1. Write a dataset class in `mermaidseg/datasets/<name>/`, on the pattern of an existing class that reads the same kind of data (point annotations or dense masks).
+2. Add the class to `DATASET_CLASSES` in `mermaidseg/datasets/factory.py`. If the dataset has dense masks, also add it to `NO_PADDING_DATASETS`.
+3. Map its labels into the MERMAID benthic-attribute space. Add a `fetch_<name>_to_mermaid` function to `mermaidseg/dataset_reconciliation/label_mapping.py`, and register it in `_REMOTE_FETCHERS` in `mermaidseg/dataset_reconciliation/registry.py`. If the dataset is scored in evaluation, also add it to `mermaidseg/evaluation/gt_mapping.py`.
+4. Add a row for each label to `configs/class_to_concepts.csv`, with the dataset in `source_dataset_source` and the label in `source_label_class_name`.
+5. Add the dataset and its splits to `configs/data_config.yaml`.
+6. Regenerate the derived configs. See [Regenerate the derived configs](derived-configs.md).
+7. Fill the offline data cache again.
+
+## Known gaps
+
+- The ingestion scripts for the external datasets are only in git history. See [Load an external dataset into S3](#load-an-external-dataset-into-s3).
+- The MERMAID parquet changes in place. A run that uses the same cutoff reads the same annotations only if no annotation older than the cutoff changes after the run.
