@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import socket
 import time
 
 import pytest
+import requests
 from conftest import Reply, ScriptedServer
 
 from coralnet_scraper.http import SessionFactory
@@ -64,11 +66,27 @@ def test_persistent_503_returns_the_last_response_after_five_retries(
     http_server: ScriptedServer,
 ):
     http_server.script("/p", Reply(503))
+    factory = _factory()
 
-    resp = _factory().coralnet().get(f"{http_server.url}/p", timeout=5)
+    resp = factory.coralnet().get(f"{http_server.url}/p", timeout=5)
 
     assert resp.status_code == 503
     assert len(http_server.requests_to("/p")) == 6
+    stats = factory.stats()
+    assert stats["retries"] == {"503": 5}
+    assert stats["final_status"] == {"503": 1}
+
+
+def test_refused_connection_is_retried_five_times_then_raises():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    factory = _factory()
+
+    with pytest.raises(requests.ConnectionError):
+        factory.coralnet().get(f"http://127.0.0.1:{port}/p", timeout=5)
+
+    assert factory.stats()["retries"] == {"connection": 5}
 
 
 def test_404_is_not_retried(http_server: ScriptedServer):
