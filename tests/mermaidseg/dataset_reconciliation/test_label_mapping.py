@@ -9,7 +9,6 @@ import requests
 import torch
 
 from mermaidseg.dataset_reconciliation import label_mapping as lm
-from mermaidseg.datasets.coralscapes.coralscapes_dataset import CORALSCAPES_ID2NAME
 from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPES_V2_ID2NAME
 from mermaidseg.datasets.local_cache import DataLoadError, LocalS3Cache
 
@@ -20,7 +19,6 @@ STATIC_MAPS = [
     lm.fetch_ucsd_mosaics_to_mermaid,
     lm.fetch_benthos_yuval_to_mermaid,
     lm.coralscapes_v2_to_mermaid,
-    lm.coralscapes_to_mermaid,
 ]
 
 
@@ -37,7 +35,6 @@ def test_static_maps_are_lowercase_nonempty_name_to_name(build):
 @pytest.mark.parametrize(
     ("build", "id2name"),
     [
-        (lm.coralscapes_to_mermaid, CORALSCAPES_ID2NAME),
         (lm.coralscapes_v2_to_mermaid, CORALSCAPES_V2_ID2NAME),
     ],
 )
@@ -54,7 +51,6 @@ def test_coralscapes_maps_cover_exactly_the_native_class_names(build, id2name):
         (lm.fetch_ucsd_mosaics_to_mermaid, "favia matthai", "dipsastraea matthaii"),
         (lm.fetch_benthos_yuval_to_mermaid, "rock", "bare substrate"),
         (lm.coralscapes_v2_to_mermaid, "acropora bleached", "bleached coral"),
-        (lm.coralscapes_to_mermaid, "crown of thorn", "acanthaster planci"),
     ],
 )
 def test_static_maps_pin_a_known_entry(build, source, target):

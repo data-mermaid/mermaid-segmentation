@@ -5,16 +5,14 @@ from __future__ import annotations
 import concurrent
 import io
 import logging
-import random
 import re
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Queue
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 import boto3
 import pandas as pd
@@ -24,7 +22,14 @@ from bs4 import BeautifulSoup
 from tqdm.auto import tqdm
 
 from coralnet_scraper import s3_io
-from coralnet_scraper.config import get_scraper_workers, validate_workers
+from coralnet_scraper.config import (
+    get_export_workers,
+    get_requests_per_second,
+    get_scraper_workers,
+    validate_requests_per_second,
+    validate_workers,
+)
+from coralnet_scraper.http import SessionFactory
 from coralnet_scraper.models import DownloadResult, ImageFailures
 from coralnet_scraper.parsers import (
     classifier_plot_data_from_source_html,
@@ -46,15 +51,9 @@ _EXPORT_PREP_RETRIES = 5
 _EXPORT_PREP_RETRY_SLEEP_S = 60  # base sleep between export_prep retries; scaled by attempt
 _PAGINATED_EXPORT_THRESHOLD = 5000  # sources above this use per-page export
 _PAGE_EXPORT_TIMEOUT = 180  # CoralNet session setup can take >60s even for 20 images
-_PAGE_RETRIES = 3
-_PAGE_RETRY_BACKOFF_S = 30  # sleep between retries, doubles each attempt
 _PAGE_DELAY_SECONDS = 2.0  # politeness delay between page export requests
-_PAGE_PARALLEL_WORKERS = 3  # concurrent export_prep/serve requests in paginated export
 _CHECKPOINT_EVERY_PAGES = 50  # upload partial annotations.csv every N completed pages
 _BROWSE_PROGRESS_EVERY = 10  # log phase-1 walk progress every N pages
-
-
-_T = TypeVar("_T")
 
 _IMAGE_HREF_PK = re.compile(r"/image/(\d+)(?:/|$)")
 
@@ -112,71 +111,6 @@ def _upload_csv(s3_client: Any, bucket: str, key: str, df: pd.DataFrame) -> None
     s3_io.upload_csv_body(s3_client, bucket=bucket, key=key, csv_text=buf.getvalue())
 
 
-# Transient network failures worth retrying on a long (multi-hour) scrape.
-# ``requests.Timeout`` is the base of both ConnectTimeout and ReadTimeout;
-# ChunkedEncodingError is a mid-body connection drop. 5xx responses are handled
-# separately in ``_is_transient`` (4xx won't fix itself on retry).
-_TRANSIENT_ERRORS = (
-    requests.Timeout,
-    requests.ConnectionError,
-    requests.exceptions.ChunkedEncodingError,
-)
-
-
-def _is_transient(exc: requests.RequestException) -> bool:
-    """True for errors worth retrying: timeouts, dropped connections, and 5xx."""
-    if isinstance(exc, requests.HTTPError):
-        resp = exc.response
-        return resp is not None and resp.status_code >= 500
-    return isinstance(exc, _TRANSIENT_ERRORS)
-
-
-def _with_retry(
-    operation: Callable[[], _T],
-    *,
-    source_id: int,
-    page_num: int,
-    kind: str,
-) -> _T:
-    """Retry ``operation`` on transient HTTP errors with exponential backoff.
-
-    Non-transient errors (e.g. a 4xx) propagate immediately. Transient errors raise
-    after :data:`_PAGE_RETRIES` attempts.
-    """
-    for attempt in range(1, _PAGE_RETRIES + 1):
-        try:
-            return operation()
-        except requests.RequestException as e:
-            if not _is_transient(e):
-                raise
-            if attempt >= _PAGE_RETRIES:
-                logger.error(
-                    "source %s page=%s %s: %s after %s attempts; giving up",
-                    source_id,
-                    page_num,
-                    kind,
-                    type(e).__name__,
-                    _PAGE_RETRIES,
-                )
-                raise
-            # Jitter the exponential backoff so concurrent shards retrying the
-            # same failing site desync instead of stampeding in lockstep.
-            base = _PAGE_RETRY_BACKOFF_S * (2 ** (attempt - 1))
-            backoff = random.uniform(0.5 * base, 1.5 * base)
-            logger.warning(
-                "source %s page=%s %s: %s (attempt %s/%s); retrying in %ss",
-                source_id,
-                page_num,
-                kind,
-                type(e).__name__,
-                attempt,
-                _PAGE_RETRIES,
-                backoff,
-            )
-            time.sleep(backoff)
-    raise AssertionError("unreachable")  # pragma: no cover
-
-
 def export_prep_timeout_seconds(total_images: int | None) -> int:
     """Read timeout for CoralNet ``export_prep`` POST (server builds the export)."""
     n = total_images or 0
@@ -206,7 +140,15 @@ class CoralNetDownloader:
     CORALNET_URL = "https://coralnet.ucsd.edu"
     LOGIN_URL = "https://coralnet.ucsd.edu/accounts/login/"
 
-    def __init__(self, username: str, password: str, *, max_workers: int | None = None) -> None:
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        *,
+        max_workers: int | None = None,
+        export_workers: int | None = None,
+        requests_per_second: float | None = None,
+    ) -> None:
         """Create the client and its HTTP and S3 sessions; no network call is made.
 
         Args:
@@ -214,34 +156,42 @@ class CoralNetDownloader:
             password: CoralNet account password.
             max_workers: Concurrent image download workers; ``None`` reads the environment
                 or falls back to the CPU-based default.
+            export_workers: Concurrent page exports of a paginated export; ``None`` reads the
+                environment or falls back to 3.
+            requests_per_second: Rate limit shared by every CoralNet session; ``None`` reads
+                the environment, where unset means no limit.
 
         Raises:
-            ValueError: If ``max_workers`` or the environment value is not an integer of at
-                least 1.
+            ValueError: If a worker count is not an integer of at least 1, or the rate is
+                not a positive number.
         """
         self.username = username
         self.password = password
         self.max_workers = (
             validate_workers(max_workers) if max_workers is not None else get_scraper_workers()
         )
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                )
-            }
+        self.export_workers = (
+            validate_workers(export_workers) if export_workers is not None else get_export_workers()
         )
-        # Size connection pool for concurrent image URL resolution
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=10, pool_maxsize=self.max_workers + 4
+        self.requests_per_second = (
+            validate_requests_per_second(requests_per_second)
+            if requests_per_second is not None
+            else get_requests_per_second()
         )
-        self.session.mount("https://", adapter)
+        # Pool sized for concurrent image URL resolution
+        self.sessions = SessionFactory(
+            pool_size=self.max_workers + 4, requests_per_second=self.requests_per_second
+        )
+        self.session = self.sessions.coralnet()
+        self.media = self.sessions.media()
         self.logged_in = False
         self._thread_local = threading.local()
         self._export_thread_local = threading.local()
         self.s3 = boto3.client("s3", config=BotoConfig(max_pool_connections=self.max_workers + 4))
+
+    def transport_stats(self) -> dict[str, Any]:
+        """Return the request accounting of every session of this client."""
+        return self.sessions.stats()
 
     def _source_main_url(self, source_id: int) -> str:
         """Return the URL of a source's overview page."""
@@ -263,35 +213,21 @@ class CoralNetDownloader:
         :meth:`login` (the main session) and :meth:`_new_logged_in_session`
         (per-worker independent sessions used by parallel export).
         """
-
-        def _get_login_page() -> requests.Response:
-            r = session.get(self.LOGIN_URL, timeout=_PAGE_GET_TIMEOUT)
-            r.raise_for_status()
-            return r
-
-        # Retry the login round-trip on transient errors: CoralNet has brief
-        # availability dips, and a single login timeout otherwise kills the whole
-        # job before any source is scraped. Invalid-credential failures raise a
-        # RuntimeError (below), which _with_retry does not retry.
-        response = _with_retry(_get_login_page, source_id=0, page_num=0, kind="login")
+        response = session.get(self.LOGIN_URL, timeout=_PAGE_GET_TIMEOUT)
+        response.raise_for_status()
         csrf_token = extract_csrf_token(response.text)
         if not csrf_token:
             raise RuntimeError("Could not find CSRF token")
-        login_response = _with_retry(
-            lambda: session.post(
-                self.LOGIN_URL,
-                data={
-                    "username": self.username,
-                    "password": self.password,
-                    "csrfmiddlewaretoken": csrf_token,
-                },
-                headers={"Referer": self.LOGIN_URL},
-                timeout=_PAGE_GET_TIMEOUT,
-                allow_redirects=True,
-            ),
-            source_id=0,
-            page_num=0,
-            kind="login",
+        login_response = session.post(
+            self.LOGIN_URL,
+            data={
+                "username": self.username,
+                "password": self.password,
+                "csrfmiddlewaretoken": csrf_token,
+            },
+            headers={"Referer": self.LOGIN_URL},
+            timeout=_PAGE_GET_TIMEOUT,
+            allow_redirects=True,
         )
         if "Sign out" not in login_response.text and login_response.url == self.LOGIN_URL:
             raise RuntimeError("Login failed - invalid credentials or other error")
@@ -630,7 +566,7 @@ class CoralNetDownloader:
             total_images_website: Website image count; an existing CSV that already covers it
                 is left as is.
             page_workers: Concurrent ``export_prep``/``serve`` workers in phase
-                2. Defaults to :data:`_PAGE_PARALLEL_WORKERS`. Pass ``1`` for
+                2. Defaults to ``self.export_workers``. Pass ``1`` for
                 deterministic ordering (used by tests).
             checkpoint_every_pages: Upload merged partial CSV after this many
                 completed pages. Set very high to disable mid-run uploads.
@@ -644,7 +580,7 @@ class CoralNetDownloader:
                 return True
 
             work_items = self._walk_browse_pages(source_id)
-            workers = page_workers if page_workers is not None else _PAGE_PARALLEL_WORKERS
+            workers = page_workers if page_workers is not None else self.export_workers
             workers = max(1, min(workers, len(work_items)))
 
             chunks_by_page = self._export_pages_parallel(
@@ -725,16 +661,8 @@ class CoralNetDownloader:
         page_num = 0
         while current_url is not None:
             page_num += 1
-
-            def fetch_page(url: str = current_url) -> requests.Response:
-                return self._raise_for_status(self.session.get(url, timeout=_PAGE_EXPORT_TIMEOUT))
-
-            page_response = _with_retry(
-                fetch_page,
-                source_id=source_id,
-                page_num=page_num,
-                kind="browse",
-            )
+            page_response = self.session.get(current_url, timeout=_PAGE_EXPORT_TIMEOUT)
+            page_response.raise_for_status()
             soup = BeautifulSoup(page_response.text, "html.parser")
             form = soup.find("form", {"id": "export-annotations-prep-form"})
             csrf_input = form.find("input", {"name": "csrfmiddlewaretoken"}) if form else None
@@ -772,14 +700,8 @@ class CoralNetDownloader:
         )
         return work_items
 
-    @staticmethod
-    def _raise_for_status(resp: requests.Response) -> requests.Response:
-        """Raise on an HTTP error status, otherwise return ``resp``."""
-        resp.raise_for_status()
-        return resp
-
     def _export_one_page(self, source_id: int, item: _PageWorkItem) -> pd.DataFrame:
-        """Phase 2 worker: export_prep POST + serve GET for one page, with retries.
+        """Phase 2 worker: export_prep POST + serve GET for one page.
 
         Uses a worker-local, independently-logged-in session
         (:meth:`_get_export_session`) so concurrent workers don't trample each other's
@@ -840,9 +762,7 @@ class CoralNetDownloader:
             serve_response.raise_for_status()
             return pd.read_csv(io.StringIO(serve_response.text))
 
-        chunk_df = _with_retry(
-            do_round_trip, source_id=source_id, page_num=item.page_num, kind="export"
-        )
+        chunk_df = do_round_trip()
         time.sleep(_PAGE_DELAY_SECONDS)
         return chunk_df
 
@@ -935,36 +855,26 @@ class CoralNetDownloader:
     def get_images(self, source_id: int) -> tuple[pd.DataFrame | None, bool]:
         """Walk CoralNet browse pages and return a DataFrame of all images.
 
-        Fetches page 1, then follows next-page links sequentially, retrying each page.
+        Fetches page 1, then follows next-page links sequentially.
         Pages merge in order and the first-seen href wins for a duplicate name.
 
         Returns:
             ``(df, True)`` with columns ``Name`` and ``Image Page``, or ``(None, False)``
-            when any page fails after retries.
+            when any page fails.
         """
-        base_url = f"{self.CORALNET_URL}/source/{source_id}/browse/images"
-
-        def fetch(url: str, page_num: int) -> tuple[dict[str, str], str | None]:
-            return _with_retry(
-                lambda: self.get_images_on_page(url),
-                source_id=source_id,
-                page_num=page_num,
-                kind="browse",
-            )
+        base_url = f"{self.CORALNET_URL}/source/{source_id}/browse/images/"
 
         p_bar = tqdm(desc="Fetching images", unit="page")
         try:
-            page1_imgs, next_rel = fetch(base_url, 1)
+            page1_imgs, next_rel = self.get_images_on_page(base_url)
             p_bar.update(1)
 
             ordered_pages: list[dict[str, str]] = [page1_imgs]
             current_url: str | None = urllib.parse.urljoin(base_url, next_rel) if next_rel else None
-            seq_page = 2
             while current_url is not None:
-                imgs, next_rel = fetch(current_url, seq_page)
+                imgs, next_rel = self.get_images_on_page(current_url)
                 ordered_pages.append(imgs)
                 p_bar.update(1)
-                seq_page += 1
                 current_url = urllib.parse.urljoin(current_url, next_rel) if next_rel else None
 
             # Merge in page order; first-seen wins for any duplicate name.
@@ -991,8 +901,7 @@ class CoralNetDownloader:
         """
         s = getattr(self._thread_local, "session", None)
         if s is None:
-            s = requests.Session()
-            s.headers.update(dict(self.session.headers))
+            s = self.sessions.coralnet()
             s.cookies.update(self.session.cookies)
             self._thread_local.session = s
         return s
@@ -1006,8 +915,7 @@ class CoralNetDownloader:
         avoid the ``export_prep`` / ``serve`` race that happens when multiple threads
         share one Django sessionid.
         """
-        session = requests.Session()
-        session.headers.update(dict(self.session.headers))
+        session = self.sessions.coralnet()
         self._perform_login(session)
         return session
 
@@ -1102,7 +1010,7 @@ class CoralNetDownloader:
                 return s3_key, True
             except self.s3.exceptions.ClientError:
                 pass
-            response = requests.get(url, timeout=timeout, stream=True)
+            response = self.media.get(url, timeout=timeout, stream=True)
             response.raise_for_status()
             self.s3.upload_fileobj(
                 response.raw, bucket_name, s3_key, ExtraArgs={"ContentType": "image/jpeg"}

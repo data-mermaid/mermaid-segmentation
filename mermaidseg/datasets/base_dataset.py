@@ -77,7 +77,7 @@ class BaseCoralDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
 
     Attributes:
         SOURCE_NAME: Identifier for this source dataset (e.g. ``"mermaid"``,
-            ``"coralnet"``, ``"coralscapes"``). Used by
+            ``"coralnet"``, ``"coralscapes_v2"``). Used by
             :class:`SourceLabelRegistry` for global ID disambiguation.
         df_annotations: DataFrame with all annotation rows. Must contain
             columns ``image_id``, ``row``, ``col``, ``source_label_name``.

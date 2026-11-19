@@ -62,7 +62,7 @@ def _set(*keys: str, value: Any) -> Callable[[dict[str, Any]], None]:
         ("training", ("loader", "unknown")),
         ("model", ("unknown",)),
         ("logger", ("unknown",)),
-        ("data", ("coralscapes",)),
+        ("data", ("unknown_source",)),
         ("data", ("coralnet", "vall")),
     ],
 )

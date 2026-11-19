@@ -52,8 +52,8 @@ import torch.nn.functional as F
 from numpy.typing import NDArray
 from tqdm import tqdm
 
-from mermaidseg.datasets.coralscapes.coralscapes_dataset import CORALSCAPES_ID2NAME
 from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import (
+    CORALSCAPES_ID2NAME,
     CORALSCAPES_V2_ID2NAME,
     coralscapes_v2_to_legacy_lut,
 )

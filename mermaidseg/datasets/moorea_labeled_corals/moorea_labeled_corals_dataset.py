@@ -3,8 +3,7 @@
 Reads Moorea Labeled Corals point annotations from a Parquet file on S3 and
 emits ``(image, source_labels)`` tuples where ``source_labels`` is in the
 **Moorea Labeled Corals label-name space** -- i.e. the canonical (case-merged)
-label strings produced by
-``mermaidseg/datasets/moorea_labeled_corals/verify_raw_data_and_add_to_s3.py``
+label strings produced by the ``external-datasets`` CLI (see ``README.md``)
 from the per-image ``<stem>.<ext>.txt`` ``row;col;label`` files of the EDI
 ``knb-lter-mcr.5006`` package (Beijbom et al., 2012). Mapping into the MERMAID
 benthic-attribute target space is performed externally via
@@ -34,8 +33,8 @@ class MooreaLabeledCoralsDataset(BaseCoralDataset):
 
     Attributes:
         annotations_path (str): Key (relative to ``source_bucket``) of the
-            Parquet file with annotations. Produced by
-            ``mermaidseg/datasets/moorea_labeled_corals/verify_raw_data_and_add_to_s3.py``.
+            Parquet file with annotations. Produced by the ``external-datasets``
+            CLI; see ``README.md`` in this directory.
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-year
             ``images/<year>/<image_id><image_ext>`` folders live.

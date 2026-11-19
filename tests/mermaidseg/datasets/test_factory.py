@@ -96,8 +96,8 @@ def test_yaml_transform_on_an_eval_split_raises_naming_dataset_and_split(stub_cl
 
 @pytest.mark.parametrize("build", ["build_datasets", "configured_source_names"])
 def test_unknown_data_key_raises(stub_classes, build):
-    data_cfg = ConfigDict({"points": {"train": {"a": 1}}, "coralscapes": {"train": None}})
-    with pytest.raises(ValueError, match="coralscapes"):
+    data_cfg = ConfigDict({"points": {"train": {"a": 1}}, "unknown_source": {"train": None}})
+    with pytest.raises(ValueError, match="unknown_source"):
         if build == "build_datasets":
             build_datasets(
                 data_cfg, padding=0, dataset_classes=stub_classes, verbose=False, input_size=SIZE

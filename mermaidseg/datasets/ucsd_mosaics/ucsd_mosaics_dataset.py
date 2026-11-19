@@ -59,9 +59,8 @@ class UCSDMosaicsDataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             retain. Non-subset classes (and the ignore label) map to ``0``.
         transform: Optional Albumentations transform applied to image and mask.
         hf_repo_id: HuggingFace dataset repo ID or local dataset directory
-            holding ``classes.json`` (e.g. a sparsified copy from
-            ``scripts/build_sparse_dense_datasets.py``); override only for
-            testing or to point at a fork of the mirror.
+            holding ``classes.json``; override only for testing or to point
+            at a fork of the mirror.
 
     Attributes:
         SOURCE_NAME: ``"ucsd_mosaics"``.

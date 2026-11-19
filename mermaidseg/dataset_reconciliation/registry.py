@@ -33,7 +33,6 @@ from mermaidseg.dataset_reconciliation.concepts import initialize_benthic_hierar
 from mermaidseg.dataset_reconciliation.label_mapping import (
     CoralNetLabelMappings,
     coralnet_to_mermaid,
-    coralscapes_to_mermaid,
     coralscapes_v2_to_mermaid,
     fetch_benthos_yuval_to_mermaid,
     fetch_catlin_seaview_to_mermaid,
@@ -59,7 +58,6 @@ def _static_source_to_target(static: dict[str, str], dataset: Any) -> dict[str, 
 
 _BUILTIN_DEFAULT_FETCHERS = {
     "mermaid": _identity_source_to_target,
-    "coralscapes": lambda ds: _static_source_to_target(coralscapes_to_mermaid(), ds),
     "coralscapes_v2": lambda ds: _static_source_to_target(coralscapes_v2_to_mermaid(), ds),
 }
 

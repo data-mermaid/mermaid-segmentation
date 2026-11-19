@@ -73,3 +73,32 @@ def test_global_offset_shifts_foreground_ids_only(dataset):
     _, mask = dataset[0]
 
     np.testing.assert_array_equal(mask, np.array([[0, 12, 11, 12], [11, 11, 0, 12]]))
+
+
+def test_annotated_unlabeled_id_zero_maps_to_nonzero_local_id_and_lookup_is_indexed_by_classes_json_id(
+    bucket_store,
+):
+    # The writer emits `unlabeled` = 0 as an annotated class.
+    classes = {"unlabeled": 0, "coral": 1, "sand": 2}
+    # Annotation rows per name: coral 3, unlabeled 2, sand 1 -> local coral=1, unlabeled=2, sand=3.
+    frame = pd.DataFrame(
+        {
+            "site": ["RS24"] * 6,
+            "image_id": ["t0", "t1", "t2", "t0", "t1", "t0"],
+            "source_label_name": ["coral"] * 3 + ["unlabeled"] * 2 + ["sand"],
+        }
+    )
+    bucket_store.put_parquet(BUCKET, ANNOTATIONS_KEY, frame)
+    bucket_store.put_json(BUCKET, f"{PREFIX}/classes.json", classes)
+
+    dataset = BenthosYuvalCoralsDataset(
+        annotations_path=ANNOTATIONS_KEY,
+        source_bucket=BUCKET,
+        source_s3_prefix=PREFIX,
+        split="val",
+    )
+
+    # Indexed by classes.json id: 0 unlabeled -> 2, 1 coral -> 1, 2 sand -> 3.
+    np.testing.assert_array_equal(
+        dataset._classes_global_to_local, np.array([2, 1, 3], dtype=np.int32)
+    )
