@@ -100,13 +100,15 @@ Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
 
 ### Select the build
 
-Set `MERMAID_CORALNET_MANIFEST_VERSION=<run>` or `MERMAID_CORALNET_MANIFEST_PATH=<key>` in the environment of the training run. See [Use a build in training](../../packages/coralnet-dataset/README.md#use-a-build-in-training).
+Set `manifest_path` on each CoralNet split (`train`, `val` and `test`) in `configs/data_config.yaml`:
 
-### Make the build the default
+```yaml
+manifest_path: etl-outputs/coralnet/<run>/coralnet_training_manifest_<run>.parquet
+```
 
-With neither variable set, `CoralNetDataset` reads the build named by `_DEFAULT_RUN` in `mermaidseg/datasets/coralnet/coralnet_dataset.py`. To make the new build the default, set `_DEFAULT_RUN` to its tag.
+Then regenerate the derived configs, starting with `configs/data_config_trainval.yaml`. See [Regenerate the derived configs](derived-configs.md). For the key layout, see [Use a build in training](../../packages/coralnet-dataset/README.md#use-a-build-in-training).
 
-A new default build changes model outputs, so item 7 of the working agreement in [AGENTS.md](../../AGENTS.md#2-working-agreement) applies. Run the evaluation, and put the metrics and the baseline they compare against in the PR.
+A new build changes model outputs, so item 7 of the working agreement in [AGENTS.md](../../AGENTS.md#2-working-agreement) applies. Run the evaluation, and put the metrics and the baseline they compare against in the PR.
 
 ### Add new sources to the splits
 
@@ -125,10 +127,10 @@ A label name in the build's `coralnet_id2name_<run>.json` trains as background w
 
 ### Warm the offline cache again
 
-An offline run (`MERMAIDSEG_S3_OFFLINE=1`) fails on any cache miss. The new manifest, its id2name JSON and new images are not in a cache that you filled before. Fill it again with the build selected, using the same data config as the training run:
+An offline run (`MERMAIDSEG_S3_OFFLINE=1`) fails on any cache miss. The new manifest, its id2name JSON and new images are not in a cache that you filled before. Fill it again, using the same data config as the training run. The data config selects the build:
 
 ```bash
-MERMAID_CORALNET_MANIFEST_VERSION=<run> uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
+uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
 ```
 
 `--data-config` defaults to `configs/data_config.yaml`. For the Slurm command, with `HF_HOME` and the final runs' data config, see [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
