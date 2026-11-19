@@ -55,11 +55,11 @@ uv sync --locked --extra wandb --group dev
 
 ### CoralNet scraper
 
-`packages/coralnet-scraper/` is a separate uv workspace member that downloads public CoralNet sources to S3. A root `uv sync` does not install it. See [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md).
+`packages/coralnet-scraper/` is a separate uv workspace member that downloads public CoralNet sources to S3. A root `uv sync` does not install it. See [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md). To recreate or update the CoralNet data end to end, follow [docs/coralnet-data-runbook.md](docs/coralnet-data-runbook.md).
 
 ### CoralNet dataset build
 
-`packages/coralnet-dataset/` is a separate uv workspace member that builds the CoralNet training manifest, resized images and label names from a scrape. A root `uv sync` does not install it. See [packages/coralnet-dataset/README.md](packages/coralnet-dataset/README.md).
+`packages/coralnet-dataset/` is a separate uv workspace member that builds the CoralNet training manifest, resized images and label names from a scrape. A root `uv sync` does not install it. See [packages/coralnet-dataset/README.md](packages/coralnet-dataset/README.md), and [docs/coralnet-data-runbook.md](docs/coralnet-data-runbook.md) for the end-to-end steps.
 
 ### Hugging Face Setup
 

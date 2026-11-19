@@ -6,6 +6,7 @@ Builds the CoralNet training dataset from a scrape on S3. Import package: `coral
 
 - **Owns:** turning a scrape into the training manifest, the resized images and the id2name JSON that `CoralNetDataset` reads.
 - **Does not own:** downloading CoralNet. That is [`coralnet-scraper`](../coralnet-scraper/README.md).
+- **End to end:** to recreate or update the CoralNet data, scrape through training, follow the [CoralNet data runbook](../../docs/coralnet-data-runbook.md).
 - **Boundary:** the package imports the `coralnet_scraper` configuration and S3 key layout. It does not import `mermaidseg`, and `mermaidseg` does not import it. The root `tests/test_package_boundaries.py` enforces both (run with the root suite). A root `uv sync` does not install it.
 
 ## Inputs
