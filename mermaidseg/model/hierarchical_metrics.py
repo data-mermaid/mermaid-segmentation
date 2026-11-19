@@ -48,6 +48,14 @@ ERROR_SPLIT = (
 )
 
 
+def _accumulator_dtype(device: torch.device) -> torch.dtype:
+    """Return the float dtype for calibration accumulators on ``device``.
+
+    float64 where supported; MPS has no float64 support, so it gets float32.
+    """
+    return torch.float32 if device.type == "mps" else torch.float64
+
+
 def _to_probabilities(scores: torch.Tensor, transform: ScoreTransform) -> torch.Tensor:
     """Normalise a rank's scores to a distribution over its channels (dim 1)."""
     if transform == "softmax":
@@ -168,7 +176,8 @@ class HierarchicalMetrics:
     def _ensure_rank_state(self, rank: str, num_channels: int, device: torch.device) -> None:
         if rank in self._bin_count:
             return
-        z = torch.zeros(len(CALIBRATION_SUBSETS), self.n_bins, dtype=torch.float64, device=device)
+        dtype = _accumulator_dtype(device)
+        z = torch.zeros(len(CALIBRATION_SUBSETS), self.n_bins, dtype=dtype, device=device)
         self._bin_count[rank] = z.clone()
         self._bin_conf[rank] = z.clone()
         self._bin_correct[rank] = z.clone()
@@ -247,7 +256,8 @@ class HierarchicalMetrics:
 
         # --- calibration: confidence-binned accuracy ------------------------------
         probs = _to_probabilities(batch.scores, self.score_transform)
-        confidence = probs.amax(dim=1).reshape(-1)[valid].double()
+        dtype = _accumulator_dtype(probs.device)
+        confidence = probs.amax(dim=1).reshape(-1)[valid].to(dtype)
         bin_idx = torch.clamp((confidence * self.n_bins).long(), 0, self.n_bins - 1)
         # Subsets are chosen by GT only: selecting on the prediction (e.g. dropping
         # pixels predicted 'none') would remove exactly the confident misses.
@@ -257,7 +267,7 @@ class HierarchicalMetrics:
             idx = bin_idx[subset]
             self._bin_count[rank][i].scatter_add_(0, idx, torch.ones_like(confidence[subset]))
             self._bin_conf[rank][i].scatter_add_(0, idx, confidence[subset])
-            self._bin_correct[rank][i].scatter_add_(0, idx, correct[subset].double())
+            self._bin_correct[rank][i].scatter_add_(0, idx, correct[subset].to(dtype))
 
     def _update_consistency(
         self, coarse: str, fine: str, coarse_batch: RankBatch, fine_batch: RankBatch
@@ -420,8 +430,8 @@ class HierarchicalMetrics:
         for rank in self.ranks:
             if rank not in self._support:
                 continue
-            support = self._support[rank].double().cpu().numpy()
-            correct = self._correct[rank].double().cpu().numpy()
+            support = self._support[rank].cpu().double().numpy()
+            correct = self._correct[rank].cpu().double().numpy()
             mask = taxon_channel_mask(self.tree, rank) & (support >= self.min_support)
             if not mask.any():
                 continue
