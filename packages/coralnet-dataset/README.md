@@ -43,7 +43,7 @@ The training manifest has these columns. `CoralNetDataset` reads `source_id`, `i
 | `source_id`, `image_id` | CoralNet ids. |
 | `row`, `col` | Point position, scaled to the image that is loaded. |
 | `coralnet_id` | CoralNet Label ID. |
-| `source_label_name` | `coralnet_id` as a string. `CoralNetDataset` replaces it with the name from the id2name JSON. |
+| `source_label_name` | `coralnet_id` as a string. `CoralNetDataset` replaces it with the lowercased name from the id2name JSON. |
 | `image_s3_key` | The resized copy when the image was resized, else the original. |
 | `load_width`, `load_height` | Dimensions of the image at `image_s3_key`. |
 | `uses_resized_image` | Whether `image_s3_key` is the resized copy. |
