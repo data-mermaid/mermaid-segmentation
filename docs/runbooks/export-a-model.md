@@ -22,7 +22,9 @@ uv run python scripts/export.py \
     --output-dir /path/to/bundle
 ```
 
-The script prints the bundle path. The bundle holds `model.json` and `weights.safetensors`, the two files that `load_bundle` in `mermaidseg/inference/bundle.py` reads.
+The script prints the bundle path. The bundle holds `model.json` and `weights.safetensors`, the two files that `load_bundle` in `mermaidseg/inference/bundle.py` reads. `model.json` records the sha256 of `weights.safetensors`, and `load_bundle` refuses weights that do not match it.
+
+Bundles exported before the `weights_sha256` key existed have no key, and `load_bundle` refuses them. Re-export each one from its checkpoint with `scripts/export.py`.
 
 ## When the export refuses a checkpoint
 

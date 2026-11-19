@@ -17,7 +17,14 @@ from typing import Any
 import torch
 from safetensors.torch import save_file
 
-from mermaidseg.inference.bundle import MODEL_JSON, SCHEMA_VERSION, TASK, WEIGHTS
+from mermaidseg.inference.bundle import (
+    MODEL_JSON,
+    SCHEMA_VERSION,
+    TASK,
+    WEIGHTS,
+    WEIGHTS_SHA256,
+    sha256_file,
+)
 from mermaidseg.inference.preprocess import CHANNEL_ORDER, INTERPOLATION
 from mermaidseg.run_setup import read_checkpoint
 
@@ -187,7 +194,10 @@ def _write_bundle_dir(
     )
     try:
         save_file(_untied_cpu_state(state_dict), staging / WEIGHTS)
-        (staging / MODEL_JSON).write_text(json.dumps(metadata, indent=2))
+        digest = sha256_file(staging / WEIGHTS)
+        (staging / MODEL_JSON).write_text(
+            json.dumps({**metadata, WEIGHTS_SHA256: digest}, indent=2)
+        )
         os.chmod(staging, 0o777 & ~_current_umask())
         os.replace(staging, out_dir)
     except BaseException:

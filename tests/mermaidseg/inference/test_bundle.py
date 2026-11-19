@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from unittest.mock import patch
@@ -12,7 +13,13 @@ import pytest
 from safetensors.torch import load_file, save_file
 
 from mermaidseg.export import export_bundle
-from mermaidseg.inference.bundle import MODEL_JSON, WEIGHTS, load_bundle
+from mermaidseg.inference.bundle import (
+    MODEL_JSON,
+    WEIGHTS,
+    WEIGHTS_SHA256,
+    load_bundle,
+    sha256_file,
+)
 from mermaidseg.inference.predictor import CBMPredictor
 from tests.mermaidseg.inference import _tiny
 
@@ -36,12 +43,50 @@ def test_load_never_calls_the_hub(bundle_dir):
 def test_load_refuses_weights_missing_a_key(bundle_dir, tmp_path):
     broken = tmp_path / "broken"
     broken.mkdir()
-    (broken / MODEL_JSON).write_text((bundle_dir / MODEL_JSON).read_text())
     weights = load_file(bundle_dir / WEIGHTS)
     del weights["concept_proj.bias"]
     save_file(weights, broken / WEIGHTS)
+    metadata = json.loads((bundle_dir / MODEL_JSON).read_text())
+    metadata[WEIGHTS_SHA256] = hashlib.sha256((broken / WEIGHTS).read_bytes()).hexdigest()
+    (broken / MODEL_JSON).write_text(json.dumps(metadata))
     with pytest.raises(RuntimeError, match="concept_proj.bias"):
         load_bundle(broken, "cpu")
+
+
+def test_load_refuses_weights_with_a_changed_value(bundle_dir, tmp_path):
+    copied = tmp_path / "copy"
+    shutil.copytree(bundle_dir, copied)
+    weights = load_file(copied / WEIGHTS)
+    name = next(iter(weights))
+    weights[name] = weights[name] + 1
+    save_file(weights, copied / WEIGHTS)
+    with pytest.raises(ValueError, match="weights_sha256"):
+        load_bundle(copied, "cpu")
+
+
+def test_load_refuses_truncated_weights_before_parsing_them(bundle_dir, tmp_path):
+    copied = tmp_path / "copy"
+    shutil.copytree(bundle_dir, copied)
+    data = (copied / WEIGHTS).read_bytes()
+    (copied / WEIGHTS).write_bytes(data[:-8])
+    with pytest.raises(ValueError, match="weights_sha256"):
+        load_bundle(copied, "cpu")
+
+
+def test_load_refuses_a_bundle_without_a_recorded_checksum(bundle_dir, tmp_path):
+    copied = tmp_path / "copy"
+    shutil.copytree(bundle_dir, copied)
+    metadata = json.loads((copied / MODEL_JSON).read_text())
+    del metadata[WEIGHTS_SHA256]
+    (copied / MODEL_JSON).write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="weights_sha256"):
+        load_bundle(copied, "cpu")
+
+
+def test_sha256_file_matches_hashlib_across_chunk_boundaries(tmp_path):
+    path = tmp_path / "blob"
+    path.write_bytes(b"x" * (2 * 1024 * 1024 + 123))
+    assert sha256_file(path) == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 @pytest.mark.parametrize(
