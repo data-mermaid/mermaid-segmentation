@@ -66,6 +66,46 @@ def _id2name_key(manifest_path: str) -> str:
     return posixpath.join(run_dir, f"coralnet_id2name_{posixpath.basename(run_dir)}.json")
 
 
+def _as_int_ids(values: pd.Series, column: str) -> pd.Series:
+    """Return ``values`` as integers (int64 unless already an integer dtype), raising on bad values.
+
+    A float column (one null is enough to force float64) would stringify as ``"82.0"`` and
+    miss the id2name lookup, turning the label into ``"none"``.
+    """
+    if pd.api.types.is_integer_dtype(values) and not values.isna().any():
+        return values  # already integral; keeps the manifest's compact dtype
+    numeric = pd.to_numeric(values, errors="coerce")
+    bad = numeric.isna() | (numeric != numeric.round())
+    if bad.any():
+        examples = values[bad].unique()[:5].tolist()
+        raise ValueError(
+            f"CoralNet {column} must be non-null integers; {int(bad.sum())} invalid rows "
+            f"(e.g. {examples})."
+        )
+    return numeric.astype(np.int64)
+
+
+def _as_int_id_set(ids: list[int | str], name: str) -> set[int]:
+    """Coerce configured source ids (YAML may quote them) to ints."""
+    try:
+        return {int(i) for i in ids}
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain integer source ids, got {ids!r}") from exc
+
+
+def _warn_unnamed_ids(coralnet_ids: pd.Series, names: pd.Series) -> None:
+    """Warn about ids that the id2name JSON could not name."""
+    unnamed = coralnet_ids[names.isna()]
+    if unnamed.empty:
+        return
+    logger.warning(
+        "%d annotations have a coralnet_id with no name in the id2name JSON "
+        "(missing or null; e.g. %s); they get a placeholder label that maps to no target.",
+        len(unnamed),
+        sorted(unnamed.unique().tolist())[:5],
+    )
+
+
 class CoralNetDataset(BaseCoralDataset):
     """Load CoralNet annotated coral reef images from a Parquet file on S3.
 
@@ -106,7 +146,6 @@ class CoralNetDataset(BaseCoralDataset):
     manifest_path: str
     manifest_sha256: str
     id2name_key: str
-    source_ids: list[int | str]
     source_bucket: str
     source_s3_prefix: str
     whitelist_sources: list[int | str] | None
@@ -137,22 +176,46 @@ class CoralNetDataset(BaseCoralDataset):
         if self.whitelist_sources is not None and self.blacklist_sources is not None:
             raise ValueError("Cannot specify both whitelist and blacklist sources.")
 
+        split = base_kwargs.get("split")
         df_annotations, df_images = self.load_annotations()
         if self.annotation_overrides is not None:
-            df_annotations = self._apply_annotation_overrides(df_annotations)
+            df_annotations = self._apply_annotation_overrides(df_annotations, split)
 
+        present = set(df_annotations["source_id"].unique())
         if self.whitelist_sources is not None:
-            df_annotations = df_annotations[
-                df_annotations["source_id"].apply(lambda x: x in self.whitelist_sources)
-            ]
+            wanted = _as_int_id_set(self.whitelist_sources, "whitelist_sources")
+            if wanted - present:
+                raise ValueError(
+                    f"whitelist_sources {sorted(wanted - present)} are not in the manifest "
+                    f"{self.manifest_path!r}."
+                )
+            df_annotations = self._drop_annotations(
+                df_annotations,
+                df_annotations["source_id"].isin(wanted),
+                "whitelist_sources",
+                split,
+            )
         if self.blacklist_sources is not None:
-            df_annotations = df_annotations[
-                df_annotations["source_id"].apply(lambda x: x not in self.blacklist_sources)
-            ]
+            unwanted = _as_int_id_set(self.blacklist_sources, "blacklist_sources")
+            if unwanted - present:
+                logger.warning(
+                    "blacklist_sources %s are not in the manifest %r.",
+                    sorted(unwanted - present),
+                    self.manifest_path,
+                )
+            df_annotations = self._drop_annotations(
+                df_annotations,
+                ~df_annotations["source_id"].isin(unwanted),
+                "blacklist_sources",
+                split,
+            )
         if self.image_blacklist is not None:
-            df_annotations = df_annotations[
-                ~df_annotations["image_id"].astype(str).isin(self._load_image_blacklist())
-            ]
+            df_annotations = self._drop_annotations(
+                df_annotations,
+                ~df_annotations["image_id"].astype(str).isin(self._load_image_blacklist()),
+                "image_blacklist",
+                split,
+            )
         if (
             self.whitelist_sources is not None
             or self.blacklist_sources is not None
@@ -163,6 +226,22 @@ class CoralNetDataset(BaseCoralDataset):
             df_images = self._derive_df_images_from_annotations(df_annotations)
 
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)
+
+    def _log_dropped(self, name: str, dropped: int, total: int, split: str | None) -> None:
+        logger.info(
+            "CoralNetDataset(split=%r): %s dropped %d of %d annotations",
+            split,
+            name,
+            dropped,
+            total,
+        )
+
+    def _drop_annotations(
+        self, df_annotations: pd.DataFrame, keep: pd.Series, name: str, split: str | None
+    ) -> pd.DataFrame:
+        """Keep the rows where ``keep`` is true and log how many the filter ``name`` dropped."""
+        self._log_dropped(name, int((~keep).sum()), len(df_annotations), split)
+        return df_annotations[keep]
 
     def load_annotations(self) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Load CoralNet annotations from the training manifest parquet on S3.
@@ -178,9 +257,12 @@ class CoralNetDataset(BaseCoralDataset):
         data = LocalS3Cache.get().read_bytes(self.source_bucket, self.manifest_path)
         self.manifest_sha256 = hashlib.sha256(data).hexdigest()
         df = pd.read_parquet(io.BytesIO(data))
+        df["source_id"] = _as_int_ids(df["source_id"], "source_id")
+        df["coralnet_id"] = _as_int_ids(df["coralnet_id"], "coralnet_id")
         coralnet_id2name = LocalS3Cache.get().read_json(self.source_bucket, self.id2name_key)
 
         df["coralnet_name"] = df["coralnet_id"].map(lambda x: coralnet_id2name.get(str(x)))
+        _warn_unnamed_ids(df["coralnet_id"], df["coralnet_name"])
         df["source_label_name"] = df["coralnet_name"].astype(str).str.lower()
         df = df.rename(columns={"image_s3_key": "image_key"})
 
@@ -214,7 +296,9 @@ class CoralNetDataset(BaseCoralDataset):
         assert self.image_blacklist is not None  # callers check before loading
         return {str(x) for x in self.image_blacklist}
 
-    def _apply_annotation_overrides(self, df_annotations: pd.DataFrame) -> pd.DataFrame:
+    def _apply_annotation_overrides(
+        self, df_annotations: pd.DataFrame, split: str | None
+    ) -> pd.DataFrame:
         """Replace each image's points with those in ``annotation_overrides``.
 
         ``image_key`` and ``source_id`` are taken from the image's manifest rows, so overrides
@@ -225,6 +309,7 @@ class CoralNetDataset(BaseCoralDataset):
             ["image_id", "row", "col", "coralnet_id"]
         ]
         overrides["image_id"] = overrides["image_id"].astype(str)
+        overrides["coralnet_id"] = _as_int_ids(overrides["coralnet_id"], "coralnet_id")
         image_ids = df_annotations["image_id"].astype(str)
         images = df_annotations.assign(image_id=image_ids)[
             ["source_id", "image_id", "image_key"]
@@ -238,10 +323,14 @@ class CoralNetDataset(BaseCoralDataset):
         overrides["coralnet_name"] = overrides["coralnet_id"].map(
             lambda x: coralnet_id2name.get(str(x))
         )
+        _warn_unnamed_ids(overrides["coralnet_id"], overrides["coralnet_name"])
         overrides["source_label_name"] = overrides["coralnet_name"].astype(str).str.lower()
         key_cols = ("source_id", "image_id", "row", "col", "coralnet_id")
         overrides = overrides.astype({c: df_annotations[c].dtype for c in key_cols})
         kept = df_annotations[~image_ids.isin(set(overrides["image_id"].astype(str)))]
+        self._log_dropped(
+            "annotation_overrides", len(df_annotations) - len(kept), len(df_annotations), split
+        )
         return pd.concat([kept, overrides[df_annotations.columns]], ignore_index=True)
 
     def _derive_df_images_from_annotations(self, df_annotations: pd.DataFrame) -> pd.DataFrame:

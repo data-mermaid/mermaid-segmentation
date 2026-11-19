@@ -191,3 +191,151 @@ def test_read_image_returns_the_rgb_array_for_the_manifest_key(cache):
 def test_read_image_without_a_manifest_key_raises_key_error(cache, image_key):
     with pytest.raises(KeyError, match="No manifest entry for source_id=1 image_id=10"):
         _make().read_image(image_id="10", source_id=1, image_key=image_key)
+
+
+def _write_manifest(cache, **columns) -> None:
+    """Rewrite the cached manifest, replacing the given columns."""
+    path = cache / "cache" / BUCKET / MANIFEST
+    df = pd.read_parquet(path)
+    for name, values in columns.items():
+        df[name] = values
+    df.to_parquet(path, index=False)
+
+
+def test_float_coralnet_ids_resolve_to_names(cache):
+    _write_manifest(cache, coralnet_id=[2.0, 3.0, 3.0, 2.0, 3.0])
+
+    ds = _make()
+
+    assert sorted(ds.df_annotations["source_label_name"].unique()) == ["hard coral", "sand"]
+    assert ds.df_annotations["coralnet_id"].dtype == "int64"
+
+
+def test_whitelist_sources_accepts_quoted_ids(cache):
+    ds = _make(whitelist_sources=["1"])
+
+    assert sorted(ds.df_images["image_id"]) == ["10", "11"]
+
+
+def test_blacklist_sources_accepts_quoted_ids(cache):
+    ds = _make(blacklist_sources=["2"])
+
+    assert sorted(ds.df_images["image_id"]) == ["10", "11"]
+
+
+def test_annotation_overrides_resolve_float_coralnet_ids(cache):
+    path = cache / "overrides.parquet"
+    pd.DataFrame(
+        {
+            "source_id": [1],
+            "image_id": ["10"],
+            "row": [5],
+            "col": [5],
+            "coralnet_id": [1.0],
+        }
+    ).to_parquet(path)
+
+    ds = _make(annotation_overrides=str(path))
+
+    img10 = ds.df_annotations[ds.df_annotations["image_id"] == "10"]
+    assert img10["source_label_name"].tolist() == ["acropora"]
+
+
+@pytest.mark.parametrize(
+    ("column", "values"),
+    [
+        ("coralnet_id", [2.0, None, 3.0, 1.0, 3.0]),
+        ("coralnet_id", [2.0, 2.5, 3.0, 1.0, 3.0]),
+        ("source_id", [1.0, None, 1.0, 2.0, 2.0]),
+    ],
+)
+def test_null_or_non_integral_ids_raise_naming_the_column(cache, column, values):
+    _write_manifest(cache, **{column: values})
+
+    with pytest.raises(ValueError, match=column):
+        _make()
+
+
+def test_non_integer_whitelist_id_raises_naming_the_parameter(cache):
+    with pytest.raises(ValueError, match="whitelist_sources"):
+        _make(whitelist_sources=["abc"])
+
+
+def test_whitelist_id_absent_from_manifest_raises_with_the_missing_ids(cache):
+    with pytest.raises(ValueError, match=r"\[99\]") as excinfo:
+        _make(whitelist_sources=[1, 99])
+
+    assert MANIFEST in str(excinfo.value)
+
+
+def test_blacklist_id_absent_from_manifest_warns_and_removes_nothing(cache, caplog):
+    with caplog.at_level("WARNING", logger=cnd.logger.name):
+        ds = _make(blacklist_sources=[99])
+
+    assert "99" in caplog.text
+    assert sorted(ds.df_images["image_id"]) == ["10", "11", "20"]
+
+
+def test_coralnet_id_missing_from_id2name_warns_with_the_count(cache, caplog):
+    _write_manifest(cache, coralnet_id=[2, 3, 3, 99, 3])
+
+    with caplog.at_level("WARNING", logger=cnd.logger.name):
+        _make()
+
+    assert "1 annotations" in caplog.text
+    assert "99" in caplog.text
+
+
+def _overrides_for_image_10(cache) -> dict:
+    path = cache / "overrides.parquet"
+    pd.DataFrame(
+        {"source_id": [1], "image_id": ["10"], "row": [1], "col": [1], "coralnet_id": [1]}
+    ).to_parquet(path)
+    return {"annotation_overrides": str(path)}
+
+
+@pytest.mark.parametrize(
+    ("make_kwargs", "expected"),
+    [
+        (lambda cache: {"whitelist_sources": [1]}, "whitelist_sources dropped 2 of 5 annotations"),
+        (lambda cache: {"blacklist_sources": [1]}, "blacklist_sources dropped 3 of 5 annotations"),
+        (lambda cache: {"image_blacklist": ["11"]}, "image_blacklist dropped 1 of 5 annotations"),
+        (_overrides_for_image_10, "annotation_overrides dropped 2 of 5 annotations"),
+    ],
+    ids=["whitelist", "blacklist", "image_blacklist", "overrides"],
+)
+def test_each_filter_logs_its_name_and_how_many_annotations_it_dropped(
+    cache, caplog, make_kwargs, expected
+):
+    kwargs = make_kwargs(cache)
+
+    with caplog.at_level("INFO", logger=cnd.logger.name):
+        _make(**kwargs)
+
+    assert expected in caplog.text
+
+
+def _write_overrides(cache, coralnet_id) -> str:
+    path = cache / "overrides.parquet"
+    pd.DataFrame(
+        {"source_id": [1], "image_id": ["10"], "row": [1], "col": [1], "coralnet_id": coralnet_id}
+    ).to_parquet(path)
+    return str(path)
+
+
+def test_override_coralnet_id_missing_from_id2name_warns_with_the_count(cache, caplog):
+    path = _write_overrides(cache, [99])
+
+    with caplog.at_level("WARNING", logger=cnd.logger.name):
+        _make(annotation_overrides=path)
+
+    assert "1 annotations" in caplog.text
+    assert "99" in caplog.text
+
+
+@pytest.mark.parametrize("coralnet_id", [[None], [2.5]])
+def test_null_or_non_integral_override_ids_raise_naming_the_column(cache, coralnet_id):
+    path = _write_overrides(cache, coralnet_id)
+
+    with pytest.raises(ValueError, match="coralnet_id"):
+        _make(annotation_overrides=path)
