@@ -81,8 +81,9 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 7. Every forward pass outside training runs under `model.eval()` and `torch.inference_mode()`.
 8. No NumPy or Python-side computation inside `forward` or the per-step training loop, and no
    `.item()` or `.cpu()` host syncs there except at logging intervals.
-9. One seeding function seeds Python, NumPy and torch, and seeds DataLoader workers through
-   `worker_init_fn` and a seeded `generator`.
+9. Seed through one module, `mermaidseg/seeding.py`: `seed_everything` seeds Python, NumPy and
+   torch, and every DataLoader takes `make_worker_seeder` as `worker_init_fn` and a seeded
+   `generator`.
 10. Don't promise bitwise reproducibility across PyTorch releases, platforms, or CPU and GPU.
 11. Load state dicts with `strict=True`, unless the mismatch is intended and the call site says why.
 
