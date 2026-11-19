@@ -35,7 +35,7 @@ Bundles exported before the `weights_sha256` key existed have no key, and `load_
 | No `model.json` beside the checkpoint | Copy the run's `model.json` into the checkpoint's directory. For SageMaker, download it with the checkpoint. |
 | The checkpoint cannot be loaded, or lacks a required key | Use another checkpoint of the run. A `*.partial` file is incomplete. |
 | No recorded lineage | Export a checkpoint that `scripts/train.py` wrote. Each checkpoint records the lineage of the session that wrote it. |
-| The lineage records a dirty or unknown git tree | The session that wrote the checkpoint ran on uncommitted code. You cannot export it. Train again from a clean commit. |
+| The lineage records a dirty or unknown git tree | The session that wrote the checkpoint ran on uncommitted code. A run that resumed or warm-started from a checkpoint inherits that checkpoint's git state, so a source that was dirty or had no lineage gives the same refusal. `lineage.parent` in the checkpoint shows the source's lineage. You cannot export it. Train again from a clean commit, from scratch or from a clean checkpoint. |
 | The config differs from the recorded lineage | The checkpoint and its lineage do not match. Use a checkpoint from one unchanged run. |
 | The output directory is not empty | Choose an empty or new directory. |
 | The parent of the output directory does not exist | Create the parent directory. |

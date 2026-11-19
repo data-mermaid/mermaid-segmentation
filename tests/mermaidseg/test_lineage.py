@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import shutil
 import subprocess
 from pathlib import Path
@@ -10,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from mermaidseg import lineage
-from mermaidseg.lineage import collect_lineage, data_version
+from mermaidseg.lineage import collect_lineage, data_version, inherit_lineage
 
 
 def _collect(**overrides):
@@ -149,3 +150,43 @@ def test_data_version_lists_manifests_of_datasets_that_have_one():
         "coralnet.train": "m/train.parquet",
         "coralnet.val": "m/val.parquet",
     }
+
+
+@pytest.mark.parametrize(
+    ("own", "source", "expected"),
+    [
+        (False, {"git_dirty": False}, False),
+        (False, {"git_dirty": True}, True),
+        (True, {"git_dirty": False}, True),
+        (False, {"git_dirty": None}, None),
+        (None, {"git_dirty": False}, None),
+        (False, {}, None),
+        (False, None, None),
+        (True, None, True),
+        (None, {"git_dirty": True}, True),
+    ],
+)
+def test_inherit_lineage_combines_git_dirty_of_own_and_source(own, source, expected):
+    assert inherit_lineage({"git_dirty": own}, source)["git_dirty"] is expected
+
+
+def test_inherit_lineage_nests_the_source_and_keeps_the_own_fields_without_mutating():
+    own = {"git_dirty": False, "git_sha": "abc", "seed": 7, "resolved_config": {"a": 1}}
+    source = {"git_dirty": False, "git_sha": "old", "parent": {"git_dirty": True}}
+    own_before, source_before = copy.deepcopy(own), copy.deepcopy(source)
+
+    result = inherit_lineage(own, source)
+
+    assert result["parent"] == source_before
+    assert {k: result[k] for k in ("git_sha", "seed", "resolved_config")} == {
+        "git_sha": "abc",
+        "seed": 7,
+        "resolved_config": {"a": 1},
+    }
+    assert own == own_before
+    assert source == source_before
+
+
+def test_inherit_lineage_records_a_missing_source_as_a_null_parent():
+    result = inherit_lineage({"git_dirty": False}, None)
+    assert "parent" in result and result["parent"] is None

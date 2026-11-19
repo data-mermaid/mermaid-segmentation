@@ -116,7 +116,7 @@ uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
 Checkpoints go to `outputs/model_checkpoints/<run>/`. `--output-dir` changes `outputs`. The run writes two files there:
 
 - `config.yaml`: the resolved config, as a record of the settings the run used. Do not pass it back in as a run config.
-- `model.json`, written when the run starts: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version, resolved config, and the torch, transformers and peft versions).
+- `model.json`, written when the run starts: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version, resolved config, and the torch, transformers and peft versions). A resumed or warm-started run also records the source checkpoint's lineage under `parent`.
 
 The config flags (`--training-config`, `--model-config`, `--data-config`, `--concept-schema-config`, `--logger-config`) take a path relative to the repo root, or an absolute path. The defaults are in `configs/`. `--resolution` sets the train crop size and the model input size. Run `scripts/train.py --help` for resume (`--checkpoint`), init (`--init-weights`) and the other flags.
 

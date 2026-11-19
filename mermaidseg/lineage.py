@@ -98,3 +98,21 @@ def collect_lineage(*, resolved_config: dict, seed: int, data_version: dict) -> 
         "resolved_config": resolved_config,
         "versions": {name: version(name) for name in VERSIONED_PACKAGES},
     }
+
+
+def inherit_lineage(lineage: dict, source: dict | None) -> dict:
+    """Lineage of a session that started from a checkpoint whose lineage is ``source``.
+
+    ``source`` is None when the checkpoint has no lineage. The result is a new dict: ``source``
+    is stored verbatim under ``parent``, and ``git_dirty`` is True if either side is True, else
+    None when either side is unknown (including a missing ``source``), else False.
+    """
+    own_dirty = lineage.get("git_dirty")
+    source_dirty = None if source is None else source.get("git_dirty")
+    if own_dirty is True or source_dirty is True:
+        git_dirty = True
+    elif own_dirty is None or source_dirty is None:
+        git_dirty = None
+    else:
+        git_dirty = False
+    return {**lineage, "git_dirty": git_dirty, "parent": source}
