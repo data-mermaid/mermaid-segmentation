@@ -58,7 +58,7 @@ Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
 
 ### Check the build
 
-1. Read the summary that each step logs: the excluded sources from `build-annotations`, the count per `header_status` from `build-images`, and the resized, corrupted and failed counts from `resize`.
+1. Read the summary that each step logs: the excluded sources from `build-annotations`, the count per `header_status` from `build-images`, and the resized, oversized, corrupted and failed counts from `resize`.
 2. Check the exit code. Exit code 1 from `all` means at least one step reported failures. Every step still runs and writes its outputs.
 3. Confirm that `etl-outputs/coralnet/<run>/` in the bucket holds four files:
    - `coralnet_annotations_<run>.parquet`
@@ -151,7 +151,8 @@ uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
 | `build-images` reports `not_found` | The image object is not on S3. Run the scraper with `--force` to upload it, then rebuild. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
 | `build-images` reports `corrupt` | The object on S3 is bad. The scraper does not replace an existing image object, so `--force` does not repair it. The manifest drops the image. |
-| `resize` reports corrupted or failed images | Run the build again. `resize` retries every image that has no resized object. The manifest drops an image that needs a resize and has none. |
+| `resize` reports corrupted or failed images | Run the build again. `resize` retries every image that has no resized object, so a rerun helps only if the cause was transient. The manifest drops an image that needs a resize and has none. |
+| `resize` reports oversized images | The original exceeds twice Pillow's `MAX_IMAGE_PIXELS`, the decompression-bomb error threshold. A rerun skips the image again and `resize` exits 1 again. The manifest drops the image. |
 
 `--force` is all-or-nothing: it reprocesses every source, not only the failed one. After a scrape, always rebuild under a new version tag.
 
