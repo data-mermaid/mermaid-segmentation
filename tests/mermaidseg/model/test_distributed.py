@@ -18,7 +18,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from torch import nn
-from torch.nn.parallel import DistributedDataParallel
+from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
 from torch.utils.data import (
     BatchSampler,
     DataLoader,
@@ -95,21 +95,7 @@ class _TinyLoss(nn.Module):
             concept_logits, target_concepts
         )
         loss = class_loss + concept_loss
-        return loss, {
-            "concepts": float(concept_loss.detach()),
-            "classification": float(class_loss.detach()),
-        }
-
-
-class _LinearRank(nn.Module):
-    """One trainable weight so a skipped DDP backward still has a hook to fire."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.scale = nn.Parameter(torch.ones(1))
-
-    def forward(self, values: torch.Tensor) -> torch.Tensor:
-        return (self.scale * values).mean()
+        return loss, {"concepts": concept_loss.detach(), "classification": class_loss.detach()}
 
 
 def _lookups(seed: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
@@ -148,6 +134,18 @@ def test_init_distributed_rejects_mismatched_world_size_before_any_group_starts(
     monkeypatch.setattr(dist, "init_process_group", lambda *a, **k: started.append(k))
     with pytest.raises(RuntimeError, match="4 ranks"):
         init_distributed_from_env(expected_world_size=4, nccl_timeout_min=30)
+    assert started == []
+
+
+def test_init_distributed_requires_cuda_for_a_multi_rank_job(monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    started: list[object] = []
+    monkeypatch.setattr(dist, "init_process_group", lambda *a, **k: started.append(k))
+
+    with pytest.raises(RuntimeError, match="requires CUDA"):
+        init_distributed_from_env(expected_world_size=2, nccl_timeout_min=30)
+
     assert started == []
 
 
@@ -227,6 +225,24 @@ def test_sharded_sampler_shuffles_from_the_broadcast_state():
     assert reconstructed == expected
 
 
+@pytest.mark.parametrize("rank", [-1, _WORLD], ids=["negative", "equal_to_world_size"])
+def test_sharded_sampler_rejects_a_rank_outside_the_world(rank):
+    with pytest.raises(ValueError, match=r"rank .* is outside 0\.\.3"):
+        ShardedBatchSampler(
+            _IndexDataset(24), 12, rank, _WORLD, generator=torch.Generator().manual_seed(0)
+        )
+
+
+def test_sharded_sampler_length_is_the_number_of_whole_global_batches():
+    sampler = ShardedBatchSampler(
+        _IndexDataset(100), 12, 1, _WORLD, generator=torch.Generator().manual_seed(0)
+    )
+
+    # 100 images make 8 whole batches of 12; the 4 left over are dropped.
+    assert len(sampler) == 8
+    assert [len(batch) for batch in sampler] == [_PER_RANK] * 8
+
+
 def _broadcast_generator_worker(rank: int, world_size: int, init_method: str, queue) -> None:
     init_gloo(rank, world_size, init_method)
     try:
@@ -273,6 +289,32 @@ def test_on_main_process_runs_on_one_rank():
     assert counts == [1, 0, 0, 0]
 
 
+def _mismatched_keys_worker(rank: int, world_size: int, init_method: str, queue) -> None:
+    init_gloo(rank, world_size, init_method)
+    try:
+        values = {"classification": 1.0, "concepts": 2.0 if rank == 0 else 3.0}
+        if rank == 1:
+            values["extra"] = 4.0
+        try:
+            reduce_components(values)
+        except RuntimeError as error:
+            queue.put((rank, str(error)))
+        else:
+            queue.put((rank, "reduced"))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_reduce_components_raises_on_every_rank_when_the_keys_differ():
+    messages = spawn_gloo(_mismatched_keys_worker, 2)
+
+    assert messages == [
+        "ranks logged different loss components; this rank has ['classification', 'concepts'].",
+        "ranks logged different loss components; "
+        "this rank has ['classification', 'concepts', 'extra'].",
+    ]
+
+
 def test_reduce_components_is_the_mean_over_ranks():
     per_rank = [
         {f"k{i}": float(rank + 1 + i) for i in range(3)} | {"shared": float(rank)}
@@ -284,41 +326,116 @@ def test_reduce_components_is_the_mean_over_ranks():
         assert payload == pytest.approx(expected)
 
 
-def _finite_then_step_worker(rank: int, world_size: int, init_method: str, queue) -> None:
+def _all_ranks_finite_worker(rank: int, world_size: int, init_method: str, queue) -> None:
     init_gloo(rank, world_size, init_method)
     try:
-        torch.manual_seed(0)
-        module = DistributedDataParallel(
-            _LinearRank(),
-            device_ids=None,
-            broadcast_buffers=False,
+        finite_everywhere = torch.tensor([1.0, 2.0])
+        bad_on_rank_one = torch.tensor([1.0, float("inf") if rank == 1 else 2.0])
+        queue.put(
+            (
+                rank,
+                {
+                    "clean": all_ranks_finite(finite_everywhere),
+                    "one_rank_bad": all_ranks_finite(bad_on_rank_one),
+                },
+            )
         )
-        values = torch.tensor([float(rank + 1), 2.0, 3.0])
-        loss = module(values)
-        if rank == 1:
-            loss = loss * float("inf")
-        finite = all_ranks_finite(loss)
-        if not finite:
-            params = [param for param in module.module.parameters() if param.requires_grad]
-            sum(param.sum() * 0.0 for param in params).backward()
-            module.zero_grad()
-        else:
-            raise AssertionError("expected a non-finite shard")
-
-        next_loss = module(values)
-        next_loss.backward()
-        scale = module.module.scale
-        assert scale.grad is not None
-        queue.put((rank, {"finite": finite, "grad": float(scale.grad), "next": float(next_loss)}))
     finally:
         dist.destroy_process_group()
 
 
-def test_non_finite_shard_aborts_the_window_on_every_rank():
-    results = spawn_gloo(_finite_then_step_worker, _WORLD)
-    assert all(payload["finite"] is False for payload in results)
-    grads = [payload["grad"] for payload in results]
-    assert grads == pytest.approx([grads[0]] * _WORLD)
+def test_a_non_finite_loss_on_one_rank_reads_as_non_finite_on_every_rank():
+    results = spawn_gloo(_all_ranks_finite_worker, _WORLD)
+
+    assert results == [{"clean": True, "one_rank_bad": False}] * _WORLD
+
+
+def _tiny_meta(state: dict[str, torch.Tensor], grad_accum_steps: int, updates: int):
+    """A distributed MetaModel over ``_TinyCBM`` (weights ``state``) and ``_TinyLoss``.
+
+    Clip 0.5 and AdamW at lr 1e-3 with no weight decay; the schedule holds the lr constant.
+    """
+    cfg = cbm_test_config()
+    cfg.training.distributed = True
+    cfg.training.world_size = _WORLD
+    cfg.training.grad_accum_steps = grad_accum_steps
+    cfg.training.iterations_per_train_epoch = updates
+    cfg.training.max_grad_norm = 0.5
+    cfg.training.optimizer.dpt_lr = 1e-3
+    target, concepts = _lookups()
+    model = _TinyCBM()
+    model.load_state_dict(state)
+    meta = meta_module.MetaModel(
+        run_name="ddp-window",
+        num_classes=_NUM_CLASSES,
+        num_concepts=_NUM_CONCEPTS,
+        model_kwargs=cfg.model,
+        training_kwargs=cfg.training,
+        device="cpu",
+        source_to_target_lookup=target,
+        source_to_concepts_lookup=concepts,
+        concept_value2id=cast("dict[str, dict[str, list[int]]]", CBM_CONCEPT_VALUE2ID),
+        model=model,
+    )
+    meta.loss = _TinyLoss()
+    return meta
+
+
+def _rank_microbatches(
+    rank: int, images: torch.Tensor, source_labels: torch.Tensor, micros: range
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """This rank's contiguous shard of each global microbatch in ``micros``."""
+    shards = []
+    for micro in micros:
+        start = micro * _GLOBAL_BATCH + rank * _PER_RANK
+        shards.append((images[start : start + _PER_RANK], source_labels[start : start + _PER_RANK]))
+    return shards
+
+
+def _record_step_gradients(meta) -> dict[str, Any]:
+    """Capture the averaged gradients and their norm at the moment ``meta`` applies its step."""
+    captured: dict[str, Any] = {}
+    real = meta._apply_accumulated_step
+
+    def _capture() -> bool:
+        trainable = {n: p for n, p in meta.model.named_parameters() if p.grad is not None}
+        captured["grads"] = {n: p.grad.detach().clone().numpy() for n, p in trainable.items()}
+        norms = torch.stack([p.grad.detach().norm() for p in trainable.values()])
+        captured["norm"] = float(norms.norm())
+        return real()
+
+    meta._apply_accumulated_step = _capture
+    return captured
+
+
+def _record_forwards_and_reductions(meta) -> list[str]:
+    """Event log of ``"forward"`` per microbatch and ``"reduce"`` per DDP gradient bucket reduced."""
+    events: list[str] = []
+    ddp = meta._get_ddp_step()
+
+    def _hook(_state, bucket):
+        events.append("reduce")
+        return default_hooks.allreduce_hook(None, bucket)
+
+    ddp.register_comm_hook(None, _hook)
+    real = meta.batch_predict_loss
+
+    def _forward(*args, **kwargs):
+        events.append("forward")
+        return real(*args, **kwargs)
+
+    meta.batch_predict_loss = _forward
+    return events
+
+
+def _trainable_weights(meta) -> dict[str, Any]:
+    # numpy, not tensors: queued tensors go through shared memory, which can be gone by the
+    # time the parent reads them once this worker exits (EOFError in queue.get).
+    return {
+        name: param.detach().clone().numpy()
+        for name, param in meta.model.named_parameters()
+        if param.requires_grad
+    }
 
 
 def _ddp_window_worker(
@@ -332,74 +449,38 @@ def _ddp_window_worker(
 ) -> None:
     init_gloo(rank, world_size, init_method)
     try:
-        target, concepts = _lookups()
-        step = ShardStep(
-            _TinyCBM(),
-            _TinyLoss(),
-            None,
-            target,
-            concepts,
-            False,
-            torch.bfloat16,
+        meta = _tiny_meta(state, grad_accum_steps=_ACCUM, updates=1)
+        captured = _record_step_gradients(meta)
+        events = _record_forwards_and_reductions(meta)
+        batches = _rank_microbatches(rank, images, source_labels, range(_ACCUM))
+        meta.train_epoch(batches, epoch=0)
+        queue.put(
+            (
+                rank,
+                {
+                    "events": events,
+                    "grads": captured["grads"],
+                    "clip": captured["norm"],
+                    "weights": _trainable_weights(meta),
+                },
+            )
         )
-        step.load_state_dict(state)
-        ddp = DistributedDataParallel(
-            DDPLossStep(step),
-            device_ids=None,
-            broadcast_buffers=False,
-        )
-        for micro in range(_ACCUM):
-            start = micro * _GLOBAL_BATCH + rank * _PER_RANK
-            shard_images = images[start : start + _PER_RANK]
-            shard_labels = source_labels[start : start + _PER_RANK]
-            sync = micro == _ACCUM - 1
-            context = ddp.no_sync() if not sync else torch.enable_grad()
-            with context:
-                loss = ddp(shard_images, shard_labels, return_maps=micro == 0)
-                (loss / _ACCUM).backward()
-        inner = ddp.module.step
-        grads = {
-            name: param.grad.detach().clone()
-            for name, param in inner.named_parameters()
-            if param.requires_grad
-        }
-        clip = torch.nn.utils.clip_grad_norm_(
-            [param for param in inner.parameters() if param.requires_grad], 0.5
-        )
-        optimizer = torch.optim.AdamW(
-            [param for param in inner.parameters() if param.requires_grad],
-            lr=1e-3,
-        )
-        optimizer.step()
-        weights = {
-            name: param.detach().clone()
-            for name, param in inner.named_parameters()
-            if param.requires_grad
-        }
-        # numpy, not tensors: queued tensors go through shared memory, which can be gone by the
-        # time the parent reads them once this worker exits (EOFError in queue.get).
-        grads = {name: tensor.cpu().numpy() for name, tensor in grads.items()}
-        weights = {name: tensor.cpu().numpy() for name, tensor in weights.items()}
-        queue.put((rank, {"grads": grads, "weights": weights, "clip": float(clip)}))
     finally:
         dist.destroy_process_group()
 
 
 def _serial_window(
-    state: dict[str, torch.Tensor], images: torch.Tensor, source_labels: torch.Tensor
+    state: dict[str, torch.Tensor],
+    images: torch.Tensor,
+    source_labels: torch.Tensor,
+    micros: range,
 ):
+    """One optimizer update on a single process: the mean over ranks' shard losses per micro."""
     target, concepts = _lookups()
-    step = ShardStep(
-        _TinyCBM(),
-        _TinyLoss(),
-        None,
-        target,
-        concepts,
-        False,
-        torch.bfloat16,
-    )
-    step.load_state_dict(state)
-    for micro in range(_ACCUM):
+    model = _TinyCBM()
+    model.load_state_dict(state)
+    step = ShardStep(model, _TinyLoss(), None, target, concepts, False, torch.bfloat16)
+    for micro in micros:
         shard_losses = []
         for rank in range(_WORLD):
             start = micro * _GLOBAL_BATCH + rank * _PER_RANK
@@ -409,20 +490,15 @@ def _serial_window(
                 return_maps=False,
             )[0]
             shard_losses.append(loss)
-        (torch.stack(shard_losses).mean() / _ACCUM).backward()
+        (torch.stack(shard_losses).mean() / len(micros)).backward()
+    trainable = [param for param in step.parameters() if param.requires_grad]
     grads = {
         name: cast(torch.Tensor, param.grad).detach().clone()
         for name, param in step.named_parameters()
         if param.requires_grad
     }
-    clip = torch.nn.utils.clip_grad_norm_(
-        [param for param in step.parameters() if param.requires_grad], 0.5
-    )
-    optimizer = torch.optim.AdamW(
-        [param for param in step.parameters() if param.requires_grad],
-        lr=1e-3,
-    )
-    optimizer.step()
+    clip = torch.nn.utils.clip_grad_norm_(trainable, 0.5)
+    torch.optim.AdamW(trainable, lr=1e-3, weight_decay=0.0).step()
     weights = {
         name: param.detach().clone()
         for name, param in step.named_parameters()
@@ -431,32 +507,99 @@ def _serial_window(
     return grads, weights, float(clip)
 
 
-def test_replica_window_matches_serial_microbatches():
+def _tiny_state() -> dict[str, torch.Tensor]:
     torch.manual_seed(0)
-    target, concepts = _lookups()
-    reference = ShardStep(
-        _TinyCBM(),
-        _TinyLoss(),
-        None,
-        target,
-        concepts,
-        False,
-        torch.bfloat16,
-    )
-    state = {name: tensor.detach().clone() for name, tensor in reference.state_dict().items()}
+    return {name: t.detach().clone() for name, t in _TinyCBM().state_dict().items()}
+
+
+def _assert_matches_serial(payload, serial_grads, serial_weights, serial_clip) -> None:
+    assert payload["clip"] == pytest.approx(serial_clip, rel=1e-5, abs=1e-6)
+    for name, grad in serial_grads.items():
+        # The serial reference names parameters through ShardStep ("model." prefix).
+        torch.testing.assert_close(
+            torch.from_numpy(payload["grads"][name.removeprefix("model.")]),
+            grad,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+    for name, weight in serial_weights.items():
+        torch.testing.assert_close(
+            torch.from_numpy(payload["weights"][name.removeprefix("model.")]),
+            weight,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+
+def test_train_epoch_window_matches_serial_microbatches():
+    """Three microbatches per update, synced only on the last, equal the serial mean-shard step."""
+    state = _tiny_state()
     images, source_labels = _batch()
-    serial_grads, serial_weights, serial_clip = _serial_window(state, images, source_labels)
+    serial = _serial_window(state, images, source_labels, range(_ACCUM))
+
     payloads = spawn_gloo(_ddp_window_worker, _WORLD, extra=(state, images, source_labels))
+
     for payload in payloads:
-        assert payload["clip"] == pytest.approx(serial_clip, rel=1e-5, abs=1e-6)
-        for name, grad in serial_grads.items():
-            torch.testing.assert_close(
-                torch.from_numpy(payload["grads"][name]), grad, rtol=1e-5, atol=1e-6
+        _assert_matches_serial(payload, *serial)
+        # Gradients are all-reduced once, in the last microbatch's backward.
+        assert payload["events"] == ["forward"] * _ACCUM + ["reduce"]
+
+
+def _skipped_window_worker(
+    rank: int,
+    world_size: int,
+    init_method: str,
+    queue,
+    state: dict[str, torch.Tensor],
+    images: torch.Tensor,
+    source_labels: torch.Tensor,
+) -> None:
+    init_gloo(rank, world_size, init_method)
+    try:
+        meta = _tiny_meta(state, grad_accum_steps=2, updates=2)
+        captured = _record_step_gradients(meta)
+        events = _record_forwards_and_reductions(meta)
+        micro0, micro1, micro2, micro3 = _rank_microbatches(rank, images, source_labels, range(4))
+        if rank == 1:
+            micro1 = (torch.full_like(micro1[0], float("inf")), micro1[1])
+        try:
+            meta.train_epoch([micro0, micro1, micro2, micro3], epoch=0)
+        except RuntimeError as error:
+            queue.put((rank, {"error": str(error)}))
+            return
+        queue.put(
+            (
+                rank,
+                {
+                    "events": events,
+                    "global_step": meta.global_step,
+                    "grads": captured["grads"],
+                    "clip": captured["norm"],
+                    "weights": _trainable_weights(meta),
+                },
             )
-        for name, weight in serial_weights.items():
-            torch.testing.assert_close(
-                torch.from_numpy(payload["weights"][name]), weight, rtol=1e-5, atol=1e-6
-            )
+        )
+    finally:
+        dist.destroy_process_group()
+
+
+def test_non_finite_shard_skips_the_window_on_every_rank_and_the_next_window_still_syncs():
+    """Rank 1's second shard of window one is non-finite: every rank drops that window.
+
+    The next window trains on microbatches 2 and 3. The dropped window still completes its
+    reduction (``_finish_skipped_reduction``), so the next window reduces only on its last backward.
+    """
+    state = _tiny_state()
+    images, source_labels = _batch(batch_size=4 * _GLOBAL_BATCH)
+    serial = _serial_window(state, images, source_labels, range(2, 4))
+
+    payloads = spawn_gloo(_skipped_window_worker, _WORLD, extra=(state, images, source_labels))
+
+    assert [payload.get("error") for payload in payloads] == [None] * _WORLD
+    assert [payload["global_step"] for payload in payloads] == [1] * _WORLD
+    for payload in payloads:
+        _assert_matches_serial(payload, *serial)
+        assert payload["events"] == ["forward", "forward", "reduce", "forward", "forward", "reduce"]
 
 
 def test_ddp_loss_step_returns_only_the_scalar_loss():

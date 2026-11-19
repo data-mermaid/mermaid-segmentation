@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
+import pytest
 import torch
 
 import mermaidseg.model.models as models_module
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.model.models import ConceptBottleneckDPTLoRADINOv3, DPTHead
 from tests.conftest import CBM_CONCEPT_VALUE2ID, CBM_NUM_CONCEPTS, IMAGE_SIZE
 
@@ -160,3 +163,133 @@ def test_dpt_head_rejects_a_grid_that_does_not_match_the_tokens():
         assert "does not match" in str(exc)
     else:
         raise AssertionError("expected a grid/token mismatch")
+
+
+@pytest.mark.parametrize(
+    ("grid", "num_patch_tokens", "expected"),
+    [
+        pytest.param((8, 8), 64, (8, 8), id="configured_grid_matches"),
+        pytest.param((8, 8), 16, (4, 4), id="square_at_another_size"),
+        pytest.param((4, 8), 50, (5, 10), id="keeps_the_two_to_one_aspect"),
+    ],
+)
+def test_infer_token_grid_falls_back_to_the_configured_aspect_ratio(
+    grid, num_patch_tokens, expected
+):
+    height, width = grid
+    head = _small_head(token_height=height, token_width=width)
+
+    assert head._infer_token_grid(num_patch_tokens) == expected
+
+
+def test_infer_token_grid_rejects_a_token_count_the_aspect_cannot_tile():
+    head = _small_head()
+
+    # 7 square-aspect tokens round to 3 rows, which leaves 7 // 3 = 2 columns: 6 != 7.
+    with pytest.raises(ValueError, match="Cannot reshape 7 patch tokens"):
+        head._infer_token_grid(7)
+
+
+def test_dpt_head_without_a_grid_infers_it_from_the_token_count():
+    head = _small_head().eval()
+    tokens = torch.randn(1, 1 + 16, 16)
+    hidden = [tokens] * 4
+
+    inferred = head(hidden)
+    explicit = head(hidden, token_height=4, token_width=4)
+
+    assert torch.equal(inferred, explicit)
+
+
+def test_dpt_head_rejects_the_wrong_number_of_hidden_states():
+    head = _small_head()
+    tokens = torch.randn(1, 1 + 16, 16)
+
+    with pytest.raises(ValueError, match="expects 4 hidden states, got 3"):
+        head([tokens] * 3, token_height=4, token_width=4)
+
+
+@pytest.mark.parametrize(
+    ("images_hw", "expected"),
+    [((56, 56), (4, 4)), ((28, 84), (2, 6))],
+    ids=["square", "wide"],
+)
+def test_input_token_grid_divides_each_side_by_the_patch_size(
+    mock_dinov3_encoder, images_hw, expected
+):
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(mock_dinov3_encoder(models_module)))
+
+    assert model._input_token_grid(torch.zeros(1, 3, *images_hw)) == expected
+
+
+@pytest.mark.parametrize("images_hw", [(56, 60), (57, 56)], ids=["width", "height"])
+def test_input_token_grid_rejects_a_side_not_divisible_by_the_patch_size(
+    mock_dinov3_encoder, images_hw
+):
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(mock_dinov3_encoder(models_module)))
+
+    with pytest.raises(ValueError, match="not divisible by patch size 14"):
+        model._input_token_grid(torch.zeros(1, 3, *images_hw))
+
+
+@pytest.mark.parametrize(
+    ("neck_sizes", "factors", "expected"),
+    [
+        pytest.param([8, 8, 8, 8], [4, 2, 1, 0.5], [1, 2, 3, 4], id="four_stages_of_four_layers"),
+        pytest.param([8, 8], [4, 2], [2, 4], id="two_stages"),
+    ],
+)
+def test_default_out_indices_are_evenly_spaced_over_the_encoder_depth(
+    mock_dinov3_encoder, neck_sizes, factors, expected
+):
+    model = ConceptBottleneckDPTLoRADINOv3(
+        **_model_kwargs(
+            mock_dinov3_encoder(models_module),
+            neck_hidden_sizes=neck_sizes,
+            reassemble_factors=factors,
+        )
+    )
+
+    assert model.out_indices == expected
+
+
+def test_explicit_out_indices_are_kept_and_must_match_the_stage_count(mock_dinov3_encoder):
+    encoder = mock_dinov3_encoder(models_module)
+
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(encoder, out_indices=[4, 3, 2, 1]))
+    assert model.out_indices == [4, 3, 2, 1]
+
+    with pytest.raises(ValueError, match=r"same length \(2 vs 4\)"):
+        ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(encoder, out_indices=[1, 3]))
+
+
+def test_concept_activation_is_a_softmax_per_rank_and_a_sigmoid_on_the_binary_tail(
+    mock_dinov3_encoder,
+):
+    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(mock_dinov3_encoder(models_module)))
+    # Rank i scores its two channels (ln(i + 2), 0), so its softmax is ((i + 2) / (i + 3), 1 / (i + 3)).
+    ranks = [[math.log(i + 2), 0.0] for i in range(len(TAXONOMIC_CONCEPTS))]
+    logits = torch.tensor([value for rank in ranks for value in rank] + [math.log(3.0)])
+
+    activated = model.concept_outputs_activation(logits.reshape(1, -1, 1, 1))
+
+    expected = [p for i in range(6) for p in ((i + 2) / (i + 3), 1 / (i + 3))] + [0.75]
+    assert activated.flatten().tolist() == pytest.approx(expected, rel=1e-6)
+
+
+@pytest.mark.parametrize("detach", [True, False], ids=["detached", "attached"])
+def test_detach_concepts_blocks_the_class_loss_from_the_concept_head(mock_dinov3_encoder, detach):
+    model = ConceptBottleneckDPTLoRADINOv3(
+        **_model_kwargs(mock_dinov3_encoder(models_module), detach_concepts=detach)
+    )
+
+    out = model(torch.randn(1, 3, *IMAGE_SIZE))
+    out.logits.sum().backward()
+
+    assert model.concept_classifier.weight.grad is not None
+    concept_grad = model.concept_proj.weight.grad
+    if detach:
+        assert concept_grad is None
+    else:
+        assert concept_grad is not None
+        assert concept_grad.abs().sum() > 0

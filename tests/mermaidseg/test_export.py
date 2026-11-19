@@ -206,6 +206,50 @@ def test_export_refuses_a_checkpoint_whose_config_differs_from_its_lineage_namin
     assert not (tmp_path / "out").exists()
 
 
+@pytest.mark.parametrize(
+    ("config", "checkpoint_lineage"),
+    [
+        pytest.param(["not", "a", "mapping"], None, id="checkpoint-config-is-not-a-mapping"),
+        pytest.param(None, {"git_dirty": False}, id="lineage-has-no-resolved-config"),
+        pytest.param(
+            None,
+            {"git_dirty": False, "resolved_config": "not a mapping"},
+            id="lineage-resolved-config-is-not-a-mapping",
+        ),
+    ],
+)
+def test_export_refuses_configs_that_are_not_both_mappings_without_naming_a_key(
+    tmp_path, config, checkpoint_lineage
+):
+    checkpoint, _ = _tiny.write_run(
+        tmp_path / "run", config=config, checkpoint_lineage=checkpoint_lineage
+    )
+    with pytest.raises(ValueError, match="does not match its lineage's resolved_config") as raised:
+        export_bundle(checkpoint, tmp_path / "out")
+    assert "at key" not in str(raised.value)
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("key", ["config", "epoch", "global_step"])
+def test_export_of_a_checkpoint_missing_a_required_key_names_the_key_and_its_path(tmp_path, key):
+    checkpoint, _ = _tiny.write_run(tmp_path / "run")
+    contents = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    del contents[key]
+    torch.save(contents, checkpoint)
+    with pytest.raises(RuntimeError, match=key) as raised:
+        export_bundle(checkpoint, tmp_path / "out")
+    assert str(checkpoint) in str(raised.value)
+    assert not (tmp_path / "out").exists()
+
+
+def test_export_refuses_an_output_path_that_is_an_existing_file(run, tmp_path):
+    out = tmp_path / "out"
+    out.write_text("not a directory")
+    with pytest.raises(ValueError, match="not empty"):
+        export_bundle(run[0], out)
+    assert out.read_text() == "not a directory"
+
+
 def test_export_without_a_sidecar_raises_naming_its_path(run, tmp_path):
     lone = tmp_path / "lone"
     lone.mkdir()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -190,8 +191,7 @@ def tiny_loader(tiny_batch):
     return DataLoader(dataset, batch_size=2, num_workers=0)
 
 
-@pytest.fixture()
-def mock_dinov3_encoder(monkeypatch):
+def dinov3_encoder_mocker(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], nn.Module]:
     """AutoModel.from_pretrained mock returning a tiny encoder with a LoRA target.
 
     Returns a factory that patches AutoModel on a target module. Uses hidden_size=16,
@@ -238,6 +238,11 @@ def mock_dinov3_encoder(monkeypatch):
         return mock_encoder
 
     return _apply_mock
+
+
+@pytest.fixture()
+def mock_dinov3_encoder(monkeypatch):
+    return dinov3_encoder_mocker(monkeypatch)
 
 
 @pytest.fixture()
