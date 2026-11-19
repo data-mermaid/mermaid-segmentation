@@ -243,37 +243,3 @@ The project uses two formats.
 ### Concept Bottleneck Models
 
 Non-taxonomic concept metrics in `mermaidseg/model/eval.py` are multiclass `Accuracy` with a hard-coded `num_classes=3` and `ignore_index=0`: class 0 is excluded from the metric, and the other two classes are the concept's two states. Taxonomic concepts use `Accuracy` with a per-concept class count derived from `concept_value2id`.
-
-## DSLP Issue Workflow
-
-This project follows the [Data Science Lifecycle Process (DSLP)](https://github.com/dslp/dslp) for managing data science work. We use structured issue templates to track different stages of the workflow.
-
-```mermaid
-flowchart TD
-    Ask["Ask\n(Problem Statement)"]
-    DataAcq["Data Acquisition"]
-    DataCreate["Data Create"]
-    Explore["Explore"]
-    Experiment["Experiment"]
-    Model["Model"]
-
-    Ask --> DataAcq
-    Ask --> DataCreate
-    DataAcq --> Explore
-    DataCreate --> Explore
-    Explore --> Experiment
-    Experiment -->|"successful"| Model
-    Experiment -->|"iterate"| Experiment
-```
-
-### Issue Types
-
-When creating a new issue, select the appropriate template:
-
-- **Ask**: Define the problem statement and proposed solution. This is the starting point for any data science initiative.
-- **Data Acquisition**: Request access to or retrieval of an existing dataset needed for the project.
-- **Data Create**: Document the creation of a new derived dataset from existing sources.
-- **Explore**: Capture data exploration efforts and discoveries that build understanding.
-- **Experiment**: Track modeling experiments and approaches for solving the problem.
-- **Model**: Productionalize a successful experiment and prepare it for deployment.
-- **Bug Report**: Report bugs, errors, or unexpected behavior in the codebase.
