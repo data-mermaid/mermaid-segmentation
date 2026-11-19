@@ -25,6 +25,10 @@ def test_parse_total_images_from_fixture():
     assert parse_total_images_from_source_html(html) == 1234
 
 
+def test_parse_total_images_is_zero_when_page_has_no_image_status_table():
+    assert parse_total_images_from_source_html("<html><body><h1>Source</h1></body></html>") == 0
+
+
 def test_parse_image_status_fixture_only_total_missing_confirmed():
     html = _fixture("source_ok.html")
     c = parse_image_status_counts(html)

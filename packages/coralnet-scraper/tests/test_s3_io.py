@@ -62,3 +62,15 @@ def test_read_csv_s3_propagates_other_client_errors():
 )
 def test_object_key_helpers(func, args, expected):
     assert func(*args) == expected
+
+
+@pytest.mark.parametrize(
+    ("base_prefix", "expected"),
+    [
+        ("/coralnet-public-images/", "coralnet-public-images/s7/"),
+        ("a/b//", "a/b/s7/"),
+        ("plain", "plain/s7/"),
+    ],
+)
+def test_source_prefix_strips_surrounding_slashes_from_base_prefix(base_prefix, expected):
+    assert s3_io.source_prefix(base_prefix, 7) == expected

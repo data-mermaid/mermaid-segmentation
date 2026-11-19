@@ -19,7 +19,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from .config import DEFAULT_WORKERS, RESIZE_THRESHOLD
-from .inspect import ImageInspection, IssueType, inspect_image
+from .inspect import ImageInspection, inspect_image
 
 logger = logging.getLogger(__name__)
 
@@ -167,36 +167,23 @@ def _validate_and_download(
     """Download an image and inspect it.
 
     Returns:
-        ``(image_bytes, inspection)``; ``image_bytes`` is None when the download or the
-        inspection failed.
+        ``(image_bytes, inspection)``; ``image_bytes`` is None when the inspection failed.
+
+    Raises:
+        Exception: Any S3 download error propagates so the caller reports a retryable failure.
     """
-    try:
-        response = s3_client.get_object(Bucket=bucket, Key=original_key)
-        image_bytes = io.BytesIO(response["Body"].read())
-        inspection = inspect_image(image_bytes)
-        if not inspection.is_valid:
-            logger.warning(
-                "Validation failed for %s/%s: %s — %s",
-                source_id,
-                image_id,
-                inspection.issue_type.value,
-                inspection.error_message,
-            )
-        return (image_bytes if inspection.is_valid else None, inspection)
-    except Exception as e:
-        logger.warning("Failed to download %s/%s: %s", source_id, image_id, e)
-        return (
-            None,
-            ImageInspection(
-                is_valid=False,
-                issue_type=IssueType.UNKNOWN,
-                format=None,
-                channels=None,
-                width=None,
-                height=None,
-                error_message=f"Download failed: {type(e).__name__}",
-            ),
+    response = s3_client.get_object(Bucket=bucket, Key=original_key)
+    image_bytes = io.BytesIO(response["Body"].read())
+    inspection = inspect_image(image_bytes)
+    if not inspection.is_valid:
+        logger.warning(
+            "Validation failed for %s/%s: %s — %s",
+            source_id,
+            image_id,
+            inspection.issue_type.value,
+            inspection.error_message,
         )
+    return (image_bytes if inspection.is_valid else None, inspection)
 
 
 def _result_row(
@@ -233,7 +220,8 @@ def resize_and_upload_image(
 
     Returns:
         A result row (see :func:`_result_row`) with status ``completed``, ``skipped`` (with a
-        ``corrupted_<issue>`` skip reason) or ``failed``.
+        ``corrupted_<issue>`` skip reason, for an image that fails inspection) or ``failed`` (for a
+        download, resize or upload error, which is retryable).
     """
     source_id = todo_item["source_id"]
     image_id = todo_item["image_id"]

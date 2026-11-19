@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import threading
+
 import pandas as pd
 import pyarrow.parquet as pq
+import pytest
 from PIL import Image
 
+from coralnet_dataset import images
 from coralnet_dataset.images import build_images
 from coralnet_dataset.io import write_parquet_deterministic
 from coralnet_dataset.schemas import (
@@ -127,3 +131,64 @@ def test_build_images_sequential_path_records_worker_exception(
     assert pd.isna(by_id.loc["bomb", "height"])
     assert by_id.loc["good", "header_status"] == "ok"
     assert (by_id.loc["good", "width"], by_id.loc["good", "height"]) == (1024, 768)
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "longest_edge", "needs_resize"),
+    [
+        (2048, 1536, 2048, False),
+        (2049, 1536, 2049, True),
+        (1536, 2048, 2048, False),
+        (1536, 2049, 2049, True),
+        (1000, 4000, 4000, True),
+    ],
+    ids=["landscape-at-2048", "landscape-2049", "portrait-at-2048", "portrait-2049", "tall"],
+)
+def test_build_images_longest_edge_and_resize_boundary(
+    fake_s3, make_jpeg, width, height, longest_edge, needs_resize
+):
+    fake_s3.put("b", "p/s1/images/img.jpg", make_jpeg(width, height))
+    ann_df = pd.DataFrame({"source_id": [1], "image_id": ["img"]})
+
+    img_df = build_images(ann_df, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
+
+    row = img_df.iloc[0]
+    assert (row["width"], row["height"]) == (width, height)
+    assert row["longest_edge"] == longest_edge
+    assert bool(row["needs_resize"]) is needs_resize
+
+
+class _ThreadRecordingS3:
+    """Wraps a FakeS3, records the calling thread and fails for keys ending in ``bomb.jpg``."""
+
+    def __init__(self, fake_s3):
+        self._fake = fake_s3
+        self.thread_ids: set[int] = set()
+
+    def get_object(self, *, Bucket, Key, Range=None):
+        self.thread_ids.add(threading.get_ident())
+        if Key.endswith("bomb.jpg"):
+            raise Image.DecompressionBombError("too big")
+        return self._fake.get_object(Bucket=Bucket, Key=Key, Range=Range)
+
+
+def test_build_images_threaded_path_records_worker_exception(fake_s3, make_jpeg, monkeypatch):
+    ids = ["a", "b", "bomb", "c"]
+    for image_id in ids:
+        fake_s3.put("b", f"p/s1/images/{image_id}.jpg", make_jpeg(1024, 768))
+    client = _ThreadRecordingS3(fake_s3)
+    monkeypatch.setattr(images, "_get_thread_client", lambda: client)
+    ann_df = pd.DataFrame({"source_id": [1] * 4, "image_id": ids})
+
+    img_df = build_images(ann_df, bucket="b", prefix="p", workers=3)
+
+    assert threading.get_ident() not in client.thread_ids
+    assert img_df["image_id"].tolist() == ["a", "b", "bomb", "c"]
+    assert img_df["header_status"].tolist() == ["ok", "ok", "worker_exception", "ok"]
+    assert img_df["error_message"].tolist() == [
+        pd.NA,
+        pd.NA,
+        "DecompressionBombError: too big",
+        pd.NA,
+    ]
+    assert img_df["width"].tolist() == [1024, 1024, pd.NA, 1024]

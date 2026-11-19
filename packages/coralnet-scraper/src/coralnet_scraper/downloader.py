@@ -325,7 +325,7 @@ class CoralNetDownloader:
             logger.exception("Permission check failed for source %s: %s", source_id, e)
             return False
 
-    _META_KEYS = ("x", "y", "nimages", "traintime", "date", "pk")
+    _META_KEYS = ("x", "y", "nimages", "date", "traintime", "pk")
     _META_COLS = ("Classifier nbr", "Accuracy", "Trained on", "Date", "Traintime", "Global id")
 
     def download_metadata(

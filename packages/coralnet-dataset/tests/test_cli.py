@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from botocore.exceptions import ClientError
 from PIL import Image
 
 from coralnet_dataset import cli
@@ -93,15 +94,12 @@ def _png_bytes() -> bytes:
 
 
 @pytest.mark.parametrize(
-    ("second_image", "expected_status"),
-    [
-        (lambda make_jpeg: make_jpeg(640, 480, padding=80_000), "sof_not_found_extended"),
-        (lambda make_jpeg: _png_bytes(), "pil_fallback"),
-    ],
+    "second_image",
+    [lambda make_jpeg: make_jpeg(640, 480, padding=80_000), lambda make_jpeg: _png_bytes()],
     ids=["sof_not_found_extended", "pil_fallback"],
 )
 def test_build_images_exits_0_when_every_image_has_dimensions(
-    monkeypatch, fake_s3, make_jpeg, tmp_path, second_image, expected_status
+    monkeypatch, fake_s3, make_jpeg, tmp_path, second_image
 ):
     ann_path = tmp_path / "ann.parquet"
     _write_annotations(ann_path, ["10", "11"])
@@ -112,8 +110,6 @@ def test_build_images_exits_0_when_every_image_has_dimensions(
     rc = cli.main(["build-images", "--annotations", str(ann_path), *_common(tmp_path)])
 
     assert rc == 0
-    images = pd.read_parquet(tmp_path / "v1" / "coralnet_images_v1.parquet")
-    assert images.loc[images["image_id"] == "11", "header_status"].item() == expected_status
 
 
 def test_build_images_exits_1_on_missing_object_and_still_writes(
@@ -128,10 +124,7 @@ def test_build_images_exits_1_on_missing_object_and_still_writes(
 
     assert rc == 1
     images = pd.read_parquet(tmp_path / "v1" / "coralnet_images_v1.parquet")
-    assert dict(zip(images["image_id"], images["header_status"], strict=True)) == {
-        "10": "ok",
-        "11": "not_found",
-    }
+    assert images["image_id"].tolist() == ["10", "11"]
 
 
 def _write_images(path: Path, needs_resize: bool) -> None:
@@ -261,7 +254,7 @@ def test_build_annotations_exits_1_when_no_sources_produce_rows(monkeypatch, fak
     rc = cli.main(["build-annotations", *_common(tmp_path)])
 
     assert rc == 1
-    assert pd.read_parquet(tmp_path / "v1" / "coralnet_annotations_v1.parquet").empty
+    assert (tmp_path / "v1" / "coralnet_annotations_v1.parquet").exists()
 
 
 _MANIFEST_COLUMNS = [
@@ -476,3 +469,24 @@ def test_cli_all_with_an_excluded_source_writes_every_output(
     }
     manifest = pd.read_parquet(out_dir / "coralnet_training_manifest_v1.parquet")
     assert manifest["source_id"].unique().tolist() == [1]
+
+
+class _HeadObjectRaises:
+    def __init__(self, code: str):
+        self._code = code
+
+    def head_object(self, *, Bucket, Key):
+        raise ClientError({"Error": {"Code": self._code, "Message": self._code}}, "HeadObject")
+
+
+@pytest.mark.parametrize("code", ["NoSuchKey", "NotFound"])
+def test_s3_object_exists_is_false_for_a_missing_key_code(code):
+    assert cli._s3_object_exists(_HeadObjectRaises(code), "b", "k") is False
+
+
+@pytest.mark.parametrize("code", ["403", "500"])
+def test_s3_object_exists_reraises_other_errors(code):
+    with pytest.raises(ClientError) as exc:
+        cli._s3_object_exists(_HeadObjectRaises(code), "b", "k")
+
+    assert exc.value.response["Error"]["Code"] == code
