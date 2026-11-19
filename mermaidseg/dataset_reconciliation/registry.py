@@ -31,14 +31,16 @@ from mermaidseg.dataset_reconciliation.concept_schema import (
 )
 from mermaidseg.dataset_reconciliation.concepts import initialize_benthic_hierarchy
 from mermaidseg.dataset_reconciliation.label_mapping import (
+    CoralNetLabelMappings,
+    coralnet_to_mermaid,
     coralscapes_to_mermaid,
     coralscapes_v2_to_mermaid,
     fetch_benthos_yuval_to_mermaid,
     fetch_catlin_seaview_to_mermaid,
-    fetch_coralnet_to_mermaid,
     fetch_moorea_labeled_corals_to_mermaid,
     fetch_pacific_labeled_corals_to_mermaid,
     fetch_ucsd_mosaics_to_mermaid,
+    load_coralnet_label_mappings,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,7 +65,6 @@ _BUILTIN_DEFAULT_FETCHERS = {
 
 
 _REMOTE_FETCHERS: dict[str, Callable[..., Mapping[str, str | None]]] = {
-    "coralnet": fetch_coralnet_to_mermaid,
     "catlin_seaview": fetch_catlin_seaview_to_mermaid,
     "moorea_labeled_corals": fetch_moorea_labeled_corals_to_mermaid,
     "pacific_labeled_corals": fetch_pacific_labeled_corals_to_mermaid,
@@ -165,6 +166,7 @@ class SourceLabelRegistry:
             seen_sources.add(name)
 
         self.datasets = list(datasets)
+        self.coralnet_label_mappings: CoralNetLabelMappings | None = None
         resolved_maps = self._resolve_source_to_target_maps()
 
         # Assign each dataset a disjoint offset in the global source-ID space and
@@ -297,6 +299,9 @@ class SourceLabelRegistry:
         for ds in self.datasets:
             name = ds.SOURCE_NAME
             ds_names_lower = {n.lower() for n in ds.source_name2id}
+            if name == "coralnet":
+                resolved[name] = self._coralnet_source_to_target(ds, ds_names_lower)
+                continue
             fetcher = _REMOTE_FETCHERS.get(name)
             if fetcher is not None:
                 resolved[name] = {
@@ -313,6 +318,29 @@ class SourceLabelRegistry:
             src_name: {k.lower(): v.lower() for k, v in m.items()}
             for src_name, m in resolved.items()
         }
+
+    def _coralnet_source_to_target(self, ds: Any, ds_names_lower: set[str]) -> dict[str, str]:
+        """Map the CoralNet dataset's label names through the MERMAID LabelMapping rows.
+
+        The rows are fetched once (API online, cached snapshot offline) and kept on
+        ``coralnet_label_mappings`` so the run can record exactly what it used.
+        """
+        id2name = getattr(ds, "coralnet_id2name", None)
+        if id2name is None:
+            raise ValueError("The coralnet dataset must expose coralnet_id2name to map its labels")
+        if self.coralnet_label_mappings is None:
+            self.coralnet_label_mappings = load_coralnet_label_mappings()
+        used = {
+            k: v for k, v in id2name.items() if isinstance(v, str) and v.lower() in ds_names_lower
+        }
+        return coralnet_to_mermaid(used, self.coralnet_label_mappings.records)
+
+    @property
+    def label_mapping_provenance(self) -> dict[str, dict[str, Any]]:
+        """Where each API-backed source mapping came from, for run lineage."""
+        if self.coralnet_label_mappings is None:
+            return {}
+        return {"coralnet": self.coralnet_label_mappings.provenance()}
 
     def _build_concepts(self, concept_schema: ConceptSchema) -> None:
         self.concept_value2id = concept_schema.concept_value2id

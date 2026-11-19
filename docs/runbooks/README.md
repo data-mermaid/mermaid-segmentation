@@ -32,7 +32,7 @@ These tasks wait on open issues. Write the runbook when the issue settles the pr
 
 | Task | Waits on |
 |---|---|
-| Update the label mappings (`configs/coralnet_to_mermaid_mapping_temporary.json`, `configs/class_to_concepts.csv`) | [#201](https://github.com/data-mermaid/mermaid-segmentation/issues/201), [#60](https://github.com/data-mermaid/mermaid-segmentation/issues/60) |
+| Update the concept mappings (`configs/class_to_concepts.csv`). CoralNet label mappings come from the MERMAID API; see [Map new labels](coralnet-data.md#map-new-labels) | [#201](https://github.com/data-mermaid/mermaid-segmentation/issues/201), [#60](https://github.com/data-mermaid/mermaid-segmentation/issues/60) |
 | Hand a model off for deployment | [#21](https://github.com/data-mermaid/mermaid-segmentation/issues/21) |
 
 ## Write a runbook

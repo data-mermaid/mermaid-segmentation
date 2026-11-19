@@ -628,6 +628,7 @@ class TestLoggerDispatch:
         registry.dataset_offsets = {"mermaid": 0}
         registry.source_to_target = torch.tensor([0, 1], dtype=torch.long)
         registry.concept_id2name = {0: "hard"}
+        registry.coralnet_label_mappings.to_json.return_value = {"records": []}
         registry.num_target_classes = 2
         registry.num_global_source_classes = 3
 
@@ -639,6 +640,7 @@ class TestLoggerDispatch:
             ("metadata/dataset_offsets.json", {"mermaid": 0}),
             ("metadata/source_to_target.json", {"0": 0, "1": 1}),
             ("metadata/concept_id2name.json", {"0": "hard"}),
+            ("metadata/label_mappings/coralnet.json", {"records": []}),
         ]
         assert tracker.params == [{"num_target_classes": 2, "num_global_source_classes": 3}]
 

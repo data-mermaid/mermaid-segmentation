@@ -1,32 +1,267 @@
 """Source-dataset to MERMAID benthic-attribute target-label mappings.
 
-Provides the HTTP fetchers + static dicts that translate a source-space label (CoralNet provider
-IDs, Coralscapes 1..39 names, MERMAID benthic-attribute names) into MERMAID benthic-attribute target
-names, plus the GPU helper ``source_labels_to_target_labels`` used at training time.
+Translates a source-space label (CoralNet label ids, Coralscapes 1..39 names, other datasets' label
+names) into a MERMAID benthic-attribute target name. CoralNet comes from the MERMAID LabelMapping
+API (or an offline snapshot of it); the other datasets use static dicts. Also holds the GPU helper
+``source_labels_to_target_labels`` used at training time.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Literal, TypedDict
 
+import requests
 import torch
 
+logger = logging.getLogger(__name__)
 
-def fetch_coralnet_to_mermaid() -> dict[str, str | None]:
-    """Load the CoralNet provider label -> MERMAID benthic-attribute map from local config.
+CORALNET_LABELMAPPINGS_URL = (
+    "https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet&limit=1000"
+)
+# The snapshot sits under the local S3 cache root, beside the cached S3 objects, in a pseudo-bucket
+# no real S3 object uses: `<cache root>/_mermaid_api/classification/labelmappings/coralnet.json`.
+CORALNET_SNAPSHOT_BUCKET = "_mermaid_api"
+CORALNET_SNAPSHOT_KEY = "classification/labelmappings/coralnet.json"
+_REQUEST_TIMEOUT_SEC = 30
 
-    Returns a dict keyed by lowercased CoralNet label name; values are the mapped MERMAID
-    benthic-attribute name(s) (or ``None`` if the CoralNet label is not yet mapped).
+
+class CoralNetLabelMapping(TypedDict):
+    """One CoralNet row from the MERMAID LabelMapping API."""
+
+    id: str | None
+    benthic_attribute_id: str | None
+    benthic_attribute_name: str | None
+    growth_form_id: str | None
+    growth_form_name: str | None
+    provider: str | None
+    provider_id: int
+    provider_label: str | None
+
+
+@dataclass(frozen=True)
+class CoralNetLabelMappings:
+    """The CoralNet label mappings a run used, keyed by CoralNet label id.
+
+    Attributes:
+        records: API rows keyed by integer CoralNet label id (``provider_id``).
+        source: ``"api"`` when fetched for this run, ``"snapshot"`` when read offline.
+        fetched_at: UTC ISO time the rows were fetched from the API.
     """
-    coralnet_to_mermaid_mapping_temporary_path = (
-        Path(__file__).resolve().parents[2]
-        / "configs"
-        / "coralnet_to_mermaid_mapping_temporary.json"
+
+    records: dict[int, CoralNetLabelMapping]
+    source: Literal["api", "snapshot"]
+    fetched_at: str
+
+    @property
+    def sha256(self) -> str:
+        """Digest of the records, independent of their order."""
+        return coralnet_mapping_digest(self.records)
+
+    def provenance(self) -> dict[str, Any]:
+        """Small summary for run lineage: source, digest, record count and fetch time."""
+        return {
+            "source": self.source,
+            "sha256": self.sha256,
+            "n_records": len(self.records),
+            "fetched_at": self.fetched_at,
+        }
+
+    def to_json(self) -> dict[str, Any]:
+        """JSON form shared by the offline snapshot and the logged run artifact."""
+        return {
+            "fetched_at": self.fetched_at,
+            "sha256": self.sha256,
+            "records": [self.records[k] for k in sorted(self.records)],
+        }
+
+
+def _fetch_paginated_results(url: str) -> list[dict]:
+    """Page through a MERMAID list endpoint until ``next`` is exhausted."""
+    records: list[dict] = []
+    next_url: str | None = url
+    while next_url:
+        response = requests.get(next_url, timeout=_REQUEST_TIMEOUT_SEC)
+        response.raise_for_status()
+        data = response.json()
+        records.extend(data["results"])
+        next_url = data.get("next")
+    return records
+
+
+def _normalize_provider_id(provider_id: object) -> int | None:
+    """Return ``provider_id`` as an int (``82``, ``82.0`` and ``"82.0"`` give 82), else None."""
+    try:
+        value = float(provider_id)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not value.is_integer():
+        return None
+    return int(value)
+
+
+def parse_coralnet_label_mappings(rows: list[dict]) -> dict[int, CoralNetLabelMapping]:
+    """Key raw LabelMapping rows by integer CoralNet label id.
+
+    Rows whose ``provider_id`` is not an integer are skipped with a warning.
+
+    Raises:
+        ValueError: If two rows share a CoralNet label id.
+    """
+    records: dict[int, CoralNetLabelMapping] = {}
+    for row in rows:
+        provider_id = _normalize_provider_id(row.get("provider_id"))
+        if provider_id is None:
+            logger.warning(
+                "Skipping CoralNet label mapping with non-integer provider_id %r",
+                row.get("provider_id"),
+            )
+            continue
+        if provider_id in records:
+            raise ValueError(f"Duplicate CoralNet label mapping for provider_id {provider_id}")
+        records[provider_id] = CoralNetLabelMapping(
+            id=row.get("id"),
+            benthic_attribute_id=row.get("benthic_attribute_id"),
+            benthic_attribute_name=row.get("benthic_attribute_name"),
+            growth_form_id=row.get("growth_form_id"),
+            growth_form_name=row.get("growth_form_name"),
+            provider=row.get("provider"),
+            provider_id=provider_id,
+            provider_label=row.get("provider_label"),
+        )
+    return records
+
+
+def fetch_coralnet_label_mappings(url: str = CORALNET_LABELMAPPINGS_URL) -> CoralNetLabelMappings:
+    """Fetch every CoralNet row from the MERMAID LabelMapping API.
+
+    Network and HTTP errors propagate: a run never falls back to a stale mapping silently.
+    """
+    records = parse_coralnet_label_mappings(_fetch_paginated_results(url))
+    logger.info("Fetched %d CoralNet label mappings from the MERMAID API", len(records))
+    return CoralNetLabelMappings(
+        records=records, source="api", fetched_at=datetime.now(UTC).isoformat()
     )
 
-    with open(coralnet_to_mermaid_mapping_temporary_path) as f:
-        return json.load(f)
+
+def coralnet_mapping_digest(records: Mapping[int, CoralNetLabelMapping]) -> str:
+    """sha256 of the records as canonical JSON (sorted ids and keys)."""
+    canonical = json.dumps([records[k] for k in sorted(records)], sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def coralnet_snapshot_path() -> Path:
+    """Path of the offline CoralNet mapping snapshot under the local cache root.
+
+    Raises:
+        RuntimeError: If no local cache root is configured.
+    """
+    from mermaidseg.datasets.local_cache import LocalS3Cache
+
+    return LocalS3Cache.get().local_path(CORALNET_SNAPSHOT_BUCKET, CORALNET_SNAPSHOT_KEY)
+
+
+def write_coralnet_snapshot(mappings: CoralNetLabelMappings, path: Path) -> None:
+    """Write ``mappings`` to ``path`` as JSON, for offline runs."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(mappings.to_json(), indent=1, sort_keys=True))
+    tmp.replace(path)
+
+
+def read_coralnet_snapshot(path: Path) -> CoralNetLabelMappings:
+    """Read a snapshot written by :func:`write_coralnet_snapshot`."""
+    data = json.loads(path.read_text())
+    return CoralNetLabelMappings(
+        records=parse_coralnet_label_mappings(data["records"]),
+        source="snapshot",
+        fetched_at=data["fetched_at"],
+    )
+
+
+def load_coralnet_label_mappings() -> CoralNetLabelMappings:
+    """CoralNet label mappings for a run: the API online, the cached snapshot offline.
+
+    Offline (``MERMAIDSEG_S3_OFFLINE`` set) reads only the snapshot that
+    ``scripts/prefetch_cache.py`` wrote. Online always fetches from the API, and also refreshes the
+    snapshot when a local cache is configured.
+
+    Raises:
+        DataLoadError: Offline and the snapshot is missing (or no cache is configured).
+        requests.RequestException: Online and the API call fails.
+    """
+    from mermaidseg.datasets.local_cache import DataLoadError, LocalS3Cache
+
+    cache = LocalS3Cache.get()
+    if cache.offline:
+        path = coralnet_snapshot_path() if cache.enabled else None
+        if path is None or not path.is_file():
+            location = f" at {path}" if path is not None else " (no local cache configured)"
+            raise DataLoadError(
+                f"no CoralNet label-mapping snapshot{location} in offline mode "
+                "(MERMAIDSEG_S3_OFFLINE set); run scripts/prefetch_cache.py "
+                "to warm the local cache before running offline."
+            )
+        mappings = read_coralnet_snapshot(path)
+        logger.info(
+            "Read %d CoralNet label mappings from the offline snapshot %s (fetched %s)",
+            len(mappings.records),
+            path,
+            mappings.fetched_at,
+        )
+        return mappings
+    mappings = fetch_coralnet_label_mappings()
+    if cache.enabled:
+        write_coralnet_snapshot(mappings, coralnet_snapshot_path())
+    return mappings
+
+
+def coralnet_to_mermaid(
+    id2name: Mapping[Any, str | None], records: Mapping[int, CoralNetLabelMapping]
+) -> dict[str, str]:
+    """Map lowercased CoralNet label names to MERMAID benthic-attribute names.
+
+    The join is on the CoralNet label id: ``id2name`` (the run's ``coralnet_id2name`` JSON) names
+    each id the dataset uses, and ``records`` maps the id to its benthic attribute. A label renamed
+    in CoralNet therefore still maps. Ids with no mapping row, or with no string name (``None`` or
+    ``NaN``), are left out, so they train as background.
+
+    Raises:
+        ValueError: If two ids share a lowercased name but map to different benthic attributes.
+    """
+    mapping: dict[str, str] = {}
+    source_id: dict[str, int] = {}
+    named = unmapped = 0
+    for raw_id, name in id2name.items():
+        if not isinstance(name, str):  # None, or NaN from a JSON null-like value
+            continue
+        named += 1
+        label_id = int(raw_id)
+        record = records.get(label_id)
+        target = record["benthic_attribute_name"] if record is not None else None
+        if target is None:
+            unmapped += 1
+            continue
+        key = name.lower()
+        if key in mapping and mapping[key] != target:
+            raise ValueError(
+                f"CoralNet label name {key!r} has ids {source_id[key]} and {label_id} mapped to "
+                f"different benthic attributes ({mapping[key]!r}, {target!r})"
+            )
+        mapping[key] = target
+        source_id[key] = label_id
+    logger.info(
+        "CoralNet label mapping: %d of %d named label ids have a MERMAID benthic attribute",
+        named - unmapped,
+        named,
+    )
+    return mapping
 
 
 def fetch_catlin_seaview_to_mermaid() -> dict[str, str]:

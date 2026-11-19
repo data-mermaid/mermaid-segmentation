@@ -5,7 +5,8 @@ This is the *only* step that needs AWS credentials. It constructs every
 configured ``(dataset, split)`` (which downloads all manifests / annotation
 parquets / label maps) and then reads every image (and, where applicable, every
 dense label) through :class:`LocalS3Cache`, write-through to the local cache
-directory. Once this succeeds, the GPU training job can run with
+directory. When CoralNet is configured it also saves the MERMAID LabelMapping rows for CoralNet into
+the cache. Once this succeeds, the GPU training job can run with
 ``MERMAIDSEG_S3_OFFLINE=1`` and no credentials at all.
 
 Example::
@@ -26,6 +27,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from mermaidseg.dataset_reconciliation.label_mapping import (
+    coralnet_snapshot_path,
+    fetch_coralnet_label_mappings,
+    write_coralnet_snapshot,
+)
 from mermaidseg.datasets import build_datasets, setup_local_cache
 from mermaidseg.datasets.local_cache import LocalS3Cache
 from mermaidseg.io import resolve_repo_path, setup_config
@@ -145,6 +151,19 @@ def _download_hf_models(repos: list[str]) -> None:
         logger.info("  done: %s", repo)
 
 
+def _snapshot_coralnet_label_mappings() -> None:
+    """Fetch the CoralNet label mappings from the MERMAID API into the cache, for offline runs."""
+    mappings = fetch_coralnet_label_mappings()
+    path = coralnet_snapshot_path()
+    write_coralnet_snapshot(mappings, path)
+    logger.info(
+        "Wrote %d CoralNet label mappings (sha256 %s) to %s",
+        len(mappings.records),
+        mappings.sha256,
+        path,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Warm the local S3 cache for the configured datasets and return the exit code."""
     args = _parse_args(argv)
@@ -184,6 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     if not datasets:
         logger.error("No datasets matched the given --datasets/--splits filters.")
         return 2
+
+    if any(name == "coralnet" for name, _split in datasets):
+        _snapshot_coralnet_label_mappings()
 
     total_failures = 0
     started = time.time()

@@ -6,6 +6,10 @@ import pandas as pd
 import pytest
 
 from mermaidseg.dataset_reconciliation import registry as registry_module
+from mermaidseg.dataset_reconciliation.label_mapping import (
+    CoralNetLabelMappings,
+    parse_coralnet_label_mappings,
+)
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry, roll_up_label
 
 
@@ -149,16 +153,67 @@ def test_label_roll_up_without_a_subset_raises(monkeypatch) -> None:
 def test_remote_fetcher_map_is_filtered_to_the_dataset_and_drops_unmapped(monkeypatch) -> None:
     monkeypatch.setitem(
         registry_module._REMOTE_FETCHERS,
-        "coralnet",
+        "moorea_labeled_corals",
         lambda: {"Acropora": "Acropora", "Sand": None, "Fish": "Fish"},
     )
-    coralnet = _StubDataset("coralnet", ["acropora", "sand"])
+    moorea = _StubDataset("moorea_labeled_corals", ["acropora", "sand"])
 
-    registry = SourceLabelRegistry([coralnet])
+    registry = SourceLabelRegistry([moorea])
 
     # Fish is not in the dataset; sand maps to None.
     assert registry.target_label2id == {"acropora": 1}
     assert registry.source_to_target.tolist() == [0, 1, 0]
+    assert registry.coralnet_label_mappings is None
+    assert registry.label_mapping_provenance == {}
+
+
+def _coralnet_mappings(rows: dict[int, str]) -> CoralNetLabelMappings:
+    records = parse_coralnet_label_mappings(
+        [{"provider_id": i, "benthic_attribute_name": n} for i, n in rows.items()]
+    )
+    return CoralNetLabelMappings(records=records, source="snapshot", fetched_at="t0")
+
+
+class _CoralNetStub(_StubDataset):
+    def __init__(self, names: list[str], id2name: dict[int, str | None] | None) -> None:
+        super().__init__("coralnet", names)
+        if id2name is not None:
+            self.coralnet_id2name = id2name
+
+
+def test_coralnet_labels_map_through_the_api_rows_by_label_id(monkeypatch) -> None:
+    calls = []
+
+    def load():
+        calls.append(1)
+        return _coralnet_mappings({82: "Acropora", 7: "Sand", 99: "Fish"})
+
+    monkeypatch.setattr(registry_module, "load_coralnet_label_mappings", load)
+    # 82 was renamed in CoralNet; the API row still matches it by id. 5 has no API row.
+    coralnet = _CoralNetStub(
+        ["acro (renamed)", "sand", "mystery"],
+        {82: "ACRO (renamed)", 7: "Sand", 5: "Mystery", 99: "Fish", 6: None},
+    )
+
+    registry = SourceLabelRegistry([coralnet])
+
+    assert calls == [1]
+    assert registry.target_label2id == {"acropora": 1, "sand": 2}
+    assert registry.source_to_target.tolist() == [0, 1, 2, 0]
+    provenance = registry.label_mapping_provenance["coralnet"]
+    assert provenance["source"] == "snapshot"
+    assert provenance["n_records"] == 3
+    assert registry.coralnet_label_mappings is not None
+    assert provenance["sha256"] == registry.coralnet_label_mappings.sha256
+
+
+def test_coralnet_dataset_without_id2name_raises(monkeypatch) -> None:
+    monkeypatch.setattr(
+        registry_module, "load_coralnet_label_mappings", lambda: _coralnet_mappings({})
+    )
+
+    with pytest.raises(ValueError, match="coralnet_id2name"):
+        SourceLabelRegistry([_CoralNetStub(["sand"], None)])
 
 
 def test_empty_dataset_list_raises() -> None:

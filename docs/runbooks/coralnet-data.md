@@ -119,7 +119,11 @@ Each CoralNet split has a `whitelist_sources` list, and `CoralNetDataset` keeps 
 
 ### Map new labels
 
-A label name in the build's `coralnet_id2name_<run>.json` trains as background when `configs/coralnet_to_mermaid_mapping_temporary.json` has no key for it, or its value is `null` (`mermaidseg/dataset_reconciliation/label_mapping.py`, `mermaidseg/dataset_reconciliation/registry.py`). Names are matched lowercased. Before training, give each new label a MERMAID benthic-attribute name.
+Training reads the CoralNet mapping from the MERMAID LabelMapping API (`/v1/classification/labelmappings/?provider=CoralNet`). Rows are keyed by CoralNet label id, and the build's `coralnet_id2name_<run>.json` names each id, so a label renamed in CoralNet still maps. A CoralNet label trains as background when the API has no row for its id (`mermaidseg/dataset_reconciliation/label_mapping.py`, `mermaidseg/dataset_reconciliation/registry.py`). Before training, add the missing rows in MERMAID. There is no mapping file in this repo to edit.
+
+Each run records the rows it used. `model.json` lineage has `data_version.label_mappings.coralnet` (source, sha256, row count, fetch time), and the tracker run has the rows as `metadata/label_mappings/coralnet.json`. An online run fails if the API call fails; it does not fall back to an old copy.
+
+A change in the API changes the class set of the next run. Compare `metadata/id2label.json` with the baseline run before you compare metrics.
 
 ### Duplicates in new sources
 
@@ -127,7 +131,7 @@ A label name in the build's `coralnet_id2name_<run>.json` trains as background w
 
 ### Warm the offline cache again
 
-An offline run (`MERMAIDSEG_S3_OFFLINE=1`) fails on any cache miss. The new manifest, its id2name JSON and new images are not in a cache that you filled before. Fill it again, using the same data config as the training run. The data config selects the build:
+An offline run (`MERMAIDSEG_S3_OFFLINE=1`) fails on any cache miss. The new manifest, its id2name JSON and new images are not in a cache that you filled before. The prefetch also saves the CoralNet LabelMapping rows into the cache (`<cache>/_mermaid_api/classification/labelmappings/coralnet.json`). An offline run uses that copy, so fill the cache again to pick up mapping changes. Fill it again, using the same data config as the training run. The data config selects the build:
 
 ```bash
 uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache

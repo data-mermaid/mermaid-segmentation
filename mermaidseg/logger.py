@@ -433,7 +433,7 @@ class Logger:
         """Log the joint :class:`SourceLabelRegistry` artifacts to the tracker.
 
         Saves ``global_id2source``, ``target_id2label``, ``source_to_target`` and (when present)
-        ``concept_id2name`` so runs are self-describing.
+        ``concept_id2name`` and the CoralNet label-mapping rows, so runs are self-describing.
         """
         try:
             self.log_dict(
@@ -458,6 +458,9 @@ class Logger:
                     {str(k): v for k, v in registry.concept_id2name.items()},
                     "metadata/concept_id2name.json",
                 )
+            coralnet_mappings = getattr(registry, "coralnet_label_mappings", None)
+            if coralnet_mappings is not None:
+                self.log_dict(coralnet_mappings.to_json(), "metadata/label_mappings/coralnet.json")
             self.log_params(
                 {
                     "num_target_classes": int(registry.num_target_classes),

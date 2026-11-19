@@ -205,6 +205,12 @@ def _lineage_params(lineage: dict[str, Any]) -> dict[str, Any]:
     params.update(
         {f"lineage/manifest_sha256/{k}": v for k, v in version.get("manifest_sha256", {}).items()}
     )
+    params.update(
+        {
+            f"lineage/label_mapping_sha256/{k}": v["sha256"]
+            for k, v in version.get("label_mappings", {}).items()
+        }
+    )
     return params
 
 
@@ -369,7 +375,9 @@ def run(args: argparse.Namespace) -> None:
         lineage = collect_lineage(
             resolved_config=to_plain_dict(cfg_logger),
             seed=seed,
-            data_version=data_version(to_plain_dict(cfg_logger.data), dataset_dict),
+            data_version=data_version(
+                to_plain_dict(cfg_logger.data), dataset_dict, registry.label_mapping_provenance
+            ),
         )
         if checkpoint_data is not None:
             lineage = inherit_lineage(lineage, checkpoint_data.get("lineage"))

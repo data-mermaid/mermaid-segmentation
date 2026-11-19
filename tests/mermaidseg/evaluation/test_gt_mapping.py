@@ -10,6 +10,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from mermaidseg.dataset_reconciliation.label_mapping import (
+    CoralNetLabelMappings,
+    parse_coralnet_label_mappings,
+)
 from mermaidseg.evaluation import gt_mapping
 from mermaidseg.evaluation.gt_mapping import (
     ConceptLookup,
@@ -172,7 +176,6 @@ def test_source_to_target_map_rejects_an_unwired_source():
 
 def test_source_to_target_map_dispatches_each_source_and_lowercases(monkeypatch):
     fetchers = {
-        "coralnet": "fetch_coralnet_to_mermaid",
         "pacific_labeled_corals": "fetch_pacific_labeled_corals_to_mermaid",
         "benthos_yuval": "fetch_benthos_yuval_to_mermaid",
         "catlin_seaview": "fetch_catlin_seaview_to_mermaid",
@@ -188,11 +191,54 @@ def test_source_to_target_map_dispatches_each_source_and_lowercases(monkeypatch)
         assert gt_mapping._source_to_target_map(source.title()) == {"label": source, "x": None}
 
 
+def _coralnet_rows(rows):
+    records = parse_coralnet_label_mappings(
+        [{"provider_id": i, "benthic_attribute_name": n} for i, n in rows.items()]
+    )
+    return CoralNetLabelMappings(records=records, source="api", fetched_at="t0")
+
+
+def test_coralnet_map_joins_the_api_rows_on_the_label_id(monkeypatch):
+    monkeypatch.setattr(
+        gt_mapping, "load_coralnet_label_mappings", lambda: _coralnet_rows({1: "Acropora"})
+    )
+
+    mapping = gt_mapping._source_to_target_map("CoralNet", {1: "ACRO", 2: "Sand"})
+
+    assert mapping == {"acro": "acropora"}
+
+
+def test_coralnet_map_without_id2name_raises():
+    with pytest.raises(ValueError, match="coralnet_id2name"):
+        gt_mapping._source_to_target_map("coralnet")
+
+
+def test_coralnet_class_lookup_uses_only_the_names_being_evaluated(monkeypatch):
+    # Ids 2 and 3 share a name with different targets, but neither name is evaluated.
+    monkeypatch.setattr(
+        gt_mapping,
+        "load_coralnet_label_mappings",
+        lambda: _coralnet_rows({1: "Acropora", 2: "Sand", 3: "Rubble"}),
+    )
+    id2label = {0: "ignore", 1: "acropora"}
+
+    lookup = build_class_lookup(
+        "coralnet", ["acro"], id2label, None, id2name={1: "Acro", 2: "dup", 3: "DUP"}
+    )
+
+    assert lookup.name_to_class_id == {"acro": 1}
+
+
 def test_class_lookup_without_hierarchy_maps_only_labels_already_in_the_vocabulary(monkeypatch):
     monkeypatch.setattr(
         gt_mapping,
         "_source_to_target_map",
-        lambda _source: {"acro": "acropora", "hc": "hard coral", "gone": None, "sand": "sand"},
+        lambda _source, _id2name=None: {
+            "acro": "acropora",
+            "hc": "hard coral",
+            "gone": None,
+            "sand": "sand",
+        },
     )
     id2label = {0: "ignore", 1: "Hard Coral", 2: "sand"}
     # With no hierarchy 'acropora' cannot roll up to 'hard coral' and is ignored.

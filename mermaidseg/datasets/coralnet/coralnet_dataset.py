@@ -260,6 +260,10 @@ class CoralNetDataset(BaseCoralDataset):
         df["source_id"] = _as_int_ids(df["source_id"], "source_id")
         df["coralnet_id"] = _as_int_ids(df["coralnet_id"], "coralnet_id")
         coralnet_id2name = LocalS3Cache.get().read_json(self.source_bucket, self.id2name_key)
+        # The registry joins the MERMAID LabelMapping rows (keyed by CoralNet label id) through this.
+        self.coralnet_id2name: dict[int, str | None] = {
+            int(k): v for k, v in coralnet_id2name.items()
+        }
 
         df["coralnet_name"] = df["coralnet_id"].map(lambda x: coralnet_id2name.get(str(x)))
         _warn_unnamed_ids(df["coralnet_id"], df["coralnet_name"])

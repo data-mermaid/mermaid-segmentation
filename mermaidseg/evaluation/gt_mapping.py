@@ -21,6 +21,7 @@ import json
 import logging
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -31,12 +32,13 @@ from mermaidseg.dataset_reconciliation.concepts import (
     initialize_benthic_hierarchy,
 )
 from mermaidseg.dataset_reconciliation.label_mapping import (
+    coralnet_to_mermaid,
     fetch_benthos_yuval_to_mermaid,
     fetch_catlin_seaview_to_mermaid,
-    fetch_coralnet_to_mermaid,
     fetch_moorea_labeled_corals_to_mermaid,
     fetch_pacific_labeled_corals_to_mermaid,
     fetch_ucsd_mosaics_to_mermaid,
+    load_coralnet_label_mappings,
 )
 from mermaidseg.dataset_reconciliation.registry import roll_up_label
 
@@ -45,12 +47,26 @@ logger = logging.getLogger(__name__)
 _PLACEHOLDER_TAXA = {"not_given", "not given", "", "nan"}
 
 
-def _source_to_target_map(source_name: str) -> dict[str, str | None]:
-    """Return the static/config ``source_label -> MERMAID target`` map for a source."""
+def _source_to_target_map(
+    source_name: str,
+    id2name: Mapping[Any, str | None] | None = None,
+) -> dict[str, str | None]:
+    """Return the ``source_label -> MERMAID target`` map for a source.
+
+    Args:
+        source_name: Source dataset name.
+        id2name: CoralNet label id -> name (the run's ``coralnet_id2name`` JSON); required for
+            ``coralnet``, whose mapping rows are keyed by label id. Ignored for other sources.
+
+    Raises:
+        ValueError: If the source has no mapping, or ``coralnet`` is given no ``id2name``.
+    """
     source_name = source_name.lower()
     raw: Mapping[str, str | None]
     if source_name == "coralnet":
-        raw = fetch_coralnet_to_mermaid()
+        if id2name is None:
+            raise ValueError("The coralnet mapping needs the dataset's coralnet_id2name")
+        raw = coralnet_to_mermaid(id2name, load_coralnet_label_mappings().records)
     elif source_name == "pacific_labeled_corals":
         raw = fetch_pacific_labeled_corals_to_mermaid()
     elif source_name == "benthos_yuval":
@@ -144,9 +160,16 @@ def build_class_lookup(
     source_label_names: list[str],
     id2label: dict[int, str],
     hierarchy: dict[str, str | None] | None = None,
+    id2name: Mapping[Any, str | None] | None = None,
 ) -> ClassLookup:
-    """Build a source-label -> MERMAID class-id lookup (training-style, with roll-up)."""
-    src_to_tgt = _source_to_target_map(source_name)
+    """Build a source-label -> MERMAID class-id lookup (training-style, with roll-up).
+
+    ``id2name`` is the CoralNet label id -> name map, required when ``source_name`` is coralnet.
+    """
+    if id2name is not None:
+        wanted = {str(n).lower() for n in source_label_names}
+        id2name = {k: v for k, v in id2name.items() if isinstance(v, str) and v.lower() in wanted}
+    src_to_tgt = _source_to_target_map(source_name, id2name)
 
     # id2label is the frozen target vocabulary (0 = ignore/background).
     target_label2id = {str(v).lower(): int(k) for k, v in id2label.items() if int(k) != 0}

@@ -20,7 +20,7 @@ This runbook trains the final model on the Slurm cluster: `cbm_final` at 256 px,
 
 Batch jobs run offline. `slurm/common.sh` unsets the AWS variables and sets `MERMAIDSEG_S3_OFFLINE=1`, so a cache miss fails the job and does not go to S3. Fill the cache first. This is the only step that needs AWS credentials.
 
-Run it on a machine that has AWS credentials and can write `MERMAIDSEG_CACHE_DIR`. Set `HF_HOME` to the cache that batch jobs use, because the Hugging Face datasets (CoralscapesV2, UCSD Mosaics) download into `HF_HOME`, not into the S3 cache:
+Run it on a machine that has AWS credentials, can reach `api.datamermaid.org` (for the CoralNet label mappings) and can write `MERMAIDSEG_CACHE_DIR`. Set `HF_HOME` to the cache that batch jobs use, because the Hugging Face datasets (CoralscapesV2, UCSD Mosaics) download into `HF_HOME`, not into the S3 cache:
 
 ```bash
 HF_HOME=$MERMAIDSEG_SCRATCH/hf-cache uv run python scripts/prefetch_cache.py \
