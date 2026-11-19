@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import shutil
 
+import numpy as np
 import pandas as pd
 import pytest
+from PIL import Image
 
 from mermaidseg.datasets.coralnet import CoralNetDataset
 from mermaidseg.datasets.coralnet import coralnet_dataset as cnd
@@ -132,3 +134,53 @@ def test_parquet_refs_resolve_against_repo_root(cache, monkeypatch):
 def test_manifest_path_is_required(cache):
     with pytest.raises(TypeError, match="manifest_path"):
         CoralNetDataset(source_bucket=BUCKET)
+
+
+def test_whitelist_and_blacklist_sources_together_raise(cache):
+    with pytest.raises(ValueError, match="both whitelist and blacklist"):
+        _make(whitelist_sources=[1], blacklist_sources=[2])
+
+
+def test_blacklist_sources_drops_those_sources_and_their_images(cache):
+    ds = _make(blacklist_sources=[1])
+
+    assert sorted(ds.df_images["image_id"]) == ["20"]
+    assert set(ds.df_annotations["source_id"]) == {2}
+
+
+def test_annotation_overrides_for_images_missing_from_the_manifest_are_dropped(cache, caplog):
+    path = cache / "overrides.parquet"
+    pd.DataFrame(
+        {
+            "source_id": [1, 1],
+            "image_id": ["10", "99"],
+            "row": [1, 2],
+            "col": [1, 2],
+            "coralnet_id": [1, 1],
+        }
+    ).to_parquet(path)
+
+    with caplog.at_level("WARNING", logger=cnd.logger.name):
+        ds = _make(annotation_overrides=str(path))
+
+    assert "99" not in set(ds.df_annotations["image_id"])
+    assert sorted(ds.df_images["image_id"]) == ["10", "11", "20"]
+    img10 = ds.df_annotations[ds.df_annotations["image_id"] == "10"]
+    assert img10[["row", "col"]].to_numpy().tolist() == [[1, 1]]
+    assert "1 images are not in the manifest" in caplog.text
+
+
+def test_read_image_returns_the_rgb_array_for_the_manifest_key(cache):
+    path = cache / "cache" / BUCKET / "k10"
+    Image.new("L", (4, 3), 7).save(path, format="PNG")
+
+    image = _make().read_image(image_id="10", source_id=1, image_key="k10")
+
+    assert image.shape == (3, 4, 3)
+    assert np.all(image == 7)
+
+
+@pytest.mark.parametrize("image_key", [None, "", float("nan")])
+def test_read_image_without_a_manifest_key_raises_key_error(cache, image_key):
+    with pytest.raises(KeyError, match="No manifest entry for source_id=1 image_id=10"):
+        _make().read_image(image_id="10", source_id=1, image_key=image_key)

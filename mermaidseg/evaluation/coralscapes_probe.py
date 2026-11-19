@@ -493,7 +493,9 @@ def _predict_classes_from_activated(
         slab = activated[:, row0:row1, :]
         flat = slab.permute(1, 2, 0).reshape(-1, n_channels)
         scores = flat @ weff.t() + beff
-        pred[row0:row1] = classes[scores.argmax(dim=1)].reshape(row1 - row0, width)
+        # A two-class LinearSVC has one score column: positive selects classes[1], else classes[0].
+        winner = (scores[:, 0] > 0).long() if scores.shape[1] == 1 else scores.argmax(dim=1)
+        pred[row0:row1] = classes[winner].reshape(row1 - row0, width)
     return pred
 
 

@@ -80,14 +80,16 @@ def test_committed_run_yamls_select_the_mlflow_tracker(path):
 # ---------- validate_run ----------
 
 
-def test_init_weights_without_init_from_job_raises():
+@pytest.mark.parametrize(
+    ("run_yaml", "init_from_job"),
+    [
+        pytest.param(_RES768, None, id="init_weights-without-job"),
+        pytest.param(_CBM, _SOURCE_JOB, id="job-without-init_weights"),
+    ],
+)
+def test_init_weights_and_init_from_job_must_be_given_together(run_yaml, init_from_job):
     with pytest.raises(ValueError, match=r"init_weights.*--init-from-job"):
-        launch.validate_run(load_run_config(_RES768), None)
-
-
-def test_init_from_job_without_init_weights_raises():
-    with pytest.raises(ValueError, match=r"init_weights.*--init-from-job"):
-        launch.validate_run(load_run_config(_CBM), _SOURCE_JOB)
+        launch.validate_run(load_run_config(run_yaml), init_from_job)
 
 
 @pytest.mark.parametrize("job", ["-starts-with-dash", "has_underscore"])
@@ -194,6 +196,22 @@ def test_missing_env_var_fails_naming_it(fake_env, monkeypatch, missing):
         launch.main(["--run-config", str(_CBM)])
 
 
+def test_read_env_names_every_missing_or_empty_variable_at_once():
+    environ = {**_FAKE_ENV, "SM_STAGING_BUCKET": "", "HF_TOKEN_SECRET_ID": ""}
+    del environ["SM_ROLE_ARN"]
+
+    with pytest.raises(ValueError) as error:
+        launch.read_env(environ)
+
+    assert str(error.value) == (
+        "environment variables not set: SM_ROLE_ARN, SM_STAGING_BUCKET, HF_TOKEN_SECRET_ID"
+    )
+
+
+def test_read_env_returns_each_required_variable_and_ignores_others():
+    assert launch.read_env({**_FAKE_ENV, "UNRELATED": "x"}) == _FAKE_ENV
+
+
 def test_dry_run_prints_the_request_without_boto3(fake_env, monkeypatch, capsys):
     monkeypatch.setattr("boto3.client", lambda *a, **k: pytest.fail("no AWS call"))
     monkeypatch.setattr(launch, "make_run_id", lambda prefix: "fixed-job")
@@ -251,12 +269,15 @@ class _FakeSageMaker:
         self.calls = calls
         self.s3 = s3
         self.source_status = "Completed"
+        self.describe_error: Exception | None = None
         self.described: list[str] = []
         self.created: list[dict[str, Any]] = []
 
     def describe_training_job(self, TrainingJobName: str) -> dict[str, str]:
         self.calls.append("sagemaker.describe_training_job")
         self.described.append(TrainingJobName)
+        if self.describe_error is not None:
+            raise self.describe_error
         return {"TrainingJobStatus": self.source_status}
 
     def create_training_job(self, **kwargs: Any) -> dict[str, str]:
@@ -368,6 +389,18 @@ def test_source_job_not_completed_exits_naming_job_and_status(aws):
     args = ["--run-config", str(_RES768), "--init-from-job", _SOURCE_JOB]
 
     with pytest.raises(SystemExit, match=rf"^ERROR: .*{_SOURCE_JOB}.*{status}"):
+        launch.main(args)
+
+    _assert_nothing_written(aws)
+    assert "s3.head_object" not in aws.calls
+
+
+def test_undescribable_source_job_exits_naming_job_and_code(aws):
+    code = "ValidationException"
+    aws.sm.describe_error = _client_error(code)
+    args = ["--run-config", str(_RES768), "--init-from-job", _SOURCE_JOB]
+
+    with pytest.raises(SystemExit, match=rf"^ERROR: cannot describe.*{_SOURCE_JOB}.*{code}"):
         launch.main(args)
 
     _assert_nothing_written(aws)

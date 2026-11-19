@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from io import BytesIO
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock
 
 import pandas as pd
+import pytest
+from botocore.exceptions import ClientError
 from PIL import Image
 
 from coralnet_dataset.resize import (
+    _validate_and_download,
     resize_and_upload_all_images,
     resize_and_upload_image,
     resize_image_to_threshold,
@@ -34,20 +37,47 @@ def test_resize_image_maintains_aspect_ratio():
 
 
 def test_resize_image_no_resize_if_below_threshold():
-    """Image below threshold is not resized."""
+    """A JPEG below the threshold is returned as the original bytes, not re-encoded."""
     # 800x400: longest edge 800 < 2048
     img = Image.new("RGB", (800, 400), color="blue")
     img_bytes = BytesIO()
     img.save(img_bytes, format="JPEG")
-    img_bytes.seek(0)
+    original = img_bytes.getvalue()
 
-    resized_bytes = resize_image_to_threshold(img_bytes)
-    resized_img = Image.open(resized_bytes)
-    resized_img.load()
+    resized_bytes = resize_image_to_threshold(BytesIO(original))
 
-    # Should return original dimensions
-    assert resized_img.width == 800
-    assert resized_img.height == 400
+    assert resized_bytes.getvalue() == original
+
+
+def test_resize_image_scales_a_portrait_image_by_its_height():
+    """1000x4000: the height is the longest edge, so it becomes 2048 and the width 512."""
+    img = Image.new("RGB", (1000, 4000), color="red")
+    img_bytes = BytesIO()
+    img.save(img_bytes, format="JPEG")
+
+    resized = Image.open(resize_image_to_threshold(img_bytes))
+
+    assert resized.size == (512, 2048)
+
+
+def test_resize_converts_cmyk_jpeg_below_threshold():
+    """CMYK cannot be shown as RGB downstream, so it is re-encoded even when small."""
+    img_bytes = BytesIO()
+    Image.new("CMYK", (800, 400), color=(0, 255, 255, 0)).save(img_bytes, format="JPEG")
+
+    resized = Image.open(resize_image_to_threshold(img_bytes))
+
+    assert (resized.format, resized.mode, resized.size) == ("JPEG", "RGB", (800, 400))
+
+
+def test_resize_re_encodes_an_rgb_png_below_threshold():
+    """An RGB PNG needs no mode change but is not a JPEG, so it is still re-encoded."""
+    img_bytes = BytesIO()
+    Image.new("RGB", (800, 400), color="blue").save(img_bytes, format="PNG")
+
+    resized = Image.open(resize_image_to_threshold(img_bytes))
+
+    assert (resized.format, resized.mode, resized.size) == ("JPEG", "RGB", (800, 400))
 
 
 def test_resize_converts_rgba_below_threshold():
@@ -68,10 +98,8 @@ def test_resize_converts_rgba_below_threshold():
     assert resized_img.height == 400
 
 
-def test_scan_for_missing_resized_images_builds_todo_list():
-    """Scan lists the resized prefix once and diffs in memory — no per-image
-    head_object."""
-    df_images = pd.DataFrame(
+def _images_frame() -> pd.DataFrame:
+    return pd.DataFrame(
         {
             "source_id": [1, 1, 2],
             "image_id": ["img_a", "img_b", "img_c"],
@@ -86,37 +114,41 @@ def test_scan_for_missing_resized_images_builds_todo_list():
         }
     )
 
-    # Mock S3 client: the resized prefix already contains img_a (img_b has needs_resize=False)
-    mock_s3 = Mock()
-    mock_paginator = MagicMock()
-    mock_paginator.paginate.return_value = [
-        {"Contents": [{"Key": "etl-outputs/coralnet/resized/s1/images/img_a.jpg"}]},
-        {},  # empty page (no Contents key) must not crash
-    ]
-    mock_s3.get_paginator.return_value = mock_paginator
 
-    # Run scan
+def test_scan_for_missing_resized_images_skips_images_already_resized(fake_s3):
+    """img_a is already resized and img_b needs no resize, so only img_c is left to do."""
+    fake_s3.put("test-bucket", "etl-outputs/coralnet/resized/s1/images/img_a.jpg", b"done")
+
     todo_df = scan_for_missing_resized_images(
-        df_images=df_images,
+        df_images=_images_frame(),
         bucket="test-bucket",
         output_prefix="etl-outputs/coralnet",
-        s3_client=mock_s3,
+        s3_client=fake_s3,
     )
 
-    # Existence comes from one paginated LIST, never per-image HEADs
-    mock_s3.get_paginator.assert_called_once_with("list_objects_v2")
-    mock_paginator.paginate.assert_called_once_with(
-        Bucket="test-bucket", Prefix="etl-outputs/coralnet/resized/"
+    expected = pd.DataFrame(
+        {
+            "source_id": [2],
+            "image_id": ["img_c"],
+            "width": [2500],
+            "height": [1500],
+            "original_s3_key": ["coralnet-public-images/s2/images/img_c.jpg"],
+            "output_s3_key": ["etl-outputs/coralnet/resized/s2/images/img_c.jpg"],
+        }
     )
-    mock_s3.head_object.assert_not_called()
+    pd.testing.assert_frame_equal(todo_df, expected)
 
-    assert len(todo_df) == 1
-    assert todo_df.iloc[0]["image_id"] == "img_c"
-    assert todo_df.iloc[0]["source_id"] == 2
-    assert todo_df.iloc[0]["original_s3_key"] == "coralnet-public-images/s2/images/img_c.jpg"
-    assert todo_df.iloc[0]["output_s3_key"] == "etl-outputs/coralnet/resized/s2/images/img_c.jpg"
-    assert "original_s3_key" in todo_df.columns
-    assert "output_s3_key" in todo_df.columns
+
+def test_scan_for_missing_resized_images_lists_every_image_when_none_is_resized(fake_s3):
+    """An empty resized prefix lists no ``Contents``; every needs_resize image is to do."""
+    todo_df = scan_for_missing_resized_images(
+        df_images=_images_frame(),
+        bucket="test-bucket",
+        output_prefix="etl-outputs/coralnet",
+        s3_client=fake_s3,
+    )
+
+    assert todo_df["image_id"].tolist() == ["img_a", "img_c"]
 
 
 def test_resize_converts_and_uploads_rgba_png(rgba_png_bytes):
@@ -193,3 +225,24 @@ def test_resize_all_images_counts_completed_corrupted_and_failed(
     assert counts == (1, 1, 1)
     assert ("b", "out/ok.jpg") in fake_s3.objects
     assert ("b", "out/bad.jpg") not in fake_s3.objects
+
+
+def test_validate_and_download_propagates_a_download_failure(fake_s3):
+    with pytest.raises(ClientError):
+        _validate_and_download("b", "orig/missing.jpg", 1, "x", fake_s3)
+
+
+def test_resize_and_upload_image_fails_an_image_whose_download_fails(fake_s3):
+    """A failed download is a retryable ``failed`` result, not a corrupted skip."""
+    todo_item = {
+        "source_id": 1,
+        "image_id": "x",
+        "original_s3_key": "orig/missing.jpg",
+        "output_s3_key": "out/x.jpg",
+    }
+
+    result = resize_and_upload_image(todo_item=todo_item, bucket="b", s3_client=fake_s3)
+
+    assert (result["status"], result["skip_reason"]) == ("failed", None)
+    assert result["error_message"].startswith("ClientError: ")
+    assert fake_s3.objects == {}

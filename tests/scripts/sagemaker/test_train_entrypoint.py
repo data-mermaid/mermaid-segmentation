@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
@@ -351,6 +352,57 @@ def test_main_without_the_init_file_raises_listing_the_init_channel(tmp_path, mo
         entrypoint.main([])
 
     assert execs == []
+
+
+def _record_exec_context(monkeypatch):
+    """Record the working directory change and the environment seen at exec, in order."""
+    events: list[Any] = []
+    seen_env: dict[str, str | None] = {}
+
+    def fake_execvp(file, argv):
+        events.append("exec")
+        seen_env.update({var: os.environ.get(var) for var in _MAIN_WRITTEN_VARS})
+        return 0
+
+    monkeypatch.setattr(os, "chdir", lambda path: events.append(("chdir", Path(path))))
+    monkeypatch.setattr(os, "execvp", fake_execvp)
+    return events, seen_env
+
+
+def test_main_exports_the_nccl_and_omp_settings_before_exec_for_several_gpus(tmp_path, monkeypatch):
+    _stub_main(tmp_path, monkeypatch, ngpu=4)
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+    _, seen_env = _record_exec_context(monkeypatch)
+
+    entrypoint.main([])
+
+    assert seen_env["OMP_NUM_THREADS"] == "1"
+    assert seen_env["TORCH_NCCL_TRACE_BUFFER_SIZE"] == "2000"
+    assert seen_env["TORCH_NCCL_DUMP_ON_TIMEOUT"] == "1"
+    assert seen_env["TORCH_NCCL_DEBUG_INFO_TEMP_FILE"] == str(
+        tmp_path / "out" / "nccl_trace" / "cbm_final_rank_"
+    )
+
+
+def test_main_exports_no_nccl_or_omp_settings_for_a_single_gpu(tmp_path, monkeypatch):
+    _stub_main(tmp_path, monkeypatch, ngpu=1)
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+    _, seen_env = _record_exec_context(monkeypatch)
+
+    entrypoint.main([])
+
+    assert seen_env["OMP_NUM_THREADS"] is None
+    assert seen_env["TORCH_NCCL_DUMP_ON_TIMEOUT"] is None
+
+
+def test_main_changes_to_the_repository_root_right_before_exec(tmp_path, monkeypatch):
+    _stub_main(tmp_path, monkeypatch, ngpu=1)
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+    events, _ = _record_exec_context(monkeypatch)
+
+    entrypoint.main([])
+
+    assert events == [("chdir", entrypoint.REPO_ROOT), "exec"]
 
 
 def _wire_real_secrets(monkeypatch, client):

@@ -70,15 +70,41 @@ def test_build_annotations_merges_per_source(fake_s3, sample_csv_factory, popula
     assert "20000" in set(ann_df.loc[ann_df["source_id"] == 2, "image_id"])
 
 
-def test_build_annotations_sorts_deterministically(fake_s3, sample_csv_factory, populate):
-    populate(
-        fake_s3, "b", "p", 5, sample_csv_factory(source_id=5, n_images=2, n_points_per_image=2)
+def test_build_annotations_sorts_rows_by_primary_key_across_sources(fake_s3, populate):
+    """Rows arrive in descending key order in both sources; the output is ascending."""
+    image_list = (
+        b"Name,Image Page\nz.jpg - Confirmed,/image/3/view/\na.jpg - Confirmed,/image/2/view/\n"
     )
-    a = build_annotations([5], bucket="b", prefix="p", workers=1, s3_client=fake_s3).annotations
-    b = build_annotations([5], bucket="b", prefix="p", workers=1, s3_client=fake_s3).annotations
-    assert a.equals(b)
-    keys = list(zip(a["source_id"], a["image_id"], a["row"], a["col"], strict=False))
-    assert keys == sorted(keys)
+    annotations = (
+        b"Name,Row,Column,Label ID,Status\n"
+        b"z.jpg,9,9,100,Confirmed\n"
+        b"z.jpg,1,5,100,Confirmed\n"
+        b"z.jpg,1,2,100,Confirmed\n"
+        b"a.jpg,4,4,100,Confirmed\n"
+    )
+    for sid in (2, 1):
+        files = {
+            "annotations.csv": annotations,
+            "image_list.csv": image_list,
+            "labelset.csv": _LABELSET_100S,
+        }
+        populate(fake_s3, "b", "p", sid, files)
+
+    ann = build_annotations(
+        [2, 1], bucket="b", prefix="p", workers=1, s3_client=fake_s3
+    ).annotations
+
+    keys = list(zip(ann["source_id"], ann["image_id"], ann["row"], ann["col"], strict=True))
+    assert keys == [
+        (1, "2", 4, 4),
+        (1, "3", 1, 2),
+        (1, "3", 1, 5),
+        (1, "3", 9, 9),
+        (2, "2", 4, 4),
+        (2, "3", 1, 2),
+        (2, "3", 1, 5),
+        (2, "3", 9, 9),
+    ]
 
 
 def test_build_annotations_strips_all_status_suffixes(fake_s3, populate):
@@ -129,11 +155,75 @@ def test_build_annotations_drops_unconfirmed_when_status_from_image_list_suffix(
     assert ann["status"].iloc[0] == "Confirmed"
 
 
+def _single_source_files(annotations: bytes, image_list: bytes) -> dict[str, bytes]:
+    return {
+        "annotations.csv": annotations,
+        "image_list.csv": image_list,
+        "labelset.csv": _LABELSET_100S,
+    }
+
+
+def test_build_annotations_status_column_wins_over_image_list_suffix(fake_s3, populate):
+    """a.jpg: Status Confirmed beats an Unconfirmed suffix; b.jpg: Unconfirmed beats Confirmed."""
+    files = _single_source_files(
+        b"Name,Row,Column,Label ID,Status\na.jpg,1,2,100,Confirmed\nb.jpg,3,4,101,Unconfirmed\n",
+        b"Name,Image Page\na.jpg - Unconfirmed,/image/1/view/\nb.jpg - Confirmed,/image/2/view/\n",
+    )
+    populate(fake_s3, "b", "p", 1, files)
+
+    ann = build_annotations([1], bucket="b", prefix="p", workers=1, s3_client=fake_s3).annotations
+
+    assert ann["image_id"].tolist() == ["1"]
+    assert ann["status"].tolist() == ["Confirmed"]
+
+
+def test_build_annotations_falls_back_to_suffix_when_status_is_empty(fake_s3, populate):
+    """Status column present but empty: the suffix decides; no suffix and no Status is dropped."""
+    files = _single_source_files(
+        b"Name,Row,Column,Label ID,Status\na.jpg,1,2,100,\nb.jpg,3,4,101,\nc.jpg,5,6,102,\n",
+        b"Name,Image Page\n"
+        b"a.jpg - Confirmed,/image/1/view/\n"
+        b"b.jpg - Unconfirmed,/image/2/view/\n"
+        b"c.jpg,/image/3/view/\n",
+    )
+    populate(fake_s3, "b", "p", 1, files)
+
+    ann = build_annotations([1], bucket="b", prefix="p", workers=1, s3_client=fake_s3).annotations
+
+    assert ann["image_id"].tolist() == ["1"]
+    assert ann["status"].tolist() == ["Confirmed"]
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [b"bad.jpg,x,2,100,Confirmed", b"bad.jpg,1,x,100,Confirmed", b"bad.jpg,1,2,x,Confirmed"],
+    ids=["row", "column", "label_id"],
+)
+def test_build_annotations_drops_rows_with_a_non_numeric_field(fake_s3, populate, bad_row):
+    files = _single_source_files(
+        b"Name,Row,Column,Label ID,Status\ngood.jpg,7,8,100,Confirmed\n" + bad_row + b"\n",
+        b"Name,Image Page\ngood.jpg,/image/1/view/\nbad.jpg,/image/2/view/\n",
+    )
+    populate(fake_s3, "b", "p", 1, files)
+
+    ann = build_annotations([1], bucket="b", prefix="p", workers=1, s3_client=fake_s3).annotations
+
+    assert list(zip(ann["image_id"], ann["row"], ann["col"], ann["coralnet_id"], strict=True)) == [
+        ("1", 7, 8, 100)
+    ]
+
+
 def test_list_source_folders_keeps_only_numeric_source_folders(fake_s3):
     bucket, prefix = "b", "coralnet-public-images"
     for folder in ("s12", "s3", "temporary", "resized", "sNotANumber"):
         fake_s3.put(bucket, f"{prefix}/{folder}/annotations.csv", b"a,b\n1,2\n")
     assert list_source_folders(fake_s3, bucket, prefix) == [3, 12]
+
+
+def test_list_source_folders_accepts_a_prefix_with_a_trailing_slash(fake_s3):
+    fake_s3.put("b", "pre/s5/annotations.csv", b"a,b\n1,2\n")
+
+    assert list_source_folders(fake_s3, "b", "pre/") == [5]
 
 
 def test_build_annotations_without_producing_sources_writes_empty_parquet(fake_s3, tmp_path):
@@ -224,6 +314,27 @@ def test_build_annotations_excludes_broken_source(fake_s3, sample_csv_factory, p
 
     assert build.annotations["source_id"].unique().tolist() == [1]
     assert build.exclusions == {kind: [2]}
+
+
+@pytest.mark.parametrize(
+    ("file_name", "body"),
+    [
+        # The labelset.csv case is the columns_missing entry of _BREAKS.
+        ("annotations.csv", b"Name,Row,Label ID,Status\na.jpg,1,1000,Confirmed\n"),
+        ("image_list.csv", b"Name,Page\na.jpg - Confirmed,/image/1/view/\n"),
+    ],
+    ids=["annotations", "image_list"],
+)
+def test_build_annotations_excludes_a_source_missing_a_required_column(
+    fake_s3, sample_csv_factory, populate, file_name, body
+):
+    files = sample_csv_factory(source_id=2, n_images=1, n_points_per_image=1)
+    files[file_name] = body
+    populate(fake_s3, "b", "p", 2, files)
+
+    build = build_annotations([2], bucket="b", prefix="p", workers=1, s3_client=fake_s3)
+
+    assert build.exclusions == {"columns_missing": [2]}
 
 
 def test_build_annotations_reports_a_missing_csv_over_a_read_failure(

@@ -22,7 +22,6 @@ class IssueType(StrEnum):
     VALID = "valid"
     UNSUPPORTED_FORMAT = "unsupported_format"
     INVALID_CHANNELS = "invalid_channels"
-    CORRUPTED_HEADER = "corrupted_header"
     DECODE_FAILURE = "decode_failure"
     TRUNCATED = "truncated"
     ZERO_SIZE = "zero_size"
@@ -112,8 +111,6 @@ def inspect_image(image_bytes: io.BytesIO | None) -> ImageInspection:
         error_msg = str(e).lower()
         if "truncated" in error_msg or "eof" in error_msg:
             issue = IssueType.TRUNCATED
-        elif "bad" in error_msg or "invalid" in error_msg:
-            issue = IssueType.CORRUPTED_HEADER
         else:
             issue = IssueType.DECODE_FAILURE
 

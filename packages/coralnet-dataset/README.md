@@ -102,7 +102,7 @@ At the end, `build-annotations` logs a summary at error level: the number of exc
 
 `build-images` logs the image count per `header_status`. `ok`, `sof_not_found_extended` and `pil_fallback` carry dimensions. `not_found`, `corrupt`, `s3_error` and `worker_exception` do not, and the manifest drops those images.
 
-`resize` logs the number of images resized, corrupted and failed. An image is corrupted when its download fails or it does not pass inspection. It is failed when the resize or the upload raises.
+`resize` logs the number of images resized, corrupted and failed. An image is corrupted when it does not pass inspection. It is failed when the download, resize or upload raises.
 
 Exit codes:
 

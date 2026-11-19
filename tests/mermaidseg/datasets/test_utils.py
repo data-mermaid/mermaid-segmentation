@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+from unittest.mock import MagicMock
+
 import numpy as np
 import pandas as pd
+import pytest
+from PIL import Image
 
-from mermaidseg.datasets.utils import create_annotation_mask
+from mermaidseg.datasets.local_cache import LocalS3Cache
+from mermaidseg.datasets.utils import create_annotation_mask, get_image_s3
 
 
 def _make_annotations(rows: list, cols: list, labels: list) -> pd.DataFrame:
@@ -75,3 +81,32 @@ def test_create_annotation_mask_unknown_label_skipped(caplog):
     assert mask[5, 5] == 1
     assert mask[10, 10] == 0
     assert "unknown label" in caplog.text.lower() or "UnknownLabel" in caplog.text
+
+
+@pytest.fixture()
+def stub_s3():
+    """An S3 client stub that serves a 6x4 (wide x high) PNG, with the singleton reset around it."""
+    buf = BytesIO()
+    Image.new("RGB", (6, 4), (10, 20, 30)).save(buf, format="PNG")
+    client = MagicMock()
+    client.get_object.return_value = {
+        "Body": MagicMock(read=MagicMock(return_value=buf.getvalue()))
+    }
+    LocalS3Cache.reset_singleton()
+    LocalS3Cache.configure(None, offline=False).set_s3_client(client)
+    yield client
+    LocalS3Cache.reset_singleton()
+
+
+def test_get_image_s3_decodes_the_object_at_the_given_key(stub_s3):
+    image = get_image_s3("bkt", "imgs/a.png")
+
+    stub_s3.get_object.assert_called_once_with(Bucket="bkt", Key="imgs/a.png")
+    assert image.size == (6, 4)
+    assert image.getpixel((0, 0)) == (10, 20, 30)
+
+
+def test_get_image_s3_thumbnail_reads_the_thumbnail_key(stub_s3):
+    get_image_s3("bkt", "imgs/a.png", thumbnail=True)
+
+    stub_s3.get_object.assert_called_once_with(Bucket="bkt", Key="imgs/a_thumbnail.png")

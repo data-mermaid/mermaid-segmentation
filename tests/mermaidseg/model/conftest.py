@@ -1,0 +1,97 @@
+"""Fixtures for the model tests: a MetaModel whose forward outputs are fixed numbers."""
+
+from __future__ import annotations
+
+import tempfile
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+import torch
+import torch.distributed as dist
+from torch import nn
+
+from mermaidseg.io import ConfigDict
+from mermaidseg.model.meta import MetaModel
+from tests.conftest import CBM_CONCEPT_VALUE2ID, NUM_CLASSES, cbm_concept_lookup
+
+
+class FixedOutputsModel(nn.Module):
+    """Returns the same logits for every image, plus a trainable scalar offset.
+
+    The offset is added to every channel, so softmax terms ignore it. It gives the optimizer
+    a parameter and the loss a gradient path without changing the hand-derived loss values.
+    """
+
+    def __init__(self, class_logits: torch.Tensor, concept_logits: torch.Tensor) -> None:
+        super().__init__()
+        self.class_logits = class_logits
+        self.concept_logits = concept_logits
+        self.offset = nn.Parameter(torch.zeros(()))
+
+    def forward(self, images: torch.Tensor) -> SimpleNamespace:
+        batch = images.shape[0]
+        logits = self.class_logits.expand(batch, -1, -1, -1) + self.offset
+        concept_logits = self.concept_logits.expand(batch, -1, -1, -1) + self.offset
+        return SimpleNamespace(
+            logits=logits, concept_logits=concept_logits, hidden_states=concept_logits.detach()
+        )
+
+
+FixedMetaFactory = Callable[..., MetaModel]
+
+
+@pytest.fixture()
+def fixed_meta_model(minimal_config: ConfigDict) -> FixedMetaFactory:
+    """Factory for a MetaModel over ``FixedOutputsModel`` (one pixel row of width 2).
+
+    ``class_logits`` are the per-class logits (default zeros), ``training`` overrides the
+    config's training section, and ``distributed`` builds the model for an initialised
+    process group.
+    """
+
+    def _factory(
+        class_logits: list[float] | None = None,
+        training: dict[str, Any] | None = None,
+        **meta_kwargs: Any,
+    ) -> MetaModel:
+        logits = torch.tensor(class_logits if class_logits is not None else [0.0] * NUM_CLASSES)
+        num_concepts = int(cbm_concept_lookup().shape[1])
+        model = FixedOutputsModel(
+            logits.reshape(1, -1, 1, 1).expand(1, -1, 1, 2),
+            torch.zeros(1, num_concepts, 1, 2),
+        )
+        cfg = minimal_config
+        for key, value in (training or {}).items():
+            if isinstance(value, dict):
+                cfg.training[key].update(value)
+            else:
+                cfg.training[key] = value
+        meta_kwargs.setdefault("concept_value2id", CBM_CONCEPT_VALUE2ID)
+        meta_kwargs.setdefault("source_to_concepts_lookup", cbm_concept_lookup())
+        meta_kwargs.setdefault("num_concepts", num_concepts)
+        return MetaModel(
+            run_name="fixed",
+            num_classes=NUM_CLASSES,
+            model_kwargs=cfg.model,
+            training_kwargs=cfg.training,
+            device="cpu",
+            model=model,
+            **meta_kwargs,
+        )
+
+    return _factory
+
+
+@pytest.fixture()
+def single_rank_group() -> Iterator[None]:
+    """An initialised one-process gloo group, destroyed afterwards."""
+    with tempfile.TemporaryDirectory() as rendezvous:
+        init_method = f"file://{Path(rendezvous) / 'rendezvous'}"
+        dist.init_process_group("gloo", init_method=init_method, rank=0, world_size=1)
+        try:
+            yield
+        finally:
+            dist.destroy_process_group()

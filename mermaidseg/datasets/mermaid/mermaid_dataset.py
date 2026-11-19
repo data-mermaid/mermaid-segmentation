@@ -33,10 +33,8 @@ class MermaidDataset(BaseCoralDataset):
     Args:
         annotations_path (str, optional): S3 path to the Parquet file with annotations.
         source_bucket (str, optional): S3 bucket name containing the dataset files.
-        annotation_date_cutoff (pd.Timestamp, optional): Only annotations with
-            ``updated_on`` on or before this date are used. Defaults to
-            2026-08-12, the date MERMAID annotations were last audited for this
-            project.
+        annotation_date_cutoff (str): Required, keyword-only. Only annotations with
+            ``updated_on`` on or before this date (interpreted as UTC) are used.
         **base_kwargs: Forwarded to :class:`BaseCoralDataset`.
     """
 
@@ -50,17 +48,14 @@ class MermaidDataset(BaseCoralDataset):
         self,
         annotations_path: str = "s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet",
         source_bucket: str = "coral-reef-training",
-        annotation_date_cutoff: str | None = None,
+        *,
+        annotation_date_cutoff: str,
         **base_kwargs: Any,
     ) -> None:
         """Initialize the dataset; arguments are described in the class docstring."""
         self.annotations_path = annotations_path
         self.source_bucket = source_bucket
-        self.annotation_date_cutoff = (
-            pd.Timestamp(annotation_date_cutoff, tz="UTC")
-            if annotation_date_cutoff is not None
-            else None
-        )
+        self.annotation_date_cutoff = pd.Timestamp(annotation_date_cutoff, tz="UTC")
 
         df_annotations, df_images = self.load_annotations(self.annotations_path)
         super().__init__(df_annotations=df_annotations, df_images=df_images, **base_kwargs)

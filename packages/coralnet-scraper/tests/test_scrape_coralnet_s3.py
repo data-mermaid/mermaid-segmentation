@@ -22,7 +22,6 @@ def test_main_raises_before_any_network_call_when_bucket_unset(monkeypatch):
         cli.main([])
     creds.assert_not_called()
     downloader_cls.assert_not_called()
-    downloader_cls.return_value.login.assert_not_called()
 
 
 def test_main_passes_configured_bucket_and_prefix(monkeypatch):

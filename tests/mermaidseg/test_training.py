@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import functools
 import json
 import multiprocessing
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import time
 import types
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,6 +31,7 @@ from mermaidseg.datasets.factory import build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import ConfigDict, load_config, resolve_repo_path
+from mermaidseg.logger import Logger
 from mermaidseg.model.distributed import DistContext
 from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
 from mermaidseg.training import (
@@ -42,7 +45,7 @@ from mermaidseg.training import (
     seed_run,
 )
 from scripts.train import build_parser
-from tests.conftest import cbm_test_config
+from tests.conftest import cbm_test_config, dinov3_encoder_mocker
 from tests.mermaidseg.conftest import init_gloo, spawn_gloo
 
 
@@ -185,7 +188,9 @@ def _write_section(path: Path, section: str, values: dict[str, Any]) -> str:
     return str(path)
 
 
-def _smoke_configs(tmp_path: Path, epochs: int = 1) -> list[str]:
+def _smoke_configs(
+    tmp_path: Path, epochs: int = 1, training_overrides: dict[str, Any] | None = None
+) -> list[str]:
     """Tiny training, model, data and logger YAMLs derived from the final run's configs."""
     training = load_config(resolve_repo_path("configs/training_config_cbm_final.yaml")).training
     training.update(
@@ -198,6 +203,7 @@ def _smoke_configs(tmp_path: Path, epochs: int = 1) -> list[str]:
         seed=7,
     )
     training.scheduler.update(warmup_iters=0, total_iters=epochs)
+    training.update(training_overrides or {})
     model = load_config(resolve_repo_path("configs/model_config_cbm_dpt_lora_vitl.yaml")).model
     model.update(
         concept_feature_dim=8,
@@ -295,8 +301,10 @@ def _smoke_args(
     *,
     epochs: int = 1,
     checkpoint: Path | None = None,
+    cli: Sequence[str] = (),
+    training_overrides: dict[str, Any] | None = None,
 ) -> argparse.Namespace:
-    cli = ["--checkpoint", str(checkpoint)] if checkpoint else []
+    checkpoint_cli = ["--checkpoint", str(checkpoint)] if checkpoint else []
     return build_parser().parse_args(
         [
             "--run-name",
@@ -309,8 +317,9 @@ def _smoke_args(
             str(output_dir),
             "--cache-dir",
             str(cache_dir),
+            *checkpoint_cli,
             *cli,
-            *_smoke_configs(tmp_path, epochs),
+            *_smoke_configs(tmp_path, epochs, training_overrides),
         ]
     )
 
@@ -670,3 +679,424 @@ def test_distributed_shuffled_loader_matches_single_process_over_two_passes():
             for shard0, shard1 in zip(rank0[pass_index], rank1[pass_index], strict=True)
         ]
         assert interleaved == expected[pass_index]
+
+
+# ---------- run() with a recording stand-in for train_model ----------
+# The loaders are built but never iterated, so none of these tests starts a DataLoader worker.
+
+
+class _RecordingTrainModel:
+    """Stands in for ``train_model``: records each call and fires ``on_optimizer_step`` at ``steps``."""
+
+    def __init__(self, steps: Sequence[int] = (), validation_metrics: dict | None = None) -> None:
+        self.steps = steps
+        self.validation_metrics = validation_metrics or {}
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> dict[int, dict]:
+        self.calls.append(kwargs)
+        meta = kwargs["meta_model"]
+        for step in self.steps:
+            meta.global_step = step
+            kwargs["on_optimizer_step"](meta)
+        epoch = kwargs["start_epoch"]
+        return {epoch: {"train_metrics": {}, "validation_metrics": self.validation_metrics}}
+
+
+@dataclasses.dataclass
+class _RunResult:
+    """What one ``run()`` left behind: the recorder, seeds, tracker params, files and exit."""
+
+    recorder: _RecordingTrainModel
+    seeds: list[int]
+    wandb_run: _FakeWandbRun
+    run_dir: Path
+    system_exit: SystemExit | None = None
+    save_atomic: dict[str, bool] = dataclasses.field(default_factory=dict)
+
+    def resolved_config(self) -> dict[str, Any]:
+        return yaml.safe_load((self.run_dir / "config.yaml").read_text())
+
+
+class _ScenarioRunner:
+    """Runs ``run()`` once per call in its own directory, with the smoke fakes scoped to the call."""
+
+    def __init__(self, tmp_path_factory: pytest.TempPathFactory) -> None:
+        self._tmp_path_factory = tmp_path_factory
+
+    def scratch_dir(self) -> Path:
+        return self._tmp_path_factory.mktemp("scratch")
+
+    def __call__(
+        self,
+        recorder: _RecordingTrainModel | None = None,
+        *,
+        catch_exit: bool = False,
+        spy_saves: bool = False,
+        **args_kwargs: Any,
+    ) -> _RunResult:
+        tmp_path = self._tmp_path_factory.mktemp("run")
+        output_dir = tmp_path / "out"
+        result = _RunResult(
+            recorder=recorder or _RecordingTrainModel(),
+            seeds=[],
+            wandb_run=_FakeWandbRun(),
+            run_dir=output_dir / "model_checkpoints" / SMOKE_RUN,
+        )
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            _, result.wandb_run, _ = _install_smoke_fakes(
+                monkeypatch, tmp_path, dinov3_encoder_mocker(monkeypatch)
+            )
+            self._record_seeds(monkeypatch, result.seeds)
+            if spy_saves:
+                self._spy_on_saves(monkeypatch, result.save_atomic)
+            monkeypatch.setattr(training, "train_model", result.recorder)
+            args = _smoke_args(tmp_path, output_dir, tmp_path / "cache", **args_kwargs)
+            try:
+                training.run(args)
+            except SystemExit as exit_:
+                if not catch_exit:
+                    raise
+                result.system_exit = exit_
+        return result
+
+    @staticmethod
+    def _record_seeds(monkeypatch: pytest.MonkeyPatch, seeds: list[int]) -> None:
+        real_seed_run = training.seed_run
+
+        def _record_seed(seed: int, train_generator: Any, val_generator: Any) -> None:
+            seeds.append(seed)
+            real_seed_run(seed, train_generator, val_generator)
+
+        monkeypatch.setattr(training, "seed_run", _record_seed)
+
+    @staticmethod
+    def _spy_on_saves(monkeypatch: pytest.MonkeyPatch, atomic_by_name: dict[str, bool]) -> None:
+        real_save = Logger.save_model_checkpoint
+
+        def _record(self, meta, epoch, metrics, checkpoint_name=None, **kwargs):
+            atomic_by_name[checkpoint_name] = kwargs.get("atomic", False)
+            real_save(self, meta, epoch, metrics, checkpoint_name=checkpoint_name, **kwargs)
+
+        monkeypatch.setattr(Logger, "save_model_checkpoint", _record)
+
+
+@pytest.fixture(scope="module")
+def run_scenario(tmp_path_factory) -> _ScenarioRunner:
+    return _ScenarioRunner(tmp_path_factory)
+
+
+@pytest.fixture(scope="module")
+def fresh_run(run_scenario) -> _RunResult:
+    """The default one-epoch run, shared by the tests that need a built model or its settings."""
+    return run_scenario()
+
+
+def _save_resume_checkpoint(meta, path: Path, **overrides: Any) -> Path:
+    torch.save({**_resume_checkpoint(meta), **overrides}, path)
+    return path
+
+
+def test_seed_run_seeds_the_global_rngs(monkeypatch):
+    seeded: list[int] = []
+    monkeypatch.setattr(training, "seed_everything", seeded.append)
+    seed_run(11, torch.Generator(), torch.Generator())
+    assert seeded == [11]
+
+
+# ---------- --init-weights and --checkpoint ----------
+
+
+def _weights_only_checkpoint(path: Path) -> Path:
+    torch.save({"model_state_dict": torch.nn.Linear(2, 2).state_dict()}, path)
+    return path
+
+
+def test_init_weights_reads_a_file_that_holds_only_model_weights(tmp_path):
+    path = _weights_only_checkpoint(tmp_path / "weights.pt")
+    args = SimpleNamespace(init_weights=str(path), checkpoint=None)
+    assert set(training._read_run_checkpoint(args)) == {"model_state_dict"}  # type: ignore[arg-type]
+
+
+def test_resume_checkpoint_must_hold_the_optimizer_and_progress_keys(tmp_path):
+    path = _weights_only_checkpoint(tmp_path / "weights.pt")
+    args = SimpleNamespace(init_weights=None, checkpoint=str(path))
+    with pytest.raises(RuntimeError, match=r"weights\.pt.*optimizer_state_dict"):
+        training._read_run_checkpoint(args)  # type: ignore[arg-type]
+
+
+def test_no_checkpoint_flag_reads_nothing():
+    assert (
+        training._read_run_checkpoint(SimpleNamespace(init_weights=None, checkpoint=None)) is None
+    )  # type: ignore[arg-type]
+
+
+def test_loading_weights_only_keeps_the_fresh_optimizer_and_progress(make_meta_model):
+    # MetaModel pops keys from the config sections it is given, so each model gets its own config.
+    source = make_meta_model(cbm_test_config(), run_name="source")
+    with torch.no_grad():
+        next(iter(source.model.parameters())).add_(1.0)
+    target = make_meta_model(cbm_test_config(), run_name="target")
+    lr_before = [group["lr"] for group in target.optimizer.param_groups]
+    checkpoint = {"model_state_dict": source.model.state_dict()}
+
+    start_epoch = load_training_checkpoint(target, checkpoint, DistContext(), load_optimizer=False)
+
+    assert start_epoch == 0
+    assert (target.global_step, target.resuming_within_epoch) == (0, False)
+    assert [group["lr"] for group in target.optimizer.param_groups] == lr_before
+    name = next(iter(source.model.state_dict()))
+    torch.testing.assert_close(target.model.state_dict()[name], source.model.state_dict()[name])
+
+
+@dataclasses.dataclass
+class _MarkedCheckpoint:
+    path: Path
+    tensor_name: str
+    marked_tensor: torch.Tensor
+
+
+@pytest.fixture(scope="module")
+def marked_checkpoint(fresh_run, run_scenario) -> _MarkedCheckpoint:
+    """The fresh run's weights, +1 on one tensor, saved with a foreign optimizer and progress."""
+    meta = fresh_run.recorder.calls[0]["meta_model"]
+    checkpoint = _resume_checkpoint(meta)
+    checkpoint["model_state_dict"] = {
+        key: value.detach().clone() for key, value in meta.model.state_dict().items()
+    }
+    name = next(k for k, v in checkpoint["model_state_dict"].items() if v.is_floating_point())
+    checkpoint["model_state_dict"][name] += 1.0
+    checkpoint["optimizer_state_dict"]["param_groups"][0]["lr"] = 123.0
+    checkpoint["global_step"] = 99
+    path = run_scenario.scratch_dir() / "init.pt"
+    torch.save(checkpoint, path)
+    return _MarkedCheckpoint(path, name, checkpoint["model_state_dict"][name])
+
+
+@pytest.fixture(scope="module")
+def init_weights_run(run_scenario, marked_checkpoint) -> _RunResult:
+    return run_scenario(cli=["--init-weights", str(marked_checkpoint.path)])
+
+
+def test_init_weights_run_loads_the_weights_into_a_fresh_optimizer_at_epoch_zero(
+    fresh_run, init_weights_run, marked_checkpoint
+):
+    configured_lrs = [
+        g["lr"] for g in fresh_run.recorder.calls[0]["meta_model"].optimizer.param_groups
+    ]
+
+    call = init_weights_run.recorder.calls[0]
+    meta = call["meta_model"]
+    assert (call["start_epoch"], call["end_epoch"]) == (0, 1)
+    assert (meta.global_step, meta.resuming_within_epoch) == (0, False)
+    assert [g["lr"] for g in meta.optimizer.param_groups] == configured_lrs
+    torch.testing.assert_close(
+        meta.model.state_dict()[marked_checkpoint.tensor_name], marked_checkpoint.marked_tensor
+    )
+
+
+def test_init_weights_run_reseeds_to_the_run_seed_not_the_checkpoint_progress(init_weights_run):
+    # Checkpoint global_step is 99 and epoch 2; the new run starts from the plain run seed.
+    assert init_weights_run.seeds == [7, 7]
+
+
+def test_init_weights_run_records_the_init_params_and_no_resume_params(
+    init_weights_run, marked_checkpoint
+):
+    params = init_weights_run.wandb_run.params
+    assert params["init/weights"] == str(marked_checkpoint.path)
+    assert (params["init/optimizer"], params["init/start_epoch"]) == ("fresh", 0)
+    assert "init/checkpoint" not in params
+
+
+@pytest.mark.parametrize(
+    ("epoch_complete", "global_step", "epochs", "expected_resume_seed"),
+    [
+        pytest.param(False, 5, 2, 7 + 5, id="mid-epoch-adds-the-global-step"),
+        pytest.param(True, 5, 3, 7 + 1, id="epoch-boundary-adds-the-start-epoch"),
+    ],
+)
+def test_resumed_run_reseeds_with_the_run_seed_plus_its_progress(
+    fresh_run, run_scenario, epoch_complete, global_step, epochs, expected_resume_seed
+):
+    checkpoint = _save_resume_checkpoint(
+        fresh_run.recorder.calls[0]["meta_model"],
+        run_scenario.scratch_dir() / "resume.pt",
+        epoch=0,
+        epoch_complete=epoch_complete,
+        global_step=global_step,
+    )
+    resumed = run_scenario(epochs=epochs, checkpoint=checkpoint)
+    assert resumed.seeds == [7, expected_resume_seed]
+    assert resumed.recorder.calls[0]["start_epoch"] == (1 if epoch_complete else 0)
+
+
+def test_resuming_a_checkpoint_that_covers_every_epoch_exits_with_status_zero(
+    fresh_run, run_scenario
+):
+    checkpoint = _save_resume_checkpoint(
+        fresh_run.recorder.calls[0]["meta_model"],
+        run_scenario.scratch_dir() / "done.pt",
+        epoch=0,
+        epoch_complete=True,
+    )
+    resumed = run_scenario(epochs=1, checkpoint=checkpoint, catch_exit=True)
+    assert resumed.system_exit is not None
+    assert resumed.system_exit.code == 0
+    assert resumed.recorder.calls == []
+
+
+def test_resuming_the_last_unfinished_epoch_still_trains_it(fresh_run, run_scenario):
+    checkpoint = _save_resume_checkpoint(
+        fresh_run.recorder.calls[0]["meta_model"],
+        run_scenario.scratch_dir() / "mid.pt",
+        epoch=0,
+        epoch_complete=False,
+    )
+    resumed = run_scenario(epochs=1, checkpoint=checkpoint)
+    assert [c["start_epoch"] for c in resumed.recorder.calls] == [0]
+
+
+# ---------- config overrides ----------
+
+
+@pytest.mark.parametrize("kl_weight", [0, -0.5])
+def test_a_non_positive_kl_weight_drops_the_taxonomic_loss_from_the_run(run_scenario, kl_weight):
+    result = run_scenario(training_overrides={"taxonomic_loss": {"kl_weight": kl_weight}})
+    assert "taxonomic_loss" not in result.resolved_config()["training"]
+    assert result.wandb_run.params["loss/kl_weight"] == 0.0
+
+
+def test_a_positive_kl_weight_keeps_the_taxonomic_loss(run_scenario):
+    result = run_scenario(training_overrides={"taxonomic_loss": {"kl_weight": 0.25}})
+    assert result.resolved_config()["training"]["taxonomic_loss"]["kl_weight"] == 0.25
+    assert result.wandb_run.params["loss/kl_weight"] == 0.25
+
+
+def test_the_grad_accum_flag_overrides_the_config_value(run_scenario):
+    result = run_scenario(
+        cli=["--grad-accum-steps", "4"], training_overrides={"grad_accum_steps": 1}
+    )
+    assert result.resolved_config()["training"]["grad_accum_steps"] == 4
+    assert result.wandb_run.params["train/grad_accum_steps"] == 4
+
+
+def test_without_the_grad_accum_flag_the_config_value_stands(run_scenario):
+    result = run_scenario(training_overrides={"grad_accum_steps": 3})
+    assert result.resolved_config()["training"]["grad_accum_steps"] == 3
+    assert result.wandb_run.params["train/grad_accum_steps"] == 3
+
+
+# ---------- checkpoints written by run() ----------
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_every_steps", "iterations", "written"),
+    [
+        pytest.param(0, 1001, True, id="no-step-checkpoints-and-a-long-epoch"),
+        pytest.param(0, 1000, False, id="a-short-epoch-writes-none"),
+        pytest.param(10, 2000, False, id="step-checkpointed-runs-write-no-epoch-file"),
+    ],
+)
+def test_model_epoch_checkpoint_is_written_only_without_step_checkpoints_on_long_epochs(
+    run_scenario, checkpoint_every_steps, iterations, written
+):
+    result = run_scenario(
+        _RecordingTrainModel(validation_metrics={"accuracy": 0.5}),
+        training_overrides={
+            "checkpoint_every_steps": checkpoint_every_steps,
+            "iterations_per_train_epoch": iterations,
+        },
+    )
+    path = result.run_dir / "model_epoch0"
+    assert path.is_file() is written
+    assert result.recorder.calls[0]["save_best_checkpoint"] is (checkpoint_every_steps <= 0)
+    if written:
+        assert torch.load(path, weights_only=True)["metrics"] == {"accuracy": 0.5}
+
+
+def _checkpoint_flags(path: Path) -> tuple[int, bool]:
+    saved = torch.load(path, weights_only=True)
+    return saved["global_step"], saved["epoch_complete"]
+
+
+def test_a_step_checkpoint_marks_its_epoch_complete_only_at_the_last_update(run_scenario):
+    result = run_scenario(
+        _RecordingTrainModel(steps=[3, 4]),
+        training_overrides={"checkpoint_every_steps": 1, "iterations_per_train_epoch": 4},
+    )
+    assert sorted(p.name for p in result.run_dir.glob("model_step*")) == [
+        "model_step3",
+        "model_step4",
+    ]
+    assert _checkpoint_flags(result.run_dir / "model_step3") == (3, False)
+    assert _checkpoint_flags(result.run_dir / "model_step4") == (4, True)
+
+
+def test_steps_off_the_checkpoint_cadence_write_nothing(run_scenario):
+    result = run_scenario(
+        _RecordingTrainModel(steps=[1, 2, 3]),
+        training_overrides={"checkpoint_every_steps": 4, "iterations_per_train_epoch": 100},
+        cli=["--preempt-checkpoint-every-steps", "5"],
+    )
+    assert list(result.run_dir.glob("model_step*")) == []
+    assert list(result.run_dir.glob("model_preempt*")) == []
+
+
+@pytest.fixture(scope="module")
+def step_and_preempt_run(run_scenario) -> _RunResult:
+    """Step checkpoints every 2 and preempt checkpoints every 3, across updates 2, 3 and 6."""
+    return run_scenario(
+        _RecordingTrainModel(steps=[2, 3, 6]),
+        training_overrides={"checkpoint_every_steps": 2, "iterations_per_train_epoch": 100},
+        cli=["--preempt-checkpoint-every-steps", "3"],
+        spy_saves=True,
+    )
+
+
+def test_only_preempt_checkpoints_are_written_atomically(step_and_preempt_run):
+    assert step_and_preempt_run.save_atomic == {
+        "model_step2": False,
+        "model_preempt3": True,
+        "model_step6": False,
+        "model_preempt6": True,
+    }
+
+
+def test_preempt_checkpoints_roll_and_leave_step_checkpoints_alone(step_and_preempt_run):
+    run_dir = step_and_preempt_run.run_dir
+    assert sorted(p.name for p in run_dir.glob("model_step*")) == [
+        "model_step2",
+        "model_step6",
+    ]
+    # model_preempt3 was pruned once model_preempt6 landed; no .partial is left behind.
+    assert sorted(p.name for p in run_dir.glob("model_preempt*")) == ["model_preempt6"]
+    assert _checkpoint_flags(run_dir / "model_preempt6") == (6, False)
+
+
+def test_preempt_checkpoints_are_written_without_interval_checkpoints(run_scenario):
+    result = run_scenario(
+        _RecordingTrainModel(steps=[3]),
+        training_overrides={"checkpoint_every_steps": 0, "iterations_per_train_epoch": 100},
+        cli=["--preempt-checkpoint-every-steps", "3"],
+    )
+    assert [p.name for p in result.run_dir.glob("model_preempt*")] == ["model_preempt3"]
+    assert list(result.run_dir.glob("model_step*")) == []
+
+
+def test_the_preempt_checkpoint_of_the_last_update_marks_the_epoch_complete(run_scenario):
+    result = run_scenario(
+        _RecordingTrainModel(steps=[4]),
+        training_overrides={"checkpoint_every_steps": 0, "iterations_per_train_epoch": 4},
+        cli=["--preempt-checkpoint-every-steps", "2"],
+    )
+    assert _checkpoint_flags(result.run_dir / "model_preempt4") == (4, True)
+
+
+def test_step_zero_never_writes_a_preempt_checkpoint(run_scenario):
+    result = run_scenario(
+        _RecordingTrainModel(steps=[0]),
+        training_overrides={"checkpoint_every_steps": 0, "iterations_per_train_epoch": 100},
+        cli=["--preempt-checkpoint-every-steps", "3"],
+    )
+    assert list(result.run_dir.glob("model_preempt*")) == []
