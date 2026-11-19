@@ -19,6 +19,7 @@ dependencies = [
     "datasets>=3.0",
     "s3fs",
     "scikit-learn",
+    "scipy",
     "pyyaml",
     "tqdm",
     "torchmetrics",

@@ -87,7 +87,8 @@ def _to_label(arr_like: Any) -> NDArray[np.uint8]:
     return arr.astype(np.uint8, copy=False)
 
 
-def _label_md5(arr: NDArray[np.uint8]) -> str:
+def label_md5(arr: NDArray[np.uint8]) -> str:
+    """Return the md5 hex digest of a label mask as uint8 bytes."""
     return hashlib.md5(np.ascontiguousarray(arr, dtype=np.uint8).tobytes()).hexdigest()
 
 
@@ -288,7 +289,7 @@ class LocalMirrorSource:
         lab = _to_label(
             Image.open(self.root / "gtFine" / "train" / site / f"{stem}_gtFine_labelIds.png")
         )
-        md5 = _label_md5(lab)
+        md5 = label_md5(lab)
         if md5 != entry["label_md5"]:
             logger.warning(
                 "Label md5 mismatch for %s/%s (probe set may not match this mirror).", site, stem
@@ -339,7 +340,7 @@ class HFSource:
         train = self.ds["train"]
         for i in tqdm(range(len(train)), desc="md5 index"):
             lab = _to_label(train[i]["label"])
-            idx[_label_md5(lab)] = i
+            idx[label_md5(lab)] = i
         self._md5_index = idx
 
     def train_image_label(self, entry: dict) -> tuple[NDArray[np.uint8], NDArray[np.uint8]]:
