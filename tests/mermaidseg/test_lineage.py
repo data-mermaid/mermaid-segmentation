@@ -149,3 +149,19 @@ def test_data_version_lists_manifests_of_datasets_that_have_one():
         "coralnet.train": "m/train.parquet",
         "coralnet.val": "m/val.parquet",
     }
+
+
+def test_data_version_lists_manifest_sha256_of_datasets_that_have_one():
+    datasets = {
+        ("coralnet", "train"): SimpleNamespace(
+            manifest_path="m/train.parquet", manifest_sha256="aa11"
+        ),
+        ("coralnet", "val"): SimpleNamespace(manifest_path="m/val.parquet"),
+        ("coralscapes_v2", "train"): SimpleNamespace(),
+    }
+    version = data_version({}, datasets)
+    assert version["manifest_sha256"] == {"coralnet.train": "aa11"}
+    assert version["manifests"] == {
+        "coralnet.train": "m/train.parquet",
+        "coralnet.val": "m/val.parquet",
+    }
