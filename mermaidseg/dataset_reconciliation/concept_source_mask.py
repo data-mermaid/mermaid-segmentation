@@ -116,13 +116,17 @@ class ConceptSourceMask:
     """Keep table for one run: row 0 keeps every channel, row ``i`` belongs to ``source_ids[i - 1]``.
 
     ``keep[row, channel]`` is False where that source's targets for that channel are set to 0.
-    Datasets other than ``dataset`` (and its sources missing from the file) use row 0.
+    Datasets other than ``dataset``, and its counted sources with nothing masked, use row 0.
+    ``covered_sources`` are the sources the builder counted; :func:`attach_source_rows` refuses a
+    ``dataset`` source outside them.
     """
 
     dataset: str
     source_ids: tuple[str, ...]
     keep: torch.Tensor  # (len(source_ids) + 1, num_channels), bool
     path: str
+    covered_sources: frozenset[str]
+    data_config: str | None
 
     @property
     def num_masked(self) -> int:
@@ -152,13 +156,19 @@ def load_concept_source_mask(
     - every concept is a binary channel of ``schema``; concepts in ``removed_concepts`` (removed
       from the run by ``training.concept_removal``) are skipped, anything else is an error;
     - with ``concepts_csv``, its sha1 matches the one recorded in the ``.meta.yaml`` sidecar, so a
-      mask built for another concept table is refused.
+      mask built for another concept table is refused;
+    - the sidecar lists the sources the builder counted (``source_ids``).
     """
     path = Path(path)
     meta_file = meta_path(path)
     if not meta_file.is_file():
         raise FileNotFoundError(f"concept source mask {path} has no sidecar {meta_file}")
     meta = yaml.safe_load(meta_file.read_text())
+    if "source_ids" not in meta:
+        raise ValueError(
+            f"{meta_file} has no source_ids, the sources the mask was built from. "
+            "Rebuild it with scripts/build_concept_source_mask.py."
+        )
     if concepts_csv is not None and meta.get("concepts_csv_sha1") != file_sha1(concepts_csv):
         raise ValueError(
             f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "
@@ -201,6 +211,8 @@ def load_concept_source_mask(
         source_ids=source_ids,
         keep=keep,
         path=str(path),
+        covered_sources=frozenset(str(s) for s in meta["source_ids"]),
+        data_config=meta.get("data_config"),
     )
 
 
@@ -244,12 +256,28 @@ class _ConstantSourceRow(Dataset):
         return getattr(self.dataset, name)
 
 
+def _check_covered(source_ids: Iterable[Any], mask: ConceptSourceMask) -> None:
+    """Raise if any of ``source_ids`` is outside the sources ``mask`` was built from."""
+    missing = sorted({str(s) for s in source_ids} - mask.covered_sources, key=_source_sort_key)
+    if missing:
+        raise ValueError(
+            f"{len(missing)} {mask.dataset} sources are not in concept source mask {mask.path} "
+            f"(built from {mask.data_config}): {', '.join(missing[:10])}"
+            f"{' ...' if len(missing) > 10 else ''}. Rebuild it with "
+            "scripts/build_concept_source_mask.py --data-config <this run's data config>."
+        )
+
+
 def attach_source_rows(datasets: Sequence[Dataset], mask: ConceptSourceMask) -> list[Dataset]:
     """Make every training dataset return ``(image, labels, source_row)``.
 
     ``BaseCoralDataset`` subclasses return the row from ``_safe_getitem``, so a retry on another
     image returns that image's row. Datasets of ``mask.dataset`` map each image's ``source_id``;
     the others, and datasets outside the base class (wrapped), always return row 0.
+
+    Raises:
+        ValueError: A ``mask.dataset`` image comes from a source the mask was not built from. Its
+            never-True concepts would silently train as False.
     """
     from mermaidseg.datasets.base_dataset import BaseCoralDataset
 
@@ -258,6 +286,7 @@ def attach_source_rows(datasets: Sequence[Dataset], mask: ConceptSourceMask) -> 
     for ds in datasets:
         if isinstance(ds, BaseCoralDataset):
             if getattr(ds, "SOURCE_NAME", None) == mask.dataset:
+                _check_covered(ds.df_images["source_id"], mask)
                 rows = mask.rows_for(ds.df_images["source_id"])
                 ds.set_source_rows(pd.Series(rows, index=ds.df_images.index))
             else:
