@@ -5,7 +5,7 @@ This runbook takes you from an empty bucket, or an older scrape, to a CoralNet b
 1. `coralnet-scraper` downloads the public CoralNet sources to S3.
 2. `coralnet-dataset` builds the training manifest, the resized images and the label names from that scrape.
 
-The package READMEs are the reference for flags, environment variables, exclusion kinds and exit codes. This page links to them and does not repeat them.
+The package READMEs are the reference for flags, environment variables, exclusion kinds and exit codes; this page gives the order and links to them.
 
 - [Before you start](#before-you-start)
 - [Recreate the data from scratch](#recreate-the-data-from-scratch)
@@ -25,7 +25,7 @@ The package READMEs are the reference for flags, environment variables, exclusio
   ```
 
   See the scraper's [environment variables](../packages/coralnet-scraper/README.md#environment-variables) and the build's [environment variables](../packages/coralnet-dataset/README.md#environment-variables).
-- **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the bucket that `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`) reads, its `source_bucket`. The manifest's `image_s3_key` and the id2name JSON are keys in that bucket. A build in any other bucket is not readable in training.
+- **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the `source_bucket` of `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`). See [Use a build in training](../packages/coralnet-dataset/README.md#use-a-build-in-training).
 
 Run every command from the repository root.
 
@@ -54,7 +54,7 @@ uv run --package coralnet-dataset coralnet-dataset all --version-tag <run> --upl
 
 To run the steps one at a time, pass the same `--version-tag` to each. Each invocation computes its own default tag, so without it the outputs land in different run directories. The step order and the flags of each step are in [Run](../packages/coralnet-dataset/README.md#run).
 
-Use a tag that is not on S3 yet. An upload to an existing key stops the command with `RuntimeError`, with or without `--version-tag`. Only `--overwrite` lets the upload replace existing files.
+Use an unused tag; see [Run](../packages/coralnet-dataset/README.md#run).
 
 ### Check the build
 
@@ -72,7 +72,7 @@ The resized images are not in that directory. `resize` writes them under `<resiz
 
 ### Add new sources
 
-Re-run the scraper without flags. It skips each source that already has `annotations.csv` on S3, so it downloads only the sources that are new on CoralNet.
+Re-run the scraper without flags. It skips each source that already has `annotations.csv` on S3, so it downloads new sources and any source that failed before its annotations upload.
 
 ### Pick up new annotations or images in existing sources
 
@@ -82,13 +82,7 @@ The scraper skips existing sources, so it does not see changes to them. To pick 
 uv run --package coralnet-scraper coralnet-scrape --force
 ```
 
-`--force` reprocesses every source, not only the changed ones. For each source:
-
-- The scraper exports the annotations again and replaces `annotations.csv`.
-- It uploads only the images that are not on S3. An image object that exists is not uploaded again.
-- A source with more than 5000 images is exported in pages and merged into its existing `annotations.csv`. If the existing file already covers as many images as CoralNet reports, the scraper keeps it and does not export again. New annotations on existing images of such a source are not picked up.
-
-See [Resume and `--force`](../packages/coralnet-scraper/README.md#resume-and---force).
+`--force` reprocesses every source, not only the changed ones; see [Resume and `--force`](../packages/coralnet-scraper/README.md#resume-and---force) for what it exports again and what it keeps.
 
 ### Rebuild under a new version tag
 
@@ -100,18 +94,13 @@ uv run --package coralnet-dataset coralnet-dataset all --version-tag <new-run> -
 
 `build-annotations` and `build-images` read every source and every annotated image again. `resize` resizes only the images that have no resized object on S3.
 
-Do not reuse an old tag. A reused tag stops with `RuntimeError` unless you pass `--overwrite`. With `--overwrite`, the upload replaces the files of that tag, and any training run that pins the old build then reads different data.
+Use an unused tag; see [Run](../packages/coralnet-dataset/README.md#run).
 
 ## Use the new build in training
 
 ### Select the build
 
-Set one of these in the environment of the training run. The path wins when both are set:
-
-- `MERMAID_CORALNET_MANIFEST_VERSION=<run>` reads `etl-outputs/coralnet/<run>/coralnet_training_manifest_<run>.parquet`.
-- `MERMAID_CORALNET_MANIFEST_PATH=<key>` reads that key.
-
-`CoralNetDataset` reads the label names from `coralnet_id2name_<run>.json` in the same directory as the manifest, where `<run>` is the directory name. A custom path must keep that layout. See [Use a build in training](../packages/coralnet-dataset/README.md#use-a-build-in-training).
+Set `MERMAID_CORALNET_MANIFEST_VERSION=<run>` or `MERMAID_CORALNET_MANIFEST_PATH=<key>` in the environment of the training run. See [Use a build in training](../packages/coralnet-dataset/README.md#use-a-build-in-training).
 
 ### Make the build the default
 
@@ -121,7 +110,22 @@ A new default build changes model outputs, so item 7 of the working agreement in
 
 ### Add new sources to the splits
 
-Each CoralNet split in `configs/data_config.yaml` and `configs/data_config_trainval.yaml` has a `whitelist_sources` list. `CoralNetDataset` keeps only the sources on that list. A new source is not in any split until you add its id to a list.
+Each CoralNet split has a `whitelist_sources` list, and `CoralNetDataset` keeps only the sources on that list. A new source is not in any split until you add its id to a list:
+
+1. Add the id to a split's `whitelist_sources` in `configs/data_config.yaml`.
+2. Regenerate `configs/data_config_trainval.yaml`, which is derived from it:
+
+   ```bash
+   uv run python scripts/build_trainval_data_config.py
+   ```
+
+### Map new labels
+
+A label name in the build's `coralnet_id2name_<run>.json` trains as background when `configs/coralnet_to_mermaid_mapping_temporary.json` has no key for it, or its value is `null` (`mermaidseg/dataset_reconciliation/label_mapping.py`, `mermaidseg/dataset_reconciliation/registry.py`). Names are matched lowercased. Before training, give each new label a MERMAID benthic-attribute name.
+
+### Duplicates in new sources
+
+`configs/coralnet/image_blacklist.parquet` and `configs/coralnet/annotation_overrides.parquet` cover only the sources they were built from. Duplicate images in new sources are not removed. See the build's [Known gaps](../packages/coralnet-dataset/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
 
 ### Warm the offline cache again
 
@@ -138,10 +142,13 @@ MERMAID_CORALNET_MANIFEST_VERSION=<run> uv run python scripts/prefetch_cache.py 
 | Failure | What to do |
 |---|---|
 | Scraper exit 1: login failure | Check `CORALNET_USERNAME` and `CORALNET_PASSWORD`, then run again. |
-| Scraper exit 1: a source failed with `metadata_download_failed`, `labelset_failed`, `image_list_failed`, `images_missing_url` or `images_upload_failed` | The source has `annotations.csv` on S3, so a plain re-run skips it. Run the scraper with `--force`. |
+| Scraper exit 1: a source failed with `metadata_download_failed`, `labelset_failed`, `image_list_failed`, `images_missing_url` or `images_upload_failed` | Unless it also failed with `annotations_failed`, the source has `annotations.csv` on S3, so a plain re-run skips it. Run the scraper with `--force`. |
 | Scraper exit 1: a source failed with any other kind, for example `annotations_failed` or an exception class name | If the source has no `annotations.csv` on S3, run the scraper again without flags. If it has one, run with `--force`. |
-| `build-annotations` excluded a source with `annotations_missing`, `image_list_missing` or `labelset_missing` | Run the scraper with `--force` to write the missing file, then rebuild. |
-| `build-annotations` excluded a source with `csv_read_failed`, `columns_missing` or `annotations_empty` | The CSV on S3 is bad. Run the scraper with `--force` to export it again, then rebuild. |
+| `build-annotations` excluded a source with `annotations_missing` | Run the scraper again without flags, then rebuild. |
+| `build-annotations` excluded a source with `image_list_missing` | Run the scraper with `--force`, then rebuild. |
+| `build-annotations` excluded a source with `labelset_missing` | Check the source on CoralNet. If it has no labels, the scraper writes no `labelset.csv` and the exclusion is expected. If it has labels, the labelset step failed (`labelset_failed` in the scraper summary): delete the source's `annotations.csv` or run the scraper with `--force`, then rebuild. |
+| `build-annotations` excluded a source with `csv_read_failed` | Rebuild first. If it repeats, run the scraper with `--force`, then rebuild. |
+| `build-annotations` excluded a source with `columns_missing` or `annotations_empty` | The CSV on S3 is bad, or, for `annotations_empty`, the source may have no annotations. Run the scraper with `--force` to export it again, then rebuild. |
 | `build-annotations` excluded a source with `image_list_incomplete` or `label_unnamed` | The source CSVs do not agree with each other. Run the scraper with `--force`, then rebuild. |
 | `build-images` reports `not_found` | The image object is not on S3. Run the scraper with `--force` to upload it, then rebuild. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
