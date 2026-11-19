@@ -362,6 +362,7 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert "sand" in sidecar["id2label"].values()
     assert sidecar["concept_id2name"]
     assert sidecar["lineage"]["seed"] == 7
+    assert "parent" not in sidecar["lineage"]
     assert sidecar["architecture"]["encoder_config"]["hidden_size"] == 16
     assert sidecar["preprocessing"]["mean"] == list(IMAGENET_MEAN)
     assert sidecar["preprocessing"]["std"] == list(IMAGENET_STD)
@@ -607,6 +608,82 @@ def test_resumed_run_continues_the_global_step_from_its_checkpoint(
     assert resumed["global_step"] == 2
     # A run that restarted from step 0 would rewrite model_step1.
     assert first_checkpoint.stat().st_mtime_ns == first_written
+
+
+def _patch_git_dirty(monkeypatch: pytest.MonkeyPatch, git_dirty: bool | None) -> None:
+    """Make ``collect_lineage`` report ``git_dirty`` whatever the checkout looks like."""
+    real_collect = training.collect_lineage
+
+    def _collect(**kwargs: Any) -> dict[str, Any]:
+        return {**real_collect(**kwargs), "git_dirty": git_dirty}
+
+    monkeypatch.setattr(training, "collect_lineage", _collect)
+
+
+@_FORK_ONLY
+def test_resumed_runs_propagate_a_dirty_ancestor_through_a_shallow_parent(
+    monkeypatch, tmp_path, mock_dinov3_encoder
+):
+    _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    output_dir = tmp_path / "out"
+    cache_dir = tmp_path / "cache"
+    run_dir = output_dir / "model_checkpoints" / SMOKE_RUN
+
+    _patch_git_dirty(monkeypatch, True)
+    training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    first_checkpoint = run_dir / "model_step1"
+    first_lineage = torch.load(first_checkpoint, map_location="cpu", weights_only=True)["lineage"]
+
+    _patch_git_dirty(monkeypatch, False)
+    training.run(
+        _smoke_args(tmp_path, output_dir, cache_dir, epochs=2, checkpoint=first_checkpoint)
+    )
+
+    resumed = torch.load(run_dir / "model_step2", map_location="cpu", weights_only=True)["lineage"]
+    sidecar = json.loads((run_dir / "model.json").read_text())["lineage"]
+    for lineage in (resumed, sidecar):
+        assert lineage["git_dirty"] is True
+        assert lineage["parent"] == {
+            "git_sha": first_lineage["git_sha"],
+            "git_dirty": first_lineage["git_dirty"],
+        }
+
+    # A clean third run still inherits the dirty verdict from its parent's own inherited flag.
+    training.run(
+        _smoke_args(tmp_path, output_dir, cache_dir, epochs=3, checkpoint=run_dir / "model_step2")
+    )
+    third = torch.load(run_dir / "model_step3", map_location="cpu", weights_only=True)["lineage"]
+    assert third["git_dirty"] is True
+    assert third["parent"] == {"git_sha": resumed["git_sha"], "git_dirty": True}
+
+
+def test_init_weights_run_from_a_checkpoint_without_lineage_is_untrusted(
+    run_scenario, marked_checkpoint
+):
+    assert "lineage" not in torch.load(marked_checkpoint.path, weights_only=True)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _patch_git_dirty(monkeypatch, False)
+        result = run_scenario(cli=["--init-weights", str(marked_checkpoint.path)])
+
+    lineage = json.loads((result.run_dir / "model.json").read_text())["lineage"]
+    assert lineage["git_dirty"] is None
+    assert "parent" in lineage and lineage["parent"] is None
+
+
+def test_init_weights_run_from_a_clean_checkpoint_records_a_shallow_parent(
+    run_scenario, marked_checkpoint
+):
+    saved = torch.load(marked_checkpoint.path, weights_only=True)
+    saved["lineage"] = {"git_sha": "abc123", "git_dirty": False, "seed": 1}
+    source_path = run_scenario.scratch_dir() / "with_lineage.pt"
+    torch.save(saved, source_path)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _patch_git_dirty(monkeypatch, False)
+        result = run_scenario(cli=["--init-weights", str(source_path)])
+
+    lineage = json.loads((result.run_dir / "model.json").read_text())["lineage"]
+    assert lineage["git_dirty"] is False
+    assert lineage["parent"] == {"git_sha": "abc123", "git_dirty": False}
 
 
 def test_lineage_params_flatten_the_lineage_dict():

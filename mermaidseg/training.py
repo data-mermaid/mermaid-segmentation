@@ -20,7 +20,7 @@ from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local
 from mermaidseg.export import write_sidecar
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import resolve_repo_path, setup_config, update_config_with_args
-from mermaidseg.lineage import collect_lineage, data_version
+from mermaidseg.lineage import collect_lineage, data_version, inherit_lineage
 from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.distributed import (
     DistContext,
@@ -371,6 +371,8 @@ def run(args: argparse.Namespace) -> None:
             seed=seed,
             data_version=data_version(to_plain_dict(cfg_logger.data), dataset_dict),
         )
+        if checkpoint_data is not None:
+            lineage = inherit_lineage(lineage, checkpoint_data.get("lineage"))
         sidecar_path = write_sidecar(
             run_dir,
             run_name=cfg.run_name,
