@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from .publish import S3Target
+from .publish import S3Target, annotations_parquet_name
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ def build_manifest(
         "s3": {
             "bucket": target.bucket,
             "prefix": target.prefix,
-            "annotations_parquet": f"{target.prefix}/{source.name}_annotations.parquet",
+            "annotations_parquet": f"{target.prefix}/{annotations_parquet_name(source.name)}",
             "image_key_template": image_key_template,
         },
         "schema": {"parquet_columns": parquet_columns},

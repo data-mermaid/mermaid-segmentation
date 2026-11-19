@@ -24,7 +24,7 @@ import pandas as pd
 from .images import find_undecodable
 from .labels import build_classes_and_colors
 from .manifest import Source, build_manifest
-from .publish import S3Target, ensure_absent, put_json, put_parquet, upload_files
+from .publish import S3Target, preflight, publish_dataset, upload_files
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,6 @@ CITATION = (
     "PLOS ONE, 10(7): e0130312."
 )
 
-ANNOTATIONS_PARQUET_NAME = f"{DATASET_NAME}_annotations.parquet"
-_METADATA_NAMES = ["classes.json", "colors.json", "manifest.json"]
 SITES: tuple[str, ...] = ("heron_reef", "line_islands", "nanwan_bay")
 SUBSETS: tuple[str, ...] = ("reference", "evaluation")
 # Reference subsets carry only ``archived``; evaluation subsets add host and visitor1..5.
@@ -247,9 +245,7 @@ def _image_uploads(df: pd.DataFrame, subsets: list[_Subset], prefix: str) -> lis
 def run(args: argparse.Namespace, client: Any) -> int:
     """Ingest Pacific Labeled Corals into S3; return the process exit code."""
     target = S3Target(args.bucket, args.prefix.strip("/"), args.dry_run)
-    ensure_absent(
-        client, target, [ANNOTATIONS_PARQUET_NAME, *_METADATA_NAMES], overwrite=args.overwrite
-    )
+    preflight(client, target, DATASET_NAME, overwrite=args.overwrite)
     data_root = args.data_dir.expanduser().resolve()
     if not data_root.is_dir():
         raise FileNotFoundError(f"--data-dir does not exist: {data_root}")
@@ -267,16 +263,6 @@ def run(args: argparse.Namespace, client: Any) -> int:
         workers=args.workers,
         skip_existing=args.skip_existing_s3,
     )
-    put_parquet(
-        client,
-        target,
-        ANNOTATIONS_PARQUET_NAME,
-        annotations,
-        sort_by=_SORT_KEYS,
-        overwrite=args.overwrite,
-    )
-    put_json(client, target, "classes.json", classes, overwrite=args.overwrite)
-    put_json(client, target, "colors.json", colors, overwrite=args.overwrite)
     manifest = build_manifest(
         SOURCE,
         target,
@@ -289,5 +275,15 @@ def run(args: argparse.Namespace, client: Any) -> int:
             "annotations_dropped_unmapped_imageid": dropped[_DROP_UNMAPPED_IMAGEID],
         },
     )
-    put_json(client, target, "manifest.json", manifest, overwrite=args.overwrite)
+    publish_dataset(
+        client,
+        target,
+        dataset_name=DATASET_NAME,
+        annotations=annotations,
+        sort_by=_SORT_KEYS,
+        classes=classes,
+        colors=colors,
+        manifest=manifest,
+        overwrite=args.overwrite,
+    )
     return 0

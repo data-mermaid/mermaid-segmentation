@@ -54,6 +54,22 @@ def ensure_absent(client: Any, target: S3Target, names: list[str], *, overwrite:
             )
 
 
+def annotations_parquet_name(dataset_name: str) -> str:
+    """Return the published annotations parquet file name for ``dataset_name``."""
+    return f"{dataset_name}_annotations.parquet"
+
+
+def preflight(client: Any, target: S3Target, dataset_name: str, *, overwrite: bool) -> None:
+    """Raise ``FileExistsError`` if any file ``publish_dataset`` writes already exists."""
+    names = [
+        annotations_parquet_name(dataset_name),
+        "classes.json",
+        "colors.json",
+        "manifest.json",
+    ]
+    ensure_absent(client, target, names, overwrite=overwrite)
+
+
 def _put_bytes(
     client: Any, target: S3Target, name: str, body: bytes, content_type: str, *, overwrite: bool
 ) -> str:
@@ -93,6 +109,32 @@ def put_parquet(
     return _put_bytes(
         client, target, name, buf.getvalue(), "application/octet-stream", overwrite=overwrite
     )
+
+
+def publish_dataset(
+    client: Any,
+    target: S3Target,
+    *,
+    dataset_name: str,
+    annotations: pd.DataFrame,
+    sort_by: list[str],
+    classes: dict[str, Any],
+    colors: dict[str, Any],
+    manifest: dict[str, Any],
+    overwrite: bool,
+) -> None:
+    """Write the dataset files, manifest last so it marks a completed publish."""
+    put_parquet(
+        client,
+        target,
+        annotations_parquet_name(dataset_name),
+        annotations,
+        sort_by=sort_by,
+        overwrite=overwrite,
+    )
+    put_json(client, target, "classes.json", classes, overwrite=overwrite)
+    put_json(client, target, "colors.json", colors, overwrite=overwrite)
+    put_json(client, target, "manifest.json", manifest, overwrite=overwrite)
 
 
 def list_keys(client: Any, bucket: str, prefix: str) -> set[str]:

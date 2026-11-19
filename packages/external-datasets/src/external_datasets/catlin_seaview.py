@@ -22,7 +22,7 @@ from tqdm.auto import tqdm
 from .images import find_undecodable
 from .labels import build_classes_and_colors
 from .manifest import Source, build_manifest
-from .publish import S3Target, ensure_absent, list_keys, put_json, put_parquet, upload_files
+from .publish import S3Target, list_keys, preflight, publish_dataset, upload_files
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +42,6 @@ REGIONS: tuple[str, ...] = (
     "PAC_USA",
 )
 
-ANNOTATIONS_PARQUET_NAME = f"{DATASET_NAME}_annotations.parquet"
-_METADATA_NAMES = ["classes.json", "colors.json", "manifest.json"]
 PARQUET_COLUMNS = {
     "region": "Catlin Seaview region code (e.g. 'ATL', 'IND_CHA').",
     "image_id": "Quadrat ID (string), filename stem of the per-region jpg.",
@@ -236,12 +234,7 @@ def _resolve_data_root(args: argparse.Namespace) -> Path:
 def run(args: argparse.Namespace, client: Any) -> int:
     """Ingest Catlin Seaview into S3; return the process exit code."""
     target = S3Target(args.bucket, args.prefix.strip("/"), args.dry_run)
-    ensure_absent(
-        client,
-        target,
-        [ANNOTATIONS_PARQUET_NAME, *_METADATA_NAMES],
-        overwrite=args.overwrite,
-    )
+    preflight(client, target, DATASET_NAME, overwrite=args.overwrite)
     data_root = _resolve_data_root(args)
 
     annotations = build_annotations(data_root)
@@ -264,16 +257,6 @@ def run(args: argparse.Namespace, client: Any) -> int:
         workers=args.workers,
         skip_existing=args.skip_existing_s3,
     )
-    put_parquet(
-        client,
-        target,
-        ANNOTATIONS_PARQUET_NAME,
-        annotations,
-        sort_by=_SORT_KEYS,
-        overwrite=args.overwrite,
-    )
-    put_json(client, target, "classes.json", classes, overwrite=args.overwrite)
-    put_json(client, target, "colors.json", colors, overwrite=args.overwrite)
     manifest = build_manifest(
         SOURCE,
         target,
@@ -281,5 +264,15 @@ def run(args: argparse.Namespace, client: Any) -> int:
         parquet_columns=PARQUET_COLUMNS,
         ingestion={"damaged_images": damaged, "images_uploaded": uploaded},
     )
-    put_json(client, target, "manifest.json", manifest, overwrite=args.overwrite)
+    publish_dataset(
+        client,
+        target,
+        dataset_name=DATASET_NAME,
+        annotations=annotations,
+        sort_by=_SORT_KEYS,
+        classes=classes,
+        colors=colors,
+        manifest=manifest,
+        overwrite=args.overwrite,
+    )
     return 0

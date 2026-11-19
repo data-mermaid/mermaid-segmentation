@@ -21,13 +21,11 @@ import pandas as pd
 from .images import find_undecodable
 from .labels import build_classes_and_colors
 from .manifest import Source, build_manifest
-from .publish import S3Target, ensure_absent, put_json, put_parquet, upload_files
+from .publish import S3Target, preflight, publish_dataset, upload_files
 
 logger = logging.getLogger(__name__)
 
 DATASET_NAME = "moorea_labeled_corals"
-ANNOTATIONS_PARQUET_NAME = f"{DATASET_NAME}_annotations.parquet"
-_METADATA_NAMES = ["classes.json", "colors.json", "manifest.json"]
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 # Points labelled OFF (any case) fell outside the annotatable region of the photo.
 _OFF_LABEL_TOKEN = "off"
@@ -139,12 +137,7 @@ def _build_annotations(pairs: list[_Pair]) -> tuple[pd.DataFrame, dict[str, str]
 def run(args: argparse.Namespace, client: Any) -> int:
     """Ingest Moorea Labeled Corals into S3; return the process exit code."""
     target = S3Target(args.bucket, args.prefix.strip("/"), args.dry_run)
-    ensure_absent(
-        client,
-        target,
-        [ANNOTATIONS_PARQUET_NAME, *_METADATA_NAMES],
-        overwrite=args.overwrite,
-    )
+    preflight(client, target, DATASET_NAME, overwrite=args.overwrite)
     data_dir = args.data_dir.expanduser().resolve()
     if not data_dir.is_dir():
         raise FileNotFoundError(f"--data-dir does not exist: {data_dir}")
@@ -161,16 +154,6 @@ def run(args: argparse.Namespace, client: Any) -> int:
     uploaded = upload_files(
         client, target, uploads, workers=args.workers, skip_existing=args.skip_existing_s3
     )
-    put_parquet(
-        client,
-        target,
-        ANNOTATIONS_PARQUET_NAME,
-        annotations,
-        sort_by=_SORT_KEYS,
-        overwrite=args.overwrite,
-    )
-    put_json(client, target, "classes.json", classes, overwrite=args.overwrite)
-    put_json(client, target, "colors.json", colors, overwrite=args.overwrite)
     manifest = build_manifest(
         SOURCE,
         target,
@@ -183,5 +166,15 @@ def run(args: argparse.Namespace, client: Any) -> int:
             "images_uploaded": uploaded,
         },
     )
-    put_json(client, target, "manifest.json", manifest, overwrite=args.overwrite)
+    publish_dataset(
+        client,
+        target,
+        dataset_name=DATASET_NAME,
+        annotations=annotations,
+        sort_by=_SORT_KEYS,
+        classes=classes,
+        colors=colors,
+        manifest=manifest,
+        overwrite=args.overwrite,
+    )
     return 0

@@ -10,6 +10,8 @@ from external_datasets.publish import (
     S3Target,
     ensure_absent,
     list_keys,
+    preflight,
+    publish_dataset,
     put_json,
     put_parquet,
     upload_files,
@@ -119,3 +121,33 @@ def test_list_keys_returns_keys_under_prefix(fake_s3):
     fake_s3.put(B, "ds/a", b"")
     fake_s3.put(B, "other/b", b"")
     assert list_keys(fake_s3, B, "ds/") == {"ds/a"}
+
+
+def test_publish_dataset_writes_parquet_then_classes_colors_manifest_last(fake_s3):
+    publish_dataset(
+        fake_s3,
+        _target(),
+        dataset_name="demo",
+        annotations=pd.DataFrame({"k": [1]}),
+        sort_by=["k"],
+        classes={"c": 1},
+        colors={"c": [0, 0, 0]},
+        manifest={"m": 1},
+        overwrite=False,
+    )
+    assert list(fake_s3.objects) == [
+        (B, "ds/demo_annotations.parquet"),
+        (B, "ds/classes.json"),
+        (B, "ds/colors.json"),
+        (B, "ds/manifest.json"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["ds/demo_annotations.parquet", "ds/classes.json", "ds/colors.json", "ds/manifest.json"],
+)
+def test_preflight_raises_when_any_published_name_exists(fake_s3, key):
+    fake_s3.put(B, key, b"old")
+    with pytest.raises(FileExistsError, match=key):
+        preflight(fake_s3, _target(), "demo", overwrite=False)

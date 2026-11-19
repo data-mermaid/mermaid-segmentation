@@ -21,7 +21,7 @@ from PIL import Image
 
 from .labels import build_classes_and_colors
 from .manifest import Source, build_manifest
-from .publish import S3Target, ensure_absent, put_json, put_parquet, upload_files
+from .publish import S3Target, preflight, publish_dataset, upload_files
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,6 @@ CITATION = (
     "label-augmentation. Dryad. doi:10.5061/dryad.8cz8w9gm3"
 )
 TILE = 2048
-ANNOTATIONS_PARQUET_NAME = f"{DATASET_NAME}_annotations.parquet"
-_METADATA_NAMES = ["classes.json", "colors.json", "manifest.json"]
 EXCLUDED_SITES = ["MD_spartan"]
 
 # Site -> raw image file, raw mask file and the label-dictionary variant its mask ids use.
@@ -243,9 +241,7 @@ def _split_uploads(
 def run(args: argparse.Namespace, client: Any) -> int:
     """Tile the Benthos Yuval mosaics and publish them to S3; return the exit code."""
     target = S3Target(args.bucket, args.prefix.strip("/"), args.dry_run)
-    ensure_absent(
-        client, target, [ANNOTATIONS_PARQUET_NAME, *_METADATA_NAMES], overwrite=args.overwrite
-    )
+    preflight(client, target, DATASET_NAME, overwrite=args.overwrite)
     data_root = args.data_dir.expanduser().resolve()
     if not data_root.is_dir():
         raise FileNotFoundError(f"--data-dir does not exist: {data_root}")
@@ -273,16 +269,6 @@ def run(args: argparse.Namespace, client: Any) -> int:
         workers=args.workers,
         skip_existing=args.skip_existing_s3 and not args.overwrite,
     )
-    put_parquet(
-        client,
-        target,
-        ANNOTATIONS_PARQUET_NAME,
-        annotations,
-        sort_by=_SORT_KEYS,
-        overwrite=args.overwrite,
-    )
-    put_json(client, target, "classes.json", classes, overwrite=args.overwrite)
-    put_json(client, target, "colors.json", colors, overwrite=args.overwrite)
     manifest = build_manifest(
         SOURCE,
         target,
@@ -297,5 +283,15 @@ def run(args: argparse.Namespace, client: Any) -> int:
             "labels_uploaded": labels_uploaded,
         },
     )
-    put_json(client, target, "manifest.json", manifest, overwrite=args.overwrite)
+    publish_dataset(
+        client,
+        target,
+        dataset_name=DATASET_NAME,
+        annotations=annotations,
+        sort_by=_SORT_KEYS,
+        classes=classes,
+        colors=colors,
+        manifest=manifest,
+        overwrite=args.overwrite,
+    )
     return 0
