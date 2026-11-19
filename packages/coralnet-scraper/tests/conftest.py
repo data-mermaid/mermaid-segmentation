@@ -6,11 +6,16 @@ touches. Keeps the test suite free of network and AWS deps.
 
 from __future__ import annotations
 
+import threading
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from botocore.exceptions import ClientError
 
+from coralnet_scraper import http
 from coralnet_scraper.downloader import CoralNetDownloader
 
 
@@ -22,6 +27,106 @@ def _fake_aws_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry immediately so transport tests do not sleep through urllib3 backoff."""
+    monkeypatch.setattr(http, "HTTP_BACKOFF_FACTOR", 0.0)
+    monkeypatch.setattr(http, "HTTP_BACKOFF_JITTER", 0.0)
+
+
+@dataclass(frozen=True)
+class Reply:
+    """One scripted HTTP answer; ``delay_s`` stalls before the status line is sent."""
+
+    status: int = 200
+    body: bytes = b""
+    headers: dict[str, str] = field(default_factory=dict)
+    delay_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class ReceivedRequest:
+    method: str
+    path: str
+    headers: dict[str, str]
+
+
+class ScriptedServer:
+    """A real HTTP server on 127.0.0.1 answering each path from a scripted reply queue.
+
+    The last reply of a path's script repeats once the queue is down to it; an unscripted
+    path answers 404. Every received request is recorded in arrival order.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._scripts: dict[str, list[Reply]] = {}
+        self.received: list[ReceivedRequest] = []
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                reply = server._record_and_pop(self.command, self.path, dict(self.headers))
+                time.sleep(reply.delay_s)
+                try:
+                    self.send_response(reply.status)
+                    for name, value in reply.headers.items():
+                        self.send_header(name, value)
+                    self.send_header("Content-Length", str(len(reply.body)))
+                    self.end_headers()
+                    self.wfile.write(reply.body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the client gave up waiting (read-timeout scripts)
+
+            do_GET = _answer
+            do_HEAD = _answer
+            do_POST = _answer
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}"
+        self._thread = threading.Thread(
+            target=self._httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
+
+    def script(self, path: str, *replies: Reply) -> None:
+        with self._lock:
+            self._scripts[path] = list(replies)
+
+    def requests_to(self, path: str) -> list[ReceivedRequest]:
+        with self._lock:
+            return [r for r in self.received if r.path == path]
+
+    def _record_and_pop(self, method: str, path: str, headers: dict[str, str]) -> Reply:
+        with self._lock:
+            self.received.append(ReceivedRequest(method, path, headers))
+            queue = self._scripts.get(path)
+            if not queue:
+                return Reply(status=404)
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+@pytest.fixture
+def http_server() -> Iterator[ScriptedServer]:
+    server = ScriptedServer()
+    server.start()
+    yield server
+    server.stop()
 
 
 @dataclass

@@ -6,8 +6,11 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 import requests
+from conftest import Reply, ScriptedServer
 
 from coralnet_scraper import batch_download as bd
+from coralnet_scraper.http import SessionFactory
+from coralnet_scraper.models import DownloadResult
 
 
 def _skip(fake_s3, source_id: int, *, force: bool) -> bool:
@@ -40,18 +43,18 @@ def test_run_batch_download_downloads_only_sources_without_annotations(fake_s3):
     result = MagicMock(skipped_no_confirmed=False)
     downloader.download_source.return_value = result
 
-    results = bd.run_batch_download(
+    outcome = bd.run_batch_download(
         [1, 2], downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3
     )
 
     downloader.download_source.assert_called_once_with(2, bucket_name="b", s3_prefix="p")
-    assert results == {2: result}
+    assert outcome.results == {2: result}
 
 
 def _run(fake_s3, downloader):
     return bd.run_batch_download(
         [1, 2, 3], downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3
-    )
+    ).results
 
 
 def test_run_batch_download_continues_after_a_source_raises(fake_s3):
@@ -93,12 +96,12 @@ def test_run_batch_download_force_downloads_a_source_with_existing_annotations(f
     result = MagicMock(skipped_no_confirmed=False)
     downloader.download_source.return_value = result
 
-    results = bd.run_batch_download(
+    outcome = bd.run_batch_download(
         [1], downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3, force=True
     )
 
     downloader.download_source.assert_called_once_with(1, bucket_name="b", s3_prefix="p")
-    assert results == {1: result}
+    assert outcome.results == {1: result}
 
 
 _LISTING_HTML = """\
@@ -112,27 +115,27 @@ _LISTING_HTML = """\
 </body></html>"""
 
 
-def _listing_response(text: str, status: int = 200) -> requests.Response:
-    resp = requests.Response()
-    resp.status_code = status
-    resp._content = text.encode()
-    return resp
+def _listing_session(
+    http_server: ScriptedServer, monkeypatch: pytest.MonkeyPatch, *replies: Reply
+) -> requests.Session:
+    http_server.script("/source/about/", *replies)
+    monkeypatch.setattr(bd, "_SOURCE_LISTING_URL", f"{http_server.url}/source/about/")
+    return SessionFactory(pool_size=2, requests_per_second=None).coralnet()
 
 
-def test_discover_public_source_ids_returns_sorted_unique_ids_from_source_links():
-    with patch.object(bd.requests, "get", return_value=_listing_response(_LISTING_HTML)) as get:
-        ids = bd.discover_public_source_ids()
+def test_discover_public_source_ids_returns_sorted_unique_ids_from_source_links(
+    http_server, monkeypatch
+):
+    session = _listing_session(http_server, monkeypatch, Reply(200, _LISTING_HTML.encode()))
 
-    assert ids == [7, 12, 100]
-    assert get.call_args.args == ("https://coralnet.ucsd.edu/source/about/",)
+    assert bd.discover_public_source_ids(session) == [7, 12, 100]
 
 
-def test_discover_public_source_ids_raises_on_error_status():
-    with (
-        patch.object(bd.requests, "get", return_value=_listing_response("", status=503)),
-        pytest.raises(requests.HTTPError),
-    ):
-        bd.discover_public_source_ids()
+def test_discover_public_source_ids_raises_when_the_listing_keeps_failing(http_server, monkeypatch):
+    session = _listing_session(http_server, monkeypatch, Reply(500))
+
+    with pytest.raises(requests.HTTPError):
+        bd.discover_public_source_ids(session)
 
 
 def _no_prompt() -> tuple:
@@ -198,3 +201,115 @@ def test_run_batch_download_sleeps_after_each_download_not_after_a_skip(
         )
 
     assert sleep.call_args_list == expected_sleeps
+
+
+class _ScriptedDownloader:
+    """Downloader double answering each source from a script.
+
+    A script value is True (ok), False (failed with ``annotations_failed``), a list of error
+    codes (failed with exactly those) or an exception to raise.
+    """
+
+    def __init__(self, script: dict[int, bool | list[str] | Exception]) -> None:
+        self.script = script
+        self.attempted: list[int] = []
+
+    def download_source(self, sid: int, *, bucket_name: str, s3_prefix: str) -> DownloadResult:
+        self.attempted.append(sid)
+        outcome = self.script[sid]
+        if isinstance(outcome, Exception):
+            raise outcome
+        if isinstance(outcome, list):
+            return DownloadResult(ok=False, errors=outcome)
+        return DownloadResult(ok=outcome, errors=[] if outcome else ["annotations_failed"])
+
+
+def _batch(
+    fake_s3, script: dict[int, bool | list[str] | Exception]
+) -> tuple[bd.BatchOutcome, list[int]]:
+    downloader = _ScriptedDownloader(script)
+    outcome = bd.run_batch_download(
+        list(script), downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3
+    )
+    return outcome, downloader.attempted
+
+
+def test_five_consecutive_failures_open_the_circuit_and_stop_the_run(fake_s3):
+    outcome, attempted = _batch(
+        fake_s3, {1: False, 2: False, 3: False, 4: False, 5: False, 6: True}
+    )
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+    assert sorted(outcome.results) == [1, 2, 3, 4, 5]
+
+
+def test_a_failed_result_with_no_error_codes_counts_as_a_failure(fake_s3):
+    outcome, attempted = _batch(fake_s3, {1: [], 2: [], 3: [], 4: [], 5: [], 6: []})
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+
+
+def test_a_success_resets_the_failure_streak(fake_s3):
+    script = {i: i == 5 for i in range(1, 10)}  # 4 failures, 1 ok, 4 failures
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped is None
+    assert attempted == list(range(1, 10))
+
+
+def test_skipped_sources_neither_count_nor_reset_the_failure_streak(fake_s3):
+    fake_s3.put_object(Bucket="b", Key="p/s2/annotations.csv", Body=b"a\n")
+    script: dict[int, bool | Exception] = {1: False, 2: True, 3: False, 4: False, 5: False}
+    script.update({6: False, 7: True})
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 3, 4, 5, 6]
+
+
+def test_a_source_whose_download_raises_counts_as_a_failure(fake_s3):
+    script: dict[int, bool | Exception] = {1: False, 2: False, 3: RuntimeError("boom")}
+    script.update({4: False, 5: False, 6: True})
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+
+
+_PER_IMAGE = ["images_missing_url"]
+
+
+def test_sources_failing_only_with_per_image_codes_never_open_the_circuit(fake_s3):
+    script: dict[int, bool | list[str] | Exception] = {
+        i: _PER_IMAGE if i % 2 else ["images_upload_failed"] for i in range(1, 6)
+    }
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped is None
+    assert attempted == [1, 2, 3, 4, 5]
+
+
+def test_a_per_image_only_failure_resets_the_failure_streak(fake_s3):
+    script: dict[int, bool | list[str] | Exception] = {1: False, 2: False, 3: _PER_IMAGE}
+    script.update({4: False, 5: False, 6: False})
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped is None
+    assert attempted == [1, 2, 3, 4, 5, 6]
+
+
+def test_per_image_codes_mixed_with_another_error_still_count_as_a_failure(fake_s3):
+    mixed = ["images_missing_url", "annotations_failed"]
+    script: dict[int, bool | list[str] | Exception] = dict.fromkeys(range(1, 7), mixed)
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]

@@ -15,6 +15,7 @@ import pytest
 import requests
 from botocore.exceptions import ClientError
 from bs4 import BeautifulSoup
+from conftest import Reply, ScriptedServer
 
 from coralnet_scraper import downloader as downloader_mod
 from coralnet_scraper import s3_io
@@ -22,7 +23,6 @@ from coralnet_scraper.downloader import (
     _PAGINATED_EXPORT_THRESHOLD,
     CoralNetDownloader,
     _extract_page_image_ids,
-    _is_transient,
     _PageWorkItem,
     export_prep_timeout_seconds,
     export_serve_timeout_seconds,
@@ -740,75 +740,27 @@ def test_paginated_export_runs_when_existing_csv_covers_fewer_images_than_websit
 # ---------------------------------------------------------------------------
 
 
-def test_get_images_multi_page_uses_urljoin():
-    """Second-page URL must be resolved via urljoin, not f-string concatenation.
-
-    Regression test for the bug where ``f"{base_url}/{next_page}"`` produced paths like
-    ``.../images/?page=2`` instead of ``.../images?page=2``. Also pins the resulting
-    DataFrame shape (``Name`` and ``Image Page`` columns).
-    """
+def test_get_images_follows_next_page_relative_to_the_trailing_slash_url(
+    http_server: ScriptedServer,
+):
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
+    dl.CORALNET_URL = http_server.url
+    first = "/source/7/browse/images/"
+    http_server.script(
+        first, Reply(200, _browse_page("c", n_thumbs=1, next_href="?page=2").encode())
+    )
+    http_server.script(f"{first}?page=2", Reply(200, _browse_page("c", n_thumbs=1).encode()))
 
-    call_urls: list[str] = []
-
-    def fake_get_images_on_page(url: str):
-        call_urls.append(url)
-        if len(call_urls) == 1:
-            return {"a.jpg": "/image/1/view/"}, "?page=2"
-        return {"b.jpg": "/image/2/view/"}, None
-
-    with patch.object(dl, "get_images_on_page", side_effect=fake_get_images_on_page):
-        df, ok = dl.get_images(7)
+    _, ok = dl.get_images(7)
 
     assert ok is True
-    assert df is not None
-    assert sorted(df["Name"].tolist()) == ["a.jpg", "b.jpg"]
-    assert sorted(df["Image Page"].tolist()) == ["/image/1/view/", "/image/2/view/"]
-    assert call_urls[0] == "https://coralnet.ucsd.edu/source/7/browse/images"
-    assert call_urls[1] == "https://coralnet.ucsd.edu/source/7/browse/images?page=2"
+    assert [r.path for r in http_server.received] == [first, f"{first}?page=2"]
 
 
 # ---------------------------------------------------------------------------
 # Paginated export retry / checkpoint / parallelism tests
 # ---------------------------------------------------------------------------
-
-
-def test_paginated_export_retries_on_page_timeout(paginated_downloader, fake_s3):
-    """A ReadTimeout on attempt 1 of page 2's export_prep is retried and succeeds.
-
-    Phase 2 ``do_round_trip`` re-fetches the browse page for a fresh CSRF before each
-    attempt, so the retry triggers a second browse GET for page 2.
-    """
-    dl = paginated_downloader
-
-    page1_html = _browse_page("csrf1", n_thumbs=2, next_href="?page=2", start_id=10)
-    page2_html = _browse_page("csrf2", n_thumbs=1, start_id=20)
-    ann1 = _ann_csv([("a.jpg", 1, 1, 10)])
-    ann2 = _ann_csv([("b.jpg", 2, 2, 20)])
-
-    get_responses = [
-        _mock_response(text=page1_html),
-        _mock_response(text=page2_html),
-        _mock_response(text=page1_html),
-        _mock_response(text=ann1),
-        _mock_response(text=page2_html),
-        _mock_response(text=page2_html),
-        _mock_response(text=ann2),
-    ]
-    post_responses = [
-        _mock_response(json_data={"session_data_timestamp": "t1"}),
-        requests.exceptions.ReadTimeout("simulated page-2 timeout"),
-        _mock_response(json_data={"session_data_timestamp": "t2"}),
-    ]
-
-    with _mock_paginated_session(dl, get=get_responses, post=post_responses):
-        ok = dl.download_annotations_paginated(1, "b", "p", page_workers=1)
-
-    assert ok is True
-    key = s3_io.object_key_annotation_csv("p", 1)
-    df = pd.read_csv(io.BytesIO(fake_s3.objects[("b", key)]))
-    assert set(df["Name"]) == {"a.jpg", "b.jpg"}
 
 
 def _page_script(page_htmls: list[str], ann_csvs: list[str]) -> tuple[list, list]:
@@ -906,183 +858,79 @@ def test_paginated_export_with_parallel_workers_keeps_page_order_when_pages_fini
     assert df["Name"].tolist() == ["a.jpg", "b.jpg", "c.jpg"]
 
 
-# ---------------------------------------------------------------------------
-# Retry tests
-# ---------------------------------------------------------------------------
-
-
-def _http_error(status: int) -> requests.HTTPError:
-    resp = requests.Response()
-    resp.status_code = status
-    return requests.HTTPError(response=resp)
-
-
-def test_is_transient_covers_timeouts_drops_and_5xx():
-    """Transient set spans connect/read timeouts, dropped connections, and 5xx."""
-    assert _is_transient(requests.ReadTimeout()) is True
-    assert _is_transient(requests.ConnectTimeout()) is True  # sibling of ReadTimeout
-    assert _is_transient(requests.ConnectionError()) is True
-    assert _is_transient(requests.exceptions.ChunkedEncodingError()) is True
-    assert _is_transient(_http_error(503)) is True
-    assert _is_transient(_http_error(500)) is True  # lowest 5xx
-    # 4xx won't fix itself on retry.
-    assert _is_transient(_http_error(499)) is False
-    assert _is_transient(_http_error(404)) is False
-    assert _is_transient(requests.HTTPError("no response attached", response=None)) is False
-
-
-def test_get_images_retries_on_5xx_then_succeeds():
-    """A 503 on a browse page is retried, not fatal."""
-    dl = CoralNetDownloader("u", "p")
+def test_paginated_export_runs_export_workers_page_round_trips_at_once(fake_s3):
+    dl = CoralNetDownloader("u", "p", export_workers=2)
     dl.logged_in = True
-    call_count = [0]
+    dl.s3 = fake_s3
+    dl._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
+    base = "https://coralnet.ucsd.edu/source/1/browse/images/"
+    urls = [base] + [f"{base}?page={i}" for i in range(2, 7)]
+    pages = {
+        url: _browse_page(
+            f"csrf{i}",
+            n_thumbs=1,
+            next_href=f"?page={i + 1}" if i < 6 else None,
+            start_id=i * 100,
+        )
+        for i, url in enumerate(urls, 1)
+    }
+    lock = threading.Lock()
+    in_flight = [0]
+    peak = [0]
 
-    def flaky(url: str):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            raise _http_error(503)
-        return {"img1.jpg": "/image/1/view/"}, None
+    def get(url: str, timeout: int | None = None, **_: object) -> MagicMock:
+        if "/export/serve/" not in url:
+            return _mock_response(text=pages[url])
+        page = int(url.rsplit("=t", 1)[1])
+        return _mock_response(text=_ann_csv([(f"{page}.jpg", page, page, page)]))
 
-    with (
-        patch.object(dl, "get_images_on_page", side_effect=flaky),
-        patch("coralnet_scraper.downloader.time.sleep"),
-    ):
-        df, ok = dl.get_images(1)
+    def post(url: str, *, data: dict, **_: object) -> MagicMock:
+        with lock:
+            in_flight[0] += 1
+            peak[0] = max(peak[0], in_flight[0])
+        threading.Event().wait(0.05)  # hold the round trip open so workers overlap
+        with lock:
+            in_flight[0] -= 1
+        page = data["csrfmiddlewaretoken"].removeprefix("csrf")
+        return _mock_response(json_data={"session_data_timestamp": f"t{page}"})
+
+    with _mock_paginated_session(dl, get=get, post=post):
+        ok = dl.download_annotations_paginated(1, "b", "p")
 
     assert ok is True
-    assert call_count[0] == 2
-    assert df is not None and len(df) == 1
+    assert peak[0] == 2
 
 
-def test_get_images_4xx_is_not_retried():
-    """A 404 propagates immediately (no retry) and fails the source."""
+def test_get_images_fails_the_walk_when_a_page_fails():
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
-    call_count = [0]
+    resp = requests.Response()
+    resp.status_code = 404
 
-    def always_404(url: str):
-        call_count[0] += 1
-        raise _http_error(404)
-
-    with (
-        patch.object(dl, "get_images_on_page", side_effect=always_404),
-        patch("coralnet_scraper.downloader.time.sleep"),
-    ):
+    with patch.object(dl, "get_images_on_page", side_effect=requests.HTTPError(response=resp)):
         df, ok = dl.get_images(1)
 
     assert ok is False
     assert df is None
-    assert call_count[0] == 1  # not retried
-
-
-def test_get_images_sequential_retries_on_inner_page_timeout():
-    """A ReadTimeout on page 2 (sequential mode) is retried transparently."""
-    dl = CoralNetDownloader("u", "p")
-    dl.logged_in = True
-
-    call_count = [0]
-
-    def flaky_get_images_on_page(url: str):
-        call_count[0] += 1
-        if call_count[0] == 2:
-            raise requests.ReadTimeout("page 2 timeout")
-        if call_count[0] in (1, 3):
-            return {f"img{call_count[0]}.jpg": f"/image/{call_count[0]}/view/"}, (
-                "?page=2" if call_count[0] == 1 else None
-            )
-        return {f"img{call_count[0]}.jpg": f"/image/{call_count[0]}/view/"}, None
-
-    with (
-        patch.object(dl, "get_images_on_page", side_effect=flaky_get_images_on_page),
-        patch("coralnet_scraper.downloader.time.sleep"),
-    ):
-        df, ok = dl.get_images(1)
-
-    assert ok is True
-    assert df is not None and len(df) == 2  # page 1 + page 2 (after retry)
-
-
-# ---------------------------------------------------------------------------
-# Login retry + jittered backoff
-# ---------------------------------------------------------------------------
 
 
 def _login_get_html() -> str:
     return '<input type="hidden" name="csrfmiddlewaretoken" value="logintok"/>'
 
 
-def test_login_retries_transient_timeout_then_succeeds():
-    """A ReadTimeout on the login GET is retried; login then succeeds.
-
-    The original bug: a single login timeout killed the whole job before any
-    source was touched, because _perform_login's GET was not retry-wrapped.
-    """
+def test_login_fails_on_invalid_credentials():
     dl = CoralNetDownloader("u", "p")
-    get_calls = [0]
-
-    def flaky_get(url, timeout=None, **_):
-        get_calls[0] += 1
-        if get_calls[0] == 1:
-            raise requests.ReadTimeout("login page slow")
-        return _mock_response(text=_login_get_html())
-
-    post_resp = _mock_response(text="<html>Sign out</html>")
-
-    with (
-        patch.object(dl.session, "get", side_effect=flaky_get),
-        patch.object(dl.session, "post", return_value=post_resp),
-        patch("coralnet_scraper.downloader.time.sleep"),
-    ):
-        ok = dl.login()
-
-    assert ok is True
-    assert dl.logged_in is True
-    assert get_calls[0] == 2  # timed out once, retried, then succeeded
-
-
-def test_login_does_not_retry_invalid_credentials():
-    """A genuine auth failure (not a transient error) fails fast — no retry."""
-    dl = CoralNetDownloader("u", "p")
-    post_calls = [0]
     bad_post = _mock_response(text="<html>Please enter a correct username and password</html>")
     bad_post.url = dl.LOGIN_URL  # stayed on the login page => failed auth
 
-    def fake_post(*_a, **_k):
-        post_calls[0] += 1
-        return bad_post
-
     with (
         patch.object(dl.session, "get", return_value=_mock_response(text=_login_get_html())),
-        patch.object(dl.session, "post", side_effect=fake_post),
-        patch("coralnet_scraper.downloader.time.sleep"),
+        patch.object(dl.session, "post", return_value=bad_post),
     ):
         ok = dl.login()
 
     assert ok is False
     assert dl.logged_in is False
-    assert post_calls[0] == 1  # not retried — invalid creds won't fix themselves
-
-
-def test_with_retry_backoff_is_jittered():
-    """Backoff is randomized within [0.5x, 1.5x] of the exponential base so that
-    concurrent shards desync instead of retrying in lockstep (thundering herd).
-    """
-    slept: list[float] = []
-
-    def always_timeout():
-        raise requests.ReadTimeout("x")
-
-    with (
-        patch.object(downloader_mod.time, "sleep", side_effect=lambda s: slept.append(s)),
-        patch.object(downloader_mod.random, "uniform", side_effect=lambda lo, _hi: lo) as uni,
-        pytest.raises(requests.ReadTimeout),
-    ):
-        downloader_mod._with_retry(always_timeout, source_id=1, page_num=1, kind="test")
-
-    # 3 attempts => 2 backoff sleeps; exponential bases are 30 and 60, jittered
-    # over [0.5*base, 1.5*base].
-    assert [c.args for c in uni.call_args_list] == [(0.5 * 30, 1.5 * 30), (0.5 * 60, 1.5 * 60)]
-    assert slept == [0.5 * 30, 0.5 * 60]  # stub returns the low bound
 
 
 def test_constructor_rejects_invalid_max_workers():
@@ -1191,12 +1039,6 @@ def _http_response(text: str = "", status: int = 200, url: str = "") -> requests
     return resp
 
 
-def _image_download_response(body: bytes, status: int = 200) -> requests.Response:
-    resp = _http_response(status=status)
-    resp.raw = io.BytesIO(body)
-    return resp
-
-
 def _downloader_on(fake_s3) -> CoralNetDownloader:
     dl = CoralNetDownloader("u", "p", max_workers=3)
     dl.logged_in = True
@@ -1204,41 +1046,32 @@ def _downloader_on(fake_s3) -> CoralNetDownloader:
     return dl
 
 
-def test_download_image_to_s3_skips_an_object_already_on_s3(fake_s3):
+def test_download_image_to_s3_skips_an_object_already_on_s3(fake_s3, http_server):
     dl = _downloader_on(fake_s3)
     fake_s3.put("b", "k.jpg", b"existing")
 
-    with patch.object(downloader_mod.requests, "get") as http_get:
-        result = dl.download_image_to_s3("http://x/1.jpg", "b", "k.jpg")
+    result = dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
 
     assert result == ("k.jpg", True)
-    http_get.assert_not_called()
+    assert http_server.received == []
     assert fake_s3.objects[("b", "k.jpg")] == b"existing"
 
 
-def test_download_image_to_s3_streams_a_missing_object_to_s3(fake_s3):
+def test_download_image_to_s3_retries_a_503_then_uploads_the_bytes(fake_s3, http_server):
     dl = _downloader_on(fake_s3)
+    http_server.script("/1.jpg", Reply(503), Reply(200, b"JPEGBYTES"))
 
-    with patch.object(
-        downloader_mod.requests, "get", return_value=_image_download_response(b"JPEGBYTES")
-    ) as http_get:
-        result = dl.download_image_to_s3("http://x/1.jpg", "b", "k.jpg")
+    result = dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
 
     assert result == ("k.jpg", True)
     assert fake_s3.objects[("b", "k.jpg")] == b"JPEGBYTES"
-    assert http_get.call_args == call("http://x/1.jpg", timeout=30, stream=True)
 
 
-@pytest.mark.parametrize(
-    "outcome",
-    [_image_download_response(b"<html>Not found</html>", status=404), requests.ConnectionError()],
-    ids=["http-404", "connection-error"],
-)
-def test_download_image_to_s3_reports_failure_and_uploads_nothing(fake_s3, outcome):
+def test_download_image_to_s3_reports_failure_and_uploads_nothing(fake_s3, http_server):
     dl = _downloader_on(fake_s3)
+    http_server.script("/1.jpg", Reply(404, b"<html>Not found</html>"))
 
-    with patch.object(downloader_mod.requests, "get", side_effect=[outcome]):
-        result = dl.download_image_to_s3("http://x/1.jpg", "b", "k.jpg")
+    result = dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
 
     assert result == ("k.jpg", False)
     assert fake_s3.objects == {}
