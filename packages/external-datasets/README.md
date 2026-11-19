@@ -39,7 +39,7 @@ The defaults are `--bucket dev-datamermaid-sm-sources` and `--prefix external_va
 A run writes in this order:
 
 1. Before it reads the raw data, the run checks that the parquet, `classes.json`, `colors.json` and `manifest.json` are not on S3. If one is there, the run stops with `FileExistsError`. Pass `--overwrite` to replace them.
-2. The run reads the raw release and decodes every image fully. Catlin Seaview and Moorea drop each damaged image and its annotations, and record it in `ingestion.damaged_images`. Pacific stops with an error before it writes to S3.
+2. The run reads the raw release and checks that every image decodes. JPEGs are decoded at reduced scale (about 1/8 per edge) to bound memory. The full scan data is still read, so truncated JPEGs are still caught. Other formats are fully decoded. Catlin Seaview and Moorea drop each damaged image and its annotations, and record it in `ingestion.damaged_images`. An image over Pillow's decompression-bomb limit (about 179 megapixels) stops the run with `DecompressionBombError` before anything is written to S3. Benthos lifts that limit only while it decodes its two mosaics. Pacific stops with an error before it writes to S3.
 3. The run uploads the images. An image whose key is already on S3 is skipped, whatever its content. Pass `--no-skip-existing-s3` to upload every image again. `--overwrite` does not change how images are uploaded, except for the Benthos `labels/` tiles: with `--overwrite`, Benthos uploads them again even if their keys exist. Label pixel values are the IDs in `classes.json`, so a rewritten `classes.json` must not keep old masks.
 4. The run writes the parquet, then `classes.json`, then `colors.json`, then `manifest.json`.
 

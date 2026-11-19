@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import io
 import json
 from pathlib import Path
@@ -11,7 +12,7 @@ import pyarrow.parquet as pq
 import pytest
 from PIL import Image
 
-from external_datasets import benthos_yuval
+from external_datasets import benthos_yuval, images
 
 B = "bkt"
 P = "ds"
@@ -188,3 +189,21 @@ def test_existing_manifest_without_overwrite_raises_before_any_write(tmp_path, f
         benthos_yuval.run(_args(tmp_path, root), fake_s3)
 
     assert list(fake_s3.objects) == [(B, f"{P}/manifest.json")]
+
+
+def test_run_lifts_pixel_limit_only_while_decoding_mosaics(tmp_path, fake_s3, monkeypatch):
+    # A 1-pixel limit makes any mosaic a decompression bomb unless the limit is lifted.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+    root = _write_raw(tmp_path / "raw", rs24_mask=np.full((2, 2), 1, dtype=np.uint8))
+
+    assert benthos_yuval.run(_args(tmp_path, root), fake_s3) == 0
+    assert Image.MAX_IMAGE_PIXELS == 1
+
+
+@pytest.mark.parametrize("module", [benthos_yuval, images])
+def test_importing_a_module_leaves_pixel_limit_unchanged(module, monkeypatch):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 12345)
+
+    importlib.reload(module)
+
+    assert Image.MAX_IMAGE_PIXELS == 12345

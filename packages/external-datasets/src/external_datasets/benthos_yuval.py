@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import ast
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +23,6 @@ from .labels import build_classes_and_colors
 from .manifest import Source, build_manifest
 from .publish import S3Target, ensure_absent, put_json, put_parquet, upload_files
 
-Image.MAX_IMAGE_PIXELS = None  # the mosaics exceed Pillow's decompression-bomb limit
 logger = logging.getLogger(__name__)
 
 DATASET_NAME = "benthos_yuval"
@@ -97,12 +98,25 @@ def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
     )
 
 
+@contextmanager
+def _decompression_limit_lifted() -> Iterator[None]:
+    """Lift Pillow's process-wide decompression-bomb limit, restoring it on exit."""
+    previous = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = None  # the mosaics exceed the default limit
+    try:
+        yield
+    finally:
+        Image.MAX_IMAGE_PIXELS = previous
+
+
 def _load_image_rgb(path: Path) -> np.ndarray:
-    return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    with _decompression_limit_lifted():
+        return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
 
 
 def _load_mask_u8(path: Path) -> np.ndarray:
-    arr = np.asarray(Image.open(path))
+    with _decompression_limit_lifted():
+        arr = np.asarray(Image.open(path))
     if arr.ndim == 3:
         arr = arr[..., 0]
     return arr.astype(np.uint8, copy=False)
