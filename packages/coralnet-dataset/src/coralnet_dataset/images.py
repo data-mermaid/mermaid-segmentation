@@ -67,11 +67,16 @@ def _scan_one(
 
 def _scan_worker(
     args: tuple[str, str, int, str],
+    s3_client: BaseClient | None = None,
 ) -> dict[str, Any]:
-    """Scan one image on a worker thread, recording any exception as ``worker_exception``."""
+    """Scan one image, recording any exception as a ``worker_exception`` row.
+
+    Used by both the threaded and the sequential paths so a failing image never stops the scan.
+    ``s3_client=None`` uses the calling thread's own client.
+    """
     bucket, prefix, source_id, image_id = args
     try:
-        return _scan_one(bucket, prefix, source_id, image_id, s3_client=None)
+        return _scan_one(bucket, prefix, source_id, image_id, s3_client=s3_client)
     except Exception as e:  # noqa: BLE001 - never crash the worker
         return {
             "source_id": int(source_id),
@@ -123,7 +128,8 @@ def build_images(
 
     Returns:
         DataFrame conforming to :data:`IMAGES_SCHEMA`; ``needs_resize`` is True when
-        ``longest_edge > RESIZE_THRESHOLD``.
+        ``longest_edge > RESIZE_THRESHOLD``. An image whose scan raises gets a row with
+        ``header_status="worker_exception"`` on both the threaded and sequential paths.
     """
     unique = derive_unique_images(annotations_df)
     if unique.empty:
@@ -144,6 +150,6 @@ def build_images(
                 rows.append(done.result())
     else:
         for item in tqdm(work, desc="Reading JPEG headers"):
-            rows.append(_scan_one(*item, s3_client=s3_client))
+            rows.append(_scan_worker(item, s3_client))
 
     return _finalise(pd.DataFrame(rows))

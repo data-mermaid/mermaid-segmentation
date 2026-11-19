@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
+from PIL import Image
 
 from coralnet_dataset.images import build_images
 from coralnet_dataset.io import write_parquet_deterministic
@@ -133,3 +134,39 @@ def test_build_images_on_empty_annotations_writes_empty_parquet(fake_s3, tmp_pat
     out = tmp_path / "images.parquet"
     write_parquet_deterministic(img_df, out, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY)
     assert pq.read_schema(out).names == [f.name for f in IMAGES_SCHEMA]
+
+
+def test_build_images_sequential_path_records_worker_exception(
+    fake_s3, jpeg_small_bytes, monkeypatch
+):
+    ann_df = pd.DataFrame(
+        {
+            "source_id": [1, 1],
+            "image_id": ["good", "bomb"],
+            "row": [0, 0],
+            "col": [0, 0],
+            "coralnet_id": [1, 1],
+            "status": ["Confirmed", "Confirmed"],
+        }
+    )
+    fake_s3.put("b", "p/s1/images/good.jpg", jpeg_small_bytes)
+    fake_s3.put("b", "p/s1/images/bomb.jpg", jpeg_small_bytes)
+    real_get_object = fake_s3.get_object
+
+    def get_object(*, Bucket, Key, Range=None):
+        if Key.endswith("bomb.jpg"):
+            raise Image.DecompressionBombError("too big")
+        return real_get_object(Bucket=Bucket, Key=Key, Range=Range)
+
+    monkeypatch.setattr(fake_s3, "get_object", get_object)
+
+    img_df = build_images(ann_df, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
+
+    by_id = img_df.set_index("image_id")
+    assert len(img_df) == 2
+    assert by_id.loc["bomb", "header_status"] == "worker_exception"
+    assert by_id.loc["bomb", "error_message"] == "DecompressionBombError: too big"
+    assert pd.isna(by_id.loc["bomb", "width"])
+    assert pd.isna(by_id.loc["bomb", "height"])
+    assert by_id.loc["good", "header_status"] == "ok"
+    assert (by_id.loc["good", "width"], by_id.loc["good", "height"]) == (1024, 768)
