@@ -740,7 +740,10 @@ class MetaModel:
             A 3-tuple of ``(average_loss, metric_results, timing)``. The data, forward
             and backward totals in ``timing`` are host-side wall times: they do not
             wait for queued GPU work, so asynchronous kernels are charged to whichever
-            phase next blocks on the device.
+            phase next blocks on the device. ``num_samples`` counts the samples of
+            microbatches that reached backward; ``num_loaded_samples`` counts every
+            sample the loader delivered, including windows later skipped for a
+            non-finite loss or an empty batch. Both are summed over ranks.
         """
         self.model.train()
 
@@ -757,6 +760,7 @@ class MetaModel:
         forward_time_total = 0.0
         backward_time_total = 0.0
         num_samples = 0
+        num_loaded_samples = 0
 
         batch_end = time.perf_counter()
 
@@ -820,6 +824,7 @@ class MetaModel:
                 data_time_total += time.perf_counter() - batch_end
 
                 images, source_labels, *extra = data
+                num_loaded_samples += int(images.size(0)) * self.world_size
                 source_rows = extra[0] if extra else None
                 if self.concept_source_keep is not None and source_rows is None:
                     raise RuntimeError(
@@ -994,6 +999,7 @@ class MetaModel:
             "forward_sec": forward_time_total,
             "backward_sec": backward_time_total,
             "num_samples": num_samples,
+            "num_loaded_samples": num_loaded_samples,
         }
         return last_loss, metric_results, timing
 

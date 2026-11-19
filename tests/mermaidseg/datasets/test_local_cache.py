@@ -130,6 +130,25 @@ def test_snapshot_stats_resets_counters(tmp_path):
     assert third.s3_fetches == 0
 
 
+def test_load_failures_are_counted_and_survive_snapshot(tmp_path):
+    cache = LocalS3Cache.configure(tmp_path, stats=create_cache_stats())
+
+    for _ in range(3):
+        cache.record_load_failure()
+    assert cache.load_failure_count() == 3
+
+    cache.snapshot_stats()
+    assert cache.load_failure_count() == 3
+
+
+def test_load_failures_without_stats_are_untracked(tmp_path):
+    cache = LocalS3Cache.configure(tmp_path)
+
+    cache.record_load_failure()
+
+    assert cache.load_failure_count() is None
+
+
 def test_load_stage_stats_flush_and_snapshot(tmp_path):
     stats = create_cache_stats()
     cache = LocalS3Cache.configure(tmp_path, stats=stats)
