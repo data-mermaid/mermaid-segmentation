@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 from torch.utils.data import DataLoader, TensorDataset
@@ -22,6 +23,7 @@ from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import next_epoch_from_checkpoint, records_train_metrics
 from mermaidseg.model.models import MODEL_CLASSES
 from tests.conftest import IMAGE_SIZE, NUM_CLASSES
+from tests.mermaidseg.conftest import cbm_meta, concept_keep
 
 
 @pytest.mark.parametrize(("raw", "expected"), [(180, 180.0), (0, 0.0), (-1, 0.0)])
@@ -560,3 +562,42 @@ def test_metamodel_runs_on_cuda_when_available(minimal_config, make_meta_model):
     meta = make_meta_model(minimal_config, run_name="test-cuda", device="cuda")
     assert meta.device == "cuda"
     assert next(meta.model.parameters()).device.type == "cuda"
+
+
+def test_train_epoch_masks_concept_targets(make_meta_model, monkeypatch, cbm_schema):
+    meta = cbm_meta(make_meta_model, cbm_schema)
+    meta.set_concept_source_mask(concept_keep(cbm_schema))
+    bleached = cbm_schema.channel_names.index("bleached")
+    seen: list[torch.Tensor] = []
+    original = meta.batch_predict_loss
+
+    def spy(images, target_labels=None, target_concepts=None, *args, **kwargs):
+        seen.append(target_concepts.detach().clone())
+        return original(images, target_labels, target_concepts, *args, **kwargs)
+
+    monkeypatch.setattr(meta, "batch_predict_loss", spy)
+    images = torch.randn(2, 3, *IMAGE_SIZE)
+    labels = torch.ones(
+        2, *IMAGE_SIZE, dtype=torch.long
+    )  # acropora: bleached False, branching True
+    rows = torch.tensor([1, 0])
+    loss, _, _ = meta.train_epoch(
+        DataLoader(TensorDataset(images, labels, rows), batch_size=2), epoch=0
+    )
+    assert np.isfinite(loss)
+    (targets,) = seen
+    assert (targets[0, bleached] == 0).all()  # sample 0's source is masked for bleached
+    assert (targets[1, bleached] == 1).all()  # sample 1 (row 0) keeps its False target
+    unmasked = [i for i in range(cbm_schema.num_channels) if i != bleached]
+    assert torch.equal(targets[0, unmasked], targets[1, unmasked])
+
+
+def test_train_epoch_requires_source_rows_when_masking(make_meta_model, cbm_schema):
+    meta = cbm_meta(make_meta_model, cbm_schema)
+    meta.set_concept_source_mask(concept_keep(cbm_schema))
+    loader = DataLoader(
+        TensorDataset(torch.randn(2, 3, *IMAGE_SIZE), torch.ones(2, *IMAGE_SIZE, dtype=torch.long)),
+        batch_size=2,
+    )
+    with pytest.raises(RuntimeError, match="no source rows"):
+        meta.train_epoch(loader, epoch=0)

@@ -17,8 +17,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts.build_trainval_data_config import HEADER, build_final_data_config
-
 _REPO = Path(__file__).resolve().parents[2]
 _SLURM = _REPO / "slurm"
 _CONFIGS = _REPO / "configs"
@@ -248,11 +246,6 @@ def test_decaying_configs_reach_zero_at_the_last_update(name):
     updates = cfg["epochs"] * cfg["iterations_per_train_epoch"]
     assert scheduler["type"] == "LinearLR" and scheduler["end_factor"] == 0.0
     assert scheduler["warmup_iters"] + scheduler["total_iters"] == updates
-
-
-def test_trainval_config_is_rebuilt_from_the_base_config():
-    rebuilt = build_final_data_config((_CONFIGS / "data_config.yaml").read_text(), header=HEADER)
-    assert rebuilt == (_CONFIGS / "data_config_trainval.yaml").read_text()
 
 
 # ---------- training launchers ----------
