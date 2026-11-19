@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 from pathlib import Path
 from typing import cast
@@ -15,10 +16,11 @@ import yaml
 
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.datasets.factory import configured_source_names
-from mermaidseg.evaluation.gt_mapping import ClassLookup, build_concept_lookup
+from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup, build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HIER_HEADLINE_KEYS
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.point_datasets import (
+    PointEvalDataset,
     run_point_evaluation,
     unit_scalar_keys,
     unit_scalars,
@@ -244,3 +246,240 @@ def test_images_are_normalised_with_the_predictors_mean_and_std(tmp_path):
     expected = (raw - 0.5) / 0.25
     for image, value in zip(batch, expected, strict=True):
         torch.testing.assert_close(image, torch.full_like(image, float(value)))
+
+
+# -- tiny hand-derived runs ------------------------------------------------------------
+TINY_CONCEPTS = ["kingdom__animalia", "kingdom__none", "bleached"]
+TINY_ID2LABEL = {0: "ignore", 1: "coral", 2: "sand"}
+TINY_MEAN = (0.5, 0.4, 0.3)
+TINY_STD = (0.25, 0.5, 0.1)
+
+
+class TinyDataset:
+    """Images of any shape; ``fail`` lists image ids whose read raises, ``gray`` gives 2-D arrays."""
+
+    def __init__(self, images, annotations, *, fail=(), gray=False):
+        self.df_images = pd.DataFrame(images)
+        self.df_annotations = pd.DataFrame(annotations)
+        self._fail = set(fail)
+        self._gray = gray
+
+    def read_image(self, image_id, **_):
+        if image_id in self._fail:
+            raise OSError(f"cannot read {image_id}")
+        shape = (4, 8) if self._gray else (4, 8, 3)
+        return np.full(shape, 100, dtype=np.uint8)
+
+
+class RowBandPredictor:
+    """Class 1 and ``bleached`` own the top half of the input rows, class 2 the bottom half."""
+
+    input_size = (4, 4)
+    mean = TINY_MEAN
+    std = TINY_STD
+    device = torch.device("cpu")
+    sample_at_points = staticmethod(CBMPredictor.sample_at_points)
+
+    def forward_probs(self, images):
+        n = images.shape[0]
+        class_maps = torch.full((n, 3, 4, 4), 0.1)
+        class_maps[:, 1, :2, :] = 0.9
+        class_maps[:, 2, 2:, :] = 0.9
+        concept_maps = torch.full((n, 3, 4, 4), 0.5)
+        concept_maps[:, 2, :2, :] = 0.9
+        concept_maps[:, 2, 2:, :] = 0.1
+        return class_maps, concept_maps
+
+
+def _tiny_lookups():
+    class_lookup = ClassLookup({"coral": 1, "sand": 2}, TINY_ID2LABEL)
+    rows = {
+        "coral": np.array([2, 1, 2], dtype=np.int8),
+        "sand": np.array([1, 2, 1], dtype=np.int8),
+    }
+    return class_lookup, ConceptLookup(rows, len(TINY_CONCEPTS))
+
+
+def _tiny_images(*ids, unit="u"):
+    return [{"source_id": unit, "image_id": i} for i in ids]
+
+
+def _tiny_annotations(image_id, points):
+    return [
+        {"image_id": image_id, "row": r, "col": c, "source_label_name": label}
+        for r, c, label in points
+    ]
+
+
+def _tiny_run(tmp_path, base_ds, *, concept_names=TINY_CONCEPTS, **kwargs):
+    class_lookup, concept_lookup = _tiny_lookups()
+    return run_point_evaluation(
+        eval_name="tiny",
+        base_ds=base_ds,
+        unit_col="source_id",
+        key_cols=["image_id"],
+        predictor=cast(CBMPredictor, RowBandPredictor()),
+        class_lookup=class_lookup,
+        concept_lookup=concept_lookup,
+        concept_names=concept_names,
+        id2label=TINY_ID2LABEL,
+        output_dir=tmp_path,
+        batch_size=kwargs.pop("batch_size", 2),
+        num_workers=0,
+        **kwargs,
+    )
+
+
+def _tiny_dataset_item(base_ds, idx=0):
+    class_lookup, concept_lookup = _tiny_lookups()
+    dataset = PointEvalDataset(
+        base_ds,
+        "source_id",
+        ["image_id"],
+        (4, 4),
+        TINY_MEAN,
+        TINY_STD,
+        class_lookup,
+        concept_lookup,
+    )
+    return dataset[idx]
+
+
+def test_points_are_sampled_by_row_and_column_on_a_non_square_image(tmp_path):
+    # Source image is 4 rows x 8 columns; predictions vary with the row only.
+    # (row, col): (0, 7) top -> 1, (3, 0) bottom -> 2, (1, 3) top -> 1, (2, 5) bottom -> 2.
+    points = [(0, 7, "coral"), (3, 0, "sand"), (1, 3, "sand"), (2, 5, "sand")]
+    base = TinyDataset(_tiny_images("a"), _tiny_annotations("a", points))
+    result = _tiny_run(tmp_path, base)
+    # Ground truth 1, 2, 2, 2 against predictions 1, 2, 1, 2: three of four correct.
+    assert result["pooled"]["num_points"] == 4
+    assert result["pooled"]["class_accuracy"] == pytest.approx(0.75)
+    # bleached is true, false, false, false; predicted (top half positive) true, false, true,
+    # false: one true positive, one false positive, two true negatives.
+    bleached = result["pooled"]["binary"]["per_concept"]["bleached"]
+    assert (bleached["tp"], bleached["fp"], bleached["fn"], bleached["tn"]) == (1, 1, 0, 2)
+
+
+def test_points_outside_the_source_image_are_dropped_and_counted(tmp_path):
+    points = [
+        (0, 0, "coral"),
+        (4, 0, "coral"),  # row == height
+        (0, 8, "sand"),  # col == width
+        (-1, 2, "sand"),
+        (0, -1, "sand"),
+        (3, 7, "sand"),
+    ]
+    base = TinyDataset(_tiny_images("a"), _tiny_annotations("a", points))
+    item = _tiny_dataset_item(base)
+    assert item["ok"] is True
+    assert item["n_out_of_bounds"] == 4
+    assert item["rows"].tolist() == [0, 3]
+    assert item["cols"].tolist() == [0, 7]
+    assert item["names"] == ["coral", "sand"]
+    assert item["ann_idx"].tolist() == [0, 5]
+    assert item["class_ids"].tolist() == [1, 2]
+    assert item["concept_rows"].tolist() == [[2, 1, 2], [1, 2, 1]]
+    assert _tiny_run(tmp_path, base)["pooled"]["num_points"] == 2
+
+
+def test_an_unreadable_image_is_counted_failed_and_contributes_no_points(tmp_path):
+    images = _tiny_images("a", "b")
+    annotations = _tiny_annotations("a", [(0, 0, "coral")]) + _tiny_annotations(
+        "b", [(0, 0, "coral"), (1, 1, "sand")]
+    )
+    base = TinyDataset(images, annotations, fail={"b"})
+    item = _tiny_dataset_item(base, idx=1)
+    assert item["ok"] is False
+    assert item["rows"].size == 0 and item["concept_rows"].shape == (0, 3)
+    assert item["image"].shape == (3, 4, 4)
+
+    result = _tiny_run(tmp_path, base)
+    assert (result["images_processed"], result["images_failed"]) == (2, 1)
+    assert result["pooled"]["num_points"] == 1
+    payload = json.loads((tmp_path / "tiny" / "metrics.json").read_text())
+    assert payload["images_failed"] == 1
+
+
+def test_a_unit_whose_only_image_fails_is_still_reported_with_no_points(tmp_path):
+    base = TinyDataset(
+        _tiny_images("a") + _tiny_images("b", unit="v"),
+        _tiny_annotations("a", [(0, 0, "coral")]) + _tiny_annotations("b", [(0, 0, "coral")]),
+        fail={"b"},
+    )
+    result = _tiny_run(tmp_path, base)
+    assert set(result["units"]) == {"u", "v"}
+    assert result["units"]["v"]["num_points"] == 0
+    assert result["units"]["u"]["num_points"] == 1
+
+
+def test_a_two_dimensional_image_is_stacked_to_three_identical_channels():
+    base = TinyDataset(_tiny_images("a"), _tiny_annotations("a", [(0, 0, "coral")]), gray=True)
+    item = _tiny_dataset_item(base)
+    assert item["ok"] is True
+    assert (item["H"], item["W"]) == (4, 8)
+    expected = torch.tensor(
+        [(100 / 255 - m) / sd for m, sd in zip(TINY_MEAN, TINY_STD, strict=True)]
+    )
+    assert item["image"].shape == (3, 4, 4)
+    torch.testing.assert_close(item["image"][:, 0, 0], expected)
+
+
+def test_max_images_per_unit_keeps_the_first_images_of_each_unit(tmp_path):
+    images = _tiny_images("a1", "a2", "a3") + _tiny_images("b1", "b2", unit="v")
+    annotations = (
+        _tiny_annotations("a1", [(0, 0, "coral")])
+        + _tiny_annotations("a2", [(0, 0, "coral")] * 2)
+        + _tiny_annotations("a3", [(0, 0, "coral")] * 3)
+        + _tiny_annotations("b1", [(0, 0, "coral")] * 4)
+        + _tiny_annotations("b2", [(0, 0, "coral")] * 5)
+    )
+    result = _tiny_run(tmp_path, TinyDataset(images, annotations), max_images_per_unit=1)
+    assert result["images_processed"] == 2
+    assert {u: d["num_points"] for u, d in result["units"].items()} == {"u": 1, "v": 4}
+    payload = json.loads((tmp_path / "tiny" / "metrics.json").read_text())
+    assert (payload["num_units_done"], payload["num_units_total"]) == (2, 2)
+
+
+def test_binary_concepts_missing_from_the_concept_names_raise_before_any_output(tmp_path):
+    base = TinyDataset(_tiny_images("a"), _tiny_annotations("a", [(0, 0, "coral")]))
+    with pytest.raises(RuntimeError, match=r"\['anthropogenic'\]"):
+        _tiny_run(tmp_path, base, binary_concepts=("bleached", "anthropogenic"))
+    assert not (tmp_path / "tiny").exists()
+
+
+def test_unmapped_labels_are_reported_per_lookup_and_written_to_metrics_json(tmp_path):
+    class_lookup = ClassLookup({"coral": 1, "sand": 0}, TINY_ID2LABEL)
+    concept_lookup = ConceptLookup({"coral": np.array([2, 1, 0], np.int8)}, 3)
+    # 'sand' maps to class 0 but has no concept row; 'mystery' has neither; names are lowercased.
+    annotations = _tiny_annotations("a", [(0, 0, "CORAL"), (1, 1, "sand"), (2, 2, "Mystery")])
+    result = run_point_evaluation(
+        eval_name="tiny",
+        base_ds=TinyDataset(_tiny_images("a"), annotations),
+        unit_col="source_id",
+        key_cols=["image_id"],
+        predictor=cast(CBMPredictor, RowBandPredictor()),
+        class_lookup=class_lookup,
+        concept_lookup=concept_lookup,
+        concept_names=TINY_CONCEPTS,
+        id2label=TINY_ID2LABEL,
+        output_dir=tmp_path,
+        num_workers=0,
+    )
+    assert result["unmapped_class_labels"] == ["mystery", "sand"]
+    assert result["unmapped_concept_labels"] == ["mystery", "sand"]
+    payload = json.loads((tmp_path / "tiny" / "metrics.json").read_text())
+    assert payload["unmapped_class_labels"] == ["mystery", "sand"]
+    assert payload["unmapped_concept_labels"] == ["mystery", "sand"]
+
+
+def test_progress_callback_reports_images_processed_after_each_batch(tmp_path):
+    ids = ["a", "b", "c", "d", "e"]
+    annotations = [row for i in ids for row in _tiny_annotations(i, [(0, 0, "coral")])]
+    calls: list[tuple[int, int]] = []
+    _tiny_run(
+        tmp_path,
+        TinyDataset(_tiny_images(*ids), annotations),
+        batch_size=2,
+        progress_cb=lambda done, total: calls.append((done, total)),
+    )
+    assert calls == [(2, 5), (4, 5), (5, 5)]

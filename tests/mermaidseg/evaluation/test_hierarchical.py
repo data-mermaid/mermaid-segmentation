@@ -83,3 +83,12 @@ def test_removed_concepts_are_taken_out_of_the_tree():
     assert "fungi" not in score.tree.channels["kingdom"]
     with pytest.raises(ValueError, match="after removing 1 concepts"):
         HierarchicalScore(_concept_names(), _CSV, removed_concepts=["genus__acropora"])
+
+
+def test_a_rank_whose_channels_are_not_contiguous_raises():
+    names = _concept_names()
+    first_kingdom = next(n for n in names if n.startswith("kingdom__"))
+    # Moving one kingdom channel to the end splits that rank's channel indices.
+    shuffled = [n for n in names if n != first_kingdom] + [first_kingdom]
+    with pytest.raises(ValueError, match="kingdom concept channels are not contiguous"):
+        HierarchicalScore(shuffled, _CSV)
