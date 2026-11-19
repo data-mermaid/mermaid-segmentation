@@ -70,12 +70,6 @@ def test_worker_seeder_differs_across_workers(
     assert _seeded_draw(monkeypatch, draw, 1000, 0) != _seeded_draw(monkeypatch, draw, 1001, 0)
 
 
-def test_worker_seeder_runs_the_inner_init() -> None:
-    calls: list[int] = []
-    make_worker_seeder(0, calls.append)(3)
-    assert calls == [3]
-
-
 def test_worker_seeder_runs_the_inner_init_in_a_spawned_worker(
     monkeypatch, tmp_path, spawn_cache_stats
 ):

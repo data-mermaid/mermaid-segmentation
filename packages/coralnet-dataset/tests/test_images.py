@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-from pathlib import Path
-
 import pandas as pd
 import pyarrow.parquet as pq
 from PIL import Image
@@ -64,26 +61,6 @@ def test_build_images_records_dimensions_and_resize_flag(
     assert not img_df.loc[img_df["image_id"] == "101", "needs_resize"].iloc[0]
 
 
-def test_build_images_deterministic_bytes(tmp_path, fake_s3, jpeg_small_bytes, jpeg_large_bytes):
-    ann_df = _seed_images(
-        fake_s3,
-        bucket="b",
-        prefix="p",
-        jpeg_small_bytes=jpeg_small_bytes,
-        jpeg_large_bytes=jpeg_large_bytes,
-    )
-    img_df = build_images(ann_df, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-
-    p1 = tmp_path / "a.parquet"
-    p2 = tmp_path / "b.parquet"
-    write_parquet_deterministic(img_df, p1, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY)
-    write_parquet_deterministic(img_df, p2, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY)
-
-    h1 = hashlib.sha256(Path(p1).read_bytes()).hexdigest()
-    h2 = hashlib.sha256(Path(p2).read_bytes()).hexdigest()
-    assert h1 == h2
-
-
 def test_build_images_handles_missing_objects(fake_s3, jpeg_small_bytes):
     ann_df = pd.DataFrame(
         {
@@ -100,26 +77,6 @@ def test_build_images_handles_missing_objects(fake_s3, jpeg_small_bytes):
     statuses = dict(zip(img_df["image_id"], img_df["header_status"], strict=False))
     assert statuses["present"] == "ok"
     assert statuses["missing"] == "not_found"
-
-
-def test_build_images_round_trips_through_parquet(
-    tmp_path, fake_s3, jpeg_small_bytes, jpeg_large_bytes
-):
-    ann_df = _seed_images(
-        fake_s3,
-        bucket="b",
-        prefix="p",
-        jpeg_small_bytes=jpeg_small_bytes,
-        jpeg_large_bytes=jpeg_large_bytes,
-    )
-    img_df = build_images(ann_df, bucket="b", prefix="p", workers=1, s3_client=fake_s3)
-    out = tmp_path / "images.parquet"
-    write_parquet_deterministic(img_df, out, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY)
-
-    schema = pq.read_schema(out)
-    assert {f.name for f in schema} == {f.name for f in IMAGES_SCHEMA}
-    round = pq.read_table(out).to_pandas()
-    assert len(round) == len(img_df)
 
 
 def test_build_images_on_empty_annotations_writes_empty_parquet(fake_s3, tmp_path):

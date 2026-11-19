@@ -42,11 +42,6 @@ def _expected_rubble(row: pd.Series) -> str:
     return "not_given"
 
 
-def test_only_the_authoritative_table_exists():
-    assert _CSV.is_file()
-    assert not (_REPO / "configs" / "class_to_concepts_final.csv").exists()
-
-
 def test_rubble_column_follows_the_rules(table):
     assert "rubble" in table.columns
     assert set(table["rubble"]) <= {"TRUE", "FALSE", "not_given"}

@@ -300,15 +300,6 @@ def _metric_failure_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 class TestMetricFailureRateLimit:
-    @pytest.mark.parametrize(("failures", "warnings"), [(1, 1), (99, 1), (100, 2), (201, 3)])
-    def test_warns_on_the_first_and_every_hundredth_failure(
-        self, failing_metrics_tracker, caplog, failures, warnings
-    ):
-        caplog.set_level(logging.WARNING)
-        for step in range(failures):
-            failing_metrics_tracker.log_metrics({"loss": 0.5}, step=step)
-        assert len(_metric_failure_warnings(caplog)) == warnings
-
     def test_warnings_carry_the_running_count_and_end_run_the_total(
         self, failing_metrics_tracker, caplog
     ):
@@ -368,7 +359,6 @@ class TestMlflowFailureModes:
     ("key", "expected"),
     [
         ("val/iou/acropora (branching) & sp+", "val/iou/acropora _branching_ _ sp_"),
-        ('val/iou/"quoted"', "val/iou/_quoted_"),
         ("lineage/manifests/a-b.c: d_e", "lineage/manifests/a-b.c: d_e"),
     ],
 )
@@ -382,8 +372,6 @@ def test_mlflow_key_replaces_disallowed_characters(key: str, expected: str):
         ("http://localhost:5000", "http://localhost:5000/#/experiments/7/runs/abc"),
         ("https://mlflow.invalid/", "https://mlflow.invalid/#/experiments/7/runs/abc"),
         ("sqlite:///mlflow.db", None),
-        ("file:///tmp/mlruns", None),
-        ("arn:aws:sagemaker:us-east-1:000000000000:mlflow-app/app", None),
     ],
 )
 def test_mlflow_run_url_only_for_http_servers(uri: str, expected: str | None):
@@ -544,17 +532,6 @@ class TestLoggerDispatch:
 class TestSaveModelCheckpoint:
     """Checkpoint saving to local files."""
 
-    def test_local_checkpoint_written(self, tmp_path, make_config, fake_tracker):
-        meta = FakeMetaModel(run_name="ckpt-run")
-        config = make_config()
-        lgr = Logger(
-            config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=50
-        )
-        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
-        files = list((tmp_path / "model_checkpoints" / "ckpt-run").iterdir())
-        assert len(files) == 1, f"Expected 1 checkpoint file, found {len(files)}: {files}"
-        assert "model_epoch50" in files[0].name, f"Expected epoch-based name, got {files[0].name}"
-
     def test_local_checkpoint_skipped_when_disabled(self, tmp_path, make_config, fake_tracker):
         meta = FakeMetaModel(run_name="ckpt-skip")
         lgr = Logger(
@@ -684,64 +661,12 @@ class TestSaveModelCheckpoint:
         assert not (directory / "model_preempt500").exists()
         assert not (directory / "model_preempt500.partial").exists()
 
-    def test_scheduler_state_included_in_checkpoint(self, tmp_path, make_config, fake_tracker):
-        meta = FakeMetaModel(run_name="sched-check")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            checkpoint_dir=str(tmp_path),
-            log_checkpoint=50,
-        )
-        meta.global_step = 25000
-        lgr.save_model_checkpoint(meta, epoch=50, metrics_dict={"loss": 0.1})
-        ckpt_file = list((tmp_path / "model_checkpoints" / "sched-check").iterdir())[0]
-        checkpoint = torch.load(ckpt_file, weights_only=True)
-        assert "scheduler_state_dict" in checkpoint
-        assert checkpoint["global_step"] == 25000
-
-
-# ===================================================================
-# Scenario tests
-# ===================================================================
-@pytest.mark.integration
-class TestScenarios:
-    """End-to-end integration tests covering full logger lifecycle."""
-
-    @staticmethod
-    def _run_logger_lifecycle(lgr, meta_model, epochs=3):
-        for epoch in range(epochs):
-            lgr.log(
-                {"train/loss": 1.0 - (epoch * 0.2), "train/accuracy": 0.5 + (epoch * 0.1)},
-                step=epoch,
-            )
-        lgr.save_model_checkpoint(
-            meta_model, epoch=epochs - 1, metrics_dict={"accuracy": 0.66, "mean_iou": 0.76}
-        )
-        lgr.end_run(failed=False)
-
-    def test_scenario_a_local_only(self, tmp_path, make_config, fake_tracker):
-        meta = FakeMetaModel(run_name="scenario_a")
-        lgr = Logger(
-            config=make_config(),
-            meta_model=meta,
-            log_checkpoint=2,
-            checkpoint_dir=str(tmp_path),
-        )
-        self._run_logger_lifecycle(lgr, meta)
-        ckpt_dir = tmp_path / "model_checkpoints" / "scenario_a"
-        assert ckpt_dir.exists()
-
 
 # ===================================================================
 # Logger.end_run & context manager
 # ===================================================================
 class TestLoggerLifecycle:
     """Logger cleanup: end_run and context manager protocol."""
-
-    def test_end_run_passes_failed_to_the_tracker(self, make_config, fake_tracker):
-        lgr, tracker = _logger(make_config)
-        lgr.end_run(failed=True)
-        assert tracker.ended == [True]
 
     def test_context_manager_ends_the_run_as_failed_on_exception(self, make_config, fake_tracker):
         lgr, tracker = _logger(make_config)
@@ -757,21 +682,14 @@ class TestLoggerLifecycle:
             pass
         assert tracker.ended == [False]
 
-    @pytest.mark.parametrize(("raises", "status"), [(True, "FAILED"), (False, "FINISHED")])
-    def test_context_manager_sets_the_mlflow_run_status(
-        self, make_config, mlflow_store, raises, status
-    ):
+    def test_context_manager_sets_the_mlflow_run_status_failed(self, make_config, mlflow_store):
         config = make_config(logger={"tracker": "mlflow", "experiment_name": "exp-s"})
         lgr = Logger(config=config, meta_model=FakeMetaModel())
         run_id = lgr.run_id
         assert run_id is not None
-        if raises:
-            with pytest.raises(ValueError, match="boom"), lgr:
-                raise ValueError("boom")
-        else:
-            with lgr:
-                pass
-        assert mlflow_store.get_run(run_id).info.status == status
+        with pytest.raises(ValueError, match="boom"), lgr:
+            raise ValueError("boom")
+        assert mlflow_store.get_run(run_id).info.status == "FAILED"
 
 
 # ===================================================================

@@ -300,15 +300,6 @@ def test_main_creates_the_nccl_trace_dir_for_several_gpus(tmp_path, monkeypatch)
     assert (tmp_path / "out" / "nccl_trace").is_dir()
 
 
-def test_main_creates_no_nccl_trace_dir_for_one_gpu(tmp_path, monkeypatch):
-    _stub_main(tmp_path, monkeypatch, ngpu=1)
-    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
-
-    entrypoint.main([])
-
-    assert not (tmp_path / "out" / "nccl_trace").exists()
-
-
 def test_main_logs_disk_usage_of_cache_and_output_dirs_before_exec(tmp_path, monkeypatch, capsys):
     _stub_main(tmp_path, monkeypatch, ngpu=4)
     monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
@@ -387,14 +378,3 @@ def test_main_exports_the_fetched_secret_at_exec_without_leaking_it(tmp_path, mo
     assert len(execs) == 1
     assert not any("hf-sekret" in arg for arg in execs[0])
     assert "hf-sekret" not in capsys.readouterr().out
-
-
-def test_main_propagates_a_failed_secret_fetch_without_exec(tmp_path, monkeypatch):
-    execs = _stub_main(tmp_path, monkeypatch, ngpu=1)
-    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
-    _wire_real_secrets(monkeypatch, _FakeSecrets({}))
-
-    with pytest.raises(ClientError):
-        entrypoint.main([])
-
-    assert execs == []

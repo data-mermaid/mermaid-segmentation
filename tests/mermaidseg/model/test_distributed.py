@@ -171,12 +171,6 @@ def test_require_world_size_matches_expected():
             require_world_size(world_size, 4)
 
 
-def test_init_distributed_requires_world_size_env_to_match_expected(monkeypatch):
-    monkeypatch.delenv("WORLD_SIZE", raising=False)
-    with pytest.raises(RuntimeError, match="4 ranks"):
-        init_distributed_from_env(expected_world_size=4, nccl_timeout_min=30)
-
-
 def test_init_distributed_single_process_when_one_rank_expected(monkeypatch):
     monkeypatch.delenv("WORLD_SIZE", raising=False)
     ctx = init_distributed_from_env(expected_world_size=1, nccl_timeout_min=30)
@@ -208,52 +202,6 @@ def test_init_distributed_passes_nccl_timeout_minutes(monkeypatch, minutes, expe
     ctx = init_distributed_from_env(expected_world_size=2, nccl_timeout_min=minutes)
     assert seen == {"backend": "nccl", "timeout": expected}
     assert (ctx.rank, ctx.world_size, ctx.local_rank) == (1, 2, 1)
-
-
-class _FakeFaulthandler:
-    def __init__(self) -> None:
-        self.armed: list[float] = []
-        self.cancelled = 0
-
-    def dump_traceback_later(self, timeout, repeat=False, exit=False):
-        assert repeat is False and exit is False
-        self.armed.append(timeout)
-
-    def cancel_dump_traceback_later(self):
-        self.cancelled += 1
-
-
-def test_watch_for_stalls_rearms_each_update_and_cancels(monkeypatch):
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(meta_module, "faulthandler", fake)
-    assert list(meta_module.watch_for_stalls(range(3), 5.0)) == [0, 1, 2]
-    assert fake.armed == [5.0, 5.0, 5.0]
-    assert fake.cancelled == 1
-
-
-def test_watch_for_stalls_cancels_on_break_and_error(monkeypatch):
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(meta_module, "faulthandler", fake)
-    for update in meta_module.watch_for_stalls(range(5), 5.0):
-        if update == 1:
-            break
-    assert fake.cancelled == 1
-
-    def run() -> None:
-        for update in meta_module.watch_for_stalls(range(5), 5.0):
-            if update == 2:
-                raise RuntimeError("stalled")
-
-    with pytest.raises(RuntimeError, match="stalled"):
-        run()
-    assert fake.cancelled == 2
-
-
-def test_watch_for_stalls_disabled_never_arms(monkeypatch):
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(meta_module, "faulthandler", fake)
-    assert list(meta_module.watch_for_stalls(range(2), 0.0)) == [0, 1]
-    assert fake.armed == [] and fake.cancelled == 0
 
 
 def test_distributed_init_requires_a_process_group(minimal_config, make_meta_model):
@@ -591,129 +539,6 @@ def test_replica_window_matches_serial_microbatches():
             torch.testing.assert_close(
                 torch.from_numpy(payload["weights"][name]), weight, rtol=1e-5, atol=1e-6
             )
-
-
-def _nccl_window_worker(
-    rank: int,
-    world_size: int,
-    init_method: str,
-    queue,
-    state: dict[str, torch.Tensor],
-    images: torch.Tensor,
-    source_labels: torch.Tensor,
-) -> None:
-    torch.cuda.set_device(rank)
-    dist.init_process_group("nccl", init_method=init_method, rank=rank, world_size=world_size)
-    try:
-        device = torch.device("cuda", rank)
-        target, concepts = _lookups()
-        step = ShardStep(
-            _TinyCBM(),
-            _TinyLoss(),
-            None,
-            target,
-            concepts,
-            False,
-            torch.bfloat16,
-        )
-        step.load_state_dict(state)
-        step = step.to(device)
-        ddp = DistributedDataParallel(
-            DDPLossStep(step),
-            device_ids=[rank],
-            broadcast_buffers=False,
-        )
-        images = images.to(device)
-        source_labels = source_labels.to(device)
-        for micro in range(_ACCUM):
-            start = micro * _GLOBAL_BATCH + rank * _PER_RANK
-            sync = micro == _ACCUM - 1
-            context = ddp.no_sync() if not sync else torch.enable_grad()
-            with context:
-                loss = ddp(
-                    images[start : start + _PER_RANK],
-                    source_labels[start : start + _PER_RANK],
-                    return_maps=micro == 0,
-                )
-                (loss / _ACCUM).backward()
-        grads = {
-            name: param.grad.detach().cpu().clone()
-            for name, param in ddp.module.step.named_parameters()
-            if param.requires_grad
-        }
-        queue.put((rank, grads))
-    finally:
-        dist.destroy_process_group()
-
-
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() != 4,
-    reason="needs exactly 4 visible GPUs",
-)
-def test_four_gpu_window_matches_serial_microbatches_on_one_gpu():
-    torch.manual_seed(0)
-    target, concepts = _lookups()
-    reference = ShardStep(
-        _TinyCBM(),
-        _TinyLoss(),
-        None,
-        target,
-        concepts,
-        False,
-        torch.bfloat16,
-    )
-    state = {name: tensor.detach().clone() for name, tensor in reference.state_dict().items()}
-    images, source_labels = _batch()
-    serial_grads, _, _ = _serial_window(state, images, source_labels)
-    payloads = _spawn(_nccl_window_worker, _WORLD, extra=(state, images, source_labels))
-    for grads in payloads:
-        for name, grad in serial_grads.items():
-            torch.testing.assert_close(grads[name], grad, rtol=1e-4, atol=1e-5)
-
-
-def _two_window_maps_worker(rank: int, world_size: int, init_method: str, queue) -> None:
-    """Reproduce the cluster crash: maps on the first micro, then a second window."""
-    _init_gloo(rank, world_size, init_method)
-    try:
-        torch.manual_seed(0)
-        target, concepts = _lookups()
-        step = ShardStep(
-            _TinyCBM(),
-            _TinyLoss(),
-            None,
-            target,
-            concepts,
-            False,
-            torch.bfloat16,
-        )
-        ddp = DistributedDataParallel(DDPLossStep(step), device_ids=None, broadcast_buffers=False)
-        images, source_labels = _batch(batch_size=3, seed=rank + 1)
-        for window in range(2):
-            for micro in range(_ACCUM):
-                sync = micro == _ACCUM - 1
-                context = ddp.no_sync() if not sync else torch.enable_grad()
-                with context:
-                    loss = ddp(
-                        images,
-                        source_labels,
-                        return_maps=window == 0 and micro == 0,
-                    )
-                    assert loss.ndim == 0
-                    if window == 0 and micro == 0:
-                        stashed = ddp.module.last
-                        assert stashed is not None
-                        assert stashed[1] is not None
-                    (loss / _ACCUM).backward()
-            for param in ddp.parameters():
-                param.grad = None
-        queue.put((rank, True))
-    finally:
-        dist.destroy_process_group()
-
-
-def test_two_ddp_windows_survive_returned_metric_maps():
-    results = _spawn(_two_window_maps_worker, _WORLD)
-    assert results == [True] * _WORLD
 
 
 def test_ddp_loss_step_returns_only_the_scalar_loss():

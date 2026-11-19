@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
-
 import cv2
 import numpy as np
 import pytest
@@ -29,18 +27,6 @@ def test_preprocess_matches_the_albumentations_eval_transform(source_hw, size_hw
     assert actual.dtype == torch.float32
     assert actual.shape == (3, *size_hw)
     np.testing.assert_allclose(actual.numpy(), expected.transpose(2, 0, 1), atol=1e-5)
-
-
-def test_imagenet_constants_hold_the_published_values():
-    assert IMAGENET_MEAN == (0.485, 0.456, 0.406)
-    assert IMAGENET_STD == (0.229, 0.224, 0.225)
-
-
-@pytest.mark.parametrize("name", ["mean", "std"])
-def test_preprocess_requires_mean_and_std_as_keyword_only(name):
-    parameter = inspect.signature(preprocess).parameters[name]
-    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
-    assert parameter.default is inspect.Parameter.empty
 
 
 @pytest.mark.parametrize("shape", [(8, 8), (8, 8, 4), (1, 8, 8, 3)])

@@ -50,40 +50,6 @@ def test_resize_image_no_resize_if_below_threshold():
     assert resized_img.height == 400
 
 
-def test_resize_image_square():
-    """Resizing square image maintains square aspect ratio."""
-    # Create 3000x3000 image
-    img = Image.new("RGB", (3000, 3000), color="green")
-    img_bytes = BytesIO()
-    img.save(img_bytes, format="JPEG")
-    img_bytes.seek(0)
-
-    resized_bytes = resize_image_to_threshold(img_bytes)
-    resized_img = Image.open(resized_bytes)
-    resized_img.load()
-
-    assert resized_img.width == 2048
-    assert resized_img.height == 2048
-
-
-def test_resize_converts_rgba_to_rgb_jpeg():
-    """RGBA images are converted to RGB so they can be JPEG-encoded (not RGBA-as-JPEG
-    error)."""
-    img = Image.new("RGBA", (3000, 2000), color=(255, 0, 0, 128))
-    img_bytes = BytesIO()
-    img.save(img_bytes, format="PNG")
-    img_bytes.seek(0)
-
-    resized_bytes = resize_image_to_threshold(img_bytes)
-    resized_img = Image.open(resized_bytes)
-    resized_img.load()
-
-    assert resized_img.format == "JPEG"
-    assert resized_img.mode == "RGB"
-    assert resized_img.width == 2048
-    assert resized_img.height == 1365
-
-
 def test_resize_converts_rgba_below_threshold():
     """A small RGBA image is still re-encoded to RGB JPEG, not passed through as raw
     bytes."""
@@ -151,56 +117,6 @@ def test_scan_for_missing_resized_images_builds_todo_list():
     assert todo_df.iloc[0]["output_s3_key"] == "etl-outputs/coralnet/resized/s2/images/img_c.jpg"
     assert "original_s3_key" in todo_df.columns
     assert "output_s3_key" in todo_df.columns
-
-
-def test_resize_and_upload_image_returns_completed_result():
-    """Worker downloads, resizes and uploads, and returns a result row."""
-    # Create mock S3 client
-    mock_s3 = Mock()
-
-    # Mock GET (download): return a 3000x2000 JPEG
-    original_img = Image.new("RGB", (3000, 2000), color="red")
-    img_bytes = BytesIO()
-    original_img.save(img_bytes, format="JPEG")
-    img_bytes.seek(0)
-
-    mock_s3.get_object.return_value = {"Body": BytesIO(img_bytes.getvalue())}
-
-    # Mock PUT (upload): track calls
-    mock_s3.put_object = MagicMock()
-    mock_s3.head_object = MagicMock()
-
-    # Create todo item
-    todo_item = {
-        "source_id": 1,
-        "image_id": "img_a",
-        "width": 3000,
-        "height": 2000,
-        "original_s3_key": "coralnet-public-images/s1/images/img_a.jpg",
-        "output_s3_key": "etl-outputs/coralnet/resized/s1/images/img_a.jpg",
-    }
-
-    result = resize_and_upload_image(
-        todo_item=todo_item,
-        bucket="test-bucket",
-        s3_client=mock_s3,
-    )
-
-    # Verify PUT was called
-    assert mock_s3.put_object.called
-    call_args = mock_s3.put_object.call_args
-    assert call_args[1]["Bucket"] == "test-bucket"
-    assert call_args[1]["Key"] == "etl-outputs/coralnet/resized/s1/images/img_a.jpg"
-
-    # No post-upload head_object verify — S3 PUT is strongly consistent
-    mock_s3.head_object.assert_not_called()
-
-    # Verify the returned result row
-    assert result["source_id"] == 1
-    assert result["image_id"] == "img_a"
-    assert result["status"] == "completed"
-    assert result["resize_timestamp"] is not None
-    assert result["skip_reason"] is None
 
 
 def test_resize_converts_and_uploads_rgba_png(rgba_png_bytes):

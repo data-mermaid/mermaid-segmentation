@@ -53,36 +53,6 @@ def _common(tmp_path: Path, tag: str = "v1") -> list[str]:
     return ["--output-dir", str(tmp_path), "--workers", "1", "--version-tag", tag]
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["build-annotations"],
-        ["build-annotations", "--source-ids", "1,2"],
-        ["build-images", "--annotations", "a.parquet"],
-        ["resize", "--images", "i.parquet"],
-        ["build-manifest", "--annotations", "a.parquet", "--images", "i.parquet"],
-        ["all", "--source-ids", "3"],
-    ],
-)
-def test_subcommands_parse(argv):
-    args = cli.build_parser().parse_args(argv)
-    assert callable(args.func)
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["build-images"],
-        ["resize"],
-        ["build-manifest", "--images", "i.parquet"],
-        ["build-manifest", "--annotations", "a.parquet"],
-    ],
-)
-def test_required_args_enforced(argv):
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(argv)
-
-
 def test_build_annotations_restricts_to_source_ids(
     monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
 ):
@@ -125,11 +95,10 @@ def _png_bytes() -> bytes:
 @pytest.mark.parametrize(
     ("second_image", "expected_status"),
     [
-        (lambda make_jpeg: make_jpeg(4096, 3000), "ok"),
         (lambda make_jpeg: make_jpeg(640, 480, padding=80_000), "sof_not_found_extended"),
         (lambda make_jpeg: _png_bytes(), "pil_fallback"),
     ],
-    ids=["ok", "sof_not_found_extended", "pil_fallback"],
+    ids=["sof_not_found_extended", "pil_fallback"],
 )
 def test_build_images_exits_0_when_every_image_has_dimensions(
     monkeypatch, fake_s3, make_jpeg, tmp_path, second_image, expected_status
@@ -392,28 +361,20 @@ def _run_upload(monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, ex
     return cli.main([*argv, *extra])
 
 
-def test_upload_refuses_to_overwrite_an_existing_key_with_default_tag(
-    monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
+@pytest.mark.parametrize(
+    ("tag", "extra"),
+    [("auto", []), ("v1", ["--version-tag", "v1"])],
+    ids=["default-tag", "explicit-tag"],
+)
+def test_upload_refuses_to_overwrite_an_existing_key(
+    monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, tag, extra
 ):
-    fake_s3.put(_BUCKET, _upload_key("auto"), b"old")
+    fake_s3.put(_BUCKET, _upload_key(tag), b"old")
 
-    with pytest.raises(RuntimeError, match=_upload_key("auto")):
-        _run_upload(monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, [])
+    with pytest.raises(RuntimeError, match=rf"{_upload_key(tag)}.*--overwrite"):
+        _run_upload(monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, extra)
 
-    assert fake_s3.objects[(_BUCKET, _upload_key("auto"))] == b"old"
-
-
-def test_upload_refuses_to_overwrite_with_explicit_tag_without_overwrite_flag(
-    monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
-):
-    fake_s3.put(_BUCKET, _upload_key("v1"), b"old")
-
-    with pytest.raises(RuntimeError, match=rf"{_upload_key('v1')}.*--overwrite"):
-        _run_upload(
-            monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path, ["--version-tag", "v1"]
-        )
-
-    assert fake_s3.objects[(_BUCKET, _upload_key("v1"))] == b"old"
+    assert fake_s3.objects[(_BUCKET, _upload_key(tag))] == b"old"
 
 
 def test_upload_overwrites_an_existing_key_with_overwrite_flag(

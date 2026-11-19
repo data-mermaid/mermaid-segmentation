@@ -201,31 +201,18 @@ def test_base_dataset_set_global_offset_shifts_emitted_mask():
     np.testing.assert_array_equal(global_mask, expected)
 
 
-def test_base_dataset_ann_positions_match_boolean_scan(minimal_dataset):
-    """Precomputed groupby indices must select the same rows (and order) as a boolean scan."""
-    for image_id in minimal_dataset.df_images["image_id"]:
-        positions = minimal_dataset._ann_positions[image_id]
-        indexed = minimal_dataset.df_annotations.iloc[positions][
-            ["row", "col", "source_label_name"]
-        ]
-        scanned = minimal_dataset.df_annotations.loc[
-            minimal_dataset.df_annotations["image_id"] == image_id,
-            ["row", "col", "source_label_name"],
-        ]
-        pd.testing.assert_frame_equal(
-            indexed.reset_index(drop=True), scanned.reset_index(drop=True)
-        )
-
-
 # --- BaseCoralDataset.__getitem__ ---
 
 
-def test_base_dataset_getitem_raises_and_logs_when_all_items_fail(single_image_annotations, caplog):
+def test_base_dataset_all_items_failing_raises_logs_and_records_context(
+    single_image_annotations, caplog
+):
     df_annotations, df_images = single_image_annotations
     ds = _AlwaysFailDataset(
         df_annotations=df_annotations,
         df_images=df_images,
         class_subset=["Coral"],
+        split="train",
     )
 
     # With a single-image dataset, recurse-on-failure exhausts every index and
@@ -239,18 +226,6 @@ def test_base_dataset_getitem_raises_and_logs_when_all_items_fail(single_image_a
     assert "img1" in caplog.text
     assert "RuntimeError" in caplog.text
 
-
-def test_base_dataset_records_failure_context(single_image_annotations):
-    df_annotations, df_images = single_image_annotations
-    ds = _AlwaysFailDataset(
-        df_annotations=df_annotations,
-        df_images=df_images,
-        class_subset=["Coral"],
-        split="train",
-    )
-
-    with pytest.raises(RuntimeError):
-        _ = ds[0]
     failures = pd.DataFrame(ds._load_failures)
     assert len(failures) == 1
 
@@ -267,23 +242,6 @@ def test_base_dataset_records_failure_context(single_image_annotations):
 
 
 # --- BaseCoralDataset empty-mask skip (train split only) ---
-
-
-def test_train_skips_image_with_no_annotations(monkeypatch):
-    df_annotations, df_images = _make_two_image_annotations(
-        img0_labels=[],
-        img1_labels=["Coral"],
-    )
-    ds = _SyntheticDataset(
-        df_annotations=df_annotations,
-        df_images=df_images,
-        split="train",
-    )
-    monkeypatch.setattr(np.random, "randint", lambda low, high: 0)
-
-    _, mask = ds[0]
-
-    assert np.any(mask > 0)
 
 
 def test_train_skips_crop_that_removed_all_labels(monkeypatch):

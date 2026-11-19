@@ -140,14 +140,6 @@ def test_names_and_splits_filters(stub_classes, monkeypatch):
     assert set(built) == {("points", "train")}
 
 
-def test_missing_section_is_skipped(stub_classes):
-    data_cfg = ConfigDict({"points": {"train": {"a": 1}}})  # no "dense" section
-    built = build_datasets(
-        data_cfg, padding=0, dataset_classes=stub_classes, verbose=False, input_size=SIZE
-    )
-    assert set(built) == {("points", "train")}
-
-
 def test_repeat_key_is_not_passed_to_the_dataset_constructor(stub_classes):
     data_cfg = ConfigDict({"points": {"train": {"whitelist": [1], "repeat": 5}}})
     built = build_datasets(

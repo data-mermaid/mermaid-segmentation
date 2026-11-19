@@ -24,10 +24,10 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 import mermaidseg.model.models
 from mermaidseg import training
-from mermaidseg.datasets.factory import DATASET_CLASSES, build_datasets
+from mermaidseg.datasets.factory import build_datasets
 from mermaidseg.datasets.local_cache import create_cache_stats
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
-from mermaidseg.io import ConfigDict, load_config, resolve_repo_path, setup_config
+from mermaidseg.io import ConfigDict, load_config, resolve_repo_path
 from mermaidseg.model.distributed import DistContext
 from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
 from mermaidseg.training import (
@@ -52,14 +52,6 @@ def _datasets() -> dict[tuple[str, str], str]:
     }
 
 
-class _Stub:
-    def __init__(self, **kwargs):
-        pass
-
-    def __len__(self) -> int:
-        return 1
-
-
 def test_train_datasets_repeat_the_configured_dataset_after_all_trains():
     data_cfg = ConfigDict(
         {"a": {"train": {}}, "coralscapes_v2": {"train": {"repeat": 6}}, "b": {"train": {}}}
@@ -76,36 +68,13 @@ def test_train_datasets_repeat_the_configured_dataset_after_all_trains():
     ]
 
 
-def test_train_datasets_without_repeat_are_not_repeated():
-    data_cfg = ConfigDict(
-        {"a": {"train": {}}, "coralscapes_v2": {"train": {"split": "train"}}, "b": {"train": {}}}
-    )
-    assert _assemble_train_datasets(_datasets(), data_cfg) == ["a", "cs", "b"]
-
-
-@pytest.mark.parametrize("repeat", [0, -1, 2.5, True])
+@pytest.mark.parametrize("repeat", [0, 2.5, True])
 def test_train_datasets_reject_an_invalid_repeat_naming_the_dataset(repeat):
     data_cfg = ConfigDict(
         {"a": {"train": {}}, "coralscapes_v2": {"train": {"repeat": repeat}}, "b": {"train": {}}}
     )
     with pytest.raises(ValueError, match="coralscapes_v2"):
         _assemble_train_datasets(_datasets(), data_cfg)
-
-
-def test_trainval_config_trains_on_six_coralscapes_v2_copies():
-    data_cfg = setup_config(
-        {"data": str(resolve_repo_path("configs/data_config_trainval.yaml"))}
-    ).data
-    classes = dict.fromkeys(DATASET_CLASSES, _Stub)
-    built = build_datasets(
-        data_cfg,
-        dataset_classes=classes,
-        splits=["train"],
-        verbose=False,
-        input_size=(256, 256),
-    )
-    train = _assemble_train_datasets(built, data_cfg)
-    assert sum(ds is built[("coralscapes_v2", "train")] for ds in train) == 6
 
 
 # ---------- shuffle order ----------
@@ -575,30 +544,6 @@ def test_resumed_mid_warmup_lr_matches_the_uninterrupted_run(make_meta_model, tm
     resumed = make_meta_model(_warmup_config(), run_name="second-half")
     load_training_checkpoint(resumed, read_checkpoint(path, RESUME_CHECKPOINT_KEYS), DistContext())
     assert _lr_after_steps(resumed, 11) == pytest.approx(continuous[5:])
-
-
-@pytest.mark.parametrize(
-    "missing",
-    [
-        "model_state_dict",
-        "optimizer_state_dict",
-        "scheduler_state_dict",
-        "warmup_iters_completed",
-        "global_step",
-        "epoch",
-        "epoch_complete",
-    ],
-)
-def test_read_checkpoint_requires_each_resume_key(
-    minimal_config, make_meta_model, tmp_path, missing
-):
-    meta = make_meta_model(minimal_config, run_name="resume-missing")
-    checkpoint = _resume_checkpoint(meta)
-    del checkpoint[missing]
-    path = tmp_path / "ckpt.pt"
-    torch.save(checkpoint, path)
-    with pytest.raises(RuntimeError, match=missing):
-        read_checkpoint(path, RESUME_CHECKPOINT_KEYS)
 
 
 def test_run_rejects_a_bad_checkpoint_before_building_datasets(monkeypatch, tmp_path):

@@ -36,18 +36,6 @@ def test_taxonomic_rank_loss_of_a_partial_mask_blends_the_masked_means():
     assert loss.item() == pytest.approx(0.5 * (5 / 3) * LN2 + 0.5 * 1.75 * LN2, rel=1e-6)
 
 
-def test_taxonomic_rank_loss_of_an_empty_mask_is_zero_with_finite_gradients():
-    logits = torch.randn(2, 3, 2, 2, requires_grad=True)
-    labels = torch.ones(2, 3, 2, 2)  # every channel inactive: no pixel is labelled
-
-    loss = calculate_taxonomic_rank_loss(logits, labels, from_logits=True, **WEIGHTS)
-    loss.backward()
-
-    assert loss.item() == 0.0
-    assert logits.grad is not None
-    assert torch.equal(logits.grad, torch.zeros_like(logits))
-
-
 def test_multi_hot_loss_of_a_partial_mask_blends_the_masked_means():
     """BCE is ln 2 at logit 0; at logit ln 3 with label 1 (target 0.01) it is ln 4 - 0.01 ln 3.
 

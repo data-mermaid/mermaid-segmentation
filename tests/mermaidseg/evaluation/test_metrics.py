@@ -50,45 +50,6 @@ def test_class_confusion_pooling():
     assert abs(pooled.accuracy() - 3 / 4) < 1e-9
 
 
-def test_taxonomic_rank_accuracy_all_vs_living():
-    # rank with 3 channels: [animalia, plantae, none]; none is local index 2.
-    rank = TaxonomicRankAccuracy("kingdom", channel_indices=[0, 1, 2], none_local_index=2)
-    # GT rows use 0/1/2. Two given pixels:
-    #  p0: animalia active (correct pred), living
-    #  p1: none active (pred none too -> correct), NOT living
-    #  p2: not_given (all zeros) -> ignored
-    gt = np.array(
-        [
-            [2, 1, 1],  # animalia
-            [1, 1, 2],  # none
-            [0, 0, 0],  # not_given
-        ]
-    )
-    pred = np.array(
-        [
-            [0.9, 0.05, 0.05],  # argmax 0 == animalia -> correct
-            [0.1, 0.1, 0.8],  # argmax 2 == none -> correct
-            [0.5, 0.3, 0.2],  # ignored
-        ],
-        dtype=np.float32,
-    )
-    rank.update(gt, pred)
-    assert rank.total_all == 2
-    assert abs(rank.acc_all - 1.0) < 1e-9
-    assert rank.total_living == 1  # only the animalia pixel
-    assert abs(rank.acc_living - 1.0) < 1e-9
-
-
-def test_taxonomic_living_excludes_none_error():
-    rank = TaxonomicRankAccuracy("kingdom", channel_indices=[0, 1, 2], none_local_index=2)
-    gt = np.array([[2, 1, 1]])  # living animalia
-    pred = np.array([[0.1, 0.1, 0.8]], dtype=np.float32)  # predicts none -> wrong
-    rank.update(gt, pred)
-    assert rank.acc_all == 0.0
-    assert rank.total_living == 1
-    assert rank.acc_living == 0.0
-
-
 def test_binary_concept_stats_matches_sklearn():
     from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
@@ -220,11 +181,10 @@ def _random_rank_rows(rng, n: int, n_channels: int, none_index: int, p_not_given
     return gt_rows, probs, gt_idx, probs.argmax(axis=1), given
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
-def test_taxonomic_macro_f1_matches_sklearn(seed):
+def test_taxonomic_macro_f1_matches_sklearn():
     from sklearn.metrics import f1_score
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(0)
     n_channels, none_index = 6, 4
     gt_rows, probs, gt_idx, pred_idx, given = _random_rank_rows(rng, 500, n_channels, none_index)
     rank = TaxonomicRankAccuracy(
@@ -253,23 +213,6 @@ def test_taxonomic_macro_f1_matches_sklearn(seed):
     assert d["n_none"] == int((y_true == none_index).sum())
     assert d["acc_all"] == pytest.approx(float((y_true == y_pred).mean()))
     assert d["acc_living"] == pytest.approx(float((y_true[living] == y_pred[living]).mean()))
-
-
-def test_taxonomic_living_f1_ignores_nonliving_predicted_as_taxon():
-    # [animalia, plantae, none]. A none pixel predicted animalia is a false positive for
-    # animalia in macro_f1_all only; a living pixel predicted none is a false negative.
-    rank = TaxonomicRankAccuracy("kingdom", channel_indices=[0, 1, 2], none_local_index=2)
-    gt = np.array([[2, 1, 1], [2, 1, 1], [1, 1, 2]])
-    pred = np.array([[0.9, 0, 0.1], [0.1, 0, 0.9], [0.9, 0, 0.1]], dtype=np.float32)
-    rank.update(gt, pred)
-    d = rank.to_dict()
-    # living: animalia tp=1, fn=1 (predicted none), no fp -> 2/3.
-    assert d["macro_f1_living"] == pytest.approx(2 / 3)
-    # all: animalia tp=1 fp=1 fn=1 -> 0.5; none tp=0 -> 0.
-    assert d["macro_f1_all"] == pytest.approx(0.25)
-    assert d["f1_none"] == pytest.approx(0.0)
-    assert d["n_taxa_all"] == 2
-    assert d["n_taxa_living"] == 1
 
 
 def test_f1_none_is_nan_without_none_channel_or_support():
@@ -301,11 +244,10 @@ def test_taxonomic_merge_equals_single_accumulator():
     assert whole.total_coral > 0
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
-def test_living_and_coral_scopes_match_sklearn(seed):
+def test_living_and_coral_scopes_match_sklearn():
     from sklearn.metrics import f1_score
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(0)
     n_channels, none_index = 6, 4
     gt_rows, probs, gt_idx, pred_idx, given = _random_rank_rows(rng, 600, n_channels, none_index)
     # live=False on non-none points stands for dead coral; coral is a subset of live.

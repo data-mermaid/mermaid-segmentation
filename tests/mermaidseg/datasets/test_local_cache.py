@@ -53,25 +53,6 @@ def test_parse_storage_ref_absolute_local():
     assert parse_storage_ref("/tmp/local.parquet", "bucket") is None
 
 
-def test_local_hit_skips_s3(tmp_path):
-    stats = create_cache_stats()
-    cache = LocalS3Cache.configure(tmp_path, stats=stats)
-    local = cache.local_path("bucket", "img.png")
-    local.parent.mkdir(parents=True)
-    local.write_bytes(b"cached")
-
-    mock_s3 = _mock_s3()
-    cache.set_s3_client(mock_s3)
-
-    result = cache.read_bytes("bucket", "img.png")
-    assert result == b"cached"
-    mock_s3.get_object.assert_not_called()
-
-    snapshot = cache.snapshot_stats()
-    assert snapshot.local_hits == 1
-    assert snapshot.s3_fetches == 0
-
-
 def test_s3_miss_write_through(tmp_path):
     stats = create_cache_stats()
     cache = LocalS3Cache.configure(tmp_path, write_through=True, stats=stats)
@@ -231,25 +212,14 @@ def test_offline_local_hit_skips_s3(tmp_path):
     assert cache.offline
 
 
-def test_offline_miss_raises_without_boto3(tmp_path):
-    stats = create_cache_stats()
-    cache = LocalS3Cache.configure(tmp_path, write_through=True, stats=stats, offline=True)
-
-    with pytest.raises(DataLoadError, match="offline mode"):
-        cache.read_bytes("bucket", "missing.png")
-
-    # No S3 client should ever be constructed in offline mode.
-    assert cache._s3_client is None
-    snapshot = cache.snapshot_stats()
-    assert snapshot.s3_fetches == 0
-
-
-def test_offline_miss_takes_no_lock(tmp_path):
+def test_offline_miss_raises_without_s3_client_or_lock(tmp_path):
     cache = LocalS3Cache.configure(tmp_path, write_through=True, offline=True)
 
     with pytest.raises(DataLoadError, match="offline mode"):
         cache.read_bytes("bucket", "sub/missing.png")
 
+    # No S3 client should ever be constructed in offline mode.
+    assert cache._s3_client is None
     assert not (tmp_path / "bucket" / "sub" / "missing.png.lock").exists()
     assert not (tmp_path / "bucket").exists()
 

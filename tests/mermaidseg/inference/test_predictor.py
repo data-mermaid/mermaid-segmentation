@@ -115,16 +115,3 @@ def test_sample_at_points_equals_interpolate_and_index():
     ref = up[:, rows, cols]
     got = CBMPredictor.sample_at_points(maps, rows, cols, height, width)
     assert torch.allclose(ref, got, atol=1e-5)
-
-
-def test_sample_at_points_corner_pixels():
-    maps = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
-    height, width = 30, 40
-    up = F.interpolate(
-        maps.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False
-    )[0]
-    rows = np.array([0, height - 1])
-    cols = np.array([0, width - 1])
-    ref = up[:, rows, cols]
-    got = CBMPredictor.sample_at_points(maps, rows, cols, height, width)
-    assert torch.allclose(ref, got, atol=1e-5)

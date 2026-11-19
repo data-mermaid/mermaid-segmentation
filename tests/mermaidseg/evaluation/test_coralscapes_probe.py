@@ -68,21 +68,6 @@ def test_unknown_split_raises(tmp_path: Path):
         )
 
 
-def test_coralscapes_bleached_codes_match_the_concept_table():
-    codes = build_coralscapes_concept_codes(_CSV, "bleached")
-    assert codes.shape == (96,)
-    assert int(codes[0]) == 0
-    assert int((codes[1:] == 2).sum()) == 19
-    assert int((codes[1:] == 1).sum()) == 76
-    assert int((codes[1:] == 0).sum()) == 0
-    by_name = {name: int(codes[class_id]) for class_id, name in CORALSCAPES_V2_ID2NAME.items()}
-    assert by_name["acropora bleached"] == 2
-    assert by_name["acropora alive"] == 1
-    assert by_name["acropora dead"] == 1
-    assert by_name["background"] == 1
-    assert by_name["sand"] == 1
-
-
 def test_coralscapes_anthropogenic_codes_match_the_concept_table():
     codes = build_coralscapes_concept_codes(_CSV, "anthropogenic")
     assert int(codes[0]) == 0

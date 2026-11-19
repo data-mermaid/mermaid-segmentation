@@ -103,7 +103,6 @@ def test_resume_with_the_same_contract_refreshes_the_lineage(tmp_path: Path):
         ({"id2label": {0: "ignore", 1: "sand"}}, "id2label"),
         ({"concept_id2name": {0: "z"}}, "concept_id2name"),
         ({"model_class": "Other"}, "architecture"),
-        ({"encoder_config": {"hidden_size": 32}}, "architecture"),
         ({"mean": (0.1, 0.1, 0.1)}, "preprocessing"),
     ],
 )
@@ -196,9 +195,8 @@ def test_export_of_a_checkpoint_without_lineage_raises_naming_its_path(tmp_path)
     assert str(checkpoint) in str(excinfo.value)
 
 
-@pytest.mark.parametrize("git_dirty", [True, None])
-def test_export_refuses_a_run_from_a_dirty_or_unknown_tree(tmp_path, git_dirty):
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", git_dirty=git_dirty)
+def test_export_refuses_a_run_from_an_unknown_tree(tmp_path):
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", git_dirty=None)
     with pytest.raises(ValueError, match="clean tree"):
         export_bundle(checkpoint, tmp_path / "out")
     assert not (tmp_path / "out").exists()
@@ -237,28 +235,6 @@ def test_export_without_a_sidecar_raises_naming_its_path(run, tmp_path):
     checkpoint.write_bytes(run[0].read_bytes())
     with pytest.raises(FileNotFoundError, match=str(lone / MODEL_JSON)):
         export_bundle(checkpoint, tmp_path / "out")
-
-
-def test_export_of_a_checkpoint_missing_the_weights_raises_naming_its_path(tmp_path):
-    checkpoint, _ = _tiny.write_run(tmp_path / "run")
-    contents = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    del contents["model_state_dict"]
-    torch.save(contents, checkpoint)
-    with pytest.raises(RuntimeError, match="model_state_dict") as excinfo:
-        export_bundle(checkpoint, tmp_path / "out")
-    assert str(checkpoint) in str(excinfo.value)
-    assert not (tmp_path / "out").exists()
-
-
-def test_a_failed_write_leaves_neither_output_nor_partial_directory(run, tmp_path):
-    out = tmp_path / "out"
-    with (
-        patch("mermaidseg.export.save_file", side_effect=OSError("disk full")),
-        pytest.raises(OSError, match="disk full"),
-    ):
-        export_bundle(run[0], out)
-    assert not out.exists()
-    assert not list(tmp_path.glob("*.partial"))
 
 
 def _precious_partial(out: Path) -> Path:

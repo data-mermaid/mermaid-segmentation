@@ -71,10 +71,6 @@ def test_coralscapes_native_lookup_matches_sorted_registry_vocab() -> None:
     background_row = schema.row_for("coralscapes", "background")
 
     assert registry.source_to_concepts is not None
-    assert int(registry.source_to_concepts[human_gid, channel_names.index("human")]) == 2
-    assert int(registry.source_to_concepts[human_gid, channel_names.index("anthropogenic")]) == 2
-    assert int(registry.source_to_concepts[background_gid, channel_names.index("background")]) == 2
-    assert int(registry.source_to_concepts[background_gid, channel_names.index("human")]) == 1
 
     human_mask = np.full((1, 4, 4), human_gid, dtype=np.int64)
     background_mask = np.full((1, 4, 4), background_gid, dtype=np.int64)

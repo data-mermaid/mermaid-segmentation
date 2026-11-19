@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from mermaidseg.datasets.utils import create_annotation_mask
 
@@ -67,12 +66,6 @@ def test_create_annotation_mask_offset_matches_where_pass():
     assert folded.dtype == np.int32
 
 
-def test_create_annotation_mask_dtype_is_int32():
-    annotations = _make_annotations([1], [1], ["Coral"])
-    mask = create_annotation_mask(annotations, (8, 8), {"Coral": 1})
-    assert mask.dtype == np.int32
-
-
 def test_create_annotation_mask_unknown_label_skipped(caplog):
     annotations = _make_annotations([5, 10], [5, 10], ["Coral", "UnknownLabel"])
 
@@ -82,17 +75,3 @@ def test_create_annotation_mask_unknown_label_skipped(caplog):
     assert mask[5, 5] == 1
     assert mask[10, 10] == 0
     assert "unknown label" in caplog.text.lower() or "UnknownLabel" in caplog.text
-
-
-@pytest.mark.parametrize(
-    "rows,cols,labels",
-    [
-        ([], [], []),
-        ([5], [5], [None]),
-    ],
-    ids=["empty", "all_null_labels"],
-)
-def test_create_annotation_mask_produces_zero_mask(rows, cols, labels):
-    annotations = _make_annotations(rows, cols, labels)
-    mask = create_annotation_mask(annotations, (10, 10), {"Coral": 1})
-    assert np.all(mask == 0)

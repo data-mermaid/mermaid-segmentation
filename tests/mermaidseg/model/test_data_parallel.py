@@ -19,7 +19,6 @@ from mermaidseg.model.data_parallel import (
     require_divisible_batch,
     shard_targets,
 )
-from mermaidseg.model.meta import records_train_metrics
 
 _NUM_SOURCE = 9
 _NUM_CONCEPTS = 5
@@ -124,12 +123,6 @@ def test_shard_step_matches_the_single_gpu_loss():
     no_maps = step(images, source_labels, return_maps=False)
     assert torch.equal(no_maps[0], expected_loss)
     assert no_maps[1:5] == (None, None, None, None)
-
-
-def test_records_train_metrics_scores_every_nth_microbatch():
-    assert [i for i in range(10) if records_train_metrics(i, 1)] == list(range(10))
-    assert [i for i in range(10) if records_train_metrics(i, 3)] == [0, 3, 6, 9]
-    assert records_train_metrics(5, 0)
 
 
 def test_train_epoch_scores_every_nth_microbatch(

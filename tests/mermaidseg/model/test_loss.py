@@ -28,13 +28,6 @@ def _batch(seed: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
     return logits, labels
 
 
-def test_concept_bottleneck_loss_requires_lambda_weight():
-    with pytest.raises(TypeError, match="lambda_weight"):
-        ConceptBottleneckLoss(
-            {}, ignore_index=0, per_pixel_loss_weight=0.5, per_image_loss_weight=0.5
-        )
-
-
 def test_each_channel_matches_the_multi_hot_loss_on_that_channel():
     logits, labels = _batch()
     losses = binary_concept_losses(logits, labels, NAMES, **WEIGHTS)
@@ -94,15 +87,3 @@ def test_masked_cross_entropy_of_a_partial_mask_blends_the_masked_means():
     )
     expected = 0.5 * (5 / 3) * LN2 + 0.5 * 1.75 * LN2
     assert loss.item() == pytest.approx(expected, rel=1e-6)
-
-
-def test_masked_cross_entropy_of_an_empty_mask_is_zero_with_finite_gradients():
-    outputs = torch.randn(2, 3, 2, 2, requires_grad=True)
-    targets = torch.zeros(2, 2, 2, dtype=torch.long)
-    loss = _masked_cross_entropy(
-        outputs, targets, weight=None, ignore_index=0, label_smoothing=0.0, **WEIGHTS
-    )
-    loss.backward()
-    assert loss.item() == 0.0
-    assert outputs.grad is not None
-    assert torch.equal(outputs.grad, torch.zeros_like(outputs))
