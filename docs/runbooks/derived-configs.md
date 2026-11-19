@@ -16,7 +16,7 @@ Some committed configs are built by scripts from other configs and from the data
 |---|---|---|---|
 | `configs/data_config_trainval.yaml` | `scripts/build_trainval_data_config.py` | `configs/data_config.yaml` | Any part of `data_config.yaml` |
 | `configs/concept_removals/min_coverage_trainval.csv` | `scripts/build_concept_removal.py` | The trainval data config, its label counts, `configs/class_to_concepts.csv` | The trainval data config, the data it reads, or `class_to_concepts.csv` |
-| `configs/concept_source_masks/coralnet_only_false.csv` | `scripts/build_concept_source_mask.py` | The CoralNet train split, `configs/class_to_concepts.csv` | The CoralNet sources or build, the CoralNet overrides in `configs/coralnet/`, or `class_to_concepts.csv` |
+| `configs/concept_source_masks/coralnet_only_false.csv` | `scripts/build_concept_source_mask.py` | The CoralNet train split of the trainval data config, `configs/class_to_concepts.csv` | The CoralNet sources or build, the CoralNet overrides in `configs/coralnet/`, or `class_to_concepts.csv` |
 
 Both training configs (`configs/training_config_cbm_final.yaml` and `configs/training_config_cbm_final_hires.yaml`) point at the removal list and the source mask.
 
@@ -76,7 +76,9 @@ uv run python scripts/build_concept_source_mask.py \
     --out configs/concept_source_masks/coralnet_only_false.csv
 ```
 
-`--data-config` defaults to `configs/data_config.yaml`. The committed mask was built from that file, as its `.meta.yaml` records. Pass `--cache-dir` to read from the local S3 cache, and `--counts-out` to write the counts of every pair.
+`--data-config` defaults to `configs/data_config_trainval.yaml`, the config that the final runs train on. Pass `--cache-dir` to read from the local S3 cache, and `--counts-out` to write the counts of every pair.
+
+The `.meta.yaml` sidecar lists the CoralNet sources that the mask was built from (`source_ids`). Training and `evaluate.py --split train` stop with an error when a CoralNet source of the run is not in that list. If you see that error, rebuild the mask with the run's data config.
 
 ## After a rebuild
 
