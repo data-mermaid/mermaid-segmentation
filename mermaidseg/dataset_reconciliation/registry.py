@@ -275,6 +275,8 @@ class SourceLabelRegistry:
             mapped = [source_to_target_np[i + offset] != 0 for i in local_ids]
             n_mapped = sum(mapped)
             msg = f"{ds.SOURCE_NAME}: {n_mapped} of {len(local_ids)} source labels"
+            # Dense-mask datasets (Coralscapes, CoralscapesV2, UCSDMosaics) carry no point
+            # annotations, so only label counts are logged for them.
             annotations = getattr(ds, "df_annotations", None)
             if annotations is not None and len(annotations):
                 counts = annotations["source_label_name"].value_counts()
