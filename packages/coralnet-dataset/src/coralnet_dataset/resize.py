@@ -252,8 +252,11 @@ def resize_and_upload_image(
             return _result_row(source_id, image_id, "skipped", skip_reason=_skip_reason(inspection))
 
         logger.debug("Resizing %s/%s", source_id, image_id)
+        width, height = inspection.width, inspection.height
+        # A valid inspection always records the original size.
+        assert width is not None and height is not None
         resized_bytes = resize_image_to_threshold(
-            image, original_bytes, original_size=(inspection.width, inspection.height)
+            image, original_bytes, original_size=(width, height)
         )
         # Release the decoded pixels before the upload holds the connection.
         del image
