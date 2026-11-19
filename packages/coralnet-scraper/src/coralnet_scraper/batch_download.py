@@ -24,6 +24,8 @@ _SOURCE_LISTING_URL = "https://coralnet.ucsd.edu/source/about/"  # links every p
 _LISTING_TIMEOUT_S = 50.0
 CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive failed sources that stop the run
 STOPPED_CIRCUIT_OPEN = "circuit_open"
+# Per-image failure codes of ``download_source``; they say nothing about the site being down.
+PER_IMAGE_ERROR_CODES = frozenset({"images_missing_url", "images_upload_failed"})
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,13 @@ def should_skip_download(
     return False
 
 
+def _is_breaker_success(res: DownloadResult) -> bool:
+    """Return whether ``res`` counts as a success for the circuit breaker."""
+    return res.ok or (
+        bool(res.errors) and all(code in PER_IMAGE_ERROR_CODES for code in res.errors)
+    )
+
+
 def run_batch_download(
     source_ids: Iterable[int],
     *,
@@ -125,7 +134,9 @@ def run_batch_download(
         A source whose skip check or download raises gets a failed result whose error code is
         the exception class name, and the run goes on. After
         :data:`CIRCUIT_BREAKER_THRESHOLD` consecutive failed sources the run stops with
-        ``stopped="circuit_open"``; skipped sources neither count nor reset that streak.
+        ``stopped="circuit_open"``; skipped sources neither count nor reset that streak. A
+        failed source whose errors are all in :data:`PER_IMAGE_ERROR_CODES` resets the streak
+        like a success.
     """
     results: dict[int, DownloadResult] = {}
     failure_streak = 0
@@ -146,7 +157,7 @@ def run_batch_download(
         if res.skipped_no_confirmed:
             logger.info("Skip source %s: zero confirmed images on website", sid)
         results[sid] = res
-        failure_streak = 0 if res.ok else failure_streak + 1
+        failure_streak = 0 if _is_breaker_success(res) else failure_streak + 1
         if failure_streak >= CIRCUIT_BREAKER_THRESHOLD:
             logger.error(
                 "Stopping the run: %d consecutive sources failed (last: %s)", failure_streak, sid
