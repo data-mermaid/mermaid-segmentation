@@ -279,7 +279,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
         target,
         image_key_template=f"{target.prefix}/images/{{region}}/{{image_id}}.jpg",
         parquet_columns=PARQUET_COLUMNS,
-        ingestion={"damaged_images": damaged, "images_uploaded_by_region": uploaded},
+        ingestion={"damaged_images": damaged, "images_uploaded": uploaded},
     )
     put_json(client, target, "manifest.json", manifest, overwrite=args.overwrite)
     return 0

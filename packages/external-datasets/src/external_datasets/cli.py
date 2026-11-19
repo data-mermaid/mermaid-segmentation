@@ -12,7 +12,7 @@ from typing import Any
 import boto3
 from botocore.config import Config
 
-from . import catlin_seaview
+from . import benthos_yuval, catlin_seaview, moorea_labeled_corals, pacific_labeled_corals
 
 DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
 DEFAULT_WORKERS = 16
@@ -22,7 +22,12 @@ _BOTO_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
 
 # Each dataset module exports ``add_arguments(parser, *, workdir)`` and ``run(args, client) -> int``; its
 # module name is the subcommand. Adding a dataset is one entry here.
-DATASET_MODULES: tuple[ModuleType, ...] = (catlin_seaview,)
+DATASET_MODULES: tuple[ModuleType, ...] = (
+    catlin_seaview,
+    moorea_labeled_corals,
+    pacific_labeled_corals,
+    benthos_yuval,
+)
 
 
 def default_workdir(dataset: str) -> Path:

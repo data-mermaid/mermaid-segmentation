@@ -105,8 +105,8 @@ def test_ca1_two_regions_publish_parquet_images_and_classes(tmp_path, fake_s3):
         "license": "Not confirmed; see UQ eSpace record UQ:734799 (doi:10.14264/uql.2019.930)",
     }
     assert manifest["s3"]["image_key_template"] == "ds/images/{region}/{image_id}.jpg"
-    assert manifest["ingestion"]["images_uploaded_by_region"]["ATL"] == 2
-    assert manifest["ingestion"]["images_uploaded_by_region"]["PAC_AUS"] == 1
+    assert manifest["ingestion"]["images_uploaded"]["ATL"] == 2
+    assert manifest["ingestion"]["images_uploaded"]["PAC_AUS"] == 1
 
 
 def test_ca2_truncated_jpg_is_dropped_recorded_and_not_uploaded(tmp_path, fake_s3):
