@@ -47,7 +47,7 @@ Sync:
 - Order of checks: every manifest against its pin, then every table against its manifest sha256, then the `selection` check, then `check_split` for each dataset, then the images. A failure before the images downloads no image.
 - `on_missing_images` is `"fail"` (default) or `"drop"` for each dataset. `drop` skips an image or mask that is absent and reports its ID in `DatasetSyncResult.dropped_image_ids`. A changed object always fails.
 - Images and masks are fetched with `IfMatch` on the recorded ETag.
-- Cached files are verified locally and never downloaded again on a mismatch. Manifests and tables are checked by sha256. Images and masks are checked by size and MD5 against the ETag; a multipart ETag is not an MD5, so only the size is checked.
+- Cached files are verified locally and never downloaded again on a mismatch. Manifests and tables are checked by sha256. Images and masks are checked by size and, for a single-part ETag, by MD5; a multipart ETag gets no MD5 check. When `images.parquet` records `crc64nvme` or `mask_crc64nvme`, sync also checks it with awscrt, on a cache hit and on a download. A row without a recorded CRC gets only the size and single-part MD5 checks.
 
 ## Errors
 
