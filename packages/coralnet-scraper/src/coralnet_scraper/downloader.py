@@ -70,6 +70,7 @@ _BROWSE_PROGRESS_EVERY = 10  # log walk progress every N pages
 _EXPORT_ATTEMPTS = 4
 _WALK_ATTEMPTS = 3
 _IMAGE_ATTEMPTS = 4
+_IMAGE_OUTAGE_STREAK = 20  # consecutive failed images that stop the image stage
 _LOGIN_ATTEMPTS = 4
 _IMAGE_TIMEOUT = (10, 60)  # connect, idle read
 _IMAGE_DEADLINE_S = 300.0  # wall-clock budget for one image body
@@ -415,7 +416,16 @@ def _image_failure_codes(failures: ImageFailures) -> list[str]:
         codes.append("images_missing_url")
     if failures.upload_failed > 0:
         codes.append("images_upload_failed")
+    if failures.skipped > 0:
+        codes.append("images_outage")
     return codes
+
+
+def _next_image_streak(streak: int, outcome: str) -> int:
+    """Return the failed-image streak after ``outcome``: reset by ok, unchanged by skipped."""
+    if outcome == "ok":
+        return 0
+    return streak if outcome == "skipped" else streak + 1
 
 
 def _upload_csv(s3_client: Any, bucket: str, key: str, df: pd.DataFrame) -> None:
@@ -1270,16 +1280,28 @@ class CoralNetDownloader:
         )
         return size
 
-    def _download_image(self, ref: ImageRef, bucket_name: str, s3_key: str) -> str:
+    def _download_image(
+        self, ref: ImageRef, bucket_name: str, s3_key: str, stop: threading.Event
+    ) -> str:
         """Resolve and download one image as one retried unit, so an expired URL is resolved again.
 
+        ``stop`` is checked before each attempt: set before the first, the image is not tried;
+        set later, it is not retried.
+
         Returns:
-            ``"ok"``, or the failure kind of the last attempt: ``"missing_url"`` when its view
-            page gave no URL, ``"upload_failed"`` when the download or upload failed.
+            ``"ok"``, ``"skipped"`` when ``stop`` was set before the first attempt, or the
+            failure kind of the last attempt: ``"missing_url"`` when its view page gave no
+            URL, ``"upload_failed"`` when the download or upload failed.
         """
         stage = "missing_url"
+        tried = False
         try:
             for attempt in _retrying(_IMAGE_ATTEMPTS):
+                if stop.is_set():
+                    if not tried:
+                        return "skipped"
+                    break
+                tried = True
                 with attempt:
                     stage = "missing_url"
                     url = self._resolve_one_image_url(ref.view_path)
@@ -1299,6 +1321,10 @@ class CoralNetDownloader:
     ) -> ImageFailures:
         """Download every image of ``refs`` to S3 across :attr:`max_workers` threads.
 
+        After :data:`_IMAGE_OUTAGE_STREAK` consecutive failed images the stage stops: images
+        not yet started are skipped and running ones are not retried. A skipped image neither
+        extends nor resets the streak.
+
         Args:
             refs: Images to download, whatever is already on S3.
             source_id: CoralNet source id.
@@ -1307,8 +1333,13 @@ class CoralNetDownloader:
 
         Returns:
             Failure counts by kind, as :meth:`_download_image` reports them.
+
+        Raises:
+            KeyboardInterrupt: After cancelling the images not yet started.
         """
         outcomes: Counter[str] = Counter()
+        stop = threading.Event()
+        streak = 0
         logger.info(
             "Image upload for source %s: %d images, %d workers",
             source_id,
@@ -1322,16 +1353,34 @@ class CoralNetDownloader:
                     ref,
                     bucket_name,
                     s3_io.object_key_image(s3_prefix, source_id, str(ref.id)),
+                    stop,
                 )
                 for ref in refs
             ]
-            for i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
-                outcomes[fut.result()] += 1
-                if i % 50 == 0 or i == len(futures):
-                    logger.info("Image upload progress source %s: %s/%s", source_id, i, len(refs))
+            try:
+                for i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+                    outcome = fut.result()
+                    outcomes[outcome] += 1
+                    streak = _next_image_streak(streak, outcome)
+                    if streak >= _IMAGE_OUTAGE_STREAK and not stop.is_set():
+                        stop.set()
+                        logger.warning(
+                            "Image upload for source %s stopped after %d consecutive failures",
+                            source_id,
+                            streak,
+                        )
+                    if i % 50 == 0 or i == len(futures):
+                        logger.info(
+                            "Image upload progress source %s: %s/%s", source_id, i, len(refs)
+                        )
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
         logger.info("Uploaded %s/%s images for source %s", outcomes["ok"], len(refs), source_id)
         return ImageFailures(
-            missing_url=outcomes["missing_url"], upload_failed=outcomes["upload_failed"]
+            missing_url=outcomes["missing_url"],
+            upload_failed=outcomes["upload_failed"],
+            skipped=outcomes["skipped"],
         )
 
     def _download_missing_images(

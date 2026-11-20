@@ -155,6 +155,21 @@ def test_summarize_failures_groups_by_error_kind():
     assert cli._summarize_failures(_MIXED_RESULTS) == _MIXED_LINES
 
 
+def test_summarize_failures_reports_skipped_images_under_images_outage():
+    results = {
+        5: DownloadResult(
+            ok=False,
+            errors=["images_outage", "images_missing_url"],
+            image_failures=ImageFailures(missing_url=20, skipped=30),
+        ),
+    }
+    assert cli._summarize_failures(results) == [
+        "Failed to download 1 source(s)",
+        "images_missing_url: 5 (20 images)",
+        "images_outage: 5 (30 images)",
+    ]
+
+
 def test_summarize_failures_lists_failure_without_error_code_as_no_error_code():
     results = {
         7: DownloadResult(ok=False),

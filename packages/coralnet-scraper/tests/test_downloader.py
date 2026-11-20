@@ -6,10 +6,12 @@ import io
 import json
 import random
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -131,6 +133,50 @@ def test_download_images_separates_missing_url_from_upload_failures():
     ):
         result = dl.download_images(_refs({1: [1, 2, 3]}), 1, "b", "p")
     assert result == ImageFailures(missing_url=1, upload_failed=1)
+
+
+def _outage_run(failing: Callable[[int], bool], count: int) -> tuple[ImageFailures, list[str]]:
+    """Run ``count`` single-worker image downloads whose view page fails when ``failing(id)``."""
+    dl = CoralNetDownloader("u", "p", max_workers=1)
+    resolved: list[str] = []
+
+    def resolve(rel: str) -> str:
+        resolved.append(rel)
+        if failing(int(rel.split("/")[2])):
+            raise requests.HTTPError("503")
+        return "http://x" + rel
+
+    real = dl._download_image
+
+    def paced(ref: ImageRef, *args: Any) -> str:
+        # Gives the collecting thread time to process image 20 before image 21 starts.
+        if ref.id == downloader_mod._IMAGE_OUTAGE_STREAK + 1:
+            time.sleep(0.2)
+        return real(ref, *args)
+
+    with (
+        patch.object(dl, "_resolve_one_image_url", side_effect=resolve),
+        patch.object(dl, "download_image_to_s3", return_value=1),
+        patch.object(dl, "_download_image", side_effect=paced),
+    ):
+        failures = dl.download_images(_refs({1: list(range(1, count + 1))}), 1, "b", "p")
+    return failures, resolved
+
+
+def test_a_run_of_failed_images_stops_the_stage_and_skips_the_rest():
+    failures, resolved = _outage_run(lambda _i: True, 25)
+
+    assert failures == ImageFailures(missing_url=20, skipped=5)
+    assert len(resolved) < 25 * downloader_mod._IMAGE_ATTEMPTS
+    assert downloader_mod._image_failure_codes(failures)[-1] == "images_outage"
+
+
+def test_a_success_resets_the_image_failure_streak():
+    # Images 1-19 fail, 20 succeeds, 21-39 fail: 19 consecutive failures twice.
+    failures, _ = _outage_run(lambda i: i != 20, 39)
+
+    assert failures.skipped == 0
+    assert "images_outage" not in downloader_mod._image_failure_codes(failures)
 
 
 _EXPORT_FORM = """\

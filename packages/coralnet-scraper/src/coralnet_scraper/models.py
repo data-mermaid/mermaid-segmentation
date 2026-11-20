@@ -12,10 +12,12 @@ class ImageFailures:
     Attributes:
         missing_url: Images whose page gave no ``Image URL``.
         upload_failed: Images whose upload reported failure or whose worker raised.
+        skipped: Images not attempted because the stage stopped after a run of failures.
     """
 
     missing_url: int = 0
     upload_failed: int = 0
+    skipped: int = 0
 
 
 @dataclass

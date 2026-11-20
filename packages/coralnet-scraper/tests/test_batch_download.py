@@ -234,6 +234,14 @@ def test_five_consecutive_failures_open_the_circuit_and_stop_the_run(fake_s3):
     assert sorted(outcome.results) == [1, 2, 3, 4, 5]
 
 
+def test_images_outage_failures_open_the_circuit(fake_s3):
+    errors = ["images_outage", "images_missing_url"]
+    outcome, attempted = _batch(fake_s3, dict.fromkeys(range(1, 7), errors))
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+
+
 def test_a_failed_result_with_no_error_codes_counts_as_a_failure(fake_s3):
     outcome, attempted = _batch(fake_s3, {1: [], 2: [], 3: [], 4: [], 5: [], 6: []})
 

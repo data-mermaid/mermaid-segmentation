@@ -48,6 +48,7 @@ _SOURCE_PREFIX = re.compile(r"/s(\d+)/$")
 _IMAGE_COUNT_ATTR = {
     "images_missing_url": "missing_url",
     "images_upload_failed": "upload_failed",
+    "images_outage": "skipped",
 }
 
 
