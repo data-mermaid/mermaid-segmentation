@@ -29,6 +29,7 @@ def seen(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     def _build_datasets(data: Any, *, input_size: tuple[int, int], **kwargs: Any) -> dict:
         seen["build"] = kwargs
+        seen["input_size"] = input_size
         return {("mermaid", "train"): dataset}
 
     def _setup_local_cache(data: Any) -> None:
@@ -83,3 +84,14 @@ def test_main_sets_the_cache_dir_on_the_data_config_before_setting_up_the_cache(
     _run(monkeypatch, tmp_path / "counts.parquet", "--cache-dir", "/tmp/x")
 
     assert seen["cache_dir"] == "/tmp/x"
+
+
+def test_main_builds_datasets_with_a_two_dimensional_positive_input_size(
+    monkeypatch, seen, tmp_path
+):
+    _run(monkeypatch, tmp_path / "counts.parquet")
+
+    size = seen["input_size"]
+    assert isinstance(size, tuple)
+    assert len(size) == 2
+    assert all(isinstance(side, int) and side > 0 for side in size)
