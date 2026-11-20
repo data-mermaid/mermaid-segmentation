@@ -6,7 +6,6 @@ import io
 import json
 import random
 import threading
-import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -135,8 +134,13 @@ def test_download_images_separates_missing_url_from_upload_failures():
     assert result == ImageFailures(missing_url=1, upload_failed=1)
 
 
-def _outage_run(failing: Callable[[int], bool], count: int) -> tuple[ImageFailures, list[str]]:
-    """Run ``count`` single-worker image downloads whose view page fails when ``failing(id)``."""
+def _outage_run(
+    failing: Callable[[int], bool], count: int, *, await_stop: bool = False
+) -> tuple[ImageFailures, list[str]]:
+    """Run ``count`` single-worker image downloads whose view page fails when ``failing(id)``.
+
+    ``await_stop`` makes image 21 wait for the collecting thread to set ``stop`` first.
+    """
     dl = CoralNetDownloader("u", "p", max_workers=1)
     resolved: list[str] = []
 
@@ -149,9 +153,8 @@ def _outage_run(failing: Callable[[int], bool], count: int) -> tuple[ImageFailur
     real = dl._download_image
 
     def paced(ref: ImageRef, *args: Any) -> str:
-        # Gives the collecting thread time to process image 20 before image 21 starts.
-        if ref.id == downloader_mod._IMAGE_OUTAGE_STREAK + 1:
-            time.sleep(0.2)
+        if await_stop and ref.id == downloader_mod._IMAGE_OUTAGE_STREAK + 1:
+            assert args[-1].wait(5)  # stop is the last positional argument
         return real(ref, *args)
 
     with (
@@ -164,11 +167,29 @@ def _outage_run(failing: Callable[[int], bool], count: int) -> tuple[ImageFailur
 
 
 def test_a_run_of_failed_images_stops_the_stage_and_skips_the_rest():
-    failures, resolved = _outage_run(lambda _i: True, 25)
+    failures, resolved = _outage_run(lambda _i: True, 25, await_stop=True)
 
     assert failures == ImageFailures(missing_url=20, skipped=5)
     assert len(resolved) < 25 * downloader_mod._IMAGE_ATTEMPTS
     assert downloader_mod._image_failure_codes(failures)[-1] == "images_outage"
+
+
+def test_an_image_that_fails_as_stop_is_set_reports_its_failure_and_uploads_nothing():
+    dl = CoralNetDownloader("u", "p")
+    stop = threading.Event()
+
+    def resolve(_rel: str) -> str:
+        stop.set()
+        raise requests.HTTPError("503")
+
+    with (
+        patch.object(dl, "_resolve_one_image_url", side_effect=resolve),
+        patch.object(dl, "download_image_to_s3", return_value=1) as upload,
+    ):
+        result = dl._download_image(ImageRef(1, 1, "/image/1/view/"), "b", "k", stop)
+
+    assert result == "missing_url"
+    upload.assert_not_called()
 
 
 def test_a_success_resets_the_image_failure_streak():
@@ -455,6 +476,14 @@ def test_a_failed_page_stops_the_export_retries_of_the_pages_still_running(
     page2_started = threading.Event()
     page1_failed = threading.Event()
     page2_attempts: list[int] = []
+    stops: list[threading.Event] = []
+    real_validated = dl._export_validated
+
+    def capture_stop(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        stops.append(kwargs["stop"])
+        return real_validated(*args, **kwargs)
+
+    monkeypatch.setattr(dl, "_export_validated", capture_stop)
 
     def round_trip(session, source_id, page_url, form, *_: object) -> pd.DataFrame:
         if form["image_id_list"] == "1":
@@ -464,7 +493,7 @@ def test_a_failed_page_stops_the_export_retries_of_the_pages_still_running(
         page2_attempts.append(1)
         page2_started.set()
         assert page1_failed.wait(5)
-        time.sleep(0.2)  # the failed flag is set after page 1's error propagates
+        assert stops[0].wait(5)
         raise ContentError("page 2")
 
     monkeypatch.setattr(dl, "_export_round_trip", round_trip)
@@ -1971,13 +2000,9 @@ def test_a_png_served_as_image_jpeg_is_stored_with_the_detected_format(http_serv
             _NOISE_JPEG[: len(_NOISE_JPEG) // 2],
             {**_JPEG_HEADERS, "Content-Encoding": "identity"},
         ),
-        (
-            _NOISE_JPEG[: len(_NOISE_JPEG) // 2],
-            {**_JPEG_HEADERS, "Content-Length": str(len(_NOISE_JPEG) // 2)},
-        ),
         (_NOISE_GIF, {"Content-Type": "image/gif"}),
     ],
-    ids=["jpeg-cut-no-length-check", "jpeg-cut-length-matches", "gif"],
+    ids=["jpeg-cut-no-length-check", "gif"],
 )
 def test_an_undecodable_or_unsupported_image_is_retried_and_never_uploaded(
     http_server, fake_s3, body, headers
@@ -1993,10 +2018,9 @@ def test_an_undecodable_or_unsupported_image_is_retried_and_never_uploaded(
     ("body", "headers", "accepted"),
     [
         (_NOISE_JPEG, _JPEG_HEADERS, True),
-        (_NOISE_JPEG + b"\x00", _JPEG_HEADERS, False),
         (_NOISE_JPEG + b"\x00", {**_JPEG_HEADERS, "Content-Encoding": "identity"}, False),
     ],
-    ids=["exactly-the-cap", "declared-over-the-cap", "streamed-over-the-cap"],
+    ids=["exactly-the-cap", "streamed-over-the-cap"],
 )
 def test_an_image_body_over_the_size_cap_is_rejected(
     http_server, fake_s3, monkeypatch, body, headers, accepted

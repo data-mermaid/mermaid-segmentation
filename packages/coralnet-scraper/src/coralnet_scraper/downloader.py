@@ -1338,7 +1338,8 @@ class CoralNetDownloader:
                 if stop.is_set():
                     if not tried:
                         return "skipped"
-                    break
+                    logger.warning("Image %s failed (%s), stage stopped", ref.id, stage)
+                    return stage
                 tried = True
                 with attempt:
                     stage = "missing_url"
@@ -1412,6 +1413,7 @@ class CoralNetDownloader:
                             "Image upload progress source %s: %s/%s", source_id, i, len(refs)
                         )
             except KeyboardInterrupt:
+                stop.set()
                 executor.shutdown(wait=False, cancel_futures=True)
                 raise
         logger.info("Uploaded %s/%s images for source %s", outcomes["ok"], len(refs), source_id)
