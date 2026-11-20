@@ -11,10 +11,10 @@ dependencies = [
     "beautifulsoup4",
     "boto3",
     "pandas",
-    "pillow",
+    "pillow>=12.2",
     "requests",
     "requests-ratelimiter",
-    "stamina",
+    "stamina>=26.2",
     "tqdm",
 ]
 

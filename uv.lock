@@ -733,10 +733,10 @@ requires-dist = [
     { name = "beautifulsoup4" },
     { name = "boto3" },
     { name = "pandas" },
-    { name = "pillow" },
+    { name = "pillow", specifier = ">=12.2" },
     { name = "requests" },
     { name = "requests-ratelimiter" },
-    { name = "stamina" },
+    { name = "stamina", specifier = ">=26.2" },
     { name = "tqdm" },
 ]
 
