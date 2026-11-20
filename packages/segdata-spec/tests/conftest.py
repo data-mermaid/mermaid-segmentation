@@ -147,6 +147,8 @@ def _images_table(
     images: dict[str, tuple[bytes, str]],
     etags: dict[str, str],
     masks: dict[str, bytes] | None,
+    crcs: dict[str, str],
+    mask_crcs: dict[str, str],
 ) -> pa.Table:
     ids = list(images)
     n = len(ids)
@@ -168,13 +170,13 @@ def _images_table(
             "key": [f"{i}.jpg" for i in ids],
             "etag": [etags.get(i, _md5(images[i][0])) for i in ids],
             "size": [len(images[i][0]) for i in ids],
-            "crc64nvme": pa.nulls(n, pa.string()),
+            "crc64nvme": [crcs.get(i) for i in ids],
             "media_type": ["image/jpeg"] * n,
             "width": [4] * n,
             "height": [4] * n,
             "group": [images[i][1] for i in ids],
             **mask_cols,
-            "mask_crc64nvme": pa.nulls(n, pa.string()),
+            "mask_crc64nvme": [mask_crcs.get(i) for i in ids],
             "source_fingerprint": ["fp"] * n,
             "attrs": pa.nulls(n, pa.string()),
         }
@@ -197,11 +199,14 @@ def publish_version(
     points: list[tuple[str, int, int, int]] | None = POINTS,
     masks: dict[str, bytes] | None = None,
     etags: dict[str, str] | None = None,
+    crcs: dict[str, str] | None = None,
+    mask_crcs: dict[str, str] | None = None,
     parents: Sequence[ParentRef] = (),
 ) -> tuple[Manifest, Pin]:
     """Store the images (and masks) and publish dataset ``ds``; clear the call log.
 
-    ``points=None`` publishes a dense version; ``etags`` gives images explicit ETags.
+    ``points=None`` publishes a dense version; ``etags`` gives images explicit ETags;
+    ``crcs`` and ``mask_crcs`` record base64 CRC64NVME values by image id.
     """
     etags = etags or {}
     for image_id, (data, _) in images.items():
@@ -211,7 +216,7 @@ def publish_version(
     for image_id, data in (masks or {}).items():
         client.put(IMG_BUCKET, f"{IMG_PREFIX}{image_id}.png", data)
     tables = {
-        "images.parquet": _images_table(images, etags, masks),
+        "images.parquet": _images_table(images, etags, masks, crcs or {}, mask_crcs or {}),
         "labels.parquet": pa.table(
             {
                 "label_id": [5, 6],
