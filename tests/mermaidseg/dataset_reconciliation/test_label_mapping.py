@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-import logging
+import functools
+import json
+import socket
+import threading
+import time
+from collections.abc import Callable
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import requests
@@ -70,29 +76,60 @@ def _row(provider_id, name="Acropora", label="ACRO"):
     }
 
 
-class _Response:
-    def __init__(self, payload, status=200):
-        self._payload = payload
-        self._status = status
+class _ApiServer:
+    """A local HTTP server whose reply is ``respond(path, n)`` -> (status, JSON body).
 
-    def raise_for_status(self):
-        if self._status >= 400:
-            raise requests.HTTPError(f"{self._status} error")
+    ``n`` counts every request received so far, starting at 1.
+    """
 
-    def json(self):
-        return self._payload
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+        self.base = ""
+        self.delay = 0.0
+        self.respond: Callable[[str, int], tuple[int, dict]] = lambda path, n: (
+            200,
+            {"results": [], "next": None},
+        )
+
+    def url(self, path: str) -> str:
+        return self.base + path
 
 
-def _patch_api(monkeypatch, pages):
-    """Serve ``pages`` (url -> payload) to ``requests.get``; record the urls asked for."""
-    seen = []
+def _page(rows, next_url=None):
+    return 200, {"results": rows, "next": next_url}
 
-    def fake_get(url, timeout):
-        seen.append(url)
-        return pages[url]
 
-    monkeypatch.setattr(lm.requests, "get", fake_get)
-    return seen
+@pytest.fixture
+def api_server(monkeypatch):
+    """Serve scripted pages over real HTTP, so requests' retry stack runs unmocked."""
+    monkeypatch.setattr(lm, "_RETRY_BACKOFF_SEC", 0)
+    state = _ApiServer()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            state.paths.append(self.path)
+            time.sleep(state.delay)
+            status, body = state.respond(self.path, len(state.paths))
+            payload = json.dumps(body).encode()
+            try:
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except OSError:  # the client timed out and hung up
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    state.base = f"http://127.0.0.1:{server.server_port}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield state
+    server.shutdown()
+    server.server_close()
 
 
 @pytest.fixture
@@ -106,22 +143,29 @@ def cache(monkeypatch):
     LocalS3Cache.reset_singleton()
 
 
-def test_fetch_follows_every_page_and_keys_rows_by_int_provider_id(monkeypatch):
-    seen = _patch_api(
-        monkeypatch,
-        {
-            "u1": _Response({"results": [_row("82")], "next": "u2"}),
-            "u2": _Response({"results": [_row("7", "Sand", "SAND")], "next": None}),
-        },
-    )
+def test_fetch_follows_every_page_and_keys_rows_by_int_provider_id(api_server):
+    pages = {
+        "/p1": _page([_row("82")], api_server.url("/p2")),
+        "/p2": _page([_row("7", "Sand", "SAND")]),
+    }
+    api_server.respond = lambda path, n: pages[path]
 
-    mappings = lm.fetch_coralnet_label_mappings("u1")
+    mappings = lm.fetch_coralnet_label_mappings(api_server.url("/p1"))
 
-    assert seen == ["u1", "u2"]
+    assert api_server.paths == ["/p1", "/p2"]
     assert set(mappings.records) == {82, 7}
     assert mappings.records[7]["benthic_attribute_name"] == "Sand"
     assert mappings.records[82]["provider_id"] == 82
     assert mappings.source == "api"
+
+
+def test_a_transient_503_is_retried_and_the_fetch_succeeds(api_server):
+    api_server.respond = lambda path, n: (503, {}) if n == 1 else _page([_row("4")])
+
+    mappings = lm.fetch_coralnet_label_mappings(api_server.url("/p1"))
+
+    assert list(mappings.records) == [4]
+    assert len(api_server.paths) == 2
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("82", 82), (82.0, 82), ("82.0", 82), (82, 82)])
@@ -129,13 +173,12 @@ def test_integer_like_provider_ids_normalize_to_int(raw, expected):
     assert list(lm.parse_coralnet_label_mappings([_row(raw)])) == [expected]
 
 
-@pytest.mark.parametrize("raw", ["abc", "8.5", None])
-def test_non_integer_provider_ids_are_skipped_with_a_warning(raw, caplog):
-    with caplog.at_level(logging.WARNING):
-        records = lm.parse_coralnet_label_mappings([_row(raw), _row("3")])
+@pytest.mark.parametrize(("raw", "shown"), [("abc", "'abc'"), ("8.5", "'8.5'"), (None, "None")])
+def test_non_integer_provider_ids_raise_naming_the_value(raw, shown):
+    with pytest.raises(ValueError, match="provider_id") as excinfo:
+        lm.parse_coralnet_label_mappings([_row("3"), _row(raw)])
 
-    assert list(records) == [3]
-    assert "non-integer provider_id" in caplog.text
+    assert shown in str(excinfo.value)
 
 
 def test_duplicate_provider_ids_raise():
@@ -143,11 +186,52 @@ def test_duplicate_provider_ids_raise():
         lm.parse_coralnet_label_mappings([_row("5"), _row("5.0")])
 
 
-def test_an_api_error_propagates_instead_of_falling_back(monkeypatch):
-    _patch_api(monkeypatch, {"u": _Response({}, status=503)})
+def test_a_persistent_503_raises_after_four_attempts_without_falling_back(api_server):
+    api_server.respond = lambda path, n: (503, {})
+
+    with pytest.raises(requests.RequestException):
+        lm.fetch_coralnet_label_mappings(api_server.url("/p1"))
+
+    assert len(api_server.paths) == 4
+
+
+def test_a_404_raises_http_error_without_retrying(api_server):
+    api_server.respond = lambda path, n: (404, {})
 
     with pytest.raises(requests.HTTPError):
-        lm.fetch_coralnet_label_mappings("u")
+        lm.fetch_coralnet_label_mappings(api_server.url("/p1"))
+
+    assert len(api_server.paths) == 1
+
+
+def test_a_next_url_that_repeats_an_earlier_page_raises(api_server):
+    pages = {
+        "/p1": _page([_row("1")], api_server.url("/p2")),
+        "/p2": _page([_row("2")], api_server.url("/p1")),
+    }
+    api_server.respond = lambda path, n: pages[path]
+
+    with pytest.raises(ValueError, match="/p1"):
+        lm.fetch_coralnet_label_mappings(api_server.url("/p1"))
+
+    assert api_server.paths == ["/p1", "/p2"]
+
+
+def test_a_server_slower_than_the_timeout_raises_a_request_error(api_server, monkeypatch):
+    monkeypatch.setattr(lm, "_REQUEST_TIMEOUT_SEC", 0.2)
+    api_server.delay = 0.6
+
+    with pytest.raises(requests.ConnectionError):
+        lm.fetch_coralnet_label_mappings(api_server.url("/p1"))
+
+
+def test_a_closed_port_raises_connection_error(api_server):
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    with pytest.raises(requests.ConnectionError):
+        lm.fetch_coralnet_label_mappings(f"http://127.0.0.1:{port}/p1")
 
 
 def _mappings(rows, source="api"):
@@ -184,10 +268,23 @@ def test_snapshot_round_trips_through_disk(tmp_path):
     assert loaded.fetched_at == "t0"
 
 
+def test_a_snapshot_whose_records_no_longer_match_its_digest_is_rejected(tmp_path):
+    path = tmp_path / "coralnet.json"
+    lm.write_coralnet_snapshot(_mappings([_row("1", "Acropora")]), path)
+    data = json.loads(path.read_text())
+    data["records"][0]["benthic_attribute_name"] = "Sand"
+    path.write_text(json.dumps(data))
+
+    with pytest.raises(ValueError, match="sha256"):
+        lm.read_coralnet_snapshot(path)
+
+
 def test_offline_load_reads_only_the_cached_snapshot(cache, monkeypatch, tmp_path):
     cache.configure(tmp_path, offline=True)
     lm.write_coralnet_snapshot(_mappings([_row("9")]), lm.coralnet_snapshot_path())
-    monkeypatch.setattr(lm.requests, "get", lambda *a, **k: pytest.fail("network used offline"))
+    monkeypatch.setattr(
+        requests.Session, "request", lambda *a, **k: pytest.fail("network used offline")
+    )
 
     mappings = lm.load_coralnet_label_mappings()
 
@@ -209,17 +306,18 @@ def test_offline_load_without_a_cache_says_to_run_prefetch(cache):
         lm.load_coralnet_label_mappings()
 
 
-def test_online_load_fetches_and_refreshes_the_snapshot(cache, monkeypatch, tmp_path):
+def test_online_load_returns_the_api_rows_and_writes_no_snapshot(cache, api_server, tmp_path):
     cache.configure(tmp_path, offline=False)
-    _patch_api(
-        monkeypatch,
-        {lm.CORALNET_LABELMAPPINGS_URL: _Response({"results": [_row("4")], "next": None})},
-    )
+    api_server.respond = lambda path, n: _page([_row("4")])
+    fetch = functools.partial(lm.fetch_coralnet_label_mappings, api_server.url("/p1"))
 
-    mappings = lm.load_coralnet_label_mappings()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(lm, "fetch_coralnet_label_mappings", fetch)
+        mappings = lm.load_coralnet_label_mappings()
 
     assert mappings.source == "api"
-    assert lm.read_coralnet_snapshot(lm.coralnet_snapshot_path()).records == mappings.records
+    assert list(mappings.records) == [4]
+    assert not lm.coralnet_snapshot_path().exists()
 
 
 def test_join_maps_lowercased_names_through_the_label_id():
@@ -230,6 +328,12 @@ def test_join_maps_lowercased_names_through_the_label_id():
     )
 
     assert mapping == {"acro renamed": "Acropora", "sand": "Sand"}
+
+
+def test_join_leaves_out_a_record_with_no_benthic_attribute_name():
+    records = lm.parse_coralnet_label_mappings([_row("1", None), _row("2", "Sand")])
+
+    assert lm.coralnet_to_mermaid({1: "Acro", 2: "Sand"}, records) == {"sand": "Sand"}
 
 
 def test_join_raises_when_one_name_has_ids_with_different_targets():

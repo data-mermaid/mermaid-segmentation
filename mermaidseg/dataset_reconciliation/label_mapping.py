@@ -19,6 +19,8 @@ from typing import Any, Literal, TypedDict
 
 import requests
 import torch
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ CORALNET_LABELMAPPINGS_URL = (
 CORALNET_SNAPSHOT_BUCKET = "_mermaid_api"
 CORALNET_SNAPSHOT_KEY = "classification/labelmappings/coralnet.json"
 _REQUEST_TIMEOUT_SEC = 30
+_RETRY_BACKOFF_SEC = 1
 
 
 class CoralNetLabelMapping(TypedDict):
@@ -82,16 +85,40 @@ class CoralNetLabelMappings:
         }
 
 
+def _retrying_session() -> requests.Session:
+    """A session that retries a GET up to 3 times on connection errors and 502/503/504."""
+    retry = Retry(
+        total=3,
+        backoff_factor=_RETRY_BACKOFF_SEC,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+    )
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.mount("http://", HTTPAdapter(max_retries=retry))
+    return session
+
+
 def _fetch_paginated_results(url: str) -> list[dict]:
-    """Page through a MERMAID list endpoint until ``next`` is exhausted."""
+    """Page through a MERMAID list endpoint until ``next`` is exhausted.
+
+    Raises:
+        requests.RequestException: A request still fails after its retries.
+        ValueError: A ``next`` URL repeats a page already fetched.
+    """
     records: list[dict] = []
+    seen: set[str] = set()
     next_url: str | None = url
-    while next_url:
-        response = requests.get(next_url, timeout=_REQUEST_TIMEOUT_SEC)
-        response.raise_for_status()
-        data = response.json()
-        records.extend(data["results"])
-        next_url = data.get("next")
+    with _retrying_session() as session:
+        while next_url:
+            if next_url in seen:
+                raise ValueError(f"Pagination loop: {next_url} was already fetched")
+            seen.add(next_url)
+            response = session.get(next_url, timeout=_REQUEST_TIMEOUT_SEC)
+            response.raise_for_status()
+            data = response.json()
+            records.extend(data["results"])
+            next_url = data.get("next")
     return records
 
 
@@ -109,20 +136,17 @@ def _normalize_provider_id(provider_id: object) -> int | None:
 def parse_coralnet_label_mappings(rows: list[dict]) -> dict[int, CoralNetLabelMapping]:
     """Key raw LabelMapping rows by integer CoralNet label id.
 
-    Rows whose ``provider_id`` is not an integer are skipped with a warning.
-
     Raises:
-        ValueError: If two rows share a CoralNet label id.
+        ValueError: If a row's ``provider_id`` is not an integer, or two rows share a CoralNet
+            label id.
     """
     records: dict[int, CoralNetLabelMapping] = {}
     for row in rows:
         provider_id = _normalize_provider_id(row.get("provider_id"))
         if provider_id is None:
-            logger.warning(
-                "Skipping CoralNet label mapping with non-integer provider_id %r",
-                row.get("provider_id"),
+            raise ValueError(
+                f"CoralNet label mapping has non-integer provider_id {row.get('provider_id')!r}"
             )
-            continue
         if provider_id in records:
             raise ValueError(f"Duplicate CoralNet label mapping for provider_id {provider_id}")
         records[provider_id] = CoralNetLabelMapping(
@@ -176,21 +200,29 @@ def write_coralnet_snapshot(mappings: CoralNetLabelMappings, path: Path) -> None
 
 
 def read_coralnet_snapshot(path: Path) -> CoralNetLabelMappings:
-    """Read a snapshot written by :func:`write_coralnet_snapshot`."""
+    """Read a snapshot written by :func:`write_coralnet_snapshot`.
+
+    Raises:
+        ValueError: If the stored ``sha256`` differs from the digest of the records read.
+    """
     data = json.loads(path.read_text())
-    return CoralNetLabelMappings(
-        records=parse_coralnet_label_mappings(data["records"]),
-        source="snapshot",
-        fetched_at=data["fetched_at"],
-    )
+    records = parse_coralnet_label_mappings(data["records"])
+    digest = coralnet_mapping_digest(records)
+    if digest != data["sha256"]:
+        raise ValueError(
+            f"CoralNet snapshot {path} is corrupt: stored sha256 {data['sha256']} "
+            f"does not match its records ({digest})"
+        )
+    return CoralNetLabelMappings(records=records, source="snapshot", fetched_at=data["fetched_at"])
 
 
 def load_coralnet_label_mappings() -> CoralNetLabelMappings:
     """CoralNet label mappings for a run: the API online, the cached snapshot offline.
 
     Offline (``MERMAIDSEG_S3_OFFLINE`` set) reads only the snapshot that
-    ``scripts/prefetch_cache.py`` wrote. Online always fetches from the API, and also refreshes the
-    snapshot when a local cache is configured.
+    ``scripts/prefetch_cache.py`` wrote. Online fetches from the API and returns the rows without
+    touching the snapshot: only ``scripts/prefetch_cache.py`` writes it, so concurrent ranks never
+    race on one file.
 
     Raises:
         DataLoadError: Offline and the snapshot is missing (or no cache is configured).
@@ -216,10 +248,7 @@ def load_coralnet_label_mappings() -> CoralNetLabelMappings:
             mappings.fetched_at,
         )
         return mappings
-    mappings = fetch_coralnet_label_mappings()
-    if cache.enabled:
-        write_coralnet_snapshot(mappings, coralnet_snapshot_path())
-    return mappings
+    return fetch_coralnet_label_mappings()
 
 
 def coralnet_to_mermaid(
