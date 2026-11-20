@@ -9,7 +9,6 @@ Some committed configs are built by scripts from other configs and from the data
 - [Rebuild the concept source mask](#rebuild-the-concept-source-mask)
 - [After a rebuild](#after-a-rebuild)
 - [When something fails](#when-something-fails)
-- [Known gaps](#known-gaps)
 
 ## What to rebuild, and when
 
@@ -59,7 +58,7 @@ The removal list names the concept channels that have too little support to trai
 
    The script counts only the train splits. It writes a parquet with the columns `dataset`, `image_id`, `label` and `n`. `--datasets` limits the count to a subset of dataset keys; a removal list built from a subset is incomplete, so omit it for a rebuild. Omit `--cache-dir` to read from S3.
 
-   The dense datasets (`coralscapes_v2`, `ucsd_mosaics` and `benthos_yuval`) read every label mask, so this step is the slow one. `coralscapes_v2` and `ucsd_mosaics` come from Hugging Face, so they need `HF_HOME` filled (see [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache)) or Hugging Face access. `benthos_yuval` reads its masks from the S3 cache. It has `train: null` in the trainval config, so it matters only for a config that gives it a train split. The S3 cache covers the other datasets.
+   The dense datasets (`coralscapes_v2`, `ucsd_mosaics` and `benthos_yuval`) read every label mask, so this step is the slow one. A full count of the six trainval datasets took 7 minutes on an Apple M1 on 2026-11-19, starting from an empty S3 cache and with the UCSD masks not yet in `HF_HOME`; steps 2 and 3 then took about 1 minute each from that cache. `coralscapes_v2` and `ucsd_mosaics` come from Hugging Face, so they need `HF_HOME` filled (see [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache)) or Hugging Face access. `benthos_yuval` reads its masks from the S3 cache. It has `train: null` in the trainval config, so it matters only for a config that gives it a train split. The S3 cache covers the other datasets.
 
    Check: the script prints one summary row (images, labels, n) for each dataset that has a train split in `configs/data_config_trainval.yaml`, then `Wrote <path> (<rows> rows)`. At the time of writing those datasets are `coralnet`, `mermaid`, `coralscapes_v2`, `catlin_seaview`, `moorea_labeled_corals` and `ucsd_mosaics`. `benthos_yuval` and `pacific_labeled_corals` have `train: null` and do not appear. Compare the rows with the file, not with this list.
 
@@ -110,7 +109,3 @@ A change to the derived configs changes model outputs. Run the evaluation and pu
 | `train_label_counts.py` raises `ValueError: no train splits to count` | No selected dataset has a train split. Either `--datasets` has a misspelled key, or it names only datasets whose train split is `null` in the data config. | Correct the names in `--datasets`, or omit `--datasets` for a rebuild. |
 | `build_concept_removal.py` exits with `N CoralNet count rows have no source in <config>; were the label counts built from the same data config?` | The label counts come from a different data config than `--data-config`. | Run step 1 again with the same `--data-config` that step 2 uses. |
 | At training start, `ValueError: <path> was built for a concept table with sha1 ..., but this run uses ... (sha1 ...)` from `load_concept_removal` or `load_concept_source_mask` | `configs/class_to_concepts.csv` changed after the CSV was built. | Rebuild both derived configs, in the order of this page. |
-
-## Known gaps
-
-One measurement exists: a count of the 1,960 CoralscapesV2 train masks (the trainval config folds validation into train) took 51 s, including startup, from a filled Hugging Face cache on an Apple M1. It was measured on 2026-11-19 at commit 8029e3c. A full count across all six datasets has not been timed.
