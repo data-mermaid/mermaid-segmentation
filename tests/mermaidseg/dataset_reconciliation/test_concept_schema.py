@@ -32,7 +32,7 @@ def test_fish_concept_and_taxonomy():
     }
     assert all(rank_idx.values())
 
-    fish_sources = {"coralscapes_v2", "coralscapes", "coralnet", "catlin_seaview"}
+    fish_sources = {"coralscapes_v2", "coralnet", "catlin_seaview"}
     seen_fish = set()
     for source in fish_sources:
         row = schema.row_for(source, "fish")

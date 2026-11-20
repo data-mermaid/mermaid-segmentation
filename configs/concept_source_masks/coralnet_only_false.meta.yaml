@@ -3,17 +3,17 @@ rule_description: source has n_false > 0 and n_true == 0 for the binary concept
 dataset: coralnet
 split: train
 data_config: configs/data_config_trainval.yaml
-data_config_sha1: 16150f052a9b645864c9344a8a3acf465b6f4005
+data_config_sha1: 57d515813e2240e97dc28908efc240692f068222
 concepts_csv: configs/class_to_concepts.csv
-concepts_csv_sha1: 3a037104b959826b03433555c161d2ae4ad7f5bb
+concepts_csv_sha1: b55540ec6b964a08fbd280dc6f9639a95d3394b9
 schema_config: configs/data_config.yaml
 n_sources: 602
 n_binary_concepts: 42
 n_pairs: 25284
 n_masked: 17092
 n_points: 14183488
-created: '2026-11-19T10:27:37'
-git_commit: 91a5d0c
+created: '2026-11-19T21:53:52'
+git_commit: f391670
 source_ids:
 - '23'
 - '69'
