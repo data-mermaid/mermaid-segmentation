@@ -93,6 +93,8 @@ def test_run_batch_download_records_a_raising_skip_check(fake_s3):
 _LISTING_HTML = """\
 <html><body>
 <a href="/about/">About</a>
+<a href="/source/new/">New Source</a>
+<a href="/source/invites/">Source Invites</a>
 <a href="/source/100/">Reef A</a>
 <a href="https://coralnet.ucsd.edu/source/7/">Reef B</a>
 <a href="/source/12/">Reef C</a>
