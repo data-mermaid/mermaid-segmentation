@@ -24,7 +24,7 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 - `scripts/sagemaker/`: the SageMaker launcher (`python -m scripts.sagemaker.launch`) and the in-container entrypoint.
 - `sagemaker/runs/`: SageMaker run YAMLs.
 - `docker/`: the SageMaker job image; deployable images are built only by the CI workflow.
-- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/segdata-etl/` builds the CoralNet training manifest from that scrape and loads the Catlin, Moorea, Pacific and Benthos raw releases into S3; `packages/segdata-spec/` defines the versioned dataset manifest, S3 layout and sync that an ETL publisher and a trainer share. `mermaidseg` imports none of the packages.
+- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/segdata-etl/` builds the CoralNet training manifest from that scrape and loads the Catlin, Moorea, Pacific and Benthos raw releases into S3; `packages/segdata-spec/` defines the versioned dataset manifest, S3 layout and sync that an ETL publisher and a trainer share. `mermaidseg` may import `segdata_spec` and none of the other packages.
 - `tests/`: the pytest suite, laid out as 7.4 sets.
 - `pyproject.toml`: dependencies, extras, dependency groups, and ruff, mypy and pytest settings.
 

@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Manifest, table schemas and taxonomy roll-up shared by the segmentation dataset publisher and trainer."
 requires-python = ">=3.11.5"
 dependencies = [
-    "boto3",
+    "awscrt",
+    "boto3>=1.35.2",
     "pyarrow",
     "pydantic>=2.13.3",
 ]

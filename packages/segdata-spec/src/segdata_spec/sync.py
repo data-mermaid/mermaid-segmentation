@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import os
-import tempfile
+import uuid
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import awscrt.checksums
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -41,7 +43,17 @@ from segdata_spec.manifest import (
 
 MissingMode = Literal["fail", "drop"]
 
-_IMAGE_COLUMNS = ["image_id", "key", "etag", "size", "mask_key", "mask_etag", "mask_size"]
+_IMAGE_COLUMNS = [
+    "image_id",
+    "key",
+    "etag",
+    "size",
+    "crc64nvme",
+    "mask_key",
+    "mask_etag",
+    "mask_size",
+    "mask_crc64nvme",
+]
 
 
 @dataclass(frozen=True)
@@ -69,13 +81,15 @@ def _sha256(data: bytes) -> str:
 def _write_atomic(path: Path, data: bytes) -> None:
     """Write via a temp file in the same directory so a reader never sees a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    # O_EXCL refuses an existing name; the kernel applies the process umask to the 0o666 mode.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
         os.replace(tmp, path)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise
 
 
@@ -114,16 +128,26 @@ def _fetch_tables(
     }
 
 
-def _object_problem(data: bytes, etag: str, size: int) -> str | None:
-    """Describe how ``data`` disagrees with the recorded size and ETag, or return None.
+def _crc64nvme_b64(data: bytes) -> str:
+    """Return the CRC64NVME in S3's ``ChecksumCRC64NVME`` form: base64 of the big-endian CRC."""
+    return base64.b64encode(awscrt.checksums.crc64nvme(data).to_bytes(8, "big")).decode()
 
-    A multipart ETag (``<hash>-<parts>``) is not an MD5 of the content, so only size is checked.
+
+def _object_problem(data: bytes, etag: str, size: int, crc64nvme: str | None) -> str | None:
+    """Describe how ``data`` disagrees with the recorded size, ETag and CRC64NVME, or return None.
+
+    A multipart ETag (``<hash>-<parts>``) is not an MD5 of the content, so the CRC64NVME is the
+    content check for those. A ``crc64nvme`` of None skips the CRC check.
     """
     if len(data) != size:
         return f"size {len(data)} differs from the recorded {size}"
     bare = etag.strip('"')
     if "-" not in bare and hashlib.md5(data, usedforsecurity=False).hexdigest() != bare:
         return f"MD5 differs from the recorded ETag {bare}"
+    if crc64nvme is not None:
+        computed = _crc64nvme_b64(data)
+        if computed != crc64nvme:
+            return f"CRC64NVME {computed} differs from the recorded {crc64nvme}"
     return None
 
 
@@ -139,26 +163,34 @@ def _download_object(client: Any, bucket: str, key: str, etag: str) -> bytes:
     return data
 
 
-def _sync_object(client: Any, cache_dir: Path, bucket: str, key: str, etag: str, size: int) -> None:
+def _sync_object(
+    client: Any,
+    cache_dir: Path,
+    bucket: str,
+    key: str,
+    etag: str,
+    size: int,
+    crc64nvme: str | None,
+) -> None:
     """Verify a cached image or mask, or download, verify and cache it."""
     path = cache_path(cache_dir, bucket, key)
     if path.exists():
-        problem = _object_problem(path.read_bytes(), etag, size)
+        problem = _object_problem(path.read_bytes(), etag, size, crc64nvme)
         if problem:
             raise ChecksumMismatch(f"cached file {path}: {problem}")
         return
     data = _download_object(client, bucket, key, etag)
-    problem = _object_problem(data, etag, size)
+    problem = _object_problem(data, etag, size, crc64nvme)
     if problem:
         raise ChecksumMismatch(f"downloaded s3://{bucket}/{key}: {problem}")
     _write_atomic(path, data)
 
 
-def _row_objects(row: Mapping[str, Any]) -> list[tuple[str, str, int]]:
-    """Return ``(key, etag, size)`` for the row's image and, when it has one, its mask."""
-    objects = [(row["key"], row["etag"], row["size"])]
+def _row_objects(row: Mapping[str, Any]) -> list[tuple[str, str, int, str | None]]:
+    """Return ``(key, etag, size, crc64nvme)`` for the row's image and, when it has one, its mask."""
+    objects = [(row["key"], row["etag"], row["size"], row["crc64nvme"])]
     if row["mask_key"] is not None:
-        objects.append((row["mask_key"], row["mask_etag"], row["mask_size"]))
+        objects.append((row["mask_key"], row["mask_etag"], row["mask_size"], row["mask_crc64nvme"]))
     return objects
 
 
@@ -192,8 +224,8 @@ def _sync_images(
     dropped: list[str] = []
     for row in images.select(_IMAGE_COLUMNS).to_pylist():
         try:
-            for key, etag, size in _row_objects(row):
-                _sync_object(client, cache_dir, store.bucket, store.prefix + key, etag, size)
+            for key, etag, size, crc in _row_objects(row):
+                _sync_object(client, cache_dir, store.bucket, store.prefix + key, etag, size, crc)
         except ImageMissing:
             if mode == "fail":
                 raise

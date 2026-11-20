@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
-from conftest import FakeS3
+from conftest import FakeS3, _client_error
 
 from segdata_spec.errors import (
+    ChecksumMismatch,
     ObjectExists,
     PinMismatch,
     PublishRefused,
@@ -176,6 +177,20 @@ def test_existing_table_raises_and_manifest_is_not_written(fake_s3, repo_dir):
     assert (BUCKET, PREFIX + "manifest.json") not in fake_s3.objects
 
 
+def test_racing_publisher_manifest_is_not_overwritten(fake_s3, repo_dir, monkeypatch):
+    fake_s3.put(BUCKET, PREFIX + "manifest.json", b"{}")
+
+    def head_404(**_):
+        raise _client_error("404", 404, "HeadObject")
+
+    monkeypatch.setattr(fake_s3, "head_object", head_404)
+
+    with pytest.raises(ObjectExists):
+        _publish(fake_s3, repo_dir)
+
+    assert fake_s3.objects[(BUCKET, PREFIX + "manifest.json")] == b"{}"
+
+
 @pytest.mark.parametrize(
     "git",
     [
@@ -263,6 +278,17 @@ def test_parent_pin_mismatch_writes_nothing(fake_s3, repo_dir):
 
     with pytest.raises(PinMismatch):
         _publish(fake_s3, repo_dir, parents=(bad,))
+
+    assert len(_put_keys(fake_s3)) == before
+
+
+def test_tampered_parent_table_writes_nothing(fake_s3, repo_dir):
+    parent = _parent_version(fake_s3, repo_dir)
+    fake_s3.put("seg-bucket", "datasets/parent/20261101-1234567/images.parquet", b"tampered")
+    before = len(_put_keys(fake_s3))
+
+    with pytest.raises(ChecksumMismatch, match="images.parquet"):
+        _publish(fake_s3, repo_dir, parents=(parent,))
 
     assert len(_put_keys(fake_s3)) == before
 

@@ -1,4 +1,7 @@
+import os
 import re
+import stat
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -35,6 +38,15 @@ def cache(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def umask_027() -> Iterator[None]:
+    previous = os.umask(0o027)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+@pytest.fixture
 def pin(fake_s3: FakeS3, tmp_path: Path) -> Pin:
     return publish_version(fake_s3, tmp_path)[1]
 
@@ -57,6 +69,15 @@ def test_sync_caches_tables_and_images_under_bucket_and_key(fake_s3, pin, cache)
         )
     }
     assert result.taxonomy is None
+
+
+def test_sync_writes_cached_files_with_umask_applied_mode(fake_s3, pin, cache, umask_027):
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    image = cache / IMG_BUCKET / "images/ds/a.jpg"
+    table = cache / BUCKET / PREFIX / "images.parquet"
+    assert stat.S_IMODE(image.stat().st_mode) == 0o640
+    assert stat.S_IMODE(table.stat().st_mode) == 0o640
 
 
 @pytest.mark.parametrize(
@@ -201,6 +222,69 @@ def test_multipart_etag_checks_cached_size_only(fake_s3, tmp_path, cache, conten
     assert cached.read_bytes() == content
 
 
+DENSE_IMAGES = {"a": (b"aaaa", "g1"), "b": (b"bbbbbbbb", "g1")}
+MASKS = {"a": b"ma", "b": b"mbmb"}
+
+
+HELLO_CRC = "jSnVw/bqjr4="  # crc64nvme(b"hello world"), base64 of the big-endian 8 bytes
+
+
+def test_cached_multipart_image_with_wrong_crc_fails_without_download(fake_s3, tmp_path, cache):
+    _, pin = publish_version(fake_s3, tmp_path, etags={"a": "abc-2"}, crcs={"a": "AAAAAAAAAAA="})
+    cached = cache / IMG_BUCKET / "images/ds/a.jpg"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"zzzz")
+
+    with pytest.raises(ChecksumMismatch, match=re.escape(str(cached))):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    assert "images/ds/a.jpg" not in _image_gets(fake_s3)
+
+
+def test_cached_multipart_image_with_matching_crc_syncs_without_download(fake_s3, tmp_path, cache):
+    _, pin = publish_version(
+        fake_s3,
+        tmp_path,
+        images={"a": (b"hello world", "g1")},
+        points=[("a", 1, 1, 5)],
+        etags={"a": "abc-2"},
+        crcs={"a": HELLO_CRC},
+    )
+    cached = cache / IMG_BUCKET / "images/ds/a.jpg"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"hello world")
+
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    assert _image_gets(fake_s3) == []
+
+
+def test_downloaded_image_with_wrong_crc_fails_and_is_not_cached(fake_s3, tmp_path, cache):
+    _, pin = publish_version(fake_s3, tmp_path, crcs={"a": "AAAAAAAAAAA="})
+
+    with pytest.raises(ChecksumMismatch, match="images/ds/a.jpg"):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    assert not (cache / IMG_BUCKET / "images/ds/a.jpg").exists()
+
+
+def test_cached_mask_with_wrong_crc_fails(fake_s3, tmp_path, cache):
+    _, pin = publish_version(
+        fake_s3,
+        tmp_path,
+        images=DENSE_IMAGES,
+        points=None,
+        masks=MASKS,
+        mask_crcs={"a": "AAAAAAAAAAA="},
+    )
+    cached = cache / IMG_BUCKET / "images/ds/a.png"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"ma")
+
+    with pytest.raises(ChecksumMismatch, match=re.escape(str(cached))):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+
 def test_taxonomy_pin_is_synced_under_taxonomy_prefix(fake_s3, pin, tmp_path, cache):
     tax = publish_taxonomy_version(fake_s3, tmp_path)
 
@@ -232,10 +316,6 @@ def test_short_download_body_fails_and_is_not_cached(fake_s3, pin, cache):
     assert not (cache / IMG_BUCKET / "images/ds/a.jpg").exists()
 
 
-DENSE_IMAGES = {"a": (b"aaaa", "g1"), "b": (b"bbbbbbbb", "g1")}
-MASKS = {"a": b"ma", "b": b"mbmb"}
-
-
 def test_dense_masks_are_downloaded_with_images(fake_s3, tmp_path, cache):
     _, pin = publish_version(fake_s3, tmp_path, images=DENSE_IMAGES, points=None, masks=MASKS)
 
@@ -254,6 +334,22 @@ def test_missing_mask_drops_its_image(fake_s3, tmp_path, cache):
 
     assert result.datasets["ds"].images_dropped == 1
     assert result.datasets["ds"].dropped_image_ids == ("b",)
+
+
+def test_changed_mask_fails(fake_s3, tmp_path, cache):
+    _, pin = publish_version(fake_s3, tmp_path, images=DENSE_IMAGES, points=None, masks=MASKS)
+    fake_s3.put(IMG_BUCKET, IMG_PREFIX + "b.png", b"XXXX")
+
+    with pytest.raises(ImageChanged, match="images/ds/b.png"):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+
+def test_missing_mask_fails_by_default(fake_s3, tmp_path, cache):
+    _, pin = publish_version(fake_s3, tmp_path, images=DENSE_IMAGES, points=None, masks=MASKS)
+    del fake_s3.objects[(IMG_BUCKET, IMG_PREFIX + "b.png")]
+
+    with pytest.raises(ImageMissing, match="images/ds/b.png"):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
 
 
 @pytest.mark.parametrize(
