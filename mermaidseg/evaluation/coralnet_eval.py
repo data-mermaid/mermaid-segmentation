@@ -148,7 +148,9 @@ def evaluate_coralnet(
         len(names),
     )
 
-    class_lookup = build_class_lookup(SOURCE_NAME, names, id2label, hierarchy)
+    class_lookup = build_class_lookup(
+        SOURCE_NAME, names, id2label, hierarchy, id2name=base.coralnet_id2name
+    )
     concept_lookup = build_concept_lookup(SOURCE_NAME, names, concept_names, taxonomy_csv)
 
     result = run_point_evaluation(

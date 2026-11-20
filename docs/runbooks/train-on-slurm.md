@@ -20,7 +20,7 @@ This runbook trains the final model on the Slurm cluster: `cbm_final` at 256 px,
 
 Batch jobs run offline. `slurm/common.sh` unsets the AWS variables and sets `MERMAIDSEG_S3_OFFLINE=1`, so a cache miss fails the job and does not go to S3. Fill the cache first. This is the only step that needs AWS credentials.
 
-Run it on a machine that has AWS credentials and can write `MERMAIDSEG_CACHE_DIR`. Set `HF_HOME` to the cache that batch jobs use, because the Hugging Face datasets (CoralscapesV2, UCSD Mosaics) download into `HF_HOME`, not into the S3 cache:
+Run it on a machine that has AWS credentials, can reach `api.datamermaid.org` (for the CoralNet label mappings) and can write `MERMAIDSEG_CACHE_DIR`. Set `HF_HOME` to the cache that batch jobs use, because the Hugging Face datasets (CoralscapesV2, UCSD Mosaics) download into `HF_HOME`, not into the S3 cache:
 
 ```bash
 HF_HOME=$MERMAIDSEG_SCRATCH/hf-cache uv run python scripts/prefetch_cache.py \
@@ -36,7 +36,7 @@ HF_HOME=$MERMAIDSEG_SCRATCH/hf-cache uv run python scripts/prefetch_cache.py \
 
 Run the script with `--help` for `--datasets`, `--splits` and `--workers`.
 
-Fill the cache again after any change to the data: a new CoralNet build, new sources on a whitelist or a new dataset in the data config. See [Warm the offline cache again](coralnet-data.md#warm-the-offline-cache-again).
+Fill the cache again after any change to the data: a new CoralNet build, new sources on a whitelist, a new dataset in the data config or a change to the CoralNet label mappings in MERMAID. See [Warm the offline cache again](coralnet-data.md#warm-the-offline-cache-again).
 
 ## Launch the runs
 
@@ -109,6 +109,8 @@ To keep the new wandb run separate from the old one, change `MERMAIDSEG_WANDB_ID
 | The launcher says a Slurm variable is not set, or `MERMAIDSEG_LOG_DIR` does not exist | Fix the env file. See [Write the env file](set-up-slurm.md#write-the-env-file). |
 | The job stops with `set WANDB_API_KEY in the secured env file` | Add `WANDB_API_KEY` to the env file that the job reads. |
 | The job fails on a cache miss | The cache does not hold an object that the run needs. [Fill the offline data cache](#fill-the-offline-data-cache) again with the run's data config. |
+| The job stops with a `DataLoadError` that says to run prefetch, for the CoralNet label mapping | The cache has no CoralNet mapping snapshot. Run `scripts/prefetch_cache.py` with `coralnet` among the selected datasets. See [Fill the offline data cache](#fill-the-offline-data-cache). |
+| The prefetch fails with an API error | Check that the prefetch host reaches `api.datamermaid.org`, then run the prefetch again. The existing snapshot is kept. |
 | `cbm_final_res768` runs out of GPU memory | Set `FINAL_768_BATCH` and `FINAL_768_ACCUM` in the shell before you launch. Their product must stay 32, or the launcher refuses. |
 | A job is cancelled about a second after it starts, with no logs | Do not pass parameters with `sbatch --export=ALL,VAR=...`. A site prolog cancels such jobs. Pass them as arguments to `train.sbatch`. |
 | A multi-GPU job times out in a collective | The NCCL flight recorder writes each rank's last collectives to `logs/nccl_trace_<run>_<job id>_rank_*`. |

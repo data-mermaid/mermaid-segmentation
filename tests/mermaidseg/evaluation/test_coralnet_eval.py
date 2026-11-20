@@ -17,9 +17,15 @@ def test_evaluate_coralnet_forwards_dedup_fields(monkeypatch):
 
             self.df_images = pd.DataFrame({"image_id": ["1"]})
             self.df_annotations = pd.DataFrame({"source_label_name": ["sand"]})
+            self.coralnet_id2name = {7: "Sand"}
+
+    class_lookup_kwargs: dict = {}
+
+    def build_class_lookup(*args, **kwargs):
+        class_lookup_kwargs.update(kwargs)
 
     monkeypatch.setattr(coralnet_eval, "CoralNetDataset", FakeDataset)
-    monkeypatch.setattr(coralnet_eval, "build_class_lookup", lambda *a, **k: None)
+    monkeypatch.setattr(coralnet_eval, "build_class_lookup", build_class_lookup)
     monkeypatch.setattr(coralnet_eval, "build_concept_lookup", lambda *a, **k: None)
     monkeypatch.setattr(coralnet_eval, "run_point_evaluation", lambda **k: {"base": k["base_ds"]})
 
@@ -41,6 +47,7 @@ def test_evaluate_coralnet_forwards_dedup_fields(monkeypatch):
     assert seen["image_blacklist"] == "/bl.parquet"
     assert seen["annotation_overrides"] == "/ov.parquet"
     assert seen["image_keep"] is None
+    assert class_lookup_kwargs["id2name"] == {7: "Sand"}
     assert result["whitelist_sources"] == [4, 5]
     assert "image_keep" not in result
 
