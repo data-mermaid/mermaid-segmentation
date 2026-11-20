@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "segdata-etl"
+version = "0.1.0"
+description = "Builds the CoralNet dataset parquets and validates and publishes external segmentation datasets to S3."
+requires-python = ">=3.11.5"
+dependencies = [
+    "coralnet-scraper",
+    "boto3",
+    "ibis-framework[duckdb]",
+    "numpy",
+    "pandas",
+    "pillow",
+    "pyarrow",
+    "requests",
+    "tqdm",
+]
+
+[project.scripts]
+segdata = "segdata_etl.cli:main"
+
+[dependency-groups]
+tests = [
+    "pytest>=8.0",
+    "pytest-socket>=0.7",
+]
+
+[tool.uv.sources]
+coralnet-scraper = { workspace = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra", "--allow-hosts=127.0.0.1,::1"]

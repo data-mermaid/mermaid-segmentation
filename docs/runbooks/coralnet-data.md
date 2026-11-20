@@ -3,7 +3,7 @@
 This runbook takes you from an empty bucket, or an older scrape, to a CoralNet build that training reads. It has two stages:
 
 1. `coralnet-scraper` downloads the public CoralNet sources to S3.
-2. `coralnet-dataset` builds the training manifest, the resized images and the label names from that scrape.
+2. `segdata build coralnet` builds the training manifest, the resized images and the label names from that scrape.
 
 The package READMEs are the reference for flags, environment variables, exclusion kinds and exit codes; this page gives the order and links to them.
 
@@ -26,8 +26,8 @@ The package READMEs are the reference for flags, environment variables, exclusio
   set -a; source .env; set +a
   ```
 
-  See the scraper's [environment variables](../../packages/coralnet-scraper/README.md#environment-variables) and the build's [environment variables](../../packages/coralnet-dataset/README.md#environment-variables).
-- **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the `source_bucket` of `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`). See [Use a build in training](../../packages/coralnet-dataset/README.md#use-a-build-in-training).
+  See the scraper's [environment variables](../../packages/coralnet-scraper/README.md#environment-variables) and the build's [environment variables](../../packages/segdata-etl/README.md#environment-variables).
+- **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the `source_bucket` of `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`). See [Use a build in training](../../packages/segdata-etl/README.md#use-a-build-in-training).
 
 - **Request rate.** The scraper sends requests without a rate limit unless you set one. To choose a limit, see [Tune the request rate](#tune-the-request-rate).
 
@@ -55,12 +55,12 @@ See [Run](../../packages/coralnet-scraper/README.md#run) for the flags, the fail
 Pick a version tag for the run, for example `20261118_coralnet`. Then run all four steps in one invocation:
 
 ```bash
-uv run --package coralnet-dataset coralnet-dataset all --version-tag <run> --upload-to-s3
+uv run --package segdata-etl segdata build coralnet all --version-tag <run> --upload-to-s3
 ```
 
-To run the steps one at a time, pass the same `--version-tag` to each. Each invocation computes its own default tag, so without it the outputs land in different run directories. The step order and the flags of each step are in [Run](../../packages/coralnet-dataset/README.md#run).
+To run the steps one at a time, pass the same `--version-tag` to each. Each invocation computes its own default tag, so without it the outputs land in different run directories. The step order and the flags of each step are in [Run](../../packages/segdata-etl/README.md#run).
 
-Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
+Use an unused tag; see [Run](../../packages/segdata-etl/README.md#run).
 
 ### Check the build
 
@@ -72,7 +72,7 @@ Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
    - `coralnet_images_<run>.parquet`
    - `coralnet_training_manifest_<run>.parquet`
 
-The resized images are not in that directory. `resize` writes them under `<resized prefix>/resized/`, which every run shares. See [Outputs](../../packages/coralnet-dataset/README.md#outputs) and [Check a build for completeness](../../packages/coralnet-dataset/README.md#check-a-build-for-completeness).
+The resized images are not in that directory. `resize` writes them under `<resized prefix>/resized/`, which every run shares. See [Outputs](../../packages/segdata-etl/README.md#outputs) and [Check a build for completeness](../../packages/segdata-etl/README.md#check-a-build-for-completeness).
 
 ## Update the data
 
@@ -99,12 +99,12 @@ The scraper skips complete sources, so it does not see changes to them. To pick 
 After any scrape, build again with a version tag that you have not used before:
 
 ```bash
-uv run --package coralnet-dataset coralnet-dataset all --version-tag <new-run> --upload-to-s3
+uv run --package segdata-etl segdata build coralnet all --version-tag <new-run> --upload-to-s3
 ```
 
 `build-annotations` and `build-images` read every source and every annotated image again. `resize` resizes only the images that have no resized object on S3.
 
-Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
+Use an unused tag; see [Run](../../packages/segdata-etl/README.md#run).
 
 ## Adopt an existing bucket
 
@@ -139,7 +139,7 @@ Use this once for a bucket that an earlier version of the scraper filled, so it 
 5. Rebuild the dataset under a new version tag:
 
    ```bash
-   uv run --package coralnet-dataset coralnet-dataset all --version-tag <new-run> --upload-to-s3
+   uv run --package segdata-etl segdata build coralnet all --version-tag <new-run> --upload-to-s3
    ```
 
 ## Tune the request rate
@@ -174,7 +174,7 @@ Set `manifest_path` on each CoralNet split (`train`, `val` and `test`) in `confi
 manifest_path: etl-outputs/coralnet/<run>/coralnet_training_manifest_<run>.parquet
 ```
 
-Then regenerate the derived configs, starting with `configs/data_config_trainval.yaml`. See [Regenerate the derived configs](derived-configs.md). For the key layout, see [Use a build in training](../../packages/coralnet-dataset/README.md#use-a-build-in-training).
+Then regenerate the derived configs, starting with `configs/data_config_trainval.yaml`. See [Regenerate the derived configs](derived-configs.md). For the key layout, see [Use a build in training](../../packages/segdata-etl/README.md#use-a-build-in-training).
 
 A new build changes model outputs, so item 7 of the working agreement in [AGENTS.md](../../AGENTS.md#2-working-agreement) applies. Run the evaluation, and put the metrics and the baseline they compare against in the PR.
 
@@ -195,7 +195,7 @@ A change in the API changes the class set of the next run. Compare `metadata/id2
 
 ### Duplicates in new sources
 
-`configs/coralnet/image_blacklist.parquet` and `configs/coralnet/annotation_overrides.parquet` cover only the sources they were built from. Duplicate images in new sources are not removed. See the build's [Known gaps](../../packages/coralnet-dataset/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
+`configs/coralnet/image_blacklist.parquet` and `configs/coralnet/annotation_overrides.parquet` cover only the sources they were built from. Duplicate images in new sources are not removed. See the build's [Known gaps](../../packages/segdata-etl/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
 
 ### Warm the offline cache again
 
@@ -235,4 +235,4 @@ After a scrape, always rebuild under a new version tag.
 
 ## Known gaps
 
-See the build's [Known gaps](../../packages/coralnet-dataset/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
+See the build's [Known gaps](../../packages/segdata-etl/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).

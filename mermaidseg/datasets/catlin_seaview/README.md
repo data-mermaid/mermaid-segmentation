@@ -36,10 +36,10 @@ The prefix also holds `classes.json`, `colors.json` and `manifest.json`. `manife
 
 ## How to rebuild
 
-The `external-datasets` package downloads the release and writes it to S3. See the [package README](../../../packages/external-datasets/README.md) for the output contract and every flag.
+The `segdata-etl` package downloads the release and writes it to S3. See the [package README](../../../packages/segdata-etl/README.md) for the output contract and every flag.
 
 ```bash
-uv run --package external-datasets external-datasets catlin_seaview
+uv run --package segdata-etl segdata build catlin_seaview
 ```
 
 Without `--data-dir`, the run downloads `tabular-data.zip` and one zip for each region from `http://data.qld.edu.au/public/Q1281/` into `--workdir` (default `outputs/external-datasets/catlin_seaview/`), and extracts them there. A rerun uses the zips already on disk.

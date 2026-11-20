@@ -36,11 +36,10 @@ ENV UV_PYTHON=3.12 \
 
 # Dependencies first (cached until the lock changes). `--locked` fails if uv.lock is stale.
 COPY pyproject.toml uv.lock .python-version ./
-# The lock lists the coralnet-scraper, coralnet-dataset, external-datasets and segdata-spec workspace members; uv reads their
+# The lock lists the coralnet-scraper, segdata-etl and segdata-spec workspace members; uv reads their
 # pyprojects to validate the lock. The members themselves are not installed.
 COPY packages/coralnet-scraper/pyproject.toml ./packages/coralnet-scraper/pyproject.toml
-COPY packages/coralnet-dataset/pyproject.toml ./packages/coralnet-dataset/pyproject.toml
-COPY packages/external-datasets/pyproject.toml ./packages/external-datasets/pyproject.toml
+COPY packages/segdata-etl/pyproject.toml ./packages/segdata-etl/pyproject.toml
 COPY packages/segdata-spec/pyproject.toml ./packages/segdata-spec/pyproject.toml
 # segdata-spec is a dependency of the root project. `--no-install-workspace` skips it and the root
 # project, so this layer holds only third-party packages and stays cached until the lock changes.

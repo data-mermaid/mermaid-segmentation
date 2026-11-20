@@ -5,7 +5,7 @@ Downloads public CoralNet sources (images, labelsets, annotations) to S3. Import
 ## Scope
 
 - **Owns:** recreating the raw CoralNet dataset in S3, one folder per public source.
-- **Does not own:** turning a scrape into the training manifest that `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`) reads. That is [`coralnet-dataset`](../coralnet-dataset/README.md).
+- **Does not own:** turning a scrape into the training manifest that `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`) reads. That is [`segdata-etl`](../segdata-etl/README.md).
 - **End to end:** to recreate or update the CoralNet data, scrape through training, follow the [CoralNet data runbook](../../docs/runbooks/coralnet-data.md).
 - **Boundary:** `mermaidseg` does not depend on or import this package, and the package does not import `mermaidseg`. The root `tests/test_package_boundaries.py` enforces both (run with the root suite). A root `uv sync` does not install it.
 
@@ -20,7 +20,7 @@ Each source is written under `s3://<bucket>/<prefix>/s<source_id>/`:
 | `annotations.csv` | CoralNet annotation export of the whole source. |
 | `image_list.csv` | One row per image from the browse pages; the `Image URL` column is empty. |
 | `images/<image_id>.jpg` | One object per image, keyed by the numeric CoralNet image id. |
-| `_complete.json` | The [completion marker](#resume). Written last, after verification. `coralnet-dataset` reads only the sources that have it. |
+| `_complete.json` | The [completion marker](#resume). Written last, after verification. `segdata-etl` reads only the sources that have it. |
 | `_partial/` | Progress of a source that is not complete. Deleted after the marker is written. |
 
 Each run also writes run-level objects under `s3://<bucket>/<prefix>/`:

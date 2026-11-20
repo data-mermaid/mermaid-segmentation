@@ -10,12 +10,12 @@ benthic attribute target space is performed externally via
 The training manifest (``coralnet_training_manifest_<run>.parquet``) carries
 per-annotation rows with ``(row, col, coralnet_id)`` in the **resized**
 coordinate space (longest edge clamped to 2048; resizing
-lives in ``coralnet_dataset.resize``) plus the resolved
+lives in ``segdata_etl.datasets.coralnet.resize``) plus the resolved
 ``image_s3_key`` for each image (resized copy when the image was resized,
 otherwise the original). The manifest comes from the data config's
 ``coralnet.<split>.manifest_path``.
 
-The ``coralnet-dataset`` package (``packages/coralnet-dataset``) produces both
+The ``segdata-etl`` package (``packages/segdata-etl``) produces both
 the manifest and the per-run label-name file ``coralnet_id2name_<run>.json``.
 The JSON sits beside the manifest, in a run directory named ``<run>``, so the
 configured ``manifest_path`` needs its sibling id2name JSON in that same directory.
