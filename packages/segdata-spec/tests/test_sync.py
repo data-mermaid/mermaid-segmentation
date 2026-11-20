@@ -256,6 +256,22 @@ def test_missing_mask_drops_its_image(fake_s3, tmp_path, cache):
     assert result.datasets["ds"].dropped_image_ids == ("b",)
 
 
+def test_changed_mask_fails(fake_s3, tmp_path, cache):
+    _, pin = publish_version(fake_s3, tmp_path, images=DENSE_IMAGES, points=None, masks=MASKS)
+    fake_s3.put(IMG_BUCKET, IMG_PREFIX + "b.png", b"XXXX")
+
+    with pytest.raises(ImageChanged, match="images/ds/b.png"):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+
+def test_missing_mask_fails_by_default(fake_s3, tmp_path, cache):
+    _, pin = publish_version(fake_s3, tmp_path, images=DENSE_IMAGES, points=None, masks=MASKS)
+    del fake_s3.objects[(IMG_BUCKET, IMG_PREFIX + "b.png")]
+
+    with pytest.raises(ImageMissing, match="images/ds/b.png"):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+
 @pytest.mark.parametrize(
     ("selection", "named"),
     [({"other": None}, "other"), ({"ds": {"G1"}}, "G1")],
