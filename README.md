@@ -78,7 +78,7 @@ uv run pytest tests/mermaidseg/test_logger.py -v
 
 To run the `live` tests, select them with `-m live`.
 
-CI also runs the coralnet-scraper, coralnet-dataset and external-datasets suites. See the Tests sections of [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md#tests), [packages/coralnet-dataset/README.md](packages/coralnet-dataset/README.md#tests) and [packages/external-datasets/README.md](packages/external-datasets/README.md#tests).
+CI also runs the coralnet-scraper, coralnet-dataset, external-datasets and segdata-spec suites. See the Tests sections of [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md#tests), [packages/coralnet-dataset/README.md](packages/coralnet-dataset/README.md#tests), [packages/external-datasets/README.md](packages/external-datasets/README.md#tests) and [packages/segdata-spec/README.md](packages/segdata-spec/README.md#tests).
 
 ### Common Commands
 
@@ -124,6 +124,7 @@ Non-taxonomic concept metrics in `mermaidseg/model/eval.py` are multiclass `Accu
 | [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md) | The CoralNet scraper |
 | [packages/coralnet-dataset/README.md](packages/coralnet-dataset/README.md) | The CoralNet dataset build |
 | [packages/external-datasets/README.md](packages/external-datasets/README.md) | Loading the four external datasets into S3 |
+| [packages/segdata-spec/README.md](packages/segdata-spec/README.md) | The versioned dataset contract: manifest, S3 layout, publish and sync |
 | [docker/jobs/README.md](docker/jobs/README.md) | The SageMaker job image, its build, IAM and quota |
 | [AGENTS.md](AGENTS.md) | Rules for coding agents |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Ways to contribute |

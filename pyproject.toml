@@ -28,6 +28,7 @@ dependencies = [
     "peft>=0.19.1",
     "pydantic>=2.13.3",
     "safetensors>=0.7.0",
+    "segdata-spec",
 ]
 
 [project.optional-dependencies]
@@ -57,6 +58,9 @@ required-version = ">=0.11.13"
 [tool.uv.workspace]
 members = ["packages/*"]
 
+[tool.uv.sources]
+segdata-spec = { workspace = true }
+
 [tool.setuptools]
 packages = { find = { where = ["."], include = ["mermaidseg*"] } }
 
@@ -76,15 +80,15 @@ ignore = ["E501"]
 convention = "google"
 
 [tool.ruff.lint.isort]
-known-first-party = ["mermaidseg", "coralnet_scraper", "coralnet_dataset", "external_datasets"]
+known-first-party = ["mermaidseg", "coralnet_scraper", "coralnet_dataset", "external_datasets", "segdata_spec"]
 
 [tool.ruff.format]
 quote-style = "double"
 
 [tool.mypy]
 python_version = "3.11"
-files = ["mermaidseg", "scripts", "tests", "packages/coralnet-scraper/src", "packages/coralnet-dataset/src", "packages/external-datasets/src"]
-mypy_path = ["packages/coralnet-scraper/src", "packages/coralnet-dataset/src", "packages/external-datasets/src"]
+files = ["mermaidseg", "scripts", "tests", "packages/coralnet-scraper/src", "packages/coralnet-dataset/src", "packages/external-datasets/src", "packages/segdata-spec/src"]
+mypy_path = ["packages/coralnet-scraper/src", "packages/coralnet-dataset/src", "packages/external-datasets/src", "packages/segdata-spec/src"]
 ignore_missing_imports = true
 follow_imports = "silent"
 explicit_package_bases = true
