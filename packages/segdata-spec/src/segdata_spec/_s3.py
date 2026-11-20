@@ -19,7 +19,9 @@ def taxonomy_prefix(name: str, version: str) -> str:
 
 
 def cache_path(cache_dir: Path, bucket: str, key: str) -> Path:
-    """Return ``<cache_dir>/<bucket>/<key>``, refusing a key that would leave the cache."""
+    """Return ``<cache_dir>/<bucket>/<key>``, refusing a bucket or key that would leave the cache."""
+    if bucket in ("", ".", "..") or "/" in bucket:
+        raise ValueError(f"refusing S3 bucket outside the cache layout: {bucket!r}")
     if key.startswith("/") or ".." in key.split("/"):
         raise ValueError(f"refusing S3 key outside the cache layout: {key!r}")
     return cache_dir / bucket / key
