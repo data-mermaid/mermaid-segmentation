@@ -95,7 +95,9 @@ def should_skip_download(
     return False
 
 
-_OUTAGE_CODES = frozenset({"login failed", "annotations_failed", "image_list_failed"})
+_OUTAGE_CODES = frozenset(
+    {"login failed", "annotations_failed", "image_list_failed", "images_outage"}
+)
 
 
 def _is_outage_failure(res: DownloadResult, *, raised: bool = False) -> bool:

@@ -76,7 +76,7 @@ A source fails when:
 
 - any of its images had no image URL (`images_missing_url`) or failed to upload (`images_upload_failed`). These still fail the source and set exit code 1, but do not count toward the [circuit breaker](#retries-and-circuit-breaker);
 - the metadata, labelset, annotations, or image list step failed;
-- the browse walk found a different number of images than the overview reports (`walk_count_mismatch:<found>!=<total>`). Only the saved walk is discarded and the next run walks again. The export and the images are not attempted. This failure does not count toward the circuit breaker;
+- the last [browse walk attempt](#retries-and-circuit-breaker) found a different number of images than the overview reports (`walk_count_mismatch:<found>!=<total>`). Only the saved walk is discarded and the next run walks again. The export and the images are not attempted. This failure does not count toward the circuit breaker;
 - the source is not accessible (`cannot access source <id>: <reason>`). The reason is CoralNet's page text, for example `Permission denied`, or `HTTP 403` or `HTTP 404` for a missing or private source. This failure does not count toward the [circuit breaker](#retries-and-circuit-breaker);
 - verification of the source failed (`verification_failed`, with the [codes](#verification));
 - the overview page shows no "Total images" count (`overview_total_missing`; `verify-existing` reports it too);
@@ -102,10 +102,30 @@ Exit code of the subcommands:
 | `invalidate` | 0 | The selected sources are invalidated. |
 | `invalidate` | 1 | `--changed` could not read the live image count of some source. The sources that could be checked are still invalidated. |
 
+### Response checks
+
+The scraper accepts a response only when its content is valid. A status of 200 is not enough.
+
+- **Annotation export.** The CSV is decoded as UTF-8, because CoralNet sends `text/csv` without a charset. An export must be CSV with a `Name` column, no null names, no HTML columns and no column whose name starts with `Unnamed`. It must contain only the requested images.
+- **Browse walk.** The walk rejects a page that lists no images. It compares the thumbnail count of a page to page 1 only when the page has a Next link. It also checks repeated image ids, and the final image count against the source overview. The overview is read again after the walk.
+- **Logged-out answers.** These answers log the session in again: a browse page without the export form, an `export_prep` answer of "must be signed in", and a serve request that lands on the login page.
+- **Images.** An image response must have a 2xx status, an `image/*`, `binary/octet-stream` (S3's default) or `application/octet-stream` content type, and the full `Content-Length`. Pillow must open and fully decode it. Only JPEG and PNG are accepted; an MPO file opens through the JPEG reader and is accepted. The body may be at most 256 MiB, declared or read. The download has a 300 s deadline. The scraper never uploads an invalid body. The stored `ContentType` comes from the detected format.
+
 ### Retries and circuit breaker
 
 - **Retries.** A GET request is retried up to 5 times on timeouts, dropped connections, and HTTP 429, 500, 502, 503 and 504 that occur before the response headers arrive. A connection dropped while the body is being read is not retried. The wait grows exponentially with jitter and honours the `Retry-After` header. A request that could not connect is retried whatever its method, because it was never sent.
-- **Circuit breaker.** After 5 consecutive outage-type failures the run stops. Outage-type failures are a raised exception, a failure with no error code, `login failed`, `overview fetch failed …`, `annotations_failed` and `image_list_failed`. Other failed sources, for example `cannot access source <id>: <reason>`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped because it is complete neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
+- **Content-level retries.** A response that fails a [response check](#response-checks) is retried as a unit:
+
+  | Unit | Attempts |
+  |---|---|
+  | Browse walk | 3 |
+  | Export round trip, including the POST | 4 |
+  | Image: resolve the pre-signed URL and download | 4 |
+  | Login | 4 |
+
+  The image unit repeats the resolve step, so an expired pre-signed URL is resolved again. Waits are 5 to 120 s with jitter. There is no cap on total retry time. A page-level walk failure resumes from the last walk checkpoint. A count mismatch redoes the walk. These retries sit on top of the transport retries above, so one image can make up to about 4 × 6 requests. After an `export_prep` read timeout, the next attempt waits an extra 60 s, because CoralNet may still be building the export. Once one page export fails, the other pages make no further attempts.
+- **Image-stage stop.** After 20 images in a row fail, the scraper skips the remaining queued images and the source gets `images_outage`.
+- **Circuit breaker.** After 5 consecutive outage-type failures the run stops. Outage-type failures are a raised exception, a failure with no error code, `login failed`, `overview fetch failed …`, `annotations_failed`, `image_list_failed` and `images_outage`. Other failed sources, for example `cannot access source <id>: <reason>`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped because it is complete neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
 
 ### Run report
 

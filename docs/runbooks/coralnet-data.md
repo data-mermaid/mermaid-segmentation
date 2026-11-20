@@ -227,7 +227,7 @@ uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
 | `build-annotations` excluded a source with `image_list_incomplete` or `label_unnamed` | The source CSVs do not agree with each other. Run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
 | `build-images` reports `not_found` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
-| `build-images` reports `corrupt` | The object on S3 is bad. The scraper does not replace an existing image object, so `invalidate` does not repair it. The manifest drops the image. |
+| `build-images` reports `corrupt` | The object on S3 is bad. Delete the corrupt image objects, run `coralnet-scrape invalidate --source-ids <id>`, then run `coralnet-scrape`. `invalidate` deletes the marker and `_partial/`, so the scraper runs the walk and the export again. Only the deleted images download again, because the image stage skips non-empty objects. The manifest drops the image until then. |
 | `resize` reports corrupted or failed images | Run the build again. `resize` retries every image that has no resized object, so a rerun helps only if the cause was transient. The manifest drops an image that needs a resize and has none. |
 | `resize` reports oversized images | The original exceeds twice Pillow's `MAX_IMAGE_PIXELS`, the decompression-bomb error threshold. A rerun skips the image again and `resize` exits 1 again. The manifest drops the image. |
 

@@ -10,6 +10,7 @@ import re
 import threading
 import time
 import urllib.parse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -19,9 +20,10 @@ from typing import Any, cast
 import boto3
 import pandas as pd
 import requests
+import stamina
 from botocore.config import Config as BotoConfig
 from bs4 import BeautifulSoup
-from tqdm.auto import tqdm
+from PIL import Image
 
 from coralnet_scraper import s3_io
 from coralnet_scraper.config import (
@@ -41,9 +43,16 @@ from coralnet_scraper.parsers import (
     parse_source_access,
     parse_total_images_from_source_html,
 )
-from coralnet_scraper.verify import Verification, orphan_image_keys, verify_source
+from coralnet_scraper.verify import (
+    Verification,
+    _strip_status,
+    orphan_image_keys,
+    verify_source,
+)
 
 logger = logging.getLogger(__name__)
+
+Image.MAX_IMAGE_PIXELS = None  # survey images legitimately exceed Pillow's bomb limit
 
 _SOURCE_INACCESSIBLE_STATUSES = frozenset({403, 404})  # missing or forbidden source overview
 _PAGE_GET_TIMEOUT = 90  # simple page GETs; CoralNet can be slow under load
@@ -51,20 +60,237 @@ _EXPORT_PREP_TIMEOUT_MIN = 300
 _EXPORT_PREP_TIMEOUT_MAX = 7200  # 2 hours
 _EXPORT_SERVE_TIMEOUT_MIN = 120
 _EXPORT_SERVE_TIMEOUT_MAX = 1800
-_EXPORT_PREP_RETRIES = 5
-_EXPORT_PREP_RETRY_SLEEP_S = 60  # base sleep between export_prep retries; scaled by attempt
+_EXPORT_PREP_TIMEOUT_STEP = 300  # export_prep read timeout added per further attempt
+_EXPORT_PREP_TIMEOUT_RETRY_WAIT_S = (
+    60  # pause after an export_prep read timeout, before the next POST
+)
+_EXPORT_PREP_HEARTBEAT_S = 60  # log while a long export_prep POST is still running
 _PAGINATED_EXPORT_THRESHOLD = 5000  # sources above this use per-page export
 _PAGE_EXPORT_TIMEOUT = 180  # CoralNet session setup can take >60s even for 20 images
 _PAGE_DELAY_SECONDS = 2.0  # politeness delay between page export requests
 _WALK_CHECKPOINT_EVERY_PAGES = 50  # save the walk's progress to _partial/walk.json every N pages
 _BROWSE_PROGRESS_EVERY = 10  # log walk progress every N pages
-_IMAGE_BATCH_SIZE = 1000  # images whose URLs are resolved, then uploaded, per batch
+_EXPORT_ATTEMPTS = 4
+_WALK_ATTEMPTS = 3
+_IMAGE_ATTEMPTS = 4
+_IMAGE_OUTAGE_STREAK = 20  # consecutive failed images that stop the image stage
+_LOGIN_ATTEMPTS = 4
+_IMAGE_TIMEOUT = (10, 60)  # connect, idle read
+_IMAGE_DEADLINE_S = 300.0  # wall-clock budget for one image body
+_IMAGE_CHUNK_BYTES = 64 * 1024
+_IMAGE_MAX_BYTES = 256 * 1024 * 1024
+_IMAGE_FORMATS = (
+    "JPEG",
+    "PNG",
+)  # the JPEG opener also yields MPO files; "MPO" itself is not an opener
+_IMAGE_CONTENT_TYPES = ("image/", "binary/octet-stream", "application/octet-stream")
+# stamina's default 45 s total timeout would end the retries of an export running for minutes.
+_RETRY_WAITS: dict[str, Any] = {
+    "timeout": None,
+    "wait_initial": 5.0,
+    "wait_max": 120.0,
+    "wait_jitter": 5.0,
+}
+_EXPORT_OPTIONS: dict[str, Any] = {
+    "browse_action": "export_annotations",
+    "label_format": "both",
+    "optional_columns": ["annotator_info", "metadata_date_aux", "metadata_other"],
+}
 _STATE_FILE = "state.json"
 _WALK_FILE = "walk.json"
 _SCRAPER_VERSION = importlib.metadata.version("coralnet-scraper")
 
 _IMAGE_HREF_PK = re.compile(r"/image/(\d+)(?:/|$)")
 _CHUNK_PAGE = re.compile(r"/page-(\d+)\.csv$")
+
+
+class ContentError(Exception):
+    """A successful response whose content is not what the request should return."""
+
+
+class WalkIncomplete(ContentError):
+    """The browse walk breaks a page rule or does not match the overview's image count."""
+
+
+class SessionExpired(Exception):
+    """CoralNet treated a logged-in session's request as logged out."""
+
+
+class ImageInvalid(Exception):
+    """A downloaded image body failed validation."""
+
+
+class UrlExpired(Exception):
+    """The signed original-image URL has expired."""
+
+
+class _ExportPrepTimeout(requests.ReadTimeout):
+    """The ``export_prep`` POST, not a GET, timed out reading its response."""
+
+
+class _TotalChanged(WalkIncomplete):
+    """The overview's image count changed while the walk ran."""
+
+    def __init__(self, total: int) -> None:
+        """Record the overview's new image count ``total``."""
+        super().__init__(f"overview image count changed to {total} during the walk")
+        self.total = total
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return whether an attempt that raised ``exc`` is worth repeating.
+
+    Content, session and image failures, transport errors and 5xx statuses are; a 4xx
+    status and any other error are not.
+    """
+    if isinstance(exc, requests.HTTPError):
+        return exc.response is None or exc.response.status_code >= 500
+    return isinstance(
+        exc,
+        ContentError | SessionExpired | ImageInvalid | UrlExpired | requests.RequestException,
+    )
+
+
+def _retrying(attempts: int) -> Any:
+    """Return a stamina retry context of ``attempts`` attempts with the scraper's waits."""
+    return stamina.retry_context(on=_is_retryable, attempts=attempts, **_RETRY_WAITS)
+
+
+def decode_export_csv(resp: requests.Response) -> pd.DataFrame:
+    """Return an ``export/serve`` response as an annotations frame.
+
+    CoralNet serves ``text/csv`` without a charset, which ``requests`` decodes as
+    ISO-8859-1; the body is UTF-8, so it is decoded from the bytes.
+
+    Raises:
+        SessionExpired: If the request landed on the login page.
+        ContentError: If the body is not ``text/csv``, not a UTF-8 CSV, has a column
+            holding HTML or an unnamed one, lacks a ``Name`` column, or has a row without
+            a name.
+    """
+    if "/accounts/login/" in resp.url:
+        raise SessionExpired("export/serve landed on the login page")
+    content_type = resp.headers.get("Content-Type", "")
+    if not content_type.startswith("text/csv"):
+        raise ContentError(f"export/serve returned {content_type or 'no content type'}")
+    try:
+        df = pd.read_csv(io.StringIO(resp.content.decode("utf-8-sig")))
+    except (UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as e:
+        raise ContentError(f"export/serve body is not a UTF-8 CSV: {type(e).__name__}") from e
+    if any("<" in str(c) or str(c).startswith("Unnamed") for c in df.columns):
+        raise ContentError("export CSV has an HTML or unnamed column")
+    if "Name" not in df.columns:
+        raise ContentError("export CSV has no Name column")
+    if df["Name"].isna().any():
+        raise ContentError("export CSV has rows without a Name")
+    return df
+
+
+def _export_timestamp(resp: requests.Response) -> str:
+    """Return the ``session_data_timestamp`` of an ``export_prep`` response.
+
+    Raises:
+        SessionExpired: If CoralNet answers that the user must be signed in.
+        ContentError: If the body is not JSON, reports another error, or has no timestamp.
+    """
+    try:
+        body = resp.json()
+    except ValueError as e:
+        raise ContentError("export_prep did not return JSON") from e
+    if not isinstance(body, dict):
+        raise ContentError("export_prep did not return a JSON object")
+    if "error" in body:
+        if "signed in" in str(body["error"]):
+            raise SessionExpired(str(body["error"]))
+        raise ContentError(f"export_prep error: {body['error']}")
+    if "session_data_timestamp" not in body:
+        raise ContentError("export_prep returned no session_data_timestamp")
+    return str(body["session_data_timestamp"])
+
+
+def _export_names(refs: list[ImageRef]) -> set[str]:
+    """Return the image names an export of ``refs`` may contain: titles without a status."""
+    return {_strip_status(r.name) for r in refs}
+
+
+def _check_export_names(df: pd.DataFrame, allowed: set[str]) -> None:
+    """Raise :class:`ContentError` if the export has a row for an image outside ``allowed``."""
+    foreign = set(df["Name"].astype(str)) - allowed
+    if foreign:
+        raise ContentError(
+            f"export has rows for {len(foreign)} images not requested, e.g. {sorted(foreign)[:2]}"
+        )
+
+
+def validate_image_bytes(data: io.BytesIO) -> str:
+    """Return the image format of ``data``, such as ``JPEG``, leaving it positioned at 0.
+
+    Only JPEG, MPO (opened as JPEG) and PNG are accepted. The image is verified, then fully decoded, so a
+    truncated body fails here.
+
+    Raises:
+        ImageInvalid: If ``data`` is empty or Pillow cannot open, verify and decode it as one
+            of the accepted formats.
+    """
+    if data.getbuffer().nbytes == 0:
+        raise ImageInvalid("empty body")
+    try:
+        data.seek(0)
+        with Image.open(data, formats=_IMAGE_FORMATS) as im:
+            fmt = im.format or ""
+            im.verify()
+        data.seek(0)
+        with Image.open(data, formats=_IMAGE_FORMATS) as im:
+            im.load()
+    except Exception as e:  # noqa: BLE001 - Pillow raises many types for bad data
+        raise ImageInvalid(f"not a decodable image: {type(e).__name__}") from e
+    finally:
+        data.seek(0)
+    return fmt
+
+
+def _check_image_response(resp: requests.Response) -> str:
+    """Return the content type of an original-image response that may carry an image.
+
+    Raises:
+        UrlExpired: If the signed URL has expired.
+        requests.HTTPError: If the status is 4xx or 5xx.
+        ImageInvalid: If the status is not 2xx or the content type is not an image one.
+    """
+    if resp.status_code == 403 and b"expired" in resp.content.lower():
+        raise UrlExpired(resp.url)
+    resp.raise_for_status()
+    if not 200 <= resp.status_code < 300:
+        raise ImageInvalid(f"status {resp.status_code}")
+    content_type = resp.headers.get("Content-Type", "")
+    if not content_type.startswith(_IMAGE_CONTENT_TYPES):
+        raise ImageInvalid(f"content type {content_type!r}")
+    return content_type
+
+
+def _read_image_body(resp: requests.Response, deadline: float) -> io.BytesIO:
+    """Return the streamed body of ``resp``, positioned at its end.
+
+    Raises:
+        ImageInvalid: If the body is still arriving at the monotonic time ``deadline``, it
+            exceeds :data:`_IMAGE_MAX_BYTES` (by an unencoded ``Content-Length``, before any
+            read, or by the bytes read), or its length differs from an unencoded
+            ``Content-Length``.
+    """
+    declared = resp.headers.get("Content-Length")
+    unencoded = "Content-Encoding" not in resp.headers
+    if declared is not None and unencoded and int(declared) > _IMAGE_MAX_BYTES:
+        raise ImageInvalid(f"declared {declared} bytes, over the {_IMAGE_MAX_BYTES} byte cap")
+    buf = io.BytesIO()
+    for chunk in resp.iter_content(chunk_size=_IMAGE_CHUNK_BYTES):
+        buf.write(chunk)
+        if buf.tell() > _IMAGE_MAX_BYTES:
+            raise ImageInvalid(f"body over the {_IMAGE_MAX_BYTES} byte cap")
+        if time.monotonic() > deadline:
+            raise ImageInvalid(f"image body took longer than {_IMAGE_DEADLINE_S:.0f} s")
+    if declared is not None and unencoded and buf.tell() != int(declared):
+        raise ImageInvalid(f"received {buf.tell()} of {declared} bytes")
+    return buf
 
 
 @dataclass(frozen=True)
@@ -87,7 +313,7 @@ class ImageRef:
         return f"/image/{self.id}/view/"
 
 
-class _WalkCountMismatch(Exception):
+class _WalkCountMismatch(WalkIncomplete):
     """The browse walk found a different number of images than the overview lists."""
 
     def __init__(self, found: int, expected: int) -> None:
@@ -126,10 +352,11 @@ class _WalkProgress:
         return cls(refs, doc["last_page"], doc["page_size"], doc["complete"])
 
 
-def _parse_browse_thumbs(html: str) -> tuple[list[tuple[int, str]], str | None]:
-    """Return a browse page's thumbnails as ``(image id, title)`` and its "Next page" link.
+def _parse_browse_thumbs(html: str) -> tuple[list[tuple[int, str]], str | None, bool]:
+    """Return a browse page's thumbnails, its "Next page" link and whether it has the export form.
 
-    A thumbnail without an ``/image/<id>/`` link is skipped; one without a title gets ``""``.
+    Thumbnails are ``(image id, title)``. A thumbnail without an ``/image/<id>/`` link is
+    skipped; one without a title gets ``""``.
     """
     soup = BeautifulSoup(html, "html.parser")
     thumbs = []
@@ -140,15 +367,37 @@ def _parse_browse_thumbs(html: str) -> tuple[list[tuple[int, str]], str | None]:
             img = wrapper.find("img")
             thumbs.append((int(match.group(1)), cast(str, img.get("title", "")) if img else ""))
     next_anchor = soup.find("a", title="Next page")
-    return thumbs, cast("str | None", next_anchor.get("href")) if next_anchor else None
+    next_href = cast("str | None", next_anchor.get("href")) if next_anchor else None
+    has_form = soup.find("form", {"id": "export-annotations-prep-form"}) is not None
+    return thumbs, next_href, has_form
 
 
-def _image_ids_by_page(refs: list[ImageRef]) -> dict[int, tuple[int, ...]]:
-    """Return the image ids of each browse page, pages ascending, ids in walk order."""
-    pages: dict[int, list[int]] = {}
+def _check_walk_page(
+    progress: _WalkProgress, thumbs: list[tuple[int, str]], has_next: bool
+) -> None:
+    """Raise :class:`WalkIncomplete` if the next page of ``progress`` breaks a walk rule.
+
+    The page must list images, a page with a Next link must list as many as page 1, and
+    no image id may repeat one already walked or another on the page.
+    """
+    page = progress.last_page + 1
+    if not thumbs:
+        raise WalkIncomplete(f"browse page {page} lists no images")
+    if has_next and progress.page_size and len(thumbs) != progress.page_size:
+        raise WalkIncomplete(
+            f"browse page {page} lists {len(thumbs)} images, page 1 lists {progress.page_size}"
+        )
+    ids = [image_id for image_id, _ in thumbs]
+    if len(set(ids)) != len(ids) or any(image_id in progress.refs for image_id in ids):
+        raise WalkIncomplete(f"browse page {page} repeats an image id")
+
+
+def _refs_by_page(refs: list[ImageRef]) -> dict[int, list[ImageRef]]:
+    """Return the images of each browse page, pages ascending, images in walk order."""
+    pages: dict[int, list[ImageRef]] = {}
     for ref in refs:
-        pages.setdefault(ref.page, []).append(ref.id)
-    return {page: tuple(pages[page]) for page in sorted(pages)}
+        pages.setdefault(ref.page, []).append(ref)
+    return {page: pages[page] for page in sorted(pages)}
 
 
 def _image_list_frame(refs: list[ImageRef]) -> pd.DataFrame:
@@ -174,7 +423,16 @@ def _image_failure_codes(failures: ImageFailures) -> list[str]:
         codes.append("images_missing_url")
     if failures.upload_failed > 0:
         codes.append("images_upload_failed")
+    if failures.skipped > 0:
+        codes.append("images_outage")
     return codes
+
+
+def _next_image_streak(streak: int, outcome: str) -> int:
+    """Return the failed-image streak after ``outcome``: reset by ok, unchanged by skipped."""
+    if outcome == "ok":
+        return 0
+    return streak if outcome == "skipped" else streak + 1
 
 
 def _upload_csv(s3_client: Any, bucket: str, key: str, df: pd.DataFrame) -> None:
@@ -198,13 +456,6 @@ def export_serve_timeout_seconds(total_images: int | None) -> int:
     if n <= 0:
         return _EXPORT_SERVE_TIMEOUT_MIN
     return min(_EXPORT_SERVE_TIMEOUT_MAX, max(_EXPORT_SERVE_TIMEOUT_MIN, 60 + n // 50))
-
-
-def half_open_batches(n_rows: int, batch_size: int) -> list[tuple[int, int]]:
-    """Return disjoint [start, end) index ranges covering ``range(n_rows)``."""
-    if n_rows < 0 or batch_size < 1:
-        raise ValueError("n_rows must be >= 0 and batch_size >= 1")
-    return [(s, min(s + batch_size, n_rows)) for s in range(0, n_rows, batch_size)]
 
 
 class CoralNetDownloader:
@@ -258,6 +509,7 @@ class CoralNetDownloader:
         self.session = self.sessions.coralnet()
         self.media = self.sessions.media()
         self.logged_in = False
+        self._login_lock = threading.Lock()
         self._thread_local = threading.local()
         self._export_thread_local = threading.local()
         self.s3 = boto3.client("s3", config=BotoConfig(max_pool_connections=self.max_workers + 4))
@@ -294,19 +546,29 @@ class CoralNetDownloader:
         csrf_token = extract_csrf_token(response.text)
         if not csrf_token:
             raise RuntimeError("Could not find CSRF token")
-        login_response = session.post(
-            self.LOGIN_URL,
-            data={
-                "username": self.username,
-                "password": self.password,
-                "csrfmiddlewaretoken": csrf_token,
-            },
-            headers={"Referer": self.LOGIN_URL},
-            timeout=_PAGE_GET_TIMEOUT,
-            allow_redirects=True,
-        )
-        if "Sign out" not in login_response.text and login_response.url == self.LOGIN_URL:
-            raise RuntimeError("Login failed - invalid credentials or other error")
+        for attempt in _retrying(_LOGIN_ATTEMPTS):
+            with attempt:
+                login_response = session.post(
+                    self.LOGIN_URL,
+                    data={
+                        "username": self.username,
+                        "password": self.password,
+                        "csrfmiddlewaretoken": csrf_token,
+                    },
+                    headers={"Referer": self.LOGIN_URL},
+                    timeout=_PAGE_GET_TIMEOUT,
+                    allow_redirects=True,
+                )
+                login_response.raise_for_status()
+        if "Sign out" not in login_response.text:
+            raise RuntimeError("Login failed - the result page shows no signed-in user")
+
+    def _relogin(self, session: requests.Session) -> None:
+        """Log ``session`` in again after CoralNet treated it as logged out."""
+        with self._login_lock:
+            logger.warning("CoralNet session expired; logging in again")
+            session.cookies.clear()
+            self._perform_login(session)
 
     def login(self) -> bool:
         """Log the main session in to CoralNet.
@@ -445,9 +707,9 @@ class CoralNetDownloader:
             total_images: Website image count; it picks the export path and sizes timeouts.
 
         Returns:
-            True on success; False on failure, after logging the error. The exported body
-            must parse as a CSV with a ``Name`` column; an empty body, an HTML error page, or
-            any other export without one fails and uploads nothing.
+            True on success; False on failure, after logging the error. The export must
+            pass :func:`decode_export_csv` and name only images of ``refs``; an export that
+            does not, after the attempts of :meth:`_export_validated`, uploads nothing.
         """
         try:
             prep_timeout = export_prep_timeout_seconds(total_images)
@@ -472,108 +734,15 @@ class CoralNetDownloader:
                     source_id, bucket_name, s3_prefix, refs=refs
                 )
 
-            browse_url = self._browse_page_url(source_id, 1)
-            response = self.session.get(browse_url, timeout=_PAGE_GET_TIMEOUT)
-            response.raise_for_status()
-            csrf = parse_export_annotations_prep_form(response.text)
-            if not csrf:
-                raise RuntimeError("Could not find export annotations form / CSRF")
-            form_data = {
-                "csrfmiddlewaretoken": csrf,
-                "browse_action": "export_annotations",
-                "image_select_type": "all",
-                "label_format": "both",
-                "optional_columns": [
-                    "annotator_info",
-                    "metadata_date_aux",
-                    "metadata_other",
-                ],
-            }
-            export_request_url = f"{self.CORALNET_URL}/source/{source_id}/annotation/export_prep/"
-            export_response = None
-            for attempt in range(1, _EXPORT_PREP_RETRIES + 1):
-                attempt_timeout = min(_EXPORT_PREP_TIMEOUT_MAX, prep_timeout + (attempt - 1) * 300)
-                try:
-                    # Background thread for the long-running POST; the main thread emits
-                    # periodic heartbeat logs so we can see progress in the run output.
-                    result_queue: Queue = Queue()
-                    exception_queue: Queue = Queue()
-
-                    def do_export_prep(
-                        attempt_timeout: int = attempt_timeout,
-                        result_queue: Queue = result_queue,
-                        exception_queue: Queue = exception_queue,
-                    ) -> None:
-                        try:
-                            resp = self.session.post(
-                                export_request_url,
-                                headers={"Referer": browse_url},
-                                data=form_data,
-                                timeout=attempt_timeout,
-                                allow_redirects=True,
-                            )
-                            result_queue.put(resp)
-                        except Exception as e:
-                            exception_queue.put(e)
-
-                    thread = threading.Thread(target=do_export_prep, daemon=True)
-                    t_start = time.monotonic()
-                    thread.start()
-
-                    heartbeat_interval = 60
-                    last_heartbeat = t_start
-
-                    while thread.is_alive():
-                        thread.join(timeout=1.0)
-                        elapsed = time.monotonic() - t_start
-
-                        if elapsed - last_heartbeat >= heartbeat_interval:
-                            logger.info(
-                                "export_prep still waiting for source %s: elapsed=%.0fs attempt=%s/%s timeout=%ss",
-                                source_id,
-                                elapsed,
-                                attempt,
-                                _EXPORT_PREP_RETRIES,
-                                attempt_timeout,
-                            )
-                            last_heartbeat = elapsed
-
-                    # Check results
-                    if not exception_queue.empty():
-                        raise exception_queue.get()
-                    if not result_queue.empty():
-                        export_response = result_queue.get()
-                        export_response.raise_for_status()
-                        break
-                    raise RuntimeError("export_prep thread completed without result")
-
-                except requests.exceptions.Timeout:
-                    if attempt >= _EXPORT_PREP_RETRIES:
-                        raise
-                    logger.warning(
-                        "export_prep timed out for source %s (attempt %s/%s, timeout=%ss); retrying",
-                        source_id,
-                        attempt,
-                        _EXPORT_PREP_RETRIES,
-                        attempt_timeout,
-                    )
-                    time.sleep(_EXPORT_PREP_RETRY_SLEEP_S * attempt)
-            if export_response is None:
-                raise RuntimeError("export_prep produced no response")
-
-            export_timestamp = export_response.json()["session_data_timestamp"]
-            serve_url = (
-                f"{self.CORALNET_URL}/source/{source_id}/export/serve/"
-                f"?session_data_timestamp={export_timestamp}"
+            df_annotations = self._export_validated(
+                self.session,
+                source_id,
+                self._browse_page_url(source_id, 1),
+                {"image_select_type": "all", **_EXPORT_OPTIONS},
+                _export_names(refs),
+                prep_timeout=prep_timeout,
+                serve_timeout=serve_timeout,
             )
-            dl = self.session.get(serve_url, timeout=serve_timeout)
-            dl.raise_for_status()
-            df_annotations = pd.read_csv(io.StringIO(dl.text))
-            if "Name" not in df_annotations.columns:
-                raise RuntimeError(
-                    f"Source {source_id}: export/serve response is not an annotations CSV "
-                    "(no 'Name' column)"
-                )
             key = s3_io.object_key_annotation_csv(s3_prefix, source_id)
             _upload_csv(self.s3, bucket_name, key, df_annotations)
             logger.info("Annotations saved s3://%s/%s", bucket_name, key)
@@ -612,9 +781,9 @@ class CoralNetDownloader:
             that finished stay on S3.
         """
         try:
-            pages = _image_ids_by_page(refs)
+            pages = _refs_by_page(refs)
             saved = self._saved_chunk_pages(source_id, bucket_name, s3_prefix)
-            todo = {page: ids for page, ids in pages.items() if page not in saved}
+            todo = {page: page_refs for page, page_refs in pages.items() if page not in saved}
             logger.info(
                 "source %s: paginated export of %d pages, %d already saved",
                 source_id,
@@ -668,35 +837,49 @@ class CoralNetDownloader:
         source_id: int,
         bucket_name: str,
         s3_prefix: str,
-        pages: dict[int, tuple[int, ...]],
+        pages: dict[int, list[ImageRef]],
         workers: int,
     ) -> None:
-        """Export and save each page of ``pages`` (page number to image ids) across workers.
+        """Export and save each page of ``pages`` (page number to its images) across workers.
 
         Raises:
             Exception: The first page failure, once every started page has finished; pages
                 still queued never start.
         """
+        failed = threading.Event()
+
+        def run(page: int, page_refs: list[ImageRef]) -> int | None:
+            if failed.is_set():
+                return None
+            try:
+                return self._export_and_save_page(
+                    source_id, bucket_name, s3_prefix, page, page_refs, stop=failed
+                )
+            except BaseException:
+                failed.set()
+                raise
+
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_page = {
-                executor.submit(
-                    self._export_and_save_page, source_id, bucket_name, s3_prefix, page, ids
-                ): page
-                for page, ids in pages.items()
+                executor.submit(run, page, page_refs): page for page, page_refs in pages.items()
             }
-            for completed, fut in enumerate(concurrent.futures.as_completed(future_to_page), 1):
-                page = future_to_page[fut]
+            completed = 0
+            for fut in concurrent.futures.as_completed(future_to_page):
                 try:
-                    rows = fut.result()
+                    annotations = fut.result()
                 except Exception:
                     executor.shutdown(wait=True, cancel_futures=True)
                     raise
+                if annotations is None:
+                    continue
+                completed += 1
+                page = future_to_page[fut]
                 logger.info(
                     "source %s page=%d images=%d annotations=%d completed=%d/%d",
                     source_id,
                     page,
                     len(pages[page]),
-                    rows,
+                    annotations,
                     completed,
                     len(pages),
                 )
@@ -707,10 +890,14 @@ class CoralNetDownloader:
         bucket_name: str,
         s3_prefix: str,
         page_num: int,
-        image_ids: tuple[int, ...],
+        page_refs: list[ImageRef],
+        stop: threading.Event | None = None,
     ) -> int:
-        """Export one page and save it as ``_partial/page-<n>.csv``; return its row count."""
-        chunk = self._export_one_page(source_id, page_num, image_ids)
+        """Export one page and save it as ``_partial/page-<n>.csv``; return its row count.
+
+        ``stop`` ends the page's export retries once set (see :meth:`_export_validated`).
+        """
+        chunk = self._export_one_page(source_id, page_num, page_refs, stop=stop)
         key = _partial_key(s3_prefix, source_id, f"page-{page_num}.csv")
         _upload_csv(self.s3, bucket_name, key, chunk)
         return len(chunk)
@@ -721,14 +908,17 @@ class CoralNetDownloader:
         return base if page_num == 1 else f"{base}?page={page_num}"
 
     def _export_one_page(
-        self, source_id: int, page_num: int, image_ids: tuple[int, ...]
+        self,
+        source_id: int,
+        page_num: int,
+        page_refs: list[ImageRef],
+        stop: threading.Event | None = None,
     ) -> pd.DataFrame:
-        """Export the annotations of ``image_ids``, the images on browse page ``page_num``.
+        """Export the annotations of ``page_refs``, the images on browse page ``page_num``.
 
         Uses a worker-local, independently-logged-in session
         (:meth:`_get_export_session`) so concurrent workers don't trample each other's
-        server-side Django session state. The worker GETs the browse page on its own
-        session to capture a CSRF token bound to that session before POSTing.
+        server-side Django session state.
 
         Sends ``image_select_type=selected`` plus ``image_id_list`` (underscore-
         separated PKs) so CoralNet's ``image_search_kwargs_to_queryset`` filters to just
@@ -737,67 +927,238 @@ class CoralNetDownloader:
         CoralNet's ``ImageSearchForm`` -- omitting it makes the form invalid and the
         serve response returns HTML instead of CSV. CoralNet caps ``image_id_list`` at
         100 entries; browse pages have 20.
+
+        ``stop`` ends the export's retries once set (see :meth:`_export_validated`).
         """
-        session = self._get_export_session()
-        page_url = self._browse_page_url(source_id, page_num)
-        browse_response = session.get(page_url, timeout=_PAGE_EXPORT_TIMEOUT)
-        browse_response.raise_for_status()
-        csrf = parse_export_annotations_prep_form(browse_response.text)
-        if not csrf:
-            raise RuntimeError(
-                f"Worker session: no CSRF on browse page {page_num} of source {source_id}"
-            )
-        form_data = {
-            "csrfmiddlewaretoken": csrf,
-            "browse_action": "export_annotations",
+        form = {
             "image_form_type": "search",
             "image_select_type": "selected",
-            "image_id_list": "_".join(str(pk) for pk in image_ids),
-            "label_format": "both",
-            "optional_columns": [
-                "annotator_info",
-                "metadata_date_aux",
-                "metadata_other",
-            ],
+            "image_id_list": "_".join(str(r.id) for r in page_refs),
+            **_EXPORT_OPTIONS,
         }
-        export_response = session.post(
-            f"{self.CORALNET_URL}/source/{source_id}/annotation/export_prep/",
-            headers={"Referer": page_url},
-            data=form_data,
-            timeout=_PAGE_EXPORT_TIMEOUT,
-            allow_redirects=True,
+        chunk_df = self._export_validated(
+            self._get_export_session(),
+            source_id,
+            self._browse_page_url(source_id, page_num),
+            form,
+            _export_names(page_refs),
+            prep_timeout=_PAGE_EXPORT_TIMEOUT,
+            serve_timeout=_PAGE_EXPORT_TIMEOUT,
+            stop=stop,
         )
-        export_response.raise_for_status()
-        export_timestamp = export_response.json()["session_data_timestamp"]
-        serve_response = session.get(
-            f"{self.CORALNET_URL}/source/{source_id}/export/serve/"
-            f"?session_data_timestamp={export_timestamp}",
-            timeout=_PAGE_EXPORT_TIMEOUT,
-        )
-        serve_response.raise_for_status()
-        chunk_df = pd.read_csv(io.StringIO(serve_response.text))
         time.sleep(_PAGE_DELAY_SECONDS)
         return chunk_df
 
-    def walk_source(self, source_id: int, bucket_name: str, s3_prefix: str) -> list[ImageRef]:
-        """Walk every browse page of a source and return its images, keyed by image id.
+    def _export_validated(
+        self,
+        session: requests.Session,
+        source_id: int,
+        page_url: str,
+        form: dict[str, Any],
+        allowed_names: set[str],
+        *,
+        prep_timeout: int,
+        serve_timeout: int,
+        stop: threading.Event | None = None,
+    ) -> pd.DataFrame:
+        """Return an export whose rows name only ``allowed_names``, retrying the round trip.
+
+        Each further attempt allows ``export_prep`` :data:`_EXPORT_PREP_TIMEOUT_STEP` more
+        seconds. A session CoralNet treats as logged out logs in again before the next attempt.
+        When the previous attempt's ``export_prep`` POST timed out reading its response, the
+        next attempt first sleeps :data:`_EXPORT_PREP_TIMEOUT_RETRY_WAIT_S` (on top of the retry
+        wait), so CoralNet can finish the abandoned export before the next POST.
+
+        Args:
+            session: Logged-in session the export runs on.
+            source_id: CoralNet source id.
+            page_url: Browse page whose export form supplies the CSRF token.
+            form: Export form fields besides the CSRF token.
+            allowed_names: Image names the export may contain.
+            prep_timeout: Read timeout of the first ``export_prep`` POST.
+            serve_timeout: Read timeout of the ``export/serve`` GET.
+            stop: When set before an attempt after the first, the previous attempt's error
+                is raised without another attempt.
+
+        Raises:
+            Exception: The last attempt's error once no attempt is left, it is not
+                worth repeating, or ``stop`` is set.
+        """
+        expired = False
+        last_error: BaseException | None = None
+        for attempt in _retrying(_EXPORT_ATTEMPTS):
+            # Raised outside `with attempt`, so stamina does not retry it.
+            if last_error is not None and stop is not None and stop.is_set():
+                raise last_error
+            if isinstance(last_error, _ExportPrepTimeout):
+                time.sleep(_EXPORT_PREP_TIMEOUT_RETRY_WAIT_S)
+            with attempt:
+                try:
+                    if expired:
+                        self._relogin(session)
+                        expired = False
+                    timeout = min(
+                        _EXPORT_PREP_TIMEOUT_MAX,
+                        prep_timeout + (attempt.num - 1) * _EXPORT_PREP_TIMEOUT_STEP,
+                    )
+                    try:
+                        df = self._export_round_trip(
+                            session, source_id, page_url, form, timeout, serve_timeout
+                        )
+                    except SessionExpired:
+                        expired = True
+                        raise
+                    _check_export_names(df, allowed_names)
+                except Exception as e:
+                    last_error = e
+                    raise
+        return df
+
+    def _export_round_trip(
+        self,
+        session: requests.Session,
+        source_id: int,
+        page_url: str,
+        form: dict[str, Any],
+        prep_timeout: int,
+        serve_timeout: int,
+    ) -> pd.DataFrame:
+        """Fetch the export form's CSRF token, run ``export_prep``, and decode the served CSV.
+
+        Raises:
+            SessionExpired: If the browse page has no export form, ``export_prep`` asks for
+                a sign-in, or the serve lands on the login page.
+            ContentError: If ``export_prep`` or the served CSV is not a valid answer.
+            requests.RequestException: On a transport error or an error status; a
+                ``export_prep`` read timeout is the subclass :class:`_ExportPrepTimeout`.
+        """
+        browse = session.get(page_url, timeout=_PAGE_EXPORT_TIMEOUT)
+        browse.raise_for_status()
+        csrf = parse_export_annotations_prep_form(browse.text)
+        if not csrf:
+            raise SessionExpired(f"browse page {page_url} has no export form")
+        try:
+            prep = self._post_export_prep(
+                session, source_id, {"csrfmiddlewaretoken": csrf, **form}, page_url, prep_timeout
+            )
+        except requests.ReadTimeout as e:
+            raise _ExportPrepTimeout(*e.args, request=e.request, response=e.response) from e
+        prep.raise_for_status()
+        timestamp = _export_timestamp(prep)
+        serve = session.get(
+            f"{self.CORALNET_URL}/source/{source_id}/export/serve/"
+            f"?session_data_timestamp={timestamp}",
+            timeout=serve_timeout,
+        )
+        serve.raise_for_status()
+        return decode_export_csv(serve)
+
+    def _post_export_prep(
+        self,
+        session: requests.Session,
+        source_id: int,
+        form: dict[str, Any],
+        referer: str,
+        timeout: int,
+    ) -> requests.Response:
+        """POST ``export_prep`` and return its response, logging each minute it is still running.
+
+        Raises:
+            requests.RequestException: If the POST fails to complete.
+        """
+        url = f"{self.CORALNET_URL}/source/{source_id}/annotation/export_prep/"
+        outcome: Queue = Queue()
+
+        def post() -> None:
+            try:
+                outcome.put(
+                    session.post(
+                        url,
+                        headers={"Referer": referer},
+                        data=form,
+                        timeout=timeout,
+                        allow_redirects=True,
+                    )
+                )
+            except Exception as e:  # noqa: BLE001 - re-raised on the calling thread
+                outcome.put(e)
+
+        thread = threading.Thread(target=post, daemon=True)
+        started = last_log = time.monotonic()
+        thread.start()
+        while thread.is_alive():
+            thread.join(timeout=1.0)
+            now = time.monotonic()
+            if now - last_log >= _EXPORT_PREP_HEARTBEAT_S:
+                logger.info(
+                    "export_prep still waiting for source %s: elapsed=%.0fs timeout=%ss",
+                    source_id,
+                    now - started,
+                    timeout,
+                )
+                last_log = now
+        result = outcome.get_nowait()
+        if isinstance(result, Exception):
+            raise result
+        return cast(requests.Response, result)
+
+    def walk_source(
+        self, source_id: int, bucket_name: str, s3_prefix: str, *, total_images: int
+    ) -> tuple[list[ImageRef], int]:
+        """Walk every browse page of a source and return its images, checked against its count.
 
         Progress is saved to ``_partial/walk.json`` every
         :data:`_WALK_CHECKPOINT_EVERY_PAGES` pages and when the walk ends. A saved walk
         that ended is returned without any request; an unfinished one continues at
         ``?page=<last page + 1>``.
 
+        A walk is retried up to :data:`_WALK_ATTEMPTS` times. A page that breaks a walk rule
+        (see :func:`_check_walk_page`) resumes from the last checkpoint; a page without the
+        export form logs the session in again first. When the walk ends, the overview is
+        read again: a changed count discards the source's ``_partial/`` and walks against the
+        new count; a walk that found another number of images starts again at page 1.
+
         Args:
             source_id: CoralNet source id.
             bucket_name: Bucket holding the source's ``_partial/``.
             s3_prefix: Key prefix of the scrape.
+            total_images: Image count of the overview when the source's download began.
 
         Returns:
-            The images in walk order; an id seen on two pages is listed once, on the first.
+            The images in walk order, and the overview count they match.
 
         Raises:
-            requests.HTTPError: If a browse page returns an error status.
-            RuntimeError: If a browse page lists no images.
+            Exception: The last attempt's error once no attempt is left or it is not
+                worth repeating, e.g. :class:`WalkIncomplete` or ``requests.HTTPError``.
+        """
+        expected = total_images
+        expired = False
+        for attempt in _retrying(_WALK_ATTEMPTS):
+            with attempt:
+                if expired:
+                    self._relogin(self.session)
+                    expired = False
+                try:
+                    refs = self._walk_once(source_id, bucket_name, s3_prefix, expected)
+                except SessionExpired:
+                    expired = True
+                    raise
+                except _TotalChanged as e:
+                    logger.warning("source %s: %s", source_id, e)
+                    expected = e.total
+                    raise
+        return refs, expected
+
+    def _walk_once(
+        self, source_id: int, bucket_name: str, s3_prefix: str, expected: int
+    ) -> list[ImageRef]:
+        """Finish the source's walk from its saved progress and return its images.
+
+        Raises:
+            SessionExpired: If a browse page has no export form.
+            WalkIncomplete: If a page breaks a walk rule, the overview count is no longer
+                ``expected`` (``_partial/`` is discarded), or the walk found another number
+                of images (the walk's progress is discarded).
         """
         key = _partial_key(s3_prefix, source_id, _WALK_FILE)
         saved = s3_io.read_json_s3(self.s3, bucket_name, key)
@@ -806,26 +1167,60 @@ class CoralNetDownloader:
             return list(progress.refs.values())
         if progress.last_page:
             logger.info("source %s: walk resumes after page %d", source_id, progress.last_page)
+        self._walk_pages(source_id, bucket_name, key, progress)
+        self._check_walk_total(source_id, bucket_name, s3_prefix, len(progress.refs), expected)
+        progress.complete = True
+        s3_io.write_json_s3(self.s3, bucket_name, key, progress.to_json())
+        logger.info("source %s: walk found %d images", source_id, len(progress.refs))
+        return list(progress.refs.values())
+
+    def _walk_pages(
+        self, source_id: int, bucket_name: str, key: str, progress: _WalkProgress
+    ) -> None:
+        """Walk the browse pages after ``progress``, checkpointing it to ``key``.
+
+        Raises:
+            SessionExpired: If a browse page has no export form.
+            WalkIncomplete: If a page breaks a walk rule.
+        """
         url: str | None = self._browse_page_url(source_id, progress.last_page + 1)
         while url is not None:
             response = self.session.get(url, timeout=_PAGE_EXPORT_TIMEOUT)
             response.raise_for_status()
-            thumbs, next_rel = _parse_browse_thumbs(response.text)
-            if not thumbs:
-                raise RuntimeError(
-                    f"No image IDs found on page {progress.last_page + 1} of source "
-                    f"{source_id}; browse page DOM may have changed"
+            thumbs, next_rel, has_form = _parse_browse_thumbs(response.text)
+            if not has_form:
+                raise SessionExpired(
+                    f"browse page {progress.last_page + 1} of source {source_id} has no export form"
                 )
+            _check_walk_page(progress, thumbs, has_next=next_rel is not None)
             progress.add_page(thumbs)
             url = urllib.parse.urljoin(url, next_rel) if next_rel else None
             if url is not None and progress.last_page % _WALK_CHECKPOINT_EVERY_PAGES == 0:
                 s3_io.write_json_s3(self.s3, bucket_name, key, progress.to_json())
             if progress.last_page % _BROWSE_PROGRESS_EVERY == 0:
                 logger.info("source %s: walked %d pages", source_id, progress.last_page)
-        progress.complete = True
-        s3_io.write_json_s3(self.s3, bucket_name, key, progress.to_json())
-        logger.info("source %s: walk found %d images", source_id, len(progress.refs))
-        return list(progress.refs.values())
+
+    def _check_walk_total(
+        self, source_id: int, bucket_name: str, s3_prefix: str, found: int, expected: int
+    ) -> None:
+        """Read the overview again and check the ``found`` images against it.
+
+        Raises:
+            ContentError: If the overview lists no image count.
+            _TotalChanged: If the count is no longer ``expected``; ``_partial/`` is discarded
+                and a fresh state for the new count is saved.
+            _WalkCountMismatch: If ``found`` differs from the count; ``walk.json`` is discarded.
+        """
+        total = self.fetch_total_images(source_id)
+        if total is None:
+            raise ContentError(f"source {source_id}: overview lists no image count")
+        if total != expected:
+            self._reset_partial(source_id, bucket_name, s3_prefix, total)
+            raise _TotalChanged(total)
+        if found != expected:
+            key = _partial_key(s3_prefix, source_id, _WALK_FILE)
+            self.s3.delete_object(Bucket=bucket_name, Key=key)
+            raise _WalkCountMismatch(found, expected)
 
     def _get_thread_session(self) -> requests.Session:
         """Per-thread session with cookies copied from the main session.
@@ -872,11 +1267,11 @@ class CoralNetDownloader:
             self._export_thread_local.session = s
         return s
 
-    def _resolve_one_image_url(self, rel: str) -> str | None:
+    def _resolve_one_image_url(self, rel: str) -> str:
         """Return the original-image URL found on the image page at the relative link ``rel``.
 
         Raises:
-            ValueError: If the page has no original-image container, e.g. a private source.
+            ValueError: If the page has no original image, e.g. a private source.
         """
         session = self._get_thread_session()
         url = urllib.parse.urljoin(self.CORALNET_URL + "/", rel)
@@ -884,141 +1279,157 @@ class CoralNetDownloader:
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         originals = soup.select("div#original_image_container > img")
-        if not originals:
+        src = originals[0].attrs.get("src") if originals else None
+        if not src:
             raise ValueError(
                 f"CoralNet image {url}: couldn't find original image container (private source?)."
             )
-        return cast("str | None", originals[0].attrs.get("src"))
+        return cast(str, src)
 
-    def get_image_urls(self, image_page_urls: list[str]) -> list[str | None]:
-        """Resolve image-page links to original-image URLs, in input order.
+    def download_image_to_s3(self, url: str, bucket_name: str, s3_key: str) -> int:
+        """Download the original image at ``url``, validate it, and upload it to ``s3_key``.
 
-        A failed lookup always yields None for that entry, with one worker or several.
-        """
-        n = len(image_page_urls)
-        workers = min(self.max_workers, n) if n > 0 else 1
-        results: list[str | None] = [None] * n
-        errors = 0
-        if workers <= 1:
-            for i, rel in enumerate(image_page_urls):
-                try:
-                    results[i] = self._resolve_one_image_url(rel)
-                except Exception as e:  # noqa: BLE001
-                    errors += 1
-                    logger.warning("Failed to resolve image URL %s: %s", rel, e)
-            if errors:
-                logger.warning("Image URL resolution: %d/%d failed", errors, n)
-            return results
-
-        logger.info("Resolving %d image URLs with %d workers", n, workers)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_idx = {
-                executor.submit(self._resolve_one_image_url, rel): i
-                for i, rel in enumerate(image_page_urls)
-            }
-            for done in tqdm(
-                concurrent.futures.as_completed(future_to_idx),
-                total=n,
-                desc="Fetching image URLs",
-                unit="image",
-            ):
-                idx = future_to_idx[done]
-                try:
-                    results[idx] = done.result()
-                except Exception as e:  # noqa: BLE001
-                    errors += 1
-                    logger.warning("Failed to resolve image URL %s: %s", image_page_urls[idx], e)
-        if errors:
-            logger.warning("Image URL resolution: %d/%d failed", errors, n)
-        return results
-
-    def download_image_to_s3(
-        self, url: str, bucket_name: str, s3_key: str, timeout: int = 30
-    ) -> tuple[str, bool]:
-        """Stream the image at ``url`` to ``s3_key`` unless a non-empty object is already there.
+        The body must arrive within :data:`_IMAGE_DEADLINE_S` seconds and fit in
+        :data:`_IMAGE_MAX_BYTES`. The object's content type is the MIME type of the format
+        Pillow detects, whatever the server declared; the format and byte count are
+        metadata.
 
         Returns:
-            ``(s3_key, ok)``; ``ok`` is False when the download or upload failed.
+            The number of bytes uploaded.
+
+        Raises:
+            UrlExpired: If the signed URL has expired.
+            ImageInvalid: If the response or its body is not a whole, decodable image;
+                nothing is uploaded.
+            requests.RequestException: On a transport error or an error status.
         """
+        deadline = time.monotonic() + _IMAGE_DEADLINE_S
+        with self.media.get(url, stream=True, timeout=_IMAGE_TIMEOUT) as response:
+            _check_image_response(response)
+            body = _read_image_body(response, deadline)
+        fmt = validate_image_bytes(body)
+        size = body.getbuffer().nbytes
+        self.s3.put_object(
+            Bucket=bucket_name,
+            Key=s3_key,
+            Body=body,
+            ContentType=Image.MIME.get(fmt, "application/octet-stream"),
+            Metadata={"source-format": fmt, "source-bytes": str(size)},
+        )
+        return size
+
+    def _download_image(
+        self, ref: ImageRef, bucket_name: str, s3_key: str, stop: threading.Event
+    ) -> str:
+        """Resolve and download one image as one retried unit, so an expired URL is resolved again.
+
+        ``stop`` is checked before each attempt: set before the first, the image is not tried;
+        set later, it is not retried.
+
+        Returns:
+            ``"ok"``, ``"skipped"`` when ``stop`` was set before the first attempt, or the
+            failure kind of the last attempt: ``"missing_url"`` when its view page gave no
+            URL, ``"upload_failed"`` when the download or upload failed.
+        """
+        stage = "missing_url"
+        tried = False
         try:
-            if s3_io.object_size(self.s3, bucket_name, s3_key):
-                return s3_key, True
-            response = self.media.get(url, timeout=timeout, stream=True)
-            response.raise_for_status()
-            self.s3.upload_fileobj(
-                response.raw, bucket_name, s3_key, ExtraArgs={"ContentType": "image/jpeg"}
-            )
-            return s3_key, True
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to download image to S3 %s: %s", url, e)
-            return s3_key, False
+            for attempt in _retrying(_IMAGE_ATTEMPTS):
+                if stop.is_set():
+                    if not tried:
+                        return "skipped"
+                    logger.warning("Image %s failed (%s), stage stopped", ref.id, stage)
+                    return stage
+                tried = True
+                with attempt:
+                    stage = "missing_url"
+                    url = self._resolve_one_image_url(ref.view_path)
+                    stage = "upload_failed"
+                    self.download_image_to_s3(url, bucket_name, s3_key)
+        except Exception as e:  # noqa: BLE001 - counted as the image's failure kind
+            logger.warning("Image %s failed (%s): %s", ref.id, stage, e)
+            return stage
+        return "ok"
 
     def download_images(
         self,
-        images: list[tuple[ImageRef, str | None]],
+        refs: list[ImageRef],
         source_id: int,
         bucket_name: str,
         s3_prefix: str = "coralnet-public-images",
     ) -> ImageFailures:
-        """Upload every image of ``images`` that has a URL to S3 in parallel.
+        """Download every image of ``refs`` to S3 across :attr:`max_workers` threads.
+
+        After :data:`_IMAGE_OUTAGE_STREAK` consecutive failed images the stage stops: images
+        not yet started are skipped and running ones are not retried. A skipped image neither
+        extends nor resets the streak.
 
         Args:
-            images: Each image with its original-image URL, or None when it has none.
+            refs: Images to download, whatever is already on S3.
             source_id: CoralNet source id.
             bucket_name: Destination S3 bucket.
             s3_prefix: Destination key prefix.
 
         Returns:
-            Failure counts: images with no URL as ``missing_url``; uploads that reported
-            failure or whose worker raised as ``upload_failed``.
+            Failure counts by kind, as :meth:`_download_image` reports them.
+
+        Raises:
+            KeyboardInterrupt: After cancelling the images not yet started.
         """
-        chunk = [(ref, url) for ref, url in images if url is not None]
-        missing_url = len(images) - len(chunk)
-        if not chunk:
-            logger.warning("No valid Image URL rows for source %s", source_id)
-            return ImageFailures(missing_url=missing_url)
-        successful = 0
-        futures: list[Any] = []
-        workers = self.max_workers
+        outcomes: Counter[str] = Counter()
+        stop = threading.Event()
+        streak = 0
         logger.info(
-            "Image upload for source %s: %d URLs, %d workers", source_id, len(chunk), workers
-        )
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            for ref, url in chunk:
-                sk = s3_io.object_key_image(s3_prefix, source_id, str(ref.id))
-                futures.append(executor.submit(self.download_image_to_s3, url, bucket_name, sk))
-            total = len(futures)
-            for i, fu in enumerate(concurrent.futures.as_completed(futures), 1):
-                try:
-                    _key, ok = fu.result()
-                    if ok:
-                        successful += 1
-                except Exception as e:  # noqa: BLE001
-                    logger.error("image worker error: %s", e)
-                if i % 50 == 0 or i == total:
-                    logger.info(
-                        "Image upload progress source %s: %s/%s",
-                        source_id,
-                        i,
-                        total,
-                    )
-        logger.info(
-            "Uploaded %s/%s images for source %s",
-            successful,
-            len(futures),
+            "Image upload for source %s: %d images, %d workers",
             source_id,
+            len(refs),
+            self.max_workers,
         )
-        return ImageFailures(missing_url=missing_url, upload_failed=len(futures) - successful)
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [
+                executor.submit(
+                    self._download_image,
+                    ref,
+                    bucket_name,
+                    s3_io.object_key_image(s3_prefix, source_id, str(ref.id)),
+                    stop,
+                )
+                for ref in refs
+            ]
+            try:
+                for i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+                    outcome = fut.result()
+                    outcomes[outcome] += 1
+                    streak = _next_image_streak(streak, outcome)
+                    if streak >= _IMAGE_OUTAGE_STREAK and not stop.is_set():
+                        stop.set()
+                        logger.warning(
+                            "Image upload for source %s stopped after %d consecutive failures",
+                            source_id,
+                            streak,
+                        )
+                    if i % 50 == 0 or i == len(futures):
+                        logger.info(
+                            "Image upload progress source %s: %s/%s", source_id, i, len(refs)
+                        )
+            except KeyboardInterrupt:
+                stop.set()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+        logger.info("Uploaded %s/%s images for source %s", outcomes["ok"], len(refs), source_id)
+        return ImageFailures(
+            missing_url=outcomes["missing_url"],
+            upload_failed=outcomes["upload_failed"],
+            skipped=outcomes["skipped"],
+        )
 
     def _download_missing_images(
         self, refs: list[ImageRef], source_id: int, bucket_name: str, s3_prefix: str
     ) -> ImageFailures:
-        """Upload every image of ``refs`` that has no non-empty object on S3 yet.
-
-        Image URLs are resolved, then uploaded, in batches of :data:`_IMAGE_BATCH_SIZE`.
+        """Download every image of ``refs`` that has no non-empty object on S3 yet.
 
         Returns:
-            The failure counts summed over every batch.
+            The failure counts of :meth:`download_images`.
         """
         images_prefix = f"{s3_io.source_prefix(s3_prefix, source_id)}images/"
         stored = {
@@ -1032,17 +1443,7 @@ class CoralNetDownloader:
         logger.info(
             "Source %s: %d of %d images already on S3", source_id, len(refs) - len(todo), len(refs)
         )
-        failures = ImageFailures()
-        for start, end in half_open_batches(len(todo), _IMAGE_BATCH_SIZE):
-            batch_refs = todo[start:end]
-            urls = self.get_image_urls([r.view_path for r in batch_refs])
-            batch = self.download_images(
-                list(zip(batch_refs, urls, strict=True)), source_id, bucket_name, s3_prefix
-            )
-            failures = ImageFailures(
-                missing_url=failures.missing_url + batch.missing_url,
-                upload_failed=failures.upload_failed + batch.upload_failed,
-            )
+        failures = self.download_images(todo, source_id, bucket_name, s3_prefix)
         if failures != ImageFailures():
             logger.warning(
                 "Source %s image failures: %d missing URL, %d upload failed",
@@ -1249,19 +1650,22 @@ class CoralNetDownloader:
         bucket_name: str,
         s3_prefix: str,
         state: dict[str, Any],
-        total_images: int,
     ) -> list[ImageRef]:
         """Return the walk's images, uploading ``image_list.csv`` unless the walk stage is done.
 
+        A walk that ended on a changed overview count starts ``state`` afresh with that count,
+        as the walk already discarded the rest of ``_partial/``.
+
         Raises:
-            _WalkCountMismatch: If the walk found other than ``total_images`` images, after
-                deleting ``_partial/walk.json`` so the next run walks again.
+            _WalkCountMismatch: If the last walk attempt found other than the overview's count
+                of images; ``_partial/walk.json`` is deleted so the next run walks again.
         """
-        refs = self.walk_source(source_id, bucket_name, s3_prefix)
-        if len(refs) != total_images:
-            walk_key = _partial_key(s3_prefix, source_id, _WALK_FILE)
-            self.s3.delete_object(Bucket=bucket_name, Key=walk_key)
-            raise _WalkCountMismatch(len(refs), total_images)
+        refs, total = self.walk_source(
+            source_id, bucket_name, s3_prefix, total_images=state["total_images"]
+        )
+        if total != state["total_images"]:
+            state.update(total_images=total, stages=[])
+            self._save_state(source_id, bucket_name, s3_prefix, state)
         if "walk" not in state["stages"]:
             list_key = s3_io.object_key_image_list_csv(s3_prefix, source_id)
             _upload_csv(self.s3, bucket_name, list_key, _image_list_frame(refs))
@@ -1281,8 +1685,9 @@ class CoralNetDownloader:
     ) -> DownloadResult:
         """Run the stages of a source with images, then verify it and write its marker.
 
-        A walk that finds other than ``total_images`` images ends the download with
-        ``walk_count_mismatch:<found>!=<total>`` before the export; the walk is not recorded.
+        A walk whose last attempt finds other than the overview's count of images ends the
+        download with ``walk_count_mismatch:<found>!=<total>`` before the export; the walk is
+        not recorded.
         """
         sid = source_id
         state = self._load_state(sid, bucket_name, s3_prefix, total_images) or self._reset_partial(
@@ -1290,13 +1695,14 @@ class CoralNetDownloader:
         )
         errs = self._download_details(sid, bucket_name, s3_prefix, overview_html, state)
         try:
-            refs = self._walk_and_list(sid, bucket_name, s3_prefix, state, total_images)
+            refs = self._walk_and_list(sid, bucket_name, s3_prefix, state)
         except _WalkCountMismatch as e:
             logger.error("Source %s: %s", sid, e)
             return DownloadResult(False, errors=[*errs, str(e)])
         except Exception:
             logger.exception("Source %s: browse walk failed", sid)
             return DownloadResult(False, errors=[*errs, "image_list_failed"])
+        total_images = state["total_images"]
         if "export" not in state["stages"]:
             if not self.download_annotations(
                 sid, bucket_name, s3_prefix, refs=refs, total_images=total_images
