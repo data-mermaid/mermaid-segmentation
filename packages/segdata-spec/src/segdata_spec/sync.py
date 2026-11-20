@@ -78,6 +78,13 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _umask() -> int:
+    """Return the process umask; ``os.umask`` has no getter, so set and restore it."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
 def _write_atomic(path: Path, data: bytes) -> None:
     """Write via a temp file in the same directory so a reader never sees a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +92,8 @@ def _write_atomic(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+        # mkstemp creates 0600; widen to the mode a normally created file gets.
+        os.chmod(tmp, 0o666 & ~_umask())
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

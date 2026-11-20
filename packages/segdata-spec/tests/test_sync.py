@@ -1,4 +1,7 @@
+import os
 import re
+import stat
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -35,6 +38,15 @@ def cache(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def umask_027() -> Iterator[None]:
+    previous = os.umask(0o027)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+@pytest.fixture
 def pin(fake_s3: FakeS3, tmp_path: Path) -> Pin:
     return publish_version(fake_s3, tmp_path)[1]
 
@@ -57,6 +69,15 @@ def test_sync_caches_tables_and_images_under_bucket_and_key(fake_s3, pin, cache)
         )
     }
     assert result.taxonomy is None
+
+
+def test_sync_writes_cached_files_with_umask_applied_mode(fake_s3, pin, cache, umask_027):
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    image = cache / IMG_BUCKET / "images/ds/a.jpg"
+    table = cache / BUCKET / PREFIX / "images.parquet"
+    assert stat.S_IMODE(image.stat().st_mode) == 0o640
+    assert stat.S_IMODE(table.stat().st_mode) == 0o640
 
 
 @pytest.mark.parametrize(
