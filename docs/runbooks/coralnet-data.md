@@ -10,6 +10,7 @@ The package READMEs are the reference for flags, environment variables, exclusio
 - [Before you start](#before-you-start)
 - [Recreate the data from scratch](#recreate-the-data-from-scratch)
 - [Update the data](#update-the-data)
+- [Adopt an existing bucket](#adopt-an-existing-bucket)
 - [Tune the request rate](#tune-the-request-rate)
 - [Use the new build in training](#use-the-new-build-in-training)
 - [When something fails](#when-something-fails)
@@ -18,7 +19,7 @@ The package READMEs are the reference for flags, environment variables, exclusio
 ## Before you start
 
 - **AWS credentials.** Both packages use the default boto3 credential chain, for example `AWS_PROFILE`.
-- **CoralNet login.** The scraper reads `CORALNET_USERNAME` and `CORALNET_PASSWORD` when both are set. Otherwise it prompts on the terminal.
+- **CoralNet login.** The scraper reads `CORALNET_USERNAME` and `CORALNET_PASSWORD` when both are set. Otherwise it prompts on the terminal. Only the scraper run logs in; `verify-existing` and `invalidate` read no credentials.
 - **Environment.** Copy the CoralNet variables from `.env.example` into `.env`. Nothing loads `.env` for you, so export it in each shell before you run a command:
 
   ```bash
@@ -29,6 +30,8 @@ The package READMEs are the reference for flags, environment variables, exclusio
 - **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the `source_bucket` of `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`). See [Use a build in training](../../packages/coralnet-dataset/README.md#use-a-build-in-training).
 
 - **Request rate.** The scraper sends requests without a rate limit unless you set one. To choose a limit, see [Tune the request rate](#tune-the-request-rate).
+
+- **Earlier scraper version.** If the bucket was filled by an earlier scraper version, its source folders have no `_complete.json`. Do [Adopt an existing bucket](#adopt-an-existing-bucket) first. A plain run would scrape every source again.
 
 Run every command from the repository root.
 
@@ -61,7 +64,7 @@ Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
 
 ### Check the build
 
-1. Read the summary that each step logs: the excluded sources from `build-annotations`, the count per `header_status` from `build-images`, and the resized, oversized, corrupted and failed counts from `resize`.
+1. Read the summary that each step logs: the excluded sources from `build-annotations` (it excludes a source with no `_complete.json` as `not_complete`), the count per `header_status` from `build-images`, and the resized, oversized, corrupted and failed counts from `resize`.
 2. Check the exit code. Exit code 1 from `all` means at least one step reported failures. Every step still runs and writes its outputs.
 3. Confirm that `etl-outputs/coralnet/<run>/` in the bucket holds four files:
    - `coralnet_annotations_<run>.parquet`
@@ -75,17 +78,21 @@ The resized images are not in that directory. `resize` writes them under `<resiz
 
 ### Add new sources
 
-Re-run the scraper without flags. It skips each source that already has `annotations.csv` on S3, so it downloads new sources and any source that failed before its annotations upload.
+Run the scraper without flags. It skips each source that has a `_complete.json` marker on S3, so it downloads new sources and finishes any source that is incomplete.
 
 ### Pick up new annotations or images in existing sources
 
-The scraper skips existing sources, so it does not see changes to them. To pick them up, run it with `--force`:
+The scraper skips complete sources, so it does not see changes to them. To pick up the changes:
 
-```bash
-uv run --package coralnet-scraper coralnet-scrape --force
-```
+1. Delete the markers of the sources whose live image count differs from the count in their marker:
 
-`--force` reprocesses every source, not only the changed ones; see [Resume and `--force`](../../packages/coralnet-scraper/README.md#resume-and---force) for what it exports again and what it keeps.
+   ```bash
+   uv run --package coralnet-scraper coralnet-scrape invalidate --changed
+   ```
+
+2. Run the scraper without flags. It redoes the invalidated sources. Image objects already on S3 are skipped.
+
+`--changed` compares image counts only, so it does not see an annotation change that leaves the count the same. To redo specific sources, use `invalidate --source-ids <id>,<id>,...`. To redo every source, use `invalidate --all`, which forces a full re-export of every source. See [Resume](../../packages/coralnet-scraper/README.md#resume).
 
 ### Rebuild under a new version tag
 
@@ -99,6 +106,42 @@ uv run --package coralnet-dataset coralnet-dataset all --version-tag <new-run> -
 
 Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
 
+## Adopt an existing bucket
+
+Use this once for a bucket that an earlier version of the scraper filled, so it has sources without `_complete.json`. The earlier version inferred "done" from `annotations.csv`, so its sources can be incomplete.
+
+1. Tune the request rate; see [Tune the request rate](#tune-the-request-rate).
+2. Verify the sources that have no marker and mark those that pass:
+
+   ```bash
+   uv run --package coralnet-scraper coralnet-scrape verify-existing
+   ```
+
+   This sends one overview request per source and reads every source's CSVs from S3.
+3. Run the scraper without flags. It downloads every source that has no marker again. Image objects already on S3 are skipped.
+
+   > **Warning:** `--prune` deletes cannot be undone unless the bucket has S3 versioning enabled. Before step 4, read the `orphan_image_objects:<n>` count in each source's marker.
+4. For each source that has an `orphan_image_objects` warning in its marker, delete the image objects that are not in its image list. Step 2 already marked these sources, and the scraper skips a marked source, so remove the markers first:
+
+   1. Remove the marker of each source:
+
+      ```bash
+      uv run --package coralnet-scraper coralnet-scrape invalidate --source-ids <id>,<id>,...
+      ```
+
+   2. Run the scraper with `--prune` on the same sources:
+
+      ```bash
+      uv run --package coralnet-scraper coralnet-scrape --prune --source-ids <id>,<id>,...
+      ```
+
+   `--prune` deletes only for a source that verifies in that run.
+5. Rebuild the dataset under a new version tag:
+
+   ```bash
+   uv run --package coralnet-dataset coralnet-dataset all --version-tag <new-run> --upload-to-s3
+   ```
+
 ## Tune the request rate
 
 Find the highest request rate at which CoralNet answers without 429s, retries or transport failures. The scraper has no rate limit by default.
@@ -109,7 +152,7 @@ Find the highest request rate at which CoralNet answers without 429s, retries or
    MERMAID_CORALNET_PREFIX=scratch/rate-tuning uv run --package coralnet-scraper coralnet-scrape --source-ids <id>,<id>,...
    ```
 
-   The run includes image traffic because the scratch prefix is empty. Before each further iteration, delete the scratch prefix from the bucket: the resume rule skips sources already on S3, so deleting it makes each run download the same sources again.
+   The run includes image traffic because the scratch prefix is empty. Before each further iteration, delete the scratch prefix from the bucket: a source with a marker is skipped, so deleting the prefix makes each run download the same sources again.
 2. Read the [run report](../../packages/coralnet-scraper/README.md#run-report) at `s3://<bucket>/scratch/rate-tuning/_runs/<UTC time>-<short id>.json`. Note the `429` and 5xx counts, the `timeout` and `connection` counts under `transport.retries`, the failed sources, and `transport.mean_rate_per_s`.
 3. If there is any 429, if retried requests exceed 1% of `transport.requests`, or if any source failed for a transport reason, set `--requests-per-second` to half the observed `transport.mean_rate_per_s`, which counts retries too. If timeouts dominate, also halve `--scraper-workers`. Repeat from step 1.
 4. Stop at the first setting with no 429, retries under 1% of requests and no transport failures. Record it in the table below, and set the values in `.env`: `MERMAID_CORALNET_REQUESTS_PER_SECOND`, `MERMAID_CORALNET_SCRAPER_WORKERS` and, if you changed it, `MERMAID_CORALNET_EXPORT_WORKERS`.
@@ -144,7 +187,11 @@ Each CoralNet split has a `whitelist_sources` list, and `CoralNetDataset` keeps 
 
 ### Map new labels
 
-A label name in the build's `coralnet_id2name_<run>.json` trains as background when `configs/coralnet_to_mermaid_mapping_temporary.json` has no key for it, or its value is `null` (`mermaidseg/dataset_reconciliation/label_mapping.py`, `mermaidseg/dataset_reconciliation/registry.py`). Names are matched lowercased. Before training, give each new label a MERMAID benthic-attribute name.
+Training reads the CoralNet mapping from the MERMAID LabelMapping API (`/v1/classification/labelmappings/?provider=CoralNet`). Rows are keyed by CoralNet label id, and the build's `coralnet_id2name_<run>.json` names each id, so a label renamed in CoralNet still maps. A CoralNet label trains as background when the API has no row for its id, or when the row's `benthic_attribute_name` is null (`mermaidseg/dataset_reconciliation/label_mapping.py`, `mermaidseg/dataset_reconciliation/registry.py`). Before training, add the missing rows in MERMAID and fill in `benthic_attribute_name` on rows where it is null. There is no mapping file in this repo to edit.
+
+Each run records the rows it used. `model.json` lineage has `data_version.label_mappings.coralnet` (source, sha256, row count, fetch time), and the tracker run has the rows as `metadata/label_mappings/coralnet.json`. An online run fails if the API call fails; it does not fall back to an old copy.
+
+A change in the API changes the class set of the next run. Compare `metadata/id2label.json` with the baseline run before you compare metrics.
 
 ### Duplicates in new sources
 
@@ -152,7 +199,7 @@ A label name in the build's `coralnet_id2name_<run>.json` trains as background w
 
 ### Warm the offline cache again
 
-An offline run (`MERMAIDSEG_S3_OFFLINE=1`) fails on any cache miss. The new manifest, its id2name JSON and new images are not in a cache that you filled before. Fill it again, using the same data config as the training run. The data config selects the build:
+An offline run (`MERMAIDSEG_S3_OFFLINE=1`) fails on any cache miss. The new manifest, its id2name JSON and new images are not in a cache that you filled before. When `coralnet` is in the selected datasets, the prefetch also saves the CoralNet LabelMapping rows into the cache (`<cache>/_mermaid_api/classification/labelmappings/coralnet.json`). Only the prefetch writes that snapshot, and an online run does not refresh it. An offline run uses the snapshot and raises `DataLoadError` when it is missing, so fill the cache again to pick up mapping changes. If the API call fails, the prefetch raises and keeps the existing snapshot. Fill it again, using the same data config as the training run. The data config selects the build:
 
 ```bash
 uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
@@ -165,23 +212,26 @@ uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
 | Failure | What to do |
 |---|---|
 | Scraper exit 1: login failure | Check `CORALNET_USERNAME` and `CORALNET_PASSWORD`, then run again. |
-| Scraper exit 1: a source failed with `metadata_download_failed`, `labelset_failed`, `image_list_failed`, `images_missing_url` or `images_upload_failed` | Unless it also failed with `annotations_failed`, the source has `annotations.csv` on S3, so a plain re-run skips it. Run the scraper with `--force`. |
-| Scraper exit 1: a source failed with any other kind, for example `annotations_failed` or an exception class name | If the source has no `annotations.csv` on S3, run the scraper again without flags. If it has one, run with `--force`. |
-| `build-annotations` excluded a source with `annotations_missing` | Run the scraper again without flags, then rebuild. |
-| `build-annotations` excluded a source with `image_list_missing` | Run the scraper with `--force`, then rebuild. |
-| `build-annotations` excluded a source with `labelset_missing` | Check the source on CoralNet. If it has no labels, the scraper writes no `labelset.csv` and the exclusion is expected. If it has labels, the labelset step failed (`labelset_failed` in the scraper summary): delete the source's `annotations.csv` or run the scraper with `--force`, then rebuild. |
-| `build-annotations` excluded a source with `csv_read_failed` | Rebuild first. If it repeats, run the scraper with `--force`, then rebuild. |
-| `build-annotations` excluded a source with `columns_missing` or `annotations_empty` | The CSV on S3 is bad, or, for `annotations_empty`, the source may have no annotations. Run the scraper with `--force` to export it again, then rebuild. |
-| `build-annotations` excluded a source with `image_list_incomplete` or `label_unnamed` | The source CSVs do not agree with each other. Run the scraper with `--force`, then rebuild. |
-| `build-images` reports `not_found` | The image object is not on S3. Run the scraper with `--force` to upload it, then rebuild. |
+| Scraper exit 1: a source failed with `cannot access source <id>: …` | The source is missing or private on CoralNet. Running again does not help. The failure does not stop the run. |
+| Scraper stopped with `Run stopped early: circuit_open` (exit 1) | CoralNet is likely down or rejecting requests. Wait, then check the transport tallies in the [run report](../../packages/coralnet-scraper/README.md#run-report). Run the same command again. If the tallies show 429 retries, lower `--requests-per-second`. |
+| Scraper exit 1: a source failed with any other kind, except `verification_failed` | The source has no marker, so run the scraper again without flags. To retry only that source, add `--source-ids <id>`. |
+| Scraper exit 1: a source failed with `verification_failed` | The log lists the [verification codes](../../packages/coralnet-scraper/README.md#verification). The source has no marker and its `_partial/` is discarded. Run the scraper again without flags. If the same codes repeat, check the source on CoralNet. |
+| Scraper exit 1: a source failed with `overview_total_missing` | The source's overview page showed no "Total images" count. Check the source page on CoralNet, then run again. The source is retried on each run until it verifies. |
+| Scraper stopped because CoralNet listed fewer sources than the previous run (exit 1, no run report) | Check that CoralNet lists the public sources. If the drop is real, run the scraper with `--allow-source-drop`. |
+| Scraper run was killed or the machine stopped | Run the same command again. Finished stages and pages are kept in `_partial/`. |
+| `build-annotations` excluded a source with `annotations_missing` | Run the scraper again without flags, then rebuild. If the source has a marker, run `invalidate --source-ids <id>` first. |
+| `build-annotations` excluded a source with `image_list_missing` | Run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
+| `build-annotations` excluded a source with `labelset_missing` | Check the source on CoralNet. If it has no labels, the scraper writes no `labelset.csv` and the exclusion is expected. If it has labels, the labelset step failed (`labelset_failed` in the scraper summary): run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
+| `build-annotations` excluded a source with `csv_read_failed` | Rebuild first. If it repeats, run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
+| `build-annotations` excluded a source with `columns_missing` or `annotations_empty` | The CSV on S3 is bad, or, for `annotations_empty`, the source may have no annotations. Run `invalidate --source-ids <id>`, run the scraper without flags to export it again, then rebuild. |
+| `build-annotations` excluded a source with `image_list_incomplete` or `label_unnamed` | The source CSVs do not agree with each other. Run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
+| `build-images` reports `not_found` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
-| `build-images` reports `corrupt` | The object on S3 is bad. The scraper does not replace an existing image object, so `--force` does not repair it. The manifest drops the image. |
+| `build-images` reports `corrupt` | The object on S3 is bad. The scraper does not replace an existing image object, so `invalidate` does not repair it. The manifest drops the image. |
 | `resize` reports corrupted or failed images | Run the build again. `resize` retries every image that has no resized object, so a rerun helps only if the cause was transient. The manifest drops an image that needs a resize and has none. |
 | `resize` reports oversized images | The original exceeds twice Pillow's `MAX_IMAGE_PIXELS`, the decompression-bomb error threshold. A rerun skips the image again and `resize` exits 1 again. The manifest drops the image. |
 
-`--force` is all-or-nothing: it reprocesses every source, not only the failed one. After a scrape, always rebuild under a new version tag.
-
-A partial `annotations.csv` from an interrupted paginated export is not detectable. Neither the scraper nor the build reports it, so the build includes that source with fewer images than CoralNet has. See [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
+After a scrape, always rebuild under a new version tag.
 
 ## Known gaps
 

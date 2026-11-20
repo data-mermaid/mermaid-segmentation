@@ -168,6 +168,13 @@ def test_data_version_lists_manifest_sha256_of_datasets_that_have_one():
     }
 
 
+def test_data_version_records_the_label_mapping_provenance():
+    provenance = {"coralnet": {"source": "api", "sha256": "bb22", "n_records": 3}}
+
+    assert data_version({}, {}, provenance)["label_mappings"] == provenance
+    assert data_version({}, {})["label_mappings"] == {}
+
+
 @pytest.mark.parametrize(
     ("own", "source", "expected"),
     [

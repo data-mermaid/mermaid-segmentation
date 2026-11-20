@@ -53,16 +53,23 @@ def _uv_lock_sha256() -> str | None:
     return hashlib.sha256(lock.read_bytes()).hexdigest()
 
 
-def data_version(cfg_data_plain: dict, datasets: Mapping[tuple[str, str], Any]) -> dict:
-    """Hash of the data config plus the manifest path and sha256 of each dataset that has one.
+def data_version(
+    cfg_data_plain: dict,
+    datasets: Mapping[tuple[str, str], Any],
+    label_mappings: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict:
+    """Hash of the data config, each dataset's manifest path and sha256, and the label mappings.
 
     Args:
         cfg_data_plain: The ``data`` config section as plain containers.
         datasets: Built datasets keyed by ``(name, split)``.
+        label_mappings: Provenance of each API-backed label mapping, keyed by source dataset
+            (see ``SourceLabelRegistry.label_mapping_provenance``).
 
     Returns:
         ``{"data_config_sha1": ..., "manifests": {"<name>.<split>": manifest_path},
-        "manifest_sha256": {"<name>.<split>": sha256}}``.
+        "manifest_sha256": {"<name>.<split>": sha256},
+        "label_mappings": {"<source>": {"source", "sha256", "n_records", "fetched_at"}}}``.
     """
     config_json = json.dumps(cfg_data_plain, sort_keys=True, default=str)
     return {
@@ -77,6 +84,7 @@ def data_version(cfg_data_plain: dict, datasets: Mapping[tuple[str, str], Any]) 
             for (name, split), ds in datasets.items()
             if hasattr(ds, "manifest_sha256")
         },
+        "label_mappings": {name: dict(info) for name, info in (label_mappings or {}).items()},
     }
 
 

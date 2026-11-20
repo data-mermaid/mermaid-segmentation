@@ -20,12 +20,15 @@ Each source is written under `s3://<bucket>/<prefix>/s<source_id>/`:
 | `annotations.csv` | CoralNet annotation export of the whole source. |
 | `image_list.csv` | One row per image from the browse pages; the `Image URL` column is empty. |
 | `images/<image_id>.jpg` | One object per image, keyed by the numeric CoralNet image id. |
+| `_complete.json` | The [completion marker](#resume). Written last, after verification. `coralnet-dataset` reads only the sources that have it. |
+| `_partial/` | Progress of a source that is not complete. Deleted after the marker is written. |
 
-Each run also writes one run-level object under `s3://<bucket>/<prefix>/_runs/`:
+Each run also writes run-level objects under `s3://<bucket>/<prefix>/`:
 
 | Object | Content |
 |---|---|
 | `_runs/<UTC time>-<short id>.json` | The [run report](#run-report) of one run. |
+| `_meta/discovered_source_ids.json` | The source ids listed by CoralNet in the previous run. Used by the [discovery guard](#discovery-guard). |
 
 `<bucket>` and `<prefix>` come from the environment variables below.
 
@@ -41,24 +44,44 @@ Flags:
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--force` | off | Process every source, including those already on S3. |
-| `--delay-seconds` | `0.0` | Pause after each source not skipped by the resume check. |
+| `--delay-seconds` | `0.0` | Pause after each source not skipped by the [resume](#resume) check. |
 | `--scraper-workers` | auto | Concurrent image download and upload workers. Overrides `MERMAID_CORALNET_SCRAPER_WORKERS`. |
 | `--source-ids` | all public sources | Comma-separated CoralNet source ids. The run processes only these, in the given order, after source discovery. An id that is not in the public listing is still attempted. |
 | `--requests-per-second` | no limit | Maximum request rate, a finite positive number. The limit applies to the first attempt of each CoralNet request and is shared by all threads. Retries wait for their backoff or the server's `Retry-After` and do not count against the limit. Image downloads from S3 pre-signed URLs are never limited. Overrides `MERMAID_CORALNET_REQUESTS_PER_SECOND`. |
 | `--export-workers` | `3` | Concurrent page exports for sources with more than 5000 images. Overrides `MERMAID_CORALNET_EXPORT_WORKERS`. |
+| `--prune` | off | After a source verifies and before its marker is written, delete the image objects that are not in the source's image list. Sources that already have a marker are not touched. Deletes cannot be undone unless the bucket has S3 versioning enabled. Read the `orphan_image_objects:<n>` [warning](#verification) in the source's marker first. Default run only; a subcommand rejects it with exit code 2. |
+| `--allow-source-drop` | off | Continue when CoralNet lists fewer than 95% of the sources of the previous run. See [Discovery guard](#discovery-guard). Default run only; a subcommand rejects it with exit code 2. |
 | `-v`, `--verbose` | off | Debug logging. |
 
-The command logs in to CoralNet, discovers the public source ids from `https://coralnet.ucsd.edu/source/about/`, and downloads each source. A failed login ends the run with exit code 1.
+Every run flag is safe to repeat: running the same command again after a failure or a kill resumes the work. Operations that change state are subcommands:
+
+| Command | Effect |
+|---|---|
+| `coralnet-scrape verify-existing [--source-ids <ids>]` | Verifies each source that has no marker against CoralNet's live image count, and writes the marker for each source that passes. Without `--source-ids`, it checks every discovered source that has no marker. Reports `overview_total_missing` for a source whose overview page shows no image count. Used to adopt a bucket scraped before markers existed. Reads no credentials and does not log in. |
+| `coralnet-scrape invalidate --source-ids <ids>` | Deletes the marker and `_partial/` of the listed sources. |
+| `coralnet-scrape invalidate --all` | Deletes the marker and `_partial/` of every source. The next plain run exports every source again. |
+| `coralnet-scrape invalidate --changed` | Deletes the marker and `_partial/` of each marked source whose live CoralNet image count differs from the count in its marker. |
+
+`invalidate` changes state only. Run the plain command afterwards to download. `invalidate` reads no credentials and does not log in. It deletes the marker and `_partial/`, which cannot be undone unless the bucket has S3 versioning enabled.
+
+There is no `--force` flag.
+
+A plain run on a bucket that has source folders but no marker in any of them logs a warning at the start. The warning points to `verify-existing`; without it every source downloads again. See [Adopt an existing bucket](../../docs/runbooks/coralnet-data.md#adopt-an-existing-bucket).
+
+The run logs in to CoralNet, discovers the public source ids from `https://coralnet.ucsd.edu/source/about/`, and downloads each source. A failed login ends the run with exit code 1. CoralNet overview pages are public, so `verify-existing` and `invalidate` do not log in.
 
 An exception inside one source, in the skip check or the download, is logged and recorded under its exception class name. The run continues with the next source.
 
 A source fails when:
 
 - any of its images had no image URL (`images_missing_url`) or failed to upload (`images_upload_failed`). These still fail the source and set exit code 1, but do not count toward the [circuit breaker](#retries-and-circuit-breaker);
-- the metadata, labelset, annotations, or image list step failed, or the source could not be accessed;
+- the metadata, labelset, annotations, or image list step failed;
+- the browse walk found a different number of images than the overview reports (`walk_count_mismatch:<found>!=<total>`). Only the saved walk is discarded and the next run walks again. The export and the images are not attempted. This failure does not count toward the circuit breaker;
+- the source is not accessible (`cannot access source <id>: <reason>`). The reason is CoralNet's page text, for example `Permission denied`, or `HTTP 403` or `HTTP 404` for a missing or private source. This failure does not count toward the [circuit breaker](#retries-and-circuit-breaker);
+- verification of the source failed (`verification_failed`, with the [codes](#verification));
+- the overview page shows no "Total images" count (`overview_total_missing`; `verify-existing` reports it too);
 - CoralNet login failed for the source (`login failed`);
-- the source overview page could not be fetched (`overview fetch failed: <exception class>: <message>`);
+- the source overview page could not be fetched (`overview fetch failed: <exception class>: <message>`, for 5xx responses, timeouts and connection errors). This failure counts toward the circuit breaker;
 - an exception was raised for it, as above.
 
 At the end the run logs a summary at error level: the number of failed sources, then one line per error kind with the sorted source ids. Image kinds give the image count per source, for example `images_missing_url: 202 (14 images)`. A failed source with no error code is listed under `no_error_code`.
@@ -67,24 +90,34 @@ Exit code:
 
 | Code | When |
 |---|---|
-| 0 | Every source downloads or is skipped. A source with zero Confirmed images, or with zero images, counts as skipped. |
-| 1 | The CoralNet login fails, any source fails, the [circuit breaker](#retries-and-circuit-breaker) stops the run, the [run report](#run-report) cannot be written to S3, even when every source succeeded (after the transport figures and failure summary are logged, the run logs `Could not write run report s3://<bucket>/<key>`), or the run stops on an uncaught error (invalid configuration, source discovery failure). |
+| 0 | Every source downloads or is skipped. A source with a marker, with zero Confirmed images, or with zero images counts as skipped. |
+| 1 | The CoralNet login fails, the source listing is empty, any source fails, the [circuit breaker](#retries-and-circuit-breaker) stops the run, the [run report](#run-report) cannot be written to S3, even when every source succeeded (after the transport figures and failure summary are logged, the run logs `Could not write run report s3://<bucket>/<key>`), the [discovery guard](#discovery-guard) stops the run (no run report is written), or the run stops on an uncaught error (invalid configuration, source discovery failure). |
+
+Exit code of the subcommands:
+
+| Command | Code | When |
+|---|---|---|
+| `verify-existing` | 0 | Every checked source verifies, or is skipped because it has a marker. |
+| `verify-existing` | 1 | Any source fails verification, or verification raises for it. Each failure is logged as an error. |
+| `invalidate` | 0 | The selected sources are invalidated. |
+| `invalidate` | 1 | `--changed` could not read the live image count of some source. The sources that could be checked are still invalidated. |
 
 ### Retries and circuit breaker
 
 - **Retries.** A GET request is retried up to 5 times on timeouts, dropped connections, and HTTP 429, 500, 502, 503 and 504 that occur before the response headers arrive. A connection dropped while the body is being read is not retried. The wait grows exponentially with jitter and honours the `Retry-After` header. A request that could not connect is retried whatever its method, because it was never sent.
-- **Circuit breaker.** After 5 consecutive failed sources the run stops. A source whose only errors are `images_missing_url` or `images_upload_failed` does not count toward the streak and resets it. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped by the resume check neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
+- **Circuit breaker.** After 5 consecutive outage-type failures the run stops. Outage-type failures are a raised exception, a failure with no error code, `login failed`, `overview fetch failed …`, `annotations_failed` and `image_list_failed`. Other failed sources, for example `cannot access source <id>: <reason>`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped because it is complete neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
 
 ### Run report
 
-After the batch loop finishes or the circuit breaker stops it, the run writes a JSON report to `s3://<bucket>/<prefix>/_runs/<UTC time>-<short id>.json`. A failed login or failed source discovery ends the run before this point, so it writes no report.
+After the batch loop finishes or the circuit breaker stops it, the run writes a JSON report to `s3://<bucket>/<prefix>/_runs/<UTC time>-<short id>.json`. A failed login, failed source discovery or a [discovery guard](#discovery-guard) stop ends the run before this point, so it writes no report.
 
 | Field | Content |
 |---|---|
-| `settings` | `scraper_workers`, `export_workers`, `requests_per_second` (`null` = no limit), `source_ids` (`null` = every public source). |
+| `settings` | `scraper_workers`, `export_workers`, `requests_per_second` (`null` = no limit), `source_ids` (`null` = every public source), `prune` and `allow_source_drop` (booleans). |
 | `started_at`, `finished_at` | Run start and end, ISO 8601 UTC. |
 | `duration_s` | Run time in seconds. |
-| `sources` | Per attempted source id: `{"ok": bool, "errors": [codes]}`. Sources skipped by the resume check are absent. |
+| `sources` | Per attempted source id: `{"ok": bool, "errors": [codes]}`. Skipped sources are absent. |
+| `skipped` | `{"complete": count, "no_confirmed": [ids], "no_images": [ids]}`. `complete` counts the sources skipped because they have a marker. `no_confirmed` and `no_images` list the sources with zero Confirmed images and with zero images. |
 | `stopped` | `null`, or why the run stopped early: `circuit_open`. |
 | `transport` | `requests`: requests sent, retries included. `mean_rate_per_s`: `requests` divided by the run time. `retries`: retries by cause: `"429"`, each 5xx code, `"timeout"`, `"connection"`. `final_status`: final responses per status code. |
 
@@ -111,17 +144,52 @@ set -a; source .env; set +a
 
 A flag overrides its environment variable.
 
-Without both credential variables the command prompts for the username and password on the terminal.
+Without both credential variables the run prompts for the username and password on the terminal. `verify-existing` and `invalidate` read no credentials.
 
 S3 access uses the default boto3 credential chain, for example `AWS_PROFILE`.
 
-### Resume and `--force`
+### Resume
 
-- A source is skipped when `<prefix>/s<id>/annotations.csv` exists in S3. The check is made before any download.
-- A source runs metadata, labelset, annotations, image list, then images. A failure in the metadata or labelset step does not stop the run, so `annotations.csv` is still uploaded. A source that failed with `annotations.csv` already uploaded is skipped on the next run unless `--force` is set. That covers `metadata_download_failed`, `labelset_failed`, `image_list_failed`, `images_missing_url`, `images_upload_failed`, and a source that stopped after the annotations upload. Find these sources in the failure summary logged at the end of the run. To retry one of them, delete its `annotations.csv` from S3. `--force` retries every source.
-- Sources with zero Confirmed images, or zero images, on CoralNet are skipped, and nothing is written for them.
-- `--force` downloads every source. Image objects already in S3 are not uploaded again.
-- A source with more than 5000 images is exported in pages. It loads an existing `annotations.csv` and merges new rows into it, and uploads a partial file every 50 pages. A source whose export fails (`annotations_failed`) or is interrupted after the first checkpoint leaves that partial `annotations.csv`, which the resume rule skips until `--force`. If the existing file already covers as many images as CoralNet reports, the export is skipped, even with `--force`, so new annotations on existing images are not picked up.
+- A source is complete only when `s<id>/_complete.json` exists. The marker is written last, after the source is verified against CoralNet's image count. A complete source is skipped without any download.
+- Progress inside a source is kept under `s<id>/_partial/`:
+  - `state.json`: the image count of the source overview at the start, the finished stages, and the update time (`total_images`, `stages`, `updated_at`).
+  - `walk.json`: the browse walk, saved every 50 pages.
+  - `page-<n>.csv`: one chunk for each exported page of a source with more than 5000 images.
+- The next run reuses `_partial/` and skips the finished stages, the walked pages, and the exported pages. If CoralNet's image count for the source changed since `_partial/` was started, the next run discards `_partial/` and starts the source again.
+- Recovery from any failure or kill is to run the same command again. Image objects already on S3 are skipped.
+- A source with a failed stage, for example an image that could not be downloaded, keeps its progress and is not verified. The next run redoes the failed stage and every stage after it. Finished earlier stages, saved walk pages, saved export pages and images already on S3 are kept.
+- Verification runs only when every stage succeeded. A source that fails verification has its `_partial/` discarded and no marker. The next run redoes the walk and the export. Image objects already on S3 are skipped.
+- A source with zero Confirmed images, or zero images, gets no marker and nothing is written for it. The next run checks it again, and the run report lists it under `skipped`.
+- To redo a complete source, run `coralnet-scrape invalidate` for it, then the plain command.
+
+### Verification
+
+Before the marker is written, the scraper reads the source back from S3 and compares it with CoralNet's image count. These failures block the marker and fail the source with `verification_failed`:
+
+| Code | Meaning |
+|---|---|
+| `annotations_missing` | `annotations.csv` is absent. |
+| `image_list_missing` | `image_list.csv` is absent. |
+| `image_list_bad_ids` | An image id in the image list cannot be parsed, or occurs twice. |
+| `image_list_count:N!=total` | The image list has N rows and CoralNet reports `total` images. |
+| `annotations_bad_columns` | `annotations.csv` has no `Name` column, or has an HTML or `Unnamed` column. |
+| `annotations_null_name` | An annotation row has no `Name`. |
+| `annotations_name_not_in_list:N` | N image names in `annotations.csv` are not in the image list. |
+| `image_objects_missing:N` | N listed images have no object on S3, or a 0-byte object. |
+
+These warnings are recorded in the marker and do not block it:
+
+| Code | Meaning |
+|---|---|
+| `confirmed_without_annotations:N` | N Confirmed images have no annotation rows. |
+| `orphan_image_objects:N` | N image objects on S3 are not in the image list. `--prune` deletes them. |
+| `duplicate_names:N` | N image names occur more than once. |
+
+The marker holds the scraper version, the completion time, the counts `total_images`, `annotation_rows`, `annotated_images` and `image_objects`, and the warnings.
+
+### Discovery guard
+
+Each run compares the source listing from CoralNet with `<prefix>/_meta/discovered_source_ids.json`, the listing of the previous run. If CoralNet lists fewer than 95% of the previous count, the run stops unless `--allow-source-drop` is set. A guard stop exits 1 and writes no run report. The run logs the sources that are no longer listed. The file is overwritten on each run, after the guard passes.
 
 ## Tests
 

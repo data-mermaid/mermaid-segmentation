@@ -14,6 +14,7 @@ This runbook scores an exported bundle with `scripts/evaluate.py`, the validatio
 - Export the checkpoint to a bundle. See [Export a model](export-a-model.md).
 - The evaluation reads the same data as training. To read it from the local S3 cache, pass `--cache-dir`. Without `--cache-dir`, the script reads S3 and needs AWS credentials.
 - The benthic hierarchy comes from the MERMAID API, and the script caches it in `--output-dir`. If the machine cannot reach the API, pass a saved copy with `--benthic-hierarchy-json`.
+- A CoralNet evaluation also reads the CoralNet label mapping: from the API online, or from the snapshot that `scripts/prefetch_cache.py` writes offline. `--benthic-hierarchy-json` does not cover it. See [Map new labels](coralnet-data.md#map-new-labels).
 
 ## Run the evaluation
 

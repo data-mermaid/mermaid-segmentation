@@ -1,6 +1,8 @@
 """Merge per-source CoralNet CSVs into one annotations frame and one label-name map.
 
 For every requested source:
+    0. Require the scraper's ``_complete.json`` marker; a source without it is excluded as
+       ``not_complete`` before any CSV is read.
     1. Read ``annotations.csv`` (Name, Row, Column, Label ID, Status, ...), ``image_list.csv``
        (Name, Image Page, ...) and ``labelset.csv`` (Label ID, Name).
     2. Strip the " - Confirmed" suffix from image_list ``Name`` values.
@@ -29,6 +31,7 @@ from tqdm import tqdm
 
 from coralnet_scraper.s3_io import (
     object_key_annotation_csv,
+    object_key_complete_marker,
     object_key_image_list_csv,
     object_key_labelset_csv,
 )
@@ -36,9 +39,12 @@ from coralnet_scraper.s3_io import (
 from .config import DEFAULT_WORKERS
 from .io import (
     CsvReader,
+    MarkerCheck,
     make_csv_reader_ibis,
     make_csv_reader_s3,
     make_ibis_connection,
+    make_marker_check,
+    make_s3_client,
 )
 from .schemas import ANNOTATIONS_PRIMARY_KEY, ANNOTATIONS_SCHEMA, validate
 
@@ -58,6 +64,7 @@ _SOURCE_CSVS: tuple[tuple[str, Callable[[str, int], str], tuple[str, ...]], ...]
 )
 
 EXCLUSION_KINDS: tuple[str, ...] = (
+    "not_complete",
     "annotations_missing",
     "image_list_missing",
     "labelset_missing",
@@ -198,12 +205,32 @@ def _parse_labelset(df_labelset: pd.DataFrame, source_id: int) -> list[tuple[int
     return [(int(i), n) for i, n in zip(ids[~bad], names[~bad], strict=True)]
 
 
-def _load_source(csv_reader: CsvReader, bucket: str, prefix: str, source_id: int) -> _SourceResult:
+def _check_source_complete(
+    marker_check: MarkerCheck, bucket: str, prefix: str, source_id: int
+) -> None:
+    """Check that the scraper's completion marker exists for the source.
+
+    Raises:
+        _SourceExcluded: ``not_complete`` when the marker is absent.
+    """
+    key = object_key_complete_marker(prefix, source_id)
+    if not marker_check(bucket, key):
+        raise _SourceExcluded("not_complete", f"{key} not found")
+
+
+def _load_source(
+    csv_reader: CsvReader,
+    marker_check: MarkerCheck,
+    bucket: str,
+    prefix: str,
+    source_id: int,
+) -> _SourceResult:
     """Read and check one source, returning its Confirmed rows and its labelset.
 
     Raises:
         _SourceExcluded: If the source fails a check, with the kind of the first failed check.
     """
+    _check_source_complete(marker_check, bucket, prefix, source_id)
     frames = _read_source_csvs(csv_reader, bucket, prefix, source_id)
     _check_source_csvs(frames)
     rows = _merge_source(frames["annotations"], frames["image_list"], source_id)
@@ -295,19 +322,20 @@ _Outcome = _SourceResult | _SourceExcluded
 
 
 def _load_source_outcome(
-    csv_reader: CsvReader, bucket: str, prefix: str, source_id: int
+    csv_reader: CsvReader, marker_check: MarkerCheck, bucket: str, prefix: str, source_id: int
 ) -> _Outcome:
     """Load one source, returning its exclusion instead of raising it."""
     try:
-        return _load_source(csv_reader, bucket, prefix, source_id)
+        return _load_source(csv_reader, marker_check, bucket, prefix, source_id)
     except _SourceExcluded as e:
         return e
 
 
-def _load_source_worker(args: tuple[int, str, str]) -> tuple[int, _Outcome]:
+def _load_source_worker(args: tuple[int, MarkerCheck, str, str]) -> tuple[int, _Outcome]:
     """Load one source on a worker thread with that thread's ibis reader."""
-    source_id, bucket, prefix = args
-    return source_id, _load_source_outcome(_get_thread_reader(), bucket, prefix, source_id)
+    source_id, marker_check, bucket, prefix = args
+    outcome = _load_source_outcome(_get_thread_reader(), marker_check, bucket, prefix, source_id)
+    return source_id, outcome
 
 
 def _sources_with_unnamed_labels(
@@ -351,10 +379,11 @@ def _load_sources(
     prefix: str,
     workers: int,
     csv_reader: CsvReader | None,
+    marker_check: MarkerCheck,
 ) -> dict[int, _Outcome]:
     """Load every source, on a thread pool unless a reader is injected."""
     if workers > 1 and csv_reader is None:
-        work = [(sid, bucket, prefix) for sid in source_ids]
+        work = [(sid, marker_check, bucket, prefix) for sid in source_ids]
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(_load_source_worker, item) for item in work]
             done = tqdm(as_completed(futures), total=len(futures), desc="Reading sources")
@@ -366,7 +395,7 @@ def _load_sources(
                 raise
     reader = csv_reader or make_csv_reader_ibis(make_ibis_connection())
     return {
-        sid: _load_source_outcome(reader, bucket, prefix, sid)
+        sid: _load_source_outcome(reader, marker_check, bucket, prefix, sid)
         for sid in tqdm(source_ids, desc="Reading sources")
     }
 
@@ -388,7 +417,8 @@ def build_annotations(
         prefix: Key prefix holding the ``s<N>/`` folders.
         workers: ThreadPoolExecutor size. Forced to 1 when ``s3_client`` or
             ``csv_reader`` is injected (tests).
-        s3_client: Pre-built boto3 client (tests). Implies a boto3-backed reader.
+        s3_client: Pre-built boto3 client (tests). Implies a boto3-backed reader, and probes the
+            completion markers; without it a default client probes them.
         csv_reader: ``CsvReader`` callable. When None and ``s3_client`` is also
             None, the production ibis path is used (per-thread DuckDB
             connection); when ``s3_client`` is given, falls back to a
@@ -403,7 +433,8 @@ def build_annotations(
     if csv_reader is None and s3_client is not None:
         csv_reader = make_csv_reader_s3(s3_client)
     logger.info("Building annotations from %d sources (workers=%d)", len(source_ids), workers)
-    outcomes = _load_sources(list(source_ids), bucket, prefix, workers, csv_reader)
+    marker_check = make_marker_check(s3_client or make_s3_client())
+    outcomes = _load_sources(list(source_ids), bucket, prefix, workers, csv_reader, marker_check)
 
     exclusions: dict[str, list[int]] = defaultdict(list)
     results: dict[int, _SourceResult] = {}

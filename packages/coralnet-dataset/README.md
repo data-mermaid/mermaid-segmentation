@@ -87,6 +87,7 @@ Each invocation computes its own default version tag. If you run the subcommands
 
 | Kind | Meaning |
 |---|---|
+| `not_complete` | The source has no `_complete.json` [completion marker](../coralnet-scraper/README.md#resume). The scraper writes it only after it verifies the source, so the build reads none of the source's CSVs. |
 | `annotations_missing` | `annotations.csv` is not on S3. |
 | `image_list_missing` | `image_list.csv` is not on S3. |
 | `labelset_missing` | `labelset.csv` is not on S3. |
@@ -95,6 +96,8 @@ Each invocation computes its own default version tag. If you run the subcommands
 | `annotations_empty` | `annotations.csv` has no rows. |
 | `image_list_incomplete` | An annotation row matches no `image_list.csv` row by `Name`. |
 | `label_unnamed` | A Label ID used by the source is not named by any included source's labelset. |
+
+A bucket filled by an older scraper has no markers. Run `coralnet-scrape verify-existing` first; see [Adopt an existing bucket](../../docs/runbooks/coralnet-data.md#adopt-an-existing-bucket). Otherwise every source is excluded as `not_complete` and `build-annotations` exits 1.
 
 Rows with a non-numeric `Row`, `Column` or `Label ID` are dropped with a warning; they do not exclude the source. A Label ID with two different names across the included sources raises `ValueError` and stops the build.
 
@@ -151,7 +154,6 @@ The dataset reads the label names from `coralnet_id2name_<run>.json` in the same
 
 ## Known gaps
 
-- A partially exported `annotations.csv` cannot be detected from S3. A paginated source whose export was interrupted leaves a partial file (see the scraper's [Resume and `--force`](../coralnet-scraper/README.md#resume-and---force)). The build includes that source with fewer images than CoralNet has. Tracked in issue #231.
 - Duplicate images (the same photo in several sources) are removed in training by `CoralNetDataset`'s `image_blacklist` and `annotation_overrides`. This package does not produce those files. Tracked in issue #231.
 
 ## Tests
