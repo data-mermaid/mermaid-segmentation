@@ -27,7 +27,11 @@ from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPE
 logger = logging.getLogger(__name__)
 
 COLUMNS = ["dataset", "image_id", "label", "n"]
+# UCSD Mosaics mask id 0 (``IGNORE_LABEL_ID``, "unlabeled / unidentified") and Benthos pixels outside the labelled
+# area ("unlabeled").
 IGNORE_LABEL_NAMES: frozenset[str] = frozenset({"unlabeled", "unlabeled / unidentified"})
+_HF_DENSE_KEYS = frozenset({"ucsd_mosaics", "coralscapes_v2"})
+_DENSE_KEYS_WITH_MASK_READER = frozenset({"benthos_yuval"}) | _HF_DENSE_KEYS
 
 
 def _is_ignore_name(name: str) -> bool:
@@ -48,7 +52,9 @@ def _dense_id_to_name(key: str, ds: Any) -> dict[int, str]:
         return {int(class_id): str(name) for name, class_id in ds._classes_global.items()}
     if key == "ucsd_mosaics":
         return {int(entry["id"]): str(entry["name"]) for entry in ds.class_table}
-    return {int(class_id): str(name) for class_id, name in CORALSCAPES_V2_ID2NAME.items()}
+    if key == "coralscapes_v2":
+        return {int(class_id): str(name) for class_id, name in CORALSCAPES_V2_ID2NAME.items()}
+    raise ValueError(f"{key}: dense dataset with no mask reader")
 
 
 def _dense_image_ids(key: str, ds: Any) -> list[str]:
@@ -58,7 +64,9 @@ def _dense_image_ids(key: str, ds: Any) -> list[str]:
             f"{site}/{image_id}"
             for site, image_id in zip(images.site, images.image_id, strict=True)
         ]
-    return [str(i) for i in range(len(ds))]
+    if key in _HF_DENSE_KEYS:
+        return [str(i) for i in range(len(ds))]
+    raise ValueError(f"{key}: dense dataset with no mask reader")
 
 
 def _iter_dense_masks(key: str, ds: Any) -> Iterator[Any]:
@@ -66,10 +74,12 @@ def _iter_dense_masks(key: str, ds: Any) -> Iterator[Any]:
         images = ds.df_images
         for idx in range(len(images)):
             yield ds.read_label(image_id=images.loc[idx, "image_id"], site=images.loc[idx, "site"])
-        return
-    labels = ds.dataset.select_columns(["label"])
-    for idx in range(len(labels)):
-        yield labels[idx]["label"]
+    elif key in _HF_DENSE_KEYS:
+        labels = ds.dataset.select_columns(["label"])
+        for idx in range(len(labels)):
+            yield labels[idx]["label"]
+    else:
+        raise ValueError(f"{key}: dense dataset with no mask reader")
 
 
 def _mask_rows(
@@ -89,18 +99,17 @@ def _mask_rows(
 
 
 def _dense_rows(key: str, ds: Any) -> pd.DataFrame:
+    if key not in _DENSE_KEYS_WITH_MASK_READER:
+        raise ValueError(f"{key}: dense dataset with no mask reader")
     id2name = _dense_id_to_name(key, ds)
     image_ids = _dense_image_ids(key, ds)
     rows: list[tuple[str, str, str, int]] = []
-    n_masks = 0
-    for mask in _iter_dense_masks(key, ds):
-        if n_masks < len(image_ids):
-            rows.extend(_mask_rows(key, image_ids[n_masks], mask, id2name))
-        n_masks += 1
+    for n_masks, (image_id, mask) in enumerate(
+        zip(image_ids, _iter_dense_masks(key, ds), strict=True), start=1
+    ):
+        rows.extend(_mask_rows(key, image_id, mask, id2name))
         if n_masks % 500 == 0:
             logger.info("%s: %d masks", key, n_masks)
-    if n_masks != len(image_ids):
-        raise RuntimeError(f"{key}: read {n_masks} masks, expected {len(image_ids)} images")
     return pd.DataFrame(rows, columns=COLUMNS)
 
 
@@ -116,8 +125,8 @@ def count_train_labels(built: Mapping[tuple[str, str], Any]) -> pd.DataFrame:
         ``n``.
 
     Raises:
-        ValueError: ``built`` is empty, or a positive mask id has no class name.
-        RuntimeError: A dense dataset yields a different number of masks than images.
+        ValueError: ``built`` is empty, a key in ``DENSE_DATASETS`` has no mask reader, or a positive mask id has
+            no class name.
     """
     if not built:
         raise ValueError("no train splits to count")

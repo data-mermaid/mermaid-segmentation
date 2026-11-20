@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from mermaidseg.dataset_reconciliation import label_counts
 from mermaidseg.dataset_reconciliation.label_counts import count_train_labels
 from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPES_V2_ID2NAME
 
@@ -39,18 +40,16 @@ class _HFDense:
         self,
         masks: list[np.ndarray],
         class_table: list[dict[str, Any]] | None = None,
-        n_images: int | None = None,
     ) -> None:
         self.dataset = _Rows(masks)
         self.class_table = class_table
-        self._n_images = len(masks) if n_images is None else n_images
 
     def __len__(self) -> int:
-        return self._n_images
+        return len(self.dataset)
 
 
 def _benthos(
-    masks: dict[str, np.ndarray],
+    masks: dict[tuple[str, str], np.ndarray],
     classes: dict[str, int],
     image_ids: list[str],
     sites: list[str] | None = None,
@@ -60,7 +59,7 @@ def _benthos(
     return SimpleNamespace(
         _classes_global=classes,
         df_images=df_images,
-        read_label=lambda image_id, site: masks[image_id],
+        read_label=lambda image_id, site: masks[(site, image_id)],
     )
 
 
@@ -131,7 +130,7 @@ def test_hf_image_ids_are_row_positions():
 
 def test_benthos_image_ids_are_site_prefixed_tile_ids():
     mask = np.array([[1]], dtype=np.uint8)
-    ds = _benthos({"x7": mask, "x9": mask}, {"Sand": 1}, ["x7", "x9"])
+    ds = _benthos({("s", "x7"): mask, ("s", "x9"): mask}, {"Sand": 1}, ["x7", "x9"])
 
     out = count_train_labels({("benthos_yuval", "train"): ds})
 
@@ -139,12 +138,41 @@ def test_benthos_image_ids_are_site_prefixed_tile_ids():
 
 
 def test_benthos_tiles_with_the_same_id_at_two_sites_get_distinct_image_ids():
-    mask = np.array([[1]], dtype=np.uint8)
-    ds = _benthos({"0_0": mask}, {"Sand": 1}, ["0_0", "0_0"], ["RS24", "CR_DoubleWreck"])
+    masks = {
+        ("RS24", "0_0"): np.array([[1, 1]], dtype=np.uint8),
+        ("CR_DoubleWreck", "0_0"): np.array([[2, 2, 2]], dtype=np.uint8),
+    }
+    ds = _benthos(masks, {"Sand": 1, "Coral": 2}, ["0_0", "0_0"], ["RS24", "CR_DoubleWreck"])
 
     out = count_train_labels({("benthos_yuval", "train"): ds})
 
-    assert _triples(out) == [("CR_DoubleWreck/0_0", "sand", 1), ("RS24/0_0", "sand", 1)]
+    assert _triples(out) == [("CR_DoubleWreck/0_0", "coral", 3), ("RS24/0_0", "sand", 2)]
+
+
+def test_benthos_mask_with_two_class_ids_counts_each_under_its_own_name():
+    mask = np.array([[1, 2, 2]], dtype=np.uint8)
+    ds = _benthos({("s", "x"): mask}, {"Sand": 1, "Coral": 2}, ["x"])
+
+    out = count_train_labels({("benthos_yuval", "train"): ds})
+
+    assert _triples(out) == [("s/x", "coral", 2), ("s/x", "sand", 1)]
+
+
+def test_benthos_unknown_positive_mask_id_raises_naming_dataset_image_and_id():
+    mask = np.array([[1, 99]], dtype=np.uint8)
+    ds = _benthos({("s", "x"): mask}, {"Sand": 1}, ["x"])
+
+    with pytest.raises(ValueError, match=r"benthos_yuval.*image 's/x'.*99"):
+        count_train_labels({("benthos_yuval", "train"): ds})
+
+
+def test_dense_dataset_with_no_mask_reader_raises(monkeypatch):
+    monkeypatch.setattr(
+        label_counts, "DENSE_DATASETS", frozenset(label_counts.DENSE_DATASETS | {"new_dense"})
+    )
+
+    with pytest.raises(ValueError, match="new_dense: dense dataset with no mask reader"):
+        count_train_labels({("new_dense", "train"): _sparse([])})
 
 
 def test_unknown_positive_mask_id_raises_naming_dataset_image_and_id():
@@ -152,15 +180,6 @@ def test_unknown_positive_mask_id_raises_naming_dataset_image_and_id():
     ds = _HFDense([mask], [{"id": 1, "name": "Sand"}])
 
     with pytest.raises(ValueError, match=r"ucsd_mosaics.*image '0'.*99"):
-        count_train_labels({("ucsd_mosaics", "train"): ds})
-
-
-@pytest.mark.parametrize("n_masks, n_images", [(2, 3), (2, 1), (1, 0)])
-def test_mask_count_differing_from_image_count_raises(n_masks, n_images):
-    mask = np.array([[1]], dtype=np.uint8)
-    ds = _HFDense([mask] * n_masks, [{"id": 1, "name": "Sand"}], n_images=n_images)
-
-    with pytest.raises(RuntimeError, match=f"{n_masks} masks, expected {n_images} images"):
         count_train_labels({("ucsd_mosaics", "train"): ds})
 
 
