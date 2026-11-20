@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import io
+import json
 from typing import Any
 
 import pandas as pd
 from botocore.exceptions import ClientError
 
 _MISSING_KEY_CODES = ("404", "NoSuchKey")
+_DELETE_BATCH_SIZE = 1000  # the DeleteObjects API limit
 
 
 def source_prefix(base_prefix: str, source_id: int) -> str:
@@ -42,11 +44,91 @@ def object_key_image(base_prefix: str, source_id: int, image_id: str) -> str:
     return f"{source_prefix(base_prefix, source_id)}images/{image_id}.jpg"
 
 
-def annotations_csv_exists(client: Any, bucket: str, base_prefix: str, source_id: int) -> bool:
-    """Return whether a source's ``annotations.csv`` object exists in ``bucket``."""
-    prefix = object_key_annotation_csv(base_prefix, source_id)
-    resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
-    return "Contents" in resp
+def object_key_complete_marker(base_prefix: str, source_id: int) -> str:
+    """Return the S3 key of a source's completion marker, ``_complete.json``."""
+    return f"{source_prefix(base_prefix, source_id)}_complete.json"
+
+
+def partial_prefix(base_prefix: str, source_id: int) -> str:
+    """Return the key prefix ``<source prefix>_partial/`` of a source's unfinished work."""
+    return f"{source_prefix(base_prefix, source_id)}_partial/"
+
+
+def key_exists(client: Any, bucket: str, key: str) -> bool:
+    """Return whether an object with exactly ``key`` exists in ``bucket``."""
+    # S3 lists keys in order, so an exact match is the first key under its own prefix.
+    resp = client.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
+    return any(o["Key"] == key for o in resp.get("Contents", []))
+
+
+def object_size(client: Any, bucket: str, key: str) -> int | None:
+    """Return the size in bytes of the object at ``key``, or None when it does not exist.
+
+    Other ClientErrors propagate.
+    """
+    try:
+        return int(client.head_object(Bucket=bucket, Key=key)["ContentLength"])
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _MISSING_KEY_CODES:
+            return None
+        raise
+
+
+def read_json_s3(client: Any, bucket: str, key: str) -> Any:
+    """Return the parsed JSON document at ``key``, or None when the key is missing.
+
+    Other ClientErrors propagate.
+    """
+    try:
+        response = client.get_object(Bucket=bucket, Key=key)
+    except ClientError as e:
+        if e.response["Error"]["Code"] in _MISSING_KEY_CODES:
+            return None
+        raise
+    return json.loads(response["Body"].read())
+
+
+def write_json_s3(client: Any, bucket: str, key: str, document: Any) -> None:
+    """Upload ``document`` as JSON to ``key`` in ``bucket``, replacing any existing object."""
+    client.put_object(
+        Bucket=bucket, Key=key, Body=json.dumps(document), ContentType="application/json"
+    )
+
+
+def object_sizes(client: Any, bucket: str, prefix: str) -> dict[str, int]:
+    """Return the size in bytes of every object under ``prefix``, across all listing pages."""
+    return {
+        obj["Key"]: obj["Size"]
+        for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
+        for obj in page.get("Contents", [])
+    }
+
+
+def delete_keys(client: Any, bucket: str, keys: list[str]) -> None:
+    """Delete ``keys`` from ``bucket`` in batches of :data:`_DELETE_BATCH_SIZE`.
+
+    Raises:
+        RuntimeError: If a response reports per-key errors; names the first failed key, its
+            code and the number of failed keys in that batch.
+    """
+    for start in range(0, len(keys), _DELETE_BATCH_SIZE):
+        batch = keys[start : start + _DELETE_BATCH_SIZE]
+        response = client.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True},
+        )
+        errors = response.get("Errors") or []
+        if errors:
+            first = errors[0]
+            raise RuntimeError(
+                f"Could not delete {len(errors)} key(s) from s3://{bucket}; "
+                f"first: {first.get('Key')} ({first.get('Code')})"
+            )
+
+
+def delete_prefix(client: Any, bucket: str, prefix: str) -> None:
+    """Delete every object whose key starts with ``prefix``, across all listing pages."""
+    delete_keys(client, bucket, list(object_sizes(client, bucket, prefix)))
 
 
 def upload_csv_body(

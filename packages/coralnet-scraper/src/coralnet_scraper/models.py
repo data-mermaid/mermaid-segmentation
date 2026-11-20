@@ -25,11 +25,13 @@ class DownloadResult:
     Attributes:
         ok: Whether the source was handled without a failure.
         skipped_no_confirmed: The source has no confirmed images on the website.
+        skipped_no_images: The source has no images on the website.
         errors: Short failure codes or messages collected during the download.
         image_failures: Counts of failed images, by kind.
     """
 
     ok: bool
     skipped_no_confirmed: bool = False
+    skipped_no_images: bool = False
     errors: list[str] = field(default_factory=list)
     image_failures: ImageFailures = field(default_factory=ImageFailures)

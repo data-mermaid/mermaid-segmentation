@@ -295,6 +295,80 @@ _BREAKS = {
 }
 
 
+def test_build_annotations_excludes_a_source_without_a_completion_marker(
+    fake_s3, sample_csv_factory, populate
+):
+    populate(
+        fake_s3,
+        "b",
+        "p",
+        1,
+        sample_csv_factory(source_id=1, n_images=1, n_points_per_image=1),
+        complete=False,
+    )
+    s3_reader = make_csv_reader_s3(fake_s3)
+    read_keys: list[str] = []
+
+    def reader(bucket, key):
+        read_keys.append(key)
+        return s3_reader(bucket, key)
+
+    build = build_annotations(
+        [1], bucket="b", prefix="p", workers=1, s3_client=fake_s3, csv_reader=reader
+    )
+
+    assert build.exclusions == {"not_complete": [1]}
+    assert build.annotations.empty
+    assert read_keys == []
+
+
+def test_build_annotations_includes_a_source_with_a_completion_marker(
+    fake_s3, sample_csv_factory, populate
+):
+    populate(
+        fake_s3, "b", "p", 1, sample_csv_factory(source_id=1, n_images=1, n_points_per_image=2)
+    )
+
+    build = build_annotations([1], bucket="b", prefix="p/", workers=1, s3_client=fake_s3)
+
+    assert build.exclusions == {}
+    assert len(build.annotations) == 2
+
+
+def test_build_annotations_keeps_only_the_marked_source_of_a_mixed_pair(
+    fake_s3, sample_csv_factory, populate
+):
+    populate(
+        fake_s3, "b", "p", 1, sample_csv_factory(source_id=1, n_images=1, n_points_per_image=2)
+    )
+    populate(
+        fake_s3,
+        "b",
+        "p",
+        2,
+        sample_csv_factory(source_id=2, n_images=1, n_points_per_image=3),
+        complete=False,
+    )
+
+    build = build_annotations([1, 2], bucket="b", prefix="p", workers=1, s3_client=fake_s3)
+
+    assert build.annotations["source_id"].unique().tolist() == [1]
+    assert len(build.annotations) == 2
+    assert build.exclusions == {"not_complete": [2]}
+
+
+def test_build_annotations_reports_not_complete_before_a_missing_csv(
+    fake_s3, sample_csv_factory, populate
+):
+    files = sample_csv_factory(source_id=1, n_images=1, n_points_per_image=1)
+    del files["annotations.csv"]
+    populate(fake_s3, "b", "p", 1, files, complete=False)
+
+    build = build_annotations([1], bucket="b", prefix="p", workers=1, s3_client=fake_s3)
+
+    assert build.exclusions == {"not_complete": [1]}
+
+
 @pytest.mark.parametrize("kind", list(_BREAKS))
 def test_build_annotations_excludes_broken_source(fake_s3, sample_csv_factory, populate, kind):
     populate(
@@ -310,7 +384,9 @@ def test_build_annotations_excludes_broken_source(fake_s3, sample_csv_factory, p
             raise OSError("read refused")
         return s3_reader(bucket, key)
 
-    build = build_annotations([1, 2], bucket="b", prefix="p", workers=1, csv_reader=reader)
+    build = build_annotations(
+        [1, 2], bucket="b", prefix="p", workers=1, s3_client=fake_s3, csv_reader=reader
+    )
 
     assert build.annotations["source_id"].unique().tolist() == [1]
     assert build.exclusions == {kind: [2]}
@@ -350,7 +426,9 @@ def test_build_annotations_reports_a_missing_csv_over_a_read_failure(
             raise OSError("read refused")
         return s3_reader(bucket, key)
 
-    build = build_annotations([2], bucket="b", prefix="p", workers=1, csv_reader=reader)
+    build = build_annotations(
+        [2], bucket="b", prefix="p", workers=1, s3_client=fake_s3, csv_reader=reader
+    )
 
     assert build.exclusions == {"labelset_missing": [2]}
 
@@ -411,7 +489,7 @@ def test_build_annotations_stops_queued_sources_after_a_worker_error(monkeypatch
     release = threading.Event()
     started: list[int] = []
 
-    def fake_outcome(_reader, _bucket, _prefix, source_id):
+    def fake_outcome(_reader, _marker_check, _bucket, _prefix, source_id):
         started.append(source_id)
         if source_id == 1:
             raise RuntimeError("unexpected")

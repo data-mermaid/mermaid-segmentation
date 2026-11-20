@@ -19,15 +19,22 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.client import BaseClient
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from coralnet_scraper.s3_io import read_csv_s3
 
 from .schemas import validate
 
+_MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
+
 _BOTO_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
 
 # Returns None when the object is missing, and raises on other errors so the caller can record them.
 CsvReader = Callable[[str, str], "pd.DataFrame | None"]
+
+
+# Returns whether the object exists, and raises on errors other than a missing key.
+MarkerCheck = Callable[[str, str], bool]
 
 
 def make_s3_client() -> BaseClient:
@@ -99,6 +106,21 @@ def make_csv_reader_s3(client: Any, **read_csv_kwargs: Any) -> CsvReader:
         return read_csv_s3(client, bucket, key, **read_csv_kwargs)
 
     return _reader
+
+
+def make_marker_check(client: Any) -> MarkerCheck:
+    """Build a :data:`MarkerCheck` that probes object existence with ``head_object``."""
+
+    def _check(bucket: str, key: str) -> bool:
+        try:
+            client.head_object(Bucket=bucket, Key=key)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") in _MISSING_KEY_CODES:
+                return False
+            raise
+        return True
+
+    return _check
 
 
 def write_parquet_deterministic(
