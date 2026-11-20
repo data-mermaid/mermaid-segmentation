@@ -20,7 +20,7 @@ Each source is written under `s3://<bucket>/<prefix>/s<source_id>/`:
 | `annotations.csv` | CoralNet annotation export of the whole source. |
 | `image_list.csv` | One row per image from the browse pages; the `Image URL` column is empty. |
 | `images/<image_id>.jpg` | One object per image, keyed by the numeric CoralNet image id. |
-| `_complete.json` | The [completion marker](#resume). Written last, after verification. |
+| `_complete.json` | The [completion marker](#resume). Written last, after verification. `coralnet-dataset` reads only the sources that have it. |
 | `_partial/` | Progress of a source that is not complete. Deleted after the marker is written. |
 
 Each run also writes run-level objects under `s3://<bucket>/<prefix>/`:
@@ -49,8 +49,8 @@ Flags:
 | `--source-ids` | all public sources | Comma-separated CoralNet source ids. The run processes only these, in the given order, after source discovery. An id that is not in the public listing is still attempted. |
 | `--requests-per-second` | no limit | Maximum request rate, a positive number. The limit applies to the first attempt of each CoralNet request and is shared by all threads. Retries wait for their backoff or the server's `Retry-After` and do not count against the limit. Image downloads from S3 pre-signed URLs are never limited. Overrides `MERMAID_CORALNET_REQUESTS_PER_SECOND`. |
 | `--export-workers` | `3` | Concurrent page exports for sources with more than 5000 images. Overrides `MERMAID_CORALNET_EXPORT_WORKERS`. |
-| `--prune` | off | After a source verifies and before its marker is written, delete the image objects that are not in the source's image list. Sources that already have a marker are not touched. |
-| `--allow-source-drop` | off | Continue when CoralNet lists fewer than 95% of the sources of the previous run. See [Discovery guard](#discovery-guard). |
+| `--prune` | off | After a source verifies and before its marker is written, delete the image objects that are not in the source's image list. Sources that already have a marker are not touched. Deletes cannot be undone unless the bucket has S3 versioning enabled. Read the `orphan_image_objects:<n>` [warning](#verification) in the source's marker first. Default run only; a subcommand rejects it with exit code 2. |
+| `--allow-source-drop` | off | Continue when CoralNet lists fewer than 95% of the sources of the previous run. See [Discovery guard](#discovery-guard). Default run only; a subcommand rejects it with exit code 2. |
 | `-v`, `--verbose` | off | Debug logging. |
 
 Every run flag is safe to repeat: running the same command again after a failure or a kill resumes the work. Operations that change state are subcommands:
@@ -59,12 +59,14 @@ Every run flag is safe to repeat: running the same command again after a failure
 |---|---|
 | `coralnet-scrape verify-existing [--source-ids <ids>]` | Verifies each source that has no marker against CoralNet's live image count, and writes the marker for each source that passes. Without `--source-ids`, it checks every discovered source that has no marker. Reports `overview_total_missing` for a source whose overview page shows no image count. Used to adopt a bucket scraped before markers existed. Reads no credentials and does not log in. |
 | `coralnet-scrape invalidate --source-ids <ids>` | Deletes the marker and `_partial/` of the listed sources. |
-| `coralnet-scrape invalidate --all` | Deletes the marker and `_partial/` of every source. |
+| `coralnet-scrape invalidate --all` | Deletes the marker and `_partial/` of every source. The next plain run exports every source again. |
 | `coralnet-scrape invalidate --changed` | Deletes the marker and `_partial/` of each marked source whose live CoralNet image count differs from the count in its marker. |
 
-`invalidate` changes state only. Run the plain command afterwards to download. `invalidate` reads no credentials and does not log in.
+`invalidate` changes state only. Run the plain command afterwards to download. `invalidate` reads no credentials and does not log in. It deletes the marker and `_partial/`, which cannot be undone unless the bucket has S3 versioning enabled.
 
 There is no `--force` flag.
+
+A plain run on a bucket that has source folders but no marker in any of them logs a warning at the start. The warning points to `verify-existing`; without it every source downloads again. See [Adopt an existing bucket](../../docs/runbooks/coralnet-data.md#adopt-an-existing-bucket).
 
 The run logs in to CoralNet, discovers the public source ids from `https://coralnet.ucsd.edu/source/about/`, and downloads each source. A failed login ends the run with exit code 1. CoralNet overview pages are public, so `verify-existing` and `invalidate` do not log in.
 
@@ -74,6 +76,7 @@ A source fails when:
 
 - any of its images had no image URL (`images_missing_url`) or failed to upload (`images_upload_failed`);
 - the metadata, labelset, annotations, or image list step failed;
+- the browse walk found a different number of images than the overview reports (`walk_count_mismatch:<found>!=<total>`). Only the saved walk is discarded and the next run walks again. The export and the images are not attempted. This failure does not count toward the circuit breaker;
 - the source is not accessible (`cannot access source <id>: <reason>`). The reason is CoralNet's page text, for example `Permission denied`, or `HTTP 403` or `HTTP 404` for a missing or private source. This failure does not count toward the [circuit breaker](#retries-and-circuit-breaker);
 - verification of the source failed (`verification_failed`, with the [codes](#verification));
 - the overview page shows no "Total images" count (`overview_total_missing`; `verify-existing` reports it too);
@@ -88,7 +91,16 @@ Exit code:
 | Code | When |
 |---|---|
 | 0 | Every source downloads or is skipped. A source with a marker, with zero Confirmed images, or with zero images counts as skipped. |
-| 1 | The CoralNet login fails, any source fails, the [circuit breaker](#retries-and-circuit-breaker) stops the run, the [run report](#run-report) cannot be written to S3 (after the transport figures and failure summary are logged, the run logs `Could not write run report s3://<bucket>/<key>`), the [discovery guard](#discovery-guard) stops the run (no run report is written), or the run stops on an uncaught error (invalid configuration, source discovery failure). |
+| 1 | The CoralNet login fails, the source listing is empty, any source fails, the [circuit breaker](#retries-and-circuit-breaker) stops the run, the [run report](#run-report) cannot be written to S3 (after the transport figures and failure summary are logged, the run logs `Could not write run report s3://<bucket>/<key>`), the [discovery guard](#discovery-guard) stops the run (no run report is written), or the run stops on an uncaught error (invalid configuration, source discovery failure). |
+
+Exit code of the subcommands:
+
+| Command | Code | When |
+|---|---|---|
+| `verify-existing` | 0 | Every checked source verifies, or is skipped because it has a marker. |
+| `verify-existing` | 1 | Any source fails verification, or verification raises for it. Each failure is logged as an error. |
+| `invalidate` | 0 | The selected sources are invalidated. |
+| `invalidate` | 1 | `--changed` could not read the live image count of some source. The sources that could be checked are still invalidated. |
 
 ### Retries and circuit breaker
 

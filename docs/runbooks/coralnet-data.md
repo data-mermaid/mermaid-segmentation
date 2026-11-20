@@ -31,6 +31,8 @@ The package READMEs are the reference for flags, environment variables, exclusio
 
 - **Request rate.** The scraper sends requests without a rate limit unless you set one. To choose a limit, see [Tune the request rate](#tune-the-request-rate).
 
+- **Earlier scraper version.** If the bucket was filled by an earlier scraper version, its source folders have no `_complete.json`. Do [Adopt an existing bucket](#adopt-an-existing-bucket) first. A plain run would scrape every source again.
+
 Run every command from the repository root.
 
 ## Recreate the data from scratch
@@ -62,7 +64,7 @@ Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
 
 ### Check the build
 
-1. Read the summary that each step logs: the excluded sources from `build-annotations`, the count per `header_status` from `build-images`, and the resized, corrupted and failed counts from `resize`.
+1. Read the summary that each step logs: the excluded sources from `build-annotations` (it excludes a source with no `_complete.json` as `not_complete`), the count per `header_status` from `build-images`, and the resized, corrupted and failed counts from `resize`.
 2. Check the exit code. Exit code 1 from `all` means at least one step reported failures. Every step still runs and writes its outputs.
 3. Confirm that `etl-outputs/coralnet/<run>/` in the bucket holds four files:
    - `coralnet_annotations_<run>.parquet`
@@ -90,7 +92,7 @@ The scraper skips complete sources, so it does not see changes to them. To pick 
 
 2. Run the scraper without flags. It redoes the invalidated sources. Image objects already on S3 are skipped.
 
-`--changed` compares image counts only, so it does not see an annotation change that leaves the count the same. To redo specific sources, use `invalidate --source-ids <id>,<id>,...`. To redo every source, use `invalidate --all`. See [Resume](../../packages/coralnet-scraper/README.md#resume).
+`--changed` compares image counts only, so it does not see an annotation change that leaves the count the same. To redo specific sources, use `invalidate --source-ids <id>,<id>,...`. To redo every source, use `invalidate --all`, which forces a full re-export of every source. See [Resume](../../packages/coralnet-scraper/README.md#resume).
 
 ### Rebuild under a new version tag
 
@@ -117,13 +119,23 @@ Use this once for a bucket that an earlier version of the scraper filled, so it 
 
    This sends one overview request per source and reads every source's CSVs from S3.
 3. Run the scraper without flags. It downloads every source that has no marker again. Image objects already on S3 are skipped.
-4. For each source that has an `orphan_image_objects` warning in its marker, run the scraper with `--prune` on that source to delete the image objects that are not in its image list:
 
-   ```bash
-   uv run --package coralnet-scraper coralnet-scrape --prune --source-ids <id>,<id>,...
-   ```
+   > **Warning:** `--prune` deletes cannot be undone unless the bucket has S3 versioning enabled. Before step 4, read the `orphan_image_objects:<n>` count in each source's marker.
+4. For each source that has an `orphan_image_objects` warning in its marker, delete the image objects that are not in its image list. Step 2 already marked these sources, and the scraper skips a marked source, so remove the markers first:
 
-   `--prune` deletes only for a source that verifies in that run. A source that already has a marker is not touched, so run `invalidate --source-ids <id>,<id>,...` for it first.
+   1. Remove the marker of each source:
+
+      ```bash
+      uv run --package coralnet-scraper coralnet-scrape invalidate --source-ids <id>,<id>,...
+      ```
+
+   2. Run the scraper with `--prune` on the same sources:
+
+      ```bash
+      uv run --package coralnet-scraper coralnet-scrape --prune --source-ids <id>,<id>,...
+      ```
+
+   `--prune` deletes only for a source that verifies in that run.
 5. Rebuild the dataset under a new version tag:
 
    ```bash
