@@ -16,10 +16,10 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 
 ## 1. Map
 
-- `mermaidseg/`: the package. All training (`training.py`), evaluation and inference logic. `mermaidseg/inference/` is the serving surface: preprocessing, predictor and model bundle.
+- `mermaidseg/`: the package. All training (`training.py`), evaluation and inference logic. `mermaidseg/inference/` is the serving surface: preprocessing, predictor and model bundle. `mermaidseg/data/` holds the readers (`PointDataset`, `DenseDataset`) over dataset versions that `segdata_spec` syncs, plus the data-config parser and sync; training does not use it yet.
 - `configs/`: committed YAML configs and the concept, mask and label-mapping inputs they reference.
 - `scripts/`: entrypoints for training (`scripts/train.py`), bundle export, evaluation, cache prefetch and the
-  data-config, concept-removal, concept-source-mask and CoralscapesV2 probe-point builders, and the train label count.
+  data-config, concept-removal, concept-source-mask and CoralscapesV2 probe-point builders, the train label count, the dataset cache sync (`scripts/sync_data.py`, which fills the local cache from pinned dataset versions) and the one-off old-vs-new point parity check (`scripts/check_dataset_parity.py`).
 - `slurm/`: Slurm launchers and `train.sbatch`.
 - `scripts/sagemaker/`: the SageMaker launcher (`python -m scripts.sagemaker.launch`) and the in-container entrypoint.
 - `sagemaker/runs/`: SageMaker run YAMLs.
