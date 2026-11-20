@@ -118,7 +118,8 @@ def validate_dataset_tables(
 
     Raises:
         SchemaValidationError: A required table is absent, ``points.parquet`` presence disagrees
-            with ``kind``, ids repeat, or ``mask_key`` population disagrees with ``kind``.
+            with ``kind``, ids repeat, ``mask_key`` population disagrees with ``kind``, or
+            a row with a ``mask_key`` lacks ``mask_etag`` or ``mask_size``.
     """
     for name in ("images.parquet", "labels.parquet", "stats/label_counts.parquet"):
         if name not in tables:
@@ -131,5 +132,9 @@ def validate_dataset_tables(
     masks = images.column("mask_key")
     if kind == "dense" and masks.null_count:
         raise SchemaValidationError("dense dataset: every image needs a mask_key")
+    if kind == "dense":
+        for column in ("mask_etag", "mask_size"):
+            if images.column(column).null_count:
+                raise SchemaValidationError(f"dense dataset: every image needs a {column}")
     if kind == "points" and masks.null_count != images.num_rows:
         raise SchemaValidationError("points dataset: mask_key must be null for every image")

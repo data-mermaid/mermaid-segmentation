@@ -12,11 +12,19 @@ from segdata_spec.taxonomy import roll_up
 HIERARCHY = {
     "acropora": "hard coral",
     "hard coral": None,
-    "porites": "hard coral",
-    "sand": None,
+    "massive": "hard coral",
+    "porites": "massive",
+    "bare": None,
+    "sand": "bare",
 }
 LABELS = [*HIERARCHY, "unknown", None]
-SUBSETS = [set(), {"hard coral"}, {"acropora", "hard coral"}, {"sand"}]
+SUBSETS = [
+    set(),
+    {"hard coral"},
+    {"acropora", "hard coral"},
+    {"massive", "hard coral"},
+    {"sand"},
+]
 
 
 @pytest.mark.parametrize(("label", "subset"), itertools.product(LABELS, range(len(SUBSETS))))

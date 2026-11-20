@@ -11,9 +11,12 @@ from segdata_spec.schema import (
 )
 
 
-def _images(ids=("a", "b"), mask_key=None) -> pa.Table:
+def _images(ids=("a", "b"), mask_key=None, mask_etag=None, mask_size=None) -> pa.Table:
     n = len(ids)
     masks = list(mask_key) if mask_key is not None else [None] * n
+    # Rows with a mask get a full fingerprint unless the caller overrides the column.
+    etags = mask_etag if mask_etag is not None else ["me" if m else None for m in masks]
+    sizes = mask_size if mask_size is not None else [5 if m else None for m in masks]
     return pa.table(
         {
             "image_id": list(ids),
@@ -26,8 +29,8 @@ def _images(ids=("a", "b"), mask_key=None) -> pa.Table:
             "height": [4] * n,
             "group": ["g"] * n,
             "mask_key": masks,
-            "mask_etag": [None] * n,
-            "mask_size": [None] * n,
+            "mask_etag": list(etags),
+            "mask_size": list(sizes),
             "mask_crc64nvme": [None] * n,
             "source_fingerprint": ["fp"] * n,
             "attrs": [None] * n,
@@ -118,18 +121,39 @@ def test_valid_tables_pass():
         ("points", _tables(points=True, labels=_labels(ids=(7, 7)))),
         ("points", _tables(points=False)),
         ("dense", _tables(points=True, images=_images(mask_key=["m/a.png", "m/b.png"]))),
-        ("dense", _tables(points=False, images=_images(mask_key=["m/a.png", None]))),
         ("points", _tables(points=True, images=_images(mask_key=["m/a.png", None]))),
+        (
+            "dense",
+            _tables(
+                points=False,
+                images=_images(mask_key=["m/a.png", "m/b.png"], mask_etag=["me", None]),
+            ),
+        ),
+        (
+            "dense",
+            _tables(
+                points=False,
+                images=_images(mask_key=["m/a.png", "m/b.png"], mask_size=[5, None]),
+            ),
+        ),
     ],
     ids=[
         "duplicate-image-id",
         "duplicate-label-id",
         "points-kind-without-points",
         "dense-kind-with-points",
-        "dense-kind-null-mask-key",
         "points-kind-with-mask-key",
+        "dense-kind-null-mask-etag",
+        "dense-kind-null-mask-size",
     ],
 )
 def test_invalid_table_sets_are_rejected(kind, tables):
     with pytest.raises(SchemaValidationError):
         validate_dataset_tables(kind, tables)
+
+
+def test_dense_kind_rejects_a_null_mask_key_alone():
+    images = _images(mask_key=["m/a.png", None], mask_etag=["me", "me"], mask_size=[5, 5])
+
+    with pytest.raises(SchemaValidationError, match="mask_key"):
+        validate_dataset_tables("dense", _tables(points=False, images=images))

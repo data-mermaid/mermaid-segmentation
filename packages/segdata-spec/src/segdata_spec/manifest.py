@@ -32,11 +32,15 @@ class ParentRef(_Model):
     manifest_sha256: str
 
 
+# Empty, or ending in "/" so ``prefix + key`` concatenates into a valid S3 key.
+KeyPrefix = Annotated[str, StringConstraints(pattern=r"^(.*/)?$")]
+
+
 class ImageStore(_Model):
     """Where a version's image and mask files live."""
 
     bucket: str
-    prefix: str
+    prefix: KeyPrefix
     owner: Literal["segdata", "external"]
 
 

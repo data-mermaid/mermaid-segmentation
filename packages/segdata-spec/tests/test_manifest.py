@@ -3,7 +3,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from segdata_spec.manifest import Manifest, dump_manifest, manifest_sha256
+from segdata_spec.manifest import Manifest, dump_manifest
 
 SHA = "a" * 64
 
@@ -104,8 +104,16 @@ def test_manifest_rejects_invalid_input(mutate):
         Manifest.model_validate_json(json.dumps(raw))
 
 
-def test_manifest_sha256_hashes_the_given_bytes():
-    assert (
-        manifest_sha256(b"abc")
-        == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    )
+@pytest.mark.parametrize(
+    ("prefix", "valid"),
+    [("images/ds/", True), ("", True), ("images/ds", False)],
+)
+def test_image_store_prefix_is_empty_or_ends_with_a_slash(prefix, valid):
+    raw = _manifest_dict()
+    raw["image_store"]["prefix"] = prefix
+
+    if valid:
+        assert Manifest.model_validate(raw).image_store.prefix == prefix
+    else:
+        with pytest.raises(ValidationError, match="prefix"):
+            Manifest.model_validate(raw)

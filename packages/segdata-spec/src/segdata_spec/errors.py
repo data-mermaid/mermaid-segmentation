@@ -12,7 +12,7 @@ class PublishRefused(SegdataError):
 
 
 class ObjectExists(SegdataError):
-    """A write-once S3 key already exists."""
+    """A write-once S3 key already exists with different bytes."""
 
 
 class PinMismatch(SegdataError):

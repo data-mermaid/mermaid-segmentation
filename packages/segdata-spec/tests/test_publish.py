@@ -332,3 +332,22 @@ def test_invalid_table_raises_before_any_write(fake_s3, repo_dir):
         _publish(fake_s3, repo_dir, tables=tables)
 
     assert fake_s3.calls == []
+
+
+def test_missing_uv_lock_refuses_before_any_write(fake_s3, tmp_path):
+    with pytest.raises(PublishRefused, match="uv.lock"):
+        _publish(fake_s3, tmp_path)
+
+    assert fake_s3.calls == []
+
+
+def test_retry_after_a_partial_publish_adopts_identical_tables(fake_s3, repo_dir):
+    _publish(fake_s3, repo_dir)
+    del fake_s3.objects[(BUCKET, PREFIX + "manifest.json")]
+    fake_s3.calls.clear()
+
+    _, sha = _publish(fake_s3, repo_dir)
+
+    stored = fake_s3.objects[(BUCKET, PREFIX + "manifest.json")]
+    assert sha == hashlib.sha256(stored).hexdigest()
+    assert len(_put_keys(fake_s3)) == 5

@@ -16,6 +16,13 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
+from segdata_spec._s3 import (
+    MANIFEST_NAME,
+    dataset_prefix,
+    is_not_found,
+    is_precondition_failed,
+    taxonomy_prefix,
+)
 from segdata_spec.errors import (
     ChecksumMismatch,
     ObjectExists,
@@ -44,9 +51,6 @@ from segdata_spec.schema import (
     conform,
     validate_dataset_tables,
 )
-
-_MANIFEST_NAME = "manifest.json"
-_NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
 
 
 @dataclass(frozen=True)
@@ -82,22 +86,6 @@ def uv_lock_sha256(repo_dir: Path) -> str | None:
     if not lock.is_file():
         return None
     return hashlib.sha256(lock.read_bytes()).hexdigest()
-
-
-def _is_not_found(exc: ClientError) -> bool:
-    code = str(exc.response.get("Error", {}).get("Code", ""))
-    return (
-        code in _NOT_FOUND_CODES
-        or exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404
-    )
-
-
-def _is_precondition_failed(exc: ClientError) -> bool:
-    code = str(exc.response.get("Error", {}).get("Code", ""))
-    return (
-        code == "PreconditionFailed"
-        or exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412
-    )
 
 
 def _guard_git(repo_dir: Path, git: GitState | None) -> tuple[GitState, str]:
@@ -146,19 +134,10 @@ def _exists(client: Any, bucket: str, key: str) -> bool:
     try:
         client.head_object(Bucket=bucket, Key=key)
     except ClientError as exc:
-        if _is_not_found(exc):
+        if is_not_found(exc):
             return False
         raise
     return True
-
-
-def _put_new(client: Any, bucket: str, key: str, data: bytes) -> None:
-    try:
-        client.put_object(Bucket=bucket, Key=key, Body=data, IfNoneMatch="*")
-    except ClientError as exc:
-        if _is_precondition_failed(exc):
-            raise ObjectExists(f"s3://{bucket}/{key} already exists") from exc
-        raise
 
 
 def _get_bytes(client: Any, bucket: str, key: str) -> bytes:
@@ -166,9 +145,21 @@ def _get_bytes(client: Any, bucket: str, key: str) -> bytes:
     return data
 
 
+def _put_new(client: Any, bucket: str, key: str, data: bytes) -> None:
+    """Write ``data`` once; an existing object with identical bytes counts as already written."""
+    try:
+        client.put_object(Bucket=bucket, Key=key, Body=data, IfNoneMatch="*")
+    except ClientError as exc:
+        if not is_precondition_failed(exc):
+            raise
+        existing = _get_bytes(client, bucket, key)
+        if hashlib.sha256(existing).digest() != hashlib.sha256(data).digest():
+            raise ObjectExists(f"s3://{bucket}/{key} already exists") from exc
+
+
 def _refuse_if_published(client: Any, bucket: str, prefix: str) -> None:
-    if _exists(client, bucket, prefix + _MANIFEST_NAME):
-        raise PublishRefused(f"s3://{bucket}/{prefix}{_MANIFEST_NAME} already exists")
+    if _exists(client, bucket, prefix + MANIFEST_NAME):
+        raise PublishRefused(f"s3://{bucket}/{prefix}{MANIFEST_NAME} already exists")
 
 
 def _write_version(
@@ -176,7 +167,7 @@ def _write_version(
 ) -> None:
     for name, data in blobs.items():
         _put_new(client, bucket, prefix + name, data)
-    _put_new(client, bucket, prefix + _MANIFEST_NAME, manifest_bytes)
+    _put_new(client, bucket, prefix + MANIFEST_NAME, manifest_bytes)
 
 
 def _etl_info(package: str, command: str, git: GitState, lock_sha: str) -> EtlInfo:
@@ -229,10 +220,10 @@ def compute_diff(parent: Mapping[str, pa.Table], child: Mapping[str, pa.Table]) 
 
 def _fetch_parent_tables(client: Any, bucket: str, parent: ParentRef) -> dict[str, pa.Table]:
     """Fetch and verify the parent's manifest, images and points tables."""
-    prefix = f"datasets/{parent.dataset}/{parent.version}/"
-    manifest_bytes = _get_bytes(client, bucket, prefix + _MANIFEST_NAME)
+    prefix = dataset_prefix(parent.dataset, parent.version)
+    manifest_bytes = _get_bytes(client, bucket, prefix + MANIFEST_NAME)
     if manifest_sha256(manifest_bytes) != parent.manifest_sha256:
-        raise PinMismatch(f"parent manifest {prefix}{_MANIFEST_NAME} does not match its pin")
+        raise PinMismatch(f"parent manifest {prefix}{MANIFEST_NAME} does not match its pin")
     manifest = Manifest.model_validate_json(manifest_bytes)
     tables: dict[str, pa.Table] = {}
     for name in ("images.parquet", "points.parquet"):
@@ -273,13 +264,13 @@ def publish_dataset(
         SchemaValidationError: A table fails its schema or the cross-table rules.
         PinMismatch: The first parent's manifest differs from its ``ParentRef``.
         ChecksumMismatch: A parent table differs from the parent manifest.
-        ObjectExists: A table key already exists; the manifest is then not written.
+        ObjectExists: A table or manifest key already exists with different bytes; the manifest is then not written.
     """
     state, lock_sha = _guard_git(repo_dir, git)
     conformed = _conform_all(tables, DATASET_TABLES)
     validate_dataset_tables(kind, conformed)
     blobs = {name: _parquet_bytes(table) for name, table in conformed.items()}
-    prefix = f"datasets/{dataset}/{version}/"
+    prefix = dataset_prefix(dataset, version)
     _refuse_if_published(client, bucket, prefix)
     diff = None
     if parents:
@@ -324,7 +315,7 @@ def publish_taxonomy(
     Raises:
         PublishRefused: The tree is dirty or unpushed, or the version already exists.
         SchemaValidationError: A table is missing, unknown or fails its schema.
-        ObjectExists: A table key already exists; the manifest is then not written.
+        ObjectExists: A table or manifest key already exists with different bytes; the manifest is then not written.
     """
     state, lock_sha = _guard_git(repo_dir, git)
     missing = sorted(set(TAXONOMY_TABLES) - set(tables))
@@ -332,7 +323,7 @@ def publish_taxonomy(
         raise SchemaValidationError(f"missing taxonomy tables: {missing}")
     conformed = _conform_all(tables, TAXONOMY_TABLES)
     blobs = {table_name: _parquet_bytes(table) for table_name, table in conformed.items()}
-    prefix = f"taxonomy/{name}/{version}/"
+    prefix = taxonomy_prefix(name, version)
     _refuse_if_published(client, bucket, prefix)
     manifest = TaxonomyManifest(
         schema_version=1,
