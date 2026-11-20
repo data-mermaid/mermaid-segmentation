@@ -40,6 +40,7 @@ from coralnet_scraper.parsers import (
     extract_csrf_token,
     parse_export_annotations_prep_form,
     parse_image_status_counts,
+    parse_points_per_image,
     parse_source_access,
     parse_total_images_from_source_html,
 )
@@ -60,6 +61,8 @@ _EXPORT_PREP_TIMEOUT_MIN = 300
 _EXPORT_PREP_TIMEOUT_MAX = 7200  # 2 hours
 _EXPORT_SERVE_TIMEOUT_MIN = 120
 _EXPORT_SERVE_TIMEOUT_MAX = 1800
+_EXPORT_PREP_ROWS_PER_S = 250  # export_prep budget; s57 ran about 440 rows/s in a live run
+_DEFAULT_POINTS_PER_IMAGE = 100  # when the overview gives no point generation method
 _EXPORT_PREP_TIMEOUT_STEP = 300  # export_prep read timeout added per further attempt
 _EXPORT_PREP_TIMEOUT_RETRY_WAIT_S = (
     60  # pause after an export_prep read timeout, before the next POST
@@ -442,12 +445,22 @@ def _upload_csv(s3_client: Any, bucket: str, key: str, df: pd.DataFrame) -> None
     s3_io.upload_csv_body(s3_client, bucket=bucket, key=key, csv_text=buf.getvalue())
 
 
-def export_prep_timeout_seconds(total_images: int | None) -> int:
-    """Read timeout for CoralNet ``export_prep`` POST (server builds the export)."""
+def export_prep_timeout_seconds(
+    total_images: int | None, points_per_image: int | None = None
+) -> int:
+    """Read timeout for CoralNet ``export_prep`` POST (server builds the export).
+
+    CoralNet's build time grows with annotation rows, estimated as ``total_images`` times
+    ``points_per_image`` (:data:`_DEFAULT_POINTS_PER_IMAGE` when ``None``).
+    """
     n = total_images or 0
     if n <= 0:
         return _EXPORT_PREP_TIMEOUT_MIN
-    return min(_EXPORT_PREP_TIMEOUT_MAX, max(_EXPORT_PREP_TIMEOUT_MIN, 120 + n // 20))
+    rows = n * (points_per_image or _DEFAULT_POINTS_PER_IMAGE)
+    return min(
+        _EXPORT_PREP_TIMEOUT_MAX,
+        max(_EXPORT_PREP_TIMEOUT_MIN, 120 + rows // _EXPORT_PREP_ROWS_PER_S),
+    )
 
 
 def export_serve_timeout_seconds(total_images: int | None) -> int:
@@ -692,6 +705,7 @@ class CoralNetDownloader:
         *,
         refs: list[ImageRef],
         total_images: int,
+        points_per_image: int | None = None,
     ) -> bool:
         """Export the source's annotations and upload them as ``annotations.csv``.
 
@@ -705,6 +719,8 @@ class CoralNetDownloader:
             refs: The source's images from :meth:`walk_source`; the paginated export
                 exports them page by page.
             total_images: Website image count; it picks the export path and sizes timeouts.
+            points_per_image: The overview's points per image; with ``total_images`` it
+                sizes the bulk ``export_prep`` timeout. ``None`` uses a default.
 
         Returns:
             True on success; False on failure, after logging the error. The export must
@@ -712,13 +728,14 @@ class CoralNetDownloader:
             does not, after the attempts of :meth:`_export_validated`, uploads nothing.
         """
         try:
-            prep_timeout = export_prep_timeout_seconds(total_images)
+            prep_timeout = export_prep_timeout_seconds(total_images, points_per_image)
             serve_timeout = export_serve_timeout_seconds(total_images)
             if total_images > 1000:
                 logger.info(
-                    "Source %s: %s images; export_prep timeout=%ss serve timeout=%ss",
+                    "Source %s: %s images x %s points; export_prep timeout=%ss serve timeout=%ss",
                     source_id,
                     total_images,
+                    points_per_image or _DEFAULT_POINTS_PER_IMAGE,
                     prep_timeout,
                     serve_timeout,
                 )
@@ -732,6 +749,13 @@ class CoralNetDownloader:
                 )
                 return self.download_annotations_paginated(
                     source_id, bucket_name, s3_prefix, refs=refs
+                )
+
+            if points_per_image is None:
+                logger.info(
+                    "Source %s: no points per image on the overview; assuming %s",
+                    source_id,
+                    _DEFAULT_POINTS_PER_IMAGE,
                 )
 
             df_annotations = self._export_validated(
@@ -1705,7 +1729,12 @@ class CoralNetDownloader:
         total_images = state["total_images"]
         if "export" not in state["stages"]:
             if not self.download_annotations(
-                sid, bucket_name, s3_prefix, refs=refs, total_images=total_images
+                sid,
+                bucket_name,
+                s3_prefix,
+                refs=refs,
+                total_images=total_images,
+                points_per_image=parse_points_per_image(overview_html),
             ):
                 return DownloadResult(False, errors=[*errs, "annotations_failed"])
             self._finish_stage(sid, bucket_name, s3_prefix, state, "export")

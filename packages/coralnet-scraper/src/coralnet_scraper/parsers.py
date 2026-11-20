@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import cast
 
@@ -87,6 +88,37 @@ def parse_total_images_from_source_html(html: str) -> int:
     if c.total_images is None:
         return 0
     return c.total_images
+
+
+_TOTAL_POINTS_RE = re.compile(r"total of (\d[\d,]*) points")
+_POINTS_RE = re.compile(r"(\d[\d,]*) points(?! per)")
+
+
+def parse_points_per_image(html: str) -> int | None:
+    """Return the points per image of the overview's point generation method, or None.
+
+    Reads the ``Point generation method:`` item of the overview's Details list, such as
+    "Simple random, 200 points" or "Stratified random, 2 rows x 5 columns of cells, 1 points
+    per cell (total of 10 points)". This is the source's default; images with imported points
+    can have other counts.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for li in soup.find_all("li"):
+        spans = li.find_all("span")
+        if len(spans) < 2 or spans[0].get_text().strip() != "Point generation method:":
+            continue
+        text = spans[1].get_text()
+        match = _TOTAL_POINTS_RE.search(text)
+        if match is None:
+            matches = _POINTS_RE.findall(text)
+            if not matches:
+                return None
+            value = matches[-1]
+        else:
+            value = match.group(1)
+        points = int(value.replace(",", ""))
+        return points if points > 0 else None
+    return None
 
 
 def classifier_plot_data_from_source_html(html: str) -> list[dict] | None:
