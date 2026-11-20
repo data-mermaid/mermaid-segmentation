@@ -15,10 +15,9 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "coralnet-dataset",
     "coralnet-scraper",
-    "external-datasets",
     "mermaidseg",
+    "segdata-etl",
     "segdata-spec",
 ]
 
@@ -672,43 +671,6 @@ wheels = [
 ]
 
 [[package]]
-name = "coralnet-dataset"
-version = "0.1.0"
-source = { editable = "packages/coralnet-dataset" }
-dependencies = [
-    { name = "boto3" },
-    { name = "coralnet-scraper" },
-    { name = "ibis-framework", extra = ["duckdb"] },
-    { name = "pandas" },
-    { name = "pillow" },
-    { name = "pyarrow" },
-    { name = "tqdm" },
-]
-
-[package.dev-dependencies]
-tests = [
-    { name = "pytest" },
-    { name = "pytest-socket" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "boto3" },
-    { name = "coralnet-scraper", editable = "packages/coralnet-scraper" },
-    { name = "ibis-framework", extras = ["duckdb"] },
-    { name = "pandas" },
-    { name = "pillow" },
-    { name = "pyarrow" },
-    { name = "tqdm" },
-]
-
-[package.metadata.requires-dev]
-tests = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-socket", specifier = ">=0.7" },
-]
-
-[[package]]
 name = "coralnet-scraper"
 version = "0.1.0"
 source = { editable = "packages/coralnet-scraper" }
@@ -1005,43 +967,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/cc/33/01ad2535ee897db2bad70cbc800655167c53afd0b955eed84f0759c2f417/duckdb-2.0.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ab51ec57d329d6f3df37c0287b55d71c3fc07bb54b61d1afed09104f953b1431", size = 24371005, upload-time = "2026-10-21T12:51:06.86Z" },
     { url = "https://files.pythonhosted.org/packages/09/d3/9e8ca1242b98f04041bef09686ecfe098b41f820aa23240f63f360b64eaf/duckdb-2.0.0-cp312-abi3-win_amd64.whl", hash = "sha256:f61c96547ed432f54dae42a717fd88563eda55cb47549715fac9f61f770c205a", size = 15368860, upload-time = "2026-10-21T12:51:09.395Z" },
     { url = "https://files.pythonhosted.org/packages/37/81/6ea5dc1050f86ec4dd038a2774766b42247ba6104e7785f13a0c600e2b33/duckdb-2.0.0-cp312-abi3-win_arm64.whl", hash = "sha256:c5e6708efaa8647e0914a16f1914354419e529a1925929950e7d610418e45873", size = 15726489, upload-time = "2026-10-21T12:51:11.643Z" },
-]
-
-[[package]]
-name = "external-datasets"
-version = "0.1.0"
-source = { editable = "packages/external-datasets" }
-dependencies = [
-    { name = "boto3" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "pillow" },
-    { name = "pyarrow" },
-    { name = "requests" },
-    { name = "tqdm" },
-]
-
-[package.dev-dependencies]
-tests = [
-    { name = "pytest" },
-    { name = "pytest-socket" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "boto3" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "pillow" },
-    { name = "pyarrow" },
-    { name = "requests" },
-    { name = "tqdm" },
-]
-
-[package.metadata.requires-dev]
-tests = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-socket", specifier = ">=0.7" },
 ]
 
 [[package]]
@@ -3769,6 +3694,47 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/52/52/e57eceff0e342a1f50e274264ed47497b59e6a4e3118808ee58ddda7b74a/scipy-1.17.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:a77cbd07b940d326d39a1d1b37817e2ee4d79cb30e7338f3d0cddffae70fcaa2", size = 37682317, upload-time = "2026-02-23T00:22:18.513Z" },
     { url = "https://files.pythonhosted.org/packages/11/2f/b29eafe4a3fbc3d6de9662b36e028d5f039e72d345e05c250e121a230dd4/scipy-1.17.1-cp314-cp314t-win_amd64.whl", hash = "sha256:eb092099205ef62cd1782b006658db09e2fed75bffcae7cc0d44052d8aa0f484", size = 37345327, upload-time = "2026-02-23T00:22:24.442Z" },
     { url = "https://files.pythonhosted.org/packages/07/39/338d9219c4e87f3e708f18857ecd24d22a0c3094752393319553096b98af/scipy-1.17.1-cp314-cp314t-win_arm64.whl", hash = "sha256:200e1050faffacc162be6a486a984a0497866ec54149a01270adc8a59b7c7d21", size = 25489165, upload-time = "2026-02-23T00:22:29.563Z" },
+]
+
+[[package]]
+name = "segdata-etl"
+version = "0.1.0"
+source = { editable = "packages/segdata-etl" }
+dependencies = [
+    { name = "boto3" },
+    { name = "coralnet-scraper" },
+    { name = "ibis-framework", extra = ["duckdb"] },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "pyarrow" },
+    { name = "requests" },
+    { name = "tqdm" },
+]
+
+[package.dev-dependencies]
+tests = [
+    { name = "pytest" },
+    { name = "pytest-socket" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3" },
+    { name = "coralnet-scraper", editable = "packages/coralnet-scraper" },
+    { name = "ibis-framework", extras = ["duckdb"] },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "pyarrow" },
+    { name = "requests" },
+    { name = "tqdm" },
+]
+
+[package.metadata.requires-dev]
+tests = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-socket", specifier = ">=0.7" },
 ]
 
 [[package]]

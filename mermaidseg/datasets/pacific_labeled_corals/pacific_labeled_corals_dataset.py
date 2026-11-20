@@ -1,7 +1,7 @@
 """Pacific Labeled Corals PyTorch dataset.
 
 Reads Pacific Labeled Corals point annotations from the Parquet produced by the
-``external-datasets`` CLI (see ``README.md``) and emits ``(image, source_labels)``
+``segdata build`` CLI (see ``README.md``) and emits ``(image, source_labels)``
 tuples in the per-site ``labelmap.txt`` name space (Beijbom et al., 2015,
 Dryad ``doi:10.5061/dryad.m5pr3``). Mapping into the MERMAID benthic-attribute
 target space is performed externally via
@@ -48,7 +48,7 @@ class PacificLabeledCoralsDataset(BaseCoralDataset):
 
     Args:
         annotations_path: Key (relative to ``source_bucket``) of the
-            annotations Parquet produced by the ``external-datasets`` CLI.
+            annotations Parquet produced by the ``segdata build`` CLI.
         source_bucket: S3 bucket name.
         source_s3_prefix: S3 prefix containing the
             ``images/<site>/<subset>/<image_id><image_ext>`` tree.

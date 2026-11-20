@@ -18,8 +18,8 @@ Bucket `dev-datamermaid-sm-sources`:
 - `coralnet_id2name_<run>.json` beside the manifest, for the label names.
 - The images at the keys in `image_s3_key`: the resized copy if the build resized the image, else the original.
 
-`image_blacklist` and `annotation_overrides`, in `configs/coralnet/`, remove duplicate images. See [Use a build in training](../../../packages/coralnet-dataset/README.md#use-a-build-in-training).
+`image_blacklist` and `annotation_overrides`, in `configs/coralnet/`, remove duplicate images. See [Use a build in training](../../../packages/segdata-etl/README.md#use-a-build-in-training).
 
 ## How to rebuild
 
-Two workspace packages build the data: [`coralnet-scraper`](../../../packages/coralnet-scraper/README.md) downloads the sources to S3, and [`coralnet-dataset`](../../../packages/coralnet-dataset/README.md) builds the manifest, the resized images and the label names. For the order of the steps, see [Recreate and update the CoralNet data](../../../docs/runbooks/coralnet-data.md).
+Two workspace packages build the data: [`coralnet-scraper`](../../../packages/coralnet-scraper/README.md) downloads the sources to S3, and [`segdata-etl`](../../../packages/segdata-etl/README.md) builds the manifest, the resized images and the label names. For the order of the steps, see [Recreate and update the CoralNet data](../../../docs/runbooks/coralnet-data.md).

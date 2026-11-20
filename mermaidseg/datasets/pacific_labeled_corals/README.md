@@ -49,7 +49,7 @@ Dryad has no stable download API, so download the package by hand from the link 
 Then run:
 
 ```bash
-uv run --package external-datasets external-datasets pacific_labeled_corals --data-dir <data-dir>
+uv run --package segdata-etl segdata build pacific_labeled_corals --data-dir <data-dir>
 ```
 
-The run stops before it writes to S3 if the three `labelmap.txt` files differ, or if an image does not decode. See the [package README](../../../packages/external-datasets/README.md) for the output contract and every flag. Pass `--dry-run` to check a run without writing to S3. If the parquet or a JSON file is already on S3, the run stops. Pass `--overwrite` to replace them.
+The run stops before it writes to S3 if the three `labelmap.txt` files differ, or if an image does not decode. See the [package README](../../../packages/segdata-etl/README.md) for the output contract and every flag. Pass `--dry-run` to check a run without writing to S3. If the parquet or a JSON file is already on S3, the run stops. Pass `--overwrite` to replace them.

@@ -39,9 +39,9 @@ To read CoralscapesV2 from a local copy, pass the directory as `hf_repo_id`. `sc
 
 Catlin Seaview, Moorea Labeled Corals, Pacific Labeled Corals and Benthos are already in S3. Load one again only if its S3 copy is lost, or the original source publishes a new version.
 
-The `external-datasets` package checks the raw download and writes the parquet, the images and the metadata to S3. Its [README](../../packages/external-datasets/README.md) gives the output contract and every flag. The README of each dataset lists the raw files to download:
+The `segdata-etl` package checks the raw download and writes the parquet, the images and the metadata to S3. Its [README](../../packages/segdata-etl/README.md) gives the output contract and every flag. The README of each dataset lists the raw files to download:
 
-| Dataset | Subcommand | Raw files |
+| Dataset | Command | Raw files |
 |---|---|---|
 | Catlin Seaview | `catlin_seaview` | The run downloads them. See [the README](../../mermaidseg/datasets/catlin_seaview/README.md#how-to-rebuild) |
 | Moorea Labeled Corals | `moorea_labeled_corals` | [Download by hand](../../mermaidseg/datasets/moorea_labeled_corals/README.md#how-to-rebuild) |
@@ -52,7 +52,7 @@ The `external-datasets` package checks the raw download and writes the parquet, 
 2. Do a dry run. It writes nothing to S3, and it stops if the parquet or a JSON file is already there. For Catlin Seaview, leave out `--data-dir`, and the run downloads the raw files:
 
    ```bash
-   uv run --package external-datasets external-datasets <subcommand> --data-dir <raw dir> --dry-run
+   uv run --package segdata-etl segdata build <dataset> --data-dir <raw dir> --dry-run
    ```
 
 3. Run the same command without `--dry-run`. To replace a dataset that is already in S3, add `--overwrite`.
