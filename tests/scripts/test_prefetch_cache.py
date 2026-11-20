@@ -9,6 +9,7 @@ import types
 
 import pandas as pd
 import pytest
+import requests
 
 import scripts.prefetch_cache as prefetch
 from mermaidseg.dataset_reconciliation.label_mapping import (
@@ -16,6 +17,7 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     coralnet_snapshot_path,
     parse_coralnet_label_mappings,
     read_coralnet_snapshot,
+    write_coralnet_snapshot,
 )
 from mermaidseg.datasets import setup_local_cache
 from mermaidseg.datasets.local_cache import LocalS3Cache
@@ -202,6 +204,39 @@ def test_main_skips_the_coralnet_snapshot_without_a_coralnet_dataset(
     assert prefetch.main(["--cache-dir", str(tmp_path), "--workers", "1"]) == 0
 
     assert _api_calls == []
+
+
+def test_main_keeps_the_existing_snapshot_when_the_api_fetch_fails(
+    tmp_path, _datasets, monkeypatch
+):
+    setup_local_cache({"local_cache_dir": str(tmp_path), "local_cache_write_through": True})
+    on_disk = {
+        7: {
+            "id": "11",
+            "benthic_attribute_id": "22",
+            "benthic_attribute_name": "Sand",
+            "growth_form_id": None,
+            "growth_form_name": None,
+            "provider": "coralnet",
+            "provider_id": 7,
+            "provider_label": "Sand",
+        }
+    }
+    path = coralnet_snapshot_path()
+    write_coralnet_snapshot(
+        CoralNetLabelMappings(records=on_disk, source="api", fetched_at="t0"), path
+    )
+    _datasets[("coralnet", "train")] = _FakeDataset(range(1))
+
+    def failing_fetch():
+        raise requests.HTTPError("503 Server Error")
+
+    monkeypatch.setattr(prefetch, "fetch_coralnet_label_mappings", failing_fetch)
+
+    with pytest.raises(requests.HTTPError):
+        prefetch.main(["--cache-dir", str(tmp_path), "--workers", "1"])
+
+    assert read_coralnet_snapshot(path).records == on_disk
 
 
 def test_main_exits_2_when_the_environment_is_offline(monkeypatch, tmp_path, caplog):
