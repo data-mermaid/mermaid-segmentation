@@ -6,7 +6,7 @@ import base64
 import hashlib
 import io
 import os
-import tempfile
+import uuid
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,25 +78,18 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _umask() -> int:
-    """Return the process umask; ``os.umask`` has no getter, so set and restore it."""
-    mask = os.umask(0)
-    os.umask(mask)
-    return mask
-
-
 def _write_atomic(path: Path, data: bytes) -> None:
     """Write via a temp file in the same directory so a reader never sees a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    # O_EXCL refuses an existing name; the kernel applies the process umask to the 0o666 mode.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
-        # mkstemp creates 0600; widen to the mode a normally created file gets.
-        os.chmod(tmp, 0o666 & ~_umask())
         os.replace(tmp, path)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise
 
 
