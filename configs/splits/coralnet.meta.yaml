@@ -1,0 +1,67 @@
+# Provenance of configs/splits/coralnet.csv.
+dataset: coralnet
+file: coralnet.csv
+columns:
+  group: connected-component label, "s<source_id>"
+  source_id: CoralNet source id
+  split_group: connected-component id from the original split build (int)
+  split: train | val | test
+
+derived_from:
+  # The per-split source sets equal data.coralnet.{train,val,test}.whitelist_sources
+  # in configs/data_config.yaml at this main commit (585 / 102 / 139 sources).
+  whitelists:
+    file: configs/data_config.yaml
+    commit: dd2b48f05ed0b67fa84fe919e842971e74a604c8
+  # split_group comes from the group column of this file on branch cleaned_up_rerun.
+  split_group:
+    file: configs/coralnet/source_splits.csv
+    commit: e0d387684ac86e13262e917d9d82aab5e22f0c9d
+
+builder:
+  # Last commit that generated source_splits.csv before it was edited by hand.
+  module: mermaidseg/datasets/coralnet/dedup/splits.py
+  commit: bc0085b07009e1c6c6bb39f5e316e8dbf89108dc
+  # These are the argparse defaults at that commit (path arguments omitted).
+  # The actual invocation was not recorded.
+  parameters:
+    val_frac: 0.10
+    test_frac: 0.10
+    max_group_frac: 0.25
+    max_id_gap: 3
+    max_km: 50.0
+    min_class_points: 500
+    min_eval_points: 100
+    w_coverage: 1.0
+    w_size: 10.0
+    iters: 200000
+    restarts: 8
+    seed: 0
+
+# Set once the leakage check has run against a published coralnet dataset version.
+checked_against: null
+
+overrides:
+  # Hand edits made after the builder ran: sources moved into train.
+  # Fill in each reason.
+  commit: e0d387684ac86e13262e917d9d82aab5e22f0c9d
+  sources:
+    - {source_id: 800, group: s800, split_group: 95, from: test, to: train, reason: ""}
+    - {source_id: 1588, group: s1588, split_group: 107, from: test, to: train, reason: ""}
+    - {source_id: 3765, group: s3765, split_group: 195, from: test, to: train, reason: ""}
+    - {source_id: 3807, group: s3807, split_group: 201, from: test, to: train, reason: ""}
+    - {source_id: 5328, group: s5328, split_group: 257, from: test, to: train, reason: ""}
+    - {source_id: 793, group: s793, split_group: 94, from: val, to: train, reason: ""}
+    - {source_id: 2074, group: s2074, split_group: 125, from: val, to: train, reason: ""}
+    - {source_id: 2282, group: s2282, split_group: 133, from: val, to: train, reason: ""}
+    - {source_id: 2722, group: s2722, split_group: 143, from: val, to: train, reason: ""}
+    - {source_id: 3722, group: s3722, split_group: 194, from: val, to: train, reason: ""}
+    - {source_id: 3785, group: s3785, split_group: 200, from: val, to: train, reason: ""}
+    - {source_id: 3948, group: s3948, split_group: 204, from: val, to: train, reason: ""}
+    - {source_id: 3949, group: s3949, split_group: 205, from: val, to: train, reason: ""}
+    - {source_id: 3989, group: s3989, split_group: 208, from: val, to: train, reason: ""}
+    - {source_id: 5218, group: s5218, split_group: 36, from: val, to: train, reason: ""}
+    - {source_id: 5411, group: s5411, split_group: 36, from: val, to: train, reason: ""}
+    - {source_id: 5690, group: s5690, split_group: 268, from: val, to: train, reason: ""}
+    - {source_id: 6207, group: s6207, split_group: 287, from: val, to: train, reason: ""}
+    - {source_id: 6965, group: s6965, split_group: 36, from: val, to: train, reason: ""}
