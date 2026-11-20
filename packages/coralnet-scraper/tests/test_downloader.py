@@ -61,9 +61,22 @@ _CSV_HEADERS = {"Content-Type": "text/csv"}
 def test_export_timeouts_scale_with_source_size():
     assert export_prep_timeout_seconds(None) == 300
     assert export_prep_timeout_seconds(100) == 300
-    assert export_prep_timeout_seconds(32176) == 1728
-    assert export_prep_timeout_seconds(100_000) == 5120
+    assert export_prep_timeout_seconds(1681, 100) == 792  # s57: 120 + 168,100 // 250
+    assert export_prep_timeout_seconds(5000, 200) == 4120
     assert export_serve_timeout_seconds(32176) == 703
+
+
+@pytest.mark.parametrize(
+    ("total_images", "points", "prep"),
+    [
+        (1681, None, 792),  # the default of 100 points
+        (1681, 10, 300),  # 120 + 67 is under the floor
+        (4000, 37, 712),
+        (5000, 10_000, 7200),  # capped
+    ],
+)
+def test_export_prep_timeout_scales_with_points_per_image(total_images, points, prep):
+    assert export_prep_timeout_seconds(total_images, points) == prep
 
 
 def _overview_html(total: int, confirmed: int | None = None) -> str:
@@ -393,6 +406,7 @@ def _run_bulk_download(
     serve_text: str = "",
     export_prep: list | None = None,
     total: int = _PAGINATED_EXPORT_THRESHOLD,
+    points: int | None = None,
 ) -> _BulkRun:
     """Run the bulk annotations path on a small source whose walk found images 1 and 2.
 
@@ -414,7 +428,9 @@ def _run_bulk_download(
         patch.object(dl.session, "post", side_effect=export_prep) as post_mock,
         patch("coralnet_scraper.downloader.time.sleep") as sleep_mock,
     ):
-        ok = dl.download_annotations(1, "b", "p", refs=_refs({1: [1, 2]}), total_images=total)
+        ok = dl.download_annotations(
+            1, "b", "p", refs=_refs({1: [1, 2]}), total_images=total, points_per_image=points
+        )
     return _BulkRun(ok=ok, get=get_mock, post=post_mock, sleep=sleep_mock)
 
 
@@ -431,7 +447,7 @@ def test_download_annotations_fails_after_four_export_prep_timeouts(fake_s3):
     )
 
     assert run.ok is False
-    assert run.prep_timeouts == [320, 620, 920, 1220]
+    assert run.prep_timeouts == [1720, 2020, 2320, 2620]  # 120 + 4000 * 100 // 250, +300 each
     assert _BULK_KEY not in fake_s3.objects
 
 
@@ -535,11 +551,11 @@ def test_an_export_failure_other_than_a_prep_read_timeout_adds_no_delay(fake_s3)
 
 
 def test_download_annotations_sizes_timeouts_from_the_total(fake_s3):
-    run = _run_bulk_download(fake_s3, serve_text=_SERVE_CSV, total=4000)
+    run = _run_bulk_download(fake_s3, serve_text=_SERVE_CSV, total=4000, points=37)
 
     assert run.ok is True
     assert run.get.call_args_list[0].args == (_BROWSE_URL,)
-    assert run.prep_timeouts == [320]  # 120 + 4000 // 20
+    assert run.prep_timeouts == [712]  # 120 + 4000 * 37 // 250
     serve_get = run.get.call_args_list[-1]
     assert serve_get.args == (
         "https://coralnet.ucsd.edu/source/1/export/serve/?session_data_timestamp=t1",
@@ -836,6 +852,13 @@ def test_download_source_stops_when_the_walk_fails(fake_s3):
     mocks["download_annotations"].assert_not_called()
 
 
+def test_download_source_passes_the_overview_points_per_image_to_the_export(fake_s3):
+    dl, mocks = _failing_step_downloader(fake_s3)
+    dl.download_source(1, bucket_name="b", s3_prefix="p")
+
+    assert mocks["download_annotations"].call_args.kwargs["points_per_image"] == 10
+
+
 def test_download_source_stops_after_annotations_fail(fake_s3):
     dl, mocks = _failing_step_downloader(fake_s3, download_annotations=False)
     res = dl.download_source(1, bucket_name="b", s3_prefix="p")
@@ -1106,9 +1129,10 @@ def test_resolve_one_image_url_raises_when_the_page_has_no_original_image():
     [
         (0, 300, 120),
         (None, 300, 120),
-        (141_600, 7200, 1800),  # 120 + n // 20 == 7200 exactly; 60 + n // 50 is 2892
+        (17_000, 6920, 400),  # 120 + 1,700,000 // 250 is under the cap
+        (17_700, 7200, 414),  # 120 + 1,770,000 // 250 == 7200 exactly
         (200_000, 7200, 1800),  # both capped
-        (88_000, 4520, 1800),  # serve 60 + 1760 = 1820 is capped
+        (88_000, 7200, 1800),  # serve 60 + 1760 = 1820 is capped
     ],
 )
 def test_export_timeouts_floor_at_zero_and_cap_for_huge_sources(total_images, prep, serve):

@@ -9,6 +9,7 @@ import pytest
 from coralnet_scraper.parsers import (
     parse_export_annotations_prep_form,
     parse_image_status_counts,
+    parse_points_per_image,
     parse_source_access,
     parse_total_images_from_source_html,
 )
@@ -72,3 +73,44 @@ def test_parse_export_annotations_prep_form():
         '<input type="hidden" name="csrfmiddlewaretoken" value="tok123"/></form>'
     )
     assert parse_export_annotations_prep_form(html) == "tok123"
+
+
+def _details_html(method: str) -> str:
+    return (
+        '<ul class="flexible-details"><li><span>Visibility:</span><span>Public</span></li>'
+        f"<li><span>Point generation method:</span><span>{method}</span></li></ul>"
+    )
+
+
+def test_parse_points_per_image_from_fixture():
+    assert parse_points_per_image(_fixture("source_ok.html")) == 10
+
+
+@pytest.mark.parametrize(
+    ("method", "points"),
+    [
+        ("Simple random, 200 points", 200),
+        (
+            "Stratified random, 2 rows x 5 columns of cells, 1 points per cell (total of 10 points)",
+            10,
+        ),
+        ("Uniform grid, 10 rows x 10 columns (total of 100 points)", 100),
+        ("Simple random, 1,500 points", 1500),
+        ("Imported, 50 points", 50),
+    ],
+)
+def test_parse_points_per_image_reads_each_method(method, points):
+    assert parse_points_per_image(_details_html(method)) == points
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<html><body><h1>Source</h1></body></html>",
+        _details_html("Unknown method"),
+        _details_html("Simple random, 0 points"),
+        _details_html("2 rows x 5 columns of cells, 1 points per cell"),
+    ],
+)
+def test_parse_points_per_image_is_none_when_unknown(html):
+    assert parse_points_per_image(html) is None
