@@ -43,6 +43,7 @@ def _images(rows: list[tuple[str, str, int, str]]) -> pa.Table:
             "height": [4] * len(rows),
             "group": [r[3] for r in rows],
             "source_fingerprint": ["fp"] * len(rows),
+            "source_name": pa.nulls(len(rows), pa.string()),
             "crc64nvme": pa.nulls(len(rows), pa.string()),
             "mask_key": pa.nulls(len(rows), pa.string()),
             "mask_etag": pa.nulls(len(rows), pa.string()),

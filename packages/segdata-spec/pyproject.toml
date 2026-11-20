@@ -10,6 +10,7 @@ requires-python = ">=3.11.5"
 dependencies = [
     "awscrt",
     "boto3>=1.35.2",
+    "pillow",
     "pyarrow",
     "pydantic>=2.13.3",
 ]

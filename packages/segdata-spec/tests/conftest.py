@@ -178,6 +178,7 @@ def _images_table(
             **mask_cols,
             "mask_crc64nvme": [mask_crcs.get(i) for i in ids],
             "source_fingerprint": ["fp"] * n,
+            "source_name": pa.nulls(n, pa.string()),
             "attrs": pa.nulls(n, pa.string()),
         }
     )

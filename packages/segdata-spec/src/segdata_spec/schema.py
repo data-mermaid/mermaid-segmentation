@@ -26,6 +26,7 @@ IMAGES_SCHEMA: pa.Schema = pa.schema(
         pa.field("mask_size", pa.int64(), nullable=True),
         pa.field("mask_crc64nvme", pa.string(), nullable=True),
         pa.field("source_fingerprint", pa.string(), nullable=False),
+        pa.field("source_name", pa.string(), nullable=True),
         # Dataset-specific extras, serialised as a JSON object string.
         pa.field("attrs", pa.string(), nullable=True),
     ]

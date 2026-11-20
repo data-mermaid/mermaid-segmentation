@@ -3781,6 +3781,7 @@ source = { editable = "packages/segdata-spec" }
 dependencies = [
     { name = "awscrt" },
     { name = "boto3" },
+    { name = "pillow" },
     { name = "pyarrow" },
     { name = "pydantic" },
 ]
@@ -3795,6 +3796,7 @@ tests = [
 requires-dist = [
     { name = "awscrt" },
     { name = "boto3", specifier = ">=1.35.2" },
+    { name = "pillow" },
     { name = "pyarrow" },
     { name = "pydantic", specifier = ">=2.13.3" },
 ]
