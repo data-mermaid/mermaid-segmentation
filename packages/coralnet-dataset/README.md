@@ -87,6 +87,7 @@ Each invocation computes its own default version tag. If you run the subcommands
 
 | Kind | Meaning |
 |---|---|
+| `not_complete` | The source has no `_complete.json` [completion marker](../coralnet-scraper/README.md#resume). The scraper writes it only after it verifies the source, so the build reads none of the source's CSVs. |
 | `annotations_missing` | `annotations.csv` is not on S3. |
 | `image_list_missing` | `image_list.csv` is not on S3. |
 | `labelset_missing` | `labelset.csv` is not on S3. |
@@ -95,6 +96,8 @@ Each invocation computes its own default version tag. If you run the subcommands
 | `annotations_empty` | `annotations.csv` has no rows. |
 | `image_list_incomplete` | An annotation row matches no `image_list.csv` row by `Name`. |
 | `label_unnamed` | A Label ID used by the source is not named by any included source's labelset. |
+
+A bucket filled by an older scraper has no markers. Run `coralnet-scrape verify-existing` first; see [Adopt an existing bucket](../../docs/runbooks/coralnet-data.md#adopt-an-existing-bucket). Otherwise every source is excluded as `not_complete` and `build-annotations` exits 1.
 
 Rows with a non-numeric `Row`, `Column` or `Label ID` are dropped with a warning; they do not exclude the source. A Label ID with two different names across the included sources raises `ValueError` and stops the build.
 

@@ -247,11 +247,21 @@ def sample_csv_factory():
 
 
 def populate_source(
-    s3: FakeS3, bucket: str, prefix: str, source_id: int, files: dict[str, bytes]
+    s3: FakeS3,
+    bucket: str,
+    prefix: str,
+    source_id: int,
+    files: dict[str, bytes],
+    *,
+    complete: bool = True,
 ) -> None:
+    """Put a source's files, plus the scraper's ``_complete.json`` marker unless ``complete``
+    is False."""
     base = f"{prefix}/s{source_id}/"
     for name, body in files.items():
         s3.put(bucket, base + name, body)
+    if complete:
+        s3.put(bucket, base + "_complete.json", b"{}")
 
 
 @pytest.fixture
