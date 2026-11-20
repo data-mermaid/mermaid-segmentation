@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import threading
 import time
 from collections import Counter
@@ -29,6 +31,30 @@ HTTP_BACKOFF_FACTOR = 2.0
 HTTP_BACKOFF_JITTER = 2.0
 HTTP_BACKOFF_MAX = 120.0
 _POOL_CONNECTIONS = 10
+
+_URL_QUERY = re.compile(r"(/[^\s?'\"]*)\?[^\s'\"]*")
+
+
+def redact_url_query(text: str) -> str:
+    """Return ``text`` with the query of every URL or URL path replaced by ``?<redacted>``."""
+    return _URL_QUERY.sub(r"\1?<redacted>", text)
+
+
+class _RedactUrlQuery(logging.Filter):
+    """Logging filter that redacts URL queries from a record's message."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_url_query(record.getMessage())
+        record.args = None
+        return True
+
+
+_URL_QUERY_FILTER = _RedactUrlQuery()
+# Presigned media URLs carry CoralNet's credentials in the query (#276). The retry warning
+# stays for live visibility; CountingRetry still counts retries for the Transport summary.
+# Both loggers write request URLs: the pool on retries and requests, util.retry on each retry.
+for _name in ("urllib3.connectionpool", "urllib3.util.retry"):
+    logging.getLogger(_name).addFilter(_URL_QUERY_FILTER)
 
 
 def user_agent() -> str:

@@ -33,7 +33,7 @@ from coralnet_scraper.config import (
     validate_requests_per_second,
     validate_workers,
 )
-from coralnet_scraper.http import SessionFactory
+from coralnet_scraper.http import SessionFactory, redact_url_query
 from coralnet_scraper.models import DownloadResult, ImageFailures
 from coralnet_scraper.parsers import (
     classifier_plot_data_from_source_html,
@@ -1371,7 +1371,7 @@ class CoralNetDownloader:
                     stage = "upload_failed"
                     self.download_image_to_s3(url, bucket_name, s3_key)
         except Exception as e:  # noqa: BLE001 - counted as the image's failure kind
-            logger.warning("Image %s failed (%s): %s", ref.id, stage, e)
+            logger.warning("Image %s failed (%s): %s", ref.id, stage, redact_url_query(str(e)))
             return stage
         return "ok"
 
