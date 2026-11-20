@@ -106,10 +106,10 @@ Exit code of the subcommands:
 
 The scraper accepts a response only when its content is valid. A status of 200 is not enough.
 
-- **Annotation export.** The CSV is decoded as UTF-8, because CoralNet sends `text/csv` without a charset. An export must be CSV with a `Name` column, no null names and no HTML columns. It must contain only the requested images.
-- **Browse walk.** The walk checks the thumbnail count of each page, repeated image ids, and the final image count against the source overview. The overview is read again after the walk.
+- **Annotation export.** The CSV is decoded as UTF-8, because CoralNet sends `text/csv` without a charset. An export must be CSV with a `Name` column, no null names, no HTML columns and no column whose name starts with `Unnamed`. It must contain only the requested images.
+- **Browse walk.** The walk rejects a page that lists no images. It compares the thumbnail count of a page to page 1 only when the page has a Next link. It also checks repeated image ids, and the final image count against the source overview. The overview is read again after the walk.
 - **Logged-out answers.** These answers log the session in again: a browse page without the export form, an `export_prep` answer of "must be signed in", and a serve request that lands on the login page.
-- **Images.** An image response must have a 2xx status, an `image/*`, `binary/octet-stream` (S3's default) or `application/octet-stream` content type, and the full `Content-Length`. Pillow must be able to open and verify it (a structural check; it does not fully decode the image). The download has a 300 s deadline. The scraper never uploads an invalid body.
+- **Images.** An image response must have a 2xx status, an `image/*`, `binary/octet-stream` (S3's default) or `application/octet-stream` content type, and the full `Content-Length`. Pillow must open and fully decode it. Only JPEG and PNG are accepted; an MPO file opens through the JPEG reader and is accepted. The body may be at most 256 MiB, declared or read. The download has a 300 s deadline. The scraper never uploads an invalid body. The stored `ContentType` comes from the detected format.
 
 ### Retries and circuit breaker
 
@@ -123,8 +123,9 @@ The scraper accepts a response only when its content is valid. A status of 200 i
   | Image: resolve the pre-signed URL and download | 4 |
   | Login | 4 |
 
-  The image unit repeats the resolve step, so an expired pre-signed URL is resolved again. Waits are 5 to 120 s with jitter. There is no cap on total retry time. A page-level walk failure resumes from the last walk checkpoint. A count mismatch redoes the walk.
-- **Circuit breaker.** After 5 consecutive outage-type failures the run stops. Outage-type failures are a raised exception, a failure with no error code, `login failed`, `overview fetch failed …`, `annotations_failed` and `image_list_failed`. Other failed sources, for example `cannot access source <id>: <reason>`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped because it is complete neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
+  The image unit repeats the resolve step, so an expired pre-signed URL is resolved again. Waits are 5 to 120 s with jitter. There is no cap on total retry time. A page-level walk failure resumes from the last walk checkpoint. A count mismatch redoes the walk. These retries sit on top of the transport retries above, so one image can make up to about 4 × 6 requests. After an `export_prep` read timeout, the next attempt waits an extra 60 s, because CoralNet may still be building the export. Once one page export fails, the other pages make no further attempts.
+- **Image-stage stop.** After 20 images in a row fail, the scraper skips the remaining queued images and the source gets `images_outage`.
+- **Circuit breaker.** After 5 consecutive outage-type failures the run stops. Outage-type failures are a raised exception, a failure with no error code, `login failed`, `overview fetch failed …`, `annotations_failed`, `image_list_failed` and `images_outage`. Other failed sources, for example `cannot access source <id>: <reason>`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped because it is complete neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
 
 ### Run report
 
