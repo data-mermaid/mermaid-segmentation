@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+import stamina
 from botocore.exceptions import ClientError
 
 from coralnet_scraper import http
@@ -36,14 +37,26 @@ def _no_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(http, "HTTP_BACKOFF_JITTER", 0.0)
 
 
+@pytest.fixture(autouse=True)
+def _no_stamina_backoff() -> Iterator[None]:
+    """Retry content failures immediately, keeping each call site's own attempt count."""
+    with stamina.set_testing(True, attempts=100, cap=True):
+        yield
+
+
 @dataclass(frozen=True)
 class Reply:
-    """One scripted HTTP answer; ``delay_s`` stalls before the status line is sent."""
+    """One scripted HTTP answer; ``delay_s`` stalls before the status line is sent.
+
+    A ``Content-Length`` in ``headers`` replaces the true body length. ``trickle_s`` sends
+    the body one byte at a time, sleeping that long between bytes.
+    """
 
     status: int = 200
     body: bytes = b""
     headers: dict[str, str] = field(default_factory=dict)
     delay_s: float = 0.0
+    trickle_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -77,9 +90,15 @@ class ScriptedServer:
                     self.send_response(reply.status)
                     for name, value in reply.headers.items():
                         self.send_header(name, value)
-                    self.send_header("Content-Length", str(len(reply.body)))
+                    if "Content-Length" not in reply.headers:
+                        self.send_header("Content-Length", str(len(reply.body)))
                     self.end_headers()
-                    self.wfile.write(reply.body)
+                    if not reply.trickle_s:
+                        self.wfile.write(reply.body)
+                    for i in range(len(reply.body) if reply.trickle_s else 0):
+                        self.wfile.write(reply.body[i : i + 1])
+                        self.wfile.flush()
+                        time.sleep(reply.trickle_s)
                 except (BrokenPipeError, ConnectionResetError):
                     pass  # the client gave up waiting (read-timeout scripts)
 
@@ -174,22 +193,26 @@ class FakeS3:
     Populate ``objects`` with ``{(bucket, key): bytes}`` to control what gets returned. ``Range``
     semantics follow ``bytes=start-end`` (inclusive). Listings are sorted by key like S3, and the
     paginator returns ``list_page_size`` keys per page. ``events`` records every write and
-    delete in order as ``("put" | "delete", key)``.
+    delete in order as ``("put" | "delete", key)``; ``headers`` keeps the ``ContentType`` and
+    ``Metadata`` of each ``put_object``.
     """
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
     events: list[tuple[str, str]] = field(default_factory=list)
+    headers: dict[tuple[str, str], dict] = field(default_factory=dict)
     list_page_size: int = 1000
 
     def put(self, bucket: str, key: str, data: bytes) -> None:
         self.objects[(bucket, key)] = data
 
-    def put_object(self, *, Bucket: str, Key: str, Body, ContentType: str | None = None):
-        """Scraper uploads CSV and JSON bodies."""
-        del ContentType  # parity with boto
+    def put_object(
+        self, *, Bucket: str, Key: str, Body, ContentType: str | None = None, Metadata=None
+    ):
+        """Scraper uploads CSV, JSON and image bodies."""
+        self.headers[(Bucket, Key)] = {"ContentType": ContentType, "Metadata": Metadata}
         if isinstance(Body, str):
             raw: bytes = Body.encode("utf-8")
-        elif isinstance(Body, bytes | memoryview):
+        elif isinstance(Body, bytes | bytearray | memoryview):
             raw = bytes(Body)
         else:
             raw = Body.read()

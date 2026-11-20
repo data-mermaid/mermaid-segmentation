@@ -90,9 +90,28 @@ Exit code:
 | 0 | Every source downloads or is skipped. A source with a marker, with zero Confirmed images, or with zero images counts as skipped. |
 | 1 | The CoralNet login fails, any source fails, the [circuit breaker](#retries-and-circuit-breaker) stops the run, the [run report](#run-report) cannot be written to S3 (after the transport figures and failure summary are logged, the run logs `Could not write run report s3://<bucket>/<key>`), the [discovery guard](#discovery-guard) stops the run (no run report is written), or the run stops on an uncaught error (invalid configuration, source discovery failure). |
 
+### Response checks
+
+The scraper accepts a response only when its content is valid. A status of 200 is not enough.
+
+- **Annotation export.** The CSV is decoded as UTF-8, because CoralNet sends `text/csv` without a charset. An export must be CSV with a `Name` column, no null names and no HTML columns. It must contain only the requested images.
+- **Browse walk.** The walk checks the thumbnail count of each page, repeated image ids, and the final image count against the source overview. The overview is read again after the walk.
+- **Logged-out answers.** These answers log the session in again: a browse page without the export form, an `export_prep` answer of "must be signed in", and a serve request that lands on the login page.
+- **Images.** An image response must have a 2xx status, an `image/*`, `binary/octet-stream` (S3's default) or `application/octet-stream` content type, and the full `Content-Length`. Pillow must be able to open and verify it (a structural check; it does not fully decode the image). The download has a 300 s deadline. The scraper never uploads an invalid body.
+
 ### Retries and circuit breaker
 
 - **Retries.** A GET request is retried up to 5 times on timeouts, dropped connections, and HTTP 429, 500, 502, 503 and 504. The wait grows exponentially with jitter and honours the `Retry-After` header. A request that could not connect is retried whatever its method, because it was never sent.
+- **Content-level retries.** A response that fails a [response check](#response-checks) is retried as a unit:
+
+  | Unit | Attempts |
+  |---|---|
+  | Browse walk | 3 |
+  | Export round trip, including the POST | 4 |
+  | Image: resolve the pre-signed URL and download | 4 |
+  | Login | 4 |
+
+  The image unit repeats the resolve step, so an expired pre-signed URL is resolved again. Waits are 5 to 120 s with jitter. There is no cap on total retry time. A page-level walk failure resumes from the last walk checkpoint. A count mismatch redoes the walk.
 - **Circuit breaker.** After 5 consecutive outage-type failures the run stops. Outage-type failures are a raised exception, `login failed`, `overview fetch failed …`, `annotations_failed` and `image_list_failed`. Other failed sources, for example `cannot access source <id>: <reason>`, `verification_failed` or image failures, neither count toward the streak nor reset it. A source that is ok resets it. The summary's first line is `Run stopped early: circuit_open` and the exit code is 1. A source skipped because it is complete neither counts toward the streak nor resets it. Running the same command again continues with the remaining sources.
 
 ### Run report

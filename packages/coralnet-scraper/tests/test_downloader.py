@@ -9,24 +9,30 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 import requests
+import stamina
+import tenacity
 from botocore.exceptions import ClientError
 from conftest import Reply, ScriptedServer
+from PIL import Image
 
 from coralnet_scraper import downloader as downloader_mod
 from coralnet_scraper.downloader import (
     _PAGINATED_EXPORT_THRESHOLD,
+    ContentError,
     CoralNetDownloader,
     ImageRef,
+    SessionExpired,
+    decode_export_csv,
     export_prep_timeout_seconds,
     export_serve_timeout_seconds,
-    half_open_batches,
 )
 from coralnet_scraper.models import ImageFailures
+from coralnet_scraper.verify import Verification
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "coralnet_html"
 
@@ -35,14 +41,15 @@ def _fixture(name: str) -> str:
     return (_FIXTURES / name).read_text(encoding="utf-8")
 
 
-def test_half_open_batches_covers_disjoint_ranges():
-    n, bs = 1001, 1000
-    ranges = half_open_batches(n, bs)
-    assert ranges == [(0, 1000), (1000, 1001)]
-    visited = []
-    for a, b in ranges:
-        visited.extend(range(a, b))
-    assert visited == list(range(n))
+def _jpeg_bytes() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), (10, 20, 30)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+_JPEG = _jpeg_bytes()
+_JPEG_HEADERS = {"Content-Type": "image/jpeg"}
+_CSV_HEADERS = {"Content-Type": "text/csv"}
 
 
 def test_export_timeouts_scale_with_source_size():
@@ -101,67 +108,50 @@ def test_download_source_skips_a_source_without_confirmed_images_or_images(
 
 def test_download_images_separates_missing_url_from_upload_failures():
     dl = CoralNetDownloader("u", "p", max_workers=2)
-    # Rows: 1 uploads, 2 fails to upload, 3 raises in the worker, 4 has no URL.
-    df = pd.DataFrame(
-        {
-            "Image Page": [f"/image/{i}/view/" for i in (1, 2, 3, 4)],
-            "Image URL": ["http://x/1", "http://x/2", "http://x/3", pd.NA],
-        }
-    )
-
-    def fake_upload(url: str, bucket: str, key: str) -> tuple[str, bool]:
-        if url.endswith("/3"):
-            raise RuntimeError("boom")
-        return key, url.endswith("/1")
-
-    with patch.object(dl, "download_image_to_s3", side_effect=fake_upload):
-        result = dl.download_images(df, 1, bucket_name="b")
-    assert result == ImageFailures(missing_url=1, upload_failed=2)
-
-
-def test_download_images_counts_every_row_missing_when_no_url_is_set():
-    dl = CoralNetDownloader("u", "p", max_workers=2)
-    df = pd.DataFrame(
-        {"Image Page": [f"/image/{i}/view/" for i in (1, 2, 3)], "Image URL": [pd.NA] * 3}
-    )
-    assert dl.download_images(df, 1, bucket_name="b") == ImageFailures(
-        missing_url=3, upload_failed=0
-    )
-
-
-def test_get_image_urls_serial_path_keeps_order_around_a_failure():
-    dl = CoralNetDownloader("u", "p", max_workers=1)
+    # Image 1 uploads, 2 has no original on its view page, 3 fails to upload.
 
     def resolve(rel: str) -> str:
         if rel == "/image/2/view/":
             raise ValueError("private")
         return "http://x" + rel
 
-    with patch.object(dl, "_resolve_one_image_url", side_effect=resolve):
-        urls = dl.get_image_urls(["/image/1/view/", "/image/2/view/", "/image/3/view/"])
-    assert urls == ["http://x/image/1/view/", None, "http://x/image/3/view/"]
+    def upload(url: str, bucket: str, key: str) -> int:
+        if url.endswith("/3/view/"):
+            raise RuntimeError("boom")
+        return 1
+
+    with (
+        patch.object(dl, "_resolve_one_image_url", side_effect=resolve),
+        patch.object(dl, "download_image_to_s3", side_effect=upload),
+    ):
+        result = dl.download_images(_refs({1: [1, 2, 3]}), 1, "b", "p")
+    assert result == ImageFailures(missing_url=1, upload_failed=1)
 
 
-_BROWSE_HTML_PAGE = """\
-<html>
+_EXPORT_FORM = """\
 <form id="export-annotations-prep-form">
   <input type="hidden" name="csrfmiddlewaretoken" value="{csrf}"/>
-</form>
-{thumbs}
-{next_link}
-</html>"""
+</form>"""
 
 
 def _browse_html(
-    thumbs: list[tuple[int, str]], next_href: str | None = None, csrf: str = "tok"
+    thumbs: list[tuple[int, str]],
+    next_href: str | None = None,
+    csrf: str = "tok",
+    *,
+    form: bool = True,
 ) -> str:
-    """A browse page with one thumbnail per ``(image id, title)``."""
+    """A browse page with one thumbnail per ``(image id, title)``.
+
+    ``form=False`` leaves out the export form, as for a logged-out visitor.
+    """
     spans = "".join(
         f'<span class="thumb_wrapper"><a href="/image/{i}/view/"><img title="{t}"/></a></span>'
         for i, t in thumbs
     )
     next_link = f'<a title="Next page" href="{next_href}">Next</a>' if next_href else ""
-    return _BROWSE_HTML_PAGE.format(csrf=csrf, thumbs=spans, next_link=next_link)
+    export_form = _EXPORT_FORM.format(csrf=csrf) if form else ""
+    return f"<html>{export_form}{spans}{next_link}</html>"
 
 
 def _browse_page(
@@ -255,6 +245,15 @@ def _mock_response(text: str | None = None, json_data: dict | None = None) -> Ma
     return r
 
 
+def _csv_response(text: str) -> requests.Response:
+    """An ``export/serve`` answer as CoralNet sends it: ``text/csv`` with no charset."""
+    return _http_response(
+        text,
+        url="https://coralnet.ucsd.edu/source/1/export/serve/",
+        headers={"Content-Type": "text/csv"},
+    )
+
+
 @contextmanager
 def _mock_paginated_session(
     dl: CoralNetDownloader,
@@ -319,73 +318,53 @@ class _BulkRun:
 def _run_bulk_download(
     fake_s3,
     *,
-    browse_html: str,
     serve_text: str = "",
     export_prep: list | None = None,
     total: int = _PAGINATED_EXPORT_THRESHOLD,
 ) -> _BulkRun:
-    """Run the bulk annotations path on a small source.
+    """Run the bulk annotations path on a small source whose walk found images 1 and 2.
 
     ``export_prep`` lists the export_prep POST outcomes in order (responses or exceptions).
     """
     dl = CoralNetDownloader("u", "p")
     dl.logged_in = True
     dl.s3 = fake_s3
-    gets = [_mock_response(text=browse_html), _mock_response(text=serve_text)]
+
+    def get(url: str, timeout: int | None = None, **_: object) -> requests.Response:
+        if "/export/serve/" in url:
+            return _csv_response(serve_text)
+        return _http_response(_BULK_BROWSE_HTML)
+
     if export_prep is None:
         export_prep = [_mock_response(json_data={"session_data_timestamp": "t1"})]
     with (
-        patch.object(dl.session, "get", side_effect=gets) as get_mock,
+        patch.object(dl.session, "get", side_effect=get) as get_mock,
         patch.object(dl.session, "post", side_effect=export_prep) as post_mock,
         patch("coralnet_scraper.downloader.time.sleep") as sleep_mock,
     ):
-        ok = dl.download_annotations(1, "b", "p", refs=[], total_images=total)
+        ok = dl.download_annotations(1, "b", "p", refs=_refs({1: [1, 2]}), total_images=total)
     return _BulkRun(ok=ok, get=get_mock, post=post_mock, sleep=sleep_mock)
 
 
-_SERVE_CSV = "Name,Row,Column,Label ID\na.jpg,1,2,3\n"
+_SERVE_CSV = "Name,Row,Column,Label ID\nimg1.jpg,1,2,3\n"
 _BROWSE_URL = "https://coralnet.ucsd.edu/source/1/browse/images/"
 
 
-def test_download_annotations_retries_export_prep_with_growing_timeout(fake_s3):
-    export_prep = [
-        requests.exceptions.ReadTimeout("t"),
-        requests.exceptions.ReadTimeout("t"),
-        _mock_response(json_data={"session_data_timestamp": "t1"}),
-    ]
+def test_download_annotations_fails_after_four_export_prep_timeouts(fake_s3):
     run = _run_bulk_download(
         fake_s3,
-        browse_html=_BULK_BROWSE_HTML,
-        serve_text=_SERVE_CSV,
-        export_prep=export_prep,
-        total=4000,
-    )
-
-    assert run.ok is True
-    assert run.prep_timeouts == [320, 620, 920]  # 120 + 4000 // 20, then +300 per attempt
-    assert run.sleep.call_args_list == [call(60), call(120)]
-    assert _BULK_KEY in fake_s3.objects
-
-
-def test_download_annotations_fails_after_five_export_prep_timeouts(fake_s3):
-    run = _run_bulk_download(
-        fake_s3,
-        browse_html=_BULK_BROWSE_HTML,
         serve_text=_SERVE_CSV,
         export_prep=[requests.exceptions.ReadTimeout("t")] * 5,
         total=4000,
     )
 
     assert run.ok is False
-    assert run.prep_timeouts == [320, 620, 920, 1220, 1520]
-    assert run.sleep.call_args_list == [call(60), call(120), call(180), call(240)]
+    assert run.prep_timeouts == [320, 620, 920, 1220]
     assert _BULK_KEY not in fake_s3.objects
 
 
 def test_download_annotations_sizes_timeouts_from_the_total(fake_s3):
-    run = _run_bulk_download(
-        fake_s3, browse_html=_BULK_BROWSE_HTML, serve_text=_SERVE_CSV, total=4000
-    )
+    run = _run_bulk_download(fake_s3, serve_text=_SERVE_CSV, total=4000)
 
     assert run.ok is True
     assert run.get.call_args_list[0].args == (_BROWSE_URL,)
@@ -400,34 +379,13 @@ def test_download_annotations_sizes_timeouts_from_the_total(fake_s3):
 def test_download_annotations_bulk_for_small_source(fake_s3):
     """Sources at or below threshold must use the existing bulk path."""
     run = _run_bulk_download(
-        fake_s3,
-        browse_html=_BULK_BROWSE_HTML,
-        serve_text="Name,Row,Column,Label ID\na.jpg,1,2,3\nb.jpg,4,5,6\n",
+        fake_s3, serve_text="Name,Row,Column,Label ID\nimg1.jpg,1,2,3\nimg2.jpg,4,5,6\n"
     )
 
     assert run.ok is True
     uploaded = pd.read_csv(io.BytesIO(fake_s3.objects[_BULK_KEY]))
     assert list(uploaded.columns) == ["Name", "Row", "Column", "Label ID"]
-    assert uploaded.to_numpy().tolist() == [["a.jpg", 1, 2, 3], ["b.jpg", 4, 5, 6]]
-
-
-def test_download_annotations_bulk_without_export_form_uploads_nothing(fake_s3):
-    run = _run_bulk_download(fake_s3, browse_html="<html><body>login</body></html>")
-
-    assert run.ok is False
-    assert _BULK_KEY not in fake_s3.objects
-    run.post.assert_not_called()
-
-
-def test_download_annotations_bulk_html_export_uploads_nothing(fake_s3):
-    run = _run_bulk_download(
-        fake_s3,
-        browse_html=_BULK_BROWSE_HTML,
-        serve_text="<html><body>Error</body></html>",
-    )
-
-    assert run.ok is False
-    assert _BULK_KEY not in fake_s3.objects
+    assert uploaded.to_numpy().tolist() == [["img1.jpg", 1, 2, 3], ["img2.jpg", 4, 5, 6]]
 
 
 def _page_script(page_htmls: list[str], ann_csvs: list[str]) -> tuple[list, list]:
@@ -438,7 +396,7 @@ def _page_script(page_htmls: list[str], ann_csvs: list[str]) -> tuple[list, list
     """
     gets = []
     for html, ann in zip(page_htmls, ann_csvs, strict=True):
-        gets += [_mock_response(text=html), _mock_response(text=ann)]
+        gets += [_mock_response(text=html), _csv_response(ann)]
     posts = [
         _mock_response(json_data={"session_data_timestamp": f"t{i}"})
         for i in range(1, len(page_htmls) + 1)
@@ -457,9 +415,9 @@ def test_paginated_export_sends_each_pages_image_ids_and_concatenates_in_page_or
     refs = _refs({1: list(range(1000, 1020)), 2: list(range(2000, 2020)), 3: [3000, 3001]})
     page_htmls = [_browse_page(f"csrf{i}") for i in (1, 2, 3)]
     ann_csvs = [
-        _ann_csv([("a.jpg", 1, 1, 100), ("b.jpg", 2, 2, 101)]),
-        _ann_csv([("c.jpg", 3, 3, 102)]),
-        _ann_csv([("d.jpg", 4, 4, 103), ("e.jpg", 5, 5, 104)]),
+        _ann_csv([("img1000.jpg", 1, 1, 100), ("img1001.jpg", 2, 2, 101)]),
+        _ann_csv([("img2000.jpg", 3, 3, 102)]),
+        _ann_csv([("img3000.jpg", 4, 4, 103), ("img3001.jpg", 5, 5, 104)]),
     ]
     gets, posts = _page_script(page_htmls, ann_csvs)
 
@@ -468,7 +426,13 @@ def test_paginated_export_sends_each_pages_image_ids_and_concatenates_in_page_or
 
     assert ok is True
     df = pd.read_csv(io.BytesIO(fake_s3.objects[_BULK_KEY]))
-    assert df["Name"].tolist() == ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]
+    assert df["Name"].tolist() == [
+        "img1000.jpg",
+        "img1001.jpg",
+        "img2000.jpg",
+        "img3000.jpg",
+        "img3001.jpg",
+    ]
     expected_id_lists = {
         "csrf1": "_".join(str(i) for i in range(1000, 1020)),
         "csrf2": "_".join(str(i) for i in range(2000, 2020)),
@@ -512,13 +476,13 @@ def test_paginated_export_with_parallel_workers_keeps_page_order_when_pages_fini
         f"{_BROWSE_URL}?page=3": _browse_page("csrf3"),
     }
     annotations = {
-        1: _ann_csv([("a.jpg", 1, 1, 10)]),
-        2: _ann_csv([("b.jpg", 2, 2, 20)]),
-        3: _ann_csv([("c.jpg", 3, 3, 30)]),
+        1: _ann_csv([("img100.jpg", 1, 1, 10)]),
+        2: _ann_csv([("img200.jpg", 2, 2, 20)]),
+        3: _ann_csv([("img300.jpg", 3, 3, 30)]),
     }
     page3_served = threading.Event()
 
-    def get(url: str, timeout: int | None = None, **_: object) -> MagicMock:
+    def get(url: str, timeout: int | None = None, **_: object) -> MagicMock | requests.Response:
         if "/export/serve/" not in url:
             return _mock_response(text=pages[url])
         page = int(url.rsplit("=t", 1)[1])
@@ -526,7 +490,7 @@ def test_paginated_export_with_parallel_workers_keeps_page_order_when_pages_fini
             assert page3_served.wait(timeout=10), "page 3 never finished"
         if page == 3:
             page3_served.set()
-        return _mock_response(text=annotations[page])
+        return _csv_response(annotations[page])
 
     def post(url: str, *, data: dict, **_: object) -> MagicMock:
         page = data["csrfmiddlewaretoken"].removeprefix("csrf")
@@ -539,7 +503,7 @@ def test_paginated_export_with_parallel_workers_keeps_page_order_when_pages_fini
 
     assert ok is True
     df = pd.read_csv(io.BytesIO(fake_s3.objects[_BULK_KEY]))
-    assert df["Name"].tolist() == ["a.jpg", "b.jpg", "c.jpg"]
+    assert df["Name"].tolist() == ["img100.jpg", "img200.jpg", "img300.jpg"]
 
 
 def test_paginated_export_runs_export_workers_page_round_trips_at_once(fake_s3):
@@ -551,12 +515,12 @@ def test_paginated_export_runs_export_workers_page_round_trips_at_once(fake_s3):
     in_flight = [0]
     peak = [0]
 
-    def get(url: str, timeout: int | None = None, **_: object) -> MagicMock:
+    def get(url: str, timeout: int | None = None, **_: object) -> MagicMock | requests.Response:
         if "/export/serve/" not in url:
             page = int(url.rsplit("=", 1)[1]) if "?page=" in url else 1
             return _mock_response(text=_browse_page(f"csrf{page}"))
         page = int(url.rsplit("=t", 1)[1])
-        return _mock_response(text=_ann_csv([(f"{page}.jpg", page, page, page)]))
+        return _csv_response(_ann_csv([(f"img{page * 100}.jpg", page, page, page)]))
 
     def post(url: str, *, data: dict, **_: object) -> MagicMock:
         with lock:
@@ -576,23 +540,30 @@ def test_paginated_export_runs_export_workers_page_round_trips_at_once(fake_s3):
     assert peak[0] == 2
 
 
+def test_the_first_failed_page_stops_the_pages_not_yet_started(fake_s3):
+    dl = CoralNetDownloader("u", "p", export_workers=3)
+    dl.s3 = fake_s3
+    attempted: list[int] = []
+
+    def export_one_page(source_id: int, page: int, page_refs: list[ImageRef]) -> pd.DataFrame:
+        attempted.append(page)
+        if page == 1:
+            threading.Event().wait(0.3)  # still running when pages 2 and 3 fail
+            return pd.DataFrame({"Name": ["img100.jpg"]})
+        raise RuntimeError(f"page {page}")
+
+    dl._export_one_page = export_one_page  # type: ignore[method-assign]
+    pages = {page: [ImageRef(page * 100, f"img{page * 100}.jpg", 1)] for page in range(1, 201)}
+
+    with pytest.raises(RuntimeError, match="page"):
+        dl._export_pages_parallel(1, "b", "p", pages, 3)
+
+    assert len(attempted) <= 3
+    assert ("b", f"{_PARTIAL}page-1.csv") in fake_s3.objects
+
+
 def _login_get_html() -> str:
     return '<input type="hidden" name="csrfmiddlewaretoken" value="logintok"/>'
-
-
-def test_login_fails_on_invalid_credentials():
-    dl = CoralNetDownloader("u", "p")
-    bad_post = _mock_response(text="<html>Please enter a correct username and password</html>")
-    bad_post.url = dl.LOGIN_URL  # stayed on the login page => failed auth
-
-    with (
-        patch.object(dl.session, "get", return_value=_mock_response(text=_login_get_html())),
-        patch.object(dl.session, "post", return_value=bad_post),
-    ):
-        ok = dl.login()
-
-    assert ok is False
-    assert dl.logged_in is False
 
 
 def test_constructor_rejects_invalid_max_workers():
@@ -611,12 +582,14 @@ def _failing_step_downloader(
         "download_metadata": (True, 1234),
         "download_labelset": True,
         "download_annotations": True,
-        "walk_source": _refs({1: [1]}),
     }
     mocks = {
         name: MagicMock(return_value=overrides.get(name, default))
         for name, default in defaults.items()
     }
+    mocks["walk_source"] = MagicMock(
+        side_effect=lambda *args, total_images: (_refs({1: [1]}), total_images)
+    )
     if "walk_source" in overrides and isinstance(overrides["walk_source"], Exception):
         mocks["walk_source"].side_effect = overrides["walk_source"]
     for name, mock in mocks.items():
@@ -625,10 +598,8 @@ def _failing_step_downloader(
         return_value=_fixture("source_ok.html"),
         **({"side_effect": overrides["overview"]} if "overview" in overrides else {}),
     )
-    dl.get_image_urls = MagicMock(return_value=["http://x/1"])  # type: ignore[method-assign]
-    dl.download_image_to_s3 = MagicMock(  # type: ignore[method-assign]
-        side_effect=lambda u, b, k: (k, True)
-    )
+    dl._resolve_one_image_url = MagicMock(return_value="http://x/1")  # type: ignore[method-assign]
+    dl.download_image_to_s3 = MagicMock(return_value=1)  # type: ignore[method-assign]
     return dl, mocks
 
 
@@ -680,7 +651,7 @@ def test_download_source_records_a_failed_step_and_still_runs_the_rest(
     assert res.ok is False
     assert code in res.errors
     mocks["download_annotations"].assert_called_once()
-    dl.get_image_urls.assert_called_once()  # type: ignore[attr-defined]
+    dl.download_image_to_s3.assert_called_once()  # type: ignore[attr-defined]
 
 
 def test_download_source_stops_when_the_walk_fails(fake_s3):
@@ -698,28 +669,11 @@ def test_download_source_stops_after_annotations_fail(fake_s3):
 
     assert res.ok is False
     assert res.errors == ["annotations_failed"]
-    dl.get_image_urls.assert_not_called()  # type: ignore[attr-defined]
-
-
-def test_download_source_sums_image_failures_across_batches(fake_s3):
-    dl, _ = _failing_step_downloader(fake_s3, walk_source=_refs({1: [1, 2]}))
-    dl.get_image_urls = MagicMock(  # type: ignore[method-assign]
-        side_effect=lambda pages: ["http://x/" + p.split("/")[2] for p in pages]
-    )
-    dl.download_image_to_s3 = MagicMock(  # type: ignore[method-assign]
-        side_effect=lambda u, b, k: (k, not u.endswith("/1"))  # only the first batch's fails
-    )
-
-    with patch.object(downloader_mod, "half_open_batches", return_value=[(0, 1), (1, 2)]):
-        res = dl.download_source(1, bucket_name="b", s3_prefix="p")
-
-    assert "images_upload_failed" in res.errors
-    assert res.image_failures == ImageFailures(missing_url=0, upload_failed=1)
+    dl.download_image_to_s3.assert_not_called()  # type: ignore[attr-defined]
 
 
 def test_download_source_reports_missing_url_when_single_image_lookup_raises(fake_s3):
     dl, _ = _failing_step_downloader(fake_s3)
-    del dl.get_image_urls
 
     with patch.object(dl, "_resolve_one_image_url", side_effect=ValueError("private")):
         res = dl.download_source(1, bucket_name="b", s3_prefix="p")
@@ -733,12 +687,15 @@ def test_download_source_reports_missing_url_when_single_image_lookup_raises(fak
 # ---------------------------------------------------------------------------
 
 
-def _http_response(text: str = "", status: int = 200, url: str = "") -> requests.Response:
+def _http_response(
+    text: str = "", status: int = 200, url: str = "", headers: dict[str, str] | None = None
+) -> requests.Response:
     """A real ``requests.Response`` so ``raise_for_status`` behaves as in production."""
     resp = requests.Response()
     resp.status_code = status
     resp._content = text.encode()
     resp.url = url
+    resp.headers.update(headers or {})
     return resp
 
 
@@ -749,45 +706,23 @@ def _downloader_on(fake_s3) -> CoralNetDownloader:
     return dl
 
 
-def test_download_image_to_s3_skips_an_object_already_on_s3(fake_s3, http_server):
-    dl = _downloader_on(fake_s3)
-    fake_s3.put("b", "k.jpg", b"existing")
-
-    result = dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
-
-    assert result == ("k.jpg", True)
-    assert http_server.received == []
-    assert fake_s3.objects[("b", "k.jpg")] == b"existing"
-
-
-def test_download_image_to_s3_replaces_a_zero_byte_object(fake_s3, http_server):
-    dl = _downloader_on(fake_s3)
-    fake_s3.put("b", "k.jpg", b"")
-    http_server.script("/1.jpg", Reply(200, b"JPEGBYTES"))
-
-    result = dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
-
-    assert result == ("k.jpg", True)
-    assert fake_s3.objects[("b", "k.jpg")] == b"JPEGBYTES"
-
-
 def test_download_image_to_s3_retries_a_503_then_uploads_the_bytes(fake_s3, http_server):
     dl = _downloader_on(fake_s3)
-    http_server.script("/1.jpg", Reply(503), Reply(200, b"JPEGBYTES"))
+    http_server.script("/1.jpg", Reply(503), Reply(200, _JPEG, _JPEG_HEADERS))
 
-    result = dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
+    size = dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
 
-    assert result == ("k.jpg", True)
-    assert fake_s3.objects[("b", "k.jpg")] == b"JPEGBYTES"
+    assert size == len(_JPEG)
+    assert fake_s3.objects[("b", "k.jpg")] == _JPEG
 
 
-def test_download_image_to_s3_reports_failure_and_uploads_nothing(fake_s3, http_server):
+def test_download_image_to_s3_raises_on_a_404_and_uploads_nothing(fake_s3, http_server):
     dl = _downloader_on(fake_s3)
     http_server.script("/1.jpg", Reply(404, b"<html>Not found</html>"))
 
-    result = dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
+    with pytest.raises(requests.HTTPError):
+        dl.download_image_to_s3(f"{http_server.url}/1.jpg", "b", "k.jpg")
 
-    assert result == ("k.jpg", False)
     assert fake_s3.objects == {}
 
 
@@ -943,21 +878,13 @@ def test_a_permission_denied_overview_fails_without_writing(http_server, fake_s3
 _LOGIN_URL = CoralNetDownloader.LOGIN_URL
 
 
-@pytest.mark.parametrize(
-    ("post_text", "post_url"),
-    [
-        ("<html>Sign out</html>", _LOGIN_URL),  # signed in, no redirect
-        ("<html>Welcome</html>", "https://coralnet.ucsd.edu/"),  # redirected away from login
-    ],
-    ids=["sign-out-link-only", "redirect-only"],
-)
-def test_login_succeeds_when_either_signal_of_success_holds(post_text, post_url):
+def test_login_posts_the_credentials_with_the_login_pages_csrf_token():
     dl = CoralNetDownloader("alice", "secret")
 
     with (
         patch.object(dl.session, "get", return_value=_http_response(_login_get_html())),
         patch.object(
-            dl.session, "post", return_value=_http_response(post_text, url=post_url)
+            dl.session, "post", return_value=_http_response("<html>Sign out</html>")
         ) as post,
     ):
         ok = dl.login()
@@ -1001,36 +928,6 @@ def test_resolve_one_image_url_raises_when_the_page_has_no_original_image():
         dl._resolve_one_image_url("/image/5/view/")
 
 
-def test_get_image_urls_with_several_workers_maps_results_to_input_order():
-    """Image 1 resolves last, image 2 fails, image 3 resolves first; results keep input order."""
-    dl = CoralNetDownloader("u", "p", max_workers=3)
-    image3_resolved = threading.Event()
-
-    def resolve(rel: str) -> str:
-        if rel == "/image/1/view/":
-            assert image3_resolved.wait(timeout=10), "image 3 never resolved"
-        if rel == "/image/2/view/":
-            raise ValueError("private")
-        if rel == "/image/3/view/":
-            image3_resolved.set()
-        return "http://x" + rel
-
-    with patch.object(dl, "_resolve_one_image_url", side_effect=resolve):
-        urls = dl.get_image_urls(["/image/1/view/", "/image/2/view/", "/image/3/view/"])
-
-    assert urls == ["http://x/image/1/view/", None, "http://x/image/3/view/"]
-
-
-def test_export_one_page_raises_when_the_worker_session_gets_no_csrf(paginated_downloader):
-    dl = paginated_downloader
-
-    with (
-        patch.object(dl.session, "get", return_value=_http_response("<html>Please log in</html>")),
-        pytest.raises(RuntimeError, match="Worker session: no CSRF on browse page 4 of source 1"),
-    ):
-        dl._export_one_page(1, 4, (5,))
-
-
 @pytest.mark.parametrize(
     ("total_images", "prep", "serve"),
     [
@@ -1046,31 +943,14 @@ def test_export_timeouts_floor_at_zero_and_cap_for_huge_sources(total_images, pr
     assert export_serve_timeout_seconds(total_images) == serve
 
 
-@pytest.mark.parametrize(
-    ("n_rows", "batch_size"),
-    [(-1, 5), (5, 0), (5, -2)],
-)
-def test_half_open_batches_rejects_a_negative_row_count_or_a_batch_size_below_one(
-    n_rows, batch_size
-):
-    with pytest.raises(ValueError, match="n_rows must be >= 0 and batch_size >= 1"):
-        half_open_batches(n_rows, batch_size)
-
-
-@pytest.mark.parametrize(
-    ("n_rows", "batch_size", "expected"),
-    [(0, 5, []), (3, 1, [(0, 1), (1, 2), (2, 3)]), (4, 4, [(0, 4)])],
-)
-def test_half_open_batches_edges(n_rows, batch_size, expected):
-    assert half_open_batches(n_rows, batch_size) == expected
-
-
 # ---------------------------------------------------------------------------
 # Browse walk, staged download and restart, against a scripted CoralNet
 # ---------------------------------------------------------------------------
 
 _BASE = "/source/1/browse/images/"
 _PREP = "/source/1/annotation/export_prep/"
+_SERVE_T1 = "/source/1/export/serve/?session_data_timestamp=t1"
+_LOGIN_PATH = "/accounts/login/"
 _MARKER = "p/s1/_complete.json"
 _PARTIAL = "p/s1/_partial/"
 
@@ -1100,12 +980,17 @@ def _script_source(
     server.script(_PREP, Reply(200, b'{"session_data_timestamp": "t1"}'))
     rows = sorted({(t, 1, 1, 7) for t in titles.values()})
     server.script(
-        "/source/1/export/serve/?session_data_timestamp=t1", Reply(200, _ann_csv(rows).encode())
+        "/source/1/export/serve/?session_data_timestamp=t1",
+        Reply(200, _ann_csv(rows).encode(), _CSV_HEADERS),
     )
     for i in titles:
-        original = f'<div id="original_image_container"><img src="{server.url}/media/{i}.jpg"/>'
-        server.script(f"/image/{i}/view/", Reply(200, original.encode()))
-        server.script(f"/media/{i}.jpg", Reply(200, f"JPEG{i}".encode()))
+        server.script(f"/image/{i}/view/", Reply(200, _view_page(server, f"/media/{i}.jpg")))
+        server.script(f"/media/{i}.jpg", Reply(200, _JPEG, _JPEG_HEADERS))
+
+
+def _view_page(server: ScriptedServer, media_path: str) -> bytes:
+    """An image view page whose original image is at ``media_path`` on ``server``."""
+    return f'<div id="original_image_container"><img src="{server.url}{media_path}"/>'.encode()
 
 
 def _site_downloader(server: ScriptedServer, fake_s3) -> CoralNetDownloader:
@@ -1113,6 +998,7 @@ def _site_downloader(server: ScriptedServer, fake_s3) -> CoralNetDownloader:
     dl.logged_in = True
     dl.s3 = fake_s3
     dl.CORALNET_URL = server.url
+    dl.LOGIN_URL = f"{server.url}{_LOGIN_PATH}"
     dl._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
     return dl
 
@@ -1183,9 +1069,12 @@ def test_a_restart_after_the_total_changed_discards_partial_state_and_walks_agai
     assert json.loads(fake_s3.objects[("b", _MARKER)])["total_images"] == 4
 
 
-def test_a_failed_verification_writes_no_marker_and_discards_partial_state(http_server, fake_s3):
+def test_a_failed_verification_writes_no_marker_and_discards_partial_state(
+    http_server, fake_s3, monkeypatch
+):
     _script_source(http_server, [[1, 2]])
-    http_server.script("/source/1/", Reply(200, _overview_html(3).encode()))
+    failed = Verification(failures=["image_missing:1"])
+    monkeypatch.setattr(downloader_mod, "verify_source", lambda *a, **k: failed)
 
     res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
 
@@ -1209,7 +1098,7 @@ def test_a_failed_image_keeps_partial_state_and_a_rerun_fetches_only_that_image(
     assert ("b", _MARKER) not in fake_s3.objects
     assert f"{_PARTIAL}state.json" in _keys(fake_s3)
 
-    http_server.script("/media/2.jpg", Reply(200, b"JPEG2"))
+    http_server.script("/media/2.jpg", Reply(200, _JPEG, _JPEG_HEADERS))
     http_server.received.clear()
     res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
 
@@ -1235,20 +1124,23 @@ def test_a_failed_labelset_writes_no_marker_even_when_the_source_verifies(http_s
 
 def test_an_interrupted_walk_resumes_after_its_last_checkpoint(http_server, fake_s3):
     _script_pages(http_server, [[(i, f"img{i}.jpg")] for i in range(1, 121)])
-    http_server.script(_page_path(111), Reply(500))
+    http_server.script("/source/1/", Reply(200, _overview_html(120).encode()))
+    http_server.script(_page_path(111), Reply(404))
     dl = _site_downloader(http_server, fake_s3)
 
     with pytest.raises(requests.HTTPError):
-        dl.walk_source(1, "b", "p")
+        dl.walk_source(1, "b", "p", total_images=120)
     saved = json.loads(fake_s3.objects[("b", f"{_PARTIAL}walk.json")])
     assert saved["last_page"] == 100
 
     _script_pages(http_server, [[(i, f"img{i}.jpg")] for i in range(1, 121)])
     http_server.received.clear()
-    refs = dl.walk_source(1, "b", "p")
+    refs, total = dl.walk_source(1, "b", "p", total_images=120)
 
-    assert [r.path for r in http_server.received] == [_page_path(n) for n in range(101, 121)]
+    walked = [r.path for r in http_server.received if r.path.startswith(_BASE)]
+    assert walked == [_page_path(n) for n in range(101, 121)]
     assert [r.id for r in refs] == list(range(1, 121))
+    assert total == 120
 
 
 def test_two_images_with_the_same_title_are_both_listed(http_server, fake_s3):
@@ -1273,7 +1165,7 @@ def test_a_paginated_export_skips_pages_with_a_saved_chunk(http_server, fake_s3,
     for page in (4, 5, 6):
         http_server.script(
             f"/source/1/export/serve/?session_data_timestamp=t{page}",
-            Reply(200, _ann_csv([(f"img{page}.jpg", 1, 1, 7)]).encode()),
+            Reply(200, _ann_csv([(f"img{page}.jpg", 1, 1, 7)]).encode(), _CSV_HEADERS),
         )
     dl = _site_downloader(http_server, fake_s3)
 
@@ -1334,3 +1226,414 @@ def test_verify_existing_writes_no_marker_for_a_source_that_fails(http_server, f
 
     assert failures == ["annotations_missing", "image_list_missing"]
     assert ("b", _MARKER) not in fake_s3.objects
+
+
+# ---------------------------------------------------------------------------
+# Response validation: exports, walk rules, session health, login, images
+# ---------------------------------------------------------------------------
+
+
+def _posts_to(server: ScriptedServer, path: str) -> list:
+    return [r for r in server.requests_to(path) if r.method == "POST"]
+
+
+def _script_login(server: ScriptedServer) -> None:
+    """Script a login page whose POST result shows a signed-in user."""
+    page = _login_get_html() + "<a>Sign out</a>"
+    server.script(_LOGIN_PATH, Reply(200, page.encode()))
+
+
+def _csv_reply(rows: list[tuple]) -> Reply:
+    return Reply(200, _ann_csv(rows).encode(), _CSV_HEADERS)
+
+
+def _page_reply(ids: list[int], next_page: int | None = None, *, form: bool = True) -> Reply:
+    """A browse page listing images ``ids`` titled ``img<id>.jpg``, linking to ``next_page``."""
+    thumbs = [(i, f"img{i}.jpg") for i in ids]
+    next_href = f"?page={next_page}" if next_page else None
+    return Reply(200, _browse_html(thumbs, next_href, form=form).encode())
+
+
+def _script_walk(server: ScriptedServer, pages: list[list[int]]) -> None:
+    """Script the overview and browse pages of a source listing ``pages`` of image ids."""
+    total = sum(len(ids) for ids in pages)
+    server.script("/source/1/", Reply(200, _overview_html(total).encode()))
+    for n, ids in enumerate(pages, 1):
+        server.script(_page_path(n), _page_reply(ids, n + 1 if n < len(pages) else None))
+
+
+def _fetches(server: ScriptedServer, pages: range) -> list[int]:
+    return [len(server.requests_to(_page_path(n))) for n in pages]
+
+
+def test_decode_export_csv_decodes_utf8_served_without_a_charset(http_server):
+    body = "Name,Row\nIrmãos 1.jpg,1\nצילום 2.jpg,2\n".encode()
+    http_server.script("/serve", Reply(200, body, _CSV_HEADERS))
+    resp = requests.get(f"{http_server.url}/serve", timeout=5)
+
+    assert decode_export_csv(resp)["Name"].tolist() == ["Irmãos 1.jpg", "צילום 2.jpg"]
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        ("Name,Row\nimg1.jpg,1\n", "text/html; charset=utf-8"),
+        ("<html><body>Server Error</body></html>", "text/csv"),
+        ("Row,Column\n", "text/csv"),
+        ("Name,Row\n,1\n", "text/csv"),
+        ("Name,<td>Row</td>\nimg1.jpg,1\n", "text/csv"),
+        ("Name,Unnamed: 5\nimg1.jpg,1\n", "text/csv"),
+    ],
+    ids=[
+        "html-content-type",
+        "html-body",
+        "no-name-column",
+        "null-name",
+        "html-column",
+        "unnamed-column",
+    ],
+)
+def test_decode_export_csv_rejects_a_body_that_is_not_an_annotations_csv(body, content_type):
+    resp = _http_response(body, headers={"Content-Type": content_type})
+
+    with pytest.raises(ContentError):
+        decode_export_csv(resp)
+
+
+def test_decode_export_csv_reports_an_expired_session_when_served_the_login_page():
+    resp = _http_response(
+        "<html>Sign in</html>",
+        url="https://coralnet.ucsd.edu/accounts/login/?next=/source/1/export/serve/",
+        headers={"Content-Type": "text/html; charset=utf-8"},
+    )
+
+    with pytest.raises(SessionExpired):
+        decode_export_csv(resp)
+
+
+def _export_page_one(dl: CoralNetDownloader) -> bool:
+    return dl.download_annotations_paginated(
+        1, "b", "p", refs=[ImageRef(1, "img1.jpg - Confirmed", 1)], page_workers=1
+    )
+
+
+def _chunk_names(fake_s3) -> list[str]:
+    chunk = pd.read_csv(io.BytesIO(fake_s3.objects[("b", f"{_PARTIAL}page-1.csv")]))
+    return chunk["Name"].tolist()
+
+
+def test_a_page_export_with_rows_for_other_images_is_exported_again(
+    http_server, fake_s3, monkeypatch
+):
+    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
+    _script_walk(http_server, [[1]])
+    http_server.script(_PREP, Reply(200, b'{"session_data_timestamp": "t1"}'))
+    http_server.script(
+        _SERVE_T1,
+        _csv_reply([("img1.jpg", 1, 1, 7), ("img9.jpg", 1, 1, 7)]),
+        _csv_reply([("img1.jpg", 1, 1, 7)]),
+    )
+
+    ok = _export_page_one(_site_downloader(http_server, fake_s3))
+
+    assert ok is True
+    assert _chunk_names(fake_s3) == ["img1.jpg"]
+    assert len(http_server.requests_to(_PREP)) == 2
+
+
+def test_an_export_prep_signed_out_error_logs_the_export_session_in_again(
+    http_server, fake_s3, monkeypatch
+):
+    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
+    _script_walk(http_server, [[1]])
+    _script_login(http_server)
+    http_server.script(
+        _PREP,
+        Reply(200, b'{"error": "You must be signed in to access this function."}'),
+        Reply(200, b'{"session_data_timestamp": "t1"}'),
+    )
+    http_server.script(_SERVE_T1, _csv_reply([("img1.jpg", 1, 1, 7)]))
+
+    ok = _export_page_one(_site_downloader(http_server, fake_s3))
+
+    assert ok is True
+    assert len(_posts_to(http_server, _LOGIN_PATH)) == 1
+    assert _chunk_names(fake_s3) == ["img1.jpg"]
+
+
+def test_a_page_export_browse_page_without_the_export_form_logs_in_again(
+    http_server, fake_s3, monkeypatch
+):
+    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
+    _script_login(http_server)
+    http_server.script(_page_path(1), _page_reply([1], form=False), _page_reply([1]))
+    http_server.script(_PREP, Reply(200, b'{"session_data_timestamp": "t1"}'))
+    http_server.script(_SERVE_T1, _csv_reply([("img1.jpg", 1, 1, 7)]))
+
+    ok = _export_page_one(_site_downloader(http_server, fake_s3))
+
+    assert ok is True
+    assert len(_posts_to(http_server, _LOGIN_PATH)) == 1
+    assert len(http_server.requests_to(_PREP)) == 1
+    assert _chunk_names(fake_s3) == ["img1.jpg"]
+
+
+def test_a_bulk_export_with_names_outside_the_walk_is_exported_again(http_server, fake_s3):
+    _script_walk(http_server, [[1]])
+    http_server.script(_PREP, Reply(200, b'{"session_data_timestamp": "t1"}'))
+    http_server.script(
+        _SERVE_T1,
+        _csv_reply([("img1.jpg", 1, 1, 7), ("img9.jpg", 1, 1, 7)]),
+        _csv_reply([("img1.jpg", 1, 1, 7)]),
+    )
+
+    ok = _site_downloader(http_server, fake_s3).download_annotations(
+        1, "b", "p", refs=[ImageRef(1, "img1.jpg - Confirmed", 1)], total_images=1
+    )
+
+    assert ok is True
+    annotations = pd.read_csv(io.BytesIO(fake_s3.objects[_BULK_KEY]))
+    assert annotations["Name"].tolist() == ["img1.jpg"]
+    assert len(http_server.requests_to(_SERVE_T1)) == 2
+
+
+def test_a_page_rule_failure_resumes_the_walk_from_the_last_checkpoint(
+    http_server, fake_s3, monkeypatch
+):
+    monkeypatch.setattr(downloader_mod, "_WALK_CHECKPOINT_EVERY_PAGES", 3)
+    pages = [[2 * n - 1, 2 * n] for n in range(1, 9)] + [[17]]
+    _script_walk(http_server, pages)
+    http_server.script(_page_path(8), _page_reply([15], 9), _page_reply([15, 16], 9))
+
+    refs, _ = _site_downloader(http_server, fake_s3).walk_source(1, "b", "p", total_images=17)
+
+    assert [r.id for r in refs] == list(range(1, 18))
+    assert _fetches(http_server, range(1, 10)) == [1, 1, 1, 1, 1, 1, 2, 2, 1]
+
+
+def test_a_walk_ending_short_of_the_total_is_redone_from_page_one(
+    http_server, fake_s3, monkeypatch
+):
+    monkeypatch.setattr(downloader_mod, "_WALK_CHECKPOINT_EVERY_PAGES", 1)
+    _script_walk(http_server, [[1, 2], [3, 4], [5]])
+    http_server.script(_page_path(2), _page_reply([5]), _page_reply([3, 4], 3))
+
+    refs, _ = _site_downloader(http_server, fake_s3).walk_source(1, "b", "p", total_images=5)
+
+    assert [r.id for r in refs] == [1, 2, 3, 4, 5]
+    assert _fetches(http_server, range(1, 4)) == [2, 2, 1]
+
+
+def test_an_image_listed_on_two_pages_makes_the_walk_retry(http_server, fake_s3, monkeypatch):
+    monkeypatch.setattr(downloader_mod, "_WALK_CHECKPOINT_EVERY_PAGES", 1)
+    _script_walk(http_server, [[1, 2], [3, 4], [5]])
+    http_server.script(_page_path(2), _page_reply([2, 3], 3), _page_reply([3, 4], 3))
+
+    refs, _ = _site_downloader(http_server, fake_s3).walk_source(1, "b", "p", total_images=5)
+
+    assert [r.id for r in refs] == [1, 2, 3, 4, 5]
+    # Caught on page 2 itself: the retry resumes after the page-1 checkpoint.
+    assert _fetches(http_server, range(1, 4)) == [1, 2, 1]
+
+
+def test_an_overview_total_changed_during_the_walk_redoes_it_against_the_new_total(
+    http_server, fake_s3
+):
+    _script_source(http_server, [[1, 2, 3]])
+    http_server.script(
+        "/source/1/",
+        Reply(200, _overview_html(2).encode()),
+        Reply(200, _overview_html(3).encode()),
+    )
+    http_server.script(_page_path(1), _page_reply([1, 2]), _page_reply([1, 2, 3]))
+
+    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
+
+    assert (res.ok, res.errors) == (True, [])
+    assert _image_list_ids(fake_s3) == [1, 2, 3]
+    assert json.loads(fake_s3.objects[("b", _MARKER)])["total_images"] == 3
+
+
+def test_a_kill_after_a_changed_total_walk_leaves_state_for_the_new_total(http_server, fake_s3):
+    _script_source(http_server, [[1, 2, 3]])
+    http_server.script(
+        "/source/1/",
+        Reply(200, _overview_html(2).encode()),
+        Reply(200, _overview_html(3).encode()),
+    )
+    http_server.script(_page_path(1), _page_reply([1, 2]), _page_reply([1, 2, 3]))
+    dl = _site_downloader(http_server, fake_s3)
+    walk_source = dl.walk_source
+
+    def killed_after_the_walk(*args: object, **kwargs: object) -> None:
+        walk_source(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    dl.walk_source = killed_after_the_walk  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        dl.download_source(1, "b", "p")
+
+    state = json.loads(fake_s3.objects[("b", f"{_PARTIAL}state.json")])
+    assert state["total_images"] == 3
+
+    http_server.received.clear()
+    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
+
+    assert res.ok is True
+    assert len(http_server.requests_to(_BASE)) == 1  # the export's form page, not a walk fetch
+
+
+def test_a_browse_page_without_the_export_form_logs_in_again(http_server, fake_s3):
+    _script_walk(http_server, [[1]])
+    _script_login(http_server)
+    http_server.script(_page_path(1), _page_reply([1], form=False), _page_reply([1]))
+
+    refs, _ = _site_downloader(http_server, fake_s3).walk_source(1, "b", "p", total_images=1)
+
+    assert [r.id for r in refs] == [1]
+    assert len(_posts_to(http_server, _LOGIN_PATH)) == 1
+
+
+def _login_downloader(server: ScriptedServer) -> CoralNetDownloader:
+    dl = CoralNetDownloader("u", "p")
+    dl.LOGIN_URL = f"{server.url}{_LOGIN_PATH}"
+    return dl
+
+
+def test_login_retries_a_post_answered_503(http_server):
+    login_page = Reply(200, _login_get_html().encode())
+    http_server.script(_LOGIN_PATH, login_page, Reply(503), Reply(200, b"<a>Sign out</a>"))
+    dl = _login_downloader(http_server)
+
+    assert dl.login() is True
+    assert len(_posts_to(http_server, _LOGIN_PATH)) == 2
+
+
+def test_login_fails_when_the_result_page_shows_no_sign_out_link(http_server):
+    login_page = Reply(200, _login_get_html().encode())
+    http_server.script(_LOGIN_PATH, login_page, Reply(200, b"<html>Welcome</html>"))
+    dl = _login_downloader(http_server)
+
+    assert dl.login() is False
+    assert dl.logged_in is False
+    assert len(_posts_to(http_server, _LOGIN_PATH)) == 1
+
+
+def _download_image_one(server: ScriptedServer, fake_s3) -> ImageFailures:
+    return _site_downloader(server, fake_s3).download_images(
+        [ImageRef(1, "img1.jpg", 1)], 1, "b", "p"
+    )
+
+
+_IMAGE_KEY = ("b", "p/s1/images/1.jpg")
+
+
+def test_an_image_body_cut_short_is_downloaded_again(http_server, fake_s3):
+    http_server.script("/image/1/view/", Reply(200, _view_page(http_server, "/media/1.jpg")))
+    short = {**_JPEG_HEADERS, "Content-Length": str(len(_JPEG))}
+    http_server.script(
+        "/media/1.jpg", Reply(200, _JPEG[:100], short), Reply(200, _JPEG, _JPEG_HEADERS)
+    )
+
+    assert _download_image_one(http_server, fake_s3) == ImageFailures()
+    assert fake_s3.objects[_IMAGE_KEY] == _JPEG
+    assert len(http_server.requests_to("/media/1.jpg")) == 2
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        (b"<html><body>Service unavailable</body></html>", "image/jpeg"),
+        (b"", "image/jpeg"),
+        (_JPEG, "text/html; charset=utf-8"),
+    ],
+    ids=["html", "empty", "html-content-type"],
+)
+def test_an_invalid_image_response_is_retried_and_never_uploaded(
+    http_server, fake_s3, body, content_type
+):
+    http_server.script("/image/1/view/", Reply(200, _view_page(http_server, "/media/1.jpg")))
+    http_server.script("/media/1.jpg", Reply(200, body, {"Content-Type": content_type}))
+
+    assert _download_image_one(http_server, fake_s3) == ImageFailures(upload_failed=1)
+    assert _IMAGE_KEY not in fake_s3.objects
+    assert len(http_server.requests_to("/media/1.jpg")) == 4
+
+
+def test_an_expired_image_url_is_resolved_again_from_the_view_page(http_server, fake_s3):
+    http_server.script(
+        "/image/1/view/",
+        Reply(200, _view_page(http_server, "/media/old.jpg")),
+        Reply(200, _view_page(http_server, "/media/new.jpg")),
+    )
+    expired = b"<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>"
+    http_server.script("/media/old.jpg", Reply(403, expired, {"Content-Type": "application/xml"}))
+    http_server.script("/media/new.jpg", Reply(200, _JPEG, _JPEG_HEADERS))
+
+    assert _download_image_one(http_server, fake_s3) == ImageFailures()
+    assert fake_s3.objects[_IMAGE_KEY] == _JPEG
+    assert len(http_server.requests_to("/image/1/view/")) == 2
+
+
+def test_a_jpeg_with_bytes_after_its_end_marker_is_uploaded_with_its_format(http_server, fake_s3):
+    body = _JPEG + b"\x00trailing"
+    http_server.script("/image/1/view/", Reply(200, _view_page(http_server, "/media/1.jpg")))
+    http_server.script("/media/1.jpg", Reply(200, body, _JPEG_HEADERS))
+
+    assert _download_image_one(http_server, fake_s3) == ImageFailures()
+    assert fake_s3.objects[_IMAGE_KEY] == body
+    assert fake_s3.headers[_IMAGE_KEY] == {
+        "ContentType": "image/jpeg",
+        "Metadata": {"source-format": "JPEG", "source-bytes": str(len(body))},
+    }
+
+
+def test_an_image_trickling_past_the_deadline_is_downloaded_again(
+    http_server, fake_s3, monkeypatch
+):
+    monkeypatch.setattr(downloader_mod, "_IMAGE_DEADLINE_S", 0.2)
+    http_server.script("/image/1/view/", Reply(200, _view_page(http_server, "/media/1.jpg")))
+    http_server.script(
+        "/media/1.jpg",
+        Reply(200, _JPEG, _JPEG_HEADERS, trickle_s=0.001),
+        Reply(200, _JPEG, _JPEG_HEADERS),
+    )
+
+    assert _download_image_one(http_server, fake_s3) == ImageFailures()
+    assert fake_s3.objects[_IMAGE_KEY] == _JPEG
+    assert len(http_server.requests_to("/media/1.jpg")) == 2
+
+
+class _SlowClock:
+    """Stands in for ``time`` inside tenacity: every clock read is 30 s after the last."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        self.now += 30.0
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        pass
+
+
+def test_content_retries_continue_past_stamina_default_total_timeout(
+    http_server, fake_s3, monkeypatch
+):
+    """Four export attempts span more than stamina's default 45 s budget and all still run."""
+    stamina.set_testing(False)
+    clock = _SlowClock()
+    monkeypatch.setattr(tenacity, "time", clock)
+    monkeypatch.setattr(tenacity.nap, "time", clock)
+    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
+    _script_walk(http_server, [[1]])
+    http_server.script(
+        _PREP, Reply(500), Reply(500), Reply(500), Reply(200, b'{"session_data_timestamp": "t1"}')
+    )
+    http_server.script(_SERVE_T1, _csv_reply([("img1.jpg", 1, 1, 7)]))
+
+    ok = _export_page_one(_site_downloader(http_server, fake_s3))
+
+    assert ok is True
+    assert len(http_server.requests_to(_PREP)) == 4

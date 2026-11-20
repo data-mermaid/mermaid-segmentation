@@ -211,7 +211,7 @@ uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
 | `build-annotations` excluded a source with `image_list_incomplete` or `label_unnamed` | The source CSVs do not agree with each other. Run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
 | `build-images` reports `not_found` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
-| `build-images` reports `corrupt` | The object on S3 is bad. The scraper does not replace an existing image object, so `invalidate` does not repair it. The manifest drops the image. |
+| `build-images` reports `corrupt` | The object on S3 is bad. Delete the corrupt image objects, run `coralnet-scrape invalidate --source-ids <id>`, then run `coralnet-scrape`. Only those images are downloaded again, because the scraper does not upload an invalid body. The manifest drops the image until then. |
 | `resize` reports corrupted or failed images | Run the build again. `resize` retries every image that has no resized object. The manifest drops an image that needs a resize and has none. |
 
 After a scrape, always rebuild under a new version tag.

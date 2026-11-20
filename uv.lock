@@ -714,8 +714,10 @@ dependencies = [
     { name = "beautifulsoup4" },
     { name = "boto3" },
     { name = "pandas" },
+    { name = "pillow" },
     { name = "requests" },
     { name = "requests-ratelimiter" },
+    { name = "stamina" },
     { name = "tqdm" },
 ]
 
@@ -730,8 +732,10 @@ requires-dist = [
     { name = "beautifulsoup4" },
     { name = "boto3" },
     { name = "pandas" },
+    { name = "pillow" },
     { name = "requests" },
     { name = "requests-ratelimiter" },
+    { name = "stamina" },
     { name = "tqdm" },
 ]
 
@@ -3934,6 +3938,18 @@ wheels = [
 ]
 
 [[package]]
+name = "stamina"
+version = "26.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tenacity" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4e/46/e5491b7985761f6870bf11af1c461f57102f564686f2fe7b8637ebcbb0f9/stamina-26.2.0.tar.gz", hash = "sha256:c81efa445d6cd6f898584faa7556df09f6e4d25c16e219914b6422eeb3372985", size = 670204, upload-time = "2026-11-15T12:58:06.696Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fe/14/ff4255606425fb66f0f4e0f5ac30e98c87a1895df615fe97ce662c551e52/stamina-26.2.0-py3-none-any.whl", hash = "sha256:4c9688f204d90544cd0c5bdd2a66fd82c6e7cb8248d70687ac69da3e7f5434f6", size = 23326, upload-time = "2026-11-15T12:58:04.938Z" },
+]
+
+[[package]]
 name = "starlette"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -4012,6 +4028,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
+]
+
+[[package]]
+name = "tenacity"
+version = "9.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/9e/497c1c8ebe5a5b5d1d4a7511aea22c0bb1a97e3170d98abdef0e1b34265a/tenacity-9.2.1.tar.gz", hash = "sha256:a606b5c808d0cded4a359d5b9932d867ff2a6a6b64d37350260fd01bbdf83839", size = 58261, upload-time = "2026-10-07T12:13:01.633Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d6/26/1ff2b0721ac66a3ec5b1402b333110b352ab0a8724052ac279a7b82d40c4/tenacity-9.2.1-py3-none-any.whl", hash = "sha256:9e56f17539296baab7beabb08b92f6ee3d7be92d8be72d763360677c2ad6580e", size = 32310, upload-time = "2026-10-07T12:13:00.102Z" },
 ]
 
 [[package]]
