@@ -74,3 +74,22 @@ def test_object_key_helpers(func, args, expected):
 )
 def test_source_prefix_strips_surrounding_slashes_from_base_prefix(base_prefix, expected):
     assert s3_io.source_prefix(base_prefix, 7) == expected
+
+
+@pytest.mark.parametrize("other_key", ["p/s10/_complete.json", "p/s1/_complete.json.bak"])
+def test_key_exists_matches_only_the_exact_key(fake_s3, other_key):
+    fake_s3.put("b", other_key, b"{}")
+
+    assert s3_io.key_exists(fake_s3, "b", "p/s1/_complete.json") is False
+
+
+def test_delete_prefix_removes_every_page_of_keys_under_the_prefix_only(fake_s3):
+    fake_s3.list_page_size = 2
+    inside = [f"p/s1/_partial/page-{n}.csv" for n in range(1, 6)]
+    outside = ["p/s1/annotations.csv", "p/s1/_partial", "p/s10/_partial/state.json"]
+    for key in inside + outside:
+        fake_s3.put("b", key, b"x")
+
+    s3_io.delete_prefix(fake_s3, "b", "p/s1/_partial/")
+
+    assert sorted(k for (_b, k) in fake_s3.objects) == sorted(outside)

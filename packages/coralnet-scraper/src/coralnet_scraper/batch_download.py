@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 from tqdm.auto import tqdm
 
 from coralnet_scraper.models import DownloadResult
-from coralnet_scraper.s3_io import annotations_csv_exists
+from coralnet_scraper.s3_io import key_exists, object_key_complete_marker
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +34,12 @@ class BatchOutcome:
         results: A result per attempted source, keyed by source id.
         stopped: Why the run stopped before the last source (``"circuit_open"``), or
             ``None`` when every source was handled.
+        skipped_complete: Sources skipped because their completion marker exists.
     """
 
     results: dict[int, DownloadResult]
     stopped: str | None
+    skipped_complete: int = 0
 
 
 def discover_public_source_ids(session: requests.Session) -> list[int]:
@@ -85,18 +87,35 @@ def should_skip_download(
     bucket: str,
     s3_prefix: str,
     s3_client: Any,
-    force: bool,
 ) -> bool:
-    """Return whether the batch loop should skip ``source_id``.
-
-    A source is skipped when its ``annotations.csv`` is already on S3, unless ``force`` is set.
-    """
-    if force:
-        return False
-    if annotations_csv_exists(s3_client, bucket, s3_prefix, source_id):
-        logger.info("Skip source %s: annotations.csv already on S3", source_id)
+    """Return whether the batch loop should skip ``source_id``: its ``_complete.json`` exists."""
+    if key_exists(s3_client, bucket, object_key_complete_marker(s3_prefix, source_id)):
+        logger.info("Skip source %s: complete", source_id)
         return True
     return False
+
+
+_OUTAGE_CODES = frozenset({"login failed", "annotations_failed", "image_list_failed"})
+
+
+def _is_outage_failure(res: DownloadResult, *, raised: bool = False) -> bool:
+    """Return whether a failed result signals an outage rather than a problem of one source.
+
+    A source whose download raised is an outage; otherwise the downloader's login, annotations,
+    image-list and overview-fetch errors are.
+    """
+    if res.ok:
+        return False
+    return raised or any(
+        e in _OUTAGE_CODES or e.startswith("overview fetch failed") for e in res.errors
+    )
+
+
+def _next_failure_streak(streak: int, res: DownloadResult, *, raised: bool = False) -> int:
+    """Return the outage streak after ``res``: reset by ok, grown by an outage failure."""
+    if res.ok:
+        return 0
+    return streak + 1 if _is_outage_failure(res, raised=raised) else streak
 
 
 def run_batch_download(
@@ -106,7 +125,7 @@ def run_batch_download(
     bucket: str,
     s3_prefix: str,
     s3_client: Any,
-    force: bool = False,
+    prune: bool = False,
     delay_seconds: float = 0.0,
 ) -> BatchOutcome:
     """Download each source that is not skipped.
@@ -117,41 +136,48 @@ def run_batch_download(
         bucket: Destination S3 bucket.
         s3_prefix: Destination key prefix.
         s3_client: S3 client used for the skip check.
-        force: Download every source, even when its annotations already exist.
+        prune: Let each downloaded source delete image objects its verified image list lacks.
         delay_seconds: Pause after each download.
 
     Returns:
-        A result per downloaded source, keyed by source id; skipped sources are absent.
+        A result per downloaded source, keyed by source id; sources skipped as complete are
+        absent and counted in ``skipped_complete``.
         A source whose skip check or download raises gets a failed result whose error code is
         the exception class name, and the run goes on. After
-        :data:`CIRCUIT_BREAKER_THRESHOLD` consecutive failed sources the run stops with
-        ``stopped="circuit_open"``; skipped sources neither count nor reset that streak.
+        :data:`CIRCUIT_BREAKER_THRESHOLD` consecutive outage failures (see
+        :func:`_is_outage_failure`) the run stops with ``stopped="circuit_open"``; an ok source
+        resets that streak, while skipped sources and other failures neither count nor reset it.
     """
     results: dict[int, DownloadResult] = {}
     failure_streak = 0
+    skipped_complete = 0
     for sid in tqdm(list(source_ids), desc="CoralNet sources"):
+        raised = False
         try:
             if should_skip_download(
                 source_id=sid,
                 bucket=bucket,
                 s3_prefix=s3_prefix,
                 s3_client=s3_client,
-                force=force,
             ):
+                skipped_complete += 1
                 continue
-            res = downloader.download_source(sid, bucket_name=bucket, s3_prefix=s3_prefix)
+            res = downloader.download_source(
+                sid, bucket_name=bucket, s3_prefix=s3_prefix, prune=prune
+            )
         except Exception as e:  # noqa: BLE001
             logger.exception("Source %s failed: %s", sid, e)
             res = DownloadResult(ok=False, errors=[type(e).__name__])
+            raised = True
         if res.skipped_no_confirmed:
             logger.info("Skip source %s: zero confirmed images on website", sid)
         results[sid] = res
-        failure_streak = 0 if res.ok else failure_streak + 1
+        failure_streak = _next_failure_streak(failure_streak, res, raised=raised)
         if failure_streak >= CIRCUIT_BREAKER_THRESHOLD:
             logger.error(
                 "Stopping the run: %d consecutive sources failed (last: %s)", failure_streak, sid
             )
-            return BatchOutcome(results=results, stopped=STOPPED_CIRCUIT_OPEN)
+            return BatchOutcome(results, STOPPED_CIRCUIT_OPEN, skipped_complete)
         if delay_seconds > 0:
             time.sleep(delay_seconds)
-    return BatchOutcome(results=results, stopped=None)
+    return BatchOutcome(results, None, skipped_complete)

@@ -151,7 +151,6 @@ The dataset reads the label names from `coralnet_id2name_<run>.json` in the same
 
 ## Known gaps
 
-- A partially exported `annotations.csv` cannot be detected from S3. A paginated source whose export was interrupted leaves a partial file (see the scraper's [Resume and `--force`](../coralnet-scraper/README.md#resume-and---force)). The build includes that source with fewer images than CoralNet has. Tracked in issue #231.
 - Duplicate images (the same photo in several sources) are removed in training by `CoralNetDataset`'s `image_blacklist` and `annotation_overrides`. This package does not produce those files. Tracked in issue #231.
 
 ## Tests

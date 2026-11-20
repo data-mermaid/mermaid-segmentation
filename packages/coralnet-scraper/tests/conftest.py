@@ -172,19 +172,20 @@ class FakeS3:
     """In-memory S3 client surface used by the scraper.
 
     Populate ``objects`` with ``{(bucket, key): bytes}`` to control what gets returned. ``Range``
-    semantics follow ``bytes=start-end`` (inclusive).
-
-    Implements the subset of boto3 used by CoralNet scraping (``put_object``, ``upload_fileobj``,
-    ``head_object``, ``get_object``, ``list_objects_v2``, ``exceptions.ClientError``).
+    semantics follow ``bytes=start-end`` (inclusive). Listings are sorted by key like S3, and the
+    paginator returns ``list_page_size`` keys per page. ``events`` records every write and
+    delete in order as ``("put" | "delete", key)``.
     """
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
+    events: list[tuple[str, str]] = field(default_factory=list)
+    list_page_size: int = 1000
 
     def put(self, bucket: str, key: str, data: bytes) -> None:
         self.objects[(bucket, key)] = data
 
     def put_object(self, *, Bucket: str, Key: str, Body, ContentType: str | None = None):
-        """Scraper uploads CSV bodies."""
+        """Scraper uploads CSV and JSON bodies."""
         del ContentType  # parity with boto
         if isinstance(Body, str):
             raw: bytes = Body.encode("utf-8")
@@ -195,11 +196,18 @@ class FakeS3:
             if isinstance(raw, str):
                 raw = raw.encode("utf-8")
         self.objects[(Bucket, Key)] = raw
+        self.events.append(("put", Key))
 
     def upload_fileobj(self, fileobj, bucket, key, ExtraArgs=None):
         """Scraper uploads image streams."""
         data = fileobj.read()
         self.objects[(bucket, key)] = data
+        self.events.append(("put", key))
+
+    def delete_object(self, *, Bucket: str, Key: str):
+        self.objects.pop((Bucket, Key), None)
+        self.events.append(("delete", Key))
+        return {}
 
     def head_object(self, *, Bucket: str, Key: str):
         if (Bucket, Key) not in self.objects:
@@ -221,14 +229,57 @@ class FakeS3:
             content_range = f"bytes {start}-{end}/{len(full)}"
         return _StubResponse(body=data, content_length=len(data), content_range=content_range)
 
+    def _sorted_keys(self, bucket: str, prefix: str) -> list[str]:
+        return sorted(k for (b, k) in self.objects if b == bucket and k.startswith(prefix))
+
+    def _contents(self, bucket: str, keys: list[str]) -> list[dict]:
+        return [{"Key": k, "Size": len(self.objects[(bucket, k)])} for k in keys]
+
     def list_objects_v2(self, *, Bucket: str, Prefix: str = "", MaxKeys: int | None = None):
-        keys = [k for (b, k) in self.objects if b == Bucket and k.startswith(Prefix)]
+        keys = self._sorted_keys(Bucket, Prefix)
         if MaxKeys is not None:
             keys = keys[:MaxKeys]
         # Real S3 omits "Contents" when nothing matches.
         if not keys:
             return {"KeyCount": 0}
-        return {"Contents": [{"Key": k} for k in keys], "KeyCount": len(keys)}
+        return {"Contents": self._contents(Bucket, keys), "KeyCount": len(keys)}
+
+    def get_paginator(self, operation: str) -> _FakeListPaginator:
+        assert operation == "list_objects_v2"
+        return _FakeListPaginator(self)
+
+
+class _FakeListPaginator:
+    """``list_objects_v2`` paginator: ``list_page_size`` entries per page, ``Delimiter`` aware."""
+
+    def __init__(self, s3: FakeS3) -> None:
+        self._s3 = s3
+
+    def paginate(self, *, Bucket: str, Prefix: str = "", Delimiter: str | None = None):
+        keys = self._s3._sorted_keys(Bucket, Prefix)
+        common: list[str] = []
+        if Delimiter:
+            direct = []
+            for k in keys:
+                rest = k[len(Prefix) :]
+                if Delimiter in rest:
+                    cp = Prefix + rest.split(Delimiter, 1)[0] + Delimiter
+                    if cp not in common:
+                        common.append(cp)
+                else:
+                    direct.append(k)
+            keys = direct
+        size = self._s3.list_page_size
+        n_pages = max(1, -(-max(len(keys), len(common)) // size))
+        for i in range(n_pages):
+            page: dict = {}
+            chunk = keys[i * size : (i + 1) * size]
+            if chunk:
+                page["Contents"] = self._s3._contents(Bucket, chunk)
+            prefixes = common[i * size : (i + 1) * size]
+            if prefixes:
+                page["CommonPrefixes"] = [{"Prefix": p} for p in prefixes]
+            yield page
 
 
 FakeS3.exceptions = _FakeS3ExceptionsShim
@@ -245,15 +296,11 @@ def paginated_downloader(fake_s3) -> CoralNetDownloader:
 
     - ``logged_in = True`` (skip real login)
     - ``s3 = fake_s3`` (in-memory S3)
-    - Phase-2 worker session creation short-circuited to return ``dl.session``
-      so a single ``patch.object(dl.session, ...)`` intercepts both phases.
+    - Export worker session creation short-circuited to return ``dl.session``
+      so a single ``patch.object(dl.session, ...)`` intercepts every request.
 
-    Mock-sequence consequence of the worker short-circuit: each browse page is
-    fetched TWICE in the mocked ``dl.session.get`` sequence — once during the
-    phase-1 walk (to discover ``Next page`` links) and once again inside the
-    phase-2 worker (to refresh the CSRF token bound to the worker's session).
-    Tests must size ``get_responses`` as ``len(pages) * 2 + len(pages)``
-    (page walk + per-page CSRF refresh + per-page serve response).
+    Each exported page costs one browse GET (the worker's own CSRF token), one
+    ``export_prep`` POST and one serve GET.
 
     Production gives each worker its own logged-in ``requests.Session`` (see
     :meth:`CoralNetDownloader._new_logged_in_session`) to avoid the CoralNet
