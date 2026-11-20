@@ -32,8 +32,8 @@ class CatlinSeaviewDataset(BaseCoralDataset):
 
     Attributes:
         annotations_path (str): Key (relative to ``source_bucket``) of the
-            Parquet file with annotations. Produced by
-            ``mermaidseg/datasets/catlin_seaview/download_raw_data_and_add_to_s3.py``.
+            Parquet file with annotations. Produced by the ``external-datasets``
+            CLI; see ``README.md`` in this directory.
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-region
             ``images/<region>/<image_id>.jpg`` folders live.

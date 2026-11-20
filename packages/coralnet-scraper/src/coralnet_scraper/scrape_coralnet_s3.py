@@ -28,6 +28,7 @@ from coralnet_scraper.batch_download import (
     run_batch_download,
 )
 from coralnet_scraper.config import (
+    DEFAULT_EXPORT_WORKERS,
     ENV_EXPORT_WORKERS,
     ENV_REQUESTS_PER_SECOND,
     ENV_SCRAPER_WORKERS,
@@ -147,7 +148,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--export-workers",
         type=int,
         default=None,
-        help=f"Concurrent page exports of a paginated export (default: 3 or {ENV_EXPORT_WORKERS})",
+        help=(
+            "Concurrent page exports of a paginated export "
+            f"(default: {DEFAULT_EXPORT_WORKERS} or {ENV_EXPORT_WORKERS})"
+        ),
     )
     p.add_argument(
         "--requests-per-second",
@@ -198,7 +202,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Only marked sources whose live image count differs from the marker's",
     )
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.command is not None and (args.prune or args.allow_source_drop):
+        p.error(f"--prune and --allow-source-drop do not apply to {args.command}")
+    return args
 
 
 def _listing_shrank(previous: list[int] | None, current: list[int]) -> bool:
@@ -212,8 +219,11 @@ def _guard_discovery(
     """Compare the listing with the previous run's; save it unless the run must stop.
 
     Returns:
-        False when the listing shrank too far and ``allow_drop`` is not set.
+        False when the listing is empty, or shrank too far and ``allow_drop`` is not set.
     """
+    if not discovered:
+        logger.error("CoralNet listed no public sources; stopping")
+        return False
     key = f"{prefix}/_meta/discovered_source_ids.json"
     previous = s3_io.read_json_s3(s3, bucket, key)
     if _listing_shrank(previous, discovered) and not allow_drop:
@@ -237,6 +247,23 @@ def _stored_source_ids(s3: Any, bucket: str, prefix: str) -> list[int]:
     )
     folders = [cp["Prefix"] for page in pages for cp in page.get("CommonPrefixes", [])]
     return sorted(int(m.group(1)) for f in folders if (m := _SOURCE_PREFIX.search(f)))
+
+
+def _warn_if_unadopted(s3: Any, bucket: str, prefix: str) -> None:
+    """Warn when the bucket holds source folders but none has a completion marker."""
+    stored = _stored_source_ids(s3, bucket, prefix)
+    if stored and not any(
+        s3_io.key_exists(s3, bucket, s3_io.object_key_complete_marker(prefix, sid))
+        for sid in stored
+    ):
+        logger.warning(
+            "%d source folders exist under s3://%s/%s but none has a completion marker; "
+            "run `coralnet-scrape verify-existing` first to adopt them, or every source "
+            "downloads again",
+            len(stored),
+            bucket,
+            prefix,
+        )
 
 
 def _changed_source_ids(
@@ -320,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns:
         Process exit code: 0 when every source downloads (or none are attempted), 1 when
-        the CoralNet login fails, the source listing shrank below 95% of the previous run's
+        the CoralNet login fails, the source listing is empty or shrank below 95% of the previous run's
         (unless ``--allow-source-drop``), any source download fails, or the circuit breaker
         stops the run. A failed or stopped run logs ``Run stopped early: <reason>`` first
         when it stopped, then one error line with the failed-source count and one per error
@@ -366,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         return _verify_existing(ids, downloader, s3, bucket, prefix)
     if not _guard_discovery(s3, bucket, prefix, discovered, allow_drop=args.allow_source_drop):
         return 1
+    _warn_if_unadopted(s3, bucket, prefix)
     outcome = run_batch_download(
         ids,
         downloader=downloader,

@@ -10,6 +10,7 @@ import pandas as pd
 from botocore.exceptions import ClientError
 
 _MISSING_KEY_CODES = ("404", "NoSuchKey")
+_DELETE_BATCH_SIZE = 1000  # the DeleteObjects API limit
 
 
 def source_prefix(base_prefix: str, source_id: int) -> str:
@@ -103,10 +104,31 @@ def object_sizes(client: Any, bucket: str, prefix: str) -> dict[str, int]:
     }
 
 
+def delete_keys(client: Any, bucket: str, keys: list[str]) -> None:
+    """Delete ``keys`` from ``bucket`` in batches of :data:`_DELETE_BATCH_SIZE`.
+
+    Raises:
+        RuntimeError: If a response reports per-key errors; names the first failed key, its
+            code and the number of failed keys in that batch.
+    """
+    for start in range(0, len(keys), _DELETE_BATCH_SIZE):
+        batch = keys[start : start + _DELETE_BATCH_SIZE]
+        response = client.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True},
+        )
+        errors = response.get("Errors") or []
+        if errors:
+            first = errors[0]
+            raise RuntimeError(
+                f"Could not delete {len(errors)} key(s) from s3://{bucket}; "
+                f"first: {first.get('Key')} ({first.get('Code')})"
+            )
+
+
 def delete_prefix(client: Any, bucket: str, prefix: str) -> None:
     """Delete every object whose key starts with ``prefix``, across all listing pages."""
-    for key in object_sizes(client, bucket, prefix):
-        client.delete_object(Bucket=bucket, Key=key)
+    delete_keys(client, bucket, list(object_sizes(client, bucket, prefix)))
 
 
 def upload_csv_body(

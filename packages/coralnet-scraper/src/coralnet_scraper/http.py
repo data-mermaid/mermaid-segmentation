@@ -9,9 +9,8 @@ from collections import Counter
 from typing import Any, Self
 
 import requests
-from pyrate_limiter import Limiter
 from requests.adapters import HTTPAdapter
-from requests_ratelimiter import LimiterAdapter
+from requests_ratelimiter import Limiter, LimiterAdapter
 from urllib3.exceptions import NewConnectionError
 from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
 from urllib3.util.retry import Retry
@@ -24,7 +23,9 @@ DEFAULT_USER_AGENT = (
 RETRY_METHODS = frozenset({"GET", "HEAD"})
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 HTTP_RETRIES = 5
-HTTP_BACKOFF_FACTOR = 2.0  # 2, 4, 8, 16, 32 s plus jitter, unless Retry-After says otherwise
+# urllib3 2.6 waits 0, 4, 8, 16, 32 s before retries 1-5, with jitter from the second retry on,
+# unless Retry-After says otherwise.
+HTTP_BACKOFF_FACTOR = 2.0
 HTTP_BACKOFF_JITTER = 2.0
 HTTP_BACKOFF_MAX = 120.0
 _POOL_CONNECTIONS = 10

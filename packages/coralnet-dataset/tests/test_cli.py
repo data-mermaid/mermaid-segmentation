@@ -42,6 +42,7 @@ def _patch_to_fake_s3(monkeypatch, fake_s3):
         lambda _con: make_csv_reader_s3(fake_s3),
     )
     monkeypatch.setattr("coralnet_dataset.images._get_thread_client", lambda: fake_s3)
+    monkeypatch.setattr("coralnet_dataset.annotations.make_s3_client", lambda: fake_s3)
 
 
 def _real_jpeg(width: int, height: int) -> bytes:

@@ -43,7 +43,7 @@ class _FakeDownloader:
         self.session = object()
         self._login_ok = login_ok
         self.totals: dict[int, int | None] = {}
-        self.verify_results: dict[int, list[str]] = {}
+        self.verify_results: dict[int, list[str] | Exception] = {}
         self.verified: list[int] = []
         self.login_calls = 0
 
@@ -59,7 +59,10 @@ class _FakeDownloader:
 
     def verify_existing(self, source_id: int, bucket_name: str, s3_prefix: str) -> list[str]:
         self.verified.append(source_id)
-        return self.verify_results[source_id]
+        result = self.verify_results[source_id]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 def test_main_raises_before_any_network_call_when_bucket_unset(monkeypatch):
@@ -317,6 +320,75 @@ def test_discovery_guard_stops_a_run_whose_listing_shrank_below_95_percent(
     assert json.loads(fake_s3.objects[_LISTING_KEY]) == expected_listing
 
 
+@pytest.mark.parametrize("baseline", [None, [1, 2, 3]], ids=["no-baseline", "with-baseline"])
+@pytest.mark.parametrize("argv", [[], ["--allow-source-drop"]], ids=["default", "allow-drop"])
+def test_an_empty_discovery_stops_the_run_and_keeps_the_baseline(
+    monkeypatch, fake_s3, caplog, baseline, argv
+):
+    if baseline is not None:
+        fake_s3.put(*_LISTING_KEY, json.dumps(baseline).encode())
+
+    _, run, _ = _run_main(monkeypatch, argv, expected_code=1, discovered=[], fake_s3=fake_s3)
+
+    run.assert_not_called()
+    if baseline is None:
+        assert _LISTING_KEY not in fake_s3.objects
+    else:
+        assert json.loads(fake_s3.objects[_LISTING_KEY]) == baseline
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--prune", "verify-existing"],
+        ["--allow-source-drop", "invalidate", "--all"],
+        ["--prune", "invalidate", "--changed"],
+    ],
+)
+def test_prune_and_allow_source_drop_are_rejected_with_a_subcommand(argv):
+    with pytest.raises(SystemExit) as exc:
+        cli._parse_args(argv)
+
+    assert exc.value.code == 2
+
+
+def _legacy_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING" and "verify-existing" in r.getMessage()
+    ]
+
+
+def test_a_bucket_of_folders_without_markers_warns_once_and_the_run_proceeds(
+    monkeypatch, fake_s3, caplog
+):
+    fake_s3.put("my-bucket", "my-prefix/s1/annotations.csv", b"Name\n")
+    fake_s3.put("my-bucket", "my-prefix/s2/annotations.csv", b"Name\n")
+
+    _, run, _ = _run_main(monkeypatch, [], discovered=[1, 2], fake_s3=fake_s3)
+
+    (warning,) = _legacy_warnings(caplog)
+    assert "2" in warning
+    run.assert_called_once()
+
+
+def test_no_legacy_warning_when_any_stored_source_has_a_marker(monkeypatch, fake_s3, caplog):
+    _store_source(fake_s3, 1, 5)
+    fake_s3.put("my-bucket", "my-prefix/s2/annotations.csv", b"Name\n")
+
+    _run_main(monkeypatch, [], discovered=[1, 2], fake_s3=fake_s3)
+
+    assert _legacy_warnings(caplog) == []
+
+
+def test_no_legacy_warning_for_an_empty_bucket(monkeypatch, fake_s3, caplog):
+    _run_main(monkeypatch, [], fake_s3=fake_s3)
+
+    assert _legacy_warnings(caplog) == []
+
+
 def test_main_reports_the_skipped_sources(monkeypatch, fake_s3):
     results = {
         1: DownloadResult(ok=True),
@@ -485,3 +557,64 @@ def test_verify_existing_checks_only_the_given_source_ids(monkeypatch, fake_s3):
 
     assert code == 0
     assert dl.verified == [1, 2]
+
+
+def test_invalidate_changed_continues_past_an_unreadable_source_and_exits_1(
+    monkeypatch, fake_s3, caplog
+):
+    _store_source(fake_s3, 1, 5)
+    _store_source(fake_s3, 10, 7)
+    _store_source(fake_s3, 3, 2)
+    fake_s3.put("my-bucket", "my-prefix/s2/annotations.csv", b"Name\n")
+    fake_s3.put("my-bucket", "my-prefix/s2/_partial/state.json", b"{}")
+
+    code, _, _ = _run_command(
+        monkeypatch, fake_s3, ["invalidate", "--changed"], totals={1: 6, 3: 9}
+    )
+
+    assert code == 1
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("Source 10" in e for e in errors)
+    assert any("[10]" in e for e in errors)
+    assert _remaining(fake_s3) == [
+        "s1/annotations.csv",
+        "s10/_complete.json",
+        "s10/_partial/state.json",
+        "s10/annotations.csv",
+        "s2/_partial/state.json",
+        "s2/annotations.csv",
+        "s3/annotations.csv",
+    ]
+
+
+def test_verify_existing_fails_a_source_reporting_a_missing_overview_total(
+    monkeypatch, fake_s3, caplog
+):
+    code, _, _ = _run_command(
+        monkeypatch,
+        fake_s3,
+        ["verify-existing"],
+        discovered=[2],
+        verify_results={2: ["overview_total_missing"]},
+    )
+
+    assert code == 1
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert errors == ["Source 2 not verified: overview_total_missing"]
+
+
+def test_verify_existing_reports_a_raising_source_by_exception_name_and_goes_on(
+    monkeypatch, fake_s3, caplog
+):
+    code, dl, _ = _run_command(
+        monkeypatch,
+        fake_s3,
+        ["verify-existing"],
+        discovered=[2, 3],
+        verify_results={2: ValueError("boom"), 3: []},
+    )
+
+    assert code == 1
+    assert dl.verified == [2, 3]
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert "Source 2 not verified: ValueError" in errors

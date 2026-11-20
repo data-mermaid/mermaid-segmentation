@@ -283,6 +283,13 @@ class ImageRef:
         return f"/image/{self.id}/view/"
 
 
+class _WalkCountMismatch(WalkIncomplete):
+    """The browse walk found a different number of images than the overview lists."""
+
+    def __init__(self, found: int, expected: int) -> None:
+        super().__init__(f"walk_count_mismatch:{found}!={expected}")
+
+
 @dataclass
 class _WalkProgress:
     """The images a browse walk has found so far, as saved in ``_partial/walk.json``."""
@@ -483,14 +490,17 @@ class CoralNetDownloader:
         response.raise_for_status()
         return response.text
 
-    def _perform_login(self, session: requests.Session) -> bool:
+    def _perform_login(self, session: requests.Session) -> None:
         """Execute the CoralNet login flow on ``session`` (independent cookie jar).
 
         Pure side-effect helper: pops a fresh login CSRF, POSTs credentials, and
-        leaves ``session`` with a logged-in ``sessionid`` cookie. Returns True
-        on success without mutating any other state. Callers compose this into
-        :meth:`login` (the main session) and :meth:`_new_logged_in_session`
-        (per-worker independent sessions used by parallel export).
+        leaves ``session`` with a logged-in ``sessionid`` cookie, mutating no other
+        state. Callers compose this into :meth:`login` (the main session) and
+        :meth:`_new_logged_in_session` (per-worker independent sessions used by
+        parallel export).
+
+        Raises:
+            RuntimeError: If the login page has no CSRF token or the login fails.
         """
         response = session.get(self.LOGIN_URL, timeout=_PAGE_GET_TIMEOUT)
         response.raise_for_status()
@@ -513,7 +523,6 @@ class CoralNetDownloader:
                 login_response.raise_for_status()
         if "Sign out" not in login_response.text:
             raise RuntimeError("Login failed - the result page shows no signed-in user")
-        return True
 
     def _relogin(self, session: requests.Session) -> None:
         """Log ``session`` in again after CoralNet treated it as logged out."""
@@ -579,12 +588,8 @@ class CoralNetDownloader:
                 [[pt.get(k) for k in self._META_KEYS] for pt in classifier_data],
                 columns=list(self._META_COLS),
             )
-            csv_buffer = io.StringIO()
-            meta_df.to_csv(csv_buffer, index=False)
             key = s3_io.object_key_metadata_csv(s3_prefix, source_id)
-            s3_io.upload_csv_body(
-                self.s3, bucket=bucket_name, key=key, csv_text=csv_buffer.getvalue()
-            )
+            _upload_csv(self.s3, bucket_name, key, meta_df)
             logger.info("Metadata saved s3://%s/%s", bucket_name, key)
             return True, total_images
         except Exception:
@@ -632,10 +637,8 @@ class CoralNetDownloader:
             labelset_df = pd.DataFrame(
                 {"Label ID": label_ids, "Name": names, "Short Code": short_codes}
             )
-            buf = io.StringIO()
-            labelset_df.to_csv(buf, index=False)
             key = s3_io.object_key_labelset_csv(s3_prefix, source_id)
-            s3_io.upload_csv_body(self.s3, bucket=bucket_name, key=key, csv_text=buf.getvalue())
+            _upload_csv(self.s3, bucket_name, key, labelset_df)
             logger.info("Labelset saved s3://%s/%s", bucket_name, key)
             return True
         except Exception:
@@ -701,10 +704,8 @@ class CoralNetDownloader:
                 prep_timeout=prep_timeout,
                 serve_timeout=serve_timeout,
             )
-            buf = io.StringIO()
-            df_annotations.to_csv(buf, index=False)
             key = s3_io.object_key_annotation_csv(s3_prefix, source_id)
-            s3_io.upload_csv_body(self.s3, bucket=bucket_name, key=key, csv_text=buf.getvalue())
+            _upload_csv(self.s3, bucket_name, key, df_annotations)
             logger.info("Annotations saved s3://%s/%s", bucket_name, key)
             return True
         except Exception:
@@ -804,7 +805,7 @@ class CoralNetDownloader:
 
         Raises:
             Exception: The first page failure, once every started page has finished; pages
-                not yet started are skipped.
+                still queued never start.
         """
         failed = threading.Event()
 
@@ -825,7 +826,11 @@ class CoralNetDownloader:
             }
             completed = 0
             for fut in concurrent.futures.as_completed(future_to_page):
-                annotations = fut.result()
+                try:
+                    annotations = fut.result()
+                except Exception:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
                 if annotations is None:
                     continue
                 completed += 1
@@ -1134,20 +1139,18 @@ class CoralNetDownloader:
             ContentError: If the overview lists no image count.
             _TotalChanged: If the count is no longer ``expected``; ``_partial/`` is discarded
                 and a fresh state for the new count is saved.
-            WalkIncomplete: If ``found`` differs from the count; ``walk.json`` is discarded.
+            _WalkCountMismatch: If ``found`` differs from the count; ``walk.json`` is discarded.
         """
         total = self.fetch_total_images(source_id)
         if total is None:
             raise ContentError(f"source {source_id}: overview lists no image count")
         if total != expected:
-            s3_io.delete_prefix(self.s3, bucket_name, s3_io.partial_prefix(s3_prefix, source_id))
-            fresh: dict[str, Any] = {"total_images": total, "stages": []}
-            self._save_state(source_id, bucket_name, s3_prefix, fresh)
+            self._reset_partial(source_id, bucket_name, s3_prefix, total)
             raise _TotalChanged(total)
         if found != expected:
             key = _partial_key(s3_prefix, source_id, _WALK_FILE)
             self.s3.delete_object(Bucket=bucket_name, Key=key)
-            raise WalkIncomplete(f"walk found {found} images, the overview lists {expected}")
+            raise _WalkCountMismatch(found, expected)
 
     def _get_thread_session(self) -> requests.Session:
         """Per-thread session with cookies copied from the main session.
@@ -1340,18 +1343,19 @@ class CoralNetDownloader:
 
     def _load_state(
         self, source_id: int, bucket_name: str, s3_prefix: str, total_images: int
-    ) -> dict[str, Any]:
-        """Return the source's ``_partial/state.json``, or start a fresh one.
+    ) -> dict[str, Any] | None:
+        """Return the source's ``_partial/state.json``.
 
-        A state recorded for another overview total, or partial work without a state, is
-        discarded with the rest of ``_partial/``: a changed source cannot be stitched.
+        Returns:
+            The state; None when there is none, or it was recorded for another overview
+            total.
         """
         state = s3_io.read_json_s3(
             self.s3, bucket_name, _partial_key(s3_prefix, source_id, _STATE_FILE)
         )
-        if state is not None and state["total_images"] == total_images:
-            return cast("dict[str, Any]", state)
-        if state is not None:
+        if state is None:
+            return None
+        if state["total_images"] != total_images:
             logger.warning(
                 "Source %s: CoralNet lists %d images, %d when the partial download began; "
                 "starting over",
@@ -1359,6 +1363,16 @@ class CoralNetDownloader:
                 total_images,
                 state["total_images"],
             )
+            return None
+        return cast("dict[str, Any]", state)
+
+    def _reset_partial(
+        self, source_id: int, bucket_name: str, s3_prefix: str, total_images: int
+    ) -> dict[str, Any]:
+        """Delete the source's ``_partial/``, then save and return a fresh state.
+
+        Partial work without a usable state is discarded: a changed source cannot be stitched.
+        """
         s3_io.delete_prefix(self.s3, bucket_name, s3_io.partial_prefix(s3_prefix, source_id))
         fresh: dict[str, Any] = {"total_images": total_images, "stages": []}
         self._save_state(source_id, bucket_name, s3_prefix, fresh)
@@ -1398,8 +1412,7 @@ class CoralNetDownloader:
     def _prune_orphans(self, source_id: int, bucket_name: str, s3_prefix: str) -> int:
         """Delete the source's image objects that its image list lacks; return how many."""
         keys = orphan_image_keys(self.s3, bucket_name, s3_prefix, source_id)
-        for key in keys:
-            self.s3.delete_object(Bucket=bucket_name, Key=key)
+        s3_io.delete_keys(self.s3, bucket_name, keys)
         if keys:
             logger.info("Source %s: pruned %d orphan image objects", source_id, len(keys))
         return len(keys)
@@ -1455,8 +1468,10 @@ class CoralNetDownloader:
 
         Returns:
             The outcome, with failure codes in ``errors`` and per-kind image counts in
-            ``image_failures``. A failed walk or annotations export ends the download. A
-            failed verification adds ``verification_failed`` and discards ``_partial/``.
+            ``image_failures``. A failed walk or annotations export ends the download, as does
+            a walk whose image count differs from the overview's
+            (``walk_count_mismatch:<found>!=<total>``; the next run walks again). A failed
+            verification adds ``verification_failed`` and discards ``_partial/``.
         """
         sid = source_id
         logger.info("Downloading CoralNet source %s", sid)
@@ -1464,15 +1479,11 @@ class CoralNetDownloader:
             return DownloadResult(False, errors=["login failed"])
         try:
             overview_html = self._get_source_overview_html(sid)
-        except requests.HTTPError as e:
-            status = e.response.status_code if e.response is not None else None
+        except Exception as e:  # noqa: BLE001
+            response = e.response if isinstance(e, requests.HTTPError) else None
+            status = response.status_code if response is not None else None
             if status in _SOURCE_INACCESSIBLE_STATUSES:
                 return DownloadResult(False, errors=[f"cannot access source {sid}: HTTP {status}"])
-            return DownloadResult(
-                False,
-                errors=[f"overview fetch failed: {type(e).__name__}: {e}"],
-            )
-        except Exception as e:  # noqa: BLE001
             return DownloadResult(
                 False,
                 errors=[f"overview fetch failed: {type(e).__name__}: {e}"],
@@ -1522,12 +1533,20 @@ class CoralNetDownloader:
         return errs
 
     def _walk_and_list(
-        self, source_id: int, bucket_name: str, s3_prefix: str, state: dict[str, Any]
+        self,
+        source_id: int,
+        bucket_name: str,
+        s3_prefix: str,
+        state: dict[str, Any],
     ) -> list[ImageRef]:
         """Return the walk's images, uploading ``image_list.csv`` unless the walk stage is done.
 
         A walk that ended on a changed overview count starts ``state`` afresh with that count,
         as the walk already discarded the rest of ``_partial/``.
+
+        Raises:
+            _WalkCountMismatch: If the last walk attempt found other than the overview's count
+                of images; ``_partial/walk.json`` is deleted so the next run walks again.
         """
         refs, total = self.walk_source(
             source_id, bucket_name, s3_prefix, total_images=state["total_images"]
@@ -1552,12 +1571,22 @@ class CoralNetDownloader:
         *,
         prune: bool,
     ) -> DownloadResult:
-        """Run the stages of a source with images, then verify it and write its marker."""
+        """Run the stages of a source with images, then verify it and write its marker.
+
+        A walk whose last attempt finds other than the overview's count of images ends the
+        download with ``walk_count_mismatch:<found>!=<total>`` before the export; the walk is
+        not recorded.
+        """
         sid = source_id
-        state = self._load_state(sid, bucket_name, s3_prefix, total_images)
+        state = self._load_state(sid, bucket_name, s3_prefix, total_images) or self._reset_partial(
+            sid, bucket_name, s3_prefix, total_images
+        )
         errs = self._download_details(sid, bucket_name, s3_prefix, overview_html, state)
         try:
             refs = self._walk_and_list(sid, bucket_name, s3_prefix, state)
+        except _WalkCountMismatch as e:
+            logger.error("Source %s: %s", sid, e)
+            return DownloadResult(False, errors=[*errs, str(e)])
         except Exception:
             logger.exception("Source %s: browse walk failed", sid)
             return DownloadResult(False, errors=[*errs, "image_list_failed"])

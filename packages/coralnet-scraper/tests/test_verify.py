@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from coralnet_scraper.verify import verify_source
+from coralnet_scraper.verify import orphan_image_keys, verify_source
 
 _LIST_KEY = "p/s1/image_list.csv"
 _ANN_KEY = "p/s1/annotations.csv"
@@ -53,31 +53,37 @@ def test_a_complete_source_passes_with_its_counts(fake_s3):
 
 
 @pytest.mark.parametrize(
-    ("store_kwargs", "expected_total", "failure"),
+    ("store_kwargs", "expected_total", "failures"),
     [
-        ({"ann": None}, 3, "annotations_missing"),
-        ({"rows": None}, 3, "image_list_missing"),
-        ({"rows": _LIST_ROWS[:2], "images": (11, 12)}, 3, "image_list_count:2!=3"),
+        ({"ann": None}, 3, ["annotations_missing"]),
+        ({"rows": None}, 3, ["image_list_missing"]),
+        ({"rows": _LIST_ROWS[:2], "images": (11, 12)}, 3, ["image_list_count:2!=3"]),
         (
             {"rows": [*_LIST_ROWS[:2], ("c.jpg - Unclassified", "/image/12/view/")]},
             3,
-            "image_list_bad_ids",
+            ["image_list_bad_ids"],
         ),
-        ({"ann": "Row,Column,Label ID\n1,1,7\n"}, 3, "annotations_bad_columns"),
-        ({"ann": "Name,<html>,Label ID\na.jpg,1,7\n"}, 3, "annotations_bad_columns"),
-        ({"ann": "Name,Row,Column,Label ID\n,1,1,7\n"}, 3, "annotations_null_name"),
+        (
+            {"rows": [*_LIST_ROWS[:2], ("c.jpg - Unclassified", "not-a-page")]},
+            3,
+            ["image_list_bad_ids"],
+        ),
+        ({"ann": "Row,Column,Label ID\n1,1,7\n"}, 3, ["annotations_bad_columns"]),
+        ({"ann": "Name,<html>,Label ID\na.jpg,1,7\n"}, 3, ["annotations_bad_columns"]),
+        ({"ann": "Name,Row,Column,Label ID\n,1,1,7\n"}, 3, ["annotations_null_name"]),
         (
             {"ann": "Name,Row,Column,Label ID\na.jpg,1,1,7\nz.jpg,1,1,7\n"},
             3,
-            "annotations_name_not_in_list:1",
+            ["annotations_name_not_in_list:1"],
         ),
-        ({"images": (11, 12)}, 3, "image_objects_missing:1"),
+        ({"images": (11, 12)}, 3, ["image_objects_missing:1"]),
     ],
     ids=[
         "no-annotations",
         "no-image-list",
         "list-short",
         "duplicate-id",
+        "unparseable-image-page",
         "no-name-column",
         "html-column",
         "null-name",
@@ -85,13 +91,26 @@ def test_a_complete_source_passes_with_its_counts(fake_s3):
         "missing-object",
     ],
 )
-def test_each_failure_blocks_the_source(fake_s3, store_kwargs, expected_total, failure):
+def test_each_failure_blocks_the_source(fake_s3, store_kwargs, expected_total, failures):
     _store(fake_s3, **store_kwargs)
 
     v = _verify(fake_s3, expected_total)
 
     assert v.ok is False
-    assert failure in v.failures
+    assert v.failures == failures
+
+
+def test_orphan_image_keys_returns_only_numeric_ids_missing_from_the_list(fake_s3):
+    fake_s3.put("b", _LIST_KEY, _list_csv([("a.jpg - Confirmed", "/image/1/view/")]))
+    for key in (
+        "p/s1/images/1.jpg",
+        "p/s1/images/99.jpg",
+        "p/s1/images/thumb.jpg",
+        "p/s10/images/5.jpg",
+    ):
+        fake_s3.put("b", key, b"JPEG!")
+
+    assert orphan_image_keys(fake_s3, "b", "p", 1) == ["p/s1/images/99.jpg"]
 
 
 def test_a_zero_byte_image_object_counts_as_missing(fake_s3):

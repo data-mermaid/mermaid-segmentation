@@ -27,6 +27,7 @@ from coralnet_scraper.downloader import (
     CoralNetDownloader,
     ImageRef,
     SessionExpired,
+    _parse_browse_thumbs,
     decode_export_csv,
     export_prep_timeout_seconds,
     export_serve_timeout_seconds,
@@ -1483,6 +1484,64 @@ def test_a_kill_after_a_changed_total_walk_leaves_state_for_the_new_total(http_s
     assert len(http_server.requests_to(_BASE)) == 1  # the export's form page, not a walk fetch
 
 
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        (
+            '<span class="thumb_wrapper"><a href="/image/5/view/"><img/></a></span>',
+            ([(5, "")], None, False),
+        ),
+        (_browse_html([(5, "a.jpg")]), ([(5, "a.jpg")], None, True)),
+        (_browse_html([(5, "a.jpg")], "?page=2"), ([(5, "a.jpg")], "?page=2", True)),
+    ],
+    ids=["no-title", "no-next-anchor", "next-anchor"],
+)
+def test_parse_browse_thumbs_reads_titles_the_next_page_link_and_the_form(html, expected):
+    assert _parse_browse_thumbs(html) == expected
+
+
+def test_a_failed_page_export_starts_no_queued_page(http_server, fake_s3, monkeypatch):
+    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
+    _script_pages(http_server, [[(i, f"img{i}.jpg")] for i in (1, 2, 3)])
+    http_server.script(_PREP, Reply(403))
+    dl = _site_downloader(http_server, fake_s3)
+
+    ok = dl.download_annotations_paginated(
+        1, "b", "p", refs=_refs({p: [p] for p in (1, 2, 3)}), page_workers=1
+    )
+
+    assert ok is False
+    # The lone worker may dequeue page 2 before the failure is seen; page 3 stays queued.
+    assert len(http_server.requests_to(_PREP)) <= 2
+    assert http_server.requests_to(_page_path(3)) == []
+
+
+def test_a_walk_short_of_the_overview_total_on_every_attempt_is_walked_again_on_the_next_run(
+    http_server, fake_s3
+):
+    _script_source(http_server, [[1, 2]])
+    http_server.script("/source/1/", Reply(200, _overview_html(3).encode()))
+
+    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
+
+    assert (res.ok, res.errors) == (False, ["walk_count_mismatch:2!=3"])
+    assert http_server.requests_to(_PREP) == []
+    assert len(http_server.requests_to(_page_path(1))) == downloader_mod._WALK_ATTEMPTS
+    assert ("b", "p/s1/image_list.csv") not in fake_s3.objects
+    assert ("b", f"{_PARTIAL}walk.json") not in fake_s3.objects
+    state = json.loads(fake_s3.objects[("b", f"{_PARTIAL}state.json")])
+    assert "walk" not in state["stages"]
+
+    _script_source(http_server, [[1, 2], [3]])
+    http_server.received.clear()
+    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
+
+    assert res.ok is True
+    assert len(http_server.requests_to(_page_path(1))) == 2  # the walk's page 1, then the export
+    assert len(http_server.requests_to(_page_path(2))) == 1
+    assert ("b", _MARKER) in fake_s3.objects
+
+
 def test_a_browse_page_without_the_export_form_logs_in_again(http_server, fake_s3):
     _script_walk(http_server, [[1]])
     _script_login(http_server)
@@ -1637,3 +1696,16 @@ def test_content_retries_continue_past_stamina_default_total_timeout(
 
     assert ok is True
     assert len(http_server.requests_to(_PREP)) == 4
+
+
+def test_prune_deletes_nothing_when_verification_fails(http_server, fake_s3, monkeypatch):
+    _script_source(http_server, [[1]])
+    failed = Verification(failures=["image_missing:1"])
+    monkeypatch.setattr(downloader_mod, "verify_source", lambda *a, **k: failed)
+    fake_s3.put("b", "p/s1/images/99.jpg", b"OLD")
+
+    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p", prune=True)
+
+    assert res.errors == ["verification_failed"]
+    assert ("delete", "p/s1/images/99.jpg") not in fake_s3.events
+    assert ("b", "p/s1/images/99.jpg") in fake_s3.objects

@@ -190,9 +190,13 @@ def test_run_batch_download_sleeps_after_each_download_not_after_a_skip(
 
 
 class _ScriptedDownloader:
-    """Downloader double that answers each source from a script: True, False or an exception."""
+    """Downloader double answering each source from a script.
 
-    def __init__(self, script: dict[int, bool | str | Exception]) -> None:
+    A script value is True (ok), False (failed with ``annotations_failed``), one error code,
+    a list of error codes (failed with exactly those) or an exception to raise.
+    """
+
+    def __init__(self, script: dict[int, bool | str | list[str] | Exception]) -> None:
         self.script = script
         self.attempted: list[int] = []
 
@@ -205,10 +209,14 @@ class _ScriptedDownloader:
             raise outcome
         if isinstance(outcome, str):
             return DownloadResult(ok=False, errors=[outcome])
+        if isinstance(outcome, list):
+            return DownloadResult(ok=False, errors=outcome)
         return DownloadResult(ok=outcome, errors=[] if outcome else ["annotations_failed"])
 
 
-def _batch(fake_s3, script: dict[int, bool | str | Exception]) -> tuple[bd.BatchOutcome, list[int]]:
+def _batch(
+    fake_s3, script: dict[int, bool | str | list[str] | Exception]
+) -> tuple[bd.BatchOutcome, list[int]]:
     downloader = _ScriptedDownloader(script)
     outcome = bd.run_batch_download(
         list(script), downloader=downloader, bucket="b", s3_prefix="p", s3_client=fake_s3
@@ -226,6 +234,13 @@ def test_five_consecutive_failures_open_the_circuit_and_stop_the_run(fake_s3):
     assert sorted(outcome.results) == [1, 2, 3, 4, 5]
 
 
+def test_a_failed_result_with_no_error_codes_counts_as_a_failure(fake_s3):
+    outcome, attempted = _batch(fake_s3, {1: [], 2: [], 3: [], 4: [], 5: [], 6: []})
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+
+
 def test_a_success_resets_the_failure_streak(fake_s3):
     script = {i: i == 5 for i in range(1, 10)}  # 4 failures, 1 ok, 4 failures
 
@@ -237,7 +252,13 @@ def test_a_success_resets_the_failure_streak(fake_s3):
 
 def test_skipped_sources_neither_count_nor_reset_the_failure_streak(fake_s3):
     _mark(fake_s3, 2)
-    script: dict[int, bool | Exception] = {1: False, 2: True, 3: False, 4: False, 5: False}
+    script: dict[int, bool | str | list[str] | Exception] = {
+        1: False,
+        2: True,
+        3: False,
+        4: False,
+        5: False,
+    }
     script.update({6: False, 7: True})
 
     outcome, attempted = _batch(fake_s3, script)
@@ -247,7 +268,11 @@ def test_skipped_sources_neither_count_nor_reset_the_failure_streak(fake_s3):
 
 
 def test_a_source_whose_download_raises_counts_as_a_failure(fake_s3):
-    script: dict[int, bool | Exception] = {1: False, 2: False, 3: RuntimeError("boom")}
+    script: dict[int, bool | str | list[str] | Exception] = {
+        1: False,
+        2: False,
+        3: RuntimeError("boom"),
+    }
     script.update({4: False, 5: False, 6: True})
 
     outcome, attempted = _batch(fake_s3, script)
@@ -260,7 +285,43 @@ def test_a_raised_exception_with_a_lowercase_class_name_counts_as_a_failure(fake
     class gaierror(Exception):  # noqa: N801
         pass
 
-    script: dict[int, bool | Exception] = {i: gaierror("dns") for i in range(1, 7)}
+    script: dict[int, bool | str | list[str] | Exception] = {
+        i: gaierror("dns") for i in range(1, 7)
+    }
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+
+
+_PER_IMAGE = ["images_missing_url"]
+
+
+def test_sources_failing_only_with_per_image_codes_never_open_the_circuit(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = {
+        i: _PER_IMAGE if i % 2 else ["images_upload_failed"] for i in range(1, 6)
+    }
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped is None
+    assert attempted == [1, 2, 3, 4, 5]
+
+
+def test_a_per_image_only_failure_does_not_reset_the_outage_streak(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = {1: False, 2: False, 3: _PER_IMAGE}
+    script.update({4: False, 5: False, 6: False, 7: True})
+
+    outcome, attempted = _batch(fake_s3, script)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5, 6]
+
+
+def test_per_image_codes_mixed_with_another_error_still_count_as_a_failure(fake_s3):
+    mixed = ["images_missing_url", "annotations_failed"]
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 7), mixed)
 
     outcome, attempted = _batch(fake_s3, script)
 
@@ -269,7 +330,9 @@ def test_a_raised_exception_with_a_lowercase_class_name_counts_as_a_failure(fake
 
 
 def test_sources_failing_verification_do_not_open_the_circuit(fake_s3):
-    script: dict[int, bool | str | Exception] = dict.fromkeys(range(1, 7), "verification_failed")
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(
+        range(1, 7), "verification_failed"
+    )
     script[7] = True
 
     outcome, attempted = _batch(fake_s3, script)
@@ -279,7 +342,7 @@ def test_sources_failing_verification_do_not_open_the_circuit(fake_s3):
 
 
 def test_a_verification_failure_does_not_reset_the_outage_streak(fake_s3):
-    script: dict[int, bool | str | Exception] = {
+    script: dict[int, bool | str | list[str] | Exception] = {
         1: "annotations_failed",
         2: "image_list_failed",
         3: "verification_failed",
@@ -304,7 +367,7 @@ def test_a_verification_failure_does_not_reset_the_outage_streak(fake_s3):
     ],
 )
 def test_sources_that_are_inaccessible_do_not_open_the_circuit(fake_s3, error):
-    script: dict[int, bool | str | Exception] = dict.fromkeys(range(1, 7), error)
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 7), error)
 
     outcome, attempted = _batch(fake_s3, script)
 

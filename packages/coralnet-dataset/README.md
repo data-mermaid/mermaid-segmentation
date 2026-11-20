@@ -87,6 +87,7 @@ Each invocation computes its own default version tag. If you run the subcommands
 
 | Kind | Meaning |
 |---|---|
+| `not_complete` | The source has no `_complete.json` [completion marker](../coralnet-scraper/README.md#resume). The scraper writes it only after it verifies the source, so the build reads none of the source's CSVs. |
 | `annotations_missing` | `annotations.csv` is not on S3. |
 | `image_list_missing` | `image_list.csv` is not on S3. |
 | `labelset_missing` | `labelset.csv` is not on S3. |
@@ -96,13 +97,15 @@ Each invocation computes its own default version tag. If you run the subcommands
 | `image_list_incomplete` | An annotation row matches no `image_list.csv` row by `Name`. |
 | `label_unnamed` | A Label ID used by the source is not named by any included source's labelset. |
 
+A bucket filled by an older scraper has no markers. Run `coralnet-scrape verify-existing` first; see [Adopt an existing bucket](../../docs/runbooks/coralnet-data.md#adopt-an-existing-bucket). Otherwise every source is excluded as `not_complete` and `build-annotations` exits 1.
+
 Rows with a non-numeric `Row`, `Column` or `Label ID` are dropped with a warning; they do not exclude the source. A Label ID with two different names across the included sources raises `ValueError` and stops the build.
 
 At the end, `build-annotations` logs a summary at error level: the number of excluded sources, then one line per kind with the sorted source ids, for example `labelset_missing: [3, 4]`.
 
 `build-images` logs the image count per `header_status`. `ok`, `sof_not_found_extended` and `pil_fallback` carry dimensions. `not_found`, `corrupt`, `s3_error` and `worker_exception` do not, and the manifest drops those images.
 
-`resize` logs the number of images resized, corrupted and failed. An image is corrupted when it does not pass inspection. It is failed when the download, resize or upload raises.
+`resize` logs the number of images resized, oversized, corrupted and failed. An image is oversized when it exceeds twice Pillow's `MAX_IMAGE_PIXELS`, the decompression-bomb error threshold. It is corrupted when it fails inspection for any other reason. It is failed when the download, resize or upload raises. Oversized and corrupted images are skipped.
 
 Exit codes:
 
@@ -110,7 +113,7 @@ Exit codes:
 |---|---|
 | `build-annotations` | Any source is excluded, or no annotation rows are built. |
 | `build-images` | Any image has no dimensions. |
-| `resize` | Any image is corrupted or failed. |
+| `resize` | Any image is oversized, corrupted or failed. |
 | `build-manifest` | Only on an uncaught error. |
 | `all` | Any step returns 1. Every step runs. |
 

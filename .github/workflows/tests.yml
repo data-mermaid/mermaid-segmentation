@@ -12,7 +12,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  tests:
+  mermaidseg:
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -24,13 +24,33 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.13"
       - name: Run unit tests
         # Live tests need S3 or CoralNet access and run outside CI, so we deselect them with
         # `not live`.
         run: uv run --group tests --extra wandb --extra mlflow pytest -m "not slow and not integration and not live" --cov=mermaidseg --cov-report=term-missing
-      - name: Run coralnet-scraper unit tests
-        if: ${{ !cancelled() }}
-        run: uv run --package coralnet-scraper --group tests pytest packages/coralnet-scraper/tests
-      - name: Run coralnet-dataset unit tests
-        if: ${{ !cancelled() }}
-        run: uv run --package coralnet-dataset --group tests pytest packages/coralnet-dataset/tests
+
+  packages:
+    name: ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [coralnet-scraper, coralnet-dataset, external-datasets]
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.13"
+      - name: Run unit tests
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: uv run --package "$PACKAGE" --group tests pytest "packages/$PACKAGE/tests"

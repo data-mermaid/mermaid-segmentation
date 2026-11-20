@@ -20,7 +20,6 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
-from mermaidseg.datasets.coralscapes.coralscapes_dataset import CORALSCAPES_ID2NAME
 from mermaidseg.datasets.utils import emit_dataset_warning
 
 logger = logging.getLogger(__name__)
@@ -227,6 +226,50 @@ CORALSCAPES_V2_TO_LEGACY_NAME: dict[str, str] = {
 }
 
 
+# Original Coralscapes (v1) 39 class ids; the target of the 95 -> 39 legacy map.
+CORALSCAPES_ID2NAME: dict[int, str] = {
+    1: "seagrass",
+    2: "trash",
+    3: "other coral dead",
+    4: "other coral bleached",
+    5: "sand",
+    6: "other coral alive",
+    7: "human",
+    8: "transect tools",
+    9: "fish",
+    10: "algae covered substrate",
+    11: "other animal",
+    12: "unknown hard substrate",
+    13: "background",
+    14: "dark",
+    15: "transect line",
+    16: "massive/meandering bleached",
+    17: "massive/meandering alive",
+    18: "rubble",
+    19: "branching bleached",
+    20: "branching dead",
+    21: "millepora",
+    22: "branching alive",
+    23: "massive/meandering dead",
+    24: "clam",
+    25: "acropora alive",
+    26: "sea cucumber",
+    27: "turbinaria",
+    28: "table acropora alive",
+    29: "sponge",
+    30: "anemone",
+    31: "pocillopora alive",
+    32: "table acropora dead",
+    33: "meandering bleached",
+    34: "stylophora alive",
+    35: "sea urchin",
+    36: "meandering alive",
+    37: "meandering dead",
+    38: "crown of thorn",
+    39: "dead clam",
+}
+
+
 def coralscapes_v2_to_legacy_lut() -> NDArray[np.uint8]:
     """Map a native CoralscapesV2 mask onto the original 39-class ids.
 
@@ -270,8 +313,7 @@ class CoralscapesV2Dataset(Dataset[tuple[torch.Tensor | NDArray[Any], Any]]):
             ``None`` for all three splits.
         transform: Optional Albumentations transform applied to image and mask.
         class_subset: Optional list of source-space (Coralscapes V2) class names to retain.
-        hf_repo_id: HuggingFace dataset repo ID or local dataset directory (e.g. a sparsified
-            copy from ``scripts/build_sparse_dense_datasets.py``) with the same columns.
+        hf_repo_id: HuggingFace dataset repo ID or local dataset directory with the same columns.
         source_id2name: Mapping from local source IDs (1..N) to Coralscapes V2 class names.
         source_name2id: Inverse of source_id2name.
         num_source_classes: ``len(source_id2name) + 1`` (incl. background).

@@ -14,6 +14,7 @@ FROM ${BASE_IMAGE}
 
 # Pinned uv. The digest is bumped by Dependabot; update the tag together with the uv used to
 # refresh uv.lock.
+# The `version` in the setup-uv steps of .github/workflows/*.yml moves with this tag.
 COPY --from=ghcr.io/astral-sh/uv:0.11.13@sha256:841c8e6fe30a8b07b4478d12d0c608cba6de66102d29d65d1cc423af86051563 /uv /uvx /usr/local/bin/
 
 # Secrets (HF_TOKEN) are never baked into the image or set in the job Environment:
@@ -35,10 +36,11 @@ ENV UV_PYTHON=3.12 \
 
 # Dependencies first (cached until the lock changes). `--locked` fails if uv.lock is stale.
 COPY pyproject.toml uv.lock .python-version ./
-# The lock lists the coralnet-scraper and coralnet-dataset workspace members; uv reads their
+# The lock lists the coralnet-scraper, coralnet-dataset and external-datasets workspace members; uv reads their
 # pyprojects to validate the lock. The members themselves are not installed.
 COPY packages/coralnet-scraper/pyproject.toml ./packages/coralnet-scraper/pyproject.toml
 COPY packages/coralnet-dataset/pyproject.toml ./packages/coralnet-dataset/pyproject.toml
+COPY packages/external-datasets/pyproject.toml ./packages/external-datasets/pyproject.toml
 RUN uv sync --locked --no-dev --extra mlflow --no-install-project
 
 # Project itself (editable so scripts/ stays importable).
