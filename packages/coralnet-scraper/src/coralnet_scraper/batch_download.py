@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import logging
 import os
+import re
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _SOURCE_LISTING_URL = "https://coralnet.ucsd.edu/source/about/"  # links every public source
 _LISTING_TIMEOUT_S = 50.0
+_SOURCE_PATH_RE = re.compile(r"/source/(\d+)/")
 CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive outage failures that stop the run
 STOPPED_CIRCUIT_OPEN = "circuit_open"
 
@@ -62,8 +64,9 @@ def discover_public_source_ids(session: requests.Session) -> list[int]:
             if urlparse(urljoin(_SOURCE_LISTING_URL, href)).scheme in ("http", "https")
         }
     )
-    source_links = [lk for lk in links if "/source/" in lk]
-    return sorted({int(lk.split("/")[-2]) for lk in source_links})
+    # Signed-in pages also link non-source pages under /source/, such as /source/new/.
+    matches = (_SOURCE_PATH_RE.fullmatch(urlparse(lk).path) for lk in links)
+    return sorted({int(m.group(1)) for m in matches if m})
 
 
 def load_coralnet_credentials() -> tuple[str, str]:
