@@ -105,7 +105,7 @@ At the end, `build-annotations` logs a summary at error level: the number of exc
 
 `build-images` logs the image count per `header_status`. `ok`, `sof_not_found_extended` and `pil_fallback` carry dimensions. `not_found`, `corrupt`, `s3_error` and `worker_exception` do not, and the manifest drops those images.
 
-`resize` logs the number of images resized, corrupted and failed. An image is corrupted when it does not pass inspection. It is failed when the download, resize or upload raises.
+`resize` logs the number of images resized, oversized, corrupted and failed. An image is oversized when it exceeds twice Pillow's `MAX_IMAGE_PIXELS`, the decompression-bomb error threshold. It is corrupted when it fails inspection for any other reason. It is failed when the download, resize or upload raises. Oversized and corrupted images are skipped.
 
 Exit codes:
 
@@ -113,7 +113,7 @@ Exit codes:
 |---|---|
 | `build-annotations` | Any source is excluded, or no annotation rows are built. |
 | `build-images` | Any image has no dimensions. |
-| `resize` | Any image is corrupted or failed. |
+| `resize` | Any image is oversized, corrupted or failed. |
 | `build-manifest` | Only on an uncaught error. |
 | `all` | Any step returns 1. Every step runs. |
 

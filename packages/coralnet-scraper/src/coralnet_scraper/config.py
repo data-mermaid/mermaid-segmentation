@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import os
 
 DEFAULT_PREFIX = "coralnet-public-images"
 # I/O-bound: scale beyond cpu_count since threads wait on network, not CPU
 DEFAULT_SCRAPER_WORKERS = min(32, max(8, (os.cpu_count() or 4) * 4))
+DEFAULT_EXPORT_WORKERS = 3
 
 ENV_BUCKET = "MERMAID_CORALNET_BUCKET"
 ENV_PREFIX = "MERMAID_CORALNET_PREFIX"
@@ -64,7 +66,7 @@ def get_scraper_workers(default: int = DEFAULT_SCRAPER_WORKERS) -> int:
     return _workers_from_env(ENV_SCRAPER_WORKERS, default)
 
 
-def get_export_workers(default: int = 3) -> int:
+def get_export_workers(default: int = DEFAULT_EXPORT_WORKERS) -> int:
     """Return the paginated-export worker count from the environment, or ``default`` when unset.
 
     Args:
@@ -89,9 +91,9 @@ def _workers_from_env(name: str, default: int) -> int:
 
 
 def validate_requests_per_second(rate: float) -> float:
-    """Return ``rate`` when it is a positive number, otherwise raise ``ValueError``."""
-    if not rate > 0:
-        raise ValueError(f"requests per second must be > 0, got {rate!r}")
+    """Return ``rate`` when it is a finite number > 0, otherwise raise ``ValueError``."""
+    if not (math.isfinite(rate) and rate > 0):
+        raise ValueError(f"requests per second must be a finite number > 0, got {rate!r}")
     return rate
 
 
@@ -99,7 +101,7 @@ def get_requests_per_second() -> float | None:
     """Return the CoralNet request-rate limit from the environment, or ``None`` when unset.
 
     Raises:
-        ValueError: If ``MERMAID_CORALNET_REQUESTS_PER_SECOND`` is not a positive number.
+        ValueError: If ``MERMAID_CORALNET_REQUESTS_PER_SECOND`` is not a finite number > 0.
     """
     raw = os.getenv(ENV_REQUESTS_PER_SECOND)
     if raw is None:

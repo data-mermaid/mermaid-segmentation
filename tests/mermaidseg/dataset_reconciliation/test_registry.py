@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from mermaidseg.dataset_reconciliation import registry as registry_module
@@ -183,3 +184,74 @@ def test_source_name_without_a_mapping_raises() -> None:
 def test_compute_concepts_without_a_schema_raises() -> None:
     with pytest.raises(ValueError, match="requires concept_schema"):
         SourceLabelRegistry([_StubDataset("mermaid", ["a"])], compute_concepts=True)
+
+
+class _AnnotatedStub(_StubDataset):
+    def __init__(self, source_name: str, names: list[str], labels: list[str] | None) -> None:
+        super().__init__(source_name, names)
+        if labels is not None:
+            self.df_annotations = pd.DataFrame({"source_label_name": labels})
+
+
+def _coverage_record(caplog):
+    return next(r for r in caplog.records if "source labels" in r.getMessage())
+
+
+def test_coverage_is_logged_at_info_when_some_labels_map(caplog) -> None:
+    ds = _AnnotatedStub("coralscapes_v2", ["sand", "zzz"], ["sand", "sand", "sand", "zzz"])
+
+    with caplog.at_level("INFO", logger=registry_module.logger.name):
+        SourceLabelRegistry([ds])
+
+    record = _coverage_record(caplog)
+    assert record.levelname == "INFO"
+    assert "1 of 2 source labels" in record.getMessage()
+    assert "75.0% of annotations" in record.getMessage()
+
+
+def test_coverage_matches_mixed_case_source_labels(caplog) -> None:
+    ds = _AnnotatedStub("coralscapes_v2", ["Sand", "Zzz"], ["Sand"] * 3 + ["Zzz"])
+
+    with caplog.at_level("INFO", logger=registry_module.logger.name):
+        SourceLabelRegistry([ds])
+
+    record = _coverage_record(caplog)
+    assert "1 of 2 source labels" in record.getMessage()
+    assert "75.0% of annotations" in record.getMessage()
+
+
+def test_coverage_warns_when_no_label_maps(caplog) -> None:
+    ds = _AnnotatedStub("coralscapes_v2", ["zz1", "zz2"], ["zz1", "zz2"])
+
+    with caplog.at_level("INFO", logger=registry_module.logger.name):
+        SourceLabelRegistry([ds])
+
+    record = _coverage_record(caplog)
+    assert record.levelname == "WARNING"
+    assert "check source label keys against the mapping" in record.getMessage()
+
+
+def test_coverage_is_judged_per_source_at_its_own_offset(caplog) -> None:
+    mermaid = _AnnotatedStub("mermaid", ["a", "b"], ["a", "b"])  # identity mapping
+    scapes = _AnnotatedStub("coralscapes_v2", ["zz1", "zz2"], ["zz1", "zz2"])
+
+    with caplog.at_level("INFO", logger=registry_module.logger.name):
+        SourceLabelRegistry([mermaid, scapes])
+
+    levels = {
+        name: next(r.levelname for r in caplog.records if r.getMessage().startswith(f"{name}:"))
+        for name in ("mermaid", "coralscapes_v2")
+    }
+    assert levels == {"mermaid": "INFO", "coralscapes_v2": "WARNING"}
+
+
+def test_coverage_without_df_annotations_logs_label_counts_only(caplog) -> None:
+    ds = _AnnotatedStub("coralscapes_v2", ["sand", "zzz"], None)
+
+    with caplog.at_level("INFO", logger=registry_module.logger.name):
+        SourceLabelRegistry([ds])
+
+    record = _coverage_record(caplog)
+    assert record.levelname == "INFO"
+    assert "1 of 2 source labels" in record.getMessage()
+    assert "of annotations" not in record.getMessage()

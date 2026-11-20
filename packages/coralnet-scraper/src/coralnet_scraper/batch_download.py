@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 _SOURCE_LISTING_URL = "https://coralnet.ucsd.edu/source/about/"  # links every public source
 _LISTING_TIMEOUT_S = 50.0
-CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive failed sources that stop the run
+CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive outage failures that stop the run
 STOPPED_CIRCUIT_OPEN = "circuit_open"
 
 
@@ -101,13 +101,15 @@ _OUTAGE_CODES = frozenset({"login failed", "annotations_failed", "image_list_fai
 def _is_outage_failure(res: DownloadResult, *, raised: bool = False) -> bool:
     """Return whether a failed result signals an outage rather than a problem of one source.
 
-    A source whose download raised is an outage; otherwise the downloader's login, annotations,
-    image-list and overview-fetch errors are.
+    A source whose download raised, or that failed with no error code, is an outage; otherwise
+    the downloader's login, annotations, image-list and overview-fetch errors are.
     """
     if res.ok:
         return False
-    return raised or any(
-        e in _OUTAGE_CODES or e.startswith("overview fetch failed") for e in res.errors
+    return (
+        raised
+        or not res.errors
+        or any(e in _OUTAGE_CODES or e.startswith("overview fetch failed") for e in res.errors)
     )
 
 

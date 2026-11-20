@@ -1,7 +1,7 @@
 """Source-dataset to MERMAID benthic-attribute target-label mappings.
 
 Provides the HTTP fetchers + static dicts that translate a source-space label (CoralNet provider
-IDs, Coralscapes 1..39 names, MERMAID benthic-attribute names) into MERMAID benthic-attribute target
+IDs, Coralscapes V2 names, MERMAID benthic-attribute names) into MERMAID benthic-attribute target
 names, plus the GPU helper ``source_labels_to_target_labels`` used at training time.
 """
 
@@ -446,56 +446,6 @@ def coralscapes_v2_to_mermaid() -> dict[str, str]:
         "water column": "background",
         "water surface": "background",
         "xeniidae alive": "xeniidae",
-    }
-
-
-def coralscapes_to_mermaid() -> dict[str, str]:
-    """Static Coralscapes 39-class -> MERMAID benthic-attribute mapping.
-
-    Mapping was previously embedded inside ``CoralscapesDataset``. Keyed by the native Coralscapes
-    class name; values are the mapped MERMAID benthic-attribute name. Labels absent from this map
-    collapse to background at training time via :class:`SourceLabelRegistry`.
-    """
-    return {
-        "human": "human",
-        "background": "background",
-        "fish": "fish",
-        "sand": "sand",
-        "rubble": "rubble",
-        "unknown hard substrate": "bare substrate",
-        "algae covered substrate": "turf algae",
-        "dark": "dark",
-        "branching bleached": "bleached coral",
-        "branching dead": "dead coral",
-        "branching alive": "hard coral",
-        "stylophora alive": "stylophora",
-        "pocillopora alive": "pocillopora",
-        "acropora alive": "acropora",
-        "table acropora alive": "acropora",
-        "table acropora dead": "dead coral",
-        "millepora": "millepora",
-        "turbinaria": "turbinaria reniformis",
-        "other coral dead": "dead coral",
-        "other coral alive": "hard coral",
-        "other coral bleached": "bleached coral",
-        "massive/meandering alive": "hard coral",
-        "massive/meandering dead": "dead coral",
-        "massive/meandering bleached": "bleached coral",
-        "meandering alive": "hard coral",
-        "meandering dead": "dead coral",
-        "meandering bleached": "bleached coral",
-        "transect line": "tape",
-        "transect tools": "unknown",
-        "sea urchin": "sea urchin",
-        "sea cucumber": "sea cucumber",
-        "anemone": "anemone",
-        "sponge": "sponge",
-        "clam": "tridacna giant clam",
-        "other animal": "other invertebrates",
-        "trash": "trash",
-        "seagrass": "seagrass",
-        "crown of thorn": "acanthaster planci",
-        "dead clam": "tridacna giant clam",
     }
 
 

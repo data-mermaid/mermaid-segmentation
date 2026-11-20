@@ -5,8 +5,10 @@ from __future__ import annotations
 import multiprocessing as mp
 import shutil
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from queue import Empty
 
 import numpy as np
 import pandas as pd
@@ -46,6 +48,11 @@ def init_gloo(rank: int, world_size: int, init_method: str) -> None:
     dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=world_size)
 
 
+# Each spawned worker re-imports torch before it reports, which takes over a minute on a slow CI
+# runner. The deadline only bounds a real hang; a crashed worker fails the wait at once.
+_GLOO_RESULT_TIMEOUT_S = 300
+
+
 def spawn_gloo(worker, world_size: int, extra: tuple = ()) -> list:
     ctx = torch_mp.get_context("spawn")
     queue = ctx.Queue()
@@ -58,7 +65,22 @@ def spawn_gloo(worker, world_size: int, extra: tuple = ()) -> list:
     try:
         for process in processes:
             process.start()
-        results = [queue.get(timeout=90) for _ in processes]
+        results: list[tuple[int, object]] = []
+        deadline = time.monotonic() + _GLOO_RESULT_TIMEOUT_S
+        while len(results) < world_size:
+            try:
+                results.append(queue.get(timeout=1))
+            except Empty:
+                for rank, process in enumerate(processes):
+                    if process.exitcode not in (None, 0):
+                        raise RuntimeError(
+                            f"gloo worker {rank} exited with {process.exitcode} before reporting"
+                        ) from None
+                if time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f"{len(results)} of {world_size} gloo workers reported within "
+                        f"{_GLOO_RESULT_TIMEOUT_S} s"
+                    ) from None
         for process in processes:
             process.join(timeout=30)
         for process in processes:

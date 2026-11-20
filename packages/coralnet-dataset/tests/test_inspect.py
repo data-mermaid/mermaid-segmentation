@@ -2,19 +2,34 @@
 
 from __future__ import annotations
 
+import os
 from io import BytesIO
 
 import pytest
 from PIL import Image
 
 from coralnet_dataset import inspect as inspect_module
-from coralnet_dataset.inspect import IssueType, inspect_image
+from coralnet_dataset.inspect import IssueType, decode_image, inspect_image
 
 
 def _png_bytes(mode: str = "RGB") -> bytes:
     buf = BytesIO()
     Image.new(mode, (64, 48)).save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _noise_jpeg_bytes(size: tuple[int, int]) -> bytes:
+    """A JPEG of random pixels, so the entropy-coded data is large enough to truncate."""
+    noise = Image.frombytes("RGB", size, os.urandom(size[0] * size[1] * 3))
+    buf = BytesIO()
+    noise.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _jpeg_bytes(size: tuple[int, int]) -> BytesIO:
+    buf = BytesIO()
+    Image.new("RGB", size, color="red").save(buf, format="JPEG")
+    return buf
 
 
 def test_inspect_image_valid_rgb(valid_rgb_jpeg_bytes):
@@ -96,15 +111,61 @@ def test_inspect_image_corrupt_pixel_data_is_decode_failure():
     assert inspection.error_message.startswith("PIL decode error: ")
 
 
-def test_inspect_image_non_oserror_failure_is_unknown(monkeypatch):
-    """A decompression bomb raises outside PIL's OSError family."""
+def test_inspect_image_decompression_bomb_is_oversized(monkeypatch):
+    """A decompression bomb is an oversized image, not a corrupted one."""
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
 
     inspection = inspect_image(BytesIO(_png_bytes()))
 
     assert inspection.is_valid is False
-    assert inspection.issue_type == IssueType.UNKNOWN
+    assert inspection.issue_type == IssueType.OVERSIZED
     assert inspection.error_message.startswith("DecompressionBombError: ")
+
+
+def test_inspect_image_non_oserror_failure_is_unknown(monkeypatch):
+    """An exception outside PIL's OSError family and not a bomb is reported as unknown."""
+
+    def _raise(_fp):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(inspect_module.Image, "open", _raise)
+
+    inspection = inspect_image(BytesIO(b"x"))
+
+    assert inspection.issue_type == IssueType.UNKNOWN
+    assert inspection.error_message == "ValueError: boom"
+
+
+@pytest.mark.parametrize(
+    ("original", "expected"),
+    [
+        # A square (max_edge, max_edge) box would leave 1000x200 undrafted.
+        ((1000, 200), (250, 50)),
+        ((1000, 1000), (250, 250)),
+        ((200, 1000), (50, 250)),
+    ],
+)
+def test_decode_image_drafts_a_jpeg_by_its_longest_edge(original, expected):
+    img, inspection = decode_image(_jpeg_bytes(original), max_edge=250)
+
+    assert img.size == expected
+    assert inspection.issue_type == IssueType.VALID
+    assert (inspection.width, inspection.height) == original
+
+
+def test_decode_image_without_max_edge_decodes_at_full_size():
+    img, _ = decode_image(_jpeg_bytes((4096, 4096)))
+
+    assert img.size == (4096, 4096)
+
+
+def test_decode_image_truncated_jpeg_is_truncated_when_drafted():
+    data = _noise_jpeg_bytes((1000, 1000))
+
+    img, inspection = decode_image(BytesIO(data[: len(data) // 2]), max_edge=250)
+
+    assert img is None
+    assert inspection.issue_type == IssueType.TRUNCATED
 
 
 @pytest.mark.parametrize(

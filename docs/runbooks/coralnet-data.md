@@ -64,7 +64,7 @@ Use an unused tag; see [Run](../../packages/coralnet-dataset/README.md#run).
 
 ### Check the build
 
-1. Read the summary that each step logs: the excluded sources from `build-annotations` (it excludes a source with no `_complete.json` as `not_complete`), the count per `header_status` from `build-images`, and the resized, corrupted and failed counts from `resize`.
+1. Read the summary that each step logs: the excluded sources from `build-annotations` (it excludes a source with no `_complete.json` as `not_complete`), the count per `header_status` from `build-images`, and the resized, oversized, corrupted and failed counts from `resize`.
 2. Check the exit code. Exit code 1 from `all` means at least one step reported failures. Every step still runs and writes its outputs.
 3. Confirm that `etl-outputs/coralnet/<run>/` in the bucket holds four files:
    - `coralnet_annotations_<run>.parquet`
@@ -153,7 +153,7 @@ Find the highest request rate at which CoralNet answers without 429s, retries or
    ```
 
    The run includes image traffic because the scratch prefix is empty. Before each further iteration, delete the scratch prefix from the bucket: a source with a marker is skipped, so deleting the prefix makes each run download the same sources again.
-2. Read the [run report](../../packages/coralnet-scraper/README.md#run-report) at `s3://<bucket>/scratch/rate-tuning/_runs/<run id>.json`. Note the `429` and 5xx counts, the `timeout` and `connection` counts under `transport.retries`, the failed sources, and `transport.mean_rate_per_s`.
+2. Read the [run report](../../packages/coralnet-scraper/README.md#run-report) at `s3://<bucket>/scratch/rate-tuning/_runs/<UTC time>-<short id>.json`. Note the `429` and 5xx counts, the `timeout` and `connection` counts under `transport.retries`, the failed sources, and `transport.mean_rate_per_s`.
 3. If there is any 429, if retried requests exceed 1% of `transport.requests`, or if any source failed for a transport reason, set `--requests-per-second` to half the observed `transport.mean_rate_per_s`, which counts retries too. If timeouts dominate, also halve `--scraper-workers`. Repeat from step 1.
 4. Stop at the first setting with no 429, retries under 1% of requests and no transport failures. Record it in the table below, and set the values in `.env`: `MERMAID_CORALNET_REQUESTS_PER_SECOND`, `MERMAID_CORALNET_SCRAPER_WORKERS` and, if you changed it, `MERMAID_CORALNET_EXPORT_WORKERS`.
 5. Run this procedure again if a later run reports 429s or the circuit breaker stops it.
@@ -182,7 +182,7 @@ A new build changes model outputs, so item 7 of the working agreement in [AGENTS
 
 Each CoralNet split has a `whitelist_sources` list, and `CoralNetDataset` keeps only the sources on that list. A new source is not in any split until you add its id to a list:
 
-1. Add the id to a split's `whitelist_sources` in `configs/data_config.yaml`.
+1. Add the id to a split's `whitelist_sources` in `configs/data_config.yaml`. The id must already be in the manifest chosen under [Select the build](#select-the-build). Otherwise `CoralNetDataset` raises a `ValueError` that names it.
 2. Regenerate the derived configs, starting with `configs/data_config_trainval.yaml`. See [Regenerate the derived configs](derived-configs.md).
 
 ### Map new labels
@@ -224,7 +224,8 @@ uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
 | `build-images` reports `not_found` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
 | `build-images` reports `corrupt` | The object on S3 is bad. The scraper does not replace an existing image object, so `invalidate` does not repair it. The manifest drops the image. |
-| `resize` reports corrupted or failed images | Run the build again. `resize` retries every image that has no resized object. The manifest drops an image that needs a resize and has none. |
+| `resize` reports corrupted or failed images | Run the build again. `resize` retries every image that has no resized object, so a rerun helps only if the cause was transient. The manifest drops an image that needs a resize and has none. |
+| `resize` reports oversized images | The original exceeds twice Pillow's `MAX_IMAGE_PIXELS`, the decompression-bomb error threshold. A rerun skips the image again and `resize` exits 1 again. The manifest drops the image. |
 
 After a scrape, always rebuild under a new version tag.
 
