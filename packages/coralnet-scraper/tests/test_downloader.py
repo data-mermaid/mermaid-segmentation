@@ -1854,6 +1854,74 @@ def test_prune_deletes_nothing_when_verification_fails(http_server, fake_s3, mon
     assert ("b", "p/s1/images/99.jpg") in fake_s3.objects
 
 
+def _overview_counting_two_images(server: ScriptedServer) -> None:
+    server.script("/source/1/", Reply(200, _overview_html(2).encode()))
+
+
+def _image_answering_404(server: ScriptedServer) -> None:
+    server.script("/media/1.jpg", Reply(404))
+
+
+@pytest.mark.parametrize(
+    "break_source", [_image_answering_404, _overview_counting_two_images], ids=["404", "walk"]
+)
+def test_prune_deletes_nothing_when_a_stage_before_verification_fails(
+    http_server, fake_s3, break_source
+):
+    _script_source(http_server, [[1]])
+    break_source(http_server)
+    fake_s3.put("b", "p/s1/images/99.jpg", b"OLD")
+
+    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p", prune=True)
+
+    assert res.ok is False
+    assert ("b", "p/s1/images/99.jpg") in fake_s3.objects
+    assert not [k for op, k in fake_s3.events if op == "delete" and "/images/" in k]
+    assert ("b", _MARKER) not in fake_s3.objects
+
+
+def test_an_export_fails_when_logging_in_again_fails(http_server, fake_s3, monkeypatch):
+    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
+    _script_walk(http_server, [[1]])
+    http_server.script(_LOGIN_PATH, Reply(200, _login_get_html().encode()))
+    http_server.script(
+        _PREP, Reply(200, b'{"error": "You must be signed in to access this function."}')
+    )
+
+    ok = _export_page_one(_site_downloader(http_server, fake_s3))
+
+    assert ok is False
+    assert len(_posts_to(http_server, _LOGIN_PATH)) == 1
+    assert len(http_server.requests_to(_PREP)) == 1
+    assert ("b", f"{_PARTIAL}page-1.csv") not in fake_s3.objects
+
+
+def test_an_export_whose_session_stays_expired_fails_after_four_attempts(
+    http_server, fake_s3, monkeypatch
+):
+    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
+    _script_walk(http_server, [[1]])
+    _script_login(http_server)
+    http_server.script(
+        _PREP, Reply(200, b'{"error": "You must be signed in to access this function."}')
+    )
+
+    ok = _export_page_one(_site_downloader(http_server, fake_s3))
+
+    assert ok is False
+    assert len(http_server.requests_to(_PREP)) == 4
+    assert ("b", f"{_PARTIAL}page-1.csv") not in fake_s3.objects
+
+
+def test_login_fails_after_four_posts_that_all_fail(http_server):
+    http_server.script(_LOGIN_PATH, Reply(200, _login_get_html().encode()), Reply(503))
+    dl = _login_downloader(http_server)
+
+    assert dl.login() is False
+    assert dl.logged_in is False
+    assert len(_posts_to(http_server, _LOGIN_PATH)) == 4
+
+
 def _noise_image_bytes(fmt: str) -> bytes:
     """A 256x256 random-pixel image, large enough that cutting it in half drops scan data."""
     pixels = random.Random(0).randbytes(256 * 256 * 3)
