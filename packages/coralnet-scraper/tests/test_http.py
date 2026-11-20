@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 import time
 
@@ -9,7 +10,7 @@ import pytest
 import requests
 from conftest import Reply, ScriptedServer
 
-from coralnet_scraper.http import SessionFactory
+from coralnet_scraper.http import SessionFactory, redact_url_query
 
 
 def _factory(requests_per_second: float | None = None) -> SessionFactory:
@@ -172,3 +173,83 @@ def test_mean_rate_counts_retries_over_the_elapsed_time(http_server: ScriptedSer
     stats = factory.stats()
     assert stats["requests"] == 3
     assert stats["mean_rate_per_s"] == 1.5
+
+
+_SIGNED = "AWSAccessKeyId=A&Signature=S&x-amz-security-token=T"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"https://s3.amazonaws.com/media/images/3.JPG?{_SIGNED}",
+            "https://s3.amazonaws.com/media/images/3.JPG?<redacted>",
+        ),
+        (
+            "after connection broken by 'RemoteDisconnected()': "
+            "/media/images/1.JPG?AWSAccessKeyId=A&Signature=S",
+            "after connection broken by 'RemoteDisconnected()': /media/images/1.JPG?<redacted>",
+        ),
+        (
+            f"https://h/media/a.JPG?{_SIGNED} then https://h/media/b.JPG?{_SIGNED}",
+            "https://h/media/a.JPG?<redacted> then https://h/media/b.JPG?<redacted>",
+        ),
+        (
+            "url: /media/images/4.JPG?Signature=S (Caused by X)",
+            "url: /media/images/4.JPG?<redacted> (Caused by X)",
+        ),
+    ],
+    ids=["absolute-url", "urllib3-path", "two-urls", "text-after-query"],
+)
+def test_redact_url_query_replaces_the_whole_query(text: str, expected: str):
+    assert redact_url_query(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://coralnet.ucsd.edu/image/123/view/",
+        "CoralNet image https://coralnet.ucsd.edu/image/123/view/: couldn't find original "
+        "image container (private source?).",
+    ],
+    ids=["bare-url", "message-with-url"],
+)
+def test_redact_url_query_leaves_text_without_a_query_unchanged(text: str):
+    assert redact_url_query(text) == text
+
+
+def test_a_retried_media_url_is_logged_without_its_query(
+    http_server: ScriptedServer, caplog: pytest.LogCaptureFixture
+):
+    path = "/media/images/1.JPG"
+    http_server.script(
+        f"{path}?AWSAccessKeyId=A&Signature=S", Reply(200, delay_s=1.0), Reply(200, b"ok")
+    )
+    caplog.set_level(logging.DEBUG)
+
+    resp = (
+        _factory().media().get(f"{http_server.url}{path}?AWSAccessKeyId=A&Signature=S", timeout=0.3)
+    )
+
+    assert resp.status_code == 200
+    pool = [r for r in caplog.records if r.name == "urllib3.connectionpool"]
+    warnings = [r for r in pool if r.levelno == logging.WARNING]
+    assert any(f"{path}?<redacted>" in r.getMessage() for r in warnings)
+    assert not any("Signature" in r.getMessage() for r in pool)
+
+
+def test_a_status_retried_media_url_is_logged_without_its_query(
+    http_server: ScriptedServer, caplog: pytest.LogCaptureFixture
+):
+    path = "/media/images/1.JPG"
+    http_server.script(f"{path}?AWSAccessKeyId=A&Signature=S", Reply(503), Reply(200, b"ok"))
+    caplog.set_level(logging.DEBUG)
+
+    resp = (
+        _factory().media().get(f"{http_server.url}{path}?AWSAccessKeyId=A&Signature=S", timeout=5)
+    )
+
+    assert resp.status_code == 200
+    retry = [r for r in caplog.records if r.name == "urllib3.util.retry"]
+    assert any("?<redacted>" in r.getMessage() for r in retry)
+    assert not any("Signature" in r.getMessage() for r in caplog.records)

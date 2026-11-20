@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import random
 import threading
 from collections.abc import Callable, Iterator
@@ -1789,6 +1790,23 @@ def test_an_invalid_image_response_is_retried_and_never_uploaded(
     assert _download_image_one(http_server, fake_s3) == ImageFailures(upload_failed=1)
     assert _IMAGE_KEY not in fake_s3.objects
     assert len(http_server.requests_to("/media/1.jpg")) == 4
+
+
+def test_a_failed_image_is_logged_without_its_media_url_query(
+    http_server, fake_s3, caplog: pytest.LogCaptureFixture
+):
+    signed = "/media/1.jpg?AWSAccessKeyId=A&Signature=S"
+    http_server.script("/image/1/view/", Reply(200, _view_page(http_server, signed)))
+    caplog.set_level(logging.DEBUG)
+
+    assert _download_image_one(http_server, fake_s3) == ImageFailures(upload_failed=1)
+
+    failed = [
+        r.getMessage() for r in caplog.records if "Image 1 failed (upload_failed)" in r.getMessage()
+    ]
+    assert failed
+    assert all("?<redacted>" in m for m in failed)
+    assert not any("Signature" in r.getMessage() for r in caplog.records)
 
 
 def test_an_expired_image_url_is_resolved_again_from_the_view_page(http_server, fake_s3):
