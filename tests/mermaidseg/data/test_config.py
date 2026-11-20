@@ -82,6 +82,16 @@ def test_use_blocks_union_with_group_blocks(tmp_path: Path) -> None:
     assert sync_plan({"datasets": {"d": entry}}, tmp_path).selection == {"d": {"g2", "x"}}
 
 
+def test_split_files_map_datasets_that_have_one_to_repo_root_paths(tmp_path: Path) -> None:
+    cfg = {
+        "datasets": {
+            "with": _entry(split_file="splits/coralnet.csv", train={"groups": "all"}),
+            "without": _entry(train={"groups": "all"}),
+        }
+    }
+    assert sync_plan(cfg, tmp_path).split_files == {"with": tmp_path / "splits/coralnet.csv"}
+
+
 def test_on_missing_images_defaults_to_fail_and_carries_drop(tmp_path: Path) -> None:
     cfg = {
         "datasets": {

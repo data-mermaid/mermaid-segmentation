@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from mermaidseg.data.config import DATASET_BUCKET, SyncPlan
+from segdata_spec.splits import coverage_checker
 from segdata_spec.sync import SyncResult, sync
 
 
@@ -18,6 +19,7 @@ def run_sync(plan: SyncPlan, cache_dir: Path, client: Any) -> SyncResult:
         bucket=DATASET_BUCKET,
         selection=plan.selection,
         on_missing_images=plan.on_missing_images,
+        check_split=coverage_checker(plan.split_files),
         taxonomy=plan.taxonomy,
     )
 

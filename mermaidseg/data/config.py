@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import pandas as pd
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from segdata_spec.manifest import Pin
+from segdata_spec.splits import read_split_file
 from segdata_spec.sync import MissingMode
 
 DATASET_BUCKET = "mermaid-seg-datasets"
@@ -84,14 +84,12 @@ class SyncPlan:
     taxonomy: Pin | None
     selection: dict[str, set[str] | None]
     on_missing_images: dict[str, MissingMode]
+    split_files: dict[str, Path]
 
 
 def _split_groups(split_file: Path, use: list[Split]) -> set[str]:
     """Return the groups of ``split_file`` whose split is in ``use``."""
-    table = pd.read_csv(split_file, dtype=str, keep_default_na=False)
-    missing = {"group", "split"} - set(table.columns)
-    if missing:
-        raise ValueError(f"split file {split_file} lacks columns {sorted(missing)}")
+    table = read_split_file(split_file).to_pandas()
     return set(table.loc[table["split"].isin(use), "group"])
 
 
@@ -126,7 +124,7 @@ def sync_plan(data_cfg: Mapping[str, Any], repo_root: Path) -> SyncPlan:
 
     Raises:
         pydantic.ValidationError: The section has an unknown key or an invalid block.
-        ValueError: A split file lacks the ``group`` or ``split`` column.
+        ValueError: A split file is malformed (see ``segdata_spec.splits.read_split_file``).
     """
     section = DataSection.model_validate(data_cfg)
     taxonomy = (
@@ -142,4 +140,9 @@ def sync_plan(data_cfg: Mapping[str, Any], repo_root: Path) -> SyncPlan:
         taxonomy=taxonomy,
         selection={name: _entry_selection(e, repo_root) for name, e in section.datasets.items()},
         on_missing_images={name: e.on_missing_images for name, e in section.datasets.items()},
+        split_files={
+            name: repo_root / e.split_file
+            for name, e in section.datasets.items()
+            if e.split_file is not None
+        },
     )
