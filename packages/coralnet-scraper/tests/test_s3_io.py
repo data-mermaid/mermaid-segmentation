@@ -93,3 +93,30 @@ def test_delete_prefix_removes_every_page_of_keys_under_the_prefix_only(fake_s3)
     s3_io.delete_prefix(fake_s3, "b", "p/s1/_partial/")
 
     assert sorted(k for (_b, k) in fake_s3.objects) == sorted(outside)
+
+
+def test_delete_keys_batches_at_1000_and_removes_every_key(fake_s3):
+    keys = [f"p/s1/images/{n}.jpg" for n in range(2001)]
+    for key in keys:
+        fake_s3.put("b", key, b"x")
+    fake_s3.put("b", "p/s1/keep.csv", b"x")
+
+    s3_io.delete_keys(fake_s3, "b", keys)
+
+    assert fake_s3.delete_objects_calls == [1000, 1000, 1]
+    assert list(fake_s3.objects) == [("b", "p/s1/keep.csv")]
+
+
+def test_delete_keys_raises_naming_the_first_failed_key_and_the_count(fake_s3):
+    fake_s3.delete_errors = {"p/b": "AccessDenied", "p/c": "InternalError"}
+    for key in ("p/a", "p/b", "p/c"):
+        fake_s3.put("b", key, b"x")
+
+    with pytest.raises(RuntimeError, match=r"p/b.*AccessDenied.*2|2.*p/b.*AccessDenied"):
+        s3_io.delete_keys(fake_s3, "b", ["p/a", "p/b", "p/c"])
+
+
+def test_delete_keys_makes_no_call_for_an_empty_list(fake_s3):
+    s3_io.delete_keys(fake_s3, "b", [])
+
+    assert fake_s3.delete_objects_calls == []

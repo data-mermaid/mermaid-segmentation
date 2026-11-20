@@ -174,12 +174,16 @@ class FakeS3:
     Populate ``objects`` with ``{(bucket, key): bytes}`` to control what gets returned. ``Range``
     semantics follow ``bytes=start-end`` (inclusive). Listings are sorted by key like S3, and the
     paginator returns ``list_page_size`` keys per page. ``events`` records every write and
-    delete in order as ``("put" | "delete", key)``.
+    delete in order as ``("put" | "delete", key)``. ``delete_errors`` maps a key to the error code
+    ``delete_objects`` reports for it instead of deleting it; ``delete_objects_calls`` records the
+    key count of each ``delete_objects`` call.
     """
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
     events: list[tuple[str, str]] = field(default_factory=list)
     list_page_size: int = 1000
+    delete_errors: dict[str, str] = field(default_factory=dict)
+    delete_objects_calls: list[int] = field(default_factory=list)
 
     def put(self, bucket: str, key: str, data: bytes) -> None:
         self.objects[(bucket, key)] = data
@@ -208,6 +212,22 @@ class FakeS3:
         self.objects.pop((Bucket, Key), None)
         self.events.append(("delete", Key))
         return {}
+
+    def delete_objects(self, *, Bucket: str, Delete: dict):
+        keys = [o["Key"] for o in Delete["Objects"]]
+        self.delete_objects_calls.append(len(keys))
+        deleted, errors = [], []
+        for key in keys:
+            if key in self.delete_errors:
+                errors.append({"Key": key, "Code": self.delete_errors[key], "Message": "m"})
+                continue
+            self.objects.pop((Bucket, key), None)
+            self.events.append(("delete", key))
+            deleted.append({"Key": key})
+        response: dict = {"Deleted": deleted}
+        if errors:
+            response["Errors"] = errors
+        return response
 
     def head_object(self, *, Bucket: str, Key: str):
         if (Bucket, Key) not in self.objects:
