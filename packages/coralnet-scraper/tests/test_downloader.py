@@ -22,6 +22,7 @@ from coralnet_scraper.downloader import (
     _PAGINATED_EXPORT_THRESHOLD,
     CoralNetDownloader,
     ImageRef,
+    _parse_browse_thumbs,
     export_prep_timeout_seconds,
     export_serve_timeout_seconds,
     half_open_batches,
@@ -101,13 +102,13 @@ def test_download_source_skips_a_source_without_confirmed_images_or_images(
 
 def test_download_images_separates_missing_url_from_upload_failures():
     dl = CoralNetDownloader("u", "p", max_workers=2)
-    # Rows: 1 uploads, 2 fails to upload, 3 raises in the worker, 4 has no URL.
-    df = pd.DataFrame(
-        {
-            "Image Page": [f"/image/{i}/view/" for i in (1, 2, 3, 4)],
-            "Image URL": ["http://x/1", "http://x/2", "http://x/3", pd.NA],
-        }
-    )
+    # Images: 1 uploads, 2 fails to upload, 3 raises in the worker, 4 has no URL.
+    images: list[tuple[ImageRef, str | None]] = [
+        (ImageRef(1, "a.jpg", 1), "http://x/1"),
+        (ImageRef(2, "b.jpg", 1), "http://x/2"),
+        (ImageRef(3, "c.jpg", 1), "http://x/3"),
+        (ImageRef(4, "d.jpg", 1), None),
+    ]
 
     def fake_upload(url: str, bucket: str, key: str) -> tuple[str, bool]:
         if url.endswith("/3"):
@@ -115,16 +116,16 @@ def test_download_images_separates_missing_url_from_upload_failures():
         return key, url.endswith("/1")
 
     with patch.object(dl, "download_image_to_s3", side_effect=fake_upload):
-        result = dl.download_images(df, 1, bucket_name="b")
+        result = dl.download_images(images, 1, bucket_name="b")
     assert result == ImageFailures(missing_url=1, upload_failed=2)
 
 
 def test_download_images_counts_every_row_missing_when_no_url_is_set():
     dl = CoralNetDownloader("u", "p", max_workers=2)
-    df = pd.DataFrame(
-        {"Image Page": [f"/image/{i}/view/" for i in (1, 2, 3)], "Image URL": [pd.NA] * 3}
-    )
-    assert dl.download_images(df, 1, bucket_name="b") == ImageFailures(
+    images: list[tuple[ImageRef, str | None]] = [
+        (ImageRef(i, f"img{i}.jpg", 1), None) for i in (1, 2, 3)
+    ]
+    assert dl.download_images(images, 1, bucket_name="b") == ImageFailures(
         missing_url=3, upload_failed=0
     )
 
@@ -621,8 +622,10 @@ def _failing_step_downloader(
         mocks["walk_source"].side_effect = overrides["walk_source"]
     for name, mock in mocks.items():
         setattr(dl, name, mock)
+    walk = overrides.get("walk_source", defaults["walk_source"])
+    total = len(walk) if isinstance(walk, list) else 1  # the walk count matches the overview
     dl._get_source_overview_html = MagicMock(  # type: ignore[method-assign]
-        return_value=_fixture("source_ok.html"),
+        return_value=_overview_html(total),
         **({"side_effect": overrides["overview"]} if "overview" in overrides else {}),
     )
     dl.get_image_urls = MagicMock(return_value=["http://x/1"])  # type: ignore[method-assign]
@@ -1183,9 +1186,17 @@ def test_a_restart_after_the_total_changed_discards_partial_state_and_walks_agai
     assert json.loads(fake_s3.objects[("b", _MARKER)])["total_images"] == 4
 
 
+def _script_foreign_annotation(server: ScriptedServer) -> None:
+    """Script the export to annotate a name the image list lacks, so verification fails."""
+    rows = [("img1.jpg", 1, 1, 7), ("foreign.jpg", 1, 1, 7)]
+    server.script(
+        "/source/1/export/serve/?session_data_timestamp=t1", Reply(200, _ann_csv(rows).encode())
+    )
+
+
 def test_a_failed_verification_writes_no_marker_and_discards_partial_state(http_server, fake_s3):
-    _script_source(http_server, [[1, 2]])
-    http_server.script("/source/1/", Reply(200, _overview_html(3).encode()))
+    _script_source(http_server, [[1]])
+    _script_foreign_annotation(http_server)
 
     res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
 
@@ -1334,3 +1345,88 @@ def test_verify_existing_writes_no_marker_for_a_source_that_fails(http_server, f
 
     assert failures == ["annotations_missing", "image_list_missing"]
     assert ("b", _MARKER) not in fake_s3.objects
+
+
+def test_walk_source_raises_on_a_page_with_no_thumbnails(http_server, fake_s3):
+    _script_pages(http_server, [[(1, "img1.jpg")], [], [(3, "img3.jpg")]])
+
+    with pytest.raises(RuntimeError, match="No image IDs found on page 2"):
+        _site_downloader(http_server, fake_s3).walk_source(1, "b", "p")
+
+    assert http_server.requests_to(_page_path(3)) == []
+    assert ("b", f"{_PARTIAL}walk.json") not in fake_s3.objects
+
+
+def test_walk_source_lists_an_id_seen_on_two_pages_once(http_server, fake_s3):
+    _script_pages(http_server, [[(1, "img1.jpg"), (2, "img2.jpg")], [(2, "img2.jpg"), (3, "c")]])
+
+    refs = _site_downloader(http_server, fake_s3).walk_source(1, "b", "p")
+
+    assert refs == [ImageRef(1, "img1.jpg", 1), ImageRef(2, "img2.jpg", 1), ImageRef(3, "c", 2)]
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        (
+            '<span class="thumb_wrapper"><a href="/image/5/view/"><img/></a></span>',
+            ([(5, "")], None),
+        ),
+        (_browse_html([(5, "a.jpg")]), ([(5, "a.jpg")], None)),
+        (_browse_html([(5, "a.jpg")], "?page=2"), ([(5, "a.jpg")], "?page=2")),
+    ],
+    ids=["no-title", "no-next-anchor", "next-anchor"],
+)
+def test_parse_browse_thumbs_reads_titles_and_the_next_page_link(html, expected):
+    assert _parse_browse_thumbs(html) == expected
+
+
+def test_a_failed_page_export_starts_no_queued_page(http_server, fake_s3, monkeypatch):
+    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
+    _script_pages(http_server, [[(i, f"img{i}.jpg")] for i in (1, 2, 3)])
+    http_server.script(_PREP, Reply(403))
+    dl = _site_downloader(http_server, fake_s3)
+
+    ok = dl.download_annotations_paginated(
+        1, "b", "p", refs=_refs({p: [p] for p in (1, 2, 3)}), page_workers=1
+    )
+
+    assert ok is False
+    # The lone worker may dequeue page 2 before the failure is seen; page 3 stays queued.
+    assert len(http_server.requests_to(_PREP)) <= 2
+    assert http_server.requests_to(_page_path(3)) == []
+
+
+def test_a_walk_short_of_the_overview_total_is_walked_again_on_the_next_run(http_server, fake_s3):
+    _script_source(http_server, [[1, 2]])
+    http_server.script("/source/1/", Reply(200, _overview_html(3).encode()))
+
+    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
+
+    assert (res.ok, res.errors) == (False, ["walk_count_mismatch:2!=3"])
+    assert http_server.requests_to(_PREP) == []
+    assert ("b", "p/s1/image_list.csv") not in fake_s3.objects
+    assert ("b", f"{_PARTIAL}walk.json") not in fake_s3.objects
+    state = json.loads(fake_s3.objects[("b", f"{_PARTIAL}state.json")])
+    assert "walk" not in state["stages"]
+
+    _script_source(http_server, [[1, 2], [3]])
+    http_server.received.clear()
+    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p")
+
+    assert res.ok is True
+    assert len(http_server.requests_to(_page_path(1))) == 2  # the walk's page 1, then the export
+    assert len(http_server.requests_to(_page_path(2))) == 1
+    assert ("b", _MARKER) in fake_s3.objects
+
+
+def test_prune_deletes_nothing_when_verification_fails(http_server, fake_s3):
+    _script_source(http_server, [[1]])
+    _script_foreign_annotation(http_server)
+    fake_s3.put("b", "p/s1/images/99.jpg", b"OLD")
+
+    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p", prune=True)
+
+    assert res.errors == ["verification_failed"]
+    assert ("delete", "p/s1/images/99.jpg") not in fake_s3.events
+    assert ("b", "p/s1/images/99.jpg") in fake_s3.objects
