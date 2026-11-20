@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "segdata-spec"
+version = "0.1.0"
+description = "Manifest, table schemas and taxonomy roll-up shared by the segmentation dataset publisher and trainer."
+requires-python = ">=3.11.5"
+dependencies = [
+    "boto3",
+    "pyarrow",
+    "pydantic>=2.13.3",
+]
+
+[dependency-groups]
+tests = [
+    "pytest>=8.0",
+    "pytest-socket>=0.7",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra", "--allow-hosts=127.0.0.1,::1"]
