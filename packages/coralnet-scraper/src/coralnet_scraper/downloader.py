@@ -52,6 +52,8 @@ from coralnet_scraper.verify import (
 
 logger = logging.getLogger(__name__)
 
+Image.MAX_IMAGE_PIXELS = None  # survey images legitimately exceed Pillow's bomb limit
+
 _SOURCE_INACCESSIBLE_STATUSES = frozenset({403, 404})  # missing or forbidden source overview
 _PAGE_GET_TIMEOUT = 90  # simple page GETs; CoralNet can be slow under load
 _EXPORT_PREP_TIMEOUT_MIN = 300
@@ -72,6 +74,11 @@ _LOGIN_ATTEMPTS = 4
 _IMAGE_TIMEOUT = (10, 60)  # connect, idle read
 _IMAGE_DEADLINE_S = 300.0  # wall-clock budget for one image body
 _IMAGE_CHUNK_BYTES = 64 * 1024
+_IMAGE_MAX_BYTES = 256 * 1024 * 1024
+_IMAGE_FORMATS = (
+    "JPEG",
+    "PNG",
+)  # the JPEG opener also yields MPO files; "MPO" itself is not an opener
 _IMAGE_CONTENT_TYPES = ("image/", "binary/octet-stream", "application/octet-stream")
 # stamina's default 45 s total timeout would end the retries of an export running for minutes.
 _RETRY_WAITS: dict[str, Any] = {
@@ -207,21 +214,30 @@ def _check_export_names(df: pd.DataFrame, allowed: set[str]) -> None:
         )
 
 
-def validate_image_bytes(data: bytes | bytearray) -> str:
-    """Return the image format of ``data``, such as ``JPEG``.
+def validate_image_bytes(data: io.BytesIO) -> str:
+    """Return the image format of ``data``, such as ``JPEG``, leaving it positioned at 0.
+
+    Only JPEG, MPO (opened as JPEG) and PNG are accepted. The image is verified, then fully decoded, so a
+    truncated body fails here.
 
     Raises:
-        ImageInvalid: If ``data`` is empty or Pillow cannot open and verify it.
+        ImageInvalid: If ``data`` is empty or Pillow cannot open, verify and decode it as one
+            of the accepted formats.
     """
-    if not data:
+    if data.getbuffer().nbytes == 0:
         raise ImageInvalid("empty body")
-    Image.MAX_IMAGE_PIXELS = None  # survey images legitimately exceed Pillow's bomb limit
     try:
-        with Image.open(io.BytesIO(data)) as im:
+        data.seek(0)
+        with Image.open(data, formats=_IMAGE_FORMATS) as im:
             fmt = im.format or ""
             im.verify()
+        data.seek(0)
+        with Image.open(data, formats=_IMAGE_FORMATS) as im:
+            im.load()
     except Exception as e:  # noqa: BLE001 - Pillow raises many types for bad data
         raise ImageInvalid(f"not a decodable image: {type(e).__name__}") from e
+    finally:
+        data.seek(0)
     return fmt
 
 
@@ -244,22 +260,28 @@ def _check_image_response(resp: requests.Response) -> str:
     return content_type
 
 
-def _read_image_body(resp: requests.Response, deadline: float) -> bytearray:
-    """Return the streamed body of ``resp``.
+def _read_image_body(resp: requests.Response, deadline: float) -> io.BytesIO:
+    """Return the streamed body of ``resp``, positioned at its end.
 
     Raises:
-        ImageInvalid: If the body is still arriving at the monotonic time ``deadline``, or
-            its length differs from an unencoded ``Content-Length``.
+        ImageInvalid: If the body is still arriving at the monotonic time ``deadline``, it
+            exceeds :data:`_IMAGE_MAX_BYTES` (by an unencoded ``Content-Length``, before any
+            read, or by the bytes read), or its length differs from an unencoded
+            ``Content-Length``.
     """
-    buf = bytearray()
-    for chunk in resp.iter_content(chunk_size=_IMAGE_CHUNK_BYTES):
-        buf += chunk
-        if time.monotonic() > deadline:
-            raise ImageInvalid(f"image body took longer than {_IMAGE_DEADLINE_S:.0f} s")
     declared = resp.headers.get("Content-Length")
     unencoded = "Content-Encoding" not in resp.headers
-    if declared is not None and unencoded and len(buf) != int(declared):
-        raise ImageInvalid(f"received {len(buf)} of {declared} bytes")
+    if declared is not None and unencoded and int(declared) > _IMAGE_MAX_BYTES:
+        raise ImageInvalid(f"declared {declared} bytes, over the {_IMAGE_MAX_BYTES} byte cap")
+    buf = io.BytesIO()
+    for chunk in resp.iter_content(chunk_size=_IMAGE_CHUNK_BYTES):
+        buf.write(chunk)
+        if buf.tell() > _IMAGE_MAX_BYTES:
+            raise ImageInvalid(f"body over the {_IMAGE_MAX_BYTES} byte cap")
+        if time.monotonic() > deadline:
+            raise ImageInvalid(f"image body took longer than {_IMAGE_DEADLINE_S:.0f} s")
+    if declared is not None and unencoded and buf.tell() != int(declared):
+        raise ImageInvalid(f"received {buf.tell()} of {declared} bytes")
     return buf
 
 
@@ -1219,8 +1241,10 @@ class CoralNetDownloader:
     def download_image_to_s3(self, url: str, bucket_name: str, s3_key: str) -> int:
         """Download the original image at ``url``, validate it, and upload it to ``s3_key``.
 
-        The body must arrive within :data:`_IMAGE_DEADLINE_S` seconds. The object carries
-        the image's content type and its format and byte count as metadata.
+        The body must arrive within :data:`_IMAGE_DEADLINE_S` seconds and fit in
+        :data:`_IMAGE_MAX_BYTES`. The object's content type is the MIME type of the format
+        Pillow detects, whatever the server declared; the format and byte count are
+        metadata.
 
         Returns:
             The number of bytes uploaded.
@@ -1233,19 +1257,18 @@ class CoralNetDownloader:
         """
         deadline = time.monotonic() + _IMAGE_DEADLINE_S
         with self.media.get(url, stream=True, timeout=_IMAGE_TIMEOUT) as response:
-            content_type = _check_image_response(response)
+            _check_image_response(response)
             body = _read_image_body(response, deadline)
         fmt = validate_image_bytes(body)
-        if not content_type.startswith("image/"):
-            content_type = Image.MIME.get(fmt, "application/octet-stream")
+        size = body.getbuffer().nbytes
         self.s3.put_object(
             Bucket=bucket_name,
             Key=s3_key,
             Body=body,
-            ContentType=content_type,
-            Metadata={"source-format": fmt, "source-bytes": str(len(body))},
+            ContentType=Image.MIME.get(fmt, "application/octet-stream"),
+            Metadata={"source-format": fmt, "source-bytes": str(size)},
         )
-        return len(body)
+        return size
 
     def _download_image(self, ref: ImageRef, bucket_name: str, s3_key: str) -> str:
         """Resolve and download one image as one retried unit, so an expired URL is resolved again.

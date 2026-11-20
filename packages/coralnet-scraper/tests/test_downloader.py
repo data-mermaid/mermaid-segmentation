@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import random
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -25,12 +26,15 @@ from coralnet_scraper.downloader import (
     _PAGINATED_EXPORT_THRESHOLD,
     ContentError,
     CoralNetDownloader,
+    ImageInvalid,
     ImageRef,
     SessionExpired,
     _parse_browse_thumbs,
+    _read_image_body,
     decode_export_csv,
     export_prep_timeout_seconds,
     export_serve_timeout_seconds,
+    validate_image_bytes,
 )
 from coralnet_scraper.models import ImageFailures
 from coralnet_scraper.verify import Verification
@@ -1709,3 +1713,120 @@ def test_prune_deletes_nothing_when_verification_fails(http_server, fake_s3, mon
     assert res.errors == ["verification_failed"]
     assert ("delete", "p/s1/images/99.jpg") not in fake_s3.events
     assert ("b", "p/s1/images/99.jpg") in fake_s3.objects
+
+
+def _noise_image_bytes(fmt: str) -> bytes:
+    """A 256x256 random-pixel image, large enough that cutting it in half drops scan data."""
+    pixels = random.Random(0).randbytes(256 * 256 * 3)
+    image = Image.frombytes("RGB", (256, 256), pixels)
+    buf = io.BytesIO()
+    if fmt == "MPO":  # a single-frame MPO save is written as a plain JPEG
+        image.save(buf, fmt, save_all=True, append_images=[image])
+    else:
+        image.save(buf, fmt)
+    return buf.getvalue()
+
+
+_NOISE_JPEG = _noise_image_bytes("JPEG")
+_NOISE_PNG = _noise_image_bytes("PNG")
+_NOISE_GIF = _noise_image_bytes("GIF")
+
+
+def _serve_image(server: ScriptedServer, body: bytes, headers: dict[str, str]) -> None:
+    server.script("/image/1/view/", Reply(200, _view_page(server, "/media/1.jpg")))
+    server.script("/media/1.jpg", Reply(200, body, headers))
+
+
+def test_an_octet_stream_jpeg_is_stored_as_image_jpeg(http_server, fake_s3):
+    _serve_image(http_server, _NOISE_JPEG, {"Content-Type": "binary/octet-stream"})
+
+    assert _download_image_one(http_server, fake_s3) == ImageFailures()
+    assert fake_s3.headers[_IMAGE_KEY]["ContentType"] == "image/jpeg"
+
+
+def test_a_png_served_as_image_jpeg_is_stored_with_the_detected_format(http_server, fake_s3):
+    _serve_image(http_server, _NOISE_PNG, _JPEG_HEADERS)
+
+    assert _download_image_one(http_server, fake_s3) == ImageFailures()
+    assert fake_s3.objects[_IMAGE_KEY] == _NOISE_PNG
+    assert fake_s3.headers[_IMAGE_KEY] == {
+        "ContentType": "image/png",
+        "Metadata": {"source-format": "PNG", "source-bytes": str(len(_NOISE_PNG))},
+    }
+
+
+# Content-Encoding makes the downloader skip its Content-Length check, so the body's own
+# decodability is the only thing that can reject the cut image.
+@pytest.mark.parametrize(
+    ("body", "headers"),
+    [
+        (
+            _NOISE_JPEG[: len(_NOISE_JPEG) // 2],
+            {**_JPEG_HEADERS, "Content-Encoding": "identity"},
+        ),
+        (
+            _NOISE_JPEG[: len(_NOISE_JPEG) // 2],
+            {**_JPEG_HEADERS, "Content-Length": str(len(_NOISE_JPEG) // 2)},
+        ),
+        (_NOISE_GIF, {"Content-Type": "image/gif"}),
+    ],
+    ids=["jpeg-cut-no-length-check", "jpeg-cut-length-matches", "gif"],
+)
+def test_an_undecodable_or_unsupported_image_is_retried_and_never_uploaded(
+    http_server, fake_s3, body, headers
+):
+    _serve_image(http_server, body, headers)
+
+    assert _download_image_one(http_server, fake_s3) == ImageFailures(upload_failed=1)
+    assert _IMAGE_KEY not in fake_s3.objects
+    assert len(http_server.requests_to("/media/1.jpg")) == 4
+
+
+@pytest.mark.parametrize(
+    ("body", "headers", "accepted"),
+    [
+        (_NOISE_JPEG, _JPEG_HEADERS, True),
+        (_NOISE_JPEG + b"\x00", _JPEG_HEADERS, False),
+        (_NOISE_JPEG + b"\x00", {**_JPEG_HEADERS, "Content-Encoding": "identity"}, False),
+    ],
+    ids=["exactly-the-cap", "declared-over-the-cap", "streamed-over-the-cap"],
+)
+def test_an_image_body_over_the_size_cap_is_rejected(
+    http_server, fake_s3, monkeypatch, body, headers, accepted
+):
+    monkeypatch.setattr(downloader_mod, "_IMAGE_MAX_BYTES", len(_NOISE_JPEG))
+    _serve_image(http_server, body, headers)
+
+    failures = _download_image_one(http_server, fake_s3)
+
+    assert failures == ImageFailures(upload_failed=0 if accepted else 1)
+    assert (_IMAGE_KEY in fake_s3.objects) is accepted
+
+
+class _NeverStreamed:
+    """A response declaring a body of 11 bytes whose body must not be read."""
+
+    headers = {"Content-Length": "11"}  # noqa: RUF012
+
+    def iter_content(self, chunk_size: int) -> Iterator[bytes]:
+        raise AssertionError("body read despite a declared length over the cap")
+
+
+def test_a_declared_length_over_the_cap_is_rejected_before_any_body_is_read(monkeypatch):
+    monkeypatch.setattr(downloader_mod, "_IMAGE_MAX_BYTES", 10)
+
+    with pytest.raises(ImageInvalid, match="11"):
+        _read_image_body(_NeverStreamed(), deadline=float("inf"))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("fmt", ["JPEG", "PNG", "MPO"])
+def test_validate_image_bytes_returns_the_format_and_leaves_the_buffer_at_the_start(fmt):
+    data = io.BytesIO(_noise_image_bytes(fmt))
+
+    assert validate_image_bytes(data) == fmt
+    assert data.tell() == 0
+
+
+def test_validate_image_bytes_rejects_an_empty_buffer():
+    with pytest.raises(ImageInvalid, match="empty body"):
+        validate_image_bytes(io.BytesIO())
