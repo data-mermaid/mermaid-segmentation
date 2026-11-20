@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,7 @@ _PLACEHOLDER_TAXA = {"not_given", "not given", "", "nan"}
 def _source_to_target_map(
     source_name: str,
     id2name: Mapping[Any, str | None] | None = None,
+    used_names: Collection[str] | None = None,
 ) -> dict[str, str | None]:
     """Return the ``source_label -> MERMAID target`` map for a source.
 
@@ -57,6 +58,7 @@ def _source_to_target_map(
         source_name: Source dataset name.
         id2name: CoralNet label id -> name (the run's ``coralnet_id2name`` JSON); required for
             ``coralnet``, whose mapping rows are keyed by label id. Ignored for other sources.
+        used_names: Label names in use; ``coralnet`` skips other ids (see ``coralnet_to_mermaid``).
 
     Raises:
         ValueError: If the source has no mapping, or ``coralnet`` is given no ``id2name``.
@@ -66,7 +68,7 @@ def _source_to_target_map(
     if source_name == "coralnet":
         if id2name is None:
             raise ValueError("The coralnet mapping needs the dataset's coralnet_id2name")
-        raw = coralnet_to_mermaid(id2name, load_coralnet_label_mappings().records)
+        raw = coralnet_to_mermaid(id2name, load_coralnet_label_mappings().records, used_names)
     elif source_name == "pacific_labeled_corals":
         raw = fetch_pacific_labeled_corals_to_mermaid()
     elif source_name == "benthos_yuval":
@@ -166,10 +168,7 @@ def build_class_lookup(
 
     ``id2name`` is the CoralNet label id -> name map, required when ``source_name`` is coralnet.
     """
-    if id2name is not None:
-        wanted = {str(n).lower() for n in source_label_names}
-        id2name = {k: v for k, v in id2name.items() if isinstance(v, str) and v.lower() in wanted}
-    src_to_tgt = _source_to_target_map(source_name, id2name)
+    src_to_tgt = _source_to_target_map(source_name, id2name, source_label_names)
 
     # id2label is the frozen target vocabulary (0 = ignore/background).
     target_label2id = {str(v).lower(): int(k) for k, v in id2label.items() if int(k) != 0}

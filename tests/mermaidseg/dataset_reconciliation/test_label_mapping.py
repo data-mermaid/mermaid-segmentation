@@ -349,6 +349,18 @@ def test_join_accepts_one_name_with_ids_that_agree():
     assert lm.coralnet_to_mermaid({1: "Acro", 2: "ACRO"}, records) == {"acro": "Acropora"}
 
 
+def test_join_skips_unused_names_before_the_collision_check():
+    records = lm.parse_coralnet_label_mappings(
+        [_row("1", "sand"), _row("2", "rubble"), _row("3", "rock"), _row("4", "coral")]
+    )
+
+    mapping = lm.coralnet_to_mermaid(
+        {1: "Sand", 2: "Rubble", 3: "Dup", 4: "DUP"}, records, used_names={"sand"}
+    )
+
+    assert mapping == {"sand": "sand"}
+
+
 @pytest.mark.live
 def test_live_api_returns_int_keyed_coralnet_rows():
     mappings = lm.fetch_coralnet_label_mappings()

@@ -323,15 +323,11 @@ class SourceLabelRegistry:
         The rows are fetched once (API online, cached snapshot offline) and kept on
         ``coralnet_label_mappings`` so the run can record exactly what it used.
         """
-        id2name = getattr(ds, "coralnet_id2name", None)
-        if id2name is None:
-            raise ValueError("The coralnet dataset must expose coralnet_id2name to map its labels")
         if self.coralnet_label_mappings is None:
             self.coralnet_label_mappings = load_coralnet_label_mappings()
-        used = {
-            k: v for k, v in id2name.items() if isinstance(v, str) and v.lower() in ds_names_lower
-        }
-        return coralnet_to_mermaid(used, self.coralnet_label_mappings.records)
+        return coralnet_to_mermaid(
+            ds.coralnet_id2name, self.coralnet_label_mappings.records, used_names=ds_names_lower
+        )
 
     @property
     def label_mapping_provenance(self) -> dict[str, dict[str, Any]]:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 import pytest
 
@@ -11,6 +13,7 @@ from mermaidseg.dataset_reconciliation.label_mapping import (
     parse_coralnet_label_mappings,
 )
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry, roll_up_label
+from mermaidseg.evaluation import gt_mapping
 
 
 def test_source_label_registry_normalizes_target_names_to_lowercase() -> None:
@@ -175,10 +178,9 @@ def _coralnet_mappings(rows: dict[int, str]) -> CoralNetLabelMappings:
 
 
 class _CoralNetStub(_StubDataset):
-    def __init__(self, names: list[str], id2name: dict[int, str | None] | None) -> None:
+    def __init__(self, names: list[str], id2name: dict[Any, str | None]) -> None:
         super().__init__("coralnet", names)
-        if id2name is not None:
-            self.coralnet_id2name = id2name
+        self.coralnet_id2name = id2name
 
 
 def test_coralnet_labels_map_through_the_api_rows_by_label_id(monkeypatch) -> None:
@@ -207,13 +209,46 @@ def test_coralnet_labels_map_through_the_api_rows_by_label_id(monkeypatch) -> No
     assert provenance["sha256"] == registry.coralnet_label_mappings.sha256
 
 
-def test_coralnet_dataset_without_id2name_raises(monkeypatch) -> None:
+def test_coralnet_used_names_sharing_a_name_with_different_targets_raise(monkeypatch) -> None:
     monkeypatch.setattr(
-        registry_module, "load_coralnet_label_mappings", lambda: _coralnet_mappings({})
+        registry_module,
+        "load_coralnet_label_mappings",
+        lambda: _coralnet_mappings({2: "Sand", 3: "Rubble"}),
     )
 
-    with pytest.raises(ValueError, match="coralnet_id2name"):
-        SourceLabelRegistry([_CoralNetStub(["sand"], None)])
+    with pytest.raises(ValueError, match="dup"):
+        SourceLabelRegistry([_CoralNetStub(["dup"], {2: "dup", 3: "DUP"})])
+
+
+def test_coralnet_source_to_target_matches_the_evaluation_lookup(monkeypatch) -> None:
+    rows = {1: "Acropora", 2: "Sand", 3: "Rubble"}
+    for module in (registry_module, gt_mapping):
+        monkeypatch.setattr(
+            module, "load_coralnet_label_mappings", lambda: _coralnet_mappings(rows)
+        )
+    # 1 renamed, 9 unmapped, 4 None, 5 NaN, 2 mixed case; 3 is not used by the dataset.
+    id2name: dict[Any, Any] = {
+        1: "ACRO (renamed)",
+        2: "SaNd",
+        9: "Mystery",
+        4: None,
+        5: float("nan"),
+        3: "Other",
+    }
+    names = ["acro (renamed)", "sand", "mystery"]
+    expected = {"acro (renamed)": "acropora", "sand": "sand"}
+
+    registry = SourceLabelRegistry([_CoralNetStub(names, id2name)])
+    registry_map = {
+        k: v.lower()
+        for k, v in registry._coralnet_source_to_target(
+            _CoralNetStub(names, id2name), set(names)
+        ).items()
+    }
+    lookup_map = gt_mapping._source_to_target_map("coralnet", id2name, used_names=names)
+
+    assert registry_map == expected
+    assert lookup_map == expected
 
 
 def test_empty_dataset_list_raises() -> None:

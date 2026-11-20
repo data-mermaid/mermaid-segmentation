@@ -458,7 +458,7 @@ class Logger:
                     {str(k): v for k, v in registry.concept_id2name.items()},
                     "metadata/concept_id2name.json",
                 )
-            coralnet_mappings = getattr(registry, "coralnet_label_mappings", None)
+            coralnet_mappings = registry.coralnet_label_mappings
             if coralnet_mappings is not None:
                 self.log_dict(coralnet_mappings.to_json(), "metadata/label_mappings/coralnet.json")
             self.log_params(

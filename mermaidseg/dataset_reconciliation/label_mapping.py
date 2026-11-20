@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -252,7 +252,9 @@ def load_coralnet_label_mappings() -> CoralNetLabelMappings:
 
 
 def coralnet_to_mermaid(
-    id2name: Mapping[Any, str | None], records: Mapping[int, CoralNetLabelMapping]
+    id2name: Mapping[Any, str | None],
+    records: Mapping[int, CoralNetLabelMapping],
+    used_names: Collection[str] | None = None,
 ) -> dict[str, str]:
     """Map lowercased CoralNet label names to MERMAID benthic-attribute names.
 
@@ -261,14 +263,24 @@ def coralnet_to_mermaid(
     in CoralNet therefore still maps. Ids with no mapping row, or with no string name (``None`` or
     ``NaN``), are left out, so they train as background.
 
+    Args:
+        id2name: CoralNet label id -> name.
+        records: API rows keyed by integer CoralNet label id.
+        used_names: Label names the caller uses (compared lowercased). When given, ids whose name
+            is not in it are skipped before the join and the collision check, so a collision
+            among unused names does not raise. ``None`` keeps every named id.
+
     Raises:
         ValueError: If two ids share a lowercased name but map to different benthic attributes.
     """
+    used = None if used_names is None else {n.lower() for n in used_names}
     mapping: dict[str, str] = {}
     source_id: dict[str, int] = {}
     named = unmapped = 0
     for raw_id, name in id2name.items():
         if not isinstance(name, str):  # None, or NaN from a JSON null-like value
+            continue
+        if used is not None and name.lower() not in used:
             continue
         named += 1
         label_id = int(raw_id)

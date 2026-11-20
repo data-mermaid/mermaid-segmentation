@@ -173,6 +173,7 @@ class CoralNetDataset(BaseCoralDataset):
         self.blacklist_sources = blacklist_sources
         self.image_blacklist = image_blacklist
         self.annotation_overrides = annotation_overrides
+        self.coralnet_id2name: dict[int, str | None] = {}
         if self.whitelist_sources is not None and self.blacklist_sources is not None:
             raise ValueError("Cannot specify both whitelist and blacklist sources.")
 
@@ -261,9 +262,7 @@ class CoralNetDataset(BaseCoralDataset):
         df["coralnet_id"] = _as_int_ids(df["coralnet_id"], "coralnet_id")
         coralnet_id2name = LocalS3Cache.get().read_json(self.source_bucket, self.id2name_key)
         # The registry joins the MERMAID LabelMapping rows (keyed by CoralNet label id) through this.
-        self.coralnet_id2name: dict[int, str | None] = {
-            int(k): v for k, v in coralnet_id2name.items()
-        }
+        self.coralnet_id2name = {int(k): v for k, v in coralnet_id2name.items()}
 
         df["coralnet_name"] = df["coralnet_id"].map(lambda x: coralnet_id2name.get(str(x)))
         _warn_unnamed_ids(df["coralnet_id"], df["coralnet_name"])

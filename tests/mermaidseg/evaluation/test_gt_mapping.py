@@ -229,11 +229,24 @@ def test_coralnet_class_lookup_uses_only_the_names_being_evaluated(monkeypatch):
     assert lookup.name_to_class_id == {"acro": 1}
 
 
+def test_coralnet_class_lookup_raises_for_used_names_with_different_targets(monkeypatch):
+    monkeypatch.setattr(
+        gt_mapping,
+        "load_coralnet_label_mappings",
+        lambda: _coralnet_rows({2: "Sand", 3: "Rubble"}),
+    )
+
+    with pytest.raises(ValueError, match="dup"):
+        build_class_lookup(
+            "coralnet", ["dup"], {0: "ignore", 1: "sand"}, None, id2name={2: "dup", 3: "DUP"}
+        )
+
+
 def test_class_lookup_without_hierarchy_maps_only_labels_already_in_the_vocabulary(monkeypatch):
     monkeypatch.setattr(
         gt_mapping,
         "_source_to_target_map",
-        lambda _source, _id2name=None: {
+        lambda _source, _id2name=None, _used_names=None: {
             "acro": "acropora",
             "hc": "hard coral",
             "gone": None,
