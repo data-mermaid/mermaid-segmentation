@@ -414,6 +414,97 @@ def test_download_annotations_fails_after_four_export_prep_timeouts(fake_s3):
     assert _BULK_KEY not in fake_s3.objects
 
 
+def _export_validated_on(dl: CoralNetDownloader, stop: threading.Event | None) -> pd.DataFrame:
+    return dl._export_validated(
+        dl.session,
+        1,
+        _BROWSE_URL,
+        {},
+        {"img1.jpg"},
+        prep_timeout=300,
+        serve_timeout=120,
+        stop=stop,
+    )
+
+
+def test_export_validated_makes_no_further_attempt_once_stop_is_set(fake_s3):
+    dl = CoralNetDownloader("u", "p")
+    stop = threading.Event()
+    attempts: list[int] = []
+
+    def failing_round_trip(*_: object) -> pd.DataFrame:
+        attempts.append(1)
+        stop.set()
+        raise ContentError(f"attempt {len(attempts)}")
+
+    with (
+        patch.object(dl, "_export_round_trip", side_effect=failing_round_trip),
+        pytest.raises(ContentError, match="attempt 1"),
+    ):
+        _export_validated_on(dl, stop)
+
+    assert len(attempts) == 1
+
+
+def test_a_failed_page_stops_the_export_retries_of_the_pages_still_running(
+    http_server, fake_s3, monkeypatch
+):
+    monkeypatch.setattr(downloader_mod, "_PAGE_DELAY_SECONDS", 0.0)
+    _script_pages(http_server, [[(1, "img1.jpg")], [(2, "img2.jpg")]])
+    dl = _site_downloader(http_server, fake_s3)
+    page2_started = threading.Event()
+    page1_failed = threading.Event()
+    page2_attempts: list[int] = []
+
+    def round_trip(session, source_id, page_url, form, *_: object) -> pd.DataFrame:
+        if form["image_id_list"] == "1":
+            assert page2_started.wait(5)
+            page1_failed.set()
+            raise requests.HTTPError(response=_http_response(status=403))
+        page2_attempts.append(1)
+        page2_started.set()
+        assert page1_failed.wait(5)
+        time.sleep(0.2)  # the failed flag is set after page 1's error propagates
+        raise ContentError("page 2")
+
+    monkeypatch.setattr(dl, "_export_round_trip", round_trip)
+
+    ok = dl.download_annotations_paginated(
+        1, "b", "p", refs=_refs({1: [1], 2: [2]}), page_workers=2
+    )
+
+    assert ok is False
+    assert len(page2_attempts) == 1
+
+
+def test_an_export_prep_read_timeout_delays_the_next_attempt_by_a_minute(fake_s3):
+    run = _run_bulk_download(
+        fake_s3,
+        serve_text=_SERVE_CSV,
+        export_prep=[
+            requests.exceptions.ReadTimeout("t"),
+            _mock_response(json_data={"session_data_timestamp": "t1"}),
+        ],
+    )
+
+    assert run.ok is True
+    assert [c.args[0] for c in run.sleep.call_args_list if c.args[0] >= 60] == [60]
+
+
+def test_an_export_failure_other_than_a_prep_read_timeout_adds_no_delay(fake_s3):
+    run = _run_bulk_download(
+        fake_s3,
+        serve_text=_SERVE_CSV,
+        export_prep=[
+            _mock_response(json_data={}),
+            _mock_response(json_data={"session_data_timestamp": "t1"}),
+        ],
+    )
+
+    assert run.ok is True
+    assert [c.args[0] for c in run.sleep.call_args_list if c.args[0] >= 60] == []
+
+
 def test_download_annotations_sizes_timeouts_from_the_total(fake_s3):
     run = _run_bulk_download(fake_s3, serve_text=_SERVE_CSV, total=4000)
 
@@ -596,7 +687,9 @@ def test_the_first_failed_page_stops_the_pages_not_yet_started(fake_s3):
     dl.s3 = fake_s3
     attempted: list[int] = []
 
-    def export_one_page(source_id: int, page: int, page_refs: list[ImageRef]) -> pd.DataFrame:
+    def export_one_page(
+        source_id: int, page: int, page_refs: list[ImageRef], stop: threading.Event | None = None
+    ) -> pd.DataFrame:
         attempted.append(page)
         if page == 1:
             threading.Event().wait(0.3)  # still running when pages 2 and 3 fail

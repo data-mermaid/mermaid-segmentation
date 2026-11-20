@@ -61,6 +61,9 @@ _EXPORT_PREP_TIMEOUT_MAX = 7200  # 2 hours
 _EXPORT_SERVE_TIMEOUT_MIN = 120
 _EXPORT_SERVE_TIMEOUT_MAX = 1800
 _EXPORT_PREP_TIMEOUT_STEP = 300  # export_prep read timeout added per further attempt
+_EXPORT_PREP_TIMEOUT_RETRY_WAIT_S = (
+    60  # pause after an export_prep read timeout, before the next POST
+)
 _EXPORT_PREP_HEARTBEAT_S = 60  # log while a long export_prep POST is still running
 _PAGINATED_EXPORT_THRESHOLD = 5000  # sources above this use per-page export
 _PAGE_EXPORT_TIMEOUT = 180  # CoralNet session setup can take >60s even for 20 images
@@ -119,6 +122,10 @@ class ImageInvalid(Exception):
 
 class UrlExpired(Exception):
     """The signed original-image URL has expired."""
+
+
+class _ExportPrepTimeout(requests.ReadTimeout):
+    """The ``export_prep`` POST, not a GET, timed out reading its response."""
 
 
 class _TotalChanged(WalkIncomplete):
@@ -846,7 +853,7 @@ class CoralNetDownloader:
                 return None
             try:
                 return self._export_and_save_page(
-                    source_id, bucket_name, s3_prefix, page, page_refs
+                    source_id, bucket_name, s3_prefix, page, page_refs, stop=failed
                 )
             except BaseException:
                 failed.set()
@@ -884,9 +891,13 @@ class CoralNetDownloader:
         s3_prefix: str,
         page_num: int,
         page_refs: list[ImageRef],
+        stop: threading.Event | None = None,
     ) -> int:
-        """Export one page and save it as ``_partial/page-<n>.csv``; return its row count."""
-        chunk = self._export_one_page(source_id, page_num, page_refs)
+        """Export one page and save it as ``_partial/page-<n>.csv``; return its row count.
+
+        ``stop`` ends the page's export retries once set (see :meth:`_export_validated`).
+        """
+        chunk = self._export_one_page(source_id, page_num, page_refs, stop=stop)
         key = _partial_key(s3_prefix, source_id, f"page-{page_num}.csv")
         _upload_csv(self.s3, bucket_name, key, chunk)
         return len(chunk)
@@ -897,7 +908,11 @@ class CoralNetDownloader:
         return base if page_num == 1 else f"{base}?page={page_num}"
 
     def _export_one_page(
-        self, source_id: int, page_num: int, page_refs: list[ImageRef]
+        self,
+        source_id: int,
+        page_num: int,
+        page_refs: list[ImageRef],
+        stop: threading.Event | None = None,
     ) -> pd.DataFrame:
         """Export the annotations of ``page_refs``, the images on browse page ``page_num``.
 
@@ -912,6 +927,8 @@ class CoralNetDownloader:
         CoralNet's ``ImageSearchForm`` -- omitting it makes the form invalid and the
         serve response returns HTML instead of CSV. CoralNet caps ``image_id_list`` at
         100 entries; browse pages have 20.
+
+        ``stop`` ends the export's retries once set (see :meth:`_export_validated`).
         """
         form = {
             "image_form_type": "search",
@@ -927,6 +944,7 @@ class CoralNetDownloader:
             _export_names(page_refs),
             prep_timeout=_PAGE_EXPORT_TIMEOUT,
             serve_timeout=_PAGE_EXPORT_TIMEOUT,
+            stop=stop,
         )
         time.sleep(_PAGE_DELAY_SECONDS)
         return chunk_df
@@ -941,11 +959,15 @@ class CoralNetDownloader:
         *,
         prep_timeout: int,
         serve_timeout: int,
+        stop: threading.Event | None = None,
     ) -> pd.DataFrame:
         """Return an export whose rows name only ``allowed_names``, retrying the round trip.
 
         Each further attempt allows ``export_prep`` :data:`_EXPORT_PREP_TIMEOUT_STEP` more
         seconds. A session CoralNet treats as logged out logs in again before the next attempt.
+        When the previous attempt's ``export_prep`` POST timed out reading its response, the
+        next attempt first sleeps :data:`_EXPORT_PREP_TIMEOUT_RETRY_WAIT_S` (on top of the retry
+        wait), so CoralNet can finish the abandoned export before the next POST.
 
         Args:
             session: Logged-in session the export runs on.
@@ -955,29 +977,41 @@ class CoralNetDownloader:
             allowed_names: Image names the export may contain.
             prep_timeout: Read timeout of the first ``export_prep`` POST.
             serve_timeout: Read timeout of the ``export/serve`` GET.
+            stop: When set before an attempt after the first, the previous attempt's error
+                is raised without another attempt.
 
         Raises:
-            Exception: The last attempt's error once no attempt is left or it is not
-                worth repeating.
+            Exception: The last attempt's error once no attempt is left, it is not
+                worth repeating, or ``stop`` is set.
         """
         expired = False
+        last_error: BaseException | None = None
         for attempt in _retrying(_EXPORT_ATTEMPTS):
+            # Raised outside `with attempt`, so stamina does not retry it.
+            if last_error is not None and stop is not None and stop.is_set():
+                raise last_error
+            if isinstance(last_error, _ExportPrepTimeout):
+                time.sleep(_EXPORT_PREP_TIMEOUT_RETRY_WAIT_S)
             with attempt:
-                if expired:
-                    self._relogin(session)
-                    expired = False
-                timeout = min(
-                    _EXPORT_PREP_TIMEOUT_MAX,
-                    prep_timeout + (attempt.num - 1) * _EXPORT_PREP_TIMEOUT_STEP,
-                )
                 try:
-                    df = self._export_round_trip(
-                        session, source_id, page_url, form, timeout, serve_timeout
+                    if expired:
+                        self._relogin(session)
+                        expired = False
+                    timeout = min(
+                        _EXPORT_PREP_TIMEOUT_MAX,
+                        prep_timeout + (attempt.num - 1) * _EXPORT_PREP_TIMEOUT_STEP,
                     )
-                except SessionExpired:
-                    expired = True
+                    try:
+                        df = self._export_round_trip(
+                            session, source_id, page_url, form, timeout, serve_timeout
+                        )
+                    except SessionExpired:
+                        expired = True
+                        raise
+                    _check_export_names(df, allowed_names)
+                except Exception as e:
+                    last_error = e
                     raise
-                _check_export_names(df, allowed_names)
         return df
 
     def _export_round_trip(
@@ -995,16 +1029,20 @@ class CoralNetDownloader:
             SessionExpired: If the browse page has no export form, ``export_prep`` asks for
                 a sign-in, or the serve lands on the login page.
             ContentError: If ``export_prep`` or the served CSV is not a valid answer.
-            requests.RequestException: On a transport error or an error status.
+            requests.RequestException: On a transport error or an error status; a
+                ``export_prep`` read timeout is the subclass :class:`_ExportPrepTimeout`.
         """
         browse = session.get(page_url, timeout=_PAGE_EXPORT_TIMEOUT)
         browse.raise_for_status()
         csrf = parse_export_annotations_prep_form(browse.text)
         if not csrf:
             raise SessionExpired(f"browse page {page_url} has no export form")
-        prep = self._post_export_prep(
-            session, source_id, {"csrfmiddlewaretoken": csrf, **form}, page_url, prep_timeout
-        )
+        try:
+            prep = self._post_export_prep(
+                session, source_id, {"csrfmiddlewaretoken": csrf, **form}, page_url, prep_timeout
+            )
+        except requests.ReadTimeout as e:
+            raise _ExportPrepTimeout(*e.args, request=e.request, response=e.response) from e
         prep.raise_for_status()
         timestamp = _export_timestamp(prep)
         serve = session.get(
