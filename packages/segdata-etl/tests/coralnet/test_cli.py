@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from io import BytesIO
 from pathlib import Path
 
@@ -515,3 +517,14 @@ def test_s3_object_exists_reraises_other_errors(code):
         build._s3_object_exists(_HeadObjectRaises(code), "b", "k")
 
     assert exc.value.response["Error"]["Code"] == code
+
+
+def test_importing_cli_does_not_load_heavy_dependencies():
+    """A fresh interpreter importing the CLI loads neither coralnet_scraper nor ibis."""
+    code = (
+        "import sys, segdata_etl.cli; "
+        "print(sorted(m for m in ('coralnet_scraper', 'ibis') if m in sys.modules))"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]"

@@ -18,7 +18,7 @@ from .datasets import (
     moorea_labeled_corals,
     pacific_labeled_corals,
 )
-from .datasets.coralnet import build as coralnet_build
+from .datasets.coralnet import commands as coralnet_commands
 
 DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
 DEFAULT_WORKERS = 16
@@ -66,7 +66,7 @@ def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.Ar
     top = parser.add_subparsers(dest="action", required=True)
     build = top.add_parser("build", help="Build and publish a dataset")
     build_sub = build.add_subparsers(dest="dataset", required=True)
-    coralnet_build.add_subcommands(build_sub)
+    coralnet_commands.add_subcommands(build_sub)
     for module in modules:
         name = module.__name__.rsplit(".", 1)[-1]
         dataset_parser = build_sub.add_parser(name, parents=[_shared_parser(name)])
@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = build_parser().parse_args(argv)
     if hasattr(args, "func"):
-        coralnet_build.configure_logging(args.verbose)
+        coralnet_commands.configure_logging(args.verbose)
         return int(args.func(args))
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
