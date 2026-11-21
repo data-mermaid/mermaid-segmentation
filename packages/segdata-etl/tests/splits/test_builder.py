@@ -278,6 +278,12 @@ def test_sources_linked_only_by_a_near_duplicate_or_a_project_share_a_split_grou
     assert table["split_group"].nunique() == 9
 
 
+def test_build_split_without_a_movable_group_names_the_likely_causes():
+    n_images = {1: 10, 2: 10, 3: 10}
+    with pytest.raises(ValueError, match="test-sources"):
+        _build(n_images, counts=_equal_counts(list(n_images)), test_sources={1, 2, 3})
+
+
 def test_best_assignment_returns_the_restart_with_the_lowest_cost():
     groups = 12
     X = np.full((groups, 1), 10.0)

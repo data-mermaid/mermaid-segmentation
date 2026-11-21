@@ -236,7 +236,8 @@ def build_split(
         the per-class distribution over the splits.
 
     Raises:
-        ValueError: A test source is not in ``sources``.
+        ValueError: A test source is not in ``sources``, or no group is both eligible and free
+            to move between splits.
     """
     unknown = sorted(test_sources - set(sources))
     if unknown:
@@ -285,6 +286,12 @@ def build_split(
         targets[1],
     )
 
+    if not (grp["eligible"] & (grp["fixed"] < 0)).any():
+        raise ValueError(
+            "no group is both eligible and free to move: every eligible group holds a "
+            "--test-sources source, none passes --max-group-frac, or every remaining group "
+            "shares an image with another source"
+        )
     P = X.sum(0)
     cls_mask = params.min_class_points <= P
     pool = X[(grp["eligible"] | (grp["fixed"] >= 0)).to_numpy()].sum(0)
