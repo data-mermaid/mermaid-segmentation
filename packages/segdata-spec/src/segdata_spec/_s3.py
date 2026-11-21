@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from botocore.exceptions import ClientError
+
+if TYPE_CHECKING:
+    from segdata_spec.resize import ResizeSpec
 
 MANIFEST_NAME = "manifest.json"
 _NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
@@ -25,6 +29,20 @@ def cache_path(cache_dir: Path, bucket: str, key: str) -> Path:
     if key.startswith("/") or ".." in key.split("/"):
         raise ValueError(f"refusing S3 key outside the cache layout: {key!r}")
     return cache_dir / bucket / key
+
+
+def resized_cache_path(cache_dir: Path, spec: ResizeSpec, bucket: str, key: str) -> Path:
+    """Return ``<cache_dir>/resized/<spec.id>/<bucket>/<key>``, refusing keys that escape it."""
+    return cache_path(cache_dir / "resized" / spec.id, bucket, key)
+
+
+def resized_index_path(cache_dir: Path, spec: ResizeSpec, bucket: str, key: str) -> Path:
+    """Return ``<cache_dir>/resized/<spec.id>/.index/<bucket>/<key>.json``, the output's sidecar.
+
+    S3 bucket names cannot start with ``.``, so ``.index`` never collides with a bucket folder.
+    """
+    path = cache_path(cache_dir / "resized" / spec.id / ".index", bucket, key)
+    return path.with_name(path.name + ".json")
 
 
 def is_not_found(exc: ClientError) -> bool:

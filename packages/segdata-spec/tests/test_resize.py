@@ -1,4 +1,5 @@
 import io
+import random
 
 import pyarrow as pa
 import pytest
@@ -16,6 +17,15 @@ def _encode(img: Image.Image, fmt: str) -> bytes:
 
 def _jpeg(size: tuple[int, int], mode: str = "RGB") -> bytes:
     return _encode(Image.new(mode, size), "JPEG")
+
+
+def _noisy_jpeg(size: tuple[int, int]) -> bytes:
+    """A seeded-noise RGB JPEG, so the resampling filter and JPEG quality change the bytes.
+
+    Tests resize it to above half its longest edge, so libjpeg decodes at full scale.
+    """
+    pixels = random.Random(0).randbytes(size[0] * size[1] * 3)
+    return _encode(Image.frombytes("RGB", size, pixels), "JPEG")
 
 
 def _decode(data: bytes) -> Image.Image:
@@ -78,12 +88,31 @@ def test_resize_image_downsizes_a_large_jpeg():
     assert (out.format, out.size) == ("JPEG", (2048, 1536))
 
 
-def test_resize_image_converts_rgba_png_to_rgb_jpeg_within_limit():
-    data = _encode(Image.new("RGBA", (100, 50)), "PNG")
+@pytest.mark.parametrize("mode", ["RGBA", "RGB", "L"])
+def test_resize_image_converts_png_to_rgb_or_l_jpeg_within_limit(mode):
+    data = _encode(Image.new(mode, (100, 50)), "PNG")
 
     out = _decode(resize_image(data, ResizeSpec(max_edge=2048)))
 
-    assert (out.format, out.mode, out.size) == ("JPEG", "RGB", (100, 50))
+    assert (out.format, out.mode, out.size) == ("JPEG", "L" if mode == "L" else "RGB", (100, 50))
+
+
+def test_resize_image_filter_changes_the_output():
+    data = _noisy_jpeg((200, 150))
+
+    lanczos = resize_image(data, ResizeSpec(max_edge=150, filter="lanczos"))
+    bilinear = resize_image(data, ResizeSpec(max_edge=150, filter="bilinear"))
+
+    assert lanczos != bilinear
+
+
+def test_resize_image_jpeg_quality_changes_the_output_size():
+    data = _noisy_jpeg((200, 150))
+
+    default = resize_image(data, ResizeSpec(max_edge=150))
+    low = resize_image(data, ResizeSpec(max_edge=150, jpeg_quality=50))
+
+    assert len(low) < len(default)
 
 
 @pytest.mark.parametrize("mode", ["RGB", "L"])
@@ -124,7 +153,10 @@ def test_resize_mask_uses_nearest_so_label_ids_survive():
 
 
 def test_resize_mask_returns_same_bytes_at_target_size():
-    data = _encode(Image.new("L", (8, 4)), "PNG")
+    # compress_level=0 differs from Pillow's default encoding, so only a pass-through is identical.
+    buf = io.BytesIO()
+    Image.new("L", (8, 4)).save(buf, format="PNG", compress_level=0)
+    data = buf.getvalue()
 
     assert resize_mask(data, (8, 4)) == data
 

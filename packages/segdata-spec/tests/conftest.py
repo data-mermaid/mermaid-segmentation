@@ -8,6 +8,7 @@ that publish small dataset and taxonomy versions into it.
 from __future__ import annotations
 
 import hashlib
+import io
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any
 import pyarrow as pa
 import pytest
 from botocore.exceptions import ClientError
+from PIL import Image
 
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_dataset, publish_taxonomy
@@ -143,12 +145,30 @@ def _md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()  # noqa: S324
 
 
+def jpeg_bytes(width: int, height: int) -> bytes:
+    """Return a real RGB JPEG of the given size, for tests that resize."""
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (200, 100, 50)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def mask_bytes(width: int, height: int, left: int, right: int) -> bytes:
+    """Return a mode-L PNG mask whose left half holds label ``left`` and right half ``right``."""
+    mask = Image.new("L", (width, height), left)
+    mask.paste(right, (width // 2, 0, width, height))
+    buf = io.BytesIO()
+    mask.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _images_table(
     images: dict[str, tuple[bytes, str]],
     etags: dict[str, str],
     masks: dict[str, bytes] | None,
     crcs: dict[str, str],
     mask_crcs: dict[str, str],
+    sizes: dict[str, tuple[int, int]],
+    media_types: dict[str, str],
 ) -> pa.Table:
     ids = list(images)
     n = len(ids)
@@ -171,9 +191,9 @@ def _images_table(
             "etag": [etags.get(i, _md5(images[i][0])) for i in ids],
             "size": [len(images[i][0]) for i in ids],
             "crc64nvme": [crcs.get(i) for i in ids],
-            "media_type": ["image/jpeg"] * n,
-            "width": [4] * n,
-            "height": [4] * n,
+            "media_type": [media_types.get(i, "image/jpeg") for i in ids],
+            "width": [sizes.get(i, (4, 4))[0] for i in ids],
+            "height": [sizes.get(i, (4, 4))[1] for i in ids],
             "group": [images[i][1] for i in ids],
             **mask_cols,
             "mask_crc64nvme": [mask_crcs.get(i) for i in ids],
@@ -202,12 +222,16 @@ def publish_version(
     etags: dict[str, str] | None = None,
     crcs: dict[str, str] | None = None,
     mask_crcs: dict[str, str] | None = None,
+    sizes: dict[str, tuple[int, int]] | None = None,
+    media_types: dict[str, str] | None = None,
     parents: Sequence[ParentRef] = (),
 ) -> tuple[Manifest, Pin]:
     """Store the images (and masks) and publish dataset ``ds``; clear the call log.
 
     ``points=None`` publishes a dense version; ``etags`` gives images explicit ETags;
-    ``crcs`` and ``mask_crcs`` record base64 CRC64NVME values by image id.
+    ``crcs`` and ``mask_crcs`` record base64 CRC64NVME values by image id; ``sizes`` records
+    ``(width, height)`` by image id (default 4x4); ``media_types`` sets the media type by image id
+    (default ``image/jpeg``).
     """
     etags = etags or {}
     for image_id, (data, _) in images.items():
@@ -217,7 +241,9 @@ def publish_version(
     for image_id, data in (masks or {}).items():
         client.put(IMG_BUCKET, f"{IMG_PREFIX}{image_id}.png", data)
     tables = {
-        "images.parquet": _images_table(images, etags, masks, crcs or {}, mask_crcs or {}),
+        "images.parquet": _images_table(
+            images, etags, masks, crcs or {}, mask_crcs or {}, sizes or {}, media_types or {}
+        ),
         "labels.parquet": pa.table(
             {
                 "label_id": [5, 6],
