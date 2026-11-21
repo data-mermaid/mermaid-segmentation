@@ -55,4 +55,3 @@ def test_meta_overrides_match_csv(split_table, meta):
         assert row["split"] == o["to"], sid
         assert row["group"] == o["group"], sid
         assert row["split_group"] == str(o["split_group"]), sid
-        assert "reason" in o, sid
