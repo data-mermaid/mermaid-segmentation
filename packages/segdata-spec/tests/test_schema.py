@@ -11,7 +11,9 @@ from segdata_spec.schema import (
 )
 
 
-def _images(ids=("a", "b"), mask_key=None, mask_etag=None, mask_size=None) -> pa.Table:
+def _images(
+    ids=("a", "b"), mask_key=None, mask_etag=None, mask_size=None, source_name=None
+) -> pa.Table:
     n = len(ids)
     masks = list(mask_key) if mask_key is not None else [None] * n
     # Rows with a mask get a full fingerprint unless the caller overrides the column.
@@ -33,6 +35,7 @@ def _images(ids=("a", "b"), mask_key=None, mask_etag=None, mask_size=None) -> pa
             "mask_size": list(sizes),
             "mask_crc64nvme": [None] * n,
             "source_fingerprint": ["fp"] * n,
+            "source_name": source_name if source_name is not None else [None] * n,
             "attrs": [None] * n,
         }
     )
@@ -105,6 +108,15 @@ def test_conform_names_the_missing_column():
 
     with pytest.raises(SchemaValidationError, match="group"):
         conform(table, IMAGES_SCHEMA)
+
+
+@pytest.mark.parametrize("source_name", [[None, None], ["s1/a.jpg", "s1/b.jpg"]])
+def test_conform_places_nullable_source_name_after_source_fingerprint(source_name):
+    result = conform(_images(source_name=source_name), IMAGES_SCHEMA)
+
+    names = result.column_names
+    assert names[names.index("source_fingerprint") + 1] == "source_name"
+    assert result["source_name"].to_pylist() == source_name
 
 
 def test_valid_tables_pass():

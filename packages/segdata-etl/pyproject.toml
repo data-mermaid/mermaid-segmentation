@@ -26,10 +26,12 @@ segdata = "segdata_etl.cli:main"
 tests = [
     "pytest>=8.0",
     "pytest-socket>=0.7",
+    "segdata-spec",
 ]
 
 [tool.uv.sources]
 coralnet-scraper = { workspace = true }
+segdata-spec = { workspace = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]

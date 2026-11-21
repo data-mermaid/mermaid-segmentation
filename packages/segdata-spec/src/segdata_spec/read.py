@@ -10,14 +10,24 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from segdata_spec._s3 import MANIFEST_NAME, cache_path, dataset_prefix, taxonomy_prefix
+from segdata_spec._s3 import (
+    MANIFEST_NAME,
+    cache_path,
+    dataset_prefix,
+    resized_cache_path,
+    taxonomy_prefix,
+)
 from segdata_spec.errors import PinMismatch
 from segdata_spec.manifest import Manifest, Pin, TaxonomyManifest, manifest_sha256
+from segdata_spec.resize import ResizeSpec, scale_images, scale_points
 
 
 @dataclass(frozen=True)
 class DatasetVersion:
-    """A synced dataset version: its manifest, its tables and its cached image paths."""
+    """A synced dataset version: its manifest, its tables and its cached image paths.
+
+    With ``resize`` set, the tables and paths describe the images resized per that spec.
+    """
 
     manifest: Manifest
     images: pa.Table
@@ -25,11 +35,17 @@ class DatasetVersion:
     labels: pa.Table
     label_counts: pa.Table
     cache_dir: Path
+    resize: ResizeSpec | None = None
+
+    def _object_path(self, key: str) -> Path:
+        store = self.manifest.image_store
+        if self.resize is None:
+            return cache_path(self.cache_dir, store.bucket, store.prefix + key)
+        return resized_cache_path(self.cache_dir, self.resize, store.bucket, store.prefix + key)
 
     def image_path(self, row: Mapping[str, Any]) -> Path:
         """Return the cached image file for an ``images`` row (a mapping with ``key``)."""
-        store = self.manifest.image_store
-        return cache_path(self.cache_dir, store.bucket, store.prefix + row["key"])
+        return self._object_path(row["key"])
 
     def mask_path(self, row: Mapping[str, Any]) -> Path:
         """Return the cached mask file for an ``images`` row (a mapping with ``mask_key``).
@@ -39,8 +55,7 @@ class DatasetVersion:
         """
         if row["mask_key"] is None:
             raise ValueError(f"image {row['image_id']} has no mask")
-        store = self.manifest.image_store
-        return cache_path(self.cache_dir, store.bucket, store.prefix + row["mask_key"])
+        return self._object_path(row["mask_key"])
 
 
 @dataclass(frozen=True)
@@ -75,23 +90,38 @@ def _read_tables(
     }
 
 
-def open_version(cache_dir: Path, bucket: str, pin: Pin) -> DatasetVersion:
+def open_version(
+    cache_dir: Path, bucket: str, pin: Pin, resize: ResizeSpec | None = None
+) -> DatasetVersion:
     """Open a dataset version that ``sync`` cached, re-verifying its manifest against ``pin``.
+
+    With ``resize``, which must match the spec ``sync`` applied, ``images`` carries the resized
+    ``width`` and ``height`` and ``media_type`` ``image/jpeg``, ``points`` are scaled from the
+    original sizes into the resized pixel grid, and ``image_path`` and ``mask_path`` resolve into
+    ``<cache_dir>/resized/<resize.id>/``.
 
     Raises:
         FileNotFoundError: The manifest or a table it lists is not in the cache.
         PinMismatch: The cached manifest differs from ``pin``.
+        ValueError: With ``resize``, a point references an ``image_id`` absent from ``images``.
     """
     prefix = dataset_prefix(pin.name, pin.version)
     manifest = Manifest.model_validate_json(_read_pinned_manifest(cache_dir, bucket, prefix, pin))
     tables = _read_tables(cache_dir, bucket, prefix, manifest.files)
+    images = tables["images.parquet"]
+    points = tables.get("points.parquet")
+    if resize is not None:
+        if points is not None:
+            points = scale_points(points, images, resize)
+        images = scale_images(images, resize)
     return DatasetVersion(
         manifest=manifest,
-        images=tables["images.parquet"],
-        points=tables.get("points.parquet"),
+        images=images,
+        points=points,
         labels=tables["labels.parquet"],
         label_counts=tables["stats/label_counts.parquet"],
         cache_dir=cache_dir,
+        resize=resize,
     )
 
 
