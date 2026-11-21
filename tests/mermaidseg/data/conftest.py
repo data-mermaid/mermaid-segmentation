@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -13,9 +14,11 @@ from typing import Any, Literal
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from botocore.exceptions import ClientError
 from numpy.typing import NDArray
 from PIL import Image
 
+from mermaidseg.data.config import DATASET_BUCKET
 from segdata_spec.manifest import (
     EtlInfo,
     FileEntry,
@@ -27,6 +30,7 @@ from segdata_spec.manifest import (
     dump_manifest,
     manifest_sha256,
 )
+from segdata_spec.publish import GitState, publish_taxonomy
 from segdata_spec.read import DatasetVersion, open_version
 from segdata_spec.schema import (
     IMAGES_SCHEMA,
@@ -235,3 +239,105 @@ def open_written(tmp_path: Path, **kwargs: Any) -> DatasetVersion:
     """Write a version with :func:`write_version` and open it."""
     cache_dir, bucket, pin = write_version(tmp_path, **kwargs)
     return open_version(cache_dir, bucket, pin)
+
+
+def _client_error(code: str, status: int, operation: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code, "Message": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        operation,
+    )
+
+
+@dataclass
+class FakeS3:
+    """The object surface of a boto3 S3 client over ``(bucket, key) -> bytes``."""
+
+    objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
+
+    def get_object(self, Bucket: str, Key: str, IfMatch: str | None = None) -> dict[str, Any]:
+        data = self.objects.get((Bucket, Key))
+        if data is None:
+            raise _client_error("NoSuchKey", 404, "GetObject")
+        if IfMatch is not None and hashlib.md5(data).hexdigest() != IfMatch.strip('"'):
+            raise _client_error("PreconditionFailed", 412, "GetObject")
+        return {"Body": io.BytesIO(data)}
+
+    def head_object(self, Bucket: str, Key: str) -> dict[str, Any]:
+        if (Bucket, Key) not in self.objects:
+            raise _client_error("404", 404, "HeadObject")
+        return {"ContentLength": len(self.objects[(Bucket, Key)])}
+
+    def put_object(self, Bucket: str, Key: str, Body: bytes, **_: Any) -> dict[str, Any]:
+        self.objects[(Bucket, Key)] = Body
+        return {}
+
+
+def _md5(path: Path) -> str:
+    return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def publish_points(
+    tmp_path: Path,
+    *,
+    images: Sequence[ImageSpec],
+    labels: Mapping[int, str] | Sequence[Mapping[str, Any]],
+    points: Sequence[PointRow],
+) -> tuple[FakeS3, Pin]:
+    """Serve a points version; the images' ETags are rewritten to the MD5 of the bytes."""
+    cache_dir, _, pin = write_version(
+        tmp_path, kind="points", images=images, labels=labels, points=points
+    )
+    prefix = cache_dir / BUCKET / "datasets" / pin.name / pin.version
+    manifest = Manifest.model_validate_json((prefix / "manifest.json").read_bytes())
+    store = manifest.image_store
+    table = pq.read_table(prefix / "images.parquet")
+    etags = [_md5(cache_dir / store.bucket / (store.prefix + k)) for k in table["key"].to_pylist()]
+    table = table.set_column(
+        table.schema.get_field_index("etag"), "etag", pa.array(etags, pa.string())
+    )
+    pq.write_table(table, prefix / "images.parquet")
+    data = (prefix / "images.parquet").read_bytes()
+    files = {
+        **manifest.files,
+        "images.parquet": FileEntry(
+            sha256=hashlib.sha256(data).hexdigest(), bytes=len(data), rows=table.num_rows
+        ),
+    }
+    manifest_bytes = dump_manifest(manifest.model_copy(update={"files": files}))
+    (prefix / "manifest.json").write_bytes(manifest_bytes)
+
+    fake = FakeS3()
+    key_prefix = f"datasets/{pin.name}/{pin.version}/"
+    for file_name in [*files, "manifest.json"]:
+        fake.objects[(DATASET_BUCKET, key_prefix + file_name)] = (prefix / file_name).read_bytes()
+    for key in table["key"].to_pylist():
+        path = cache_dir / store.bucket / (store.prefix + key)
+        fake.objects[(store.bucket, store.prefix + key)] = path.read_bytes()
+    return fake, Pin(
+        name=pin.name, version=pin.version, manifest_sha256=manifest_sha256(manifest_bytes)
+    )
+
+
+def publish_taxonomy_version(fake: FakeS3, tmp_path: Path, version: str) -> Pin:
+    """Publish taxonomy ``mermaid-benthic`` to ``fake`` under the dataset bucket."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    (repo / "uv.lock").write_bytes(b"lock-bytes")
+    _, sha = publish_taxonomy(
+        fake,
+        bucket=DATASET_BUCKET,
+        name="mermaid-benthic",
+        version=version,
+        tables={
+            "benthic_attributes.parquet": pa.table(
+                {"id": ["1", "2"], "name": ["Hard coral", "Acropora"], "parent_id": [None, "1"]}
+            ),
+            "growth_forms.parquet": pa.table({"id": ["9"], "name": ["Branching"]}),
+        },
+        etl_package="segdata-etl",
+        etl_command="segdata taxonomy",
+        source=SourceInfo(type="test", uri="s3://src/", revision="r1"),
+        repo_dir=repo,
+        git=GitState(sha="abcdef1234567", dirty=False, pushed=True),
+    )
+    return Pin(name="mermaid-benthic", version=version, manifest_sha256=sha)

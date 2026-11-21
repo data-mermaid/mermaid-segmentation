@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,11 @@ import numpy as np
 import pytest
 
 from mermaidseg.data import DenseDataset, PointDataset
+from mermaidseg.data.base import _next_random_idx
+from mermaidseg.dataset_reconciliation.split_wiring import (
+    apply_vocabularies,
+    build_source_vocabularies,
+)
 from segdata_spec.read import DatasetVersion
 from tests.mermaidseg.data.conftest import ImageSpec, open_written
 
@@ -161,3 +167,141 @@ def test_missing_mask_fails_at_construction(tmp_path: Path) -> None:
     version.mask_path({"mask_key": "i1.png", "image_id": "i1"}).unlink()
     with pytest.raises(FileNotFoundError, match="i1.png"):
         DenseDataset(version, split="val")
+
+
+@pytest.mark.parametrize(
+    ("points", "raises"),
+    [([("i1", 0, 0, 1), ("i1", 1, 1, 2)], True), ([("i1", 0, 0, 1)], False)],
+    ids=["both-selected", "second-unselected"],
+)
+def test_label_name_shared_by_two_selected_label_ids_raises(
+    tmp_path: Path, points: list[tuple[str, int, int, int]], raises: bool
+) -> None:
+    version = open_written(
+        tmp_path,
+        kind="points",
+        images=[ImageSpec("i1")],
+        labels={1: "Sand", 2: "Sand"},
+        points=points,
+    )
+    expectation = pytest.raises(ValueError, match="Sand") if raises else nullcontext()
+    with expectation:
+        assert PointDataset(version, split="val").source_id2name == {1: "Sand"}
+
+
+def test_empty_selection_raises_on_access(tmp_path: Path) -> None:
+    version = _point_version(tmp_path, [("i1", 0, 0, 5)])
+    version.image_path({"key": "i1.jpg"}).unlink()
+    ds = PointDataset(version, split="val", on_missing_images="drop")
+    with pytest.raises(RuntimeError, match="dataset is empty"):
+        ds[0]
+
+
+def test_negative_global_offset_raises(tmp_path: Path) -> None:
+    ds = PointDataset(_point_version(tmp_path, [("i1", 0, 0, 5)]), split="val")
+    with pytest.raises(ValueError, match="-1"):
+        ds.set_global_offset(-1)
+
+
+@pytest.mark.parametrize(
+    ("idx", "n", "expected"),
+    [(0, 1, {0}), (0, 3, {1, 2}), (1, 3, {0, 2}), (2, 3, {0, 1})],
+)
+def test_next_random_idx_skips_idx_and_reaches_every_other_index(
+    idx: int, n: int, expected: set[int]
+) -> None:
+    seen = set()
+    for seed in range(50):
+        np.random.seed(seed)
+        seen.add(_next_random_idx(idx, n))
+    assert seen == expected
+
+
+def _two_image_version(tmp_path: Path, kind: str) -> DatasetVersion:
+    """i1 (group g1) holds label 4 twice and 7 once; i2 (group g2) alone holds label 9."""
+    labels = {4: "four", 7: "seven", 9: "nine"}
+    if kind == "points":
+        return open_written(
+            tmp_path,
+            kind="points",
+            images=[ImageSpec("i1", "g1"), ImageSpec("i2", "g2")],
+            labels=labels,
+            points=[("i1", 0, 0, 4), ("i1", 1, 1, 4), ("i1", 2, 2, 7), ("i2", 0, 0, 9)],
+        )
+    first = np.zeros((6, 6), np.uint8)
+    first[0, 0] = first[1, 1] = 4
+    first[2, 2] = 7
+    second = np.zeros((6, 6), np.uint8)
+    second[0, 0] = 9
+    return open_written(
+        tmp_path,
+        kind="dense",
+        images=[ImageSpec("i1", "g1", mask=first), ImageSpec("i2", "g2", mask=second)],
+        labels=labels,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "missing", "kwargs"),
+    [
+        ("points", None, {"groups": ["g1"]}),
+        ("dense", None, {"groups": ["g1"]}),
+        ("points", "i2.jpg", {"on_missing_images": "drop"}),
+        ("dense", "i2.png", {"on_missing_images": "drop"}),
+    ],
+    ids=["points-group", "dense-group", "points-drop-image", "dense-drop-mask"],
+)
+def test_vocabulary_omits_a_label_only_a_removed_image_holds(
+    tmp_path: Path, kind: str, missing: str | None, kwargs: dict[str, Any]
+) -> None:
+    version = _two_image_version(tmp_path, kind)
+    if missing == "i2.jpg":
+        version.image_path({"key": missing}).unlink()
+    elif missing == "i2.png":
+        version.mask_path({"mask_key": missing, "image_id": "i2"}).unlink()
+    reader = PointDataset if kind == "points" else DenseDataset
+    ds = reader(version, split="val", **kwargs)
+    assert list(ds.images["image_id"]) == ["i1"]
+    assert ds.source_id2name == {1: "four", 2: "seven"}
+    assert ds.source_id2label_id == {1: 4, 2: 7}
+    assert ds.num_source_classes == 3
+
+
+def test_set_source_vocabulary_missing_a_served_name_raises(tmp_path: Path) -> None:
+    points = [("i1", 0, 0, 5), ("i1", 1, 1, 7)]
+    ds = PointDataset(_point_version(tmp_path, points), split="val")
+    with pytest.raises(ValueError, match="seven") as info:
+        ds.set_source_vocabulary({1: "five"}, {"five": 1}, 2)
+    assert "'five'" not in str(info.value)
+
+
+def test_split_vocabularies_give_one_mask_id_per_name_across_splits(tmp_path: Path) -> None:
+    # train holds five and seven, val holds nine and seven; the sorted union is
+    # five=1, nine=2, seven=3.
+    version = open_written(
+        tmp_path,
+        kind="points",
+        images=[ImageSpec("i1", "train"), ImageSpec("i2", "val")],
+        labels=LABELS,
+        points=[
+            ("i1", 0, 0, 5),
+            ("i1", 1, 1, 5),
+            ("i1", 2, 2, 7),
+            ("i2", 0, 0, 9),
+            ("i2", 1, 1, 9),
+            ("i2", 2, 2, 7),
+        ],
+    )
+    train = PointDataset(version, split="train", groups=["train"])
+    val = PointDataset(version, split="val", groups=["val"])
+    splits = {("ds", "train"): train, ("ds", "val"): val}
+    vocabularies = build_source_vocabularies(splits)
+    # Production applies the vocabulary twice (prepare_splits_for_registry, then attach_registry).
+    apply_vocabularies(splits, vocabularies)
+    apply_vocabularies(splits, vocabularies)
+    for ds in (train, val):
+        ds.set_global_offset(10)
+    _, train_mask = train[0]
+    _, val_mask = val[0]
+    assert (train_mask[0, 0], train_mask[1, 1], train_mask[2, 2]) == (11, 11, 13)
+    assert (val_mask[0, 0], val_mask[1, 1], val_mask[2, 2]) == (12, 12, 13)

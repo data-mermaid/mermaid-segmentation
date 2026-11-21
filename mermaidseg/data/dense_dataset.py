@@ -47,6 +47,7 @@ class DenseDataset(VersionDataset):
         on_missing_images: Literal["fail", "drop"] = "fail",
     ) -> None:
         """Select images and build the label lookup; arguments as in :class:`VersionDataset`."""
+        self._max_label_id = int(max(version.labels.column("label_id").to_pylist(), default=0))
         super().__init__(
             version,
             split=split,
@@ -58,8 +59,6 @@ class DenseDataset(VersionDataset):
             raise ValueError(
                 "label_id 0 is counted in the selected images, but mask value 0 is unlabeled"
             )
-        self._max_label_id = int(max(version.labels.column("label_id").to_pylist(), default=0))
-        self._apply_offset()
 
     def _apply_offset(self) -> None:
         self._lut = build_lut(self.source_id2label_id, self._max_label_id, self._global_offset)
