@@ -95,9 +95,9 @@ def _split_build_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     defaults = SplitParams()
     tuning_help = {
-        "val_frac": "Share of groups assigned to val",
-        "test_frac": "Share of groups assigned to test",
-        "max_group_frac": "Largest share of points a group may hold to go to val or test",
+        "val_frac": "Share of images assigned to val",
+        "test_frac": "Share of images assigned to test",
+        "max_group_frac": "Largest group, as a share of the smaller eval split's image target, that may go to val or test",
         "max_id_gap": "Max source ID gap for two sources to count as one project",
         "max_km": "Max distance in km for two sources to count as one project",
         "min_class_points": "Min points a class needs to be counted in the class space",
