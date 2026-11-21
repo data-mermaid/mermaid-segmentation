@@ -169,6 +169,7 @@ def _images_table(
     mask_crcs: dict[str, str],
     sizes: dict[str, tuple[int, int]],
     media_types: dict[str, str],
+    source_names: dict[str, str],
 ) -> pa.Table:
     ids = list(images)
     n = len(ids)
@@ -198,7 +199,7 @@ def _images_table(
             **mask_cols,
             "mask_crc64nvme": [mask_crcs.get(i) for i in ids],
             "source_fingerprint": ["fp"] * n,
-            "source_name": pa.nulls(n, pa.string()),
+            "source_name": pa.array([source_names.get(i) for i in ids], pa.string()),
             "attrs": pa.nulls(n, pa.string()),
         }
     )
@@ -224,6 +225,7 @@ def publish_version(
     mask_crcs: dict[str, str] | None = None,
     sizes: dict[str, tuple[int, int]] | None = None,
     media_types: dict[str, str] | None = None,
+    source_names: dict[str, str] | None = None,
     parents: Sequence[ParentRef] = (),
 ) -> tuple[Manifest, Pin]:
     """Store the images (and masks) and publish dataset ``ds``; clear the call log.
@@ -231,7 +233,7 @@ def publish_version(
     ``points=None`` publishes a dense version; ``etags`` gives images explicit ETags;
     ``crcs`` and ``mask_crcs`` record base64 CRC64NVME values by image id; ``sizes`` records
     ``(width, height)`` by image id (default 4x4); ``media_types`` sets the media type by image id
-    (default ``image/jpeg``).
+    (default ``image/jpeg``); ``source_names`` sets ``source_name`` by image id (default null).
     """
     etags = etags or {}
     for image_id, (data, _) in images.items():
@@ -242,7 +244,14 @@ def publish_version(
         client.put(IMG_BUCKET, f"{IMG_PREFIX}{image_id}.png", data)
     tables = {
         "images.parquet": _images_table(
-            images, etags, masks, crcs or {}, mask_crcs or {}, sizes or {}, media_types or {}
+            images,
+            etags,
+            masks,
+            crcs or {},
+            mask_crcs or {},
+            sizes or {},
+            media_types or {},
+            source_names or {},
         ),
         "labels.parquet": pa.table(
             {

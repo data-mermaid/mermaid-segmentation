@@ -6,7 +6,14 @@ import pytest
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 
-from segdata_spec.resize import ResizeSpec, resize_image, resize_mask, scale_points, scaled_size
+from segdata_spec.resize import (
+    ResizeSpec,
+    resize_image,
+    resize_mask,
+    scale_images,
+    scale_points,
+    scaled_size,
+)
 
 
 def _encode(img: Image.Image, fmt: str) -> bytes:
@@ -76,6 +83,9 @@ def test_spec_rejects_invalid_values(kwargs):
         ((2215, 1000), (2047, 924)),
         ((2048, 1536), (2048, 1536)),
         ((2049, 1000), (2048, 999)),
+        # A zero edge would fail the encode, so each edge keeps at least one pixel.
+        ((10000, 3), (2048, 1)),
+        ((3, 10000), (1, 2048)),
     ],
 )
 def test_scaled_size(size, expected):
@@ -95,6 +105,32 @@ def test_resize_image_converts_png_to_rgb_or_l_jpeg_within_limit(mode):
     out = _decode(resize_image(data, ResizeSpec(max_edge=2048)))
 
     assert (out.format, out.mode, out.size) == ("JPEG", "L" if mode == "L" else "RGB", (100, 50))
+
+
+def test_resize_image_keeps_a_one_pixel_edge_on_an_extreme_aspect_ratio():
+    out = _decode(resize_image(_jpeg((10000, 3)), ResizeSpec(max_edge=2048)))
+
+    assert (out.format, out.size) == ("JPEG", (2048, 1))
+
+
+def test_resize_image_scales_a_palette_png_above_the_limit_to_rgb_jpeg():
+    data = _encode(Image.new("P", (300, 200)), "PNG")
+
+    out = _decode(resize_image(data, ResizeSpec(max_edge=150)))
+
+    assert (out.format, out.mode, out.size) == ("JPEG", "RGB", (150, 100))
+
+
+def test_resize_image_scales_a_cmyk_jpeg_above_the_limit_to_rgb_jpeg():
+    out = _decode(resize_image(_jpeg((300, 200), "CMYK"), ResizeSpec(max_edge=150)))
+
+    assert (out.format, out.mode, out.size) == ("JPEG", "RGB", (150, 100))
+
+
+def test_resize_image_scales_an_image_one_pixel_over_the_limit():
+    out = _decode(resize_image(_jpeg((151, 100)), ResizeSpec(max_edge=150)))
+
+    assert out.size == (150, 99)
 
 
 def test_resize_image_filter_changes_the_output():
@@ -181,6 +217,27 @@ def _points(rows: list[tuple[str, int, int]]) -> pa.Table:
             "annotator": ["x"] * len(rows),
         }
     )
+
+
+def test_scale_images_sets_resized_size_and_jpeg_media_type_and_keeps_the_rest():
+    images = pa.table(
+        {
+            "image_id": ["big", "small"],
+            "width": pa.array([4000, 1600], pa.int32()),
+            "height": pa.array([3000, 1200], pa.int32()),
+            "media_type": ["image/png", "image/png"],
+            "group": ["g1", "g2"],
+        }
+    )
+
+    out = scale_images(images, ResizeSpec(max_edge=2048))
+
+    assert out["width"].to_pylist() == [2048, 1600]
+    assert out["height"].to_pylist() == [1536, 1200]
+    assert out["media_type"].to_pylist() == ["image/jpeg", "image/jpeg"]
+    assert out["image_id"].to_pylist() == ["big", "small"]
+    assert out["group"].to_pylist() == ["g1", "g2"]
+    assert out.schema.equals(images.schema)
 
 
 @pytest.mark.parametrize(

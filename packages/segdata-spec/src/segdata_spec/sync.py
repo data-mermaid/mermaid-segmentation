@@ -21,6 +21,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
+from PIL import Image, UnidentifiedImageError
 
 from segdata_spec._s3 import (
     MANIFEST_NAME,
@@ -36,6 +37,7 @@ from segdata_spec.errors import (
     ChecksumMismatch,
     ImageChanged,
     ImageMissing,
+    ImageUndecodable,
     PinMismatch,
     SegdataError,
 )
@@ -202,13 +204,30 @@ def _sync_object(
     _write_atomic(path, data)
 
 
+def _output_size(output: bytes) -> tuple[int, int]:
+    """Read a resized output's pixel ``(width, height)`` from its header."""
+    return Image.open(io.BytesIO(output), formats=("JPEG", "PNG")).size
+
+
 def _index_entry(output: bytes, source_etag: str) -> bytes:
-    entry = {"source_etag": source_etag, "size": len(output), "sha256": _sha256(output)}
+    width, height = _output_size(output)
+    entry = {
+        "source_etag": source_etag,
+        "size": len(output),
+        "sha256": _sha256(output),
+        "width": width,
+        "height": height,
+    }
     return json.dumps(entry, sort_keys=True).encode()
 
 
-def _resized_problem(output: bytes, entry: Any, source_etag: str) -> str | None:
-    """Describe how a resized output disagrees with its index entry and source ETag, or None."""
+def _resized_problem(
+    output: bytes, entry: Any, source_etag: str, expected_size: tuple[int, int]
+) -> str | None:
+    """Describe how a resized output disagrees with its index entry, source ETag or size, or None.
+
+    ``expected_size`` is the pixel ``(width, height)`` the entry must record.
+    """
     if not isinstance(entry, dict):
         return "its index entry is not a JSON object"
     if entry.get("source_etag") != source_etag:
@@ -217,10 +236,15 @@ def _resized_problem(output: bytes, entry: Any, source_etag: str) -> str | None:
         return f"size {len(output)} differs from the indexed {entry.get('size')!r}"
     if entry.get("sha256") != _sha256(output):
         return "sha256 differs from the indexed sha256"
+    indexed = (entry.get("width"), entry.get("height"))
+    if indexed != expected_size:
+        return f"indexed size {indexed!r} is not the expected {expected_size!r}"
     return None
 
 
-def _verify_resized(output: Path, index: Path, source_etag: str) -> None:
+def _verify_resized(
+    output: Path, index: Path, source_etag: str, expected_size: tuple[int, int]
+) -> None:
     """Raise ``ChecksumMismatch`` unless ``output`` matches its sidecar index entry."""
     if not index.is_file():
         raise ChecksumMismatch(f"cached file {output} has no index entry at {index}")
@@ -228,9 +252,19 @@ def _verify_resized(output: Path, index: Path, source_etag: str) -> None:
         entry = json.loads(index.read_bytes())
     except ValueError as exc:
         raise ChecksumMismatch(f"cached file {output}: index entry {index} is not JSON") from exc
-    problem = _resized_problem(output.read_bytes(), entry, source_etag)
+    problem = _resized_problem(output.read_bytes(), entry, source_etag, expected_size)
     if problem:
         raise ChecksumMismatch(f"cached file {output}: {problem}")
+
+
+def _transform_decoded(
+    transform: Callable[[bytes], bytes], data: bytes, bucket: str, key: str
+) -> bytes:
+    """Apply ``transform``, raising ``ImageUndecodable`` when Pillow cannot decode ``data``."""
+    try:
+        return transform(data)
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ImageUndecodable(f"s3://{bucket}/{key}: {exc}") from exc
 
 
 def _sync_resized_object(
@@ -240,22 +274,31 @@ def _sync_resized_object(
     obj: tuple[str, str, int, str | None],
     bucket: str,
     transform: Callable[[bytes], bytes],
+    expected_size: tuple[int, int],
 ) -> None:
     """Verify a cached resized object, or download, verify, transform and cache it.
 
-    The sidecar is written before the output, so an output on disk always has its index entry.
+    ``expected_size`` is the pixel size the output must have, on a cache hit and after the
+    transform. The sidecar is written before the output, so an output on disk always has its
+    index entry.
     """
     key, etag, size, crc64nvme = obj
     output = resized_cache_path(cache_dir, spec, bucket, key)
     index = resized_index_path(cache_dir, spec, bucket, key)
     if output.exists():
-        _verify_resized(output, index, etag)
+        _verify_resized(output, index, etag, expected_size)
         return
     data = _download_object(client, bucket, key, etag)
     problem = _object_problem(data, etag, size, crc64nvme)
     if problem:
         raise ChecksumMismatch(f"downloaded s3://{bucket}/{key}: {problem}")
-    resized = transform(data)
+    resized = _transform_decoded(transform, data, bucket, key)
+    actual = _output_size(resized)
+    if actual != expected_size:
+        raise ChecksumMismatch(
+            f"downloaded s3://{bucket}/{key}: resized to {actual[0]}x{actual[1]}, "
+            f"expected {expected_size[0]}x{expected_size[1]}"
+        )
     _write_atomic(index, _index_entry(resized, etag))
     _write_atomic(output, resized)
 
@@ -273,12 +316,12 @@ def _sync_row(
         for key, etag, size, crc in objects:
             _sync_object(client, cache_dir, store.bucket, key, etag, size, crc)
         return
+    expected = scaled_size(row["width"], row["height"], spec)
     transforms: list[Callable[[bytes], bytes]] = [partial(resize_image, spec=spec)]
     if row["mask_key"] is not None:
-        mask_size = scaled_size(row["width"], row["height"], spec)
-        transforms.append(partial(resize_mask, size=mask_size))
+        transforms.append(partial(resize_mask, size=expected))
     for obj, transform in zip(objects, transforms, strict=True):
-        _sync_resized_object(client, cache_dir, spec, obj, store.bucket, transform)
+        _sync_resized_object(client, cache_dir, spec, obj, store.bucket, transform, expected)
 
 
 def _row_objects(row: Mapping[str, Any]) -> list[tuple[str, str, int, str | None]]:
@@ -426,7 +469,7 @@ def sync(
     resized to its image's scaled size, at ``<cache_dir>/resized/<spec.id>/<bucket>/<key>``; the
     original is not cached. A sidecar at
     ``<cache_dir>/resized/<spec.id>/.index/<bucket>/<key>.json`` records the source ETag and the
-    output's size and sha256, and is written before the output.
+    output's size, sha256 and pixel width and height, and is written before the output.
     A cached output is verified against its sidecar and never re-downloaded. A dataset absent from
     ``resize``, or mapped to None, caches the original bytes.
 
@@ -437,7 +480,9 @@ def sync(
     Raises:
         PinMismatch: A manifest, downloaded or cached, differs from its pin.
         ChecksumMismatch: A table, image or mask, downloaded or cached, differs from its record,
-            or a cached resized output has no sidecar or differs from it.
+            or a cached resized output has no sidecar or differs from it, or a resized output's
+            pixel size differs from the size scaled from its row's ``width`` and ``height``.
+        ImageUndecodable: An original to resize matches its record but Pillow cannot decode it.
         ImageChanged: An image or mask no longer matches its recorded ETag.
         ImageMissing: An image or mask is absent and its dataset's mode is ``fail``.
         ValueError: ``max_workers`` is below 1 (raised before any S3 call); ``selection`` names

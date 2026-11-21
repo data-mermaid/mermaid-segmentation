@@ -19,7 +19,7 @@ from segdata_spec._s3 import (
 )
 from segdata_spec.errors import PinMismatch
 from segdata_spec.manifest import Manifest, Pin, TaxonomyManifest, manifest_sha256
-from segdata_spec.resize import ResizeSpec, scale_points, scaled_size
+from segdata_spec.resize import ResizeSpec, scale_images, scale_points
 
 
 @dataclass(frozen=True)
@@ -90,24 +90,6 @@ def _read_tables(
     }
 
 
-def _resized_images(images: pa.Table, spec: ResizeSpec) -> pa.Table:
-    """Return ``images`` with ``width`` and ``height`` scaled per ``spec`` and JPEG media types."""
-    sizes = [
-        scaled_size(w, h, spec)
-        for w, h in zip(images["width"].to_pylist(), images["height"].to_pylist(), strict=True)
-    ]
-    replacements = {
-        "width": [w for w, _ in sizes],
-        "height": [h for _, h in sizes],
-        "media_type": ["image/jpeg"] * images.num_rows,
-    }
-    for name, values in replacements.items():
-        field = images.schema.field(name)
-        index = images.schema.get_field_index(name)
-        images = images.set_column(index, field, pa.array(values, field.type))
-    return images
-
-
 def open_version(
     cache_dir: Path, bucket: str, pin: Pin, resize: ResizeSpec | None = None
 ) -> DatasetVersion:
@@ -121,6 +103,7 @@ def open_version(
     Raises:
         FileNotFoundError: The manifest or a table it lists is not in the cache.
         PinMismatch: The cached manifest differs from ``pin``.
+        ValueError: With ``resize``, a point references an ``image_id`` absent from ``images``.
     """
     prefix = dataset_prefix(pin.name, pin.version)
     manifest = Manifest.model_validate_json(_read_pinned_manifest(cache_dir, bucket, prefix, pin))
@@ -130,7 +113,7 @@ def open_version(
     if resize is not None:
         if points is not None:
             points = scale_points(points, images, resize)
-        images = _resized_images(images, resize)
+        images = scale_images(images, resize)
     return DatasetVersion(
         manifest=manifest,
         images=images,

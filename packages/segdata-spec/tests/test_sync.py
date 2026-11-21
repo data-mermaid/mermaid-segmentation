@@ -26,7 +26,13 @@ from conftest import (
 )
 from PIL import Image
 
-from segdata_spec.errors import ChecksumMismatch, ImageChanged, ImageMissing, PinMismatch
+from segdata_spec.errors import (
+    ChecksumMismatch,
+    ImageChanged,
+    ImageMissing,
+    ImageUndecodable,
+    PinMismatch,
+)
 from segdata_spec.manifest import Pin
 from segdata_spec.resize import ResizeSpec
 from segdata_spec.sync import _IN_FLIGHT_PER_WORKER, DatasetSyncResult, sync
@@ -439,6 +445,8 @@ def test_resized_sync_writes_output_and_sidecar_but_not_the_original(fake_s3, re
         "source_etag": hashlib.md5(JPEG_A).hexdigest(),  # noqa: S324
         "size": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
+        "width": 32,
+        "height": 24,
     }
     assert not (cache / IMG_BUCKET).exists()
 
@@ -448,17 +456,36 @@ def _rewrite_sidecar(cache: Path, **changes: Any) -> None:
     path.write_text(json.dumps({**json.loads(path.read_text()), **changes}))
 
 
+def _drop_from_sidecar(cache: Path, name: str) -> None:
+    path = _sidecar(cache, SPEC)
+    entry = json.loads(path.read_text())
+    del entry[name]
+    path.write_text(json.dumps(entry))
+
+
 @pytest.mark.parametrize(
     "tamper",
     [
-        lambda cache: _resized(cache, SPEC).write_bytes(b"tampered"),
+        lambda cache: _rewrite_sidecar(cache, size=_resized(cache, SPEC).stat().st_size + 1),
+        lambda cache: _resized(cache, SPEC).write_bytes(
+            b"x" * _resized(cache, SPEC).stat().st_size
+        ),
+        lambda cache: _rewrite_sidecar(cache, width=31),
+        lambda cache: _rewrite_sidecar(cache, height=25),
+        lambda cache: _drop_from_sidecar(cache, "width"),
+        lambda cache: _drop_from_sidecar(cache, "height"),
         lambda cache: _rewrite_sidecar(cache, source_etag="0" * 32),
         lambda cache: _sidecar(cache, SPEC).unlink(),
         lambda cache: _sidecar(cache, SPEC).write_text("{trunc"),
         lambda cache: _sidecar(cache, SPEC).write_text("[]"),
     ],
     ids=[
-        "output-bytes",
+        "indexed-size-only",
+        "output-bytes-same-length",
+        "indexed-width",
+        "indexed-height",
+        "missing-width",
+        "missing-height",
         "stale-source-etag",
         "missing-sidecar",
         "malformed-sidecar",
@@ -474,6 +501,64 @@ def test_unverifiable_resized_output_fails_without_download(fake_s3, resize_pin,
         _sync_resized(fake_s3, resize_pin, cache)
 
     assert _image_gets(fake_s3) == []
+
+
+def test_cached_output_fails_when_a_later_version_records_another_resized_size(
+    fake_s3, resize_pin, cache, tmp_path
+):
+    _sync_resized(fake_s3, resize_pin, cache)
+    # Same image bytes and ETag, but the row now says 96x48, which scales to 32x16, not 32x24.
+    _, later = publish_version(
+        fake_s3,
+        tmp_path,
+        version="20261121-abcdef2",
+        images=RESIZE_IMAGES,
+        points=[("a", 1, 1, 5)],
+        sizes={"a": (96, 48)},
+    )
+    fake_s3.calls.clear()
+
+    with pytest.raises(ChecksumMismatch, match=re.escape(str(_resized(cache, SPEC)))):
+        _sync_resized(fake_s3, later, cache)
+
+    assert _image_gets(fake_s3) == []
+
+
+def test_original_whose_row_size_disagrees_with_its_header_fails_and_caches_nothing(
+    fake_s3, tmp_path, cache
+):
+    _, pin = publish_version(
+        fake_s3, tmp_path, images=RESIZE_IMAGES, points=[("a", 1, 1, 5)], sizes={"a": (96, 48)}
+    )
+
+    with pytest.raises(ChecksumMismatch, match=r"images/ds/a\.jpg.*32x24.*expected 32x16"):
+        _sync_resized(fake_s3, pin, cache)
+
+    assert not (cache / "resized").exists()
+
+
+def test_undecodable_original_raises_naming_it_and_caches_nothing(fake_s3, tmp_path, cache):
+    _, pin = publish_version(
+        fake_s3,
+        tmp_path,
+        images={"a": (b"not an image", "g1")},
+        points=[("a", 1, 1, 5)],
+        sizes=RESIZE_SIZES,
+    )
+
+    with pytest.raises(ImageUndecodable, match=f"s3://{IMG_BUCKET}/{IMG_PREFIX}a.jpg"):
+        _sync_resized(fake_s3, pin, cache)
+
+    assert not (cache / "resized").exists()
+
+
+def test_decompression_bomb_original_propagates_unwrapped(fake_s3, resize_pin, cache, monkeypatch):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+
+    with pytest.raises(Image.DecompressionBombError):
+        _sync_resized(fake_s3, resize_pin, cache)
+
+    assert not (cache / "resized").exists()
 
 
 def test_failed_sidecar_write_leaves_no_output(fake_s3, resize_pin, cache, monkeypatch):

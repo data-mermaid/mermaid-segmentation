@@ -1,6 +1,9 @@
+import hashlib
+import io
 import re
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 from conftest import (
     BUCKET,
@@ -13,7 +16,7 @@ from conftest import (
 )
 
 from segdata_spec.errors import PinMismatch
-from segdata_spec.manifest import Pin
+from segdata_spec.manifest import FileEntry, Pin, dump_manifest, manifest_sha256
 from segdata_spec.read import open_taxonomy, open_version
 from segdata_spec.resize import ResizeSpec
 from segdata_spec.sync import sync
@@ -141,3 +144,53 @@ def test_mask_path_with_resize_resolves_into_the_spec_folder(fake_s3, tmp_path, 
 
     assert path == cache / "resized" / SPEC.id / IMG_BUCKET / "images/ds/a.png"
     assert path.is_file()
+
+
+@pytest.mark.parametrize("resize", [None, SPEC], ids=["plain", "resized"])
+def test_open_version_keeps_source_names(fake_s3, tmp_path, cache, resize):
+    _, pin = publish_version(
+        fake_s3,
+        tmp_path,
+        images={"a": (jpeg_bytes(64, 48), "g1"), "b": (jpeg_bytes(64, 48), "g1")},
+        sizes={"a": (64, 48), "b": (64, 48)},
+        source_names={"a": "reef-1.jpg", "b": "reef-2.jpg"},
+    )
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, resize={"ds": resize})
+
+    version = open_version(cache, BUCKET, pin, resize=resize)
+
+    assert version.images["source_name"].to_pylist() == ["reef-1.jpg", "reef-2.jpg"]
+
+
+def _publish_without_source_name(fake_s3, tmp_path) -> Pin:
+    """Rewrite a published version's images table without ``source_name``, as an older ETL did.
+
+    ``publish_dataset`` refuses such a table, so the table and manifest go straight into S3.
+    """
+    manifest, pin = publish_version(
+        fake_s3, tmp_path, images={"a": (jpeg_bytes(64, 48), "g1")}, sizes={"a": (64, 48)}
+    )
+    key = (BUCKET, f"{PREFIX}images.parquet")
+    table = pq.read_table(io.BytesIO(fake_s3.objects[key])).drop_columns(["source_name"])
+    sink = io.BytesIO()
+    pq.write_table(table, sink)
+    fake_s3.put(*key, sink.getvalue())
+    entry = FileEntry(
+        sha256=hashlib.sha256(sink.getvalue()).hexdigest(),
+        bytes=len(sink.getvalue()),
+        rows=table.num_rows,
+    )
+    legacy = manifest.model_copy(update={"files": {**manifest.files, "images.parquet": entry}})
+    manifest_bytes = dump_manifest(legacy)
+    fake_s3.put(BUCKET, f"{PREFIX}manifest.json", manifest_bytes)
+    return Pin(name="ds", version=VERSION, manifest_sha256=manifest_sha256(manifest_bytes))
+
+
+def test_a_version_without_a_source_name_column_syncs_and_opens(fake_s3, tmp_path, cache):
+    pin = _publish_without_source_name(fake_s3, tmp_path)
+
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+    version = open_version(cache, BUCKET, pin)
+
+    assert "source_name" not in version.images.column_names
+    assert version.images["image_id"].to_pylist() == ["a"]

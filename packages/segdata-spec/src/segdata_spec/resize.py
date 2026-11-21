@@ -1,7 +1,9 @@
 """Resize specs and the pure image, mask and point transforms that apply them.
 
-The image path is a copy of the ETL's decode-and-resize so that the trainer's resized cache is
-byte-identical to what the ETL publishes; it must not import ``segdata_etl``.
+The image path copies the ETL's decode-and-resize. For JPEG and PNG images whose scaled edges are
+at least one pixel, the trainer's resized cache is byte-identical to what the ETL publishes.
+Unlike the ETL, it decodes only JPEG and PNG and clamps a zero edge to one pixel. It must not
+import ``segdata_etl``.
 """
 
 from __future__ import annotations
@@ -45,13 +47,14 @@ def scaled_size(width: int, height: int, spec: ResizeSpec) -> tuple[int, int]:
 
     The scale is ``max_edge / longest`` multiplied into each edge and truncated, in that float
     order, which gives 2047 for a longest edge of 2215 at ``max_edge=2048``; the ETL computes the
-    same way, so the sizes stay byte-for-byte aligned.
+    same way, so the sizes stay byte-for-byte aligned. Each edge is at least one pixel; this
+    differs from the ETL only where the ETL would produce a zero edge and fail.
     """
     longest = max(width, height)
     if longest <= spec.max_edge:
         return width, height
     scale = spec.max_edge / longest
-    return int(width * scale), int(height * scale)
+    return max(1, int(width * scale)), max(1, int(height * scale))
 
 
 def _draft_to_max_edge(img: Image.Image, max_edge: int) -> None:
@@ -107,6 +110,33 @@ def resize_mask(data: bytes, size: tuple[int, int]) -> bytes:
     return output.getvalue()
 
 
+def _scaled_sizes(images: pa.Table, spec: ResizeSpec) -> tuple[list[int], list[int]]:
+    """Return the scaled ``(widths, heights)`` of ``images``, in row order."""
+    sizes = [
+        scaled_size(w, h, spec)
+        for w, h in zip(images["width"].to_pylist(), images["height"].to_pylist(), strict=True)
+    ]
+    return [w for w, _ in sizes], [h for _, h in sizes]
+
+
+def scale_images(images: pa.Table, spec: ResizeSpec) -> pa.Table:
+    """Return ``images`` with ``width`` and ``height`` scaled per ``spec`` and JPEG media types.
+
+    Other columns, the schema and the field types are preserved.
+    """
+    widths, heights = _scaled_sizes(images, spec)
+    replacements = {
+        "width": widths,
+        "height": heights,
+        "media_type": ["image/jpeg"] * images.num_rows,
+    }
+    for name, values in replacements.items():
+        field = images.schema.field(name)
+        index = images.schema.get_field_index(name)
+        images = images.set_column(index, field, pa.array(values, field.type))
+    return images
+
+
 def scale_points(points: pa.Table, images: pa.Table, spec: ResizeSpec) -> pa.Table:
     """Return ``points`` with ``row`` and ``col`` moved into the resized image's pixel grid.
 
@@ -117,10 +147,7 @@ def scale_points(points: pa.Table, images: pa.Table, spec: ResizeSpec) -> pa.Tab
     Raises:
         ValueError: A point references an ``image_id`` absent from ``images``.
     """
-    sizes = [
-        scaled_size(w, h, spec)
-        for w, h in zip(images["width"].to_pylist(), images["height"].to_pylist(), strict=True)
-    ]
+    widths, heights = _scaled_sizes(images, spec)
     index = pc.index_in(points["image_id"], value_set=images["image_id"])
     if index.null_count:
         raise ValueError("points reference image_ids missing from images")
@@ -133,10 +160,10 @@ def scale_points(points: pa.Table, images: pa.Table, spec: ResizeSpec) -> pa.Tab
         return clamped.cast(points.schema.field(column).type)
 
     out = points
-    for column, orig_name, axis in (("row", "height", 1), ("col", "width", 0)):
+    for column, orig_name, new_values in (("row", "height", heights), ("col", "width", widths)):
         out = out.set_column(
             out.schema.get_field_index(column),
             points.schema.field(column),
-            _axis(column, orig_name, [s[axis] for s in sizes]),
+            _axis(column, orig_name, new_values),
         )
     return out
