@@ -17,14 +17,14 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 ## 1. Map
 
 - `mermaidseg/`: the package. All training (`training.py`), evaluation and inference logic. `mermaidseg/inference/` is the serving surface: preprocessing, predictor and model bundle. `mermaidseg/data/` holds the readers (`PointDataset`, `DenseDataset`) over dataset versions that `segdata_spec` syncs, plus the data-config parser and sync; training does not use it yet.
-- `configs/`: committed YAML configs and the concept, mask and label-mapping inputs they reference.
+- `configs/`: committed YAML configs and the concept, mask and label-mapping inputs they reference. `configs/splits/` holds the committed CoralNet train/val/test split (`coralnet.csv`) and its provenance (`coralnet.meta.yaml`); it is reviewed in git and never regenerated at train time.
 - `scripts/`: entrypoints for training (`scripts/train.py`), bundle export, evaluation, cache prefetch and the
   data-config, concept-removal, concept-source-mask and CoralscapesV2 probe-point builders, the train label count, the dataset cache sync (`scripts/sync_data.py`, which fills the local cache from pinned dataset versions) and the one-off old-vs-new point parity check (`scripts/check_dataset_parity.py`).
 - `slurm/`: Slurm launchers and `train.sbatch`.
 - `scripts/sagemaker/`: the SageMaker launcher (`python -m scripts.sagemaker.launch`) and the in-container entrypoint.
 - `sagemaker/runs/`: SageMaker run YAMLs.
 - `docker/`: the SageMaker job image; deployable images are built only by the CI workflow.
-- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/segdata-etl/` builds the CoralNet training manifest from that scrape and loads the Catlin, Moorea, Pacific and Benthos raw releases into S3; `packages/segdata-spec/` defines the versioned dataset manifest, S3 layout and sync that an ETL publisher and a trainer share. `mermaidseg` may import `segdata_spec` and none of the other packages.
+- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/segdata-etl/` builds the CoralNet training manifest from that scrape and loads the Catlin, Moorea, Pacific and Benthos raw releases into S3; its `segdata_etl/splits/` builds and leakage-checks the split on demand (`segdata split build`, `segdata split leakage`); `packages/segdata-spec/` defines the versioned dataset manifest, S3 layout and sync that an ETL publisher and a trainer share, plus the split-file format and coverage check. `mermaidseg` may import `segdata_spec` and none of the other packages.
 - `tests/`: the pytest suite, laid out as 7.4 sets.
 - `pyproject.toml`: dependencies, extras, dependency groups, and ruff, mypy and pytest settings.
 
@@ -199,8 +199,8 @@ Where a doc disagrees with this file or the code, this file and the code win.
 | Test and lint commands, architecture overview | `README.md`: Running Tests, Common Commands, Architecture overview |
 | Setup, data, training (Slurm, SageMaker), export and evaluation procedures | `docs/runbooks/` |
 | The CoralNet scraper: S3 layout, environment variables, running and testing it | `packages/coralnet-scraper/README.md` |
-| The CoralNet dataset build and the external datasets (Catlin, Moorea, Pacific, Benthos): outputs, completeness checks, environment variables, output contract, running and testing them | `packages/segdata-etl/README.md` |
-| The versioned dataset contract (manifest, S3 and cache layout, publish, sync, errors), and its tests | `packages/segdata-spec/README.md` |
+| The CoralNet dataset build and the external datasets (Catlin, Moorea, Pacific, Benthos): outputs, completeness checks, environment variables, output contract, running and testing them; the split build and leakage commands | `packages/segdata-etl/README.md` |
+| The versioned dataset contract (manifest, S3 and cache layout, publish, sync, split-file format, errors), and its tests | `packages/segdata-spec/README.md` |
 | Recreate or update the CoralNet data end to end | `docs/runbooks/coralnet-data.md` |
 | Lint, type-check, test and dependency settings; CI checks; pre-commit hooks | `pyproject.toml`; `.github/workflows/`; `.pre-commit-config.yaml` |
 | Source and history of each rule, for editing this file | `docs/agents-md-sources.md` |

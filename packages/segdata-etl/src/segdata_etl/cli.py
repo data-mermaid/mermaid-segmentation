@@ -94,18 +94,33 @@ def _split_build_flags(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(flag, type=Path, required=True, help=help_text)
     parser.add_argument("--out-dir", type=Path, required=True)
     defaults = SplitParams()
+    tuning_help = {
+        "val_frac": "Share of groups assigned to val",
+        "test_frac": "Share of groups assigned to test",
+        "max_group_frac": "Largest share of points a group may hold to go to val or test",
+        "max_id_gap": "Max source ID gap for two sources to count as one project",
+        "max_km": "Max distance in km for two sources to count as one project",
+        "min_class_points": "Min points a class needs to be counted in the class space",
+        "min_eval_points": "Min points per class that val and test should hold",
+        "w_coverage": "Annealing weight on class coverage of val and test",
+        "w_size": "Annealing weight on split size deviation",
+        "iters": "Annealing iterations per restart",
+        "restarts": "Annealing restarts; the best run wins",
+        "seed": "Random seed for annealing",
+    }
     for field in fields(SplitParams):
         parser.add_argument(
             "--" + field.name.replace("_", "-"),
             type=type(getattr(defaults, field.name)),
             default=getattr(defaults, field.name),
+            help=tuning_help[field.name] + " (default: %(default)s)",
         )
 
 
 def _add_split_subcommands(top: Any) -> None:
     split = top.add_parser("split", help="Build or check the CoralNet train/val/test split")
     split_sub = split.add_subparsers(dest="command", required=True)
-    build = split_sub.add_parser("build", help="Build configs/splits/coralnet.csv and its meta")
+    build = split_sub.add_parser("build", help="Build a CoralNet split into --out-dir")
     _split_build_flags(build)
     build.set_defaults(func=lambda args: split_builder.run(args, make_s3_client()))
     leakage = split_sub.add_parser("leakage", help="Check a split file for cross-split images")
