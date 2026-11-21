@@ -11,11 +11,11 @@ from typing import Any
 import pandas as pd
 
 from mermaidseg.data.config import DATASET_BUCKET
-from mermaidseg.data.point_dataset import PointDataset
+from mermaidseg.data.point_dataset import select_points
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
 from mermaidseg.datasets.factory import build_datasets
 from segdata_spec.manifest import Pin
-from segdata_spec.read import open_version
+from segdata_spec.read import DatasetVersion, open_version
 from segdata_spec.sync import sync
 
 # Val/test transform size for the old loader; only its annotations are read here.
@@ -95,10 +95,9 @@ def old_points(ds: Any) -> pd.DataFrame:
     ).reset_index(drop=True)[_COLUMNS]
 
 
-def new_points(reader: PointDataset) -> pd.DataFrame:
-    """Return the selected points of a reader with the same columns as :func:`old_points`."""
-    labels = reader.version.labels.to_pandas().set_index("label_id")
-    points = reader.points
+def new_points(version: DatasetVersion, points: pd.DataFrame) -> pd.DataFrame:
+    """Return ``points`` of ``version`` with the same columns as :func:`old_points`."""
+    labels = version.labels.to_pandas().set_index("label_id")
     attribute = points["label_id"].map(labels["mermaid_benthic_attribute"])
     lowered = attribute.str.lower().astype(object)
     return pd.DataFrame(
@@ -118,7 +117,7 @@ def _none_if_na(value: Any) -> Any:
 
 def _point_counter(points: pd.DataFrame) -> Counter[Point]:
     keys = zip(
-        points["image_id"].astype(str),
+        points["image_id"],
         points["row"].astype(int),
         points["col"].astype(int),
         (_none_if_na(m) for m in points["mapped"]),
@@ -155,8 +154,6 @@ def compare(old: pd.DataFrame, new: pd.DataFrame, new_groups: Mapping[str, str])
     Returns:
         The report; ``ok`` when the points agree as multisets.
     """
-    old = old.assign(image_id=old["image_id"].astype(str))
-    new = new.assign(image_id=new["image_id"].astype(str))
     new = _restrict_to_old_groups(old, new, new_groups)
     old_images, new_images = set(old["image_id"]), set(new["image_id"])
     old_counter, new_counter = _point_counter(old), _point_counter(new)
@@ -211,17 +208,19 @@ def run_parity(
     client: Any,
     annotators: Sequence[str] | None,
 ) -> ParityReport:
-    """Build the old dataset, sync and open the pinned version, and compare their points.
+    """Build the old dataset, sync the pinned version's tables, and compare their points.
+
+    No image is downloaded: only the parquet tables are synced.
 
     Args:
         data_cfg: The ``data`` section of the old data config.
         dataset: Dataset name.
-        split: Split to build on the old side and to serve on the new side.
+        split: Split to build on the old side; the new side compares every split.
         version: Version to compare against.
         manifest_sha256: The sha256 of that version's manifest.
         cache_dir: The local cache root.
         client: An S3 client.
-        annotators: Annotators in priority order for the new reader.
+        annotators: Annotators in priority order for selecting the new points.
 
     Returns:
         The parity report over all groups of the new version that hold old images.
@@ -231,11 +230,18 @@ def run_parity(
     )
     old = old_points(built[(dataset, split)])
     pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
-    sync(client, {dataset: pin}, cache_dir, bucket=DATASET_BUCKET)
-    reader = PointDataset(
-        open_version(cache_dir, DATASET_BUCKET, pin),
-        split=split,  # type: ignore[arg-type]
-        annotators=annotators,
+    sync(
+        client,
+        {dataset: pin},
+        cache_dir,
+        bucket=DATASET_BUCKET,
+        selection={dataset: set()},
     )
-    new_groups = dict(zip(reader.images["image_id"], reader.images["group"], strict=True))
-    return compare(old, new_points(reader), new_groups)
+    version_data = open_version(cache_dir, DATASET_BUCKET, pin)
+    if version_data.points is None:
+        raise ValueError(f"{dataset} {version} has no points table")
+    images = version_data.images.to_pandas()
+    points = select_points(version_data.points.to_pandas(), images, annotators)
+    kept = images[images["image_id"].isin(points["image_id"])]
+    new_groups = dict(zip(kept["image_id"], kept["group"], strict=True))
+    return compare(old, new_points(version_data, points), new_groups)
