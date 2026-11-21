@@ -13,7 +13,7 @@ from segdata_spec.manifest import Pin
 from segdata_spec.splits import read_split_file
 from segdata_spec.sync import MissingMode
 
-DATASET_BUCKET = "mermaid-seg-datasets"
+DATASET_BUCKET = "mermaid-ic-datasets"
 TAXONOMY_NAME = "mermaid-benthic"
 
 Split = Literal["train", "val", "test"]
@@ -35,9 +35,6 @@ class SplitSelection(_Strict):
 
     use: list[Split] | None = None
     groups: Literal["all"] | list[str] | None = None
-    annotator: list[str] | None = None
-    repeat: int | None = None
-    transform: Any = None
 
     @model_validator(mode="after")
     def _exactly_one_selector(self) -> SplitSelection:
@@ -73,7 +70,6 @@ class DataSection(_Strict):
 
     taxonomy: PinRef | None = None
     datasets: dict[str, DatasetEntry]
-    default: Any = None
 
 
 @dataclass(frozen=True)

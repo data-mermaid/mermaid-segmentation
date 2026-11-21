@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
+import mermaidseg.data.parity as parity_module
 import mermaidseg.dataset_reconciliation.registry as registry_module
 from mermaidseg.data.parity import (
     ParityReport,
@@ -15,9 +16,9 @@ from mermaidseg.data.parity import (
     format_report,
     new_points,
     old_points,
+    run_parity,
 )
-from mermaidseg.data.point_dataset import PointDataset
-from tests.mermaidseg.data.conftest import ImageSpec, open_written
+from tests.mermaidseg.data.conftest import ImageSpec, open_written, publish_points
 
 _COLUMNS = ["image_id", "row", "col", "native_name", "mapped"]
 
@@ -85,13 +86,6 @@ def test_compare_ignores_new_groups_without_old_images() -> None:
     assert report.new_only_images == ["extra"]
 
 
-def test_compare_matches_int_and_str_image_ids() -> None:
-    old = _frame([(12, 1, 1, "x", "hard")])
-    new = _frame([("12", 1, 1, "x", "hard")])
-
-    assert compare(old, new, {"12": "g1"}).ok
-
-
 def test_compare_reports_label_count_diffs() -> None:
     old = _frame([("a", i, i, "x", "m") for i in range(3)])
     new = _frame([("a", i, i, "x", "m") for i in range(2)])
@@ -113,14 +107,18 @@ def test_format_report_names_the_verdict() -> None:
 class _StubOld:
     SOURCE_NAME = "catlin_seaview"
 
-    def __init__(self) -> None:
-        self.df_annotations = pd.DataFrame(
-            {
-                "image_id": [10, 10, 11],
-                "row": [1, 2, 3],
-                "col": [4, 5, 6],
-                "source_label_name": ["Hard", "Soft", "Hard"],
-            }
+    def __init__(self, annotations: pd.DataFrame | None = None) -> None:
+        self.df_annotations = (
+            annotations
+            if annotations is not None
+            else pd.DataFrame(
+                {
+                    "image_id": [10, 10, 11],
+                    "row": [1, 2, 3],
+                    "col": [4, 5, 6],
+                    "source_label_name": ["Hard", "Soft", "Hard"],
+                }
+            )
         )
         self.source_id2name = {1: "Hard", 2: "Soft"}
         self.source_name2id = {"Hard": 1, "Soft": 2}
@@ -147,24 +145,88 @@ def test_old_points_maps_through_the_registry_and_leaves_unmapped_none(
     assert points["mapped"].tolist() == ["hard coral", None, "hard coral"]
 
 
-def _reader(tmp_path: Path) -> PointDataset:
-    version = open_written(
-        tmp_path,
-        kind="points",
-        images=[ImageSpec("i1"), ImageSpec("i2")],
-        labels=[
-            {"label_id": 1, "name": "Acropora", "mermaid_benthic_attribute": "Hard Coral"},
-            {"label_id": 2, "name": "Rubble", "mermaid_benthic_attribute": None},
-        ],
-        points=[("i1", 1, 1, 1), ("i1", 2, 2, 2), ("i2", 3, 3, 1)],
-    )
-    return PointDataset(version, split="train")
+_LABELS = [
+    {"label_id": 1, "name": "Acropora", "mermaid_benthic_attribute": "Hard Coral"},
+    {"label_id": 2, "name": "Rubble", "mermaid_benthic_attribute": None},
+]
+_IMAGES = [ImageSpec("i1"), ImageSpec("i2")]
 
 
 def test_new_points_lowercases_the_attribute_and_keeps_null_none(tmp_path: Path) -> None:
-    points = new_points(_reader(tmp_path))
+    version = open_written(
+        tmp_path,
+        kind="points",
+        images=_IMAGES,
+        labels=_LABELS,
+        points=[("i1", 1, 1, 1), ("i1", 2, 2, 2), ("i2", 3, 3, 1)],
+    )
+
+    assert version.points is not None
+    points = new_points(version, version.points.to_pandas())
 
     assert list(points.columns) == _COLUMNS
     assert points["native_name"].tolist() == ["Acropora", "Rubble", "Acropora"]
     assert points["mapped"].tolist() == ["hard coral", None, "hard coral"]
     assert points["image_id"].tolist() == ["i1", "i1", "i2"]
+
+
+def _old_stub(rows: list[tuple[str, int, int]]) -> _StubOld:
+    return _StubOld(
+        pd.DataFrame(
+            {
+                "image_id": [r[0] for r in rows],
+                "row": [r[1] for r in rows],
+                "col": [r[2] for r in rows],
+                "source_label_name": ["Acropora"] * len(rows),
+            }
+        )
+    )
+
+
+def _run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, old_rows: list[tuple[str, int, int]]
+) -> tuple[ParityReport, Path]:
+    fake, pin = publish_points(
+        tmp_path / "pub",
+        images=_IMAGES,
+        labels=_LABELS,
+        points=[("i1", 1, 1, 1), ("i2", 3, 3, 1)],
+    )
+    monkeypatch.setitem(
+        registry_module._REMOTE_FETCHERS, "catlin_seaview", lambda: {"Acropora": "Hard Coral"}
+    )
+    stub = _old_stub(old_rows)
+    stub.source_name2id = {"Acropora": 1}
+    stub.source_id2name = {1: "Acropora"}
+    monkeypatch.setattr(parity_module, "build_datasets", lambda *a, **k: {("ds", "train"): stub})
+    cache_dir = tmp_path / "cache"
+    report = run_parity(
+        {},
+        dataset="ds",
+        split="train",
+        version=pin.version,
+        manifest_sha256=pin.manifest_sha256,
+        cache_dir=cache_dir,
+        client=fake,
+        annotators=None,
+    )
+    return report, cache_dir
+
+
+def test_run_parity_passes_on_matching_points_without_downloading_images(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    report, cache_dir = _run(monkeypatch, tmp_path, [("i1", 1, 1), ("i2", 3, 3)])
+
+    assert report.ok
+    assert {p.suffix for p in cache_dir.rglob("*") if p.is_file()} == {".json", ".parquet"}
+
+
+def test_run_parity_reports_a_point_moved_by_one_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    report, _ = _run(monkeypatch, tmp_path, [("i1", 2, 1), ("i2", 3, 3)])
+
+    assert not report.ok
+    assert report.old_only_points == Counter({("i1", 2, 1, "hard coral"): 1})
+    assert report.new_only_points == Counter({("i1", 1, 1, "hard coral"): 1})

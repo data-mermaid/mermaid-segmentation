@@ -35,7 +35,22 @@ def test_rasterize_points_matches_create_annotation_mask(padding: int | None) ->
     assert np.array_equal(mask, expected)
 
 
-def test_annotator_priority_falls_back_and_drops_unlisted(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("annotators", "label_ids", "painted"),
+    [
+        # host labels (1, 1) as 5; archived alone labels (2, 2) as 7; 5 and 7 tie on one point.
+        (["host", "archived"], {1: 5, 2: 7}, (1, 2, 0)),
+        # archived labels both points as 7.
+        (["archived", "host"], {1: 7}, (1, 1, 0)),
+    ],
+    ids=["host-first", "archived-first"],
+)
+def test_annotator_priority_falls_back_and_drops_unlisted(
+    tmp_path: Path,
+    annotators: list[str],
+    label_ids: dict[int, int],
+    painted: tuple[int, int, int],
+) -> None:
     points = [
         ("i1", 1, 1, 5, "host"),
         ("i1", 1, 1, 7, "archived"),
@@ -45,10 +60,10 @@ def test_annotator_priority_falls_back_and_drops_unlisted(tmp_path: Path) -> Non
     version = open_written(
         tmp_path, kind="points", images=[ImageSpec("i1")], labels=LABELS, points=points
     )
-    ds = PointDataset(version, split="val", annotators=["host", "archived"])
+    ds = PointDataset(version, split="val", annotators=annotators)
     _, mask = ds[0]
-    assert ds.source_id2label_id == {1: 5, 2: 7}
-    assert (mask[1, 1], mask[2, 2], mask[3, 3]) == (1, 2, 0)
+    assert ds.source_id2label_id == label_ids
+    assert (mask[1, 1], mask[2, 2], mask[3, 3]) == painted
 
 
 @pytest.mark.parametrize(
@@ -162,3 +177,12 @@ def _write_points(tmp_path: Path, points: list[tuple[str, int, int, int]], ids: 
         labels=LABELS,
         points=points,
     )
+
+
+def test_set_source_vocabulary_repaints_points_with_the_new_ids(tmp_path: Path) -> None:
+    # Local ids are five=1 (two points) and seven=2; the new vocabulary reverses them.
+    points = [("i1", 0, 0, 5), ("i1", 1, 1, 5), ("i1", 2, 2, 7)]
+    ds = PointDataset(_write_points(tmp_path, points, ["i1"]), split="val")
+    ds.set_source_vocabulary({1: "seven", 2: "five"}, {"seven": 1, "five": 2}, 3)
+    _, mask = ds[0]
+    assert (mask[0, 0], mask[1, 1], mask[2, 2], mask[3, 3]) == (2, 2, 1, 0)

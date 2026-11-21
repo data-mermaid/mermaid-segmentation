@@ -91,6 +91,37 @@ def _out_of_bounds(points: pd.DataFrame, images: pd.DataFrame) -> pd.DataFrame:
     return points[~inside]
 
 
+def select_points(
+    points: pd.DataFrame, images: pd.DataFrame, annotators: Sequence[str] | None
+) -> pd.DataFrame:
+    """Return the points of ``images``, one annotator's labels per point position.
+
+    Args:
+        points: Point rows (``image_id, row, col, label_id, annotator``).
+        images: Image rows with ``image_id``, ``height`` and ``width``.
+        annotators: Annotators in priority order. A point keeps the labels of the first one that
+            annotated it, and a point with none of them is dropped. ``None`` requires a single
+            annotator in ``points``.
+
+    Returns:
+        The selected point rows.
+
+    Raises:
+        ValueError: A listed annotator is absent from ``points``, ``annotators`` is ``None`` and
+            the selected points have several annotators, or a selected point lies outside its
+            image.
+    """
+    if annotators is not None:
+        _check_annotators_exist(points, annotators)
+    selected = points[points["image_id"].isin(images["image_id"])]
+    selected = _select_annotators(selected, annotators)
+    outside = _out_of_bounds(selected, images)
+    if not outside.empty:
+        listed = outside.head(_MAX_LISTED_POINTS).to_dict("records")
+        raise ValueError(f"{len(outside)} point(s) lie outside their image, e.g. {listed}")
+    return selected
+
+
 class PointDataset(VersionDataset):
     """Point-annotation reader; each item's mask is the image's points, painted with ``padding``.
 
@@ -143,25 +174,21 @@ class PointDataset(VersionDataset):
             transform=transform,
             on_missing_images=on_missing_images,
         )
-        label_to_local = {label: i for i, label in self.source_id2label_id.items()}
+        # ``drop`` mode removes images after ``_filter_images``, so their points go here.
         self.points = self.points[self.points["image_id"].isin(self.images["image_id"])]
         points = self.points
         self._rows = points["row"].to_numpy(dtype=np.intp)
         self._cols = points["col"].to_numpy(dtype=np.intp)
-        self._local_ids = points["label_id"].map(label_to_local).to_numpy(dtype=np.int32)
         self._positions = points.reset_index(drop=True).groupby("image_id", sort=False).indices
+        self._refresh_source_ids()
+
+    def _refresh_source_ids(self) -> None:
+        label_to_local = {label: i for i, label in self.source_id2label_id.items()}
+        self._local_ids = self.points["label_id"].map(label_to_local).to_numpy(dtype=np.int32)
 
     def _filter_images(self, images: pd.DataFrame) -> pd.DataFrame:
-        if self._annotators is not None:
-            _check_annotators_exist(self.points, self._annotators)
-        points = self.points[self.points["image_id"].isin(images["image_id"])]
-        points = _select_annotators(points, self._annotators)
-        outside = _out_of_bounds(points, images)
-        if not outside.empty:
-            listed = outside.head(_MAX_LISTED_POINTS).to_dict("records")
-            raise ValueError(f"{len(outside)} point(s) lie outside their image, e.g. {listed}")
-        self.points = points
-        return images[images["image_id"].isin(points["image_id"])]
+        self.points = select_points(self.points, images, self._annotators)
+        return images[images["image_id"].isin(self.points["image_id"])]
 
     def _label_counts(self) -> pd.Series:
         selected = self.points[self.points["image_id"].isin(self.images["image_id"])]

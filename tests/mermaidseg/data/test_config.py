@@ -126,6 +126,29 @@ def test_invalid_entries_raise(tmp_path: Path, entry: dict[str, Any]) -> None:
         sync_plan({"datasets": {"d": entry}}, tmp_path)
 
 
+def _plan_with_split_rows(root: Path, rows: list[str]) -> None:
+    path = root / "s.csv"
+    path.write_text("group,split\n" + "".join(f"{r}\n" for r in rows))
+    cfg = {"datasets": {"d": _entry(split_file="s.csv", train={"use": ["train"]})}}
+    sync_plan(cfg, root)
+
+
+@pytest.mark.parametrize("bad", ["Val", "holdout", ""])
+def test_split_value_outside_known_splits_raises(tmp_path: Path, bad: str) -> None:
+    with pytest.raises(ValueError, match=f"'{bad}'"):
+        _plan_with_split_rows(tmp_path, ["g1,train", f"g2,{bad}"])
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [["g1,train", "g1,val"], ["g1,train", "g1,train"]],
+    ids=["across-splits", "within-split"],
+)
+def test_group_on_more_than_one_row_raises(tmp_path: Path, rows: list[str]) -> None:
+    with pytest.raises(ValueError, match="g1"):
+        _plan_with_split_rows(tmp_path, rows)
+
+
 def test_unknown_section_key_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         sync_plan({"datasets": {}, "bucket": "other"}, tmp_path)

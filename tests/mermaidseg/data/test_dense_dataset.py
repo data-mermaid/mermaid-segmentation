@@ -74,3 +74,11 @@ def test_label_id_zero_in_the_counts_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="label_id 0"):
         DenseDataset(version, split="val")
+
+
+def test_set_source_vocabulary_maps_native_ids_to_the_new_ids(tmp_path: Path) -> None:
+    # Local ids are 4 -> 1 (two pixels) and 7 -> 2; the new vocabulary reverses them.
+    ds = DenseDataset(_version(tmp_path, _mask((0, 0, 4), (1, 1, 4), (2, 2, 7))), split="val")
+    ds.set_source_vocabulary({1: "seven", 2: "four"}, {"seven": 1, "four": 2}, 3)
+    _, mask = ds[0]
+    assert (mask[0, 0], mask[1, 1], mask[2, 2], mask[3, 3]) == (2, 2, 1, 0)

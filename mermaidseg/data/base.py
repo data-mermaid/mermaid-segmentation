@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -50,6 +51,10 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
     (shifted by the global offset), where ``N`` is the number of labels present in the selection.
     Subclasses set ``KIND`` and supply the mask.
 
+    ``__init__`` runs its steps in this order: group selection; ``_filter_images``, which may
+    narrow subclass state (``PointDataset`` narrows ``self.points``); the cache check, through
+    ``_row_paths``; ``self.images`` set; ``_label_counts``; the vocabulary; ``_apply_offset``.
+
     Attributes:
         SOURCE_NAME: The dataset name from the manifest.
         images: The selected rows of ``images.parquet``, indexed ``0..len-1``.
@@ -93,7 +98,8 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
                 removes those images and counts them in ``images_dropped``.
 
         Raises:
-            ValueError: The reader kind differs from the manifest kind, or a group is unknown.
+            ValueError: The reader kind differs from the manifest kind, a group is unknown, or
+                two label ids in the selection's vocabulary share a name.
             FileNotFoundError: A selected file is not cached and ``on_missing_images`` is
                 ``"fail"``.
         """
@@ -125,10 +131,14 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         unnamed = [i for i in label_ids if i not in names]
         if unnamed:
             raise ValueError(f"label ids missing from labels.parquet: {unnamed}")
+        shared = sorted(n for n, k in Counter(names[i] for i in label_ids).items() if k > 1)
+        if shared:
+            raise ValueError(f"label names shared by several selected label ids: {shared}")
         self.source_id2label_id = dict(enumerate(label_ids, start=1))
         self.source_id2name = {i: names[label] for i, label in self.source_id2label_id.items()}
         self.source_name2id = {name: i for i, name in self.source_id2name.items()}
         self.num_source_classes = len(self.source_id2name) + 1
+        self._apply_offset()
 
     def _filter_images(self, images: pd.DataFrame) -> pd.DataFrame:
         """Hook: narrow the group-selected rows before the cache check."""
@@ -148,6 +158,10 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
 
     def _apply_offset(self) -> None:
         """Hook: refresh state derived from the global offset."""
+
+    def _refresh_source_ids(self) -> None:
+        """Hook: refresh state derived from ``source_id2label_id``."""
+        self._apply_offset()
 
     def _check_cache(
         self, images: pd.DataFrame, mode: Literal["fail", "drop"]
@@ -179,6 +193,33 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
             raise ValueError(f"global offset must be non-negative, got {offset}")
         self._global_offset = int(offset)
         self._apply_offset()
+
+    def set_source_vocabulary(
+        self,
+        source_id2name: dict[int, str],
+        source_name2id: dict[str, int],
+        num_source_classes: int,
+    ) -> None:
+        """Replace the source maps with a shared vocabulary and remap mask ids to it.
+
+        Args:
+            source_id2name: Source id to label name.
+            source_name2id: Inverse of ``source_id2name``.
+            num_source_classes: ``len(source_id2name) + 1`` (including background).
+
+        Raises:
+            ValueError: A label name this reader serves is not in ``source_name2id``.
+        """
+        # Derived from the id maps, which stay consistent when a wider vocabulary is applied.
+        served = {self.source_id2name[i]: label for i, label in self.source_id2label_id.items()}
+        missing = sorted(set(served) - set(source_name2id))
+        if missing:
+            raise ValueError(f"label names missing from the new vocabulary: {missing}")
+        self.source_id2name = dict(source_id2name)
+        self.source_name2id = dict(source_name2id)
+        self.num_source_classes = int(num_source_classes)
+        self.source_id2label_id = {source_name2id[n]: label for n, label in served.items()}
+        self._refresh_source_ids()
 
     @property
     def global_offset(self) -> int:
