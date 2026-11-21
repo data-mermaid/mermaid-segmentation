@@ -3,7 +3,7 @@ import random
 
 import pyarrow as pa
 import pytest
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 
 from segdata_spec.resize import ResizeSpec, resize_image, resize_mask, scale_points, scaled_size
@@ -221,3 +221,15 @@ def test_scale_points_keeps_columns_order_and_types():
     assert out.schema.equals(points.schema)
     assert out["image_id"].to_pylist() == ["small", "big", "small"]
     assert out["label_id"].to_pylist() == [0, 1, 2]
+
+
+def test_resize_image_rejects_a_format_outside_jpeg_and_png():
+    tiff = _encode(Image.new("RGB", (8, 8)), "TIFF")
+
+    with pytest.raises(UnidentifiedImageError):
+        resize_image(tiff, ResizeSpec(max_edge=2048))
+
+
+def test_resize_mask_rejects_a_format_other_than_png():
+    with pytest.raises(UnidentifiedImageError):
+        resize_mask(_jpeg((8, 8)), (4, 4))

@@ -72,9 +72,10 @@ def resize_image(data: bytes, spec: ResizeSpec) -> bytes:
     A JPEG in RGB or L mode within ``spec.max_edge`` passes through. Any other image is
     re-encoded as JPEG, converted to RGB when its mode is not RGB or L. An image above twice Pillow's
     ``Image.MAX_IMAGE_PIXELS`` raises ``DecompressionBombError``; one between the limit and
-    twice it only warns.
+    twice it only warns. Only JPEG and PNG input is decoded; any other format raises
+    ``PIL.UnidentifiedImageError``.
     """
-    img: Image.Image = Image.open(io.BytesIO(data))
+    img: Image.Image = Image.open(io.BytesIO(data), formats=("JPEG", "PNG"))
     original_size = img.size  # header size, read before a JPEG draft shrinks it
     _draft_to_max_edge(img, spec.max_edge)
     img.load()
@@ -94,8 +95,11 @@ def resize_image(data: bytes, spec: ResizeSpec) -> bytes:
 
 
 def resize_mask(data: bytes, size: tuple[int, int]) -> bytes:
-    """Return the mask PNG resized to ``size`` with nearest-neighbour, keeping its mode."""
-    mask = Image.open(io.BytesIO(data))
+    """Return the mask PNG resized to ``size`` with nearest-neighbour, keeping its mode.
+
+    Only PNG input is decoded; any other format raises ``PIL.UnidentifiedImageError``.
+    """
+    mask = Image.open(io.BytesIO(data), formats=("PNG",))
     if mask.size == size:
         return data
     output = io.BytesIO()
