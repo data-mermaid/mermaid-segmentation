@@ -399,6 +399,20 @@ def _require_raw_parent(manifest: Manifest, raw: Pin) -> None:
         )
 
 
+def _with_excluded(split_table: pd.DataFrame, excluded: set[int]) -> pd.DataFrame:
+    """Append one ``excluded`` row, with an empty ``split_group``, per source id of ``excluded``."""
+    ids = sorted(excluded)
+    rows = pd.DataFrame(
+        {
+            "group": [f"s{s}" for s in ids],
+            "source_id": pd.Series(ids, dtype=split_table["source_id"].dtype),
+            "split_group": pd.Series([pd.NA] * len(ids), dtype="Int64"),
+            "split": "excluded",
+        }
+    )
+    return pd.concat([split_table.astype({"split_group": "Int64"}), rows], ignore_index=True)
+
+
 def run(args: argparse.Namespace, client: Any) -> int:
     """Sync the pinned tables, build the split and write it to ``args.out_dir``.
 
@@ -437,6 +451,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
         subset=subset,
         params=params,
     )
+    split_table = _with_excluded(split_table, excluded & set(n_images.index))
     meta = _meta(args, {**datasets, TAXONOMY: taxonomy}, excluded, params, summary, git)
     split_file = write_outputs(args.out_dir, split_table, summary, dist, meta)
     logger.info("wrote %s", split_file)

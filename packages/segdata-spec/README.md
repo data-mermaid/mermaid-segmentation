@@ -35,11 +35,12 @@ Images and masks are not under these prefixes. Their keys are `image_store.prefi
 
 ## Splits
 
-`splits.py` defines the split file: a CSV that assigns each dataset group to `train`, `val` or `test`. It does not choose the assignment.
+`splits.py` defines the split file: a CSV that assigns each dataset group to `train`, `val`, `test` or `excluded`. It does not choose the assignment.
 
-- **Columns:** `group` and `split` are required. `source_id` and `split_group` are optional, and other columns are allowed.
-- `read_split_file(path)` returns the file as a table of string columns. It raises `ValueError` if a required column is missing, a `split` value is not `train`, `val` or `test`, a group appears twice, or a `split_group` spans more than one split.
-- `check_coverage(split_file, dataset, groups)` raises `SplitCoverageError` if `groups` holds a group the file does not list. Groups the file lists but `groups` lacks are allowed.
+- **Columns:** `group` and `split` are required. `source_id` and `split_group` are optional, and other columns are allowed. A blank `split_group` means the row has none, and the straddling check skips it.
+- `read_split_file(path)` returns the file as a table of string columns. It raises `ValueError` if a required column is missing, a `split` value is not `train`, `val`, `test` or `excluded`, a group appears twice, or a `split_group` spans more than one split.
+- `check_coverage(split_file, dataset, groups)` raises `SplitCoverageError` if `groups` holds a group the file does not list. A group listed as `excluded` counts as listed, so a version may hold it. Groups the file lists but `groups` lacks are allowed.
+- `excluded` marks a group that is kept in the version but not used for training. A data config's `use:` accepts only `train`, `val` and `test`, so a `use:` selection never picks an `excluded` group. A data config block with `groups: all` or named groups selects by name, bypasses the split file, and includes excluded groups.
 - `coverage_checker(split_files)` takes a mapping from dataset name to split file and returns the `check_split` callback for `sync`. It checks the mapped datasets and skips the others.
 
 ```python

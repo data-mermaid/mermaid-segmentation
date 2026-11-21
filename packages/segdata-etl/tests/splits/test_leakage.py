@@ -47,6 +47,11 @@ def test_counts_eval_images_whose_key_is_in_another_split():
     }
 
 
+def test_blank_split_group_is_not_a_spanning_group():
+    split = _split([("s1", "", "train"), ("s3", "", "val")])
+    assert check_leakage(split, _images()).spanning_split_groups.empty
+
+
 def test_lists_cross_split_source_pairs():
     pairs = check_leakage(LEAKY, _images()).source_pairs
     assert pairs.to_dict("records") == [
@@ -62,6 +67,15 @@ def test_flags_split_groups_spanning_splits():
 def test_has_leakage_is_true_when_only_a_split_group_spans_splits():
     split = _split([("s1", "0", "train"), ("s3", "0", "val")])
     assert check_leakage(split, _images()).has_leakage
+
+
+def test_excluded_group_is_ignored_by_every_check():
+    split = _split([("s1", "0", "train"), ("s2", "0", "excluded")])
+    report = check_leakage(split, _images())
+    assert report.per_source["n_dup"].sum() == 0
+    assert report.source_pairs.empty
+    assert report.spanning_split_groups.empty
+    assert not report.has_leakage
 
 
 def _leakage_argv(

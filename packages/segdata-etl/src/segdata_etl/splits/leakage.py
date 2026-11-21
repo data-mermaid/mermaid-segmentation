@@ -86,6 +86,7 @@ def _source_pairs(keyed: pd.DataFrame) -> pd.DataFrame:
 def _spanning_split_groups(split_table: pd.DataFrame) -> pd.DataFrame:
     if "split_group" not in split_table.columns:
         return pd.DataFrame({"split_group": [], "splits": []})
+    split_table = split_table[split_table["split_group"] != ""]
     splits = split_table.groupby("split_group")["split"].agg(lambda s: ";".join(sorted(set(s))))
     return splits[splits.str.contains(";")].rename("splits").reset_index()
 
@@ -94,9 +95,11 @@ def check_leakage(split_table: pd.DataFrame, images: pd.DataFrame) -> LeakageRep
     """Find images and split_groups that cross splits.
 
     Args:
-        split_table: ``group`` and ``split``, with an optional ``split_group``.
+        split_table: ``group`` and ``split``, with an optional ``split_group``. Rows whose split
+            is ``excluded`` are dropped before any check.
         images: ``group``, ``crc64nvme`` and ``size`` per image.
     """
+    split_table = split_table[split_table["split"] != "excluded"]
     keyed = _keyed_images(split_table, images)
     return LeakageReport(
         per_source=_per_source(keyed),

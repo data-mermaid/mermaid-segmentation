@@ -11,6 +11,7 @@ from segdata_etl import cli
 from segdata_etl.splits.anneal import anneal
 from segdata_etl.splits.builder import SplitParams, _best_assignment, build_split
 from segdata_spec.manifest import ParentRef
+from segdata_spec.splits import check_coverage
 
 from .conftest import (
     BUCKET,
@@ -135,8 +136,20 @@ def test_test_source_component_goes_to_test(built):
     assert table.loc[["10", "11"], "split"].tolist() == ["test", "test"]
 
 
-def test_excluded_source_is_absent(built):
-    assert sorted(_table(built[0])["source_id"].astype(int)) == SOURCES[:-1]
+def test_excluded_source_is_listed_with_the_excluded_split(built):
+    row = _table(built[0]).set_index("source_id").loc["99"]
+    assert row.to_dict() == {"group": "s99", "split_group": "", "split": "excluded"}
+
+
+def test_split_file_covers_every_group_of_the_curated_version(built):
+    check_coverage(built[0] / "coralnet.csv", "coralnet", {f"s{s}" for s in SOURCES})
+
+
+def test_exclude_source_outside_the_version_writes_no_row(tmp_path, fixture_cache):
+    argv, out_dir, inputs = _argv(tmp_path, fixture_cache, _publish(fixture_cache))
+    inputs["exclude_sources"].write_text("99\n555\n")
+    assert cli.main(argv) == 0
+    assert "555" not in _table(out_dir)["source_id"].tolist()
 
 
 def test_meta_records_each_input_sha256(built):

@@ -41,6 +41,11 @@ def test_unknown_split_value_is_rejected(tmp_path: Path) -> None:
         read_split_file(_write(tmp_path, "group,split\ns1,validation\n"))
 
 
+def test_excluded_split_value_is_read_and_kept(tmp_path: Path) -> None:
+    table = read_split_file(_write(tmp_path, "group,split\ns1,excluded\ns2,train\n"))
+    assert table.column("split").to_pylist() == ["excluded", "train"]
+
+
 def test_duplicate_group_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="s1"):
         read_split_file(_write(tmp_path, "group,split\ns1,train\ns1,val\n"))
@@ -50,6 +55,11 @@ def test_split_group_across_two_splits_is_rejected(tmp_path: Path) -> None:
     text = "group,split,split_group\ns1,train,7\ns2,test,7\n"
     with pytest.raises(ValueError, match="7"):
         read_split_file(_write(tmp_path, text))
+
+
+def test_blank_split_group_means_none_and_may_span_splits(tmp_path: Path) -> None:
+    text = "group,source_id,split_group,split\ns1,1,5,train\ns2,2,,excluded\ns3,3,,train\n"
+    assert read_split_file(_write(tmp_path, text)).num_rows == 3
 
 
 def test_split_group_repeated_within_one_split_is_accepted(tmp_path: Path) -> None:

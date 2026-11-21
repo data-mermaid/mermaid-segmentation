@@ -2,10 +2,10 @@
 dataset: coralnet
 file: coralnet.csv
 columns:
-  group: connected-component label, "s<source_id>"
+  group: per-source group label, "s<source_id>"
   source_id: CoralNet source id
-  split_group: connected-component id from the original split build (int)
-  split: train | val | test
+  split_group: connected-component id from the original split build (int); blank on excluded rows, and blank means none
+  split: train | val | test | excluded
 
 derived_from:
   # The per-split source sets equal data.coralnet.{train,val,test}.whitelist_sources
