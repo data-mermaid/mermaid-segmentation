@@ -6,7 +6,7 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 
 - **Owns:** the `manifest.json` and parquet table schemas, the S3 key layout, the local cache layout, publishing a version, syncing pinned versions and their image files into the cache (resizing them there when given a resize spec), opening synced versions, and the benthic-attribute `roll_up`.
 - **Does not own:** extracting or converting source data, choosing versions or pins, train/validation splits (the caller passes a `check_split` callback), or publishing and owning the original image files. The ETL puts the originals in S3; the manifest's `image_store` names the bucket and prefix.
-- **Boundary:** the package does not import `mermaidseg`, `coralnet_scraper` or `segdata_etl`, and `mermaidseg/inference` does not import it. The root `tests/test_package_boundaries.py` enforces this. `mermaidseg` declares it as a dependency but does not import it.
+- **Boundary:** the package does not import `mermaidseg`, `coralnet_scraper` or `segdata_etl`, and `mermaidseg/inference` does not import it. The root `tests/test_package_boundaries.py` enforces this. `mermaidseg` imports it (`mermaidseg/data/`).
 
 ## Callers
 

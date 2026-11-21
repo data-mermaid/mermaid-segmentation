@@ -1,0 +1,112 @@
+"""run_sync and format_summary over a fixture version served by an in-test fake S3 client."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from mermaidseg.data import PointDataset
+from mermaidseg.data.config import DATASET_BUCKET, SyncPlan
+from mermaidseg.data.sync import format_summary, run_sync
+from segdata_spec.errors import ImageMissing
+from segdata_spec.manifest import Pin
+from segdata_spec.read import open_version
+from segdata_spec.sync import DatasetSyncResult, SyncResult
+from tests.mermaidseg.data.conftest import (
+    FakeS3,
+    ImageSpec,
+    publish_points,
+    publish_taxonomy_version,
+)
+
+LABELS = {5: "five"}
+IMAGES = [ImageSpec("i1", group="g1"), ImageSpec("i2", group="g2")]
+POINTS = [("i1", 2, 3, 5), ("i2", 4, 4, 5)]
+
+
+def _publish(tmp_path: Path) -> tuple[FakeS3, Pin]:
+    return publish_points(tmp_path, images=IMAGES, labels=LABELS, points=POINTS)
+
+
+def _plan(pin: Pin, groups: set[str] | None, mode: str = "fail") -> SyncPlan:
+    return SyncPlan(
+        pins={"ds": pin},
+        taxonomy=None,
+        selection={"ds": groups},
+        on_missing_images={"ds": mode},  # type: ignore[dict-item]
+    )
+
+
+def _image_files(cache_dir: Path) -> set[str]:
+    return {p.name for p in (cache_dir / "img-bucket").rglob("*.jpg")}
+
+
+def test_run_sync_fills_the_cache_so_a_reader_opens_it(tmp_path: Path) -> None:
+    fake, pin = _publish(tmp_path / "pub")
+    cache_dir = tmp_path / "synced"
+    result = run_sync(_plan(pin, None), cache_dir, fake)
+    assert result.datasets["ds"].images_dropped == 0
+    ds = PointDataset(open_version(cache_dir, DATASET_BUCKET, pin), split="val")
+    assert len(ds) == 2
+    _, mask = ds[0]
+    assert mask[2, 3] == 1
+
+
+def test_run_sync_forwards_the_selection(tmp_path: Path) -> None:
+    fake, pin = _publish(tmp_path / "pub")
+    cache_dir = tmp_path / "synced"
+    run_sync(_plan(pin, {"g1"}), cache_dir, fake)
+    assert _image_files(cache_dir) == {"i1.jpg"}
+
+
+def test_run_sync_forwards_the_missing_mode_and_reports_the_count(tmp_path: Path) -> None:
+    fake, pin = _publish(tmp_path / "pub")
+    del fake.objects[("img-bucket", "imgs/i2.jpg")]
+    cache_dir = tmp_path / "synced"
+    result = run_sync(_plan(pin, None, "drop"), cache_dir, fake)
+    assert result.datasets["ds"].images_dropped == 1
+    assert format_summary(result) == "ds: version 20260101-abc1234, images_dropped 1"
+    assert _image_files(cache_dir) == {"i1.jpg"}
+
+
+def test_run_sync_fails_on_a_missing_image_by_default(tmp_path: Path) -> None:
+    fake, pin = _publish(tmp_path / "pub")
+    del fake.objects[("img-bucket", "imgs/i2.jpg")]
+    with pytest.raises(ImageMissing):
+        run_sync(_plan(pin, None), tmp_path / "synced", fake)
+
+
+def test_run_sync_forwards_the_taxonomy_pin(tmp_path: Path) -> None:
+    fake, pin = _publish(tmp_path / "pub")
+    taxonomy = publish_taxonomy_version(fake, tmp_path / "pub", "20261120-1234567")
+    plan = SyncPlan(
+        pins={"ds": pin}, taxonomy=taxonomy, selection={"ds": set()}, on_missing_images={}
+    )
+    cache_dir = tmp_path / "synced"
+
+    result = run_sync(plan, cache_dir, fake)
+
+    assert result.taxonomy is not None
+    assert result.taxonomy.version == "20261120-1234567"
+    folder = cache_dir / DATASET_BUCKET / "taxonomy" / "mermaid-benthic" / "20261120-1234567"
+    assert {p.name for p in folder.iterdir()} == {
+        "manifest.json",
+        "benthic_attributes.parquet",
+        "growth_forms.parquet",
+    }
+
+
+def test_format_summary_lists_each_dataset_and_the_taxonomy() -> None:
+    def dataset(version: str, dropped: int) -> DatasetSyncResult:
+        return DatasetSyncResult(version, "0" * 64, dropped, ("x",) * dropped)
+
+    result = SyncResult(
+        datasets={"a": dataset("20260101-abc1234", 0), "b": dataset("20260102-abc1234", 3)},
+        taxonomy=Pin(name="mermaid-benthic", version="20260103-abc1234", manifest_sha256="1" * 64),
+    )
+    assert format_summary(result).splitlines() == [
+        "a: version 20260101-abc1234, images_dropped 0",
+        "b: version 20260102-abc1234, images_dropped 3",
+        "taxonomy: version 20260103-abc1234",
+    ]
