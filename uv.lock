@@ -3753,6 +3753,7 @@ dependencies = [
 tests = [
     { name = "pytest" },
     { name = "pytest-socket" },
+    { name = "segdata-spec" },
 ]
 
 [package.metadata]
@@ -3772,6 +3773,7 @@ requires-dist = [
 tests = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-socket", specifier = ">=0.7" },
+    { name = "segdata-spec", editable = "packages/segdata-spec" },
 ]
 
 [[package]]
