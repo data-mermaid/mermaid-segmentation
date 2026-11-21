@@ -31,6 +31,10 @@ class ImageMissing(SegdataError):
     """An image object listed in ``images.parquet`` is absent from its store."""
 
 
+class ImageUndecodable(SegdataError):
+    """An image or mask matches its record but cannot be decoded."""
+
+
 class SchemaValidationError(SegdataError, ValueError):
     """A table does not satisfy its declared schema."""
 

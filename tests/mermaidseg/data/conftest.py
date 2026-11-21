@@ -108,6 +108,7 @@ def _images_table(images: Sequence[ImageSpec], sizes: Mapping[str, int], dense: 
                 ),
                 "mask_crc64nvme": nulls,
                 "source_fingerprint": ["fp"] * n,
+                "source_name": nulls,
                 "attrs": nulls,
             }
         ),

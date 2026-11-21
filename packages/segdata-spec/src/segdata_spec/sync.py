@@ -5,10 +5,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import json
 import os
 import uuid
-from collections.abc import Callable, Collection, Mapping
+from collections import deque
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,6 +21,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
+from PIL import Image, UnidentifiedImageError
 
 from segdata_spec._s3 import (
     MANIFEST_NAME,
@@ -24,12 +29,15 @@ from segdata_spec._s3 import (
     dataset_prefix,
     is_not_found,
     is_precondition_failed,
+    resized_cache_path,
+    resized_index_path,
     taxonomy_prefix,
 )
 from segdata_spec.errors import (
     ChecksumMismatch,
     ImageChanged,
     ImageMissing,
+    ImageUndecodable,
     PinMismatch,
     SegdataError,
 )
@@ -40,6 +48,7 @@ from segdata_spec.manifest import (
     Pin,
     TaxonomyManifest,
 )
+from segdata_spec.resize import ResizeSpec, resize_image, resize_mask, scaled_size
 
 MissingMode = Literal["fail", "drop"]
 
@@ -49,21 +58,30 @@ _IMAGE_COLUMNS = [
     "etag",
     "size",
     "crc64nvme",
+    "width",
+    "height",
     "mask_key",
     "mask_etag",
     "mask_size",
     "mask_crc64nvme",
 ]
 
+# Rows submitted to the pool per worker ahead of the row being consumed.
+_IN_FLIGHT_PER_WORKER = 4
+
 
 @dataclass(frozen=True)
 class DatasetSyncResult:
-    """What ``sync`` did for one dataset pin; ``images_dropped`` feeds model lineage."""
+    """What ``sync`` did for one dataset pin; ``images_dropped`` and ``resize`` feed lineage.
+
+    ``resize`` is the spec applied to the dataset's images, or None when they were cached as is.
+    """
 
     version: str
     manifest_sha256: str
     images_dropped: int
     dropped_image_ids: tuple[str, ...]
+    resize: ResizeSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +204,126 @@ def _sync_object(
     _write_atomic(path, data)
 
 
+def _output_size(output: bytes) -> tuple[int, int]:
+    """Read a resized output's pixel ``(width, height)`` from its header."""
+    return Image.open(io.BytesIO(output), formats=("JPEG", "PNG")).size
+
+
+def _index_entry(output: bytes, source_etag: str) -> bytes:
+    width, height = _output_size(output)
+    entry = {
+        "source_etag": source_etag,
+        "size": len(output),
+        "sha256": _sha256(output),
+        "width": width,
+        "height": height,
+    }
+    return json.dumps(entry, sort_keys=True).encode()
+
+
+def _resized_problem(
+    output: bytes, entry: Any, source_etag: str, expected_size: tuple[int, int]
+) -> str | None:
+    """Describe how a resized output disagrees with its index entry, source ETag or size, or None.
+
+    ``expected_size`` is the pixel ``(width, height)`` the entry must record.
+    """
+    if not isinstance(entry, dict):
+        return "its index entry is not a JSON object"
+    if entry.get("source_etag") != source_etag:
+        return f"index entry source ETag {entry.get('source_etag')!r} is not {source_etag!r}"
+    if entry.get("size") != len(output):
+        return f"size {len(output)} differs from the indexed {entry.get('size')!r}"
+    if entry.get("sha256") != _sha256(output):
+        return "sha256 differs from the indexed sha256"
+    indexed = (entry.get("width"), entry.get("height"))
+    if indexed != expected_size:
+        return f"indexed size {indexed!r} is not the expected {expected_size!r}"
+    return None
+
+
+def _verify_resized(
+    output: Path, index: Path, source_etag: str, expected_size: tuple[int, int]
+) -> None:
+    """Raise ``ChecksumMismatch`` unless ``output`` matches its sidecar index entry."""
+    if not index.is_file():
+        raise ChecksumMismatch(f"cached file {output} has no index entry at {index}")
+    try:
+        entry = json.loads(index.read_bytes())
+    except ValueError as exc:
+        raise ChecksumMismatch(f"cached file {output}: index entry {index} is not JSON") from exc
+    problem = _resized_problem(output.read_bytes(), entry, source_etag, expected_size)
+    if problem:
+        raise ChecksumMismatch(f"cached file {output}: {problem}")
+
+
+def _transform_decoded(
+    transform: Callable[[bytes], bytes], data: bytes, bucket: str, key: str
+) -> bytes:
+    """Apply ``transform``, raising ``ImageUndecodable`` when Pillow cannot decode ``data``."""
+    try:
+        return transform(data)
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ImageUndecodable(f"s3://{bucket}/{key}: {exc}") from exc
+
+
+def _sync_resized_object(
+    client: Any,
+    cache_dir: Path,
+    spec: ResizeSpec,
+    obj: tuple[str, str, int, str | None],
+    bucket: str,
+    transform: Callable[[bytes], bytes],
+    expected_size: tuple[int, int],
+) -> None:
+    """Verify a cached resized object, or download, verify, transform and cache it.
+
+    ``expected_size`` is the pixel size the output must have, on a cache hit and after the
+    transform. The sidecar is written before the output, so an output on disk always has its
+    index entry.
+    """
+    key, etag, size, crc64nvme = obj
+    output = resized_cache_path(cache_dir, spec, bucket, key)
+    index = resized_index_path(cache_dir, spec, bucket, key)
+    if output.exists():
+        _verify_resized(output, index, etag, expected_size)
+        return
+    data = _download_object(client, bucket, key, etag)
+    problem = _object_problem(data, etag, size, crc64nvme)
+    if problem:
+        raise ChecksumMismatch(f"downloaded s3://{bucket}/{key}: {problem}")
+    resized = _transform_decoded(transform, data, bucket, key)
+    actual = _output_size(resized)
+    if actual != expected_size:
+        raise ChecksumMismatch(
+            f"downloaded s3://{bucket}/{key}: resized to {actual[0]}x{actual[1]}, "
+            f"expected {expected_size[0]}x{expected_size[1]}"
+        )
+    _write_atomic(index, _index_entry(resized, etag))
+    _write_atomic(output, resized)
+
+
+def _sync_row(
+    client: Any,
+    cache_dir: Path,
+    store: ImageStore,
+    spec: ResizeSpec | None,
+    row: Mapping[str, Any],
+) -> None:
+    """Sync one row's image and mask, resized per ``spec`` or as is when it is None."""
+    objects = [(store.prefix + key, etag, size, crc) for key, etag, size, crc in _row_objects(row)]
+    if spec is None:
+        for key, etag, size, crc in objects:
+            _sync_object(client, cache_dir, store.bucket, key, etag, size, crc)
+        return
+    expected = scaled_size(row["width"], row["height"], spec)
+    transforms: list[Callable[[bytes], bytes]] = [partial(resize_image, spec=spec)]
+    if row["mask_key"] is not None:
+        transforms.append(partial(resize_mask, size=expected))
+    for obj, transform in zip(objects, transforms, strict=True):
+        _sync_resized_object(client, cache_dir, spec, obj, store.bucket, transform, expected)
+
+
 def _row_objects(row: Mapping[str, Any]) -> list[tuple[str, str, int, str | None]]:
     """Return ``(key, etag, size, crc64nvme)`` for the row's image and, when it has one, its mask."""
     objects = [(row["key"], row["etag"], row["size"], row["crc64nvme"])]
@@ -217,15 +355,44 @@ def _check_selection(
             raise ValueError(f"selection names groups absent from dataset {name!r}: {absent}")
 
 
-def _sync_images(
-    client: Any, cache_dir: Path, store: ImageStore, images: pa.Table, mode: MissingMode
+def _check_resize(resize: Mapping[str, ResizeSpec | None], pins: Mapping[str, Pin]) -> None:
+    unknown = sorted(set(resize) - set(pins))
+    if unknown:
+        raise ValueError(f"resize names datasets that are not pinned: {unknown}")
+
+
+def _resolve_max_workers(max_workers: int | None) -> int:
+    if max_workers is None:
+        return min(8, os.cpu_count() or 1)
+    if max_workers < 1:
+        raise ValueError(f"max_workers must be at least 1, got {max_workers}")
+    return max_workers
+
+
+def _ordered_futures(
+    pool: ThreadPoolExecutor,
+    work: Callable[[dict[str, Any]], None],
+    rows: Iterable[dict[str, Any]],
+    window: int,
+) -> Iterator[tuple[dict[str, Any], Future[None]]]:
+    """Yield ``(row, future)`` in row order, with at most ``window`` rows submitted at once."""
+    pending: deque[tuple[dict[str, Any], Future[None]]] = deque()
+    for row in rows:
+        pending.append((row, pool.submit(work, row)))
+        if len(pending) >= window:
+            yield pending.popleft()
+    while pending:
+        yield pending.popleft()
+
+
+def _collect_dropped(
+    outcomes: Iterable[tuple[dict[str, Any], Future[None]]], mode: MissingMode
 ) -> tuple[str, ...]:
-    """Sync every image and mask in ``images``; return the ids dropped as missing."""
+    """Wait on each row in order; return the ids dropped as missing, raising any other failure."""
     dropped: list[str] = []
-    for row in images.select(_IMAGE_COLUMNS).to_pylist():
+    for row, future in outcomes:
         try:
-            for key, etag, size, crc in _row_objects(row):
-                _sync_object(client, cache_dir, store.bucket, store.prefix + key, etag, size, crc)
+            future.result()
         except ImageMissing:
             if mode == "fail":
                 raise
@@ -233,16 +400,43 @@ def _sync_images(
     return tuple(dropped)
 
 
+def _sync_images(
+    client: Any,
+    cache_dir: Path,
+    store: ImageStore,
+    images: pa.Table,
+    mode: MissingMode,
+    spec: ResizeSpec | None,
+    max_workers: int,
+) -> tuple[str, ...]:
+    """Sync every image and mask in ``images`` on a worker pool; return the ids dropped as missing.
+
+    Results are consumed in row order, so the error raised and the dropped ids match a serial run.
+    """
+    work = partial(_sync_row, client, cache_dir, store, spec)
+    rows = images.select(_IMAGE_COLUMNS).to_pylist()
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        try:
+            outcomes = _ordered_futures(pool, work, rows, _IN_FLIGHT_PER_WORKER * max_workers)
+            return _collect_dropped(outcomes, mode)
+        except BaseException:
+            pool.shutdown(cancel_futures=True)
+            raise
+
+
 def _images_table(table_bytes: Mapping[str, bytes]) -> pa.Table:
     return pq.read_table(io.BytesIO(table_bytes["images.parquet"]))
 
 
-def _dataset_result(pin: Pin, dropped: tuple[str, ...]) -> DatasetSyncResult:
+def _dataset_result(
+    pin: Pin, dropped: tuple[str, ...], spec: ResizeSpec | None
+) -> DatasetSyncResult:
     return DatasetSyncResult(
         version=pin.version,
         manifest_sha256=pin.manifest_sha256,
         images_dropped=len(dropped),
         dropped_image_ids=dropped,
+        resize=spec,
     )
 
 
@@ -262,23 +456,46 @@ def sync(
     on_missing_images: Mapping[str, MissingMode] | None = None,
     check_split: Callable[[str, set[str]], None] | None = None,
     taxonomy: Pin | None = None,
+    resize: Mapping[str, ResizeSpec | None] | None = None,
+    max_workers: int | None = None,
 ) -> SyncResult:
     """Sync pinned versions into ``<cache_dir>/<bucket>/<key>``, verifying every file.
 
-    Every manifest, then every table, then the selection check, then ``check_split`` per dataset,
-    all precede the first image. A dataset absent from ``selection`` syncs all groups; one absent
-    from ``on_missing_images`` fails on a missing image.
+    Every manifest, then every table, then the selection and ``resize`` checks, then
+    ``check_split`` per dataset, all precede the first image. A dataset absent from ``selection``
+    syncs all groups; one absent from ``on_missing_images`` fails on a missing image.
+
+    A dataset with a spec in ``resize`` caches each image resized per the spec, and each mask
+    resized to its image's scaled size, at ``<cache_dir>/resized/<spec.id>/<bucket>/<key>``; the
+    original is not cached. A sidecar at
+    ``<cache_dir>/resized/<spec.id>/.index/<bucket>/<key>.json`` records the source ETag and the
+    output's size, sha256 and pixel width and height, and is written before the output.
+    A cached output is verified against its sidecar and never re-downloaded. A dataset absent from
+    ``resize``, or mapped to None, caches the original bytes.
+
+    Images and masks are synced on ``max_workers`` threads (default ``min(8, os.cpu_count())``),
+    with results taken in row order, so the error raised and ``dropped_image_ids`` match a serial
+    run. Configure ``client`` with ``max_pool_connections`` of at least ``max_workers``.
 
     Raises:
         PinMismatch: A manifest, downloaded or cached, differs from its pin.
-        ChecksumMismatch: A table, image or mask, downloaded or cached, differs from its record.
+        ChecksumMismatch: A table, image or mask, downloaded or cached, differs from its record,
+            or a cached resized output has no sidecar or differs from it, or a resized output's
+            pixel size differs from the size scaled from its row's ``width`` and ``height``.
+        ImageUndecodable: An original to resize matches its record but Pillow cannot decode it.
         ImageChanged: An image or mask no longer matches its recorded ETag.
         ImageMissing: An image or mask is absent and its dataset's mode is ``fail``.
-        ValueError: ``selection`` names a dataset not in ``pins`` or a group absent from its
-            dataset (raised before any image), or a published key would leave the cache.
+        ValueError: ``max_workers`` is below 1 (raised before any S3 call); ``selection`` names
+            a dataset not in ``pins`` or a group absent from its dataset, or ``resize`` names a
+            dataset not in ``pins`` (raised before any image); or a published key would leave
+            the cache.
+        PIL.Image.DecompressionBombError: An original to resize is above twice Pillow's
+            ``Image.MAX_IMAGE_PIXELS``; one between the limit and twice it only warns.
     """
+    workers = _resolve_max_workers(max_workers)
     selection = selection or {}
     on_missing_images = on_missing_images or {}
+    resize = resize or {}
     manifests = {
         name: Manifest.model_validate_json(
             _fetch_manifest(client, cache_dir, bucket, dataset_prefix(pin.name, pin.version), pin)
@@ -308,6 +525,7 @@ def sync(
             client, cache_dir, bucket, taxonomy_prefix(taxonomy.name, taxonomy.version), tax_files
         )
     _check_selection(selection, images)
+    _check_resize(resize, pins)
     if check_split is not None:
         for name, table in images.items():
             check_split(name, set(pc.unique(table.column("group")).to_pylist()))
@@ -320,7 +538,10 @@ def sync(
                 manifests[name].image_store,
                 _select_groups(images[name], selection.get(name)),
                 on_missing_images.get(name, "fail"),
+                resize.get(name),
+                workers,
             ),
+            resize.get(name),
         )
         for name, pin in pins.items()
     }

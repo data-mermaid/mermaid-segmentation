@@ -29,6 +29,7 @@ segdata = "segdata_etl.cli:main"
 tests = [
     "pytest>=8.0",
     "pytest-socket>=0.7",
+    "segdata-spec",
 ]
 
 [tool.uv.sources]

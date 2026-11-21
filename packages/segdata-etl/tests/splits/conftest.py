@@ -84,6 +84,7 @@ def images_table(rows: list[tuple[str, str, str | None, int]]) -> pa.Table:
             "mask_size": pa.nulls(n, pa.int64()),
             "mask_crc64nvme": pa.nulls(n, pa.string()),
             "source_fingerprint": ["fp"] * n,
+            "source_name": pa.nulls(n, pa.string()),
             "attrs": pa.nulls(n, pa.string()),
         }
     )
