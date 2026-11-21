@@ -9,11 +9,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from segdata_spec import DATASET_BUCKET as DATASET_BUCKET
 from segdata_spec.manifest import Pin
 from segdata_spec.splits import read_split_file
 from segdata_spec.sync import MissingMode
 
-DATASET_BUCKET = "mermaid-ic-datasets"
 TAXONOMY_NAME = "mermaid-benthic"
 
 Split = Literal["train", "val", "test"]

@@ -13,6 +13,8 @@ from typing import Any
 import boto3
 from botocore.config import Config
 
+from segdata_spec import DATASET_BUCKET
+
 from .datasets import (
     benthos_yuval,
     catlin_seaview,
@@ -25,7 +27,6 @@ from .splits import leakage as split_leakage
 from .splits.builder import SplitParams
 
 DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
-SPLIT_BUCKET = "mermaid-ic-datasets"
 DEFAULT_WORKERS = 16
 WORKDIR_ROOT = Path("outputs") / "external-datasets"
 
@@ -74,7 +75,7 @@ def _pin_flags(parser: argparse.ArgumentParser, prefix: str, what: str) -> None:
 
 def _split_cache_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cache-dir", type=Path, required=True, help="Local segdata cache")
-    parser.add_argument("--bucket", default=SPLIT_BUCKET, help="Bucket holding the versions")
+    parser.add_argument("--bucket", default=DATASET_BUCKET, help="Bucket holding the versions")
     parser.add_argument("-v", "--verbose", action="store_true")
 
 
