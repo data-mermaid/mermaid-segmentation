@@ -4,6 +4,8 @@
 python scripts/check_dataset_parity.py --data-config configs/data_config.yaml \
     --dataset catlin_seaview --split train --version 20261120-ab12cd3 \
     --manifest-sha256 <sha256> --cache-dir /scratch/cache
+
+Needs S3 read access through the default boto3 credentials. Exits 1 on any difference.
 """
 
 from __future__ import annotations
@@ -23,11 +25,13 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--data-config", type=Path, required=True, help="old data config")
-    p.add_argument("--dataset", required=True)
-    p.add_argument("--split", required=True)
-    p.add_argument("--version", required=True)
-    p.add_argument("--manifest-sha256", required=True)
-    p.add_argument("--cache-dir", type=Path, required=True)
+    p.add_argument("--dataset", required=True, help="dataset name in the old data config")
+    p.add_argument("--split", required=True, help="split to compare")
+    p.add_argument("--version", required=True, help="pinned dataset version")
+    p.add_argument("--manifest-sha256", required=True, help="sha256 of the version's manifest")
+    p.add_argument(
+        "--cache-dir", type=Path, required=True, help="directory the version is downloaded into"
+    )
     p.add_argument("--annotator", action="append", default=None, help="repeat for priority order")
     args = p.parse_args(argv)
     cfg = yaml.safe_load(args.data_config.read_text())
