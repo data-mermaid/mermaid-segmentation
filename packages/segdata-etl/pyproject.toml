@@ -11,11 +11,14 @@ dependencies = [
     "coralnet-scraper",
     "boto3",
     "ibis-framework[duckdb]",
+    "networkx",
     "numpy",
     "pandas",
     "pillow",
     "pyarrow",
+    "pyyaml",
     "requests",
+    "segdata-spec",
     "tqdm",
 ]
 
@@ -30,6 +33,7 @@ tests = [
 
 [tool.uv.sources]
 coralnet-scraper = { workspace = true }
+segdata-spec = { workspace = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]
