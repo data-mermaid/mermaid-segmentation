@@ -140,19 +140,19 @@ def _best_assignment(
     best: tuple[np.ndarray, float] | None = None
     for r in range(params.restarts):
         a, c = anneal(
-            X,
-            n,
-            P,
-            grp["eligible"].to_numpy(),
-            targets,
-            fracs,
-            params.w_size,
-            cls_mask,
-            min_pts,
-            params.w_coverage,
-            params.iters,
-            params.seed + r,
-            grp["fixed"].to_numpy(),
+            X=X,
+            n=n,
+            P=P,
+            eligible=grp["eligible"].to_numpy(),
+            targets=targets,
+            fracs=fracs,
+            w_size=params.w_size,
+            cls_mask=cls_mask,
+            min_pts=min_pts,
+            w_cov=params.w_coverage,
+            iters=params.iters,
+            seed=params.seed + r,
+            fixed=grp["fixed"].to_numpy(),
         )
         logger.info("restart %d: cost %.4f", r, c)
         if best is None or c < best[1]:
