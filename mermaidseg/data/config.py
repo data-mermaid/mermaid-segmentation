@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from segdata_spec.manifest import Pin
 from segdata_spec.sync import MissingMode
 
-DATASET_BUCKET = "mermaid-seg-datasets"
+DATASET_BUCKET = "mermaid-ic-datasets"
 TAXONOMY_NAME = "mermaid-benthic"
 
 Split = Literal["train", "val", "test"]
@@ -35,9 +35,6 @@ class SplitSelection(_Strict):
 
     use: list[Split] | None = None
     groups: Literal["all"] | list[str] | None = None
-    annotator: list[str] | None = None
-    repeat: int | None = None
-    transform: Any = None
 
     @model_validator(mode="after")
     def _exactly_one_selector(self) -> SplitSelection:
@@ -73,7 +70,6 @@ class DataSection(_Strict):
 
     taxonomy: PinRef | None = None
     datasets: dict[str, DatasetEntry]
-    default: Any = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +88,12 @@ def _split_groups(split_file: Path, use: list[Split]) -> set[str]:
     missing = {"group", "split"} - set(table.columns)
     if missing:
         raise ValueError(f"split file {split_file} lacks columns {sorted(missing)}")
+    bad = sorted(set(table["split"]) - set(get_args(Split)))
+    if bad:
+        raise ValueError(f"split file {split_file} has unknown split values {bad}")
+    duplicated = sorted(set(table.loc[table["group"].duplicated(), "group"]))
+    if duplicated:
+        raise ValueError(f"split file {split_file} lists groups on more than one row: {duplicated}")
     return set(table.loc[table["split"].isin(use), "group"])
 
 
@@ -126,7 +128,8 @@ def sync_plan(data_cfg: Mapping[str, Any], repo_root: Path) -> SyncPlan:
 
     Raises:
         pydantic.ValidationError: The section has an unknown key or an invalid block.
-        ValueError: A split file lacks the ``group`` or ``split`` column.
+        ValueError: A split file lacks the ``group`` or ``split`` column, has a ``split`` value
+            outside train, val and test, or lists a group on more than one row.
     """
     section = DataSection.model_validate(data_cfg)
     taxonomy = (
