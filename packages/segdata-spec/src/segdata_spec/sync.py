@@ -444,7 +444,8 @@ def sync(
             a dataset not in ``pins`` or a group absent from its dataset, or ``resize`` names a
             dataset not in ``pins`` (raised before any image); or a published key would leave
             the cache.
-        PIL.Image.DecompressionBombError: An original to resize exceeds Pillow's pixel limit.
+        PIL.Image.DecompressionBombError: An original to resize is above twice Pillow's
+            ``Image.MAX_IMAGE_PIXELS``; one between the limit and twice it only warns.
     """
     workers = _resolve_max_workers(max_workers)
     selection = selection or {}

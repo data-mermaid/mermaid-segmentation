@@ -70,8 +70,9 @@ def resize_image(data: bytes, spec: ResizeSpec) -> bytes:
     """Return ``data`` downscaled per ``spec`` as JPEG, or unchanged when no re-encode is needed.
 
     A JPEG in RGB or L mode within ``spec.max_edge`` passes through. Any other image is
-    re-encoded as JPEG, converted to RGB when its mode is not RGB or L. Pillow's
-    ``DecompressionBombError`` propagates.
+    re-encoded as JPEG, converted to RGB when its mode is not RGB or L. An image above twice Pillow's
+    ``Image.MAX_IMAGE_PIXELS`` raises ``DecompressionBombError``; one between the limit and
+    twice it only warns.
     """
     img: Image.Image = Image.open(io.BytesIO(data))
     original_size = img.size  # header size, read before a JPEG draft shrinks it
