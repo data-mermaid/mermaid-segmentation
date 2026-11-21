@@ -11,11 +11,14 @@ dependencies = [
     "coralnet-scraper",
     "boto3",
     "ibis-framework[duckdb]",
+    "networkx",
     "numpy",
     "pandas",
     "pillow",
     "pyarrow",
+    "pyyaml",
     "requests",
+    "segdata-spec",
     "tqdm",
 ]
 

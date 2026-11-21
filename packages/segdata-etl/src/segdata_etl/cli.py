@@ -1,16 +1,19 @@
-"""``segdata`` console script: ``build coralnet <stage>`` and ``build <external dataset>``."""
+"""``segdata`` console script: ``build coralnet <stage>``, ``build <external dataset>`` and ``split``."""
 
 from __future__ import annotations
 
 import argparse
 import logging
 from collections.abc import Sequence
+from dataclasses import fields
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import boto3
 from botocore.config import Config
+
+from segdata_spec import DATASET_BUCKET
 
 from .datasets import (
     benthos_yuval,
@@ -19,6 +22,9 @@ from .datasets import (
     pacific_labeled_corals,
 )
 from .datasets.coralnet import commands as coralnet_commands
+from .splits import builder as split_builder
+from .splits import leakage as split_leakage
+from .splits.builder import SplitParams
 
 DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
 DEFAULT_WORKERS = 16
@@ -60,8 +66,74 @@ def _shared_parser(dataset: str) -> argparse.ArgumentParser:
     return parent
 
 
+def _pin_flags(parser: argparse.ArgumentParser, prefix: str, what: str) -> None:
+    parser.add_argument(f"--{prefix}version", required=True, help=f"Version of {what}")
+    parser.add_argument(
+        f"--{prefix}manifest-sha256", required=True, help=f"Manifest sha256 of {what}"
+    )
+
+
+def _split_cache_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--cache-dir", type=Path, required=True, help="Local segdata cache")
+    parser.add_argument("--bucket", default=DATASET_BUCKET, help="Bucket holding the versions")
+    parser.add_argument("-v", "--verbose", action="store_true")
+
+
+def _split_build_flags(parser: argparse.ArgumentParser) -> None:
+    _pin_flags(parser, "", "the curated coralnet dataset")
+    _pin_flags(parser, "raw-", "the coralnet-raw parent")
+    _pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
+    _split_cache_flags(parser)
+    inputs = {
+        "--near-dup-labels": "Near-duplicate pair labels CSV; dup / unsure pairs link sources",
+        "--metadata": "Source metadata CSV: source_id, admins, latitude, longitude",
+        "--test-sources": "Source ids whose groups go to test, one per line",
+        "--exclude-sources": "Source ids left out entirely, one per line",
+        "--training-config": "Training config; its training.class_subset is the class space",
+    }
+    for flag, help_text in inputs.items():
+        parser.add_argument(flag, type=Path, required=True, help=help_text)
+    parser.add_argument("--out-dir", type=Path, required=True)
+    defaults = SplitParams()
+    tuning_help = {
+        "val_frac": "Share of images assigned to val",
+        "test_frac": "Share of images assigned to test",
+        "max_group_frac": "Largest group, as a share of the smaller eval split's image target, that may go to val or test",
+        "max_id_gap": "Max source ID gap for two sources to count as one project",
+        "max_km": "Max distance in km for two sources to count as one project",
+        "min_class_points": "Min points a class needs to be counted in the class space",
+        "min_eval_points": "Min points per class that val and test should hold",
+        "w_coverage": "Annealing weight on class coverage of val and test",
+        "w_size": "Annealing weight on split size deviation",
+        "iters": "Annealing iterations per restart",
+        "restarts": "Annealing restarts; the best run wins",
+        "seed": "Random seed for annealing",
+    }
+    for field in fields(SplitParams):
+        parser.add_argument(
+            "--" + field.name.replace("_", "-"),
+            type=type(getattr(defaults, field.name)),
+            default=getattr(defaults, field.name),
+            help=tuning_help[field.name] + " (default: %(default)s)",
+        )
+
+
+def _add_split_subcommands(top: Any) -> None:
+    split = top.add_parser("split", help="Build or check the CoralNet train/val/test split")
+    split_sub = split.add_subparsers(dest="command", required=True)
+    build = split_sub.add_parser("build", help="Build a CoralNet split into --out-dir")
+    _split_build_flags(build)
+    build.set_defaults(func=lambda args: split_builder.run(args, make_s3_client()))
+    leakage = split_sub.add_parser("leakage", help="Check a split file for cross-split images")
+    leakage.add_argument("--split-file", type=Path, required=True)
+    _pin_flags(leakage, "", "the coralnet dataset")
+    _split_cache_flags(leakage)
+    leakage.add_argument("--out-dir", type=Path, default=None, help="Write the report CSVs here")
+    leakage.set_defaults(func=lambda args: split_leakage.run(args, make_s3_client()))
+
+
 def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.ArgumentParser:
-    """Build the top-level parser: ``build coralnet <stage>`` and one ``build`` entry per dataset."""
+    """Build the top-level parser: ``build coralnet <stage>``, one ``build`` entry per dataset, and ``split``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
     top = parser.add_subparsers(dest="action", required=True)
     build = top.add_parser("build", help="Build and publish a dataset")
@@ -72,6 +144,7 @@ def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.Ar
         dataset_parser = build_sub.add_parser(name, parents=[_shared_parser(name)])
         module.add_arguments(dataset_parser, workdir=default_workdir(name))
         dataset_parser.set_defaults(run=module.run)
+    _add_split_subcommands(top)
     return parser
 
 

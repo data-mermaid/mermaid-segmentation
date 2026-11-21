@@ -3744,11 +3744,14 @@ dependencies = [
     { name = "boto3" },
     { name = "coralnet-scraper" },
     { name = "ibis-framework", extra = ["duckdb"] },
+    { name = "networkx" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pillow" },
     { name = "pyarrow" },
+    { name = "pyyaml" },
     { name = "requests" },
+    { name = "segdata-spec" },
     { name = "tqdm" },
 ]
 
@@ -3764,11 +3767,14 @@ requires-dist = [
     { name = "boto3" },
     { name = "coralnet-scraper", editable = "packages/coralnet-scraper" },
     { name = "ibis-framework", extras = ["duckdb"] },
+    { name = "networkx" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pillow" },
     { name = "pyarrow" },
+    { name = "pyyaml" },
     { name = "requests" },
+    { name = "segdata-spec", editable = "packages/segdata-spec" },
     { name = "tqdm" },
 ]
 

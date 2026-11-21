@@ -4,8 +4,8 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 
 ## Scope
 
-- **Owns:** the `manifest.json` and parquet table schemas, the S3 key layout, the local cache layout, publishing a version, syncing pinned versions and their image files into the cache (resizing them there when given a resize spec), opening synced versions, and the benthic-attribute `roll_up`.
-- **Does not own:** extracting or converting source data, choosing versions or pins, train/validation splits (the caller passes a `check_split` callback), or publishing and owning the original image files. The ETL puts the originals in S3; the manifest's `image_store` names the bucket and prefix.
+- **Owns:** the `manifest.json` and parquet table schemas, the S3 key layout, the local cache layout, publishing a version, syncing pinned versions and their image files into the cache (resizing them there when given a resize spec), opening synced versions, the benthic-attribute `roll_up`, and the split-file format with its coverage check.
+- **Does not own:** extracting or converting source data, choosing versions or pins, choosing the train/val/test split (the package reads and checks a split file; the split is built elsewhere), or publishing and owning the original image files. The ETL puts the originals in S3; the manifest's `image_store` names the bucket and prefix.
 - **Boundary:** the package does not import `mermaidseg`, `coralnet_scraper` or `segdata_etl`, and `mermaidseg/inference` does not import it. The root `tests/test_package_boundaries.py` enforces this. `mermaidseg` imports it (`mermaidseg/data/`).
 
 ## Callers
@@ -15,6 +15,7 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 | ETL | `publish.publish_dataset` and `publish.publish_taxonomy`. Each returns the manifest and its sha256, which becomes a `manifest.Pin`. |
 | Trainer | `sync.sync(client, pins, cache_dir, bucket=..., resize=..., max_workers=...)`, which needs S3 access, then `read.open_version(..., resize=...)` and `read.open_taxonomy`, which read only the cache. Also `resize` (`ResizeSpec`, `scaled_size`, `resize_image`, `resize_mask`, `scale_points`, `scale_images`). `scale_images` returns the images table with the resized `width` and `height` and `media_type` `image/jpeg`; `open_version(resize=)` uses it. |
 | Both | `taxonomy.roll_up` and `taxonomy.hierarchy_from_table`. |
+| Split builder and trainer | `splits.read_split_file`. The trainer also passes `splits.coverage_checker` to `sync`. |
 
 `resize` copies the ETL's decode-and-resize rather than being called by it. For JPEG and PNG images whose scaled edges are at least 1 px, `test_segdata_spec_parity.py` keeps the two byte-identical. Otherwise they diverge: the spec refuses formats other than JPEG and PNG, which the ETL decodes, and clamps a zero edge to 1 px, where the ETL fails.
 
@@ -55,6 +56,23 @@ A resized file keeps the source key name, so a key ending `.png` may hold JPEG b
 - Masks are scaled to their image's new size with nearest-neighbour and stay PNG.
 - `open_version(resize=)` reports the resized `width` and `height` and `media_type` `image/jpeg`. It scales `points` from the recorded original size, with floor and then a clamp to the image. It reads no images. `size`, `etag`, the CRC columns and their mask counterparts still describe the S3 original.
 
+## Splits
+
+`splits.py` defines the split file: a CSV that assigns each dataset group to `train`, `val`, `test` or `excluded`. It does not choose the assignment.
+
+- **Columns:** `group` and `split` are required. `source_id` and `split_group` are optional, and other columns are allowed. A blank `split_group` means the row has none, and the straddling check skips it.
+- `read_split_file(path)` returns the file as a table of string columns. It raises `ValueError` if a required column is missing, a `split` value is not `train`, `val`, `test` or `excluded`, a group appears twice, or a `split_group` spans more than one split.
+- `check_coverage(split_file, dataset, groups)` raises `SplitCoverageError` if `groups` holds a group the file does not list. A group listed as `excluded` counts as listed, so a version may hold it. Groups the file lists but `groups` lacks are allowed.
+- `excluded` marks a group that is kept in the version but not used for training. A data config's `use:` accepts only `train`, `val` and `test`, so a `use:` selection never picks an `excluded` group. A data config block with `groups: all` or named groups selects by name, bypasses the split file, and includes excluded groups.
+- `coverage_checker(split_files)` takes a mapping from dataset name to split file and returns the `check_split` callback for `sync`. It checks the mapped datasets and skips the others.
+
+```python
+sync(client, pins, cache_dir, bucket=bucket,
+     check_split=coverage_checker({"coralnet": Path("configs/splits/coralnet.csv")}))
+```
+
+`mermaidseg/data/sync.py` passes this callback in `run_sync`, so a sync fails before any image download when a pinned version has an unlisted group.
+
 ## Guarantees
 
 Publish:
@@ -67,7 +85,7 @@ Publish:
 
 Sync:
 
-- Order of checks: `max_workers` (before any S3 call), every manifest against its pin, every table against its manifest sha256, the `selection` and `resize` checks, `check_split` for each dataset, then the images. A failure before the images downloads no image.
+- Order of checks: `max_workers` (before any S3 call), every manifest against its pin, every table against its manifest sha256, the `selection` and `resize` checks, `check_split` for each dataset, then the images. A failure before the images downloads no image. `check_split` is a callable `(dataset, groups) -> None` that receives the groups in the dataset's `images.parquet`. Callers pass `coverage_checker(split_files)` for it (see [Splits](#splits)).
 - `on_missing_images` is `"fail"` (default) or `"drop"` for each dataset. `drop` skips an image or mask that is absent and reports its ID in `DatasetSyncResult.dropped_image_ids`. A changed object always fails.
 - Images and masks are fetched with `IfMatch` on the recorded ETag.
 - With a resize spec, the original is verified (`IfMatch`, size, MD5, CRC64NVME) before it is resized, and only the result is written. The index entry is written before the output, so the output file is the commit point.
@@ -90,6 +108,7 @@ All derive from `errors.SegdataError`.
 | `ChecksumMismatch` | A table, image or mask differs from its recorded checksum or size, or a cached resized output has no valid index entry or differs from it. |
 | `ImageChanged` | An image no longer matches its recorded ETag. |
 | `ImageMissing` | An image is absent and the dataset's mode is `fail`. |
+| `SplitCoverageError` | A dataset version has a group that its split file does not list. |
 | `ImageUndecodable` | An image or mask matches its checksums but cannot be decoded (for example, a format other than JPEG or PNG). Names the S3 key. |
 
 `sync` also raises `ValueError` for a `selection` that names an unpinned dataset or an absent group, a `resize` that names an unpinned dataset, or `max_workers` below 1. `read` raises `FileNotFoundError` for a manifest or table that is not cached. `read` and `open_version` raise `ValueError` when a point names an `image_id` absent from `images` (resize set).

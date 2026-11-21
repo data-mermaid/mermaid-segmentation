@@ -29,7 +29,7 @@ def test_main_plans_syncs_and_prints(
     config.write_text(_CONFIG)
     cache_dir = tmp_path / "cache"
     seen: dict[str, Any] = {}
-    plan = SyncPlan(pins={}, taxonomy=None, selection={}, on_missing_images={})
+    plan = SyncPlan(pins={}, taxonomy=None, selection={}, on_missing_images={}, split_files={})
     result = SyncResult(datasets={}, taxonomy=None)
 
     def _sync_plan(data_cfg: Any, repo_root: Path) -> SyncPlan:

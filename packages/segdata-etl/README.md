@@ -1,6 +1,6 @@
 # segdata-etl
 
-Builds the segmentation training data in S3: the CoralNet training manifest, and the four external datasets. Import package: `segdata_etl`; console script: `segdata`. Every dataset runs as `segdata build <dataset>`.
+Builds the segmentation training data in S3: the CoralNet training manifest, and the four external datasets. Import package: `segdata_etl`; console script: `segdata`. Every dataset runs as `segdata build <dataset>`. The CoralNet split runs as `segdata split build` and `segdata split leakage` (see [CoralNet split](#coralnet-split)).
 
 ## Scope
 
@@ -167,6 +167,81 @@ The dataset reads the label names from `coralnet_id2name_<run>.json` in the same
 ### Known gaps
 
 - Duplicate images (the same photo in several sources) are removed in training by `CoralNetDataset`'s `image_blacklist` and `annotation_overrides`. This package does not produce those files. Tracked in issue #231.
+
+## CoralNet split
+
+`segdata split build` assigns the curated CoralNet dataset to train, val and test by source group, and lists excluded sources as `excluded`. `segdata split leakage` checks a split file for images shared across splits. Both run only on demand: when you re-split on purpose, or check a version. Training never runs them. The committed result is `configs/splits/coralnet.csv` with its provenance in `configs/splits/coralnet.meta.yaml`. That meta file predates `build`. It records the original split's provenance (whitelists, builder commit, manual overrides), not the `pins` and `inputs` layout that `build` writes. The file format and coverage check are in [segdata-spec](../segdata-spec/README.md#splits).
+
+Both commands read pinned versions from `--bucket` (default `mermaid-ic-datasets`) through `--cache-dir`. They sync tables only, never images. Each needs `--version` and `--manifest-sha256` for the `coralnet` dataset.
+
+### Build a split
+
+`build` groups sources that must stay together: sources that share a byte-identical image in the raw parent version, sources with a near-duplicate pair labelled `dup` or `unsure`, and sources of one project (a shared admin, with nearby source IDs or locations). Groups of the `--test-sources` go to test. A group may go to val or test only if none of its sources shares an image with another source and it is small enough: the group's images must not exceed `--max-group-frac` of the image target of the smaller eval split. `--val-frac` and `--test-frac` are shares of images. Simulated annealing assigns the eligible groups, and the best of `--restarts` runs wins.
+
+Required inputs:
+
+| Flag | Content |
+|---|---|
+| `--version`, `--manifest-sha256` | Pin of the curated `coralnet` dataset. |
+| `--raw-version`, `--raw-manifest-sha256` | Pin of the `coralnet-raw` parent. |
+| `--taxonomy-version`, `--taxonomy-manifest-sha256` | Pin of the `mermaid-benthic` taxonomy. |
+| `--cache-dir` | Local segdata cache. |
+| `--near-dup-labels` | Near-duplicate pair labels CSV. |
+| `--metadata` | CSV with `source_id`, `admins`, `latitude`, `longitude`. |
+| `--test-sources` | Source IDs fixed to test, one per line. |
+| `--exclude-sources` | Source IDs kept out of train, val and test, one per line. Each one that is in the curated version is written to the split file as `excluded`. |
+| `--training-config` | Training config. Its `training.class_subset` is the class space. |
+| `--out-dir` | Output directory. |
+
+The tuning flags are `--val-frac`, `--test-frac`, `--max-group-frac`, `--max-id-gap`, `--max-km`, `--min-class-points`, `--min-eval-points`, `--w-coverage`, `--w-size`, `--iters`, `--restarts` and `--seed`. Run `segdata split build --help` for the defaults.
+
+Outputs, all in `--out-dir`:
+
+| File | Content |
+|---|---|
+| `coralnet.csv` | The split file: `group`, `source_id`, `split_group`, `split`. `group` is `s<source_id>`. `split` is `train`, `val`, `test` or `excluded`. An `excluded` row has a blank `split_group`, and a blank `split_group` means none. An id in `--exclude-sources` that is not in the curated version has no row. |
+| `coralnet.meta.yaml` | Pins, input file paths and sha256, excluded sources, parameters, git SHA and a summary. |
+| `class_distribution.csv` | Points per class in each split. |
+| `summary.json` | Sources, groups, images and points per split, plus classes missing from or thin in val and test. |
+
+`build` writes its outputs only to `--out-dir` and the synced tables to `--cache-dir`. Point `--out-dir` at a scratch directory, not `configs/splits/`, then copy the reviewed output in by hand. The change is then reviewed in git.
+
+```bash
+uv run --package segdata-etl segdata split build \
+  --version <v> --manifest-sha256 <sha> \
+  --raw-version <v> --raw-manifest-sha256 <sha> \
+  --taxonomy-version <v> --taxonomy-manifest-sha256 <sha> \
+  --cache-dir <cache> \
+  --near-dup-labels <labels.csv> --metadata <metadata.csv> \
+  --test-sources <test.txt> --exclude-sources <exclude.txt> \
+  --training-config <training.yaml> \
+  --out-dir <scratch-dir>
+```
+
+`build` stops with a `ValueError` before it writes any output file when:
+
+- The `--raw-version` and `--raw-manifest-sha256` pin is not a `coralnet-raw` parent that the `coralnet` manifest declares. The error lists the declared parents.
+- A raw image of a source in the split universe has no `crc64nvme`, so it cannot be matched as a duplicate. The universe is the curated sources minus `--exclude-sources`. The error gives the count and the sorted source ids.
+- A `--test-sources` id is not in the universe (for example, it is also in `--exclude-sources`). The error lists the sorted ids.
+
+### Check a split for leakage
+
+`leakage` reads a split file and the `images.parquet` of the pinned `coralnet` version. Two images are the same when their `crc64nvme` and `size` match. Groups the split file does not list, and rows with `split` `excluded`, are ignored. The check reports:
+
+- images of val that also appear in train, and images of test that also appear in train or val, per group;
+- pairs of groups in different splits that share an image;
+- `split_group` values that span more than one split. Blank values are skipped.
+
+The command prints the report. With `--out-dir` it also writes `leakage_per_source.csv`, `leakage_pairs.csv` and `leakage_split_groups.csv`. It exits 1 if any of the three findings is non-empty, and 0 otherwise.
+
+```bash
+uv run --package segdata-etl segdata split leakage \
+  --split-file configs/splits/coralnet.csv \
+  --version <v> --manifest-sha256 <sha> \
+  --cache-dir <cache> --out-dir <report-dir>
+```
+
+`leakage` stops with a `ValueError` before it prints the report when any image of a group that the split file lists has no `crc64nvme`. The error gives the count and the sorted group names.
 
 ## External datasets
 

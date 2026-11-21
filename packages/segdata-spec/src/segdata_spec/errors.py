@@ -37,3 +37,7 @@ class ImageUndecodable(SegdataError):
 
 class SchemaValidationError(SegdataError, ValueError):
     """A table does not satisfy its declared schema."""
+
+
+class SplitCoverageError(SegdataError):
+    """A dataset version has groups its split file does not list."""

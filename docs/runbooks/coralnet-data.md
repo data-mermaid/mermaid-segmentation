@@ -185,6 +185,11 @@ Each CoralNet split has a `whitelist_sources` list, and `CoralNetDataset` keeps 
 1. Add the id to a split's `whitelist_sources` in `configs/data_config.yaml`. The id must already be in the manifest chosen under [Select the build](#select-the-build). Otherwise `CoralNetDataset` raises a `ValueError` that names it.
 2. Regenerate the derived configs, starting with `configs/data_config_trainval.yaml`. See [Regenerate the derived configs](derived-configs.md).
 
+3. A sync fails on any group that the split file does not list. To add sources without moving existing ones, append rows to `configs/splits/coralnet.csv` by hand. Each row has `group` `s<id>`, the `source_id`, its `split`, and a `split_group` that is either a new id not used elsewhere or blank.
+   `segdata split build` re-runs the assignment over every source, so existing train, val and test membership changes, the test set included. Use it only to re-split on purpose. That is a change to model inputs, so it needs review. If you rebuild, copy `<out-dir>/coralnet.csv` and its meta over the committed files.
+
+   Before you commit, run `segdata split leakage` on `configs/splits/coralnet.csv` against the new version; the full command is in [CoralNet split](../../packages/segdata-etl/README.md#coralnet-split).
+
 ### Map new labels
 
 Training reads the CoralNet mapping from the MERMAID LabelMapping API (`/v1/classification/labelmappings/?provider=CoralNet`). Rows are keyed by CoralNet label id, and the build's `coralnet_id2name_<run>.json` names each id, so a label renamed in CoralNet still maps. A CoralNet label trains as background when the API has no row for its id, or when the row's `benthic_attribute_name` is null (`mermaidseg/dataset_reconciliation/label_mapping.py`, `mermaidseg/dataset_reconciliation/registry.py`). Before training, add the missing rows in MERMAID and fill in `benthic_attribute_name` on rows where it is null. There is no mapping file in this repo to edit.
