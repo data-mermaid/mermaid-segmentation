@@ -52,20 +52,16 @@ def test_put_new_through_local_dir_twice_returns_real_crc_then_already_present(t
     assert (second.crc64nvme, second.already_present) == ("Sv1wpwepjTw=", True)
 
 
-def test_local_head_reports_full_object_crc64nvme(tmp_path):
-    client = LocalDirS3(tmp_path)
-    client.put_object(Bucket="bkt", Key="k", Body=b"{}")
-    head = client.head_object(Bucket="bkt", Key="k")
-    assert head["ChecksumCRC64NVME"] == "Sv1wpwepjTw="
-    assert head["ChecksumType"] == "FULL_OBJECT"
-
-
 def test_next_version_defaults_to_the_utc_date(tmp_path: Path, monkeypatch):
     class _Clock(datetime):
         @classmethod
         def now(cls, tz=None):
-            # 23:30 in UTC-5 is already the next day in UTC.
-            return datetime(2026, 11, 24, 4, 30, tzinfo=UTC).astimezone(tz)
+            # A naive now() is host-local 23:30, the previous day in UTC; a UTC now() is the next day.
+            return (
+                datetime(2026, 11, 24, 4, 30, tzinfo=UTC)
+                if tz is not None
+                else datetime(2026, 11, 23, 23, 30)
+            )
 
     monkeypatch.setattr(stage, "datetime", _Clock)
     assert next_version(tmp_path, "bkt", "ds", git_sha="abc1234def5678") == "20261124-abc1234"

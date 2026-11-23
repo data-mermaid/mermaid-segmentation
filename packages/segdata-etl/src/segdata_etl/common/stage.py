@@ -91,7 +91,6 @@ def _checksums(data: bytes) -> dict[str, str]:
     return {
         "ETag": _etag(data),
         "ChecksumCRC64NVME": crc64nvme_b64(data),
-        "ChecksumType": "FULL_OBJECT",
     }
 
 
