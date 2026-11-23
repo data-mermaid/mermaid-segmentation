@@ -101,7 +101,7 @@ def _guard_git(repo_dir: Path, git: GitState | None) -> tuple[GitState, str]:
     return state, lock
 
 
-def _parquet_bytes(table: pa.Table) -> bytes:
+def table_bytes(table: pa.Table) -> bytes:
     """Serialise to parquet; the same table always yields the same bytes."""
     sink = io.BytesIO()
     pq.write_table(table, sink, compression="zstd")
@@ -269,7 +269,7 @@ def publish_dataset(
     state, lock_sha = _guard_git(repo_dir, git)
     conformed = _conform_all(tables, DATASET_TABLES)
     validate_dataset_tables(kind, conformed)
-    blobs = {name: _parquet_bytes(table) for name, table in conformed.items()}
+    blobs = {name: table_bytes(table) for name, table in conformed.items()}
     prefix = dataset_prefix(dataset, version)
     _refuse_if_published(client, bucket, prefix)
     diff = None
@@ -322,7 +322,7 @@ def publish_taxonomy(
     if missing:
         raise SchemaValidationError(f"missing taxonomy tables: {missing}")
     conformed = _conform_all(tables, TAXONOMY_TABLES)
-    blobs = {table_name: _parquet_bytes(table) for table_name, table in conformed.items()}
+    blobs = {table_name: table_bytes(table) for table_name, table in conformed.items()}
     prefix = taxonomy_prefix(name, version)
     _refuse_if_published(client, bucket, prefix)
     manifest = TaxonomyManifest(
