@@ -10,7 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 from PIL import Image
 
-from segdata_etl.datasets import pacific_labeled_corals as plc
+from segdata_etl.ingest import pacific_labeled_corals as plc
 
 B = "bkt"
 P = "ds"

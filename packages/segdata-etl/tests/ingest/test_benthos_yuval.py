@@ -13,7 +13,7 @@ import pytest
 from PIL import Image, UnidentifiedImageError
 
 from segdata_etl.common import images
-from segdata_etl.datasets import benthos_yuval
+from segdata_etl.ingest import benthos_yuval
 
 B = "bkt"
 P = "ds"

@@ -1,4 +1,4 @@
-"""``segdata`` console script: ``build coralnet <stage>``, ``build <external dataset>`` and ``split``."""
+"""``segdata`` console script: ``build coralnet <stage>``, ``ingest <external dataset>`` and ``split``."""
 
 from __future__ import annotations
 
@@ -15,13 +15,13 @@ from botocore.config import Config
 
 from segdata_spec import DATASET_BUCKET
 
-from .datasets import (
+from .datasets.coralnet import commands as coralnet_commands
+from .ingest import (
     benthos_yuval,
     catlin_seaview,
     moorea_labeled_corals,
     pacific_labeled_corals,
 )
-from .datasets.coralnet import commands as coralnet_commands
 from .splits import builder as split_builder
 from .splits import leakage as split_leakage
 from .splits.builder import SplitParams
@@ -133,15 +133,17 @@ def _add_split_subcommands(top: Any) -> None:
 
 
 def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.ArgumentParser:
-    """Build the top-level parser: ``build coralnet <stage>``, one ``build`` entry per dataset, and ``split``."""
+    """Build the top-level parser: ``build coralnet <stage>``, one ``ingest`` entry per dataset, and ``split``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
     top = parser.add_subparsers(dest="action", required=True)
     build = top.add_parser("build", help="Build and publish a dataset")
     build_sub = build.add_subparsers(dest="dataset", required=True)
     coralnet_commands.add_subcommands(build_sub)
+    ingest = top.add_parser("ingest", help="Validate and publish an external dataset")
+    ingest_sub = ingest.add_subparsers(dest="dataset", required=True)
     for module in modules:
         name = module.__name__.rsplit(".", 1)[-1]
-        dataset_parser = build_sub.add_parser(name, parents=[_shared_parser(name)])
+        dataset_parser = ingest_sub.add_parser(name, parents=[_shared_parser(name)])
         module.add_arguments(dataset_parser, workdir=default_workdir(name))
         dataset_parser.set_defaults(run=module.run)
     _add_split_subcommands(top)
