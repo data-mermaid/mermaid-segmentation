@@ -36,7 +36,7 @@ from segdata_etl.common.version import list_versions, next_version
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec.errors import ObjectExists
 from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
-from segdata_spec.publish import _fetch_parent_tables, probe_git, publish_dataset
+from segdata_spec.publish import _fetch_parent_tables, _guard_git, probe_git, publish_dataset
 from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 
 from .annotations import _IMAGE_LIST_NAME, _derive_image_id, _get_thread_reader
@@ -46,6 +46,7 @@ from .io import CsvReader, make_s3_client
 logger = logging.getLogger(__name__)
 
 DATASET = "coralnet-raw"
+POOL_HEADROOM = 8
 DEFAULT_SOURCE_BUCKET = "dev-datamermaid-sm-sources"
 IMAGE_PREFIX = "images/coralnet/"
 STORAGE_CLASS = "INTELLIGENT_TIERING"
@@ -647,13 +648,19 @@ def _workers(flag: int | None) -> int:
     return get_workers() if flag is None else validate_workers(flag)
 
 
+def _pool_size(workers: int) -> int:
+    """Connections for the shared S3 client: every worker, plus headroom for overlapping pools."""
+    return workers + POOL_HEADROOM
+
+
 def run_raw(args: argparse.Namespace) -> int:
     """Publish a new ``coralnet-raw`` version and print its version and manifest sha256."""
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     git = probe_git(repo_root)
+    _guard_git(repo_root, git)
     parent = _parent_ref(args)
     workers = _workers(args.workers)
-    source_client = make_s3_client()
+    source_client = make_s3_client(max_pool_connections=_pool_size(workers))
     source_bucket, prefix = _source_bucket(), get_prefix()
     build = read_build(source_client, source_bucket, args.build_run, args.source_ids)
     client, bucket = open_store(args.store, source_client=source_client)

@@ -32,7 +32,7 @@ from segdata_etl.splits.builder import _require_raw_parent
 from segdata_etl.splits.inputs import sync_tables
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec.manifest import ImageStore, LabelMapping, Manifest, ParentRef, Pin, SourceInfo
-from segdata_spec.publish import GitState, probe_git, publish_dataset, table_bytes
+from segdata_spec.publish import GitState, _guard_git, probe_git, publish_dataset, table_bytes
 from segdata_spec.read import DatasetVersion, open_taxonomy
 from segdata_spec.schema import DATASET_TABLES, conform
 
@@ -280,6 +280,7 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     git = probe_git(repo_root)
+    _guard_git(repo_root, git)
     client, bucket = open_store(args.store, source_client=source_client)
     if args.label_map == CLEANED_UP_RERUN:
         built = _curate_v1(args, client, bucket, repo_root)

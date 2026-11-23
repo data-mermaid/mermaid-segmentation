@@ -19,6 +19,7 @@ from segdata_etl.datasets.coralnet.curate import versions
 from segdata_etl.label_maps import coralnet_api
 from segdata_etl.splits.builder import _require_raw_parent
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.errors import PublishRefused
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_dataset, publish_taxonomy
 from segdata_spec.schema import IMAGES_SCHEMA, POINTS_SCHEMA
@@ -350,3 +351,19 @@ def test_v2_publishes_nothing_when_its_snapshot_cannot_be_written(
 
     folders = (world.store / DATASET_BUCKET / "datasets" / "coralnet").iterdir()
     assert [p.name for p in folders] == [v1_version]
+
+
+def test_a_dirty_tree_is_refused_before_any_sync(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        versions, "probe_git", lambda _dir: GitState(sha="abcdef1234567", dirty=True, pushed=True)
+    )
+
+    def no_sync(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the guard must fire before any sync")
+
+    monkeypatch.setattr(versions, "sync_tables", no_sync)
+
+    with pytest.raises(PublishRefused, match="uncommitted changes"):
+        world.run("cleaned_up_rerun", ("raw-", world.raw), ("taxonomy-", world.taxonomy))

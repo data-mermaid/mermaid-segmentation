@@ -93,13 +93,19 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
 
 
-def _add_source_ids_flag(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--source-ids",
-        type=_parse_source_ids,
-        default=None,
-        help="Comma-separated source ids (default: every s<id>/ folder under the prefix)",
-    )
+_LEGACY_SOURCE_IDS_HELP = (
+    "Comma-separated source ids (default: every s<id>/ folder under the prefix)"
+)
+_RAW_SOURCE_IDS_HELP = (
+    "Comma-separated source ids to publish. Required with a directory --store; "
+    "refused with --store s3, which publishes every source in the build run"
+)
+
+
+def _add_source_ids_flag(
+    p: argparse.ArgumentParser, help_text: str = _LEGACY_SOURCE_IDS_HELP
+) -> None:
+    p.add_argument("--source-ids", type=_parse_source_ids, default=None, help=help_text)
 
 
 def add_subcommands(sub: Any) -> None:
@@ -146,7 +152,7 @@ def add_subcommands(sub: Any) -> None:
         default="20260623_nogit",
         help="Build run under etl-outputs/coralnet/ to publish (default: %(default)s)",
     )
-    _add_source_ids_flag(p_raw)
+    _add_source_ids_flag(p_raw, _RAW_SOURCE_IDS_HELP)
     p_raw.add_argument("--parent-version", default=None, help="coralnet-raw version to reuse")
     p_raw.add_argument(
         "--parent-manifest-sha256", default=None, help="Manifest sha256 of --parent-version"

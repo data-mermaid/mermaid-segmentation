@@ -16,7 +16,7 @@ from segdata_etl.common.local_store import LocalStore
 from segdata_etl.datasets.coralnet import raw
 from segdata_etl.datasets.coralnet.io import make_csv_reader_s3
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.errors import ObjectExists
+from segdata_spec.errors import ObjectExists, PublishRefused
 from segdata_spec.manifest import Manifest
 from segdata_spec.publish import GitState
 
@@ -521,7 +521,7 @@ def test_cli_publishes_a_coralnet_raw_version_into_the_local_store(
     (repo / "uv.lock").write_text("lock")
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
     monkeypatch.delenv("MERMAID_CORALNET_PREFIX", raising=False)
-    monkeypatch.setattr(raw, "make_s3_client", lambda: source)
+    monkeypatch.setattr(raw, "make_s3_client", lambda **_kw: source)
     monkeypatch.setattr(raw, "_get_thread_reader", lambda: make_csv_reader_s3(source))
     monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
     monkeypatch.setattr(
@@ -559,7 +559,7 @@ def test_raw_flag_misuse_is_a_usage_error(
     flags: list[str],
     message: str,
 ) -> None:
-    def no_aws() -> None:
+    def no_aws(**_kw: object) -> None:
         raise AssertionError("a usage error must not reach S3")
 
     monkeypatch.setattr(raw, "make_s3_client", no_aws)
@@ -570,3 +570,51 @@ def test_raw_flag_misuse_is_a_usage_error(
 
     assert exit_info.value.code == 2
     assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("git", "message"),
+    [
+        (GitState(sha="abcdef1234567", dirty=False, pushed=False), "not contained in any remote"),
+        (GitState(sha="abcdef1234567", dirty=True, pushed=True), "uncommitted changes"),
+    ],
+)
+def test_an_unpublishable_tree_is_refused_before_any_s3_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git: GitState, message: str
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "uv.lock").write_text("lock")
+    monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
+    monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
+    monkeypatch.setattr(raw, "probe_git", lambda _dir: git)
+
+    def no_s3(**_kw: object) -> None:
+        raise AssertionError("the guard must fire before an S3 client is made")
+
+    monkeypatch.setattr(raw, "make_s3_client", no_s3)
+    argv = ["build", "coralnet", "raw", "--store", str(tmp_path / "store"), "--source-ids", "1"]
+
+    with pytest.raises(PublishRefused, match=message):
+        cli.main(argv)
+
+
+def test_a_tree_without_a_lock_file_is_refused_before_any_s3_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
+    monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
+    monkeypatch.setattr(
+        raw, "probe_git", lambda _dir: GitState(sha="abcdef1234567", dirty=False, pushed=True)
+    )
+
+    def no_s3(**_kw: object) -> None:
+        raise AssertionError("the guard must fire before an S3 client is made")
+
+    monkeypatch.setattr(raw, "make_s3_client", no_s3)
+    argv = ["build", "coralnet", "raw", "--store", str(tmp_path / "store"), "--source-ids", "1"]
+
+    with pytest.raises(PublishRefused, match="no uv.lock"):
+        cli.main(argv)
