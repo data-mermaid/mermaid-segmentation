@@ -20,6 +20,7 @@ from mermaidseg.datasets.factory import build_datasets
 from mermaidseg.io import ConfigDict, preprocess_data_config
 from segdata_spec.manifest import Pin
 from segdata_spec.read import DatasetVersion, open_version
+from segdata_spec.resize import ResizeSpec
 from segdata_spec.sync import sync
 
 # Val/test transform size for the old loader; only its annotations are read here.
@@ -141,7 +142,7 @@ def old_points(ds: Any) -> pd.DataFrame:
         ds: An old ``BaseCoralDataset``; registering it sets its global offset.
 
     Returns:
-        Columns ``image_id`` (str), ``row``, ``col``, ``native_name`` and ``mapped``.
+        Columns ``image_id`` (str), ``row``, ``col``, ``native_name`` (lowercased) and ``mapped``.
     """
     names = _mapped_names(SourceLabelRegistry([ds]), ds)
     annotations = ds.df_annotations
@@ -152,7 +153,7 @@ def old_points(ds: Any) -> pd.DataFrame:
             "image_id": annotations["image_id"].astype(str),
             "row": annotations["row"],
             "col": annotations["col"],
-            "native_name": native,
+            "native_name": native.str.lower(),
             "mapped": mapped.where(mapped.notna(), None),
         }
     ).reset_index(drop=True)[_COLUMNS]
@@ -168,7 +169,7 @@ def new_points(version: DatasetVersion, points: pd.DataFrame) -> pd.DataFrame:
             "image_id": points["image_id"].astype(str),
             "row": points["row"],
             "col": points["col"],
-            "native_name": points["label_id"].map(labels["name"]),
+            "native_name": points["label_id"].map(labels["name"].str.lower()),
             "mapped": lowered.where(attribute.notna(), None),
         }
     ).reset_index(drop=True)[_COLUMNS]
@@ -568,11 +569,15 @@ class _OfflineClient:
 
 
 def _sync_version(
-    client: Any, pin: Pin, cache_dir: Path, groups: Collection[str] | None
+    client: Any,
+    pin: Pin,
+    cache_dir: Path,
+    groups: Collection[str] | None,
+    resize: ResizeSpec | None = None,
 ) -> DatasetVersion:
-    """Sync ``pin`` (its tables, plus the images and masks of ``groups``) and open it."""
+    """Sync ``pin`` (its tables, plus the images and masks of ``groups``) and open it at ``resize``."""
     sync(client, {pin.name: pin}, cache_dir, bucket=DATASET_BUCKET, selection={pin.name: groups})
-    return open_version(cache_dir, DATASET_BUCKET, pin)
+    return open_version(cache_dir, DATASET_BUCKET, pin, resize)
 
 
 def run_parity(
@@ -586,6 +591,7 @@ def run_parity(
     client: Any | None,
     annotators: Sequence[str] | None,
     offline: bool = False,
+    resize: ResizeSpec | None = None,
 ) -> ParityReport | DenseParityReport:
     """Build the old dataset, sync and verify the pinned version, and compare with the old side.
 
@@ -607,13 +613,16 @@ def run_parity(
         annotators: Annotators in priority order for selecting the new points.
         offline: Verify the version already staged in ``cache_dir`` exactly as a sync does, with
             no S3 access; a file that is not staged raises ``FileNotFoundError``.
+        resize: When given, new points are scaled into the resized pixel grid of this spec, as
+            the old loader's coordinates are; no image is needed, only ``width`` and ``height``.
+            Points versions only.
 
     Returns:
         The parity report over all groups of the new version that hold old images.
 
     Raises:
-        ValueError: ``client`` is ``None`` and ``offline`` is false, or the old split has no
-            points or tiles.
+        ValueError: ``client`` is ``None`` and ``offline`` is false, ``resize`` is given for a
+            dense version, or the old split has no points or tiles.
         FileNotFoundError: ``offline`` and a file the check needs is not staged.
     """
     if client is None and not offline:
@@ -625,9 +634,11 @@ def run_parity(
     old_ds = built[(dataset, split)]
     pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
     source = _OfflineClient() if offline else client
-    version_data = _sync_version(source, pin, cache_dir, set())
+    version_data = _sync_version(source, pin, cache_dir, set(), resize)
     if version_data.manifest.kind != "dense":
         return _compare_points(old_ds, version_data, annotators)
+    if resize is not None:
+        raise ValueError("resize applies to points versions only")
     old_counts, old_mapped = old_dense_counts(old_ds)
     _require_old(old_counts, "tiles")
     version_data = _sync_version(source, pin, cache_dir, None)

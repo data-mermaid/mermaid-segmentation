@@ -29,6 +29,7 @@ from mermaidseg.data.parity import (
 from segdata_spec.errors import ChecksumMismatch, PinMismatch
 from segdata_spec.manifest import Pin
 from segdata_spec.read import open_version
+from segdata_spec.resize import ResizeSpec
 from tests.mermaidseg.data.conftest import (
     BUCKET,
     IMAGE_BUCKET,
@@ -178,7 +179,7 @@ def test_old_points_maps_through_the_registry_and_leaves_unmapped_none(
 
     assert list(points.columns) == _COLUMNS
     assert points["image_id"].tolist() == ["10", "10", "11"]
-    assert points["native_name"].tolist() == ["Hard", "Soft", "Hard"]
+    assert points["native_name"].tolist() == ["hard", "soft", "hard"]
     assert points["mapped"].tolist() == ["hard coral", None, "hard coral"]
 
 
@@ -189,7 +190,7 @@ _LABELS = [
 _IMAGES = [ImageSpec("i1"), ImageSpec("i2")]
 
 
-def test_new_points_lowercases_the_attribute_and_keeps_null_none(tmp_path: Path) -> None:
+def test_new_points_lowercases_names_and_attribute_and_keeps_null_none(tmp_path: Path) -> None:
     version = open_written(
         tmp_path,
         kind="points",
@@ -202,7 +203,7 @@ def test_new_points_lowercases_the_attribute_and_keeps_null_none(tmp_path: Path)
     points = new_points(version, version.points.to_pandas())
 
     assert list(points.columns) == _COLUMNS
-    assert points["native_name"].tolist() == ["Acropora", "Rubble", "Acropora"]
+    assert points["native_name"].tolist() == ["acropora", "rubble", "acropora"]
     assert points["mapped"].tolist() == ["hard coral", None, "hard coral"]
     assert points["image_id"].tolist() == ["i1", "i1", "i2"]
 
@@ -221,14 +222,15 @@ def _old_stub(rows: list[tuple[str, int, int]]) -> _StubOld:
 
 
 def _run(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, old_rows: list[tuple[str, int, int]]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    old_rows: list[tuple[str, int, int]],
+    *,
+    images: Sequence[ImageSpec] = _IMAGES,
+    points: Sequence[tuple[str, int, int, int]] = (("i1", 1, 1, 1), ("i2", 3, 3, 1)),
+    resize: ResizeSpec | None = None,
 ) -> tuple[ParityReport, Path]:
-    fake, pin = publish_points(
-        tmp_path / "pub",
-        images=_IMAGES,
-        labels=_LABELS,
-        points=[("i1", 1, 1, 1), ("i2", 3, 3, 1)],
-    )
+    fake, pin = publish_points(tmp_path / "pub", images=images, labels=_LABELS, points=points)
     monkeypatch.setitem(
         registry_module._REMOTE_FETCHERS, "catlin_seaview", lambda: {"Acropora": "Hard Coral"}
     )
@@ -246,6 +248,7 @@ def _run(
         cache_dir=cache_dir,
         client=fake,
         annotators=None,
+        resize=resize,
     )
     assert isinstance(report, ParityReport)
     return report, cache_dir
@@ -786,3 +789,32 @@ def test_run_parity_rejects_an_old_split_without_tiles(
 
     with pytest.raises(ValueError, match="no tiles"):
         run_parity({}, **_offline_args(cache_dir, pin))
+
+
+_WIDE = [ImageSpec("w1", width=4096, height=2048)]
+_WIDE_POINT = (("w1", 1000, 3000, 1),)
+
+
+def test_run_parity_scales_new_points_into_the_resized_space(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    report, cache_dir = _run(
+        monkeypatch,
+        tmp_path,
+        [("w1", 500, 1500)],
+        images=_WIDE,
+        points=_WIDE_POINT,
+        resize=ResizeSpec(max_edge=2048),
+    )
+
+    assert report.ok
+    assert {p.suffix for p in cache_dir.rglob("*") if p.is_file()} == {".json", ".parquet"}
+
+
+def test_run_parity_without_resize_reports_the_scaled_pair_as_different(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    report, _ = _run(monkeypatch, tmp_path, [("w1", 500, 1500)], images=_WIDE, points=_WIDE_POINT)
+
+    assert report.old_only_points == Counter({("w1", 500, 1500, "hard coral"): 1})
+    assert report.new_only_points == Counter({("w1", 1000, 3000, "hard coral"): 1})

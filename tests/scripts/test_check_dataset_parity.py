@@ -7,6 +7,7 @@ import pytest
 
 import scripts.check_dataset_parity as script
 from mermaidseg.data.parity import ParityReport
+from segdata_spec.resize import ResizeSpec
 
 _ARGS = [
     "--dataset",
@@ -59,6 +60,7 @@ def test_main_returns_one_on_any_difference(
         "client": ("client", "s3"),
         "annotators": ["a1", "a2"],
         "offline": False,
+        "resize": None,
     }
     assert capsys.readouterr().out.rstrip().endswith("PARITY OK" if code == 0 else "PARITY FAILED")
 
@@ -87,3 +89,25 @@ def test_main_offline_builds_no_s3_client(
     assert result == 0
     assert seen["client"] is None
     assert seen["offline"] is True
+
+
+def test_main_builds_a_resize_spec_from_the_max_edge_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "data.yaml"
+    config.write_text("data: {}\n")
+    seen: dict[str, Any] = {}
+
+    def _run_parity(data_cfg: Any, **kwargs: Any) -> ParityReport:
+        seen.update(kwargs)
+        return ParityReport()
+
+    monkeypatch.setattr(script, "run_parity", _run_parity)
+    monkeypatch.setattr(script.boto3, "client", lambda name: None)
+
+    script.main(
+        ["--data-config", str(config), "--cache-dir", str(tmp_path), *_ARGS]
+        + ["--resize-max-edge", "2048"]
+    )
+
+    assert seen["resize"] == ResizeSpec(max_edge=2048)

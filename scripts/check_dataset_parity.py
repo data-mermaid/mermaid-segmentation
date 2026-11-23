@@ -15,6 +15,10 @@ is built, and every file must already be staged in --cache-dir, where the same c
 sit at <dir>/mermaid-ic-datasets/datasets/<name>/<version>/; dense images and masks sit at
 <dir>/<image store bucket>/<prefix><key>. A file that is not staged fails the run.
 
+Native label names are compared lowercased on both sides. With --resize-max-edge N, new point
+coordinates are scaled so the longest image edge is N, as in the old loader's space (CoralNet
+manifest coordinates are at 2048). Without it they are compared unscaled. Points versions only.
+
 Exits 1 on any difference. Exits with an error when the old split has no points or tiles.
 """
 
@@ -27,6 +31,7 @@ import boto3
 import yaml
 
 from mermaidseg.data.parity import format_report, run_parity
+from segdata_spec.resize import ResizeSpec
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,7 +53,14 @@ def main(argv: list[str] | None = None) -> int:
         help="verify the version staged in --cache-dir with the same checks; no S3",
     )
     p.add_argument("--annotator", action="append", default=None, help="repeat for priority order")
+    p.add_argument(
+        "--resize-max-edge",
+        type=int,
+        default=None,
+        help="scale new points to this longest image edge (default filter and quality)",
+    )
     args = p.parse_args(argv)
+    resize = ResizeSpec(max_edge=args.resize_max_edge) if args.resize_max_edge is not None else None
     cfg = yaml.safe_load(args.data_config.read_text())
     report = run_parity(
         cfg["data"],
@@ -60,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         client=None if args.offline else boto3.client("s3"),
         annotators=args.annotator,
         offline=args.offline,
+        resize=resize,
     )
     print(format_report(report))
     return 0 if report.ok else 1
