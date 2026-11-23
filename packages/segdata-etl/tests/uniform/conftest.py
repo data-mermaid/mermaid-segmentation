@@ -11,6 +11,7 @@ import base64
 import hashlib
 import io
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import awscrt.checksums
@@ -139,6 +140,7 @@ class FakeS3:
         response: dict[str, Any] = {
             "ContentLength": len(self.objects[(Bucket, Key)]),
             "ETag": self.etags[(Bucket, Key)],
+            "LastModified": datetime(2026, 8, 12, 6, 30, tzinfo=UTC),
         }
         if kwargs.get("ChecksumMode") == "ENABLED" and (Bucket, Key) in self.crcs:
             response["ChecksumCRC64NVME"] = self.crcs[(Bucket, Key)]
@@ -149,6 +151,8 @@ class FakeS3:
         if (Bucket, Key) not in self.objects:
             raise client_error("NoSuchKey", 404, "GetObject")
         data = self.objects[(Bucket, Key)]
+        if kwargs.get("IfMatch") not in (None, self.etags[(Bucket, Key)]):
+            raise client_error("PreconditionFailed", 412, "GetObject")
         response: dict[str, Any] = {"ETag": self.etags[(Bucket, Key)]}
         range_header = kwargs.get("Range")
         if range_header is None:

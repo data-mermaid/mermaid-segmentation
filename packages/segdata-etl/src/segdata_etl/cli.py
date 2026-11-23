@@ -18,6 +18,7 @@ from segdata_spec import DATASET_BUCKET
 from .datasets import (
     benthos_yuval,
     catlin_seaview,
+    mermaid,
     moorea_labeled_corals,
     pacific_labeled_corals,
 )
@@ -41,6 +42,10 @@ DATASET_MODULES: tuple[ModuleType, ...] = (
     benthos_yuval,
 )
 
+# Uniform-format builds stage a version under ``--stage-dir``; each module has the same contract as
+# DATASET_MODULES. Adding one is one entry here.
+UNIFORM_MODULES: tuple[ModuleType, ...] = (mermaid,)
+
 
 def default_workdir(dataset: str) -> Path:
     """Return the default local working directory for ``dataset``."""
@@ -62,6 +67,16 @@ def _shared_parser(dataset: str) -> argparse.ArgumentParser:
         "--no-skip-existing-s3", dest="skip_existing_s3", action="store_false", default=True
     )
     parent.add_argument("--overwrite", action="store_true")
+    parent.add_argument("-v", "--verbose", action="store_true")
+    return parent
+
+
+def _uniform_parser() -> argparse.ArgumentParser:
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument(
+        "--stage-dir", type=Path, required=True, help="Local directory the version is staged in"
+    )
+    parent.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parent.add_argument("-v", "--verbose", action="store_true")
     return parent
 
@@ -132,7 +147,10 @@ def _add_split_subcommands(top: Any) -> None:
     leakage.set_defaults(func=lambda args: split_leakage.run(args, make_s3_client()))
 
 
-def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.ArgumentParser:
+def build_parser(
+    modules: Sequence[ModuleType] = DATASET_MODULES,
+    uniform_modules: Sequence[ModuleType] = UNIFORM_MODULES,
+) -> argparse.ArgumentParser:
     """Build the top-level parser: ``build coralnet <stage>``, one ``build`` entry per dataset, and ``split``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
     top = parser.add_subparsers(dest="action", required=True)
@@ -144,6 +162,11 @@ def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.Ar
         dataset_parser = build_sub.add_parser(name, parents=[_shared_parser(name)])
         module.add_arguments(dataset_parser, workdir=default_workdir(name))
         dataset_parser.set_defaults(run=module.run)
+    for module in uniform_modules:
+        name = module.__name__.rsplit(".", 1)[-1]
+        uniform_parser = build_sub.add_parser(name, parents=[_uniform_parser()])
+        module.add_arguments(uniform_parser, workdir=default_workdir(name))
+        uniform_parser.set_defaults(run=module.run)
     _add_split_subcommands(top)
     return parser
 
