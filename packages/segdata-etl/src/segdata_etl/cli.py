@@ -17,6 +17,7 @@ from segdata_spec import DATASET_BUCKET
 
 from . import taxonomy
 from .common.store import add_store_argument
+from .datasets import catlin_seaview as catlin_seaview_build
 from .datasets.coralnet import commands as coralnet_commands
 from .ingest import (
     benthos_yuval,
@@ -134,6 +135,15 @@ def _add_split_subcommands(top: Any) -> None:
     leakage.set_defaults(func=lambda args: split_leakage.run(args, make_s3_client()))
 
 
+def _add_external_builds(build_sub: Any) -> None:
+    parser = build_sub.add_parser(
+        "catlin_seaview", help="Publish the legacy Catlin Seaview prefix as a dataset version"
+    )
+    catlin_seaview_build.add_arguments(parser, workdir=default_workdir("catlin_seaview"))
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.set_defaults(func=lambda args: catlin_seaview_build.run(args, make_s3_client()))
+
+
 def _add_taxonomy_subcommand(top: Any) -> None:
     parser = top.add_parser("taxonomy", help="Fetch and publish the MERMAID benthic taxonomy")
     add_store_argument(parser)
@@ -151,6 +161,7 @@ def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.Ar
     build = top.add_parser("build", help="Build and publish a dataset")
     build_sub = build.add_subparsers(dest="dataset", required=True)
     coralnet_commands.add_subcommands(build_sub)
+    _add_external_builds(build_sub)
     ingest = top.add_parser("ingest", help="Validate and publish an external dataset")
     ingest_sub = ingest.add_subparsers(dest="dataset", required=True)
     for module in modules:

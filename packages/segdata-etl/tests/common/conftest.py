@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,7 +30,7 @@ class _Body:
 
 @dataclass
 class FakeS3:
-    """In-memory S3 client for ``copy_images``; ``objects`` maps ``(bucket, key)`` to bytes.
+    """In-memory S3 client for ``copy_images``, publishing and listing; ``objects`` maps ``(bucket, key)`` to bytes.
 
     ``copy_calls`` holds the keyword arguments of every ``copy_object``. ``no_crc`` lists objects
     whose HEAD omits ``ChecksumCRC64NVME``, as an object uploaded without a full-object CRC does.
@@ -84,6 +85,50 @@ class FakeS3:
         if (Bucket, Key) not in self.objects:
             raise client_error("NoSuchKey", 404, "GetObject")
         return {"Body": _Body(self.objects[(Bucket, Key)])}
+
+    def put_object(
+        self, *, Bucket: str, Key: str, Body: bytes, IfNoneMatch: str | None = None, **_: Any
+    ) -> dict[str, Any]:
+        if IfNoneMatch == "*" and (Bucket, Key) in self.objects:
+            raise client_error("PreconditionFailed", 412, "PutObject")
+        self.objects[(Bucket, Key)] = bytes(Body)
+        return {"ETag": self._etag(Bucket, Key)}
+
+    def list_objects_v2(
+        self, *, Bucket: str, Prefix: str = "", Delimiter: str | None = None
+    ) -> dict[str, Any]:
+        """One page; ``Contents`` and ``CommonPrefixes`` are absent when empty, as in S3."""
+        contents: list[dict[str, Any]] = []
+        folders: set[str] = set()
+        for bucket, key in sorted(self.objects):
+            if bucket != Bucket or not key.startswith(Prefix):
+                continue
+            rest = key[len(Prefix) :]
+            if Delimiter and Delimiter in rest:
+                folders.add(Prefix + rest.split(Delimiter, 1)[0] + Delimiter)
+            else:
+                etag = self._etag(bucket, key)
+                contents.append(
+                    {"Key": key, "ETag": etag, "Size": len(self.objects[(bucket, key)])}
+                )
+        response: dict[str, Any] = {"KeyCount": len(contents) + len(folders)}
+        if contents:
+            response["Contents"] = contents
+        if folders:
+            response["CommonPrefixes"] = [{"Prefix": f} for f in sorted(folders)]
+        return response
+
+    def get_paginator(self, operation: str) -> _Paginator:
+        assert operation == "list_objects_v2"
+        return _Paginator(self)
+
+
+class _Paginator:
+    def __init__(self, client: FakeS3):
+        self._client = client
+
+    def paginate(self, **kwargs: Any) -> Iterator[dict[str, Any]]:
+        yield self._client.list_objects_v2(**kwargs)
 
 
 @pytest.fixture
