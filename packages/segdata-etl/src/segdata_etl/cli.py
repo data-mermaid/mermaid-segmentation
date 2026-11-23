@@ -172,6 +172,47 @@ def _add_taxonomy_subcommand(top: Any) -> None:
     )
 
 
+def _run_curate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from .datasets.coralnet.curate import versions
+
+    errors = versions.pin_flag_errors(args)
+    if errors:
+        parser.error("; ".join(errors))
+    return versions.run(args, source_client=make_s3_client())
+
+
+def _add_curate_subcommand(top: Any) -> None:
+    curate = top.add_parser("curate", help="Publish a curated dataset version from its parents")
+    curate_sub = curate.add_subparsers(dest="dataset", required=True)
+    parser = curate_sub.add_parser("coralnet", help="Publish a curated coralnet version")
+    parser.add_argument(
+        "--label-map",
+        choices=("cleaned_up_rerun", "mermaid_api"),
+        required=True,
+        help="cleaned_up_rerun curates raw (v1); mermaid_api relabels a v1 version (v2)",
+    )
+    add_store_argument(parser)
+    _pin_flags(parser, "raw-", "the coralnet-raw parent")
+    _pin_flags(
+        parser, "taxonomy-", "the mermaid-benthic taxonomy (cleaned_up_rerun)", required=False
+    )
+    _pin_flags(parser, "parent-", "the v1 coralnet parent (mermaid_api)", required=False)
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("outputs") / "segdata-cache",
+        help="Local cache for the synced parent tables (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("outputs") / "coralnet-curate",
+        help="Local outputs; mermaid_api saves its API snapshot under <out-dir>/<version>/",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.set_defaults(func=lambda args: _run_curate(parser, args))
+
+
 def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.ArgumentParser:
     """Build the top-level parser: ``build coralnet <stage>``, one ``ingest`` entry per dataset, and ``split``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
@@ -189,6 +230,7 @@ def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.Ar
         dataset_parser.set_defaults(run=module.run)
     _add_split_subcommands(top)
     _add_taxonomy_subcommand(top)
+    _add_curate_subcommand(top)
     return parser
 
 
