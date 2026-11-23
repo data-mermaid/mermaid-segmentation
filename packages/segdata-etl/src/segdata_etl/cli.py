@@ -1,4 +1,4 @@
-"""``segdata`` console script: ``build coralnet <stage>``, ``build <external dataset>`` and ``split``."""
+"""``segdata`` console script: ``build coralnet <stage>``, ``build <external dataset>``, ``split`` and ``promote``."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from botocore.config import Config
 
 from segdata_spec import DATASET_BUCKET
 
+from . import promote as promote_module
 from .datasets import (
     benthos_yuval,
     catlin_seaview,
@@ -149,11 +150,32 @@ def _add_split_subcommands(top: Any) -> None:
     leakage.set_defaults(func=lambda args: split_leakage.run(args, make_s3_client()))
 
 
+def _add_promote_subcommand(top: Any) -> None:
+    promote = top.add_parser("promote", help="Upload a staged dataset version, write-once")
+    promote.add_argument("--stage-dir", type=Path, required=True, help="Local stage directory")
+    promote.add_argument("--dataset", required=True)
+    promote.add_argument("--version", required=True)
+    promote.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    promote.add_argument("-v", "--verbose", action="store_true")
+    promote.set_defaults(run=_run_promote)
+
+
+def _run_promote(args: argparse.Namespace, client: Any) -> int:
+    promote_module.promote(
+        client,
+        stage_dir=args.stage_dir,
+        dataset=args.dataset,
+        version=args.version,
+        workers=args.workers,
+    )
+    return 0
+
+
 def build_parser(
     modules: Sequence[ModuleType] = DATASET_MODULES,
     uniform_modules: Sequence[ModuleType] = UNIFORM_MODULES,
 ) -> argparse.ArgumentParser:
-    """Build the top-level parser: ``build coralnet <stage>``, one ``build`` entry per dataset, and ``split``."""
+    """Build the top-level parser: ``build coralnet <stage>``, one ``build`` entry per dataset, ``split`` and ``promote``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
     top = parser.add_subparsers(dest="action", required=True)
     build = top.add_parser("build", help="Build and publish a dataset")
@@ -170,6 +192,7 @@ def build_parser(
         module.add_arguments(uniform_parser, workdir=default_workdir(name))
         uniform_parser.set_defaults(run=module.run)
     _add_split_subcommands(top)
+    _add_promote_subcommand(top)
     return parser
 
 

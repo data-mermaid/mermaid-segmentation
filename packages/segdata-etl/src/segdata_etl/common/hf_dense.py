@@ -16,7 +16,6 @@ import logging
 import re
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
 from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -359,8 +358,10 @@ def _stage_shard(
             )
 
 
-def run_build(source: DenseSource, args: argparse.Namespace) -> int:
+def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int:
     """Stage a dense dataset version from ``args.revision`` under ``args.stage_dir``.
+
+    ``client`` is the real S3 client; it is only read, to keep the version clear of the bucket.
 
     Raises:
         ValueError: Image ids collide, or the curated map disagrees with the vocabulary.
@@ -380,7 +381,7 @@ def run_build(source: DenseSource, args: argparse.Namespace) -> int:
         _stage_shard(source, args.stage_dir, local, split, ids, vocab.keys(), out)
     dropped = {"image_unreadable_header": out.unreadable, "mask_invalid": out.mask_invalid}
     version = next_version(
-        args.stage_dir, DATASET_BUCKET, source.dataset, today=date.today(), git_sha=git.sha
+        args.stage_dir, DATASET_BUCKET, source.dataset, git_sha=git.sha, client=client
     )
     manifest, _ = publish_dataset(
         LocalDirS3(args.stage_dir),

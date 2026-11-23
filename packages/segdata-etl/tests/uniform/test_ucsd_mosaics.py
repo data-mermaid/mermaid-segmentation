@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 from segdata_etl import cli
 from segdata_spec import DATASET_BUCKET
 
-from .conftest import jpeg_bytes
+from .conftest import FakeS3, jpeg_bytes
 from .hf_helpers import image_col, install_hub, mask_png
 
 CSV = "label_id,name,mermaid_benthic_attribute\n1,Acropora (branching),acropora\n"
@@ -51,7 +51,7 @@ def build(monkeypatch, tmp_path, shards) -> Path:
     )
     stage = tmp_path / "stage"
     args = cli.build_parser().parse_args(["build", "ucsd_mosaics", "--stage-dir", str(stage)])
-    assert args.run(args, object()) == 0
+    assert args.run(args, FakeS3()) == 0
     (version,) = (stage / DATASET_BUCKET / "datasets" / "ucsd_mosaics").iterdir()
     return version
 

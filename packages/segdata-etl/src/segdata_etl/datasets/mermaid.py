@@ -487,7 +487,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     labelled, pairs = with_label_ids(annotations[annotations["image_id"].astype(str).isin(kept)])
     rows = [o.row for o in outcomes if o.row is not None]
     stage = LocalDirS3(args.stage_dir)
-    version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha)
+    version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
     manifest, _ = publish_dataset(
         stage,
         bucket=DATASET_BUCKET,

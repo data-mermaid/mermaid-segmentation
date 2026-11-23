@@ -70,6 +70,5 @@ def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
 
 
 def run(args: argparse.Namespace, client: Any) -> int:
-    """Stage a UCSD mosaics version; ``client`` is unused because nothing touches S3."""
-    del client
-    return hf_dense.run_build(SOURCE, args)
+    """Stage a UCSD mosaics version; ``client`` only checks the bucket for version clashes."""
+    return hf_dense.run_build(SOURCE, args, client)

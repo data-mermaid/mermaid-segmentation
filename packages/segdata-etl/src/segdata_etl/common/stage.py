@@ -15,7 +15,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.s3_objects import crc64nvme_b64
-from segdata_spec._s3 import cache_path, dataset_prefix
+from segdata_spec._s3 import MANIFEST_NAME, cache_path, dataset_prefix, is_not_found
 
 _SHA_LENGTH = 7
 
@@ -95,17 +95,41 @@ def _checksums(data: bytes) -> dict[str, str]:
     }
 
 
-def next_version(
-    stage_root: Path, bucket: str, dataset: str, *, git_sha: str, today: date | None = None
-) -> str:
-    """Return ``YYYYMMDD-<sha7>``, with ``-2``, ``-3``, ... appended until the staged dir is free.
+def version_published(client: Any, bucket: str, dataset: str, version: str) -> bool:
+    """Return whether ``datasets/<dataset>/<version>/manifest.json`` exists in ``bucket``."""
+    try:
+        client.head_object(Bucket=bucket, Key=dataset_prefix(dataset, version) + MANIFEST_NAME)
+    except ClientError as exc:
+        if is_not_found(exc):
+            return False
+        raise
+    return True
 
-    ``today`` defaults to the current UTC date.
+
+def next_version(
+    stage_root: Path,
+    bucket: str,
+    dataset: str,
+    *,
+    git_sha: str,
+    today: date | None = None,
+    client: Any | None = None,
+) -> str:
+    """Return ``YYYYMMDD-<sha7>``, with ``-2``, ``-3``, ... appended until the version is free.
+
+    A version is taken when the staged dir exists or, given ``client``, when its manifest exists in
+    ``bucket``. ``today`` defaults to the current UTC date.
     """
     today = today or datetime.now(UTC).date()
     base = f"{today:%Y%m%d}-{git_sha[:_SHA_LENGTH]}"
+
+    def taken(candidate: str) -> bool:
+        if cache_path(stage_root, bucket, dataset_prefix(dataset, candidate)).exists():
+            return True
+        return client is not None and version_published(client, bucket, dataset, candidate)
+
     candidate, counter = base, 1
-    while cache_path(stage_root, bucket, dataset_prefix(dataset, candidate)).exists():
+    while taken(candidate):
         counter += 1
         candidate = f"{base}-{counter}"
     return candidate

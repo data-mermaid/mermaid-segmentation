@@ -18,7 +18,7 @@ from segdata_etl import cli
 from segdata_etl.datasets import coralscapes_v2, ucsd_mosaics
 from segdata_spec import DATASET_BUCKET
 
-from .conftest import crc64nvme_b64, jpeg_bytes, png_bytes
+from .conftest import FakeS3, crc64nvme_b64, jpeg_bytes, png_bytes
 from .hf_helpers import image_col, install_hub, mask_png
 
 SHA = "8a4567b2fbec14882e09aebff63a7a1ca5e24dca"
@@ -63,7 +63,7 @@ def build(monkeypatch, tmp_path, *, shards=None, csv=CSV, extra=()) -> Path:
     args = cli.build_parser().parse_args(
         ["build", "coralscapes_v2", "--stage-dir", str(stage), *extra]
     )
-    assert args.run(args, object()) == 0
+    assert args.run(args, FakeS3()) == 0
     assert {r for _, _, r in hub.downloaded} == {SHA}
     (version,) = (stage / DATASET_BUCKET / "datasets" / "coralscapes_v2").iterdir()
     return version

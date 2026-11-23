@@ -118,7 +118,9 @@ class FakeS3:
         src = (CopySource["Bucket"], CopySource["Key"])
         if src not in self.objects:
             raise client_error("NoSuchKey", 404, "CopyObject")
-        if kwargs.get("CopySourceIfMatch") not in (None, self.etags[src]):
+        wanted = kwargs.get("CopySourceIfMatch")
+        # S3 accepts the ETag with or without its quotes.
+        if wanted is not None and wanted.strip('"') != self.etags[src].strip('"'):
             raise client_error("PreconditionFailed", 412, "CopyObject")
         if kwargs.get("IfNoneMatch") == "*" and (Bucket, Key) in self.objects:
             raise client_error("PreconditionFailed", 412, "CopyObject")
