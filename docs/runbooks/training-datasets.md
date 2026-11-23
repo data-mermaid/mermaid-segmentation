@@ -4,7 +4,8 @@ This runbook says where each dataset in `configs/data_config.yaml` comes from, h
 
 - [Where each dataset lives](#where-each-dataset-lives)
 - [Get the Hugging Face datasets](#get-the-hugging-face-datasets)
-- [Load an external dataset into S3](#load-an-external-dataset-into-s3)
+- [Ingest an external dataset into S3](#ingest-an-external-dataset-into-s3)
+- [Publish the versioned datasets](#publish-the-versioned-datasets)
 - [Update the MERMAID data](#update-the-mermaid-data)
 - [Add a new dataset](#add-a-new-dataset)
 - [Known gaps](#known-gaps)
@@ -35,11 +36,11 @@ The data config selects the subset of each dataset that a split uses, for exampl
 
 To read CoralscapesV2 from a local copy, pass the directory as `hf_repo_id`. `scripts/evaluate.py` takes `--coralscapes-root` for the same purpose.
 
-## Load an external dataset into S3
+## Ingest an external dataset into S3
 
-Catlin Seaview, Moorea Labeled Corals, Pacific Labeled Corals and Benthos are already in S3. Load one again only if its S3 copy is lost, or the original source publishes a new version.
+Catlin Seaview, Moorea Labeled Corals, Pacific Labeled Corals and Benthos are already in S3. Ingest one again only if its S3 copy is lost, or the original source publishes a new version.
 
-The `segdata-etl` package checks the raw download and writes the parquet, the images and the metadata to S3. Its [README](../../packages/segdata-etl/README.md) gives the output contract and every flag. The README of each dataset lists the raw files to download:
+`segdata ingest` in the `segdata-etl` package checks the raw download and writes the parquet, the images and the metadata to the legacy `external_validation_datasets/<name>/` prefix. Training reads that prefix. Its [README](../../packages/segdata-etl/README.md) gives the output contract and every flag. The README of each dataset lists the raw files to download:
 
 | Dataset | Command | Raw files |
 |---|---|---|
@@ -52,11 +53,60 @@ The `segdata-etl` package checks the raw download and writes the parquet, the im
 2. Do a dry run. It writes nothing to S3, and it stops if the parquet or a JSON file is already there. For Catlin Seaview, leave out `--data-dir`, and the run downloads the raw files:
 
    ```bash
-   uv run --package segdata-etl segdata build <dataset> --data-dir <raw dir> --dry-run
+   uv run --package segdata-etl segdata ingest <dataset> --data-dir <raw dir> --dry-run
    ```
 
 3. Run the same command without `--dry-run`. To replace a dataset that is already in S3, add `--overwrite`.
 4. Fill the offline data cache again. See [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
+5. Publish new versions of the dataset. See [Publish the versioned datasets](#publish-the-versioned-datasets).
+
+## Publish the versioned datasets
+
+`segdata build <name>` turns the legacy prefix of an external dataset into an immutable versioned dataset, and `segdata taxonomy` snapshots the MERMAID benthic taxonomy that the dataset labels map to. Both publish to the `mermaid-ic-datasets` bucket. A published version is permanent: the bucket denies overwrite and delete. Stage and check first, then publish once.
+
+A version string is `YYYYMMDD-<sha7>`, with `-2`, `-3` for a rebuild on the same day. Each command prints `version:` and `manifest_sha256:`. Together they are the pin that consumers use. The package README has the [flags](../../packages/segdata-etl/README.md#build-a-versioned-external-dataset) and the [taxonomy options](../../packages/segdata-etl/README.md#taxonomy-snapshot).
+
+1. Commit and push the code. Staging and publishing both refuse a dirty or unpushed tree.
+2. Stage the taxonomy in the local store. `--store` defaults to `outputs/segdata-store`, so this writes no S3 object:
+
+   ```bash
+   uv run --package segdata-etl segdata taxonomy
+   ```
+
+3. Stage each dataset in the same store, against the taxonomy pin from step 2. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`:
+
+   ```bash
+   uv run --package segdata-etl segdata build <name> \
+     --taxonomy-version <v> --taxonomy-sha256 <sha>
+   ```
+
+4. Check that each staged version loads the same as the legacy dataset. The check reads the store as the cache, with no S3 access:
+
+   ```bash
+   uv run python scripts/check_dataset_parity.py --offline \
+     --cache-dir outputs/segdata-store \
+     --data-config <old data config> --dataset <name> --split <split> \
+     --version <v> --manifest-sha256 <sha>
+   ```
+
+   For `pacific_labeled_corals`, add `--annotator host --annotator archived`.
+
+   The script exits 1 on any difference. Run `--help` for the options.
+5. Publish the taxonomy to S3 from the staged copy, with no new fetch. `<staged taxonomy folder>` is the `taxonomy/mermaid-benthic/<version>/` folder in the local store. The command verifies it against its manifest:
+
+   ```bash
+   uv run --package segdata-etl segdata taxonomy --store s3 \
+     --tables-from <staged taxonomy folder>
+   ```
+
+6. Publish each dataset to S3, against the taxonomy pin that step 5 printed:
+
+   ```bash
+   uv run --package segdata-etl segdata build <name> --store s3 \
+     --taxonomy-version <v> --taxonomy-sha256 <sha>
+   ```
+
+The datasets in S3 are new versions built from the same legacy prefix. Training still reads the legacy prefix.
 
 ## Update the MERMAID data
 

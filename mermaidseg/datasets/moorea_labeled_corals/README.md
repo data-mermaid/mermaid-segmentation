@@ -40,7 +40,7 @@ The EDI package needs a login, so download it by hand from the link above. Unzip
 Then run:
 
 ```bash
-uv run --package segdata-etl segdata build moorea_labeled_corals --data-dir <data-dir>
+uv run --package segdata-etl segdata ingest moorea_labeled_corals --data-dir <data-dir>
 ```
 
 The run drops each damaged image and its annotations. See the [package README](../../../packages/segdata-etl/README.md) for the output contract and every flag. Pass `--dry-run` to check a run without writing to S3. If the parquet or a JSON file is already on S3, the run stops. Pass `--overwrite` to replace them.
