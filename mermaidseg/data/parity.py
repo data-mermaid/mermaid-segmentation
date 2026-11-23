@@ -20,6 +20,7 @@ from mermaidseg.data.point_dataset import select_points
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
 from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPES_V2_ID2NAME
 from mermaidseg.datasets.factory import build_datasets
+from mermaidseg.io import ConfigDict, preprocess_data_config
 from segdata_spec.manifest import Pin
 from segdata_spec.read import DatasetVersion, open_version
 from segdata_spec.sync import sync as sync_versions
@@ -76,6 +77,14 @@ def _mapped_names(registry: SourceLabelRegistry, ds: Any) -> dict[str, str | Non
         target_id = int(registry.source_to_target[local_id + offset])
         result[name] = registry.target_id2label[target_id] if target_id else None
     return result
+
+
+def _build_old(data_cfg: Mapping[str, Any], dataset: str, split: str) -> Any:
+    """Build one old dataset from the raw ``data`` section, expanded as training expands it."""
+    expanded = preprocess_data_config(ConfigDict({"data": data_cfg})).data
+    return build_datasets(
+        expanded, input_size=_UNUSED_INPUT_SIZE, names=[dataset], splits=[split], verbose=False
+    )
 
 
 def old_points(ds: Any) -> pd.DataFrame:
@@ -250,9 +259,7 @@ def run_parity(
     Returns:
         The parity report over all groups of the new version that hold old images.
     """
-    built = build_datasets(
-        data_cfg, input_size=_UNUSED_INPUT_SIZE, names=[dataset], splits=[split], verbose=False
-    )
+    built = _build_old(data_cfg, dataset, split)
     old = old_points(built[(dataset, split)])
     pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
     if sync:
@@ -528,9 +535,7 @@ def run_dense_parity(
     Raises:
         ValueError: The version is not dense.
     """
-    built = build_datasets(
-        data_cfg, input_size=_UNUSED_INPUT_SIZE, names=[dataset], splits=[split], verbose=False
-    )
+    built = _build_old(data_cfg, dataset, split)
     old = built[(dataset, split)]
     groups = old_groups(old)
     pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)

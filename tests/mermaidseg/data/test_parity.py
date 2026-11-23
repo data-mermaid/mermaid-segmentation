@@ -283,6 +283,67 @@ def test_run_parity_without_sync_reads_the_cache_and_never_uses_the_client(
     assert report.ok
 
 
+_DEFAULT_CFG: dict[str, Any] = {
+    "local_cache_dir": "/cache",
+    "default": {"train": {"transform": "t"}, "val": {"transform": "v"}},
+    "ds": {"train": {"sites": ["a"]}},
+}
+
+
+def _strict_builder(seen: list[Any], built: Any) -> Any:
+    """A ``build_datasets`` stand-in that rejects ``default`` the way the real one does."""
+
+    def build(data_cfg: Any, **_: Any) -> Any:
+        if "default" in data_cfg:
+            raise ValueError("unknown data keys ['default']")
+        seen.append(data_cfg)
+        return {("ds", "train"): built}
+
+    return build
+
+
+def _assert_default_expanded(seen: list[Any]) -> None:
+    (cfg,) = seen
+    assert cfg["ds"]["train"] == {"transform": "t", "sites": ["a"]}
+    assert cfg["ds"]["val"] == {"transform": "v"}
+    assert cfg["local_cache_dir"] == "/cache"
+
+
+def test_run_parity_builds_the_old_side_from_the_expanded_data_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache_dir, _, pin = write_version(
+        tmp_path,
+        kind="points",
+        images=_IMAGES,
+        labels=_LABELS,
+        points=[("i1", 1, 1, 1), ("i2", 3, 3, 1)],
+    )
+    monkeypatch.setitem(
+        registry_module._REMOTE_FETCHERS, "catlin_seaview", lambda: {"Acropora": "Hard Coral"}
+    )
+    stub = _old_stub([("i1", 1, 1), ("i2", 3, 3)])
+    stub.source_name2id = {"Acropora": 1}
+    stub.source_id2name = {1: "Acropora"}
+    seen: list[Any] = []
+    monkeypatch.setattr(parity_module, "build_datasets", _strict_builder(seen, stub))
+
+    run_parity(
+        _DEFAULT_CFG,
+        dataset="ds",
+        split="train",
+        version=pin.version,
+        manifest_sha256=pin.manifest_sha256,
+        cache_dir=cache_dir,
+        client=_NoClient(),
+        annotators=None,
+        sync=False,
+    )
+
+    _assert_default_expanded(seen)
+    assert "default" in _DEFAULT_CFG
+
+
 # --- dense ---------------------------------------------------------------------------------
 
 _RNG = np.random.default_rng(0)
@@ -487,3 +548,36 @@ def test_format_dense_report_lists_each_difference() -> None:
     ):
         assert expected in text
     assert format_dense_report(DenseParityReport()).endswith("PARITY OK")
+
+
+def test_run_dense_parity_builds_the_old_side_from_the_expanded_data_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _StubDense(_old_rows())
+    cache_dir, _, pin = write_version(
+        tmp_path,
+        kind="dense",
+        images=_new_images(),
+        labels=[
+            {"label_id": i, "name": n, "mermaid_benthic_attribute": _ATTRIBUTES[n]}
+            for i, n in _NAMES.items()
+        ],
+    )
+    monkeypatch.setitem(
+        registry_module._REMOTE_FETCHERS, "catlin_seaview", lambda: dict(old.mapping)
+    )
+    seen: list[Any] = []
+    monkeypatch.setattr(parity_module, "build_datasets", _strict_builder(seen, old))
+
+    run_dense_parity(
+        _DEFAULT_CFG,
+        dataset="ds",
+        split="train",
+        version=pin.version,
+        manifest_sha256=pin.manifest_sha256,
+        cache_dir=cache_dir,
+        client=_NoClient(),
+        sync=False,
+    )
+
+    _assert_default_expanded(seen)
