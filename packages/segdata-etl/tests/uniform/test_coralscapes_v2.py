@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from PIL import Image
 
 from segdata_etl import cli
 from segdata_etl.datasets import coralscapes_v2, ucsd_mosaics
@@ -24,8 +27,8 @@ ID2LABEL = {"1": "alpha", "2": "beta", "7": "gamma"}
 # 4x3 mask: label 0 x5, label 2 x4, label 7 x3.
 PIXELS = [0, 0, 0, 0, 0, 2, 2, 2, 2, 7, 7, 7]
 
-IMG_A = jpeg_bytes(8, 6)
-IMG_B = png_bytes(5, 4)
+IMG_A = jpeg_bytes(4, 3)
+IMG_B = png_bytes(3, 2)
 MASK = mask_png(PIXELS, 4, 3)
 MASK_B = mask_png([1] * 6, 3, 2)
 
@@ -86,7 +89,7 @@ def test_images_are_staged_byte_identical_with_row_fields_from_the_bytes(monkeyp
     assert a["group"] == "train"
     assert a["source_name"] == "a1"
     assert json.loads(a["attrs"]) == {"hf_split": "train", "site": "s1"}
-    assert (a["media_type"], a["width"], a["height"]) == ("image/jpeg", 8, 6)
+    assert (a["media_type"], a["width"], a["height"]) == ("image/jpeg", 4, 3)
     assert a["etag"] == hashlib.md5(IMG_A).hexdigest()  # noqa: S324
     assert (a["size"], a["crc64nvme"]) == (len(IMG_A), crc64nvme_b64(IMG_A))
     assert a["mask_etag"] == hashlib.md5(MASK).hexdigest()  # noqa: S324
@@ -176,7 +179,7 @@ def test_gif_image_is_dropped_with_its_mask_and_its_id_logged(monkeypatch, tmp_p
 def test_mask_that_is_not_png_drops_the_image(monkeypatch, tmp_path):
     shards = default_shards()
     shards["instances/train-00000-of-00001.parquet"] = shard(
-        ["a1", "badmask"], [IMG_A, IMG_A], [MASK, jpeg_bytes(8, 6)]
+        ["a1", "badmask"], [IMG_A, IMG_A], [MASK, jpeg_bytes(4, 3)]
     )
 
     version = build(monkeypatch, tmp_path, shards=shards)
@@ -185,6 +188,82 @@ def test_mask_that_is_not_png_drops_the_image(monkeypatch, tmp_path):
     assert not (images_root(version) / "train" / "badmask.jpg").exists()
     dropped = json.loads((version / "manifest.json").read_bytes())["stats"]["dropped"]
     assert dropped["image_unreadable_header"] == 1
+
+
+def stage_with_bad_mask(monkeypatch, tmp_path, caplog, image: bytes, mask: bytes):
+    """Build with a train row ``bad`` between the good row ``a1`` and the validation row ``b1``."""
+    shards = default_shards()
+    shards["instances/train-00000-of-00001.parquet"] = shard(
+        ["a1", "bad"], [IMG_A, image], [MASK, mask]
+    )
+    with caplog.at_level("WARNING"):
+        version = build(monkeypatch, tmp_path, shards=shards)
+    return version, json.loads((version / "manifest.json").read_bytes())["stats"]["dropped"]
+
+
+def assert_bad_row_dropped(version: Path, dropped: dict[str, int], caplog) -> None:
+    assert {r["image_id"] for r in table(version, "images.parquet")} == {"a1", "b1"}
+    assert not list(images_root(version).rglob("bad*"))
+    assert "bad" not in version.joinpath("uploads.jsonl").read_text()
+    assert {c["image_id"] for c in table(version, "stats/label_counts.parquet")} == {"a1", "b1"}
+    assert dropped["mask_invalid"] == 1
+    assert dropped["image_unreadable_header"] == 0
+    assert "bad" in caplog.text
+
+
+def test_valid_build_drops_no_mask(monkeypatch, tmp_path):
+    version = build(monkeypatch, tmp_path)
+
+    dropped = json.loads((version / "manifest.json").read_bytes())["stats"]["dropped"]
+    assert dropped["mask_invalid"] == 0
+
+
+def test_mask_size_differing_from_the_image_drops_the_row(monkeypatch, tmp_path, caplog):
+    # Image 5x3, mask 4x3.
+    version, dropped = stage_with_bad_mask(
+        monkeypatch, tmp_path, caplog, jpeg_bytes(5, 3), mask_png(PIXELS, 4, 3)
+    )
+
+    assert_bad_row_dropped(version, dropped, caplog)
+
+
+def test_rgb_mask_drops_the_row(monkeypatch, tmp_path, caplog):
+    version, dropped = stage_with_bad_mask(monkeypatch, tmp_path, caplog, IMG_A, png_bytes(4, 3))
+
+    assert_bad_row_dropped(version, dropped, caplog)
+
+
+def test_mask_value_outside_the_vocabulary_drops_the_row(monkeypatch, tmp_path, caplog):
+    # The vocabulary ids are 1, 2 and 7, so 8 is the first id outside it.
+    version, dropped = stage_with_bad_mask(
+        monkeypatch, tmp_path, caplog, IMG_A, mask_png([0, 8] * 6, 4, 3)
+    )
+
+    assert_bad_row_dropped(version, dropped, caplog)
+
+
+def test_mask_value_at_the_vocabulary_maximum_is_kept(monkeypatch, tmp_path):
+    shards = default_shards()
+    shards["instances/train-00000-of-00001.parquet"] = shard(
+        ["edge"], [IMG_A], [mask_png([0, 7] * 6, 4, 3)]
+    )
+
+    version = build(monkeypatch, tmp_path, shards=shards)
+
+    assert {r["image_id"] for r in table(version, "images.parquet")} == {"edge", "b1"}
+    dropped = json.loads((version / "manifest.json").read_bytes())["stats"]["dropped"]
+    assert dropped["mask_invalid"] == 0
+
+
+def test_sixteen_bit_mask_with_vocabulary_ids_is_kept(monkeypatch, tmp_path):
+    buf = io.BytesIO()
+    Image.fromarray(np.array([[0, 2, 7, 7]] * 3, dtype=np.uint16)).save(buf, format="PNG")
+    shards = default_shards()
+    shards["instances/train-00000-of-00001.parquet"] = shard(["deep"], [IMG_A], [buf.getvalue()])
+
+    version = build(monkeypatch, tmp_path, shards=shards)
+
+    assert {r["image_id"] for r in table(version, "images.parquet")} == {"deep", "b1"}
 
 
 def test_duplicate_stems_fail_the_build(monkeypatch, tmp_path):

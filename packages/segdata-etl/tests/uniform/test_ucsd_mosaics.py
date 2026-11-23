@@ -26,7 +26,7 @@ CLASSES = [
     },
     {"id": 2, "raw_legend_id": 1, "name": "Fungia", "description": "", "color_rgb": []},
 ]
-IMG = jpeg_bytes(8, 6)
+IMG = jpeg_bytes(2, 2)
 MASK = mask_png([0, 1, 2, 2], 2, 2)
 
 

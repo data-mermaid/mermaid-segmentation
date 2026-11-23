@@ -14,7 +14,7 @@ import io
 import json
 import logging
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from importlib import resources
@@ -50,6 +50,8 @@ CURATED_ROOT: Path | None = None
 
 _EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png"}
 _PNG = "image/png"
+# Pillow modes that decode to a 2-D integer array of label ids.
+_ID_MODES = frozenset({"L", "P", "I;16", "I"})
 
 
 @dataclass(frozen=True)
@@ -135,11 +137,36 @@ def read_header(image: bytes, mask: bytes) -> tuple[str, int, int] | None:
     return None if dims is None else (media_type, dims[0], dims[1])
 
 
-def label_pixel_counts(mask: bytes) -> dict[int, int]:
-    """Count mask pixels per native label, excluding 0."""
-    pixels = np.asarray(Image.open(io.BytesIO(mask))).ravel()
-    counts = np.bincount(pixels)
-    return {int(i): int(n) for i, n in enumerate(counts) if i != 0 and n}
+class MaskInvalid(ValueError):
+    """A mask cannot serve as a label map for its image."""
+
+
+def label_pixel_counts(
+    mask: bytes, size: tuple[int, int], vocab_ids: Collection[int]
+) -> dict[int, int]:
+    """Count mask pixels per native label, excluding 0.
+
+    The mask must match ``size`` (width, height), have a mode whose pixel values are label ids, and
+    hold only ids in ``vocab_ids`` or 0.
+
+    Raises:
+        MaskInvalid: The mask is undecodable, mis-sized, not single-channel, or holds another id.
+    """
+    try:
+        decoded = Image.open(io.BytesIO(mask))
+        if decoded.size != size:
+            raise MaskInvalid(
+                f"mask is {decoded.size[0]}x{decoded.size[1]}, image is {size[0]}x{size[1]}"
+            )
+        if decoded.mode not in _ID_MODES:
+            raise MaskInvalid(f"mask mode {decoded.mode} does not hold label ids")
+        values, counts = np.unique(np.asarray(decoded), return_counts=True)
+    except OSError as exc:
+        raise MaskInvalid(f"mask cannot be decoded: {exc}") from exc
+    stray = sorted({int(v) for v in values} - set(vocab_ids) - {0})
+    if stray:
+        raise MaskInvalid(f"mask holds ids outside the vocabulary: {stray[:5]}")
+    return {int(v): int(n) for v, n in zip(values, counts, strict=True) if v != 0}
 
 
 def _object_fields(data: bytes) -> tuple[str, int, str]:
@@ -287,6 +314,7 @@ class _Staged:
     counts: list[tuple[str, int, int]] = field(default_factory=list)
     files: list[StagedFile] = field(default_factory=list)
     unreadable: int = 0
+    mask_invalid: int = 0
 
 
 def _stage_shard(
@@ -295,6 +323,7 @@ def _stage_shard(
     local: str,
     split: str,
     ids: Mapping[tuple[str, str], str],
+    vocab_ids: Collection[int],
     out: _Staged,
 ) -> None:
     columns = (*source.meta_columns, "image", "label")
@@ -308,13 +337,17 @@ def _stage_shard(
                 logger.warning("dropping image %s: unreadable image or mask header", image_id)
                 out.unreadable += 1
                 continue
+            try:
+                label_counts = label_pixel_counts(mask, header[1:], vocab_ids)
+            except MaskInvalid as exc:
+                logger.warning("dropping image %s: invalid mask: %s", image_id, exc)
+                out.mask_invalid += 1
+                continue
             record = image_row(image_id, info, image, mask, header)
             stage_bytes(stage_dir, source, record["key"], image)
             stage_bytes(stage_dir, source, record["mask_key"], mask)
             out.rows.append(record)
-            out.counts.extend(
-                (image_id, label, n) for label, n in sorted(label_pixel_counts(mask).items())
-            )
+            out.counts.extend((image_id, label, n) for label, n in sorted(label_counts.items()))
             prefix = source.image_prefix
             out.files.append(
                 StagedFile(prefix + record["key"], record["size"], record["crc64nvme"], header[0])
@@ -344,8 +377,8 @@ def run_build(source: DenseSource, args: argparse.Namespace) -> int:
     out = _Staged()
     for name, split in shards:
         local = hf_hub_download(source.repo, name, repo_type="dataset", revision=args.revision)
-        _stage_shard(source, args.stage_dir, local, split, ids, out)
-    dropped = {"image_unreadable_header": out.unreadable}
+        _stage_shard(source, args.stage_dir, local, split, ids, vocab.keys(), out)
+    dropped = {"image_unreadable_header": out.unreadable, "mask_invalid": out.mask_invalid}
     version = next_version(
         args.stage_dir, DATASET_BUCKET, source.dataset, today=date.today(), git_sha=git.sha
     )
