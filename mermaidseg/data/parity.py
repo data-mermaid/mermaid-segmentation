@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from datasets import load_dataset
 from numpy.typing import NDArray
 from PIL import Image
 
@@ -362,10 +363,46 @@ def old_groups(ds: Any) -> set[str] | None:
     return {ds.split} if isinstance(ds.split, str) else set(ds.split)
 
 
+_HF_SPLITS = ("train", "validation", "test")
+
+
+def _loaded_splits(ds: Any) -> list[str]:
+    """Return the HF splits an old Coralscapes dataset concatenated, in order."""
+    if ds.split is None:
+        return list(_HF_SPLITS)
+    return [ds.split] if isinstance(ds.split, str) else list(ds.split)
+
+
+def _split_lengths(ds: Any, splits: Sequence[str]) -> list[int]:
+    """Return the row count of each loaded split; the old dataset keeps only the concatenation."""
+    if len(splits) == 1:
+        return [len(ds.dataset)]
+    hf_dataset = load_dataset(ds.hf_repo_id)
+    return [len(hf_dataset[name]) for name in splits]
+
+
+def _positional_id(index: int, splits: Sequence[str], lengths: Sequence[int]) -> str:
+    """Name row ``index`` of the concatenation by its split and index within that split."""
+    for name, length in zip(splits, lengths, strict=True):
+        if index < length:
+            return f"{name} row {index}"
+        index -= length
+    raise IndexError("row index beyond the loaded splits")
+
+
 def old_dense_rows(ds: Any) -> Iterator[IdImageMask]:
-    """Yield ``(row id, native RGB image, native mask)`` from the HF rows, before any transform."""
+    """Yield ``(row id, native RGB image, native mask)`` from the HF rows, before any transform.
+
+    Rows without a ``filename`` are named ``"<split> row <index within the split>"``.
+    """
+    boundaries: tuple[list[str], list[int]] | None = None
     for index, row in enumerate(ds.dataset):
-        row_id = row.get("filename") or f"row {index}"
+        row_id = row.get("filename")
+        if not row_id:
+            if boundaries is None:
+                splits = _loaded_splits(ds)
+                boundaries = (splits, _split_lengths(ds, splits))
+            row_id = _positional_id(index, *boundaries)
         yield str(row_id), _rgb_array(row["image"]), _native_mask(row["label"])
 
 

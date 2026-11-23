@@ -19,6 +19,7 @@ from mermaidseg.data.parity import (
     format_dense_report,
     format_report,
     new_points,
+    old_dense_rows,
     old_points,
     run_dense_parity,
     run_parity,
@@ -404,6 +405,52 @@ def test_dense_mapping_difference_is_a_vocabulary_mismatch(
     ]
 
 
+def test_dense_name_difference_alone_is_a_vocabulary_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    labels = [
+        {"label_id": 1, "name": "a", "mermaid_benthic_attribute": "Hard Coral"},
+        {"label_id": 2, "name": "b2", "mermaid_benthic_attribute": "Rubble"},
+        {"label_id": 3, "name": "c", "mermaid_benthic_attribute": None},
+    ]
+
+    report = _run_dense(
+        monkeypatch, tmp_path, _StubDense(_old_rows()), _new_images(), new_labels=labels
+    )
+
+    assert not report.ok
+    assert report.vocab_mismatches == [
+        VocabMismatch(
+            label_id=2, old_name="b", new_name="b2", old_mapped="rubble", new_mapped="rubble"
+        )
+    ]
+
+
+def test_old_dense_rows_name_unnamed_rows_by_hf_split_and_index_within_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image, mask = _PIXELS["p1"], _MASK1
+    old: Any = _StubDense([])
+    old.split = ["train", "validation"]
+    old.hf_repo_id = "repo"
+    old.dataset = [{"image": image, "label": mask} for _ in range(3)]
+    monkeypatch.setattr(
+        parity_module,
+        "load_dataset",
+        lambda repo: {"train": [0, 1], "validation": [0]} if repo == "repo" else {},
+    )
+
+    ids = [row_id for row_id, _, _ in old_dense_rows(old)]
+
+    assert ids == ["train row 0", "train row 1", "validation row 0"]
+
+
+def test_old_dense_rows_keep_the_filename_when_the_row_has_one() -> None:
+    old = _StubDense([("f1", _PIXELS["p1"], _MASK1)])
+
+    assert [row_id for row_id, _, _ in old_dense_rows(old)] == ["f1"]
+
+
 def test_dense_records_the_probe_result(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     report = _run_dense(
         monkeypatch, tmp_path, _StubDense(_old_rows()), _new_images(), probe=lambda: "abc123"
@@ -417,6 +464,7 @@ def test_format_dense_report_lists_each_difference() -> None:
     report = DenseParityReport(
         matched=1,
         old_only=["o3"],
+        new_only=["n9"],
         mask_diffs={"n1": 4},
         label_pixel_diff={1: (8, 7)},
         vocab_mismatches=[VocabMismatch(2, "b", "b", "sand", "rubble")],
@@ -426,6 +474,16 @@ def test_format_dense_report_lists_each_difference() -> None:
     text = format_dense_report(report)
 
     assert text.endswith("PARITY FAILED")
-    for expected in ("o3", "n1: 4 pixels", "1: old 8, new 7", "id 2", "sand", "rubble", "abc123"):
+    for expected in (
+        "matched images: 1",
+        "o3",
+        "n9",
+        "n1: 4 pixels",
+        "1: old 8, new 7",
+        "id 2",
+        "sand",
+        "rubble",
+        "abc123",
+    ):
         assert expected in text
     assert format_dense_report(DenseParityReport()).endswith("PARITY OK")
