@@ -97,12 +97,22 @@ def _read_manifest(version_dir: Path, dataset: str, version: str) -> tuple[bytes
     return data, manifest
 
 
-def _verify_tables(version_dir: Path, manifest: Manifest) -> bytes:
-    """Check each listed table against the manifest; return the bytes of ``images.parquet``."""
+def _verify_tables(version_dir: Path, manifest: Manifest) -> dict[str, bytes]:
+    """Check each listed table against the manifest; return the staged bytes by table name."""
     tables = {name: _read_table(version_dir, name, manifest) for name in manifest.files}
     if "images.parquet" not in tables:
         raise PublishRefused("the manifest lists no images.parquet")
-    return tables["images.parquet"]
+    return tables
+
+
+def _table_expectations(tables: Mapping[str, bytes], prefix: str) -> dict[str, _Expected]:
+    """Map each table's destination key to the fingerprint of its staged bytes."""
+    return {
+        prefix + name: _Expected(
+            hashlib.md5(data, usedforsecurity=False).hexdigest(), len(data), crc64nvme_b64(data)
+        )
+        for name, data in tables.items()
+    }
 
 
 def _read_table(version_dir: Path, name: str, manifest: Manifest) -> bytes:
@@ -218,21 +228,20 @@ def _manifest_published(client: Any, dataset: str, version: str) -> bool:
     return True
 
 
-def _conflicting_key(client: Any, step: _Copy | _Upload) -> str | None:
-    """Return the step's destination key if it exists with a fingerprint other than planned."""
-    head = head_with_checksum(client, DATASET_BUCKET, step.dst_key)
+def _conflicting_key(client: Any, key: str, expect: _Expected) -> str | None:
+    """Return ``key`` if it exists in the dataset bucket with a fingerprint other than ``expect``."""
+    head = head_with_checksum(client, DATASET_BUCKET, key)
     if head is None:
         return None
-    expect = step.expect
     same = (
         _norm_etag(head["ETag"]) == _norm_etag(expect.etag)
         and head["ContentLength"] == expect.size
         and head.get("ChecksumCRC64NVME") == expect.crc64nvme
     )
-    return None if same else step.dst_key
+    return None if same else key
 
 
-def _check_destinations(client: Any, steps: Iterable[_Copy | _Upload], workers: int) -> None:
+def _check_destinations(client: Any, planned: Mapping[str, _Expected], workers: int) -> None:
     """Refuse when a planned key exists with other content; matching keys are left to the rerun."""
     conflicts: list[str] = []
 
@@ -240,7 +249,7 @@ def _check_destinations(client: Any, steps: Iterable[_Copy | _Upload], workers: 
         if key is not None:
             conflicts.append(key)
 
-    _run_bounded(lambda step: _conflicting_key(client, step), steps, workers, collect)
+    _run_bounded(lambda item: _conflicting_key(client, *item), planned.items(), workers, collect)
     if conflicts:
         named = ", ".join(sorted(conflicts)[:_NAMED_CONFLICTS])
         raise PublishRefused(
@@ -252,13 +261,14 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
     """Check everything that can be checked before the first write; return the plan."""
     version_dir = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version))
     manifest_bytes, manifest = _read_manifest(version_dir, dataset, version)
-    images = _verify_tables(version_dir, manifest)
-    expected = _image_expectations(images, manifest.image_store.prefix)
+    tables = _verify_tables(version_dir, manifest)
+    expected = _image_expectations(tables["images.parquet"], manifest.image_store.prefix)
     steps = _plan_steps(stage_dir, version_dir, expected)
     _check_key_sets(steps, expected)
     if _manifest_published(client, dataset, version):
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
-    _check_destinations(client, steps, workers)
+    table_expected = _table_expectations(tables, dataset_prefix(dataset, version))
+    _check_destinations(client, {**{s.dst_key: s.expect for s in steps}, **table_expected}, workers)
     return _Plan(manifest, manifest_bytes, steps)
 
 

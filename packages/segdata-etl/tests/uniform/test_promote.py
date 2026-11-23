@@ -16,7 +16,7 @@ from segdata_etl.common.stage import next_version
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
 
-from .conftest import FakeS3, client_error, crc64nvme_b64, jpeg_bytes, png_bytes
+from .conftest import FakeS3, client_error, crc64nvme_b64, jpeg_bytes, md5_etag, png_bytes
 from .test_coralscapes_v2 import IMG_A, IMG_B, MASK, MASK_B
 from .test_coralscapes_v2 import build as build_coralscapes
 from .test_coralscapes_v2 import shard as coralscapes_shard
@@ -347,6 +347,66 @@ def test_planned_upload_key_holding_other_bytes_refuses_with_only_heads(monkeypa
         run_promote(fake, tmp_path / "stage", version_path.name, dataset="coralscapes_v2")
 
     assert {op for op, *_ in fake.calls} == {"head"}
+
+
+def plant_same_length(fake: FakeS3, key: str, data: bytes, differs: str) -> None:
+    """Seed ``key`` with ``data`` minus a flipped byte, so the size matches the plan.
+
+    ``differs`` names the fingerprint that catches it: ``etag`` keeps the planned CRC,
+    ``crc`` keeps the planned ETag, and ``both`` keeps neither.
+    """
+    flipped = bytes([data[0] ^ 1]) + data[1:]
+    fake.put(DATASET_BUCKET, key, flipped, etag=md5_etag(data) if differs == "crc" else None)
+    if differs == "etag":
+        fake.crcs[(DATASET_BUCKET, key)] = crc64nvme_b64(data)
+
+
+@pytest.mark.parametrize("differs", ["etag", "crc", "both"])
+def test_planned_copy_key_holding_same_length_other_bytes_refuses_with_only_heads(
+    repo,  # noqa: F811
+    tmp_path,
+    differs,
+):
+    fake, stage, version = stage_mermaid(tmp_path)
+    line = copy_destinations(stage, version)[0]
+    plant_same_length(
+        fake, line["dst_key"], fake.objects[(line["src_bucket"], line["src_key"])], differs
+    )
+    fake.calls.clear()
+
+    with pytest.raises(PublishRefused, match=line["dst_key"]):
+        run_promote(fake, stage, version)
+
+    assert {op for op, *_ in fake.calls} == {"head"}
+
+
+@pytest.mark.parametrize("differs", ["etag", "crc", "both"])
+def test_planned_upload_key_holding_same_length_other_bytes_refuses_with_only_heads(
+    monkeypatch, tmp_path, differs
+):
+    version_path = build_coralscapes(monkeypatch, tmp_path)
+    fake = FakeS3()
+    taken = "images/coralscapes_v2/train/a1.jpg"
+    plant_same_length(fake, taken, IMG_A, differs)
+
+    with pytest.raises(PublishRefused, match=taken):
+        run_promote(fake, tmp_path / "stage", version_path.name, dataset="coralscapes_v2")
+
+    assert {op for op, *_ in fake.calls} == {"head"}
+
+
+def test_table_key_holding_other_bytes_refuses_with_only_heads(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    taken = f"datasets/mermaid/{version}/images.parquet"
+    staged = (version_dir(stage, "mermaid", version) / "images.parquet").read_bytes()
+    fake.put(DATASET_BUCKET, taken, staged[:-1] + bytes([staged[-1] ^ 1]))
+    fake.calls.clear()
+
+    with pytest.raises(PublishRefused, match=taken):
+        run_promote(fake, stage, version)
+
+    assert {op for op, *_ in fake.calls} == {"head"}
+    assert all(c[3].get("ChecksumMode") == "ENABLED" for c in fake.ops("head")[1:])
 
 
 def test_planned_upload_key_holding_identical_bytes_still_promotes(monkeypatch, tmp_path):

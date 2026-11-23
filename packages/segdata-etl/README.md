@@ -309,7 +309,7 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset <data
 
 `promote` also takes `--workers` (default 16) and `-v`, `--verbose`. It writes in this order:
 
-1. Preflight, before any write. It checks the staged tables against `manifest.json`, refuses a manifest whose `stats.n_images` is 0, checks that the plan file names exactly the image and mask keys in `images.parquet` with the same size and checksums, and checks each staged upload file. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
+1. Preflight, before any write. It checks the staged tables against `manifest.json`, refuses a manifest whose `stats.n_images` is 0, checks that the plan file names exactly the image and mask keys in `images.parquet` with the same size and checksums, and checks each staged upload file. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
 2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`.
 3. The tables.
 4. `manifest.json`.
