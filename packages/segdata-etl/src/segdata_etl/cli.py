@@ -18,9 +18,11 @@ from segdata_spec import DATASET_BUCKET
 from .datasets import (
     benthos_yuval,
     catlin_seaview,
+    coralscapes_v2,
     mermaid,
     moorea_labeled_corals,
     pacific_labeled_corals,
+    ucsd_mosaics,
 )
 from .datasets.coralnet import commands as coralnet_commands
 from .splits import builder as split_builder
@@ -44,7 +46,7 @@ DATASET_MODULES: tuple[ModuleType, ...] = (
 
 # Uniform-format builds stage a version under ``--stage-dir``; each module has the same contract as
 # DATASET_MODULES. Adding one is one entry here.
-UNIFORM_MODULES: tuple[ModuleType, ...] = (mermaid,)
+UNIFORM_MODULES: tuple[ModuleType, ...] = (mermaid, coralscapes_v2, ucsd_mosaics)
 
 
 def default_workdir(dataset: str) -> Path:

@@ -8,8 +8,10 @@ version = "0.1.0"
 description = "Builds the CoralNet dataset parquets and validates and publishes external segmentation datasets to S3."
 requires-python = ">=3.11.5"
 dependencies = [
+    "awscrt",
     "coralnet-scraper",
     "boto3",
+    "huggingface-hub>=0.36.2",
     "ibis-framework[duckdb]",
     "networkx",
     "numpy",

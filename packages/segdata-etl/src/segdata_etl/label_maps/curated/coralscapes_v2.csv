@@ -1,0 +1,96 @@
+label_id,name,mermaid_benthic_attribute
+1,acanthaster planci,acanthaster planci
+2,acropora alive,acropora
+3,acropora bleached,bleached coral
+4,acropora dead,dead coral
+5,algae covered brain coral,turf algae
+6,algae covered branching coral,turf algae
+7,algae covered lobophylliidae,turf algae
+8,algae covered massive coral,turf algae
+9,algae covered pocillopora,turf algae
+10,algae covered porites,turf algae
+11,algae covered substrate,turf algae
+12,algae covered table acropora,turf algae
+13,anemone,anemone
+14,background,background
+15,brain coral alive,hard coral
+16,brain coral bleached,bleached coral
+17,brain coral dead,dead coral
+18,branching coral alive,hard coral
+19,branching coral bleached,bleached coral
+20,branching coral dead,dead coral
+21,cirrhipathes,hard coral
+22,dark,dark
+23,dead giant clam,tridacna giant clam
+24,feather worm,sabellidae
+25,fish,fish
+26,fungiidae alive,fungiidae
+27,fungiidae bleached,bleached coral
+28,fungiidae dead,dead coral
+29,galaxea alive,galaxea
+30,galaxea bleached,bleached coral
+31,galaxea dead,dead coral
+32,giant clam,tridacna giant clam
+33,goniopora alive,goniopora
+34,goniopora dead,dead coral
+35,hard coral alive,hard coral
+36,hard coral bleached,bleached coral
+37,hard coral dead,dead coral
+38,hard substrate,bare substrate
+39,human,human
+40,human-made structure,bare substrate
+41,leather coral alive,alcyoniidae
+42,lobophylliidae alive,lobophyllia
+43,lobophylliidae bleached,bleached coral
+44,lobophylliidae dead,dead coral
+45,massive alive,hard coral
+46,massive bleached,bleached coral
+47,massive dead,dead coral
+48,meandering coral alive,hard coral
+49,meandering coral bleached,bleached coral
+50,meandering coral dead,dead coral
+51,millepora,millepora
+52,millepora bleached,bleached coral
+53,millepora dead,dead coral
+54,nephtheidae alive,nephtheidae
+55,other animal,other invertebrates
+56,other coral alive,hard coral
+57,other coral bleached,bleached coral
+58,other coral dead,dead coral
+59,pavona alive,pavona
+60,pavona bleached,bleached coral
+61,pavona dead,dead coral
+62,pocillopora alive,pocillopora
+63,pocillopora bleached,bleached coral
+64,pocillopora dead,dead coral
+65,porites alive,porites
+66,porites bleached,bleached coral
+67,porites dead,dead coral
+68,rubble,rubble
+69,sand,sand
+70,sea cucumber,sea cucumber
+71,sea urchin,sea urchin
+72,seagrass,seagrass
+73,seriatopora alive,seriatopora
+74,seriatopora bleached,bleached coral
+75,seriatopora dead,dead coral
+76,soft coral (malacalcyonacea) alive,soft coral
+77,soft coral (malacalcyonacea) bleached,bleached coral
+78,sponge,sponge
+79,stylophora alive,stylophora
+80,stylophora bleached,bleached coral
+81,stylophora dead,dead coral
+82,table acropora alive,acropora
+83,table acropora bleached,bleached coral
+84,table acropora dead,dead coral
+85,thin plate/encrusting coral alive,hard coral
+86,thin plate/encrusting coral bleached,bleached coral
+87,thin plate/encrusting coral dead,dead coral
+88,transect line,tape
+89,transect tools,unknown
+90,trash,trash
+91,turbinaria,turbinaria reniformis
+92,turbinaria dead,dead coral
+93,water column,background
+94,water surface,background
+95,xeniidae alive,xeniidae
