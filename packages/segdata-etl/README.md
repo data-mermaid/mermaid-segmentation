@@ -260,7 +260,7 @@ uv run --package segdata-etl segdata build <dataset> --stage-dir <stage> ...
 
 The build writes the version to `<stage>/mermaid-ic-datasets/datasets/<dataset>/<version>/`. This is the [cache layout](../segdata-spec/README.md#cache-layout) that segdata `sync` writes.
 
-The version is `YYYYMMDD-<sha7>`: the UTC date and the first seven characters of the git commit. If that version is already staged, or its `manifest.json` is already in `mermaid-ic-datasets`, the build appends `-2`, `-3` and so on until the name is free.
+The version is `YYYYMMDD-<sha7>`: the UTC date and the first seven characters of the git commit. If that version is already staged, or any object exists under `datasets/<dataset>/<version>/` in `mermaid-ic-datasets` (a half-promoted version included), the build appends `-2`, `-3` and so on until the name is free.
 
 Flags on every uniform build:
 
@@ -281,6 +281,8 @@ Each dataset:
 `mermaid` is a points dataset. Its labels are the BA+GF pairs, numbered from 1 and named `BA::GF`. The trailing `::` stays when there is no growth form. The plan file `copies.jsonl` lists one server-side copy per image, from `coral-reef-training` to `mermaid-ic-datasets`. The build stages no image bytes.
 
 `coralscapes_v2` and `ucsd_mosaics` are dense datasets. The build stages each image and mask byte for byte under `<stage>/mermaid-ic-datasets/images/<dataset>/`, and `uploads.jsonl` lists each staged file. Their labels map to MERMAID benthic attributes through the curated CSVs in `segdata_etl/label_maps/curated/` (`coralscapes_v2.csv`, `ucsd_mosaics.csv`; columns `label_id`, `name`, `mermaid_benthic_attribute`).
+
+The build fails when no file in the pinned revision matches the shard pattern. It also fails when a `.parquet` under the shard directory does not match the pattern. The shard directory is `instances/` for `coralscapes_v2` and `data/` for `ucsd_mosaics`.
 
 The manifest's `stats.dropped` counts what the build left out:
 
@@ -307,7 +309,7 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset <data
 
 `promote` also takes `--workers` (default 16) and `-v`, `--verbose`. It writes in this order:
 
-1. Preflight, before any write. It checks the staged tables against `manifest.json`, checks that the plan file names exactly the image and mask keys in `images.parquet` with the same size and checksums, and checks each staged upload file. It refuses a version whose `manifest.json` is already in the bucket.
+1. Preflight, before any write. It checks the staged tables against `manifest.json`, refuses a manifest whose `stats.n_images` is 0, checks that the plan file names exactly the image and mask keys in `images.parquet` with the same size and checksums, and checks each staged upload file. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
 2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`.
 3. The tables.
 4. `manifest.json`.
