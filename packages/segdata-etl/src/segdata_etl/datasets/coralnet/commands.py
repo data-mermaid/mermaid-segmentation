@@ -9,6 +9,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ...common.store import add_store_argument
+
 _DEFAULT_OUTPUT_DIR = Path("outputs/coralnet-dataset")
 
 
@@ -21,6 +23,33 @@ def _stage(name: str) -> Callable[[argparse.Namespace], int]:
         return int(getattr(build, f"_cmd_{name}")(args))
 
     return run
+
+
+def raw_flag_errors(args: argparse.Namespace) -> list[str]:
+    """Problems with the ``raw`` flags; empty when they are right.
+
+    A directory ``--store`` needs ``--source-ids``, ``--store s3`` takes none, and the parent
+    pin's two flags come together.
+    """
+    errors: list[str] = []
+    on_s3 = str(args.store) == "s3"
+    if not on_s3 and args.source_ids is None:
+        errors.append("a directory --store needs --source-ids")
+    if on_s3 and args.source_ids is not None:
+        errors.append("--store s3 takes no --source-ids")
+    if (args.parent_version is None) != (args.parent_manifest_sha256 is None):
+        errors.append("--parent-version and --parent-manifest-sha256 go together")
+    return errors
+
+
+def _run_raw(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Check the flags, then run ``raw.run_raw``, importing ``raw`` on first call."""
+    errors = raw_flag_errors(args)
+    if errors:
+        parser.error("; ".join(errors))
+    from . import raw
+
+    return raw.run_raw(args)
 
 
 def _parse_source_ids(raw: str) -> list[int]:
@@ -74,7 +103,7 @@ def _add_source_ids_flag(p: argparse.ArgumentParser) -> None:
 
 
 def add_subcommands(sub: Any) -> None:
-    """Register the ``coralnet`` command and its five stage subcommands on ``sub``."""
+    """Register the ``coralnet`` command and its six stage subcommands on ``sub``."""
     coralnet = sub.add_parser(
         "coralnet",
         help="Build the CoralNet annotations, images and training-manifest parquets",
@@ -107,6 +136,29 @@ def add_subcommands(sub: Any) -> None:
     _add_common_flags(p_all)
     _add_source_ids_flag(p_all)
     p_all.set_defaults(func=_stage("all"))
+
+    p_raw = stages.add_parser(
+        "raw", help="Publish a frozen build run as a coralnet-raw dataset version"
+    )
+    add_store_argument(p_raw)
+    p_raw.add_argument(
+        "--build-run",
+        default="20260623_nogit",
+        help="Build run under etl-outputs/coralnet/ to publish (default: %(default)s)",
+    )
+    _add_source_ids_flag(p_raw)
+    p_raw.add_argument("--parent-version", default=None, help="coralnet-raw version to reuse")
+    p_raw.add_argument(
+        "--parent-manifest-sha256", default=None, help="Manifest sha256 of --parent-version"
+    )
+    p_raw.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Concurrent S3 workers (default: MERMAID_CORALNET_ETL_WORKERS, else 16)",
+    )
+    p_raw.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
+    p_raw.set_defaults(func=lambda args: _run_raw(p_raw, args))
 
 
 def configure_logging(verbose: bool) -> None:

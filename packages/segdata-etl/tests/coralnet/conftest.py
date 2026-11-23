@@ -8,6 +8,7 @@ Keeps the test suite free of network and AWS deps.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import struct
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from dataclasses import dataclass, field
 import pytest
 from botocore.exceptions import ClientError
 from PIL import Image
+
+from segdata_spec.sync import _crc64nvme_b64
 
 
 @pytest.fixture(autouse=True)
@@ -95,10 +98,20 @@ class FakeS3:
     """In-memory S3 client surface used by the dataset build.
 
     Populate ``objects`` with ``{(bucket, key): bytes}`` to control what gets returned. ``Range``
-    semantics follow ``bytes=start-end`` (inclusive).
+    semantics follow ``bytes=start-end`` (inclusive). ``full_reads`` records the key of every
+    ``get_object`` without a ``Range``, which is how a ``LocalStore`` copy reads its source.
+    ``multipart`` holds the ``(bucket, key)`` pairs listed with a two-part upload's ETag.
     """
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
+    full_reads: list[str] = field(default_factory=list)
+    multipart: set[tuple[str, str]] = field(default_factory=set)
+
+    def etag(self, bucket: str, key: str) -> str:
+        """The quoted ETag S3 gives the object: its MD5, suffixed ``-2`` for a multipart upload."""
+        digest = hashlib.md5(self.objects[(bucket, key)], usedforsecurity=False).hexdigest()
+        suffix = "-2" if (bucket, key) in self.multipart else ""
+        return f'"{digest}{suffix}"'
 
     def put(self, bucket: str, key: str, data: bytes) -> None:
         self.objects[(bucket, key)] = data
@@ -116,10 +129,16 @@ class FakeS3:
                 raw = raw.encode("utf-8")
         self.objects[(Bucket, Key)] = raw
 
-    def head_object(self, *, Bucket: str, Key: str):
+    def head_object(self, *, Bucket: str, Key: str, ChecksumMode: str | None = None):
         if (Bucket, Key) not in self.objects:
             raise _client_error("404", "HeadObject")
-        return {"ContentLength": len(self.objects[(Bucket, Key)])}
+        response = {
+            "ContentLength": len(self.objects[(Bucket, Key)]),
+            "ETag": self.etag(Bucket, Key),
+        }
+        if ChecksumMode == "ENABLED":
+            response["ChecksumCRC64NVME"] = _crc64nvme_b64(self.objects[(Bucket, Key)])
+        return response
 
     def upload_file(self, Filename: str, Bucket: str, Key: str) -> None:
         with open(Filename, "rb") as f:
@@ -129,6 +148,8 @@ class FakeS3:
         if (Bucket, Key) not in self.objects:
             raise _client_error("404", "GetObject")
         full = self.objects[(Bucket, Key)]
+        if not Range:
+            self.full_reads.append(Key)
         content_range: str | None = None
         data = full
         if Range:
@@ -150,7 +171,7 @@ class FakeS3:
             if Delimiter and Delimiter in rest:
                 common_prefixes.add(Prefix + rest.split(Delimiter, 1)[0] + Delimiter)
             else:
-                contents.append({"Key": k})
+                contents.append({"Key": k, "ETag": self.etag(Bucket, k)})
         response: dict = {"KeyCount": len(common_prefixes) + len(contents)}
         if common_prefixes:
             response["CommonPrefixes"] = [{"Prefix": p} for p in sorted(common_prefixes)]
