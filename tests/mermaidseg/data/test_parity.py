@@ -5,20 +5,30 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
 import mermaidseg.data.parity as parity_module
 import mermaidseg.dataset_reconciliation.registry as registry_module
 from mermaidseg.data.parity import (
+    DenseParityReport,
     ParityReport,
+    VocabMismatch,
     compare,
+    format_dense_report,
     format_report,
     new_points,
     old_points,
+    run_dense_parity,
     run_parity,
 )
-from tests.mermaidseg.data.conftest import ImageSpec, open_written, publish_points
+from tests.mermaidseg.data.conftest import (
+    ImageSpec,
+    open_written,
+    publish_points,
+    write_version,
+)
 
 _COLUMNS = ["image_id", "row", "col", "native_name", "mapped"]
 
@@ -230,3 +240,192 @@ def test_run_parity_reports_a_point_moved_by_one_row(
     assert not report.ok
     assert report.old_only_points == Counter({("i1", 2, 1, "hard coral"): 1})
     assert report.new_only_points == Counter({("i1", 1, 1, "hard coral"): 1})
+
+
+class _NoClient:
+    """A client whose every attribute access fails, proving S3 is never reached."""
+
+    def __getattribute__(self, name: str) -> Any:
+        raise AssertionError(f"client.{name} was used")
+
+
+def test_run_parity_without_sync_reads_the_cache_and_never_uses_the_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache_dir, _, pin = write_version(
+        tmp_path,
+        kind="points",
+        images=_IMAGES,
+        labels=_LABELS,
+        points=[("i1", 1, 1, 1), ("i2", 3, 3, 1)],
+    )
+    monkeypatch.setitem(
+        registry_module._REMOTE_FETCHERS, "catlin_seaview", lambda: {"Acropora": "Hard Coral"}
+    )
+    stub = _old_stub([("i1", 1, 1), ("i2", 3, 3)])
+    stub.source_name2id = {"Acropora": 1}
+    stub.source_id2name = {1: "Acropora"}
+    monkeypatch.setattr(parity_module, "build_datasets", lambda *a, **k: {("ds", "train"): stub})
+
+    report = run_parity(
+        {},
+        dataset="ds",
+        split="train",
+        version=pin.version,
+        manifest_sha256=pin.manifest_sha256,
+        cache_dir=cache_dir,
+        client=_NoClient(),
+        annotators=None,
+        sync=False,
+    )
+
+    assert report.ok
+
+
+# --- dense ---------------------------------------------------------------------------------
+
+_RNG = np.random.default_rng(0)
+_PIXELS = {name: _RNG.integers(0, 255, (4, 4, 3), dtype=np.uint8) for name in ("p1", "p2", "p3")}
+_MASK1 = np.array([[1, 1, 2, 2], [1, 1, 2, 2], [3, 3, 0, 0], [3, 3, 0, 0]], dtype=np.uint8)
+_MASK2 = np.array([[2, 2, 2, 2], [1, 1, 1, 1], [3, 3, 3, 3], [0, 0, 0, 0]], dtype=np.uint8)
+_NAMES = {1: "a", 2: "b", 3: "c"}
+_ATTRIBUTES = {"a": "Hard Coral", "b": "Rubble", "c": None}
+
+
+class _StubDense:
+    SOURCE_NAME = "catlin_seaview"
+
+    def __init__(
+        self,
+        rows: list[tuple[str, np.ndarray, np.ndarray]],
+        mapping: dict[str, str | None] | None = None,
+    ) -> None:
+        self.dataset = [{"filename": f, "image": i, "label": m} for f, i, m in rows]
+        self.split = "train"
+        self.class_table = [{"id": i, "name": n} for i, n in _NAMES.items()]
+        self.source_id2name = dict(_NAMES)
+        self.source_name2id = {n: i for i, n in _NAMES.items()}
+        self.mapping = _ATTRIBUTES if mapping is None else mapping
+
+    def set_global_offset(self, offset: int) -> None:
+        self.offset = offset
+
+
+def _old_rows() -> list[tuple[str, np.ndarray, np.ndarray]]:
+    return [("o1", _PIXELS["p1"], _MASK1), ("o2", _PIXELS["p2"], _MASK2)]
+
+
+def _run_dense(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    old: _StubDense,
+    new_images: Sequence[ImageSpec],
+    new_labels: Sequence[dict[str, Any]] | None = None,
+    probe: Any = lambda: None,
+) -> DenseParityReport:
+    labels = new_labels or [
+        {"label_id": i, "name": n, "mermaid_benthic_attribute": _ATTRIBUTES[n]}
+        for i, n in _NAMES.items()
+    ]
+    cache_dir, _, pin = write_version(tmp_path, kind="dense", images=new_images, labels=labels)
+    monkeypatch.setitem(
+        registry_module._REMOTE_FETCHERS, "catlin_seaview", lambda: dict(old.mapping)
+    )
+    monkeypatch.setattr(parity_module, "build_datasets", lambda *a, **k: {("ds", "train"): old})
+    return run_dense_parity(
+        {},
+        dataset="ds",
+        split="train",
+        version=pin.version,
+        manifest_sha256=pin.manifest_sha256,
+        cache_dir=cache_dir,
+        client=_NoClient(),
+        sync=False,
+        hf_revision_probe=probe,
+    )
+
+
+def _new_images(mask1: np.ndarray = _MASK1, pixels2: str = "p2") -> list[ImageSpec]:
+    return [
+        ImageSpec("n1", group="train", mask=mask1, pixels=_PIXELS["p1"]),
+        ImageSpec("n2", group="train", mask=_MASK2, pixels=_PIXELS[pixels2]),
+    ]
+
+
+def test_dense_identical_sides_are_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    report = _run_dense(monkeypatch, tmp_path, _StubDense(_old_rows()), _new_images())
+
+    assert report.ok
+    assert report.matched == 2
+    assert report == DenseParityReport(matched=2)
+
+
+def test_dense_one_differing_mask_pixel_names_the_image_and_shifts_label_counts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changed = _MASK1.copy()
+    changed[0, 0] = 2  # label 1 -> 2
+
+    report = _run_dense(monkeypatch, tmp_path, _StubDense(_old_rows()), _new_images(changed))
+
+    assert not report.ok
+    assert report.mask_diffs == {"n1": 1}
+    assert report.label_pixel_diff == {1: (8, 7), 2: (8, 9)}
+
+
+def test_dense_unmatched_images_are_listed_on_each_side(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    report = _run_dense(
+        monkeypatch,
+        tmp_path,
+        _StubDense([_old_rows()[0], ("o3", _PIXELS["p3"], _MASK2)]),
+        _new_images(),
+    )
+
+    assert not report.ok
+    assert report.matched == 1
+    assert report.old_only == ["o3"]
+    assert report.new_only == ["n2"]
+
+
+def test_dense_mapping_difference_is_a_vocabulary_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _StubDense(_old_rows(), mapping={"a": "Hard Coral", "b": "Sand", "c": None})
+
+    report = _run_dense(monkeypatch, tmp_path, old, _new_images())
+
+    assert not report.ok
+    assert report.vocab_mismatches == [
+        VocabMismatch(
+            label_id=2, old_name="b", new_name="b", old_mapped="sand", new_mapped="rubble"
+        )
+    ]
+
+
+def test_dense_records_the_probe_result(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    report = _run_dense(
+        monkeypatch, tmp_path, _StubDense(_old_rows()), _new_images(), probe=lambda: "abc123"
+    )
+
+    assert report.hf_revision_at_run == "abc123"
+    assert report.ok
+
+
+def test_format_dense_report_lists_each_difference() -> None:
+    report = DenseParityReport(
+        matched=1,
+        old_only=["o3"],
+        mask_diffs={"n1": 4},
+        label_pixel_diff={1: (8, 7)},
+        vocab_mismatches=[VocabMismatch(2, "b", "b", "sand", "rubble")],
+        hf_revision_at_run="abc123",
+    )
+
+    text = format_dense_report(report)
+
+    assert text.endswith("PARITY FAILED")
+    for expected in ("o3", "n1: 4 pixels", "1: old 8, new 7", "id 2", "sand", "rubble", "abc123"):
+        assert expected in text
+    assert format_dense_report(DenseParityReport()).endswith("PARITY OK")
