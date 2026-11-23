@@ -17,7 +17,10 @@ from segdata_spec import DATASET_BUCKET
 
 from . import taxonomy
 from .common.store import add_store_argument
+from .datasets import benthos_yuval as benthos_yuval_build
 from .datasets import catlin_seaview as catlin_seaview_build
+from .datasets import moorea_labeled_corals as moorea_labeled_corals_build
+from .datasets import pacific_labeled_corals as pacific_labeled_corals_build
 from .datasets.coralnet import commands as coralnet_commands
 from .ingest import (
     benthos_yuval,
@@ -135,13 +138,34 @@ def _add_split_subcommands(top: Any) -> None:
     leakage.set_defaults(func=lambda args: split_leakage.run(args, make_s3_client()))
 
 
-def _add_external_builds(build_sub: Any) -> None:
-    parser = build_sub.add_parser(
-        "catlin_seaview", help="Publish the legacy Catlin Seaview prefix as a dataset version"
-    )
-    catlin_seaview_build.add_arguments(parser, workdir=default_workdir("catlin_seaview"))
+# Each external builder module exports ``add_arguments``, ``run(args, client)`` and ``DATASET``.
+_EXTERNAL_BUILDS: tuple[tuple[ModuleType, str], ...] = (
+    (catlin_seaview_build, "Publish the legacy Catlin Seaview prefix as a dataset version"),
+    (
+        moorea_labeled_corals_build,
+        "Publish the legacy Moorea Labeled Corals prefix as a dataset version",
+    ),
+    (
+        pacific_labeled_corals_build,
+        "Publish the legacy Pacific Labeled Corals prefix as a dataset version",
+    ),
+    (
+        benthos_yuval_build,
+        "Publish the legacy Benthos Yuval tiles and masks as a dense dataset version",
+    ),
+)
+
+
+def _add_external_build(build_sub: Any, module: ModuleType, help_text: str) -> None:
+    parser = build_sub.add_parser(module.DATASET, help=help_text)
+    module.add_arguments(parser, workdir=default_workdir(module.DATASET))
     parser.add_argument("-v", "--verbose", action="store_true")
-    parser.set_defaults(func=lambda args: catlin_seaview_build.run(args, make_s3_client()))
+    parser.set_defaults(func=lambda args: module.run(args, make_s3_client()))
+
+
+def _add_external_builds(build_sub: Any) -> None:
+    for module, help_text in _EXTERNAL_BUILDS:
+        _add_external_build(build_sub, module, help_text)
 
 
 def _add_taxonomy_subcommand(top: Any) -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
@@ -11,6 +11,11 @@ from pydantic import TypeAdapter, ValidationError
 from segdata_spec.manifest import Version
 
 _VERSION = TypeAdapter(Version)
+
+
+def utc_today() -> date:
+    """Return today's date in UTC, the date a version name carries."""
+    return datetime.now(UTC).date()
 
 
 def next_version(existing: Iterable[str], *, git_sha: str, today: date) -> str:

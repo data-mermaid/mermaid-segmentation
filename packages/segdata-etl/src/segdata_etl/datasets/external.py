@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
@@ -29,7 +30,7 @@ from segdata_spec.errors import PublishRefused
 from segdata_spec.manifest import ImageStore, LabelMapping, Pin
 from segdata_spec.publish import GitState, _guard_git, probe_git
 from segdata_spec.read import Taxonomy, open_taxonomy
-from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA
+from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 from segdata_spec.sync import sync
 
 DEFAULT_WORKERS = 16
@@ -191,6 +192,26 @@ def label_mapping_record(labels: pa.Table, info: CuratedMapInfo, *, git_sha: str
         n_mapped=sum(target is not None for target in targets),
         n_unresolved=sum(t is not None and i is None for t, i in zip(targets, ids, strict=True)),
     )
+
+
+def build_points(annotations: pd.DataFrame, classes: Mapping[str, int]) -> pa.Table:
+    """Build ``points.parquet`` from ``image_id, row, col, source_label_name, annotator`` rows.
+
+    Raises:
+        ValueError: A ``source_label_name`` is not in ``classes.json``.
+    """
+    unknown = sorted(set(annotations["source_label_name"]) - set(classes))
+    if unknown:
+        raise ValueError(f"label names not in classes.json: {unknown}")
+    return pa.table(
+        {
+            "image_id": annotations["image_id"].astype(str).tolist(),
+            "row": annotations["row"].tolist(),
+            "col": annotations["col"].tolist(),
+            "label_id": annotations["source_label_name"].map(classes).tolist(),
+            "annotator": annotations["annotator"].astype(str).tolist(),
+        }
+    ).cast(POINTS_SCHEMA)
 
 
 def count_labels(points: pa.Table) -> pa.Table:

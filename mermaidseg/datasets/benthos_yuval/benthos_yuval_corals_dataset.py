@@ -1,6 +1,6 @@
 """Benthos Yuval PyTorch dataset (dense segmentation tiles).
 
-Reads tiles produced by the ``segdata build`` CLI and emits ``(image, source_labels)``
+Reads tiles produced by the ``segdata ingest`` CLI and emits ``(image, source_labels)``
 pairs in the Benthos Yuval source-label space. See ``README.md`` for dataset details.
 """
 

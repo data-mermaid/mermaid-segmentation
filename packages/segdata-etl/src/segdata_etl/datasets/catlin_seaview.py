@@ -4,21 +4,16 @@ from __future__ import annotations
 
 import argparse
 import logging
-from collections.abc import Mapping
-from datetime import date
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-import pyarrow as pa
-
 from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
 from segdata_etl.common.store import open_store
+from segdata_etl.common.version import utc_today
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import load_curated
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec.publish import publish_dataset
-from segdata_spec.schema import POINTS_SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -30,26 +25,6 @@ def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
     """Add the shared external-builder options; Catlin needs no others and no ``workdir``."""
     del workdir
     external.add_build_arguments(parser)
-
-
-def _build_points(annotations: pd.DataFrame, classes: Mapping[str, int]) -> pa.Table:
-    """Build ``points.parquet`` from the legacy annotations, one ``default`` annotator row each.
-
-    Raises:
-        ValueError: A ``source_label_name`` is not in ``classes.json``.
-    """
-    unknown = sorted(set(annotations["source_label_name"]) - set(classes))
-    if unknown:
-        raise ValueError(f"label names not in classes.json: {unknown}")
-    return pa.table(
-        {
-            "image_id": annotations["image_id"].astype(str).tolist(),
-            "row": annotations["row"].tolist(),
-            "col": annotations["col"].tolist(),
-            "label_id": annotations["source_label_name"].map(classes).tolist(),
-            "annotator": ["default"] * len(annotations),
-        }
-    ).cast(POINTS_SCHEMA)
 
 
 def run(args: argparse.Namespace, client: Any) -> int:
@@ -65,9 +40,11 @@ def run(args: argparse.Namespace, client: Any) -> int:
         cache_dir=external.taxonomy_cache_dir(args.store, args.cache_dir),
     )
     legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
+    source = source_info(legacy, license_override=LICENSE)
+    dropped = legacy_dropped(DATASET, legacy.manifest)
     curated, curated_info = load_curated(DATASET)
     labels = external.build_labels(legacy.classes, curated, taxonomy.benthic_attributes)
-    points = _build_points(legacy.annotations, legacy.classes)
+    points = external.build_points(legacy.annotations.assign(annotator="default"), legacy.classes)
     images = external.legacy_images(legacy.objects, external.group_folder_identity)
     annotated = set(zip(legacy.annotations["region"], legacy.annotations["image_id"], strict=True))
     external.require_same_ids(
@@ -76,7 +53,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     external.require_known_labels(points, labels)
     sniffed = external.sniff_legacy_images(client, images, legacy=legacy, workers=args.workers)
     external.require_points_inside(points, images, sniffed)
-    version = external.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=date.today())
+    version = external.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=utc_today())
     external.require_version_absent(dest, bucket, DATASET, version)
     images_table = external.stage_images(
         client,
@@ -103,9 +80,9 @@ def run(args: argparse.Namespace, client: Any) -> int:
         image_store=external.image_store(bucket, DATASET),
         etl_package="segdata-etl",
         etl_command=external.build_command(DATASET, args),
-        source=source_info(legacy, license_override=LICENSE),
+        source=source,
         label_mapping=external.label_mapping_record(labels, curated_info, git_sha=git.sha),
-        dropped=legacy_dropped(DATASET, legacy.manifest),
+        dropped=dropped,
         repo_dir=repo_root,
         git=git,
     )

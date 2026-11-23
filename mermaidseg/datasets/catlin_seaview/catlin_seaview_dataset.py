@@ -32,7 +32,7 @@ class CatlinSeaviewDataset(BaseCoralDataset):
 
     Attributes:
         annotations_path (str): Key (relative to ``source_bucket``) of the
-            Parquet file with annotations. Produced by the ``segdata build``
+            Parquet file with annotations. Produced by the ``segdata ingest``
             CLI; see ``README.md`` in this directory.
         source_bucket (str): S3 bucket name containing the dataset files.
         source_s3_prefix (str): S3 prefix under which the per-region

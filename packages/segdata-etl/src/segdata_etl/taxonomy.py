@@ -11,7 +11,7 @@ import hashlib
 import io
 import logging
 import shlex
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 import requests
 
 from segdata_etl.common.store import open_store
-from segdata_etl.common.version import list_versions, next_version
+from segdata_etl.common.version import list_versions, next_version, utc_today
 from segdata_spec.manifest import SourceInfo, TaxonomyManifest
 from segdata_spec.publish import probe_git, publish_taxonomy
 from segdata_spec.schema import (
@@ -164,7 +164,7 @@ def run_taxonomy(
     version = next_version(
         list_versions(client, bucket, f"taxonomy/{NAME}/"),
         git_sha=probe.sha,
-        today=date.today(),
+        today=utc_today(),
     )
     manifest, sha = publish_taxonomy(
         client,
