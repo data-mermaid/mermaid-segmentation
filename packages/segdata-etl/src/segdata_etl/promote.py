@@ -11,23 +11,33 @@ import hashlib
 import json
 import logging
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import pyarrow.parquet as pq
+from botocore.exceptions import ClientError
 
-from segdata_etl.common.s3_objects import ObjectConflict, copy_new, crc64nvme_b64, put_new
-from segdata_etl.common.stage import version_published
+from segdata_etl.common.s3_objects import (
+    ObjectConflict,
+    copy_new,
+    crc64nvme_b64,
+    head_with_checksum,
+    put_new,
+)
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import MANIFEST_NAME, cache_path, dataset_prefix
+from segdata_spec._s3 import MANIFEST_NAME, cache_path, dataset_prefix, is_not_found
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
 from segdata_spec.manifest import Manifest, manifest_sha256
 
 logger = logging.getLogger(__name__)
+
+_Item = TypeVar("_Item")
+_Result = TypeVar("_Result")
+_NAMED_CONFLICTS = 5
 
 COPIES_NAME = "copies.jsonl"
 UPLOADS_NAME = "uploads.jsonl"
@@ -82,6 +92,8 @@ def _read_manifest(version_dir: Path, dataset: str, version: str) -> tuple[bytes
         raise PublishRefused(
             f"{path} describes {manifest.dataset} {manifest.version}, not {dataset} {version}"
         )
+    if manifest.stats.n_images == 0:
+        raise PublishRefused(f"{path} holds no images")
     return data, manifest
 
 
@@ -193,7 +205,50 @@ def _check_key_sets(steps: Iterable[_Copy | _Upload], expected: Mapping[str, _Ex
         )
 
 
-def _preflight(client: Any, stage_dir: Path, dataset: str, version: str) -> _Plan:
+def _manifest_published(client: Any, dataset: str, version: str) -> bool:
+    """Return whether the version's ``manifest.json`` exists in the dataset bucket."""
+    try:
+        client.head_object(
+            Bucket=DATASET_BUCKET, Key=dataset_prefix(dataset, version) + MANIFEST_NAME
+        )
+    except ClientError as exc:
+        if is_not_found(exc):
+            return False
+        raise
+    return True
+
+
+def _conflicting_key(client: Any, step: _Copy | _Upload) -> str | None:
+    """Return the step's destination key if it exists with a fingerprint other than planned."""
+    head = head_with_checksum(client, DATASET_BUCKET, step.dst_key)
+    if head is None:
+        return None
+    expect = step.expect
+    same = (
+        _norm_etag(head["ETag"]) == _norm_etag(expect.etag)
+        and head["ContentLength"] == expect.size
+        and head.get("ChecksumCRC64NVME") == expect.crc64nvme
+    )
+    return None if same else step.dst_key
+
+
+def _check_destinations(client: Any, steps: Iterable[_Copy | _Upload], workers: int) -> None:
+    """Refuse when a planned key exists with other content; matching keys are left to the rerun."""
+    conflicts: list[str] = []
+
+    def collect(key: str | None) -> None:
+        if key is not None:
+            conflicts.append(key)
+
+    _run_bounded(lambda step: _conflicting_key(client, step), steps, workers, collect)
+    if conflicts:
+        named = ", ".join(sorted(conflicts)[:_NAMED_CONFLICTS])
+        raise PublishRefused(
+            f"{len(conflicts)} planned keys already hold other content in {DATASET_BUCKET}: {named}"
+        )
+
+
+def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers: int) -> _Plan:
     """Check everything that can be checked before the first write; return the plan."""
     version_dir = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version))
     manifest_bytes, manifest = _read_manifest(version_dir, dataset, version)
@@ -201,8 +256,9 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str) -> _Pla
     expected = _image_expectations(images, manifest.image_store.prefix)
     steps = _plan_steps(stage_dir, version_dir, expected)
     _check_key_sets(steps, expected)
-    if version_published(client, DATASET_BUCKET, dataset, version):
+    if _manifest_published(client, dataset, version):
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
+    _check_destinations(client, steps, workers)
     return _Plan(manifest, manifest_bytes, steps)
 
 
@@ -249,30 +305,47 @@ def _run_step(client: Any, step: _Copy | _Upload) -> tuple[str, bool]:
 
 
 def _drain(
-    pending: set[Future[tuple[str, bool]]], tally: Counter[str], *, all_done: bool
-) -> set[Future[tuple[str, bool]]]:
+    pending: set[Future[_Result]], consume: Callable[[_Result], None], *, all_done: bool
+) -> set[Future[_Result]]:
     done, pending = wait(pending, return_when=ALL_COMPLETED if all_done else FIRST_COMPLETED)
     for future in done:
-        kind, present = future.result()
-        tally["present" if present else kind] += 1
+        consume(future.result())
     return pending
+
+
+def _run_bounded(
+    fn: Callable[[_Item], _Result],
+    items: Iterable[_Item],
+    workers: int,
+    consume: Callable[[_Result], None],
+) -> None:
+    """Run ``fn`` on every item in a bounded pool, passing each result to ``consume``.
+
+    The first failure stops submitting and raises.
+    """
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending: set[Future[_Result]] = set()
+        try:
+            for item in items:
+                pending.add(pool.submit(fn, item))
+                if len(pending) >= workers * 2:
+                    pending = _drain(pending, consume, all_done=False)
+            _drain(pending, consume, all_done=True)
+        except BaseException:
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
 
 
 def _write_images(
     client: Any, steps: Iterable[_Copy | _Upload], workers: int, tally: Counter[str]
 ) -> None:
     """Run every copy and put in a bounded pool; the first failure stops submitting and raises."""
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        pending: set[Future[tuple[str, bool]]] = set()
-        try:
-            for step in steps:
-                pending.add(pool.submit(_run_step, client, step))
-                if len(pending) >= workers * 2:
-                    pending = _drain(pending, tally, all_done=False)
-            _drain(pending, tally, all_done=True)
-        except BaseException:
-            pool.shutdown(wait=True, cancel_futures=True)
-            raise
+
+    def count(result: tuple[str, bool]) -> None:
+        kind, present = result
+        tally["present" if present else kind] += 1
+
+    _run_bounded(lambda step: _run_step(client, step), steps, workers, count)
 
 
 def _write_tables(
@@ -309,13 +382,13 @@ def promote(client: Any, *, stage_dir: Path, dataset: str, version: str, workers
     """Upload the staged ``dataset`` ``version`` to the dataset bucket, exactly as staged.
 
     Raises:
-        PublishRefused: The staging is inconsistent or the version is already published; nothing
-            was written.
+        PublishRefused: The staging is inconsistent or holds no images, the version is already
+            published, or a planned key holds other content; nothing was written.
         ChecksumMismatch: A staged table differs from the manifest.
         ObjectConflict: An object landed with, or already holds, other content than planned.
         SourceChanged: A copy source no longer has the planned ETag.
     """
-    plan = _preflight(client, stage_dir, dataset, version)
+    plan = _preflight(client, stage_dir, dataset, version, workers)
     version_dir = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version))
     tally: Counter[str] = Counter()
     try:

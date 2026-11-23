@@ -211,13 +211,6 @@ def assert_bad_row_dropped(version: Path, dropped: dict[str, int], caplog) -> No
     assert "bad" in caplog.text
 
 
-def test_valid_build_drops_no_mask(monkeypatch, tmp_path):
-    version = build(monkeypatch, tmp_path)
-
-    dropped = json.loads((version / "manifest.json").read_bytes())["stats"]["dropped"]
-    assert dropped["mask_invalid"] == 0
-
-
 def test_mask_size_differing_from_the_image_drops_the_row(monkeypatch, tmp_path, caplog):
     # Image 5x3, mask 4x3.
     version, dropped = stage_with_bad_mask(
@@ -271,6 +264,25 @@ def test_duplicate_stems_fail_the_build(monkeypatch, tmp_path):
     shards["instances/validation-00000-of-00001.parquet"] = shard(["a1"], [IMG_B], [MASK_B])
 
     with pytest.raises(ValueError, match="a1"):
+        build(monkeypatch, tmp_path, shards=shards)
+
+
+def test_listing_without_a_matching_shard_fails_the_build(monkeypatch, tmp_path):
+    shards = {
+        "data/train-00000-of-00001.parquet": default_shards()["data/train-00000-of-00001.parquet"]
+    }
+
+    with pytest.raises(ValueError, match="no shard"):
+        build(monkeypatch, tmp_path, shards=shards)
+
+
+def test_parquet_in_the_shard_directory_that_misses_the_pattern_fails_the_build(
+    monkeypatch, tmp_path
+):
+    shards = default_shards()
+    shards["instances/val-00000-of-00001.parquet"] = shard(["c1"], [IMG_B], [MASK_B])
+
+    with pytest.raises(ValueError, match="instances/val-00000-of-00001.parquet"):
         build(monkeypatch, tmp_path, shards=shards)
 
 

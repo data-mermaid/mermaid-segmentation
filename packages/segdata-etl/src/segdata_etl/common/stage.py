@@ -15,7 +15,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.s3_objects import crc64nvme_b64
-from segdata_spec._s3 import MANIFEST_NAME, cache_path, dataset_prefix, is_not_found
+from segdata_spec._s3 import cache_path, dataset_prefix
 
 _SHA_LENGTH = 7
 
@@ -94,15 +94,12 @@ def _checksums(data: bytes) -> dict[str, str]:
     }
 
 
-def version_published(client: Any, bucket: str, dataset: str, version: str) -> bool:
-    """Return whether ``datasets/<dataset>/<version>/manifest.json`` exists in ``bucket``."""
-    try:
-        client.head_object(Bucket=bucket, Key=dataset_prefix(dataset, version) + MANIFEST_NAME)
-    except ClientError as exc:
-        if is_not_found(exc):
-            return False
-        raise
-    return True
+def version_taken(client: Any, bucket: str, dataset: str, version: str) -> bool:
+    """Return whether any object exists under ``datasets/<dataset>/<version>/`` in ``bucket``."""
+    response = client.list_objects_v2(
+        Bucket=bucket, Prefix=dataset_prefix(dataset, version), MaxKeys=1
+    )
+    return bool(response.get("Contents"))
 
 
 def next_version(
@@ -116,8 +113,8 @@ def next_version(
 ) -> str:
     """Return ``YYYYMMDD-<sha7>``, with ``-2``, ``-3``, ... appended until the version is free.
 
-    A version is taken when the staged dir exists or, given ``client``, when its manifest exists in
-    ``bucket``. ``today`` defaults to the current UTC date.
+    A version is taken when the staged dir exists or, given ``client``, when any object exists under its
+    prefix in ``bucket``, which includes a half-promoted version. ``today`` defaults to the current UTC date.
     """
     today = today or datetime.now(UTC).date()
     base = f"{today:%Y%m%d}-{git_sha[:_SHA_LENGTH]}"
@@ -125,7 +122,7 @@ def next_version(
     def taken(candidate: str) -> bool:
         if cache_path(stage_root, bucket, dataset_prefix(dataset, candidate)).exists():
             return True
-        return client is not None and version_published(client, bucket, dataset, candidate)
+        return client is not None and version_taken(client, bucket, dataset, candidate)
 
     candidate, counter = base, 1
     while taken(candidate):

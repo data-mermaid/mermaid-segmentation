@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,12 +12,14 @@ import pytest
 
 from segdata_etl import cli, promote
 from segdata_etl.common.s3_objects import ObjectConflict
+from segdata_etl.common.stage import next_version
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
 
 from .conftest import FakeS3, client_error, crc64nvme_b64, jpeg_bytes, png_bytes
 from .test_coralscapes_v2 import IMG_A, IMG_B, MASK, MASK_B
 from .test_coralscapes_v2 import build as build_coralscapes
+from .test_coralscapes_v2 import shard as coralscapes_shard
 from .test_mermaid import (  # noqa: F401
     ENCRUSTING,
     RUBBLE,
@@ -155,11 +159,24 @@ def test_plan_missing_a_line_refuses_at_preflight(repo, tmp_path):  # noqa: F811
     assert fake.calls == []
 
 
-def test_plan_line_disagreeing_with_images_parquet_refuses_at_preflight(repo, tmp_path):  # noqa: F811
+@pytest.mark.parametrize(
+    ("field", "edit_value"),
+    [
+        ("size", lambda v: v + 1),
+        ("crc64nvme", lambda v: crc64nvme_b64(b"other")),
+        ("etag", lambda v: hashlib.md5(b"other").hexdigest()),  # noqa: S324
+    ],
+)
+def test_plan_line_disagreeing_with_images_parquet_refuses_at_preflight(
+    repo,  # noqa: F811
+    tmp_path,
+    field,
+    edit_value,
+):
     fake, stage, version = stage_mermaid(tmp_path)
 
     def edit(lines):
-        lines[0]["size"] += 1
+        lines[0][field] = edit_value(lines[0][field])
         return lines
 
     rewrite_plan(stage, version, edit)
@@ -300,3 +317,98 @@ def test_cli_requires_its_flags_and_dispatches(monkeypatch, tmp_path):
         "version": "v",
         "workers": 3,
     }
+
+
+def copy_destinations(stage: Path, version: str) -> list[dict[str, Any]]:
+    path = version_dir(stage, "mermaid", version) / "copies.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_planned_copy_key_holding_other_bytes_refuses_with_only_heads(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    taken = copy_destinations(stage, version)[0]["dst_key"]
+    fake.put(DATASET_BUCKET, taken, b"other bytes")
+    fake.calls.clear()
+
+    with pytest.raises(PublishRefused, match=taken):
+        run_promote(fake, stage, version)
+
+    assert {op for op, *_ in fake.calls} == {"head"}
+    assert all(c[3].get("ChecksumMode") == "ENABLED" for c in fake.ops("head")[1:])
+
+
+def test_planned_upload_key_holding_other_bytes_refuses_with_only_heads(monkeypatch, tmp_path):
+    version_path = build_coralscapes(monkeypatch, tmp_path)
+    fake = FakeS3()
+    taken = "images/coralscapes_v2/train/a1.jpg"
+    fake.put(DATASET_BUCKET, taken, IMG_A + b"x")
+
+    with pytest.raises(PublishRefused, match=taken):
+        run_promote(fake, tmp_path / "stage", version_path.name, dataset="coralscapes_v2")
+
+    assert {op for op, *_ in fake.calls} == {"head"}
+
+
+def test_planned_upload_key_holding_identical_bytes_still_promotes(monkeypatch, tmp_path):
+    version_path = build_coralscapes(monkeypatch, tmp_path)
+    fake = FakeS3()
+    fake.put(DATASET_BUCKET, "images/coralscapes_v2/train/a1.jpg", IMG_A)
+
+    run_promote(fake, tmp_path / "stage", version_path.name, dataset="coralscapes_v2")
+
+    manifest_key = f"datasets/coralscapes_v2/{version_path.name}/manifest.json"
+    assert (DATASET_BUCKET, manifest_key) in fake.objects
+
+
+def test_half_uploaded_version_counts_as_taken_yet_promote_resumes_it(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    prefix = f"datasets/mermaid/{version}/"
+    staged_images = (version_dir(stage, "mermaid", version) / "images.parquet").read_bytes()
+    fake.put(DATASET_BUCKET, prefix + "images.parquet", staged_images)
+
+    day, sha = version.split("-", 1)
+    free = next_version(
+        tmp_path / "empty",
+        DATASET_BUCKET,
+        "mermaid",
+        git_sha=sha,
+        today=datetime.strptime(day, "%Y%m%d").date(),  # noqa: DTZ007
+        client=fake,
+    )
+    assert free == f"{version}-2"
+    run_promote(fake, stage, version)
+
+    assert (DATASET_BUCKET, prefix + "manifest.json") in fake.objects
+
+
+def test_zero_image_version_refuses_with_no_writes(monkeypatch, tmp_path):
+    bad = shard_with_only_unreadable_images()
+    version_path = build_coralscapes(monkeypatch, tmp_path, shards=bad)
+    fake = FakeS3()
+
+    with pytest.raises(PublishRefused, match="no images"):
+        run_promote(fake, tmp_path / "stage", version_path.name, dataset="coralscapes_v2")
+
+    assert writes(fake) == []
+
+
+def shard_with_only_unreadable_images() -> dict[str, Any]:
+    gif = b"GIF89a-not-supported"
+    return {"instances/train-00000-of-00001.parquet": coralscapes_shard(["g1"], [gif], [MASK])}
+
+
+def test_upload_landing_with_another_crc_raises_and_no_table_is_written(monkeypatch, tmp_path):
+    class WrongCrc(FakeS3):
+        def put_object(self, **kwargs: Any) -> dict[str, Any]:
+            response = super().put_object(**kwargs)
+            if kwargs["Key"].startswith("images/"):
+                response["ChecksumCRC64NVME"] = crc64nvme_b64(b"other")
+            return response
+
+    version_path = build_coralscapes(monkeypatch, tmp_path)
+    fake = WrongCrc()
+
+    with pytest.raises(ObjectConflict):
+        run_promote(fake, tmp_path / "stage", version_path.name, dataset="coralscapes_v2")
+
+    assert not [k for _, k in fake.objects if k.startswith("datasets/")]

@@ -55,6 +55,7 @@ SOURCE = DenseSource(
         "Raine et al. 2024, CVPR"
     ),
     vocab_file="classes.json",
+    shard_dir="data/",
     shard_pattern=re.compile(r"data/([^/]+)-\d+-of-\d+\.parquet"),
     meta_columns=("filename", "site", "original_split"),
     parse_vocab=_vocab,

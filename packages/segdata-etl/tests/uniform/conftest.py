@@ -171,6 +171,16 @@ class FakeS3:
             "ContentRange": f"bytes {start}-{end}/{len(data)}",
         }
 
+    def list_objects_v2(
+        self, *, Bucket: str, Prefix: str = "", MaxKeys: int = 1000, **kwargs: Any
+    ) -> dict[str, Any]:
+        self.calls.append(("list", Bucket, Prefix, {"MaxKeys": MaxKeys, **kwargs}))
+        keys = sorted(k for b, k in self.objects if b == Bucket and k.startswith(Prefix))[:MaxKeys]
+        response: dict[str, Any] = {"KeyCount": len(keys)}
+        if keys:
+            response["Contents"] = [{"Key": k} for k in keys]
+        return response
+
     def ops(self, op: str) -> list[tuple[str, str, str, dict[str, Any]]]:
         return [call for call in self.calls if call[0] == op]
 

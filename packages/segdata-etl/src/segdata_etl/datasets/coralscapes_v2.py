@@ -50,6 +50,7 @@ SOURCE = DenseSource(
         "in Coral Reefs, ECCV Workshop on Marine Vision, 2026"
     ),
     vocab_file="id2label.json",
+    shard_dir="instances/",
     shard_pattern=re.compile(r"instances/(train|validation|test)-.*\.parquet"),
     meta_columns=("stem", "site"),
     parse_vocab=_vocab,

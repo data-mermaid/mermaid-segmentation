@@ -8,7 +8,6 @@ the staged files a later promote step uploads.
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import io
 import json
@@ -20,14 +19,19 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import awscrt.checksums
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from huggingface_hub import HfApi, hf_hub_download
 from PIL import Image
 
-from segdata_etl.common.s3_objects import ObjectConflict, image_size, sniff_media_type
+from segdata_etl.common.s3_objects import (
+    ObjectConflict,
+    crc64nvme_b64,
+    image_size,
+    md5_hex,
+    sniff_media_type,
+)
 from segdata_etl.common.stage import LocalDirS3, next_version
 from segdata_etl.label_maps.curated import load_curated
 from segdata_spec import DATASET_BUCKET
@@ -73,6 +77,7 @@ class DenseSource:
     license: str
     citation: str
     vocab_file: str
+    shard_dir: str  # every parquet under this directory must match shard_pattern
     shard_pattern: re.Pattern[str]  # group 1 is the split name the shard holds
     meta_columns: tuple[str, ...]
     parse_vocab: Callable[[bytes], dict[int, str]]
@@ -109,19 +114,28 @@ def _list_repo_files(repo: str, revision: str) -> list[str]:
     return HfApi().list_repo_files(repo, repo_type="dataset", revision=revision)
 
 
-def crc64nvme_b64(data: bytes) -> str:
-    """Return the CRC64NVME in S3's ``ChecksumCRC64NVME`` form: base64 of the big-endian CRC."""
-    return base64.b64encode(awscrt.checksums.crc64nvme(data).to_bytes(8, "big")).decode()
-
-
-def _md5(data: bytes) -> str:
-    return hashlib.md5(data).hexdigest()  # noqa: S324
-
-
 def select_shards(files: Sequence[str], pattern: re.Pattern[str]) -> list[tuple[str, str]]:
     """Return ``(file, split)`` for each file the pattern matches, sorted by file name."""
     found = [(f, m.group(1)) for f in files if (m := pattern.fullmatch(f))]
     return sorted(found)
+
+
+def _shards_or_raise(files: Sequence[str], source: DenseSource) -> list[tuple[str, str]]:
+    """Return the shards to stage, requiring at least one and no stray parquet in the shard dir.
+
+    Raises:
+        ValueError: No file matches the pattern, or a parquet under ``source.shard_dir`` does not.
+    """
+    shards = select_shards(files, source.shard_pattern)
+    if not shards:
+        raise ValueError(f"no shard of {source.repo} matches {source.shard_pattern.pattern}")
+    matched = {name for name, _ in shards}
+    for name in sorted(files):
+        if name.startswith(source.shard_dir) and name.endswith(".parquet") and name not in matched:
+            raise ValueError(
+                f"{name} is under {source.shard_dir} but does not match the shard pattern"
+            )
+    return shards
 
 
 def read_header(image: bytes, mask: bytes) -> tuple[str, int, int] | None:
@@ -169,7 +183,7 @@ def label_pixel_counts(
 
 
 def _object_fields(data: bytes) -> tuple[str, int, str]:
-    return _md5(data), len(data), crc64nvme_b64(data)
+    return md5_hex(data), len(data), crc64nvme_b64(data)
 
 
 def image_row(
@@ -364,11 +378,12 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
     ``client`` is the real S3 client; it is only read, to keep the version clear of the bucket.
 
     Raises:
-        ValueError: Image ids collide, or the curated map disagrees with the vocabulary.
+        ValueError: No shard matches, a stray parquet sits in the shard directory, image ids
+            collide, or the curated map disagrees with the vocabulary.
         ObjectConflict: A staged file exists with other bytes.
     """
     git = probe_git(REPO_ROOT)
-    shards = select_shards(_list_repo_files(source.repo, args.revision), source.shard_pattern)
+    shards = _shards_or_raise(_list_repo_files(source.repo, args.revision), source)
     vocab_path = hf_hub_download(
         source.repo, source.vocab_file, repo_type="dataset", revision=args.revision
     )

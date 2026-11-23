@@ -89,7 +89,7 @@ def image_size(head: bytes) -> tuple[int, int] | None:
     return width, height
 
 
-def _head_with_checksum(client: Any, bucket: str, key: str) -> dict[str, Any] | None:
+def head_with_checksum(client: Any, bucket: str, key: str) -> dict[str, Any] | None:
     """HEAD an object with its checksum, or None when it is absent."""
     try:
         response: dict[str, Any] = client.head_object(
@@ -157,7 +157,7 @@ def _resolve_copy_412(
     expect: tuple[str, int, str],
 ) -> CopyResult:
     expect_etag, expect_size, expect_crc = expect
-    existing = _head_with_checksum(client, *dst)
+    existing = head_with_checksum(client, *dst)
     if existing is None:
         raise SourceChanged(f"s3://{src[0]}/{src[1]} no longer matches its ETag") from exc
     etag, size = existing["ETag"], existing["ContentLength"]
@@ -200,7 +200,7 @@ def _accept_identical(
     existing: bytes = client.get_object(Bucket=bucket, Key=key)["Body"].read()
     if existing != body:
         raise ObjectConflict(f"s3://{bucket}/{key} already exists with different bytes") from exc
-    head = _head_with_checksum(client, bucket, key)
+    head = head_with_checksum(client, bucket, key)
     if head is None:
         raise ObjectConflict(f"s3://{bucket}/{key} vanished while being verified") from exc
     crc = head.get("ChecksumCRC64NVME")
