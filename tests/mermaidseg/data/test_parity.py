@@ -700,7 +700,7 @@ def test_dense_report_with_only_excluded_sites_is_ok() -> None:
 
 
 def test_format_dense_report_lists_ten_label_name_diffs_then_the_remainder() -> None:
-    diff = {i: (f"a{i}", f"b{i}") for i in range(1, 13)}
+    diff: dict[int, tuple[str | None, str | None]] = {i: (f"a{i}", f"b{i}") for i in range(1, 13)}
 
     text = format_report(DenseParityReport(native_name_diff=diff))
 
