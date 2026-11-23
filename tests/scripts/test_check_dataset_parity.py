@@ -58,5 +58,32 @@ def test_main_returns_one_on_any_difference(
         "cache_dir": tmp_path / "c",
         "client": ("client", "s3"),
         "annotators": ["a1", "a2"],
+        "offline": False,
     }
     assert capsys.readouterr().out.rstrip().endswith("PARITY OK" if code == 0 else "PARITY FAILED")
+
+
+def test_main_offline_builds_no_s3_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "data.yaml"
+    config.write_text("data:\n  catlin_seaview:\n    train: {}\n")
+    seen: dict[str, Any] = {}
+
+    def _run_parity(data_cfg: Any, **kwargs: Any) -> ParityReport:
+        seen.update(kwargs)
+        return ParityReport()
+
+    def _no_client(name: str) -> None:
+        raise AssertionError("an S3 client was built")
+
+    monkeypatch.setattr(script, "run_parity", _run_parity)
+    monkeypatch.setattr(script.boto3, "client", _no_client)
+
+    result = script.main(
+        ["--data-config", str(config), "--cache-dir", str(tmp_path / "c"), "--offline", *_ARGS]
+    )
+
+    assert result == 0
+    assert seen["client"] is None
+    assert seen["offline"] is True

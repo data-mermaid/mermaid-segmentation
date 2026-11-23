@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
-"""Compare the points of an old point loader with a pinned dataset version.
+"""Compare an old dataset loader (points or dense) with a pinned dataset version.
 
 python scripts/check_dataset_parity.py --data-config configs/data_config.yaml \
     --dataset catlin_seaview --split train --version 20261120-ab12cd3 \
     --manifest-sha256 <sha256> --cache-dir /scratch/cache
 
-Needs S3 read access through the default boto3 credentials. Exits 1 on any difference.
+What is verified: the manifest against --manifest-sha256, and every table against the
+manifest's sha256. For a dense version, every image and mask is also synced and verified by size,
+ETag and CRC64NVME; each tile's mask must then equal the old mask pixel for pixel, and its
+label_counts rows must equal the mask's pixel counts. A points version syncs no image.
+
+Needs S3 read access through the default boto3 credentials, unless --offline: then no S3 client
+is built, and every file must already be staged in --cache-dir, where the same checks run. Tables
+sit at <dir>/mermaid-ic-datasets/datasets/<name>/<version>/; dense images and masks sit at
+<dir>/<image store bucket>/<prefix><key>. A file that is not staged fails the run.
+
+Exits 1 on any difference. Exits with an error when the old split has no points or tiles.
 """
 
 from __future__ import annotations
@@ -32,6 +42,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--cache-dir", type=Path, required=True, help="directory the version is downloaded into"
     )
+    p.add_argument(
+        "--offline",
+        action="store_true",
+        help="verify the version staged in --cache-dir with the same checks; no S3",
+    )
     p.add_argument("--annotator", action="append", default=None, help="repeat for priority order")
     args = p.parse_args(argv)
     cfg = yaml.safe_load(args.data_config.read_text())
@@ -42,8 +57,9 @@ def main(argv: list[str] | None = None) -> int:
         version=args.version,
         manifest_sha256=args.manifest_sha256,
         cache_dir=args.cache_dir,
-        client=boto3.client("s3"),
+        client=None if args.offline else boto3.client("s3"),
         annotators=args.annotator,
+        offline=args.offline,
     )
     print(format_report(report))
     return 0 if report.ok else 1
