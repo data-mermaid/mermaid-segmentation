@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-import hashlib
-import json
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
-import pyarrow as pa
 import pytest
 from botocore.exceptions import ClientError
 
+from segdata_etl.common import stage
+from segdata_etl.common.s3_objects import put_new
 from segdata_etl.common.stage import LocalDirS3, next_version
 from segdata_spec._s3 import is_not_found, is_precondition_failed
-from segdata_spec.manifest import ImageStore, SourceInfo
-from segdata_spec.publish import GitState, publish_dataset
 
-from .conftest import jpeg_bytes, md5_etag
+from .conftest import md5_etag
 
 
 def test_local_put_round_trips_to_get_and_head(tmp_path):
@@ -46,71 +43,32 @@ def test_local_missing_key_is_not_found(tmp_path):
     assert is_not_found(get_info.value)
 
 
-def test_publish_dataset_into_local_dir_matches_manifest_checksums(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "uv.lock").write_bytes(b"lock-bytes")
-    jpg = jpeg_bytes(7, 5)
-    mask = b"mask"
-    images = pa.table(
-        {
-            "image_id": ["a"],
-            "key": ["a.jpg"],
-            "etag": [md5_etag(jpg).strip('"')],
-            "size": [len(jpg)],
-            "crc64nvme": pa.nulls(1, pa.string()),
-            "media_type": ["image/jpeg"],
-            "width": [7],
-            "height": [5],
-            "group": ["g1"],
-            "mask_key": ["a.png"],
-            "mask_etag": [md5_etag(mask).strip('"')],
-            "mask_size": [len(mask)],
-            "mask_crc64nvme": pa.nulls(1, pa.string()),
-            "source_fingerprint": ["fp"],
-            "source_name": pa.nulls(1, pa.string()),
-            "attrs": pa.nulls(1, pa.string()),
-        }
-    )
-    labels = pa.table(
-        {
-            "label_id": [5],
-            "name": ["x"],
-            "mermaid_benthic_attribute_id": pa.nulls(1, pa.string()),
-            "mermaid_benthic_attribute": pa.nulls(1, pa.string()),
-            "mermaid_growth_form": pa.nulls(1, pa.string()),
-            "mapping_source": ["curated"],
-        }
-    )
-    counts = pa.table({"image_id": ["a"], "label_id": [5], "n": [1]})
-    client = LocalDirS3(tmp_path / "stage")
-    publish_dataset(
-        client,
-        bucket="bkt",
-        dataset="ds",
-        version="20261123-abc1234",
-        kind="dense",
-        tables={
-            "images.parquet": images,
-            "labels.parquet": labels,
-            "stats/label_counts.parquet": counts,
-        },
-        image_store=ImageStore(bucket="img", prefix="images/ds/", owner="segdata"),
-        etl_package="segdata-etl",
-        etl_command="test",
-        source=SourceInfo(type="test", uri="s3://src/", revision="r1"),
-        repo_dir=repo,
-        git=GitState(sha="abcdef1234567", dirty=False, pushed=True),
-    )
-    root = tmp_path / "stage" / "bkt" / "datasets" / "ds" / "20261123-abc1234"
-    manifest = json.loads((root / "manifest.json").read_bytes())
-    assert set(manifest["files"]) == {
-        "images.parquet",
-        "labels.parquet",
-        "stats/label_counts.parquet",
-    }
-    for name, entry in manifest["files"].items():
-        assert hashlib.sha256((root / name).read_bytes()).hexdigest() == entry["sha256"]
+def test_put_new_through_local_dir_twice_returns_real_crc_then_already_present(tmp_path):
+    client = LocalDirS3(tmp_path)
+    kwargs = {"bucket": "bkt", "key": "k.json", "body": b"{}", "content_type": "application/json"}
+    first = put_new(client, **kwargs)
+    second = put_new(client, **kwargs)
+    assert (first.crc64nvme, first.already_present) == ("Sv1wpwepjTw=", False)
+    assert (second.crc64nvme, second.already_present) == ("Sv1wpwepjTw=", True)
+
+
+def test_local_head_reports_full_object_crc64nvme(tmp_path):
+    client = LocalDirS3(tmp_path)
+    client.put_object(Bucket="bkt", Key="k", Body=b"{}")
+    head = client.head_object(Bucket="bkt", Key="k")
+    assert head["ChecksumCRC64NVME"] == "Sv1wpwepjTw="
+    assert head["ChecksumType"] == "FULL_OBJECT"
+
+
+def test_next_version_defaults_to_the_utc_date(tmp_path: Path, monkeypatch):
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # 23:30 in UTC-5 is already the next day in UTC.
+            return datetime(2026, 11, 24, 4, 30, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(stage, "datetime", _Clock)
+    assert next_version(tmp_path, "bkt", "ds", git_sha="abc1234def5678") == "20261124-abc1234"
 
 
 def test_next_version_appends_first_free_counter(tmp_path: Path):

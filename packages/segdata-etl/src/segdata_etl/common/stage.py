@@ -7,13 +7,14 @@ promote step uploads the staged tree write-once.
 from __future__ import annotations
 
 import hashlib
-from datetime import date
+from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from botocore.exceptions import ClientError
 
+from segdata_etl.common.s3_objects import crc64nvme_b64
 from segdata_spec._s3 import cache_path, dataset_prefix
 
 _SHA_LENGTH = 7
@@ -63,7 +64,7 @@ class LocalDirS3:
         data = _as_bytes(Body)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-        return {"ETag": _etag(data)}
+        return _checksums(data)
 
     def head_object(self, *, Bucket: str, Key: str, **_: Any) -> dict[str, Any]:
         """Return size and ETag, or raise a 404 for a missing key."""
@@ -71,7 +72,7 @@ class LocalDirS3:
         if not path.is_file():
             raise _error("404", 404, "HeadObject")
         data = path.read_bytes()
-        return {"ContentLength": len(data), "ETag": _etag(data)}
+        return {"ContentLength": len(data), **_checksums(data)}
 
     def get_object(self, *, Bucket: str, Key: str, **_: Any) -> dict[str, Any]:
         """Return the whole object as a readable body, or raise a 404 for a missing key."""
@@ -86,8 +87,22 @@ def _etag(data: bytes) -> str:
     return f'"{hashlib.md5(data).hexdigest()}"'  # noqa: S324
 
 
-def next_version(stage_root: Path, bucket: str, dataset: str, *, today: date, git_sha: str) -> str:
-    """Return ``YYYYMMDD-<sha7>``, with ``-2``, ``-3``, ... appended until the staged dir is free."""
+def _checksums(data: bytes) -> dict[str, str]:
+    return {
+        "ETag": _etag(data),
+        "ChecksumCRC64NVME": crc64nvme_b64(data),
+        "ChecksumType": "FULL_OBJECT",
+    }
+
+
+def next_version(
+    stage_root: Path, bucket: str, dataset: str, *, git_sha: str, today: date | None = None
+) -> str:
+    """Return ``YYYYMMDD-<sha7>``, with ``-2``, ``-3``, ... appended until the staged dir is free.
+
+    ``today`` defaults to the current UTC date.
+    """
+    today = today or datetime.now(UTC).date()
     base = f"{today:%Y%m%d}-{git_sha[:_SHA_LENGTH]}"
     candidate, counter = base, 1
     while cache_path(stage_root, bucket, dataset_prefix(dataset, candidate)).exists():

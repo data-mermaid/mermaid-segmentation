@@ -123,7 +123,9 @@ class FakeS3:
         if kwargs.get("IfNoneMatch") == "*" and (Bucket, Key) in self.objects:
             raise client_error("PreconditionFailed", 412, "CopyObject")
         self.objects[(Bucket, Key)] = self.objects[src]
-        self.etags[(Bucket, Key)] = self.etags[src]
+        # A single CopyObject writes a single-part object: its ETag is the MD5 of the bytes, so a
+        # multipart source ETag is not carried over.
+        self.etags[(Bucket, Key)] = md5_etag(self.objects[src])
         if kwargs.get("ChecksumAlgorithm") == "CRC64NVME":
             self.crcs[(Bucket, Key)] = crc64nvme_b64(self.objects[src])
         else:

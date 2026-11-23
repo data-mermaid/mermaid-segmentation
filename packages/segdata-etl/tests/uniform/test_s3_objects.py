@@ -52,6 +52,7 @@ def _seed_source(fake: FakeS3) -> tuple[bytes, str]:
 
 def _copy(fake: FakeS3, data: bytes, etag: str, **overrides):
     kwargs = {
+        "expect_etag": md5_etag(data),
         "src_bucket": SRC,
         "src_key": SRC_KEY,
         "src_etag": etag,
@@ -115,6 +116,47 @@ def test_copy_new_changed_source_etag_is_distinct_error(fake_s3):
     assert (DST, DST_KEY) not in fake_s3.objects
 
 
+def test_copy_new_multipart_source_lands_with_md5_etag(fake_s3):
+    data = jpeg_bytes(37, 23)
+    fake_s3.put(SRC, SRC_KEY, data, etag='"abc123-2"')
+    result = _copy(fake_s3, data, '"abc123-2"')
+    assert result.etag == md5_etag(data)
+
+
+def test_copy_new_destination_etag_differing_from_expected_conflicts(fake_s3):
+    data, etag = _seed_source(fake_s3)
+    with pytest.raises(ObjectConflict):
+        _copy(fake_s3, data, etag, expect_etag='"abc123-2"')
+
+
+def test_copy_new_existing_destination_with_other_etag_conflicts(fake_s3):
+    data, etag = _seed_source(fake_s3)
+    fake_s3.put(DST, DST_KEY, data, etag='"abc123-2"')
+    with pytest.raises(ObjectConflict):
+        _copy(fake_s3, data, etag)
+
+
+def test_copy_new_response_without_crc_raises(fake_s3):
+    data, etag = _seed_source(fake_s3)
+    real_copy = fake_s3.copy_object
+
+    def copy_without_crc(**kwargs):
+        response = real_copy(**kwargs)
+        del response["CopyObjectResult"]["ChecksumCRC64NVME"]
+        return response
+
+    fake_s3.copy_object = copy_without_crc
+    with pytest.raises(ObjectConflict):
+        _copy(fake_s3, data, etag)
+
+
+def test_copy_new_existing_destination_without_crc_raises(fake_s3):
+    data, etag = _seed_source(fake_s3)
+    fake_s3.put(DST, DST_KEY, data, crc=False)
+    with pytest.raises(ObjectConflict):
+        _copy(fake_s3, data, etag)
+
+
 def test_put_new_absent_key_writes_conditionally(fake_s3):
     result = put_new(fake_s3, bucket=DST, key="k.json", body=b"{}", content_type="application/json")
     (call,) = fake_s3.ops("put")
@@ -132,6 +174,27 @@ def test_put_new_identical_existing_bytes_is_accepted(fake_s3):
     fake_s3.put(DST, "k.json", b"{}")
     result = put_new(fake_s3, bucket=DST, key="k.json", body=b"{}", content_type="application/json")
     assert result.already_present is True
+    assert result.etag == '"99914b932bd37a50b983c5e7c90ae93b"'
+    assert result.crc64nvme == "Sv1wpwepjTw="
+
+
+def test_put_new_response_without_crc_raises(fake_s3):
+    real_put = fake_s3.put_object
+
+    def put_without_crc(**kwargs):
+        response = real_put(**kwargs)
+        del response["ChecksumCRC64NVME"]
+        return response
+
+    fake_s3.put_object = put_without_crc
+    with pytest.raises(ObjectConflict):
+        put_new(fake_s3, bucket=DST, key="k.json", body=b"{}", content_type="application/json")
+
+
+def test_put_new_identical_existing_bytes_without_crc_raises(fake_s3):
+    fake_s3.put(DST, "k.json", b"{}", crc=False)
+    with pytest.raises(ObjectConflict):
+        put_new(fake_s3, bucket=DST, key="k.json", body=b"{}", content_type="application/json")
 
 
 def test_put_new_different_existing_bytes_conflicts(fake_s3):

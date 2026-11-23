@@ -6,10 +6,13 @@ that already holds identical content counts as done; any other content is a conf
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import struct
 from dataclasses import dataclass
 from typing import Any
 
+import awscrt.checksums
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.jpeg_header import _find_sof_dimensions
@@ -47,6 +50,20 @@ class PutResult:
     size: int
     crc64nvme: str
     already_present: bool
+
+
+def crc64nvme_b64(data: bytes) -> str:
+    """Return the CRC64NVME in S3's ``ChecksumCRC64NVME`` form: base64 of the big-endian CRC."""
+    return base64.b64encode(awscrt.checksums.crc64nvme(data).to_bytes(8, "big")).decode()
+
+
+def md5_hex(data: bytes) -> str:
+    """Return the MD5 hex digest, the ETag S3 gives a single-part object (unquoted)."""
+    return hashlib.md5(data).hexdigest()  # noqa: S324
+
+
+def _norm_etag(etag: str) -> str:
+    return etag.strip('"')
 
 
 def sniff_media_type(head: bytes) -> str | None:
@@ -93,6 +110,7 @@ def copy_new(
     src_etag: str,
     dst_bucket: str,
     dst_key: str,
+    expect_etag: str,
     expect_size: int,
     expect_crc64nvme: str,
 ) -> CopyResult:
@@ -100,7 +118,8 @@ def copy_new(
 
     Raises:
         SourceChanged: The source ETag differs from ``src_etag`` (the destination is absent).
-        ObjectConflict: The destination exists, or the copy landed, with another size or CRC64NVME.
+        ObjectConflict: The destination exists, or the copy landed, with another ETag, size or
+            CRC64NVME, or S3 reported no CRC64NVME.
     """
     try:
         response = client.copy_object(
@@ -115,42 +134,46 @@ def copy_new(
         if not is_precondition_failed(exc):
             raise
         return _resolve_copy_412(
-            client, exc, src_bucket, src_key, dst_bucket, dst_key, expect_size, expect_crc64nvme
+            client,
+            exc,
+            (src_bucket, src_key),
+            (dst_bucket, dst_key),
+            (expect_etag, expect_size, expect_crc64nvme),
         )
     result = response["CopyObjectResult"]
-    crc = result.get("ChecksumCRC64NVME", expect_crc64nvme)
-    if crc != expect_crc64nvme:
-        raise ObjectConflict(f"s3://{dst_bucket}/{dst_key} copied with CRC64NVME {crc}")
-    return CopyResult(result["ETag"], expect_size, crc, already_present=False)
+    etag, crc = result["ETag"], result.get("ChecksumCRC64NVME")
+    if _norm_etag(etag) != _norm_etag(expect_etag) or crc != expect_crc64nvme:
+        raise ObjectConflict(
+            f"s3://{dst_bucket}/{dst_key} copied with ETag {etag} and CRC64NVME {crc}"
+        )
+    return CopyResult(etag, expect_size, crc, already_present=False)
 
 
 def _resolve_copy_412(
     client: Any,
     exc: ClientError,
-    src_bucket: str,
-    src_key: str,
-    dst_bucket: str,
-    dst_key: str,
-    expect_size: int,
-    expect_crc64nvme: str,
+    src: tuple[str, str],
+    dst: tuple[str, str],
+    expect: tuple[str, int, str],
 ) -> CopyResult:
-    existing = _head_with_checksum(client, dst_bucket, dst_key)
+    expect_etag, expect_size, expect_crc = expect
+    existing = _head_with_checksum(client, *dst)
     if existing is None:
-        raise SourceChanged(f"s3://{src_bucket}/{src_key} no longer matches its ETag") from exc
-    size = existing["ContentLength"]
+        raise SourceChanged(f"s3://{src[0]}/{src[1]} no longer matches its ETag") from exc
+    etag, size = existing["ETag"], existing["ContentLength"]
     crc = existing.get("ChecksumCRC64NVME")
-    if size != expect_size or crc != expect_crc64nvme:
+    if _norm_etag(etag) != _norm_etag(expect_etag) or size != expect_size or crc != expect_crc:
         raise ObjectConflict(
-            f"s3://{dst_bucket}/{dst_key} exists with size {size} and CRC64NVME {crc}"
+            f"s3://{dst[0]}/{dst[1]} exists with ETag {etag}, size {size} and CRC64NVME {crc}"
         ) from exc
-    return CopyResult(existing["ETag"], size, crc, already_present=True)
+    return CopyResult(etag, size, crc, already_present=True)
 
 
 def put_new(client: Any, *, bucket: str, key: str, body: bytes, content_type: str) -> PutResult:
     """Write ``body`` once; an existing object with identical bytes counts as already written.
 
     Raises:
-        ObjectConflict: The key exists with different bytes.
+        ObjectConflict: The key exists with different bytes, or S3 reported no CRC64NVME.
     """
     try:
         response = client.put_object(
@@ -165,9 +188,10 @@ def put_new(client: Any, *, bucket: str, key: str, body: bytes, content_type: st
         if not is_precondition_failed(exc):
             raise
         return _accept_identical(client, exc, bucket, key, body)
-    return PutResult(
-        response["ETag"], len(body), response["ChecksumCRC64NVME"], already_present=False
-    )
+    crc = response.get("ChecksumCRC64NVME")
+    if crc is None:
+        raise ObjectConflict(f"s3://{bucket}/{key} was written without a CRC64NVME")
+    return PutResult(response["ETag"], len(body), crc, already_present=False)
 
 
 def _accept_identical(
@@ -179,6 +203,7 @@ def _accept_identical(
     head = _head_with_checksum(client, bucket, key)
     if head is None:
         raise ObjectConflict(f"s3://{bucket}/{key} vanished while being verified") from exc
-    return PutResult(
-        head["ETag"], len(body), head.get("ChecksumCRC64NVME", ""), already_present=True
-    )
+    crc = head.get("ChecksumCRC64NVME")
+    if crc is None:
+        raise ObjectConflict(f"s3://{bucket}/{key} exists without a CRC64NVME") from exc
+    return PutResult(head["ETag"], len(body), crc, already_present=True)

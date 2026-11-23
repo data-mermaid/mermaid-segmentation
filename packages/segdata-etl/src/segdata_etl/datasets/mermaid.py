@@ -15,7 +15,6 @@ import logging
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -25,7 +24,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-from segdata_etl.common.s3_objects import SourceChanged, image_size, sniff_media_type
+from segdata_etl.common.s3_objects import (
+    SourceChanged,
+    crc64nvme_b64,
+    image_size,
+    md5_hex,
+    sniff_media_type,
+)
 from segdata_etl.common.stage import LocalDirS3, next_version
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._s3 import cache_path, dataset_prefix, is_not_found, is_precondition_failed
@@ -73,6 +78,7 @@ class ImageOutcome:
     row: dict[str, Any] | None = None
     carried: bool = False
     dropped: str | None = None
+    found_as_jpg: bool = False
 
 
 def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
@@ -155,21 +161,58 @@ def read_image_header(client: Any, key: str, etag: str, size: int) -> tuple[str,
     return None if dims is None else (media_type, dims[0], dims[1])
 
 
+@dataclass(frozen=True)
+class _ObjectFacts:
+    """The destination object's ETag, size and CRC64NVME, and the source ETag it was planned from."""
+
+    etag: str
+    size: int
+    crc64nvme: str
+    source_etag: str
+
+
+def _needs_full_read(head: Mapping[str, Any]) -> bool:
+    """A multipart ETag or a missing CRC64NVME means the copy would not carry the source's values."""
+    return "-" in head["ETag"] or head.get("ChecksumCRC64NVME") is None
+
+
+def _read_full(client: Any, key: str, etag: str) -> bytes:
+    try:
+        data: bytes = client.get_object(Bucket=SOURCE_BUCKET, Key=key, IfMatch=etag)["Body"].read()
+    except ClientError as exc:
+        if is_precondition_failed(exc):
+            raise SourceChanged(f"s3://{SOURCE_BUCKET}/{key} changed while it was read") from exc
+        raise
+    return data
+
+
+def _read_whole_object(
+    client: Any, key: str, head: Mapping[str, Any]
+) -> tuple[tuple[str, int, int], _ObjectFacts] | None:
+    """Download the object and derive the header and the values a single-part copy will carry."""
+    data = _read_full(client, key, head["ETag"])
+    media_type = sniff_media_type(data)
+    dims = image_size(data)
+    if media_type is None or dims is None:
+        return None
+    facts = _ObjectFacts(md5_hex(data), len(data), crc64nvme_b64(data), head["ETag"].strip('"'))
+    return (media_type, dims[0], dims[1]), facts
+
+
 def _image_row(
     image_id: str,
     source_key: str,
-    head: Mapping[str, Any],
+    facts: _ObjectFacts,
     header: tuple[str, int, int],
     region: tuple[Any, Any],
 ) -> dict[str, Any]:
     media_type, width, height = header
-    etag = head["ETag"].strip('"')
     return {
         "image_id": image_id,
         "key": image_id + _EXTENSIONS[media_type],
-        "etag": etag,
-        "size": head["ContentLength"],
-        "crc64nvme": head.get("ChecksumCRC64NVME"),
+        "etag": facts.etag,
+        "size": facts.size,
+        "crc64nvme": facts.crc64nvme,
         "media_type": media_type,
         "width": width,
         "height": height,
@@ -178,7 +221,7 @@ def _image_row(
         "mask_etag": None,
         "mask_size": None,
         "mask_crc64nvme": None,
-        "source_fingerprint": etag,
+        "source_fingerprint": facts.source_etag,
         "source_name": None,
         "attrs": json.dumps(
             {"source_key": source_key, "region_id": region[0], "region_name": region[1]},
@@ -187,28 +230,55 @@ def _image_row(
     }
 
 
+def _head_source(client: Any, image_id: str) -> tuple[str, Mapping[str, Any]] | None:
+    """HEAD ``mermaid/<id>.png``, then ``.jpg``; return the key found and its HEAD, or None."""
+    for extension in (".png", ".jpg"):
+        key = f"{SOURCE_IMAGE_PREFIX}{image_id}{extension}"
+        try:
+            head: Mapping[str, Any] = client.head_object(
+                Bucket=SOURCE_BUCKET, Key=key, ChecksumMode="ENABLED"
+            )
+        except ClientError as exc:
+            if is_not_found(exc):
+                continue
+            raise
+        return key, head
+    return None
+
+
 def probe_image(
     client: Any,
     image_id: str,
     region: tuple[Any, Any],
     parent_rows: Mapping[str, dict[str, Any]],
 ) -> ImageOutcome:
-    """Decide one image from its source HEAD and, unless a parent row matches, its header bytes."""
-    source_key = f"{SOURCE_IMAGE_PREFIX}{image_id}.png"
-    try:
-        head = client.head_object(Bucket=SOURCE_BUCKET, Key=source_key, ChecksumMode="ENABLED")
-    except ClientError as exc:
-        if is_not_found(exc):
-            return ImageOutcome(image_id, dropped="image_deleted_at_source")
-        raise
+    """Decide one image from its source HEAD and, unless a parent row matches, its bytes.
+
+    A multipart ETag or a missing CRC64NVME means the whole object is read, so the row records the
+    ETag and CRC64NVME a single-part copy will have; the source ETag stays the fingerprint.
+    """
+    found = _head_source(client, image_id)
+    if found is None:
+        return ImageOutcome(image_id, dropped="image_deleted_at_source")
+    source_key, head = found
+    as_jpg = source_key.endswith(".jpg")
+    source_etag = head["ETag"].strip('"')
     parent = parent_rows.get(image_id)
-    if parent is not None and parent["source_fingerprint"] == head["ETag"].strip('"'):
-        return ImageOutcome(image_id, row=parent, carried=True)
-    header = read_image_header(client, source_key, head["ETag"], head["ContentLength"])
-    if header is None:
+    if parent is not None and parent["source_fingerprint"] == source_etag:
+        return ImageOutcome(image_id, row=parent, carried=True, found_as_jpg=as_jpg)
+    if _needs_full_read(head):
+        whole = _read_whole_object(client, source_key, head)
+        header, facts = whole if whole is not None else (None, None)
+    else:
+        header = read_image_header(client, source_key, head["ETag"], head["ContentLength"])
+        facts = _ObjectFacts(
+            source_etag, head["ContentLength"], head["ChecksumCRC64NVME"], source_etag
+        )
+    if header is None or facts is None:
         logger.warning("dropping image %s: unreadable header in %s", image_id, source_key)
         return ImageOutcome(image_id, dropped="image_unreadable_header")
-    return ImageOutcome(image_id, row=_image_row(image_id, source_key, head, header, region))
+    row = _image_row(image_id, source_key, facts, header, region)
+    return ImageOutcome(image_id, row=row, found_as_jpg=as_jpg)
 
 
 def first_regions(annotations: pd.DataFrame) -> dict[str, tuple[Any, Any]]:
@@ -306,7 +376,11 @@ def label_counts_table(labelled: pd.DataFrame) -> pa.Table:
 
 
 def copy_plan(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Describe the server-side copy of each image row, in ``image_id`` order."""
+    """Describe the server-side copy of each image row, in ``image_id`` order.
+
+    ``src_etag`` is the source object's ETag; ``etag``, ``size`` and ``crc64nvme`` are the
+    destination object's expected values.
+    """
     plan = []
     for row in sorted(rows, key=lambda r: r["image_id"]):
         source_key = json.loads(row["attrs"])["source_key"]
@@ -314,7 +388,8 @@ def copy_plan(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             {
                 "src_bucket": SOURCE_BUCKET,
                 "src_key": source_key,
-                "src_etag": row["etag"],
+                "src_etag": row["source_fingerprint"],
+                "etag": row["etag"],
                 "dst_bucket": DATASET_BUCKET,
                 "dst_key": IMAGE_PREFIX + row["key"],
                 "size": row["size"],
@@ -412,9 +487,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     labelled, pairs = with_label_ids(annotations[annotations["image_id"].astype(str).isin(kept)])
     rows = [o.row for o in outcomes if o.row is not None]
     stage = LocalDirS3(args.stage_dir)
-    version = next_version(
-        args.stage_dir, DATASET_BUCKET, DATASET, today=date.today(), git_sha=git.sha
-    )
+    version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha)
     manifest, _ = publish_dataset(
         stage,
         bucket=DATASET_BUCKET,
@@ -448,14 +521,18 @@ def run(args: argparse.Namespace, client: Any) -> int:
         repo_dir=REPO_ROOT,
         git=git,
     )
-    plan = copy_plan([o.row for o in outcomes if o.row is not None and not o.carried])
+    plan = copy_plan(rows)
     _write_copies(args.stage_dir, version, plan)
+    jpg_ids = sorted(o.image_id for o in outcomes if o.found_as_jpg and o.row is not None)
+    if jpg_ids:
+        logger.info("images found only as .jpg keys: %s", jpg_ids)
     logger.info(
-        "staged mermaid %s: %d images, %d points, %d copies, dropped %s",
+        "staged mermaid %s: %d images, %d points, %d copies, %d found only as .jpg, dropped %s",
         version,
         manifest.stats.n_images,
         manifest.stats.n_points,
         len(plan),
+        len(jpg_ids),
         dropped,
     )
     return 0

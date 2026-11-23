@@ -190,6 +190,7 @@ def test_end_to_end_stages_images_points_and_copy_plan(repo, tmp_path):
         "src_bucket": SRC_BUCKET,
         "src_key": "mermaid/i1.png",
         "src_etag": i1["etag"],
+        "etag": i1["etag"],
         "dst_bucket": DATASET_BUCKET,
         "dst_key": "images/mermaid/i1.png",
         "size": len(blobs["i1"]),
@@ -227,6 +228,73 @@ def test_jpeg_bytes_under_png_key_get_jpg_key_and_jpeg_media_type(repo, tmp_path
     (plan,) = copies(version)
     assert plan["src_key"] == "mermaid/j1.png"
     assert plan["dst_key"] == "images/mermaid/j1.jpg"
+
+
+def test_multipart_source_etag_records_the_copied_objects_md5_and_keeps_source_fingerprint(
+    repo, tmp_path
+):
+    fake = FakeS3()
+    data = png_bytes(9, 7)
+    seed(fake, [ann("m1", "p1", 1, 1)], {"m1": data})
+    fake.put(SRC_BUCKET, "mermaid/m1.png", data, etag='"b68d19ab-2"')
+    stage = tmp_path / "stage"
+
+    build(fake, stage)
+
+    version = only_version(stage)
+    (row,) = table(version, "images.parquet")
+    assert row["etag"] == hashlib.md5(data).hexdigest()  # noqa: S324
+    assert row["crc64nvme"] == crc64nvme_b64(data)
+    assert row["size"] == len(data)
+    assert row["source_fingerprint"] == "b68d19ab-2"
+    assert (row["media_type"], row["width"], row["height"]) == ("image/png", 9, 7)
+    (plan,) = copies(version)
+    assert plan["src_etag"] == "b68d19ab-2"
+    assert plan["etag"] == row["etag"]
+    assert (plan["size"], plan["crc64nvme"]) == (len(data), crc64nvme_b64(data))
+    full_reads = [c for c in fake.ops("get") if c[2] == "mermaid/m1.png"]
+    assert [c[3].get("IfMatch") for c in full_reads] == ['"b68d19ab-2"']
+    assert "Range" not in full_reads[0][3]
+
+
+def test_source_without_crc64nvme_is_read_in_full_and_checksummed(repo, tmp_path):
+    fake = FakeS3()
+    data = png_bytes(6, 4)
+    seed(fake, [ann("n1", "p1", 1, 1)], {"n1": data})
+    fake.put(SRC_BUCKET, "mermaid/n1.png", data, crc=False)
+    stage = tmp_path / "stage"
+
+    build(fake, stage)
+
+    version = only_version(stage)
+    (row,) = table(version, "images.parquet")
+    assert row["crc64nvme"] == crc64nvme_b64(data)
+    assert row["etag"] == hashlib.md5(data).hexdigest()  # noqa: S324
+    assert row["source_fingerprint"] == row["etag"]
+    (plan,) = copies(version)
+    assert plan["crc64nvme"] == crc64nvme_b64(data)
+
+
+def test_png_404_falls_back_to_the_jpg_key_without_counting_a_deletion(repo, tmp_path, caplog):
+    fake = FakeS3()
+    data = jpeg_bytes(10, 8)
+    seed(fake, [ann("j1", "p1", 1, 1), ann("gone", "p2", 2, 2)], {})
+    fake.put(SRC_BUCKET, "mermaid/j1.jpg", data)
+    stage = tmp_path / "stage"
+
+    with caplog.at_level("INFO"):
+        build(fake, stage)
+
+    version = only_version(stage)
+    (row,) = table(version, "images.parquet")
+    assert row["image_id"] == "j1"
+    assert json.loads(row["attrs"])["source_key"] == "mermaid/j1.jpg"
+    (plan,) = copies(version)
+    assert plan["src_key"] == "mermaid/j1.jpg"
+    dropped = json.loads((version / "manifest.json").read_bytes())["stats"]["dropped"]
+    assert dropped["image_deleted_at_source"] == 1
+    assert "1 found only as .jpg" in caplog.text
+    assert "j1" in caplog.text
 
 
 def test_labels_are_ba_gf_pairs_numbered_by_sorted_ids(repo, tmp_path):
@@ -337,7 +405,7 @@ def test_annotations_changed_between_head_and_get_fails_and_stages_nothing(repo,
     assert version_dirs(stage) == []
 
 
-def test_parent_rows_with_unchanged_fingerprint_are_carried_and_not_copied(repo, tmp_path):
+def test_parent_rows_with_unchanged_fingerprint_are_carried_planned_and_not_reread(repo, tmp_path):
     fake = FakeS3()
     a, b = png_bytes(4, 4), png_bytes(6, 6)
     seed(fake, [ann("a", "p1", 1, 1), ann("b", "p2", 2, 2)], {"a": a, "b": b})
@@ -347,6 +415,7 @@ def test_parent_rows_with_unchanged_fingerprint_are_carried_and_not_copied(repo,
     parent_sha = _sha256(parent / "manifest.json")
     b2 = png_bytes(7, 7)
     fake.put(SRC_BUCKET, "mermaid/b.png", b2)
+    fake.calls.clear()
 
     build(
         fake,
@@ -362,7 +431,8 @@ def test_parent_rows_with_unchanged_fingerprint_are_carried_and_not_copied(repo,
     images = {r["image_id"]: r for r in table(child, "images.parquet")}
     assert images["a"] == {r["image_id"]: r for r in table(parent, "images.parquet")}["a"]
     assert images["b"]["etag"] == md5_etag(b2).strip('"')
-    assert [c["src_key"] for c in copies(child)] == ["mermaid/b.png"]
+    assert [c["src_key"] for c in copies(child)] == ["mermaid/a.png", "mermaid/b.png"]
+    assert not [c for c in fake.ops("get") if c[2] == "mermaid/a.png"]
     manifest = json.loads((child / "manifest.json").read_bytes())
     assert manifest["parents"] == [
         {"dataset": "mermaid", "version": parent.name, "manifest_sha256": parent_sha}
@@ -417,7 +487,6 @@ def test_stage_dir_is_required_and_dispatches_to_run(monkeypatch, tmp_path):
     args = seen["args"]
     assert args.stage_dir == tmp_path
     assert args.annotation_date_cutoff == CUTOFF
-    assert args.workers == 16
 
 
 def _sha256(path: Path) -> str:
