@@ -15,6 +15,8 @@ from botocore.config import Config
 
 from segdata_spec import DATASET_BUCKET
 
+from . import taxonomy
+from .common.store import add_store_argument
 from .datasets.coralnet import commands as coralnet_commands
 from .ingest import (
     benthos_yuval,
@@ -132,6 +134,16 @@ def _add_split_subcommands(top: Any) -> None:
     leakage.set_defaults(func=lambda args: split_leakage.run(args, make_s3_client()))
 
 
+def _add_taxonomy_subcommand(top: Any) -> None:
+    parser = top.add_parser("taxonomy", help="Fetch and publish the MERMAID benthic taxonomy")
+    add_store_argument(parser)
+    taxonomy.add_arguments(parser)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.set_defaults(
+        func=lambda args: taxonomy.run_taxonomy(args, source_client=make_s3_client())
+    )
+
+
 def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.ArgumentParser:
     """Build the top-level parser: ``build coralnet <stage>``, one ``ingest`` entry per dataset, and ``split``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
@@ -147,6 +159,7 @@ def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.Ar
         module.add_arguments(dataset_parser, workdir=default_workdir(name))
         dataset_parser.set_defaults(run=module.run)
     _add_split_subcommands(top)
+    _add_taxonomy_subcommand(top)
     return parser
 
 
