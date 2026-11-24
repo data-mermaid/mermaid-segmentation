@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from uniform.conftest import FakeS3
+from s3_fake import FakeS3
 
 from segdata_etl.datasets import pacific_labeled_corals
 

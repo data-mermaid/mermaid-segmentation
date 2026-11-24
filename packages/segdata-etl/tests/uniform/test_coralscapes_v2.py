@@ -13,12 +13,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from PIL import Image
+from s3_fake import FakeS3, crc64nvme
 
 from segdata_etl import cli
 from segdata_etl.datasets import coralscapes_v2, ucsd_mosaics
 from segdata_spec import DATASET_BUCKET
 
-from .conftest import FakeS3, crc64nvme_b64, jpeg_bytes, png_bytes
+from .conftest import jpeg_bytes, png_bytes
 from .hf_helpers import image_col, install_hub, mask_png
 
 SHA = "8a4567b2fbec14882e09aebff63a7a1ca5e24dca"
@@ -91,9 +92,9 @@ def test_images_are_staged_byte_identical_with_row_fields_from_the_bytes(monkeyp
     assert json.loads(a["attrs"]) == {"hf_split": "train", "site": "s1"}
     assert (a["media_type"], a["width"], a["height"]) == ("image/jpeg", 4, 3)
     assert a["etag"] == hashlib.md5(IMG_A).hexdigest()  # noqa: S324
-    assert (a["size"], a["crc64nvme"]) == (len(IMG_A), crc64nvme_b64(IMG_A))
+    assert (a["size"], a["crc64nvme"]) == (len(IMG_A), crc64nvme(IMG_A))
     assert a["mask_etag"] == hashlib.md5(MASK).hexdigest()  # noqa: S324
-    assert (a["mask_size"], a["mask_crc64nvme"]) == (len(MASK), crc64nvme_b64(MASK))
+    assert (a["mask_size"], a["mask_crc64nvme"]) == (len(MASK), crc64nvme(MASK))
     assert a["source_fingerprint"] == hashlib.sha256(IMG_A).hexdigest()
     assert rows["b1"]["group"] == "validation"
     assert rows["b1"]["media_type"] == "image/png"
@@ -302,7 +303,7 @@ def test_uploads_jsonl_lists_each_staged_file_with_its_destination(monkeypatch, 
         "dst_bucket": DATASET_BUCKET,
         "dst_key": "images/coralscapes_v2/train/a1.jpg",
         "size": len(IMG_A),
-        "crc64nvme": crc64nvme_b64(IMG_A),
+        "crc64nvme": crc64nvme(IMG_A),
         "content_type": "image/jpeg",
     }
     assert uploads["images/coralscapes_v2/train/a1_label.png"]["content_type"] == "image/png"

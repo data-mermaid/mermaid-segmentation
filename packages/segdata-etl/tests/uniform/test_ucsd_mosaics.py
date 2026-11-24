@@ -9,13 +9,14 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from s3_fake import FakeS3
 
 from segdata_etl import cli
 from segdata_etl.common import hf_dense
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.publish import GitState, PublishRefused
 
-from .conftest import FakeS3, jpeg_bytes
+from .conftest import jpeg_bytes
 from .hf_helpers import image_col, install_hub, mask_png
 
 CSV = "label_id,name,mermaid_benthic_attribute\n1,Acropora (branching),acropora\n"

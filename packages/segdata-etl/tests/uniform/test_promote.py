@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from s3_fake import FakeS3, client_error, crc64nvme, quoted_etag
 
 from segdata_etl import cli, promote
 from segdata_etl.common.s3_objects import ObjectConflict
@@ -16,7 +17,7 @@ from segdata_etl.common.stage import next_version
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
 
-from .conftest import FakeS3, client_error, crc64nvme_b64, jpeg_bytes, md5_etag, png_bytes
+from .conftest import jpeg_bytes, png_bytes
 from .test_coralscapes_v2 import IMG_A, IMG_B, MASK, MASK_B
 from .test_coralscapes_v2 import build as build_coralscapes
 from .test_coralscapes_v2 import shard as coralscapes_shard
@@ -86,7 +87,7 @@ def test_copy_landing_with_another_crc_raises_before_any_table_is_put(repo, tmp_
     class WrongCrc(FakeS3):
         def copy_object(self, **kwargs: Any) -> dict[str, Any]:
             response = super().copy_object(**kwargs)
-            response["CopyObjectResult"]["ChecksumCRC64NVME"] = crc64nvme_b64(b"other")
+            response["CopyObjectResult"]["ChecksumCRC64NVME"] = crc64nvme(b"other")
             return response
 
     fake, stage, version = stage_mermaid(tmp_path)
@@ -163,7 +164,7 @@ def test_plan_missing_a_line_refuses_at_preflight(repo, tmp_path):  # noqa: F811
     ("field", "edit_value"),
     [
         ("size", lambda v: v + 1),
-        ("crc64nvme", lambda v: crc64nvme_b64(b"other")),
+        ("crc64nvme", lambda v: crc64nvme(b"other")),
         ("etag", lambda v: hashlib.md5(b"other").hexdigest()),  # noqa: S324
     ],
 )
@@ -251,7 +252,7 @@ def test_hf_uploads_land_byte_identical_with_the_planned_crc(monkeypatch, tmp_pa
     }
     for key, data in expected.items():
         assert fake.objects[(DATASET_BUCKET, key)] == data
-        assert fake.crcs[(DATASET_BUCKET, key)] == crc64nvme_b64(data)
+        assert fake.crcs[(DATASET_BUCKET, key)] == crc64nvme(data)
     log = writes(fake)
     assert [op for op, *_ in log] == ["put"] * len(log)
     assert log[-1][2].endswith("/manifest.json")
@@ -351,9 +352,9 @@ def plant_same_length(fake: FakeS3, key: str, data: bytes, differs: str) -> None
     ``crc`` keeps the planned ETag, and ``both`` keeps neither.
     """
     flipped = bytes([data[0] ^ 1]) + data[1:]
-    fake.put(DATASET_BUCKET, key, flipped, etag=md5_etag(data) if differs == "crc" else None)
+    fake.put(DATASET_BUCKET, key, flipped, etag=quoted_etag(data) if differs == "crc" else None)
     if differs == "etag":
-        fake.crcs[(DATASET_BUCKET, key)] = crc64nvme_b64(data)
+        fake.crcs[(DATASET_BUCKET, key)] = crc64nvme(data)
 
 
 @pytest.mark.parametrize("differs", ["etag", "crc", "both"])
@@ -457,7 +458,7 @@ def test_upload_landing_with_another_crc_raises_and_no_table_is_written(monkeypa
         def put_object(self, **kwargs: Any) -> dict[str, Any]:
             response = super().put_object(**kwargs)
             if kwargs["Key"].startswith("images/"):
-                response["ChecksumCRC64NVME"] = crc64nvme_b64(b"other")
+                response["ChecksumCRC64NVME"] = crc64nvme(b"other")
             return response
 
     version_path = build_coralscapes(monkeypatch, tmp_path)
@@ -544,12 +545,12 @@ def stage_dense(monkeypatch, tmp_path: Path) -> tuple[FakeS3, Path, str]:
             {
                 "src_bucket": SOURCE_BUCKET,
                 "src_key": src_key,
-                "src_etag": md5_etag(data),
+                "src_etag": quoted_etag(data),
                 "dst_bucket": DATASET_BUCKET,
                 "dst_key": line["dst_key"],
                 "size": len(data),
-                "crc64nvme": crc64nvme_b64(data),
-                "etag": md5_etag(data),
+                "crc64nvme": crc64nvme(data),
+                "etag": quoted_etag(data),
             }
         )
     masks = [x for x in lines if x["dst_key"].endswith("_label.png")]
@@ -572,7 +573,7 @@ def test_dense_version_copies_images_uploads_masks_and_writes_the_manifest_last(
     assert {k for op, _, k, _ in log if op == "copy"} == image_keys
     assert {k for op, _, k, _ in log[:4] if op == "put"} == mask_keys
     matches = {kw["CopySourceIfMatch"] for op, _, _, kw in log if op == "copy"}
-    assert matches == {md5_etag(IMG_A), md5_etag(IMG_B)}
+    assert matches == {quoted_etag(IMG_A), quoted_etag(IMG_B)}
     assert fake.objects[(DATASET_BUCKET, f"images/{DENSE}/train/a1.jpg")] == IMG_A
     assert fake.objects[(DATASET_BUCKET, f"images/{DENSE}/train/a1_label.png")] == MASK
     assert log[-1][2] == f"datasets/{DENSE}/{version}/manifest.json"
@@ -674,7 +675,7 @@ def test_tables_only_version_with_an_absent_or_changed_image_refuses_with_no_wri
     if fault == "missing":
         del fake.objects[(store["bucket"], key)]
     else:
-        fake.etags[(store["bucket"], key)] = md5_etag(b"other")
+        fake.etags[(store["bucket"], key)] = quoted_etag(b"other")
 
     with pytest.raises(PublishRefused, match=key):
         run_promote(fake, stage, version)

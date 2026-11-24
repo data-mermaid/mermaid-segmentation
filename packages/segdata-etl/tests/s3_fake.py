@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from botocore.exceptions import ClientError
@@ -59,18 +60,28 @@ def _as_bytes(body: Any) -> bytes:
 class FakeS3:
     """In-memory S3 client; ``objects`` maps ``(bucket, key)`` to bytes.
 
-    ``Range`` on ``get_object`` follows ``bytes=start-end`` (inclusive). ``full_reads`` records
-    the key of every ``get_object`` without a ``Range``. ``multipart`` holds the objects whose
-    ETag is a two-part upload's. ``no_crc`` lists objects whose HEAD omits
-    ``ChecksumCRC64NVME``, as an object uploaded without a full-object CRC does.
-    ``copy_calls`` holds the keyword arguments of every ``copy_object``; ``copy_error`` makes
-    every ``copy_object`` raise that error code with status 403. ``source_changes_on_copy`` maps
-    a source ``(bucket, key)`` to the bytes it holds by the time ``copy_object`` reads it, as a
-    source overwritten between the HEAD and the copy does. ``page_size`` caps the entries of a
-    ``list_objects_v2`` page and issues ``NextContinuationToken``; ``None`` lists in one page.
+    ``calls`` logs every operation as ``(op, bucket, key_or_prefix, kwargs)``; ``ops(op)`` filters
+    it. ``etags`` and ``crcs`` override the ETag and CRC64NVME computed from an object's bytes;
+    ``multipart`` holds the objects whose ETag is a two-part upload's. An object has a CRC64NVME
+    unless it is in ``no_crc``: a write through ``put_object`` or ``copy_object`` stores one only
+    when it passes ``ChecksumAlgorithm="CRC64NVME"``, as S3 does, and ``put`` seeds one unless
+    told ``crc=False``; objects placed straight into ``objects`` have one. ``put_object`` and
+    ``copy_object`` responses carry ``ChecksumCRC64NVME`` when the object has one.
+
+    ``Range`` on ``get_object`` follows ``bytes=start-end`` (inclusive, end optional) and
+    ``IfMatch`` raises 412 on a different ETag; ``full_reads`` records the key of every
+    ``get_object`` without a ``Range``. ``copy_calls`` holds the keyword arguments of every
+    ``copy_object``; ``copy_error`` makes every ``copy_object`` raise that error code with status
+    403. ``source_changes_on_copy`` maps a source ``(bucket, key)`` to the bytes it holds by the
+    time ``copy_object`` reads it, as a source overwritten between the HEAD and the copy does.
+    ``page_size`` caps the entries of a ``list_objects_v2`` page below ``MaxKeys`` and issues
+    ``NextContinuationToken``; ``None`` leaves ``MaxKeys`` as the cap.
     """
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
+    crcs: dict[tuple[str, str], str] = field(default_factory=dict)
+    etags: dict[tuple[str, str], str] = field(default_factory=dict)
+    calls: list[tuple[str, str, str, dict[str, Any]]] = field(default_factory=list)
     full_reads: list[str] = field(default_factory=list)
     multipart: set[tuple[str, str]] = field(default_factory=set)
     no_crc: set[tuple[str, str]] = field(default_factory=set)
@@ -79,71 +90,120 @@ class FakeS3:
     source_changes_on_copy: dict[tuple[str, str], bytes] = field(default_factory=dict)
     page_size: int | None = None
 
+    @property
+    def puts(self) -> list[str]:
+        """The key of every ``put_object`` and ``upload_file``, in call order."""
+        return [key for op, _, key, _ in self.calls if op == "put"]
+
+    def ops(self, op: str) -> list[tuple[str, str, str, dict[str, Any]]]:
+        return [call for call in self.calls if call[0] == op]
+
     def etag(self, bucket: str, key: str) -> str:
         """The quoted ETag S3 gives the object."""
+        if (bucket, key) in self.etags:
+            return self.etags[(bucket, key)]
         return quoted_etag(self.objects[(bucket, key)], multipart=(bucket, key) in self.multipart)
 
-    def put(self, bucket: str, key: str, data: bytes) -> None:
-        self.objects[(bucket, key)] = data
+    def crc(self, bucket: str, key: str) -> str | None:
+        """The object's CRC64NVME, or ``None`` when it was written without one."""
+        if (bucket, key) in self.no_crc:
+            return None
+        return self.crcs.get((bucket, key)) or crc64nvme(self.objects[(bucket, key)])
 
-    def put_object(
-        self, *, Bucket: str, Key: str, Body: Any, IfNoneMatch: str | None = None, **_: Any
-    ) -> dict[str, Any]:
-        if IfNoneMatch == "*" and (Bucket, Key) in self.objects:
+    def put(
+        self, bucket: str, key: str, data: bytes, *, etag: str | None = None, crc: bool = True
+    ) -> None:
+        """Seed an object without logging a call."""
+        location = (bucket, key)
+        self.objects[location] = data
+        self.multipart.discard(location)
+        self.crcs.pop(location, None)
+        if etag is None:
+            self.etags.pop(location, None)
+        else:
+            self.etags[location] = etag
+        if crc:
+            self.no_crc.discard(location)
+            self.crcs[location] = crc64nvme(data)
+        else:
+            self.no_crc.add(location)
+
+    def put_object(self, *, Bucket: str, Key: str, Body: Any, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("put", Bucket, Key, dict(kwargs)))
+        if kwargs.get("IfNoneMatch") == "*" and (Bucket, Key) in self.objects:
             raise client_error("PreconditionFailed", 412, "PutObject")
-        self.objects[(Bucket, Key)] = _as_bytes(Body)
-        return {"ETag": self.etag(Bucket, Key)}
+        self.put(Bucket, Key, _as_bytes(Body), crc=kwargs.get("ChecksumAlgorithm") == "CRC64NVME")
+        response: dict[str, Any] = {"ETag": self.etag(Bucket, Key)}
+        if (crc := self.crc(Bucket, Key)) is not None:
+            response["ChecksumCRC64NVME"] = crc
+        return response
 
     def upload_file(self, Filename: str, Bucket: str, Key: str) -> None:
+        self.calls.append(("put", Bucket, Key, {}))
         with open(Filename, "rb") as f:
-            self.objects[(Bucket, Key)] = f.read()
+            self.put(Bucket, Key, f.read(), crc=False)
 
     def copy_object(
         self, *, CopySource: dict[str, str], Bucket: str, Key: str, **kwargs: Any
     ) -> dict[str, Any]:
         self.copy_calls.append({"CopySource": CopySource, "Bucket": Bucket, "Key": Key, **kwargs})
+        self.calls.append(("copy", Bucket, Key, {"CopySource": CopySource, **kwargs}))
         if self.copy_error is not None:
             raise client_error(self.copy_error, 403, "CopyObject")
-        if kwargs.get("IfNoneMatch") == "*" and (Bucket, Key) in self.objects:
-            raise client_error("PreconditionFailed", 412, "CopyObject")
         source = (CopySource["Bucket"], CopySource["Key"])
         if source in self.source_changes_on_copy:
             self.objects[source] = self.source_changes_on_copy[source]
-        data = self.objects[source]
-        self.objects[(Bucket, Key)] = data
-        return {
-            "CopyObjectResult": {
-                "ETag": self.etag(Bucket, Key),
-                "ChecksumCRC64NVME": crc64nvme(data),
-            }
-        }
+        if source not in self.objects:
+            raise client_error("NoSuchKey", 404, "CopyObject")
+        wanted = kwargs.get("CopySourceIfMatch")
+        # S3 accepts the ETag with or without its quotes.
+        if wanted is not None and wanted.strip('"') != self.etag(*source).strip('"'):
+            raise client_error("PreconditionFailed", 412, "CopyObject")
+        if kwargs.get("IfNoneMatch") == "*" and (Bucket, Key) in self.objects:
+            raise client_error("PreconditionFailed", 412, "CopyObject")
+        # A single CopyObject writes a single-part object, so a multipart source ETag is not
+        # carried over.
+        self.put(
+            Bucket, Key, self.objects[source], crc=kwargs.get("ChecksumAlgorithm") == "CRC64NVME"
+        )
+        result: dict[str, Any] = {"ETag": self.etag(Bucket, Key)}
+        if (crc := self.crc(Bucket, Key)) is not None:
+            result["ChecksumCRC64NVME"] = crc
+        return {"CopyObjectResult": result}
 
-    def head_object(
-        self, *, Bucket: str, Key: str, ChecksumMode: str | None = None
-    ) -> dict[str, Any]:
+    def head_object(self, *, Bucket: str, Key: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("head", Bucket, Key, dict(kwargs)))
         if (Bucket, Key) not in self.objects:
             raise client_error("404", 404, "HeadObject")
-        data = self.objects[(Bucket, Key)]
-        response: dict[str, Any] = {"ContentLength": len(data), "ETag": self.etag(Bucket, Key)}
-        if ChecksumMode == "ENABLED" and (Bucket, Key) not in self.no_crc:
-            response["ChecksumCRC64NVME"] = crc64nvme(data)
+        response: dict[str, Any] = {
+            "ContentLength": len(self.objects[(Bucket, Key)]),
+            "ETag": self.etag(Bucket, Key),
+            "LastModified": datetime(2026, 8, 12, 6, 30, tzinfo=UTC),
+        }
+        crc = self.crc(Bucket, Key)
+        if kwargs.get("ChecksumMode") == "ENABLED" and crc is not None:
+            response["ChecksumCRC64NVME"] = crc
         return response
 
-    def get_object(
-        self, *, Bucket: str, Key: str, Range: str | None = None, **_: Any
-    ) -> dict[str, Any]:
+    def get_object(self, *, Bucket: str, Key: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("get", Bucket, Key, dict(kwargs)))
         if (Bucket, Key) not in self.objects:
             raise client_error("NoSuchKey", 404, "GetObject")
         full = self.objects[(Bucket, Key)]
-        if not Range:
+        etag = self.etag(Bucket, Key)
+        if kwargs.get("IfMatch") not in (None, etag):
+            raise client_error("PreconditionFailed", 412, "GetObject")
+        range_header = kwargs.get("Range")
+        if not range_header:
             self.full_reads.append(Key)
-            return {"Body": _Body(full), "ContentLength": len(full)}
-        assert Range.startswith("bytes=")
-        start_str, end_str = Range[len("bytes=") :].split("-")
+            return {"ETag": etag, "Body": _Body(full), "ContentLength": len(full)}
+        assert range_header.startswith("bytes=")
+        start_str, end_str = range_header[len("bytes=") :].split("-")
         start = int(start_str)
-        end = int(end_str) if end_str else len(full) - 1
+        end = min(int(end_str), len(full) - 1) if end_str else len(full) - 1
         data = full[start : end + 1]
         return {
+            "ETag": etag,
             "Body": _Body(data),
             "ContentLength": len(data),
             "ContentRange": f"bytes {start}-{end}/{len(full)}",
@@ -155,12 +215,16 @@ class FakeS3:
         Bucket: str,
         Prefix: str = "",
         Delimiter: str | None = None,
+        MaxKeys: int = 1000,
         ContinuationToken: str | None = None,
     ) -> dict[str, Any]:
         """One page; ``Contents`` and ``CommonPrefixes`` are absent when empty, as in S3.
 
         The token is the index of the page's first entry among all entries, in key order.
         """
+        extras = {"Delimiter": Delimiter, "ContinuationToken": ContinuationToken}
+        logged = {name: value for name, value in extras.items() if value is not None}
+        self.calls.append(("list", Bucket, Prefix, {"MaxKeys": MaxKeys, **logged}))
         entries: list[tuple[str, str]] = []
         folders: set[str] = set()
         for bucket, key in sorted(self.objects):
@@ -175,7 +239,8 @@ class FakeS3:
             else:
                 entries.append(("object", key))
         start = int(ContinuationToken) if ContinuationToken else 0
-        end = len(entries) if self.page_size is None else start + self.page_size
+        limit = MaxKeys if self.page_size is None else min(self.page_size, MaxKeys)
+        end = start + limit
         contents = [
             {
                 "Key": key,

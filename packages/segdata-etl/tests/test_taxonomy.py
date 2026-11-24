@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import requests
-from botocore.exceptions import ClientError
+from s3_fake import FakeS3
 
 from segdata_etl import taxonomy
 from segdata_spec import DATASET_BUCKET
@@ -192,28 +192,6 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(taxonomy, "probe_git", lambda _dir: CLEAN_GIT)
     monkeypatch.setattr("segdata_spec.publish.probe_git", lambda _dir: CLEAN_GIT)
     return root
-
-
-class FakeS3:
-    """Holds objects by (bucket, key); ``put_object`` stores the body unconditionally and records each key."""
-
-    def __init__(self, objects: dict[tuple[str, str], bytes] | None = None):
-        self.objects = dict(objects or {})
-        self.puts: list[str] = []
-
-    def put_object(self, *, Bucket: str, Key: str, Body: Any, **_: Any) -> dict[str, Any]:
-        self.puts.append(Key)
-        self.objects[(Bucket, Key)] = Body if isinstance(Body, bytes) else Body.read()
-        return {}
-
-    def head_object(self, *, Bucket: str, Key: str, **_: Any) -> dict[str, Any]:
-        if (Bucket, Key) not in self.objects:
-            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
-        return {"ContentLength": len(self.objects[(Bucket, Key)])}
-
-    def list_objects_v2(self, *, Bucket: str, Prefix: str, **_: Any) -> dict[str, Any]:
-        keys = [k for b, k in self.objects if b == Bucket and k.startswith(Prefix)]
-        return {"Contents": [{"Key": k} for k in keys]} if keys else {}
 
 
 def _args(**overrides: Any) -> argparse.Namespace:

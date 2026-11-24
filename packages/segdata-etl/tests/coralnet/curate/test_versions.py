@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 import pytest
-from uniform.conftest import FakeS3, crc64nvme_b64, md5_etag
+from s3_fake import FakeS3, crc64nvme, quoted_etag
 
 from segdata_etl import cli, promote
 from segdata_etl.common.copy_plan import COPIES_NAME, UPLOADS_NAME
@@ -88,9 +88,9 @@ def _image(image_id: str, group: str) -> dict[str, object]:
     return {
         "image_id": image_id,
         "key": f"{group}/{image_id}.jpg",
-        "etag": md5_etag(data),
+        "etag": quoted_etag(data),
         "size": len(data),
-        "crc64nvme": crc64nvme_b64(data),
+        "crc64nvme": crc64nvme(data),
         "media_type": "image/jpeg",
         "width": 640,
         "height": 480,

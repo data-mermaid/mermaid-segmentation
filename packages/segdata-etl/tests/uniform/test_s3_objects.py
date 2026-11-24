@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from s3_fake import FakeS3, crc64nvme, quoted_etag
 
 from segdata_etl.common.s3_objects import (
     ObjectConflict,
@@ -11,7 +12,7 @@ from segdata_etl.common.s3_objects import (
     sniff_media_type,
 )
 
-from .conftest import FakeS3, crc64nvme_b64, jpeg_bytes, md5_etag, png_bytes
+from .conftest import jpeg_bytes, png_bytes
 
 SRC = "src-bucket"
 DST = "dst-bucket"
@@ -47,19 +48,19 @@ def test_image_size_unreadable_is_none(head):
 def _seed_source(fake: FakeS3) -> tuple[bytes, str]:
     data = jpeg_bytes(37, 23)
     fake.put(SRC, SRC_KEY, data)
-    return data, md5_etag(data)
+    return data, quoted_etag(data)
 
 
 def _copy(fake: FakeS3, data: bytes, etag: str, **overrides):
     kwargs = {
-        "expect_etag": md5_etag(data),
+        "expect_etag": quoted_etag(data),
         "src_bucket": SRC,
         "src_key": SRC_KEY,
         "src_etag": etag,
         "dst_bucket": DST,
         "dst_key": DST_KEY,
         "expect_size": len(data),
-        "expect_crc64nvme": crc64nvme_b64(data),
+        "expect_crc64nvme": crc64nvme(data),
     }
     return copy_new(fake, **{**kwargs, **overrides})
 
@@ -75,7 +76,7 @@ def test_copy_new_absent_destination_copies_conditionally(fake_s3):
     assert call[3]["CopySource"] == {"Bucket": SRC, "Key": SRC_KEY}
     assert result.etag == etag
     assert result.size == len(data)
-    assert result.crc64nvme == crc64nvme_b64(data)
+    assert result.crc64nvme == crc64nvme(data)
     assert result.already_present is False
     assert fake_s3.objects[(DST, DST_KEY)] == data
 
@@ -87,7 +88,7 @@ def test_copy_new_existing_identical_destination_is_accepted(fake_s3):
     assert result.already_present is True
     assert result.etag == etag
     assert result.size == len(data)
-    assert result.crc64nvme == crc64nvme_b64(data)
+    assert result.crc64nvme == crc64nvme(data)
     (head,) = fake_s3.ops("head")
     assert head[3]["ChecksumMode"] == "ENABLED"
 
@@ -120,7 +121,7 @@ def test_copy_new_multipart_source_lands_with_md5_etag(fake_s3):
     data = jpeg_bytes(37, 23)
     fake_s3.put(SRC, SRC_KEY, data, etag='"abc123-2"')
     result = _copy(fake_s3, data, '"abc123-2"')
-    assert result.etag == md5_etag(data)
+    assert result.etag == quoted_etag(data)
 
 
 def test_copy_new_destination_etag_differing_from_expected_conflicts(fake_s3):
@@ -164,9 +165,9 @@ def test_put_new_absent_key_writes_conditionally(fake_s3):
     assert call[3]["ChecksumAlgorithm"] == "CRC64NVME"
     assert call[3]["ContentType"] == "application/json"
     assert fake_s3.objects[(DST, "k.json")] == b"{}"
-    assert result.etag == md5_etag(b"{}")
+    assert result.etag == quoted_etag(b"{}")
     assert result.size == 2
-    assert result.crc64nvme == crc64nvme_b64(b"{}")
+    assert result.crc64nvme == crc64nvme(b"{}")
     assert result.already_present is False
 
 

@@ -56,7 +56,6 @@ class RecordingS3(FakeS3):
         super().__init__(objects=objects if objects is not None else {})
         self.heads: list[str] = []
         self.gets: list[str] = []
-        self.puts: list[str] = []
         self.fail_on_head: int | None = None
 
     def head_object(self, *, Bucket: str, Key: str, ChecksumMode: str | None = None) -> Any:
@@ -72,7 +71,6 @@ class RecordingS3(FakeS3):
 
     def put_object(self, *, Bucket: str, Key: str, Body: Any, **kw: Any) -> dict[str, Any]:
         response = super().put_object(Bucket=Bucket, Key=Key, Body=Body, **kw)
-        self.puts.append(Key)
         return {**response, "ChecksumCRC64NVME": crc64nvme(self.objects[(Bucket, Key)])}
 
     def list_objects_v2(self, *, MaxKeys: int | None = None, **kw: Any) -> dict[str, Any]:
