@@ -206,7 +206,7 @@ These rules apply to both commands and to `segdata taxonomy`.
 uv run --package segdata-etl segdata build coralnet raw --store s3
 ```
 
-The command reads `coralnet_annotations_<run>.parquet`, `coralnet_images_<run>.parquet` and `coralnet_id2name_<run>.json` from `etl-outputs/coralnet/<run>/` in `MERMAID_CORALNET_BUCKET` (default `dev-datamermaid-sm-sources`). It reads each source's `image_list.csv` and lists its `images/` folder under `MERMAID_CORALNET_PREFIX`. See [Environment variables](#environment-variables).
+The command reads `coralnet_annotations_<run>.parquet`, `coralnet_images_<run>.parquet` and `coralnet_id2name_<run>.json` from `etl-outputs/coralnet/<run>/` in `MERMAID_CORALNET_BUCKET`, which is required: the command raises `ValueError` when it is unset. It reads each source's `image_list.csv` and lists its `images/` folder under `MERMAID_CORALNET_PREFIX`. See [Environment variables](#environment-variables).
 
 | Flag | Default | Effect |
 |---|---|---|
@@ -250,7 +250,7 @@ A rerun copies only what the store does not hold:
 1. The command lists every object under `images/coralnet/` in the destination.
 2. A listed key counts as copied when its ETag is the original's ETag, or when the checkpoint has a row with the same key, original ETag and listed ETag. Its CRC64NVME comes from that checkpoint row, else from a HEAD.
 3. A listed key with any other ETag stops the run with `ObjectExists` before any copy, unless the original is multipart (its ETag contains `-`). A copy writes a multipart original as one part with a new ETag, so the listing cannot match it. Such a key goes to the copy step instead.
-4. The command copies the rest in batches of 1000 and rewrites the checkpoint after each batch. When a conditional copy fails with 412 because the key exists, the command compares the size and CRC64NVME of both objects (MD5 when either has no CRC). It adopts the object when they match and raises `ObjectExists` when they differ.
+4. The command copies the rest in batches of 1000. It writes the checkpoint every 20 batches and once after the last batch. A crash loses the checkpoint rows since the last write; the rerun adopts those keys again from the listing and a HEAD, and a multipart original through the conditional copy and compare. When a conditional copy fails with 412 because the key exists, the command compares the size and CRC64NVME of both objects (MD5 when either has no CRC). It adopts the object when they match and raises `ObjectExists` when they differ.
 
 The checkpoint is a parquet of each copied key with its original ETag, ETag, size and CRC64NVME:
 
@@ -281,7 +281,7 @@ uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api --s
 | `--taxonomy-version`, `--taxonomy-manifest-sha256` | none | Pin of the `mermaid-benthic` taxonomy. `cleaned_up_rerun` needs both; `mermaid_api` takes neither. |
 | `--parent-version`, `--parent-manifest-sha256` | none | Pin of the v1 `coralnet` version. `mermaid_api` needs both; `cleaned_up_rerun` takes neither. |
 | `--cache-dir` | `outputs/segdata-cache` | Where the parent tables are synced. No image is synced. |
-| `--out-dir` | `outputs/coralnet-curate` | `mermaid_api` writes the API snapshot to `<out-dir>/<version>/coralnet_label_mappings.json`. |
+| `--out-dir` | `outputs/coralnet-curate` | `mermaid_api` writes a local copy of the API snapshot to `<out-dir>/<version>/coralnet_label_mappings.json`. |
 | `-v`, `--verbose` | off | Debug logging. |
 
 A missing pin flag, a pin flag of the other label map, or one flag of a pin without the other is a usage error (exit 2). The message names the flags.
@@ -298,7 +298,7 @@ A missing pin flag, a pin flag of the other label map, or one flag of a pin with
 2. The command fetches every CoralNet row from `https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet&limit=1000`. It retries a GET 3 times on connection errors and 502, 503 and 504, then fails. It never uses an older copy.
 3. `images.parquet`, `points.parquet` and `stats/label_counts.parquet` are v1's. Before it publishes, the command checks that each one serialises to the sha256 and size in v1's manifest, and raises `RuntimeError` if one differs. `stats.dropped` repeats v1's.
 4. Labels. One row per label of the raw version, joined to the API rows on the integer CoralNet Label ID. A label is unmapped when its name is not a string, the API has no row for it, or the row's `benthic_attribute_name` is null. Mapped rows take the attribute ID, attribute name and growth form name from the API.
-5. The command writes the snapshot under `--out-dir`, then publishes. The snapshot holds `fetched_at`, `sha256` and the rows sorted by ID. The manifest's `label_mapping` records the same sha256 and fetch time. If the snapshot cannot be written, nothing is published.
+5. The command writes the snapshot under `--out-dir`, then publishes. The snapshot holds `fetched_at`, `sha256` and the rows sorted by ID. The command also publishes it as `coralnet_label_mappings.json` under the version prefix (`datasets/coralnet/<version>/`), after the tables and before `manifest.json`. The manifest's `files` does not list it. Its `sha256` equals `label_mapping.sha256` in the manifest, which also records the fetch time. If the snapshot cannot be written, nothing is published.
 
 `stats.dropped` of a v1 version:
 

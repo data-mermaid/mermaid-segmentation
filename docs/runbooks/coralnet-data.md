@@ -220,8 +220,8 @@ This procedure publishes a CoralNet build as dataset versions in `s3://mermaid-i
 ### Preconditions
 
 - A build run in `etl-outputs/coralnet/<run>/`. See [Build the dataset](#build-the-dataset). `raw` publishes `20260623_nogit` unless you pass `--build-run`.
-- A git checkout of this repository. Commit and push before you publish: every publish refuses a tree with uncommitted changes to tracked files, and a HEAD that no remote branch contains. `raw` finds this only after it copies the images.
-- The environment from [Before you start](#before-you-start). `raw` reads `MERMAID_CORALNET_BUCKET` and `MERMAID_CORALNET_PREFIX`.
+- A git checkout of this repository. Commit and push before you publish: every publish refuses a tree with uncommitted changes to tracked files, and a HEAD that no remote branch contains. `raw` checks this before it copies any image.
+- The environment from [Before you start](#before-you-start). `raw` requires `MERMAID_CORALNET_BUCKET` (it raises `ValueError` when unset) and reads `MERMAID_CORALNET_PREFIX`.
 - AWS credentials that read the scrape bucket. For `--store s3`, they must also write `mermaid-ic-datasets`.
 - Network access to `api.datamermaid.org` for the taxonomy and for v2.
 
@@ -321,7 +321,7 @@ uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api --s
   --parent-version <v1> --parent-manifest-sha256 <sha>
 ```
 
-Use the same raw pin as v1. The command saves the LabelMapping API rows it used to `outputs/coralnet-curate/<version>/coralnet_label_mappings.json`.
+Use the same raw pin as v1. The command saves the LabelMapping API rows it used to `outputs/coralnet-curate/<version>/coralnet_label_mappings.json`. It also publishes the same file as `coralnet_label_mappings.json` under the version prefix.
 
 ### Find the published versions
 
@@ -333,7 +333,7 @@ Use the same raw pin as v1. The command saves the LabelMapping API rows it used 
 | Original images | `s3://mermaid-ic-datasets/images/coralnet/s<source_id>/<image_id>.jpg` or `.png` |
 | Locally staged versions | The same keys under `outputs/segdata-store/mermaid-ic-datasets/` |
 
-Each version folder holds `manifest.json` and the tables. `segdata split build` takes the `coralnet` and `coralnet-raw` pins; see [CoralNet split](../../packages/segdata-etl/README.md#coralnet-split).
+Each version folder holds `manifest.json` and the tables. A v2 folder also holds `coralnet_label_mappings.json`, which the manifest does not list. `segdata split build` takes the `coralnet` and `coralnet-raw` pins; see [CoralNet split](../../packages/segdata-etl/README.md#coralnet-split).
 
 ### When a publish fails
 
