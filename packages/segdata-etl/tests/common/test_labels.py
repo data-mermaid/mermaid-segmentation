@@ -35,5 +35,4 @@ def test_a_name_matching_several_attributes_raises_naming_them() -> None:
     index = taxonomy_name_index(ATTRIBUTES)
     with pytest.raises(AmbiguousTaxonomyName, match=r"'porites'.*'Porites'.*'PORITES'") as info:
         resolve_taxonomy_name("porites", index)
-    assert info.value.name == "porites"
     assert isinstance(info.value, ValueError)

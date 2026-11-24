@@ -18,7 +18,6 @@ class AmbiguousTaxonomyName(ValueError):
         super().__init__(
             f"{name!r} matches several taxonomy benthic attributes (ignoring case): {matches}"
         )
-        self.name = name
 
 
 def build_classes_and_colors(
