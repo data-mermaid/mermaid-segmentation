@@ -1,289 +1,172 @@
-"""Pacific Labeled Corals ingestion: verify a manually downloaded package, publish to S3.
-
-The Dryad package ``doi:10.5061/dryad.m5pr3`` has no stable download API, so ``--data-dir``
-points at the unzipped package::
-
-    <root>/<site>/labelmap.txt
-    <root>/<site>/<subset>/{imagemap.txt, annotations.txt, imgs/}
-
-Only the three Pacific sites are ingested; the Moorea split is a separate dataset.
-"""
+"""``segdata build pacific_labeled_corals``: stage the legacy Pacific prefix as a dataset version."""
 
 from __future__ import annotations
 
 import argparse
-import csv
-import logging
-from collections import Counter
-from dataclasses import dataclass
-from pathlib import Path
+from collections.abc import Sequence
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pandas as pd
 
-from ..common.images import find_undecodable
-from ..common.labels import build_classes_and_colors
-from ..common.manifest import Source, build_manifest
-from ..common.publish import S3Target, preflight, publish_dataset, upload_files
+from segdata_etl.common import publishing
+from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
+from segdata_etl.common.stage import refuse_unpublishable
+from segdata_etl.datasets import external
+from segdata_etl.label_maps.curated import curated_source, load_curated
+from segdata_etl.taxonomy import find_repo_root
+from segdata_spec import DATASET_BUCKET
+from segdata_spec.publish import probe_git
 
-logger = logging.getLogger(__name__)
-
-DATASET_NAME = "pacific_labeled_corals"
-DRYAD_URL = "https://datadryad.org/dataset/doi:10.5061/dryad.m5pr3"
-CITATION = (
-    "Beijbom, O., Edmunds, P. J., Roelfsema, C., Smith, J., Kline, D. I., "
-    "Neal, B. P., Dunlap, M. J., Moriarty, V., Fan, T.-Y., Tan, C.-J., "
-    "Chan, S., Treibitz, T., Gamst, A., Mitchell, B. G., Kriegman, D. "
-    "(2015). Towards Automated Annotation of Benthic Survey Images: "
-    "Variability of Human Experts and Operational Modes of Automation. "
-    "PLOS ONE, 10(7): e0130312."
-)
-
-SITES: tuple[str, ...] = ("heron_reef", "line_islands", "nanwan_bay")
-SUBSETS: tuple[str, ...] = ("reference", "evaluation")
-# Reference subsets carry only ``archived``; evaluation subsets add host and visitor1..5.
-OTHER_ANNOTATOR_COLS: tuple[str, ...] = ("host", *(f"visitor{i}" for i in range(1, 6)))
-ALL_ANNOTATOR_COLS: tuple[str, ...] = ("archived", *OTHER_ANNOTATOR_COLS)
-_SORT_KEYS = ["site", "subset", "image_id", "row", "col"]
-
-PARQUET_COLUMNS = {
-    "site": "Pacific site code (heron_reef, line_islands, nanwan_bay).",
-    "subset": "Annotation subset (reference or evaluation).",
-    "raw_imageid": "Original integer imageid from imagemap.txt.",
-    "image_id": "Filename stem of the source jpg (string).",
-    "image_ext": "Filename suffix incl. dot, e.g. '.JPG'.",
-    "row": "Annotation pixel row (integer).",
-    "col": "Annotation pixel column (integer).",
-    "archived": (
-        "Pacific Labeled Corals label name from the original ecological survey "
-        "(the only annotator present in reference subsets)."
-    ),
-    "host": "Re-annotation by the same coral expert (evaluation subsets only; NA elsewhere).",
-    **{
-        f"visitor{i}": f"Annotation by visiting coral expert #{i} (evaluation subsets only; NA elsewhere)."
-        for i in range(1, 6)
-    },
-}
-
-SOURCE = Source(
-    name=DATASET_NAME,
-    citation=CITATION,
-    raw_data_url=DRYAD_URL,
-    license="CC0 1.0 (Dryad)",
-)
-
-
-@dataclass(frozen=True)
-class _Subset:
-    site: str
-    subset: str
-    subset_dir: Path
-    imagemap: dict[int, str]
-    ann_rows: list[dict[str, str]]
+DATASET = "pacific_labeled_corals"
+LICENSE = "CC0 1.0 (Dryad)"
+ANNOTATORS = ("archived", "host", *(f"visitor{i}" for i in range(1, 6)))
+_IMAGES_FOLDER = "images"
+_SHOWN = 5
 
 
 def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
-    """Register the Pacific Labeled Corals flags; the raw data is downloaded manually."""
-    del workdir  # no automatic download
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        required=True,
-        help=f"Unzipped Dryad package (manual download from {DRYAD_URL}).",
-    )
+    """Add the shared external-builder options; Pacific needs no others and no ``workdir``."""
+    del workdir
+    external.add_build_arguments(parser)
 
 
-def _read_csv_dicts(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8") as fh:
-        return [dict(row) for row in csv.DictReader(fh, skipinitialspace=True)]
+def pacific_identity(key: str) -> tuple[str, str] | None:
+    """Identify ``images/<site>/<subset>/<image_id>.<ext>`` as ``(image_id, site)``.
 
+    Returns None for a key off ``images/``.
 
-def _read_labelmap(site_dir: Path) -> dict[int, str]:
-    rows = _read_csv_dicts(site_dir / "labelmap.txt")
-    return {int(r["labelid"]): r["name"].strip() for r in rows}
-
-
-def _read_imagemap(path: Path) -> dict[int, str]:
-    """Read ``{imageid: filename}``; the filename column is ``imagefile`` or ``image``."""
-    mapping: dict[int, str] = {}
-    for raw in _read_csv_dicts(path):
-        name = (raw.get("imagefile") or raw.get("image") or "").strip()
-        if not name:
-            raise KeyError(f"No filename column in {path}")
-        mapping[int(raw["imageid"])] = name
-    return mapping
-
-
-def _read_shared_labelmap(data_root: Path) -> dict[int, str]:
-    """Return the labelmap shared by every site; differing sites raise ``ValueError``."""
-    maps = {site: _read_labelmap(data_root / site) for site in SITES}
-    shared = maps[SITES[0]]
-    for site, labelmap in maps.items():
-        if labelmap != shared:
-            raise ValueError(
-                f"Per-site labelmap.txt mismatch at {site}; expected identical labelmaps "
-                "across all sites."
-            )
-    return shared
-
-
-def _collect_subsets(data_root: Path) -> list[_Subset]:
-    subsets: list[_Subset] = []
-    for site in SITES:
-        for subset in SUBSETS:
-            subset_dir = data_root / site / subset
-            if not subset_dir.is_dir():
-                raise FileNotFoundError(f"Missing subset directory: {subset_dir}")
-            for required in ("imagemap.txt", "annotations.txt", "imgs"):
-                if not (subset_dir / required).exists():
-                    raise FileNotFoundError(f"Missing expected file/dir: {subset_dir / required}")
-            subsets.append(
-                _Subset(
-                    site,
-                    subset,
-                    subset_dir,
-                    _read_imagemap(subset_dir / "imagemap.txt"),
-                    _read_csv_dicts(subset_dir / "annotations.txt"),
-                )
-            )
-    return subsets
-
-
-def _assert_images_decode(subsets: list[_Subset], *, workers: int) -> None:
-    """Raise ``RuntimeError`` listing the first offenders if any mapped image is unreadable."""
-    paths = [s.subset_dir / "imgs" / name for s in subsets for name in s.imagemap.values()]
-    failures = find_undecodable(paths, workers=workers)
-    if failures:
-        sample = "\n  ".join(f"{p}: {e}" for p, e in failures[:5])
-        more = f"\n  ... ({len(failures) - 5} more)" if len(failures) > 5 else ""
-        raise RuntimeError(
-            f"Integrity check failed: {len(failures)} image(s) could not be decoded.\n"
-            f"  {sample}{more}"
-        )
-
-
-_DROP_UNMAPPED_IMAGEID = "unmapped imageid"
-_DROP_UNKNOWN_ARCHIVED = "unknown archived"
-
-
-def _build_record(
-    subset: _Subset, raw: dict[str, str], labelid_to_name: dict[int, str]
-) -> tuple[dict[str, object] | None, str | None]:
-    """Return ``(row, None)``, or ``(None, reason)`` when its image or archived label is unknown."""
-    imageid = int(raw["imageid"])
-    if imageid not in subset.imagemap:
-        return None, _DROP_UNMAPPED_IMAGEID
-    archived = labelid_to_name.get(int(raw["archived"]))
-    if archived is None:
-        return None, _DROP_UNKNOWN_ARCHIVED
-    image_path = Path(subset.imagemap[imageid])
-    record: dict[str, object] = {
-        "site": subset.site,
-        "subset": subset.subset,
-        "raw_imageid": imageid,
-        "image_id": image_path.stem,
-        "image_ext": image_path.suffix,
-        "row": int(raw["row"]),
-        "col": int(raw["col"]),
-        "archived": archived,
-    }
-    for col in OTHER_ANNOTATOR_COLS:
-        raw_val = raw.get(col)
-        record[col] = labelid_to_name.get(int(raw_val), pd.NA) if raw_val else pd.NA
-    return record, None
-
-
-def _build_annotations_df(
-    subsets: list[_Subset], labelid_to_name: dict[int, str]
-) -> tuple[pd.DataFrame, Counter[str]]:
-    """Return the wide annotations frame (one row per site, subset, image, row, col) and drop counts.
-
-    The counts are keyed by drop reason; each non-zero reason is logged at WARNING.
+    Raises:
+        ValueError: A key under ``images/`` is not exactly two folders deep.
     """
-    records: list[dict[str, object]] = []
-    dropped: Counter[str] = Counter()
-    for subset in subsets:
-        for raw in subset.ann_rows:
-            rec, reason = _build_record(subset, raw, labelid_to_name)
-            if rec is not None:
-                records.append(rec)
-            elif reason is not None:
-                dropped[reason] += 1
-    for reason, n in dropped.items():
-        logger.warning("Dropped %d annotation row(s): %s", n, reason)
-    if not records:
-        raise RuntimeError("No usable annotation rows were assembled; check --data-dir layout.")
-    df = pd.DataFrame.from_records(records).astype(
-        {
-            "site": "string",
-            "subset": "string",
-            "raw_imageid": "int64",
-            "image_id": "string",
-            "image_ext": "string",
-            "row": "int64",
-            "col": "int64",
-            **dict.fromkeys(ALL_ANNOTATOR_COLS, "string"),
-        }
+    parts = PurePosixPath(key).parts
+    if parts[0] != _IMAGES_FOLDER:
+        return None
+    if len(parts) != 4:
+        raise ValueError(f"legacy image {key!r} is not at images/<site>/<subset>/<file>")
+    return PurePosixPath(parts[3]).stem, parts[1]
+
+
+def _key_subset(image: external.LegacyImage) -> str:
+    return PurePosixPath(image.key).parts[2]
+
+
+def _long_annotations(annotations: pd.DataFrame) -> pd.DataFrame:
+    """Return one row per non-null annotator column per position, ``annotator`` = column name.
+
+    Rows keep the legacy row order, then the ``ANNOTATORS`` order within a position.
+    """
+    melted = annotations.reset_index(names="_position").melt(
+        id_vars=["_position", "image_id", "row", "col"],
+        value_vars=list(ANNOTATORS),
+        var_name="annotator",
+        value_name="source_label_name",
     )
-    return df, dropped
+    melted = melted.dropna(subset=["source_label_name"])
+    rank = melted["annotator"].map({name: i for i, name in enumerate(ANNOTATORS)})
+    order = melted.assign(_rank=rank).sort_values(["_position", "_rank"], kind="stable")
+    return order.drop(columns=["_position", "_rank"]).reset_index(drop=True)
 
 
-def _image_uploads(df: pd.DataFrame, subsets: list[_Subset], prefix: str) -> list[tuple[Path, str]]:
-    """Return ``(local path, key)`` for each distinct annotated image."""
-    by_key = {(s.site, s.subset): s for s in subsets}
-    unique = df.drop_duplicates(["site", "subset", "image_id"])
-    uploads = []
-    for site, subset, imageid, image_id, ext in unique[
-        ["site", "subset", "raw_imageid", "image_id", "image_ext"]
-    ].itertuples(index=False):
-        s = by_key[(site, subset)]
-        local = s.subset_dir / "imgs" / s.imagemap[imageid]
-        uploads.append((local, f"{prefix}/images/{site}/{subset}/{image_id}{ext}"))
-    return uploads
+def _image_attrs(annotations: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    """Return ``{"subset", "raw_imageid"}`` per image id from the legacy annotations.
+
+    Raises:
+        ValueError: An image id carries more than one ``(subset, raw_imageid)`` pair.
+    """
+    pairs = annotations[["image_id", "subset", "raw_imageid"]].drop_duplicates()
+    repeated = sorted(set(pairs["image_id"][pairs["image_id"].duplicated()]))
+    if repeated:
+        raise ValueError(f"images with several (subset, raw_imageid) pairs: {repeated[:5]}")
+    return {
+        str(image_id): {"subset": str(subset), "raw_imageid": int(raw)}
+        for image_id, subset, raw in pairs.itertuples(index=False)
+    }
+
+
+def _require_unique_positions(annotations: pd.DataFrame) -> None:
+    """Refuse a ``(image_id, row, col)`` that appears on more than one legacy row.
+
+    Raises:
+        ValueError: Some position is duplicated; the message gives the count and the first few.
+    """
+    duplicated = annotations.loc[
+        annotations.duplicated(["image_id", "row", "col"], keep=False), ["image_id", "row", "col"]
+    ].drop_duplicates()
+    if len(duplicated):
+        first = list(duplicated.head(_SHOWN).itertuples(index=False, name=None))
+        raise ValueError(f"{len(duplicated)} duplicated positions (image_id, row, col): {first}")
+
+
+def _annotated_images(annotations: pd.DataFrame) -> set[tuple[str, str, str]]:
+    columns = (annotations[c].astype(str) for c in ("site", "subset", "image_id"))
+    return set(zip(*columns, strict=True))
+
+
+def _with_attrs(
+    images: Sequence[external.LegacyImage], attrs: dict[str, dict[str, Any]]
+) -> list[external.LegacyImage]:
+    return [replace(image, attrs=attrs[image.image_id]) for image in images]
 
 
 def run(args: argparse.Namespace, client: Any) -> int:
-    """Ingest Pacific Labeled Corals into S3; return the process exit code."""
-    target = S3Target(args.bucket, args.prefix.strip("/"), args.dry_run)
-    preflight(client, target, DATASET_NAME, overwrite=args.overwrite)
-    data_root = args.data_dir.expanduser().resolve()
-    if not data_root.is_dir():
-        raise FileNotFoundError(f"--data-dir does not exist: {data_root}")
+    """Stage a new ``pacific_labeled_corals`` version and print its version and manifest sha256.
 
-    labelid_to_name = _read_shared_labelmap(data_root)
-    subsets = _collect_subsets(data_root)
-    _assert_images_decode(subsets, workers=args.workers)
-    annotations, dropped = _build_annotations_df(subsets, labelid_to_name)
-    classes, colors = build_classes_and_colors(labelid_to_name.values())
+    Points are long form, one row per annotator label; label counts count every such row.
 
-    uploaded = upload_files(
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed.
+    """
+    repo_root = find_repo_root(Path(__file__).resolve().parent)
+    git = probe_git(repo_root)
+    refuse_unpublishable(git)
+    taxonomy = external.load_taxonomy(
         client,
-        target,
-        _image_uploads(annotations, subsets, target.prefix),
-        workers=args.workers,
-        skip_existing=args.skip_existing_s3,
+        DATASET_BUCKET,
+        version=args.taxonomy_version,
+        manifest_sha256=args.taxonomy_manifest_sha256,
+        cache_dir=args.cache_dir,
     )
-    manifest = build_manifest(
-        SOURCE,
-        target,
-        image_key_template=f"{target.prefix}/images/{{site}}/{{subset}}/{{image_id}}{{image_ext}}",
-        parquet_columns=PARQUET_COLUMNS,
-        ingestion={
-            "excluded_sites": ["moorea"],
-            "images_uploaded": uploaded,
-            "annotations_dropped_unknown_archived": dropped[_DROP_UNKNOWN_ARCHIVED],
-            "annotations_dropped_unmapped_imageid": dropped[_DROP_UNMAPPED_IMAGEID],
+    legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
+    source = source_info(legacy, license_override=LICENSE)
+    dropped = legacy_dropped(DATASET, legacy.manifest)
+    curated = load_curated(DATASET)
+    labels = external.build_labels(legacy.classes, curated, taxonomy.benthic_attributes)
+    points = external.build_points(_long_annotations(legacy.annotations), legacy.classes)
+    _require_unique_positions(legacy.annotations)
+    images = external.legacy_images(legacy.objects, pacific_identity)
+    external.require_same_ids(
+        {(image.group, _key_subset(image), image.image_id) for image in images},
+        _annotated_images(legacy.annotations),
+        what="pacific images",
+    )
+    images = _with_attrs(images, _image_attrs(legacy.annotations))
+    external.require_known_labels(points, labels)
+    probe = external.probe_legacy_images(client, images, legacy=legacy, workers=args.workers)
+    points = external.drop_unreadable_points(points, probe)
+    # Bounds depend only on (image_id, row, col), so a position leaves with all its annotator
+    # rows; points_out_of_bounds counts point rows, as in the other builders.
+    points, dropped = external.drop_points_outside_and_record(
+        points, probe.images, probe.sniffed, dropped
+    )
+    return external.publish_version(
+        dataset=DATASET,
+        kind="points",
+        tables={
+            "points.parquet": points,
+            "labels.parquet": labels,
+            "stats/label_counts.parquet": publishing.count_labels(points),
         },
+        source=source,
+        label_mapping=external.label_mapping_record(
+            labels, curated_source(DATASET), git_sha=git.sha
+        ),
+        dropped=dropped,
+        git=git,
+        repo_root=repo_root,
+        client=client,
+        probe=probe,
+        legacy=legacy,
+        args=args,
     )
-    publish_dataset(
-        client,
-        target,
-        dataset_name=DATASET_NAME,
-        annotations=annotations,
-        sort_by=_SORT_KEYS,
-        classes=classes,
-        colors=colors,
-        manifest=manifest,
-        overwrite=args.overwrite,
-    )
-    return 0

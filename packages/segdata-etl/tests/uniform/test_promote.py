@@ -187,15 +187,10 @@ def test_plan_line_disagreeing_with_images_parquet_refuses_at_preflight(
     assert fake.calls == []
 
 
-def test_both_or_neither_plan_file_refuses(repo, tmp_path):  # noqa: F811
+def test_neither_plan_file_refuses(repo, tmp_path):  # noqa: F811
     fake, stage, version = stage_mermaid(tmp_path)
-    directory = version_dir(stage, "mermaid", version)
-    (directory / "uploads.jsonl").write_text("")
-    with pytest.raises(PublishRefused, match="exactly one"):
-        run_promote(fake, stage, version)
-    (directory / "uploads.jsonl").unlink()
-    (directory / "copies.jsonl").unlink()
-    with pytest.raises(PublishRefused, match="exactly one"):
+    (version_dir(stage, "mermaid", version) / "copies.jsonl").unlink()
+    with pytest.raises(PublishRefused, match="at least one"):
         run_promote(fake, stage, version)
     assert fake.calls == []
 
@@ -526,3 +521,90 @@ def test_parent_published_with_the_pinned_bytes_lets_promote_proceed(repo, tmp_p
     run_promote(fake, stage, version)
 
     assert (DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json") in fake.objects
+
+
+SOURCE_BUCKET = "dense-source"
+DENSE = "coralscapes_v2"
+
+
+def stage_dense(monkeypatch, tmp_path: Path) -> tuple[FakeS3, Path, str]:
+    """Stage coralscapes, then move its image uploads into copies.jsonl; masks stay uploads."""
+    version_path = build_coralscapes(monkeypatch, tmp_path)
+    stage = tmp_path / "stage"
+    fake = FakeS3()
+    lines = [json.loads(x) for x in (version_path / "uploads.jsonl").read_text().splitlines()]
+    copies = []
+    for line in lines:
+        if line["dst_key"].endswith("_label.png"):
+            continue
+        data = (stage / line["local_path"]).read_bytes()
+        src_key = "src/" + line["dst_key"]
+        fake.put(SOURCE_BUCKET, src_key, data)
+        copies.append(
+            {
+                "src_bucket": SOURCE_BUCKET,
+                "src_key": src_key,
+                "src_etag": md5_etag(data),
+                "dst_bucket": DATASET_BUCKET,
+                "dst_key": line["dst_key"],
+                "size": len(data),
+                "crc64nvme": crc64nvme_b64(data),
+                "etag": md5_etag(data),
+            }
+        )
+    masks = [x for x in lines if x["dst_key"].endswith("_label.png")]
+    (version_path / "copies.jsonl").write_text("".join(json.dumps(x) + "\n" for x in copies))
+    (version_path / "uploads.jsonl").write_text("".join(json.dumps(x) + "\n" for x in masks))
+    fake.calls.clear()
+    return fake, stage, version_path.name
+
+
+def test_dense_version_copies_images_uploads_masks_and_writes_the_manifest_last(
+    monkeypatch, tmp_path
+):
+    fake, stage, version = stage_dense(monkeypatch, tmp_path)
+
+    run_promote(fake, stage, version, dataset=DENSE)
+
+    log = writes(fake)
+    image_keys = {f"images/{DENSE}/train/a1.jpg", f"images/{DENSE}/validation/b1.png"}
+    mask_keys = {f"images/{DENSE}/train/a1_label.png", f"images/{DENSE}/validation/b1_label.png"}
+    assert {k for op, _, k, _ in log if op == "copy"} == image_keys
+    assert {k for op, _, k, _ in log[:4] if op == "put"} == mask_keys
+    matches = {kw["CopySourceIfMatch"] for op, _, _, kw in log if op == "copy"}
+    assert matches == {md5_etag(IMG_A), md5_etag(IMG_B)}
+    assert fake.objects[(DATASET_BUCKET, f"images/{DENSE}/train/a1.jpg")] == IMG_A
+    assert fake.objects[(DATASET_BUCKET, f"images/{DENSE}/train/a1_label.png")] == MASK
+    assert log[-1][2] == f"datasets/{DENSE}/{version}/manifest.json"
+
+
+def test_key_listed_in_both_plan_files_refuses_before_any_write(monkeypatch, tmp_path):
+    fake, stage, version = stage_dense(monkeypatch, tmp_path)
+    directory = version_dir(stage, DENSE, version)
+    copied = json.loads((directory / "copies.jsonl").read_text().splitlines()[0])
+    upload = {
+        "local_path": f"{DATASET_BUCKET}/{copied['dst_key']}",
+        "dst_bucket": DATASET_BUCKET,
+        "dst_key": copied["dst_key"],
+        "size": copied["size"],
+        "crc64nvme": copied["crc64nvme"],
+        "content_type": "image/jpeg",
+    }
+    with (directory / "uploads.jsonl").open("a") as handle:
+        handle.write(json.dumps(upload) + "\n")
+
+    with pytest.raises(PublishRefused, match="1 duplicated"):
+        run_promote(fake, stage, version, dataset=DENSE)
+
+    assert writes(fake) == []
+
+
+def test_key_in_neither_plan_file_refuses_before_any_write(monkeypatch, tmp_path):
+    fake, stage, version = stage_dense(monkeypatch, tmp_path)
+    path = version_dir(stage, DENSE, version) / "uploads.jsonl"
+    path.write_text("".join(path.read_text().splitlines(keepends=True)[1:]))
+
+    with pytest.raises(PublishRefused, match="1 missing"):
+        run_promote(fake, stage, version, dataset=DENSE)
+
+    assert writes(fake) == []

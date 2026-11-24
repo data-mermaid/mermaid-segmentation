@@ -12,7 +12,7 @@ import pytest
 from PIL import Image
 
 from segdata_etl.cli import build_parser
-from segdata_etl.datasets import catlin_seaview
+from segdata_etl.ingest import catlin_seaview
 
 B = "bkt"
 P = "ds"
@@ -307,7 +307,7 @@ def test_force_download_fetches_again(tmp_path, fake_s3, monkeypatch):
 
 
 def test_add_arguments_defaults():
-    ns = build_parser().parse_args(["build", "catlin_seaview"])
+    ns = build_parser().parse_args(["ingest", "catlin_seaview"])
 
     assert ns.data_dir is None
     assert ns.force_download is False

@@ -113,6 +113,34 @@ def test_no_sync_routes_a_dense_version_to_the_dense_path_without_a_client(
     assert capsys.readouterr().out.rstrip().endswith("PARITY OK" if code == 0 else "PARITY FAILED")
 
 
+def test_no_sync_builds_no_s3_client_for_a_points_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "data.yaml"
+    config.write_text("data:\n  catlin_seaview:\n    train: {}\n")
+    seen: dict[str, Any] = {}
+
+    def _run_parity(data_cfg: Any, **kwargs: Any) -> ParityReport:
+        seen.update(kwargs)
+        return ParityReport()
+
+    def _unexpected(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("S3 used")
+
+    monkeypatch.setattr(script, "run_parity", _run_parity)
+    monkeypatch.setattr(script, "sync_tables", _unexpected)
+    monkeypatch.setattr(script, "version_kind", lambda cache_dir, pin: "points")
+    monkeypatch.setattr(script.boto3, "client", _unexpected)
+
+    result = script.main(
+        ["--data-config", str(config), "--cache-dir", str(tmp_path / "c"), "--no-sync", *_ARGS]
+    )
+
+    assert result == 0
+    assert seen["client"] is None
+    assert seen["sync"] is False
+
+
 def test_hf_head_sha_returns_none_with_a_warning_when_the_hub_is_unreachable(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

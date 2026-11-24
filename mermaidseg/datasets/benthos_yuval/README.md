@@ -47,7 +47,7 @@ The Dryad download needs a login, so download these six files by hand from the l
 Then run:
 
 ```bash
-uv run --package segdata-etl segdata build benthos_yuval --data-dir <data-dir>
+uv run --package segdata-etl segdata ingest benthos_yuval --data-dir <data-dir>
 ```
 
 The run writes the tiles to `--workdir` (default `outputs/external-datasets/benthos_yuval/`) before it uploads them. See the [package README](../../../packages/segdata-etl/README.md) for the output contract and every flag. Pass `--dry-run` to check a run without writing to S3. If the parquet or a JSON file is already on S3, the run stops. Pass `--overwrite` to replace them.

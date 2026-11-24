@@ -1,21 +1,31 @@
 # segdata-etl
 
-Builds the segmentation training data in S3: the CoralNet training manifest, the four external datasets, and the uniform-format versions of MERMAID, Coralscapes V2 and UCSD mosaics. Import package: `segdata_etl`; console script: `segdata`. Every dataset runs as `segdata build <dataset>`. The CoralNet split runs as `segdata split build` and `segdata split leakage` (see [CoralNet split](#coralnet-split)). A staged uniform version is published with `segdata promote` (see [Uniform datasets](#uniform-datasets)).
+Builds the segmentation training data in S3: the CoralNet training manifest, the four external datasets, the uniform-format versions of MERMAID, Coralscapes V2 and UCSD mosaics, and the versioned datasets and taxonomy that `segdata_spec` defines. Import package: `segdata_etl`; console script: `segdata`.
+
+| Command | Does |
+|---|---|
+| `segdata build coralnet <stage>` | Builds the CoralNet training dataset (see [CoralNet](#coralnet)). |
+| `segdata ingest <name>` | Loads a raw external release into the legacy `external_validation_datasets/<name>/` prefix (see [Ingest an external dataset](#ingest-an-external-dataset)). |
+| `segdata build <name>` | Builds an immutable versioned dataset from that legacy prefix (see [Build a versioned external dataset](#build-a-versioned-external-dataset)). |
+| `segdata build <uniform>` | Stages a uniform-format version of `mermaid`, `coralscapes_v2` or `ucsd_mosaics` on disk (see [Uniform datasets](#uniform-datasets)). |
+| `segdata promote` | Uploads a staged uniform or external dataset version to `mermaid-ic-datasets` (see [Promote a version](#promote-a-version)). |
+| `segdata taxonomy` | Snapshots the MERMAID benthic taxonomy as a version (see [Taxonomy snapshot](#taxonomy-snapshot)). |
+| `segdata split build`, `segdata split leakage` | Builds and checks the CoralNet split (see [CoralNet split](#coralnet-split)). |
 
 ## Scope
 
-- **Owns:** turning a CoralNet scrape into the training manifest, the resized images and the id2name JSON; checking each raw external release, converting it, and writing it to S3; and staging the `mermaid`, `coralscapes_v2` and `ucsd_mosaics` versions and promoting them to `mermaid-ic-datasets`. The CoralNet code is in `segdata_etl/datasets/coralnet/` (the CLI stages are in `build.py`). The external and uniform dataset modules are in `segdata_etl/datasets/`, and `promote` is in `segdata_etl/promote.py`. The shared helpers are in `segdata_etl/common/`: `images.py`, `jpeg_header.py`, `publish.py`, `labels.py`, `manifest.py`, and for the uniform builds `s3_objects.py`, `stage.py` and `hf_dense.py`:
+- **Owns:** turning a CoralNet scrape into the training manifest, the resized images and the id2name JSON; checking each raw external release and writing it to the legacy S3 prefix; building the external datasets and the MERMAID benthic taxonomy as published versions; and staging the `mermaid`, `coralscapes_v2` and `ucsd_mosaics` versions and promoting them to `mermaid-ic-datasets`. The CoralNet code is in `segdata_etl/datasets/coralnet/` (the CLI stages are in `build.py`). The raw-release ingest modules are in `segdata_etl/ingest/`. The versioned external and uniform dataset modules are in `segdata_etl/datasets/`, with the shared external steps in `datasets/external.py` and the curated label maps in `label_maps/curated/<name>.csv`. `promote` is in `segdata_etl/promote.py`. The taxonomy snapshot is `segdata_etl/taxonomy.py`. The shared helpers are in `segdata_etl/common/`: `images.py`, `jpeg_header.py`, `publish.py`, `labels.py`, `manifest.py`, and for the uniform builds `s3_objects.py`, `stage.py` and `hf_dense.py`:
   - `s3_objects.py`: write-once S3 copy and put. Each write sends `IfNoneMatch="*"`; a key that already holds the same content counts as done, and other content raises `ObjectConflict`.
   - `stage.py`: `LocalDirS3`, a directory that stands in for the S3 client so a build publishes to disk, and the version naming.
   - `hf_dense.py`: the shared build of a dense dataset from a pinned Hugging Face revision, used by `coralscapes_v2` and `ucsd_mosaics`.
-- **Does not own:** downloading CoralNet. That is [`coralnet-scraper`](../coralnet-scraper/README.md).
-- **Boundary:** The root `tests/test_package_boundaries.py` enforces these rules (run with the root suite): `segdata_etl` does not import `mermaidseg`; `mermaidseg` and `scripts` import neither `segdata_etl` nor `coralnet_scraper`; `coralnet_scraper` imports neither `mermaidseg` nor `segdata_etl`. Only `segdata_etl/datasets/coralnet/` may import `coralnet_scraper`, for its configuration and S3 key layout. The boundary test enforces this, so `common/` and the external dataset modules stay free of it. The `segdata` CLI loads the CoralNet build code, and with it `coralnet_scraper` and `ibis`, only when a `build coralnet` stage runs. The argparse wiring is in `datasets/coralnet/commands.py`, which imports neither. A root `uv sync` does not install the package.
+- **Does not own:** downloading CoralNet. That is [`coralnet-scraper`](../coralnet-scraper/README.md). Nor the MERMAID parquet or the Hugging Face datasets, except as the sources of the uniform `mermaid`, `coralscapes_v2` and `ucsd_mosaics` builds.
+- **Boundary:** The root `tests/test_package_boundaries.py` enforces these rules (run with the root suite): `segdata_etl` does not import `mermaidseg`; `mermaidseg` and `scripts` import neither `segdata_etl` nor `coralnet_scraper`; `coralnet_scraper` imports neither `mermaidseg` nor `segdata_etl`. Only `segdata_etl/datasets/coralnet/` may import `coralnet_scraper`, for its configuration and S3 key layout. The boundary test enforces this, so `common/`, `ingest/` and the external and uniform dataset modules stay free of it. The `segdata` CLI loads the CoralNet build code, and with it `coralnet_scraper` and `ibis`, only when a `build coralnet` stage runs. The argparse wiring is in `datasets/coralnet/commands.py`, which imports neither. A root `uv sync` does not install the package.
 
 ```bash
-uv run --package segdata-etl segdata build <dataset> ...
+uv run --package segdata-etl segdata <command> ...
 ```
 
-`<dataset>` is `coralnet`, `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals`, `benthos_yuval`, `mermaid`, `coralscapes_v2` or `ucsd_mosaics`. `coralnet` takes a stage after it (see [Run](#run)).
+`<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. `<uniform>` is `mermaid`, `coralscapes_v2` or `ucsd_mosaics`. `build coralnet` takes a stage after it (see [Run](#run)). A staged uniform or external dataset version is published with `segdata promote`.
 
 ## CoralNet
 
@@ -311,20 +321,20 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset <data
 
 `promote` also takes `--workers` (default 16) and `-v`, `--verbose`. It writes in this order:
 
-1. Preflight, before any write. It checks the staged tables against `manifest.json`, refuses a manifest whose `stats.n_images` is 0, checks that the plan file names exactly the image and mask keys in `images.parquet` with the same size and checksums, and checks each staged upload file. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
+1. Preflight, before any write. It checks the staged tables against `manifest.json`, refuses a manifest whose `stats.n_images` is 0, checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name exactly the image and mask keys in `images.parquet`, each once, with the same size and checksums, and checks each staged upload file. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
 2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`.
 3. The tables.
 4. `manifest.json`.
 
 Every write is write-once. A key that already holds the planned content counts as done, and other content stops the run with `ObjectConflict`. A version is visible only when its `manifest.json` exists. If `promote` stops before step 4, run it again: it continues from the objects already written.
 
-## External datasets
+## Ingest an external dataset
 
-Loads the raw releases of four external datasets into S3, in the layout that their dataset classes in `mermaidseg/datasets/` read. One command for each dataset: `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` and `benthos_yuval`.
+`segdata ingest <name>` loads the raw release of an external dataset into S3, in the layout that its dataset class in `mermaidseg/datasets/` reads. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. The code is in `segdata_etl/ingest/`. It writes the legacy `external_validation_datasets/<name>/` prefix, which training reads. [Build a versioned external dataset](#build-a-versioned-external-dataset) reads that prefix.
 
 ### Published files
 
-Every dataset command writes the same set of files under `s3://<bucket>/<prefix>/`:
+Every ingest command writes the same set of files under `s3://<bucket>/<prefix>/`:
 
 | Key | Content |
 |---|---|
@@ -372,15 +382,15 @@ Every dataset records `images_uploaded`: the number of images this run sent to S
 | `pacific_labeled_corals` | `excluded_sites`. `annotations_dropped_unknown_archived`: annotations dropped because their `archived` label ID is not in the label table. `annotations_dropped_unmapped_imageid`: annotations dropped because their image ID is not in the image map. `images_uploaded`. The run logs each drop count as a warning. |
 | `benthos_yuval` | `excluded_sites`, `tile_size`, `label_key_template`, `num_tiles` (a count for each site), `images_uploaded` and `labels_uploaded`. |
 
-### Run an external dataset
+### Run an ingest
 
 Run from the repository root. `uv run --package segdata-etl` installs the package and its dependencies on first use. S3 access uses the default boto3 credential chain.
 
 ```bash
-uv run --package segdata-etl segdata build <name> --data-dir <raw dir>
+uv run --package segdata-etl segdata ingest <name> --data-dir <raw dir>
 ```
 
-Flags on every dataset command:
+Flags on every ingest command:
 
 | Flag | Default | Effect |
 |---|---|---|
@@ -392,7 +402,7 @@ Flags on every dataset command:
 | `--overwrite` | off | Replace the parquet and the JSON files if they exist. Benthos also uploads the `labels/` tiles again. |
 | `-v`, `--verbose` | off | Debug logging. |
 
-Flags for each dataset:
+Flags for each ingest command:
 
 | Dataset | Flags |
 |---|---|
@@ -408,12 +418,60 @@ The README of each dataset lists the raw files to download and their layout:
 - [Pacific Labeled Corals](../../mermaidseg/datasets/pacific_labeled_corals/README.md)
 - [Benthos](../../mermaidseg/datasets/benthos_yuval/README.md)
 
+## Build a versioned external dataset
+
+`segdata build <name>` stages an immutable dataset version in the `segdata_spec` uniform format from the legacy prefix that `segdata ingest <name>` wrote. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. The build never writes to S3, and it copies no image. [Promote a version](#promote-a-version) publishes it. The code is in `segdata_etl/datasets/`; the shared steps are in `datasets/external.py`. The format and the publish rules are in the [segdata-spec README](../segdata-spec/README.md).
+
+The build reads the legacy prefix from `--legacy-bucket` and the pinned taxonomy from `mermaid-ic-datasets`, so the taxonomy must be published before you stage a dataset. The build refuses a taxonomy pin whose manifest is not in `mermaid-ic-datasets`, even when `--cache-dir` already holds it. It maps the dataset's labels to the taxonomy with the curated map `segdata_etl/label_maps/curated/<name>.csv`. It stages the tables and the plan file `copies.jsonl` under `<stage>/mermaid-ic-datasets/datasets/<name>/<version>/`. Benthos also stages its masks, with `uploads.jsonl`. The build ends by printing two lines:
+
+```text
+version: <YYYYMMDD-sha7>
+manifest_sha256: <sha256>
+```
+
+`manifest_sha256` is the pin: a consumer needs both values to read the version. A version string is `YYYYMMDD-<sha7>` (the UTC date and short git commit), with `-2`, `-3` for a rebuild on the same day.
+
+```bash
+uv run --package segdata-etl segdata build <name> --stage-dir <stage> \
+  --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
+```
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--stage-dir` | none (required) | Local directory the version is staged in. |
+| `--taxonomy-version`, `--taxonomy-manifest-sha256` | required | Pin of the `mermaid-benthic` taxonomy that the labels map to. |
+| `--cache-dir` | `outputs/segdata-cache` | Where the build syncs the taxonomy from S3. |
+| `--workers` | 16 | Threads for inspecting images. |
+| `--legacy-bucket` | `dev-datamermaid-sm-sources` | Bucket that holds the legacy prefix. |
+| `-v`, `--verbose` | off | Debug logging. |
+
+An image whose legacy header cannot be read is dropped with its points. The count is `stats.dropped["image_unreadable_header"]` in the manifest.
+
+The build refuses a dirty or unpushed git tree. [Check a staged version](#check-a-staged-version) with the parity script before you promote. The order of staging, checking and publishing is in the [runbook](../../docs/runbooks/training-datasets.md#publish-the-versioned-datasets).
+
+## Taxonomy snapshot
+
+`segdata taxonomy` stages the MERMAID benthic hierarchy, from `/v1/benthicattributes/` and the growth forms in `/v1/choices/`, as `taxonomy/mermaid-benthic/<version>/`, then publishes the staged tables. The version string follows the same `YYYYMMDD-<sha7>[-N]` form. Each step prints the version and its manifest sha256, which are the taxonomy pin for `segdata build`. Staging writes no S3 object. Publishing names the new version against S3, so the name is free there.
+
+```bash
+uv run --package segdata-etl segdata taxonomy --stage-dir <stage>
+uv run --package segdata-etl segdata taxonomy --tables-from <staged taxonomy folder> --publish
+```
+
+| Flag | Effect |
+|---|---|
+| `--stage-dir <dir>` | Fetch the API and stage a version in this local directory. |
+| `--tables-from <folder> --publish` | Re-check the tables of a staged taxonomy version folder and publish them to S3 under a new version name, with no HTTP call. The folder is `<stage>/mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>/`. |
+| `-v`, `--verbose` | Debug logging. |
+
+Any other flag combination is refused.
+
 ## Tests
 
 ```bash
 uv run --package segdata-etl --group tests pytest packages/segdata-etl/tests
 ```
 
-The CoralNet suite is in `packages/segdata-etl/tests/coralnet/`, the external dataset suite in `packages/segdata-etl/tests/external/`, the split suite in `packages/segdata-etl/tests/splits/` and the uniform dataset suite in `packages/segdata-etl/tests/uniform/`. Pass one directory to run one suite.
+The CoralNet suite is in `packages/segdata-etl/tests/coralnet/`, the raw-release ingest suite in `packages/segdata-etl/tests/ingest/`, the external dataset builder suite in `packages/segdata-etl/tests/datasets/`, the split suite in `packages/segdata-etl/tests/splits/`, the uniform dataset suite in `packages/segdata-etl/tests/uniform/`, the publishing and legacy helper suite in `packages/segdata-etl/tests/common/` and the label map suite in `packages/segdata-etl/tests/label_maps/`. `test_segdata_spec_parity.py` and `test_taxonomy.py` sit directly in `packages/segdata-etl/tests/`. Pass one directory to run one suite.
 
-The CoralNet tests are offline and use no network. The external dataset tests use an in-memory S3 fake and synthetic raw trees. `pytest-socket` blocks every host except localhost.
+The CoralNet tests are offline and use no network. The ingest and external builder tests use an in-memory S3 fake (`FakeS3`, defined in `tests/ingest/conftest.py` and reused from `tests/uniform/conftest.py` by `tests/datasets/`) and synthetic raw trees. `pytest-socket` blocks every host except localhost.

@@ -2,7 +2,8 @@
 
 Provides a hand-rolled in-memory ``FakeS3`` that implements the boto3 client surface the staging
 and copy helpers touch: conditional ``put_object`` and ``copy_object``, ``head_object`` with
-checksums, ranged ``get_object`` and an ordered call log. Errors carry the codes real S3 raises.
+checksums, ranged ``get_object``, a one-page listing paginator and an ordered call log. Errors
+carry the codes real S3 raises.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -178,11 +180,28 @@ class FakeS3:
         keys = sorted(k for b, k in self.objects if b == Bucket and k.startswith(Prefix))[:MaxKeys]
         response: dict[str, Any] = {"KeyCount": len(keys)}
         if keys:
-            response["Contents"] = [{"Key": k} for k in keys]
+            response["Contents"] = [
+                {"Key": k, "ETag": self.etags[(Bucket, k)], "Size": len(self.objects[(Bucket, k)])}
+                for k in keys
+            ]
         return response
+
+    def get_paginator(self, operation: str) -> _Paginator:
+        assert operation == "list_objects_v2"
+        return _Paginator(self)
 
     def ops(self, op: str) -> list[tuple[str, str, str, dict[str, Any]]]:
         return [call for call in self.calls if call[0] == op]
+
+
+class _Paginator:
+    """One page per call, which is all the small listings in these tests need."""
+
+    def __init__(self, client: FakeS3):
+        self._client = client
+
+    def paginate(self, **kwargs: Any) -> Iterator[dict[str, Any]]:
+        yield self._client.list_objects_v2(**kwargs)
 
 
 @pytest.fixture

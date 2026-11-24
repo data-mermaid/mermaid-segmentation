@@ -1,4 +1,4 @@
-"""``segdata`` console script: ``build coralnet <stage>``, ``build <external dataset>``, ``split`` and ``promote``."""
+"""``segdata`` console script: ``build``, ``ingest``, ``taxonomy``, ``split`` and ``promote``."""
 
 from __future__ import annotations
 
@@ -16,16 +16,20 @@ from botocore.config import Config
 from segdata_spec import DATASET_BUCKET
 
 from . import promote as promote_module
-from .datasets import (
+from . import taxonomy
+from .common.cli_flags import _pin_flags
+from .datasets import benthos_yuval as benthos_yuval_build
+from .datasets import catlin_seaview as catlin_seaview_build
+from .datasets import coralscapes_v2, mermaid, ucsd_mosaics
+from .datasets import moorea_labeled_corals as moorea_labeled_corals_build
+from .datasets import pacific_labeled_corals as pacific_labeled_corals_build
+from .datasets.coralnet import commands as coralnet_commands
+from .ingest import (
     benthos_yuval,
     catlin_seaview,
-    coralscapes_v2,
-    mermaid,
     moorea_labeled_corals,
     pacific_labeled_corals,
-    ucsd_mosaics,
 )
-from .datasets.coralnet import commands as coralnet_commands
 from .splits import builder as split_builder
 from .splits import leakage as split_leakage
 from .splits.builder import SplitParams
@@ -82,13 +86,6 @@ def _uniform_parser() -> argparse.ArgumentParser:
     parent.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parent.add_argument("-v", "--verbose", action="store_true")
     return parent
-
-
-def _pin_flags(parser: argparse.ArgumentParser, prefix: str, what: str) -> None:
-    parser.add_argument(f"--{prefix}version", required=True, help=f"Version of {what}")
-    parser.add_argument(
-        f"--{prefix}manifest-sha256", required=True, help=f"Manifest sha256 of {what}"
-    )
 
 
 def _split_cache_flags(parser: argparse.ArgumentParser) -> None:
@@ -150,6 +147,44 @@ def _add_split_subcommands(top: Any) -> None:
     leakage.set_defaults(func=lambda args: split_leakage.run(args, make_s3_client()))
 
 
+# Each external builder module exports ``add_arguments``, ``run(args, client)`` and ``DATASET``.
+_EXTERNAL_BUILDS: tuple[tuple[ModuleType, str], ...] = (
+    (catlin_seaview_build, "Publish the legacy Catlin Seaview prefix as a dataset version"),
+    (
+        moorea_labeled_corals_build,
+        "Publish the legacy Moorea Labeled Corals prefix as a dataset version",
+    ),
+    (
+        pacific_labeled_corals_build,
+        "Publish the legacy Pacific Labeled Corals prefix as a dataset version",
+    ),
+    (
+        benthos_yuval_build,
+        "Publish the legacy Benthos Yuval tiles and masks as a dense dataset version",
+    ),
+)
+
+
+def _add_external_build(build_sub: Any, module: ModuleType, help_text: str) -> None:
+    parser = build_sub.add_parser(module.DATASET, help=help_text, parents=[_uniform_parser()])
+    module.add_arguments(parser, workdir=default_workdir(module.DATASET))
+    parser.set_defaults(func=lambda args: module.run(args, make_s3_client()))
+
+
+def _add_external_builds(build_sub: Any) -> None:
+    for module, help_text in _EXTERNAL_BUILDS:
+        _add_external_build(build_sub, module, help_text)
+
+
+def _add_taxonomy_subcommand(top: Any) -> None:
+    parser = top.add_parser("taxonomy", help="Fetch and publish the MERMAID benthic taxonomy")
+    taxonomy.add_arguments(parser)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.set_defaults(
+        func=lambda args: taxonomy.run_taxonomy(args, source_client=make_s3_client())
+    )
+
+
 def _add_promote_subcommand(top: Any) -> None:
     promote = top.add_parser("promote", help="Upload a staged dataset version, write-once")
     promote.add_argument("--stage-dir", type=Path, required=True, help="Local stage directory")
@@ -175,15 +210,18 @@ def build_parser(
     modules: Sequence[ModuleType] = DATASET_MODULES,
     uniform_modules: Sequence[ModuleType] = UNIFORM_MODULES,
 ) -> argparse.ArgumentParser:
-    """Build the top-level parser: ``build coralnet <stage>``, one ``build`` entry per dataset, ``split`` and ``promote``."""
+    """Build the top-level parser: ``build``, one ``ingest`` entry per dataset, ``taxonomy``, ``split`` and ``promote``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
     top = parser.add_subparsers(dest="action", required=True)
     build = top.add_parser("build", help="Build and publish a dataset")
     build_sub = build.add_subparsers(dest="dataset", required=True)
     coralnet_commands.add_subcommands(build_sub)
+    _add_external_builds(build_sub)
+    ingest = top.add_parser("ingest", help="Validate and publish an external dataset")
+    ingest_sub = ingest.add_subparsers(dest="dataset", required=True)
     for module in modules:
         name = module.__name__.rsplit(".", 1)[-1]
-        dataset_parser = build_sub.add_parser(name, parents=[_shared_parser(name)])
+        dataset_parser = ingest_sub.add_parser(name, parents=[_shared_parser(name)])
         module.add_arguments(dataset_parser, workdir=default_workdir(name))
         dataset_parser.set_defaults(run=module.run)
     for module in uniform_modules:
@@ -192,6 +230,7 @@ def build_parser(
         module.add_arguments(uniform_parser, workdir=default_workdir(name))
         uniform_parser.set_defaults(run=module.run)
     _add_split_subcommands(top)
+    _add_taxonomy_subcommand(top)
     _add_promote_subcommand(top)
     return parser
 

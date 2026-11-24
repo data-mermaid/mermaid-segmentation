@@ -15,7 +15,6 @@ import logging
 import re
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -25,24 +24,22 @@ import pyarrow.parquet as pq
 from huggingface_hub import HfApi, hf_hub_download
 from PIL import Image
 
+from segdata_etl.common.copy_plan import StagedFile, stage_bytes, write_uploads
 from segdata_etl.common.s3_objects import (
-    ObjectConflict,
     crc64nvme_b64,
     image_size,
     md5_hex,
     sniff_media_type,
 )
 from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
-from segdata_etl.label_maps.curated import load_curated
+from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import cache_path, dataset_prefix
 from segdata_spec.manifest import ImageStore, LabelMapping, SourceInfo
 from segdata_spec.publish import probe_git, publish_dataset
 from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA
 
 logger = logging.getLogger(__name__)
 
-UPLOADS_NAME = "uploads.jsonl"
 BATCH_SIZE = 16
 MASK_SUFFIX = "_label.png"
 
@@ -89,16 +86,6 @@ class DenseSource:
     def image_prefix(self) -> str:
         """Key prefix of the dataset's objects in the image store."""
         return f"images/{self.dataset}/"
-
-
-@dataclass(frozen=True)
-class StagedFile:
-    """One staged object and the upload that will put it in the dataset bucket."""
-
-    key: str
-    size: int
-    crc64nvme: str
-    content_type: str
 
 
 def add_revision_argument(parser: argparse.ArgumentParser, source: DenseSource) -> None:
@@ -217,21 +204,6 @@ def image_row(
     }
 
 
-def stage_bytes(stage_dir: Path, source: DenseSource, key: str, data: bytes) -> None:
-    """Write ``data`` under the image prefix; an existing file must hold the same bytes.
-
-    Raises:
-        ObjectConflict: The staged file exists with other bytes.
-    """
-    path = cache_path(stage_dir, DATASET_BUCKET, source.image_prefix + key)
-    if path.exists():
-        if path.read_bytes() != data:
-            raise ObjectConflict(f"{path} already holds different bytes")
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-
-
 def _batches(path: str, columns: Sequence[str]) -> Iterator[list[dict[str, Any]]]:
     with pq.ParquetFile(path) as parquet:
         for batch in parquet.iter_batches(batch_size=BATCH_SIZE, columns=list(columns)):
@@ -297,26 +269,6 @@ def label_counts_table(counts: Sequence[tuple[str, int, int]]) -> pa.Table:
     )
 
 
-def upload_entries(files: Sequence[StagedFile]) -> list[dict[str, Any]]:
-    """Describe the upload of each staged file, in destination-key order."""
-    return [
-        {
-            "local_path": f"{DATASET_BUCKET}/{f.key}",
-            "dst_bucket": DATASET_BUCKET,
-            "dst_key": f.key,
-            "size": f.size,
-            "crc64nvme": f.crc64nvme,
-            "content_type": f.content_type,
-        }
-        for f in sorted(files, key=lambda f: f.key)
-    ]
-
-
-def _curated_bytes(dataset: str) -> bytes:
-    directory = CURATED_ROOT or resources.files("segdata_etl.label_maps") / "curated"
-    return (directory / f"{dataset}.csv").read_bytes()
-
-
 def _command_line(source: DenseSource, args: argparse.Namespace) -> str:
     return f"segdata build {source.dataset} --stage-dir {args.stage_dir} --revision {args.revision}"
 
@@ -357,8 +309,8 @@ def _stage_shard(
                 out.mask_invalid += 1
                 continue
             record = image_row(image_id, info, image, mask, header)
-            stage_bytes(stage_dir, source, record["key"], image)
-            stage_bytes(stage_dir, source, record["mask_key"], mask)
+            stage_bytes(stage_dir, source.image_prefix + record["key"], image)
+            stage_bytes(stage_dir, source.image_prefix + record["mask_key"], mask)
             out.rows.append(record)
             out.counts.extend((image_id, label, n) for label, n in sorted(label_counts.items()))
             prefix = source.image_prefix
@@ -423,7 +375,7 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         ),
         label_mapping=LabelMapping(
             source="curated",
-            sha256=hashlib.sha256(_curated_bytes(source.dataset)).hexdigest(),
+            sha256=curated_source(source.dataset, root=CURATED_ROOT).sha256,
             n_labels=len(vocab),
             n_mapped=n_mapped,
         ),
@@ -431,12 +383,7 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         repo_dir=REPO_ROOT,
         git=git,
     )
-    path = cache_path(
-        args.stage_dir, DATASET_BUCKET, dataset_prefix(source.dataset, version) + UPLOADS_NAME
-    )
-    path.write_text(
-        "".join(json.dumps(e, sort_keys=True) + "\n" for e in upload_entries(out.files))
-    )
+    write_uploads(args.stage_dir, source.dataset, version, out.files)
     logger.info(
         "staged %s %s: %d images, %d files, dropped %s",
         source.dataset,

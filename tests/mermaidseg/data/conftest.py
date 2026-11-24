@@ -60,6 +60,7 @@ class ImageSpec:
     width: int = 8
     mask: NDArray[np.integer[Any]] | None = None
     pixels: NDArray[np.uint8] | None = None
+    source_name: str | None = None
 
 
 PointRow = tuple[str, int, int, int] | tuple[str, int, int, int, str]
@@ -93,7 +94,9 @@ def _write_files(cache_dir: Path, images: Sequence[ImageSpec]) -> dict[str, int]
     return sizes
 
 
-def _images_table(images: Sequence[ImageSpec], sizes: Mapping[str, int], dense: bool) -> pa.Table:
+def _images_table(
+    images: Sequence[ImageSpec], sizes: Mapping[str, int], etags: Mapping[str, str], dense: bool
+) -> pa.Table:
     n = len(images)
     nulls = pa.nulls(n, pa.string())
     return conform(
@@ -101,7 +104,7 @@ def _images_table(images: Sequence[ImageSpec], sizes: Mapping[str, int], dense: 
             {
                 "image_id": [s.image_id for s in images],
                 "key": [f"{s.image_id}.jpg" for s in images],
-                "etag": ["etag"] * n,
+                "etag": [etags[f"{s.image_id}.jpg"] for s in images],
                 "size": [sizes[f"{s.image_id}.jpg"] for s in images],
                 "crc64nvme": nulls,
                 "media_type": ["image/jpeg"] * n,
@@ -109,7 +112,7 @@ def _images_table(images: Sequence[ImageSpec], sizes: Mapping[str, int], dense: 
                 "height": [_size(s)[0] for s in images],
                 "group": [s.group for s in images],
                 "mask_key": [f"{s.image_id}.png" for s in images] if dense else nulls,
-                "mask_etag": ["etag"] * n if dense else nulls,
+                "mask_etag": [etags[f"{s.image_id}.png"] for s in images] if dense else nulls,
                 "mask_size": (
                     [sizes[f"{s.image_id}.png"] for s in images]
                     if dense
@@ -117,7 +120,7 @@ def _images_table(images: Sequence[ImageSpec], sizes: Mapping[str, int], dense: 
                 ),
                 "mask_crc64nvme": nulls,
                 "source_fingerprint": ["fp"] * n,
-                "source_name": nulls,
+                "source_name": pa.array([s.source_name for s in images], pa.string()),
                 "attrs": nulls,
             }
         ),
@@ -195,8 +198,10 @@ def write_version(
     """
     cache_dir = tmp_path / "cache"
     sizes = _write_files(cache_dir, images)
+    # Real MD5 ETags let ``sync`` verify the staged images and masks from the cache.
+    etags = {name: _md5(cache_dir / IMAGE_BUCKET / IMAGE_PREFIX / name) for name in sizes}
     tables = {
-        "images.parquet": _images_table(images, sizes, kind == "dense"),
+        "images.parquet": _images_table(images, sizes, etags, kind == "dense"),
         "labels.parquet": _labels_table(labels),
         "stats/label_counts.parquet": _counts_table(
             _derived_counts(images, points) if label_counts is None else label_counts

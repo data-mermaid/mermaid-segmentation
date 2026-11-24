@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
-from hashlib import sha256
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,8 @@ from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
 from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPES_V2_ID2NAME
 from mermaidseg.datasets.factory import build_datasets
 from mermaidseg.io import ConfigDict, preprocess_data_config
+from segdata_spec._s3 import cache_path, dataset_prefix
+from segdata_spec.errors import ChecksumMismatch
 from segdata_spec.manifest import Pin
 from segdata_spec.read import DatasetVersion, open_version
 from segdata_spec.sync import sync as sync_versions
@@ -34,6 +36,8 @@ _MAX_LISTED = 10
 Point = tuple[str, int, int, str | None]
 CountDiff = dict[str | None, tuple[int, int]]
 LabelCountDiff = dict[int, tuple[int, int]]
+Tile = tuple[str, str]
+TileCounts = dict[Tile, Counter[int]]
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,10 @@ class ParityReport:
         new_only_points: ``(image_id, row, col, mapped)`` the new side has more often.
         native_diff: Native label -> ``(old count, new count)`` where the counts differ.
         mapped_diff: Mapped label -> ``(old count, new count)`` where the counts differ.
+        points_matched: Points present on both sides, counted as a multiset intersection.
+        groups_compared: New groups that hold at least one old image.
+        excluded_groups: New group without old images -> ``(images, points)``; informational,
+            not part of ``ok``.
     """
 
     old_only_images: list[str] = field(default_factory=list)
@@ -56,6 +64,9 @@ class ParityReport:
     new_only_points: Counter[Point] = field(default_factory=Counter)
     native_diff: CountDiff = field(default_factory=dict)
     mapped_diff: CountDiff = field(default_factory=dict)
+    points_matched: int = 0
+    groups_compared: int = 0
+    excluded_groups: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -152,12 +163,11 @@ def _count_diff(old: Counter[str | None], new: Counter[str | None]) -> CountDiff
     return {label: (old[label], new[label]) for label in labels if old[label] != new[label]}
 
 
-def _restrict_to_old_groups(
-    old: pd.DataFrame, new: pd.DataFrame, new_groups: Mapping[str, str]
-) -> pd.DataFrame:
-    """Keep the new points of the groups that hold at least one old image."""
-    groups = {new_groups[i] for i in set(old["image_id"]) if i in new_groups}
-    return new[new["image_id"].map(new_groups).isin(groups)]
+def _excluded_groups(excluded: pd.DataFrame, groups: pd.Series) -> dict[str, tuple[int, int]]:
+    """Return group -> ``(images, points)`` of the new points outside the compared groups."""
+    by_group = excluded["image_id"].groupby(groups[excluded.index])
+    images, points = by_group.nunique(), by_group.size()
+    return {str(g): (int(images[g]), int(points[g])) for g in images.index}
 
 
 def compare(old: pd.DataFrame, new: pd.DataFrame, new_groups: Mapping[str, str]) -> ParityReport:
@@ -169,9 +179,14 @@ def compare(old: pd.DataFrame, new: pd.DataFrame, new_groups: Mapping[str, str])
         new_groups: ``image_id -> group`` of the new version's images.
 
     Returns:
-        The report; ``ok`` when the points agree as multisets.
+        The report; ``ok`` when the points agree as multisets. New groups without old images are
+        listed in ``excluded_groups`` and left out of the comparison.
     """
-    new = _restrict_to_old_groups(old, new, new_groups)
+    compared = {new_groups[i] for i in set(old["image_id"]) if i in new_groups}
+    groups = new["image_id"].map(new_groups)
+    kept = groups.isin(compared)
+    excluded = _excluded_groups(new[~kept], groups)
+    new = new[kept]
     old_images, new_images = set(old["image_id"]), set(new["image_id"])
     old_counter, new_counter = _point_counter(old), _point_counter(new)
     return ParityReport(
@@ -183,6 +198,9 @@ def compare(old: pd.DataFrame, new: pd.DataFrame, new_groups: Mapping[str, str])
             _label_counts(old, "native_name"), _label_counts(new, "native_name")
         ),
         mapped_diff=_count_diff(_label_counts(old, "mapped"), _label_counts(new, "mapped")),
+        points_matched=sum((old_counter & new_counter).values()),
+        groups_compared=len(compared),
+        excluded_groups=excluded,
     )
 
 
@@ -194,10 +212,33 @@ def _format_list(title: str, items: Collection[Any]) -> list[str]:
     return [f"{title}: {len(items)}", f"  {shown}{more}"]
 
 
-def _format_diff(title: str, diff: Mapping[Any, tuple[int, int]]) -> list[str]:
+def _format_diff(
+    title: str, diff: Mapping[Any, tuple[Any, Any]], limit: int | None = None
+) -> list[str]:
     if not diff:
         return [f"{title}: none"]
-    return [f"{title}:", *(f"  {label}: old {o}, new {n}" for label, (o, n) in diff.items())]
+    lines = [f"{title}:", *(f"  {k}: old {o}, new {n}" for k, (o, n) in list(diff.items())[:limit])]
+    if limit is not None and len(diff) > limit:
+        lines.append(f"  (+{len(diff) - limit} more)")
+    return lines
+
+
+def _format_excluded(
+    title: str, groups: Mapping[str, tuple[int, int]], units: tuple[str, str]
+) -> list[str]:
+    if not groups:
+        return [f"{title}: none"]
+    first, second = units
+    lines = [f"{title}: {len(groups)}"]
+    for group, (a, b) in list(groups.items())[:_MAX_LISTED]:
+        lines.append(f"  {group}: {a} {first}, {b} {second}")
+    if len(groups) > _MAX_LISTED:
+        lines.append(f"  (+{len(groups) - _MAX_LISTED} more)")
+    return lines
+
+
+def _verdict(ok: bool) -> str:
+    return "PARITY OK" if ok else "PARITY FAILED"
 
 
 def format_report(report: ParityReport) -> str:
@@ -209,7 +250,10 @@ def format_report(report: ParityReport) -> str:
         *_format_list("points only in new", sorted(report.new_only_points.elements(), key=str)),
         *_format_diff("native label counts", report.native_diff),
         *_format_diff("mapped label counts", report.mapped_diff),
-        "PARITY OK" if report.ok else "PARITY FAILED",
+        f"points matched: {report.points_matched}",
+        f"groups compared: {report.groups_compared}",
+        *_format_excluded("new groups excluded", report.excluded_groups, ("images", "points")),
+        _verdict(report.ok),
     ]
     return "\n".join(lines)
 
@@ -230,6 +274,32 @@ def version_kind(cache_dir: Path, pin: Pin) -> str:
     return open_version(cache_dir, DATASET_BUCKET, pin).manifest.kind
 
 
+def _verify_cached_tables(version: DatasetVersion, pin: Pin) -> None:
+    """Check every cached table of ``version`` against the sha256 its manifest records.
+
+    Raises:
+        ChecksumMismatch: A cached table differs from its manifest entry, as ``sync`` raises.
+    """
+    prefix = dataset_prefix(pin.name, pin.version)
+    for name, entry in version.manifest.files.items():
+        path = cache_path(version.cache_dir, DATASET_BUCKET, prefix + name)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != entry.sha256:
+            raise ChecksumMismatch(f"cached file {path} does not match its expected sha256")
+
+
+def _open_cached(cache_dir: Path, pin: Pin) -> DatasetVersion:
+    """Open a staged version without S3, verifying its manifest and every table it lists."""
+    version = open_version(cache_dir, DATASET_BUCKET, pin)
+    _verify_cached_tables(version, pin)
+    return version
+
+
+def _require_old(items: Collection[Any], what: str) -> None:
+    """Raise ``ValueError`` when the old side yields nothing, which would compare as parity."""
+    if len(items) == 0:
+        raise ValueError(f"the old split has no {what}; there is nothing to compare")
+
+
 def run_parity(
     data_cfg: Mapping[str, Any],
     *,
@@ -244,7 +314,8 @@ def run_parity(
 ) -> ParityReport:
     """Build the old dataset, open the pinned version's tables, and compare their points.
 
-    No image is downloaded: only the parquet tables are synced.
+    No image is downloaded: only the parquet tables are synced. The manifest is verified against
+    ``manifest_sha256`` and every table against the manifest's sha256, with or without ``sync``.
 
     Args:
         data_cfg: The ``data`` section of the old data config.
@@ -259,13 +330,21 @@ def run_parity(
 
     Returns:
         The parity report over all groups of the new version that hold old images.
+
+    Raises:
+        ValueError: The old split has no points, or the version has no points table.
+        PinMismatch: The manifest differs from ``manifest_sha256``.
+        ChecksumMismatch: A table differs from its manifest entry.
     """
     built = _build_old(data_cfg, dataset, split)
     old = old_points(built[(dataset, split)])
+    _require_old(old, "points")
     pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
     if sync:
         sync_tables(client, pin, cache_dir)
-    version_data = open_version(cache_dir, DATASET_BUCKET, pin)
+        version_data = open_version(cache_dir, DATASET_BUCKET, pin)
+    else:
+        version_data = _open_cached(cache_dir, pin)
     if version_data.points is None:
         raise ValueError(f"{dataset} {version} has no points table")
     images = version_data.images.to_pandas()
@@ -295,15 +374,38 @@ class VocabMismatch:
 class DenseParityReport:
     """The differences between an old dense dataset and a dense version; empty means parity.
 
+    Two old-side adapters fill it. The Hugging Face adapter (Coralscapes, UCSD mosaics) fills
+    ``matched`` through ``hf_revision_at_run``; the Benthos adapter fills ``old_only_tiles``
+    through ``excluded_sites``. The fields the other adapter fills stay empty.
+
     Attributes:
-        matched: Images present on both sides, matched by the sha256 of their RGB pixels.
-        old_only: Old row ids with no new image.
-        new_only: New image ids with no old row.
-        mask_diffs: New image id -> differing native mask pixels, for matched images whose masks
-            differ; a shape mismatch counts every pixel of the larger mask.
-        label_pixel_diff: Native label id -> ``(old pixels, new pixels)`` where the totals differ.
-        vocab_mismatches: Label ids whose name or MERMAID mapping differ.
-        hf_revision_at_run: Head revision of the unpinned Hugging Face source, if it was reachable.
+        matched: HF: images present on both sides, matched by the sha256 of their RGB pixels.
+        old_only: HF: old row ids with no new image.
+        new_only: HF: new image ids with no old row.
+        mask_diffs: HF: new image id -> differing native mask pixels, for matched images whose
+            masks differ; a shape mismatch counts every pixel of the larger mask.
+        label_pixel_diff: HF: native label id -> ``(old pixels, new pixels)`` where the totals
+            differ.
+        vocab_mismatches: HF: label ids whose name or MERMAID mapping differ.
+        hf_revision_at_run: HF: head revision of the unpinned Hugging Face source, if reachable.
+        old_only_tiles: Benthos: ``(site, tile)`` with an old mask and no new tile.
+        new_only_tiles: Benthos: ``(site, tile)`` of the compared sites with a new tile and no
+            old mask.
+        tile_diff: Benthos: ``(site, tile)`` -> label id -> ``(old pixels, new pixels)`` where
+            they differ.
+        mapped_diff: Benthos: mapped label -> ``(old pixels, new pixels)`` over the matched tiles.
+        label_map_diff: Benthos: label id -> ``(old mapped name, new mapped name)`` where they
+            differ, for every id with pixels on either side.
+        native_name_diff: Benthos: label id -> ``(old name, new name)``, lowercased, where the
+            ``classes.json`` name differs from the ``labels`` name, for every id with pixels on
+            either side.
+        mask_mismatches: Benthos: matched tiles whose stored new mask differs from the old mask.
+        label_count_mismatches: Benthos: ``(site, tile)`` -> label id -> ``(label_counts pixels,
+            decoded mask pixels)`` where they differ, over every new tile.
+        tiles_matched: Benthos: tiles present on both sides.
+        sites_compared: Benthos: new sites that hold at least one old tile.
+        excluded_sites: Benthos: new site without old tiles -> ``(tiles, labeled pixels)``;
+            informational, not part of ``ok``.
     """
 
     matched: int = 0
@@ -313,6 +415,17 @@ class DenseParityReport:
     label_pixel_diff: LabelCountDiff = field(default_factory=dict)
     vocab_mismatches: list[VocabMismatch] = field(default_factory=list)
     hf_revision_at_run: str | None = None
+    old_only_tiles: list[Tile] = field(default_factory=list)
+    new_only_tiles: list[Tile] = field(default_factory=list)
+    tile_diff: dict[Tile, dict[int, tuple[int, int]]] = field(default_factory=dict)
+    mapped_diff: CountDiff = field(default_factory=dict)
+    label_map_diff: dict[int, tuple[str | None, str | None]] = field(default_factory=dict)
+    native_name_diff: dict[int, tuple[str | None, str | None]] = field(default_factory=dict)
+    mask_mismatches: list[Tile] = field(default_factory=list)
+    label_count_mismatches: dict[Tile, dict[int, tuple[int, int]]] = field(default_factory=dict)
+    tiles_matched: int = 0
+    sites_compared: int = 0
+    excluded_sites: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -323,11 +436,33 @@ class DenseParityReport:
             or self.mask_diffs
             or self.label_pixel_diff
             or self.vocab_mismatches
+            or self.old_only_tiles
+            or self.new_only_tiles
+            or self.tile_diff
+            or self.mapped_diff
+            or self.label_map_diff
+            or self.native_name_diff
+            or self.mask_mismatches
+            or self.label_count_mismatches
         )
 
 
 def _no_revision() -> str | None:
     return None
+
+
+def _native_mask(mask: Any) -> NDArray[Any]:
+    array = np.asarray(mask)
+    return array[..., 0] if array.ndim == 3 else array
+
+
+def _read_new_mask(version: DatasetVersion, row: Mapping[str, Any]) -> NDArray[Any]:
+    """Decode a synced mask as the dense loaders do: the first channel of a multi-channel PNG."""
+    with Image.open(version.mask_path(row)) as handle:
+        return _native_mask(handle)
+
+
+# --- dense: Hugging Face adapter (Coralscapes, UCSD mosaics) -------------------------------
 
 
 def _rgb_array(image: Any) -> NDArray[Any]:
@@ -336,13 +471,8 @@ def _rgb_array(image: Any) -> NDArray[Any]:
     return np.asarray(image)
 
 
-def _native_mask(mask: Any) -> NDArray[Any]:
-    array = np.asarray(mask)
-    return array[..., 0] if array.ndim == 3 else array
-
-
 def _pixel_sha(array: NDArray[Any]) -> str:
-    digest = sha256(repr(array.shape).encode())
+    digest = hashlib.sha256(repr(array.shape).encode())
     digest.update(np.ascontiguousarray(array).tobytes())
     return digest.hexdigest()
 
@@ -462,11 +592,6 @@ def _index_new_images(
     return by_sha, label_pixels
 
 
-def _read_new_mask(version: DatasetVersion, row: Mapping[str, Any]) -> NDArray[Any]:
-    with Image.open(version.mask_path(row)) as handle:
-        return _native_mask(handle)
-
-
 def compare_dense_images(
     old_rows: Iterable[IdImageMask],
     new_by_sha: Mapping[str, Sequence[str]],
@@ -527,48 +652,13 @@ def _subset_vocabulary(
     return {i: old_names[i] for i in ids}, labels[labels["label_id"].isin(ids)]
 
 
-def run_dense_parity(
-    data_cfg: Mapping[str, Any],
-    *,
-    dataset: str,
-    split: str,
-    version: str,
-    manifest_sha256: str,
-    cache_dir: Path,
-    client: Any,
-    sync: bool = True,
-    hf_revision_probe: Callable[[], str | None] = _no_revision,
+def _hf_dense_report(
+    old: Any,
+    version_data: DatasetVersion,
+    groups: set[str] | None,
+    hf_revision_probe: Callable[[], str | None],
 ) -> DenseParityReport:
-    """Compare an old dense dataset with a dense version, image by image.
-
-    Images are matched by the sha256 of the decoded RGB pixels; the native masks, the per-label
-    pixel totals and the vocabulary are then compared.
-
-    Args:
-        data_cfg: The ``data`` section of the old data config.
-        dataset: Dataset name.
-        split: Split to build on the old side; the new side takes the same groups.
-        version: Version to compare against.
-        manifest_sha256: The sha256 of that version's manifest.
-        cache_dir: The local cache root.
-        client: An S3 client; unused with ``sync=False``.
-        sync: When False, S3 is not reached and the version is read from ``cache_dir`` as staged.
-        hf_revision_probe: Returns the head revision of the old loader's HF source, or ``None``.
-
-    Raises:
-        ValueError: The version is not dense.
-    """
-    built = _build_old(data_cfg, dataset, split)
-    old = built[(dataset, split)]
-    groups = old_groups(old)
-    pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
-    if sync:
-        sync_versions(
-            client, {dataset: pin}, cache_dir, bucket=DATASET_BUCKET, selection={dataset: groups}
-        )
-    version_data = open_version(cache_dir, DATASET_BUCKET, pin)
-    if version_data.manifest.kind != "dense":
-        raise ValueError(f"{dataset} {version} is not a dense version")
+    """Match HF rows to new images by pixel hash, then compare masks, pixels and vocabulary."""
     images = version_data.images.to_pandas()
     if groups is not None:
         images = images[images["group"].isin(groups)]
@@ -593,15 +683,304 @@ def run_dense_parity(
     )
 
 
-def format_dense_report(report: DenseParityReport) -> str:
-    """Render a dense report as text, ending with ``PARITY OK`` or ``PARITY FAILED``."""
+# --- dense: Benthos adapter ----------------------------------------------------------------
+
+
+def _labeled_pixels(mask: NDArray[Any]) -> Counter[int]:
+    """Count the pixels per label id of a mask, excluding the unlabeled class 0."""
+    pixels = np.bincount(np.asarray(mask).ravel())
+    return Counter({int(i): int(n) for i, n in enumerate(pixels) if i and n})
+
+
+def old_dense_counts(ds: Any) -> tuple[TileCounts, dict[int, str | None]]:
+    """Count the labeled pixels per tile of an old dense dataset, and map its label ids.
+
+    Args:
+        ds: An old ``BenthosYuvalCoralsDataset``; registering it sets its global offset.
+
+    Returns:
+        ``(site, tile) -> label id -> pixels`` read from the raw masks, with the unlabeled class
+        0 excluded, and ``classes.json`` label id -> mapped target name (``None`` when unmapped).
+    """
+    names = _mapped_names(SourceLabelRegistry([ds]), ds)
+    mapped = {int(i): names.get(name) for name, i in ds._classes_global.items()}
+    counts: TileCounts = {}
+    for site, tile in zip(ds.df_images["site"], ds.df_images["image_id"], strict=True):
+        counts[(str(site), str(tile))] = _labeled_pixels(ds.read_label(image_id=tile, site=site))
+    return counts, mapped
+
+
+def _tile_rows(version: DatasetVersion) -> dict[Tile, dict[str, Any]]:
+    """Key each ``images`` row of a dense version by ``(group, source_name stem)``.
+
+    Raises:
+        ValueError: A tile has no ``source_name``, or two tiles share a key.
+    """
+    rows = version.images.to_pylist()
+    if any(row["source_name"] is None for row in rows):
+        raise ValueError("a dense tile has no source_name; it cannot be matched to the old tiles")
+    keys = [(str(row["group"]), Path(row["source_name"]).stem) for row in rows]
+    colliding = sorted(key for key, n in Counter(keys).items() if n > 1)
+    if colliding:
+        raise ValueError(f"dense tiles share a (group, source_name stem) key: {colliding}")
+    return dict(zip(keys, rows, strict=True))
+
+
+def new_dense_counts(version: DatasetVersion) -> tuple[TileCounts, dict[int, str | None]]:
+    """Return the labeled pixels per tile of a dense version, and its label ids' mapped names.
+
+    Tiles are keyed by ``(group, source_name stem)``; the counts come from ``label_counts`` and
+    exclude the unlabeled 0.
+
+    Raises:
+        ValueError: A tile has no ``source_name``, or two tiles share a key.
+    """
+    tiles = {row["image_id"]: tile for tile, row in _tile_rows(version).items()}
+    counts: TileCounts = {tile: Counter() for tile in tiles.values()}
+    for row in version.label_counts.to_pandas().itertuples():
+        if row.label_id:
+            counts[tiles[row.image_id]][int(row.label_id)] += int(row.n)
+    labels = version.labels.to_pandas()
+    attribute = labels["mermaid_benthic_attribute"]
+    mapped = {
+        int(i): (None if pd.isna(a) else str(a).lower())
+        for i, a in zip(labels["label_id"], attribute, strict=True)
+    }
+    return counts, mapped
+
+
+def _decoded_new_counts(version: DatasetVersion) -> TileCounts:
+    """Count the labeled pixels of every synced mask of a dense version, keyed like its tiles."""
+    return {
+        tile: _labeled_pixels(_read_new_mask(version, row))
+        for tile, row in _tile_rows(version).items()
+    }
+
+
+def _mask_mismatches(old_ds: Any, version: DatasetVersion, tiles: Collection[Tile]) -> list[Tile]:
+    """Return the ``tiles`` whose synced new mask is not pixel-equal to the old raw mask."""
+    rows = _tile_rows(version)
+    return [
+        (site, tile)
+        for site, tile in sorted(tiles)
+        if not np.array_equal(
+            _read_new_mask(version, rows[(site, tile)]),
+            np.asarray(old_ds.read_label(image_id=tile, site=site)),
+        )
+    ]
+
+
+def _tile_count_diff(
+    left: TileCounts, right: TileCounts, tiles: Collection[Tile]
+) -> dict[Tile, dict[int, tuple[int, int]]]:
+    """Return tile -> label id -> ``(left pixels, right pixels)`` where they differ."""
+    result = {}
+    for tile in sorted(tiles):
+        a, b = left.get(tile, Counter()), right.get(tile, Counter())
+        diff = {label: (a[label], b[label]) for label in sorted(a.keys() | b.keys())}
+        diff = {label: pair for label, pair in diff.items() if pair[0] != pair[1]}
+        if diff:
+            result[tile] = diff
+    return result
+
+
+def _mapped_totals(
+    counts: TileCounts, tiles: Collection[Tile], mapped: Mapping[int, str | None]
+) -> Counter[str | None]:
+    totals: Counter[str | None] = Counter()
+    for tile in tiles:
+        for label, n in counts[tile].items():
+            totals[mapped.get(label)] += n
+    return totals
+
+
+def _label_map_diff(
+    counts: Collection[Counter[int]],
+    old_mapped: Mapping[int, str | None],
+    new_mapped: Mapping[int, str | None],
+) -> dict[int, tuple[str | None, str | None]]:
+    """Return label id -> ``(old name, new name)`` where they differ, over the ids with pixels."""
+    ids = sorted({label for c in counts for label, n in c.items() if n})
+    pairs = {i: (old_mapped.get(i), new_mapped.get(i)) for i in ids}
+    return {i: pair for i, pair in pairs.items() if pair[0] != pair[1]}
+
+
+def _old_native_names(ds: Any) -> dict[int, str]:
+    """Return the ``classes.json`` label id -> lowercased name of an old dense dataset."""
+    return {int(i): str(name).lower() for name, i in ds._classes_global.items()}
+
+
+def _new_native_names(version: DatasetVersion) -> dict[int, str]:
+    """Return the ``labels`` label id -> lowercased name of a dense version."""
+    labels = version.labels.to_pandas()
+    return {int(i): str(n).lower() for i, n in zip(labels["label_id"], labels["name"], strict=True)}
+
+
+def _excluded_sites(counts: TileCounts) -> dict[str, tuple[int, int]]:
+    """Return site -> ``(tiles, labeled pixels)`` of ``counts``."""
+    tiles: Counter[str] = Counter()
+    pixels: Counter[str] = Counter()
+    for (site, _), c in counts.items():
+        tiles[site] += 1
+        pixels[site] += sum(c.values())
+    return {site: (tiles[site], pixels[site]) for site in sorted(tiles)}
+
+
+def compare_dense(
+    old: TileCounts,
+    new: TileCounts,
+    old_mapped: Mapping[int, str | None],
+    new_mapped: Mapping[int, str | None],
+) -> DenseParityReport:
+    """Compare per-tile pixel counts over the sites of the new version that hold old tiles.
+
+    Args:
+        old: Counts from :func:`old_dense_counts`.
+        new: Counts from :func:`new_dense_counts`.
+        old_mapped: Label id -> mapped name on the old side.
+        new_mapped: Label id -> mapped name on the new side.
+
+    Returns:
+        The report; ``ok`` when every tile matches, the mapped pixel totals agree and every label
+        id with pixels maps to the same name on both sides. New sites without old tiles are
+        listed in ``excluded_sites`` and left out of the comparison.
+    """
+    sites = {site for site, _ in old}
+    excluded = {tile: c for tile, c in new.items() if tile[0] not in sites}
+    new = {tile: c for tile, c in new.items() if tile[0] in sites}
+    both = sorted(old.keys() & new.keys())
+    return DenseParityReport(
+        old_only_tiles=sorted(old.keys() - new.keys()),
+        new_only_tiles=sorted(new.keys() - old.keys()),
+        tile_diff=_tile_count_diff(old, new, both),
+        mapped_diff=_count_diff(
+            _mapped_totals(old, both, old_mapped), _mapped_totals(new, both, new_mapped)
+        ),
+        label_map_diff=_label_map_diff([*old.values(), *new.values()], old_mapped, new_mapped),
+        tiles_matched=len(both),
+        sites_compared=len({site for site, _ in new}),
+        excluded_sites=_excluded_sites(excluded),
+    )
+
+
+def _benthos_dense_report(
+    old_ds: Any,
+    old_counts: TileCounts,
+    old_mapped: Mapping[int, str | None],
+    version_data: DatasetVersion,
+) -> DenseParityReport:
+    """Compare the counts, the label names, then the synced masks and ``label_counts``."""
+    new_counts, new_mapped = new_dense_counts(version_data)
+    report = compare_dense(old_counts, new_counts, old_mapped, new_mapped)
+    matched = old_counts.keys() & new_counts.keys()
+    decoded = _decoded_new_counts(version_data)
+    return replace(
+        report,
+        mask_mismatches=_mask_mismatches(old_ds, version_data, matched),
+        label_count_mismatches=_tile_count_diff(new_counts, decoded, new_counts.keys()),
+        native_name_diff=_label_map_diff(
+            [*old_counts.values(), *new_counts.values()],
+            _old_native_names(old_ds),
+            _new_native_names(version_data),
+        ),
+    )
+
+
+# --- dense: dispatch -----------------------------------------------------------------------
+
+
+def _is_benthos(ds: Any) -> bool:
+    """True for an old dataset with the Benthos loader interface (raw masks + ``classes.json``)."""
+    return hasattr(ds, "read_label") and hasattr(ds, "_classes_global")
+
+
+def run_dense_parity(
+    data_cfg: Mapping[str, Any],
+    *,
+    dataset: str,
+    split: str,
+    version: str,
+    manifest_sha256: str,
+    cache_dir: Path,
+    client: Any,
+    sync: bool = True,
+    hf_revision_probe: Callable[[], str | None] = _no_revision,
+) -> DenseParityReport:
+    """Compare an old dense dataset with a dense version, through the adapter of the old loader.
+
+    A Benthos-shaped old dataset (``read_label`` and ``_classes_global``) is compared tile by
+    tile: per-tile pixel counts, raw mask equality, ``label_counts`` against the decoded masks,
+    and label names and mappings; every group is synced. Any other is read as Hugging Face rows,
+    matched to the new images by the sha256 of the RGB pixels, and its masks, per-label pixel
+    totals and vocabulary are compared; only the groups it covers are synced.
+
+    Args:
+        data_cfg: The ``data`` section of the old data config.
+        dataset: Dataset name.
+        split: Split to build on the old side.
+        version: Version to compare against.
+        manifest_sha256: The sha256 of that version's manifest.
+        cache_dir: The local cache root.
+        client: An S3 client; unused with ``sync=False``.
+        sync: When False, S3 is not reached: the manifest and tables are verified in
+            ``cache_dir`` and the images and masks are read from it as staged.
+        hf_revision_probe: Returns the head revision of the old loader's HF source, or ``None``;
+            called by the Hugging Face adapter only.
+
+    Raises:
+        ValueError: The old split has no tiles or images, or the version is not dense.
+        PinMismatch: The manifest differs from ``manifest_sha256``.
+        ChecksumMismatch: A table, or with ``sync`` an image or mask, differs from its record.
+        FileNotFoundError: With ``sync=False``, an image or mask the check reads is not staged.
+    """
+    built = _build_old(data_cfg, dataset, split)
+    old = built[(dataset, split)]
+    benthos = _is_benthos(old)
+    if benthos:
+        old_counts, old_mapped = old_dense_counts(old)
+        _require_old(old_counts, "tiles")
+        groups = None
+    else:
+        _require_old(old.dataset, "images")
+        groups = old_groups(old)
+    pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
+    if sync:
+        sync_versions(
+            client, {dataset: pin}, cache_dir, bucket=DATASET_BUCKET, selection={dataset: groups}
+        )
+        version_data = open_version(cache_dir, DATASET_BUCKET, pin)
+    else:
+        version_data = _open_cached(cache_dir, pin)
+    if version_data.manifest.kind != "dense":
+        raise ValueError(f"{dataset} {version} is not a dense version")
+    if benthos:
+        return _benthos_dense_report(old, old_counts, old_mapped, version_data)
+    return _hf_dense_report(old, version_data, groups, hf_revision_probe)
+
+
+def _format_tile_diff(
+    title: str, diff: Mapping[Tile, Mapping[int, tuple[int, int]]], sides: tuple[str, str]
+) -> list[str]:
+    if not diff:
+        return [f"{title}: none"]
+    left, right = sides
+    lines = [f"{title}: {len(diff)} tiles"]
+    for (site, tile), labels in list(diff.items())[:_MAX_LISTED]:
+        counts = ", ".join(f"label {k} {left} {a}, {right} {b}" for k, (a, b) in labels.items())
+        lines.append(f"  {site}/{tile}: {counts}")
+    if len(diff) > _MAX_LISTED:
+        lines.append(f"  (+{len(diff) - _MAX_LISTED} more)")
+    return lines
+
+
+def _format_hf_fields(report: DenseParityReport) -> list[str]:
     mismatches = [
         f"id {m.label_id}: name old {m.old_name!r}, new {m.new_name!r}; "
         f"mapped old {m.old_mapped!r}, new {m.new_mapped!r}"
         for m in report.vocab_mismatches
     ]
     mask_diffs = [f"{image}: {n} pixels" for image, n in report.mask_diffs.items()]
-    lines = [
+    return [
         f"matched images: {report.matched}",
         *_format_list("old-only images", report.old_only),
         *_format_list("new-only images", report.new_only),
@@ -609,6 +988,28 @@ def format_dense_report(report: DenseParityReport) -> str:
         *_format_diff("native label pixel counts", report.label_pixel_diff),
         *_format_list("vocabulary mismatches", mismatches),
         f"HF revision at run: {report.hf_revision_at_run or 'unknown'}",
-        "PARITY OK" if report.ok else "PARITY FAILED",
     ]
+
+
+def _format_benthos_fields(report: DenseParityReport) -> list[str]:
+    return [
+        *_format_list("old-only tiles", [f"{s}/{t}" for s, t in report.old_only_tiles]),
+        *_format_list("new-only tiles", [f"{s}/{t}" for s, t in report.new_only_tiles]),
+        *_format_tile_diff("tile label counts", report.tile_diff, ("old", "new")),
+        *_format_list("mask pixel mismatches", [f"{s}/{t}" for s, t in report.mask_mismatches]),
+        *_format_tile_diff(
+            "label_counts vs mask", report.label_count_mismatches, ("table", "mask")
+        ),
+        *_format_diff("mapped label pixels", report.mapped_diff),
+        *_format_diff("label id mapping", report.label_map_diff),
+        *_format_diff("label id native names", report.native_name_diff, _MAX_LISTED),
+        f"tiles matched: {report.tiles_matched}",
+        f"sites compared: {report.sites_compared}",
+        *_format_excluded("new sites excluded", report.excluded_sites, ("tiles", "pixels")),
+    ]
+
+
+def format_dense_report(report: DenseParityReport) -> str:
+    """Render a dense report as text, ending with ``PARITY OK`` or ``PARITY FAILED``."""
+    lines = [*_format_hf_fields(report), *_format_benthos_fields(report), _verdict(report.ok)]
     return "\n".join(lines)

@@ -41,7 +41,7 @@ def test_c1_dry_run_exits_zero_and_writes_nothing(
     monkeypatch.setattr(cli, "make_s3_client", lambda: fake_s3)
     tree = build_tree(tmp_path / "raw")
 
-    code = cli.main(["build", dataset, "--data-dir", str(tree), "--dry-run"])
+    code = cli.main(["ingest", dataset, "--data-dir", str(tree), "--dry-run"])
 
     assert code == 0
     assert fake_s3.objects == {}
@@ -55,9 +55,9 @@ def test_c2_second_run_without_overwrite_fails_and_keeps_parquet(tmp_path, fake_
         "external_validation_datasets/catlin_seaview/catlin_seaview_annotations.parquet",
     )
 
-    assert cli.main(["build", "catlin_seaview", "--data-dir", str(tree)]) == 0
+    assert cli.main(["ingest", "catlin_seaview", "--data-dir", str(tree)]) == 0
     first = fake_s3.objects[key]
 
     with pytest.raises(FileExistsError, match="--overwrite"):
-        cli.main(["build", "catlin_seaview", "--data-dir", str(tree)])
+        cli.main(["ingest", "catlin_seaview", "--data-dir", str(tree)])
     assert fake_s3.objects[key] == first

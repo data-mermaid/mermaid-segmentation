@@ -24,13 +24,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-from segdata_etl.common.s3_objects import (
-    SourceChanged,
-    crc64nvme_b64,
-    image_size,
-    md5_hex,
-    sniff_media_type,
+from segdata_etl.common.copy_plan import (
+    ImageOutcome,
+    ObjectFacts,
+    copy_plan,
+    write_copies,
 )
+from segdata_etl.common.copy_plan import probe_image as probe_source_image
 from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._s3 import cache_path, dataset_prefix, is_not_found, is_precondition_failed
@@ -47,13 +47,10 @@ DEFAULT_ANNOTATIONS_URI = f"s3://{SOURCE_BUCKET}/mermaid/mermaid_confirmed_annot
 IMAGE_PREFIX = "images/mermaid/"
 GROUP = "mermaid"
 ANNOTATOR = "default"
-COPIES_NAME = "copies.jsonl"
 
 # The repo root, which holds ``uv.lock`` and the git checkout that built the version.
 REPO_ROOT = Path(__file__).resolve().parents[5]
 
-_FIRST_READ = 64 * 1024
-_MAX_READ = 1024 * 1024
 _EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png"}
 
 
@@ -68,17 +65,6 @@ class AnnotationsFile:
     table: pd.DataFrame
     etag: str
     last_modified: str
-
-
-@dataclass(frozen=True)
-class ImageOutcome:
-    """What probing one source image decided: a row to keep, a row to carry, or a drop reason."""
-
-    image_id: str
-    row: dict[str, Any] | None = None
-    carried: bool = False
-    dropped: str | None = None
-    found_as_jpg: bool = False
 
 
 def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
@@ -130,81 +116,10 @@ def apply_cutoff(annotations: pd.DataFrame, cutoff: str) -> tuple[pd.DataFrame, 
     return annotations[keep], int((~keep).sum())
 
 
-def _read_range(client: Any, key: str, etag: str, last_byte: int) -> bytes:
-    response = client.get_object(
-        Bucket=SOURCE_BUCKET, Key=key, Range=f"bytes=0-{last_byte}", IfMatch=etag
-    )
-    data: bytes = response["Body"].read()
-    return data
-
-
-def read_image_header(client: Any, key: str, etag: str, size: int) -> tuple[str, int, int] | None:
-    """Return ``(media_type, width, height)`` from the object's leading bytes, or None if unreadable.
-
-    The first 64 KB usually holds the header; a JPEG whose SOF lies further in is read up to 1 MB.
-
-    Raises:
-        SourceChanged: The object no longer matches ``etag``.
-    """
-    if size == 0:
-        return None  # S3 answers a ranged GET on an empty object with 416
-    try:
-        head = _read_range(client, key, etag, _FIRST_READ - 1)
-        media_type = sniff_media_type(head)
-        if media_type is None:
-            return None
-        dims = image_size(head)
-        if dims is None and media_type == "image/jpeg" and size > _FIRST_READ:
-            dims = image_size(_read_range(client, key, etag, _MAX_READ - 1))
-    except ClientError as exc:
-        if is_precondition_failed(exc):
-            raise SourceChanged(f"s3://{SOURCE_BUCKET}/{key} changed while it was read") from exc
-        raise
-    return None if dims is None else (media_type, dims[0], dims[1])
-
-
-@dataclass(frozen=True)
-class _ObjectFacts:
-    """The destination object's ETag, size and CRC64NVME, and the source ETag it was planned from."""
-
-    etag: str
-    size: int
-    crc64nvme: str
-    source_etag: str
-
-
-def _needs_full_read(head: Mapping[str, Any]) -> bool:
-    """A multipart ETag or a missing CRC64NVME means the copy would not carry the source's values."""
-    return "-" in head["ETag"] or head.get("ChecksumCRC64NVME") is None
-
-
-def _read_full(client: Any, key: str, etag: str) -> bytes:
-    try:
-        data: bytes = client.get_object(Bucket=SOURCE_BUCKET, Key=key, IfMatch=etag)["Body"].read()
-    except ClientError as exc:
-        if is_precondition_failed(exc):
-            raise SourceChanged(f"s3://{SOURCE_BUCKET}/{key} changed while it was read") from exc
-        raise
-    return data
-
-
-def _read_whole_object(
-    client: Any, key: str, head: Mapping[str, Any]
-) -> tuple[tuple[str, int, int], _ObjectFacts] | None:
-    """Download the object and derive the header and the values a single-part copy will carry."""
-    data = _read_full(client, key, head["ETag"])
-    media_type = sniff_media_type(data)
-    dims = image_size(data)
-    if media_type is None or dims is None:
-        return None
-    facts = _ObjectFacts(md5_hex(data), len(data), crc64nvme_b64(data), head["ETag"].strip('"'))
-    return (media_type, dims[0], dims[1]), facts
-
-
 def _image_row(
     image_id: str,
     source_key: str,
-    facts: _ObjectFacts,
+    facts: ObjectFacts,
     header: tuple[str, int, int],
     region: tuple[Any, Any],
 ) -> dict[str, Any]:
@@ -232,6 +147,11 @@ def _image_row(
     }
 
 
+def _source_key(row: Mapping[str, Any]) -> str:
+    source_key: str = json.loads(row["attrs"])["source_key"]
+    return source_key
+
+
 def _head_source(client: Any, image_id: str) -> tuple[str, Mapping[str, Any]] | None:
     """HEAD ``mermaid/<id>.png``, then ``.jpg``; return the key found and its HEAD, or None."""
     for extension in (".png", ".jpg"):
@@ -254,33 +174,21 @@ def probe_image(
     region: tuple[Any, Any],
     parent_rows: Mapping[str, dict[str, Any]],
 ) -> ImageOutcome:
-    """Decide one image from its source HEAD and, unless a parent row matches, its bytes.
-
-    A multipart ETag or a missing CRC64NVME means the whole object is read, so the row records the
-    ETag and CRC64NVME a single-part copy will have; the source ETag stays the fingerprint.
-    """
+    """Decide one image from its source HEAD and, unless a parent row matches, its bytes."""
     found = _head_source(client, image_id)
     if found is None:
         return ImageOutcome(image_id, dropped="image_deleted_at_source")
     source_key, head = found
-    as_jpg = source_key.endswith(".jpg")
-    source_etag = head["ETag"].strip('"')
-    parent = parent_rows.get(image_id)
-    if parent is not None and parent["source_fingerprint"] == source_etag:
-        return ImageOutcome(image_id, row=parent, carried=True, found_as_jpg=as_jpg)
-    if _needs_full_read(head):
-        whole = _read_whole_object(client, source_key, head)
-        header, facts = whole if whole is not None else (None, None)
-    else:
-        header = read_image_header(client, source_key, head["ETag"], head["ContentLength"])
-        facts = _ObjectFacts(
-            source_etag, head["ContentLength"], head["ChecksumCRC64NVME"], source_etag
-        )
-    if header is None or facts is None:
-        logger.warning("dropping image %s: unreadable header in %s", image_id, source_key)
-        return ImageOutcome(image_id, dropped="image_unreadable_header")
-    row = _image_row(image_id, source_key, facts, header, region)
-    return ImageOutcome(image_id, row=row, found_as_jpg=as_jpg)
+    return probe_source_image(
+        client,
+        SOURCE_BUCKET,
+        image_id,
+        source_key,
+        head,
+        parent_rows,
+        lambda facts, header: _image_row(image_id, source_key, facts, header, region),
+        found_as_jpg=source_key.endswith(".jpg"),
+    )
 
 
 def first_regions(annotations: pd.DataFrame) -> dict[str, tuple[Any, Any]]:
@@ -403,30 +311,6 @@ def label_counts_table(labelled: pd.DataFrame) -> pa.Table:
         },
         schema=LABEL_COUNTS_SCHEMA,
     )
-
-
-def copy_plan(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Describe the server-side copy of each image row, in ``image_id`` order.
-
-    ``src_etag`` is the source object's ETag; ``etag``, ``size`` and ``crc64nvme`` are the
-    destination object's expected values.
-    """
-    plan = []
-    for row in sorted(rows, key=lambda r: r["image_id"]):
-        source_key = json.loads(row["attrs"])["source_key"]
-        plan.append(
-            {
-                "src_bucket": SOURCE_BUCKET,
-                "src_key": source_key,
-                "src_etag": row["source_fingerprint"],
-                "etag": row["etag"],
-                "dst_bucket": DATASET_BUCKET,
-                "dst_key": IMAGE_PREFIX + row["key"],
-                "size": row["size"],
-                "crc64nvme": row["crc64nvme"],
-            }
-        )
-    return plan
 
 
 def load_parent_rows(stage_dir: Path, version: str | None) -> dict[str, dict[str, Any]]:
@@ -566,8 +450,8 @@ def run(args: argparse.Namespace, client: Any) -> int:
         repo_dir=REPO_ROOT,
         git=git,
     )
-    plan = copy_plan(rows)
-    _write_copies(args.stage_dir, version, plan)
+    plan = copy_plan(rows, src_bucket=SOURCE_BUCKET, src_key=_source_key, dst_prefix=IMAGE_PREFIX)
+    write_copies(args.stage_dir, DATASET, version, plan)
     jpg_ids = sorted(o.image_id for o in outcomes if o.found_as_jpg and o.row is not None)
     if jpg_ids:
         logger.info("images found only as .jpg keys: %s", jpg_ids)
@@ -581,8 +465,3 @@ def run(args: argparse.Namespace, client: Any) -> int:
         dropped,
     )
     return 0
-
-
-def _write_copies(stage_dir: Path, version: str, plan: Sequence[Mapping[str, Any]]) -> None:
-    path = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(DATASET, version) + COPIES_NAME)
-    path.write_text("".join(json.dumps(entry, sort_keys=True) + "\n" for entry in plan))

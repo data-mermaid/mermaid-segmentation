@@ -24,7 +24,7 @@ each change. Lookup material (setup, commands, architecture) is linked in sectio
 - `scripts/sagemaker/`: the SageMaker launcher (`python -m scripts.sagemaker.launch`) and the in-container entrypoint.
 - `sagemaker/runs/`: SageMaker run YAMLs.
 - `docker/`: the SageMaker job image; deployable images are built only by the CI workflow.
-- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/segdata-etl/` builds the CoralNet training manifest from that scrape and loads the Catlin, Moorea, Pacific and Benthos raw releases into S3; its `segdata_etl/splits/` builds and leakage-checks the split on demand (`segdata split build`, `segdata split leakage`); `packages/segdata-spec/` defines the versioned dataset manifest, S3 layout and sync that an ETL publisher and a trainer share, plus the split-file format and coverage check. `mermaidseg` may import `segdata_spec` and none of the other packages.
+- `packages/`: uv workspace members outside the model path. `packages/coralnet-scraper/` downloads public CoralNet sources to S3; `packages/segdata-etl/` builds the CoralNet training manifest from that scrape and loads the Catlin, Moorea, Pacific and Benthos raw releases into S3 (`segdata ingest`), stages them and the MERMAID benthic taxonomy as versioned datasets (`segdata build`, `segdata taxonomy --stage-dir`), publishes a staged taxonomy (`segdata taxonomy --tables-from … --publish`) and publishes staged dataset versions (`segdata promote`); its `segdata_etl/splits/` builds and leakage-checks the split on demand (`segdata split build`, `segdata split leakage`); `packages/segdata-spec/` defines the versioned dataset manifest, S3 layout and sync that an ETL publisher and a trainer share, plus the split-file format and coverage check. `mermaidseg` may import `segdata_spec` and none of the other packages.
 - `tests/`: the pytest suite, laid out as 7.4 sets.
 - `pyproject.toml`: dependencies, extras, dependency groups, and ruff, mypy and pytest settings.
 
@@ -199,7 +199,7 @@ Where a doc disagrees with this file or the code, this file and the code win.
 | Test and lint commands, architecture overview | `README.md`: Running Tests, Common Commands, Architecture overview |
 | Setup, data, training (Slurm, SageMaker), export and evaluation procedures | `docs/runbooks/` |
 | The CoralNet scraper: S3 layout, environment variables, running and testing it | `packages/coralnet-scraper/README.md` |
-| The CoralNet dataset build and the external datasets (Catlin, Moorea, Pacific, Benthos): outputs, completeness checks, environment variables, output contract, running and testing them; the split build and leakage commands | `packages/segdata-etl/README.md` |
+| The CoralNet dataset build and the external datasets (Catlin, Moorea, Pacific, Benthos): outputs, completeness checks, environment variables, output contract, ingesting, building, publishing and testing them; the taxonomy snapshot; the split build and leakage commands | `packages/segdata-etl/README.md` |
 | The versioned dataset contract (manifest, S3 and cache layout, publish, sync, split-file format, errors), and its tests | `packages/segdata-spec/README.md` |
 | Recreate or update the CoralNet data end to end | `docs/runbooks/coralnet-data.md` |
 | Lint, type-check, test and dependency settings; CI checks; pre-commit hooks | `pyproject.toml`; `.github/workflows/`; `.pre-commit-config.yaml` |

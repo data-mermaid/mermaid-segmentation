@@ -1,13 +1,32 @@
 #!/usr/bin/env python3
-"""Compare the points of an old point loader with a pinned dataset version.
+"""Compare an old dataset loader (points or dense) with a pinned dataset version.
 
 python scripts/check_dataset_parity.py --data-config configs/data_config.yaml \
     --dataset catlin_seaview --split train --version 20261120-ab12cd3 \
     --manifest-sha256 <sha256> --cache-dir /scratch/cache
 
-Reads points or dense versions, as the manifest's kind says. Needs S3 read access through the
-default boto3 credentials; with --no-sync it reads a locally staged version from --cache-dir and
-never calls S3. Exits 1 on any difference.
+What is verified: the manifest against --manifest-sha256, and every table against the
+manifest's sha256, also under --no-sync. The manifest's kind picks the comparison. A points
+version syncs no image and is compared point by point. A dense version also syncs the images and
+masks it compares, each verified by size, ETag and CRC64NVME. A Benthos-shaped old loader is
+compared tile by tile: each tile's mask must equal the old mask pixel for pixel, and its
+label_counts rows must equal the mask's pixel counts. A Hugging Face old loader is matched image
+by image by pixel hash, and its masks, pixel totals and vocabulary are compared.
+
+Needs S3 read access through the default boto3 credentials. The old side always loads its
+annotations, classes.json and masks through LocalS3Cache.
+
+--no-sync makes only the new side offline: no S3 client is built, and the version must already
+be staged in --cache-dir. Tables sit at <dir>/mermaid-ic-datasets/datasets/<name>/<version>/;
+dense images and masks sit at <dir>/<image store bucket>/<prefix><key>. The tables are verified
+as a sync verifies them; images and masks are read as staged. A table or file that is not staged
+fails the run.
+
+To make the old side offline too, pre-fill a local cache (for example with
+scripts/prefetch_cache.py) and set MERMAIDSEG_LOCAL_CACHE_DIR to it and MERMAIDSEG_S3_OFFLINE=1.
+A cache miss then raises instead of calling S3.
+
+Exits 1 on any difference. Exits with an error when the old split has no points, tiles or images.
 """
 
 from __future__ import annotations
@@ -76,7 +95,9 @@ def main(argv: list[str] | None = None) -> int:
         "--cache-dir", type=Path, required=True, help="directory the version is downloaded into"
     )
     p.add_argument(
-        "--no-sync", action="store_true", help="read a staged version from --cache-dir; no S3"
+        "--no-sync",
+        action="store_true",
+        help="no S3 for the new version, staged in --cache-dir; the old side still needs S3 or a cache",
     )
     p.add_argument("--annotator", action="append", default=None, help="repeat for priority order")
     args = p.parse_args(argv)
