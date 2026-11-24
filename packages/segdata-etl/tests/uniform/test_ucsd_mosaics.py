@@ -1,4 +1,4 @@
-"""Tests for ``segdata build ucsd_mosaics``: site groups, id policy and the research-only license."""
+"""Tests for ``segdata build ucsd_mosaics``: site groups, id policy and the CC BY-NC 4.0 license."""
 
 from __future__ import annotations
 
@@ -79,8 +79,8 @@ def test_site_becomes_a_lowercase_group_with_original_case_in_attrs(monkeypatch,
     manifest = json.loads((version / "manifest.json").read_bytes())
     assert manifest["source"]["uri"] == "hf://datasets/josauder/UCSD-mosaics-mirror"
     assert manifest["source"]["revision"] == "6a6483841f8ee20bd7d8ee2aa760f10d1e9db704"
-    assert (
-        manifest["source"]["license"] == "research-only (LICENSE file absent at revision 6a64838)"
+    assert manifest["source"]["license"] == (
+        "Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)"
     )
     assert (version.parents[2] / "images/ucsd_mosaics/palwave13/tile_1.jpg").read_bytes() == IMG
 
