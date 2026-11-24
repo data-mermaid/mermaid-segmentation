@@ -10,10 +10,17 @@ manifest's sha256. For a dense version, every image and mask is also synced and 
 ETag and CRC64NVME; each tile's mask must then equal the old mask pixel for pixel, and its
 label_counts rows must equal the mask's pixel counts. A points version syncs no image.
 
-Needs S3 read access through the default boto3 credentials, unless --offline: then no S3 client
-is built, and every file must already be staged in --cache-dir, where the same checks run. Tables
-sit at <dir>/mermaid-ic-datasets/datasets/<name>/<version>/; dense images and masks sit at
+Needs S3 read access through the default boto3 credentials. The old side always loads its
+annotations, classes.json and masks through LocalS3Cache, and the new side syncs from S3.
+
+--offline makes only the new side offline: no S3 client is built, and every file must already be
+staged in --cache-dir, where the same checks run. Tables sit at
+<dir>/mermaid-ic-datasets/datasets/<name>/<version>/; dense images and masks sit at
 <dir>/<image store bucket>/<prefix><key>. A file that is not staged fails the run.
+
+To make the old side offline too, pre-fill a local cache (for example with
+scripts/prefetch_cache.py) and set MERMAIDSEG_LOCAL_CACHE_DIR to it and MERMAIDSEG_S3_OFFLINE=1.
+A cache miss then raises instead of calling S3.
 
 Exits 1 on any difference. Exits with an error when the old split has no points or tiles.
 """
@@ -45,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--offline",
         action="store_true",
-        help="verify the version staged in --cache-dir with the same checks; no S3",
+        help="no S3 for the new version, staged in --cache-dir; the old side still needs S3 or a cache",
     )
     p.add_argument("--annotator", action="append", default=None, help="repeat for priority order")
     args = p.parse_args(argv)

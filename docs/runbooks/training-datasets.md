@@ -80,7 +80,7 @@ A version string is `YYYYMMDD-<sha7>`, with `-2`, `-3` for a rebuild on the same
      --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
    ```
 
-4. Check that each staged version loads the same as the legacy dataset. The check reads the store as the cache, with no S3 access:
+4. Check that each staged version loads the same as the legacy dataset. `--offline` reads the new version from the store as the cache, with no S3 access for it. The old side still loads its annotations, `classes.json` and masks from S3 through `LocalS3Cache`, so the check needs S3 read access unless you also pre-fill a local cache (for example with `scripts/prefetch_cache.py`) and set `MERMAIDSEG_LOCAL_CACHE_DIR=<that cache>` and `MERMAIDSEG_S3_OFFLINE=1`. A cache miss then raises instead of calling S3.
 
    ```bash
    uv run python scripts/check_dataset_parity.py --offline \

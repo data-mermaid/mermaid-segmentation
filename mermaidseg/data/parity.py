@@ -603,10 +603,13 @@ def run_parity(
         version: Version to compare against.
         manifest_sha256: The sha256 of that version's manifest.
         cache_dir: The local cache root.
-        client: An S3 client; unused, and may be ``None``, when ``offline``.
+        client: An S3 client for the new version; unused, and may be ``None``, when ``offline``.
         annotators: Annotators in priority order for selecting the new points.
         offline: Verify the version already staged in ``cache_dir`` exactly as a sync does, with
-            no S3 access; a file that is not staged raises ``FileNotFoundError``.
+            no S3 access for the new side; a file that is not staged raises
+            ``FileNotFoundError``. The old side still loads through ``LocalS3Cache``, so it
+            needs S3 credentials unless ``MERMAIDSEG_LOCAL_CACHE_DIR`` names a pre-filled cache
+            and ``MERMAIDSEG_S3_OFFLINE=1``; a cache miss then raises ``DataLoadError``.
 
     Returns:
         The parity report over all groups of the new version that hold old images.
