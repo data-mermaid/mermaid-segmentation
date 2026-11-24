@@ -58,7 +58,7 @@ The data has three layers of processing. Cite all three works:
 
 ## Licence
 
-Research use only. The source dataset is distributed for research purposes and must not be redistributed beyond research use. Use of the data, directly or through the mirror, carries the same terms and the obligation to cite the three works above. The Hugging Face card gives the licence as `other`, named `research-only`.
+Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0), governed by UC San Diego Library's copyright terms. Use of the data, directly or through the mirror, carries the same terms and the obligation to cite the three works above.
 
 ## Where the class reads from
 

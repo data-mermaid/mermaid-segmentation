@@ -57,7 +57,7 @@ SOURCE = DenseSource(
     dataset=DATASET,
     repo="josauder/UCSD-mosaics-mirror",
     revision=REVISION,
-    license=f"research-only (LICENSE file absent at revision {REVISION[:7]})",
+    license="Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)",
     citation=(
         "Edwards et al. 2017, Coral Reefs 36; Alonso et al. 2019, J. Field Robotics 36; "
         "Raine et al. 2024, CVPR"
