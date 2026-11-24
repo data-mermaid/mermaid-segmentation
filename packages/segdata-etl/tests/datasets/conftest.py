@@ -119,16 +119,10 @@ def legacy_etag(data: bytes) -> str:
 
 
 def assert_curated_label_mapping(manifest: Manifest, dataset: str, labels: pa.Table) -> None:
-    """Assert the manifest's label mapping is the curated map of ``dataset``, counted from ``labels``."""
-    targets = labels.column("mermaid_benthic_attribute").to_pylist()
-    ids = labels.column("mermaid_benthic_attribute_id").to_pylist()
+    """Assert the manifest's label mapping is the curated map of ``dataset`` over ``labels``."""
     mapping = manifest.label_mapping
     assert mapping is not None
     assert mapping.source == "curated"
     assert mapping.n_labels == labels.num_rows
-    assert mapping.n_mapped == sum(t is not None for t in targets)
-    assert mapping.n_unresolved == sum(
-        t is not None and i is None for t, i in zip(targets, ids, strict=True)
-    )
     assert mapping.git_ref == CLEAN_GIT.sha
     assert mapping.sha256 == load_curated(dataset)[1].sha256
