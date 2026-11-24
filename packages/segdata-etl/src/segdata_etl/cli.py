@@ -18,7 +18,6 @@ from segdata_spec import DATASET_BUCKET
 from . import promote as promote_module
 from . import taxonomy
 from .common.cli_flags import _pin_flags
-from .common.store import add_store_argument
 from .datasets import benthos_yuval as benthos_yuval_build
 from .datasets import catlin_seaview as catlin_seaview_build
 from .datasets import coralscapes_v2, mermaid, ucsd_mosaics
@@ -179,7 +178,6 @@ def _add_external_builds(build_sub: Any) -> None:
 
 def _add_taxonomy_subcommand(top: Any) -> None:
     parser = top.add_parser("taxonomy", help="Fetch and publish the MERMAID benthic taxonomy")
-    add_store_argument(parser)
     taxonomy.add_arguments(parser)
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.set_defaults(

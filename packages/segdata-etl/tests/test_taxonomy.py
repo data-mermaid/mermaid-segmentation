@@ -1,4 +1,4 @@
-"""``fetch_taxonomy`` and ``run_taxonomy``, against a fake HTTP session and a LocalStore."""
+"""``fetch_taxonomy`` and ``run_taxonomy``, against a fake HTTP session and a fake S3."""
 
 from __future__ import annotations
 
@@ -12,11 +12,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import requests
+from botocore.exceptions import ClientError
 
 from segdata_etl import taxonomy
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import Pin
-from segdata_spec.publish import GitState
+from segdata_spec.publish import GitState, PublishRefused
 from segdata_spec.read import open_taxonomy
 
 BASE = "https://api.test/v1"
@@ -193,82 +194,126 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def _args(store: Path, **overrides: Any) -> argparse.Namespace:
-    values = {"store": store, "tables_from": None, "base_url": BASE}
+class FakeS3:
+    """Holds objects by (bucket, key); ``put_object`` honours ``IfNoneMatch`` and records each put."""
+
+    def __init__(self, objects: dict[tuple[str, str], bytes] | None = None):
+        self.objects = dict(objects or {})
+        self.puts: list[str] = []
+
+    def put_object(self, *, Bucket: str, Key: str, Body: Any, **_: Any) -> dict[str, Any]:
+        self.puts.append(Key)
+        self.objects[(Bucket, Key)] = Body if isinstance(Body, bytes) else Body.read()
+        return {}
+
+    def head_object(self, *, Bucket: str, Key: str, **_: Any) -> dict[str, Any]:
+        if (Bucket, Key) not in self.objects:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {"ContentLength": len(self.objects[(Bucket, Key)])}
+
+    def list_objects_v2(self, *, Bucket: str, Prefix: str, **_: Any) -> dict[str, Any]:
+        keys = [k for b, k in self.objects if b == Bucket and k.startswith(Prefix)]
+        return {"Contents": [{"Key": k} for k in keys]} if keys else {}
+
+
+def _args(**overrides: Any) -> argparse.Namespace:
+    values = {
+        "stage_dir": None,
+        "tables_from": None,
+        "publish": False,
+        "base_url": BASE,
+    }
     return argparse.Namespace(**{**values, **overrides})
 
 
-def _run(args: argparse.Namespace, session: Any, capsys: pytest.CaptureFixture[str]) -> str:
-    assert taxonomy.run_taxonomy(args, source_client=object(), session=session) == 0
+def _run(
+    args: argparse.Namespace,
+    session: Any,
+    capsys: pytest.CaptureFixture[str],
+    s3: FakeS3 | None = None,
+) -> str:
+    assert taxonomy.run_taxonomy(args, source_client=s3 or FakeS3(), session=session) == 0
     return capsys.readouterr().out
 
 
-def _published_dir(store: Path) -> Path:
-    (version_dir,) = (store / DATASET_BUCKET / "taxonomy" / "mermaid-benthic").iterdir()
+def _staged_dir(stage: Path) -> Path:
+    (version_dir,) = (stage / DATASET_BUCKET / "taxonomy" / "mermaid-benthic").iterdir()
     return version_dir
 
 
-def test_run_publishes_a_version_that_open_taxonomy_reads(
+def _stage(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Path:
+    _run(_args(stage_dir=tmp_path / "staged"), FakeSession(_routes()), capsys)
+    return _staged_dir(tmp_path / "staged")
+
+
+def test_stage_writes_a_readable_version_under_the_stage_dir_and_nothing_to_s3(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    store = tmp_path / "store"
-    out = _run(_args(store), FakeSession(_routes()), capsys)
-    version_dir = _published_dir(store)
+    stage, s3 = tmp_path / "stage", FakeS3()
+    out = _run(_args(stage_dir=stage), FakeSession(_routes()), capsys, s3)
+    version_dir = _staged_dir(stage)
     assert version_dir.name.endswith("-abcdef1")
     sha = hashlib.sha256((version_dir / "manifest.json").read_bytes()).hexdigest()
-    assert version_dir.name in out
-    assert sha in out
+    assert f"version: {version_dir.name}\nmanifest_sha256: {sha}" in out
+    assert s3.puts == []
     pin = Pin(name="mermaid-benthic", version=version_dir.name, manifest_sha256=sha)
-    tax = open_taxonomy(store, DATASET_BUCKET, pin)
+    tax = open_taxonomy(stage, DATASET_BUCKET, pin)
     assert tax.benthic_attributes.num_rows == 2
     assert tax.manifest.source.uri == BASE
-    assert tax.manifest.etl.command == f"segdata taxonomy --store {store} --base-url {BASE}"
+    assert tax.manifest.etl.command == f"segdata taxonomy --stage-dir {stage} --base-url {BASE}"
 
 
-def test_run_tables_from_republishes_staged_bytes_without_http(
+def test_stage_names_a_version_already_in_s3_with_a_counter(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    staged_store = tmp_path / "staged"
-    _run(_args(staged_store), FakeSession(_routes()), capsys)
-    staged = _published_dir(staged_store)
-    session = FakeSession({})
-    target = tmp_path / "target"
-    _run(_args(target, tables_from=staged), session, capsys)
-    published = _published_dir(target)
+    first = _stage(tmp_path / "probe", capsys)
+    taken = f"taxonomy/mermaid-benthic/{first.name}/manifest.json"
+    s3 = FakeS3({(DATASET_BUCKET, taken): b"{}"})
+    _run(_args(stage_dir=tmp_path / "stage"), FakeSession(_routes()), capsys, s3)
+    assert _staged_dir(tmp_path / "stage").name == f"{first.name}-2"
+
+
+def test_publish_sends_the_staged_bytes_to_s3_without_http(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    staged = _stage(tmp_path, capsys)
+    session, s3 = FakeSession({}), FakeS3()
+    _run(_args(tables_from=staged, publish=True), session, capsys, s3)
+    prefix = f"taxonomy/mermaid-benthic/{staged.name}/"
     assert session.calls == []
     for name in ("benthic_attributes.parquet", "growth_forms.parquet"):
-        assert (published / name).read_bytes() == (staged / name).read_bytes()
-    staged_source = json.loads((staged / "manifest.json").read_text())["source"]
-    assert json.loads((published / "manifest.json").read_text())["source"] == staged_source
+        assert s3.objects[(DATASET_BUCKET, prefix + name)] == (staged / name).read_bytes()
+    published = json.loads(s3.objects[(DATASET_BUCKET, prefix + "manifest.json")])
+    assert published["source"] == json.loads((staged / "manifest.json").read_text())["source"]
+    assert published["etl"]["command"] == f"segdata taxonomy --tables-from {staged} --publish"
 
 
-def test_run_tables_from_refuses_a_staged_table_altered_after_staging(
+def test_publish_refuses_a_staged_table_altered_after_staging(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _run(_args(tmp_path / "staged"), FakeSession(_routes()), capsys)
-    staged = _published_dir(tmp_path / "staged")
+    staged = _stage(tmp_path, capsys)
     (staged / "growth_forms.parquet").write_bytes(b"altered")
+    s3 = FakeS3()
     with pytest.raises(ValueError, match="sha256"):
-        _run(_args(tmp_path / "target", tables_from=staged), FakeSession({}), capsys)
+        _run(_args(tables_from=staged, publish=True), FakeSession({}), capsys, s3)
+    assert s3.puts == []
 
 
-def test_run_tables_from_refuses_a_staged_folder_of_another_name(
+def test_publish_refuses_a_staged_folder_of_another_name(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _run(_args(tmp_path / "staged"), FakeSession(_routes()), capsys)
-    staged = _published_dir(tmp_path / "staged")
+    staged = _stage(tmp_path, capsys)
     manifest = json.loads((staged / "manifest.json").read_text())
     manifest["name"] = "other"
     (staged / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="other"):
-        _run(_args(tmp_path / "target", tables_from=staged), FakeSession({}), capsys)
+        _run(_args(tables_from=staged, publish=True), FakeSession({}), capsys)
 
 
-def test_run_tables_from_refuses_staged_duplicate_ids_with_a_matching_sha256(
+def test_publish_refuses_staged_duplicate_ids_with_a_matching_sha256(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _run(_args(tmp_path / "staged"), FakeSession(_routes()), capsys)
-    staged = _published_dir(tmp_path / "staged")
+    staged = _stage(tmp_path, capsys)
     duplicated = pa.table(
         {"id": ["a1", "a1"], "name": ["Hard coral", "Hard coral"], "parent_id": [None, None]}
     )
@@ -277,7 +322,42 @@ def test_run_tables_from_refuses_staged_duplicate_ids_with_a_matching_sha256(
     new_sha = hashlib.sha256((staged / "benthic_attributes.parquet").read_bytes()).hexdigest()
     manifest["files"]["benthic_attributes.parquet"]["sha256"] = new_sha
     (staged / "manifest.json").write_text(json.dumps(manifest))
-    target = tmp_path / "target"
+    s3 = FakeS3()
     with pytest.raises(ValueError, match="duplicate ids"):
-        _run(_args(target, tables_from=staged), FakeSession({}), capsys)
-    assert not (target / DATASET_BUCKET / "taxonomy").exists()
+        _run(_args(tables_from=staged, publish=True), FakeSession({}), capsys, s3)
+    assert s3.puts == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"tables_from": Path("staged")}, "add --publish"),
+        ({"publish": True}, "needs --tables-from"),
+        ({}, "give --stage-dir"),
+        ({"tables_from": Path("staged"), "publish": True, "stage_dir": Path("d")}, "cannot be"),
+    ],
+)
+def test_flag_combinations_other_than_stage_or_publish_are_refused_before_any_fetch(
+    repo: Path, overrides: dict[str, Any], match: str
+) -> None:
+    session = FakeSession({})
+    with pytest.raises(ValueError, match=match):
+        taxonomy.run_taxonomy(_args(**overrides), source_client=FakeS3(), session=session)  # type: ignore[arg-type]
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "state", [GitState("abcdef1", True, True), GitState("abcdef1", False, False)]
+)
+def test_a_dirty_or_unpushed_tree_is_refused_before_any_fetch(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: GitState
+) -> None:
+    monkeypatch.setattr(taxonomy, "probe_git", lambda _dir: state)
+    session = FakeSession({})
+    with pytest.raises(PublishRefused):
+        taxonomy.run_taxonomy(
+            _args(stage_dir=tmp_path / "stage"),
+            source_client=FakeS3(),
+            session=session,  # type: ignore[arg-type]
+        )
+    assert session.calls == []
