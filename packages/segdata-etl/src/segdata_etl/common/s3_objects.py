@@ -115,18 +115,17 @@ def copy_new(
     expect_etag: str,
     expect_size: int,
     expect_crc64nvme: str,
-    storage_class: str | None = None,
+    storage_class: str,
 ) -> CopyResult:
     """Copy ``src`` to ``dst`` once, guarded by the source ETag and the destination's absence.
 
-    ``storage_class`` sets the destination's S3 storage class; None keeps the bucket default.
+    ``storage_class`` sets the destination's S3 storage class.
 
     Raises:
         SourceChanged: The source ETag differs from ``src_etag`` (the destination is absent).
         ObjectConflict: The destination exists, or the copy landed, with another ETag, size or
             CRC64NVME, or S3 reported no CRC64NVME.
     """
-    extra = {} if storage_class is None else {"StorageClass": storage_class}
     try:
         response = client.copy_object(
             Bucket=dst_bucket,
@@ -135,7 +134,7 @@ def copy_new(
             IfNoneMatch="*",
             CopySourceIfMatch=src_etag,
             ChecksumAlgorithm=_CRC_ALGORITHM,
-            **extra,
+            StorageClass=storage_class,
         )
     except ClientError as exc:
         if not is_precondition_failed(exc):
@@ -176,8 +175,18 @@ def _resolve_copy_412(
     return CopyResult(etag, size, crc, already_present=True)
 
 
-def put_new(client: Any, *, bucket: str, key: str, body: bytes, content_type: str) -> PutResult:
+def put_new(
+    client: Any,
+    *,
+    bucket: str,
+    key: str,
+    body: bytes,
+    content_type: str,
+    storage_class: str | None = None,
+) -> PutResult:
     """Write ``body`` once; an existing object with identical bytes counts as already written.
+
+    ``storage_class`` sets the object's S3 storage class; None keeps the bucket default.
 
     Raises:
         ObjectConflict: The key exists with different bytes, or S3 reported no CRC64NVME.
@@ -190,6 +199,7 @@ def put_new(client: Any, *, bucket: str, key: str, body: bytes, content_type: st
             ContentType=content_type,
             IfNoneMatch="*",
             ChecksumAlgorithm=_CRC_ALGORITHM,
+            **({} if storage_class is None else {"StorageClass": storage_class}),
         )
     except ClientError as exc:
         if not is_precondition_failed(exc):
