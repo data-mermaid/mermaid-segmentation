@@ -1,22 +1,30 @@
-"""One-off comparison of the old point loaders with a synced point version."""
+"""One-off comparison of the old loaders with a synced (or locally staged) dataset version."""
 
 from __future__ import annotations
 
+import json
 from collections import Counter
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
+from datasets import load_dataset
+from numpy.typing import NDArray
+from PIL import Image
 
 from mermaidseg.data.config import DATASET_BUCKET
 from mermaidseg.data.point_dataset import select_points
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
+from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPES_V2_ID2NAME
 from mermaidseg.datasets.factory import build_datasets
+from mermaidseg.io import ConfigDict, preprocess_data_config
 from segdata_spec.manifest import Pin
 from segdata_spec.read import DatasetVersion, open_version
-from segdata_spec.sync import sync
+from segdata_spec.sync import sync as sync_versions
 
 # Val/test transform size for the old loader; only its annotations are read here.
 _UNUSED_INPUT_SIZE = (256, 256)
@@ -25,6 +33,7 @@ _MAX_LISTED = 10
 
 Point = tuple[str, int, int, str | None]
 CountDiff = dict[str | None, tuple[int, int]]
+LabelCountDiff = dict[int, tuple[int, int]]
 
 
 @dataclass(frozen=True)
@@ -69,6 +78,14 @@ def _mapped_names(registry: SourceLabelRegistry, ds: Any) -> dict[str, str | Non
         target_id = int(registry.source_to_target[local_id + offset])
         result[name] = registry.target_id2label[target_id] if target_id else None
     return result
+
+
+def _build_old(data_cfg: Mapping[str, Any], dataset: str, split: str) -> Any:
+    """Build one old dataset from the raw ``data`` section, expanded as training expands it."""
+    expanded = preprocess_data_config(ConfigDict({"data": data_cfg})).data
+    return build_datasets(
+        expanded, input_size=_UNUSED_INPUT_SIZE, names=[dataset], splits=[split], verbose=False
+    )
 
 
 def old_points(ds: Any) -> pd.DataFrame:
@@ -177,7 +194,7 @@ def _format_list(title: str, items: Collection[Any]) -> list[str]:
     return [f"{title}: {len(items)}", f"  {shown}{more}"]
 
 
-def _format_diff(title: str, diff: CountDiff) -> list[str]:
+def _format_diff(title: str, diff: Mapping[Any, tuple[int, int]]) -> list[str]:
     if not diff:
         return [f"{title}: none"]
     return [f"{title}:", *(f"  {label}: old {o}, new {n}" for label, (o, n) in diff.items())]
@@ -197,6 +214,22 @@ def format_report(report: ParityReport) -> str:
     return "\n".join(lines)
 
 
+def sync_tables(client: Any, pin: Pin, cache_dir: Path) -> None:
+    """Download and verify the parquet tables of ``pin`` into ``cache_dir``, and no image."""
+    sync_versions(
+        client,
+        {pin.name: pin},
+        cache_dir,
+        bucket=DATASET_BUCKET,
+        selection={pin.name: set()},
+    )
+
+
+def version_kind(cache_dir: Path, pin: Pin) -> str:
+    """Return the ``kind`` of the cached version, re-verifying its manifest against ``pin``."""
+    return open_version(cache_dir, DATASET_BUCKET, pin).manifest.kind
+
+
 def run_parity(
     data_cfg: Mapping[str, Any],
     *,
@@ -207,8 +240,9 @@ def run_parity(
     cache_dir: Path,
     client: Any,
     annotators: Sequence[str] | None,
+    sync: bool = True,
 ) -> ParityReport:
-    """Build the old dataset, sync the pinned version's tables, and compare their points.
+    """Build the old dataset, open the pinned version's tables, and compare their points.
 
     No image is downloaded: only the parquet tables are synced.
 
@@ -219,24 +253,18 @@ def run_parity(
         version: Version to compare against.
         manifest_sha256: The sha256 of that version's manifest.
         cache_dir: The local cache root.
-        client: An S3 client.
+        client: An S3 client; unused with ``sync=False``.
         annotators: Annotators in priority order for selecting the new points.
+        sync: When False, S3 is not reached and the version is read from ``cache_dir`` as staged.
 
     Returns:
         The parity report over all groups of the new version that hold old images.
     """
-    built = build_datasets(
-        data_cfg, input_size=_UNUSED_INPUT_SIZE, names=[dataset], splits=[split], verbose=False
-    )
+    built = _build_old(data_cfg, dataset, split)
     old = old_points(built[(dataset, split)])
     pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
-    sync(
-        client,
-        {dataset: pin},
-        cache_dir,
-        bucket=DATASET_BUCKET,
-        selection={dataset: set()},
-    )
+    if sync:
+        sync_tables(client, pin, cache_dir)
     version_data = open_version(cache_dir, DATASET_BUCKET, pin)
     if version_data.points is None:
         raise ValueError(f"{dataset} {version} has no points table")
@@ -245,3 +273,342 @@ def run_parity(
     kept = images[images["image_id"].isin(points["image_id"])]
     new_groups = dict(zip(kept["image_id"], kept["group"], strict=True))
     return compare(old, new_points(version_data, points), new_groups)
+
+
+# --- dense ---------------------------------------------------------------------------------
+
+IdImageMask = tuple[str, NDArray[Any], NDArray[Any]]
+
+
+@dataclass(frozen=True)
+class VocabMismatch:
+    """One native label id whose old and new name or MERMAID mapping differ (``None`` if absent)."""
+
+    label_id: int
+    old_name: str | None
+    new_name: str | None
+    old_mapped: str | None
+    new_mapped: str | None
+
+
+@dataclass(frozen=True)
+class DenseParityReport:
+    """The differences between an old dense dataset and a dense version; empty means parity.
+
+    Attributes:
+        matched: Images present on both sides, matched by the sha256 of their RGB pixels.
+        old_only: Old row ids with no new image.
+        new_only: New image ids with no old row.
+        mask_diffs: New image id -> differing native mask pixels, for matched images whose masks
+            differ; a shape mismatch counts every pixel of the larger mask.
+        label_pixel_diff: Native label id -> ``(old pixels, new pixels)`` where the totals differ.
+        vocab_mismatches: Label ids whose name or MERMAID mapping differ.
+        hf_revision_at_run: Head revision of the unpinned Hugging Face source, if it was reachable.
+    """
+
+    matched: int = 0
+    old_only: list[str] = field(default_factory=list)
+    new_only: list[str] = field(default_factory=list)
+    mask_diffs: dict[str, int] = field(default_factory=dict)
+    label_pixel_diff: LabelCountDiff = field(default_factory=dict)
+    vocab_mismatches: list[VocabMismatch] = field(default_factory=list)
+    hf_revision_at_run: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """True when no field reports a difference."""
+        return not (
+            self.old_only
+            or self.new_only
+            or self.mask_diffs
+            or self.label_pixel_diff
+            or self.vocab_mismatches
+        )
+
+
+def _no_revision() -> str | None:
+    return None
+
+
+def _rgb_array(image: Any) -> NDArray[Any]:
+    if isinstance(image, Image.Image):
+        return np.asarray(image.convert("RGB"))
+    return np.asarray(image)
+
+
+def _native_mask(mask: Any) -> NDArray[Any]:
+    array = np.asarray(mask)
+    return array[..., 0] if array.ndim == 3 else array
+
+
+def _pixel_sha(array: NDArray[Any]) -> str:
+    digest = sha256(repr(array.shape).encode())
+    digest.update(np.ascontiguousarray(array).tobytes())
+    return digest.hexdigest()
+
+
+def _add_label_pixels(counter: Counter[int], mask: NDArray[Any]) -> None:
+    values, counts = np.unique(mask, return_counts=True)
+    counter.update(dict(zip(values.tolist(), counts.tolist(), strict=True)))
+
+
+def _differing_pixels(old: NDArray[Any], new: NDArray[Any]) -> int:
+    if old.shape != new.shape:
+        return max(old.size, new.size)
+    return int((old != new).sum())
+
+
+def old_groups(ds: Any) -> set[str] | None:
+    """Return the new-version groups an old dense dataset covers, ``None`` for every group.
+
+    UCSD mosaics load one HF split per site, which is the group; Coralscapes' ``split`` is.
+    """
+    sites = getattr(ds, "sites", None)
+    if sites is not None:
+        return set(sites)
+    if ds.split is None:
+        return None
+    return {ds.split} if isinstance(ds.split, str) else set(ds.split)
+
+
+_HF_SPLITS = ("train", "validation", "test")
+
+
+def _loaded_splits(ds: Any) -> list[str]:
+    """Return the HF splits an old Coralscapes dataset concatenated, in order."""
+    if ds.split is None:
+        return list(_HF_SPLITS)
+    return [ds.split] if isinstance(ds.split, str) else list(ds.split)
+
+
+def _split_lengths(ds: Any, splits: Sequence[str]) -> list[int]:
+    """Return the row count of each loaded split; the old dataset keeps only the concatenation."""
+    if len(splits) == 1:
+        return [len(ds.dataset)]
+    hf_dataset = load_dataset(ds.hf_repo_id)
+    return [len(hf_dataset[name]) for name in splits]
+
+
+def _positional_id(index: int, splits: Sequence[str], lengths: Sequence[int]) -> str:
+    """Name row ``index`` of the concatenation by its split and index within that split."""
+    for name, length in zip(splits, lengths, strict=True):
+        if index < length:
+            return f"{name} row {index}"
+        index -= length
+    raise IndexError("row index beyond the loaded splits")
+
+
+def old_dense_rows(ds: Any) -> Iterator[IdImageMask]:
+    """Yield ``(row id, native RGB image, native mask)`` from the HF rows, before any transform.
+
+    Rows without a ``filename`` are named ``"<split> row <index within the split>"``.
+    """
+    boundaries: tuple[list[str], list[int]] | None = None
+    for index, row in enumerate(ds.dataset):
+        row_id = row.get("filename")
+        if not row_id:
+            if boundaries is None:
+                splits = _loaded_splits(ds)
+                boundaries = (splits, _split_lengths(ds, splits))
+            row_id = _positional_id(index, *boundaries)
+        yield str(row_id), _rgb_array(row["image"]), _native_mask(row["label"])
+
+
+def _native_id2name(ds: Any) -> dict[int, str]:
+    """Return the native mask id -> class name of an old dense dataset (UCSD or Coralscapes)."""
+    table = getattr(ds, "class_table", None)
+    if table is not None:
+        return {int(entry["id"]): entry["name"] for entry in table}
+    return dict(CORALSCAPES_V2_ID2NAME)
+
+
+def vocabulary_mismatches(
+    old_names: Mapping[int, str],
+    old_mapped: Mapping[str, str | None],
+    labels: pd.DataFrame,
+) -> list[VocabMismatch]:
+    """List the label ids where the old and new name, or lowercased MERMAID mapping, differ.
+
+    Args:
+        old_names: Native id -> old class name.
+        old_mapped: Old class name -> mapped target name, lowercase, ``None`` when unmapped.
+        labels: ``labels.parquet`` as a frame with ``label_id``, ``name`` and
+            ``mermaid_benthic_attribute``.
+    """
+    new = labels.set_index("label_id")
+    mismatches = []
+    for label_id in sorted(old_names.keys() | set(new.index)):
+        old_name = old_names.get(label_id)
+        new_name = _none_if_na(new["name"].get(label_id))
+        attribute = _none_if_na(new["mermaid_benthic_attribute"].get(label_id))
+        new_mapped = None if attribute is None else attribute.lower()
+        old_target = old_mapped.get(old_name) if old_name is not None else None
+        if (old_name, old_target) != (new_name, new_mapped):
+            mismatches.append(VocabMismatch(label_id, old_name, new_name, old_target, new_mapped))
+    return mismatches
+
+
+def _index_new_images(
+    version: DatasetVersion, images: pd.DataFrame
+) -> tuple[dict[str, list[str]], Counter[int]]:
+    """Decode the new images: ``sha256 of RGB pixels -> image ids`` and total pixels per label."""
+    by_sha: dict[str, list[str]] = {}
+    label_pixels: Counter[int] = Counter()
+    for row in images.to_dict("records"):
+        with Image.open(version.image_path(row)) as handle:
+            rgb = np.asarray(handle.convert("RGB"))
+        by_sha.setdefault(_pixel_sha(rgb), []).append(row["image_id"])
+        _add_label_pixels(label_pixels, _read_new_mask(version, row))
+    return by_sha, label_pixels
+
+
+def _read_new_mask(version: DatasetVersion, row: Mapping[str, Any]) -> NDArray[Any]:
+    with Image.open(version.mask_path(row)) as handle:
+        return _native_mask(handle)
+
+
+def compare_dense_images(
+    old_rows: Iterable[IdImageMask],
+    new_by_sha: Mapping[str, Sequence[str]],
+    load_new_mask: Callable[[str], NDArray[Any]],
+) -> tuple[int, list[str], list[str], dict[str, int], Counter[int]]:
+    """Match old rows to new images by pixel hash and compare the matched masks.
+
+    Returns:
+        ``(matched, old_only ids, new_only ids, mask_diffs, old label pixels)``.
+    """
+    remaining = {sha: list(ids) for sha, ids in new_by_sha.items()}
+    old_only: list[str] = []
+    mask_diffs: dict[str, int] = {}
+    old_pixels: Counter[int] = Counter()
+    matched = 0
+    for row_id, image, mask in old_rows:
+        _add_label_pixels(old_pixels, mask)
+        candidates = remaining.get(_pixel_sha(image))
+        if not candidates:
+            old_only.append(row_id)
+            continue
+        new_id = candidates.pop(0)
+        matched += 1
+        differing = _differing_pixels(mask, load_new_mask(new_id))
+        if differing:
+            mask_diffs[new_id] = differing
+    new_only = sorted(i for ids in remaining.values() for i in ids)
+    return matched, old_only, new_only, mask_diffs, old_pixels
+
+
+def _label_pixel_diff(old: Counter[int], new: Counter[int]) -> LabelCountDiff:
+    return {k: (old[k], new[k]) for k in sorted(old.keys() | new.keys()) if old[k] != new[k]}
+
+
+def _old_vocabulary(ds: Any) -> tuple[dict[int, str], dict[str, str | None]]:
+    return _native_id2name(ds), _mapped_names(SourceLabelRegistry([ds]), ds)
+
+
+def _restrict_to_original_splits(ds: Any, images: pd.DataFrame) -> pd.DataFrame:
+    """Keep the images whose ``original_split`` the old loader kept, when it filters on one."""
+    resolve = getattr(ds, "_resolved_original_splits", None)
+    allowed = None if resolve is None else resolve()
+    if allowed is None:
+        return images
+    kept = [json.loads(attrs)["original_split"] in allowed for attrs in images["attrs"]]
+    return images[kept]
+
+
+def _subset_vocabulary(
+    ds: Any,
+    old_names: Mapping[int, str],
+    labels: pd.DataFrame,
+) -> tuple[dict[int, str], pd.DataFrame]:
+    """Limit the native names and the new labels to the ids of ``ds.class_subset``, if set."""
+    if getattr(ds, "class_subset", None) is None:
+        return dict(old_names), labels
+    ids = {i for i, name in old_names.items() if name in ds.source_name2id}
+    return {i: old_names[i] for i in ids}, labels[labels["label_id"].isin(ids)]
+
+
+def run_dense_parity(
+    data_cfg: Mapping[str, Any],
+    *,
+    dataset: str,
+    split: str,
+    version: str,
+    manifest_sha256: str,
+    cache_dir: Path,
+    client: Any,
+    sync: bool = True,
+    hf_revision_probe: Callable[[], str | None] = _no_revision,
+) -> DenseParityReport:
+    """Compare an old dense dataset with a dense version, image by image.
+
+    Images are matched by the sha256 of the decoded RGB pixels; the native masks, the per-label
+    pixel totals and the vocabulary are then compared.
+
+    Args:
+        data_cfg: The ``data`` section of the old data config.
+        dataset: Dataset name.
+        split: Split to build on the old side; the new side takes the same groups.
+        version: Version to compare against.
+        manifest_sha256: The sha256 of that version's manifest.
+        cache_dir: The local cache root.
+        client: An S3 client; unused with ``sync=False``.
+        sync: When False, S3 is not reached and the version is read from ``cache_dir`` as staged.
+        hf_revision_probe: Returns the head revision of the old loader's HF source, or ``None``.
+
+    Raises:
+        ValueError: The version is not dense.
+    """
+    built = _build_old(data_cfg, dataset, split)
+    old = built[(dataset, split)]
+    groups = old_groups(old)
+    pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
+    if sync:
+        sync_versions(
+            client, {dataset: pin}, cache_dir, bucket=DATASET_BUCKET, selection={dataset: groups}
+        )
+    version_data = open_version(cache_dir, DATASET_BUCKET, pin)
+    if version_data.manifest.kind != "dense":
+        raise ValueError(f"{dataset} {version} is not a dense version")
+    images = version_data.images.to_pandas()
+    if groups is not None:
+        images = images[images["group"].isin(groups)]
+    images = _restrict_to_original_splits(old, images)
+    rows_by_id = {row["image_id"]: row for row in images.to_dict("records")}
+    new_by_sha, new_pixels = _index_new_images(version_data, images)
+    matched, old_only, new_only, mask_diffs, old_pixels = compare_dense_images(
+        old_dense_rows(old),
+        new_by_sha,
+        lambda image_id: _read_new_mask(version_data, rows_by_id[image_id]),
+    )
+    old_names, old_mapped = _old_vocabulary(old)
+    old_names, labels = _subset_vocabulary(old, old_names, version_data.labels.to_pandas())
+    return DenseParityReport(
+        matched=matched,
+        old_only=old_only,
+        new_only=new_only,
+        mask_diffs=mask_diffs,
+        label_pixel_diff=_label_pixel_diff(old_pixels, new_pixels),
+        vocab_mismatches=vocabulary_mismatches(old_names, old_mapped, labels),
+        hf_revision_at_run=hf_revision_probe(),
+    )
+
+
+def format_dense_report(report: DenseParityReport) -> str:
+    """Render a dense report as text, ending with ``PARITY OK`` or ``PARITY FAILED``."""
+    mismatches = [
+        f"id {m.label_id}: name old {m.old_name!r}, new {m.new_name!r}; "
+        f"mapped old {m.old_mapped!r}, new {m.new_mapped!r}"
+        for m in report.vocab_mismatches
+    ]
+    mask_diffs = [f"{image}: {n} pixels" for image, n in report.mask_diffs.items()]
+    lines = [
+        f"matched images: {report.matched}",
+        *_format_list("old-only images", report.old_only),
+        *_format_list("new-only images", report.new_only),
+        *_format_list("images with differing masks", mask_diffs),
+        *_format_diff("native label pixel counts", report.label_pixel_diff),
+        *_format_list("vocabulary mismatches", mismatches),
+        f"HF revision at run: {report.hf_revision_at_run or 'unknown'}",
+        "PARITY OK" if report.ok else "PARITY FAILED",
+    ]
+    return "\n".join(lines)
