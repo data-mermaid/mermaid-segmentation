@@ -420,9 +420,9 @@ The README of each dataset lists the raw files to download and their layout:
 
 ## Build a versioned external dataset
 
-`segdata build <name>` builds an immutable dataset version in the `segdata_spec` uniform format from the legacy prefix that `segdata ingest <name>` wrote, and publishes it with `segdata_spec.publish.publish_dataset`. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. The code is in `segdata_etl/datasets/`; the shared steps are in `datasets/external.py`. The format and the publish rules are in the [segdata-spec README](../segdata-spec/README.md).
+`segdata build <name>` stages an immutable dataset version in the `segdata_spec` uniform format from the legacy prefix that `segdata ingest <name>` wrote. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. The build never writes to S3, and it copies no image. [Promote a version](#promote-a-version) publishes it. The code is in `segdata_etl/datasets/`; the shared steps are in `datasets/external.py`. The format and the publish rules are in the [segdata-spec README](../segdata-spec/README.md).
 
-The build reads the legacy prefix from `--legacy-bucket` and the pinned taxonomy from the store. It maps the dataset's labels to the taxonomy with the curated map `segdata_etl/label_maps/curated/<name>.csv`, copies each image to `images/<name>/<group>/<image_id>.<ext>` in the store, and publishes the tables. The build ends by printing two lines:
+The build reads the legacy prefix from `--legacy-bucket` and the pinned taxonomy from `mermaid-ic-datasets`, so the taxonomy must be published before you stage a dataset. It maps the dataset's labels to the taxonomy with the curated map `segdata_etl/label_maps/curated/<name>.csv`. It stages the tables and the plan file `copies.jsonl` under `<stage>/mermaid-ic-datasets/datasets/<name>/<version>/`. Benthos also stages its masks, with `uploads.jsonl`. The build ends by printing two lines:
 
 ```text
 version: <YYYYMMDD-sha7>
@@ -432,30 +432,39 @@ manifest_sha256: <sha256>
 `manifest_sha256` is the pin: a consumer needs both values to read the version. A version string is `YYYYMMDD-<sha7>` (the UTC date and short git commit), with `-2`, `-3` for a rebuild on the same day.
 
 ```bash
-uv run --package segdata-etl segdata build <name> \
+uv run --package segdata-etl segdata build <name> --stage-dir <stage> \
   --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
 ```
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--store` | `outputs/segdata-store` | Where to publish: a local directory, or `s3` for the `mermaid-ic-datasets` bucket. A local store is laid out as `<dir>/<bucket>/<key>`. Publishing to S3 happens only when you pass `s3`. |
+| `--stage-dir` | none (required) | Local directory the version is staged in. |
 | `--taxonomy-version`, `--taxonomy-manifest-sha256` | required | Pin of the `mermaid-benthic` taxonomy that the labels map to. |
-| `--cache-dir` | The store directory; `outputs/segdata-cache` with `--store s3` | Where the build syncs the taxonomy. |
-| `--workers` | 16 | Threads for copying and inspecting images. |
+| `--cache-dir` | `outputs/segdata-cache` | Where the build syncs the taxonomy from S3. |
+| `--workers` | 16 | Threads for inspecting images. |
 | `--legacy-bucket` | `dev-datamermaid-sm-sources` | Bucket that holds the legacy prefix. |
 | `-v`, `--verbose` | off | Debug logging. |
 
-The build refuses a dirty or unpushed git tree, and a version folder that already holds objects. A published version is permanent: the bucket denies overwrite and delete. The order of staging, checking and publishing is in the [runbook](../../docs/runbooks/training-datasets.md#publish-the-versioned-datasets).
+An image whose legacy header cannot be read is dropped with its points. The count is `stats.dropped["image_unreadable_header"]` in the manifest.
+
+The build refuses a dirty or unpushed git tree. [Check a staged version](#check-a-staged-version) with the parity script before you promote. The order of staging, checking and publishing is in the [runbook](../../docs/runbooks/training-datasets.md#publish-the-versioned-datasets).
 
 ## Taxonomy snapshot
 
-`segdata taxonomy` fetches the MERMAID benthic hierarchy, from `/v1/benthicattributes/` and the growth forms in `/v1/choices/`, and publishes it as `taxonomy/mermaid-benthic/<version>/`. The version string follows the same `YYYYMMDD-<sha7>[-N]` form. The command prints the version and its manifest sha256, which are the taxonomy pin for `segdata build`.
+`segdata taxonomy` stages the MERMAID benthic hierarchy, from `/v1/benthicattributes/` and the growth forms in `/v1/choices/`, as `taxonomy/mermaid-benthic/<version>/`, then publishes the staged tables. The version string follows the same `YYYYMMDD-<sha7>[-N]` form. Each step prints the version and its manifest sha256, which are the taxonomy pin for `segdata build`. Staging writes no S3 object. Publishing names the new version against S3, so the name is free there.
 
-| Flag | Default | Effect |
-|---|---|---|
-| `--store` | `outputs/segdata-store` | Where to publish: a local directory, or `s3`. Same as for `segdata build`. |
-| `--tables-from <folder>` | none | Republish the tables of a staged taxonomy version folder, verified against its manifest, with no HTTP call. Use it to publish a version that you staged and checked locally. |
-| `-v`, `--verbose` | off | Debug logging. |
+```bash
+uv run --package segdata-etl segdata taxonomy --stage-dir <stage>
+uv run --package segdata-etl segdata taxonomy --tables-from <staged taxonomy folder> --publish
+```
+
+| Flag | Effect |
+|---|---|
+| `--stage-dir <dir>` | Fetch the API and stage a version in this local directory. |
+| `--tables-from <folder> --publish` | Re-check the tables of a staged taxonomy version folder and publish them to S3 under a new version name, with no HTTP call. The folder is `<stage>/mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>/`. |
+| `-v`, `--verbose` | Debug logging. |
+
+Any other flag combination is refused.
 
 ## Tests
 
