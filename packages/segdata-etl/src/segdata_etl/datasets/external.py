@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shlex
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +31,8 @@ from segdata_spec.manifest import LabelMapping, Pin
 from segdata_spec.read import Taxonomy, open_taxonomy
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 from segdata_spec.sync import sync
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_WORKERS = 16
 DEFAULT_CACHE_DIR = Path("outputs") / "segdata-cache"
@@ -263,34 +266,6 @@ def _bounds_join(
     return joined, inside
 
 
-def require_points_inside(
-    points: pa.Table,
-    images: Iterable[LegacyImage],
-    sniffed: Mapping[str, tuple[str, int, int]],
-) -> None:
-    """Refuse points outside their image's sniffed ``(width, height)``, naming the first five.
-
-    A point is inside when ``0 <= row < height`` and ``0 <= col < width``; a point whose image
-    has no sniffed size counts as outside.
-
-    Raises:
-        ValueError: A point lies outside its image.
-    """
-    joined, inside = _bounds_join(points, images, sniffed)
-    outside = joined.filter(pc.invert(pc.fill_null(inside, False))).sort_by(
-        [("image_id", "ascending"), ("row", "ascending"), ("col", "ascending")]
-    )
-    if outside.num_rows:
-        first = [
-            (r["image_id"], r["row"], r["col"], r["width"], r["height"])
-            for r in outside.slice(0, 5).to_pylist()
-        ]
-        raise ValueError(
-            f"{outside.num_rows} points outside their image "
-            f"(image_id, row, col, width, height): {first}"
-        )
-
-
 def drop_points_outside(
     points: pa.Table,
     images: Iterable[LegacyImage],
@@ -298,7 +273,8 @@ def drop_points_outside(
 ) -> tuple[pa.Table, int]:
     """Return the points inside their image's sniffed size, in order, and the number dropped.
 
-    Uses the bounds rule of `require_points_inside`.
+    A point is inside when ``0 <= row < height`` and ``0 <= col < width``. The count is of point
+    rows, so a long-form position with several annotator rows counts once per row.
 
     Raises:
         ValueError: A point's image has no sniffed size.
@@ -310,6 +286,26 @@ def drop_points_outside(
         raise ValueError(f"{unsized.num_rows} points whose image has no sniffed size: {ids}")
     kept = points.filter(inside)
     return kept, points.num_rows - kept.num_rows
+
+
+def drop_points_outside_and_record(
+    points: pa.Table,
+    images: Iterable[LegacyImage],
+    sniffed: Mapping[str, tuple[str, int, int]],
+    dropped: dict[str, int],
+) -> tuple[pa.Table, dict[str, int]]:
+    """Drop out-of-bounds points; return the kept points and ``dropped`` with the count merged in.
+
+    ``points_out_of_bounds`` is added only when some point is dropped, and the count is logged.
+
+    Raises:
+        ValueError: A point's image has no sniffed size.
+    """
+    kept, n_out_of_bounds = drop_points_outside(points, images, sniffed)
+    if not n_out_of_bounds:
+        return kept, dropped
+    logger.info("dropped %d points outside their image", n_out_of_bounds)
+    return kept, {**dropped, "points_out_of_bounds": n_out_of_bounds}
 
 
 def require_same_ids(found: Collection[Any], expected: Collection[Any], *, what: str) -> None:

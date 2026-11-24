@@ -144,7 +144,9 @@ def run(args: argparse.Namespace, client: Any) -> int:
     images = _with_attrs(images, _image_attrs(legacy.annotations))
     external.require_known_labels(points, labels)
     sniffed = external.sniff_legacy_images(client, images, legacy=legacy, workers=args.workers)
-    external.require_points_inside(points, images, sniffed)
+    # Bounds depend only on (image_id, row, col), so a position leaves with all its annotator
+    # rows; points_out_of_bounds counts point rows, as in the other builders.
+    points, dropped = external.drop_points_outside_and_record(points, images, sniffed, dropped)
     version = publishing.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=utc_today())
     publishing.require_version_absent(dest, bucket, DATASET, version)
     images_table = external.stage_images(

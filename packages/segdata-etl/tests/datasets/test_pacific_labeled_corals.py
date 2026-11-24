@@ -189,3 +189,24 @@ def test_build_refuses_inconsistent_annotations_before_copying(
         pacific_labeled_corals.run(build_args(pacific_labeled_corals, store, taxonomy_sha), s3)
 
     assert not (store / DATASET_BUCKET / "images").exists()
+
+
+def test_build_drops_every_annotator_row_of_a_point_past_an_edge_and_counts_the_rows(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    s3 = FakeS3()
+    # ref_1 is 7 wide, so col 7 is outside; both annotators' rows go, and label 5 would count.
+    outside = ("heron_reef", "reference", 11, "ref_1", ".JPG", 1, 7, "Acropora", "Bare substrate")
+    _legacy(s3, [*ANNOTATIONS, (*outside, NA, NA, NA, NA, NA)])
+    store = tmp_path / "store"
+    taxonomy_sha = publish_fixture_taxonomy(LocalStore(store), repo)
+    args = build_args(pacific_labeled_corals, store, taxonomy_sha)
+
+    pin = run_builder(pacific_labeled_corals, args, s3, capsys)
+
+    version = open_version(store, DATASET_BUCKET, pin)
+    assert version.manifest.stats.dropped == {"points_out_of_bounds": 2}
+    assert version.points is not None
+    assert version.points.num_rows == 5
+    assert (1, 7) not in {(r["row"], r["col"]) for r in version.points.to_pylist()}
+    assert sum(r["n"] for r in version.label_counts.to_pylist()) == 5
