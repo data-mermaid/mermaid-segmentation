@@ -728,23 +728,34 @@ class _SecondCopyFails(RecordingStore):
         return self._inner.copy_object(**kwargs)
 
 
-def test_an_interrupted_run_keeps_finished_copies_and_the_rerun_copies_only_the_rest(
+def test_a_crash_between_checkpoint_writes_leaves_the_rerun_to_adopt_the_unrecorded_copy(
     source: FakeS3, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(raw, "_CHECKPOINT_BATCH", 1)
-    monkeypatch.setattr(raw, "_CHECKPOINT_EVERY", 1)
+    monkeypatch.setattr(raw, "_CHECKPOINT_EVERY", 2)
+    source.multipart.add((SRC, _key(1, "10")))
     failing = _SecondCopyFails(LocalStore(tmp_path / "store", source_client=source))
 
     with pytest.raises(RuntimeError, match="interrupted"):
         _build(source, tmp_path, store=failing)
 
-    assert [row["dest_key"] for row in _read_checkpoint_rows(tmp_path)] == [DEST_10]
+    # The first copy finished, but the crash came before the second batch's checkpoint write.
+    assert (tmp_path / "store" / DST / DEST_10).read_bytes() == JPEG
+    assert not (tmp_path / "checkpoint.parquet").exists()
 
     rerun = _store(source, tmp_path)
     result = _build(source, tmp_path, store=rerun)
 
-    assert rerun.keys_of("copy_object") == ["images/coralnet/s2/20.png"]
+    assert rerun.keys_of("copy_object") == [DEST_10, "images/coralnet/s2/20.png"]
+    assert _row_10(result) == (f'"{JPEG_MD5}"', 12, JPEG_CRC, MULTIPART_10)
     assert result.tables["images.parquet"].column("crc64nvme").to_pylist() == [JPEG_CRC, PNG_CRC]
+    assert [
+        (r["dest_key"], r["etag"], r["size"], r["crc64nvme"])
+        for r in _read_checkpoint_rows(tmp_path)
+    ] == [
+        (DEST_10, f'"{JPEG_MD5}"', 12, JPEG_CRC),
+        ("images/coralnet/s2/20.png", f'"{PNG_MD5}"', 15, PNG_CRC),
+    ]
 
 
 @pytest.mark.parametrize(("extra", "writes"), [(1, 2), (2, 2)], ids=["3_images", "4_images"])
