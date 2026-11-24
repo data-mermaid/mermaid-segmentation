@@ -156,7 +156,6 @@ def test_build_records_the_legacy_licence_and_drop_counts_in_the_manifest(
     assert manifest.stats.dropped == {
         "damaged_images": 2,
         "off_annotations": 13,
-        "case_merged_labels": 1,
     }
     assert manifest.etl.command.startswith(
         f"segdata build moorea_labeled_corals --store {published.store}"

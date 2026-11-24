@@ -108,7 +108,6 @@ def legacy_dropped(name: str, manifest: dict) -> dict[str, int]:
         return {
             "damaged_images": len(manifest["damaged_images"]),
             "off_annotations": int(manifest["off_annotations_dropped"]),
-            "case_merged_labels": len(manifest["case_merged_labels"]),
         }
     if name in ("pacific_labeled_corals", "benthos_yuval"):
         return {}

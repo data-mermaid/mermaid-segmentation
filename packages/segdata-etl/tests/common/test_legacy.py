@@ -185,7 +185,7 @@ def test_legacy_dropped_counts_catlin_ids_across_regions() -> None:
     assert legacy_dropped("catlin_seaview", manifest) == {"damaged_images": 4}
 
 
-def test_legacy_dropped_counts_moorea_damaged_off_and_merged() -> None:
+def test_legacy_dropped_counts_moorea_damaged_and_off() -> None:
     manifest = {
         "damaged_images": ["2008/a.jpg", "2009/b.jpg"],
         "off_annotations_dropped": 11,
@@ -195,7 +195,6 @@ def test_legacy_dropped_counts_moorea_damaged_off_and_merged() -> None:
     assert legacy_dropped("moorea_labeled_corals", manifest) == {
         "damaged_images": 2,
         "off_annotations": 11,
-        "case_merged_labels": 3,
     }
 
 
@@ -208,7 +207,7 @@ def test_legacy_dropped_is_empty_for_datasets_without_drop_counts(name: str) -> 
     ("name", "manifest"),
     [
         ("catlin_seaview", {"source": {}}),
-        ("moorea_labeled_corals", {"damaged_images": [], "off_annotations_dropped": 0}),
+        ("moorea_labeled_corals", {"damaged_images": []}),
     ],
 )
 def test_legacy_dropped_raises_key_error_when_a_required_field_is_absent(
