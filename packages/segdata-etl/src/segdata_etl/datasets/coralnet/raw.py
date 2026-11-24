@@ -18,7 +18,6 @@ import shlex
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,7 @@ from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
 from segdata_etl.common.media import SNIFF_BYTES, sniff_media_type
 from segdata_etl.common.publishing import checked_git_state, count_labels, pick_version
 from segdata_etl.common.store import DEFAULT_STORE, open_store
+from segdata_etl.common.version import utc_today
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec.errors import ObjectExists
 from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
@@ -674,7 +674,7 @@ def run_raw(args: argparse.Namespace) -> int:
         checkpoint=checkpoint_path(args.store, args.build_run),
         parent_images=parent_images,
     )
-    version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=date.today())
+    version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
     manifest, sha = publish_dataset(
         client,
         bucket=bucket,

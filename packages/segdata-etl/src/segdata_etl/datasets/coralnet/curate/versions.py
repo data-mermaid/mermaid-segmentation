@@ -12,7 +12,6 @@ import hashlib
 import logging
 import shlex
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +19,7 @@ import pyarrow as pa
 
 from segdata_etl.common.publishing import checked_git_state, pick_version
 from segdata_etl.common.store import open_store
+from segdata_etl.common.version import utc_today
 from segdata_etl.datasets.coralnet.curate.build import curate
 from segdata_etl.label_maps.coralnet_api import (
     CoralNetLabelMappings,
@@ -233,7 +233,7 @@ def _command_line(args: argparse.Namespace) -> str:
 
 
 def _next_version(client: Any, bucket: str, git: GitState) -> str:
-    return pick_version(client, bucket, DATASET, git_sha=git.sha, today=date.today())
+    return pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
 
 
 def _publish(
