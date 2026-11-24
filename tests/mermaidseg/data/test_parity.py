@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import mermaidseg.data.parity as parity_module
 import mermaidseg.dataset_reconciliation.registry as registry_module
+from mermaidseg.data.config import DATASET_BUCKET
 from mermaidseg.data.parity import (
     DenseParityReport,
     ParityReport,
@@ -24,6 +29,7 @@ from mermaidseg.data.parity import (
     run_dense_parity,
     run_parity,
 )
+from segdata_spec.manifest import FileEntry, Manifest, Pin, dump_manifest, manifest_sha256
 from tests.mermaidseg.data.conftest import (
     ImageSpec,
     open_written,
@@ -373,6 +379,35 @@ class _StubDense:
         self.offset = offset
 
 
+class _StubUcsd(_StubDense):
+    def __init__(self, *args: Any, whitelist: set[str] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.whitelist = whitelist
+
+    def _resolved_original_splits(self) -> set[str] | None:
+        return self.whitelist
+
+
+def _set_attrs(cache_dir: Path, pin: Pin, attrs: Mapping[str, str]) -> Pin:
+    """Rewrite ``attrs`` of the version's images and re-pin the manifest."""
+    prefix = cache_dir / DATASET_BUCKET / "datasets" / pin.name / pin.version
+    table = pq.read_table(prefix / "images.parquet")
+    column = pa.array([attrs.get(i) for i in table["image_id"].to_pylist()], pa.string())
+    table = table.set_column(table.schema.get_field_index("attrs"), "attrs", column)
+    pq.write_table(table, prefix / "images.parquet")
+    data = (prefix / "images.parquet").read_bytes()
+    manifest = Manifest.model_validate_json((prefix / "manifest.json").read_bytes())
+    files = {
+        **manifest.files,
+        "images.parquet": FileEntry(
+            sha256=hashlib.sha256(data).hexdigest(), bytes=len(data), rows=table.num_rows
+        ),
+    }
+    manifest_bytes = dump_manifest(manifest.model_copy(update={"files": files}))
+    (prefix / "manifest.json").write_bytes(manifest_bytes)
+    return Pin(name=pin.name, version=pin.version, manifest_sha256=manifest_sha256(manifest_bytes))
+
+
 def _old_rows() -> list[tuple[str, np.ndarray, np.ndarray]]:
     return [("o1", _PIXELS["p1"], _MASK1), ("o2", _PIXELS["p2"], _MASK2)]
 
@@ -384,12 +419,15 @@ def _run_dense(
     new_images: Sequence[ImageSpec],
     new_labels: Sequence[dict[str, Any]] | None = None,
     probe: Any = lambda: None,
+    attrs: Mapping[str, str] | None = None,
 ) -> DenseParityReport:
     labels = new_labels or [
         {"label_id": i, "name": n, "mermaid_benthic_attribute": _ATTRIBUTES[n]}
         for i, n in _NAMES.items()
     ]
     cache_dir, _, pin = write_version(tmp_path, kind="dense", images=new_images, labels=labels)
+    if attrs is not None:
+        pin = _set_attrs(cache_dir, pin, attrs)
     monkeypatch.setitem(
         registry_module._REMOTE_FETCHERS, "catlin_seaview", lambda: dict(old.mapping)
     )
@@ -483,6 +521,82 @@ def test_dense_name_difference_alone_is_a_vocabulary_mismatch(
     assert report.vocab_mismatches == [
         VocabMismatch(
             label_id=2, old_name="b", new_name="b2", old_mapped="rubble", new_mapped="rubble"
+        )
+    ]
+
+
+def _split_attrs(**splits: str) -> dict[str, str]:
+    return {i: json.dumps({"original_split": split}) for i, split in splits.items()}
+
+
+def test_dense_original_split_whitelist_drops_new_images_the_old_loader_dropped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _StubUcsd(_old_rows()[:1], whitelist={"train"})
+
+    report = _run_dense(
+        monkeypatch, tmp_path, old, _new_images(), attrs=_split_attrs(n1="train", n2="test")
+    )
+
+    assert report.new_only == []
+    assert report.ok
+
+
+def test_dense_original_split_filter_still_reports_a_kept_image_that_differs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _StubUcsd(_old_rows()[:1], whitelist={"train"})
+
+    report = _run_dense(
+        monkeypatch,
+        tmp_path,
+        old,
+        _new_images(pixels2="p3"),
+        attrs=_split_attrs(n1="train", n2="train"),
+    )
+
+    assert report.new_only == ["n2"]
+    assert not report.ok
+
+
+def test_dense_without_an_original_split_filter_keeps_every_new_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _StubUcsd(_old_rows()[:1], whitelist=None)
+
+    report = _run_dense(
+        monkeypatch, tmp_path, old, _new_images(), attrs=_split_attrs(n1="train", n2="test")
+    )
+
+    assert report.new_only == ["n2"]
+
+
+def _subset_old(mapping: dict[str, str | None] | None = None) -> _StubDense:
+    old = _StubDense(_old_rows(), mapping=mapping)
+    old.class_subset = ["a"]
+    old.source_id2name = {1: "a"}
+    old.source_name2id = {"a": 1}
+    return old
+
+
+def test_dense_class_subset_compares_the_vocabulary_of_the_subset_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    report = _run_dense(monkeypatch, tmp_path, _subset_old(), _new_images())
+
+    assert report.vocab_mismatches == []
+
+
+def test_dense_class_subset_still_reports_a_mismatch_inside_the_subset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = _subset_old(mapping={"a": "Sand", "b": "Rubble", "c": None})
+
+    report = _run_dense(monkeypatch, tmp_path, old, _new_images())
+
+    assert report.vocab_mismatches == [
+        VocabMismatch(
+            label_id=1, old_name="a", new_name="a", old_mapped="sand", new_mapped="hard coral"
         )
     ]
 

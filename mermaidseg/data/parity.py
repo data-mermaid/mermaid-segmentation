@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -504,6 +505,28 @@ def _old_vocabulary(ds: Any) -> tuple[dict[int, str], dict[str, str | None]]:
     return _native_id2name(ds), _mapped_names(SourceLabelRegistry([ds]), ds)
 
 
+def _restrict_to_original_splits(ds: Any, images: pd.DataFrame) -> pd.DataFrame:
+    """Keep the images whose ``original_split`` the old loader kept, when it filters on one."""
+    resolve = getattr(ds, "_resolved_original_splits", None)
+    allowed = None if resolve is None else resolve()
+    if allowed is None:
+        return images
+    kept = [json.loads(attrs)["original_split"] in allowed for attrs in images["attrs"]]
+    return images[kept]
+
+
+def _subset_vocabulary(
+    ds: Any,
+    old_names: Mapping[int, str],
+    labels: pd.DataFrame,
+) -> tuple[dict[int, str], pd.DataFrame]:
+    """Limit the native names and the new labels to the ids of ``ds.class_subset``, if set."""
+    if getattr(ds, "class_subset", None) is None:
+        return dict(old_names), labels
+    ids = {i for i, name in old_names.items() if name in ds.source_name2id}
+    return {i: old_names[i] for i in ids}, labels[labels["label_id"].isin(ids)]
+
+
 def run_dense_parity(
     data_cfg: Mapping[str, Any],
     *,
@@ -549,6 +572,7 @@ def run_dense_parity(
     images = version_data.images.to_pandas()
     if groups is not None:
         images = images[images["group"].isin(groups)]
+    images = _restrict_to_original_splits(old, images)
     rows_by_id = {row["image_id"]: row for row in images.to_dict("records")}
     new_by_sha, new_pixels = _index_new_images(version_data, images)
     matched, old_only, new_only, mask_diffs, old_pixels = compare_dense_images(
@@ -557,7 +581,7 @@ def run_dense_parity(
         lambda image_id: _read_new_mask(version_data, rows_by_id[image_id]),
     )
     old_names, old_mapped = _old_vocabulary(old)
-    labels = version_data.labels.to_pandas()
+    old_names, labels = _subset_vocabulary(old, old_names, version_data.labels.to_pandas())
     return DenseParityReport(
         matched=matched,
         old_only=old_only,
