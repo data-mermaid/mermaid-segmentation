@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pyarrow as pa
 import pytest
+from uniform.conftest import FakeS3
 
 from segdata_etl.common.legacy import LegacyObject
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import CURATED_SCHEMA, CuratedSource
+from segdata_spec import DATASET_BUCKET
+from segdata_spec.errors import PublishRefused
+
+from .conftest import TAXONOMY_VERSION, publish_fixture_taxonomy
 
 ATTRIBUTES = pa.table(
     {
@@ -182,3 +189,38 @@ def test_require_same_ids_names_the_unmatched_id(
     external.require_same_ids({"a"}, {"a"}, what="images")
     with pytest.raises(ValueError, match=missing):
         external.require_same_ids(found, expected, what="images")
+
+
+def _published_taxonomy(tmp_path: Path) -> tuple[FakeS3, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "uv.lock").write_text("lock")
+    s3 = FakeS3()
+    return s3, publish_fixture_taxonomy(s3, repo)
+
+
+def test_load_taxonomy_refuses_a_pin_that_is_cached_but_not_published(tmp_path: Path) -> None:
+    s3, sha = _published_taxonomy(tmp_path)
+    cache = tmp_path / "cache"
+    external.load_taxonomy(
+        s3, DATASET_BUCKET, version=TAXONOMY_VERSION, manifest_sha256=sha, cache_dir=cache
+    )
+    s3.objects.clear()
+
+    with pytest.raises(PublishRefused, match=f"{TAXONOMY_VERSION} is not published"):
+        external.load_taxonomy(
+            s3, DATASET_BUCKET, version=TAXONOMY_VERSION, manifest_sha256=sha, cache_dir=cache
+        )
+
+
+def test_load_taxonomy_refuses_a_published_manifest_other_than_the_pin(tmp_path: Path) -> None:
+    s3, _ = _published_taxonomy(tmp_path)
+
+    with pytest.raises(PublishRefused, match="does not match its pin"):
+        external.load_taxonomy(
+            s3,
+            DATASET_BUCKET,
+            version=TAXONOMY_VERSION,
+            manifest_sha256="0" * 64,
+            cache_dir=tmp_path / "cache",
+        )
