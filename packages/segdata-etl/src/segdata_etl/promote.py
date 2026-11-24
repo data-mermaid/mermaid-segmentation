@@ -3,6 +3,10 @@
 The bucket denies deletes, so everything is checked before the first write. Images go first, then
 the tables, and ``manifest.json`` last: a version is visible only once its manifest exists, and a
 rerun after a crash finds the written objects already present and carries on.
+
+A staged version carries ``copies.jsonl``, ``uploads.jsonl``, or both (a dense dataset copies its
+images from S3 and uploads its masks). Together the two files must name every image and mask key
+in ``images.parquet`` exactly once.
 """
 
 from __future__ import annotations
@@ -183,23 +187,25 @@ def _upload_step(
 def _plan_steps(
     stage_dir: Path, version_dir: Path, expected: Mapping[str, _Expected]
 ) -> tuple[_Copy | _Upload, ...]:
+    """Return the steps of every staged plan file, copies before uploads.
+
+    The caller checks that the combined destination keys match ``expected`` exactly once each.
+    """
     present = [n for n in (COPIES_NAME, UPLOADS_NAME) if (version_dir / n).is_file()]
-    if len(present) != 1:
-        raise PublishRefused(
-            f"exactly one of {COPIES_NAME} and {UPLOADS_NAME} must be staged, found {present}"
-        )
-    name = present[0]
+    if not present:
+        raise PublishRefused(f"at least one of {COPIES_NAME} and {UPLOADS_NAME} must be staged")
     steps: list[_Copy | _Upload] = []
-    for number, line in enumerate(_read_lines(version_dir / name), start=1):
-        where = f"{name} line {number}"
-        if line.get("dst_bucket") != DATASET_BUCKET:
-            raise PublishRefused(f"{where}: destination bucket is not {DATASET_BUCKET}")
-        if line.get("dst_key") not in expected:
-            raise PublishRefused(f"plan keys differ from images.parquet: {where} is not in it")
-        if name == COPIES_NAME:
-            steps.append(_copy_step(line, expected, where))
-        else:
-            steps.append(_upload_step(stage_dir, line, expected, where))
+    for name in present:
+        for number, line in enumerate(_read_lines(version_dir / name), start=1):
+            where = f"{name} line {number}"
+            if line.get("dst_bucket") != DATASET_BUCKET:
+                raise PublishRefused(f"{where}: destination bucket is not {DATASET_BUCKET}")
+            if line.get("dst_key") not in expected:
+                raise PublishRefused(f"plan keys differ from images.parquet: {where} is not in it")
+            if name == COPIES_NAME:
+                steps.append(_copy_step(line, expected, where))
+            else:
+                steps.append(_upload_step(stage_dir, line, expected, where))
     return tuple(steps)
 
 
