@@ -10,6 +10,7 @@ from segdata_etl.common.local_store import LocalStore
 from segdata_spec import DATASET_BUCKET
 
 DEFAULT_STORE = Path("outputs") / "segdata-store"
+DEFAULT_CACHE_DIR = Path("outputs") / "segdata-cache"
 _S3 = "s3"
 
 

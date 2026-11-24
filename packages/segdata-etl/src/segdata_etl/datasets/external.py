@@ -26,7 +26,7 @@ from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
 from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject, sniff_image
 from segdata_etl.common.media import EXTENSIONS
 from segdata_etl.common.publishing import image_prefix
-from segdata_etl.common.store import add_store_argument
+from segdata_etl.common.store import DEFAULT_CACHE_DIR, add_store_argument
 from segdata_etl.label_maps.curated import CuratedMapInfo
 from segdata_spec.manifest import LabelMapping, Pin
 from segdata_spec.read import Taxonomy, open_taxonomy
@@ -34,7 +34,6 @@ from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 from segdata_spec.sync import sync
 
 DEFAULT_WORKERS = 16
-DEFAULT_CACHE_DIR = Path("outputs") / "segdata-cache"
 TAXONOMY_NAME = "mermaid-benthic"
 _IMAGES_FOLDER = "images"
 

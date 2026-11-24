@@ -17,7 +17,7 @@ from segdata_spec import DATASET_BUCKET
 
 from . import taxonomy
 from .common.cli_flags import _pin_flags
-from .common.store import add_store_argument
+from .common.store import DEFAULT_CACHE_DIR, add_store_argument
 from .datasets import benthos_yuval as benthos_yuval_build
 from .datasets import catlin_seaview as catlin_seaview_build
 from .datasets import moorea_labeled_corals as moorea_labeled_corals_build
@@ -200,7 +200,7 @@ def _add_curate_subcommand(top: Any) -> None:
     parser.add_argument(
         "--cache-dir",
         type=Path,
-        default=Path("outputs") / "segdata-cache",
+        default=DEFAULT_CACHE_DIR,
         help="Local cache for the synced parent tables (default: %(default)s)",
     )
     parser.add_argument(

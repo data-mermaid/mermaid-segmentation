@@ -232,10 +232,6 @@ def _command_line(args: argparse.Namespace) -> str:
     return shlex.join(parts)
 
 
-def _next_version(client: Any, bucket: str, git: GitState) -> str:
-    return pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
-
-
 def _publish(
     args: argparse.Namespace,
     client: Any,
@@ -281,11 +277,11 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
     client, bucket = open_store(args.store, source_client=source_client)
     if args.label_map == CLEANED_UP_RERUN:
         built = _curate_v1(args, client, bucket, repo_root)
-        version = _next_version(client, bucket, git)
+        version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
     else:
         built, v1, mappings = _curate_v2(args, client, bucket)
         check_reused_tables(v1.manifest, built.tables)
-        version = _next_version(client, bucket, git)
+        version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
         snapshot = _write_snapshot(args.out_dir / version, mappings)
         logger.info("wrote %s", snapshot)
     manifest, sha = _publish(args, client, bucket, built, version, repo_root, git)
