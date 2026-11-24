@@ -244,7 +244,7 @@ def _list_source_etags(client: Any, bucket: str, prefix: str, source_id: int) ->
 
 def _string_csv_reader(client: Any) -> CsvReader:
     """A boto3 reader yielding every cell as a string, as the DuckDB ``all_varchar`` reader does."""
-    return make_csv_reader_s3(client, dtype=str, keep_default_na=False)
+    return make_csv_reader_s3(client, dtype=str, keep_default_na=False, index_col=False)
 
 
 def _read_source(
