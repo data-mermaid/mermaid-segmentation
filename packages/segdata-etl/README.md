@@ -5,23 +5,23 @@ Builds the segmentation training data in S3: the CoralNet training manifest, the
 | Command | Does |
 |---|---|
 | `segdata build coralnet <stage>` | Builds the CoralNet training dataset (see [CoralNet](#coralnet)). |
-| `segdata build coralnet raw` | Publishes a CoralNet build run as the `coralnet-raw` dataset version (see [Publish coralnet-raw](#publish-coralnet-raw)). |
-| `segdata curate coralnet` | Publishes the curated `coralnet` v1 and v2 versions from `coralnet-raw` (see [Curate coralnet v1 and v2](#curate-coralnet-v1-and-v2)). |
+| `segdata build coralnet raw` | Stages a CoralNet build run as the `coralnet-raw` dataset version (see [Stage coralnet-raw](#stage-coralnet-raw)). |
+| `segdata curate coralnet` | Stages the curated `coralnet` v1 and v2 versions from `coralnet-raw` (see [Curate coralnet v1 and v2](#curate-coralnet-v1-and-v2)). |
 | `segdata ingest <name>` | Loads a raw external release into the legacy `external_validation_datasets/<name>/` prefix (see [Ingest an external dataset](#ingest-an-external-dataset)). |
 | `segdata build <name>` | Builds an immutable versioned dataset from that legacy prefix (see [Build a versioned external dataset](#build-a-versioned-external-dataset)). |
 | `segdata build <uniform>` | Stages a uniform-format version of `mermaid`, `coralscapes_v2` or `ucsd_mosaics` on disk (see [Uniform datasets](#uniform-datasets)). |
-| `segdata promote` | Uploads a staged uniform or external dataset version to `mermaid-ic-datasets` (see [Promote a version](#promote-a-version)). |
+| `segdata promote` | Uploads a staged dataset version to `mermaid-ic-datasets` (see [Promote a version](#promote-a-version)). |
 | `segdata taxonomy` | Snapshots the MERMAID benthic taxonomy as a version (see [Taxonomy snapshot](#taxonomy-snapshot)). |
 | `segdata split build`, `segdata split leakage` | Builds and checks the CoralNet split (see [CoralNet split](#coralnet-split)). |
 
 ## Scope
 
-- **Owns:** turning a CoralNet scrape into the training manifest, the resized images and the id2name JSON; checking each raw external release and writing it to the legacy S3 prefix; building the external datasets and the MERMAID benthic taxonomy as published versions; and staging the `mermaid`, `coralscapes_v2` and `ucsd_mosaics` versions and promoting them to `mermaid-ic-datasets`. The CoralNet code is in `segdata_etl/datasets/coralnet/` (the CLI stages are in `build.py`). The raw-release ingest modules are in `segdata_etl/ingest/`. The versioned external and uniform dataset modules are in `segdata_etl/datasets/`, with the shared external steps in `datasets/external.py` and the curated label maps in `label_maps/curated/<name>.csv`. `promote` is in `segdata_etl/promote.py`. The taxonomy snapshot is `segdata_etl/taxonomy.py`. The shared helpers are in `segdata_etl/common/`: `images.py`, `jpeg_header.py`, `publish.py`, `labels.py`, `manifest.py`, and for the uniform builds `s3_objects.py`, `stage.py` and `hf_dense.py`:
+**Owns:** turning a CoralNet scrape into the training manifest, the resized images and the id2name JSON; checking each raw external release and writing it to the legacy S3 prefix; building the external datasets and the MERMAID benthic taxonomy as published versions; and staging the `mermaid`, `coralscapes_v2` and `ucsd_mosaics` versions and promoting them to `mermaid-ic-datasets`. The CoralNet code is in `segdata_etl/datasets/coralnet/` (the CLI stages are in `build.py`). The raw-release ingest modules are in `segdata_etl/ingest/`. The versioned external and uniform dataset modules are in `segdata_etl/datasets/`, with the shared external steps in `datasets/external.py` and the curated label maps in `label_maps/curated/<name>.csv`. `promote` is in `segdata_etl/promote.py`. The taxonomy snapshot is `segdata_etl/taxonomy.py`. The shared helpers are in `segdata_etl/common/`: `images.py`, `jpeg_header.py`, `publish.py`, `labels.py`, `manifest.py`, and for the uniform builds `s3_objects.py`, `stage.py` and `hf_dense.py`:
   - `s3_objects.py`: write-once S3 copy and put. Each write sends `IfNoneMatch="*"`; a key that already holds the same content counts as done, and other content raises `ObjectConflict`.
   - `stage.py`: `LocalDirS3`, a directory that stands in for the S3 client so a build publishes to disk, and the version naming.
   - `hf_dense.py`: the shared build of a dense dataset from a pinned Hugging Face revision, used by `coralscapes_v2` and `ucsd_mosaics`.
-- **Does not own:** downloading CoralNet. That is [`coralnet-scraper`](../coralnet-scraper/README.md). Nor the MERMAID parquet or the Hugging Face datasets, except as the sources of the uniform `mermaid`, `coralscapes_v2` and `ucsd_mosaics` builds.
-- **Boundary:** The root `tests/test_package_boundaries.py` enforces these rules (run with the root suite): `segdata_etl` does not import `mermaidseg`; `mermaidseg` and `scripts` import neither `segdata_etl` nor `coralnet_scraper`; `coralnet_scraper` imports neither `mermaidseg` nor `segdata_etl`. Only `segdata_etl/datasets/coralnet/` may import `coralnet_scraper`, for its configuration and S3 key layout. The boundary test enforces this, so `common/`, `ingest/` and the external and uniform dataset modules stay free of it. The `segdata` CLI loads the CoralNet build code, and with it `coralnet_scraper` and `ibis`, only when a `build coralnet` stage runs. The argparse wiring is in `datasets/coralnet/commands.py`, which imports neither. A root `uv sync` does not install the package.
+**Does not own:** downloading CoralNet. That is [`coralnet-scraper`](../coralnet-scraper/README.md). Nor the MERMAID parquet or the Hugging Face datasets, except as the sources of the uniform `mermaid`, `coralscapes_v2` and `ucsd_mosaics` builds.
+**Boundary:** The root `tests/test_package_boundaries.py` enforces these rules (run with the root suite): `segdata_etl` does not import `mermaidseg`; `mermaidseg` and `scripts` import neither `segdata_etl` nor `coralnet_scraper`; `coralnet_scraper` imports neither `mermaidseg` nor `segdata_etl`. Only `segdata_etl/datasets/coralnet/` may import `coralnet_scraper`, for its configuration and S3 key layout. The boundary test enforces this, so `common/`, `ingest/` and the external and uniform dataset modules stay free of it. The `segdata` CLI loads the CoralNet build code, and with it `coralnet_scraper` and `ibis`, only when a `build coralnet` stage runs. The argparse wiring is in `datasets/coralnet/commands.py`, which imports neither. A root `uv sync` does not install the package.
 
 ```bash
 uv run --package segdata-etl segdata <command> ...
@@ -33,8 +33,8 @@ uv run --package segdata-etl segdata <command> ...
 
 Builds the CoralNet training dataset from a scrape on S3.
 
-- **End to end:** to recreate or update the CoralNet data, scrape through training, follow the [CoralNet data runbook](../../docs/runbooks/coralnet-data.md).
-- **Consumer:** `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`) reads the manifest and the id2name JSON.
+**End to end:** to recreate or update the CoralNet data, scrape through training, follow the [CoralNet data runbook](../../docs/runbooks/coralnet-data.md).
+**Consumer:** `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`) reads the manifest and the id2name JSON.
 
 ### Inputs
 
@@ -181,48 +181,47 @@ The dataset reads the label names from `coralnet_id2name_<run>.json` in the same
 
 ### Known gaps
 
-- Duplicate images (the same photo in several sources) are removed in training by `CoralNetDataset`'s `image_blacklist` and `annotation_overrides`. This package does not produce those files. Tracked in issue #231.
+Duplicate images (the same photo in several sources) are removed in training by `CoralNetDataset`'s `image_blacklist` and `annotation_overrides`. This package does not produce those files. Tracked in issue #231.
 
 ## CoralNet dataset versions
 
-Two commands publish CoralNet as dataset versions in the [segdata-spec](../segdata-spec/README.md) format. For the order to run them in, see [Publish CoralNet dataset versions](../../docs/runbooks/coralnet-data.md#publish-coralnet-dataset-versions).
+Two commands stage CoralNet as dataset versions in the [segdata-spec](../segdata-spec/README.md) format, and `segdata promote` publishes each one. For the order to run them in, see [Publish CoralNet dataset versions](../../docs/runbooks/coralnet-data.md#publish-coralnet-dataset-versions).
 
-| Command | Publishes | Built from |
+| Command | Stages | Built from |
 |---|---|---|
-| `segdata build coralnet raw` | `coralnet-raw` | A build run under `etl-outputs/coralnet/<run>/`, and the original images of the scrape. |
-| `segdata curate coralnet --label-map cleaned_up_rerun` | `coralnet` v1 | A `coralnet-raw` version and a `mermaid-benthic` taxonomy version. |
-| `segdata curate coralnet --label-map mermaid_api` | `coralnet` v2 | A v1 `coralnet` version, its `coralnet-raw` parent, and the MERMAID LabelMapping API. |
+| `segdata build coralnet raw` | `coralnet-raw`, with `copies.jsonl` | A build run under `etl-outputs/coralnet/<run>/`, and the original images of the scrape. |
+| `segdata curate coralnet --label-map cleaned_up_rerun` | `coralnet` v1, tables only | A `coralnet-raw` version and a `mermaid-benthic` taxonomy version. |
+| `segdata curate coralnet --label-map mermaid_api` | `coralnet` v2, tables only | A v1 `coralnet` version, its `coralnet-raw` parent, and the MERMAID LabelMapping API. |
 
-### Store, version name and publish guard
+### Stage directory, version name and publish guard
 
-These rules apply to both commands and to `segdata taxonomy`.
+These rules apply to both commands and to `segdata taxonomy --stage-dir`.
 
-- **Store.** `--store` is a local directory (default `outputs/segdata-store`) or `s3`. A directory store holds each object at `<dir>/mermaid-ic-datasets/<key>`, which is the segdata cache layout. `--store s3` writes to the bucket `mermaid-ic-datasets` with the default boto3 credentials. The pinned parent versions are read from the same store, so a version on S3 needs its parents on S3.
-- **Version name.** `YYYYMMDD-<sha7>`: the UTC date (`common.version.utc_today()`) and the first 7 characters of the HEAD commit. If the store already holds that version of the dataset, the command takes the lowest free suffix: `-2`, then `-3`, and so on.
-- **Publish guard.** `publish_dataset` (`segdata_spec/publish.py`) raises `PublishRefused` when tracked files have uncommitted changes, when no remote branch contains HEAD, or when the repository root has no `uv.lock`. The repository root is the nearest directory at or above the package that holds `.git` and `uv.lock`, so run the commands from a git checkout. `raw` checks the git state before it creates any S3 client, so it refuses an unpublishable tree before it copies any image.
-- **Write-once.** Tables, the manifest and copied images are written only if absent. A key that holds other bytes raises `ObjectExists`.
-- **Pin.** On success the command prints `version: <version>` and `manifest_sha256: <sha256>`. These two values are the pin that the next command takes.
+**Stage.** `--stage-dir` is a local directory. A command writes each object at `<stage>/mermaid-ic-datasets/<key>`, which is the segdata cache layout. No stage command writes to S3.
+**Version name.** `YYYYMMDD-<sha7>`: the UTC date and the first 7 characters of the HEAD commit. If the stage or the bucket already holds that version of the dataset, the command takes the lowest free suffix: `-2`, then `-3`, and so on. The bucket is read to check the name.
+**Publish guard.** `publish_dataset` (`segdata_spec/publish.py`) raises `PublishRefused` when tracked files have uncommitted changes, when no remote branch contains HEAD, or when the repository root has no `uv.lock`. The repository root is the nearest directory at or above the package that holds `.git` and `uv.lock`, so run the commands from a git checkout. `raw` checks the git state before it creates any S3 client, so it refuses an unpublishable tree before it probes any image.
+**Pin.** On success the command prints `version: <version>` and `manifest_sha256: <sha256>`. These two values are the pin that the next command takes. `segdata promote` publishes the staged version under the same name, so the pin of a staged version is the pin of the published one.
 
-### Publish coralnet-raw
+### Stage coralnet-raw
 
-`segdata build coralnet raw` publishes one build run as a `coralnet-raw` version, and copies the originals of its kept images into the store.
+`segdata build coralnet raw` stages one build run as a `coralnet-raw` version and plans the copy of the originals of its kept images.
 
 ```bash
-uv run --package segdata-etl segdata build coralnet raw --store s3
+uv run --package segdata-etl segdata build coralnet raw --stage-dir <stage> --build-run <run>
 ```
 
 The command reads `coralnet_annotations_<run>.parquet`, `coralnet_images_<run>.parquet` and `coralnet_id2name_<run>.json` from `etl-outputs/coralnet/<run>/` in `MERMAID_CORALNET_BUCKET`, which is required: the command raises `ValueError` when it is unset. It reads each source's `image_list.csv` and lists its `images/` folder under `MERMAID_CORALNET_PREFIX`. See [Environment variables](#environment-variables).
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--store` | `outputs/segdata-store` | Destination: a directory or `s3`. |
-| `--build-run` | `20260623_nogit` | Build run under `etl-outputs/coralnet/` to publish. |
-| `--source-ids 1,2,3` | all | Keep only these sources of the build run. A directory store needs it. `--store s3` refuses it, so an S3 version holds every source of the build run. |
-| `--parent-version`, `--parent-manifest-sha256` | none | A `coralnet-raw` version to reuse. Give both or neither. |
+| `--stage-dir` | required | Local directory the version is staged in. |
+| `--build-run` | `20260623_nogit` | Build run under `etl-outputs/coralnet/` to stage. |
+| `--source-ids 1,2,3` | all | Keep only these sources of the build run. |
+| `--parent-version`, `--parent-manifest-sha256` | none | A `coralnet-raw` version to reuse, staged under `--stage-dir`. Give both or neither. |
 | `--workers` | `MERMAID_CORALNET_ETL_WORKERS`, else 16 | Concurrent S3 workers. |
 | `-v`, `--verbose` | off | Debug logging. |
 
-A wrong flag combination is a usage error (exit 2) before any S3 read.
+One flag of the parent pin without the other is a usage error (exit 2) before any S3 read.
 
 The version holds:
 
@@ -235,7 +234,9 @@ The version holds:
 
 An image is kept when it has dimensions in the images parquet, has at least one annotation, has its original on S3, and is a JPEG or PNG. The media type is JPEG when `header_status` is `ok`; otherwise the command reads the first 8 bytes of the original.
 
-Each kept original is copied server side into the store, write-once, with a CRC64NVME checksum and the `INTELLIGENT_TIERING` storage class. A directory store downloads the originals into the directory. With a parent pin, an image whose `image_id` and source ETag match a parent row keeps the parent's key and object fields, and is not copied. The new version lists the parent in `parents`.
+The command probes every kept original with a HEAD. It also reads an original in full when it is multipart or has no CRC64NVME checksum, which covers most scraper uploads, and computes the ETag, size and CRC64NVME its copy will carry. No image is copied. `copies.jsonl`, staged beside the tables, plans one server-side copy for each image, with `storage_class` `INTELLIGENT_TIERING`. With a parent pin, an image whose `image_id` and source ETag match a parent row keeps the parent's key and object fields, and is not probed. The new version lists the parent in `parents`.
+
+Run a full corpus on an EC2 host in `us-east-1`. The full reads dominate the run time and the transfer.
 
 `stats.dropped` in the manifest:
 
@@ -248,32 +249,26 @@ Each kept original is copied server side into the store, write-once, with a CRC6
 | `unsupported_format` | images | Originals that are neither JPEG nor PNG. |
 | `source_name_missing` | images | Published images with a null `source_name`. These images stay in the version. |
 
-#### Resume a raw publish
+#### Resume a raw stage
 
-A rerun copies only what the store does not hold:
+The probe results are checkpointed in `<stage>/checkpoints/coralnet-raw-<build-run>-<sha7>.parquet`, where `<sha7>` is the first 7 characters of the HEAD commit. A rerun of the same command with the same `--stage-dir` and commit probes only the images that the checkpoint lacks.
 
-1. The command lists every object under `images/coralnet/` in the destination.
-2. A listed key counts as copied when its ETag is the original's ETag, or when the checkpoint has a row with the same key, original ETag and listed ETag. Its CRC64NVME comes from that checkpoint row, else from a HEAD.
-3. A listed key with any other ETag stops the run with `ObjectExists` before any copy, unless the original is multipart (its ETag contains `-`). A copy writes a multipart original as one part with a new ETag, so the listing cannot match it. Such a key goes to the copy step instead.
-4. The command copies the rest in batches of 1000. It writes the checkpoint every 20 batches and once after the last batch. A crash loses the checkpoint rows since the last write; the rerun adopts those keys again from the listing and a HEAD, and a multipart original through the conditional copy and compare. When a conditional copy fails with 412 because the key exists, the command compares the size and CRC64NVME of both objects (MD5 when either has no CRC). It adopts the object when they match and raises `ObjectExists` when they differ.
-
-The checkpoint is a parquet of each copied key with its original ETag, ETag, size and CRC64NVME:
-
-- `--store s3`: `outputs/coralnet-raw-checkpoints/s3-<build-run>.parquet`, relative to the working directory.
-- Directory store: `<store>/checkpoints/coralnet-raw-<build-run>.parquet`.
-
-Without the checkpoint a rerun is still correct, but it sends a HEAD for each held key and sends each multipart original through the copy and compare again.
+The checkpoint is written after every 20th batch of 1000 probes, and once after the last batch. A crash loses the probes since the last write.
+A checkpoint row wins over a parent row for the same image.
+A new commit starts a new checkpoint.
 
 ### Curate coralnet v1 and v2
 
-`segdata curate coralnet` publishes a `coralnet` version from pinned parents. `--label-map` selects the version kind.
+`segdata curate coralnet` stages a `coralnet` version from pinned parents. `--label-map` selects the version kind. The version holds tables only, on the image store of raw: no plan file is staged, and no image is read or copied.
 
 ```bash
-uv run --package segdata-etl segdata curate coralnet --label-map cleaned_up_rerun --store s3 \
+uv run --package segdata-etl segdata curate coralnet --label-map cleaned_up_rerun \
+  --stage-dir <stage> \
   --raw-version <v> --raw-manifest-sha256 <sha> \
   --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
 
-uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api --store s3 \
+uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api \
+  --stage-dir <stage> \
   --raw-version <v> --raw-manifest-sha256 <sha> \
   --parent-version <v1> --parent-manifest-sha256 <sha>
 ```
@@ -281,17 +276,16 @@ uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api --s
 | Flag | Default | Effect |
 |---|---|---|
 | `--label-map` | required | `cleaned_up_rerun` (v1) or `mermaid_api` (v2). |
-| `--store` | `outputs/segdata-store` | Destination, and where the parents are read from. |
+| `--stage-dir` | required | Local directory the version is staged in. |
 | `--raw-version`, `--raw-manifest-sha256` | required | Pin of the `coralnet-raw` parent. |
 | `--taxonomy-version`, `--taxonomy-manifest-sha256` | none | Pin of the `mermaid-benthic` taxonomy. `cleaned_up_rerun` needs both; `mermaid_api` takes neither. |
 | `--parent-version`, `--parent-manifest-sha256` | none | Pin of the v1 `coralnet` version. `mermaid_api` needs both; `cleaned_up_rerun` takes neither. |
-| `--cache-dir` | `outputs/segdata-cache` | Where the parent tables are synced. No image is synced. |
-| `--out-dir` | `outputs/coralnet-curate` | `mermaid_api` writes a local copy of the API snapshot to `<out-dir>/<version>/coralnet_label_mappings.json`. |
+| `--cache-dir` | `outputs/segdata-cache` | Where the parent tables and the taxonomy are synced from S3. The command reads this directory first, so `--cache-dir <stage>` reads parents that are only staged. No image is synced. |
 | `-v`, `--verbose` | off | Debug logging. |
 
 A missing pin flag, a pin flag of the other label map, or one flag of a pin without the other is a usage error (exit 2). The message names the flags.
 
-**v1 (`cleaned_up_rerun`)** has one parent, the raw version, and uses its image store. It copies no image.
+**v1 (`cleaned_up_rerun`)** has one parent, the raw version, and uses its image store.
 
 1. Overrides. For each image in `configs/coralnet/annotation_overrides.parquet`, the override points replace all of that image's raw points. Override points are in the pixel space of the image resized to a longest edge of 2048. For an original whose longest edge is more than 2048, each point is mapped back to original coordinates: a raw point with the same label that scales to the same position gives its exact coordinates; otherwise the command takes the smallest original coordinate that scales to the override position. Overrides of smaller images are used as they are.
 2. Blacklist. The images in `configs/coralnet/image_blacklist.parquet` (by `image_id`) and their points are dropped.
@@ -301,9 +295,9 @@ A missing pin flag, a pin flag of the other label map, or one flag of a pin with
 
 1. The raw pin must be a `coralnet-raw` parent that the v1 manifest declares. Otherwise the run stops with `ValueError`.
 2. The command fetches every CoralNet row from `https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet&limit=1000`. It retries a GET 3 times on connection errors and 502, 503 and 504, then fails. It never uses an older copy.
-3. `images.parquet`, `points.parquet` and `stats/label_counts.parquet` are v1's. Before it publishes, the command checks that each one serialises to the sha256 and size in v1's manifest, and raises `RuntimeError` if one differs. `stats.dropped` repeats v1's.
+3. `images.parquet`, `points.parquet` and `stats/label_counts.parquet` are v1's. Before it stages, the command checks that each one serialises to the sha256 and size in v1's manifest, and raises `RuntimeError` if one differs. `stats.dropped` repeats v1's.
 4. Labels. One row per label of the raw version, joined to the API rows on the integer CoralNet Label ID. A label is unmapped when its name is not a string, the API has no row for it, or the row's `benthic_attribute_name` is null. Mapped rows take the attribute ID, attribute name and growth form name from the API.
-5. The command writes the snapshot under `--out-dir`, then publishes. The snapshot holds `fetched_at`, `sha256` and the rows sorted by ID. The command also publishes it as `coralnet_label_mappings.json` under the version prefix (`datasets/coralnet/<version>/`), after the tables and before `manifest.json`. The manifest's `files` does not list it. Its `sha256` equals `label_mapping.sha256` in the manifest, which also records the fetch time. If the snapshot cannot be written, nothing is published.
+5. The snapshot of the API rows is an extra file of the version, `coralnet_label_mappings.json`, staged beside the tables and listed in the manifest's `extra_files`. It holds `fetched_at`, `sha256` and the rows sorted by ID. Its `sha256` equals `label_mapping.sha256` in the manifest, which also records the fetch time. `segdata promote` uploads it with the tables.
 
 `stats.dropped` of a v1 version:
 
@@ -364,17 +358,17 @@ uv run --package segdata-etl segdata split build \
 
 `build` stops with a `ValueError` before it writes any output file when:
 
-- The `--raw-version` and `--raw-manifest-sha256` pin is not a `coralnet-raw` parent that the `coralnet` manifest declares. The error lists the declared parents.
-- A raw image of a source in the split universe has no `crc64nvme`, so it cannot be matched as a duplicate. The universe is the curated sources minus `--exclude-sources`. The error gives the count and the sorted source ids.
-- A `--test-sources` id is not in the universe (for example, it is also in `--exclude-sources`). The error lists the sorted ids.
+The `--raw-version` and `--raw-manifest-sha256` pin is not a `coralnet-raw` parent that the `coralnet` manifest declares. The error lists the declared parents.
+A raw image of a source in the split universe has no `crc64nvme`, so it cannot be matched as a duplicate. The universe is the curated sources minus `--exclude-sources`. The error gives the count and the sorted source ids.
+A `--test-sources` id is not in the universe (for example, it is also in `--exclude-sources`). The error lists the sorted ids.
 
 ### Check a split for leakage
 
 `leakage` reads a split file and the `images.parquet` of the pinned `coralnet` version. Two images are the same when their `crc64nvme` and `size` match. Groups the split file does not list, and rows with `split` `excluded`, are ignored. The check reports:
 
-- images of val that also appear in train, and images of test that also appear in train or val, per group;
-- pairs of groups in different splits that share an image;
-- `split_group` values that span more than one split. Blank values are skipped.
+images of val that also appear in train, and images of test that also appear in train or val, per group;
+pairs of groups in different splits that share an image;
+`split_group` values that span more than one split. Blank values are skipped.
 
 The command prints the report. With `--out-dir` it also writes `leakage_per_source.csv`, `leakage_pairs.csv` and `leakage_split_groups.csv`. It exits 1 if any of the three findings is non-empty, and 0 otherwise.
 
@@ -450,11 +444,20 @@ Publishing is irreversible. `mermaid-ic-datasets` denies overwrite and delete, s
 uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset <dataset> --version <version>
 ```
 
-`promote` also takes `--workers` (default 16) and `-v`, `--verbose`. It writes in this order:
+`promote` also takes `--workers` (default 16) and `-v`, `--verbose`.
 
-1. Preflight, before any write. It checks the staged tables against `manifest.json`, refuses a manifest whose `stats.n_images` is 0, checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name exactly the image and mask keys in `images.parquet`, each once, with the same size and checksums, and checks each staged upload file. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
-2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`.
-3. The tables.
+A staged version has one of two shapes:
+
+- A version with `copies.jsonl`, `uploads.jsonl` or both. `copies.jsonl` plans server-side copies of images from S3; `uploads.jsonl` plans uploads of staged files. A `copies.jsonl` line may name a `storage_class` for its copy, and `coralnet-raw` names `INTELLIGENT_TIERING` for each. A line without one uses the bucket default.
+- A tables-only version, with neither file. It reuses images that are already published. `promote` publishes it only when a published parent has the same image store.
+
+Either shape may list `extra_files` in its manifest. `promote` uploads each one under the version prefix after the tables, and requires the staged bytes to match the sha256 and size in the manifest. The `coralnet` v2 version carries `coralnet_label_mappings.json` this way.
+
+`promote` writes in this order:
+
+1. Preflight, before any write. It checks the staged tables and extra files against `manifest.json`, and refuses a manifest whose `stats.n_images` is 0. It checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name exactly the image and mask keys in `images.parquet`, each once, with the same size and checksums, and checks each staged upload file. For a tables-only version, it checks that a published parent has the same image store, then HEADs every image and mask key in `images.parquet` in the bucket: each must exist with the row's ETag, size and CRC64NVME. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table and extra file key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
+2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`. A tables-only version writes none.
+3. The tables and the extra files.
 4. `manifest.json`.
 
 Every write is write-once. A key that already holds the planned content counts as done, and other content stops the run with `ObjectConflict`. A version is visible only when its `manifest.json` exists. If `promote` stops before step 4, run it again: it continues from the objects already written.
@@ -544,10 +547,10 @@ Flags for each ingest command:
 
 The README of each dataset lists the raw files to download and their layout:
 
-- [Catlin Seaview](../../mermaidseg/datasets/catlin_seaview/README.md)
-- [Moorea Labeled Corals](../../mermaidseg/datasets/moorea_labeled_corals/README.md)
-- [Pacific Labeled Corals](../../mermaidseg/datasets/pacific_labeled_corals/README.md)
-- [Benthos](../../mermaidseg/datasets/benthos_yuval/README.md)
+[Catlin Seaview](../../mermaidseg/datasets/catlin_seaview/README.md)
+[Moorea Labeled Corals](../../mermaidseg/datasets/moorea_labeled_corals/README.md)
+[Pacific Labeled Corals](../../mermaidseg/datasets/pacific_labeled_corals/README.md)
+[Benthos](../../mermaidseg/datasets/benthos_yuval/README.md)
 
 ## Build a versioned external dataset
 
