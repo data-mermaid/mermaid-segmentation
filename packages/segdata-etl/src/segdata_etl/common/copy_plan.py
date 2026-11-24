@@ -1,4 +1,7 @@
-"""Dataset-independent source probing and the server-side copy plan shared by the object-copy builders."""
+"""Dataset-independent source probing and the promote plans shared by the staging builders.
+
+``copies.jsonl`` lists server-side copies from a source bucket; ``uploads.jsonl`` lists staged files.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.s3_objects import (
+    ObjectConflict,
     SourceChanged,
     crc64nvme_b64,
     image_size,
@@ -24,6 +28,7 @@ from segdata_spec._s3 import cache_path, dataset_prefix, is_precondition_failed
 logger = logging.getLogger(__name__)
 
 COPIES_NAME = "copies.jsonl"
+UPLOADS_NAME = "uploads.jsonl"
 
 _FIRST_READ = 64 * 1024
 _MAX_READ = 1024 * 1024
@@ -181,3 +186,49 @@ def write_copies(
     """Write ``copies.jsonl`` for the staged version, one sorted-key JSON object per line."""
     path = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version) + COPIES_NAME)
     path.write_text("".join(json.dumps(entry, sort_keys=True) + "\n" for entry in plan))
+
+
+@dataclass(frozen=True)
+class StagedFile:
+    """One staged object and the upload that will put it in the dataset bucket."""
+
+    key: str
+    size: int
+    crc64nvme: str
+    content_type: str
+
+
+def stage_bytes(stage_dir: Path, key: str, data: bytes) -> None:
+    """Write ``data`` at dataset-bucket ``key`` in the stage; an existing file must hold the same bytes.
+
+    Raises:
+        ObjectConflict: The staged file exists with other bytes.
+    """
+    path = cache_path(stage_dir, DATASET_BUCKET, key)
+    if path.exists():
+        if path.read_bytes() != data:
+            raise ObjectConflict(f"{path} already holds different bytes")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def upload_entries(files: Sequence[StagedFile]) -> list[dict[str, Any]]:
+    """Describe the upload of each staged file, in destination-key order."""
+    return [
+        {
+            "local_path": f"{DATASET_BUCKET}/{f.key}",
+            "dst_bucket": DATASET_BUCKET,
+            "dst_key": f.key,
+            "size": f.size,
+            "crc64nvme": f.crc64nvme,
+            "content_type": f.content_type,
+        }
+        for f in sorted(files, key=lambda f: f.key)
+    ]
+
+
+def write_uploads(stage_dir: Path, dataset: str, version: str, files: Sequence[StagedFile]) -> None:
+    """Write ``uploads.jsonl`` for the staged version, one sorted-key JSON object per line."""
+    path = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version) + UPLOADS_NAME)
+    path.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in upload_entries(files)))

@@ -1,33 +1,34 @@
-"""``segdata build benthos_yuval`` from a fake legacy prefix of tiles and masks into a LocalStore."""
+"""``segdata build benthos_yuval`` from a fake legacy prefix of tiles and masks into a local stage."""
 
 from __future__ import annotations
 
 import io
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
-from common.conftest import FakeS3
+from uniform.conftest import FakeS3
 
-from segdata_etl.common.local_store import LocalStore
+from segdata_etl import promote
 from segdata_etl.datasets import benthos_yuval
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.read import DatasetVersion, open_version
 
 from .conftest import (
     LEGACY_BUCKET,
+    Staged,
+    assert_copies_match_sources,
     assert_curated_label_mapping,
     build_args,
-    copied_columns,
     legacy_etag,
     make_repo,
     mask_png,
+    plan_lines,
     png,
+    probed_columns,
     publish_fixture_taxonomy,
-    run_builder,
+    stage_version,
 )
 
 PREFIX = "external_validation_datasets/benthos_yuval/"
@@ -77,15 +78,8 @@ def _legacy(
         if mask is not None:
             files[f"labels/{site}/{stem}.png"] = mask_png(mask)
     for name, data in files.items():
-        s3.objects[(LEGACY_BUCKET, PREFIX + name)] = data
+        s3.put(LEGACY_BUCKET, PREFIX + name, data)
     return files
-
-
-@dataclass(frozen=True)
-class Published:
-    store: Path
-    version: DatasetVersion
-    files: dict[str, bytes]
 
 
 @pytest.fixture
@@ -94,47 +88,103 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def published(repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Published:
-    s3 = FakeS3()
-    files = _legacy(s3)
-    store = tmp_path / "store"
-    taxonomy_sha = publish_fixture_taxonomy(LocalStore(store), repo)
-    pin = run_builder(benthos_yuval, build_args(benthos_yuval, store, taxonomy_sha), s3, capsys)
-    return Published(store, open_version(store, DATASET_BUCKET, pin), files)
+def s3() -> FakeS3:
+    fake = FakeS3()
+    _legacy(fake)
+    return fake
 
 
-def test_build_names_tiles_by_site_and_copies_each_mask(published: Published) -> None:
+@pytest.fixture
+def staged(s3: FakeS3, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Staged:
+    return stage_version(benthos_yuval, s3, repo, tmp_path, capsys)
+
+
+def _file(s3: FakeS3, name: str) -> bytes:
+    return s3.objects[(LEGACY_BUCKET, PREFIX + name)]
+
+
+def test_build_names_tiles_by_site_with_their_mask_columns(s3: FakeS3, staged: Staged) -> None:
     def row(site: str, stem: str, w: int, h: int) -> dict[str, object]:
-        image = published.files[f"images/{site}/{stem}.png"]
-        mask = published.files[f"labels/{site}/{stem}.png"]
+        image = _file(s3, f"images/{site}/{stem}.png")
+        mask = _file(s3, f"labels/{site}/{stem}.png")
         return {
             "image_id": f"{site}_{stem}",
             "key": f"{site}/{site}_{stem}.png",
-            **copied_columns(image),
+            **probed_columns(image),
             "media_type": "image/png",
             "width": w,
             "height": h,
             "group": site,
             "mask_key": f"{site}/{site}_{stem}_mask.png",
-            **copied_columns(mask, "mask_"),
+            **probed_columns(mask, "mask_"),
             "source_fingerprint": legacy_etag(image),
             "source_name": f"{stem}.png",
             "attrs": None,
         }
 
-    assert sorted(published.version.images.to_pylist(), key=lambda r: r["image_id"]) == [
+    assert sorted(staged.version.images.to_pylist(), key=lambda r: r["image_id"]) == [
         row("CR_DoubleWreck", "0_0", 3, 3),
         row("RS24", "0_0", 4, 4),
         row("RS24", "0_4", 4, 2),
     ]
-    copied = published.store / DATASET_BUCKET / "images/benthos_yuval/RS24/RS24_0_0_mask.png"
-    assert copied.read_bytes() == published.files["labels/RS24/0_0.png"]
 
 
-def test_build_publishes_a_dense_version_counting_mask_pixels_without_unlabeled(
-    published: Published,
+def test_build_plans_image_copies_and_stages_each_mask_for_upload(
+    s3: FakeS3, staged: Staged
 ) -> None:
-    version = published.version
+    assert_copies_match_sources(
+        staged,
+        {
+            f"{site}_{stem}": (
+                f"{PREFIX}images/{site}/{stem}.png",
+                _file(s3, f"images/{site}/{stem}.png"),
+            )
+            for site, stem in TILES
+        },
+    )
+    expected = []
+    for site, stem in sorted(TILES):
+        mask = _file(s3, f"labels/{site}/{stem}.png")
+        key = f"images/benthos_yuval/{site}/{site}_{stem}_mask.png"
+        assert (staged.stage / DATASET_BUCKET / key).read_bytes() == mask
+        expected.append(
+            {
+                "local_path": f"{DATASET_BUCKET}/{key}",
+                "dst_bucket": DATASET_BUCKET,
+                "dst_key": key,
+                "size": len(mask),
+                "crc64nvme": probed_columns(mask)["crc64nvme"],
+                "content_type": "image/png",
+            }
+        )
+    assert plan_lines(staged.stage, staged.pin, "uploads.jsonl") == expected
+
+
+def test_staged_version_promotes_with_images_copied_and_masks_uploaded(
+    s3: FakeS3, staged: Staged
+) -> None:
+    promote.promote(
+        s3, stage_dir=staged.stage, dataset=staged.pin.name, version=staged.pin.version, workers=2
+    )
+
+    prefix = f"datasets/benthos_yuval/{staged.pin.version}/"
+    assert (DATASET_BUCKET, prefix + "manifest.json") in s3.objects
+    expected = {}
+    for site, stem in TILES:
+        base = f"images/benthos_yuval/{site}/{site}_{stem}"
+        expected[base + ".png"] = _file(s3, f"images/{site}/{stem}.png")
+        expected[base + "_mask.png"] = _file(s3, f"labels/{site}/{stem}.png")
+    assert {
+        key: data
+        for (bucket, key), data in s3.objects.items()
+        if bucket == DATASET_BUCKET and key.startswith("images/")
+    } == expected
+
+
+def test_build_stages_a_dense_version_counting_mask_pixels_without_unlabeled(
+    staged: Staged,
+) -> None:
+    version = staged.version
     assert version.manifest.kind == "dense"
     assert version.points is None
     assert version.label_counts.to_pylist() == [
@@ -145,14 +195,11 @@ def test_build_publishes_a_dense_version_counting_mask_pixels_without_unlabeled(
     ]
 
 
-def test_build_records_the_dryad_licence_and_no_drops(published: Published) -> None:
-    manifest = published.version.manifest
+def test_build_records_the_dryad_licence_and_no_drops(staged: Staged) -> None:
+    manifest = staged.version.manifest
     assert manifest.source.license == "CC0 1.0 (Dryad)"
     assert manifest.stats.dropped == {}
-    assert manifest.etl.command.startswith(f"segdata build benthos_yuval --store {published.store}")
-    assert_curated_label_mapping(
-        published.version.manifest, benthos_yuval.DATASET, published.version.labels
-    )
+    assert_curated_label_mapping(manifest, benthos_yuval.DATASET, staged.version.labels)
 
 
 @pytest.mark.parametrize(
@@ -165,7 +212,7 @@ def test_build_records_the_dryad_licence_and_no_drops(published: Published) -> N
     ],
     ids=["size-differs", "value-not-a-label", "labels-disagree-with-parquet", "mask-missing"],
 )
-def test_build_refuses_a_bad_mask_before_copying_any_image(
+def test_build_refuses_a_bad_mask_before_staging(
     repo: Path,
     tmp_path: Path,
     masks: dict[tuple[str, str], np.ndarray | None],
@@ -174,10 +221,10 @@ def test_build_refuses_a_bad_mask_before_copying_any_image(
 ) -> None:
     s3 = FakeS3()
     _legacy(s3, annotations, masks)
-    store = tmp_path / "store"
-    taxonomy_sha = publish_fixture_taxonomy(LocalStore(store), repo)
+    stage = tmp_path / "stage"
+    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
     with pytest.raises(ValueError, match=message):
-        benthos_yuval.run(build_args(benthos_yuval, store, taxonomy_sha), s3)
+        benthos_yuval.run(build_args(benthos_yuval, stage, taxonomy_sha), s3)
 
-    assert not (store / DATASET_BUCKET / "images").exists()
+    assert not stage.exists()

@@ -1,4 +1,4 @@
-"""``segdata build benthos_yuval``: publish the legacy Benthos tiles and masks as a dense version."""
+"""``segdata build benthos_yuval``: stage the legacy Benthos tiles and masks as a dense version."""
 
 from __future__ import annotations
 
@@ -15,12 +15,13 @@ import pandas as pd
 import pyarrow as pa
 from PIL import Image
 
-from segdata_etl.common import publishing
 from segdata_etl.common.legacy import LegacyDataset, legacy_dropped, read_legacy, source_info
-from segdata_etl.common.store import open_store
+from segdata_etl.common.stage import refuse_unpublishable
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_etl.taxonomy import find_repo_root
+from segdata_spec import DATASET_BUCKET
+from segdata_spec.publish import probe_git
 from segdata_spec.schema import LABEL_COUNTS_SCHEMA
 
 DATASET = "benthos_yuval"
@@ -105,18 +106,19 @@ def _mask_stats(png: bytes) -> _MaskStats:
     )
 
 
-def _read_mask_stats(
+def _read_masks(
     client: Any, images: Sequence[external.LegacyImage], *, legacy: LegacyDataset, workers: int
-) -> dict[str, _MaskStats]:
-    """Download and decode each tile's legacy mask on ``workers`` threads, keyed by image id."""
+) -> dict[str, bytes]:
+    """Download each tile's legacy mask on ``workers`` threads, keyed by image id."""
 
-    def read(image: external.LegacyImage) -> _MaskStats:
+    def read(image: external.LegacyImage) -> bytes:
         key = legacy.prefix + str(image.mask_key)
-        return _mask_stats(client.get_object(Bucket=legacy.bucket, Key=key)["Body"].read())
+        data: bytes = client.get_object(Bucket=legacy.bucket, Key=key)["Body"].read()
+        return data
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        stats = list(pool.map(read, images))
-    return {image.image_id: stat for image, stat in zip(images, stats, strict=True)}
+        masks = list(pool.map(read, images))
+    return {image.image_id: mask for image, mask in zip(images, masks, strict=True)}
 
 
 def _mask_problem(
@@ -169,19 +171,23 @@ def _mask_label_counts(stats: Mapping[str, _MaskStats]) -> pa.Table:
 
 
 def run(args: argparse.Namespace, client: Any) -> int:
-    """Publish a new dense ``benthos_yuval`` version and print its version and manifest sha256.
+    """Stage a new dense ``benthos_yuval`` version and print its version and manifest sha256.
 
-    Every mask is downloaded and checked before any image is copied.
+    Every kept tile's mask is downloaded and checked before anything is staged; the masks are
+    staged for upload and the tiles planned as copies.
+
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed.
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
-    dest, bucket = open_store(args.store, source_client=client)
-    git = publishing.checked_git_state(repo_root)
+    git = probe_git(repo_root)
+    refuse_unpublishable(git)
     taxonomy = external.load_taxonomy(
-        dest,
-        bucket,
+        client,
+        DATASET_BUCKET,
         version=args.taxonomy_version,
         manifest_sha256=args.taxonomy_manifest_sha256,
-        cache_dir=external.taxonomy_cache_dir(args.store, args.cache_dir),
+        cache_dir=args.cache_dir,
     )
     legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
     source = source_info(legacy, license_override=LICENSE)
@@ -200,10 +206,11 @@ def run(args: argparse.Namespace, client: Any) -> int:
         what="benthos masks",
     )
     tile_labels = _tile_labels(legacy.annotations, legacy.classes)
-    sniffed = external.sniff_legacy_images(client, images, legacy=legacy, workers=args.workers)
-    stats = _read_mask_stats(client, images, legacy=legacy, workers=args.workers)
+    probe = external.probe_legacy_images(client, images, legacy=legacy, workers=args.workers)
+    masks = _read_masks(client, probe.images, legacy=legacy, workers=args.workers)
+    stats = {image_id: _mask_stats(mask) for image_id, mask in masks.items()}
     label_ids = labels.column("label_id").to_pylist()
-    _require_masks_match(images, sniffed, stats, tile_labels, label_ids)
+    _require_masks_match(probe.images, probe.sniffed, stats, tile_labels, label_ids)
     return external.publish_version(
         dataset=DATASET,
         kind="dense",
@@ -218,11 +225,9 @@ def run(args: argparse.Namespace, client: Any) -> int:
         dropped=dropped,
         git=git,
         repo_root=repo_root,
-        source_client=client,
-        dest=dest,
-        bucket=bucket,
-        images=images,
-        sniffed=sniffed,
+        client=client,
+        probe=probe,
         legacy=legacy,
         args=args,
+        masks=masks,
     )

@@ -16,11 +16,9 @@ from segdata_etl.common.legacy import (
     LegacyObject,
     legacy_dropped,
     read_legacy,
-    sniff_image,
     source_info,
     source_revision,
 )
-from segdata_spec.errors import ImageUndecodable
 
 BUCKET = "dev-datamermaid-sm-sources"
 
@@ -51,29 +49,18 @@ class _Paginator:
 
 
 class LegacyS3:
-    """In-memory S3 client with a paginated listing and ranged GETs."""
+    """In-memory S3 client with a paginated listing and whole-object GETs."""
 
     def __init__(self, objects: dict[tuple[str, str], bytes], reverse_listing: bool = False):
         self.objects = objects
         self.reverse_listing = reverse_listing
-        self.get_calls: list[dict[str, Any]] = []
 
     def get_paginator(self, operation: str) -> _Paginator:
         assert operation == "list_objects_v2"
         return _Paginator(self)
 
-    def get_object(  # noqa: N803
-        self, *, Bucket: str, Key: str, Range: str | None = None
-    ) -> dict[str, Any]:
-        self.get_calls.append({"Key": Key, "Range": Range})
-        data = self.objects[(Bucket, Key)]
-        if Range is None:
-            return {"Body": _Body(data)}
-        start, end = (int(x) for x in Range.removeprefix("bytes=").split("-"))
-        return {
-            "Body": _Body(data[start : end + 1]),
-            "ContentRange": f"bytes {start}-{min(end, len(data) - 1)}/{len(data)}",
-        }
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+        return {"Body": _Body(self.objects[(Bucket, Key)])}
 
 
 def _image_bytes(fmt: str, size: tuple[int, int], **save_kwargs: Any) -> bytes:
@@ -103,33 +90,6 @@ def _legacy_objects(name: str = "demo", prefix: str | None = None) -> dict[tuple
         (BUCKET, f"{prefix}images/g1/a.jpg"): _image_bytes("JPEG", (7, 5)),
         (BUCKET, f"{prefix}images/g2/b.jpg"): _image_bytes("JPEG", (7, 5), quality=50),
     }
-
-
-def test_sniff_image_reads_media_type_and_width_height_from_bytes() -> None:
-    client = LegacyS3(
-        {
-            (BUCKET, "a.jpg"): _image_bytes("JPEG", (7, 5)),
-            (BUCKET, "b.png"): _image_bytes("PNG", (6, 4)),
-        }
-    )
-
-    assert sniff_image(client, BUCKET, "a.jpg") == ("image/jpeg", 7, 5)
-    assert sniff_image(client, BUCKET, "b.png") == ("image/png", 6, 4)
-
-
-def test_sniff_image_falls_back_to_full_get_when_sof_is_past_the_first_chunk() -> None:
-    data = _image_bytes("JPEG", (9, 3), icc_profile=b"\x00" * 150_000)
-    client = LegacyS3({(BUCKET, "big.jpg"): data})
-
-    assert sniff_image(client, BUCKET, "big.jpg") == ("image/jpeg", 9, 3)
-    assert [c["Range"] for c in client.get_calls] == ["bytes=0-65535", None]
-
-
-def test_sniff_image_raises_for_bytes_that_are_not_jpeg_or_png() -> None:
-    client = LegacyS3({(BUCKET, "x.gif"): _image_bytes("GIF", (4, 4))})
-
-    with pytest.raises(ImageUndecodable):
-        sniff_image(client, BUCKET, "x.gif")
 
 
 def test_read_legacy_returns_tables_manifest_and_stripped_etag_objects() -> None:

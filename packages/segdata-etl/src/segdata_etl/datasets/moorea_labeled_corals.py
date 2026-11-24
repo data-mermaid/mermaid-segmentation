@@ -1,4 +1,4 @@
-"""``segdata build moorea_labeled_corals``: publish the legacy Moorea prefix as a dataset version."""
+"""``segdata build moorea_labeled_corals``: stage the legacy Moorea prefix as a dataset version."""
 
 from __future__ import annotations
 
@@ -8,10 +8,12 @@ from typing import Any
 
 from segdata_etl.common import publishing
 from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
-from segdata_etl.common.store import open_store
+from segdata_etl.common.stage import refuse_unpublishable
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_etl.taxonomy import find_repo_root
+from segdata_spec import DATASET_BUCKET
+from segdata_spec.publish import probe_git
 
 DATASET = "moorea_labeled_corals"
 
@@ -23,19 +25,22 @@ def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
 
 
 def run(args: argparse.Namespace, client: Any) -> int:
-    """Publish a new ``moorea_labeled_corals`` version and print its version and manifest sha256.
+    """Stage a new ``moorea_labeled_corals`` version and print its version and manifest sha256.
 
     Points take the case-merged ``source_label_name``; the licence comes from the legacy manifest.
+
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed.
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
-    dest, bucket = open_store(args.store, source_client=client)
-    git = publishing.checked_git_state(repo_root)
+    git = probe_git(repo_root)
+    refuse_unpublishable(git)
     taxonomy = external.load_taxonomy(
-        dest,
-        bucket,
+        client,
+        DATASET_BUCKET,
         version=args.taxonomy_version,
         manifest_sha256=args.taxonomy_manifest_sha256,
-        cache_dir=external.taxonomy_cache_dir(args.store, args.cache_dir),
+        cache_dir=args.cache_dir,
     )
     legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
     source = source_info(legacy)
@@ -52,8 +57,11 @@ def run(args: argparse.Namespace, client: Any) -> int:
         {(image.group, image.image_id) for image in images}, annotated, what="moorea images"
     )
     external.require_known_labels(points, labels)
-    sniffed = external.sniff_legacy_images(client, images, legacy=legacy, workers=args.workers)
-    points, dropped = external.drop_points_outside_and_record(points, images, sniffed, dropped)
+    probe = external.probe_legacy_images(client, images, legacy=legacy, workers=args.workers)
+    points = external.drop_unreadable_points(points, probe)
+    points, dropped = external.drop_points_outside_and_record(
+        points, probe.images, probe.sniffed, dropped
+    )
     return external.publish_version(
         dataset=DATASET,
         kind="points",
@@ -69,11 +77,8 @@ def run(args: argparse.Namespace, client: Any) -> int:
         dropped=dropped,
         git=git,
         repo_root=repo_root,
-        source_client=client,
-        dest=dest,
-        bucket=bucket,
-        images=images,
-        sniffed=sniffed,
+        client=client,
+        probe=probe,
         legacy=legacy,
         args=args,
     )

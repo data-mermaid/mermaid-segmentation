@@ -1,33 +1,33 @@
-"""``segdata build moorea_labeled_corals`` from a fake legacy prefix into a LocalStore."""
+"""``segdata build moorea_labeled_corals`` from a fake legacy prefix into a local stage."""
 
 from __future__ import annotations
 
 import io
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 import pytest
-from common.conftest import FakeS3
+from uniform.conftest import FakeS3
 
-from segdata_etl.common.local_store import LocalStore
+from segdata_etl import promote
 from segdata_etl.datasets import moorea_labeled_corals
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.read import DatasetVersion, open_version
 
 from .conftest import (
     LEGACY_BUCKET,
+    Staged,
+    assert_copies_match_sources,
     assert_curated_label_mapping,
     build_args,
-    copied_columns,
     jpeg,
     legacy_etag,
     make_repo,
     no_mask,
     png,
+    probed_columns,
     publish_fixture_taxonomy,
-    run_builder,
+    stage_version,
 )
 
 PREFIX = "external_validation_datasets/moorea_labeled_corals/"
@@ -76,14 +76,7 @@ def _legacy(
     for (year, image_id, ext), data in IMAGES.items():
         files[f"images/{year}/{image_id}{ext}"] = data
     for name, data in files.items():
-        s3.objects[(LEGACY_BUCKET, PREFIX + name)] = data
-
-
-@dataclass(frozen=True)
-class Published:
-    store: Path
-    version: DatasetVersion
-    taxonomy_sha: str
+        s3.put(LEGACY_BUCKET, PREFIX + name, data)
 
 
 @pytest.fixture
@@ -92,24 +85,24 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def published(repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Published:
-    s3 = FakeS3()
-    _legacy(s3)
-    store = tmp_path / "store"
-    taxonomy_sha = publish_fixture_taxonomy(LocalStore(store), repo)
-    pin = run_builder(
-        moorea_labeled_corals, build_args(moorea_labeled_corals, store, taxonomy_sha), s3, capsys
-    )
-    return Published(store, open_version(store, DATASET_BUCKET, pin), taxonomy_sha)
+def s3() -> FakeS3:
+    fake = FakeS3()
+    _legacy(fake)
+    return fake
 
 
-def test_build_groups_images_by_year_and_keeps_the_png_extension(published: Published) -> None:
+@pytest.fixture
+def staged(s3: FakeS3, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Staged:
+    return stage_version(moorea_labeled_corals, s3, repo, tmp_path, capsys)
+
+
+def test_build_groups_images_by_year_and_keeps_the_png_extension(staged: Staged) -> None:
     def row(year: str, image_id: str, ext: str, media: str, w: int, h: int) -> dict[str, object]:
         data = IMAGES[(year, image_id, f".{ext}")]
         return {
             "image_id": image_id,
             "key": f"{year}/{image_id}.{ext}",
-            **copied_columns(data),
+            **probed_columns(data),
             "media_type": media,
             "width": w,
             "height": h,
@@ -120,19 +113,44 @@ def test_build_groups_images_by_year_and_keeps_the_png_extension(published: Publ
             "attrs": None,
         }
 
-    assert sorted(published.version.images.to_pylist(), key=lambda r: r["image_id"]) == [
+    assert sorted(staged.version.images.to_pylist(), key=lambda r: r["image_id"]) == [
         row("2008", "mcr_a", "jpg", "image/jpeg", 7, 5),
         row("2008", "mcr_b", "png", "image/png", 6, 4),
         row("2009", "mcr_c", "jpg", "image/jpeg", 5, 3),
     ]
-    copied = published.store / DATASET_BUCKET / "images/moorea_labeled_corals/2008/mcr_b.png"
-    assert copied.read_bytes() == IMAGES[("2008", "mcr_b", ".png")]
 
 
-def test_build_takes_point_labels_from_the_case_merged_source_label_name(
-    published: Published,
+def test_build_plans_a_copy_of_each_legacy_image(staged: Staged) -> None:
+    assert_copies_match_sources(
+        staged,
+        {
+            image_id: (f"{PREFIX}images/{year}/{image_id}{ext}", data)
+            for (year, image_id, ext), data in IMAGES.items()
+        },
+    )
+
+
+def test_staged_version_promotes_with_the_images_copied_from_the_legacy_prefix(
+    s3: FakeS3, staged: Staged
 ) -> None:
-    version = published.version
+    promote.promote(
+        s3, stage_dir=staged.stage, dataset=staged.pin.name, version=staged.pin.version, workers=2
+    )
+
+    prefix = f"datasets/moorea_labeled_corals/{staged.pin.version}/"
+    assert (DATASET_BUCKET, prefix + "manifest.json") in s3.objects
+    assert {
+        key: data
+        for (bucket, key), data in s3.objects.items()
+        if bucket == DATASET_BUCKET and key.startswith("images/")
+    } == {
+        f"images/moorea_labeled_corals/{year}/{image_id}{ext}": data
+        for (year, image_id, ext), data in IMAGES.items()
+    }
+
+
+def test_build_takes_point_labels_from_the_case_merged_source_label_name(staged: Staged) -> None:
+    version = staged.version
     assert version.points is not None
     assert version.points.to_pylist() == [
         {"image_id": "mcr_a", "row": 1, "col": 2, "label_id": 3, "annotator": "default"},
@@ -149,45 +167,40 @@ def test_build_takes_point_labels_from_the_case_merged_source_label_name(
     ]
 
 
-def test_build_records_the_legacy_licence_and_drop_counts_in_the_manifest(
-    published: Published,
-) -> None:
-    manifest = published.version.manifest
+def test_build_records_the_legacy_licence_and_drop_counts_in_the_manifest(staged: Staged) -> None:
+    manifest = staged.version.manifest
     assert manifest.source.license == "CC BY 4.0"
     assert manifest.stats.dropped == {
         "damaged_images": 2,
         "off_annotations": 13,
     }
-    assert manifest.etl.command.startswith(
-        f"segdata build moorea_labeled_corals --store {published.store}"
-    )
-    assert_curated_label_mapping(manifest, moorea_labeled_corals.DATASET, published.version.labels)
+    assert_curated_label_mapping(manifest, moorea_labeled_corals.DATASET, staged.version.labels)
 
 
-def test_build_refuses_an_image_annotated_under_another_year(repo: Path, tmp_path: Path) -> None:
-    s3 = FakeS3()
-    _legacy(s3, [a if a[1] != "mcr_b" else ("2009", *a[1:]) for a in ANNOTATIONS])
-    store = tmp_path / "store"
-    taxonomy_sha = publish_fixture_taxonomy(LocalStore(store), repo)
-
-    with pytest.raises(ValueError, match="2009"):
-        moorea_labeled_corals.run(build_args(moorea_labeled_corals, store, taxonomy_sha), s3)
-
-    assert not (store / DATASET_BUCKET / "images").exists()
-
-
-def test_build_refuses_a_legacy_manifest_without_a_licence_before_copying(
-    repo: Path, tmp_path: Path
+@pytest.mark.parametrize(
+    ("annotations", "licence", "message"),
+    [
+        ([a if a[1] != "mcr_b" else ("2009", *a[1:]) for a in ANNOTATIONS], "CC BY 4.0", "2009"),
+        (ANNOTATIONS, None, "no licence"),
+    ],
+    ids=["other-year", "no-licence"],
+)
+def test_build_refuses_an_inconsistent_legacy_prefix_before_staging(
+    repo: Path,
+    tmp_path: Path,
+    annotations: list[Annotation],
+    licence: str | None,
+    message: str,
 ) -> None:
     s3 = FakeS3()
-    _legacy(s3, licence=None)
-    store = tmp_path / "store"
-    taxonomy_sha = publish_fixture_taxonomy(LocalStore(store), repo)
+    _legacy(s3, annotations, licence=licence)
+    stage = tmp_path / "stage"
+    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
-    with pytest.raises(ValueError, match="no licence"):
-        moorea_labeled_corals.run(build_args(moorea_labeled_corals, store, taxonomy_sha), s3)
+    with pytest.raises(ValueError, match=message):
+        moorea_labeled_corals.run(build_args(moorea_labeled_corals, stage, taxonomy_sha), s3)
 
-    assert not (store / DATASET_BUCKET / "images").exists()
+    assert not stage.exists()
 
 
 def test_build_drops_a_point_past_the_bottom_edge_and_records_it(
@@ -196,13 +209,9 @@ def test_build_drops_a_point_past_the_bottom_edge_and_records_it(
     s3 = FakeS3()
     # mcr_a is 5 high, so row 5 is outside; label 8 would add a count row if it were kept.
     _legacy(s3, [*ANNOTATIONS, ("2008", "mcr_a", ".jpg", 5, 0, "Sand", "sand")])
-    store = tmp_path / "store"
-    taxonomy_sha = publish_fixture_taxonomy(LocalStore(store), repo)
-    args = build_args(moorea_labeled_corals, store, taxonomy_sha)
 
-    pin = run_builder(moorea_labeled_corals, args, s3, capsys)
+    version = stage_version(moorea_labeled_corals, s3, repo, tmp_path, capsys).version
 
-    version = open_version(store, DATASET_BUCKET, pin)
     assert version.manifest.stats.dropped["points_out_of_bounds"] == 1
     assert version.points is not None
     assert version.points.num_rows == len(ANNOTATIONS)
