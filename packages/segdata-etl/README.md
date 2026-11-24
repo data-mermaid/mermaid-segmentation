@@ -280,7 +280,7 @@ uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api \
 | `--raw-version`, `--raw-manifest-sha256` | required | Pin of the `coralnet-raw` parent. |
 | `--taxonomy-version`, `--taxonomy-manifest-sha256` | none | Pin of the `mermaid-benthic` taxonomy. `cleaned_up_rerun` needs both; `mermaid_api` takes neither. The pin must be published in `mermaid-ic-datasets`, even when `--cache-dir` already holds it. |
 | `--parent-version`, `--parent-manifest-sha256` | none | Pin of the v1 `coralnet` version. `mermaid_api` needs both; `cleaned_up_rerun` takes neither. |
-| `--cache-dir` | `outputs/segdata-cache` | Where the parent tables and the taxonomy are synced from S3. The command reads this directory first, so `--cache-dir <stage>` reads parents that are only staged. No image is synced. |
+| `--cache-dir` | `outputs/segdata-cache` | Where the parent tables and the taxonomy are synced from S3. The command reads this directory first, so `--cache-dir <stage>` reads parents (raw, v1) that are only staged. The taxonomy pin must be published: a taxonomy that is only staged is refused. No image is synced. |
 | `-v`, `--verbose` | off | Debug logging. |
 
 A missing pin flag, a pin flag of the other label map, or one flag of a pin without the other is a usage error (exit 2). The message names the flags.

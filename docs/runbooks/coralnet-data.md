@@ -243,13 +243,7 @@ Stage a few sources and compare them with the old CoralNet loader before you pub
      --source-ids <id>,<id>,... --build-run <run>
    ```
 
-2. Stage a taxonomy version into the same directory:
-
-   ```bash
-   uv run --package segdata-etl segdata taxonomy --stage-dir <check-stage>
-   ```
-
-3. Stage v1 from the two pins. `--cache-dir <check-stage>` makes the command read the staged parents instead of S3:
+2. Stage v1 from the raw pin and a published taxonomy pin. Publish the taxonomy first if none exists: see [Publish the versioned datasets](training-datasets.md#publish-the-versioned-datasets), which stages it with `segdata taxonomy --stage-dir` and publishes it with `--tables-from <staged taxonomy folder> --publish`. The command refuses a taxonomy pin that is not published in `mermaid-ic-datasets`, even when `<check-stage>` holds it. `--cache-dir <check-stage>` makes the command read the staged raw version instead of S3:
 
    ```bash
    uv run --package segdata-etl segdata curate coralnet --label-map cleaned_up_rerun \
@@ -258,7 +252,7 @@ Stage a few sources and compare them with the old CoralNet loader before you pub
      --taxonomy-version <tax> --taxonomy-manifest-sha256 <sha>
    ```
 
-4. Stage v2 from the raw pin and the v1 pin:
+3. Stage v2 from the raw pin and the v1 pin. `--cache-dir <check-stage>` reads both staged parents:
 
    ```bash
    uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api \
@@ -267,9 +261,9 @@ Stage a few sources and compare them with the old CoralNet loader before you pub
      --parent-version <v1> --parent-manifest-sha256 <sha>
    ```
 
-5. Copy `configs/data_config.yaml` to a path git ignores, for example `outputs/parity_data_config.yaml`. In the copy, cut the `whitelist_sources` of `coralnet` `train`, `val` and `test` to the staged sources of each split. The old loader reads every source in the list, so without this cut the old side holds sources that you did not stage.
+4. Copy `configs/data_config.yaml` to a path git ignores, for example `outputs/parity_data_config.yaml`. In the copy, cut the `whitelist_sources` of `coralnet` `train`, `val` and `test` to the staged sources of each split. The old loader reads every source in the list, so without this cut the old side holds sources that you did not stage.
 
-6. Compare each version with the old loader, once for each split that holds staged sources:
+5. Compare each version with the old loader, once for each split that holds staged sources:
 
    ```bash
    uv run python scripts/check_dataset_parity.py --no-sync --data-config outputs/parity_data_config.yaml \
