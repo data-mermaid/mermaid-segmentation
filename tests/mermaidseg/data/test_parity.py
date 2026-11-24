@@ -531,6 +531,31 @@ def test_run_parity_dispatches_a_dense_version_to_the_dense_comparison(
     assert report.tile_diff == {("RS24", "7_9"): {3: (4, 3)}}
 
 
+def test_run_parity_refuses_resize_for_a_dense_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache_dir, bucket, pin = _dense_version(tmp_path)
+    monkeypatch.setattr(parity_module, "DATASET_BUCKET", bucket)
+    masks = {("RS24", "0_5"): _TILE_MASK_A, ("RS24", "7_9"): _TILE_MASK_B}
+    monkeypatch.setattr(
+        parity_module, "build_datasets", lambda *a, **k: {("ds", "val"): _StubDense(masks)}
+    )
+
+    with pytest.raises(ValueError, match="resize applies to points versions only"):
+        run_parity(
+            {},
+            dataset="ds",
+            split="val",
+            version=pin.version,
+            manifest_sha256=pin.manifest_sha256,
+            cache_dir=cache_dir,
+            client=None,
+            annotators=None,
+            offline=True,
+            resize=ResizeSpec(max_edge=2048),
+        )
+
+
 def test_format_dense_report_lists_every_finding_and_what_was_compared() -> None:
     report = DenseParityReport(
         old_only_tiles=[("s", "1_1")],
