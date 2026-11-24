@@ -386,12 +386,8 @@ def test_source_labels_to_target_labels_accepts_non_long_integer_labels():
     assert lm.source_labels_to_target_labels(labels, lookup).tolist() == [[[7, 5]]]
 
 
-# --- Golden digest, shared with segdata-etl ---
-# Counterpart of ``packages/segdata-etl/tests/label_maps/test_coralnet_api.py``, which pins
-# segdata-etl's copy of the parse and digest to the same ``MAIN_DIGEST`` for the same rows. The
-# rows and the digest are copied as literals because the root environment does not install
-# segdata-etl and mermaidseg must not import segdata_etl; a change to either copy breaks one of
-# the two tests.
+# --- Golden digest ---
+# Pins the parse and digest of the legacy runtime mapping to ``MAIN_DIGEST`` for fixed rows.
 
 MAIN_DIGEST = "562cc2d876b238eda53a7274f7fc3e4191f1f84c8c9d382f936d37e050985b63"
 

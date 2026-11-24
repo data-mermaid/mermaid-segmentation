@@ -1,9 +1,8 @@
 """``segdata promote``: upload one staged dataset version to the write-once dataset bucket.
 
 The bucket denies deletes, so everything is checked before the first write. Images go first, then
-the tables and the manifest's ``extra_files``, and ``manifest.json`` last: a version is visible only
-once its manifest exists, and a rerun after a crash finds the written objects already present and
-carries on. Each staged extra file must match its sha256 and size in the manifest.
+the tables, and ``manifest.json`` last: a version is visible only once its manifest exists, and a
+rerun after a crash finds the written objects already present and carries on.
 
 A staged version carries ``copies.jsonl``, ``uploads.jsonl``, or both (a dense dataset copies its
 images from S3 and uploads its masks). Together the two files must name every image and mask key
@@ -20,7 +19,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import mimetypes
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -87,7 +85,6 @@ class _Plan:
     manifest: Manifest
     manifest_bytes: bytes
     steps: tuple[_Copy | _Upload, ...]
-    extras: Mapping[str, bytes]
 
 
 def _norm_etag(etag: str) -> str:
@@ -117,26 +114,8 @@ def _verify_tables(version_dir: Path, manifest: Manifest) -> dict[str, bytes]:
     return tables
 
 
-def _verify_extra_files(stage_dir: Path, prefix: str, manifest: Manifest) -> dict[str, bytes]:
-    """Check each staged extra file against the manifest; return the staged bytes by name."""
-    extras: dict[str, bytes] = {}
-    for name, entry in manifest.extra_files.items():
-        path = cache_path(stage_dir, DATASET_BUCKET, prefix + name)
-        data = path.read_bytes() if path.is_file() else None
-        if (
-            data is None
-            or len(data) != entry.size
-            or hashlib.sha256(data).hexdigest() != entry.sha256
-        ):
-            raise PublishRefused(
-                f"staged extra file {name} is missing or does not match the manifest"
-            )
-        extras[name] = data
-    return extras
-
-
 def _table_expectations(tables: Mapping[str, bytes], prefix: str) -> dict[str, _Expected]:
-    """Map each table's or extra file's destination key to the fingerprint of its staged bytes."""
+    """Map each table's destination key to the fingerprint of its staged bytes."""
     return {
         prefix + name: _Expected(
             hashlib.md5(data, usedforsecurity=False).hexdigest(), len(data), crc64nvme_b64(data)
@@ -359,7 +338,6 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
     version_dir = cache_path(stage_dir, DATASET_BUCKET, prefix)
     manifest_bytes, manifest = _read_manifest(version_dir, dataset, version)
     tables = _verify_tables(version_dir, manifest)
-    extras = _verify_extra_files(stage_dir, prefix, manifest)
     expected = _image_expectations(tables["images.parquet"], manifest.image_store.prefix)
     steps = _plan_steps(stage_dir, version_dir, expected)
     if steps:
@@ -370,9 +348,9 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
     if not steps:
         _check_shared_store(manifest, parent_bodies)
         _check_images_present(client, manifest.image_store.bucket, expected, workers)
-    file_expected = _table_expectations({**tables, **extras}, prefix)
+    file_expected = _table_expectations(tables, prefix)
     _check_destinations(client, {**{s.dst_key: s.expect for s in steps}, **file_expected}, workers)
-    return _Plan(manifest, manifest_bytes, steps, extras)
+    return _Plan(manifest, manifest_bytes, steps)
 
 
 def _run_copy(client: Any, step: _Copy) -> bool:
@@ -477,21 +455,12 @@ def _write_tables(
         tally["tables"] += 1
 
 
-def _write_extras(client: Any, extras: Mapping[str, bytes], prefix: str) -> None:
-    for name, data in extras.items():
-        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
-        put_new(
-            client, bucket=DATASET_BUCKET, key=prefix + name, body=data, content_type=content_type
-        )
-
-
 def _write_version(
     client: Any, plan: _Plan, version_dir: Path, workers: int, tally: Counter[str]
 ) -> None:
     prefix = dataset_prefix(plan.manifest.dataset, plan.manifest.version)
     _write_images(client, plan.steps, workers, tally)
     _write_tables(client, version_dir, plan.manifest, prefix, tally)
-    _write_extras(client, plan.extras, prefix)
     put_new(
         client,
         bucket=DATASET_BUCKET,
@@ -506,9 +475,8 @@ def promote(client: Any, *, stage_dir: Path, dataset: str, version: str, workers
     """Upload the staged ``dataset`` ``version`` to the dataset bucket, exactly as staged.
 
     Raises:
-        PublishRefused: The staging is inconsistent or holds no images, a staged extra file
-            differs from the manifest, the version is already published, a planned key holds
-            other content, or a tables-only version lacks a parent on its image store or an
+        PublishRefused: The staging is inconsistent or holds no images, the version is already
+            published, a planned key holds other content, or a tables-only version lacks a parent on its image store or an
             image there; nothing was written.
         ChecksumMismatch: A staged table differs from the manifest.
         ObjectConflict: An object landed with, or already holds, other content than planned.

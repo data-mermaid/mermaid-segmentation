@@ -33,7 +33,6 @@ from segdata_spec.errors import (
 from segdata_spec.manifest import (
     DiffFromParent,
     EtlInfo,
-    ExtraFile,
     FileEntry,
     ImageStore,
     LabelMapping,
@@ -131,13 +130,6 @@ def _file_entries(
     }
 
 
-def _extra_entries(extra_files: Mapping[str, bytes]) -> dict[str, ExtraFile]:
-    return {
-        name: ExtraFile(sha256=hashlib.sha256(data).hexdigest(), size=len(data))
-        for name, data in extra_files.items()
-    }
-
-
 def _exists(client: Any, bucket: str, key: str) -> bool:
     try:
         client.head_object(Bucket=bucket, Key=key)
@@ -170,21 +162,14 @@ def _refuse_if_published(client: Any, bucket: str, prefix: str) -> None:
         raise PublishRefused(f"s3://{bucket}/{prefix}{MANIFEST_NAME} already exists")
 
 
-def _check_extra_files(extra_files: Mapping[str, bytes], tables: Mapping[str, pa.Table]) -> None:
-    clashing = sorted(set(extra_files) & {*tables, MANIFEST_NAME})
-    if clashing:
-        raise SchemaValidationError(f"extra files collide with tables or the manifest: {clashing}")
-
-
 def _write_version(
     client: Any,
     bucket: str,
     prefix: str,
     blobs: Mapping[str, bytes],
     manifest_bytes: bytes,
-    extra_files: Mapping[str, bytes] | None = None,
 ) -> None:
-    for name, data in {**blobs, **(extra_files or {})}.items():
+    for name, data in blobs.items():
         _put_new(client, bucket, prefix + name, data)
     _put_new(client, bucket, prefix + MANIFEST_NAME, manifest_bytes)
 
@@ -276,26 +261,21 @@ def publish_dataset(
     parents: Sequence[ParentRef] = (),
     label_mapping: LabelMapping | None = None,
     dropped: Mapping[str, int] | None = None,
-    extra_files: Mapping[str, bytes] | None = None,
     repo_dir: Path,
     git: GitState | None = None,
 ) -> tuple[Manifest, str]:
     """Publish a dataset version under ``datasets/<dataset>/<version>/``.
 
-    Returns the manifest and its sha256. ``extra_files`` (name to bytes) are written after the
-    tables and before the manifest, and are listed with their sha256 and size in
-    ``manifest.extra_files``, not in ``manifest.files``.
+    Returns the manifest and its sha256. The tables are written before the manifest.
 
     Raises:
         PublishRefused: The tree is dirty or unpushed, or the version already exists.
-        SchemaValidationError: A table fails its schema or the cross-table rules, or an
-            ``extra_files`` key is a table name or the manifest name.
+        SchemaValidationError: A table fails its schema or the cross-table rules.
         PinMismatch: The first parent's manifest differs from its ``ParentRef``.
         ChecksumMismatch: A parent table differs from the parent manifest.
-        ObjectExists: A table, extra file or manifest key already exists with different bytes; the manifest is then not written.
+        ObjectExists: A table or manifest key already exists with different bytes; the manifest is then not written.
     """
     state, lock_sha = _guard_git(repo_dir, git)
-    _check_extra_files(extra_files or {}, tables)
     conformed = _conform_all(tables, DATASET_TABLES)
     validate_dataset_tables(kind, conformed)
     blobs = {name: table_bytes(table) for name, table in conformed.items()}
@@ -316,12 +296,11 @@ def publish_dataset(
         parents=tuple(parents),
         label_mapping=label_mapping,
         files=_file_entries(conformed, blobs),
-        extra_files=_extra_entries(extra_files or {}),
         stats=_dataset_stats(conformed, dropped or {}),
         diff_from_parent=diff,
     )
     manifest_bytes = dump_manifest(manifest)
-    _write_version(client, bucket, prefix, blobs, manifest_bytes, extra_files)
+    _write_version(client, bucket, prefix, blobs, manifest_bytes)
     return manifest, manifest_sha256(manifest_bytes)
 
 

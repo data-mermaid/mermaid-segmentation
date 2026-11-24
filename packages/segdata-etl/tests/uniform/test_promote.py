@@ -683,39 +683,6 @@ def test_tables_only_version_with_an_absent_or_changed_image_refuses_with_no_wri
     assert writes(fake) == []
 
 
-def add_extra_file(stage: Path, version: str, listed: bytes, staged: bytes) -> None:
-    """List ``notes.json`` with the fingerprint of ``listed`` and stage ``staged`` under it."""
-    directory = version_dir(stage, "mermaid", version)
-    manifest = json.loads((directory / "manifest.json").read_bytes())
-    manifest["extra_files"] = {
-        "notes.json": {"sha256": hashlib.sha256(listed).hexdigest(), "size": len(listed)}
-    }
-    (directory / "manifest.json").write_text(json.dumps(manifest))
-    (directory / "notes.json").write_bytes(staged)
-
-
-def test_extra_file_listed_in_the_manifest_is_uploaded_before_the_manifest(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path)
-    add_extra_file(stage, version, b'{"k": 1}', b'{"k": 1}')
-
-    run_promote(fake, stage, version)
-
-    prefix = f"datasets/mermaid/{version}/"
-    keys = [k for _, _, k, _ in writes(fake)]
-    assert keys[-2:] == [prefix + "notes.json", prefix + "manifest.json"]
-    assert fake.objects[(DATASET_BUCKET, prefix + "notes.json")] == b'{"k": 1}'
-
-
-def test_staged_extra_file_differing_from_the_manifest_refuses_with_no_writes(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path)
-    add_extra_file(stage, version, b'{"k": 1}', b'{"k": 2}')
-
-    with pytest.raises(PublishRefused, match="notes.json"):
-        run_promote(fake, stage, version)
-
-    assert fake.calls == []
-
-
 def test_images_and_masks_land_in_intelligent_tiering_and_tables_keep_the_default(
     monkeypatch, tmp_path
 ):

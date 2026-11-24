@@ -6,7 +6,7 @@ import hashlib
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, StringConstraints
 
 # YYYYMMDD-<etl git sha7>, with -N for a second build on the same day.
 Version = Annotated[str, StringConstraints(pattern=r"^\d{8}-[0-9a-f]{7}(-\d+)?$")]
@@ -86,13 +86,6 @@ class FileEntry(_Model):
     rows: int
 
 
-class ExtraFile(_Model):
-    """Checksum and size of one non-table file published beside the tables."""
-
-    sha256: str
-    size: int
-
-
 class Stats(_Model):
     """Counts over a version's tables, with every dropped row category."""
 
@@ -127,7 +120,6 @@ class Manifest(_Model):
     parents: tuple[ParentRef, ...] = ()
     label_mapping: LabelMapping | None = None
     files: dict[str, FileEntry]
-    extra_files: dict[str, ExtraFile] = Field(default_factory=dict)
     stats: Stats
     diff_from_parent: DiffFromParent | None = None
 
