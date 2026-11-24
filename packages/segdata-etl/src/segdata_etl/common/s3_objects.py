@@ -21,6 +21,8 @@ from segdata_spec._s3 import is_not_found, is_precondition_failed
 _JPEG_SOI = b"\xff\xd8\xff"
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PNG_IHDR_END = 24
+# File extension, without the dot, of each media type ``sniff_media_type`` returns.
+EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png"}
 _CRC_ALGORITHM = "CRC64NVME"
 
 

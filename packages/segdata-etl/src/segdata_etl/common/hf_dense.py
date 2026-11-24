@@ -26,6 +26,7 @@ from PIL import Image
 
 from segdata_etl.common.copy_plan import StagedFile, stage_bytes, write_uploads
 from segdata_etl.common.s3_objects import (
+    EXTENSIONS,
     crc64nvme_b64,
     image_size,
     md5_hex,
@@ -48,7 +49,6 @@ REPO_ROOT = Path(__file__).resolve().parents[5]
 # A directory holding ``<dataset>.csv`` in place of the packaged curated maps.
 CURATED_ROOT: Path | None = None
 
-_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png"}
 _PNG = "image/png"
 # Pillow modes that decode to a 2-D integer array of label ids.
 _ID_MODES = frozenset({"L", "P", "I;16", "I"})
@@ -186,7 +186,7 @@ def image_row(
     mask_etag, mask_size, mask_crc = _object_fields(mask)
     return {
         "image_id": image_id,
-        "key": f"{info.group}/{info.stem}{_EXTENSIONS[media_type]}",
+        "key": f"{info.group}/{info.stem}.{EXTENSIONS[media_type]}",
         "etag": etag,
         "size": size,
         "crc64nvme": crc,

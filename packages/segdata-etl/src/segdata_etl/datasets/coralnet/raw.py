@@ -30,7 +30,6 @@ from coralnet_scraper.s3_io import object_key_image_list_csv
 from segdata_etl.common.cli_flags import pin_command_parts
 from segdata_etl.common.copy import CopyItem, copy_images
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
-from segdata_etl.common.media import EXTENSIONS, SNIFF_BYTES, sniff_media_type
 from segdata_etl.common.publishing import (
     checked_git_state,
     count_labels,
@@ -38,6 +37,7 @@ from segdata_etl.common.publishing import (
     image_store,
     pick_version,
 )
+from segdata_etl.common.s3_objects import EXTENSIONS, sniff_media_type
 from segdata_etl.common.store import DEFAULT_STORE, open_store
 from segdata_etl.common.version import utc_today
 from segdata_etl.taxonomy import find_repo_root
@@ -65,6 +65,8 @@ _NONE_NAMED_LABEL = "2474"
 _CHECKPOINT_BATCH = 1000
 # Batches per checkpoint write: a crash loses at most this many batches of finished copies.
 _CHECKPOINT_EVERY = 20
+# Bytes read to recognise a PNG signature, the longer of the two supported magic numbers.
+_SNIFF_BYTES = 8
 _COPIED = ["etag", "size", "crc64nvme"]
 _CHECKPOINT_COLUMNS = ["dest_key", "source_fingerprint", *_COPIED]
 
@@ -305,11 +307,8 @@ def _media_type(client: Any, bucket: str, key: str, header_status: str) -> str |
     """
     if header_status == "ok":
         return "image/jpeg"
-    response = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{SNIFF_BYTES - 1}")
-    try:
-        return sniff_media_type(response["Body"].read())
-    except ValueError:
-        return None
+    response = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{_SNIFF_BYTES - 1}")
+    return sniff_media_type(response["Body"].read())
 
 
 def _fill_media_types(client: Any, bucket: str, rows: pd.DataFrame, workers: int) -> pd.Series:

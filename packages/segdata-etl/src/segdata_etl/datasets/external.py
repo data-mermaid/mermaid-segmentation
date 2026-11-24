@@ -37,12 +37,13 @@ from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
 from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject
 from segdata_etl.common.publishing import image_prefix
 from segdata_etl.common.s3_objects import (
+    EXTENSIONS,
     SourceChanged,
     crc64nvme_b64,
     head_with_checksum,
     md5_hex,
 )
-from segdata_etl.common.stage import LocalDirS3, next_version
+from segdata_etl.common.stage import DEFAULT_CACHE_DIR, LocalDirS3, next_version
 from segdata_etl.label_maps.curated import CuratedSource
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
@@ -53,10 +54,8 @@ from segdata_spec.sync import sync
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CACHE_DIR = Path("outputs") / "segdata-cache"
 TAXONOMY_NAME = "mermaid-benthic"
 _IMAGES_FOLDER = "images"
-_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png"}
 _PNG = "image/png"
 
 
@@ -330,7 +329,7 @@ def require_same_ids(found: Collection[Any], expected: Collection[Any], *, what:
 
 def image_key(image: LegacyImage, media_type: str) -> str:
     """Return ``<group>/<image_id>.<ext>``, the key relative to the image store prefix."""
-    return f"{image.group}/{image.image_id}.{_EXTENSIONS[media_type]}"
+    return f"{image.group}/{image.image_id}.{EXTENSIONS[media_type]}"
 
 
 def _mask_dest_key(image: LegacyImage) -> str:

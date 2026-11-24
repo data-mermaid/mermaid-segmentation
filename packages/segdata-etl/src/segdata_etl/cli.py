@@ -18,13 +18,13 @@ from segdata_spec import DATASET_BUCKET
 from . import promote as promote_module
 from . import taxonomy
 from .common.cli_flags import _pin_flags
+from .common.stage import DEFAULT_CACHE_DIR
 from .datasets import benthos_yuval as benthos_yuval_build
 from .datasets import catlin_seaview as catlin_seaview_build
 from .datasets import coralscapes_v2, mermaid, ucsd_mosaics
 from .datasets import moorea_labeled_corals as moorea_labeled_corals_build
 from .datasets import pacific_labeled_corals as pacific_labeled_corals_build
 from .datasets.coralnet import commands as coralnet_commands
-from .datasets.external import DEFAULT_CACHE_DIR
 from .ingest import (
     benthos_yuval,
     catlin_seaview,
