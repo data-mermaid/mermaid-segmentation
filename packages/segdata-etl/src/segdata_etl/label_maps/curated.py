@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+from collections.abc import Iterable
 from dataclasses import dataclass
 from importlib import resources
 
@@ -27,13 +28,32 @@ class CuratedMapInfo:
     n_entries: int
 
 
+def _build_mapping(dataset: str, rows: Iterable[dict[str, str]]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for row in rows:
+        key, target = row["native_name"], row["mermaid_benthic_attribute"]
+        if key in mapping:
+            raise ValueError(f"curated map {dataset}: duplicate native_name {key!r}")
+        if key != key.strip().lower():
+            raise ValueError(f"curated map {dataset}: native_name {key!r} is not normalized")
+        if not target.strip():
+            raise ValueError(f"curated map {dataset}: native_name {key!r} has an empty target")
+        mapping[key] = target
+    return mapping
+
+
 def load_curated(dataset: str) -> tuple[dict[str, str], CuratedMapInfo]:
-    """Return the ``native_name -> mermaid_benthic_attribute`` map of ``dataset`` and its info."""
+    """Return the ``native_name -> mermaid_benthic_attribute`` map of ``dataset`` and its info.
+
+    Raises:
+        ValueError: ``dataset`` is unknown, a ``native_name`` repeats or is not stripped and
+            lowercase, or a ``mermaid_benthic_attribute`` is empty.
+    """
     if dataset not in DATASETS:
         raise ValueError(f"unknown curated dataset {dataset!r}; expected one of {DATASETS}")
     raw = resources.files(_PACKAGE).joinpath(f"curated/{dataset}.csv").read_bytes()
     reader = csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=""))
-    mapping = {row["native_name"]: row["mermaid_benthic_attribute"] for row in reader}
+    mapping = _build_mapping(dataset, reader)
     info = CuratedMapInfo(
         path=f"{_REPO_DIR}/{dataset}.csv",
         sha256=hashlib.sha256(raw).hexdigest(),
