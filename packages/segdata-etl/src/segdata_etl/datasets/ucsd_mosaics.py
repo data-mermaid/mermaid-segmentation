@@ -39,7 +39,15 @@ def _describe(row: Mapping[str, Any], split: str) -> RowInfo:
 
 
 def _assign_ids(infos: Sequence[RowInfo]) -> dict[tuple[str, str], str]:
-    """Use the bare stem as the id when stems are unique across sites, else ``<group>/<stem>``."""
+    """Use the bare stem as the id when stems are unique across sites, else ``<group>/<stem>``.
+
+    Raises:
+        ValueError: A ``(group, stem)`` pair repeats, so two rows would share an id.
+    """
+    pairs = Counter((i.group, i.stem) for i in infos)
+    repeated = sorted(p for p, n in pairs.items() if n > 1)
+    if repeated:
+        raise ValueError(f"ucsd_mosaics (site, stem) pairs are not unique: {repeated[:5]}")
     shared = any(n > 1 for n in Counter(i.stem for i in infos).values())
     logger.info("image ids are %s", "group-qualified" if shared else "bare stems")
     return {(i.group, i.stem): f"{i.group}/{i.stem}" if shared else i.stem for i in infos}

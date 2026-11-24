@@ -8,6 +8,7 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from segdata_etl import cli
 from segdata_spec import DATASET_BUCKET
@@ -107,3 +108,12 @@ def test_unique_stems_are_the_image_ids(monkeypatch, tmp_path):
     version = build(monkeypatch, tmp_path, shards)
 
     assert set(images(version)) == {"a", "b"}
+
+
+def test_stem_repeated_within_one_site_raises_naming_the_pair_before_any_download(
+    monkeypatch, tmp_path
+):
+    shards = {"data/palwave13-00000-of-00001.parquet": shard("PALWave13", ["a.jpg", "sub/a.jpg"])}
+
+    with pytest.raises(ValueError, match=r"palwave13.*a"):
+        build(monkeypatch, tmp_path, shards)
