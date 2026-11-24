@@ -15,19 +15,22 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from segdata_etl.common import publishing
 from segdata_etl.common.cli_flags import _pin_flags
 from segdata_etl.common.copy import CopiedObject, CopyItem, copy_images
 from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject, sniff_image
 from segdata_etl.common.publishing import image_prefix
 from segdata_etl.common.store import add_store_argument
+from segdata_etl.common.version import utc_today
 from segdata_etl.label_maps.curated import CuratedMapInfo
-from segdata_spec.manifest import LabelMapping, Pin
+from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
+from segdata_spec.publish import GitState, publish_dataset
 from segdata_spec.read import Taxonomy, open_taxonomy
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 from segdata_spec.sync import sync
@@ -466,3 +469,61 @@ def build_command(dataset: str, args: argparse.Namespace) -> str:
     if args.legacy_bucket != DEFAULT_BUCKET:
         parts += ["--legacy-bucket", args.legacy_bucket]
     return shlex.join(parts)
+
+
+def publish_version(
+    *,
+    dataset: str,
+    kind: Literal["points", "dense"],
+    tables: Mapping[str, pa.Table],
+    source: SourceInfo,
+    label_mapping: LabelMapping,
+    dropped: Mapping[str, int],
+    git: GitState,
+    repo_root: Path,
+    source_client: Any,
+    dest: Any,
+    bucket: str,
+    images: Sequence[LegacyImage],
+    sniffed: Mapping[str, tuple[str, int, int]],
+    legacy: LegacyDataset,
+    args: argparse.Namespace,
+) -> int:
+    """Pick a free version, copy the images and publish; print its version and manifest sha256.
+
+    ``tables`` holds the dataset-specific tables; ``images.parquet`` is added from the copy.
+
+    Raises:
+        PublishRefused: The picked version folder already holds objects.
+    """
+    version = publishing.pick_version(dest, bucket, dataset, git_sha=git.sha, today=utc_today())
+    publishing.require_version_absent(dest, bucket, dataset, version)
+    images_table = stage_images(
+        source_client,
+        dest,
+        images,
+        sniffed,
+        legacy=legacy,
+        dest_bucket=bucket,
+        dataset=dataset,
+        workers=args.workers,
+    )
+    manifest, sha = publish_dataset(
+        dest,
+        bucket=bucket,
+        dataset=dataset,
+        version=version,
+        kind=kind,
+        tables={"images.parquet": images_table, **tables},
+        image_store=publishing.image_store(bucket, dataset),
+        etl_package="segdata-etl",
+        etl_command=build_command(dataset, args),
+        source=source,
+        label_mapping=label_mapping,
+        dropped=dropped,
+        repo_dir=repo_root,
+        git=git,
+    )
+    logger.info("published %s %s", dataset, manifest.version)
+    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
+    return 0

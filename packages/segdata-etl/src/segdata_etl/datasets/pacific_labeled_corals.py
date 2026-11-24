@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import logging
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -14,13 +13,9 @@ import pandas as pd
 from segdata_etl.common import publishing
 from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
 from segdata_etl.common.store import open_store
-from segdata_etl.common.version import utc_today
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import load_curated
 from segdata_etl.taxonomy import find_repo_root
-from segdata_spec.publish import publish_dataset
-
-logger = logging.getLogger(__name__)
 
 DATASET = "pacific_labeled_corals"
 LICENSE = "CC0 1.0 (Dryad)"
@@ -147,39 +142,24 @@ def run(args: argparse.Namespace, client: Any) -> int:
     # Bounds depend only on (image_id, row, col), so a position leaves with all its annotator
     # rows; points_out_of_bounds counts point rows, as in the other builders.
     points, dropped = external.drop_points_outside_and_record(points, images, sniffed, dropped)
-    version = publishing.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=utc_today())
-    publishing.require_version_absent(dest, bucket, DATASET, version)
-    images_table = external.stage_images(
-        client,
-        dest,
-        images,
-        sniffed,
-        legacy=legacy,
-        dest_bucket=bucket,
+    return external.publish_version(
         dataset=DATASET,
-        workers=args.workers,
-    )
-    manifest, sha = publish_dataset(
-        dest,
-        bucket=bucket,
-        dataset=DATASET,
-        version=version,
         kind="points",
         tables={
-            "images.parquet": images_table,
             "points.parquet": points,
             "labels.parquet": labels,
             "stats/label_counts.parquet": publishing.count_labels(points),
         },
-        image_store=publishing.image_store(bucket, DATASET),
-        etl_package="segdata-etl",
-        etl_command=external.build_command(DATASET, args),
         source=source,
         label_mapping=external.label_mapping_record(labels, curated_info, git_sha=git.sha),
         dropped=dropped,
-        repo_dir=repo_root,
         git=git,
+        repo_root=repo_root,
+        source_client=client,
+        dest=dest,
+        bucket=bucket,
+        images=images,
+        sniffed=sniffed,
+        legacy=legacy,
+        args=args,
     )
-    logger.info("published %s %s", DATASET, manifest.version)
-    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
-    return 0

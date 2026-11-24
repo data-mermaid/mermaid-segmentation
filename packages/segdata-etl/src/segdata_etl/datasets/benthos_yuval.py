@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import io
-import logging
 from collections.abc import Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -19,14 +18,10 @@ from PIL import Image
 from segdata_etl.common import publishing
 from segdata_etl.common.legacy import LegacyDataset, legacy_dropped, read_legacy, source_info
 from segdata_etl.common.store import open_store
-from segdata_etl.common.version import utc_today
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import load_curated
 from segdata_etl.taxonomy import find_repo_root
-from segdata_spec.publish import publish_dataset
 from segdata_spec.schema import LABEL_COUNTS_SCHEMA
-
-logger = logging.getLogger(__name__)
 
 DATASET = "benthos_yuval"
 LICENSE = "CC0 1.0 (Dryad)"
@@ -209,38 +204,23 @@ def run(args: argparse.Namespace, client: Any) -> int:
     stats = _read_mask_stats(client, images, legacy=legacy, workers=args.workers)
     label_ids = labels.column("label_id").to_pylist()
     _require_masks_match(images, sniffed, stats, tile_labels, label_ids)
-    version = publishing.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=utc_today())
-    publishing.require_version_absent(dest, bucket, DATASET, version)
-    images_table = external.stage_images(
-        client,
-        dest,
-        images,
-        sniffed,
-        legacy=legacy,
-        dest_bucket=bucket,
+    return external.publish_version(
         dataset=DATASET,
-        workers=args.workers,
-    )
-    manifest, sha = publish_dataset(
-        dest,
-        bucket=bucket,
-        dataset=DATASET,
-        version=version,
         kind="dense",
         tables={
-            "images.parquet": images_table,
             "labels.parquet": labels,
             "stats/label_counts.parquet": _mask_label_counts(stats),
         },
-        image_store=publishing.image_store(bucket, DATASET),
-        etl_package="segdata-etl",
-        etl_command=external.build_command(DATASET, args),
         source=source,
         label_mapping=external.label_mapping_record(labels, curated_info, git_sha=git.sha),
         dropped=dropped,
-        repo_dir=repo_root,
         git=git,
+        repo_root=repo_root,
+        source_client=client,
+        dest=dest,
+        bucket=bucket,
+        images=images,
+        sniffed=sniffed,
+        legacy=legacy,
+        args=args,
     )
-    logger.info("published %s %s", DATASET, manifest.version)
-    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
-    return 0
