@@ -356,13 +356,13 @@ manifest_sha256: <sha256>
 
 ```bash
 uv run --package segdata-etl segdata build <name> \
-  --taxonomy-version <v> --taxonomy-sha256 <sha>
+  --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
 ```
 
 | Flag | Default | Effect |
 |---|---|---|
 | `--store` | `outputs/segdata-store` | Where to publish: a local directory, or `s3` for the `mermaid-ic-datasets` bucket. A local store is laid out as `<dir>/<bucket>/<key>`. Publishing to S3 happens only when you pass `s3`. |
-| `--taxonomy-version`, `--taxonomy-sha256` | required | Pin of the `mermaid-benthic` taxonomy that the labels map to. |
+| `--taxonomy-version`, `--taxonomy-manifest-sha256` | required | Pin of the `mermaid-benthic` taxonomy that the labels map to. |
 | `--cache-dir` | The store directory; `outputs/segdata-cache` with `--store s3` | Where the build syncs the taxonomy. |
 | `--workers` | 16 | Threads for copying and inspecting images. |
 | `--legacy-bucket` | `dev-datamermaid-sm-sources` | Bucket that holds the legacy prefix. |

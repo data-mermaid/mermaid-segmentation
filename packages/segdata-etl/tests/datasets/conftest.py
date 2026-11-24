@@ -14,7 +14,7 @@ import pyarrow as pa
 import pytest
 from PIL import Image
 
-from segdata_etl.datasets import external
+from segdata_etl.common import publishing
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_taxonomy
@@ -77,7 +77,7 @@ def make_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, builder: ModuleTy
     root.mkdir()
     (root / "uv.lock").write_text("lock")
     monkeypatch.setattr(builder, "find_repo_root", lambda _start: root)
-    monkeypatch.setattr(external, "probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr(publishing, "probe_git", lambda _dir: CLEAN_GIT)
     return root
 
 
@@ -85,7 +85,7 @@ def build_args(builder: ModuleType, store: str | Path, taxonomy_sha: str) -> arg
     parser = argparse.ArgumentParser()
     builder.add_arguments(parser, workdir=Path("unused"))
     argv = ["--store", str(store), "--taxonomy-version", TAXONOMY_VERSION]
-    return parser.parse_args([*argv, "--taxonomy-sha256", taxonomy_sha, "--workers", "2"])
+    return parser.parse_args([*argv, "--taxonomy-manifest-sha256", taxonomy_sha, "--workers", "2"])
 
 
 def run_builder(

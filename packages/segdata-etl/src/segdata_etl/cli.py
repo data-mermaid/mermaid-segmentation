@@ -16,6 +16,7 @@ from botocore.config import Config
 from segdata_spec import DATASET_BUCKET
 
 from . import taxonomy
+from .common.cli_flags import _pin_flags
 from .common.store import add_store_argument
 from .datasets import benthos_yuval as benthos_yuval_build
 from .datasets import catlin_seaview as catlin_seaview_build
@@ -70,13 +71,6 @@ def _shared_parser(dataset: str) -> argparse.ArgumentParser:
     parent.add_argument("--overwrite", action="store_true")
     parent.add_argument("-v", "--verbose", action="store_true")
     return parent
-
-
-def _pin_flags(parser: argparse.ArgumentParser, prefix: str, what: str) -> None:
-    parser.add_argument(f"--{prefix}version", required=True, help=f"Version of {what}")
-    parser.add_argument(
-        f"--{prefix}manifest-sha256", required=True, help=f"Manifest sha256 of {what}"
-    )
 
 
 def _split_cache_flags(parser: argparse.ArgumentParser) -> None:

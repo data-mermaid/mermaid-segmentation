@@ -16,8 +16,9 @@ import pytest
 from common.conftest import FakeS3
 from PIL import Image
 
+from segdata_etl.common import publishing
 from segdata_etl.common.local_store import LocalStore
-from segdata_etl.datasets import catlin_seaview, external
+from segdata_etl.datasets import catlin_seaview
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
 from segdata_spec.manifest import Pin, SourceInfo
@@ -108,7 +109,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root.mkdir()
     (root / "uv.lock").write_text("lock")
     monkeypatch.setattr(catlin_seaview, "find_repo_root", lambda _start: root)
-    monkeypatch.setattr(external, "probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr(publishing, "probe_git", lambda _dir: CLEAN_GIT)
     return root
 
 
@@ -116,7 +117,9 @@ def _args(store: str | Path, taxonomy_sha: str, *extra: str) -> argparse.Namespa
     parser = argparse.ArgumentParser()
     catlin_seaview.add_arguments(parser, workdir=Path("unused"))
     argv = ["--store", str(store), "--taxonomy-version", TAXONOMY_VERSION]
-    return parser.parse_args([*argv, "--taxonomy-sha256", taxonomy_sha, "--workers", "2", *extra])
+    return parser.parse_args(
+        [*argv, "--taxonomy-manifest-sha256", taxonomy_sha, "--workers", "2", *extra]
+    )
 
 
 def _run(args: argparse.Namespace, s3: FakeS3, capsys: pytest.CaptureFixture[str]) -> Pin:
@@ -218,7 +221,7 @@ def test_build_records_licence_source_dropped_and_command_in_the_manifest(
     assert manifest.stats.dropped == {"damaged_images": 2}
     assert manifest.etl.command == (
         f"segdata build catlin_seaview --store {published.store}"
-        f" --taxonomy-version {TAXONOMY_VERSION} --taxonomy-sha256 {published.taxonomy_sha}"
+        f" --taxonomy-version {TAXONOMY_VERSION} --taxonomy-manifest-sha256 {published.taxonomy_sha}"
     )
 
 
@@ -255,7 +258,7 @@ def test_build_refuses_a_dirty_tree_before_copying_any_image(
     store = tmp_path / "store"
     taxonomy_sha = _publish_taxonomy(LocalStore(store), repo)
     dirty = GitState(sha=CLEAN_GIT.sha, dirty=True, pushed=True)
-    monkeypatch.setattr(external, "probe_git", lambda _dir: dirty)
+    monkeypatch.setattr(publishing, "probe_git", lambda _dir: dirty)
 
     with pytest.raises(PublishRefused):
         catlin_seaview.run(_args(store, taxonomy_sha), s3)

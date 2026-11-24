@@ -77,7 +77,7 @@ A version string is `YYYYMMDD-<sha7>`, with `-2`, `-3` for a rebuild on the same
 
    ```bash
    uv run --package segdata-etl segdata build <name> \
-     --taxonomy-version <v> --taxonomy-sha256 <sha>
+     --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
    ```
 
 4. Check that each staged version loads the same as the legacy dataset. The check reads the store as the cache, with no S3 access:
@@ -103,7 +103,7 @@ A version string is `YYYYMMDD-<sha7>`, with `-2`, `-3` for a rebuild on the same
 
    ```bash
    uv run --package segdata-etl segdata build <name> --store s3 \
-     --taxonomy-version <v> --taxonomy-sha256 <sha>
+     --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
    ```
 
 The datasets in S3 are new versions built from the same legacy prefix. Training still reads the legacy prefix.

@@ -16,6 +16,7 @@ import pandas as pd
 import pyarrow as pa
 from PIL import Image
 
+from segdata_etl.common import publishing
 from segdata_etl.common.legacy import LegacyDataset, legacy_dropped, read_legacy, source_info
 from segdata_etl.common.store import open_store
 from segdata_etl.common.version import utc_today
@@ -179,12 +180,12 @@ def run(args: argparse.Namespace, client: Any) -> int:
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     dest, bucket = open_store(args.store, source_client=client)
-    git = external.checked_git_state(repo_root)
+    git = publishing.checked_git_state(repo_root)
     taxonomy = external.load_taxonomy(
         dest,
         bucket,
         version=args.taxonomy_version,
-        manifest_sha256=args.taxonomy_sha256,
+        manifest_sha256=args.taxonomy_manifest_sha256,
         cache_dir=external.taxonomy_cache_dir(args.store, args.cache_dir),
     )
     legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
@@ -208,8 +209,8 @@ def run(args: argparse.Namespace, client: Any) -> int:
     stats = _read_mask_stats(client, images, legacy=legacy, workers=args.workers)
     label_ids = labels.column("label_id").to_pylist()
     _require_masks_match(images, sniffed, stats, tile_labels, label_ids)
-    version = external.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=utc_today())
-    external.require_version_absent(dest, bucket, DATASET, version)
+    version = publishing.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=utc_today())
+    publishing.require_version_absent(dest, bucket, DATASET, version)
     images_table = external.stage_images(
         client,
         dest,
@@ -231,7 +232,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
             "labels.parquet": labels,
             "stats/label_counts.parquet": _mask_label_counts(stats),
         },
-        image_store=external.image_store(bucket, DATASET),
+        image_store=publishing.image_store(bucket, DATASET),
         etl_package="segdata-etl",
         etl_command=external.build_command(DATASET, args),
         source=source,
