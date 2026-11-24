@@ -112,13 +112,16 @@ def test_unique_stems_are_the_image_ids(monkeypatch, tmp_path):
     assert set(images(version)) == {"a", "b"}
 
 
-def test_stem_repeated_within_one_site_raises_naming_the_pair_before_any_download(
+def test_stem_repeated_within_one_site_raises_naming_the_pair_before_any_image_is_staged(
     monkeypatch, tmp_path
 ):
     shards = {"data/palwave13-00000-of-00001.parquet": shard("PALWave13", ["a.jpg", "sub/a.jpg"])}
 
     with pytest.raises(ValueError, match=r"palwave13.*a"):
         build(monkeypatch, tmp_path, shards)
+
+    stage = tmp_path / "stage"
+    assert not stage.exists() or not [f for f in stage.rglob("*") if f.is_file()]
 
 
 def test_dirty_git_refuses_before_any_shard_download(monkeypatch, tmp_path):

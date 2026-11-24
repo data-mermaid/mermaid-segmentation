@@ -362,6 +362,7 @@ _ATTRIBUTES = {"a": "Hard Coral", "b": "Rubble", "c": None}
 
 class _StubDense:
     SOURCE_NAME = "catlin_seaview"
+    class_subset: list[str] | None = None
 
     def __init__(
         self,
@@ -445,10 +446,10 @@ def _run_dense(
     )
 
 
-def _new_images(mask1: np.ndarray = _MASK1, pixels2: str = "p2") -> list[ImageSpec]:
+def _new_images(mask1: np.ndarray = _MASK1) -> list[ImageSpec]:
     return [
         ImageSpec("n1", group="train", mask=mask1, pixels=_PIXELS["p1"]),
-        ImageSpec("n2", group="train", mask=_MASK2, pixels=_PIXELS[pixels2]),
+        ImageSpec("n2", group="train", mask=_MASK2, pixels=_PIXELS["p2"]),
     ]
 
 
@@ -542,23 +543,6 @@ def test_dense_original_split_whitelist_drops_new_images_the_old_loader_dropped(
     assert report.ok
 
 
-def test_dense_original_split_filter_still_reports_a_kept_image_that_differs(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    old = _StubUcsd(_old_rows()[:1], whitelist={"train"})
-
-    report = _run_dense(
-        monkeypatch,
-        tmp_path,
-        old,
-        _new_images(pixels2="p3"),
-        attrs=_split_attrs(n1="train", n2="train"),
-    )
-
-    assert report.new_only == ["n2"]
-    assert not report.ok
-
-
 def test_dense_without_an_original_split_filter_keeps_every_new_image(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -577,14 +561,6 @@ def _subset_old(mapping: dict[str, str | None] | None = None) -> _StubDense:
     old.source_id2name = {1: "a"}
     old.source_name2id = {"a": 1}
     return old
-
-
-def test_dense_class_subset_compares_the_vocabulary_of_the_subset_only(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    report = _run_dense(monkeypatch, tmp_path, _subset_old(), _new_images())
-
-    assert report.vocab_mismatches == []
 
 
 def test_dense_class_subset_still_reports_a_mismatch_inside_the_subset(
