@@ -12,6 +12,7 @@ import pyarrow as pa
 import pytest
 
 from segdata_etl import cli
+from segdata_etl.common import publishing
 from segdata_etl.common.local_store import LocalStore
 from segdata_etl.datasets.coralnet import raw
 from segdata_etl.datasets.coralnet.io import make_csv_reader_s3
@@ -525,7 +526,9 @@ def test_cli_publishes_a_coralnet_raw_version_into_the_local_store(
     monkeypatch.setattr(raw, "_get_thread_reader", lambda: make_csv_reader_s3(source))
     monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
     monkeypatch.setattr(
-        raw, "probe_git", lambda _dir: GitState(sha="abcdef1234567", dirty=False, pushed=True)
+        publishing,
+        "probe_git",
+        lambda _dir: GitState(sha="abcdef1234567", dirty=False, pushed=True),
     )
     _put_build(source, "run1")
     store = tmp_path / "store"
@@ -587,7 +590,7 @@ def test_an_unpublishable_tree_is_refused_before_any_s3_call(
     (repo / "uv.lock").write_text("lock")
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
     monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
-    monkeypatch.setattr(raw, "probe_git", lambda _dir: git)
+    monkeypatch.setattr(publishing, "probe_git", lambda _dir: git)
 
     def no_s3(**_kw: object) -> None:
         raise AssertionError("the guard must fire before an S3 client is made")
@@ -607,7 +610,9 @@ def test_a_tree_without_a_lock_file_is_refused_before_any_s3_call(
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
     monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
     monkeypatch.setattr(
-        raw, "probe_git", lambda _dir: GitState(sha="abcdef1234567", dirty=False, pushed=True)
+        publishing,
+        "probe_git",
+        lambda _dir: GitState(sha="abcdef1234567", dirty=False, pushed=True),
     )
 
     def no_s3(**_kw: object) -> None:

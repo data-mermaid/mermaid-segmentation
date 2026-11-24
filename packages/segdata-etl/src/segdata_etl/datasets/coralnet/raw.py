@@ -31,13 +31,13 @@ from coralnet_scraper.s3_io import object_key_image_list_csv
 from segdata_etl.common.copy import CopyItem, copy_images
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
 from segdata_etl.common.media import SNIFF_BYTES, sniff_media_type
+from segdata_etl.common.publishing import checked_git_state, count_labels, pick_version
 from segdata_etl.common.store import DEFAULT_STORE, open_store
-from segdata_etl.common.version import list_versions, next_version
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec.errors import ObjectExists
 from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
-from segdata_spec.publish import _fetch_parent_tables, _guard_git, probe_git, publish_dataset
-from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
+from segdata_spec.publish import _fetch_parent_tables, publish_dataset
+from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 
 from .annotations import _IMAGE_LIST_NAME, _derive_image_id, _get_thread_reader
 from .config import DEFAULT_OUTPUT_S3_PREFIX, get_workers
@@ -221,11 +221,8 @@ def _points_and_counts(points: pd.DataFrame) -> tuple[pa.Table, pa.Table]:
             "annotator": ANNOTATOR,
         }
     ).sort_values(["image_id", "row", "col"], kind="mergesort")
-    counts = frame.groupby(["image_id", "label_id"], sort=True).size().rename("n").reset_index()
-    return (
-        pa.Table.from_pandas(frame, schema=POINTS_SCHEMA, preserve_index=False),
-        pa.Table.from_pandas(counts, schema=LABEL_COUNTS_SCHEMA, preserve_index=False),
-    )
+    points_table = pa.Table.from_pandas(frame, schema=POINTS_SCHEMA, preserve_index=False)
+    return points_table, count_labels(points_table)
 
 
 def _list_source_etags(client: Any, bucket: str, prefix: str, source_id: int) -> dict[str, str]:
@@ -656,8 +653,7 @@ def _pool_size(workers: int) -> int:
 def run_raw(args: argparse.Namespace) -> int:
     """Publish a new ``coralnet-raw`` version and print its version and manifest sha256."""
     repo_root = find_repo_root(Path(__file__).resolve().parent)
-    git = probe_git(repo_root)
-    _guard_git(repo_root, git)
+    git = checked_git_state(repo_root)
     parent = _parent_ref(args)
     workers = _workers(args.workers)
     source_client = make_s3_client(max_pool_connections=_pool_size(workers))
@@ -678,9 +674,7 @@ def run_raw(args: argparse.Namespace) -> int:
         checkpoint=checkpoint_path(args.store, args.build_run),
         parent_images=parent_images,
     )
-    version = next_version(
-        list_versions(client, bucket, f"datasets/{DATASET}/"), git_sha=git.sha, today=date.today()
-    )
+    version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=date.today())
     manifest, sha = publish_dataset(
         client,
         bucket=bucket,

@@ -14,6 +14,7 @@ import pyarrow as pa
 import pytest
 
 from segdata_etl import cli
+from segdata_etl.common import publishing
 from segdata_etl.common.local_store import LocalStore
 from segdata_etl.datasets.coralnet.curate import versions
 from segdata_etl.label_maps import coralnet_api
@@ -202,7 +203,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         repo / "configs" / "coralnet" / "annotation_overrides.parquet"
     )
     monkeypatch.setattr(versions, "find_repo_root", lambda _start: repo)
-    monkeypatch.setattr(versions, "probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr(publishing, "probe_git", lambda _dir: CLEAN_GIT)
     monkeypatch.setattr("segdata_spec.publish.probe_git", lambda _dir: CLEAN_GIT)
 
     store = tmp_path / "store"
@@ -357,7 +358,7 @@ def test_a_dirty_tree_is_refused_before_any_sync(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        versions, "probe_git", lambda _dir: GitState(sha="abcdef1234567", dirty=True, pushed=True)
+        publishing, "probe_git", lambda _dir: GitState(sha="abcdef1234567", dirty=True, pushed=True)
     )
 
     def no_sync(*_args: object, **_kwargs: object) -> None:
