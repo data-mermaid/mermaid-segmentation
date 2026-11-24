@@ -9,21 +9,15 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import struct
 from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
 from botocore.client import BaseClient
 
-from segdata_etl.common.jpeg_header import _find_sof_dimensions
-from segdata_etl.common.media import sniff_media_type
-from segdata_spec.errors import ImageUndecodable
 from segdata_spec.manifest import SourceInfo
 
 DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
-_FIRST_CHUNK = 65_536
-_PNG_HEADER_LEN = 24  # signature(8) + IHDR length/type(8) + width(4) + height(4)
 
 
 @dataclass(frozen=True)
@@ -108,38 +102,10 @@ def legacy_dropped(name: str, manifest: dict) -> dict[str, int]:
         return {
             "damaged_images": len(manifest["damaged_images"]),
             "off_annotations": int(manifest["off_annotations_dropped"]),
-            "case_merged_labels": len(manifest["case_merged_labels"]),
         }
     if name in ("pacific_labeled_corals", "benthos_yuval"):
         return {}
     raise ValueError(f"unknown legacy dataset {name!r}")
-
-
-def _png_dimensions(head: bytes) -> tuple[int, int]:
-    if len(head) < _PNG_HEADER_LEN:
-        raise ImageUndecodable("truncated PNG header")
-    width, height = struct.unpack(">II", head[16:24])
-    return width, height
-
-
-def sniff_image(client: BaseClient, bucket: str, key: str) -> tuple[str, int, int]:
-    """Return ``(media_type, width, height)`` of a JPEG or PNG from its header bytes."""
-    head = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{_FIRST_CHUNK - 1}")[
-        "Body"
-    ].read()
-    try:
-        media_type = sniff_media_type(head)
-    except ValueError as err:
-        raise ImageUndecodable(f"s3://{bucket}/{key} is neither JPEG nor PNG") from err
-    if media_type == "image/png":
-        width, height = _png_dimensions(head)
-        return media_type, width, height
-    dims = _find_sof_dimensions(head)
-    if dims is None:
-        dims = _find_sof_dimensions(_get_bytes(client, bucket, key))
-    if dims is None:
-        raise ImageUndecodable(f"no JPEG SOF marker in s3://{bucket}/{key}")
-    return media_type, dims[1], dims[0]
 
 
 def source_info(ds: LegacyDataset, *, license_override: str | None = None) -> SourceInfo:

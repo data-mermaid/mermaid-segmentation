@@ -1,41 +1,63 @@
 """Shared steps of the external dataset version builders (Catlin, Moorea, Pacific, Benthos).
 
 Each builder module reads its legacy ``external_validation_datasets/<name>/`` prefix and calls
-these helpers to build the uniform tables, copy the images and publish a dataset version.
+these helpers to build the uniform tables and stage a dataset version under ``--stage-dir``, with
+``copies.jsonl`` (and, for masks, ``uploads.jsonl``) for ``segdata promote`` to run.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shlex
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from segdata_etl.common import publishing
 from segdata_etl.common.cli_flags import _pin_flags, pin_command_parts
-from segdata_etl.common.copy import CopiedObject, CopyItem, copy_images
+from segdata_etl.common.copy_plan import (
+    ImageOutcome,
+    ObjectFacts,
+    StagedFile,
+    copy_plan,
+    probe_image,
+    stage_bytes,
+    write_copies,
+    write_uploads,
+)
 from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
-from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject, sniff_image
-from segdata_etl.common.media import EXTENSIONS
+from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject
 from segdata_etl.common.publishing import image_prefix
-from segdata_etl.common.store import DEFAULT_CACHE_DIR, add_store_argument
-from segdata_etl.label_maps.curated import CuratedMapInfo
-from segdata_spec.manifest import LabelMapping, Pin
+from segdata_etl.common.s3_objects import (
+    SourceChanged,
+    crc64nvme_b64,
+    head_with_checksum,
+    md5_hex,
+)
+from segdata_etl.common.stage import LocalDirS3, next_version
+from segdata_etl.label_maps.curated import CuratedSource
+from segdata_spec import DATASET_BUCKET
+from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
+from segdata_spec.publish import GitState, publish_dataset
 from segdata_spec.read import Taxonomy, open_taxonomy
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 from segdata_spec.sync import sync
 
-DEFAULT_WORKERS = 16
+logger = logging.getLogger(__name__)
+
+DEFAULT_CACHE_DIR = Path("outputs") / "segdata-cache"
 TAXONOMY_NAME = "mermaid-benthic"
 _IMAGES_FOLDER = "images"
+_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png"}
+_PNG = "image/png"
 
 
 Identify = Callable[[str], tuple[str, str] | None]
@@ -57,60 +79,65 @@ class LegacyImage:
     attrs: Mapping[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class LegacyProbe:
+    """What probing the legacy images found.
+
+    ``images`` holds the readable images in input order; ``rows`` their ``images.parquet`` rows by
+    image id; ``sniffed`` their ``(media_type, width, height)`` by legacy key; ``unreadable`` the
+    ids of the images whose header could not be read.
+    """
+
+    images: list[LegacyImage]
+    rows: dict[str, dict[str, Any]]
+    sniffed: dict[str, tuple[str, int, int]]
+    unreadable: list[str]
+
+
 def add_build_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add the options every external builder shares, including ``--store``."""
-    add_store_argument(parser)
+    """Add the taxonomy pin, ``--cache-dir`` and ``--legacy-bucket`` every external builder shares."""
     _pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
     parser.add_argument(
         "--cache-dir",
         type=Path,
-        default=None,
-        help=(
-            "Where the taxonomy is synced (default: the store directory, "
-            f"or {DEFAULT_CACHE_DIR} with --store s3)"
-        ),
+        default=DEFAULT_CACHE_DIR,
+        help="Where the taxonomy is synced (default: %(default)s)",
     )
-    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument(
         "--legacy-bucket", default=DEFAULT_BUCKET, help="Bucket holding the legacy prefix"
     )
 
 
-def taxonomy_cache_dir(store: str | Path, cache_dir: Path | None) -> Path:
-    """Return ``cache_dir`` if set, else the store directory, or the default cache for ``s3``."""
-    if cache_dir is not None:
-        return cache_dir
-    if str(store) == "s3":
-        return DEFAULT_CACHE_DIR
-    return Path(store)
-
-
 def load_taxonomy(
     client: Any, bucket: str, *, version: str, manifest_sha256: str, cache_dir: Path
 ) -> Taxonomy:
-    """Sync the pinned ``mermaid-benthic`` taxonomy from the store into ``cache_dir`` and open it."""
+    """Sync the pinned ``mermaid-benthic`` taxonomy from ``bucket`` into ``cache_dir`` and open it."""
     pin = Pin(name=TAXONOMY_NAME, version=version, manifest_sha256=manifest_sha256)
     sync(client, {}, cache_dir, bucket=bucket, taxonomy=pin)
     return open_taxonomy(cache_dir, bucket, pin)
 
 
-def build_labels(
-    classes: Mapping[str, int], curated: Mapping[str, str], attributes: pa.Table
-) -> pa.Table:
+def build_labels(classes: Mapping[str, int], curated: pa.Table, attributes: pa.Table) -> pa.Table:
     """Build ``labels.parquet`` from ``classes.json``, the curated map and taxonomy attributes.
 
-    Label 0 (``unlabeled``) is left out. A curated target found in the taxonomy, ignoring case,
-    takes its canonical name and id; one not found keeps the curated value with a null id.
+    Classes join the curated map on lowercase ``name``. Label 0 (``unlabeled``) is left out. A
+    curated target found in the taxonomy, ignoring case, takes its canonical name and id; one not
+    found keeps the curated value with a null id.
 
     Raises:
-        ValueError: A curated target matches more than one taxonomy name, ignoring case.
+        AmbiguousTaxonomyName: A curated target matches more than one taxonomy name, ignoring case.
     """
     index = taxonomy_name_index(attributes)
+    targets = {
+        row["name"].lower(): row["mermaid_benthic_attribute"]
+        for row in curated.to_pylist()
+        if row["name"] is not None
+    }
     rows = []
     for name, label_id in sorted(classes.items(), key=lambda item: item[1]):
         if label_id == 0:
             continue
-        target = curated.get(name.lower())
+        target = targets.get(name.lower())
         match = resolve_taxonomy_name(target, index) if target is not None else None
         rows.append(
             {
@@ -125,7 +152,7 @@ def build_labels(
     return pa.Table.from_pylist(rows, schema=LABELS_SCHEMA)
 
 
-def label_mapping_record(labels: pa.Table, info: CuratedMapInfo, *, git_sha: str) -> LabelMapping:
+def label_mapping_record(labels: pa.Table, info: CuratedSource, *, git_sha: str) -> LabelMapping:
     """Describe the curated mapping of ``labels`` for the manifest."""
     targets = labels.column("mermaid_benthic_attribute").to_pylist()
     ids = labels.column("mermaid_benthic_attribute_id").to_pylist()
@@ -244,34 +271,6 @@ def _bounds_join(
     return joined, inside
 
 
-def require_points_inside(
-    points: pa.Table,
-    images: Iterable[LegacyImage],
-    sniffed: Mapping[str, tuple[str, int, int]],
-) -> None:
-    """Refuse points outside their image's sniffed ``(width, height)``, naming the first five.
-
-    A point is inside when ``0 <= row < height`` and ``0 <= col < width``; a point whose image
-    has no sniffed size counts as outside.
-
-    Raises:
-        ValueError: A point lies outside its image.
-    """
-    joined, inside = _bounds_join(points, images, sniffed)
-    outside = joined.filter(pc.invert(pc.fill_null(inside, False))).sort_by(
-        [("image_id", "ascending"), ("row", "ascending"), ("col", "ascending")]
-    )
-    if outside.num_rows:
-        first = [
-            (r["image_id"], r["row"], r["col"], r["width"], r["height"])
-            for r in outside.slice(0, 5).to_pylist()
-        ]
-        raise ValueError(
-            f"{outside.num_rows} points outside their image "
-            f"(image_id, row, col, width, height): {first}"
-        )
-
-
 def drop_points_outside(
     points: pa.Table,
     images: Iterable[LegacyImage],
@@ -279,7 +278,8 @@ def drop_points_outside(
 ) -> tuple[pa.Table, int]:
     """Return the points inside their image's sniffed size, in order, and the number dropped.
 
-    Uses the bounds rule of `require_points_inside`.
+    A point is inside when ``0 <= row < height`` and ``0 <= col < width``. The count is of point
+    rows, so a long-form position with several annotator rows counts once per row.
 
     Raises:
         ValueError: A point's image has no sniffed size.
@@ -291,6 +291,26 @@ def drop_points_outside(
         raise ValueError(f"{unsized.num_rows} points whose image has no sniffed size: {ids}")
     kept = points.filter(inside)
     return kept, points.num_rows - kept.num_rows
+
+
+def drop_points_outside_and_record(
+    points: pa.Table,
+    images: Iterable[LegacyImage],
+    sniffed: Mapping[str, tuple[str, int, int]],
+    dropped: dict[str, int],
+) -> tuple[pa.Table, dict[str, int]]:
+    """Drop out-of-bounds points; return the kept points and ``dropped`` with the count merged in.
+
+    ``points_out_of_bounds`` is added only when some point is dropped, and the count is logged.
+
+    Raises:
+        ValueError: A point's image has no sniffed size.
+    """
+    kept, n_out_of_bounds = drop_points_outside(points, images, sniffed)
+    if not n_out_of_bounds:
+        return kept, dropped
+    logger.info("dropped %d points outside their image", n_out_of_bounds)
+    return kept, {**dropped, "points_out_of_bounds": n_out_of_bounds}
 
 
 def require_same_ids(found: Collection[Any], expected: Collection[Any], *, what: str) -> None:
@@ -308,18 +328,9 @@ def require_same_ids(found: Collection[Any], expected: Collection[Any], *, what:
         )
 
 
-def sniff_images(
-    client: Any, bucket: str, keys: Sequence[str], *, workers: int
-) -> dict[str, tuple[str, int, int]]:
-    """Return ``(media_type, width, height)`` per key, read from header bytes on ``workers`` threads."""
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = pool.map(partial(sniff_image, client, bucket), keys)
-        return dict(zip(keys, results, strict=True))
-
-
 def image_key(image: LegacyImage, media_type: str) -> str:
     """Return ``<group>/<image_id>.<ext>``, the key relative to the image store prefix."""
-    return f"{image.group}/{image.image_id}.{EXTENSIONS[media_type]}"
+    return f"{image.group}/{image.image_id}.{_EXTENSIONS[media_type]}"
 
 
 def _mask_dest_key(image: LegacyImage) -> str:
@@ -327,119 +338,216 @@ def _mask_dest_key(image: LegacyImage) -> str:
     return f"{image.group}/{image.image_id}_mask.png"
 
 
-def copy_items(
-    images: Iterable[LegacyImage],
-    sniffed: Mapping[str, tuple[str, int, int]],
-    *,
-    legacy: LegacyDataset,
-    dataset: str,
-) -> list[CopyItem]:
-    """Plan one copy per image, plus one per mask, from the legacy prefix into the image store."""
-    items = []
-    for image in images:
-        items.append(
-            CopyItem(
-                source_bucket=legacy.bucket,
-                source_key=legacy.prefix + image.key,
-                dest_key=image_prefix(dataset) + image_key(image, sniffed[image.key][0]),
-            )
-        )
-        if image.mask_key is not None:
-            items.append(
-                CopyItem(
-                    source_bucket=legacy.bucket,
-                    source_key=legacy.prefix + image.mask_key,
-                    dest_key=image_prefix(dataset) + _mask_dest_key(image),
-                )
-            )
-    return items
-
-
-def _mask_columns(
-    image: LegacyImage, copied: Mapping[str, CopiedObject], *, dataset: str
+def _image_row(
+    image: LegacyImage, facts: ObjectFacts, header: tuple[str, int, int]
 ) -> dict[str, Any]:
-    """Return the ``mask_*`` columns of ``image``'s row, all None when it has no mask."""
-    if image.mask_key is None:
-        return {"mask_key": None, "mask_etag": None, "mask_size": None, "mask_crc64nvme": None}
-    key = _mask_dest_key(image)
-    result = copied[image_prefix(dataset) + key]
+    """Build the maskless ``images.parquet`` row of ``image``; ``attrs`` as sorted-key JSON."""
+    media_type, width, height = header
     return {
-        "mask_key": key,
-        "mask_etag": result.etag,
-        "mask_size": result.size,
-        "mask_crc64nvme": result.crc64nvme,
+        "image_id": image.image_id,
+        "key": image_key(image, media_type),
+        "etag": facts.etag,
+        "size": facts.size,
+        "crc64nvme": facts.crc64nvme,
+        "media_type": media_type,
+        "width": width,
+        "height": height,
+        "group": image.group,
+        "mask_key": None,
+        "mask_etag": None,
+        "mask_size": None,
+        "mask_crc64nvme": None,
+        "source_fingerprint": facts.source_etag,
+        "source_name": PurePosixPath(image.key).name,
+        "attrs": None if image.attrs is None else json.dumps(image.attrs, sort_keys=True),
     }
 
 
-def image_rows(
-    images: Iterable[LegacyImage],
-    sniffed: Mapping[str, tuple[str, int, int]],
-    copied: Mapping[str, CopiedObject],
-    *,
-    dataset: str,
-) -> pa.Table:
-    """Build ``images.parquet`` from the legacy images, their header sizes and copy results.
+def _head_listed(client: Any, legacy: LegacyDataset, image: LegacyImage) -> Mapping[str, Any]:
+    """HEAD the legacy image with its checksum.
 
-    ``copied`` is keyed by full destination key; the legacy ETag is the ``source_fingerprint``.
-    ``attrs`` is written as a JSON object with sorted keys.
+    Raises:
+        SourceChanged: The object is gone or its ETag differs from the listing.
     """
-    rows = []
-    for image in images:
-        media_type, width, height = sniffed[image.key]
-        key = image_key(image, media_type)
-        result = copied[image_prefix(dataset) + key]
-        rows.append(
-            {
-                "image_id": image.image_id,
-                "key": key,
-                "etag": result.etag,
-                "size": result.size,
-                "crc64nvme": result.crc64nvme,
-                "media_type": media_type,
-                "width": width,
-                "height": height,
-                "group": image.group,
-                **_mask_columns(image, copied, dataset=dataset),
-                "source_fingerprint": image.etag,
-                "source_name": PurePosixPath(image.key).name,
-                "attrs": None if image.attrs is None else json.dumps(image.attrs, sort_keys=True),
-            }
-        )
-    return pa.Table.from_pylist(rows, schema=IMAGES_SCHEMA)
+    key = legacy.prefix + image.key
+    head = head_with_checksum(client, legacy.bucket, key)
+    if head is None or head["ETag"].strip('"') != image.etag:
+        raise SourceChanged(f"s3://{legacy.bucket}/{key} changed since it was listed")
+    return head
 
 
-def sniff_legacy_images(
-    source_client: Any, images: Sequence[LegacyImage], *, legacy: LegacyDataset, workers: int
-) -> dict[str, tuple[str, int, int]]:
-    """Return ``(media_type, width, height)`` of each legacy image, keyed by its relative key."""
-    keys = [legacy.prefix + image.key for image in images]
-    by_full_key = sniff_images(source_client, legacy.bucket, keys, workers=workers)
-    return {image.key: by_full_key[legacy.prefix + image.key] for image in images}
-
-
-def stage_images(
-    source_client: Any,
-    dest: Any,
-    images: Sequence[LegacyImage],
-    sniffed: Mapping[str, tuple[str, int, int]],
-    *,
-    legacy: LegacyDataset,
-    dest_bucket: str,
-    dataset: str,
-    workers: int,
-) -> pa.Table:
-    """Copy each sniffed legacy image and mask into the image store; return ``images.parquet``."""
-    items = copy_items(images, sniffed, legacy=legacy, dataset=dataset)
-    copied = copy_images(
-        dest, items, dest_bucket=dest_bucket, workers=workers, source_client=source_client
+def _probe_one(client: Any, legacy: LegacyDataset, image: LegacyImage) -> ImageOutcome:
+    return probe_image(
+        client,
+        legacy.bucket,
+        image.image_id,
+        legacy.prefix + image.key,
+        _head_listed(client, legacy, image),
+        {},
+        lambda facts, header: _image_row(image, facts, header),
     )
-    return image_rows(images, sniffed, copied, dataset=dataset)
+
+
+def _probe_result(images: Sequence[LegacyImage], outcomes: Sequence[ImageOutcome]) -> LegacyProbe:
+    rows = {o.image_id: o.row for o in outcomes if o.row is not None}
+    kept = [image for image in images if image.image_id in rows]
+    sniffed = {
+        image.key: (
+            rows[image.image_id]["media_type"],
+            rows[image.image_id]["width"],
+            rows[image.image_id]["height"],
+        )
+        for image in kept
+    }
+    unreadable = [o.image_id for o in outcomes if o.row is None]
+    return LegacyProbe(images=kept, rows=rows, sniffed=sniffed, unreadable=unreadable)
+
+
+def probe_legacy_images(
+    client: Any, images: Sequence[LegacyImage], *, legacy: LegacyDataset, workers: int
+) -> LegacyProbe:
+    """HEAD and sniff every legacy image on ``workers`` threads; an unreadable header drops it.
+
+    Raises:
+        SourceChanged: An image changed since the listing or while it was read.
+    """
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        outcomes = list(pool.map(lambda image: _probe_one(client, legacy, image), images))
+    return _probe_result(images, outcomes)
+
+
+def drop_unreadable_points(points: pa.Table, probe: LegacyProbe) -> pa.Table:
+    """Return the points whose image the probe kept, in order."""
+    kept = pa.array(list(probe.rows), pa.string())
+    return points.filter(pc.is_in(points.column("image_id"), value_set=kept))
+
+
+def _with_unreadable(dropped: Mapping[str, int], probe: LegacyProbe) -> dict[str, int]:
+    """Merge ``image_unreadable_header`` into ``dropped`` when the probe dropped an image."""
+    if not probe.unreadable:
+        return dict(dropped)
+    return {**dropped, "image_unreadable_header": len(probe.unreadable)}
+
+
+def _mask_columns(image: LegacyImage, mask: bytes) -> dict[str, Any]:
+    """Return the ``mask_*`` columns of ``image``'s row for the mask bytes staged for it."""
+    return {
+        "mask_key": _mask_dest_key(image),
+        "mask_etag": md5_hex(mask),
+        "mask_size": len(mask),
+        "mask_crc64nvme": crc64nvme_b64(mask),
+    }
+
+
+def _stage_masks(
+    stage_dir: Path, dataset: str, images: Sequence[LegacyImage], masks: Mapping[str, bytes]
+) -> list[StagedFile]:
+    """Write each image's mask bytes into the stage; return the uploads that publish them.
+
+    Raises:
+        ObjectConflict: A staged mask file exists with other bytes.
+    """
+    files = []
+    for image in images:
+        mask = masks[image.image_id]
+        key = image_prefix(dataset) + _mask_dest_key(image)
+        stage_bytes(stage_dir, key, mask)
+        files.append(StagedFile(key, len(mask), crc64nvme_b64(mask), _PNG))
+    return files
+
+
+def _image_rows(probe: LegacyProbe, masks: Mapping[str, bytes] | None) -> list[dict[str, Any]]:
+    """Return the kept images' rows in probe order, with mask columns when ``masks`` is given."""
+    rows = [probe.rows[image.image_id] for image in probe.images]
+    if masks is None:
+        return rows
+    return [
+        {**row, **_mask_columns(image, masks[image.image_id])}
+        for image, row in zip(probe.images, rows, strict=True)
+    ]
+
+
+def _legacy_copy_plan(
+    rows: Sequence[Mapping[str, Any]], probe: LegacyProbe, *, legacy: LegacyDataset, dataset: str
+) -> list[dict[str, Any]]:
+    """Plan the copy of each image row from its legacy object into the dataset's image prefix."""
+    source_keys = {image.image_id: legacy.prefix + image.key for image in probe.images}
+    return copy_plan(
+        rows,
+        src_bucket=legacy.bucket,
+        src_key=lambda row: source_keys[row["image_id"]],
+        dst_prefix=image_prefix(dataset),
+    )
 
 
 def build_command(dataset: str, args: argparse.Namespace) -> str:
     """Reconstruct ``segdata build <dataset>`` from the options that shape the version."""
-    parts = ["segdata", "build", dataset, "--store", str(args.store)]
+    parts = ["segdata", "build", dataset, "--stage-dir", str(args.stage_dir)]
     parts += pin_command_parts(args, "taxonomy-")
     if args.legacy_bucket != DEFAULT_BUCKET:
         parts += ["--legacy-bucket", args.legacy_bucket]
     return shlex.join(parts)
+
+
+def publish_version(
+    *,
+    dataset: str,
+    kind: Literal["points", "dense"],
+    tables: Mapping[str, pa.Table],
+    source: SourceInfo,
+    label_mapping: LabelMapping,
+    dropped: Mapping[str, int],
+    git: GitState,
+    repo_root: Path,
+    client: Any,
+    probe: LegacyProbe,
+    legacy: LegacyDataset,
+    args: argparse.Namespace,
+    masks: Mapping[str, bytes] | None = None,
+) -> int:
+    """Stage a new version and its plans under ``args.stage_dir``; print its version and sha256.
+
+    ``tables`` holds the dataset-specific tables; ``images.parquet`` is built from the probe, and
+    ``image_unreadable_header`` joins ``dropped`` when the probe dropped an image. Each image is
+    planned as a copy from the legacy prefix in ``copies.jsonl``. ``masks`` holds each kept
+    image's mask bytes by image id; they are staged and listed in ``uploads.jsonl``.
+
+    Raises:
+        PublishRefused: The tree is dirty or unpushed, or ``uv.lock`` is missing.
+        ObjectConflict: A staged mask file exists with other bytes.
+    """
+    version = next_version(args.stage_dir, DATASET_BUCKET, dataset, git_sha=git.sha, client=client)
+    rows = _image_rows(probe, masks)
+    uploads: list[StagedFile] = []
+    if masks is not None:
+        uploads = _stage_masks(args.stage_dir, dataset, probe.images, masks)
+    manifest, sha = publish_dataset(
+        LocalDirS3(args.stage_dir),
+        bucket=DATASET_BUCKET,
+        dataset=dataset,
+        version=version,
+        kind=kind,
+        tables={"images.parquet": pa.Table.from_pylist(rows, schema=IMAGES_SCHEMA), **tables},
+        image_store=publishing.image_store(DATASET_BUCKET, dataset),
+        etl_package="segdata-etl",
+        etl_command=build_command(dataset, args),
+        source=source,
+        label_mapping=label_mapping,
+        dropped=_with_unreadable(dropped, probe),
+        repo_dir=repo_root,
+        git=git,
+    )
+    plan = _legacy_copy_plan(rows, probe, legacy=legacy, dataset=dataset)
+    write_copies(args.stage_dir, dataset, version, plan)
+    if uploads:
+        write_uploads(args.stage_dir, dataset, version, uploads)
+    logger.info(
+        "staged %s %s: %d images, %d copies, %d uploads",
+        dataset,
+        manifest.version,
+        manifest.stats.n_images,
+        len(plan),
+        len(uploads),
+    )
+    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
+    return 0

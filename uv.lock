@@ -3741,8 +3741,10 @@ name = "segdata-etl"
 version = "0.1.0"
 source = { editable = "packages/segdata-etl" }
 dependencies = [
+    { name = "awscrt" },
     { name = "boto3" },
     { name = "coralnet-scraper" },
+    { name = "huggingface-hub" },
     { name = "ibis-framework", extra = ["duckdb"] },
     { name = "networkx" },
     { name = "numpy" },
@@ -3764,8 +3766,10 @@ tests = [
 
 [package.metadata]
 requires-dist = [
+    { name = "awscrt" },
     { name = "boto3" },
     { name = "coralnet-scraper", editable = "packages/coralnet-scraper" },
+    { name = "huggingface-hub", specifier = ">=0.36.2" },
     { name = "ibis-framework", extras = ["duckdb"] },
     { name = "networkx" },
     { name = "numpy" },

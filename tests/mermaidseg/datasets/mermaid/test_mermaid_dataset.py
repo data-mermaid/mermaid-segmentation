@@ -65,3 +65,35 @@ def test_item_is_the_rgb_image_and_a_point_mask_of_audited_annotations(bucket_st
 def test_construction_without_a_cutoff_raises_a_missing_argument_error(bucket_store, tmp_path):
     with pytest.raises(TypeError, match="annotation_date_cutoff"):
         MermaidDataset(annotations_path=_annotations_file(tmp_path), source_bucket=BUCKET)
+
+
+def test_cutoff_keeps_the_whole_cutoff_day_in_utc_and_drops_the_next_midnight(
+    bucket_store, tmp_path
+):
+    stamps = [
+        pd.Timestamp("2026-08-12T23:59:59.999999", tz="UTC"),
+        pd.Timestamp("2026-08-13T00:00:00", tz="UTC"),
+    ]
+    frame = pd.DataFrame(
+        {
+            "image_id": ["img_a", "img_b"],
+            "region_id": [1, 1],
+            "region_name": ["r1", "r1"],
+            "benthic_attribute_name": ["Sand", "Sand"],
+            "row": [1, 2],
+            "col": [1, 2],
+            "updated_on": stamps,
+        }
+    )
+    path = tmp_path / "boundary.parquet"
+    frame.to_parquet(path, index=False)
+    bucket_store.put_solid(BUCKET, "mermaid/img_a.png", (8, 6), (9, 8, 7))
+
+    ds = MermaidDataset(
+        annotations_path=str(path),
+        source_bucket=BUCKET,
+        annotation_date_cutoff="2026-08-12",
+        split="val",
+    )
+
+    assert ds.df_images["image_id"].tolist() == ["img_a"]

@@ -1,21 +1,21 @@
-native_name,mermaid_benthic_attribute
-acropora,acropora
-all other,other
-bare substrate,bare substrate
-cca,crustose coralline algae
-favia,favia
-favites,favites
-macroalgae,macroalgae
-millepora,millepora
-montipora,montipora
-other scleractinians,hard coral
-pavona,pavona
-platygyra,platygyra
-pocillopora,pocillopora
-porites,porites
-sand,sand
-soft coral,soft coral
-sponges,sponge
-transect hardware,transect tools
-turf,turf algae
-unclear,background
+label_id,name,mermaid_benthic_attribute
+,acropora,acropora
+,all other,other
+,bare substrate,bare substrate
+,cca,crustose coralline algae
+,favia,favia
+,favites,favites
+,macroalgae,macroalgae
+,millepora,millepora
+,montipora,montipora
+,other scleractinians,hard coral
+,pavona,pavona
+,platygyra,platygyra
+,pocillopora,pocillopora
+,porites,porites
+,sand,sand
+,soft coral,soft coral
+,sponges,sponge
+,transect hardware,transect tools
+,turf,turf algae
+,unclear,background

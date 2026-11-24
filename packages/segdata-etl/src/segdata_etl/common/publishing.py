@@ -2,47 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date
-from pathlib import Path
-from typing import Any
-
 import pyarrow as pa
 
-from segdata_etl.common.version import list_versions, next_version
-from segdata_spec.errors import PublishRefused
 from segdata_spec.manifest import ImageStore
-from segdata_spec.publish import GitState, _guard_git, probe_git
 from segdata_spec.schema import LABEL_COUNTS_SCHEMA
 
 _IMAGES_FOLDER = "images"
-
-
-def checked_git_state(repo_root: Path) -> GitState:
-    """Probe git once and refuse a dirty, unpushed or lock-less tree, as ``publish_dataset`` does.
-
-    Raises:
-        PublishRefused: The tree cannot be published from.
-    """
-    state, _lock = _guard_git(repo_root, probe_git(repo_root))
-    return state
-
-
-def pick_version(client: Any, bucket: str, dataset: str, *, git_sha: str, today: date) -> str:
-    """Return the next free version name under ``datasets/<dataset>/``."""
-    existing = list_versions(client, bucket, f"datasets/{dataset}/")
-    return next_version(existing, git_sha=git_sha, today=today)
-
-
-def require_version_absent(client: Any, bucket: str, dataset: str, version: str) -> None:
-    """Refuse a version folder that already holds any object.
-
-    Raises:
-        PublishRefused: ``datasets/<dataset>/<version>/`` is not empty.
-    """
-    prefix = f"datasets/{dataset}/{version}/"
-    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
-        if page.get("Contents"):
-            raise PublishRefused(f"s3://{bucket}/{prefix} already holds objects")
 
 
 def count_labels(points: pa.Table) -> pa.Table:

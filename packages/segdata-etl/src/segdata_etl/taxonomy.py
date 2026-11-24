@@ -1,7 +1,8 @@
-"""``segdata taxonomy``: fetch the MERMAID benthic taxonomy and publish it as a version.
+"""``segdata taxonomy``: stage the MERMAID benthic taxonomy locally, then publish the staged tables.
 
-``--tables-from`` republishes the tables of a staged version, e.g. a local one to S3, with its
-original source revision and the exact table bytes.
+``--stage-dir`` fetches the API and stages a version on disk. ``--tables-from <staged folder> --publish``
+re-checks those tables and publishes them to S3 as a new version, with the staged source revision and the
+exact table bytes.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import io
 import logging
 import shlex
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +21,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 
-from segdata_etl.common.store import open_store
-from segdata_etl.common.version import list_versions, next_version, utc_today
+from segdata_etl.common.stage import LocalDirS3, next_free_version, refuse_unpublishable
+from segdata_spec import DATASET_BUCKET
+from segdata_spec._s3 import taxonomy_prefix
 from segdata_spec.manifest import SourceInfo, TaxonomyManifest
-from segdata_spec.publish import probe_git, publish_taxonomy
+from segdata_spec.publish import GitState, probe_git, publish_taxonomy
 from segdata_spec.schema import (
     BENTHIC_ATTRIBUTES_SCHEMA,
     GROWTH_FORMS_SCHEMA,
@@ -71,6 +74,8 @@ def _fetch_attributes(session: requests.Session, base_url: str) -> list[dict[str
 def _fetch_growth_forms(session: requests.Session, base_url: str) -> list[dict[str, Any]]:
     for choice in _get_json(session, f"{base_url}/choices/"):
         if choice.get("name") == "growthforms":
+            if not choice["data"]:
+                raise ValueError(f"{base_url}/choices/ 'growthforms' entry is empty")
             return [{"id": r["id"], "name": r["name"]} for r in choice["data"]]
     raise ValueError(f"{base_url}/choices/ has no 'growthforms' entry")
 
@@ -86,7 +91,7 @@ def fetch_taxonomy(
 
     Raises:
         requests.HTTPError: A response is not 2xx.
-        ValueError: ``/choices/`` has no ``growthforms`` entry, the attribute pages repeat a URL,
+        ValueError: ``/choices/`` has no ``growthforms`` entry or it is empty, the attribute pages repeat a URL,
             disagree with the API count or hold no rows, a table has duplicate ids, or an
             attribute's parent is not an attribute.
         KeyError: An attribute row lacks ``parent``.
@@ -121,12 +126,29 @@ def find_repo_root(start: Path) -> Path:
 
 
 def _command_line(args: argparse.Namespace) -> str:
-    parts = ["segdata", "taxonomy", "--store", str(args.store)]
+    parts = ["segdata", "taxonomy"]
     if args.tables_from is not None:
-        parts += ["--tables-from", str(args.tables_from)]
-    if args.base_url != DEFAULT_BASE_URL:
-        parts += ["--base-url", args.base_url]
+        parts += ["--tables-from", str(args.tables_from), "--publish"]
+    else:
+        parts += ["--stage-dir", str(args.stage_dir)]
+        if args.base_url != DEFAULT_BASE_URL:
+            parts += ["--base-url", args.base_url]
     return shlex.join(parts)
+
+
+def _check_mode(args: argparse.Namespace) -> None:
+    """Refuse flag combinations other than stage (``--stage-dir``) or publish (``--tables-from --publish``)."""
+    if args.tables_from is not None:
+        if not args.publish:
+            raise ValueError("--tables-from only publishes a staged version; add --publish")
+        if args.stage_dir is not None:
+            raise ValueError("--stage-dir stages a fetch; it cannot be combined with --tables-from")
+    elif args.publish:
+        raise ValueError("--publish needs --tables-from <staged folder>; stage first, then publish")
+    elif args.stage_dir is None:
+        raise ValueError(
+            "give --stage-dir to stage, or --tables-from <folder> --publish to publish"
+        )
 
 
 def _read_staged(directory: Path) -> tuple[dict[str, pa.Table], SourceInfo]:
@@ -139,6 +161,7 @@ def _read_staged(directory: Path) -> tuple[dict[str, pa.Table], SourceInfo]:
         if hashlib.sha256(data).hexdigest() != manifest.files[name].sha256:
             raise ValueError(f"{directory / name} does not match the sha256 in its manifest")
         tables[name] = pq.read_table(io.BytesIO(data))
+    _check_tables(tables[_BA], tables[_GF])
     return tables, manifest.source
 
 
@@ -150,25 +173,19 @@ def _fetch_source(
     return tables, SourceInfo(type="mermaid-api", uri=base_url, revision=fetched_at)
 
 
-def run_taxonomy(
-    args: argparse.Namespace, *, source_client: Any, session: requests.Session | None = None
+def _write_version(
+    args: argparse.Namespace,
+    *,
+    client: Any,
+    version: str,
+    tables: dict[str, pa.Table],
+    source: SourceInfo,
+    repo_root: Path,
+    git: GitState,
 ) -> int:
-    """Publish a new ``mermaid-benthic`` version and print its version and manifest sha256."""
-    repo_root = find_repo_root(Path(__file__).resolve().parent)
-    probe = probe_git(repo_root)
-    if args.tables_from is not None:
-        tables, source = _read_staged(Path(args.tables_from))
-    else:
-        tables, source = _fetch_source(session or requests.Session(), args.base_url)
-    client, bucket = open_store(args.store, source_client=source_client)
-    version = next_version(
-        list_versions(client, bucket, f"taxonomy/{NAME}/"),
-        git_sha=probe.sha,
-        today=utc_today(),
-    )
     manifest, sha = publish_taxonomy(
         client,
-        bucket=bucket,
+        bucket=DATASET_BUCKET,
         name=NAME,
         version=version,
         tables=tables,
@@ -176,19 +193,70 @@ def run_taxonomy(
         etl_command=_command_line(args),
         source=source,
         repo_dir=repo_root,
-        git=probe,
+        git=git,
     )
-    logger.info("published taxonomy %s", manifest.version)
+    logger.info("wrote taxonomy %s", manifest.version)
     print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0
 
 
+def run_taxonomy(
+    args: argparse.Namespace, *, source_client: Any, session: requests.Session | None = None
+) -> int:
+    """Stage a fetched taxonomy under ``--stage-dir``, or publish a staged one with ``--tables-from``.
+
+    Prints the version and manifest sha256. A staged version is named against the staged folders and the
+    versions in S3; a published one is named against S3 only.
+
+    Raises:
+        ValueError: The flags are not a stage or a publish, or a staged table fails its check.
+        PublishRefused: The git tree is dirty or unpushed.
+    """
+    _check_mode(args)
+    repo_root = find_repo_root(Path(__file__).resolve().parent)
+    git = probe_git(repo_root)
+    refuse_unpublishable(git)
+    staging = args.tables_from is None
+    if staging:
+        tables, source = _fetch_source(session or requests.Session(), args.base_url)
+    else:
+        tables, source = _read_staged(Path(args.tables_from))
+    version = next_free_version(
+        args.stage_dir if staging else None,
+        DATASET_BUCKET,
+        partial(taxonomy_prefix, NAME),
+        git_sha=git.sha,
+        client=source_client,
+    )
+    client = LocalDirS3(args.stage_dir) if staging else source_client
+    return _write_version(
+        args,
+        client=client,
+        version=version,
+        tables=tables,
+        source=source,
+        repo_root=repo_root,
+        git=git,
+    )
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add ``--tables-from`` and ``--base-url``; ``--store`` comes from ``add_store_argument``."""
+    """Add ``--stage-dir``, ``--tables-from``, ``--publish`` and ``--base-url``."""
+    parser.add_argument(
+        "--stage-dir",
+        type=Path,
+        default=None,
+        help="Fetch the taxonomy and stage a version in this local directory",
+    )
     parser.add_argument(
         "--tables-from",
         type=Path,
         default=None,
-        help="Publish the tables of this staged taxonomy version folder; makes no HTTP call",
+        help="Staged taxonomy version folder to publish to S3; requires --publish; makes no HTTP call",
+    )
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="Publish the --tables-from version to S3 after re-checking its tables",
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help=argparse.SUPPRESS)

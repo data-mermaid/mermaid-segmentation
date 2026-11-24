@@ -73,8 +73,9 @@ class MermaidDataset(BaseCoralDataset):
         df_annotations = df_annotations.rename(
             columns={"benthic_attribute_name": "source_label_name"}
         )
+        end_of_cutoff_day = self.annotation_date_cutoff + pd.Timedelta(days=1)
         df_annotations = df_annotations[
-            df_annotations["updated_on"] <= self.annotation_date_cutoff
+            df_annotations["updated_on"] < end_of_cutoff_day
         ].reset_index(drop=True)
         df_images = self._derive_df_images_from_annotations(df_annotations)
         return df_annotations, df_images

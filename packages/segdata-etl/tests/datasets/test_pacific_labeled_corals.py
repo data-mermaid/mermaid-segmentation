@@ -1,31 +1,29 @@
-"""``segdata build pacific_labeled_corals`` from a fake legacy prefix into a LocalStore."""
+"""``segdata build pacific_labeled_corals`` from a fake legacy prefix into a local stage."""
 
 from __future__ import annotations
 
 import io
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 import pytest
-from s3_fake import FakeS3
+from uniform.conftest import FakeS3
 
-from segdata_etl.common.local_store import LocalStore
 from segdata_etl.datasets import pacific_labeled_corals
-from segdata_spec import DATASET_BUCKET
-from segdata_spec.read import DatasetVersion, open_version
 
 from .conftest import (
     LEGACY_BUCKET,
+    Staged,
+    assert_curated_label_mapping,
     build_args,
-    copied_columns,
     jpeg,
     legacy_etag,
     make_repo,
     no_mask,
+    probed_columns,
     publish_fixture_taxonomy,
-    run_builder,
+    stage_version,
 )
 
 PREFIX = "external_validation_datasets/pacific_labeled_corals/"
@@ -82,13 +80,7 @@ def _legacy(s3: FakeS3, annotations: list[Annotation] = ANNOTATIONS) -> None:
     for (site, subset, image_id, ext), data in IMAGES.items():
         files[f"images/{site}/{subset}/{image_id}{ext}"] = data
     for name, data in files.items():
-        s3.objects[(LEGACY_BUCKET, PREFIX + name)] = data
-
-
-@dataclass(frozen=True)
-class Published:
-    store: Path
-    version: DatasetVersion
+        s3.put(LEGACY_BUCKET, PREFIX + name, data)
 
 
 @pytest.fixture
@@ -97,25 +89,21 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def published(repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Published:
+def staged(repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Staged:
     s3 = FakeS3()
     _legacy(s3)
-    store = tmp_path / "store"
-    taxonomy_sha = publish_fixture_taxonomy(LocalStore(store), repo)
-    args = build_args(pacific_labeled_corals, store, taxonomy_sha)
-    pin = run_builder(pacific_labeled_corals, args, s3, capsys)
-    return Published(store, open_version(store, DATASET_BUCKET, pin))
+    return stage_version(pacific_labeled_corals, s3, repo, tmp_path, capsys)
 
 
 def test_build_groups_images_by_site_with_subset_and_raw_imageid_in_attrs(
-    published: Published,
+    staged: Staged,
 ) -> None:
     def row(site: str, subset: str, image_id: str, ext: str, w: int, h: int, raw: int) -> dict:
         data = IMAGES[(site, subset, image_id, ext)]
         return {
             "image_id": image_id,
             "key": f"{site}/{image_id}.jpg",
-            **copied_columns(data),
+            **probed_columns(data),
             "media_type": "image/jpeg",
             "width": w,
             "height": h,
@@ -126,7 +114,7 @@ def test_build_groups_images_by_site_with_subset_and_raw_imageid_in_attrs(
             "attrs": f'{{"raw_imageid": {raw}, "subset": "{subset}"}}',
         }
 
-    assert sorted(published.version.images.to_pylist(), key=lambda r: r["image_id"]) == [
+    assert sorted(staged.version.images.to_pylist(), key=lambda r: r["image_id"]) == [
         row("heron_reef", "evaluation", "ev_1", ".jpg", 6, 4, 4),
         row("nanwan_bay", "reference", "nb_1", ".jpg", 5, 3, 9),
         row("heron_reef", "reference", "ref_1", ".JPG", 7, 5, 11),
@@ -134,9 +122,9 @@ def test_build_groups_images_by_site_with_subset_and_raw_imageid_in_attrs(
 
 
 def test_build_writes_one_point_row_per_present_annotator_and_counts_each(
-    published: Published,
+    staged: Staged,
 ) -> None:
-    version = published.version
+    version = staged.version
     assert version.points is not None
     assert version.points.to_pylist() == [
         {"image_id": "ref_1", "row": 1, "col": 2, "label_id": 2, "annotator": "archived"},
@@ -153,13 +141,11 @@ def test_build_writes_one_point_row_per_present_annotator_and_counts_each(
     ]
 
 
-def test_build_records_the_dryad_licence_and_no_drops(published: Published) -> None:
-    manifest = published.version.manifest
+def test_build_records_the_dryad_licence_and_no_drops(staged: Staged) -> None:
+    manifest = staged.version.manifest
     assert manifest.source.license == "CC0 1.0 (Dryad)"
     assert manifest.stats.dropped == {}
-    assert manifest.etl.command.startswith(
-        f"segdata build pacific_labeled_corals --store {published.store}"
-    )
+    assert_curated_label_mapping(manifest, pacific_labeled_corals.DATASET, staged.version.labels)
 
 
 @pytest.mark.parametrize(
@@ -172,7 +158,7 @@ def test_build_records_the_dryad_licence_and_no_drops(published: Published) -> N
     ],
     ids=["other-subset", "other-site", "two-raw-imageids", "duplicated-position"],
 )
-def test_build_refuses_inconsistent_annotations_before_copying(
+def test_build_refuses_inconsistent_annotations_before_staging(
     repo: Path,
     tmp_path: Path,
     changed: tuple[str, str, int, str],
@@ -182,10 +168,27 @@ def test_build_refuses_inconsistent_annotations_before_copying(
     s3 = FakeS3()
     extra = (*changed, ".JPG", *position, "Acropora", NA, NA, NA, NA, NA, NA)
     _legacy(s3, [*ANNOTATIONS, extra])
-    store = tmp_path / "store"
-    taxonomy_sha = publish_fixture_taxonomy(LocalStore(store), repo)
+    stage = tmp_path / "stage"
+    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
     with pytest.raises(ValueError, match=message):
-        pacific_labeled_corals.run(build_args(pacific_labeled_corals, store, taxonomy_sha), s3)
+        pacific_labeled_corals.run(build_args(pacific_labeled_corals, stage, taxonomy_sha), s3)
 
-    assert not (store / DATASET_BUCKET / "images").exists()
+    assert not stage.exists()
+
+
+def test_build_drops_every_annotator_row_of_a_point_past_an_edge_and_counts_the_rows(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    s3 = FakeS3()
+    # ref_1 is 7 wide, so col 7 is outside; both annotators' rows go, and label 5 would count.
+    outside = ("heron_reef", "reference", 11, "ref_1", ".JPG", 1, 7, "Acropora", "Bare substrate")
+    _legacy(s3, [*ANNOTATIONS, (*outside, NA, NA, NA, NA, NA)])
+
+    version = stage_version(pacific_labeled_corals, s3, repo, tmp_path, capsys).version
+
+    assert version.manifest.stats.dropped == {"points_out_of_bounds": 2}
+    assert version.points is not None
+    assert version.points.num_rows == 5
+    assert (1, 7) not in {(r["row"], r["col"]) for r in version.points.to_pylist()}
+    assert sum(r["n"] for r in version.label_counts.to_pylist()) == 5

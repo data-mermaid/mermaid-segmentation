@@ -1,8 +1,7 @@
-"""Checks that each curated CSV under segdata-etl equals its ``label_mapping.py`` dict.
+"""The curated CSVs carry the same name -> MERMAID target pairs as the mermaidseg dicts they replace.
 
-Each CSV's native-name to MERMAID benthic-attribute pairs and row count must match the dict
-returned by the matching ``fetch_*_to_mermaid`` function. Reads the CSVs by file path because the
-root environment does not install segdata-etl and mermaidseg must not import segdata_etl.
+The CSVs are read from their path in the repo rather than through ``segdata_etl``,
+because the mermaidseg test environment does not install that package.
 """
 
 from __future__ import annotations
@@ -13,31 +12,40 @@ from pathlib import Path
 
 import pytest
 
-from mermaidseg.dataset_reconciliation import label_mapping
-
-_CURATED = (
-    Path(__file__).resolve().parent.parent
-    / "packages"
-    / "segdata-etl"
-    / "src"
-    / "segdata_etl"
-    / "label_maps"
-    / "curated"
+from mermaidseg.dataset_reconciliation.label_mapping import (
+    coralscapes_v2_to_mermaid,
+    fetch_benthos_yuval_to_mermaid,
+    fetch_catlin_seaview_to_mermaid,
+    fetch_moorea_labeled_corals_to_mermaid,
+    fetch_pacific_labeled_corals_to_mermaid,
+    fetch_ucsd_mosaics_to_mermaid,
 )
 
-_DICTS: dict[str, Callable[[], dict[str, str]]] = {
-    "catlin_seaview": label_mapping.fetch_catlin_seaview_to_mermaid,
-    "moorea_labeled_corals": label_mapping.fetch_moorea_labeled_corals_to_mermaid,
-    "pacific_labeled_corals": label_mapping.fetch_pacific_labeled_corals_to_mermaid,
-    "benthos_yuval": label_mapping.fetch_benthos_yuval_to_mermaid,
-}
+CURATED_DIR = (
+    Path(__file__).resolve().parents[1] / "packages/segdata-etl/src/segdata_etl/label_maps/curated"
+)
 
 
-@pytest.mark.parametrize("dataset", sorted(_DICTS))
-def test_csv_equals_the_label_mapping_dict(dataset: str) -> None:
-    with (_CURATED / f"{dataset}.csv").open(newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+def _mapped_rows(dataset: str) -> list[dict[str, str]]:
+    with (CURATED_DIR / f"{dataset}.csv").open(newline="", encoding="utf-8") as f:
+        return [row for row in csv.DictReader(f) if row["mermaid_benthic_attribute"]]
 
-    expected = _DICTS[dataset]()
-    assert {r["native_name"]: r["mermaid_benthic_attribute"] for r in rows} == expected
+
+@pytest.mark.parametrize(
+    ("dataset", "legacy"),
+    [
+        ("coralscapes_v2", coralscapes_v2_to_mermaid),
+        ("ucsd_mosaics", fetch_ucsd_mosaics_to_mermaid),
+        ("catlin_seaview", fetch_catlin_seaview_to_mermaid),
+        ("moorea_labeled_corals", fetch_moorea_labeled_corals_to_mermaid),
+        ("pacific_labeled_corals", fetch_pacific_labeled_corals_to_mermaid),
+        ("benthos_yuval", fetch_benthos_yuval_to_mermaid),
+    ],
+)
+def test_curated_csv_equals_the_mermaidseg_dict(
+    dataset: str, legacy: Callable[[], dict[str, str]]
+) -> None:
+    rows = _mapped_rows(dataset)
+    expected = legacy()
+    assert {row["name"].lower(): row["mermaid_benthic_attribute"] for row in rows} == expected
     assert len(rows) == len(expected)

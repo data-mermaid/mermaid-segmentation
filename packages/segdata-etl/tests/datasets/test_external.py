@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import pandas as pd
 import pyarrow as pa
 import pytest
 
-from segdata_etl.common.copy import CopiedObject, CopyItem
-from segdata_etl.common.legacy import LegacyDataset, LegacyObject
+from segdata_etl.common.legacy import LegacyObject
 from segdata_etl.datasets import external
-from segdata_etl.label_maps.curated import CuratedMapInfo
+from segdata_etl.label_maps.curated import CURATED_SCHEMA, CuratedSource
 
 ATTRIBUTES = pa.table(
     {
@@ -19,7 +17,14 @@ ATTRIBUTES = pa.table(
     }
 )
 CLASSES = {"unlabeled": 0, "Acropora digitate": 5, "Water": 7, "Mystery": 9}
-CURATED = {"acropora digitate": "acropora", "water": "background"}
+CURATED = pa.table(
+    {
+        "label_id": [None, None],
+        "name": ["acropora digitate", "water"],
+        "mermaid_benthic_attribute": ["acropora", "background"],
+    },
+    schema=CURATED_SCHEMA,
+)
 
 
 def _row(label_id: int, name: str, ba_id: str | None, ba: str | None) -> dict[str, object]:
@@ -52,7 +57,7 @@ def test_build_labels_refuses_a_target_matching_two_taxonomy_names() -> None:
 
 def test_label_mapping_record_counts_mapped_and_unresolved_labels() -> None:
     labels = external.build_labels(CLASSES, CURATED, ATTRIBUTES)
-    info = CuratedMapInfo(path="curated/x.csv", sha256="f" * 64, n_entries=2)
+    info = CuratedSource(path="curated/x.csv", sha256="f" * 64)
     record = external.label_mapping_record(labels, info, git_sha="abc123")
     assert (record.n_labels, record.n_mapped, record.n_unresolved) == (3, 2, 1)
     assert (record.source, record.sha256, record.path, record.git_ref) == (
@@ -120,75 +125,17 @@ def test_image_key_takes_png_extension_from_media_type() -> None:
     assert external.image_key(image, "image/png") == "g/7.png"
 
 
-LEGACY = LegacyDataset(
-    name="benthos",
-    bucket="legacy-bucket",
-    prefix="legacy/benthos/",
-    annotations=pd.DataFrame(),
-    classes={},
-    manifest={},
-    manifest_sha256="0" * 64,
-    objects={},
-)
-
-
-def test_copy_items_and_image_rows_carry_the_mask_copy() -> None:
-    image = external.LegacyImage(
-        image_id="7", group="site1", key="imgs/7.jpg", etag="src-etag", mask_key="masks/7.png"
-    )
-    sniffed = {"imgs/7.jpg": ("image/jpeg", 40, 30)}
-
-    items = external.copy_items([image], sniffed, legacy=LEGACY, dataset="benthos")
-
-    assert items == [
-        CopyItem("legacy-bucket", "legacy/benthos/imgs/7.jpg", "images/benthos/site1/7.jpg"),
-        CopyItem("legacy-bucket", "legacy/benthos/masks/7.png", "images/benthos/site1/7_mask.png"),
-    ]
-    copied = {
-        "images/benthos/site1/7.jpg": CopiedObject(etag='"i"', size=100, crc64nvme="ic"),
-        "images/benthos/site1/7_mask.png": CopiedObject(etag='"m"', size=20, crc64nvme="mc"),
-    }
-    row = external.image_rows([image], sniffed, copied, dataset="benthos").to_pylist()[0]
-    assert (row["key"], row["etag"], row["size"], row["crc64nvme"]) == (
-        "site1/7.jpg",
-        '"i"',
-        100,
-        "ic",
-    )
-    assert (row["mask_key"], row["mask_etag"], row["mask_size"], row["mask_crc64nvme"]) == (
-        "site1/7_mask.png",
-        '"m"',
-        20,
-        "mc",
-    )
-
-
-def test_image_rows_writes_attrs_as_a_sorted_json_object() -> None:
-    image = external.LegacyImage(
-        image_id="7", group="g", key="7.jpg", etag="e", attrs={"site": "s1", "depth": 5}
-    )
-    copied = {"images/d/g/7.jpg": CopiedObject(etag='"i"', size=1, crc64nvme=None)}
-    rows = external.image_rows(
-        [image], {"7.jpg": ("image/jpeg", 4, 3)}, copied, dataset="d"
-    ).to_pylist()
-    assert rows[0]["attrs"] == '{"depth": 5, "site": "s1"}'
-
-
 SIZES = {"7.jpg": ("image/jpeg", 4, 3)}
 IMAGE_7 = external.LegacyImage(image_id="7", group="g", key="7.jpg", etag="e")
 
 
-def test_require_points_inside_accepts_the_last_pixel() -> None:
-    external.require_points_inside(_points(("7", 0, 0, 1), ("7", 2, 3, 1)), [IMAGE_7], SIZES)
-
-
-@pytest.mark.parametrize(
-    ("row", "col"), [(3, 0), (0, 4), (-1, 0), (0, -1)], ids=["row", "col", "neg-row", "neg-col"]
-)
-def test_require_points_inside_refuses_a_point_past_an_edge(row: int, col: int) -> None:
-    points = _points(("7", 1, 1, 1), ("7", row, col, 1))
-    with pytest.raises(ValueError, match=rf"1 points outside.*'7', {row}, {col}"):
-        external.require_points_inside(points, [IMAGE_7], SIZES)
+def test_drop_points_outside_keeps_the_last_pixel_and_drops_each_edge_past_it() -> None:
+    points = _points(
+        ("7", 2, 3, 1), ("7", 3, 0, 2), ("7", 0, 4, 3), ("7", -1, 0, 4), ("7", 0, -1, 5)
+    )
+    kept, dropped = external.drop_points_outside(points, [IMAGE_7], SIZES)
+    assert dropped == 4
+    assert kept.column("label_id").to_pylist() == [1]
 
 
 def test_drop_points_outside_keeps_in_bounds_points_in_order_and_counts_the_rest() -> None:
@@ -202,6 +149,19 @@ def test_drop_points_outside_keeps_in_bounds_points_in_order_and_counts_the_rest
 def test_drop_points_outside_refuses_a_point_whose_image_has_no_size() -> None:
     with pytest.raises(ValueError, match=r"no sniffed size.*'8'"):
         external.drop_points_outside(_points(("7", 0, 0, 1), ("8", 0, 0, 1)), [IMAGE_7], SIZES)
+
+
+def test_drop_points_outside_and_record_merges_the_count_only_when_points_are_dropped() -> None:
+    inside = _points(("7", 0, 0, 1))
+    assert external.drop_points_outside_and_record(inside, [IMAGE_7], SIZES, {"a": 1}) == (
+        inside,
+        {"a": 1},
+    )
+    kept, dropped = external.drop_points_outside_and_record(
+        _points(("7", 0, 0, 1), ("7", 3, 0, 2)), [IMAGE_7], SIZES, {"a": 1}
+    )
+    assert kept.num_rows == 1
+    assert dropped == {"a": 1, "points_out_of_bounds": 1}
 
 
 def test_require_known_labels_refuses_a_label_id_missing_from_labels() -> None:

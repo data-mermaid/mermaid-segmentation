@@ -1,22 +1,19 @@
-"""``segdata build catlin_seaview``: publish the legacy Catlin Seaview prefix as a dataset version."""
+"""``segdata build catlin_seaview``: stage the legacy Catlin Seaview prefix as a dataset version."""
 
 from __future__ import annotations
 
 import argparse
-import logging
 from pathlib import Path
 from typing import Any
 
 from segdata_etl.common import publishing
 from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
-from segdata_etl.common.store import open_store
-from segdata_etl.common.version import utc_today
+from segdata_etl.common.stage import refuse_unpublishable
 from segdata_etl.datasets import external
-from segdata_etl.label_maps.curated import load_curated
+from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_etl.taxonomy import find_repo_root
-from segdata_spec.publish import publish_dataset
-
-logger = logging.getLogger(__name__)
+from segdata_spec import DATASET_BUCKET
+from segdata_spec.publish import probe_git
 
 DATASET = "catlin_seaview"
 LICENSE = "CC BY-NC-SA 4.0"
@@ -29,21 +26,25 @@ def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
 
 
 def run(args: argparse.Namespace, client: Any) -> int:
-    """Publish a new ``catlin_seaview`` version and print its version and manifest sha256."""
+    """Stage a new ``catlin_seaview`` version and print its version and manifest sha256.
+
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed.
+    """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
-    dest, bucket = open_store(args.store, source_client=client)
-    git = publishing.checked_git_state(repo_root)
+    git = probe_git(repo_root)
+    refuse_unpublishable(git)
     taxonomy = external.load_taxonomy(
-        dest,
-        bucket,
+        client,
+        DATASET_BUCKET,
         version=args.taxonomy_version,
         manifest_sha256=args.taxonomy_manifest_sha256,
-        cache_dir=external.taxonomy_cache_dir(args.store, args.cache_dir),
+        cache_dir=args.cache_dir,
     )
     legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
     source = source_info(legacy, license_override=LICENSE)
     dropped = legacy_dropped(DATASET, legacy.manifest)
-    curated, curated_info = load_curated(DATASET)
+    curated = load_curated(DATASET)
     labels = external.build_labels(legacy.classes, curated, taxonomy.benthic_attributes)
     points = external.build_points(legacy.annotations.assign(annotator="default"), legacy.classes)
     images = external.legacy_images(legacy.objects, external.group_folder_identity)
@@ -52,44 +53,28 @@ def run(args: argparse.Namespace, client: Any) -> int:
         {(image.group, image.image_id) for image in images}, annotated, what="catlin images"
     )
     external.require_known_labels(points, labels)
-    sniffed = external.sniff_legacy_images(client, images, legacy=legacy, workers=args.workers)
-    points, n_out_of_bounds = external.drop_points_outside(points, images, sniffed)
-    if n_out_of_bounds:
-        logger.info("dropped %d points outside their image", n_out_of_bounds)
-        dropped = {**dropped, "points_out_of_bounds": n_out_of_bounds}
-    version = publishing.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=utc_today())
-    publishing.require_version_absent(dest, bucket, DATASET, version)
-    images_table = external.stage_images(
-        client,
-        dest,
-        images,
-        sniffed,
-        legacy=legacy,
-        dest_bucket=bucket,
-        dataset=DATASET,
-        workers=args.workers,
+    probe = external.probe_legacy_images(client, images, legacy=legacy, workers=args.workers)
+    points = external.drop_unreadable_points(points, probe)
+    points, dropped = external.drop_points_outside_and_record(
+        points, probe.images, probe.sniffed, dropped
     )
-    manifest, sha = publish_dataset(
-        dest,
-        bucket=bucket,
+    return external.publish_version(
         dataset=DATASET,
-        version=version,
         kind="points",
         tables={
-            "images.parquet": images_table,
             "points.parquet": points,
             "labels.parquet": labels,
             "stats/label_counts.parquet": publishing.count_labels(points),
         },
-        image_store=publishing.image_store(bucket, DATASET),
-        etl_package="segdata-etl",
-        etl_command=external.build_command(DATASET, args),
         source=source,
-        label_mapping=external.label_mapping_record(labels, curated_info, git_sha=git.sha),
+        label_mapping=external.label_mapping_record(
+            labels, curated_source(DATASET), git_sha=git.sha
+        ),
         dropped=dropped,
-        repo_dir=repo_root,
         git=git,
+        repo_root=repo_root,
+        client=client,
+        probe=probe,
+        legacy=legacy,
+        args=args,
     )
-    logger.info("published %s %s", DATASET, manifest.version)
-    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
-    return 0

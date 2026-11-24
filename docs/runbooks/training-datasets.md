@@ -62,29 +62,40 @@ Catlin Seaview, Moorea Labeled Corals, Pacific Labeled Corals and Benthos are al
 
 ## Publish the versioned datasets
 
-`segdata build <name>` turns the legacy prefix of an external dataset into an immutable versioned dataset, and `segdata taxonomy` snapshots the MERMAID benthic taxonomy that the dataset labels map to. Both publish to the `mermaid-ic-datasets` bucket. A published version is permanent: the bucket denies overwrite and delete. Stage and check first, then publish once.
+`segdata build <name>` stages an external dataset from its legacy prefix as an immutable versioned dataset, and `segdata taxonomy` stages a snapshot of the MERMAID benthic taxonomy that the dataset labels map to. Staging writes to a local directory only. Publishing writes to the `mermaid-ic-datasets` bucket: `segdata taxonomy --tables-from <folder> --publish` for the taxonomy, `segdata promote` for a dataset. A published version is permanent: the bucket denies overwrite and delete, so a version is write-once. Stage and check first, then publish once.
 
-A version string is `YYYYMMDD-<sha7>`, with `-2`, `-3` for a rebuild on the same day. Each command prints `version:` and `manifest_sha256:`. Together they are the pin that consumers use. The package README has the [flags](../../packages/segdata-etl/README.md#build-a-versioned-external-dataset) and the [taxonomy options](../../packages/segdata-etl/README.md#taxonomy-snapshot).
+A version string is `YYYYMMDD-<sha7>`, with `-2`, `-3` for a rebuild on the same day. Each stage and publish command prints `version:` and `manifest_sha256:`. Together they are the pin that consumers use. The package README has the [flags](../../packages/segdata-etl/README.md#build-a-versioned-external-dataset), the [taxonomy options](../../packages/segdata-etl/README.md#taxonomy-snapshot) and the [promote steps](../../packages/segdata-etl/README.md#promote-a-version).
+
+The dataset builds read the taxonomy pin from `mermaid-ic-datasets`, so publish the taxonomy before you stage a dataset.
 
 1. Commit and push the code. Staging and publishing both refuse a dirty or unpushed tree.
-2. Stage the taxonomy in the local store. `--store` defaults to `outputs/segdata-store`, so this writes no S3 object:
+2. Stage the taxonomy. This writes no S3 object:
 
    ```bash
-   uv run --package segdata-etl segdata taxonomy
+   uv run --package segdata-etl segdata taxonomy --stage-dir <stage dir>
    ```
 
-3. Stage each dataset in the same store, against the taxonomy pin from step 2. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`:
+3. Review the staged tables. `<staged taxonomy folder>` is `<stage dir>/mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>/`.
+4. Publish the taxonomy to S3 from the staged copy, with no new fetch. The command re-checks the staged tables, publishes them under a new version name (date and git sha) and prints the pin:
 
    ```bash
-   uv run --package segdata-etl segdata build <name> \
+   uv run --package segdata-etl segdata taxonomy --tables-from <staged taxonomy folder> --publish
+   ```
+
+5. Stage each dataset against the published pin. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. The build copies no image. It stages the tables and `copies.jsonl`, and Benthos also stages its masks and `uploads.jsonl`:
+
+   ```bash
+   uv run --package segdata-etl segdata build <name> --stage-dir <stage dir> \
      --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
    ```
 
-4. Check that each staged version loads the same as the legacy dataset. The check reads the store as the cache, with no S3 access:
+   An image whose header cannot be read is dropped with its points. The count is `stats.dropped["image_unreadable_header"]` in the manifest.
+
+6. Check that each staged version loads the same as the legacy dataset. `--no-sync` reads the new version from `--cache-dir`, the stage dir, with no S3 access for it, and still checks the sha256 of each table. The old side loads its annotations, `classes.json` and masks from S3 through `LocalS3Cache`, so the check needs S3 read access unless you pre-fill a local cache (for example with `scripts/prefetch_cache.py`) and set `MERMAIDSEG_LOCAL_CACHE_DIR=<that cache>` and `MERMAIDSEG_S3_OFFLINE=1`. A cache miss then raises instead of calling S3. The points datasets need no images. Benthos reads its staged masks.
 
    ```bash
-   uv run python scripts/check_dataset_parity.py --offline \
-     --cache-dir outputs/segdata-store \
+   uv run python scripts/check_dataset_parity.py --no-sync \
+     --cache-dir <stage dir> \
      --data-config <old data config> --dataset <name> --split <split> \
      --version <v> --manifest-sha256 <sha>
    ```
@@ -92,18 +103,11 @@ A version string is `YYYYMMDD-<sha7>`, with `-2`, `-3` for a rebuild on the same
    For `pacific_labeled_corals`, add `--annotator host --annotator archived`.
 
    The script exits 1 on any difference. Run `--help` for the options.
-5. Publish the taxonomy to S3 from the staged copy, with no new fetch. `<staged taxonomy folder>` is the `taxonomy/mermaid-benthic/<version>/` folder in the local store. The command verifies it against its manifest:
+7. Publish each dataset to S3. Get explicit approval first:
 
    ```bash
-   uv run --package segdata-etl segdata taxonomy --store s3 \
-     --tables-from <staged taxonomy folder>
-   ```
-
-6. Publish each dataset to S3, against the taxonomy pin that step 5 printed:
-
-   ```bash
-   uv run --package segdata-etl segdata build <name> --store s3 \
-     --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
+   uv run --package segdata-etl segdata promote --stage-dir <stage dir> \
+     --dataset <name> --version <version>
    ```
 
 The datasets in S3 are new versions built from the same legacy prefix. Training still reads the legacy prefix.

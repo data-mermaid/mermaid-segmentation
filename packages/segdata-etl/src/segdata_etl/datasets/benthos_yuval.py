@@ -1,10 +1,9 @@
-"""``segdata build benthos_yuval``: publish the legacy Benthos tiles and masks as a dense version."""
+"""``segdata build benthos_yuval``: stage the legacy Benthos tiles and masks as a dense version."""
 
 from __future__ import annotations
 
 import argparse
 import io
-import logging
 from collections.abc import Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -14,19 +13,19 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+from botocore.exceptions import ClientError
 from PIL import Image
 
-from segdata_etl.common import publishing
 from segdata_etl.common.legacy import LegacyDataset, legacy_dropped, read_legacy, source_info
-from segdata_etl.common.store import open_store
-from segdata_etl.common.version import utc_today
+from segdata_etl.common.s3_objects import SourceChanged
+from segdata_etl.common.stage import refuse_unpublishable
 from segdata_etl.datasets import external
-from segdata_etl.label_maps.curated import load_curated
+from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_etl.taxonomy import find_repo_root
-from segdata_spec.publish import publish_dataset
+from segdata_spec import DATASET_BUCKET
+from segdata_spec._s3 import is_precondition_failed
+from segdata_spec.publish import probe_git
 from segdata_spec.schema import LABEL_COUNTS_SCHEMA
-
-logger = logging.getLogger(__name__)
 
 DATASET = "benthos_yuval"
 LICENSE = "CC0 1.0 (Dryad)"
@@ -110,18 +109,33 @@ def _mask_stats(png: bytes) -> _MaskStats:
     )
 
 
-def _read_mask_stats(
+def _read_masks(
     client: Any, images: Sequence[external.LegacyImage], *, legacy: LegacyDataset, workers: int
-) -> dict[str, _MaskStats]:
-    """Download and decode each tile's legacy mask on ``workers`` threads, keyed by image id."""
+) -> dict[str, bytes]:
+    """Download each tile's legacy mask on ``workers`` threads, keyed by image id.
 
-    def read(image: external.LegacyImage) -> _MaskStats:
+    Raises:
+        SourceChanged: A mask's ETag differs from the listing.
+    """
+
+    def read(image: external.LegacyImage) -> bytes:
         key = legacy.prefix + str(image.mask_key)
-        return _mask_stats(client.get_object(Bucket=legacy.bucket, Key=key)["Body"].read())
+        etag = legacy.objects[str(image.mask_key)].etag
+        try:
+            data: bytes = client.get_object(Bucket=legacy.bucket, Key=key, IfMatch=f'"{etag}"')[
+                "Body"
+            ].read()
+        except ClientError as exc:
+            if is_precondition_failed(exc):
+                raise SourceChanged(
+                    f"s3://{legacy.bucket}/{key} changed since it was listed"
+                ) from exc
+            raise
+        return data
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        stats = list(pool.map(read, images))
-    return {image.image_id: stat for image, stat in zip(images, stats, strict=True)}
+        masks = list(pool.map(read, images))
+    return {image.image_id: mask for image, mask in zip(images, masks, strict=True)}
 
 
 def _mask_problem(
@@ -174,24 +188,28 @@ def _mask_label_counts(stats: Mapping[str, _MaskStats]) -> pa.Table:
 
 
 def run(args: argparse.Namespace, client: Any) -> int:
-    """Publish a new dense ``benthos_yuval`` version and print its version and manifest sha256.
+    """Stage a new dense ``benthos_yuval`` version and print its version and manifest sha256.
 
-    Every mask is downloaded and checked before any image is copied.
+    Every kept tile's mask is downloaded and checked before anything is staged; the masks are
+    staged for upload and the tiles planned as copies.
+
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed.
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
-    dest, bucket = open_store(args.store, source_client=client)
-    git = publishing.checked_git_state(repo_root)
+    git = probe_git(repo_root)
+    refuse_unpublishable(git)
     taxonomy = external.load_taxonomy(
-        dest,
-        bucket,
+        client,
+        DATASET_BUCKET,
         version=args.taxonomy_version,
         manifest_sha256=args.taxonomy_manifest_sha256,
-        cache_dir=external.taxonomy_cache_dir(args.store, args.cache_dir),
+        cache_dir=args.cache_dir,
     )
     legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
     source = source_info(legacy, license_override=LICENSE)
     dropped = legacy_dropped(DATASET, legacy.manifest)
-    curated, curated_info = load_curated(DATASET)
+    curated = load_curated(DATASET)
     labels = external.build_labels(legacy.classes, curated, taxonomy.benthic_attributes)
     images = _with_masks(external.legacy_images(legacy.objects, benthos_identity))
     external.require_same_ids(
@@ -205,42 +223,28 @@ def run(args: argparse.Namespace, client: Any) -> int:
         what="benthos masks",
     )
     tile_labels = _tile_labels(legacy.annotations, legacy.classes)
-    sniffed = external.sniff_legacy_images(client, images, legacy=legacy, workers=args.workers)
-    stats = _read_mask_stats(client, images, legacy=legacy, workers=args.workers)
+    probe = external.probe_legacy_images(client, images, legacy=legacy, workers=args.workers)
+    masks = _read_masks(client, probe.images, legacy=legacy, workers=args.workers)
+    stats = {image_id: _mask_stats(mask) for image_id, mask in masks.items()}
     label_ids = labels.column("label_id").to_pylist()
-    _require_masks_match(images, sniffed, stats, tile_labels, label_ids)
-    version = publishing.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=utc_today())
-    publishing.require_version_absent(dest, bucket, DATASET, version)
-    images_table = external.stage_images(
-        client,
-        dest,
-        images,
-        sniffed,
-        legacy=legacy,
-        dest_bucket=bucket,
+    _require_masks_match(probe.images, probe.sniffed, stats, tile_labels, label_ids)
+    return external.publish_version(
         dataset=DATASET,
-        workers=args.workers,
-    )
-    manifest, sha = publish_dataset(
-        dest,
-        bucket=bucket,
-        dataset=DATASET,
-        version=version,
         kind="dense",
         tables={
-            "images.parquet": images_table,
             "labels.parquet": labels,
             "stats/label_counts.parquet": _mask_label_counts(stats),
         },
-        image_store=publishing.image_store(bucket, DATASET),
-        etl_package="segdata-etl",
-        etl_command=external.build_command(DATASET, args),
         source=source,
-        label_mapping=external.label_mapping_record(labels, curated_info, git_sha=git.sha),
+        label_mapping=external.label_mapping_record(
+            labels, curated_source(DATASET), git_sha=git.sha
+        ),
         dropped=dropped,
-        repo_dir=repo_root,
         git=git,
+        repo_root=repo_root,
+        client=client,
+        probe=probe,
+        legacy=legacy,
+        args=args,
+        masks=masks,
     )
-    logger.info("published %s %s", DATASET, manifest.version)
-    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
-    return 0
