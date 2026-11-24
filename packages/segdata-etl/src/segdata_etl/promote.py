@@ -1,12 +1,18 @@
 """``segdata promote``: upload one staged dataset version to the write-once dataset bucket.
 
 The bucket denies deletes, so everything is checked before the first write. Images go first, then
-the tables, and ``manifest.json`` last: a version is visible only once its manifest exists, and a
-rerun after a crash finds the written objects already present and carries on.
+the tables and the manifest's ``extra_files``, and ``manifest.json`` last: a version is visible only
+once its manifest exists, and a rerun after a crash finds the written objects already present and
+carries on. Each staged extra file must match its sha256 and size in the manifest.
 
 A staged version carries ``copies.jsonl``, ``uploads.jsonl``, or both (a dense dataset copies its
 images from S3 and uploads its masks). Together the two files must name every image and mask key
-in ``images.parquet`` exactly once.
+in ``images.parquet`` exactly once. A ``copies.jsonl`` line may name a ``storage_class`` for its
+copy.
+
+A version with neither file is tables-only: it reuses images already published. It needs a
+published parent on the same image store, and every image and mask key in ``images.parquet`` must
+already exist there with the row's ETag, size and CRC64NVME.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import mimetypes
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -64,6 +71,7 @@ class _Copy:
     src_etag: str
     dst_key: str
     expect: _Expected
+    storage_class: str | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +87,7 @@ class _Plan:
     manifest: Manifest
     manifest_bytes: bytes
     steps: tuple[_Copy | _Upload, ...]
+    extras: Mapping[str, bytes]
 
 
 def _norm_etag(etag: str) -> str:
@@ -108,8 +117,26 @@ def _verify_tables(version_dir: Path, manifest: Manifest) -> dict[str, bytes]:
     return tables
 
 
+def _verify_extra_files(stage_dir: Path, prefix: str, manifest: Manifest) -> dict[str, bytes]:
+    """Check each staged extra file against the manifest; return the staged bytes by name."""
+    extras: dict[str, bytes] = {}
+    for name, entry in manifest.extra_files.items():
+        path = cache_path(stage_dir, DATASET_BUCKET, prefix + name)
+        data = path.read_bytes() if path.is_file() else None
+        if (
+            data is None
+            or len(data) != entry.size
+            or hashlib.sha256(data).hexdigest() != entry.sha256
+        ):
+            raise PublishRefused(
+                f"staged extra file {name} is missing or does not match the manifest"
+            )
+        extras[name] = data
+    return extras
+
+
 def _table_expectations(tables: Mapping[str, bytes], prefix: str) -> dict[str, _Expected]:
-    """Map each table's destination key to the fingerprint of its staged bytes."""
+    """Map each table's or extra file's destination key to the fingerprint of its staged bytes."""
     return {
         prefix + name: _Expected(
             hashlib.md5(data, usedforsecurity=False).hexdigest(), len(data), crc64nvme_b64(data)
@@ -166,7 +193,14 @@ def _copy_step(line: Mapping[str, Any], expected: Mapping[str, _Expected], where
     _require_filled(line, ("src_etag", "crc64nvme", "etag"), where)
     expect = _Expected(line["etag"], line["size"], line["crc64nvme"])
     _check_against_row(line, expected[line["dst_key"]], True, where)
-    return _Copy(line["src_bucket"], line["src_key"], line["src_etag"], line["dst_key"], expect)
+    return _Copy(
+        line["src_bucket"],
+        line["src_key"],
+        line["src_etag"],
+        line["dst_key"],
+        expect,
+        line.get("storage_class"),
+    )
 
 
 def _upload_step(
@@ -186,13 +220,11 @@ def _upload_step(
 def _plan_steps(
     stage_dir: Path, version_dir: Path, expected: Mapping[str, _Expected]
 ) -> tuple[_Copy | _Upload, ...]:
-    """Return the steps of every staged plan file, copies before uploads.
+    """Return the steps of every staged plan file, copies before uploads; none when tables-only.
 
     The caller checks that the combined destination keys match ``expected`` exactly once each.
     """
     present = [n for n in (COPIES_NAME, UPLOADS_NAME) if (version_dir / n).is_file()]
-    if not present:
-        raise PublishRefused(f"at least one of {COPIES_NAME} and {UPLOADS_NAME} must be staged")
     steps: list[_Copy | _Upload] = []
     for name in present:
         for number, line in enumerate(_read_lines(version_dir / name), start=1):
@@ -233,8 +265,9 @@ def _manifest_published(client: Any, dataset: str, version: str) -> bool:
     return True
 
 
-def _check_parents(client: Any, manifest: Manifest) -> None:
-    """Refuse unless every parent's published ``manifest.json`` has the pinned bytes."""
+def _check_parents(client: Any, manifest: Manifest) -> list[bytes]:
+    """Refuse unless every parent's published ``manifest.json`` has the pinned bytes; return them."""
+    bodies: list[bytes] = []
     for parent in manifest.parents:
         key = dataset_prefix(parent.dataset, parent.version) + MANIFEST_NAME
         try:
@@ -249,19 +282,60 @@ def _check_parents(client: Any, manifest: Manifest) -> None:
             raise PublishRefused(
                 f"parent manifest s3://{DATASET_BUCKET}/{key} does not match its pin"
             )
+        bodies.append(body)
+    return bodies
+
+
+def _check_shared_store(manifest: Manifest, parent_bodies: Iterable[bytes]) -> None:
+    """Refuse a tables-only version unless one parent publishes the same image store."""
+    if not manifest.parents:
+        raise PublishRefused(
+            f"a version with neither {COPIES_NAME} nor {UPLOADS_NAME} needs a published parent"
+        )
+    stores = [Manifest.model_validate_json(body).image_store for body in parent_bodies]
+    if manifest.image_store not in stores:
+        raise PublishRefused("no parent shares this version's image store")
+
+
+def _matches(head: Mapping[str, Any], expect: _Expected) -> bool:
+    return bool(
+        _norm_etag(head["ETag"]) == _norm_etag(expect.etag)
+        and head["ContentLength"] == expect.size
+        and head.get("ChecksumCRC64NVME") == expect.crc64nvme
+    )
 
 
 def _conflicting_key(client: Any, key: str, expect: _Expected) -> str | None:
     """Return ``key`` if it exists in the dataset bucket with a fingerprint other than ``expect``."""
     head = head_with_checksum(client, DATASET_BUCKET, key)
-    if head is None:
-        return None
-    same = (
-        _norm_etag(head["ETag"]) == _norm_etag(expect.etag)
-        and head["ContentLength"] == expect.size
-        and head.get("ChecksumCRC64NVME") == expect.crc64nvme
+    return None if head is None or _matches(head, expect) else key
+
+
+def _unmatched_key(client: Any, bucket: str, key: str, expect: _Expected) -> str | None:
+    """Return ``key`` unless it exists in ``bucket`` with the fingerprint ``expect``."""
+    head = head_with_checksum(client, bucket, key)
+    return None if head is not None and _matches(head, expect) else key
+
+
+def _check_images_present(
+    client: Any, bucket: str, expected: Mapping[str, _Expected], workers: int
+) -> None:
+    """Refuse unless every expected image and mask key exists in ``bucket`` as planned."""
+    unmatched: list[str] = []
+
+    def collect(key: str | None) -> None:
+        if key is not None:
+            unmatched.append(key)
+
+    _run_bounded(
+        lambda item: _unmatched_key(client, bucket, *item), expected.items(), workers, collect
     )
-    return None if same else key
+    if unmatched:
+        named = ", ".join(sorted(unmatched)[:_NAMED_CONFLICTS])
+        raise PublishRefused(
+            f"{len(unmatched)} image keys are absent from s3://{bucket} or hold other content: "
+            f"{named}"
+        )
 
 
 def _check_destinations(client: Any, planned: Mapping[str, _Expected], workers: int) -> None:
@@ -282,18 +356,24 @@ def _check_destinations(client: Any, planned: Mapping[str, _Expected], workers: 
 
 def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers: int) -> _Plan:
     """Check everything that can be checked before the first write; return the plan."""
-    version_dir = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version))
+    prefix = dataset_prefix(dataset, version)
+    version_dir = cache_path(stage_dir, DATASET_BUCKET, prefix)
     manifest_bytes, manifest = _read_manifest(version_dir, dataset, version)
     tables = _verify_tables(version_dir, manifest)
+    extras = _verify_extra_files(stage_dir, prefix, manifest)
     expected = _image_expectations(tables["images.parquet"], manifest.image_store.prefix)
     steps = _plan_steps(stage_dir, version_dir, expected)
-    _check_key_sets(steps, expected)
+    if steps:
+        _check_key_sets(steps, expected)
     if _manifest_published(client, dataset, version):
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
-    _check_parents(client, manifest)
-    table_expected = _table_expectations(tables, dataset_prefix(dataset, version))
-    _check_destinations(client, {**{s.dst_key: s.expect for s in steps}, **table_expected}, workers)
-    return _Plan(manifest, manifest_bytes, steps)
+    parent_bodies = _check_parents(client, manifest)
+    if not steps:
+        _check_shared_store(manifest, parent_bodies)
+        _check_images_present(client, manifest.image_store.bucket, expected, workers)
+    file_expected = _table_expectations({**tables, **extras}, prefix)
+    _check_destinations(client, {**{s.dst_key: s.expect for s in steps}, **file_expected}, workers)
+    return _Plan(manifest, manifest_bytes, steps, extras)
 
 
 def _run_copy(client: Any, step: _Copy) -> bool:
@@ -307,6 +387,7 @@ def _run_copy(client: Any, step: _Copy) -> bool:
         expect_etag=step.expect.etag,
         expect_size=step.expect.size,
         expect_crc64nvme=step.expect.crc64nvme,
+        storage_class=step.storage_class,
     )
     return result.already_present
 
@@ -396,12 +477,21 @@ def _write_tables(
         tally["tables"] += 1
 
 
+def _write_extras(client: Any, extras: Mapping[str, bytes], prefix: str) -> None:
+    for name, data in extras.items():
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        put_new(
+            client, bucket=DATASET_BUCKET, key=prefix + name, body=data, content_type=content_type
+        )
+
+
 def _write_version(
     client: Any, plan: _Plan, version_dir: Path, workers: int, tally: Counter[str]
 ) -> None:
     prefix = dataset_prefix(plan.manifest.dataset, plan.manifest.version)
     _write_images(client, plan.steps, workers, tally)
     _write_tables(client, version_dir, plan.manifest, prefix, tally)
+    _write_extras(client, plan.extras, prefix)
     put_new(
         client,
         bucket=DATASET_BUCKET,
@@ -416,8 +506,10 @@ def promote(client: Any, *, stage_dir: Path, dataset: str, version: str, workers
     """Upload the staged ``dataset`` ``version`` to the dataset bucket, exactly as staged.
 
     Raises:
-        PublishRefused: The staging is inconsistent or holds no images, the version is already
-            published, or a planned key holds other content; nothing was written.
+        PublishRefused: The staging is inconsistent or holds no images, a staged extra file
+            differs from the manifest, the version is already published, a planned key holds
+            other content, or a tables-only version lacks a parent on its image store or an
+            image there; nothing was written.
         ChecksumMismatch: A staged table differs from the manifest.
         ObjectConflict: An object landed with, or already holds, other content than planned.
         SourceChanged: A copy source no longer has the planned ETag.

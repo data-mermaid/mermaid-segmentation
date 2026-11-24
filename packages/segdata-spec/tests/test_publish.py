@@ -1,4 +1,5 @@
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from segdata_spec.errors import (
     PublishRefused,
     SchemaValidationError,
 )
-from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
+from segdata_spec.manifest import ImageStore, Manifest, ParentRef, SourceInfo
 from segdata_spec.publish import (
     GitState,
     compute_diff,
@@ -145,6 +146,62 @@ def test_tables_precede_manifest_with_write_once_puts(fake_s3, repo_dir):
     assert manifest.etl.git_sha == "abcdef1234567"
     assert manifest.etl.git_dirty is False
     assert manifest.etl.uv_lock_sha256 == hashlib.sha256(b"lock-bytes").hexdigest()
+
+
+def test_extra_file_is_written_between_tables_and_manifest_and_not_listed_as_a_table(
+    fake_s3, repo_dir
+):
+    manifest, _ = _publish(fake_s3, repo_dir, extra_files={"notes.json": b'{"k": 1}'})
+
+    keys = _put_keys(fake_s3)
+    assert keys[-2:] == [PREFIX + "notes.json", PREFIX + "manifest.json"]
+    assert len(keys) == 6
+    assert fake_s3.objects[(BUCKET, PREFIX + "notes.json")] == b'{"k": 1}'
+    assert "notes.json" not in manifest.files
+
+
+def test_manifest_lists_each_extra_file_and_a_manifest_without_the_field_still_loads(
+    fake_s3, repo_dir
+):
+    extras = {"notes.json": b'{"k": 1}', "splits/README.md": b"# splits\n"}
+
+    _publish(fake_s3, repo_dir, extra_files=extras)
+
+    stored = fake_s3.objects[(BUCKET, PREFIX + "manifest.json")]
+    listed = json.loads(stored)["extra_files"]
+    assert listed == {
+        "notes.json": {
+            "sha256": hashlib.sha256(b'{"k": 1}').hexdigest(),
+            "size": 8,
+        },
+        "splits/README.md": {
+            "sha256": hashlib.sha256(b"# splits\n").hexdigest(),
+            "size": 9,
+        },
+    }
+    legacy = json.loads(stored)
+    del legacy["extra_files"]
+    assert Manifest.model_validate(legacy).extra_files == {}
+
+
+def test_existing_extra_file_with_other_bytes_raises_and_manifest_is_not_written(fake_s3, repo_dir):
+    fake_s3.put(BUCKET, PREFIX + "notes.json", b"old")
+
+    with pytest.raises(ObjectExists):
+        _publish(fake_s3, repo_dir, extra_files={"notes.json": b"new"})
+
+    assert fake_s3.objects[(BUCKET, PREFIX + "notes.json")] == b"old"
+    assert (BUCKET, PREFIX + "manifest.json") not in fake_s3.objects
+
+
+@pytest.mark.parametrize("key", ["images.parquet", "manifest.json"])
+def test_extra_file_colliding_with_a_table_or_manifest_raises_before_any_write(
+    fake_s3, repo_dir, key
+):
+    with pytest.raises(SchemaValidationError, match=key):
+        _publish(fake_s3, repo_dir, extra_files={key: b"x"})
+
+    assert _put_keys(fake_s3) == []
 
 
 def test_stats_are_derived_from_tables(fake_s3, repo_dir):

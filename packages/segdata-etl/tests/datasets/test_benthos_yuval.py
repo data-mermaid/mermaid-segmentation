@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from uniform.conftest import FakeS3
+from s3_fake import FakeS3
 
 from segdata_etl import promote
 from segdata_etl.common.s3_objects import SourceChanged

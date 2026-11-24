@@ -5,14 +5,13 @@ from pathlib import Path
 
 import pytest
 from botocore.exceptions import ClientError
+from s3_fake import FakeS3, quoted_etag
 
 from segdata_etl.common import stage
 from segdata_etl.common.s3_objects import put_new
 from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
 from segdata_spec._s3 import is_not_found, is_precondition_failed
 from segdata_spec.publish import GitState, PublishRefused
-
-from .conftest import FakeS3, md5_etag
 
 
 def test_local_put_round_trips_to_get_and_head(tmp_path):
@@ -22,7 +21,7 @@ def test_local_put_round_trips_to_get_and_head(tmp_path):
     assert client.get_object(Bucket="bkt", Key="a/b.bin")["Body"].read() == b"hello"
     head = client.head_object(Bucket="bkt", Key="a/b.bin")
     assert head["ContentLength"] == 5
-    assert head["ETag"] == md5_etag(b"hello")
+    assert head["ETag"] == quoted_etag(b"hello")
 
 
 def test_local_put_if_none_match_on_existing_key_is_precondition_failed(tmp_path):

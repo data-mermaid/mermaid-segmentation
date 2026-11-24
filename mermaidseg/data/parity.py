@@ -26,6 +26,7 @@ from segdata_spec._s3 import cache_path, dataset_prefix
 from segdata_spec.errors import ChecksumMismatch
 from segdata_spec.manifest import Pin
 from segdata_spec.read import DatasetVersion, open_version
+from segdata_spec.resize import ResizeSpec
 from segdata_spec.sync import sync as sync_versions
 
 # Val/test transform size for the old loader; only its annotations are read here.
@@ -106,7 +107,7 @@ def old_points(ds: Any) -> pd.DataFrame:
         ds: An old ``BaseCoralDataset``; registering it sets its global offset.
 
     Returns:
-        Columns ``image_id`` (str), ``row``, ``col``, ``native_name`` and ``mapped``.
+        Columns ``image_id`` (str), ``row``, ``col``, ``native_name`` (lowercased) and ``mapped``.
     """
     names = _mapped_names(SourceLabelRegistry([ds]), ds)
     annotations = ds.df_annotations
@@ -117,7 +118,7 @@ def old_points(ds: Any) -> pd.DataFrame:
             "image_id": annotations["image_id"].astype(str),
             "row": annotations["row"],
             "col": annotations["col"],
-            "native_name": native,
+            "native_name": native.str.lower(),
             "mapped": mapped.where(mapped.notna(), None),
         }
     ).reset_index(drop=True)[_COLUMNS]
@@ -133,7 +134,7 @@ def new_points(version: DatasetVersion, points: pd.DataFrame) -> pd.DataFrame:
             "image_id": points["image_id"].astype(str),
             "row": points["row"],
             "col": points["col"],
-            "native_name": points["label_id"].map(labels["name"]),
+            "native_name": points["label_id"].map(labels["name"].str.lower()),
             "mapped": lowered.where(attribute.notna(), None),
         }
     ).reset_index(drop=True)[_COLUMNS]
@@ -287,9 +288,9 @@ def _verify_cached_tables(version: DatasetVersion, pin: Pin) -> None:
             raise ChecksumMismatch(f"cached file {path} does not match its expected sha256")
 
 
-def _open_cached(cache_dir: Path, pin: Pin) -> DatasetVersion:
-    """Open a staged version without S3, verifying its manifest and every table it lists."""
-    version = open_version(cache_dir, DATASET_BUCKET, pin)
+def _open_cached(cache_dir: Path, pin: Pin, resize: ResizeSpec | None = None) -> DatasetVersion:
+    """Open a staged version at ``resize`` without S3, verifying its manifest and every table."""
+    version = open_version(cache_dir, DATASET_BUCKET, pin, resize)
     _verify_cached_tables(version, pin)
     return version
 
@@ -311,6 +312,7 @@ def run_parity(
     client: Any,
     annotators: Sequence[str] | None,
     sync: bool = True,
+    resize: ResizeSpec | None = None,
 ) -> ParityReport:
     """Build the old dataset, open the pinned version's tables, and compare their points.
 
@@ -327,6 +329,8 @@ def run_parity(
         client: An S3 client; unused with ``sync=False``.
         annotators: Annotators in priority order for selecting the new points.
         sync: When False, S3 is not reached and the version is read from ``cache_dir`` as staged.
+        resize: When given, new points are scaled into the resized pixel grid of this spec, as
+            the old loader's coordinates are; no image is needed, only ``width`` and ``height``.
 
     Returns:
         The parity report over all groups of the new version that hold old images.
@@ -342,9 +346,9 @@ def run_parity(
     pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
     if sync:
         sync_tables(client, pin, cache_dir)
-        version_data = open_version(cache_dir, DATASET_BUCKET, pin)
+        version_data = open_version(cache_dir, DATASET_BUCKET, pin, resize)
     else:
-        version_data = _open_cached(cache_dir, pin)
+        version_data = _open_cached(cache_dir, pin, resize)
     if version_data.points is None:
         raise ValueError(f"{dataset} {version} has no points table")
     images = version_data.images.to_pandas()

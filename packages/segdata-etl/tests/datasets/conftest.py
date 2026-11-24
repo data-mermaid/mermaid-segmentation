@@ -20,7 +20,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 from PIL import Image
-from uniform.conftest import FakeS3, crc64nvme_b64
+from s3_fake import FakeS3, crc64nvme
 
 from segdata_etl import cli
 from segdata_etl.label_maps.curated import curated_source
@@ -151,7 +151,7 @@ def probed_columns(data: bytes, prefix: str = "") -> dict[str, Any]:
     return {
         f"{prefix}etag": legacy_etag(data),
         f"{prefix}size": len(data),
-        f"{prefix}crc64nvme": crc64nvme_b64(data),
+        f"{prefix}crc64nvme": crc64nvme(data),
     }
 
 

@@ -393,7 +393,7 @@ def params_from_args(args: argparse.Namespace) -> SplitParams:
     return SplitParams(**{name: getattr(args, name) for name in SplitParams.__dataclass_fields__})
 
 
-def _require_raw_parent(manifest: Manifest, raw: Pin) -> None:
+def require_raw_parent(manifest: Manifest, raw: Pin) -> None:
     """Refuse a raw pin that is not the version the curated manifest declares as its parent."""
     declared = [p for p in manifest.parents if p.dataset == RAW_DATASET]
     if not any(
@@ -431,7 +431,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     datasets, taxonomy = _pins(args)
     versions = sync_tables(client, datasets, args.cache_dir, args.bucket, taxonomy)
     curated = versions[DATASET]
-    _require_raw_parent(curated.manifest, datasets[RAW_DATASET])
+    require_raw_parent(curated.manifest, datasets[RAW_DATASET])
     tax = open_taxonomy(args.cache_dir, args.bucket, taxonomy)
     excluded = read_source_list(args.exclude_sources)
     n_images = images_per_source(curated.images)

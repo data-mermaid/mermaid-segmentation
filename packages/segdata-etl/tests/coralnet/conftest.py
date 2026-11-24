@@ -1,30 +1,18 @@
 """Shared fixtures for the CoralNet dataset tests.
 
-Provides a hand-rolled in-memory ``FakeS3`` that implements the boto3 client surface the package
-touches (``get_object`` with ``Range``, ``head_object``, ``put_object``, ``upload_file``,
-``list_objects_v2``, ``get_paginator``).
-Keeps the test suite free of network and AWS deps.
+Image-byte and CSV builders for the scraped-source tests; ``fake_s3`` is in the root conftest.
 """
 
 from __future__ import annotations
 
 import io
 import struct
-from dataclasses import dataclass, field
 
 import pytest
-from botocore.exceptions import ClientError
 from PIL import Image
+from s3_fake import FakeS3
 
-
-@pytest.fixture(autouse=True)
-def _fake_aws_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give boto3 static credentials so it never queries the EC2 metadata endpoint."""
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
+__all__ = ["populate_source"]
 
 
 def _make_jpeg_bytes(width: int, height: int, *, sof_marker: int = 0xC0, padding: int = 0) -> bytes:
@@ -56,133 +44,11 @@ def _make_jpeg_bytes(width: int, height: int, *, sof_marker: int = 0xC0, padding
     return bytes(out)
 
 
-@dataclass
-class _StubResponse:
-    body: bytes
-    content_length: int
-    content_range: str | None = None
-
-    def __getitem__(self, key):
-        if key == "Body":
-            return _Body(self.body)
-        if key == "ContentLength":
-            return self.content_length
-        if key == "ContentRange" and self.content_range is not None:
-            return self.content_range
-        raise KeyError(key)
-
-    def get(self, key, default=None):
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-
-class _Body:
-    def __init__(self, data: bytes):
-        self._data = data
-
-    def read(self) -> bytes:
-        return self._data
-
-
-def _client_error(code: str, op: str) -> ClientError:
-    return ClientError({"Error": {"Code": code, "Message": code}}, op)
-
-
-@dataclass
-class FakeS3:
-    """In-memory S3 client surface used by the dataset build.
-
-    Populate ``objects`` with ``{(bucket, key): bytes}`` to control what gets returned. ``Range``
-    semantics follow ``bytes=start-end`` (inclusive).
-    """
-
-    objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
-
-    def put(self, bucket: str, key: str, data: bytes) -> None:
-        self.objects[(bucket, key)] = data
-
-    def put_object(self, *, Bucket: str, Key: str, Body, ContentType: str | None = None):
-        """Resize uploads image bodies."""
-        del ContentType  # parity with boto
-        if isinstance(Body, str):
-            raw: bytes = Body.encode("utf-8")
-        elif isinstance(Body, bytes | memoryview):
-            raw = bytes(Body)
-        else:
-            raw = Body.read()
-            if isinstance(raw, str):
-                raw = raw.encode("utf-8")
-        self.objects[(Bucket, Key)] = raw
-
-    def head_object(self, *, Bucket: str, Key: str):
-        if (Bucket, Key) not in self.objects:
-            raise _client_error("404", "HeadObject")
-        return {"ContentLength": len(self.objects[(Bucket, Key)])}
-
-    def upload_file(self, Filename: str, Bucket: str, Key: str) -> None:
-        with open(Filename, "rb") as f:
-            self.objects[(Bucket, Key)] = f.read()
-
-    def get_object(self, *, Bucket: str, Key: str, Range: str | None = None):
-        if (Bucket, Key) not in self.objects:
-            raise _client_error("404", "GetObject")
-        full = self.objects[(Bucket, Key)]
-        content_range: str | None = None
-        data = full
-        if Range:
-            assert Range.startswith("bytes=")
-            start_str, end_str = Range[len("bytes=") :].split("-")
-            start = int(start_str)
-            end = int(end_str) if end_str else len(full) - 1
-            data = full[start : end + 1]
-            content_range = f"bytes {start}-{end}/{len(full)}"
-        return _StubResponse(body=data, content_length=len(data), content_range=content_range)
-
-    def list_objects_v2(self, *, Bucket: str, Prefix: str = "", Delimiter: str = ""):
-        """Mirror S3: ``Contents`` and ``CommonPrefixes`` are absent when empty."""
-        keys = [k for (b, k) in self.objects if b == Bucket and k.startswith(Prefix)]
-        common_prefixes: set[str] = set()
-        contents = []
-        for k in keys:
-            rest = k[len(Prefix) :]
-            if Delimiter and Delimiter in rest:
-                common_prefixes.add(Prefix + rest.split(Delimiter, 1)[0] + Delimiter)
-            else:
-                contents.append({"Key": k})
-        response: dict = {"KeyCount": len(common_prefixes) + len(contents)}
-        if common_prefixes:
-            response["CommonPrefixes"] = [{"Prefix": p} for p in sorted(common_prefixes)]
-        if contents:
-            response["Contents"] = contents
-        return response
-
-    def get_paginator(self, name: str):
-        if name != "list_objects_v2":
-            raise NotImplementedError(name)
-        return _Paginator(self)
-
-
-class _Paginator:
-    def __init__(self, client: FakeS3):
-        self._client = client
-
-    def paginate(self, *, Bucket: str, Prefix: str = "", Delimiter: str | None = None):
-        delim = Delimiter if Delimiter is not None else ""
-        yield self._client.list_objects_v2(Bucket=Bucket, Prefix=Prefix, Delimiter=delim)
-
-
 def _csv_bytes(headers: list[str], rows: list[list]) -> bytes:
     lines = [",".join(headers)]
     for r in rows:
         lines.append(",".join(str(x) for x in r))
     return ("\n".join(lines) + "\n").encode("utf-8")
-
-
-@pytest.fixture
-def fake_s3() -> FakeS3:
-    return FakeS3()
 
 
 @pytest.fixture

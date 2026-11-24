@@ -1,4 +1,4 @@
-"""``segdata`` console script: ``build``, ``ingest``, ``taxonomy``, ``split`` and ``promote``."""
+"""``segdata`` console script: ``build``, ``ingest``, ``taxonomy``, ``split``, ``curate`` and ``promote``."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from segdata_spec import DATASET_BUCKET
 from . import promote as promote_module
 from . import taxonomy
 from .common.cli_flags import _pin_flags
+from .common.stage import DEFAULT_CACHE_DIR
 from .datasets import benthos_yuval as benthos_yuval_build
 from .datasets import catlin_seaview as catlin_seaview_build
 from .datasets import coralscapes_v2, mermaid, ucsd_mosaics
@@ -185,6 +186,44 @@ def _add_taxonomy_subcommand(top: Any) -> None:
     )
 
 
+def _run_curate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from .datasets.coralnet.curate import versions
+
+    errors = versions.pin_flag_errors(args)
+    if errors:
+        parser.error("; ".join(errors))
+    return versions.run(args, source_client=make_s3_client())
+
+
+def _add_curate_subcommand(top: Any) -> None:
+    curate = top.add_parser("curate", help="Stage a curated dataset version from its parents")
+    curate_sub = curate.add_subparsers(dest="dataset", required=True)
+    parser = curate_sub.add_parser("coralnet", help="Stage a curated coralnet version")
+    parser.add_argument(
+        "--label-map",
+        choices=("cleaned_up_rerun", "mermaid_api"),
+        required=True,
+        help="cleaned_up_rerun curates raw (v1); mermaid_api relabels a v1 version (v2)",
+    )
+    _pin_flags(parser, "raw-", "the coralnet-raw parent")
+    _pin_flags(
+        parser, "taxonomy-", "the mermaid-benthic taxonomy (cleaned_up_rerun)", required=False
+    )
+    _pin_flags(parser, "parent-", "the v1 coralnet parent (mermaid_api)", required=False)
+    parser.add_argument(
+        "--stage-dir", type=Path, required=True, help="Local directory the version is staged in"
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=DEFAULT_CACHE_DIR,
+        help="Local cache for the synced parent tables and taxonomy; the stage dir reads "
+        "staged parents (default: %(default)s)",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.set_defaults(func=lambda args: _run_curate(parser, args))
+
+
 def _add_promote_subcommand(top: Any) -> None:
     promote = top.add_parser("promote", help="Upload a staged dataset version, write-once")
     promote.add_argument("--stage-dir", type=Path, required=True, help="Local stage directory")
@@ -210,7 +249,7 @@ def build_parser(
     modules: Sequence[ModuleType] = DATASET_MODULES,
     uniform_modules: Sequence[ModuleType] = UNIFORM_MODULES,
 ) -> argparse.ArgumentParser:
-    """Build the top-level parser: ``build``, one ``ingest`` entry per dataset, ``taxonomy``, ``split`` and ``promote``."""
+    """Build the top-level parser: ``build``, one ``ingest`` entry per dataset, ``taxonomy``, ``split``, ``curate`` and ``promote``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
     top = parser.add_subparsers(dest="action", required=True)
     build = top.add_parser("build", help="Build and publish a dataset")
@@ -231,6 +270,7 @@ def build_parser(
         uniform_parser.set_defaults(run=module.run)
     _add_split_subcommands(top)
     _add_taxonomy_subcommand(top)
+    _add_curate_subcommand(top)
     _add_promote_subcommand(top)
     return parser
 

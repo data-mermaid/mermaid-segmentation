@@ -20,10 +20,9 @@ from typing import Any, Literal
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
-from botocore.exceptions import ClientError
 
 from segdata_etl.common import publishing
-from segdata_etl.common.cli_flags import _pin_flags
+from segdata_etl.common.cli_flags import _pin_flags, pin_command_parts
 from segdata_etl.common.copy_plan import (
     ImageOutcome,
     ObjectFacts,
@@ -34,21 +33,21 @@ from segdata_etl.common.copy_plan import (
     write_copies,
     write_uploads,
 )
+from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
 from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject
 from segdata_etl.common.publishing import image_prefix
 from segdata_etl.common.s3_objects import (
+    EXTENSIONS,
     SourceChanged,
     crc64nvme_b64,
     head_with_checksum,
     md5_hex,
 )
-from segdata_etl.common.stage import LocalDirS3, next_version
+from segdata_etl.common.stage import DEFAULT_CACHE_DIR, LocalDirS3, next_version
 from segdata_etl.label_maps.curated import CuratedSource
+from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import MANIFEST_NAME, is_not_found, taxonomy_prefix
-from segdata_spec.errors import PublishRefused
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
-from segdata_spec.manifest import manifest_sha256 as _manifest_sha256
 from segdata_spec.publish import GitState, publish_dataset
 from segdata_spec.read import Taxonomy, open_taxonomy
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
@@ -56,10 +55,8 @@ from segdata_spec.sync import sync
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CACHE_DIR = Path("outputs") / "segdata-cache"
 TAXONOMY_NAME = "mermaid-benthic"
 _IMAGES_FOLDER = "images"
-_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png"}
 _PNG = "image/png"
 
 
@@ -111,30 +108,6 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _require_published_taxonomy(client: Any, bucket: str, pin: Pin) -> None:
-    """Refuse unless ``bucket`` holds the pinned taxonomy manifest with the pinned sha256.
-
-    ``sync`` trusts a cached manifest, so without this check a staged, unpublished taxonomy in
-    ``--cache-dir`` would pass. ``segdata taxonomy --publish`` names a new version, so a staged pin
-    never resolves in the bucket.
-
-    Raises:
-        PublishRefused: The manifest is absent from ``bucket`` or does not match the pin.
-    """
-    key = taxonomy_prefix(pin.name, pin.version) + MANIFEST_NAME
-    try:
-        body: bytes = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-    except ClientError as exc:
-        if is_not_found(exc):
-            raise PublishRefused(
-                f"taxonomy {pin.name} {pin.version} is not published in {bucket}; "
-                "publish it before staging a dataset"
-            ) from exc
-        raise
-    if _manifest_sha256(body) != pin.manifest_sha256:
-        raise PublishRefused(f"taxonomy manifest s3://{bucket}/{key} does not match its pin")
-
-
 def load_taxonomy(
     client: Any, bucket: str, *, version: str, manifest_sha256: str, cache_dir: Path
 ) -> Taxonomy:
@@ -144,28 +117,9 @@ def load_taxonomy(
         PublishRefused: The pinned taxonomy manifest is not published in ``bucket``.
     """
     pin = Pin(name=TAXONOMY_NAME, version=version, manifest_sha256=manifest_sha256)
-    _require_published_taxonomy(client, bucket, pin)
+    require_published_taxonomy(client, bucket, pin)
     sync(client, {}, cache_dir, bucket=bucket, taxonomy=pin)
     return open_taxonomy(cache_dir, bucket, pin)
-
-
-def _resolve_target(
-    target: str, by_name: Mapping[str, list[tuple[str, str]]]
-) -> tuple[str, str] | None:
-    """Return the taxonomy ``(id, name)`` of ``target``, or None when no attribute has that name."""
-    matches = by_name.get(target.lower(), [])
-    if len(matches) > 1:
-        raise ValueError(f"curated target {target!r} matches several taxonomy names: {matches}")
-    return matches[0] if matches else None
-
-
-def _attributes_by_name(attributes: pa.Table) -> dict[str, list[tuple[str, str]]]:
-    by_name: dict[str, list[tuple[str, str]]] = {}
-    for attr_id, name in zip(
-        attributes.column("id").to_pylist(), attributes.column("name").to_pylist(), strict=True
-    ):
-        by_name.setdefault(name.lower(), []).append((attr_id, name))
-    return by_name
 
 
 def build_labels(classes: Mapping[str, int], curated: pa.Table, attributes: pa.Table) -> pa.Table:
@@ -176,9 +130,9 @@ def build_labels(classes: Mapping[str, int], curated: pa.Table, attributes: pa.T
     found keeps the curated value with a null id.
 
     Raises:
-        ValueError: A curated target matches more than one taxonomy name, ignoring case.
+        AmbiguousTaxonomyName: A curated target matches more than one taxonomy name, ignoring case.
     """
-    by_name = _attributes_by_name(attributes)
+    index = taxonomy_name_index(attributes)
     targets = {
         row["name"].lower(): row["mermaid_benthic_attribute"]
         for row in curated.to_pylist()
@@ -189,7 +143,7 @@ def build_labels(classes: Mapping[str, int], curated: pa.Table, attributes: pa.T
         if label_id == 0:
             continue
         target = targets.get(name.lower())
-        match = _resolve_target(target, by_name) if target is not None else None
+        match = resolve_taxonomy_name(target, index) if target is not None else None
         rows.append(
             {
                 "label_id": label_id,
@@ -381,7 +335,7 @@ def require_same_ids(found: Collection[Any], expected: Collection[Any], *, what:
 
 def image_key(image: LegacyImage, media_type: str) -> str:
     """Return ``<group>/<image_id>.<ext>``, the key relative to the image store prefix."""
-    return f"{image.group}/{image.image_id}.{_EXTENSIONS[media_type]}"
+    return f"{image.group}/{image.image_id}.{EXTENSIONS[media_type]}"
 
 
 def _mask_dest_key(image: LegacyImage) -> str:
@@ -534,8 +488,7 @@ def _legacy_copy_plan(
 def build_command(dataset: str, args: argparse.Namespace) -> str:
     """Reconstruct ``segdata build <dataset>`` from the options that shape the version."""
     parts = ["segdata", "build", dataset, "--stage-dir", str(args.stage_dir)]
-    parts += ["--taxonomy-version", args.taxonomy_version]
-    parts += ["--taxonomy-manifest-sha256", args.taxonomy_manifest_sha256]
+    parts += pin_command_parts(args, "taxonomy-")
     if args.legacy_bucket != DEFAULT_BUCKET:
         parts += ["--legacy-bucket", args.legacy_bucket]
     return shlex.join(parts)

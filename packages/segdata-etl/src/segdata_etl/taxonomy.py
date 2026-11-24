@@ -20,11 +20,13 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
+from botocore.exceptions import ClientError
 
 from segdata_etl.common.stage import LocalDirS3, next_free_version, refuse_unpublishable
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import taxonomy_prefix
-from segdata_spec.manifest import SourceInfo, TaxonomyManifest
+from segdata_spec._s3 import MANIFEST_NAME, is_not_found, taxonomy_prefix
+from segdata_spec.errors import PublishRefused
+from segdata_spec.manifest import Pin, SourceInfo, TaxonomyManifest, manifest_sha256
 from segdata_spec.publish import GitState, probe_git, publish_taxonomy
 from segdata_spec.schema import (
     BENTHIC_ATTRIBUTES_SCHEMA,
@@ -111,6 +113,30 @@ def _check_tables(attributes: pa.Table, growth_forms: pa.Table) -> None:
     unknown = {p for p in attributes["parent_id"].to_pylist() if p is not None} - known
     if unknown:
         raise ValueError(f"benthic attributes name unknown parents: {sorted(unknown)}")
+
+
+def require_published_taxonomy(client: Any, bucket: str, pin: Pin) -> None:
+    """Refuse unless ``bucket`` holds the pinned taxonomy manifest with the pinned sha256.
+
+    ``sync`` trusts a cached manifest, so without this check a staged, unpublished taxonomy in
+    ``--cache-dir`` would pass. ``segdata taxonomy --publish`` names a new version, so a staged pin
+    never resolves in the bucket.
+
+    Raises:
+        PublishRefused: The manifest is absent from ``bucket`` or does not match the pin.
+    """
+    key = taxonomy_prefix(pin.name, pin.version) + MANIFEST_NAME
+    try:
+        body: bytes = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    except ClientError as exc:
+        if is_not_found(exc):
+            raise PublishRefused(
+                f"taxonomy {pin.name} {pin.version} is not published in {bucket}; "
+                "publish it before staging a dataset"
+            ) from exc
+        raise
+    if manifest_sha256(body) != pin.manifest_sha256:
+        raise PublishRefused(f"taxonomy manifest s3://{bucket}/{key} does not match its pin")
 
 
 def find_repo_root(start: Path) -> Path:

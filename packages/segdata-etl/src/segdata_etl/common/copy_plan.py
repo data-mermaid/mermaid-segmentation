@@ -93,7 +93,12 @@ def needs_full_read(head: Mapping[str, Any]) -> bool:
     return "-" in head["ETag"] or head.get("ChecksumCRC64NVME") is None
 
 
-def _read_full(client: Any, bucket: str, key: str, etag: str) -> bytes:
+def read_full(client: Any, bucket: str, key: str, etag: str) -> bytes:
+    """Download the whole object, guarded by ``etag``.
+
+    Raises:
+        SourceChanged: The object no longer matches ``etag``.
+    """
     try:
         data: bytes = client.get_object(Bucket=bucket, Key=key, IfMatch=etag)["Body"].read()
     except ClientError as exc:
@@ -107,7 +112,7 @@ def read_whole_object(
     client: Any, bucket: str, key: str, head: Mapping[str, Any]
 ) -> tuple[tuple[str, int, int], ObjectFacts] | None:
     """Download the object and derive the header and the values a single-part copy will carry."""
-    data = _read_full(client, bucket, key, head["ETag"])
+    data = read_full(client, bucket, key, head["ETag"])
     media_type = sniff_media_type(data)
     dims = image_size(data)
     if media_type is None or dims is None:

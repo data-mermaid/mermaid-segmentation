@@ -13,6 +13,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from s3_fake import FakeS3, crc64nvme, quoted_etag
 
 from segdata_etl import cli
 from segdata_etl.datasets import mermaid
@@ -20,7 +21,7 @@ from segdata_spec import DATASET_BUCKET
 from segdata_spec.publish import GitState, PublishRefused
 from segdata_spec.schema import LABELS_SCHEMA
 
-from .conftest import FakeS3, crc64nvme_b64, jpeg_bytes, md5_etag, png_bytes
+from .conftest import jpeg_bytes, png_bytes
 
 SRC_BUCKET = "coral-reef-training"
 PARQUET_KEY = "mermaid/mermaid_confirmed_annotations.parquet"
@@ -154,9 +155,9 @@ def test_end_to_end_stages_images_points_and_copy_plan(repo, tmp_path):
     assert set(images) == {"i1", "i2", "i3"}
     i1 = images["i1"]
     assert i1["key"] == "i1.png"
-    assert i1["etag"] == md5_etag(blobs["i1"]).strip('"')
+    assert i1["etag"] == quoted_etag(blobs["i1"]).strip('"')
     assert i1["size"] == len(blobs["i1"])
-    assert i1["crc64nvme"] == crc64nvme_b64(blobs["i1"])
+    assert i1["crc64nvme"] == crc64nvme(blobs["i1"])
     assert i1["source_fingerprint"] == i1["etag"]
     assert (i1["media_type"], i1["width"], i1["height"]) == ("image/png", 8, 6)
     assert i1["group"] == "mermaid"
@@ -196,7 +197,7 @@ def test_end_to_end_stages_images_points_and_copy_plan(repo, tmp_path):
         "dst_bucket": DATASET_BUCKET,
         "dst_key": "images/mermaid/i1.png",
         "size": len(blobs["i1"]),
-        "crc64nvme": crc64nvme_b64(blobs["i1"]),
+        "crc64nvme": crc64nvme(blobs["i1"]),
     }
     manifest = json.loads((version / "manifest.json").read_bytes())
     assert "copies.jsonl" not in manifest["files"]
@@ -246,14 +247,14 @@ def test_multipart_source_etag_records_the_copied_objects_md5_and_keeps_source_f
     version = only_version(stage)
     (row,) = table(version, "images.parquet")
     assert row["etag"] == hashlib.md5(data).hexdigest()  # noqa: S324
-    assert row["crc64nvme"] == crc64nvme_b64(data)
+    assert row["crc64nvme"] == crc64nvme(data)
     assert row["size"] == len(data)
     assert row["source_fingerprint"] == "b68d19ab-2"
     assert (row["media_type"], row["width"], row["height"]) == ("image/png", 9, 7)
     (plan,) = copies(version)
     assert plan["src_etag"] == "b68d19ab-2"
     assert plan["etag"] == row["etag"]
-    assert (plan["size"], plan["crc64nvme"]) == (len(data), crc64nvme_b64(data))
+    assert (plan["size"], plan["crc64nvme"]) == (len(data), crc64nvme(data))
     full_reads = [c for c in fake.ops("get") if c[2] == "mermaid/m1.png"]
     assert [c[3].get("IfMatch") for c in full_reads] == ['"b68d19ab-2"']
     assert "Range" not in full_reads[0][3]
@@ -270,11 +271,11 @@ def test_source_without_crc64nvme_is_read_in_full_and_checksummed(repo, tmp_path
 
     version = only_version(stage)
     (row,) = table(version, "images.parquet")
-    assert row["crc64nvme"] == crc64nvme_b64(data)
+    assert row["crc64nvme"] == crc64nvme(data)
     assert row["etag"] == hashlib.md5(data).hexdigest()  # noqa: S324
     assert row["source_fingerprint"] == row["etag"]
     (plan,) = copies(version)
-    assert plan["crc64nvme"] == crc64nvme_b64(data)
+    assert plan["crc64nvme"] == crc64nvme(data)
 
 
 def test_png_404_falls_back_to_the_jpg_key_without_counting_a_deletion(repo, tmp_path, caplog):
@@ -514,7 +515,7 @@ def test_parent_rows_with_unchanged_fingerprint_are_carried_planned_and_not_rere
     assert child != parent
     images = {r["image_id"]: r for r in table(child, "images.parquet")}
     assert images["a"] == {r["image_id"]: r for r in table(parent, "images.parquet")}["a"]
-    assert images["b"]["etag"] == md5_etag(b2).strip('"')
+    assert images["b"]["etag"] == quoted_etag(b2).strip('"')
     assert [c["src_key"] for c in copies(child)] == ["mermaid/a.png", "mermaid/b.png"]
     assert not [c for c in fake.ops("get") if c[2] == "mermaid/a.png"]
     manifest = json.loads((child / "manifest.json").read_bytes())

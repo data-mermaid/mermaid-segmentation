@@ -31,6 +31,7 @@ from segdata_etl.common.copy_plan import (
     write_copies,
 )
 from segdata_etl.common.copy_plan import probe_image as probe_source_image
+from segdata_etl.common.s3_objects import EXTENSIONS
 from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._s3 import cache_path, dataset_prefix, is_not_found, is_precondition_failed
@@ -50,8 +51,6 @@ ANNOTATOR = "default"
 
 # The repo root, which holds ``uv.lock`` and the git checkout that built the version.
 REPO_ROOT = Path(__file__).resolve().parents[5]
-
-_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png"}
 
 
 class AnnotationsChanged(Exception):
@@ -126,7 +125,7 @@ def _image_row(
     media_type, width, height = header
     return {
         "image_id": image_id,
-        "key": image_id + _EXTENSIONS[media_type],
+        "key": f"{image_id}.{EXTENSIONS[media_type]}",
         "etag": facts.etag,
         "size": facts.size,
         "crc64nvme": facts.crc64nvme,

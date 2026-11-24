@@ -37,9 +37,17 @@ CsvReader = Callable[[str, str], "pd.DataFrame | None"]
 MarkerCheck = Callable[[str, str], bool]
 
 
-def make_s3_client() -> BaseClient:
-    """Build a boto3 S3 client with adaptive retries for long-running jobs."""
-    return boto3.client("s3", config=_BOTO_CONFIG)
+def make_s3_client(max_pool_connections: int | None = None) -> BaseClient:
+    """Build a boto3 S3 client with adaptive retries for long-running jobs.
+
+    ``max_pool_connections`` sizes the connection pool shared by worker threads; ``None`` keeps
+    botocore's default of 10.
+    """
+    if max_pool_connections is None:
+        return boto3.client("s3", config=_BOTO_CONFIG)
+    return boto3.client(
+        "s3", config=_BOTO_CONFIG.merge(Config(max_pool_connections=max_pool_connections))
+    )
 
 
 def make_ibis_connection() -> Any:

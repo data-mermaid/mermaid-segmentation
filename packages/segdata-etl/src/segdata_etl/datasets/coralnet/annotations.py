@@ -56,6 +56,9 @@ _REQUIRED_ANNOTATIONS_COLS = ("Name", "Row", "Column", "Label ID")
 _REQUIRED_IMAGE_LIST_COLS = ("Name", "Image Page")
 _REQUIRED_LABELSET_COLS = ("Label ID", "Name")
 
+# An image_list Name: the basename, then an optional " - <status>" suffix.
+_IMAGE_LIST_NAME = r"^(?P<stripped>.+?)(?:\s-\s(?P<status>Confirmed|Unconfirmed|Unclassified))?$"
+
 # (file stem, key builder, required columns), in the order the per-source checks run.
 _SOURCE_CSVS: tuple[tuple[str, Callable[[str, int], str], tuple[str, ...]], ...] = (
     ("annotations", object_key_annotation_csv, _REQUIRED_ANNOTATIONS_COLS),
@@ -250,11 +253,7 @@ def _merge_source(
     # capture that into a new column AND strip it from Name in a single regex
     # pass, so the merged parquet preserves status even when annotations.csv
     # lacks a Status column (most pre-2021 sources).
-    name_parts = (
-        df_images["Name"]
-        .astype(str)
-        .str.extract(r"^(?P<stripped>.+?)(?:\s-\s(?P<status>Confirmed|Unconfirmed|Unclassified))?$")
-    )
+    name_parts = df_images["Name"].astype(str).str.extract(_IMAGE_LIST_NAME)
     df_images = df_images.assign(
         Name=name_parts["stripped"],
         image_id=_derive_image_id(df_images["Image Page"]),

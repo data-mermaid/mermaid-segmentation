@@ -1,10 +1,23 @@
-"""Class-id and palette construction."""
+"""Class-id and palette construction, and benthic-attribute name lookup in a taxonomy."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 import numpy as np
+import pyarrow as pa
+
+TaxonomyNameIndex = Mapping[str, list[tuple[str, str]]]
+
+
+class AmbiguousTaxonomyName(ValueError):
+    """A name matches more than one taxonomy benthic attribute, ignoring case."""
+
+    def __init__(self, name: str, matches: list[str]) -> None:
+        """Record ``name`` and name every attribute spelling it matches."""
+        super().__init__(
+            f"{name!r} matches several taxonomy benthic attributes (ignoring case): {matches}"
+        )
 
 
 def build_classes_and_colors(
@@ -23,3 +36,25 @@ def build_classes_and_colors(
     for name in ordered:
         colors[name] = [int(x) for x in rng.integers(0, 256, size=3)]
     return classes, colors
+
+
+def taxonomy_name_index(attributes: pa.Table) -> dict[str, list[tuple[str, str]]]:
+    """Index a ``benthic_attributes`` table's ``(id, name)`` rows by lowercased name."""
+    index: dict[str, list[tuple[str, str]]] = {}
+    for attr_id, name in zip(
+        attributes.column("id").to_pylist(), attributes.column("name").to_pylist(), strict=True
+    ):
+        index.setdefault(name.lower(), []).append((attr_id, name))
+    return index
+
+
+def resolve_taxonomy_name(name: str, index: TaxonomyNameIndex) -> tuple[str, str] | None:
+    """Return the taxonomy ``(id, canonical name)`` of ``name`` ignoring case, or None if absent.
+
+    Raises:
+        AmbiguousTaxonomyName: ``name`` matches more than one taxonomy row.
+    """
+    matches = index.get(name.lower(), [])
+    if len(matches) > 1:
+        raise AmbiguousTaxonomyName(name, [match_name for _, match_name in matches])
+    return matches[0] if matches else None

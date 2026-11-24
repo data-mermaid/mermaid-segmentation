@@ -20,6 +20,8 @@ from segdata_etl.common.s3_objects import crc64nvme_b64
 from segdata_spec._s3 import cache_path, dataset_prefix
 from segdata_spec.publish import GitState, PublishRefused
 
+DEFAULT_CACHE_DIR = Path("outputs") / "segdata-cache"
+
 _SHA_LENGTH = 7
 
 

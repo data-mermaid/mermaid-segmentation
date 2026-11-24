@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from s3_fake import FakeS3, client_error, crc64nvme, quoted_etag
 
 from segdata_etl import cli, promote
 from segdata_etl.common.s3_objects import ObjectConflict
@@ -16,7 +17,7 @@ from segdata_etl.common.stage import next_version
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
 
-from .conftest import FakeS3, client_error, crc64nvme_b64, jpeg_bytes, md5_etag, png_bytes
+from .conftest import jpeg_bytes, png_bytes
 from .test_coralscapes_v2 import IMG_A, IMG_B, MASK, MASK_B
 from .test_coralscapes_v2 import build as build_coralscapes
 from .test_coralscapes_v2 import shard as coralscapes_shard
@@ -86,7 +87,7 @@ def test_copy_landing_with_another_crc_raises_before_any_table_is_put(repo, tmp_
     class WrongCrc(FakeS3):
         def copy_object(self, **kwargs: Any) -> dict[str, Any]:
             response = super().copy_object(**kwargs)
-            response["CopyObjectResult"]["ChecksumCRC64NVME"] = crc64nvme_b64(b"other")
+            response["CopyObjectResult"]["ChecksumCRC64NVME"] = crc64nvme(b"other")
             return response
 
     fake, stage, version = stage_mermaid(tmp_path)
@@ -163,7 +164,7 @@ def test_plan_missing_a_line_refuses_at_preflight(repo, tmp_path):  # noqa: F811
     ("field", "edit_value"),
     [
         ("size", lambda v: v + 1),
-        ("crc64nvme", lambda v: crc64nvme_b64(b"other")),
+        ("crc64nvme", lambda v: crc64nvme(b"other")),
         ("etag", lambda v: hashlib.md5(b"other").hexdigest()),  # noqa: S324
     ],
 )
@@ -187,12 +188,12 @@ def test_plan_line_disagreeing_with_images_parquet_refuses_at_preflight(
     assert fake.calls == []
 
 
-def test_neither_plan_file_refuses(repo, tmp_path):  # noqa: F811
+def test_tables_only_version_without_a_parent_refuses_with_no_writes(repo, tmp_path):  # noqa: F811
     fake, stage, version = stage_mermaid(tmp_path)
     (version_dir(stage, "mermaid", version) / "copies.jsonl").unlink()
-    with pytest.raises(PublishRefused, match="at least one"):
+    with pytest.raises(PublishRefused, match="parent"):
         run_promote(fake, stage, version)
-    assert fake.calls == []
+    assert writes(fake) == []
 
 
 def test_rerun_after_a_crash_finds_the_images_present_and_writes_the_manifest(repo, tmp_path):  # noqa: F811
@@ -251,7 +252,7 @@ def test_hf_uploads_land_byte_identical_with_the_planned_crc(monkeypatch, tmp_pa
     }
     for key, data in expected.items():
         assert fake.objects[(DATASET_BUCKET, key)] == data
-        assert fake.crcs[(DATASET_BUCKET, key)] == crc64nvme_b64(data)
+        assert fake.crcs[(DATASET_BUCKET, key)] == crc64nvme(data)
     log = writes(fake)
     assert [op for op, *_ in log] == ["put"] * len(log)
     assert log[-1][2].endswith("/manifest.json")
@@ -351,9 +352,9 @@ def plant_same_length(fake: FakeS3, key: str, data: bytes, differs: str) -> None
     ``crc`` keeps the planned ETag, and ``both`` keeps neither.
     """
     flipped = bytes([data[0] ^ 1]) + data[1:]
-    fake.put(DATASET_BUCKET, key, flipped, etag=md5_etag(data) if differs == "crc" else None)
+    fake.put(DATASET_BUCKET, key, flipped, etag=quoted_etag(data) if differs == "crc" else None)
     if differs == "etag":
-        fake.crcs[(DATASET_BUCKET, key)] = crc64nvme_b64(data)
+        fake.crcs[(DATASET_BUCKET, key)] = crc64nvme(data)
 
 
 @pytest.mark.parametrize("differs", ["etag", "crc", "both"])
@@ -457,7 +458,7 @@ def test_upload_landing_with_another_crc_raises_and_no_table_is_written(monkeypa
         def put_object(self, **kwargs: Any) -> dict[str, Any]:
             response = super().put_object(**kwargs)
             if kwargs["Key"].startswith("images/"):
-                response["ChecksumCRC64NVME"] = crc64nvme_b64(b"other")
+                response["ChecksumCRC64NVME"] = crc64nvme(b"other")
             return response
 
     version_path = build_coralscapes(monkeypatch, tmp_path)
@@ -544,12 +545,12 @@ def stage_dense(monkeypatch, tmp_path: Path) -> tuple[FakeS3, Path, str]:
             {
                 "src_bucket": SOURCE_BUCKET,
                 "src_key": src_key,
-                "src_etag": md5_etag(data),
+                "src_etag": quoted_etag(data),
                 "dst_bucket": DATASET_BUCKET,
                 "dst_key": line["dst_key"],
                 "size": len(data),
-                "crc64nvme": crc64nvme_b64(data),
-                "etag": md5_etag(data),
+                "crc64nvme": crc64nvme(data),
+                "etag": quoted_etag(data),
             }
         )
     masks = [x for x in lines if x["dst_key"].endswith("_label.png")]
@@ -572,7 +573,7 @@ def test_dense_version_copies_images_uploads_masks_and_writes_the_manifest_last(
     assert {k for op, _, k, _ in log if op == "copy"} == image_keys
     assert {k for op, _, k, _ in log[:4] if op == "put"} == mask_keys
     matches = {kw["CopySourceIfMatch"] for op, _, _, kw in log if op == "copy"}
-    assert matches == {md5_etag(IMG_A), md5_etag(IMG_B)}
+    assert matches == {quoted_etag(IMG_A), quoted_etag(IMG_B)}
     assert fake.objects[(DATASET_BUCKET, f"images/{DENSE}/train/a1.jpg")] == IMG_A
     assert fake.objects[(DATASET_BUCKET, f"images/{DENSE}/train/a1_label.png")] == MASK
     assert log[-1][2] == f"datasets/{DENSE}/{version}/manifest.json"
@@ -608,3 +609,125 @@ def test_key_in_neither_plan_file_refuses_before_any_write(monkeypatch, tmp_path
         run_promote(fake, stage, version, dataset=DENSE)
 
     assert writes(fake) == []
+
+
+def stage_tables_only(
+    tmp_path: Path, parent_store: dict[str, Any] | None = None
+) -> tuple[FakeS3, Path, str, dict[str, Any]]:
+    """Stage a mermaid version without plan files, its images already in its image store.
+
+    Its one parent is published with the same image store, or with ``parent_store``.
+    """
+    fake, stage, version = stage_mermaid(tmp_path)
+    directory = version_dir(stage, "mermaid", version)
+    parent = json.loads((directory / "manifest.json").read_bytes())
+    store = parent["image_store"]
+    for line in copy_destinations(stage, version):
+        data = fake.objects[(line["src_bucket"], line["src_key"])]
+        fake.put(store["bucket"], line["dst_key"], data)
+    (directory / "copies.jsonl").unlink()
+    parent.update(dataset="parent", version=PARENT_VERSION)
+    if parent_store is not None:
+        parent["image_store"] = parent_store
+    parent_bytes = json.dumps(parent).encode()
+    fake.put(DATASET_BUCKET, PARENT_KEY, parent_bytes)
+    pin_parent(stage, version, parent_bytes)
+    fake.calls.clear()
+    return fake, stage, version, store
+
+
+def test_tables_only_version_on_its_parents_image_store_writes_tables_then_the_manifest(
+    repo,  # noqa: F811
+    tmp_path,
+):
+    fake, stage, version, _ = stage_tables_only(tmp_path)
+
+    run_promote(fake, stage, version)
+
+    prefix = f"datasets/mermaid/{version}/"
+    log = writes(fake)
+    assert [op for op, *_ in log] == ["put"] * 5
+    assert {k for _, _, k, _ in log[:-1]} == {prefix + t for t in _TABLES}
+    assert log[-1][2] == prefix + "manifest.json"
+
+
+def test_tables_only_version_whose_parent_has_another_image_store_refuses_with_no_writes(
+    repo,  # noqa: F811
+    tmp_path,
+):
+    other = {"bucket": "elsewhere", "prefix": "", "owner": "external"}
+    fake, stage, version, _ = stage_tables_only(tmp_path, parent_store=other)
+
+    with pytest.raises(PublishRefused, match="image store"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+@pytest.mark.parametrize("fault", ["missing", "etag"])
+def test_tables_only_version_with_an_absent_or_changed_image_refuses_with_no_writes(
+    repo,  # noqa: F811
+    tmp_path,
+    fault,
+):
+    fake, stage, version, store = stage_tables_only(tmp_path)
+    key = next(k for b, k in sorted(fake.objects) if b == store["bucket"] and "/i2." in k)
+    if fault == "missing":
+        del fake.objects[(store["bucket"], key)]
+    else:
+        fake.etags[(store["bucket"], key)] = quoted_etag(b"other")
+
+    with pytest.raises(PublishRefused, match=key):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def add_extra_file(stage: Path, version: str, listed: bytes, staged: bytes) -> None:
+    """List ``notes.json`` with the fingerprint of ``listed`` and stage ``staged`` under it."""
+    directory = version_dir(stage, "mermaid", version)
+    manifest = json.loads((directory / "manifest.json").read_bytes())
+    manifest["extra_files"] = {
+        "notes.json": {"sha256": hashlib.sha256(listed).hexdigest(), "size": len(listed)}
+    }
+    (directory / "manifest.json").write_text(json.dumps(manifest))
+    (directory / "notes.json").write_bytes(staged)
+
+
+def test_extra_file_listed_in_the_manifest_is_uploaded_before_the_manifest(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    add_extra_file(stage, version, b'{"k": 1}', b'{"k": 1}')
+
+    run_promote(fake, stage, version)
+
+    prefix = f"datasets/mermaid/{version}/"
+    keys = [k for _, _, k, _ in writes(fake)]
+    assert keys[-2:] == [prefix + "notes.json", prefix + "manifest.json"]
+    assert fake.objects[(DATASET_BUCKET, prefix + "notes.json")] == b'{"k": 1}'
+
+
+def test_staged_extra_file_differing_from_the_manifest_refuses_with_no_writes(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    add_extra_file(stage, version, b'{"k": 1}', b'{"k": 2}')
+
+    with pytest.raises(PublishRefused, match="notes.json"):
+        run_promote(fake, stage, version)
+
+    assert fake.calls == []
+
+
+def test_copy_line_with_a_storage_class_passes_it_to_copy_object(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    chosen = copy_destinations(stage, version)[0]["dst_key"]
+
+    def edit(lines):
+        lines[0]["storage_class"] = "GLACIER_IR"
+        return lines
+
+    rewrite_plan(stage, version, edit)
+
+    run_promote(fake, stage, version)
+
+    classes = {key: kw.get("StorageClass") for _, _, key, kw in fake.ops("copy")}
+    assert len(classes) == 3
+    assert classes == {key: ("GLACIER_IR" if key == chosen else None) for key in classes}

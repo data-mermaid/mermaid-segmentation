@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
-from uniform.conftest import FakeS3
+from s3_fake import FakeS3
 
 from segdata_etl.common.legacy import LegacyObject
 from segdata_etl.datasets import external

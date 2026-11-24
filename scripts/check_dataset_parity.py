@@ -26,6 +26,11 @@ To make the old side offline too, pre-fill a local cache (for example with
 scripts/prefetch_cache.py) and set MERMAIDSEG_LOCAL_CACHE_DIR to it and MERMAIDSEG_S3_OFFLINE=1.
 A cache miss then raises instead of calling S3.
 
+Native label names of a points version are compared lowercased on both sides. With
+--resize-max-edge N, new point coordinates are scaled so the longest image edge is N, as in the
+old loader's space (CoralNet manifest coordinates are at 2048). Without it they are compared
+unscaled. Points versions only: a dense version with --resize-max-edge is an error.
+
 Exits 1 on any difference. Exits with an error when the old split has no points, tiles or images.
 """
 
@@ -52,6 +57,7 @@ from mermaidseg.data.parity import (
 )
 from mermaidseg.datasets.factory import DATASET_CLASSES
 from segdata_spec.manifest import Pin
+from segdata_spec.resize import ResizeSpec
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +106,14 @@ def main(argv: list[str] | None = None) -> int:
         help="no S3 for the new version, staged in --cache-dir; the old side still needs S3 or a cache",
     )
     p.add_argument("--annotator", action="append", default=None, help="repeat for priority order")
+    p.add_argument(
+        "--resize-max-edge",
+        type=int,
+        default=None,
+        help="scale new points to this longest image edge (default filter and quality)",
+    )
     args = p.parse_args(argv)
+    resize = ResizeSpec(max_edge=args.resize_max_edge) if args.resize_max_edge is not None else None
     cfg = yaml.safe_load(args.data_config.read_text())
     pin = Pin(name=args.dataset, version=args.version, manifest_sha256=args.manifest_sha256)
     client = None if args.no_sync else boto3.client("s3")
@@ -115,7 +128,10 @@ def main(argv: list[str] | None = None) -> int:
         "client": client,
         "sync": not args.no_sync,
     }
-    if version_kind(args.cache_dir, pin) == "dense":
+    kind = version_kind(args.cache_dir, pin)
+    if kind == "dense" and resize is not None:
+        p.error("--resize-max-edge applies to points versions only")
+    if kind == "dense":
         dense_report = run_dense_parity(
             cfg["data"],
             hf_revision_probe=_revision_probe(cfg["data"], args.dataset, args.split),
@@ -124,7 +140,9 @@ def main(argv: list[str] | None = None) -> int:
         print(format_dense_report(dense_report))
         return 0 if dense_report.ok else 1
     # The tables were synced above; only the dense path still has images to fetch.
-    report = run_parity(cfg["data"], annotators=args.annotator, **{**common, "sync": False})
+    report = run_parity(
+        cfg["data"], annotators=args.annotator, resize=resize, **{**common, "sync": False}
+    )
     print(format_report(report))
     return 0 if report.ok else 1
 

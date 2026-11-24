@@ -9,6 +9,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ...common.cli_flags import _pin_flags, half_pin_error
+
 _DEFAULT_OUTPUT_DIR = Path("outputs/coralnet-dataset")
 
 
@@ -21,6 +23,25 @@ def _stage(name: str) -> Callable[[argparse.Namespace], int]:
         return int(getattr(build, f"_cmd_{name}")(args))
 
     return run
+
+
+def raw_flag_errors(args: argparse.Namespace) -> list[str]:
+    """Problems with the ``raw`` flags; empty when they are right.
+
+    The parent pin's two flags come together.
+    """
+    pin_error = half_pin_error(args, "parent-")
+    return [] if pin_error is None else [pin_error]
+
+
+def _run_raw(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Check the flags, then run ``raw.run_raw``, importing ``raw`` on first call."""
+    errors = raw_flag_errors(args)
+    if errors:
+        parser.error("; ".join(errors))
+    from . import raw
+
+    return raw.run_raw(args)
 
 
 def _parse_source_ids(raw: str) -> list[int]:
@@ -64,17 +85,22 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
 
 
-def _add_source_ids_flag(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--source-ids",
-        type=_parse_source_ids,
-        default=None,
-        help="Comma-separated source ids (default: every s<id>/ folder under the prefix)",
-    )
+_LEGACY_SOURCE_IDS_HELP = (
+    "Comma-separated source ids (default: every s<id>/ folder under the prefix)"
+)
+_RAW_SOURCE_IDS_HELP = (
+    "Comma-separated source ids to stage (default: every source in the build run)"
+)
+
+
+def _add_source_ids_flag(
+    p: argparse.ArgumentParser, help_text: str = _LEGACY_SOURCE_IDS_HELP
+) -> None:
+    p.add_argument("--source-ids", type=_parse_source_ids, default=None, help=help_text)
 
 
 def add_subcommands(sub: Any) -> None:
-    """Register the ``coralnet`` command and its five stage subcommands on ``sub``."""
+    """Register the ``coralnet`` command and its six stage subcommands on ``sub``."""
     coralnet = sub.add_parser(
         "coralnet",
         help="Build the CoralNet annotations, images and training-manifest parquets",
@@ -107,6 +133,28 @@ def add_subcommands(sub: Any) -> None:
     _add_common_flags(p_all)
     _add_source_ids_flag(p_all)
     p_all.set_defaults(func=_stage("all"))
+
+    p_raw = stages.add_parser(
+        "raw", help="Stage a frozen build run as a coralnet-raw dataset version"
+    )
+    p_raw.add_argument(
+        "--stage-dir", type=Path, required=True, help="Local directory the version is staged in"
+    )
+    p_raw.add_argument(
+        "--build-run",
+        default="20260623_nogit",
+        help="Build run under etl-outputs/coralnet/ to stage (default: %(default)s)",
+    )
+    _add_source_ids_flag(p_raw, _RAW_SOURCE_IDS_HELP)
+    _pin_flags(p_raw, "parent-", "the coralnet-raw parent to reuse", required=False)
+    p_raw.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Concurrent S3 workers (default: MERMAID_CORALNET_ETL_WORKERS, else 16)",
+    )
+    p_raw.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
+    p_raw.set_defaults(func=lambda args: _run_raw(p_raw, args))
 
 
 def configure_logging(verbose: bool) -> None:

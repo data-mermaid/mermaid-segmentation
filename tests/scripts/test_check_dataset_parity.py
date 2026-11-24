@@ -8,6 +8,7 @@ import pytest
 
 import scripts.check_dataset_parity as script
 from mermaidseg.data.parity import DenseParityReport, ParityReport
+from segdata_spec.resize import ResizeSpec
 from tests.mermaidseg.data.conftest import ImageSpec, write_version
 
 _VERSION = "20260101-abc1234"
@@ -65,6 +66,7 @@ def test_main_returns_one_on_any_difference(
         "cache_dir": tmp_path / "c",
         "client": ("client", "s3"),
         "annotators": ["a1", "a2"],
+        "resize": None,
     }
     assert capsys.readouterr().out.rstrip().endswith("PARITY OK" if code == 0 else "PARITY FAILED")
 
@@ -139,6 +141,54 @@ def test_no_sync_builds_no_s3_client_for_a_points_version(
     assert result == 0
     assert seen["client"] is None
     assert seen["sync"] is False
+
+
+def test_main_builds_a_resize_spec_from_the_max_edge_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "data.yaml"
+    config.write_text("data: {}\n")
+    seen: dict[str, Any] = {}
+
+    def _run_parity(data_cfg: Any, **kwargs: Any) -> ParityReport:
+        seen.update(kwargs)
+        return ParityReport()
+
+    monkeypatch.setattr(script, "run_parity", _run_parity)
+    monkeypatch.setattr(script, "sync_tables", lambda *a, **k: None)
+    monkeypatch.setattr(script, "version_kind", lambda cache_dir, pin: "points")
+    monkeypatch.setattr(script.boto3, "client", lambda name: None)
+
+    script.main(
+        ["--data-config", str(config), "--cache-dir", str(tmp_path), *_ARGS]
+        + ["--resize-max-edge", "2048"]
+    )
+
+    assert seen["resize"] == ResizeSpec(max_edge=2048)
+
+
+def test_main_refuses_resize_max_edge_for_a_dense_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "data.yaml"
+    config.write_text("data: {}\n")
+
+    def _unexpected(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("comparison ran")
+
+    monkeypatch.setattr(script, "run_dense_parity", _unexpected)
+    monkeypatch.setattr(script, "run_parity", _unexpected)
+    monkeypatch.setattr(script, "sync_tables", lambda *a, **k: None)
+    monkeypatch.setattr(script, "version_kind", lambda cache_dir, pin: "dense")
+    monkeypatch.setattr(script.boto3, "client", lambda name: None)
+
+    with pytest.raises(SystemExit) as exit_info:
+        script.main(
+            ["--data-config", str(config), "--cache-dir", str(tmp_path), *_ARGS]
+            + ["--resize-max-edge", "2048"]
+        )
+
+    assert exit_info.value.code == 2
 
 
 def test_hf_head_sha_returns_none_with_a_warning_when_the_hub_is_unreachable(
