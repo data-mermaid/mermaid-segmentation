@@ -6,7 +6,7 @@ Builds the segmentation training data in S3: the CoralNet training manifest, the
 |---|---|
 | `segdata build coralnet <stage>` | Builds the CoralNet training dataset (see [CoralNet](#coralnet)). |
 | `segdata build coralnet raw` | Stages a CoralNet build run as the `coralnet-raw` dataset version (see [Stage coralnet-raw](#stage-coralnet-raw)). |
-| `segdata curate coralnet` | Stages the curated `coralnet` v1 and v2 versions from `coralnet-raw` (see [Curate coralnet v1 and v2](#curate-coralnet-v1-and-v2)). |
+| `segdata curate coralnet` | Stages the curated `coralnet` v1 version from `coralnet-raw` (see [Curate coralnet v1](#curate-coralnet-v1)). |
 | `segdata ingest <name>` | Loads a raw external release into the legacy `external_validation_datasets/<name>/` prefix (see [Ingest an external dataset](#ingest-an-external-dataset)). |
 | `segdata build <name>` | Builds an immutable versioned dataset from that legacy prefix (see [Build a versioned external dataset](#build-a-versioned-external-dataset)). |
 | `segdata build <uniform>` | Stages a uniform-format version of `mermaid`, `coralscapes_v2` or `ucsd_mosaics` on disk (see [Uniform datasets](#uniform-datasets)). |
@@ -190,8 +190,7 @@ Two commands stage CoralNet as dataset versions in the [segdata-spec](../segdata
 | Command | Stages | Built from |
 |---|---|---|
 | `segdata build coralnet raw` | `coralnet-raw`, with `copies.jsonl` | A build run under `etl-outputs/coralnet/<run>/`, and the original images of the scrape. |
-| `segdata curate coralnet --label-map cleaned_up_rerun` | `coralnet` v1, tables only | A `coralnet-raw` version and a `mermaid-benthic` taxonomy version. |
-| `segdata curate coralnet --label-map mermaid_api` | `coralnet` v2, tables only | A v1 `coralnet` version, its `coralnet-raw` parent, and the MERMAID LabelMapping API. |
+| `segdata curate coralnet` | `coralnet` v1, tables only | A `coralnet-raw` version and a `mermaid-benthic` taxonomy version. |
 
 ### Stage directory, version name and publish guard
 
@@ -257,47 +256,32 @@ The checkpoint is written after every 20th batch of 1000 probes, and once after 
 A checkpoint row wins over a parent row for the same image.
 A new commit starts a new checkpoint.
 
-### Curate coralnet v1 and v2
+### Curate coralnet v1
 
-`segdata curate coralnet` stages a `coralnet` version from pinned parents. `--label-map` selects the version kind. The version holds tables only, on the image store of raw: no plan file is staged, and no image is read or copied.
+`segdata curate coralnet` stages the `coralnet` v1 version from pinned parents. The version holds tables only, on the image store of raw: no plan file is staged, and no image is read or copied. v1 reproduces the training labels of the `cleaned_up_rerun` model.
 
 ```bash
-uv run --package segdata-etl segdata curate coralnet --label-map cleaned_up_rerun \
+uv run --package segdata-etl segdata curate coralnet \
   --stage-dir <stage> \
   --raw-version <v> --raw-manifest-sha256 <sha> \
   --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
-
-uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api \
-  --stage-dir <stage> \
-  --raw-version <v> --raw-manifest-sha256 <sha> \
-  --parent-version <v1> --parent-manifest-sha256 <sha>
 ```
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--label-map` | required | `cleaned_up_rerun` (v1) or `mermaid_api` (v2). |
 | `--stage-dir` | required | Local directory the version is staged in. |
 | `--raw-version`, `--raw-manifest-sha256` | required | Pin of the `coralnet-raw` parent. |
-| `--taxonomy-version`, `--taxonomy-manifest-sha256` | none | Pin of the `mermaid-benthic` taxonomy. `cleaned_up_rerun` needs both; `mermaid_api` takes neither. The pin must be published in `mermaid-ic-datasets`, even when `--cache-dir` already holds it. |
-| `--parent-version`, `--parent-manifest-sha256` | none | Pin of the v1 `coralnet` version. `mermaid_api` needs both; `cleaned_up_rerun` takes neither. |
-| `--cache-dir` | `outputs/segdata-cache` | Where the parent tables and the taxonomy are synced from S3. The command reads this directory first, so `--cache-dir <stage>` reads parents (raw, v1) that are only staged. The taxonomy pin must be published: a taxonomy that is only staged is refused. No image is synced. |
+| `--taxonomy-version`, `--taxonomy-manifest-sha256` | required | Pin of the `mermaid-benthic` taxonomy. The pin must be published in `mermaid-ic-datasets`, even when `--cache-dir` already holds it. |
+| `--cache-dir` | `outputs/segdata-cache` | Where the parent tables and the taxonomy are synced from S3. The command reads this directory first, so `--cache-dir <stage>` reads a raw parent that is only staged. The taxonomy pin must be published: a taxonomy that is only staged is refused. No image is synced. |
 | `-v`, `--verbose` | off | Debug logging. |
 
-A missing pin flag, a pin flag of the other label map, or one flag of a pin without the other is a usage error (exit 2). The message names the flags.
+A missing pin flag, or one flag of a pin without the other, is a usage error (exit 2). The message names the flags.
 
-**v1 (`cleaned_up_rerun`)** has one parent, the raw version, and uses its image store.
+The version has one parent, the raw version, and uses its image store.
 
 1. Overrides. For each image in `configs/coralnet/annotation_overrides.parquet`, the override points replace all of that image's raw points. Override points are in the pixel space of the image resized to a longest edge of 2048. For an original whose longest edge is more than 2048, each point is mapped back to original coordinates: a raw point with the same label that scales to the same position gives its exact coordinates; otherwise the command takes the smallest original coordinate that scales to the override position. Overrides of smaller images are used as they are.
 2. Blacklist. The images in `configs/coralnet/image_blacklist.parquet` (by `image_id`) and their points are dropped.
 3. Labels. One row per label of the raw version. The lowercased CoralNet name is looked up in `segdata_etl/label_maps/coralnet_cleaned_up_rerun.json`, a copy of `configs/coralnet_to_mermaid_mapping_temporary.json` at commit `e0d3876`. The target name is resolved to a benthic attribute ID in the pinned taxonomy by name, ignoring case. A target with no match keeps its name with a null ID, and `label_mapping.n_unresolved` counts it. A target that matches more than one attribute stops the run with `ValueError`. `mermaid_growth_form` is null.
-
-**v2 (`mermaid_api`)** has two parents, `[v1, raw]`.
-
-1. The raw pin must be a `coralnet-raw` parent that the v1 manifest declares. Otherwise the run stops with `ValueError`.
-2. The command fetches every CoralNet row from `https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet&limit=1000`. It retries a GET 3 times on connection errors and 502, 503 and 504, then fails. It never uses an older copy.
-3. `images.parquet`, `points.parquet` and `stats/label_counts.parquet` are v1's. Before it stages, the command checks that each one serialises to the sha256 and size in v1's manifest, and raises `RuntimeError` if one differs. `stats.dropped` repeats v1's.
-4. Labels. One row per label of the raw version, joined to the API rows on the integer CoralNet Label ID. A label is unmapped when its name is not a string, the API has no row for it, or the row's `benthic_attribute_name` is null. Mapped rows take the attribute ID, attribute name and growth form name from the API.
-5. The snapshot of the API rows is an extra file of the version, `coralnet_label_mappings.json`, staged beside the tables and listed in the manifest's `extra_files`. It holds `fetched_at`, `sha256` and the rows sorted by ID. Its `sha256` equals `label_mapping.sha256` in the manifest, which also records the fetch time. `segdata promote` uploads it with the tables.
 
 `stats.dropped` of a v1 version:
 
@@ -451,13 +435,11 @@ A staged version has one of two shapes:
 - A version with `copies.jsonl`, `uploads.jsonl` or both. `copies.jsonl` plans server-side copies of images from S3; `uploads.jsonl` plans uploads of staged files. `promote` writes every image and mask in the `INTELLIGENT_TIERING` storage class; tables and the manifest keep the bucket default.
 - A tables-only version, with neither file. It reuses images that are already published. `promote` publishes it only when a published parent has the same image store.
 
-Either shape may list `extra_files` in its manifest. `promote` uploads each one under the version prefix after the tables, and requires the staged bytes to match the sha256 and size in the manifest. The `coralnet` v2 version carries `coralnet_label_mappings.json` this way.
-
 `promote` writes in this order:
 
-1. Preflight, before any write. It checks the staged tables and extra files against `manifest.json`, and refuses a manifest whose `stats.n_images` is 0. It checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name exactly the image and mask keys in `images.parquet`, each once, with the same size and checksums, and checks each staged upload file. For a tables-only version, it checks that a published parent has the same image store, then HEADs every image and mask key in `images.parquet` in the bucket: each must exist with the row's ETag, size and CRC64NVME. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table and extra file key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
+1. Preflight, before any write. It checks the staged tables against `manifest.json`, and refuses a manifest whose `stats.n_images` is 0. It checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name exactly the image and mask keys in `images.parquet`, each once, with the same size and checksums, and checks each staged upload file. For a tables-only version, it checks that a published parent has the same image store, then HEADs every image and mask key in `images.parquet` in the bucket: each must exist with the row's ETag, size and CRC64NVME. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
 2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`. A tables-only version writes none.
-3. The tables and the extra files.
+3. The tables.
 4. `manifest.json`.
 
 Every write is write-once. A key that already holds the planned content counts as done, and other content stops the run with `ObjectConflict`. A version is visible only when its `manifest.json` exists. If `promote` stops before step 4, run it again: it continues from the objects already written.

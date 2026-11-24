@@ -186,12 +186,9 @@ def _add_taxonomy_subcommand(top: Any) -> None:
     )
 
 
-def _run_curate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+def _run_curate(args: argparse.Namespace) -> int:
     from .datasets.coralnet.curate import versions
 
-    errors = versions.pin_flag_errors(args)
-    if errors:
-        parser.error("; ".join(errors))
     return versions.run(args, source_client=make_s3_client())
 
 
@@ -199,17 +196,8 @@ def _add_curate_subcommand(top: Any) -> None:
     curate = top.add_parser("curate", help="Stage a curated dataset version from its parents")
     curate_sub = curate.add_subparsers(dest="dataset", required=True)
     parser = curate_sub.add_parser("coralnet", help="Stage a curated coralnet version")
-    parser.add_argument(
-        "--label-map",
-        choices=("cleaned_up_rerun", "mermaid_api"),
-        required=True,
-        help="cleaned_up_rerun curates raw (v1); mermaid_api relabels a v1 version (v2)",
-    )
     _pin_flags(parser, "raw-", "the coralnet-raw parent")
-    _pin_flags(
-        parser, "taxonomy-", "the mermaid-benthic taxonomy (cleaned_up_rerun)", required=False
-    )
-    _pin_flags(parser, "parent-", "the v1 coralnet parent (mermaid_api)", required=False)
+    _pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
     parser.add_argument(
         "--stage-dir", type=Path, required=True, help="Local directory the version is staged in"
     )
@@ -221,7 +209,7 @@ def _add_curate_subcommand(top: Any) -> None:
         "staged parents (default: %(default)s)",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
-    parser.set_defaults(func=lambda args: _run_curate(parser, args))
+    parser.set_defaults(func=_run_curate)
 
 
 def _add_promote_subcommand(top: Any) -> None:
