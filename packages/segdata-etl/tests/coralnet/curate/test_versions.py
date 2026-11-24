@@ -416,12 +416,28 @@ def test_an_api_attribute_absent_from_the_taxonomy_is_refused_and_stages_nothing
     assert not world.coralnet_dir().exists()
 
 
-def test_an_api_http_error_propagates_and_stages_nothing(
+def test_an_api_growth_form_absent_from_the_taxonomy_is_refused_and_stages_nothing(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _use_api(monkeypatch, FakeApiSession([], error=requests.HTTPError("503")))
+    _use_api(monkeypatch, FakeApiSession([{**API_ROWS[0], "growth_form_id": "g-gone"}]))
 
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(ValueError, match="g-gone"):
+        world.run(("raw-", world.raw), ("taxonomy-", world.taxonomy))
+
+    assert not world.coralnet_dir().exists()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [requests.HTTPError("503"), requests.ConnectionError("refused"), requests.Timeout("slow")],
+    ids=["http", "connection", "timeout"],
+)
+def test_an_api_request_error_propagates_and_stages_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch, error: requests.RequestException
+) -> None:
+    _use_api(monkeypatch, FakeApiSession([], error=error))
+
+    with pytest.raises(type(error)):
         world.run(("raw-", world.raw), ("taxonomy-", world.taxonomy))
 
     assert not world.coralnet_dir().exists()

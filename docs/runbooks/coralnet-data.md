@@ -295,7 +295,7 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coral
 
 ### Publish the taxonomy
 
-`curate` checks each mapped benthic attribute id against a `mermaid-benthic` taxonomy version on S3, so publish one before you stage the curated version. A taxonomy that lacks an id the API now returns stops `curate`: stage and publish a newer one. The steps are in [Publish the versioned datasets](training-datasets.md#publish-the-versioned-datasets): stage with `segdata taxonomy --stage-dir <stage>`, then publish with `--tables-from <staged taxonomy folder> --publish`. Record the pin that the publish prints. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
+`curate` checks each mapped benthic attribute id and growth form id against a `mermaid-benthic` taxonomy version on S3, so publish one before you stage the curated version. A taxonomy that lacks an id the API returns stops `curate`: stage and publish a newer one. The steps are in [Publish the versioned datasets](training-datasets.md#publish-the-versioned-datasets): stage with `segdata taxonomy --stage-dir <stage>`, then publish with `--tables-from <staged taxonomy folder> --publish`. Record the pin that the publish prints. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
 
 ### Stage and publish the curated version
 
@@ -345,7 +345,7 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `SourceChanged` (raw stage) | An original was replaced between its HEAD and its read. Run the same command again. |
 | `PublishRefused` from `promote` (tables-only curated version) | No published parent has the same image store, or an image key is missing or differs. Nothing was written. Publish the parent first. |
 | `PinMismatch` | A pin's sha256 does not match the manifest in the store. Copy the pin again from the output of the command that published it. |
-| `ValueError` from `curate` listing benthic attribute ids missing from the taxonomy | The API maps a label to an attribute that the pinned taxonomy lacks. Nothing was staged. Stage and publish a newer taxonomy, then pin it. |
+| `ValueError` from `curate` listing benthic attribute or growth form ids missing from the taxonomy | The API maps a label to an attribute or growth form that the pinned taxonomy lacks. Nothing was staged. Stage and publish a newer taxonomy, then pin it. |
 | `curate` stops on a connection error or an HTTP error from `api.datamermaid.org` | The label mapping could not be fetched. Nothing was staged. Check network access, then run again. |
 | HTTP or connection error from `api.datamermaid.org` (taxonomy) | Run again when the API answers. |
 

@@ -70,13 +70,15 @@ def build_curated(
     raw_ref: ParentRef,
     mappings: CoralNetLabelMappings,
     benthic_attributes: pa.Table,
+    growth_forms: pa.Table,
     config_dir: Path,
 ) -> CuratedVersion:
     """Curate ``raw`` with the configs in ``config_dir`` and map its labels by the API rows.
 
     Raises:
-        ValueError: ``raw`` has no points table, or a mapped ``benthic_attribute_id`` is absent
-            from ``benthic_attributes``.
+        ValueError: ``raw`` has no points table, a mapped record has no
+            ``benthic_attribute_id``, or a mapped ``benthic_attribute_id`` or ``growth_form_id`` is
+            absent from ``benthic_attributes`` or ``growth_forms``.
     """
     curated = curate(
         raw,
@@ -84,7 +86,10 @@ def build_curated(
         annotation_overrides=config_dir / "annotation_overrides.parquet",
     )
     labels, mapping = api_labels(
-        id_to_name(raw.labels), mappings, set(benthic_attributes.column("id").to_pylist())
+        id_to_name(raw.labels),
+        mappings,
+        set(benthic_attributes.column("id").to_pylist()),
+        set(growth_forms.column("id").to_pylist()),
     )
     return CuratedVersion(
         tables={
@@ -124,6 +129,7 @@ def _curate(args: argparse.Namespace, client: Any, bucket: str, repo_root: Path)
         _ref(raw_pin),
         mappings,
         tax.benthic_attributes,
+        tax.growth_forms,
         repo_root / CONFIG_DIR,
     )
 

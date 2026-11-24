@@ -173,6 +173,7 @@ def api_labels(
     id2name: Mapping[int, str | None],
     mappings: CoralNetLabelMappings,
     benthic_attribute_ids: set[str],
+    growth_form_ids: set[str],
 ) -> tuple[pa.Table, LabelMapping]:
     """Build ``labels.parquet`` rows and the mapping provenance for the labels in ``id2name``.
 
@@ -183,10 +184,12 @@ def api_labels(
         id2name: CoralNet label id -> name, for the ids the dataset uses.
         mappings: The API rows, keyed by CoralNet label id.
         benthic_attribute_ids: The ids of the pinned taxonomy's benthic attributes.
+        growth_form_ids: The ids of the pinned taxonomy's growth forms.
 
     Raises:
-        ValueError: A mapped ``benthic_attribute_id`` is absent from ``benthic_attribute_ids``;
-            the message lists every such id.
+        ValueError: A mapped record has no ``benthic_attribute_id``, or its
+            ``benthic_attribute_id`` or ``growth_form_id`` is absent from the pinned taxonomy;
+            the message lists every such label or id.
     """
     label_ids = list(id2name)
     mapped: list[CoralNetLabelMapping | None] = []
@@ -194,10 +197,19 @@ def api_labels(
         record = mappings.records.get(label_id) if isinstance(id2name[label_id], str) else None
         has_target = record is not None and record["benthic_attribute_name"] is not None
         mapped.append(record if has_target else None)
+    no_id = [
+        i for i, r in zip(label_ids, mapped, strict=True) if r and not r["benthic_attribute_id"]
+    ]
+    if no_id:
+        raise ValueError(f"Mapped CoralNet labels with no benthic_attribute_id: {sorted(no_id)}")
     used = {r["benthic_attribute_id"] for r in mapped if r and r["benthic_attribute_id"]}
     missing = sorted(used - benthic_attribute_ids)
     if missing:
         raise ValueError(f"Mapped benthic_attribute_id not in the pinned taxonomy: {missing}")
+    forms = {r["growth_form_id"] for r in mapped if r and r["growth_form_id"]}
+    missing_forms = sorted(forms - growth_form_ids)
+    if missing_forms:
+        raise ValueError(f"Mapped growth_form_id not in the pinned taxonomy: {missing_forms}")
     table = conform(
         pa.table(
             {

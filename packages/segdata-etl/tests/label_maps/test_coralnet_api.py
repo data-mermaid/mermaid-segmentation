@@ -113,6 +113,7 @@ def test_api_labels_carry_attribute_growth_form_and_unmapped_ids() -> None:
         {82: "Acropora (branching)", 7: "Unknown", 99: "No record", 5: None},
         _mappings(_DIGEST_RECORDS),
         {"b1"},
+        {"g1"},
     )
     assert table.schema == LABELS_SCHEMA
     rows = {r["label_id"]: r for r in table.to_pylist()}
@@ -135,7 +136,7 @@ def test_api_labels_carry_attribute_growth_form_and_unmapped_ids() -> None:
 
 
 def test_api_labels_treat_a_label_without_a_name_as_unmapped_even_with_a_record() -> None:
-    table, mapping = api_labels({82: None}, _mappings(_DIGEST_RECORDS), {"b1"})
+    table, mapping = api_labels({82: None}, _mappings(_DIGEST_RECORDS), {"b1"}, {"g1"})
     row = table.to_pylist()[0]
     assert row["mermaid_benthic_attribute"] is None
     assert row["mermaid_benthic_attribute_id"] is None
@@ -144,7 +145,7 @@ def test_api_labels_treat_a_label_without_a_name_as_unmapped_even_with_a_record(
 
 
 def test_api_labels_treat_a_non_string_name_as_unmapped_even_with_a_record() -> None:
-    table, mapping = api_labels({82: 82}, _mappings(_DIGEST_RECORDS), {"b1"})  # type: ignore[dict-item]
+    table, mapping = api_labels({82: 82}, _mappings(_DIGEST_RECORDS), {"b1"}, {"g1"})  # type: ignore[dict-item]
     row = table.to_pylist()[0]
     assert row["mermaid_benthic_attribute_id"] is None
     assert (mapping.n_labels, mapping.n_mapped) == (1, 0)
@@ -156,10 +157,30 @@ def test_api_labels_raise_listing_every_attribute_id_absent_from_the_taxonomy() 
 
     records = {1: record(1, "zz"), 2: record(2, "aa"), 3: record(3, "zz"), 4: record(4, "b1")}
     with pytest.raises(ValueError, match=r"\['aa', 'zz'\]"):
-        api_labels({i: f"L{i}" for i in records}, _mappings(records), {"b1"})
+        api_labels({i: f"L{i}" for i in records}, _mappings(records), {"b1"}, {"g1"})
 
 
 def test_api_labels_ignore_an_absent_attribute_id_on_an_unmapped_record() -> None:
     absent = _ACROPORA | {"benthic_attribute_id": "gone", "benthic_attribute_name": None}
-    _, mapping = api_labels({82: "Acropora"}, _mappings({82: absent}), set())  # type: ignore[dict-item]
+    _, mapping = api_labels({82: "Acropora"}, _mappings({82: absent}), set(), set())  # type: ignore[dict-item]
     assert mapping.n_mapped == 0
+
+
+def test_api_labels_raise_listing_every_mapped_label_with_no_attribute_id() -> None:
+    no_id = _ACROPORA | {"benthic_attribute_id": None}
+    records = {5: no_id, 3: no_id, 82: _ACROPORA}
+    with pytest.raises(ValueError, match=r"no benthic_attribute_id: \[3, 5\]"):
+        api_labels({i: f"L{i}" for i in records}, _mappings(records), {"b1"}, {"g1"})  # type: ignore[arg-type]
+
+
+def test_api_labels_raise_listing_every_growth_form_id_absent_from_the_taxonomy() -> None:
+    records = {
+        1: _ACROPORA | {"provider_id": 1, "growth_form_id": "gz"},
+        2: _ACROPORA | {"provider_id": 2, "growth_form_id": "ga"},
+        3: _ACROPORA | {"provider_id": 3, "growth_form_id": None},
+        82: _ACROPORA,
+    }
+    with pytest.raises(
+        ValueError, match=r"growth_form_id not in the pinned taxonomy: \['ga', 'gz'\]"
+    ):
+        api_labels({i: f"L{i}" for i in records}, _mappings(records), {"b1"}, {"g1"})  # type: ignore[arg-type]
