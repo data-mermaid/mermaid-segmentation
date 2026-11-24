@@ -8,7 +8,7 @@ Builds the segmentation training data in S3: the CoralNet training manifest, the
 | `segdata ingest <name>` | Loads a raw external release into the legacy `external_validation_datasets/<name>/` prefix (see [Ingest an external dataset](#ingest-an-external-dataset)). |
 | `segdata build <name>` | Builds an immutable versioned dataset from that legacy prefix (see [Build a versioned external dataset](#build-a-versioned-external-dataset)). |
 | `segdata build <uniform>` | Stages a uniform-format version of `mermaid`, `coralscapes_v2` or `ucsd_mosaics` on disk (see [Uniform datasets](#uniform-datasets)). |
-| `segdata promote` | Uploads a staged uniform version to `mermaid-ic-datasets` (see [Promote a version](#promote-a-version)). |
+| `segdata promote` | Uploads a staged uniform or external dataset version to `mermaid-ic-datasets` (see [Promote a version](#promote-a-version)). |
 | `segdata taxonomy` | Snapshots the MERMAID benthic taxonomy as a version (see [Taxonomy snapshot](#taxonomy-snapshot)). |
 | `segdata split build`, `segdata split leakage` | Builds and checks the CoralNet split (see [CoralNet split](#coralnet-split)). |
 
@@ -25,7 +25,7 @@ Builds the segmentation training data in S3: the CoralNet training manifest, the
 uv run --package segdata-etl segdata <command> ...
 ```
 
-`<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. `<uniform>` is `mermaid`, `coralscapes_v2` or `ucsd_mosaics`. `build coralnet` takes a stage after it (see [Run](#run)). A staged uniform version is published with `segdata promote`.
+`<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. `<uniform>` is `mermaid`, `coralscapes_v2` or `ucsd_mosaics`. `build coralnet` takes a stage after it (see [Run](#run)). A staged uniform or external dataset version is published with `segdata promote`.
 
 ## CoralNet
 
@@ -321,7 +321,7 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset <data
 
 `promote` also takes `--workers` (default 16) and `-v`, `--verbose`. It writes in this order:
 
-1. Preflight, before any write. It checks the staged tables against `manifest.json`, refuses a manifest whose `stats.n_images` is 0, checks that the plan file names exactly the image and mask keys in `images.parquet` with the same size and checksums, and checks each staged upload file. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
+1. Preflight, before any write. It checks the staged tables against `manifest.json`, refuses a manifest whose `stats.n_images` is 0, checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name exactly the image and mask keys in `images.parquet`, each once, with the same size and checksums, and checks each staged upload file. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
 2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`.
 3. The tables.
 4. `manifest.json`.
@@ -472,6 +472,6 @@ Any other flag combination is refused.
 uv run --package segdata-etl --group tests pytest packages/segdata-etl/tests
 ```
 
-The CoralNet suite is in `packages/segdata-etl/tests/coralnet/`, the external dataset suite in `packages/segdata-etl/tests/external/`, the split suite in `packages/segdata-etl/tests/splits/` and the uniform dataset suite in `packages/segdata-etl/tests/uniform/`. Pass one directory to run one suite.
+The CoralNet suite is in `packages/segdata-etl/tests/coralnet/`, the raw-release ingest suite in `packages/segdata-etl/tests/ingest/`, the external dataset builder suite in `packages/segdata-etl/tests/datasets/`, the split suite in `packages/segdata-etl/tests/splits/`, the uniform dataset suite in `packages/segdata-etl/tests/uniform/`, the publishing and legacy helper suite in `packages/segdata-etl/tests/common/` and the label map suite in `packages/segdata-etl/tests/label_maps/`. `test_segdata_spec_parity.py` and `test_taxonomy.py` sit directly in `packages/segdata-etl/tests/`. Pass one directory to run one suite.
 
-The CoralNet tests are offline and use no network. The external dataset tests use an in-memory S3 fake and synthetic raw trees. `pytest-socket` blocks every host except localhost.
+The CoralNet tests are offline and use no network. The ingest and external builder tests use an in-memory S3 fake (`FakeS3`, defined in `tests/ingest/conftest.py` and reused from `tests/uniform/conftest.py` by `tests/datasets/`) and synthetic raw trees. `pytest-socket` blocks every host except localhost.
