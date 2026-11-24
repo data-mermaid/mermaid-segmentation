@@ -18,6 +18,7 @@ from segdata_spec.read import DatasetVersion, open_version
 
 from .conftest import (
     LEGACY_BUCKET,
+    assert_curated_label_mapping,
     build_args,
     copied_columns,
     jpeg,
@@ -160,6 +161,7 @@ def test_build_records_the_legacy_licence_and_drop_counts_in_the_manifest(
     assert manifest.etl.command.startswith(
         f"segdata build moorea_labeled_corals --store {published.store}"
     )
+    assert_curated_label_mapping(manifest, moorea_labeled_corals.DATASET, published.version.labels)
 
 
 def test_build_refuses_an_image_annotated_under_another_year(repo: Path, tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ from segdata_spec.read import DatasetVersion, open_version
 
 from .conftest import (
     LEGACY_BUCKET,
+    assert_curated_label_mapping,
     build_args,
     copied_columns,
     jpeg,
@@ -160,6 +161,7 @@ def test_build_records_the_dryad_licence_and_no_drops(published: Published) -> N
     assert manifest.etl.command.startswith(
         f"segdata build pacific_labeled_corals --store {published.store}"
     )
+    assert_curated_label_mapping(manifest, pacific_labeled_corals.DATASET, published.version.labels)
 
 
 @pytest.mark.parametrize(

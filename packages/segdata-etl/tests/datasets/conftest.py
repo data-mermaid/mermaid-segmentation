@@ -15,8 +15,9 @@ import pytest
 from PIL import Image
 
 from segdata_etl.common import publishing
+from segdata_etl.label_maps.curated import load_curated
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.manifest import Pin, SourceInfo
+from segdata_spec.manifest import Manifest, Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_taxonomy
 from segdata_spec.sync import _crc64nvme_b64
 
@@ -115,3 +116,19 @@ def no_mask() -> dict[str, Any]:
 
 def legacy_etag(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()  # noqa: S324
+
+
+def assert_curated_label_mapping(manifest: Manifest, dataset: str, labels: pa.Table) -> None:
+    """Assert the manifest's label mapping is the curated map of ``dataset``, counted from ``labels``."""
+    targets = labels.column("mermaid_benthic_attribute").to_pylist()
+    ids = labels.column("mermaid_benthic_attribute_id").to_pylist()
+    mapping = manifest.label_mapping
+    assert mapping is not None
+    assert mapping.source == "curated"
+    assert mapping.n_labels == labels.num_rows
+    assert mapping.n_mapped == sum(t is not None for t in targets)
+    assert mapping.n_unresolved == sum(
+        t is not None and i is None for t, i in zip(targets, ids, strict=True)
+    )
+    assert mapping.git_ref == CLEAN_GIT.sha
+    assert mapping.sha256 == load_curated(dataset)[1].sha256

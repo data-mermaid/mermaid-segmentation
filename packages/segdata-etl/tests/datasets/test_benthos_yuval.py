@@ -19,6 +19,7 @@ from segdata_spec.read import DatasetVersion, open_version
 
 from .conftest import (
     LEGACY_BUCKET,
+    assert_curated_label_mapping,
     build_args,
     copied_columns,
     legacy_etag,
@@ -149,6 +150,9 @@ def test_build_records_the_dryad_licence_and_no_drops(published: Published) -> N
     assert manifest.source.license == "CC0 1.0 (Dryad)"
     assert manifest.stats.dropped == {}
     assert manifest.etl.command.startswith(f"segdata build benthos_yuval --store {published.store}")
+    assert_curated_label_mapping(
+        published.version.manifest, benthos_yuval.DATASET, published.version.labels
+    )
 
 
 @pytest.mark.parametrize(

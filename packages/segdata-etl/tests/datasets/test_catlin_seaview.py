@@ -26,6 +26,8 @@ from segdata_spec.publish import GitState, publish_taxonomy
 from segdata_spec.read import DatasetVersion, open_version
 from segdata_spec.sync import _crc64nvme_b64, sync
 
+from .conftest import assert_curated_label_mapping
+
 LEGACY_BUCKET = "dev-datamermaid-sm-sources"
 PREFIX = "external_validation_datasets/catlin_seaview/"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
@@ -209,6 +211,9 @@ def test_build_writes_points_labels_and_counts(published: Published) -> None:
         (12, "Water", None),
     ]
     assert version.label_counts.num_rows == 4
+    assert_curated_label_mapping(
+        published.version.manifest, catlin_seaview.DATASET, published.version.labels
+    )
 
 
 def test_build_records_licence_source_dropped_and_command_in_the_manifest(
