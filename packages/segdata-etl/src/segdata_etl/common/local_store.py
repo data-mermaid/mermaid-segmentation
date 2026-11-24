@@ -157,7 +157,8 @@ class LocalStore:
             Bucket=CopySource["Bucket"], Key=CopySource["Key"]
         )
         data = bytes(response["Body"].read())
-        if CopySourceIfMatch is not None and CopySourceIfMatch.strip('"') != _etag(data).strip('"'):
+        source_etag = response.get("ETag", _etag(data))
+        if CopySourceIfMatch is not None and CopySourceIfMatch.strip('"') != source_etag.strip('"'):
             raise _client_error("PreconditionFailed", 412, "CopyObject")
         self._store(Bucket, Key, data, IfNoneMatch)
         return {

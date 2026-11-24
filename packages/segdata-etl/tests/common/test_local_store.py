@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,31 @@ def test_copy_object_with_a_different_source_etag_is_412_and_writes_nothing(
 
     assert _code(exc) == ("PreconditionFailed", 412)
     assert not (tmp_path / "dst" / "db" / "a.jpg").exists()
+
+
+class _MultipartSource:
+    """A source client whose stored ETag is not the MD5 of the bytes, as for multipart uploads."""
+
+    def __init__(self, data: bytes, etag: str) -> None:
+        self._data = data
+        self._etag = etag
+
+    def get_object(self, **_: object) -> dict[str, object]:
+        return {"Body": io.BytesIO(self._data), "ETag": self._etag}
+
+
+def test_copy_object_matches_if_match_against_the_sources_stored_etag(tmp_path: Path) -> None:
+    multipart_etag = '"0123456789abcdef0123456789abcdef-2"'
+    store = LocalStore(tmp_path / "dst", source_client=_MultipartSource(b"abc", multipart_etag))
+
+    store.copy_object(
+        CopySource={"Bucket": "sb", "Key": "a.jpg"},
+        Bucket="db",
+        Key="a.jpg",
+        CopySourceIfMatch=multipart_etag,
+    )
+
+    assert (tmp_path / "dst" / "db" / "a.jpg").read_bytes() == b"abc"
 
 
 def test_list_objects_v2_returns_keys_and_immediate_child_prefixes(tmp_path: Path) -> None:
