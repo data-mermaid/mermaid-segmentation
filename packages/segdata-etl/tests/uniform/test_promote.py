@@ -472,3 +472,57 @@ def test_upload_landing_with_another_crc_raises_and_no_table_is_written(monkeypa
         run_promote(fake, tmp_path / "stage", version_path.name, dataset="coralscapes_v2")
 
     assert not [k for _, k in fake.objects if k.startswith("datasets/")]
+
+
+PARENT_VERSION = "20261101-1234567"
+PARENT_KEY = f"datasets/parent/{PARENT_VERSION}/manifest.json"
+PARENT_MANIFEST = b'{"dataset": "parent"}'
+
+
+def pin_parent(stage: Path, version: str, pinned: bytes = PARENT_MANIFEST) -> None:
+    """Add a parent pin on ``PARENT_MANIFEST`` to the staged mermaid manifest."""
+    path = version_dir(stage, "mermaid", version) / "manifest.json"
+    manifest = json.loads(path.read_bytes())
+    manifest["parents"] = [
+        {
+            "dataset": "parent",
+            "version": PARENT_VERSION,
+            "manifest_sha256": hashlib.sha256(pinned).hexdigest(),
+        }
+    ]
+    path.write_text(json.dumps(manifest))
+
+
+def test_unpublished_parent_refuses_with_no_writes(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    pin_parent(stage, version)
+
+    with pytest.raises(PublishRefused, match="parent"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_parent_manifest_with_other_bytes_than_the_pin_refuses_with_no_writes(
+    repo,  # noqa: F811
+    tmp_path,
+):
+    fake, stage, version = stage_mermaid(tmp_path)
+    pin_parent(stage, version)
+    fake.put(DATASET_BUCKET, PARENT_KEY, PARENT_MANIFEST + b" ")
+
+    with pytest.raises(PublishRefused, match="parent"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_parent_published_with_the_pinned_bytes_lets_promote_proceed(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    pin_parent(stage, version)
+    fake.put(DATASET_BUCKET, PARENT_KEY, PARENT_MANIFEST)
+    fake.calls.clear()
+
+    run_promote(fake, stage, version)
+
+    assert (DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json") in fake.objects

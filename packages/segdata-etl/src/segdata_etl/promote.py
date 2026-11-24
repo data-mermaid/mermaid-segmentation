@@ -228,6 +228,24 @@ def _manifest_published(client: Any, dataset: str, version: str) -> bool:
     return True
 
 
+def _check_parents(client: Any, manifest: Manifest) -> None:
+    """Refuse unless every parent's published ``manifest.json`` has the pinned bytes."""
+    for parent in manifest.parents:
+        key = dataset_prefix(parent.dataset, parent.version) + MANIFEST_NAME
+        try:
+            body = client.get_object(Bucket=DATASET_BUCKET, Key=key)["Body"].read()
+        except ClientError as exc:
+            if is_not_found(exc):
+                raise PublishRefused(
+                    f"parent {parent.dataset} {parent.version} is not published in {DATASET_BUCKET}"
+                ) from exc
+            raise
+        if manifest_sha256(body) != parent.manifest_sha256:
+            raise PublishRefused(
+                f"parent manifest s3://{DATASET_BUCKET}/{key} does not match its pin"
+            )
+
+
 def _conflicting_key(client: Any, key: str, expect: _Expected) -> str | None:
     """Return ``key`` if it exists in the dataset bucket with a fingerprint other than ``expect``."""
     head = head_with_checksum(client, DATASET_BUCKET, key)
@@ -267,6 +285,7 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
     _check_key_sets(steps, expected)
     if _manifest_published(client, dataset, version):
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
+    _check_parents(client, manifest)
     table_expected = _table_expectations(tables, dataset_prefix(dataset, version))
     _check_destinations(client, {**{s.dst_key: s.expect for s in steps}, **table_expected}, workers)
     return _Plan(manifest, manifest_bytes, steps)
