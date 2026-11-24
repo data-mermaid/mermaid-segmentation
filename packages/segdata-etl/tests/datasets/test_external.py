@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pandas as pd
 import pyarrow as pa
 import pytest
@@ -137,12 +139,25 @@ def test_copy_items_and_image_rows_carry_the_mask_copy() -> None:
         image_id="7", group="site1", key="imgs/7.jpg", etag="src-etag", mask_key="masks/7.png"
     )
     sniffed = {"imgs/7.jpg": ("image/jpeg", 40, 30)}
+    legacy = dataclasses.replace(
+        LEGACY, objects={"masks/7.png": LegacyObject("masks/7.png", "mask-etag", 20)}
+    )
 
-    items = external.copy_items([image], sniffed, legacy=LEGACY, dataset="benthos")
+    items = external.copy_items([image], sniffed, legacy=legacy, dataset="benthos")
 
     assert items == [
-        CopyItem("legacy-bucket", "legacy/benthos/imgs/7.jpg", "images/benthos/site1/7.jpg"),
-        CopyItem("legacy-bucket", "legacy/benthos/masks/7.png", "images/benthos/site1/7_mask.png"),
+        CopyItem(
+            "legacy-bucket",
+            "legacy/benthos/imgs/7.jpg",
+            "images/benthos/site1/7.jpg",
+            '"src-etag"',
+        ),
+        CopyItem(
+            "legacy-bucket",
+            "legacy/benthos/masks/7.png",
+            "images/benthos/site1/7_mask.png",
+            '"mask-etag"',
+        ),
     ]
     copied = {
         "images/benthos/site1/7.jpg": CopiedObject(etag='"i"', size=100, crc64nvme="ic"),

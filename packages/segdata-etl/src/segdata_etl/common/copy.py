@@ -19,11 +19,15 @@ from segdata_spec.sync import _IN_FLIGHT_PER_WORKER
 
 @dataclass(frozen=True)
 class CopyItem:
-    """One object to copy from ``source_bucket/source_key`` to ``dest_key`` in the destination."""
+    """One object to copy from ``source_bucket/source_key`` to ``dest_key`` in the destination.
+
+    ``source_etag`` is the quoted ETag S3 listed for the source; the copy refuses any other version.
+    """
 
     source_bucket: str
     source_key: str
     dest_key: str
+    source_etag: str
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,14 @@ def _copied_size(
     return int(dest_head["ContentLength"])
 
 
+def _changed_since_listed(item: CopyItem) -> str:
+    return f"s3://{item.source_bucket}/{item.source_key} changed since it was listed"
+
+
+def _is_missing(exc: ClientError) -> bool:
+    return bool(exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404)
+
+
 def _copy_one(
     client: Any,
     source_client: Any,
@@ -97,8 +109,11 @@ def _copy_one(
     source_head = source_client.head_object(
         Bucket=item.source_bucket, Key=item.source_key, ChecksumMode="ENABLED"
     )
+    if source_head["ETag"] != item.source_etag:
+        raise RuntimeError(_changed_since_listed(item))
     kwargs: dict[str, Any] = {
         "CopySource": {"Bucket": item.source_bucket, "Key": item.source_key},
+        "CopySourceIfMatch": item.source_etag,
         "Bucket": dest_bucket,
         "Key": item.dest_key,
         "IfNoneMatch": "*",
@@ -113,9 +128,15 @@ def _copy_one(
     except ClientError as exc:
         if not is_precondition_failed(exc):
             raise
-        dest_head = client.head_object(
-            Bucket=dest_bucket, Key=item.dest_key, ChecksumMode="ENABLED"
-        )
+        try:
+            dest_head = client.head_object(
+                Bucket=dest_bucket, Key=item.dest_key, ChecksumMode="ENABLED"
+            )
+        except ClientError as head_exc:
+            # An absent destination means the 412 came from CopySourceIfMatch, not IfNoneMatch.
+            if not _is_missing(head_exc):
+                raise
+            raise RuntimeError(_changed_since_listed(item)) from exc
         if not _same_content(client, source_client, item, dest_bucket, source_head, dest_head):
             raise ObjectExists(
                 f"s3://{dest_bucket}/{item.dest_key} already exists with different bytes"

@@ -342,6 +342,11 @@ def _mask_dest_key(image: LegacyImage) -> str:
     return f"{image.group}/{image.image_id}_mask.png"
 
 
+def _quoted(etag: str) -> str:
+    """Return ``etag`` in the quoted form S3 sends in headers; listings are stored unquoted."""
+    return f'"{etag}"'
+
+
 def copy_items(
     images: Iterable[LegacyImage],
     sniffed: Mapping[str, tuple[str, int, int]],
@@ -357,6 +362,7 @@ def copy_items(
                 source_bucket=legacy.bucket,
                 source_key=legacy.prefix + image.key,
                 dest_key=image_prefix(dataset) + image_key(image, sniffed[image.key][0]),
+                source_etag=_quoted(image.etag),
             )
         )
         if image.mask_key is not None:
@@ -365,6 +371,7 @@ def copy_items(
                     source_bucket=legacy.bucket,
                     source_key=legacy.prefix + image.mask_key,
                     dest_key=image_prefix(dataset) + _mask_dest_key(image),
+                    source_etag=_quoted(legacy.objects[image.mask_key].etag),
                 )
             )
     return items

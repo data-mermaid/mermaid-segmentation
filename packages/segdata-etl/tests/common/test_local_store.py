@@ -65,6 +65,7 @@ def test_copy_object_writes_source_bytes_and_returns_s3_etag_and_crc(tmp_path: P
         Bucket="db",
         Key="out/a.jpg",
         IfNoneMatch="*",
+        CopySourceIfMatch=ABC_MD5_ETAG,
         ChecksumAlgorithm="CRC64NVME",
         StorageClass="INTELLIGENT_TIERING",
     )
@@ -88,6 +89,25 @@ def test_copy_object_if_none_match_on_existing_key_is_412_and_keeps_bytes(tmp_pa
 
     assert _code(exc) == ("PreconditionFailed", 412)
     assert (tmp_path / "dst" / "db" / "a.jpg").read_bytes() == b"old"
+
+
+def test_copy_object_with_a_different_source_etag_is_412_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    source = LocalStore(tmp_path / "src")
+    source.put_object(Bucket="sb", Key="a.jpg", Body=b"abc")
+    store = LocalStore(tmp_path / "dst", source_client=source)
+
+    with pytest.raises(ClientError) as exc:
+        store.copy_object(
+            CopySource={"Bucket": "sb", "Key": "a.jpg"},
+            Bucket="db",
+            Key="a.jpg",
+            CopySourceIfMatch='"00000000000000000000000000000000"',
+        )
+
+    assert _code(exc) == ("PreconditionFailed", 412)
+    assert not (tmp_path / "dst" / "db" / "a.jpg").exists()
 
 
 def test_list_objects_v2_returns_keys_and_immediate_child_prefixes(tmp_path: Path) -> None:

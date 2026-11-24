@@ -141,17 +141,24 @@ class LocalStore:
         Bucket: str,
         Key: str,
         IfNoneMatch: str | None = None,
+        CopySourceIfMatch: str | None = None,
         ChecksumAlgorithm: str | None = None,
         StorageClass: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """Copy ``CopySource`` read through ``source_client``; return S3's ETag and CRC64NVME."""
+        """Copy ``CopySource`` read through ``source_client``; return S3's ETag and CRC64NVME.
+
+        A ``CopySourceIfMatch`` differing from the source's ETag raises a 412 ClientError and
+        writes nothing.
+        """
         if self._source_client is None:
             raise ValueError("copy_object needs a source_client")
         response = self._source_client.get_object(
             Bucket=CopySource["Bucket"], Key=CopySource["Key"]
         )
         data = bytes(response["Body"].read())
+        if CopySourceIfMatch is not None and CopySourceIfMatch.strip('"') != _etag(data).strip('"'):
+            raise _client_error("PreconditionFailed", 412, "CopyObject")
         self._store(Bucket, Key, data, IfNoneMatch)
         return {
             "CopyObjectResult": {"ETag": _etag(data), "ChecksumCRC64NVME": _crc64nvme_b64(data)}

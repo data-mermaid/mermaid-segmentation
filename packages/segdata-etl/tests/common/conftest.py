@@ -37,6 +37,8 @@ class FakeS3:
     ``copy_error`` makes every ``copy_object`` raise that error code with status 403.
     ``source_changes_on_copy`` maps a source ``(bucket, key)`` to the bytes it holds by the time
     ``copy_object`` reads it, as a source overwritten between the HEAD and the copy does.
+    ``copy_object`` raises a 412 without writing when ``IfNoneMatch="*"`` meets an existing
+    destination or ``CopySourceIfMatch`` differs from the source's current ETag.
     """
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
@@ -59,6 +61,9 @@ class FakeS3:
         source = (CopySource["Bucket"], CopySource["Key"])
         if source in self.source_changes_on_copy:
             self.objects[source] = self.source_changes_on_copy[source]
+        if_match = kwargs.get("CopySourceIfMatch")
+        if if_match is not None and if_match != self._etag(*source):
+            raise client_error("PreconditionFailed", 412, "CopyObject")
         data = self.objects[source]
         self.objects[(Bucket, Key)] = data
         return {

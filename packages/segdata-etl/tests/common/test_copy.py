@@ -24,8 +24,8 @@ SRC = "src-bucket"
 DST = "dst-bucket"
 
 
-def _item(key: str = "a.jpg", dest: str = "out/a.jpg") -> CopyItem:
-    return CopyItem(source_bucket=SRC, source_key=key, dest_key=dest)
+def _item(key: str = "a.jpg", dest: str = "out/a.jpg", etag: str = ABC_ETAG) -> CopyItem:
+    return CopyItem(source_bucket=SRC, source_key=key, dest_key=dest, source_etag=etag)
 
 
 def test_each_item_is_one_conditional_checksummed_copy(fake_s3: FakeS3) -> None:
@@ -38,6 +38,7 @@ def test_each_item_is_one_conditional_checksummed_copy(fake_s3: FakeS3) -> None:
             "CopySource": {"Bucket": SRC, "Key": "a.jpg"},
             "Bucket": DST,
             "Key": "out/a.jpg",
+            "CopySourceIfMatch": ABC_ETAG,
             "IfNoneMatch": "*",
             "ChecksumAlgorithm": "CRC64NVME",
             "TaggingDirective": "REPLACE",
@@ -108,7 +109,7 @@ def test_every_item_is_copied_once_across_workers(fake_s3: FakeS3) -> None:
     items = []
     for i in range(20):
         fake_s3.objects[(SRC, f"{i}.jpg")] = f"img{i}".encode()
-        items.append(_item(f"{i}.jpg", f"out/{i}.jpg"))
+        items.append(_item(f"{i}.jpg", f"out/{i}.jpg", fake_s3._etag(SRC, f"{i}.jpg")))
 
     result = copy_images(fake_s3, items, dest_bucket=DST, workers=4)
 
@@ -139,22 +140,35 @@ def test_dest_without_crc_and_different_bytes_raises_object_exists(fake_s3: Fake
         copy_images(fake_s3, [_item()], dest_bucket=DST, workers=1)
 
 
-def test_a_source_that_changes_during_the_copy_raises(fake_s3: FakeS3) -> None:
+def test_a_source_that_changes_during_the_copy_is_refused_before_anything_is_written(
+    fake_s3: FakeS3,
+) -> None:
     fake_s3.objects[(SRC, "a.jpg")] = b"abc"
     fake_s3.source_changes_on_copy[(SRC, "a.jpg")] = b"abcdef"
 
-    with pytest.raises(RuntimeError, match="a.jpg"):
+    with pytest.raises(RuntimeError, match="a.jpg changed since it was listed"):
         copy_images(fake_s3, [_item()], dest_bucket=DST, workers=1)
 
+    assert (DST, "out/a.jpg") not in fake_s3.objects
 
-def test_size_comes_from_the_destination_when_the_source_has_no_crc(fake_s3: FakeS3) -> None:
+
+def test_a_source_overwritten_after_listing_is_refused_without_a_copy(fake_s3: FakeS3) -> None:
+    fake_s3.objects[(SRC, "a.jpg")] = b"abcdef"
+
+    with pytest.raises(RuntimeError, match="a.jpg changed since it was listed"):
+        copy_images(fake_s3, [_item()], dest_bucket=DST, workers=1)
+
+    assert fake_s3.copy_calls == []
+    assert (DST, "out/a.jpg") not in fake_s3.objects
+
+
+def test_a_source_without_crc_is_copied_and_sized_from_the_destination(fake_s3: FakeS3) -> None:
     fake_s3.objects[(SRC, "a.jpg")] = b"abc"
     fake_s3.no_crc.add((SRC, "a.jpg"))
-    fake_s3.source_changes_on_copy[(SRC, "a.jpg")] = b"abcdef"
 
     result = copy_images(fake_s3, [_item()], dest_bucket=DST, workers=1)
 
-    assert result["out/a.jpg"].size == 6
+    assert result["out/a.jpg"].size == 3
 
 
 def test_a_localstore_destination_copies_from_a_separate_source_client(tmp_path: Path) -> None:
