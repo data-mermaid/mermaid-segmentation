@@ -30,12 +30,18 @@ from coralnet_scraper.s3_io import object_key_image_list_csv
 from segdata_etl.common.copy import CopyItem, copy_images
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
 from segdata_etl.common.media import EXTENSIONS, SNIFF_BYTES, sniff_media_type
-from segdata_etl.common.publishing import checked_git_state, count_labels, pick_version
+from segdata_etl.common.publishing import (
+    checked_git_state,
+    count_labels,
+    image_prefix,
+    image_store,
+    pick_version,
+)
 from segdata_etl.common.store import DEFAULT_STORE, open_store
 from segdata_etl.common.version import utc_today
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec.errors import ObjectExists
-from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
+from segdata_spec.manifest import ParentRef, SourceInfo
 from segdata_spec.publish import _fetch_parent_tables, publish_dataset
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 
@@ -48,7 +54,9 @@ logger = logging.getLogger(__name__)
 DATASET = "coralnet-raw"
 POOL_HEADROOM = 8
 DEFAULT_SOURCE_BUCKET = "dev-datamermaid-sm-sources"
-IMAGE_PREFIX = "images/coralnet/"
+# The images live under the "coralnet" family, not the "coralnet-raw" dataset name.
+_IMAGE_FAMILY = "coralnet"
+IMAGE_PREFIX = image_prefix(_IMAGE_FAMILY)
 STORAGE_CLASS = "INTELLIGENT_TIERING"
 ANNOTATOR = "default"
 # CoralNet label 2474 is named the literal string "None", which pandas read as NaN into id2name.
@@ -681,7 +689,7 @@ def run_raw(args: argparse.Namespace) -> int:
         version=version,
         kind="points",
         tables=result.tables,
-        image_store=ImageStore(bucket=bucket, prefix=IMAGE_PREFIX, owner="segdata"),
+        image_store=image_store(bucket, _IMAGE_FAMILY),
         etl_package="segdata-etl",
         etl_command=_command_line(args),
         source=SourceInfo(
