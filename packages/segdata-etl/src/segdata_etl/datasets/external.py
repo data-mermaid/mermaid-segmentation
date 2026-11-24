@@ -22,6 +22,7 @@ import pyarrow.compute as pc
 
 from segdata_etl.common.cli_flags import _pin_flags
 from segdata_etl.common.copy import CopiedObject, CopyItem, copy_images
+from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
 from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject, sniff_image
 from segdata_etl.common.publishing import image_prefix
 from segdata_etl.common.store import add_store_argument
@@ -94,25 +95,6 @@ def load_taxonomy(
     return open_taxonomy(cache_dir, bucket, pin)
 
 
-def _resolve_target(
-    target: str, by_name: Mapping[str, list[tuple[str, str]]]
-) -> tuple[str, str] | None:
-    """Return the taxonomy ``(id, name)`` of ``target``, or None when no attribute has that name."""
-    matches = by_name.get(target.lower(), [])
-    if len(matches) > 1:
-        raise ValueError(f"curated target {target!r} matches several taxonomy names: {matches}")
-    return matches[0] if matches else None
-
-
-def _attributes_by_name(attributes: pa.Table) -> dict[str, list[tuple[str, str]]]:
-    by_name: dict[str, list[tuple[str, str]]] = {}
-    for attr_id, name in zip(
-        attributes.column("id").to_pylist(), attributes.column("name").to_pylist(), strict=True
-    ):
-        by_name.setdefault(name.lower(), []).append((attr_id, name))
-    return by_name
-
-
 def build_labels(
     classes: Mapping[str, int], curated: Mapping[str, str], attributes: pa.Table
 ) -> pa.Table:
@@ -124,13 +106,13 @@ def build_labels(
     Raises:
         ValueError: A curated target matches more than one taxonomy name, ignoring case.
     """
-    by_name = _attributes_by_name(attributes)
+    index = taxonomy_name_index(attributes)
     rows = []
     for name, label_id in sorted(classes.items(), key=lambda item: item[1]):
         if label_id == 0:
             continue
         target = curated.get(name.lower())
-        match = _resolve_target(target, by_name) if target is not None else None
+        match = resolve_taxonomy_name(target, index) if target is not None else None
         rows.append(
             {
                 "label_id": label_id,

@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import defaultdict
 from collections.abc import Mapping
 from importlib import resources
 from typing import Final, Literal
 
 import pyarrow as pa
 
+from segdata_etl.common.labels import (
+    AmbiguousTaxonomyName,
+    resolve_taxonomy_name,
+    taxonomy_name_index,
+)
 from segdata_spec.manifest import LabelMapping
 from segdata_spec.schema import LABELS_SCHEMA, conform
 
@@ -33,31 +37,26 @@ def _target_name(name: str | None, name_to_target: Mapping[str, str | None]) -> 
     return name_to_target.get(name.lower())
 
 
-def _ids_by_lower_name(taxonomy: pa.Table) -> dict[str, list[str]]:
-    ids: dict[str, list[str]] = defaultdict(list)
-    for tax_id, tax_name in zip(
-        taxonomy.column("id").to_pylist(), taxonomy.column("name").to_pylist(), strict=True
-    ):
-        ids[tax_name.lower()].append(tax_id)
-    return ids
-
-
 def _resolve_ids(targets: set[str], taxonomy: pa.Table) -> dict[str, str | None]:
     """Map each target name to its taxonomy id by case-insensitive name.
 
     Raises:
-        ValueError: A target matches more than one taxonomy row.
+        ValueError: A target matches more than one taxonomy row; every such target is named.
     """
-    by_name = _ids_by_lower_name(taxonomy)
-    ambiguous = sorted(t for t in targets if len(by_name.get(t.lower(), ())) > 1)
+    index = taxonomy_name_index(taxonomy)
+    resolved: dict[str, str | None] = {}
+    ambiguous: list[str] = []
+    for target in sorted(targets):
+        try:
+            match = resolve_taxonomy_name(target, index)
+        except AmbiguousTaxonomyName:
+            ambiguous.append(target)
+            continue
+        resolved[target] = match[0] if match else None
     if ambiguous:
         raise ValueError(
             f"taxonomy has several benthic attributes named (ignoring case): {ambiguous}"
         )
-    resolved: dict[str, str | None] = {}
-    for target in targets:
-        matches = by_name.get(target.lower(), [])
-        resolved[target] = matches[0] if matches else None
     return resolved
 
 
