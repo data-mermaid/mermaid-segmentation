@@ -8,6 +8,8 @@ _JPEG_MAGIC = b"\xff\xd8\xff"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # Bytes a caller must read for ``sniff_media_type`` to recognise every supported type.
 SNIFF_BYTES = len(_PNG_MAGIC)
+# File extension, without the dot, of each media type ``sniff_media_type`` returns.
+EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png"}
 
 
 def sniff_media_type(head: bytes) -> Literal["image/jpeg", "image/png"]:

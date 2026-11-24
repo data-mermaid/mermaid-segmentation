@@ -132,6 +132,14 @@ def test_sniff_image_raises_for_bytes_that_are_not_jpeg_or_png() -> None:
         sniff_image(client, BUCKET, "x.gif")
 
 
+def test_sniff_image_rejects_a_soi_not_followed_by_a_marker() -> None:
+    jpeg = _image_bytes("JPEG", (4, 4))
+    client = LegacyS3({(BUCKET, "x.jpg"): b"\xff\xd8\x00" + jpeg[2:]})
+
+    with pytest.raises(ImageUndecodable, match="neither JPEG nor PNG"):
+        sniff_image(client, BUCKET, "x.jpg")
+
+
 def test_read_legacy_returns_tables_manifest_and_stripped_etag_objects() -> None:
     objects = _legacy_objects()
     client = LegacyS3(objects)

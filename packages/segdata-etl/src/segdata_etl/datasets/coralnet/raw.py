@@ -29,7 +29,7 @@ from coralnet_scraper.config import ENV_BUCKET, get_prefix, validate_workers
 from coralnet_scraper.s3_io import object_key_image_list_csv
 from segdata_etl.common.copy import CopyItem, copy_images
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
-from segdata_etl.common.media import SNIFF_BYTES, sniff_media_type
+from segdata_etl.common.media import EXTENSIONS, SNIFF_BYTES, sniff_media_type
 from segdata_etl.common.publishing import checked_git_state, count_labels, pick_version
 from segdata_etl.common.store import DEFAULT_STORE, open_store
 from segdata_etl.common.version import utc_today
@@ -55,7 +55,6 @@ ANNOTATOR = "default"
 _NONE_NAMED_LABEL = "2474"
 # Copies per checkpoint write: a crash loses at most this many finished copies.
 _CHECKPOINT_BATCH = 1000
-_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png"}
 _COPIED = ["etag", "size", "crc64nvme"]
 _CHECKPOINT_COLUMNS = ["dest_key", "source_fingerprint", *_COPIED]
 
@@ -153,7 +152,7 @@ def _attach_sources(
 
 
 def _image_key(source_id: int, image_id: str, media_type: str) -> str:
-    return f"s{source_id}/{image_id}{_EXTENSIONS[media_type]}"
+    return f"s{source_id}/{image_id}.{EXTENSIONS[media_type]}"
 
 
 def _carry_forward(rows: pd.DataFrame, parent: pa.Table | None) -> pd.DataFrame:

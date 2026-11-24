@@ -24,6 +24,7 @@ from segdata_etl.common.cli_flags import _pin_flags
 from segdata_etl.common.copy import CopiedObject, CopyItem, copy_images
 from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
 from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject, sniff_image
+from segdata_etl.common.media import EXTENSIONS
 from segdata_etl.common.publishing import image_prefix
 from segdata_etl.common.store import add_store_argument
 from segdata_etl.label_maps.curated import CuratedMapInfo
@@ -36,7 +37,6 @@ DEFAULT_WORKERS = 16
 DEFAULT_CACHE_DIR = Path("outputs") / "segdata-cache"
 TAXONOMY_NAME = "mermaid-benthic"
 _IMAGES_FOLDER = "images"
-_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png"}
 
 
 Identify = Callable[[str], tuple[str, str] | None]
@@ -320,7 +320,7 @@ def sniff_images(
 
 def image_key(image: LegacyImage, media_type: str) -> str:
     """Return ``<group>/<image_id>.<ext>``, the key relative to the image store prefix."""
-    return f"{image.group}/{image.image_id}.{_EXTENSIONS[media_type]}"
+    return f"{image.group}/{image.image_id}.{EXTENSIONS[media_type]}"
 
 
 def _mask_dest_key(image: LegacyImage) -> str:

@@ -17,12 +17,12 @@ import pandas as pd
 from botocore.client import BaseClient
 
 from segdata_etl.common.jpeg_header import _find_sof_dimensions
+from segdata_etl.common.media import sniff_media_type
 from segdata_spec.errors import ImageUndecodable
 from segdata_spec.manifest import SourceInfo
 
 DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
 _FIRST_CHUNK = 65_536
-_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PNG_HEADER_LEN = 24  # signature(8) + IHDR length/type(8) + width(4) + height(4)
 
 
@@ -127,17 +127,19 @@ def sniff_image(client: BaseClient, bucket: str, key: str) -> tuple[str, int, in
     head = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{_FIRST_CHUNK - 1}")[
         "Body"
     ].read()
-    if head.startswith(_PNG_SIGNATURE):
+    try:
+        media_type = sniff_media_type(head)
+    except ValueError as err:
+        raise ImageUndecodable(f"s3://{bucket}/{key} is neither JPEG nor PNG") from err
+    if media_type == "image/png":
         width, height = _png_dimensions(head)
-        return "image/png", width, height
-    if head[:2] == b"\xff\xd8":
-        dims = _find_sof_dimensions(head)
-        if dims is None:
-            dims = _find_sof_dimensions(_get_bytes(client, bucket, key))
-        if dims is None:
-            raise ImageUndecodable(f"no JPEG SOF marker in s3://{bucket}/{key}")
-        return "image/jpeg", dims[1], dims[0]
-    raise ImageUndecodable(f"s3://{bucket}/{key} is neither JPEG nor PNG")
+        return media_type, width, height
+    dims = _find_sof_dimensions(head)
+    if dims is None:
+        dims = _find_sof_dimensions(_get_bytes(client, bucket, key))
+    if dims is None:
+        raise ImageUndecodable(f"no JPEG SOF marker in s3://{bucket}/{key}")
+    return media_type, dims[1], dims[0]
 
 
 def source_info(ds: LegacyDataset, *, license_override: str | None = None) -> SourceInfo:
