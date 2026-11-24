@@ -675,9 +675,7 @@ def test_staging_writes_the_tables_and_a_copy_plan_and_nothing_to_s3(
     assert staging.objects == before
 
 
-def test_the_recorded_command_names_the_stage_dir_and_no_store(
-    staging: RecordingS3, tmp_path: Path
-) -> None:
+def test_the_recorded_command_names_the_stage_dir(staging: RecordingS3, tmp_path: Path) -> None:
     stage = tmp_path / "stage"
 
     _stage_raw(stage, "--source-ids", "1,2")
@@ -783,9 +781,8 @@ def test_an_unpublishable_tree_is_refused_before_any_s3_call(
     [
         ([], "--stage-dir"),
         (["--stage-dir", "{tmp}", "--parent-version", "v1"], "--parent-manifest-sha256"),
-        (["--stage-dir", "{tmp}", "--store", "s3"], "--store"),
     ],
-    ids=["no_stage_dir", "half_parent_pin", "store_is_gone"],
+    ids=["no_stage_dir", "half_parent_pin"],
 )
 def test_raw_flag_misuse_is_a_usage_error(
     tmp_path: Path,

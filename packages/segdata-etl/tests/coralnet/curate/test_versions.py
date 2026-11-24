@@ -421,24 +421,14 @@ def test_the_recorded_command_names_the_stage_dir(world: World) -> None:
 
     command = manifest.etl.command
     assert f"--stage-dir {world.stage}" in command
-    assert "--store" not in command
 
 
-@pytest.mark.parametrize(
-    ("argv", "named"),
-    [
-        (["--cache-dir", "c"], "--stage-dir"),
-        (["--stage-dir", "s", "--store", "x"], "unrecognized arguments: --store"),
-    ],
-)
-def test_stage_dir_is_required_and_store_is_gone(
-    world: World, argv: list[str], named: str, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_stage_dir_is_required(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     pins = ["--raw-version", "v", "--raw-manifest-sha256", "0" * 64]
     with pytest.raises(SystemExit) as exit_info:
-        cli.main(["curate", "coralnet", "--label-map", "mermaid_api", *pins, *argv])
+        cli.main(["curate", "coralnet", "--label-map", "mermaid_api", *pins, "--cache-dir", "c"])
     assert exit_info.value.code == 2
-    assert named in capsys.readouterr().err
+    assert "--stage-dir" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

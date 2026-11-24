@@ -1278,6 +1278,36 @@ def test_run_parity_scales_new_points_into_the_resized_space(
     assert {p.suffix for p in cache_dir.rglob("*") if p.is_file()} == {".json", ".parquet"}
 
 
+def test_run_parity_without_sync_scales_cached_points_into_the_resized_space(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache_dir, _, pin = write_version(
+        tmp_path, kind="points", images=_WIDE, labels=_LABELS, points=list(_WIDE_POINT)
+    )
+    monkeypatch.setitem(
+        registry_module._REMOTE_FETCHERS, "catlin_seaview", lambda: {"Acropora": "Hard Coral"}
+    )
+    stub = _old_stub([("w1", 500, 1500)])
+    stub.source_name2id = {"Acropora": 1}
+    stub.source_id2name = {1: "Acropora"}
+    monkeypatch.setattr(parity_module, "build_datasets", lambda *a, **k: {("ds", "train"): stub})
+
+    report = run_parity(
+        {},
+        dataset="ds",
+        split="train",
+        version=pin.version,
+        manifest_sha256=pin.manifest_sha256,
+        cache_dir=cache_dir,
+        client=_NoClient(),
+        annotators=None,
+        resize=ResizeSpec(max_edge=2048),
+        sync=False,
+    )
+
+    assert report.ok
+
+
 def test_run_parity_without_resize_reports_the_scaled_pair_as_different(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
