@@ -8,9 +8,10 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
+from segdata_etl.common.publishing import count_labels
 from segdata_etl.datasets.coralnet.curate.overrides import OverrideStats, apply_overrides
 from segdata_spec.read import DatasetVersion
-from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, POINTS_SCHEMA
+from segdata_spec.schema import IMAGES_SCHEMA, POINTS_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -35,11 +36,11 @@ def _curate_frames(
     blacklisted = images["image_id"].isin(blacklist_ids)
     images = images[~blacklisted]
     points = points[~points["image_id"].isin(blacklist_ids)]
-    counts = points.groupby(["image_id", "label_id"], sort=True).size().rename("n").reset_index()
+    points_table = pa.Table.from_pandas(points, schema=POINTS_SCHEMA, preserve_index=False)
     return CuratedTables(
         images=pa.Table.from_pandas(images, schema=IMAGES_SCHEMA, preserve_index=False),
-        points=pa.Table.from_pandas(points, schema=POINTS_SCHEMA, preserve_index=False),
-        label_counts=pa.Table.from_pandas(counts, schema=LABEL_COUNTS_SCHEMA, preserve_index=False),
+        points=points_table,
+        label_counts=count_labels(points_table),
         dropped={
             "blacklisted_images": int(blacklisted.sum()),
             "override_images_not_in_raw": stats.override_images_not_in_raw,
