@@ -178,10 +178,9 @@ def _ref(pin: Pin) -> ParentRef:
 
 
 def _pin(args: argparse.Namespace, prefix: str, name: str) -> Pin:
-    return Pin(
-        name=name,
-        version=getattr(args, f"{prefix}_version"),
-        manifest_sha256=getattr(args, f"{prefix}_manifest_sha256"),
+    version, manifest_sha256 = pin_values(args, f"{prefix}-")
+    return Pin.model_validate(
+        {"name": name, "version": version, "manifest_sha256": manifest_sha256}
     )
 
 

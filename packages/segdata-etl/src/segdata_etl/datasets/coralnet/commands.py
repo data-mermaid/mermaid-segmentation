@@ -155,7 +155,7 @@ def add_subcommands(sub: Any) -> None:
         help="Build run under etl-outputs/coralnet/ to publish (default: %(default)s)",
     )
     _add_source_ids_flag(p_raw, _RAW_SOURCE_IDS_HELP)
-    _pin_flags(p_raw, "parent-", "the coralnet-raw version to reuse", required=False)
+    _pin_flags(p_raw, "parent-", "the coralnet-raw parent to reuse", required=False)
     p_raw.add_argument(
         "--workers",
         type=int,
