@@ -112,6 +112,21 @@ The dataset builds read the taxonomy pin from `mermaid-ic-datasets`, so publish 
 
 The datasets in S3 are new versions built from the same legacy prefix. Training still reads the legacy prefix.
 
+### Superseded versions
+
+These published versions have an `extra_files` key in `manifest.json`. The manifest schema in `packages/segdata-spec/src/segdata_spec/manifest.py` has no such field and forbids unknown keys, so `segdata_spec` cannot read them. Do not pin them; pin a newer version of the same dataset.
+
+| Dataset | Version |
+|---|---|
+| `coralnet` | `20261124-e6abfad` |
+| `catlin_seaview` | `20261124-e6abfad` |
+| `moorea_labeled_corals` | `20261124-e6abfad` |
+| `pacific_labeled_corals` | `20261124-e6abfad` |
+| `benthos_yuval` | `20261124-e6abfad` |
+| `mermaid` | `20261124-e6abfad` |
+| `coralscapes_v2` | `20261124-e6abfad` |
+| `ucsd_mosaics` | `20261124-8a28955` |
+
 ## Update the MERMAID data
 
 `mermaid_confirmed_annotations.parquet` grows as MERMAID users confirm annotations. This repository does not write it. The dataset reads its images from the keys in that parquet.
