@@ -41,7 +41,7 @@ from segdata_spec.schema import (
     validate_dataset_tables,
 )
 
-BUCKET = "seg-bucket"
+BUCKET = DATASET_BUCKET
 IMAGE_BUCKET = "img-bucket"
 IMAGE_PREFIX = "imgs/"
 VERSION = "20260101-abc1234"
@@ -49,13 +49,17 @@ VERSION = "20260101-abc1234"
 
 @dataclass(frozen=True)
 class ImageSpec:
-    """One image of a fixture version; ``mask`` (a dense label map) sets its size when given."""
+    """One image of a fixture version; ``mask`` (a dense label map) sets its size when given.
+
+    ``pixels`` (an ``(h, w, 3)`` uint8 array) is stored losslessly under the ``.jpg`` key.
+    """
 
     image_id: str
     group: str = "g1"
     height: int = 8
     width: int = 8
     mask: NDArray[np.integer[Any]] | None = None
+    pixels: NDArray[np.uint8] | None = None
     source_name: str | None = None
 
 
@@ -63,6 +67,8 @@ PointRow = tuple[str, int, int, int] | tuple[str, int, int, int, str]
 
 
 def _size(spec: ImageSpec) -> tuple[int, int]:
+    if spec.pixels is not None:
+        return spec.pixels.shape[0], spec.pixels.shape[1]
     if spec.mask is not None:
         return spec.mask.shape[0], spec.mask.shape[1]
     return spec.height, spec.width
@@ -76,7 +82,10 @@ def _write_files(cache_dir: Path, images: Sequence[ImageSpec]) -> dict[str, int]
     for spec in images:
         height, width = _size(spec)
         jpg = root / f"{spec.image_id}.jpg"
-        Image.fromarray(np.full((height, width, 3), 128, np.uint8)).save(jpg, "JPEG")
+        if spec.pixels is None:
+            Image.fromarray(np.full((height, width, 3), 128, np.uint8)).save(jpg, "JPEG")
+        else:
+            Image.fromarray(spec.pixels).save(jpg, "PNG")
         sizes[jpg.name] = jpg.stat().st_size
         if spec.mask is not None:
             png = root / f"{spec.image_id}.png"
@@ -189,7 +198,7 @@ def write_version(
     """
     cache_dir = tmp_path / "cache"
     sizes = _write_files(cache_dir, images)
-    # Real MD5 ETags let ``sync`` verify the staged images and masks offline.
+    # Real MD5 ETags let ``sync`` verify the staged images and masks from the cache.
     etags = {name: _md5(cache_dir / IMAGE_BUCKET / IMAGE_PREFIX / name) for name in sizes}
     tables = {
         "images.parquet": _images_table(images, sizes, etags, kind == "dense"),

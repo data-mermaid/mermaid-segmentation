@@ -14,8 +14,9 @@ import pyarrow as pa
 import pytest
 from PIL import Image
 
+from segdata_etl import cli
 from segdata_etl.common import publishing
-from segdata_etl.label_maps.curated import load_curated
+from segdata_etl.label_maps.curated import curated_source
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import Manifest, Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_taxonomy
@@ -83,9 +84,9 @@ def make_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, builder: ModuleTy
 
 
 def build_args(builder: ModuleType, store: str | Path, taxonomy_sha: str) -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(parents=[cli._uniform_parser()])
     builder.add_arguments(parser, workdir=Path("unused"))
-    argv = ["--store", str(store), "--taxonomy-version", TAXONOMY_VERSION]
+    argv = ["--stage-dir", "unused", "--store", str(store), "--taxonomy-version", TAXONOMY_VERSION]
     return parser.parse_args([*argv, "--taxonomy-manifest-sha256", taxonomy_sha, "--workers", "2"])
 
 
@@ -125,4 +126,4 @@ def assert_curated_label_mapping(manifest: Manifest, dataset: str, labels: pa.Ta
     assert mapping.source == "curated"
     assert mapping.n_labels == labels.num_rows
     assert mapping.git_ref == CLEAN_GIT.sha
-    assert mapping.sha256 == load_curated(dataset)[1].sha256
+    assert mapping.sha256 == curated_source(dataset).sha256

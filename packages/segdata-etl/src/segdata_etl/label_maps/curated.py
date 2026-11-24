@@ -1,62 +1,93 @@
-"""Load the curated native-label to MERMAID benthic-attribute maps shipped as package data."""
+"""Load a dataset's curated label map from the packaged CSV."""
 
 from __future__ import annotations
 
-import csv
 import hashlib
-import io
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib import resources
+from importlib.resources.abc import Traversable
+from pathlib import Path
+from typing import Any
 
-_PACKAGE = "segdata_etl.label_maps"
-_REPO_DIR = "packages/segdata-etl/src/segdata_etl/label_maps/curated"
-DATASETS = (
-    "catlin_seaview",
-    "moorea_labeled_corals",
-    "pacific_labeled_corals",
-    "benthos_yuval",
+import pyarrow as pa
+import pyarrow.csv as pacsv
+
+CURATED_SCHEMA = pa.schema(
+    [
+        ("label_id", pa.int32()),
+        ("name", pa.string()),
+        ("mermaid_benthic_attribute", pa.string()),
+    ]
 )
+
+_REPO_DIR = "packages/segdata-etl/src/segdata_etl/label_maps/curated"
 
 
 @dataclass(frozen=True)
-class CuratedMapInfo:
-    """Provenance of a curated map: repo-relative CSV path, CSV byte sha256 and row count."""
+class CuratedSource:
+    """Provenance of a curated map: repo-relative CSV path and sha256 of the CSV bytes."""
 
     path: str
     sha256: str
-    n_entries: int
 
 
-def _build_mapping(dataset: str, rows: Iterable[dict[str, str]]) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for row in rows:
-        key, target = row["native_name"], row["mermaid_benthic_attribute"]
-        if key in mapping:
-            raise ValueError(f"curated map {dataset}: duplicate native_name {key!r}")
-        if key != key.strip().lower():
-            raise ValueError(f"curated map {dataset}: native_name {key!r} is not normalized")
-        if not target.strip():
-            raise ValueError(f"curated map {dataset}: native_name {key!r} has an empty target")
-        mapping[key] = target
-    return mapping
+def _directory(root: Path | None) -> Path | Traversable:
+    return root if root is not None else resources.files(__package__) / "curated"
 
 
-def load_curated(dataset: str) -> tuple[dict[str, str], CuratedMapInfo]:
-    """Return the ``native_name -> mermaid_benthic_attribute`` map of ``dataset`` and its info.
+def _row_key(dataset: str, row: Mapping[str, Any]) -> str:
+    """Return the row's key: ``label_id`` when set, else its name, which must be stripped lowercase.
 
     Raises:
-        ValueError: ``dataset`` is unknown, a ``native_name`` repeats or is not stripped and
-            lowercase, or a ``mermaid_benthic_attribute`` is empty.
+        ValueError: The row has neither key, or its name key is not stripped lowercase.
     """
-    if dataset not in DATASETS:
-        raise ValueError(f"unknown curated dataset {dataset!r}; expected one of {DATASETS}")
-    raw = resources.files(_PACKAGE).joinpath(f"curated/{dataset}.csv").read_bytes()
-    reader = csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=""))
-    mapping = _build_mapping(dataset, reader)
-    info = CuratedMapInfo(
-        path=f"{_REPO_DIR}/{dataset}.csv",
-        sha256=hashlib.sha256(raw).hexdigest(),
-        n_entries=len(mapping),
-    )
-    return mapping, info
+    if row["label_id"] is not None:
+        return f"label_id {row['label_id']}"
+    name = row["name"]
+    if name is None:
+        raise ValueError(f"curated map {dataset}: a row has neither label_id nor name")
+    if name != name.strip().lower():
+        raise ValueError(f"curated map {dataset}: name {name!r} is not normalized")
+    return f"name {name!r}"
+
+
+def _validate(dataset: str, rows: Iterable[Mapping[str, Any]]) -> None:
+    """Refuse a row without a valid key, or a key that repeats; a null target is unmapped."""
+    seen: set[str] = set()
+    for row in rows:
+        key = _row_key(dataset, row)
+        if key in seen:
+            raise ValueError(f"curated map {dataset}: duplicate {key}")
+        seen.add(key)
+
+
+def load_curated(dataset: str, *, root: Path | None = None) -> pa.Table:
+    """Read ``<dataset>.csv`` from the packaged ``curated`` directory, or from ``root`` when given.
+
+    An empty cell is null; a null ``mermaid_benthic_attribute`` leaves the label unmapped. A row is
+    keyed by ``label_id`` when set, otherwise by ``name``.
+
+    Raises:
+        ValueError: A key repeats, a name key is not stripped lowercase, or a row has neither
+            ``label_id`` nor ``name``.
+    """
+    with resources.as_file(_directory(root) / f"{dataset}.csv") as path:
+        table = pacsv.read_csv(
+            path,
+            convert_options=pacsv.ConvertOptions(
+                column_types=CURATED_SCHEMA, strings_can_be_null=True
+            ),
+        )
+    _validate(dataset, table.to_pylist())
+    return table
+
+
+def curated_source(dataset: str, *, root: Path | None = None) -> CuratedSource:
+    """Return the CSV path of ``dataset``'s curated map and the sha256 of its raw bytes.
+
+    The path is repo-relative for the packaged map, and under ``root`` when ``root`` is given.
+    """
+    raw = (_directory(root) / f"{dataset}.csv").read_bytes()
+    path = f"{_REPO_DIR}/{dataset}.csv" if root is None else str(root / f"{dataset}.csv")
+    return CuratedSource(path=path, sha256=hashlib.sha256(raw).hexdigest())

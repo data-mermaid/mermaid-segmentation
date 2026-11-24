@@ -1,4 +1,4 @@
-"""``segdata`` console script: ``build coralnet <stage>``, ``ingest <external dataset>`` and ``split``."""
+"""``segdata`` console script: ``build``, ``ingest``, ``taxonomy``, ``split`` and ``promote``."""
 
 from __future__ import annotations
 
@@ -15,11 +15,13 @@ from botocore.config import Config
 
 from segdata_spec import DATASET_BUCKET
 
+from . import promote as promote_module
 from . import taxonomy
 from .common.cli_flags import _pin_flags
 from .common.store import add_store_argument
 from .datasets import benthos_yuval as benthos_yuval_build
 from .datasets import catlin_seaview as catlin_seaview_build
+from .datasets import coralscapes_v2, mermaid, ucsd_mosaics
 from .datasets import moorea_labeled_corals as moorea_labeled_corals_build
 from .datasets import pacific_labeled_corals as pacific_labeled_corals_build
 from .datasets.coralnet import commands as coralnet_commands
@@ -48,6 +50,10 @@ DATASET_MODULES: tuple[ModuleType, ...] = (
     benthos_yuval,
 )
 
+# Uniform-format builds stage a version under ``--stage-dir``; each module has the same contract as
+# DATASET_MODULES. Adding one is one entry here.
+UNIFORM_MODULES: tuple[ModuleType, ...] = (mermaid, coralscapes_v2, ucsd_mosaics)
+
 
 def default_workdir(dataset: str) -> Path:
     """Return the default local working directory for ``dataset``."""
@@ -69,6 +75,16 @@ def _shared_parser(dataset: str) -> argparse.ArgumentParser:
         "--no-skip-existing-s3", dest="skip_existing_s3", action="store_false", default=True
     )
     parent.add_argument("--overwrite", action="store_true")
+    parent.add_argument("-v", "--verbose", action="store_true")
+    return parent
+
+
+def _uniform_parser() -> argparse.ArgumentParser:
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument(
+        "--stage-dir", type=Path, required=True, help="Local directory the version is staged in"
+    )
+    parent.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parent.add_argument("-v", "--verbose", action="store_true")
     return parent
 
@@ -151,9 +167,8 @@ _EXTERNAL_BUILDS: tuple[tuple[ModuleType, str], ...] = (
 
 
 def _add_external_build(build_sub: Any, module: ModuleType, help_text: str) -> None:
-    parser = build_sub.add_parser(module.DATASET, help=help_text)
+    parser = build_sub.add_parser(module.DATASET, help=help_text, parents=[_uniform_parser()])
     module.add_arguments(parser, workdir=default_workdir(module.DATASET))
-    parser.add_argument("-v", "--verbose", action="store_true")
     parser.set_defaults(func=lambda args: module.run(args, make_s3_client()))
 
 
@@ -172,8 +187,32 @@ def _add_taxonomy_subcommand(top: Any) -> None:
     )
 
 
-def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.ArgumentParser:
-    """Build the top-level parser: ``build coralnet <stage>``, one ``ingest`` entry per dataset, and ``split``."""
+def _add_promote_subcommand(top: Any) -> None:
+    promote = top.add_parser("promote", help="Upload a staged dataset version, write-once")
+    promote.add_argument("--stage-dir", type=Path, required=True, help="Local stage directory")
+    promote.add_argument("--dataset", required=True)
+    promote.add_argument("--version", required=True)
+    promote.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    promote.add_argument("-v", "--verbose", action="store_true")
+    promote.set_defaults(run=_run_promote)
+
+
+def _run_promote(args: argparse.Namespace, client: Any) -> int:
+    promote_module.promote(
+        client,
+        stage_dir=args.stage_dir,
+        dataset=args.dataset,
+        version=args.version,
+        workers=args.workers,
+    )
+    return 0
+
+
+def build_parser(
+    modules: Sequence[ModuleType] = DATASET_MODULES,
+    uniform_modules: Sequence[ModuleType] = UNIFORM_MODULES,
+) -> argparse.ArgumentParser:
+    """Build the top-level parser: ``build``, one ``ingest`` entry per dataset, ``taxonomy``, ``split`` and ``promote``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
     top = parser.add_subparsers(dest="action", required=True)
     build = top.add_parser("build", help="Build and publish a dataset")
@@ -187,8 +226,14 @@ def build_parser(modules: Sequence[ModuleType] = DATASET_MODULES) -> argparse.Ar
         dataset_parser = ingest_sub.add_parser(name, parents=[_shared_parser(name)])
         module.add_arguments(dataset_parser, workdir=default_workdir(name))
         dataset_parser.set_defaults(run=module.run)
+    for module in uniform_modules:
+        name = module.__name__.rsplit(".", 1)[-1]
+        uniform_parser = build_sub.add_parser(name, parents=[_uniform_parser()])
+        module.add_arguments(uniform_parser, workdir=default_workdir(name))
+        uniform_parser.set_defaults(run=module.run)
     _add_split_subcommands(top)
     _add_taxonomy_subcommand(top)
+    _add_promote_subcommand(top)
     return parser
 
 

@@ -1,1 +1,1 @@
-"""Curated native-label to MERMAID label maps."""
+"""Curated label maps shipped with the package."""

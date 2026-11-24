@@ -14,7 +14,7 @@ from segdata_etl.common import publishing
 from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
 from segdata_etl.common.store import open_store
 from segdata_etl.datasets import external
-from segdata_etl.label_maps.curated import load_curated
+from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_etl.taxonomy import find_repo_root
 
 DATASET = "pacific_labeled_corals"
@@ -126,7 +126,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
     source = source_info(legacy, license_override=LICENSE)
     dropped = legacy_dropped(DATASET, legacy.manifest)
-    curated, curated_info = load_curated(DATASET)
+    curated = load_curated(DATASET)
     labels = external.build_labels(legacy.classes, curated, taxonomy.benthic_attributes)
     points = external.build_points(_long_annotations(legacy.annotations), legacy.classes)
     _require_unique_positions(legacy.annotations)
@@ -151,7 +151,9 @@ def run(args: argparse.Namespace, client: Any) -> int:
             "stats/label_counts.parquet": publishing.count_labels(points),
         },
         source=source,
-        label_mapping=external.label_mapping_record(labels, curated_info, git_sha=git.sha),
+        label_mapping=external.label_mapping_record(
+            labels, curated_source(DATASET), git_sha=git.sha
+        ),
         dropped=dropped,
         git=git,
         repo_root=repo_root,

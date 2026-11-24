@@ -16,6 +16,7 @@ import pytest
 from common.conftest import FakeS3
 from PIL import Image
 
+from segdata_etl import cli
 from segdata_etl.common import publishing
 from segdata_etl.common.local_store import LocalStore
 from segdata_etl.datasets import catlin_seaview
@@ -116,9 +117,9 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _args(store: str | Path, taxonomy_sha: str, *extra: str) -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(parents=[cli._uniform_parser()])
     catlin_seaview.add_arguments(parser, workdir=Path("unused"))
-    argv = ["--store", str(store), "--taxonomy-version", TAXONOMY_VERSION]
+    argv = ["--stage-dir", "unused", "--store", str(store), "--taxonomy-version", TAXONOMY_VERSION]
     return parser.parse_args(
         [*argv, "--taxonomy-manifest-sha256", taxonomy_sha, "--workers", "2", *extra]
     )

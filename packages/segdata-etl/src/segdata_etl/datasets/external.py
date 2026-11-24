@@ -28,7 +28,7 @@ from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObjec
 from segdata_etl.common.publishing import image_prefix
 from segdata_etl.common.store import add_store_argument
 from segdata_etl.common.version import utc_today
-from segdata_etl.label_maps.curated import CuratedMapInfo
+from segdata_etl.label_maps.curated import CuratedSource
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_dataset
 from segdata_spec.read import Taxonomy, open_taxonomy
@@ -37,7 +37,6 @@ from segdata_spec.sync import sync
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WORKERS = 16
 DEFAULT_CACHE_DIR = Path("outputs") / "segdata-cache"
 TAXONOMY_NAME = "mermaid-benthic"
 _IMAGES_FOLDER = "images"
@@ -76,7 +75,6 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
             f"or {DEFAULT_CACHE_DIR} with --store s3)"
         ),
     )
-    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument(
         "--legacy-bucket", default=DEFAULT_BUCKET, help="Bucket holding the legacy prefix"
     )
@@ -119,23 +117,27 @@ def _attributes_by_name(attributes: pa.Table) -> dict[str, list[tuple[str, str]]
     return by_name
 
 
-def build_labels(
-    classes: Mapping[str, int], curated: Mapping[str, str], attributes: pa.Table
-) -> pa.Table:
+def build_labels(classes: Mapping[str, int], curated: pa.Table, attributes: pa.Table) -> pa.Table:
     """Build ``labels.parquet`` from ``classes.json``, the curated map and taxonomy attributes.
 
-    Label 0 (``unlabeled``) is left out. A curated target found in the taxonomy, ignoring case,
-    takes its canonical name and id; one not found keeps the curated value with a null id.
+    Classes join the curated map on lowercase ``name``. Label 0 (``unlabeled``) is left out. A
+    curated target found in the taxonomy, ignoring case, takes its canonical name and id; one not
+    found keeps the curated value with a null id.
 
     Raises:
         ValueError: A curated target matches more than one taxonomy name, ignoring case.
     """
     by_name = _attributes_by_name(attributes)
+    targets = {
+        row["name"].lower(): row["mermaid_benthic_attribute"]
+        for row in curated.to_pylist()
+        if row["name"] is not None
+    }
     rows = []
     for name, label_id in sorted(classes.items(), key=lambda item: item[1]):
         if label_id == 0:
             continue
-        target = curated.get(name.lower())
+        target = targets.get(name.lower())
         match = _resolve_target(target, by_name) if target is not None else None
         rows.append(
             {
@@ -150,7 +152,7 @@ def build_labels(
     return pa.Table.from_pylist(rows, schema=LABELS_SCHEMA)
 
 
-def label_mapping_record(labels: pa.Table, info: CuratedMapInfo, *, git_sha: str) -> LabelMapping:
+def label_mapping_record(labels: pa.Table, info: CuratedSource, *, git_sha: str) -> LabelMapping:
     """Describe the curated mapping of ``labels`` for the manifest."""
     targets = labels.column("mermaid_benthic_attribute").to_pylist()
     ids = labels.column("mermaid_benthic_attribute_id").to_pylist()

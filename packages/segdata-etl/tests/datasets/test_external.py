@@ -11,7 +11,7 @@ import pytest
 from segdata_etl.common.copy import CopiedObject, CopyItem
 from segdata_etl.common.legacy import LegacyDataset, LegacyObject
 from segdata_etl.datasets import external
-from segdata_etl.label_maps.curated import CuratedMapInfo
+from segdata_etl.label_maps.curated import CURATED_SCHEMA, CuratedSource
 
 ATTRIBUTES = pa.table(
     {
@@ -21,7 +21,14 @@ ATTRIBUTES = pa.table(
     }
 )
 CLASSES = {"unlabeled": 0, "Acropora digitate": 5, "Water": 7, "Mystery": 9}
-CURATED = {"acropora digitate": "acropora", "water": "background"}
+CURATED = pa.table(
+    {
+        "label_id": [None, None],
+        "name": ["acropora digitate", "water"],
+        "mermaid_benthic_attribute": ["acropora", "background"],
+    },
+    schema=CURATED_SCHEMA,
+)
 
 
 def _row(label_id: int, name: str, ba_id: str | None, ba: str | None) -> dict[str, object]:
@@ -54,7 +61,7 @@ def test_build_labels_refuses_a_target_matching_two_taxonomy_names() -> None:
 
 def test_label_mapping_record_counts_mapped_and_unresolved_labels() -> None:
     labels = external.build_labels(CLASSES, CURATED, ATTRIBUTES)
-    info = CuratedMapInfo(path="curated/x.csv", sha256="f" * 64, n_entries=2)
+    info = CuratedSource(path="curated/x.csv", sha256="f" * 64)
     record = external.label_mapping_record(labels, info, git_sha="abc123")
     assert (record.n_labels, record.n_mapped, record.n_unresolved) == (3, 2, 1)
     assert (record.source, record.sha256, record.path, record.git_ref) == (
