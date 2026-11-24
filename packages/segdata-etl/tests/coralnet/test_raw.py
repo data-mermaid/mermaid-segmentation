@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 import pytest
+from s3_fake import FakeS3
 
 from segdata_etl import cli
 from segdata_etl.common import publishing
@@ -20,8 +21,6 @@ from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ObjectExists, PublishRefused
 from segdata_spec.manifest import Manifest
 from segdata_spec.publish import GitState
-
-from .conftest import FakeS3
 
 SRC = "src"
 DST = "dst"

@@ -1,4 +1,4 @@
-"""Shared fixtures for the external-dataset tests.
+"""Fixtures shared by every segdata-etl test: AWS-free credentials and the in-memory S3 fake.
 
 The in-memory ``FakeS3`` comes from ``s3_fake``; it keeps the suite free of network and AWS deps.
 """

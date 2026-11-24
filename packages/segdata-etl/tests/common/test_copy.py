@@ -10,12 +10,11 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
+from s3_fake import FakeS3
 
 from segdata_etl.common.copy import CopiedObject, CopyItem, copy_images
 from segdata_etl.common.local_store import LocalStore
 from segdata_spec.errors import ObjectExists
-
-from .conftest import FakeS3
 
 # MD5 of b"abc", and S3's base64 big-endian CRC64NVME of b"abc".
 ABC_ETAG = '"900150983cd24fb0d6963f7d28e17f72"'

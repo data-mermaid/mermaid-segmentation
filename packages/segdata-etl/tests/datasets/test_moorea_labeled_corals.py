@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from common.conftest import FakeS3
+from s3_fake import FakeS3
 
 from segdata_etl.common.local_store import LocalStore
 from segdata_etl.datasets import moorea_labeled_corals

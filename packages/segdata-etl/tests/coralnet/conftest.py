@@ -1,6 +1,6 @@
 """Shared fixtures for the CoralNet dataset tests.
 
-The in-memory ``FakeS3`` comes from ``s3_fake``; it keeps the suite free of network and AWS deps.
+Image-byte and CSV builders for the scraped-source tests; ``fake_s3`` is in the root conftest.
 """
 
 from __future__ import annotations
@@ -12,17 +12,7 @@ import pytest
 from PIL import Image
 from s3_fake import FakeS3
 
-__all__ = ["FakeS3", "populate_source"]
-
-
-@pytest.fixture(autouse=True)
-def _fake_aws_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give boto3 static credentials so it never queries the EC2 metadata endpoint."""
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
+__all__ = ["populate_source"]
 
 
 def _make_jpeg_bytes(width: int, height: int, *, sof_marker: int = 0xC0, padding: int = 0) -> bytes:
@@ -59,11 +49,6 @@ def _csv_bytes(headers: list[str], rows: list[list]) -> bytes:
     for r in rows:
         lines.append(",".join(str(x) for x in r))
     return ("\n".join(lines) + "\n").encode("utf-8")
-
-
-@pytest.fixture
-def fake_s3() -> FakeS3:
-    return FakeS3()
 
 
 @pytest.fixture

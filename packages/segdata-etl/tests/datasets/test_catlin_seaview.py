@@ -13,8 +13,8 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 import pytest
-from common.conftest import FakeS3
 from PIL import Image
+from s3_fake import FakeS3
 
 from segdata_etl.common import publishing
 from segdata_etl.common.local_store import LocalStore
