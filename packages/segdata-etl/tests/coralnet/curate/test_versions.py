@@ -18,7 +18,7 @@ from segdata_etl.common import publishing
 from segdata_etl.common.local_store import LocalStore
 from segdata_etl.datasets.coralnet.curate import versions
 from segdata_etl.label_maps import coralnet_api
-from segdata_etl.splits.builder import _require_raw_parent
+from segdata_etl.splits.builder import require_raw_parent
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
@@ -29,6 +29,7 @@ CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
 RAW_STORE = ImageStore(bucket="img-bucket", prefix="coralnet/", owner="segdata")
 RAW_SOURCE = SourceInfo(type="coralnet-scrape", uri="s3://scrape/", revision="2026-11-01")
 KEPT, BLACK, OVERRIDDEN = "10", "11", "12"
+SNAPSHOT = "coralnet_label_mappings.json"
 API_ROWS = [
     {
         "id": "m1",
@@ -260,6 +261,12 @@ def test_v1_curates_raw_and_maps_labels_by_the_cleaned_up_rerun_json(world: Worl
     assert manifest.source == RAW_SOURCE
     labels = world.table(version, "labels.parquet")
     assert sorted(labels["label_id"]) == [1, 2, 3, 4]
+    acro = labels[labels["label_id"] == 1].iloc[0]
+    assert acro["mermaid_benthic_attribute_id"] == "ba-acro"
+    assert acro["mapping_source"] == "cleaned_up_rerun_json"
+    assert not (
+        world.store / DATASET_BUCKET / "datasets" / "coralnet" / version / SNAPSHOT
+    ).exists()
 
 
 def test_v2_keeps_v1_tables_and_maps_labels_by_the_api(
@@ -277,13 +284,21 @@ def test_v2_keeps_v1_tables_and_maps_labels_by_the_api(
     for name in ("images.parquet", "points.parquet", "stats/label_counts.parquet"):
         assert v2.files[name].sha256 == v1.files[name].sha256
     assert v2.stats.dropped == v1.stats.dropped
-    snapshot = json.loads((world.out / v2_version / "coralnet_label_mappings.json").read_text())
+    snapshot = json.loads((world.out / v2_version / SNAPSHOT).read_text())
     assert v2.label_mapping is not None
     assert v2.label_mapping.source == "mermaid_api"
     assert v2.label_mapping.sha256 == snapshot["sha256"]
     labels = world.table(v2_version, "labels.parquet")
     assert sorted(labels["label_id"]) == [1, 2, 3, 4]
-    _require_raw_parent(v2, world.raw)
+    acro = labels[labels["label_id"] == 1].iloc[0]
+    assert acro["mermaid_benthic_attribute_id"] == "api-acro"
+    assert acro["mapping_source"] == "mermaid_api"
+    published = (
+        world.store / DATASET_BUCKET / "datasets" / "coralnet" / v2_version / SNAPSHOT
+    ).read_bytes()
+    assert json.loads(published)["sha256"] == v2.label_mapping.sha256
+    assert published == (world.out / v2_version / SNAPSHOT).read_bytes()
+    require_raw_parent(v2, world.raw)
 
 
 @pytest.mark.parametrize(

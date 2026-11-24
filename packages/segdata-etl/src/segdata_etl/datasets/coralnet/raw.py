@@ -43,7 +43,7 @@ from segdata_etl.common.version import utc_today
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec.errors import ObjectExists
 from segdata_spec.manifest import ParentRef, SourceInfo
-from segdata_spec.publish import _fetch_parent_tables, publish_dataset
+from segdata_spec.publish import fetch_parent_tables, publish_dataset
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 
 from .annotations import _IMAGE_LIST_NAME, _derive_image_id
@@ -687,7 +687,7 @@ def run_raw(args: argparse.Namespace) -> int:
     build = read_build(source_client, source_bucket, args.build_run, args.source_ids)
     client, bucket = open_store(args.store, source_client=source_client)
     parent_images = (
-        None if parent is None else _fetch_parent_tables(client, bucket, parent)["images.parquet"]
+        None if parent is None else fetch_parent_tables(client, bucket, parent)["images.parquet"]
     )
     result = build_raw(
         source_client,

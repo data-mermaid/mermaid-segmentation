@@ -147,6 +147,36 @@ def test_tables_precede_manifest_with_write_once_puts(fake_s3, repo_dir):
     assert manifest.etl.uv_lock_sha256 == hashlib.sha256(b"lock-bytes").hexdigest()
 
 
+def test_extra_file_is_written_between_tables_and_manifest_and_not_listed(fake_s3, repo_dir):
+    manifest, _ = _publish(fake_s3, repo_dir, extra_files={"notes.json": b'{"k": 1}'})
+
+    keys = _put_keys(fake_s3)
+    assert keys[-2:] == [PREFIX + "notes.json", PREFIX + "manifest.json"]
+    assert len(keys) == 6
+    assert fake_s3.objects[(BUCKET, PREFIX + "notes.json")] == b'{"k": 1}'
+    assert "notes.json" not in manifest.files
+
+
+def test_existing_extra_file_with_other_bytes_raises_and_manifest_is_not_written(fake_s3, repo_dir):
+    fake_s3.put(BUCKET, PREFIX + "notes.json", b"old")
+
+    with pytest.raises(ObjectExists):
+        _publish(fake_s3, repo_dir, extra_files={"notes.json": b"new"})
+
+    assert fake_s3.objects[(BUCKET, PREFIX + "notes.json")] == b"old"
+    assert (BUCKET, PREFIX + "manifest.json") not in fake_s3.objects
+
+
+@pytest.mark.parametrize("key", ["images.parquet", "manifest.json"])
+def test_extra_file_colliding_with_a_table_or_manifest_raises_before_any_write(
+    fake_s3, repo_dir, key
+):
+    with pytest.raises(SchemaValidationError, match=key):
+        _publish(fake_s3, repo_dir, extra_files={key: b"x"})
+
+    assert _put_keys(fake_s3) == []
+
+
 def test_stats_are_derived_from_tables(fake_s3, repo_dir):
     manifest, _ = _publish(fake_s3, repo_dir, dropped={"missing_image": 4})
 

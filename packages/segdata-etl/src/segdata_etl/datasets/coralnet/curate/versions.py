@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import logging
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from segdata_etl.label_maps.coralnet_api import (
     snapshot_json_text,
 )
 from segdata_etl.label_maps.coralnet_cleaned_up_rerun import cleaned_up_rerun_labels
-from segdata_etl.splits.builder import _require_raw_parent
+from segdata_etl.splits.builder import require_raw_parent
 from segdata_etl.splits.inputs import sync_tables
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec.manifest import ImageStore, LabelMapping, Manifest, ParentRef, Pin, SourceInfo
@@ -203,7 +204,7 @@ def _curate_v2(
     v1_pin = _pin(args, "parent", DATASET)
     synced = sync_tables(client, {DATASET: v1_pin, RAW_DATASET: raw_pin}, args.cache_dir, bucket)
     v1 = synced[DATASET]
-    _require_raw_parent(v1.manifest, raw_pin)
+    require_raw_parent(v1.manifest, raw_pin)
     mappings = fetch_coralnet_label_mappings()
     built = build_v2(v1, synced[RAW_DATASET], _ref(v1_pin), _ref(raw_pin), mappings)
     return built, v1, mappings
@@ -239,6 +240,7 @@ def _publish(
     version: str,
     repo_root: Path,
     git: GitState,
+    extra_files: Mapping[str, bytes] | None = None,
 ) -> tuple[Manifest, str]:
     return publish_dataset(
         client,
@@ -254,6 +256,7 @@ def _publish(
         parents=built.parents,
         label_mapping=built.label_mapping,
         dropped=built.dropped,
+        extra_files=extra_files,
         repo_dir=repo_root,
         git=git,
     )
@@ -263,7 +266,9 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
     """Build the version ``args.label_map`` names, publish it and print its version and sha256.
 
     The mermaid_api build first writes the fetched API snapshot to
-    ``<args.out_dir>/<version>/coralnet_label_mappings.json``, so a published v2 always has one.
+    ``<args.out_dir>/<version>/coralnet_label_mappings.json`` and publishes the same bytes beside
+    the version's tables, outside ``manifest.files``. The cleaned_up_rerun build publishes no
+    snapshot.
 
     Raises:
         ValueError: A mapped target name matches more than one benthic attribute ignoring case,
@@ -274,6 +279,7 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     git = checked_git_state(repo_root)
     client, bucket = open_store(args.store, source_client=source_client)
+    extra_files: dict[str, bytes] | None = None
     if args.label_map == CLEANED_UP_RERUN:
         built = _curate_v1(args, client, bucket, repo_root)
         version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
@@ -283,7 +289,8 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
         version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
         snapshot = _write_snapshot(args.out_dir / version, mappings)
         logger.info("wrote %s", snapshot)
-    manifest, sha = _publish(args, client, bucket, built, version, repo_root, git)
+        extra_files = {SNAPSHOT_NAME: snapshot_json_text(mappings).encode()}
+    manifest, sha = _publish(args, client, bucket, built, version, repo_root, git, extra_files)
     logger.info("published %s %s", DATASET, manifest.version)
     print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0
