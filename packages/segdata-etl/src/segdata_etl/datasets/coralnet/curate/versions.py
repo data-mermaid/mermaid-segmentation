@@ -1,8 +1,10 @@
-"""``segdata curate coralnet``: publish a curated ``coralnet`` version built from ``coralnet-raw``.
+"""``segdata curate coralnet``: stage a curated ``coralnet`` version built from ``coralnet-raw``.
 
 ``--label-map cleaned_up_rerun`` (v1) curates raw's points with the committed blacklist and
 overrides and maps labels by the cleaned_up_rerun JSON. ``--label-map mermaid_api`` (v2) keeps the
 tables of a v1 version and maps labels by the MERMAID LabelMapping API.
+
+Both stage tables only, on raw's image store, for ``segdata promote`` to publish.
 """
 
 from __future__ import annotations
@@ -17,11 +19,10 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+from botocore.exceptions import ClientError
 
 from segdata_etl.common.cli_flags import pin_command_parts, pin_flag_names, pin_values
-from segdata_etl.common.publishing import checked_git_state, pick_version
-from segdata_etl.common.store import open_store
-from segdata_etl.common.version import utc_today
+from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
 from segdata_etl.datasets.coralnet.curate.build import curate
 from segdata_etl.label_maps.coralnet_api import (
     CoralNetLabelMappings,
@@ -33,8 +34,10 @@ from segdata_etl.label_maps.coralnet_cleaned_up_rerun import cleaned_up_rerun_la
 from segdata_etl.splits.builder import require_raw_parent
 from segdata_etl.splits.inputs import sync_tables
 from segdata_etl.taxonomy import find_repo_root
+from segdata_spec import DATASET_BUCKET
+from segdata_spec._s3 import is_not_found
 from segdata_spec.manifest import ImageStore, LabelMapping, Manifest, ParentRef, Pin, SourceInfo
-from segdata_spec.publish import GitState, publish_dataset, table_bytes
+from segdata_spec.publish import GitState, probe_git, publish_dataset, table_bytes
 from segdata_spec.read import DatasetVersion, open_taxonomy
 from segdata_spec.schema import DATASET_TABLES, conform
 
@@ -210,11 +213,34 @@ def _curate_v2(
     return built, v1, mappings
 
 
-def _write_snapshot(out_dir: Path, mappings: CoralNetLabelMappings) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / SNAPSHOT_NAME
-    path.write_text(snapshot_json_text(mappings))
-    return path
+class _StageOverCache:
+    """Writes to the stage; a read the stage cannot serve falls back to the cache.
+
+    ``publish_dataset`` reads its first parent through its client, and a parent synced from S3
+    sits in the cache; it verifies that parent's manifest and tables against the pin.
+    """
+
+    def __init__(self, stage_dir: Path, cache_dir: Path):
+        """Write under ``stage_dir``; read from ``stage_dir``, then ``cache_dir``."""
+        self._stage = LocalDirS3(stage_dir)
+        self._cache = LocalDirS3(cache_dir)
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        """Write the object to the stage."""
+        return self._stage.put_object(**kwargs)
+
+    def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        """Head the object in the stage."""
+        return self._stage.head_object(**kwargs)
+
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        """Return the object from the stage, or from the cache when the stage lacks it."""
+        try:
+            return self._stage.get_object(**kwargs)
+        except ClientError as exc:
+            if not is_not_found(exc):
+                raise
+        return self._cache.get_object(**kwargs)
 
 
 def _command_line(args: argparse.Namespace) -> str:
@@ -224,18 +250,16 @@ def _command_line(args: argparse.Namespace) -> str:
         DATASET,
         "--label-map",
         args.label_map,
-        "--store",
-        str(args.store),
+        "--stage-dir",
+        str(args.stage_dir),
     ]
     for prefix in ("raw", *_PINS_BY_LABEL_MAP[args.label_map]):
         parts += pin_command_parts(args, f"{prefix}-")
     return shlex.join(parts)
 
 
-def _publish(
+def _stage(
     args: argparse.Namespace,
-    client: Any,
-    bucket: str,
     built: CuratedVersion,
     version: str,
     repo_root: Path,
@@ -243,8 +267,8 @@ def _publish(
     extra_files: Mapping[str, bytes] | None = None,
 ) -> tuple[Manifest, str]:
     return publish_dataset(
-        client,
-        bucket=bucket,
+        _StageOverCache(args.stage_dir, args.cache_dir),
+        bucket=DATASET_BUCKET,
         dataset=DATASET,
         version=version,
         kind="points",
@@ -263,34 +287,34 @@ def _publish(
 
 
 def run(args: argparse.Namespace, *, source_client: Any) -> int:
-    """Build the version ``args.label_map`` names, publish it and print its version and sha256.
+    """Stage the version ``args.label_map`` names under ``args.stage_dir``; print version and sha256.
 
-    The mermaid_api build first writes the fetched API snapshot to
-    ``<args.out_dir>/<version>/coralnet_label_mappings.json`` and publishes the same bytes beside
-    the version's tables, outside ``manifest.files``. The cleaned_up_rerun build publishes no
-    snapshot.
+    Parents and the taxonomy are synced from the dataset bucket into ``args.cache_dir``; the sync
+    reads the cache first, so ``--cache-dir`` set to the stage dir reads parents staged there. The
+    version reuses raw's image store and stages no copy or upload plan. The mermaid_api build
+    stages the fetched API snapshot as the manifest-listed extra file
+    ``coralnet_label_mappings.json``; the cleaned_up_rerun build stages none.
 
     Raises:
+        PublishRefused: The git tree is dirty or unpushed; nothing is read or staged.
         ValueError: A mapped target name matches more than one benthic attribute ignoring case,
             or the raw pin is not a raw parent of the ``--parent-*`` version.
-        RuntimeError: The v2 tables reused from v1 would not keep v1's bytes; nothing is published.
-        OSError: The v2 snapshot cannot be written; nothing is published.
+        RuntimeError: The v2 tables reused from v1 would not keep v1's bytes; nothing is staged.
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
-    git = checked_git_state(repo_root)
-    client, bucket = open_store(args.store, source_client=source_client)
+    git = probe_git(repo_root)
+    refuse_unpublishable(git)
     extra_files: dict[str, bytes] | None = None
     if args.label_map == CLEANED_UP_RERUN:
-        built = _curate_v1(args, client, bucket, repo_root)
-        version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
+        built = _curate_v1(args, source_client, DATASET_BUCKET, repo_root)
     else:
-        built, v1, mappings = _curate_v2(args, client, bucket)
+        built, v1, mappings = _curate_v2(args, source_client, DATASET_BUCKET)
         check_reused_tables(v1.manifest, built.tables)
-        version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
-        snapshot = _write_snapshot(args.out_dir / version, mappings)
-        logger.info("wrote %s", snapshot)
         extra_files = {SNAPSHOT_NAME: snapshot_json_text(mappings).encode()}
-    manifest, sha = _publish(args, client, bucket, built, version, repo_root, git, extra_files)
-    logger.info("published %s %s", DATASET, manifest.version)
+    version = next_version(
+        args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=source_client
+    )
+    manifest, sha = _stage(args, built, version, repo_root, git, extra_files)
+    logger.info("staged %s %s under %s", DATASET, manifest.version, args.stage_dir)
     print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0

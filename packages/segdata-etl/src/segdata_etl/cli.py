@@ -196,9 +196,9 @@ def _run_curate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
 
 
 def _add_curate_subcommand(top: Any) -> None:
-    curate = top.add_parser("curate", help="Publish a curated dataset version from its parents")
+    curate = top.add_parser("curate", help="Stage a curated dataset version from its parents")
     curate_sub = curate.add_subparsers(dest="dataset", required=True)
-    parser = curate_sub.add_parser("coralnet", help="Publish a curated coralnet version")
+    parser = curate_sub.add_parser("coralnet", help="Stage a curated coralnet version")
     parser.add_argument(
         "--label-map",
         choices=("cleaned_up_rerun", "mermaid_api"),
@@ -211,16 +211,14 @@ def _add_curate_subcommand(top: Any) -> None:
     )
     _pin_flags(parser, "parent-", "the v1 coralnet parent (mermaid_api)", required=False)
     parser.add_argument(
+        "--stage-dir", type=Path, required=True, help="Local directory the version is staged in"
+    )
+    parser.add_argument(
         "--cache-dir",
         type=Path,
         default=DEFAULT_CACHE_DIR,
-        help="Local cache for the synced parent tables (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--out-dir",
-        type=Path,
-        default=Path("outputs") / "coralnet-curate",
-        help="Local outputs; mermaid_api saves its API snapshot under <out-dir>/<version>/",
+        help="Local cache for the synced parent tables and taxonomy; the stage dir reads "
+        "staged parents (default: %(default)s)",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.set_defaults(func=lambda args: _run_curate(parser, args))
