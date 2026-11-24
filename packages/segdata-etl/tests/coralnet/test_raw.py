@@ -15,7 +15,7 @@ from s3_fake import FakeS3
 from segdata_etl import cli
 from segdata_etl.common import publishing
 from segdata_etl.common.local_store import LocalStore
-from segdata_etl.datasets.coralnet import raw
+from segdata_etl.datasets.coralnet import annotations, io, raw
 from segdata_etl.datasets.coralnet.io import make_csv_reader_s3
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ObjectExists, PublishRefused
@@ -513,6 +513,10 @@ def _put_build(source: FakeS3, run: str) -> None:
     source.put(SRC, f"{base}id2name_{run}.json", b'{"100": "Acropora", "200": "Sand"}')
 
 
+def _no_ibis(*_args: object, **_kwargs: object) -> None:
+    raise AssertionError("raw must read image lists through boto3, not DuckDB")
+
+
 def test_cli_publishes_a_coralnet_raw_version_into_the_local_store(
     source: FakeS3, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -522,7 +526,8 @@ def test_cli_publishes_a_coralnet_raw_version_into_the_local_store(
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
     monkeypatch.delenv("MERMAID_CORALNET_PREFIX", raising=False)
     monkeypatch.setattr(raw, "make_s3_client", lambda **_kw: source)
-    monkeypatch.setattr(raw, "_get_thread_reader", lambda: make_csv_reader_s3(source))
+    monkeypatch.setattr(io, "make_ibis_connection", _no_ibis)
+    monkeypatch.setattr(annotations, "_get_thread_reader", _no_ibis)
     monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
     monkeypatch.setattr(
         publishing,
@@ -622,3 +627,32 @@ def test_a_tree_without_a_lock_file_is_refused_before_any_s3_call(
 
     with pytest.raises(PublishRefused, match="no uv.lock"):
         cli.main(argv)
+
+
+def test_image_list_names_parse_as_exact_strings(source: FakeS3) -> None:
+    source.put(
+        SRC,
+        f"{PREFIX}/s9/image_list.csv",
+        (
+            b"Name,Image Page\n"
+            b'"a, b.jpg - Confirmed",/image/1/view/\n'
+            b"NaN,/image/2/view/\n"
+            b"None,/image/3/view/\n"
+            b"0012.jpg,/image/4/view/\n"
+            b"  padded.jpg  ,/image/5/view/\n"
+            b"NA - Unconfirmed,/image/6/view/\n"
+        ),
+    )
+    image_list = raw._string_csv_reader(source)(SRC, f"{PREFIX}/s9/image_list.csv")
+    assert image_list is not None
+
+    names = raw._source_names(image_list)
+
+    assert dict(zip(names["image_id"], names["source_name"], strict=True)) == {
+        "1": "a, b.jpg",
+        "2": "NaN",
+        "3": "None",
+        "4": "0012.jpg",
+        "5": "  padded.jpg  ",
+        "6": "NA",
+    }

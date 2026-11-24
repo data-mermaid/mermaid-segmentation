@@ -46,9 +46,9 @@ from segdata_spec.manifest import ParentRef, SourceInfo
 from segdata_spec.publish import _fetch_parent_tables, publish_dataset
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 
-from .annotations import _IMAGE_LIST_NAME, _derive_image_id, _get_thread_reader
+from .annotations import _IMAGE_LIST_NAME, _derive_image_id
 from .config import DEFAULT_OUTPUT_S3_PREFIX, get_workers
-from .io import CsvReader, make_s3_client
+from .io import CsvReader, make_csv_reader_s3, make_s3_client
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +242,11 @@ def _list_source_etags(client: Any, bucket: str, prefix: str, source_id: int) ->
     return etags
 
 
+def _string_csv_reader(client: Any) -> CsvReader:
+    """A boto3 reader yielding every cell as a string, as the DuckDB ``all_varchar`` reader does."""
+    return make_csv_reader_s3(client, dtype=str, keep_default_na=False)
+
+
 def _read_source(
     client: Any, reader: CsvReader, bucket: str, prefix: str, source_id: int
 ) -> tuple[dict[str, str], pd.DataFrame | None]:
@@ -266,16 +271,18 @@ def _gather_sources(
 ) -> tuple[dict[str, str], pd.DataFrame, list[int]]:
     """Return the merged ``{key: ETag}`` listings and names, and the sources with no image_list.
 
-    An injected ``csv_reader`` reads the sources in turn; otherwise each worker thread reads
-    through its own DuckDB connection.
+    An injected ``csv_reader`` reads the sources in turn; otherwise the worker threads read
+    through the shared boto3 client, never DuckDB, whose aws extension crashes when many threads
+    open connections at once.
     """
     if csv_reader is not None:
         results = [_read_source(client, csv_reader, bucket, prefix, sid) for sid in source_ids]
     else:
+        reader = _string_csv_reader(client)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(
                 pool.map(
-                    lambda sid: _read_source(client, _get_thread_reader(), bucket, prefix, sid),
+                    lambda sid: _read_source(client, reader, bucket, prefix, sid),
                     source_ids,
                 )
             )
