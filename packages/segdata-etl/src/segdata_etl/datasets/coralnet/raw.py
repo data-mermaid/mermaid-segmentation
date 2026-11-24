@@ -27,6 +27,7 @@ import pyarrow.parquet as pq
 
 from coralnet_scraper.config import ENV_BUCKET, get_prefix, validate_workers
 from coralnet_scraper.s3_io import object_key_image_list_csv
+from segdata_etl.common.cli_flags import pin_command_parts
 from segdata_etl.common.copy import CopyItem, copy_images
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
 from segdata_etl.common.media import EXTENSIONS, SNIFF_BYTES, sniff_media_type
@@ -643,8 +644,7 @@ def _command_line(args: argparse.Namespace) -> str:
     if args.source_ids is not None:
         parts += ["--source-ids", ",".join(str(sid) for sid in args.source_ids)]
     if args.parent_version is not None:
-        parts += ["--parent-version", args.parent_version]
-        parts += ["--parent-manifest-sha256", args.parent_manifest_sha256]
+        parts += pin_command_parts(args, "parent-")
     return shlex.join(parts)
 
 

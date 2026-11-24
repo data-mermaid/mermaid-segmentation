@@ -20,7 +20,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from segdata_etl.common.cli_flags import _pin_flags
+from segdata_etl.common.cli_flags import _pin_flags, pin_command_parts
 from segdata_etl.common.copy import CopiedObject, CopyItem, copy_images
 from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
 from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject, sniff_image
@@ -440,8 +440,7 @@ def stage_images(
 def build_command(dataset: str, args: argparse.Namespace) -> str:
     """Reconstruct ``segdata build <dataset>`` from the options that shape the version."""
     parts = ["segdata", "build", dataset, "--store", str(args.store)]
-    parts += ["--taxonomy-version", args.taxonomy_version]
-    parts += ["--taxonomy-manifest-sha256", args.taxonomy_manifest_sha256]
+    parts += pin_command_parts(args, "taxonomy-")
     if args.legacy_bucket != DEFAULT_BUCKET:
         parts += ["--legacy-bucket", args.legacy_bucket]
     return shlex.join(parts)

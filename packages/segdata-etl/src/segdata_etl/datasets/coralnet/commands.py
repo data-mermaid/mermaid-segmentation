@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ...common.cli_flags import _pin_flags, half_pin_error
 from ...common.store import add_store_argument
 
 _DEFAULT_OUTPUT_DIR = Path("outputs/coralnet-dataset")
@@ -37,8 +38,9 @@ def raw_flag_errors(args: argparse.Namespace) -> list[str]:
         errors.append("a directory --store needs --source-ids")
     if on_s3 and args.source_ids is not None:
         errors.append("--store s3 takes no --source-ids")
-    if (args.parent_version is None) != (args.parent_manifest_sha256 is None):
-        errors.append("--parent-version and --parent-manifest-sha256 go together")
+    pin_error = half_pin_error(args, "parent-")
+    if pin_error is not None:
+        errors.append(pin_error)
     return errors
 
 
@@ -153,10 +155,7 @@ def add_subcommands(sub: Any) -> None:
         help="Build run under etl-outputs/coralnet/ to publish (default: %(default)s)",
     )
     _add_source_ids_flag(p_raw, _RAW_SOURCE_IDS_HELP)
-    p_raw.add_argument("--parent-version", default=None, help="coralnet-raw version to reuse")
-    p_raw.add_argument(
-        "--parent-manifest-sha256", default=None, help="Manifest sha256 of --parent-version"
-    )
+    _pin_flags(p_raw, "parent-", "the coralnet-raw version to reuse", required=False)
     p_raw.add_argument(
         "--workers",
         type=int,

@@ -17,6 +17,7 @@ from typing import Any
 
 import pyarrow as pa
 
+from segdata_etl.common.cli_flags import pin_command_parts, pin_flag_names, pin_values
 from segdata_etl.common.publishing import checked_git_state, pick_version
 from segdata_etl.common.store import open_store
 from segdata_etl.common.version import utc_today
@@ -72,8 +73,8 @@ def pin_flag_errors(args: argparse.Namespace) -> list[str]:
     needed = _PINS_BY_LABEL_MAP[args.label_map]
     errors: list[str] = []
     for prefix in _OPTIONAL_PINS:
-        values = (getattr(args, f"{prefix}_version"), getattr(args, f"{prefix}_manifest_sha256"))
-        flags = f"--{prefix}-version and --{prefix}-manifest-sha256"
+        values = pin_values(args, f"{prefix}-")
+        flags = pin_flag_names(f"{prefix}-")
         if prefix in needed and None in values:
             errors.append(f"--label-map {args.label_map} needs {flags}")
         elif prefix not in needed and values != (None, None):
@@ -227,8 +228,7 @@ def _command_line(args: argparse.Namespace) -> str:
         str(args.store),
     ]
     for prefix in ("raw", *_PINS_BY_LABEL_MAP[args.label_map]):
-        parts += [f"--{prefix}-version", getattr(args, f"{prefix}_version")]
-        parts += [f"--{prefix}-manifest-sha256", getattr(args, f"{prefix}_manifest_sha256")]
+        parts += pin_command_parts(args, f"{prefix}-")
     return shlex.join(parts)
 
 
