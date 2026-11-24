@@ -55,7 +55,7 @@ def test_digest_matches_segdata_etl() -> None:
 
 
 def test_parse_of_the_digest_rows_gives_the_same_digest() -> None:
-    parsed = parse_coralnet_label_mappings([_ACROPORA, _UNKNOWN])
+    parsed = parse_coralnet_label_mappings([dict(_ACROPORA), dict(_UNKNOWN)])
     assert coralnet_mapping_digest(parsed) == MAIN_DIGEST
 
 
