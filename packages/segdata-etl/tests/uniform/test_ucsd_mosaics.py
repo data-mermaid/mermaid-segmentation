@@ -11,7 +11,9 @@ import pyarrow.parquet as pq
 import pytest
 
 from segdata_etl import cli
+from segdata_etl.common import hf_dense
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.publish import GitState, PublishRefused
 
 from .conftest import FakeS3, jpeg_bytes
 from .hf_helpers import image_col, install_hub, mask_png
@@ -117,3 +119,23 @@ def test_stem_repeated_within_one_site_raises_naming_the_pair_before_any_downloa
 
     with pytest.raises(ValueError, match=r"palwave13.*a"):
         build(monkeypatch, tmp_path, shards)
+
+
+def test_dirty_git_refuses_before_any_shard_download(monkeypatch, tmp_path):
+    hub = install_hub(
+        monkeypatch,
+        tmp_path,
+        vocabulary=("classes.json", CLASSES),
+        curated_csv=("ucsd_mosaics", CSV),
+        shards={"data/palwave13-00000-of-00001.parquet": shard("PALWave13", ["a.jpg"])},
+    )
+    dirty = GitState(sha="abcdef1234567", dirty=True, pushed=True)
+    monkeypatch.setattr(hf_dense, "probe_git", lambda _: dirty)
+    args = cli.build_parser().parse_args(
+        ["build", "ucsd_mosaics", "--stage-dir", str(tmp_path / "stage")]
+    )
+
+    with pytest.raises(PublishRefused, match="uncommitted"):
+        args.run(args, FakeS3())
+
+    assert hub.downloaded == []

@@ -16,6 +16,7 @@ from botocore.exceptions import ClientError
 
 from segdata_etl.common.s3_objects import crc64nvme_b64
 from segdata_spec._s3 import cache_path, dataset_prefix
+from segdata_spec.publish import GitState, PublishRefused
 
 _SHA_LENGTH = 7
 
@@ -92,6 +93,18 @@ def _checksums(data: bytes) -> dict[str, str]:
         "ETag": _etag(data),
         "ChecksumCRC64NVME": crc64nvme_b64(data),
     }
+
+
+def refuse_unpublishable(git: GitState) -> None:
+    """Raise ``PublishRefused`` for a dirty or unpushed tree, with the messages ``publish`` uses.
+
+    Raises:
+        PublishRefused: The tree has uncommitted tracked changes, or HEAD is on no remote branch.
+    """
+    if git.dirty:
+        raise PublishRefused("working tree has uncommitted changes to tracked files")
+    if not git.pushed:
+        raise PublishRefused(f"HEAD {git.sha} is not contained in any remote branch")
 
 
 def version_taken(client: Any, bucket: str, dataset: str, version: str) -> bool:

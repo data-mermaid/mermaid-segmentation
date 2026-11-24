@@ -31,7 +31,7 @@ from segdata_etl.common.s3_objects import (
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import LocalDirS3, next_version
+from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._s3 import cache_path, dataset_prefix, is_not_found, is_precondition_failed
 from segdata_spec.manifest import ImageStore, LabelMapping, ParentRef, SourceInfo
@@ -88,7 +88,7 @@ def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
     parser.add_argument(
         "--annotation-date-cutoff",
         required=True,
-        help="YYYY-MM-DD; keep annotations updated at or before this midnight UTC",
+        help="YYYY-MM-DD; keep annotations updated through the end of this day (UTC), inclusive",
     )
     parser.add_argument("--parent-version", default=None, help="Staged version to reuse rows from")
     parser.add_argument(
@@ -125,8 +125,8 @@ def read_annotations(client: Any, uri: str) -> AnnotationsFile:
 
 
 def apply_cutoff(annotations: pd.DataFrame, cutoff: str) -> tuple[pd.DataFrame, int]:
-    """Keep rows with ``updated_on`` at or before midnight UTC of ``cutoff``; return them and the drop count."""
-    keep = annotations["updated_on"] <= pd.Timestamp(cutoff, tz="UTC")
+    """Keep rows updated through the end of the ``cutoff`` day (UTC), inclusive; return them and the drop count."""
+    keep = annotations["updated_on"] < pd.Timestamp(cutoff, tz="UTC") + pd.Timedelta(days=1)
     return annotations[keep], int((~keep).sum())
 
 
@@ -146,6 +146,8 @@ def read_image_header(client: Any, key: str, etag: str, size: int) -> tuple[str,
     Raises:
         SourceChanged: The object no longer matches ``etag``.
     """
+    if size == 0:
+        return None  # S3 answers a ranged GET on an empty object with 416
     try:
         head = _read_range(client, key, etag, _FIRST_READ - 1)
         media_type = sniff_media_type(head)
@@ -354,7 +356,7 @@ def labels_table(pairs: pd.DataFrame) -> pa.Table:
             ],
             "mermaid_benthic_attribute_id": pairs["benthic_attribute_id"].tolist(),
             "mermaid_benthic_attribute": pairs["benthic_attribute_name"].tolist(),
-            "mermaid_growth_form": gf_names.tolist(),
+            "mermaid_growth_form": [gf or "" for gf in gf_names],
             "mapping_source": ["identity"] * len(pairs),
         },
         schema=LABELS_SCHEMA,
@@ -512,9 +514,11 @@ def run(args: argparse.Namespace, client: Any) -> int:
         ValueError: Only one of the parent flags is given, or a URI is not ``s3://``.
         AnnotationsChanged: The annotations parquet was replaced during the read.
         SourceChanged: A source image was replaced between its HEAD and its read.
+        PublishRefused: The git tree is dirty or unpushed.
     """
     parents = _parent_refs(args)
     git = probe_git(REPO_ROOT)
+    refuse_unpublishable(git)
     source = read_annotations(client, args.annotations_uri)
     annotations, n_after_cutoff = apply_cutoff(source.table, args.annotation_date_cutoff)
     parent_rows = load_parent_rows(args.stage_dir, args.parent_version)

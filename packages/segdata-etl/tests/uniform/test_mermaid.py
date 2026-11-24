@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,7 @@ import pytest
 from segdata_etl import cli
 from segdata_etl.datasets import mermaid
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.publish import GitState
+from segdata_spec.publish import GitState, PublishRefused
 from segdata_spec.schema import LABELS_SCHEMA
 
 from .conftest import FakeS3, crc64nvme_b64, jpeg_bytes, md5_etag, png_bytes
@@ -319,7 +319,7 @@ def test_labels_are_ba_gf_pairs_numbered_by_sorted_ids(repo, tmp_path):
         "name": "Rubble::",
         "mermaid_benthic_attribute_id": "aaa",
         "mermaid_benthic_attribute": "Rubble",
-        "mermaid_growth_form": None,
+        "mermaid_growth_form": "",
         "mapping_source": "identity",
     }
     assert labels[2]["name"] == "Hard coral::Encrusting"
@@ -389,22 +389,48 @@ def test_parent_label_ids_match_on_the_growth_form_name():
     assert ids == {("b", "Branching"): 4, ("b", "Massive"): 5}
 
 
-def test_cutoff_keeps_midnight_and_drops_one_microsecond_later(repo, tmp_path):
+def test_cutoff_keeps_the_named_day_and_drops_the_next_midnight(repo, tmp_path):
     fake = FakeS3()
-    midnight = datetime(2026, 8, 12, tzinfo=UTC)
     rows = [
-        ann("i1", "p1", 1, 1, updated_on=midnight),
-        ann("i1", "p2", 2, 2, updated_on=midnight + timedelta(microseconds=1)),
+        ann("i1", "p1", 1, 1, updated_on=datetime(2026, 11, 20, 23, 59, 59, 999999, tzinfo=UTC)),
+        ann("i1", "p2", 2, 2, updated_on=datetime(2026, 11, 21, tzinfo=UTC)),
     ]
     seed(fake, rows, {"i1": png_bytes(4, 4)})
     stage = tmp_path / "stage"
 
-    build(fake, stage)
+    build(fake, stage, cutoff="2026-11-20")
 
     version = only_version(stage)
     assert [(p["row"], p["col"]) for p in table(version, "points.parquet")] == [(1, 1)]
     stats = json.loads((version / "manifest.json").read_bytes())["stats"]
     assert stats["dropped"]["annotation_after_cutoff"] == 1
+
+
+def test_zero_byte_source_image_is_dropped_without_a_ranged_get(repo, tmp_path):
+    fake = FakeS3()
+    rows = [ann("i1", "p1", 1, 1), ann("empty", "p2", 2, 2)]
+    seed(fake, rows, {"i1": png_bytes(4, 4), "empty": b""})
+    stage = tmp_path / "stage"
+
+    assert build(fake, stage) == 0
+
+    version = only_version(stage)
+    assert [r["image_id"] for r in table(version, "images.parquet")] == ["i1"]
+    dropped = json.loads((version / "manifest.json").read_bytes())["stats"]["dropped"]
+    assert dropped["image_unreadable_header"] == 1
+    assert [c for c in fake.calls if c[0] == "get" and c[2] == "mermaid/empty.png"] == []
+
+
+def test_dirty_git_refuses_before_reading_the_annotations(repo, tmp_path, monkeypatch):
+    fake = FakeS3()
+    seed(fake, [ann("i1", "p1", 1, 1)], {"i1": png_bytes(4, 4)})
+    dirty = GitState(sha="abcdef1234567", dirty=True, pushed=True)
+    monkeypatch.setattr(mermaid, "probe_git", lambda _: dirty)
+
+    with pytest.raises(PublishRefused, match="uncommitted"):
+        build(fake, tmp_path / "stage")
+
+    assert [c for c in fake.calls if c[0] == "get" and c[2] == PARQUET_KEY] == []
 
 
 def test_image_deleted_at_source_is_dropped_with_its_points(repo, tmp_path):
@@ -577,3 +603,18 @@ def test_stage_dir_is_required_and_dispatches_to_run(monkeypatch, tmp_path):
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_labels_write_an_empty_growth_form_not_null_for_a_pair_without_one():
+    pairs = pd.DataFrame(
+        {
+            "label_id": [1, 2],
+            "benthic_attribute_id": ["aaa", "bbb"],
+            "benthic_attribute_name": ["Rubble", "Hard coral"],
+            "growth_form_name": [None, "Branching"],
+        }
+    )
+
+    rows = mermaid.labels_table(pairs).to_pylist()
+
+    assert [r["mermaid_growth_form"] for r in rows] == ["", "Branching"]

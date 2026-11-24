@@ -32,7 +32,7 @@ from segdata_etl.common.s3_objects import (
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import LocalDirS3, next_version
+from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
 from segdata_etl.label_maps.curated import load_curated
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._s3 import cache_path, dataset_prefix
@@ -381,8 +381,10 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         ValueError: No shard matches, a stray parquet sits in the shard directory, image ids
             collide, or the curated map disagrees with the vocabulary.
         ObjectConflict: A staged file exists with other bytes.
+        PublishRefused: The git tree is dirty or unpushed.
     """
     git = probe_git(REPO_ROOT)
+    refuse_unpublishable(git)
     shards = _shards_or_raise(_list_repo_files(source.repo, args.revision), source)
     vocab_path = hf_hub_download(
         source.repo, source.vocab_file, repo_type="dataset", revision=args.revision
