@@ -33,6 +33,7 @@ from segdata_spec.errors import (
 from segdata_spec.manifest import (
     DiffFromParent,
     EtlInfo,
+    ExtraFile,
     FileEntry,
     ImageStore,
     LabelMapping,
@@ -127,6 +128,13 @@ def _file_entries(
             rows=table.num_rows,
         )
         for name, table in tables.items()
+    }
+
+
+def _extra_entries(extra_files: Mapping[str, bytes]) -> dict[str, ExtraFile]:
+    return {
+        name: ExtraFile(sha256=hashlib.sha256(data).hexdigest(), size=len(data))
+        for name, data in extra_files.items()
     }
 
 
@@ -275,7 +283,8 @@ def publish_dataset(
     """Publish a dataset version under ``datasets/<dataset>/<version>/``.
 
     Returns the manifest and its sha256. ``extra_files`` (name to bytes) are written after the
-    tables and before the manifest, and are not listed in ``manifest.files``.
+    tables and before the manifest, and are listed with their sha256 and size in
+    ``manifest.extra_files``, not in ``manifest.files``.
 
     Raises:
         PublishRefused: The tree is dirty or unpushed, or the version already exists.
@@ -307,6 +316,7 @@ def publish_dataset(
         parents=tuple(parents),
         label_mapping=label_mapping,
         files=_file_entries(conformed, blobs),
+        extra_files=_extra_entries(extra_files or {}),
         stats=_dataset_stats(conformed, dropped or {}),
         diff_from_parent=diff,
     )

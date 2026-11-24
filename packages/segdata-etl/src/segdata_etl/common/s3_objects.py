@@ -115,14 +115,18 @@ def copy_new(
     expect_etag: str,
     expect_size: int,
     expect_crc64nvme: str,
+    storage_class: str | None = None,
 ) -> CopyResult:
     """Copy ``src`` to ``dst`` once, guarded by the source ETag and the destination's absence.
+
+    ``storage_class`` sets the destination's S3 storage class; None keeps the bucket default.
 
     Raises:
         SourceChanged: The source ETag differs from ``src_etag`` (the destination is absent).
         ObjectConflict: The destination exists, or the copy landed, with another ETag, size or
             CRC64NVME, or S3 reported no CRC64NVME.
     """
+    extra = {} if storage_class is None else {"StorageClass": storage_class}
     try:
         response = client.copy_object(
             Bucket=dst_bucket,
@@ -131,6 +135,7 @@ def copy_new(
             IfNoneMatch="*",
             CopySourceIfMatch=src_etag,
             ChecksumAlgorithm=_CRC_ALGORITHM,
+            **extra,
         )
     except ClientError as exc:
         if not is_precondition_failed(exc):
