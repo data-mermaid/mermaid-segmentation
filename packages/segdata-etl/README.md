@@ -5,6 +5,8 @@ Builds the segmentation training data in S3: the CoralNet training manifest, the
 | Command | Does |
 |---|---|
 | `segdata build coralnet <stage>` | Builds the CoralNet training dataset (see [CoralNet](#coralnet)). |
+| `segdata build coralnet raw` | Publishes a CoralNet build run as the `coralnet-raw` dataset version (see [Publish coralnet-raw](#publish-coralnet-raw)). |
+| `segdata curate coralnet` | Publishes the curated `coralnet` v1 and v2 versions from `coralnet-raw` (see [Curate coralnet v1 and v2](#curate-coralnet-v1-and-v2)). |
 | `segdata ingest <name>` | Loads a raw external release into the legacy `external_validation_datasets/<name>/` prefix (see [Ingest an external dataset](#ingest-an-external-dataset)). |
 | `segdata build <name>` | Builds an immutable versioned dataset from that legacy prefix (see [Build a versioned external dataset](#build-a-versioned-external-dataset)). |
 | `segdata taxonomy` | Snapshots the MERMAID benthic taxonomy as a version (see [Taxonomy snapshot](#taxonomy-snapshot)). |
@@ -175,6 +177,135 @@ The dataset reads the label names from `coralnet_id2name_<run>.json` in the same
 ### Known gaps
 
 - Duplicate images (the same photo in several sources) are removed in training by `CoralNetDataset`'s `image_blacklist` and `annotation_overrides`. This package does not produce those files. Tracked in issue #231.
+
+## CoralNet dataset versions
+
+Two commands publish CoralNet as dataset versions in the [segdata-spec](../segdata-spec/README.md) format. For the order to run them in, see [Publish CoralNet dataset versions](../../docs/runbooks/coralnet-data.md#publish-coralnet-dataset-versions).
+
+| Command | Publishes | Built from |
+|---|---|---|
+| `segdata build coralnet raw` | `coralnet-raw` | A build run under `etl-outputs/coralnet/<run>/`, and the original images of the scrape. |
+| `segdata curate coralnet --label-map cleaned_up_rerun` | `coralnet` v1 | A `coralnet-raw` version and a `mermaid-benthic` taxonomy version. |
+| `segdata curate coralnet --label-map mermaid_api` | `coralnet` v2 | A v1 `coralnet` version, its `coralnet-raw` parent, and the MERMAID LabelMapping API. |
+
+### Store, version name and publish guard
+
+These rules apply to both commands and to `segdata taxonomy`.
+
+- **Store.** `--store` is a local directory (default `outputs/segdata-store`) or `s3`. A directory store holds each object at `<dir>/mermaid-ic-datasets/<key>`, which is the segdata cache layout. `--store s3` writes to the bucket `mermaid-ic-datasets` with the default boto3 credentials. The pinned parent versions are read from the same store, so a version on S3 needs its parents on S3.
+- **Version name.** `YYYYMMDD-<sha7>`: the local date and the first 7 characters of the HEAD commit. If the store already holds that version of the dataset, the command takes the lowest free suffix: `-2`, then `-3`, and so on.
+- **Publish guard.** `publish_dataset` (`segdata_spec/publish.py`) raises `PublishRefused` when tracked files have uncommitted changes, when no remote branch contains HEAD, or when the repository root has no `uv.lock`. The repository root is the nearest directory at or above the package that holds `.git` and `uv.lock`, so run the commands from a git checkout. The guard runs at publish time, after the build work: `raw` copies its images first, then refuses.
+- **Write-once.** Tables, the manifest and copied images are written only if absent. A key that holds other bytes raises `ObjectExists`.
+- **Pin.** On success the command prints `version: <version>` and `manifest_sha256: <sha256>`. These two values are the pin that the next command takes.
+
+### Publish coralnet-raw
+
+`segdata build coralnet raw` publishes one build run as a `coralnet-raw` version, and copies the originals of its kept images into the store.
+
+```bash
+uv run --package segdata-etl segdata build coralnet raw --store s3
+```
+
+The command reads `coralnet_annotations_<run>.parquet`, `coralnet_images_<run>.parquet` and `coralnet_id2name_<run>.json` from `etl-outputs/coralnet/<run>/` in `MERMAID_CORALNET_BUCKET` (default `dev-datamermaid-sm-sources`). It reads each source's `image_list.csv` and lists its `images/` folder under `MERMAID_CORALNET_PREFIX`. See [Environment variables](#environment-variables).
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--store` | `outputs/segdata-store` | Destination: a directory or `s3`. |
+| `--build-run` | `20260623_nogit` | Build run under `etl-outputs/coralnet/` to publish. |
+| `--source-ids 1,2,3` | all | Keep only these sources of the build run. A directory store needs it. `--store s3` refuses it, so an S3 version holds every source of the build run. |
+| `--parent-version`, `--parent-manifest-sha256` | none | A `coralnet-raw` version to reuse. Give both or neither. |
+| `--workers` | `MERMAID_CORALNET_ETL_WORKERS`, else 16 | Concurrent S3 workers. |
+| `-v`, `--verbose` | off | Debug logging. |
+
+A wrong flag combination is a usage error (exit 2) before any S3 read.
+
+The version holds:
+
+| Table | Content |
+|---|---|
+| `images.parquet` | One row per kept image. `key` is `s<source_id>/<image_id>.jpg` or `.png` under the image store prefix `images/coralnet/`. `width` and `height` are the original's. `group` is `s<source_id>`. `source_fingerprint` is the original's S3 ETag. `source_name` is the image's name in `image_list.csv` without the status suffix, or null. |
+| `points.parquet` | The build's annotations of the kept images, in the pixel space of the original. `label_id` is the CoralNet Label ID; `annotator` is `default`. |
+| `labels.parquet` | One row for every ID in the build's id2name JSON, used or not. Native names only: the MERMAID columns are null and `mapping_source` is `identity`. |
+| `stats/label_counts.parquet` | Points per image and label. |
+
+An image is kept when it has dimensions in the images parquet, has at least one annotation, has its original on S3, and is a JPEG or PNG. The media type is JPEG when `header_status` is `ok`; otherwise the command reads the first 8 bytes of the original.
+
+Each kept original is copied server side into the store, write-once, with a CRC64NVME checksum and the `INTELLIGENT_TIERING` storage class. A directory store downloads the originals into the directory. With a parent pin, an image whose `image_id` and source ETag match a parent row keeps the parent's key and object fields, and is not copied. The new version lists the parent in `parents`.
+
+`stats.dropped` in the manifest:
+
+| Key | Unit | Counts |
+|---|---|---|
+| `no_dimensions` | images | Images whose `header_status` carries no dimensions. |
+| `no_annotations` | images | Images with dimensions and no annotation. |
+| `annotations_without_image` | annotation rows | Annotations whose image is not in the images parquet. |
+| `source_missing` | images | Kept images whose original is not in the source's `images/` folder. |
+| `unsupported_format` | images | Originals that are neither JPEG nor PNG. |
+| `source_name_missing` | images | Published images with a null `source_name`. These images stay in the version. |
+
+#### Resume a raw publish
+
+A rerun copies only what the store does not hold:
+
+1. The command lists every object under `images/coralnet/` in the destination.
+2. A listed key counts as copied when its ETag is the original's ETag, or when the checkpoint has a row with the same key, original ETag and listed ETag. Its CRC64NVME comes from that checkpoint row, else from a HEAD.
+3. A listed key with any other ETag stops the run with `ObjectExists` before any copy, unless the original is multipart (its ETag contains `-`). A copy writes a multipart original as one part with a new ETag, so the listing cannot match it. Such a key goes to the copy step instead.
+4. The command copies the rest in batches of 1000 and rewrites the checkpoint after each batch. When a conditional copy fails with 412 because the key exists, the command compares the size and CRC64NVME of both objects (MD5 when either has no CRC). It adopts the object when they match and raises `ObjectExists` when they differ.
+
+The checkpoint is a parquet of each copied key with its original ETag, ETag, size and CRC64NVME:
+
+- `--store s3`: `outputs/coralnet-raw-checkpoints/s3-<build-run>.parquet`, relative to the working directory.
+- Directory store: `<store>/checkpoints/coralnet-raw-<build-run>.parquet`.
+
+Without the checkpoint a rerun is still correct, but it sends a HEAD for each held key and sends each multipart original through the copy and compare again.
+
+### Curate coralnet v1 and v2
+
+`segdata curate coralnet` publishes a `coralnet` version from pinned parents. `--label-map` selects the version kind.
+
+```bash
+uv run --package segdata-etl segdata curate coralnet --label-map cleaned_up_rerun --store s3 \
+  --raw-version <v> --raw-manifest-sha256 <sha> \
+  --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
+
+uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api --store s3 \
+  --raw-version <v> --raw-manifest-sha256 <sha> \
+  --parent-version <v1> --parent-manifest-sha256 <sha>
+```
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--label-map` | required | `cleaned_up_rerun` (v1) or `mermaid_api` (v2). |
+| `--store` | `outputs/segdata-store` | Destination, and where the parents are read from. |
+| `--raw-version`, `--raw-manifest-sha256` | required | Pin of the `coralnet-raw` parent. |
+| `--taxonomy-version`, `--taxonomy-manifest-sha256` | none | Pin of the `mermaid-benthic` taxonomy. `cleaned_up_rerun` needs both; `mermaid_api` takes neither. |
+| `--parent-version`, `--parent-manifest-sha256` | none | Pin of the v1 `coralnet` version. `mermaid_api` needs both; `cleaned_up_rerun` takes neither. |
+| `--cache-dir` | `outputs/segdata-cache` | Where the parent tables are synced. No image is synced. |
+| `--out-dir` | `outputs/coralnet-curate` | `mermaid_api` writes the API snapshot to `<out-dir>/<version>/coralnet_label_mappings.json`. |
+| `-v`, `--verbose` | off | Debug logging. |
+
+A missing pin flag, a pin flag of the other label map, or one flag of a pin without the other is a usage error (exit 2). The message names the flags.
+
+**v1 (`cleaned_up_rerun`)** has one parent, the raw version, and uses its image store. It copies no image.
+
+1. Overrides. For each image in `configs/coralnet/annotation_overrides.parquet`, the override points replace all of that image's raw points. Override points are in the pixel space of the image resized to a longest edge of 2048. For an original whose longest edge is more than 2048, each point is mapped back to original coordinates: a raw point with the same label that scales to the same position gives its exact coordinates; otherwise the command takes the smallest original coordinate that scales to the override position. Overrides of smaller images are used as they are.
+2. Blacklist. The images in `configs/coralnet/image_blacklist.parquet` (by `image_id`) and their points are dropped.
+3. Labels. One row per label of the raw version. The lowercased CoralNet name is looked up in `segdata_etl/label_maps/coralnet_cleaned_up_rerun.json`, a copy of `configs/coralnet_to_mermaid_mapping_temporary.json` at commit `e0d3876`. The target name is resolved to a benthic attribute ID in the pinned taxonomy by name, ignoring case. A target with no match keeps its name with a null ID, and `label_mapping.n_unresolved` counts it. A target that matches more than one attribute stops the run with `ValueError`. `mermaid_growth_form` is null.
+
+**v2 (`mermaid_api`)** has two parents, `[v1, raw]`.
+
+1. The raw pin must be a `coralnet-raw` parent that the v1 manifest declares. Otherwise the run stops with `ValueError`.
+2. The command fetches every CoralNet row from `https://api.datamermaid.org/v1/classification/labelmappings/?provider=CoralNet&limit=1000`. It retries a GET 3 times on connection errors and 502, 503 and 504, then fails. It never uses an older copy.
+3. `images.parquet`, `points.parquet` and `stats/label_counts.parquet` are v1's. Before it publishes, the command checks that each one serialises to the sha256 and size in v1's manifest, and raises `RuntimeError` if one differs. `stats.dropped` repeats v1's.
+4. Labels. One row per label of the raw version, joined to the API rows on the integer CoralNet Label ID. A label is unmapped when its name is not a string, the API has no row for it, or the row's `benthic_attribute_name` is null. Mapped rows take the attribute ID, attribute name and growth form name from the API.
+5. The command writes the snapshot under `--out-dir`, then publishes. The snapshot holds `fetched_at`, `sha256` and the rows sorted by ID. The manifest's `label_mapping` records the same sha256 and fetch time. If the snapshot cannot be written, nothing is published.
+
+`stats.dropped` of a v1 version:
+
+| Key | Unit | Counts |
+|---|---|---|
+| `blacklisted_images` | images | Raw images dropped by the blacklist. |
+| `override_images_not_in_raw` | images | Distinct override images that the raw version does not hold. Their overrides are dropped. |
 
 ## CoralNet split
 

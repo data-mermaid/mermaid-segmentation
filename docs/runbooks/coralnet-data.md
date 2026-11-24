@@ -13,6 +13,7 @@ The package READMEs are the reference for flags, environment variables, exclusio
 - [Adopt an existing bucket](#adopt-an-existing-bucket)
 - [Tune the request rate](#tune-the-request-rate)
 - [Use the new build in training](#use-the-new-build-in-training)
+- [Publish CoralNet dataset versions](#publish-coralnet-dataset-versions)
 - [When something fails](#when-something-fails)
 - [Known gaps](#known-gaps)
 
@@ -211,6 +212,146 @@ uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
 ```
 
 `--data-config` defaults to `configs/data_config.yaml`. For the Slurm command, with `HF_HOME` and the final runs' data config, see [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
+
+## Publish CoralNet dataset versions
+
+This procedure publishes a CoralNet build as dataset versions in `s3://mermaid-ic-datasets/`: `coralnet-raw`, then `coralnet` v1, then `coralnet` v2. The flags, the tables and the resume rules are in [CoralNet dataset versions](../../packages/segdata-etl/README.md#coralnet-dataset-versions).
+
+### Preconditions
+
+- A build run in `etl-outputs/coralnet/<run>/`. See [Build the dataset](#build-the-dataset). `raw` publishes `20260623_nogit` unless you pass `--build-run`.
+- A git checkout of this repository. Commit and push before you publish: every publish refuses a tree with uncommitted changes to tracked files, and a HEAD that no remote branch contains. `raw` finds this only after it copies the images.
+- The environment from [Before you start](#before-you-start). `raw` reads `MERMAID_CORALNET_BUCKET` and `MERMAID_CORALNET_PREFIX`.
+- AWS credentials that read the scrape bucket. For `--store s3`, they must also write `mermaid-ic-datasets`.
+- Network access to `api.datamermaid.org` for the taxonomy and for v2.
+
+Each command prints `version:` and `manifest_sha256:`. Record both: they are the pin that the next step takes.
+
+### Stage a source subset and check parity
+
+Publish a few sources into the local store (`outputs/segdata-store`) first, and compare them with the old CoralNet loader. Pick the sources from the `coralnet` `whitelist_sources` in `configs/data_config.yaml`.
+
+1. Publish a raw version of the sources:
+
+   ```bash
+   uv run --package segdata-etl segdata build coralnet raw --source-ids <id>,<id>,...
+   ```
+
+2. Publish a taxonomy version into the same store:
+
+   ```bash
+   uv run --package segdata-etl segdata taxonomy
+   ```
+
+3. Curate v1 from the two pins:
+
+   ```bash
+   uv run --package segdata-etl segdata curate coralnet --label-map cleaned_up_rerun \
+     --raw-version <raw> --raw-manifest-sha256 <sha> \
+     --taxonomy-version <tax> --taxonomy-manifest-sha256 <sha>
+   ```
+
+4. Curate v2 from the raw pin and the v1 pin:
+
+   ```bash
+   uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api \
+     --raw-version <raw> --raw-manifest-sha256 <sha> \
+     --parent-version <v1> --parent-manifest-sha256 <sha>
+   ```
+
+5. Copy `configs/data_config.yaml` to a path git ignores, for example `outputs/parity_data_config.yaml`. In the copy, cut the `whitelist_sources` of `coralnet` `train`, `val` and `test` to the staged sources of each split. The old loader reads every source in the list, so without this cut the old side holds sources that you did not stage.
+
+6. Compare each version with the old loader, once for each split that holds staged sources:
+
+   ```bash
+   uv run python scripts/check_dataset_parity.py --data-config outputs/parity_data_config.yaml \
+     --dataset coralnet --split <split> --version <version> --manifest-sha256 <sha> \
+     --cache-dir outputs/segdata-store --offline --resize-max-edge 2048
+   ```
+
+   - `--cache-dir outputs/segdata-store` works because a directory store has the cache layout.
+   - `--offline` verifies the staged version with the same checks as a sync, with no S3 access to `mermaid-ic-datasets`.
+   - `--resize-max-edge 2048` scales the new points into the old loader's 2048 px space.
+   - The old loader reads its annotations from `dev-datamermaid-sm-sources`, so the default boto3 credentials must read that bucket.
+
+   Expected result:
+
+   | Version | Result |
+   |---|---|
+   | v2 | `PARITY OK`. Every line is `none`: images, points, native labels and mapped labels agree. The old loader maps labels through the live MERMAID API, as v2 does. |
+   | v1 | Only the mapped labels differ, because v1 maps labels with `cleaned_up_rerun`. `mapped label counts` lists them. `points only in old` and `points only in new` also list points, because a point key includes its mapped label: the two lists hold the same positions with different mapped labels. Images and native label counts are `none`. The script prints `PARITY FAILED` and exits 1. |
+
+### Publish the taxonomy
+
+v1 resolves its labels against a `mermaid-benthic` taxonomy version on S3. Publish one:
+
+```bash
+uv run --package segdata-etl segdata taxonomy --store s3
+```
+
+To publish the tables you staged locally in place of a new fetch, pass `--tables-from outputs/segdata-store/mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>`. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
+
+### Copy the raw images
+
+Run this step on an AWS host, not a laptop. Run it from the repository root of a checkout on that host:
+
+```bash
+uv run --package segdata-etl segdata build coralnet raw --store s3 --build-run <run>
+```
+
+The command copies every kept original into `s3://mermaid-ic-datasets/images/coralnet/`, then publishes the `coralnet-raw` version. To reuse the objects of an earlier `coralnet-raw` version, add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`.
+
+The checkpoint is `outputs/coralnet-raw-checkpoints/s3-<run>.parquet` on that host. Keep it. If the run stops, run the same command again from the same directory: it skips the images that the destination already holds. Without the checkpoint the rerun is still correct, but slower. See [Resume a raw publish](../../packages/segdata-etl/README.md#resume-a-raw-publish).
+
+### Curate v1
+
+```bash
+uv run --package segdata-etl segdata curate coralnet --label-map cleaned_up_rerun --store s3 \
+  --raw-version <raw> --raw-manifest-sha256 <sha> \
+  --taxonomy-version <tax> --taxonomy-manifest-sha256 <sha>
+```
+
+v1 applies `configs/coralnet/annotation_overrides.parquet` and `configs/coralnet/image_blacklist.parquet` from the checkout, and copies no image.
+
+### Curate v2
+
+```bash
+uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api --store s3 \
+  --raw-version <raw> --raw-manifest-sha256 <sha> \
+  --parent-version <v1> --parent-manifest-sha256 <sha>
+```
+
+Use the same raw pin as v1. The command saves the LabelMapping API rows it used to `outputs/coralnet-curate/<version>/coralnet_label_mappings.json`.
+
+### Find the published versions
+
+| What | Where |
+|---|---|
+| `coralnet-raw` version | `s3://mermaid-ic-datasets/datasets/coralnet-raw/<version>/` |
+| `coralnet` v1 and v2 | `s3://mermaid-ic-datasets/datasets/coralnet/<version>/` |
+| Taxonomy | `s3://mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>/` |
+| Original images | `s3://mermaid-ic-datasets/images/coralnet/s<source_id>/<image_id>.jpg` or `.png` |
+| Locally staged versions | The same keys under `outputs/segdata-store/mermaid-ic-datasets/` |
+
+Each version folder holds `manifest.json` and the tables. `segdata split build` takes the `coralnet` and `coralnet-raw` pins; see [CoralNet split](../../packages/segdata-etl/README.md#coralnet-split).
+
+### When a publish fails
+
+| Failure | What to do |
+|---|---|
+| Exit 2 with a usage error, for example `a directory --store needs --source-ids` | Fix the flags the message names. Nothing ran. |
+| `FileNotFoundError: no git root holding uv.lock` | Run the command from a git checkout of this repository. |
+| `PublishRefused: HEAD <sha> is not contained in any remote branch` | Push the branch and run again. A raw rerun skips the images it already copied. |
+| `PublishRefused: working tree has uncommitted changes to tracked files` | Commit or discard the changes and run again. |
+| `PublishRefused: s3://.../manifest.json already exists` | Another run published that version name. Run again: the command takes the next free name. |
+| `ObjectExists: <n> destination keys hold other objects` (raw) | Keys under `images/coralnet/` hold objects that are not the originals. Nothing was copied. Find out what wrote them; the command does not replace them. |
+| `ObjectExists: s3://... already exists with different bytes` (raw) | A destination key holds other bytes than its original. Handle it as the row above. |
+| `RuntimeError: s3://... changed while being copied` (raw) | Run again. |
+| `PinMismatch` | A pin's sha256 does not match the manifest in the store. Copy the pin again from the output of the command that published it. |
+| `ValueError: taxonomy has several benthic attributes named (ignoring case): [...]` (v1) | The pinned taxonomy has more than one attribute with a mapped name. v1 cannot be published against that taxonomy version. |
+| `ValueError: the coralnet-raw pin ... is not a coralnet-raw parent of coralnet <v1>` (v2) | Pass the raw pin that the v1 manifest lists in `parents`. |
+| `RuntimeError: coralnet would not reuse the bytes of <v1> for [...]` (v2) | The tables would not keep v1's bytes. Nothing was published. |
+| HTTP or connection error from `api.datamermaid.org` (taxonomy or v2) | Run again when the API answers. v2 never uses an older mapping. |
 
 ## When something fails
 
