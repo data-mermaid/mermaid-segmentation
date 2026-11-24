@@ -13,14 +13,17 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+from botocore.exceptions import ClientError
 from PIL import Image
 
 from segdata_etl.common.legacy import LegacyDataset, legacy_dropped, read_legacy, source_info
+from segdata_etl.common.s3_objects import SourceChanged
 from segdata_etl.common.stage import refuse_unpublishable
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
+from segdata_spec._s3 import is_precondition_failed
 from segdata_spec.publish import probe_git
 from segdata_spec.schema import LABEL_COUNTS_SCHEMA
 
@@ -109,11 +112,25 @@ def _mask_stats(png: bytes) -> _MaskStats:
 def _read_masks(
     client: Any, images: Sequence[external.LegacyImage], *, legacy: LegacyDataset, workers: int
 ) -> dict[str, bytes]:
-    """Download each tile's legacy mask on ``workers`` threads, keyed by image id."""
+    """Download each tile's legacy mask on ``workers`` threads, keyed by image id.
+
+    Raises:
+        SourceChanged: A mask's ETag differs from the listing.
+    """
 
     def read(image: external.LegacyImage) -> bytes:
         key = legacy.prefix + str(image.mask_key)
-        data: bytes = client.get_object(Bucket=legacy.bucket, Key=key)["Body"].read()
+        etag = legacy.objects[str(image.mask_key)].etag
+        try:
+            data: bytes = client.get_object(Bucket=legacy.bucket, Key=key, IfMatch=f'"{etag}"')[
+                "Body"
+            ].read()
+        except ClientError as exc:
+            if is_precondition_failed(exc):
+                raise SourceChanged(
+                    f"s3://{legacy.bucket}/{key} changed since it was listed"
+                ) from exc
+            raise
         return data
 
     with ThreadPoolExecutor(max_workers=workers) as pool:

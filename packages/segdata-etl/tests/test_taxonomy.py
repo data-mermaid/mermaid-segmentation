@@ -195,7 +195,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class FakeS3:
-    """Holds objects by (bucket, key); ``put_object`` honours ``IfNoneMatch`` and records each put."""
+    """Holds objects by (bucket, key); ``put_object`` stores the body unconditionally and records each key."""
 
     def __init__(self, objects: dict[tuple[str, str], bytes] | None = None):
         self.objects = dict(objects or {})

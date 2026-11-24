@@ -12,6 +12,7 @@ import pytest
 from uniform.conftest import FakeS3
 
 from segdata_etl import promote
+from segdata_etl.common.s3_objects import SourceChanged
 from segdata_etl.datasets import benthos_yuval
 from segdata_spec import DATASET_BUCKET
 
@@ -225,6 +226,27 @@ def test_build_refuses_a_bad_mask_before_staging(
     taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
     with pytest.raises(ValueError, match=message):
+        benthos_yuval.run(build_args(benthos_yuval, stage, taxonomy_sha), s3)
+
+    assert not stage.exists()
+
+
+def test_build_refuses_a_mask_replaced_between_listing_and_read(
+    s3: FakeS3, repo: Path, tmp_path: Path
+) -> None:
+    mask_key = PREFIX + "labels/RS24/0_0.png"
+    real_get = s3.get_object
+
+    def get_after_replacement(*, Bucket: str, Key: str, **kwargs: object) -> dict[str, object]:
+        if Key == mask_key:
+            s3.put(Bucket, Key, mask_png(np.ones((4, 4))))
+        return real_get(Bucket=Bucket, Key=Key, **kwargs)
+
+    s3.get_object = get_after_replacement  # type: ignore[method-assign]
+    stage = tmp_path / "stage"
+    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
+
+    with pytest.raises(SourceChanged, match="labels/RS24/0_0.png"):
         benthos_yuval.run(build_args(benthos_yuval, stage, taxonomy_sha), s3)
 
     assert not stage.exists()
