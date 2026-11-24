@@ -661,7 +661,6 @@ def test_staging_writes_the_tables_and_a_copy_plan_and_nothing_to_s3(
             "src_etag": row["source_fingerprint"],
             "dst_bucket": DATASET_BUCKET,
             "dst_key": dst,
-            "storage_class": "INTELLIGENT_TIERING",
             "etag": row["etag"],
             "size": row["size"],
             "crc64nvme": row["crc64nvme"],
@@ -737,7 +736,7 @@ def test_a_staged_parent_pin_carries_unchanged_images_forward(
     assert staging.image_gets() == [_key(2, "20")]
 
 
-def test_a_staged_version_promotes_with_its_storage_class_and_the_manifest_last(
+def test_a_staged_version_promotes_into_intelligent_tiering_with_the_manifest_last(
     staging: RecordingS3, tmp_path: Path
 ) -> None:
     stage = tmp_path / "stage"

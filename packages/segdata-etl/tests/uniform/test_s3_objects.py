@@ -61,6 +61,7 @@ def _copy(fake: FakeS3, data: bytes, etag: str, **overrides):
         "dst_key": DST_KEY,
         "expect_size": len(data),
         "expect_crc64nvme": crc64nvme(data),
+        "storage_class": "INTELLIGENT_TIERING",
     }
     return copy_new(fake, **{**kwargs, **overrides})
 

@@ -66,7 +66,6 @@ POOL_HEADROOM = 8
 # The images live under the "coralnet" family, not the "coralnet-raw" dataset name.
 _IMAGE_FAMILY = "coralnet"
 IMAGE_PREFIX = image_prefix(_IMAGE_FAMILY)
-STORAGE_CLASS = "INTELLIGENT_TIERING"
 ANNOTATOR = "default"
 # Hex digits of the commit sha in a checkpoint name, as in a version name.
 _SHA_LENGTH = 7
@@ -580,11 +579,10 @@ def _source_key(row: Mapping[str, Any]) -> str:
 
 
 def _copies(images: pa.Table, source_bucket: str) -> list[dict[str, Any]]:
-    """Plan each image's server-side copy from the scrape bucket into Intelligent-Tiering."""
-    plan = copy_plan(
+    """Plan each image's server-side copy from the scrape bucket."""
+    return copy_plan(
         images.to_pylist(), src_bucket=source_bucket, src_key=_source_key, dst_prefix=IMAGE_PREFIX
     )
-    return [{**entry, "storage_class": STORAGE_CLASS} for entry in plan]
 
 
 def _command_line(args: argparse.Namespace) -> str:

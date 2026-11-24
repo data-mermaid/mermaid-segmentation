@@ -293,7 +293,7 @@ Run this step on an EC2 host in `us-east-1`, not a laptop. A full corpus reads f
 uv run --package segdata-etl segdata build coralnet raw --stage-dir <stage> --build-run <run>
 ```
 
-The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`, with the `INTELLIGENT_TIERING` storage class for each copy. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, stage that version under the same `<stage>` and add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads the parent from `<stage>`, not from S3.
+The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, stage that version under the same `<stage>` and add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads the parent from `<stage>`, not from S3.
 
 The probe results are checkpointed under `<stage>/checkpoints/`. If the run stops, run the same command again with the same `--stage-dir`: it probes only the images the checkpoint lacks. See [Resume a raw stage](../../packages/segdata-etl/README.md#resume-a-raw-stage).
 

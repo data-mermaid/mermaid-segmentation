@@ -716,18 +716,15 @@ def test_staged_extra_file_differing_from_the_manifest_refuses_with_no_writes(re
     assert fake.calls == []
 
 
-def test_copy_line_with_a_storage_class_passes_it_to_copy_object(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path)
-    chosen = copy_destinations(stage, version)[0]["dst_key"]
+def test_images_and_masks_land_in_intelligent_tiering_and_tables_keep_the_default(
+    monkeypatch, tmp_path
+):
+    fake, stage, version = stage_dense(monkeypatch, tmp_path)
 
-    def edit(lines):
-        lines[0]["storage_class"] = "GLACIER_IR"
-        return lines
+    run_promote(fake, stage, version, dataset=DENSE)
 
-    rewrite_plan(stage, version, edit)
-
-    run_promote(fake, stage, version)
-
-    classes = {key: kw.get("StorageClass") for _, _, key, kw in fake.ops("copy")}
-    assert len(classes) == 3
-    assert classes == {key: ("GLACIER_IR" if key == chosen else None) for key in classes}
+    classes = {key: kw.get("StorageClass") for _, _, key, kw in writes(fake)}
+    images = {k for k in classes if k.startswith("images/")}
+    assert len(images) == 4
+    assert {classes[k] for k in images} == {"INTELLIGENT_TIERING"}
+    assert {classes[k] for k in classes.keys() - images} == {None}

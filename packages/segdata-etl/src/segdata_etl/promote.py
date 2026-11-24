@@ -7,8 +7,8 @@ carries on. Each staged extra file must match its sha256 and size in the manifes
 
 A staged version carries ``copies.jsonl``, ``uploads.jsonl``, or both (a dense dataset copies its
 images from S3 and uploads its masks). Together the two files must name every image and mask key
-in ``images.parquet`` exactly once. A ``copies.jsonl`` line may name a ``storage_class`` for its
-copy.
+in ``images.parquet`` exactly once. Every image and mask is written in the Intelligent-Tiering
+storage class; the tables and the manifest keep the bucket default.
 
 A version with neither file is tables-only: it reuses images already published. It needs a
 published parent on the same image store, and every image and mask key in ``images.parquet`` must
@@ -53,6 +53,7 @@ _NAMED_CONFLICTS = 5
 
 _PARQUET = "application/vnd.apache.parquet"
 _JSON = "application/json"
+IMAGE_STORAGE_CLASS = "INTELLIGENT_TIERING"
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,6 @@ class _Copy:
     src_etag: str
     dst_key: str
     expect: _Expected
-    storage_class: str | None = None
 
 
 @dataclass(frozen=True)
@@ -199,7 +199,6 @@ def _copy_step(line: Mapping[str, Any], expected: Mapping[str, _Expected], where
         line["src_etag"],
         line["dst_key"],
         expect,
-        line.get("storage_class"),
     )
 
 
@@ -387,7 +386,7 @@ def _run_copy(client: Any, step: _Copy) -> bool:
         expect_etag=step.expect.etag,
         expect_size=step.expect.size,
         expect_crc64nvme=step.expect.crc64nvme,
-        storage_class=step.storage_class,
+        storage_class=IMAGE_STORAGE_CLASS,
     )
     return result.already_present
 
@@ -399,6 +398,7 @@ def _run_upload(client: Any, step: _Upload) -> bool:
         key=step.dst_key,
         body=step.local_path.read_bytes(),
         content_type=step.content_type,
+        storage_class=IMAGE_STORAGE_CLASS,
     )
     expect = step.expect
     if (

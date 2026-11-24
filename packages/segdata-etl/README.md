@@ -234,7 +234,7 @@ The version holds:
 
 An image is kept when it has dimensions in the images parquet, has at least one annotation, has its original on S3, and is a JPEG or PNG. The media type is JPEG when `header_status` is `ok`; otherwise the command reads the first 8 bytes of the original.
 
-The command probes every kept original with a HEAD. It also reads an original in full when it is multipart or has no CRC64NVME checksum, which covers most scraper uploads, and computes the ETag, size and CRC64NVME its copy will carry. No image is copied. `copies.jsonl`, staged beside the tables, plans one server-side copy for each image, with `storage_class` `INTELLIGENT_TIERING`. With a parent pin, an image whose `image_id` and source ETag match a parent row keeps the parent's key and object fields, and is not probed. The new version lists the parent in `parents`.
+The command probes every kept original with a HEAD. It also reads an original in full when it is multipart or has no CRC64NVME checksum, which covers most scraper uploads, and computes the ETag, size and CRC64NVME its copy will carry. No image is copied. `copies.jsonl`, staged beside the tables, plans one server-side copy for each image. With a parent pin, an image whose `image_id` and source ETag match a parent row keeps the parent's key and object fields, and is not probed. The new version lists the parent in `parents`.
 
 Run a full corpus on an EC2 host in `us-east-1`. The full reads dominate the run time and the transfer.
 
@@ -448,7 +448,7 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset <data
 
 A staged version has one of two shapes:
 
-- A version with `copies.jsonl`, `uploads.jsonl` or both. `copies.jsonl` plans server-side copies of images from S3; `uploads.jsonl` plans uploads of staged files. A `copies.jsonl` line may name a `storage_class` for its copy, and `coralnet-raw` names `INTELLIGENT_TIERING` for each. A line without one uses the bucket default.
+- A version with `copies.jsonl`, `uploads.jsonl` or both. `copies.jsonl` plans server-side copies of images from S3; `uploads.jsonl` plans uploads of staged files. `promote` writes every image and mask in the `INTELLIGENT_TIERING` storage class; tables and the manifest keep the bucket default.
 - A tables-only version, with neither file. It reuses images that are already published. `promote` publishes it only when a published parent has the same image store.
 
 Either shape may list `extra_files` in its manifest. `promote` uploads each one under the version prefix after the tables, and requires the staged bytes to match the sha256 and size in the manifest. The `coralnet` v2 version carries `coralnet_label_mappings.json` this way.
