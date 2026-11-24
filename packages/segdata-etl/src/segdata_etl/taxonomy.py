@@ -71,6 +71,8 @@ def _fetch_attributes(session: requests.Session, base_url: str) -> list[dict[str
 def _fetch_growth_forms(session: requests.Session, base_url: str) -> list[dict[str, Any]]:
     for choice in _get_json(session, f"{base_url}/choices/"):
         if choice.get("name") == "growthforms":
+            if not choice["data"]:
+                raise ValueError(f"{base_url}/choices/ 'growthforms' entry is empty")
             return [{"id": r["id"], "name": r["name"]} for r in choice["data"]]
     raise ValueError(f"{base_url}/choices/ has no 'growthforms' entry")
 
@@ -86,7 +88,7 @@ def fetch_taxonomy(
 
     Raises:
         requests.HTTPError: A response is not 2xx.
-        ValueError: ``/choices/`` has no ``growthforms`` entry, the attribute pages repeat a URL,
+        ValueError: ``/choices/`` has no ``growthforms`` entry or it is empty, the attribute pages repeat a URL,
             disagree with the API count or hold no rows, a table has duplicate ids, or an
             attribute's parent is not an attribute.
         KeyError: An attribute row lacks ``parent``.
@@ -139,6 +141,7 @@ def _read_staged(directory: Path) -> tuple[dict[str, pa.Table], SourceInfo]:
         if hashlib.sha256(data).hexdigest() != manifest.files[name].sha256:
             raise ValueError(f"{directory / name} does not match the sha256 in its manifest")
         tables[name] = pq.read_table(io.BytesIO(data))
+    _check_tables(tables[_BA], tables[_GF])
     return tables, manifest.source
 
 

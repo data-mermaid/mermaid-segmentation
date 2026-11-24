@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import requests
 
@@ -113,8 +115,8 @@ def _bad_attribute_routes(case: str) -> dict[str, _Response]:
     page2 = f"{first}?page=2"
     if case == "empty page":
         routes[first] = _Response({"count": 2, "next": None, "results": []})
-    elif case == "duplicate id with unknown parent":
-        dup = {"id": "b2", "name": "Acropora", "parent": "zz"}
+    elif case == "duplicate id":
+        dup = {"id": "b2", "name": "Acropora", "parent": None}
         routes[first] = _Response({"count": 2, "next": page2, "results": [dup]})
         routes[page2] = _Response({"count": 2, "next": None, "results": [dup]})
     elif case == "rows lack parent":
@@ -139,21 +141,44 @@ def _bad_attribute_routes(case: str) -> dict[str, _Response]:
 
 
 @pytest.mark.parametrize(
-    "case",
+    ("case", "exc", "match"),
     [
-        "empty page",
-        "duplicate id with unknown parent",
-        "rows lack parent",
-        "unknown parent",
-        "next repeats",
-        "more rows than count",
-        "fewer rows than count",
+        ("empty page", ValueError, "0 rows fetched"),
+        ("duplicate id", ValueError, "duplicate ids"),
+        ("rows lack parent", KeyError, "parent"),
+        ("unknown parent", ValueError, "unknown parents"),
+        ("next repeats", ValueError, "repeats"),
+        ("more rows than count", ValueError, "2 rows fetched, API count is 1"),
+        ("fewer rows than count", ValueError, "1 rows fetched, API count is 2"),
     ],
 )
-def test_fetch_refuses_a_partial_duplicated_or_flattened_fetch(case: str) -> None:
+def test_fetch_refuses_a_partial_duplicated_or_flattened_fetch(
+    case: str, exc: type[Exception], match: str
+) -> None:
     session = FakeSession(_bad_attribute_routes(case))
-    with pytest.raises((ValueError, KeyError)):
+    with pytest.raises(exc, match=match):
         taxonomy.fetch_taxonomy(session, BASE)  # type: ignore[arg-type]
+
+
+def test_fetch_refuses_duplicate_growth_form_ids() -> None:
+    routes = _routes()
+    routes[f"{BASE}/choices/"] = _Response(
+        [
+            {
+                "name": "growthforms",
+                "data": [{"id": "g1", "name": "Massive"}, {"id": "g1", "name": "Branching"}],
+            }
+        ]
+    )
+    with pytest.raises(ValueError, match="growth forms hold duplicate ids"):
+        taxonomy.fetch_taxonomy(FakeSession(routes), BASE)  # type: ignore[arg-type]
+
+
+def test_fetch_refuses_an_empty_growthforms_entry() -> None:
+    routes = _routes()
+    routes[f"{BASE}/choices/"] = _Response([{"name": "growthforms", "data": []}])
+    with pytest.raises(ValueError, match="growthforms.*empty"):
+        taxonomy.fetch_taxonomy(FakeSession(routes), BASE)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -237,3 +262,22 @@ def test_run_tables_from_refuses_a_staged_folder_of_another_name(
     (staged / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="other"):
         _run(_args(tmp_path / "target", tables_from=staged), FakeSession({}), capsys)
+
+
+def test_run_tables_from_refuses_staged_duplicate_ids_with_a_matching_sha256(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _run(_args(tmp_path / "staged"), FakeSession(_routes()), capsys)
+    staged = _published_dir(tmp_path / "staged")
+    duplicated = pa.table(
+        {"id": ["a1", "a1"], "name": ["Hard coral", "Hard coral"], "parent_id": [None, None]}
+    )
+    pq.write_table(duplicated, staged / "benthic_attributes.parquet")
+    manifest = json.loads((staged / "manifest.json").read_text())
+    new_sha = hashlib.sha256((staged / "benthic_attributes.parquet").read_bytes()).hexdigest()
+    manifest["files"]["benthic_attributes.parquet"]["sha256"] = new_sha
+    (staged / "manifest.json").write_text(json.dumps(manifest))
+    target = tmp_path / "target"
+    with pytest.raises(ValueError, match="duplicate ids"):
+        _run(_args(target, tables_from=staged), FakeSession({}), capsys)
+    assert not (target / DATASET_BUCKET / "taxonomy").exists()
