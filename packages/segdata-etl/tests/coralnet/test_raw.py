@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sys
@@ -11,7 +12,7 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 import pytest
-from s3_fake import FakeS3
+from s3_fake import FakeS3, quoted_etag
 
 from segdata_etl import cli
 from segdata_etl.common import publishing
@@ -672,3 +673,166 @@ def test_trailing_commas_on_every_row_do_not_shift_the_names_into_the_index(
         "1": "x.jpg",
         "2": "y.jpg",
     }
+
+
+def _build_with_extra_images(source: FakeS3, extra: int) -> raw.BuildTables:
+    """The fixture build plus ``extra`` annotated source-1 JPEGs, each with distinct bytes."""
+    build = _fixture_build()
+    ids = [str(30 + n) for n in range(extra)]
+    for image_id in ids:
+        source.put(SRC, _key(1, image_id), b"\xff\xd8\xff\xe0extra-" + image_id.encode())
+    return raw.BuildTables(
+        annotations=pd.concat([build.annotations, _annotations([(1, i, 0, 0, 100) for i in ids])]),
+        images=pd.concat([build.images, _images([(1, i, "ok", 10, 10) for i in ids])]),
+        id2name=ID2NAME,
+    )
+
+
+def _read_checkpoint_rows(tmp_path: Path) -> list[dict[str, Any]]:
+    frame = pd.read_parquet(tmp_path / "checkpoint.parquet").sort_values("dest_key")
+    return frame.to_dict("records")
+
+
+def test_the_checkpoint_file_holds_one_row_per_copied_key(source: FakeS3, tmp_path: Path) -> None:
+    _build(source, tmp_path)
+
+    assert _read_checkpoint_rows(tmp_path) == [
+        {
+            "dest_key": "images/coralnet/s1/10.jpg",
+            "source_fingerprint": f'"{JPEG_MD5}"',
+            "etag": f'"{JPEG_MD5}"',
+            "size": 12,
+            "crc64nvme": JPEG_CRC,
+        },
+        {
+            "dest_key": "images/coralnet/s2/20.png",
+            "source_fingerprint": f'"{PNG_MD5}"',
+            "etag": f'"{PNG_MD5}"',
+            "size": 15,
+            "crc64nvme": PNG_CRC,
+        },
+    ]
+
+
+class _SecondCopyFails(RecordingStore):
+    """A store whose second ``copy_object`` raises, as a crash mid-run does."""
+
+    def __init__(self, inner: LocalStore):
+        super().__init__(inner)
+        self.copies = 0
+
+    def copy_object(self, **kwargs: Any) -> Any:
+        self.copies += 1
+        if self.copies == 2:
+            raise RuntimeError("interrupted")
+        return self._inner.copy_object(**kwargs)
+
+
+def test_an_interrupted_run_keeps_finished_copies_and_the_rerun_copies_only_the_rest(
+    source: FakeS3, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(raw, "_CHECKPOINT_BATCH", 1)
+    monkeypatch.setattr(raw, "_CHECKPOINT_EVERY", 1)
+    failing = _SecondCopyFails(LocalStore(tmp_path / "store", source_client=source))
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        _build(source, tmp_path, store=failing)
+
+    assert [row["dest_key"] for row in _read_checkpoint_rows(tmp_path)] == [DEST_10]
+
+    rerun = _store(source, tmp_path)
+    result = _build(source, tmp_path, store=rerun)
+
+    assert rerun.keys_of("copy_object") == ["images/coralnet/s2/20.png"]
+    assert result.tables["images.parquet"].column("crc64nvme").to_pylist() == [JPEG_CRC, PNG_CRC]
+
+
+@pytest.mark.parametrize(("extra", "writes"), [(1, 2), (2, 2)], ids=["3_images", "4_images"])
+def test_the_checkpoint_is_written_every_interval_and_once_after_the_last_batch(
+    source: FakeS3,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra: int,
+    writes: int,
+) -> None:
+    monkeypatch.setattr(raw, "_CHECKPOINT_BATCH", 1)
+    monkeypatch.setattr(raw, "_CHECKPOINT_EVERY", 2)
+    written: list[int] = []
+    real_write = raw._write_checkpoint
+
+    def record(path: Path, finished: pd.DataFrame) -> None:
+        written.append(len(finished))
+        real_write(path, finished)
+
+    monkeypatch.setattr(raw, "_write_checkpoint", record)
+
+    _build(source, tmp_path, _build_with_extra_images(source, extra))
+
+    assert len(written) == writes
+    assert written[-1] == 2 + extra
+
+
+def test_listings_follow_continuation_tokens_across_pages() -> None:
+    s3 = FakeS3(page_size=2)
+    dest_keys = [f"{raw.IMAGE_PREFIX}s1/{n}.jpg" for n in range(5)]
+    source_keys = [_key(1, str(n)) for n in range(5)]
+    for key in dest_keys:
+        s3.put(DST, key, JPEG)
+    for key in source_keys:
+        s3.put(SRC, key, PNG)
+
+    held = raw._list_dest_objects(s3, DST)
+    etags = raw._list_source_etags(s3, SRC, PREFIX, 1)
+
+    assert held["dest_key"].tolist() == dest_keys
+    assert etags == dict.fromkeys(source_keys, quoted_etag(PNG))
+    assert held["etag"].tolist() == [quoted_etag(JPEG)] * 5
+
+
+class _DestinationRaced(FakeS3):
+    """A FakeS3 that creates the destination key with other bytes once the image listing ends."""
+
+    def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
+        response = super().list_objects_v2(**kwargs)
+        if kwargs.get("Prefix") == raw.IMAGE_PREFIX:
+            self.put(DST, DEST_10, b"other")
+        return response
+
+
+def test_a_key_created_after_the_listing_with_other_bytes_fails_the_copy_as_object_exists(
+    source: FakeS3, tmp_path: Path
+) -> None:
+    racing = _DestinationRaced(objects=source.objects)
+
+    with pytest.raises(ObjectExists, match=DEST_10):
+        _build(racing, tmp_path, store=racing)  # type: ignore[arg-type]
+
+
+def test_a_missing_bucket_env_var_refuses_before_any_s3_client_is_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "uv.lock").write_text("lock")
+    monkeypatch.delenv("MERMAID_CORALNET_BUCKET", raising=False)
+    monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
+    monkeypatch.setattr(
+        publishing,
+        "probe_git",
+        lambda _dir: GitState(sha="abcdef1234567", dirty=False, pushed=True),
+    )
+
+    def no_s3(**_kw: object) -> None:
+        raise AssertionError("an unset bucket must be refused before an S3 client is made")
+
+    monkeypatch.setattr(raw, "make_s3_client", no_s3)
+    args = argparse.Namespace(
+        store=str(tmp_path / "store"),
+        build_run="run1",
+        source_ids=[1],
+        parent_version=None,
+        workers=1,
+    )
+
+    with pytest.raises(ValueError, match="MERMAID_CORALNET_BUCKET"):
+        raw.run_raw(args)

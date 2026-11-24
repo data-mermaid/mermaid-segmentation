@@ -25,7 +25,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from coralnet_scraper.config import ENV_BUCKET, get_prefix, validate_workers
+from coralnet_scraper.config import get_bucket, get_prefix, validate_workers
 from coralnet_scraper.s3_io import object_key_image_list_csv
 from segdata_etl.common.cli_flags import pin_command_parts
 from segdata_etl.common.copy import CopyItem, copy_images
@@ -54,7 +54,6 @@ logger = logging.getLogger(__name__)
 
 DATASET = "coralnet-raw"
 POOL_HEADROOM = 8
-DEFAULT_SOURCE_BUCKET = "dev-datamermaid-sm-sources"
 # The images live under the "coralnet" family, not the "coralnet-raw" dataset name.
 _IMAGE_FAMILY = "coralnet"
 IMAGE_PREFIX = image_prefix(_IMAGE_FAMILY)
@@ -62,8 +61,10 @@ STORAGE_CLASS = "INTELLIGENT_TIERING"
 ANNOTATOR = "default"
 # CoralNet label 2474 is named the literal string "None", which pandas read as NaN into id2name.
 _NONE_NAMED_LABEL = "2474"
-# Copies per checkpoint write: a crash loses at most this many finished copies.
+# Copies per batch, the unit of progress between checkpoint writes.
 _CHECKPOINT_BATCH = 1000
+# Batches per checkpoint write: a crash loses at most this many batches of finished copies.
+_CHECKPOINT_EVERY = 20
 _COPIED = ["etag", "size", "crc64nvme"]
 _CHECKPOINT_COLUMNS = ["dest_key", "source_fingerprint", *_COPIED]
 
@@ -450,9 +451,14 @@ def _copy_pending(
     workers: int,
     checkpoint: Path,
 ) -> pd.DataFrame:
-    """Copy ``pending`` in batches, adding each batch to the checkpoint; return the new copies."""
+    """Copy ``pending`` in batches; return the new copies.
+
+    The checkpoint, ``finished`` plus the new copies, is written after every
+    ``_CHECKPOINT_EVERY``-th batch and once after the last batch, never twice for one state.
+    """
     copies = finished.iloc[0:0]
-    for start in range(0, len(pending), _CHECKPOINT_BATCH):
+    starts = range(0, len(pending), _CHECKPOINT_BATCH)
+    for number, start in enumerate(starts, 1):
         batch = pending.iloc[start : start + _CHECKPOINT_BATCH]
         items = [
             CopyItem(source_bucket=source_bucket, source_key=s3_key, dest_key=IMAGE_PREFIX + key)
@@ -476,7 +482,8 @@ def _copy_pending(
             }
         )
         copies = pd.concat([copies, done], ignore_index=True)
-        _write_checkpoint(checkpoint, pd.concat([finished, copies], ignore_index=True))
+        if number % _CHECKPOINT_EVERY == 0 or number == len(starts):
+            _write_checkpoint(checkpoint, pd.concat([finished, copies], ignore_index=True))
         logger.info("copied %d of %d images", min(start + len(batch), len(pending)), len(pending))
     return copies
 
@@ -626,7 +633,12 @@ def read_build(
 
 
 def _source_bucket() -> str:
-    return os.getenv(ENV_BUCKET) or DEFAULT_SOURCE_BUCKET
+    """The CoralNet source bucket from ``MERMAID_CORALNET_BUCKET``; there is no default.
+
+    Raises:
+        ValueError: The variable is unset or empty.
+    """
+    return get_bucket()
 
 
 def _parent_ref(args: argparse.Namespace) -> ParentRef | None:
@@ -670,8 +682,8 @@ def run_raw(args: argparse.Namespace) -> int:
     git = checked_git_state(repo_root)
     parent = _parent_ref(args)
     workers = _workers(args.workers)
-    source_client = make_s3_client(max_pool_connections=_pool_size(workers))
     source_bucket, prefix = _source_bucket(), get_prefix()
+    source_client = make_s3_client(max_pool_connections=_pool_size(workers))
     build = read_build(source_client, source_bucket, args.build_run, args.source_ids)
     client, bucket = open_store(args.store, source_client=source_client)
     parent_images = (

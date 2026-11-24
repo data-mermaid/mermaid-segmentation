@@ -66,7 +66,8 @@ class FakeS3:
     ``copy_calls`` holds the keyword arguments of every ``copy_object``; ``copy_error`` makes
     every ``copy_object`` raise that error code with status 403. ``source_changes_on_copy`` maps
     a source ``(bucket, key)`` to the bytes it holds by the time ``copy_object`` reads it, as a
-    source overwritten between the HEAD and the copy does.
+    source overwritten between the HEAD and the copy does. ``page_size`` caps the entries of a
+    ``list_objects_v2`` page and issues ``NextContinuationToken``; ``None`` lists in one page.
     """
 
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
@@ -76,6 +77,7 @@ class FakeS3:
     copy_calls: list[dict[str, Any]] = field(default_factory=list)
     copy_error: str | None = None
     source_changes_on_copy: dict[tuple[str, str], bytes] = field(default_factory=dict)
+    page_size: int | None = None
 
     def etag(self, bucket: str, key: str) -> str:
         """The quoted ETag S3 gives the object."""
@@ -148,25 +150,52 @@ class FakeS3:
         }
 
     def list_objects_v2(
-        self, *, Bucket: str, Prefix: str = "", Delimiter: str | None = None
+        self,
+        *,
+        Bucket: str,
+        Prefix: str = "",
+        Delimiter: str | None = None,
+        ContinuationToken: str | None = None,
     ) -> dict[str, Any]:
-        """One page; ``Contents`` and ``CommonPrefixes`` are absent when empty, as in S3."""
-        contents: list[dict[str, Any]] = []
+        """One page; ``Contents`` and ``CommonPrefixes`` are absent when empty, as in S3.
+
+        The token is the index of the page's first entry among all entries, in key order.
+        """
+        entries: list[tuple[str, str]] = []
         folders: set[str] = set()
         for bucket, key in sorted(self.objects):
             if bucket != Bucket or not key.startswith(Prefix):
                 continue
             rest = key[len(Prefix) :]
             if Delimiter and Delimiter in rest:
-                folders.add(Prefix + rest.split(Delimiter, 1)[0] + Delimiter)
+                folder = Prefix + rest.split(Delimiter, 1)[0] + Delimiter
+                if folder not in folders:
+                    folders.add(folder)
+                    entries.append(("folder", folder))
             else:
-                size = len(self.objects[(bucket, key)])
-                contents.append({"Key": key, "ETag": self.etag(bucket, key), "Size": size})
-        response: dict[str, Any] = {"KeyCount": len(contents) + len(folders)}
+                entries.append(("object", key))
+        start = int(ContinuationToken) if ContinuationToken else 0
+        end = len(entries) if self.page_size is None else start + self.page_size
+        contents = [
+            {
+                "Key": key,
+                "ETag": self.etag(Bucket, key),
+                "Size": len(self.objects[(Bucket, key)]),
+            }
+            for kind, key in entries[start:end]
+            if kind == "object"
+        ]
+        prefixes = [{"Prefix": name} for kind, name in entries[start:end] if kind == "folder"]
+        response: dict[str, Any] = {
+            "KeyCount": len(contents) + len(prefixes),
+            "IsTruncated": end < len(entries),
+        }
+        if end < len(entries):
+            response["NextContinuationToken"] = str(end)
         if contents:
             response["Contents"] = contents
-        if folders:
-            response["CommonPrefixes"] = [{"Prefix": f} for f in sorted(folders)]
+        if prefixes:
+            response["CommonPrefixes"] = prefixes
         return response
 
     def get_paginator(self, operation: str) -> _Paginator:
@@ -180,4 +209,10 @@ class _Paginator:
         self._client = client
 
     def paginate(self, **kwargs: Any) -> Iterator[dict[str, Any]]:
-        yield self._client.list_objects_v2(**kwargs)
+        token: str | None = None
+        while True:
+            page = self._client.list_objects_v2(**kwargs, ContinuationToken=token)
+            yield page
+            if not page["IsTruncated"]:
+                return
+            token = page["NextContinuationToken"]
