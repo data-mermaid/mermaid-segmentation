@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -17,6 +18,7 @@ from segdata_etl import cli
 from segdata_etl.datasets import mermaid
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.publish import GitState
+from segdata_spec.schema import LABELS_SCHEMA
 
 from .conftest import FakeS3, crc64nvme_b64, jpeg_bytes, md5_etag, png_bytes
 
@@ -331,6 +333,62 @@ def test_labels_are_ba_gf_pairs_numbered_by_sorted_ids(repo, tmp_path):
     assert len(mapping["sha256"]) == 64
 
 
+def parent_labels(entries: list[tuple[int, str, str | None]]) -> pa.Table:
+    """A parent ``labels.parquet`` from ``(label_id, ba_id, growth_form_name)`` entries."""
+    return pa.Table.from_pylist(
+        [
+            {
+                "label_id": label_id,
+                "name": f"{ba_id}::{gf or ''}",
+                "mermaid_benthic_attribute_id": ba_id,
+                "mermaid_benthic_attribute": ba_id,
+                "mermaid_growth_form": gf,
+                "mapping_source": "identity",
+            }
+            for label_id, ba_id, gf in entries
+        ],
+        schema=LABELS_SCHEMA,
+    )
+
+
+def label_ids_by_pair(
+    labels: list[tuple[str, str, str | None, str | None]], parent: pa.Table
+) -> dict[tuple[str, str | None], int]:
+    rows = [ann("i1", f"p{n}", n, n, label) for n, label in enumerate(labels)]
+    labelled, _ = mermaid.with_label_ids(pd.DataFrame(rows), parent)
+    return {
+        (r.benthic_attribute_id, r.growth_form_name): int(r.label_id)
+        for r in labelled.itertuples(index=False)
+    }
+
+
+def test_parent_label_ids_are_reused_and_new_pairs_follow_the_parent_maximum():
+    parent = parent_labels([(1, "a", None), (2, "c", "")])
+    labels = [("a", "Sand", None, None), ("b", "B", "g1", "Branching"), ("c", "Turf", None, None)]
+
+    ids = label_ids_by_pair(labels, parent)
+
+    assert ids == {("a", None): 1, ("c", None): 2, ("b", "Branching"): 3}
+
+
+def test_parent_label_id_gaps_are_kept_and_new_pairs_number_from_the_maximum():
+    parent = parent_labels([(1, "a", None), (5, "c", None)])
+    labels = [(ba, ba, None, None) for ba in ("a", "b", "c", "d")]
+
+    ids = label_ids_by_pair(labels, parent)
+
+    assert ids == {("a", None): 1, ("c", None): 5, ("b", None): 6, ("d", None): 7}
+
+
+def test_parent_label_ids_match_on_the_growth_form_name():
+    parent = parent_labels([(4, "b", "Branching")])
+    labels = [("b", "B", "g9", "Branching"), ("b", "B", "g3", "Massive")]
+
+    ids = label_ids_by_pair(labels, parent)
+
+    assert ids == {("b", "Branching"): 4, ("b", "Massive"): 5}
+
+
 def test_cutoff_keeps_midnight_and_drops_one_microsecond_later(repo, tmp_path):
     fake = FakeS3()
     midnight = datetime(2026, 8, 12, tzinfo=UTC)
@@ -438,6 +496,34 @@ def test_parent_rows_with_unchanged_fingerprint_are_carried_planned_and_not_rere
         {"dataset": "mermaid", "version": parent.name, "manifest_sha256": parent_sha}
     ]
     assert manifest["diff_from_parent"]["images_changed"] == 1
+
+
+def test_child_adding_one_pair_keeps_parent_label_ids_so_no_points_are_removed(repo, tmp_path):
+    fake = FakeS3()
+    parent_rows = [ann("i1", "p1", 1, 1, RUBBLE), ann("i1", "p2", 2, 2, BRANCHING)]
+    seed(fake, parent_rows, {"i1": png_bytes(4, 4)})
+    stage = tmp_path / "stage"
+    build(fake, stage)
+    parent = only_version(stage)
+    # ENCRUSTING sorts between RUBBLE and BRANCHING, so fresh numbering would shift BRANCHING.
+    child_rows = [
+        *parent_rows,
+        ann("i1", "p3", 3, 3, ENCRUSTING),
+        ann("i1", "p4", 4, 4, ENCRUSTING),
+    ]
+    fake.put(SRC_BUCKET, PARQUET_KEY, parquet_bytes(child_rows))
+
+    build(
+        fake,
+        stage,
+        "--parent-version",
+        parent.name,
+        "--parent-manifest-sha256",
+        _sha256(parent / "manifest.json"),
+    )
+
+    diff = json.loads((version_dirs(stage)[-1] / "manifest.json").read_bytes())["diff_from_parent"]
+    assert (diff["points_removed"], diff["points_added"]) == (0, 2)
 
 
 def test_parent_flags_must_come_together(repo, tmp_path):

@@ -293,8 +293,36 @@ def _gf_id(frame: pd.DataFrame) -> pd.Series:
     return frame["growth_form_id"].fillna("")
 
 
-def with_label_ids(annotations: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Number the BA+GF pairs 1..N by ``(benthic_attribute_id, growth_form_id or '')``.
+def _parent_label_ids(parent_labels: pa.Table) -> dict[tuple[str, str], int]:
+    """Map the parent's ``(benthic_attribute_id, growth_form_name or '')`` to its ``label_id``."""
+    return {
+        (row["mermaid_benthic_attribute_id"], row["mermaid_growth_form"] or ""): row["label_id"]
+        for row in parent_labels.to_pylist()
+    }
+
+
+def _assign_label_ids(pairs: pd.DataFrame, parent_labels: pa.Table | None) -> list[int]:
+    """Reuse the parent's id for each matching pair; number the rest upward from its maximum."""
+    known = {} if parent_labels is None else _parent_label_ids(parent_labels)
+    next_id = max(known.values(), default=0) + 1
+    ids = []
+    for ba_id, gf_name in zip(
+        pairs["benthic_attribute_id"], pairs["growth_form_name"].fillna(""), strict=True
+    ):
+        label_id = known.get((ba_id, gf_name))
+        if label_id is None:
+            label_id, next_id = next_id, next_id + 1
+        ids.append(label_id)
+    return ids
+
+
+def with_label_ids(
+    annotations: pd.DataFrame, parent_labels: pa.Table | None = None
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Give each BA+GF pair a ``label_id``, in ``(benthic_attribute_id, growth_form_id or '')`` order.
+
+    Without ``parent_labels`` the pairs are numbered 1..N. With the parent's ``labels.parquet``, a
+    pair keeps the parent's id and a new pair is numbered upward from the parent's maximum id.
 
     Returns the annotations with a ``label_id`` column and the labels frame.
     """
@@ -305,7 +333,7 @@ def with_label_ids(annotations: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFram
         .sort_values(["benthic_attribute_id", "_gf"])
         .reset_index(drop=True)
     )
-    pairs["label_id"] = pairs.index + 1
+    pairs["label_id"] = _assign_label_ids(pairs, parent_labels)
     ids = pairs.set_index(["benthic_attribute_id", "_gf"])["label_id"]
     keyed = frame.set_index(["benthic_attribute_id", "_gf"]).index
     labelled = annotations.assign(label_id=ids.reindex(keyed).to_numpy())
@@ -409,6 +437,16 @@ def load_parent_rows(stage_dir: Path, version: str | None) -> dict[str, dict[str
     return {row["image_id"]: row for row in pq.read_table(path).to_pylist()}
 
 
+def load_parent_labels(stage_dir: Path, version: str | None) -> pa.Table | None:
+    """Read the staged parent's ``labels.parquet``; None without a parent."""
+    if version is None:
+        return None
+    path = cache_path(
+        stage_dir, DATASET_BUCKET, dataset_prefix(DATASET, version) + "labels.parquet"
+    )
+    return pq.read_table(path)
+
+
 def _parent_refs(args: argparse.Namespace) -> list[ParentRef]:
     if (args.parent_version is None) != (args.parent_manifest_sha256 is None):
         raise ValueError("--parent-version and --parent-manifest-sha256 go together")
@@ -484,7 +522,10 @@ def run(args: argparse.Namespace, client: Any) -> int:
     kept = {o.image_id for o in outcomes if o.row is not None}
     points_per_image = annotations["image_id"].astype(str).value_counts().to_dict()
     dropped = _dropped_counts(n_after_cutoff, outcomes, points_per_image)
-    labelled, pairs = with_label_ids(annotations[annotations["image_id"].astype(str).isin(kept)])
+    labelled, pairs = with_label_ids(
+        annotations[annotations["image_id"].astype(str).isin(kept)],
+        load_parent_labels(args.stage_dir, args.parent_version),
+    )
     rows = [o.row for o in outcomes if o.row is not None]
     stage = LocalDirS3(args.stage_dir)
     version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
