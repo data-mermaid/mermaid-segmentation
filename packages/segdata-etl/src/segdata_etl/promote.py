@@ -21,6 +21,7 @@ from typing import Any, TypeVar
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
+from segdata_etl.common.copy_plan import COPIES_NAME
 from segdata_etl.common.s3_objects import (
     ObjectConflict,
     copy_new,
@@ -39,7 +40,6 @@ _Item = TypeVar("_Item")
 _Result = TypeVar("_Result")
 _NAMED_CONFLICTS = 5
 
-COPIES_NAME = "copies.jsonl"
 UPLOADS_NAME = "uploads.jsonl"
 _PARQUET = "application/vnd.apache.parquet"
 _JSON = "application/json"
