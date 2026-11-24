@@ -56,7 +56,7 @@ def test_main_returns_one_on_any_difference(
 
     assert result == code
     assert seen == {
-        "sync": True,
+        "sync": False,
         "data_cfg": {"catlin_seaview": {"train": {}}},
         "dataset": "catlin_seaview",
         "split": "train",

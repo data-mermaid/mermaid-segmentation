@@ -102,7 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(format_dense_report(dense_report))
         return 0 if dense_report.ok else 1
-    report = run_parity(cfg["data"], annotators=args.annotator, **common)
+    # The tables were synced above; only the dense path still has images to fetch.
+    report = run_parity(cfg["data"], annotators=args.annotator, **{**common, "sync": False})
     print(format_report(report))
     return 0 if report.ok else 1
 
