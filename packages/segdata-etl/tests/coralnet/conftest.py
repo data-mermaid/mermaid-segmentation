@@ -1,23 +1,18 @@
 """Shared fixtures for the CoralNet dataset tests.
 
-Provides a hand-rolled in-memory ``FakeS3`` that implements the boto3 client surface the package
-touches (``get_object`` with ``Range``, ``head_object``, ``put_object``, ``upload_file``,
-``list_objects_v2``, ``get_paginator``).
-Keeps the test suite free of network and AWS deps.
+The in-memory ``FakeS3`` comes from ``s3_fake``; it keeps the suite free of network and AWS deps.
 """
 
 from __future__ import annotations
 
-import hashlib
 import io
 import struct
-from dataclasses import dataclass, field
 
 import pytest
-from botocore.exceptions import ClientError
 from PIL import Image
+from s3_fake import FakeS3
 
-from segdata_spec.sync import _crc64nvme_b64
+__all__ = ["FakeS3", "populate_source"]
 
 
 @pytest.fixture(autouse=True)
@@ -57,141 +52,6 @@ def _make_jpeg_bytes(width: int, height: int, *, sof_marker: int = 0xC0, padding
     out += bytes([1])
     out += b"\xff\xd9"  # EOI
     return bytes(out)
-
-
-@dataclass
-class _StubResponse:
-    body: bytes
-    content_length: int
-    content_range: str | None = None
-
-    def __getitem__(self, key):
-        if key == "Body":
-            return _Body(self.body)
-        if key == "ContentLength":
-            return self.content_length
-        if key == "ContentRange" and self.content_range is not None:
-            return self.content_range
-        raise KeyError(key)
-
-    def get(self, key, default=None):
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-
-class _Body:
-    def __init__(self, data: bytes):
-        self._data = data
-
-    def read(self) -> bytes:
-        return self._data
-
-
-def _client_error(code: str, op: str) -> ClientError:
-    return ClientError({"Error": {"Code": code, "Message": code}}, op)
-
-
-@dataclass
-class FakeS3:
-    """In-memory S3 client surface used by the dataset build.
-
-    Populate ``objects`` with ``{(bucket, key): bytes}`` to control what gets returned. ``Range``
-    semantics follow ``bytes=start-end`` (inclusive). ``full_reads`` records the key of every
-    ``get_object`` without a ``Range``, which is how a ``LocalStore`` copy reads its source.
-    ``multipart`` holds the ``(bucket, key)`` pairs listed with a two-part upload's ETag.
-    """
-
-    objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
-    full_reads: list[str] = field(default_factory=list)
-    multipart: set[tuple[str, str]] = field(default_factory=set)
-
-    def etag(self, bucket: str, key: str) -> str:
-        """The quoted ETag S3 gives the object: its MD5, suffixed ``-2`` for a multipart upload."""
-        digest = hashlib.md5(self.objects[(bucket, key)], usedforsecurity=False).hexdigest()
-        suffix = "-2" if (bucket, key) in self.multipart else ""
-        return f'"{digest}{suffix}"'
-
-    def put(self, bucket: str, key: str, data: bytes) -> None:
-        self.objects[(bucket, key)] = data
-
-    def put_object(self, *, Bucket: str, Key: str, Body, ContentType: str | None = None):
-        """Resize uploads image bodies."""
-        del ContentType  # parity with boto
-        if isinstance(Body, str):
-            raw: bytes = Body.encode("utf-8")
-        elif isinstance(Body, bytes | memoryview):
-            raw = bytes(Body)
-        else:
-            raw = Body.read()
-            if isinstance(raw, str):
-                raw = raw.encode("utf-8")
-        self.objects[(Bucket, Key)] = raw
-
-    def head_object(self, *, Bucket: str, Key: str, ChecksumMode: str | None = None):
-        if (Bucket, Key) not in self.objects:
-            raise _client_error("404", "HeadObject")
-        response = {
-            "ContentLength": len(self.objects[(Bucket, Key)]),
-            "ETag": self.etag(Bucket, Key),
-        }
-        if ChecksumMode == "ENABLED":
-            response["ChecksumCRC64NVME"] = _crc64nvme_b64(self.objects[(Bucket, Key)])
-        return response
-
-    def upload_file(self, Filename: str, Bucket: str, Key: str) -> None:
-        with open(Filename, "rb") as f:
-            self.objects[(Bucket, Key)] = f.read()
-
-    def get_object(self, *, Bucket: str, Key: str, Range: str | None = None):
-        if (Bucket, Key) not in self.objects:
-            raise _client_error("404", "GetObject")
-        full = self.objects[(Bucket, Key)]
-        if not Range:
-            self.full_reads.append(Key)
-        content_range: str | None = None
-        data = full
-        if Range:
-            assert Range.startswith("bytes=")
-            start_str, end_str = Range[len("bytes=") :].split("-")
-            start = int(start_str)
-            end = int(end_str) if end_str else len(full) - 1
-            data = full[start : end + 1]
-            content_range = f"bytes {start}-{end}/{len(full)}"
-        return _StubResponse(body=data, content_length=len(data), content_range=content_range)
-
-    def list_objects_v2(self, *, Bucket: str, Prefix: str = "", Delimiter: str = ""):
-        """Mirror S3: ``Contents`` and ``CommonPrefixes`` are absent when empty."""
-        keys = [k for (b, k) in self.objects if b == Bucket and k.startswith(Prefix)]
-        common_prefixes: set[str] = set()
-        contents = []
-        for k in keys:
-            rest = k[len(Prefix) :]
-            if Delimiter and Delimiter in rest:
-                common_prefixes.add(Prefix + rest.split(Delimiter, 1)[0] + Delimiter)
-            else:
-                contents.append({"Key": k, "ETag": self.etag(Bucket, k)})
-        response: dict = {"KeyCount": len(common_prefixes) + len(contents)}
-        if common_prefixes:
-            response["CommonPrefixes"] = [{"Prefix": p} for p in sorted(common_prefixes)]
-        if contents:
-            response["Contents"] = contents
-        return response
-
-    def get_paginator(self, name: str):
-        if name != "list_objects_v2":
-            raise NotImplementedError(name)
-        return _Paginator(self)
-
-
-class _Paginator:
-    def __init__(self, client: FakeS3):
-        self._client = client
-
-    def paginate(self, *, Bucket: str, Prefix: str = "", Delimiter: str | None = None):
-        delim = Delimiter if Delimiter is not None else ""
-        yield self._client.list_objects_v2(Bucket=Bucket, Prefix=Prefix, Delimiter=delim)
 
 
 def _csv_bytes(headers: list[str], rows: list[list]) -> bytes:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import io
 from pathlib import Path
 from types import ModuleType
@@ -13,12 +12,12 @@ import numpy as np
 import pyarrow as pa
 import pytest
 from PIL import Image
+from s3_fake import crc64nvme, md5_hex, quoted_etag
 
 from segdata_etl.common import publishing
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_taxonomy
-from segdata_spec.sync import _crc64nvme_b64
 
 LEGACY_BUCKET = "dev-datamermaid-sm-sources"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
@@ -101,11 +100,10 @@ def run_builder(
 
 def copied_columns(data: bytes, prefix: str = "") -> dict[str, Any]:
     """Return the etag, size and crc64nvme columns S3 reports for a copy of ``data``."""
-    md5 = hashlib.md5(data).hexdigest()  # noqa: S324
     return {
-        f"{prefix}etag": f'"{md5}"',
+        f"{prefix}etag": quoted_etag(data),
         f"{prefix}size": len(data),
-        f"{prefix}crc64nvme": _crc64nvme_b64(data),
+        f"{prefix}crc64nvme": crc64nvme(data),
     }
 
 
@@ -114,4 +112,4 @@ def no_mask() -> dict[str, Any]:
 
 
 def legacy_etag(data: bytes) -> str:
-    return hashlib.md5(data).hexdigest()  # noqa: S324
+    return md5_hex(data)
