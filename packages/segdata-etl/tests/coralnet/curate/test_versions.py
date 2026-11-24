@@ -397,6 +397,17 @@ def test_v1_against_a_raw_staged_only_in_the_stage_dir_reads_no_raw_from_s3(
     assert [c for c in world.s3.calls if "coralnet-raw" in c[2]] == []
 
 
+def test_v1_refuses_a_taxonomy_cached_but_not_published(world: World) -> None:
+    first, _manifest, _pin = _stage_v1(world)
+    for key in [k for k in world.s3.objects if k[1].startswith("taxonomy/")]:
+        del world.s3.objects[key]
+
+    with pytest.raises(PublishRefused, match=f"{world.taxonomy.version} is not published"):
+        world.run("cleaned_up_rerun", ("raw-", world.raw), ("taxonomy-", world.taxonomy))
+
+    assert list(world.staged()) == [first]
+
+
 @pytest.mark.parametrize(
     ("git", "message"),
     [

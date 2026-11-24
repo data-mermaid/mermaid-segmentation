@@ -20,7 +20,6 @@ from typing import Any, Literal
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
-from botocore.exceptions import ClientError
 
 from segdata_etl.common import publishing
 from segdata_etl.common.cli_flags import _pin_flags, pin_command_parts
@@ -46,11 +45,9 @@ from segdata_etl.common.s3_objects import (
 )
 from segdata_etl.common.stage import DEFAULT_CACHE_DIR, LocalDirS3, next_version
 from segdata_etl.label_maps.curated import CuratedSource
+from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import MANIFEST_NAME, is_not_found, taxonomy_prefix
-from segdata_spec.errors import PublishRefused
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
-from segdata_spec.manifest import manifest_sha256 as _manifest_sha256
 from segdata_spec.publish import GitState, publish_dataset
 from segdata_spec.read import Taxonomy, open_taxonomy
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
@@ -111,30 +108,6 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _require_published_taxonomy(client: Any, bucket: str, pin: Pin) -> None:
-    """Refuse unless ``bucket`` holds the pinned taxonomy manifest with the pinned sha256.
-
-    ``sync`` trusts a cached manifest, so without this check a staged, unpublished taxonomy in
-    ``--cache-dir`` would pass. ``segdata taxonomy --publish`` names a new version, so a staged pin
-    never resolves in the bucket.
-
-    Raises:
-        PublishRefused: The manifest is absent from ``bucket`` or does not match the pin.
-    """
-    key = taxonomy_prefix(pin.name, pin.version) + MANIFEST_NAME
-    try:
-        body: bytes = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-    except ClientError as exc:
-        if is_not_found(exc):
-            raise PublishRefused(
-                f"taxonomy {pin.name} {pin.version} is not published in {bucket}; "
-                "publish it before staging a dataset"
-            ) from exc
-        raise
-    if _manifest_sha256(body) != pin.manifest_sha256:
-        raise PublishRefused(f"taxonomy manifest s3://{bucket}/{key} does not match its pin")
-
-
 def load_taxonomy(
     client: Any, bucket: str, *, version: str, manifest_sha256: str, cache_dir: Path
 ) -> Taxonomy:
@@ -144,7 +117,7 @@ def load_taxonomy(
         PublishRefused: The pinned taxonomy manifest is not published in ``bucket``.
     """
     pin = Pin(name=TAXONOMY_NAME, version=version, manifest_sha256=manifest_sha256)
-    _require_published_taxonomy(client, bucket, pin)
+    require_published_taxonomy(client, bucket, pin)
     sync(client, {}, cache_dir, bucket=bucket, taxonomy=pin)
     return open_taxonomy(cache_dir, bucket, pin)
 

@@ -33,7 +33,7 @@ from segdata_etl.label_maps.coralnet_api import (
 from segdata_etl.label_maps.coralnet_cleaned_up_rerun import cleaned_up_rerun_labels
 from segdata_etl.splits.builder import require_raw_parent
 from segdata_etl.splits.inputs import sync_tables
-from segdata_etl.taxonomy import find_repo_root
+from segdata_etl.taxonomy import find_repo_root, require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._s3 import is_not_found
 from segdata_spec.manifest import ImageStore, LabelMapping, Manifest, ParentRef, Pin, SourceInfo
@@ -193,6 +193,7 @@ def _curate_v1(
 ) -> CuratedVersion:
     raw_pin = _pin(args, "raw", RAW_DATASET)
     tax_pin = _pin(args, "taxonomy", TAXONOMY)
+    require_published_taxonomy(client, bucket, tax_pin)
     synced = sync_tables(client, {RAW_DATASET: raw_pin}, args.cache_dir, bucket, tax_pin)
     tax = open_taxonomy(args.cache_dir, bucket, tax_pin)
     return build_v1(
@@ -291,12 +292,14 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
 
     Parents and the taxonomy are synced from the dataset bucket into ``args.cache_dir``; the sync
     reads the cache first, so ``--cache-dir`` set to the stage dir reads parents staged there. The
+    taxonomy pin must still be published in the dataset bucket, even when the cache holds it. The
     version reuses raw's image store and stages no copy or upload plan. The mermaid_api build
     stages the fetched API snapshot as the manifest-listed extra file
     ``coralnet_label_mappings.json``; the cleaned_up_rerun build stages none.
 
     Raises:
         PublishRefused: The git tree is dirty or unpushed; nothing is read or staged.
+            For ``cleaned_up_rerun``, also when the taxonomy pin is not published in the bucket.
         ValueError: A mapped target name matches more than one benthic attribute ignoring case,
             or the raw pin is not a raw parent of the ``--parent-*`` version.
         RuntimeError: The v2 tables reused from v1 would not keep v1's bytes; nothing is staged.

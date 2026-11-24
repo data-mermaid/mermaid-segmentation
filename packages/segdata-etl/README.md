@@ -278,7 +278,7 @@ uv run --package segdata-etl segdata curate coralnet --label-map mermaid_api \
 | `--label-map` | required | `cleaned_up_rerun` (v1) or `mermaid_api` (v2). |
 | `--stage-dir` | required | Local directory the version is staged in. |
 | `--raw-version`, `--raw-manifest-sha256` | required | Pin of the `coralnet-raw` parent. |
-| `--taxonomy-version`, `--taxonomy-manifest-sha256` | none | Pin of the `mermaid-benthic` taxonomy. `cleaned_up_rerun` needs both; `mermaid_api` takes neither. |
+| `--taxonomy-version`, `--taxonomy-manifest-sha256` | none | Pin of the `mermaid-benthic` taxonomy. `cleaned_up_rerun` needs both; `mermaid_api` takes neither. The pin must be published in `mermaid-ic-datasets`, even when `--cache-dir` already holds it. |
 | `--parent-version`, `--parent-manifest-sha256` | none | Pin of the v1 `coralnet` version. `mermaid_api` needs both; `cleaned_up_rerun` takes neither. |
 | `--cache-dir` | `outputs/segdata-cache` | Where the parent tables and the taxonomy are synced from S3. The command reads this directory first, so `--cache-dir <stage>` reads parents that are only staged. No image is synced. |
 | `-v`, `--verbose` | off | Debug logging. |
