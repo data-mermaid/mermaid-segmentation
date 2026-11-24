@@ -40,8 +40,10 @@ def test_each_item_is_one_conditional_checksummed_copy(fake_s3: FakeS3) -> None:
             "Key": "out/a.jpg",
             "IfNoneMatch": "*",
             "ChecksumAlgorithm": "CRC64NVME",
+            "TaggingDirective": "REPLACE",
         }
     ]
+    assert "Tagging" not in fake_s3.copy_calls[0]
     assert result == {"out/a.jpg": CopiedObject(etag=ABC_ETAG, size=3, crc64nvme=ABC_CRC)}
 
 

@@ -103,6 +103,8 @@ def _copy_one(
         "Key": item.dest_key,
         "IfNoneMatch": "*",
         "ChecksumAlgorithm": "CRC64NVME",
+        # REPLACE writes the copy untagged, so no tagging permissions are needed.
+        "TaggingDirective": "REPLACE",
     }
     if storage_class is not None:
         kwargs["StorageClass"] = storage_class
