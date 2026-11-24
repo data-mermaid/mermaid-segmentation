@@ -53,7 +53,10 @@ def run(args: argparse.Namespace, client: Any) -> int:
     )
     external.require_known_labels(points, labels)
     sniffed = external.sniff_legacy_images(client, images, legacy=legacy, workers=args.workers)
-    external.require_points_inside(points, images, sniffed)
+    points, n_out_of_bounds = external.drop_points_outside(points, images, sniffed)
+    if n_out_of_bounds:
+        logger.info("dropped %d points outside their image", n_out_of_bounds)
+        dropped = {**dropped, "points_out_of_bounds": n_out_of_bounds}
     version = publishing.pick_version(dest, bucket, DATASET, git_sha=git.sha, today=utc_today())
     publishing.require_version_absent(dest, bucket, DATASET, version)
     images_table = external.stage_images(

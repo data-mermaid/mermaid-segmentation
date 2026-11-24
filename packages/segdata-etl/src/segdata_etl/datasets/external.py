@@ -239,6 +239,30 @@ def _sizes_table(
     )
 
 
+def _bounds_join(
+    points: pa.Table,
+    images: Iterable[LegacyImage],
+    sniffed: Mapping[str, tuple[str, int, int]],
+) -> tuple[pa.Table, pa.ChunkedArray]:
+    """Join points to their image sizes; return the join in point order and an ``inside`` mask.
+
+    A point is inside when ``0 <= row < height`` and ``0 <= col < width``. The mask is null for a
+    point whose image has no sniffed size.
+    """
+    positioned = points.select(["image_id", "row", "col"]).append_column(
+        "_position", pa.array(range(points.num_rows), pa.int64())
+    )
+    joined = positioned.join(
+        _sizes_table(images, sniffed), "image_id", join_type="left outer"
+    ).sort_by("_position")
+    row, col = joined.column("row"), joined.column("col")
+    inside = pc.and_kleene(
+        pc.and_kleene(pc.greater_equal(row, 0), pc.less(row, joined.column("height"))),
+        pc.and_kleene(pc.greater_equal(col, 0), pc.less(col, joined.column("width"))),
+    )
+    return joined, inside
+
+
 def require_points_inside(
     points: pa.Table,
     images: Iterable[LegacyImage],
@@ -252,14 +276,7 @@ def require_points_inside(
     Raises:
         ValueError: A point lies outside its image.
     """
-    joined = points.select(["image_id", "row", "col"]).join(
-        _sizes_table(images, sniffed), "image_id", join_type="left outer"
-    )
-    row, col = joined.column("row"), joined.column("col")
-    inside = pc.and_kleene(
-        pc.and_kleene(pc.greater_equal(row, 0), pc.less(row, joined.column("height"))),
-        pc.and_kleene(pc.greater_equal(col, 0), pc.less(col, joined.column("width"))),
-    )
+    joined, inside = _bounds_join(points, images, sniffed)
     outside = joined.filter(pc.invert(pc.fill_null(inside, False))).sort_by(
         [("image_id", "ascending"), ("row", "ascending"), ("col", "ascending")]
     )
@@ -272,6 +289,27 @@ def require_points_inside(
             f"{outside.num_rows} points outside their image "
             f"(image_id, row, col, width, height): {first}"
         )
+
+
+def drop_points_outside(
+    points: pa.Table,
+    images: Iterable[LegacyImage],
+    sniffed: Mapping[str, tuple[str, int, int]],
+) -> tuple[pa.Table, int]:
+    """Return the points inside their image's sniffed size, in order, and the number dropped.
+
+    Uses the bounds rule of `require_points_inside`.
+
+    Raises:
+        ValueError: A point's image has no sniffed size.
+    """
+    joined, inside = _bounds_join(points, images, sniffed)
+    unsized = joined.filter(pc.is_null(inside))
+    if unsized.num_rows:
+        ids = sorted(set(unsized.column("image_id").to_pylist()))[:5]
+        raise ValueError(f"{unsized.num_rows} points whose image has no sniffed size: {ids}")
+    kept = points.filter(inside)
+    return kept, points.num_rows - kept.num_rows
 
 
 def require_same_ids(found: Collection[Any], expected: Collection[Any], *, what: str) -> None:

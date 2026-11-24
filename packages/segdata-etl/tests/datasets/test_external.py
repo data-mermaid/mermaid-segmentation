@@ -191,6 +191,19 @@ def test_require_points_inside_refuses_a_point_past_an_edge(row: int, col: int) 
         external.require_points_inside(points, [IMAGE_7], SIZES)
 
 
+def test_drop_points_outside_keeps_in_bounds_points_in_order_and_counts_the_rest() -> None:
+    points = _points(("7", 2, 3, 1), ("7", 1, 4, 2), ("7", 0, 0, 3), ("7", 3, 1, 4), ("7", 1, 1, 5))
+    kept, dropped = external.drop_points_outside(points, [IMAGE_7], SIZES)
+    assert dropped == 2
+    assert kept.column("label_id").to_pylist() == [1, 3, 5]
+    assert kept.schema == points.schema
+
+
+def test_drop_points_outside_refuses_a_point_whose_image_has_no_size() -> None:
+    with pytest.raises(ValueError, match=r"no sniffed size.*'8'"):
+        external.drop_points_outside(_points(("7", 0, 0, 1), ("8", 0, 0, 1)), [IMAGE_7], SIZES)
+
+
 def test_require_known_labels_refuses_a_label_id_missing_from_labels() -> None:
     labels = external.build_labels(CLASSES, CURATED, ATTRIBUTES)
     external.require_known_labels(_points(("7", 0, 0, 5), ("7", 0, 0, 9)), labels)

@@ -306,23 +306,34 @@ def test_build_refuses_an_image_annotated_under_another_region(repo: Path, tmp_p
     assert not (store / DATASET_BUCKET / "images").exists()
 
 
-@pytest.mark.parametrize(
-    ("annotation", "message"),
-    [
-        (("ATL", "1002", 4, 0, "Water"), "points outside"),
-        (("ATL", "1002", 1, 1, "unlabeled"), "not in labels.parquet"),
-    ],
-    ids=["row-past-image-height", "unlabeled-point"],
-)
-def test_build_refuses_a_bad_point_before_copying_any_image(
-    repo: Path, tmp_path: Path, annotation: tuple[str, str, int, int, str], message: str
+def test_build_refuses_an_unlabeled_point_before_copying_any_image(
+    repo: Path, tmp_path: Path
 ) -> None:
     s3 = FakeS3()
-    _legacy(s3, [*ANNOTATIONS, annotation])
+    _legacy(s3, [*ANNOTATIONS, ("ATL", "1002", 1, 1, "unlabeled")])
     store = tmp_path / "store"
     taxonomy_sha = _publish_taxonomy(LocalStore(store), repo)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="not in labels.parquet"):
         catlin_seaview.run(_args(store, taxonomy_sha), s3)
 
     assert not (store / DATASET_BUCKET / "images").exists()
+
+
+def test_build_drops_a_point_past_the_right_edge_and_records_it(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    s3 = FakeS3()
+    # ATL/1002 is 6 wide, so col 6 is outside; label 12 would add a count row if it were kept.
+    _legacy(s3, [*ANNOTATIONS, ("ATL", "1002", 1, 6, "Water")])
+    store = tmp_path / "store"
+    taxonomy_sha = _publish_taxonomy(LocalStore(store), repo)
+
+    pin = _run(_args(store, taxonomy_sha), s3, capsys)
+
+    version = open_version(store, DATASET_BUCKET, pin)
+    assert version.manifest.stats.dropped == {"damaged_images": 2, "points_out_of_bounds": 1}
+    assert version.points is not None
+    assert version.points.num_rows == len(ANNOTATIONS)
+    assert (1, 6) not in {(r["row"], r["col"]) for r in version.points.to_pylist()}
+    assert sum(r["n"] for r in version.label_counts.to_pylist()) == len(ANNOTATIONS)
