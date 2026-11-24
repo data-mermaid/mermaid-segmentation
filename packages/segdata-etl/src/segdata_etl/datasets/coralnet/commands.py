@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from ...common.cli_flags import _pin_flags, half_pin_error
-from ...common.store import add_store_argument
 
 _DEFAULT_OUTPUT_DIR = Path("outputs/coralnet-dataset")
 
@@ -29,19 +28,10 @@ def _stage(name: str) -> Callable[[argparse.Namespace], int]:
 def raw_flag_errors(args: argparse.Namespace) -> list[str]:
     """Problems with the ``raw`` flags; empty when they are right.
 
-    A directory ``--store`` needs ``--source-ids``, ``--store s3`` takes none, and the parent
-    pin's two flags come together.
+    The parent pin's two flags come together.
     """
-    errors: list[str] = []
-    on_s3 = str(args.store) == "s3"
-    if not on_s3 and args.source_ids is None:
-        errors.append("a directory --store needs --source-ids")
-    if on_s3 and args.source_ids is not None:
-        errors.append("--store s3 takes no --source-ids")
     pin_error = half_pin_error(args, "parent-")
-    if pin_error is not None:
-        errors.append(pin_error)
-    return errors
+    return [] if pin_error is None else [pin_error]
 
 
 def _run_raw(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -99,8 +89,7 @@ _LEGACY_SOURCE_IDS_HELP = (
     "Comma-separated source ids (default: every s<id>/ folder under the prefix)"
 )
 _RAW_SOURCE_IDS_HELP = (
-    "Comma-separated source ids to publish. Required with a directory --store; "
-    "refused with --store s3, which publishes every source in the build run"
+    "Comma-separated source ids to stage (default: every source in the build run)"
 )
 
 
@@ -146,13 +135,15 @@ def add_subcommands(sub: Any) -> None:
     p_all.set_defaults(func=_stage("all"))
 
     p_raw = stages.add_parser(
-        "raw", help="Publish a frozen build run as a coralnet-raw dataset version"
+        "raw", help="Stage a frozen build run as a coralnet-raw dataset version"
     )
-    add_store_argument(p_raw)
+    p_raw.add_argument(
+        "--stage-dir", type=Path, required=True, help="Local directory the version is staged in"
+    )
     p_raw.add_argument(
         "--build-run",
         default="20260623_nogit",
-        help="Build run under etl-outputs/coralnet/ to publish (default: %(default)s)",
+        help="Build run under etl-outputs/coralnet/ to stage (default: %(default)s)",
     )
     _add_source_ids_flag(p_raw, _RAW_SOURCE_IDS_HELP)
     _pin_flags(p_raw, "parent-", "the coralnet-raw parent to reuse", required=False)

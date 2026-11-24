@@ -1,9 +1,11 @@
-"""``segdata build coralnet raw``: publish a frozen CoralNet build as a ``coralnet-raw`` version.
+"""``segdata build coralnet raw``: stage a frozen CoralNet build as a ``coralnet-raw`` version.
 
 The build's annotations, images and id2name tables become the version's points, images and labels.
-Each kept original is copied server side into the segdata image store. A rerun skips keys the store
-already holds with the source's ETag, taking their CRC64NVME from a local checkpoint or a HEAD, and
-a parent pin carries forward the parent's objects for images whose source is unchanged.
+Each kept original is probed (HEAD, plus a full read for a multipart or CRC-less object) for the
+values its server-side copy will carry, and ``copies.jsonl`` plans that copy for ``segdata
+promote``; nothing is written to S3. Width and height come from the build run. Probed rows are
+checkpointed under the stage dir so a rerun probes only the rest, and a parent pin carries forward
+the parent's rows whose listed source ETag is unchanged.
 """
 
 from __future__ import annotations
@@ -15,7 +17,8 @@ import logging
 import math
 import os
 import shlex
-from collections.abc import Sequence
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,22 +31,28 @@ import pyarrow.parquet as pq
 from coralnet_scraper.config import get_bucket, get_prefix, validate_workers
 from coralnet_scraper.s3_io import object_key_image_list_csv
 from segdata_etl.common.cli_flags import pin_command_parts
-from segdata_etl.common.copy import CopyItem, copy_images
-from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
-from segdata_etl.common.publishing import (
-    checked_git_state,
-    count_labels,
-    image_prefix,
-    image_store,
-    pick_version,
+from segdata_etl.common.copy_plan import (
+    ImageOutcome,
+    ObjectFacts,
+    copy_plan,
+    needs_full_read,
+    read_full,
+    write_copies,
 )
-from segdata_etl.common.s3_objects import EXTENSIONS, sniff_media_type
-from segdata_etl.common.store import DEFAULT_STORE, open_store
-from segdata_etl.common.version import utc_today
+from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
+from segdata_etl.common.publishing import count_labels, image_prefix, image_store
+from segdata_etl.common.s3_objects import (
+    EXTENSIONS,
+    crc64nvme_b64,
+    head_with_checksum,
+    md5_hex,
+    sniff_media_type,
+)
+from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
 from segdata_etl.taxonomy import find_repo_root
-from segdata_spec.errors import ObjectExists
+from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import ParentRef, SourceInfo
-from segdata_spec.publish import fetch_parent_tables, publish_dataset
+from segdata_spec.publish import fetch_parent_tables, probe_git, publish_dataset
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 
 from .annotations import _IMAGE_LIST_NAME, _derive_image_id
@@ -59,16 +68,27 @@ _IMAGE_FAMILY = "coralnet"
 IMAGE_PREFIX = image_prefix(_IMAGE_FAMILY)
 STORAGE_CLASS = "INTELLIGENT_TIERING"
 ANNOTATOR = "default"
+# Hex digits of the commit sha in a checkpoint name, as in a version name.
+_SHA_LENGTH = 7
 # CoralNet label 2474 is named the literal string "None", which pandas read as NaN into id2name.
 _NONE_NAMED_LABEL = "2474"
-# Copies per batch, the unit of progress between checkpoint writes.
+# Probes per batch, the unit of progress between checkpoint writes.
 _CHECKPOINT_BATCH = 1000
-# Batches per checkpoint write: a crash loses at most this many batches of finished copies.
+# Batches per checkpoint write: a crash loses at most this many batches of finished probes.
 _CHECKPOINT_EVERY = 20
 # Bytes read to recognise a PNG signature, the longer of the two supported magic numbers.
 _SNIFF_BYTES = 8
-_COPIED = ["etag", "size", "crc64nvme"]
-_CHECKPOINT_COLUMNS = ["dest_key", "source_fingerprint", *_COPIED]
+_SOURCE_MISSING = "source_missing"
+_UNSUPPORTED = "unsupported_format"
+_OBJECT_COLUMNS = [
+    "image_id",
+    "key",
+    "media_type",
+    "etag",
+    "size",
+    "crc64nvme",
+    "source_fingerprint",
+]
 
 
 @dataclass(frozen=True)
@@ -156,43 +176,16 @@ def _source_names(image_list: pd.DataFrame) -> pd.DataFrame:
 def _attach_sources(
     kept: pd.DataFrame, fingerprints: dict[str, str], names: pd.DataFrame
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Add each image's source ETag and name; return the rows and the ids with no source object."""
+    """Add each image's unquoted source ETag and name; return the rows and the ids with no source."""
     rows = kept.assign(source_fingerprint=kept["s3_key"].map(fingerprints))
     missing = rows["source_fingerprint"].isna()
     rows = rows[~missing].merge(names, on="image_id", how="left")
+    rows["source_fingerprint"] = rows["source_fingerprint"].str.strip('"')
     return rows, sorted(kept["image_id"][missing].tolist())
 
 
 def _image_key(source_id: int, image_id: str, media_type: str) -> str:
     return f"s{source_id}/{image_id}.{EXTENSIONS[media_type]}"
-
-
-def _carry_forward(rows: pd.DataFrame, parent: pa.Table | None) -> pd.DataFrame:
-    """Take the parent's key, media type and object fields for rows whose source is unchanged.
-
-    Rows the parent lacks get null in those fields.
-    """
-    columns = ["image_id", "source_fingerprint", "key", "media_type", *_COPIED]
-    if parent is None:
-        parent_rows = pd.DataFrame({name: pd.Series(dtype=object) for name in columns})
-    else:
-        parent_rows = parent.select(columns).to_pandas()
-    return rows.merge(parent_rows, on=["image_id", "source_fingerprint"], how="left")
-
-
-def _fill_copied(rows: pd.DataFrame, done: pd.DataFrame) -> pd.DataFrame:
-    """Fill the object fields of rows not yet filled from ``done``, matched by key and source."""
-    match = rows.merge(
-        done[_CHECKPOINT_COLUMNS],
-        left_on=[IMAGE_PREFIX + rows["key"], "source_fingerprint"],
-        right_on=["dest_key", "source_fingerprint"],
-        how="left",
-        suffixes=("", "_done"),
-    )
-    open_rows = match["etag"].isna()
-    for column in _COPIED:
-        match[column] = match[column].astype(object).where(~open_rows, match[f"{column}_done"])
-    return match.drop(columns=[f"{c}_done" for c in _COPIED] + ["dest_key"])
 
 
 def _images_table(rows: pd.DataFrame) -> pa.Table:
@@ -300,30 +293,6 @@ def _gather_sources(
     return etags, names, unlisted
 
 
-def _media_type(client: Any, bucket: str, key: str, header_status: str) -> str | None:
-    """JPEG for a header the JPEG parser read; otherwise sniffed from the first bytes.
-
-    None when the sniffed bytes are neither JPEG nor PNG.
-    """
-    if header_status == "ok":
-        return "image/jpeg"
-    response = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{_SNIFF_BYTES - 1}")
-    return sniff_media_type(response["Body"].read())
-
-
-def _fill_media_types(client: Any, bucket: str, rows: pd.DataFrame, workers: int) -> pd.Series:
-    """Each row's media type: the carried one, else from its header status or a sniff."""
-    open_rows = rows[rows["media_type"].isna()]
-    pairs = zip(open_rows["s3_key"], open_rows["header_status"], strict=True)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        found = list(
-            pool.map(lambda pair: _media_type(client, bucket, pair[0], str(pair[1])), pairs)
-        )
-    media = rows["media_type"].astype(object)
-    media[open_rows.index] = pd.Series(found, index=open_rows.index, dtype=object)
-    return media
-
-
 def _count_unnamed(rows: pd.DataFrame, unlisted: list[int]) -> int:
     """Count the rows with no source name, logging those whose source has an image_list."""
     unnamed = rows["source_name"].isna()
@@ -339,262 +308,213 @@ def _count_unnamed(rows: pd.DataFrame, unlisted: list[int]) -> int:
 
 def _read_checkpoint(path: Path) -> pd.DataFrame:
     if not path.is_file():
-        return pd.DataFrame({name: pd.Series(dtype=object) for name in _CHECKPOINT_COLUMNS})
-    return pd.read_parquet(path, columns=_CHECKPOINT_COLUMNS)
+        return pd.DataFrame({name: pd.Series(dtype=object) for name in _OBJECT_COLUMNS})
+    return pd.read_parquet(path, columns=_OBJECT_COLUMNS)
 
 
-def _write_checkpoint(path: Path, finished: pd.DataFrame) -> None:
+def _write_checkpoint(path: Path, probed: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    latest = finished.drop_duplicates("dest_key", keep="last")
-    latest[_CHECKPOINT_COLUMNS].to_parquet(tmp, index=False)
+    latest = probed.drop_duplicates("image_id", keep="last")
+    latest[_OBJECT_COLUMNS].to_parquet(tmp, index=False)
     os.replace(tmp, path)
 
 
-def _list_dest_objects(client: Any, bucket: str) -> pd.DataFrame:
-    """Return the ``dest_key``, ``etag`` and ``size`` of every object under ``IMAGE_PREFIX``."""
-    entries: list[tuple[str, str, int]] = []
-    paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=IMAGE_PREFIX):
-        entries += [(e["Key"], e["ETag"], e["Size"]) for e in page.get("Contents", [])]
-    return pd.DataFrame(entries, columns=["dest_key", "etag", "size"])
+def _split_known(rows: pd.DataFrame, known: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return the known rows matching a row's image id and source fingerprint, and the rest.
 
-
-def _match_held(rows: pd.DataFrame, held: pd.DataFrame, checkpoint: pd.DataFrame) -> pd.DataFrame:
-    """Fill the object fields of unfilled rows whose key ``held`` lists with a known object.
-
-    A held key is known when its ETag is the row's source fingerprint, or when a checkpoint row
-    with the same key and source fingerprint recorded that ETag; the CRC comes from that
-    checkpoint row and stays null without one. A copy rewrites a multipart original as one part,
-    so a held key with another ETag and a multipart fingerprint stays unfilled for the copy's
-    content check.
-
-    Raises:
-        ObjectExists: A listed key's ETag differs from its row's single-part source fingerprint.
+    Of two known rows for one image id, the later wins.
     """
-    unfilled = rows["etag"].isna().to_numpy()
-    listed = held.rename(columns={"etag": "held_etag", "size": "held_size"})
-    keys = ["dest_key", "source_fingerprint", "held_etag"]
-    recorded = checkpoint.rename(columns={"etag": "held_etag", "crc64nvme": "checkpoint_crc"})
-    recorded = (
-        recorded[[*keys, "checkpoint_crc"]]
-        .drop_duplicates(keys, keep="last")
-        .assign(checkpointed=True)
+    pairs = list(zip(rows["image_id"].astype(str), rows["source_fingerprint"], strict=True))
+    held = set(zip(known["image_id"].astype(str), known["source_fingerprint"], strict=True))
+    wanted = set(pairs)
+    known_pairs = zip(known["image_id"].astype(str), known["source_fingerprint"], strict=True)
+    reused = known[[pair in wanted for pair in known_pairs]]
+    pending = rows[[pair not in held for pair in pairs]]
+    return reused.drop_duplicates("image_id", keep="last"), pending
+
+
+def _object_row(
+    source_id: int, image_id: str, facts: ObjectFacts, media_type: str
+) -> dict[str, Any]:
+    return {
+        "image_id": image_id,
+        "key": _image_key(source_id, image_id, media_type),
+        "media_type": media_type,
+        "etag": facts.etag,
+        "size": facts.size,
+        "crc64nvme": facts.crc64nvme,
+        "source_fingerprint": facts.source_etag,
+    }
+
+
+def _media_type(
+    client: Any, bucket: str, key: str, header_status: str, head: Mapping[str, Any]
+) -> str | None:
+    """JPEG for a header the JPEG parser read; otherwise sniffed from the first bytes.
+
+    None when the sniffed bytes are neither JPEG nor PNG.
+    """
+    if header_status == "ok":
+        return "image/jpeg"
+    if head["ContentLength"] == 0:
+        return None  # S3 answers a ranged GET on an empty object with 416
+    response = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{_SNIFF_BYTES - 1}")
+    return sniff_media_type(response["Body"].read())
+
+
+def _object_facts(client: Any, bucket: str, key: str, head: Mapping[str, Any]) -> ObjectFacts:
+    """The values the copy will carry: the HEAD's, or a whole read's for a multipart or CRC-less object.
+
+    The whole read needs no parseable image header; width and height come from the build run.
+    """
+    source_etag = head["ETag"].strip('"')
+    if needs_full_read(head):
+        data = read_full(client, bucket, key, head["ETag"])
+        return ObjectFacts(md5_hex(data), len(data), crc64nvme_b64(data), source_etag)
+    return ObjectFacts(source_etag, head["ContentLength"], head["ChecksumCRC64NVME"], source_etag)
+
+
+def _probe_one(client: Any, bucket: str, image: Mapping[str, Any]) -> ImageOutcome:
+    """Probe one original; a drop is ``source_missing`` or ``unsupported_format``."""
+    image_id, key = str(image["image_id"]), str(image["s3_key"])
+    head = head_with_checksum(client, bucket, key)
+    if head is None:
+        return ImageOutcome(image_id, dropped=_SOURCE_MISSING)
+    media_type = _media_type(client, bucket, key, str(image["header_status"]), head)
+    if media_type is None:
+        return ImageOutcome(image_id, dropped=_UNSUPPORTED)
+    facts = _object_facts(client, bucket, key, head)
+    return ImageOutcome(
+        image_id, row=_object_row(int(image["source_id"]), image_id, facts, media_type)
     )
-    merged = (
-        rows.assign(dest_key=IMAGE_PREFIX + rows["key"])
-        .merge(listed, on="dest_key", how="left")
-        .merge(recorded, on=keys, how="left")
-    )
-    present = unfilled & merged["held_etag"].notna().to_numpy()
-    same = (merged["held_etag"] == merged["source_fingerprint"]).to_numpy()
-    known = present & (same | merged["checkpointed"].notna().to_numpy())
-    multipart = merged["source_fingerprint"].astype(str).str.contains("-", regex=False).to_numpy()
-    foreign = present & ~known & ~multipart
-    if foreign.any():
-        held_keys = sorted(merged["dest_key"][foreign])
-        raise ObjectExists(
-            f"{len(held_keys)} destination keys hold other objects: {held_keys[:10]}"
-        )
-    for column, source in (("etag", "held_etag"), ("size", "held_size")):
-        merged[column] = merged[column].astype(object).where(~known, merged[source])
-    merged["crc64nvme"] = merged["crc64nvme"].astype(object).where(~known, merged["checkpoint_crc"])
-    return merged.drop(
-        columns=["dest_key", "held_etag", "held_size", "checkpoint_crc", "checkpointed"]
-    )
 
 
-def _head_crcs(client: Any, bucket: str, keys: list[str], workers: int) -> list[str | None]:
-    """Return each key's CRC64NVME from a HEAD with checksum mode enabled."""
-
-    def head(key: str) -> str | None:
-        response = client.head_object(Bucket=bucket, Key=key, ChecksumMode="ENABLED")
-        return response.get("ChecksumCRC64NVME")
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(head, keys))
+def _kept_frame(outcomes: Sequence[ImageOutcome]) -> pd.DataFrame:
+    rows = [{c: o.row[c] for c in _OBJECT_COLUMNS} for o in outcomes if o.row is not None]
+    return pd.DataFrame(rows, columns=_OBJECT_COLUMNS)
 
 
-def _resolve_held(
-    store_client: Any,
-    rows: pd.DataFrame,
-    checkpoint: pd.DataFrame,
-    *,
-    dest_bucket: str,
-    workers: int,
-) -> pd.DataFrame:
-    """Fill the rows the destination already holds, reading CRCs the checkpoint lacks by HEAD."""
-    matched = _match_held(rows, _list_dest_objects(store_client, dest_bucket), checkpoint)
-    no_crc = (
-        rows["etag"].isna().to_numpy()
-        & matched["etag"].notna().to_numpy()
-        & matched["crc64nvme"].isna().to_numpy()
-    )
-    keys = (IMAGE_PREFIX + matched["key"][no_crc]).tolist()
-    matched.loc[no_crc, "crc64nvme"] = pd.Series(
-        _head_crcs(store_client, dest_bucket, keys, workers),
-        index=matched.index[no_crc],
-        dtype=object,
-    )
-    return matched
-
-
-def _copy_pending(
-    store_client: Any,
-    source_client: Any,
+def _probe_pending(
+    client: Any,
+    bucket: str,
     pending: pd.DataFrame,
-    finished: pd.DataFrame,
+    done: pd.DataFrame,
     *,
-    source_bucket: str,
-    dest_bucket: str,
     workers: int,
     checkpoint: Path,
-) -> pd.DataFrame:
-    """Copy ``pending`` in batches; return the new copies.
+) -> list[ImageOutcome]:
+    """Probe ``pending`` in batches; return every outcome.
 
-    The checkpoint, ``finished`` plus the new copies, is written after every
+    The checkpoint, ``done`` plus the rows kept so far, is written after every
     ``_CHECKPOINT_EVERY``-th batch and once after the last batch, never twice for one state.
     """
-    copies = finished.iloc[0:0]
-    starts = range(0, len(pending), _CHECKPOINT_BATCH)
-    for number, start in enumerate(starts, 1):
-        batch = pending.iloc[start : start + _CHECKPOINT_BATCH]
-        items = [
-            CopyItem(source_bucket=source_bucket, source_key=s3_key, dest_key=IMAGE_PREFIX + key)
-            for s3_key, key in zip(batch["s3_key"], batch["key"], strict=True)
-        ]
-        copied = copy_images(
-            store_client,
-            items,
-            dest_bucket=dest_bucket,
-            workers=workers,
-            storage_class=STORAGE_CLASS,
-            source_client=source_client,
-        )
-        done = pd.DataFrame(
-            {
-                "dest_key": [item.dest_key for item in items],
-                "source_fingerprint": batch["source_fingerprint"].tolist(),
-                "etag": [copied[item.dest_key].etag for item in items],
-                "size": [copied[item.dest_key].size for item in items],
-                "crc64nvme": [copied[item.dest_key].crc64nvme for item in items],
-            }
-        )
-        copies = pd.concat([copies, done], ignore_index=True)
-        if number % _CHECKPOINT_EVERY == 0 or number == len(starts):
-            _write_checkpoint(checkpoint, pd.concat([finished, copies], ignore_index=True))
-        logger.info("copied %d of %d images", min(start + len(batch), len(pending)), len(pending))
-    return copies
+    images = pending[["image_id", "source_id", "s3_key", "header_status"]].to_dict("records")
+    outcomes: list[ImageOutcome] = []
+    starts = range(0, len(images), _CHECKPOINT_BATCH)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for number, start in enumerate(starts, 1):
+            batch = images[start : start + _CHECKPOINT_BATCH]
+            outcomes += pool.map(lambda image: _probe_one(client, bucket, image), batch)
+            if number % _CHECKPOINT_EVERY == 0 or number == len(starts):
+                kept = _kept_frame(outcomes)
+                _write_checkpoint(checkpoint, pd.concat([done, kept], ignore_index=True))
+            logger.info("probed %d of %d images", start + len(batch), len(images))
+    return outcomes
 
 
-def _drop_unsupported(rows: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """Drop the rows with no media type, logging their ids; return the rest and the count."""
-    unsupported = rows["media_type"].isna()
-    if unsupported.any():
-        logger.warning(
-            "%d originals are neither JPEG nor PNG; dropped image ids: %s",
-            int(unsupported.sum()),
-            sorted(rows["image_id"][unsupported].tolist()),
-        )
-    return rows[~unsupported].reset_index(drop=True), int(unsupported.sum())
+def _record_drops(outcomes: Sequence[ImageOutcome], dropped: dict[str, int]) -> None:
+    """Add the probe's drops to ``dropped`` by reason, logging the image ids of each reason."""
+    reasons = Counter(o.dropped for o in outcomes if o.dropped is not None)
+    for reason in (_SOURCE_MISSING, _UNSUPPORTED):
+        ids = sorted(o.image_id for o in outcomes if o.dropped == reason)
+        if ids:
+            logger.warning("%d images dropped as %s: %s", len(ids), reason, ids)
+        dropped[reason] = dropped.get(reason, 0) + reasons[reason]
 
 
-def _resolve_rows(
-    source_client: Any,
+def _known_rows(parent_images: pa.Table | None, done: pd.DataFrame) -> pd.DataFrame:
+    """The parent's object rows followed by the checkpoint's, which win for one image id."""
+    if parent_images is None:
+        return done
+    parent = parent_images.select(_OBJECT_COLUMNS).to_pandas()
+    return pd.concat([parent, done], ignore_index=True)
+
+
+def _select_rows(
+    client: Any,
     build: BuildTables,
     *,
     source_bucket: str,
     prefix: str,
     workers: int,
     csv_reader: CsvReader | None,
-    parent_images: pa.Table | None,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
-    """Return the kept image rows with source, media type and key, their points, and drops.
-
-    Rows the parent carries keep its key, media type and object fields.
-    """
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], list[int]]:
+    """Return the kept rows with source fingerprint and name, their points, drops and unlisted."""
     kept, points, dropped = _select_images(build)
     source_ids = sorted(int(sid) for sid in kept["source_id"].unique())
     etags, names, unlisted = _gather_sources(
-        source_client, source_bucket, prefix, source_ids, workers=workers, csv_reader=csv_reader
+        client, source_bucket, prefix, source_ids, workers=workers, csv_reader=csv_reader
     )
     rows, missing = _attach_sources(kept, etags, names)
     if missing:
         logger.warning(
             "%d source originals are missing; dropped image ids: %s", len(missing), missing
         )
-    dropped["source_missing"] = len(missing)
-    rows = _carry_forward(rows, parent_images)
-    rows["media_type"] = _fill_media_types(source_client, source_bucket, rows, workers)
-    rows, dropped["unsupported_format"] = _drop_unsupported(rows)
-    dropped["source_name_missing"] = _count_unnamed(rows, unlisted)
-    rows["key"] = [
-        _image_key(int(sid), str(image_id), media_type) if pd.isna(key) else key
-        for sid, image_id, media_type, key in zip(
-            rows["source_id"], rows["image_id"], rows["media_type"], rows["key"], strict=True
-        )
-    ]
-    return rows, points[points["image_id"].isin(rows["image_id"])], dropped
+    dropped[_SOURCE_MISSING] = len(missing)
+    return rows, points, dropped, unlisted
+
+
+def _with_objects(rows: pd.DataFrame, objects: pd.DataFrame) -> pd.DataFrame:
+    """Join each row to its object fields by image id; rows without them are dropped."""
+    keyed = rows.drop(columns=["source_fingerprint"]).assign(_id=rows["image_id"].astype(str))
+    found = objects.drop(columns=["image_id"]).assign(_id=objects["image_id"].astype(str))
+    return keyed.merge(found, on="_id", how="inner").drop(columns=["_id"])
 
 
 def build_raw(
-    source_client: Any,
-    store_client: Any,
+    client: Any,
     build: BuildTables,
     *,
     source_bucket: str,
     prefix: str,
-    dest_bucket: str,
     workers: int,
     checkpoint: Path,
     parent_images: pa.Table | None = None,
     csv_reader: CsvReader | None = None,
 ) -> RawTables:
-    """Copy the kept originals into ``dest_bucket`` and return the ``coralnet-raw`` tables.
+    """Probe the kept originals and return the ``coralnet-raw`` tables.
 
-    Rows of ``parent_images`` with the same image id and source fingerprint are reused. Keys the
-    destination already holds with the row's source ETag, or with the ETag the checkpoint recorded
-    for that source, are not copied again; the checkpoint supplies their CRC64NVME.
+    Checkpoint rows and ``parent_images`` rows whose image id and source fingerprint match the
+    source listing are reused without any request for that image.
 
     Raises:
         ValueError: A label name is not a string, or an image_list names an image twice.
-        segdata_spec.errors.ObjectExists: A destination key holds an object whose ETag is neither
-            the row's single-part source fingerprint nor its recorded copy, or holds other bytes
-            than a multipart source.
+        SourceChanged: An original was replaced between its HEAD and its read.
     """
-    rows, points, dropped = _resolve_rows(
-        source_client,
+    rows, points, dropped, unlisted = _select_rows(
+        client,
         build,
         source_bucket=source_bucket,
         prefix=prefix,
         workers=workers,
         csv_reader=csv_reader,
-        parent_images=parent_images,
     )
-    finished = _read_checkpoint(checkpoint)
-    rows = _resolve_held(
-        store_client,
-        rows,
-        finished,
-        dest_bucket=dest_bucket,
-        workers=workers,
-    )
-    pending = rows[rows["etag"].isna()]
-    logger.info(
-        "%d images to copy, %d already in the store", len(pending), len(rows) - len(pending)
-    )
-    copies = _copy_pending(
-        store_client,
-        source_client,
+    done = _read_checkpoint(checkpoint)
+    reused, pending = _split_known(rows, _known_rows(parent_images, done))
+    logger.info("%d images to probe, %d reused", len(pending), len(rows) - len(pending))
+    outcomes = _probe_pending(
+        client,
+        source_bucket,
         pending,
-        finished,
-        source_bucket=source_bucket,
-        dest_bucket=dest_bucket,
+        done,
         workers=workers,
         checkpoint=checkpoint,
     )
-    rows = _fill_copied(rows, copies)
-    point_table, counts = _points_and_counts(points)
+    _record_drops(outcomes, dropped)
+    rows = _with_objects(rows, pd.concat([reused, _kept_frame(outcomes)], ignore_index=True))
+    dropped["source_name_missing"] = _count_unnamed(rows, unlisted)
+    point_table, counts = _points_and_counts(points[points["image_id"].isin(rows["image_id"])])
     tables = {
         "images.parquet": _images_table(rows),
         "points.parquet": point_table,
@@ -649,15 +569,26 @@ def _parent_ref(args: argparse.Namespace) -> ParentRef | None:
     )
 
 
-def checkpoint_path(store: str | Path, build_run: str) -> Path:
-    """The copy checkpoint: inside a local store's directory, or under ``outputs/`` for S3."""
-    if str(store) == "s3":
-        return DEFAULT_STORE.parent / "coralnet-raw-checkpoints" / f"s3-{build_run}.parquet"
-    return Path(store) / "checkpoints" / f"{DATASET}-{build_run}.parquet"
+def checkpoint_path(stage_dir: Path, build_run: str, git_sha: str) -> Path:
+    """The probe checkpoint of one build run at one commit, beside the staged bucket tree."""
+    return stage_dir / "checkpoints" / f"{DATASET}-{build_run}-{git_sha[:_SHA_LENGTH]}.parquet"
+
+
+def _source_key(row: Mapping[str, Any]) -> str:
+    source_key: str = json.loads(row["attrs"])["source_key"]
+    return source_key
+
+
+def _copies(images: pa.Table, source_bucket: str) -> list[dict[str, Any]]:
+    """Plan each image's server-side copy from the scrape bucket into Intelligent-Tiering."""
+    plan = copy_plan(
+        images.to_pylist(), src_bucket=source_bucket, src_key=_source_key, dst_prefix=IMAGE_PREFIX
+    )
+    return [{**entry, "storage_class": STORAGE_CLASS} for entry in plan]
 
 
 def _command_line(args: argparse.Namespace) -> str:
-    parts = ["segdata", "build", "coralnet", "raw", "--store", str(args.store)]
+    parts = ["segdata", "build", "coralnet", "raw", "--stage-dir", str(args.stage_dir)]
     parts += ["--build-run", args.build_run]
     if args.source_ids is not None:
         parts += ["--source-ids", ",".join(str(sid) for sid in args.source_ids)]
@@ -676,38 +607,46 @@ def _pool_size(workers: int) -> int:
 
 
 def run_raw(args: argparse.Namespace) -> int:
-    """Publish a new ``coralnet-raw`` version and print its version and manifest sha256."""
+    """Stage a new ``coralnet-raw`` version and its copy plan; print its version and sha256.
+
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed, or ``uv.lock`` is missing.
+        ValueError: ``MERMAID_CORALNET_BUCKET`` is unset.
+        PinMismatch: The staged parent's manifest differs from its pin.
+        SourceChanged: An original was replaced between its HEAD and its read.
+    """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
-    git = checked_git_state(repo_root)
+    git = probe_git(repo_root)
+    refuse_unpublishable(git)
     parent = _parent_ref(args)
     workers = _workers(args.workers)
     source_bucket, prefix = _source_bucket(), get_prefix()
-    source_client = make_s3_client(max_pool_connections=_pool_size(workers))
-    build = read_build(source_client, source_bucket, args.build_run, args.source_ids)
-    client, bucket = open_store(args.store, source_client=source_client)
+    client = make_s3_client(max_pool_connections=_pool_size(workers))
+    build = read_build(client, source_bucket, args.build_run, args.source_ids)
+    stage = LocalDirS3(args.stage_dir)
     parent_images = (
-        None if parent is None else fetch_parent_tables(client, bucket, parent)["images.parquet"]
+        None
+        if parent is None
+        else fetch_parent_tables(stage, DATASET_BUCKET, parent)["images.parquet"]
     )
     result = build_raw(
-        source_client,
         client,
         build,
         source_bucket=source_bucket,
         prefix=prefix,
-        dest_bucket=bucket,
         workers=workers,
-        checkpoint=checkpoint_path(args.store, args.build_run),
+        checkpoint=checkpoint_path(args.stage_dir, args.build_run, git.sha),
         parent_images=parent_images,
     )
-    version = pick_version(client, bucket, DATASET, git_sha=git.sha, today=utc_today())
+    version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
     manifest, sha = publish_dataset(
-        client,
-        bucket=bucket,
+        stage,
+        bucket=DATASET_BUCKET,
         dataset=DATASET,
         version=version,
         kind="points",
         tables=result.tables,
-        image_store=image_store(bucket, _IMAGE_FAMILY),
+        image_store=image_store(DATASET_BUCKET, _IMAGE_FAMILY),
         etl_package="segdata-etl",
         etl_command=_command_line(args),
         source=SourceInfo(
@@ -718,6 +657,15 @@ def run_raw(args: argparse.Namespace) -> int:
         repo_dir=repo_root,
         git=git,
     )
-    logger.info("published %s %s; dropped %s", DATASET, manifest.version, result.dropped)
+    plan = _copies(result.tables["images.parquet"], source_bucket)
+    write_copies(args.stage_dir, DATASET, version, plan)
+    logger.info(
+        "staged %s %s: %d images, %d copies; dropped %s",
+        DATASET,
+        manifest.version,
+        manifest.stats.n_images,
+        len(plan),
+        result.dropped,
+    )
     print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0
