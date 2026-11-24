@@ -280,6 +280,8 @@ Each dataset:
 
 `mermaid` is a points dataset. Its labels are the BA+GF pairs, numbered from 1 and named `BA::GF`. The trailing `::` stays when there is no growth form. The plan file `copies.jsonl` lists one server-side copy per image, from `coral-reef-training` to `mermaid-ic-datasets`. The build stages no image bytes.
 
+With `--parent-version`, a pair keeps the `label_id` it has in the parent's `labels.parquet`, matched on benthic attribute id and growth-form name, and a new pair is numbered from the parent's highest id plus 1. Ids are stable against the direct parent only: a pair with no points in a version leaves that version's `labels.parquet`, so a later version can reuse its id for a different pair. The match uses the growth-form name, so renaming a growth form in MERMAID gives its pairs new ids.
+
 `coralscapes_v2` and `ucsd_mosaics` are dense datasets. The build stages each image and mask byte for byte under `<stage>/mermaid-ic-datasets/images/<dataset>/`, and `uploads.jsonl` lists each staged file. Their labels map to MERMAID benthic attributes through the curated CSVs in `segdata_etl/label_maps/curated/` (`coralscapes_v2.csv`, `ucsd_mosaics.csv`; columns `label_id`, `name`, `mermaid_benthic_attribute`).
 
 The build fails when no file in the pinned revision matches the shard pattern. It also fails when a `.parquet` under the shard directory does not match the pattern. The shard directory is `instances/` for `coralscapes_v2` and `data/` for `ucsd_mosaics`.
