@@ -8,8 +8,16 @@ from __future__ import annotations
 
 import pandas as pd
 import pyarrow as pa
+import pytest
 
-from segdata_etl.datasets.coralnet.curate.overrides import OverrideStats, apply_overrides
+from segdata_etl.datasets.coralnet.curate.overrides import (
+    OverrideStats,
+    _invert,
+    apply_overrides,
+)
+from segdata_etl.datasets.coralnet.curate.overrides import (
+    _forward as forward_coord,
+)
 from segdata_spec.resize import ResizeSpec, scale_points
 
 IMG = "1924169"
@@ -151,3 +159,56 @@ def test_override_image_ids_are_compared_as_strings() -> None:
     overrides["image_id"] = overrides["image_id"].astype("int64")
     out, _ = apply_overrides(_points((IMG, 1, 1, 1)), images, overrides)
     assert _tuples(out) == [(IMG, 3, 4, 6)]
+
+
+def test_image_exactly_at_the_load_edge_is_copied_unchanged() -> None:
+    images = _images(("edge", 2048, 1500))
+    out, stats = apply_overrides(
+        _points(("edge", 1, 1, 1)), images, _overrides(("edge", 1000, 1000, 4))
+    )
+    assert _tuples(out) == [("edge", 1000, 1000, 4)]
+    assert (stats.points_unscaled, stats.points_inverted, stats.points_exact) == (1, 0, 0)
+
+
+def test_image_one_pixel_over_the_load_edge_is_inverted() -> None:
+    # 2049 x 1500 scales by 2048 / 2049: rows 1500 -> 1499 (factor 1499/1500). floor(1000 * 1499/1500)
+    # = 999 misses 1000, and floor(1001 * 1499/1500) = 1000, so the smallest original row is 1001.
+    # Columns land on 1001 for the same reason (1000 floors to 999 at factor ~0.9995).
+    images = _images(("over", 2049, 1500))
+    out, stats = apply_overrides(
+        _points(("over", 1, 1, 1)), images, _overrides(("over", 1000, 1000, 4))
+    )
+    assert _tuples(out) == [("over", 1001, 1001, 4)]
+    assert (stats.points_unscaled, stats.points_inverted) == (0, 1)
+
+
+@pytest.mark.parametrize(
+    ("resized", "original"),
+    [
+        # 4096 x 1024 scales by 0.5 exactly (2048 x 512), so the smallest original is 2 * resized.
+        ((0, 0), (0, 0)),
+        ((100, 301), (200, 602)),
+        ((511, 2047), (1022, 4094)),
+    ],
+)
+def test_wide_image_inverts_to_exact_original_coordinates(
+    resized: tuple[int, int], original: tuple[int, int]
+) -> None:
+    images = _images(("wide", 4096, 1024))
+    out, _ = apply_overrides(
+        _points(("wide", 5, 5, 1)), images, _overrides(("wide", resized[0], resized[1], 4))
+    )
+    assert _tuples(out) == [("wide", original[0], original[1], 4)]
+
+
+@pytest.mark.parametrize(
+    ("orig", "new"), [(4096, 2048), (3000, 2048), (2049, 2048), (1500, 1096), (3469, 2038)]
+)
+def test_invert_is_the_smallest_original_that_scales_forward_to_each_resized_coordinate(
+    orig: int, new: int
+) -> None:
+    for x in range(new):
+        c = _invert(x, orig, new)
+        assert forward_coord(c, orig, new) == x
+        if c > 0:
+            assert forward_coord(c - 1, orig, new) < x
