@@ -61,11 +61,12 @@ A new data source adds an ETL module that publishes a version. `mermaidseg` does
 1. Write the ETL module in `packages/segdata-etl/src/segdata_etl/datasets/`, on the pattern of an existing module of the same kind: `catlin_seaview.py` (points), `benthos_yuval.py` or `ucsd_mosaics.py` (masks).
 2. Map its labels to the MERMAID taxonomy. External datasets use a curated CSV in `packages/segdata-etl/src/segdata_etl/label_maps/curated/<name>.csv`. The mapping goes into the published version's `labels.parquet`.
 3. Register the module in `packages/segdata-etl/src/segdata_etl/cli.py` so that `segdata build <name>` runs it.
-4. Stage, check and publish the version. Commit and push first, because staging refuses a dirty or unpushed tree. The commands are in the [segdata-etl README](../../packages/segdata-etl/README.md). Record the `version` and `manifest_sha256` that each command prints.
-5. Add the dataset to `configs/data_config.yaml` with that pin and a `train`, `val` or `test` block that selects its groups.
-6. Add a row for each label to `configs/class_to_concepts.csv`, with the dataset in `source_dataset_source` and the label in `source_label_class_name`.
-7. [Regenerate the derived configs](derived-configs.md).
-8. Sync the cache. See [Get the data](#get-the-data).
+4. If the taxonomy pin that the dataset maps to is not yet published, stage it with `segdata taxonomy --stage-dir <stage>` and publish it with `segdata promote --stage-dir <stage> --taxonomy mermaid-benthic --version <tax>`. Dataset builds refuse a pin that is only staged. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
+5. Stage, check and publish the version. Commit and push first, because staging refuses a dirty or unpushed tree. The commands are in the [segdata-etl README](../../packages/segdata-etl/README.md). Record the `version` and `manifest_sha256` that each command prints.
+6. Add the dataset to `configs/data_config.yaml` with that pin and a `train`, `val` or `test` block that selects its groups.
+7. Add a row for each label to `configs/class_to_concepts.csv`, with the dataset in `source_dataset_source` and the label in `source_label_class_name`.
+8. [Regenerate the derived configs](derived-configs.md).
+9. Sync the cache. See [Get the data](#get-the-data).
 
 ## Update the MERMAID data
 

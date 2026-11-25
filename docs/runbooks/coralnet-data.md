@@ -4,7 +4,7 @@ This runbook takes you from an empty bucket, or an older scrape, to published Co
 
 1. `coralnet-scraper` downloads the public CoralNet sources to S3.
 2. `segdata build coralnet` builds the annotations table, the images table and the label names from that scrape.
-3. `segdata build coralnet raw`, `segdata taxonomy`, `segdata curate coralnet` and `segdata promote` publish the `coralnet-raw` dataset version, a `mermaid-benthic` taxonomy version and the `coralnet` dataset version.
+3. `segdata build coralnet raw`, `segdata taxonomy` and `segdata curate coralnet` stage the `coralnet-raw` dataset version, a `mermaid-benthic` taxonomy version and the `coralnet` dataset version. `segdata promote` publishes each staged version (with `--taxonomy` for the taxonomy).
 
 The package READMEs are the reference for flags, environment variables, exclusion kinds and exit codes; this page gives the order and links to them.
 
