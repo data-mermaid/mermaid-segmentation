@@ -240,6 +240,39 @@ def _check_carried_sizes(
         )
 
 
+def _check_carried_points(
+    points: pd.DataFrame, parent_images: pa.Table | None, carried: list[str]
+) -> None:
+    """Refuse a carried id with a build point outside the parent row's image.
+
+    A point is outside when its 0-based ``row`` or ``col`` is negative or at or past the height
+    or width.
+
+    Raises:
+        ValueError: At least one carried id has such a point; the first 10 are named.
+    """
+    if parent_images is None or not carried:
+        return
+    size = {
+        row["image_id"]: (row["width"], row["height"])
+        for row in parent_images.select(["image_id", "width", "height"]).to_pylist()
+    }
+    ids = points["image_id"].astype(str)
+    mask = ids.isin(carried)
+    kept = points[mask]
+    outside = sorted(
+        {
+            image_id
+            for image_id, row, col in zip(ids[mask], kept["row"], kept["col"], strict=True)
+            if not (0 <= row < size[image_id][1] and 0 <= col < size[image_id][0])
+        }
+    )
+    if outside:
+        raise ValueError(
+            f"{len(outside)} carried images have points outside the parent's size: {outside[:10]}"
+        )
+
+
 def _image_key(source_id: int, image_id: str, media_type: str) -> str:
     return f"s{source_id}/{image_id}.{EXTENSIONS[media_type]}"
 
@@ -514,7 +547,8 @@ def _select_rows(
     counted neither as ``no_dimensions`` nor as ``source_missing``.
 
     Raises:
-        ValueError: A carried image's build size differs from the parent's.
+        ValueError: A carried image's build size differs from the parent's, or a not_found carried
+            image has a point outside the parent's size.
     """
     held = _parent_ids(parent_images)
     kept, points, dropped, lost = _select_images(build, held)
@@ -525,6 +559,7 @@ def _select_rows(
     rows, absent = _attach_sources(kept, etags, names)
     listed_out, missing = _split_carried(absent, held)
     _check_carried_sizes(kept, parent_images, listed_out)
+    _check_carried_points(points, parent_images, lost)
     carried = sorted([*lost, *listed_out])
     if missing:
         logger.warning(
@@ -575,7 +610,8 @@ def build_raw(
 
     Raises:
         ValueError: A label name is not a string, an image_list names an image twice, or a carried
-            image's build size differs from the parent's.
+            image's build size differs from the parent's or a not_found carried image has a point
+            outside the parent's size.
         SourceChanged: An original was replaced between its HEAD and its read.
     """
     rows, points, dropped, unlisted, carried = _select_rows(
