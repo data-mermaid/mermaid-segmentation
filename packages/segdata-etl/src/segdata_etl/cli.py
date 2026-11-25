@@ -1,4 +1,4 @@
-"""``segdata`` console script: ``build``, ``ingest``, ``taxonomy``, ``split``, ``curate`` and ``promote``."""
+"""``segdata`` console script: ``build``, ``ingest``, ``taxonomy``, ``split``, ``curate``, ``promote`` and ``features``."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from botocore.config import Config
 
 from segdata_spec import DATASET_BUCKET
 
+from . import features, taxonomy
 from . import promote as promote_module
-from . import taxonomy
 from .common.cli_flags import _pin_flags
 from .common.stage import DEFAULT_CACHE_DIR
 from .datasets import benthos_yuval as benthos_yuval_build
@@ -222,6 +222,16 @@ def _add_promote_subcommand(top: Any) -> None:
     promote.set_defaults(run=_run_promote)
 
 
+def _add_features_subcommand(top: Any) -> None:
+    parser = top.add_parser("features", help="Attach feature sets to published dataset versions")
+    features_sub = parser.add_subparsers(dest="command", required=True)
+    attach = features_sub.add_parser(
+        "attach", help="Copy existing feature vectors into a published version as a feature set"
+    )
+    features.add_arguments(attach)
+    attach.set_defaults(run=features.run)
+
+
 def _run_promote(args: argparse.Namespace, client: Any) -> int:
     promote_module.promote(
         client,
@@ -237,7 +247,7 @@ def build_parser(
     modules: Sequence[ModuleType] = DATASET_MODULES,
     uniform_modules: Sequence[ModuleType] = UNIFORM_MODULES,
 ) -> argparse.ArgumentParser:
-    """Build the top-level parser: ``build``, one ``ingest`` entry per dataset, ``taxonomy``, ``split``, ``curate`` and ``promote``."""
+    """Build the top-level parser: ``build``, one ``ingest`` entry per dataset, ``taxonomy``, ``split``, ``curate``, ``promote`` and ``features``."""
     parser = argparse.ArgumentParser(prog="segdata", description=__doc__)
     top = parser.add_subparsers(dest="action", required=True)
     build = top.add_parser("build", help="Build and publish a dataset")
@@ -260,6 +270,7 @@ def build_parser(
     _add_taxonomy_subcommand(top)
     _add_curate_subcommand(top)
     _add_promote_subcommand(top)
+    _add_features_subcommand(top)
     return parser
 
 
