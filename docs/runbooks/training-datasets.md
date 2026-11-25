@@ -15,7 +15,7 @@ CoralNet has its own runbook: [Recreate and update the CoralNet data](coralnet-d
 ## How a dataset reaches training
 
 1. An ETL module in `packages/segdata-etl` stages a dataset version and `segdata promote` publishes it to the `mermaid-ic-datasets` bucket. The version has a manifest, parquet tables (`images`, `labels`, `points` for point datasets, `stats/label_counts`) and the image files. Each label is mapped to a MERMAID benthic attribute and growth form in `labels.parquet`. The [segdata-spec README](../../packages/segdata-spec/README.md) defines the layout.
-2. The data config pins the version by `version` and `manifest_sha256`. It also pins the taxonomy snapshot that the label roll-up uses, and selects the groups of each split.
+2. The data config pins the version by `version` and `manifest_sha256`. It also pins the taxonomy snapshot that the label roll-up uses (`segdata taxonomy` stages it and `segdata promote --taxonomy` publishes it), and selects the groups of each split.
 3. `scripts/sync_data.py` downloads each pinned version into the cache and verifies it. For CoralNet it also resizes each image to 2048 px on its longest edge.
 4. The readers in `mermaidseg/data/` open the cache: `PointDataset` for point datasets and `DenseDataset` for mask datasets.
 

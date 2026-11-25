@@ -4,7 +4,7 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 
 ## Scope
 
-- **Owns:** the `manifest.json` and parquet table schemas, the S3 key layout, the local cache layout, publishing a version, syncing pinned versions and their image files into the cache (resizing them there when given a resize spec), opening synced versions, the benthic-attribute `roll_up`, and the split-file format with its coverage check.
+- **Owns:** the `manifest.json` and parquet table schemas, the S3 key layout, the local cache layout, staging a version as local files, syncing pinned versions and their image files into the cache (resizing them there when given a resize spec), opening synced versions, the benthic-attribute `roll_up`, and the split-file format with its coverage check.
 - **Does not own:** extracting or converting source data, choosing versions or pins, choosing the train/val/test split (the package reads and checks a split file; the split is built elsewhere), or publishing and owning the original image files. The ETL puts the originals in S3; the manifest's `image_store` names the bucket and prefix.
 - **Boundary:** the package does not import `mermaidseg`, `coralnet_scraper` or `segdata_etl`, and `mermaidseg/inference` does not import it. The root `tests/test_package_boundaries.py` enforces this. `mermaidseg` imports it (`mermaidseg/data/`).
 
@@ -12,14 +12,16 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 
 | Caller | Calls |
 |---|---|
-| ETL | `publish.publish_dataset` and `publish.publish_taxonomy`. Each returns the manifest and its sha256, which becomes a `manifest.Pin`. |
+| ETL | `stage.stage_dataset` and `stage.stage_taxonomy`, which write a version to a local stage directory. Each returns the manifest and its sha256, which becomes a `manifest.Pin`. `segdata promote` in `segdata-etl` uploads a staged version; nothing in this package writes to S3. Also `stage.read_parent_tables`, `git.probe_git` and `git.refuse_unpublishable`. |
 | Trainer | `sync.sync(client, pins, cache_dir, bucket=..., resize=..., max_workers=...)`, which needs S3 access; `sync.check_published_manifest(client, bucket, pin, taxonomy=...)`, which reads the manifest without caching it; then `read.open_version(..., resize=...)` and `read.open_taxonomy`, which read only the cache. Also `resize` (`ResizeSpec`, `scaled_size`, `resize_image`, `resize_mask`, `scale_points`, `scale_images`). `scale_images` returns the images table with the resized `width` and `height` and `media_type` `image/jpeg`; `open_version(resize=)` uses it. |
-| Both | `taxonomy.roll_up` and `taxonomy.hierarchy_from_table`. |
+| Both | `taxonomy.roll_up` and `taxonomy.hierarchy_from_table`; `layout` for the S3 keys and cache paths; `s3` for `exists`, `get_bytes`, `is_not_found`, `is_precondition_failed`, `norm_etag` and `crc64nvme_b64`. |
 | Split builder and trainer | `splits.read_split_file`. The trainer also passes `splits.coverage_checker` to `sync`. |
 
 `resize` on `sync` maps a dataset name to a `ResizeSpec` or `None`. A dataset that is absent or maps to `None` is cached as is. `DatasetSyncResult.resize` records the spec that was applied, for model lineage. After each dataset version syncs, `sync` writes a marker (see Cache layout) that records the resize spec, the synced groups and the dropped image ids. `open_version(..., resize=...)` raises `NotSynced` when the version has no marker for that spec, and the message names the requested resize id and the ids that do have a marker. `DatasetVersion.synced_groups` holds the groups whose images are cached, or `None` when all of them are. Sync never deletes cached images, so `open_version` unions the groups of every marker for the version and spec: a later sync adds its groups, and a tables-only sync (a selection of no groups) adds none. `ResizeSpec` is a training-cache step only: evaluation and serving resize any input to the model's `input_size`, so inference does not apply it. A `ResizeSpec` holds `max_edge`, `filter` (`lanczos`, `bicubic` or `bilinear`) and `jpeg_quality`; its `id` is the first 12 hex characters of a hash of the three fields.
 
 `sync` runs on `max_workers` threads (default `min(8, os.cpu_count())`). Create the boto3 client with `max_pool_connections` of at least `max_workers`.
+
+`s3.is_not_found` counts an object as missing for the codes `404`, `NoSuchKey` and `NotFound`, or for an HTTP 404 whose code is empty or numeric. Any other code, `NoSuchBucket` included, is not a missing object, so `s3.exists` raises it.
 
 ## S3 layout
 
@@ -33,7 +35,7 @@ taxonomy/<name>/<version>/growth_forms.parquet
 
 Images and masks are not under these prefixes. Their keys are `image_store.prefix` plus the `key` and `mask_key` columns of `images.parquet`.
 
-`images.parquet` also has a nullable `source_name`: the image's name at its source. It is data only and is never part of a key. Publishers must supply the column (nulls allowed); `publish_dataset` refuses a table without it. `sync` and `open_version` accept a version published without the column; its `images` table then has no `source_name`.
+`images.parquet` also has a nullable `source_name`: the image's name at its source. It is data only and is never part of a key. Publishers must supply the column (nulls allowed); `stage_dataset` refuses a table without it. `sync` and `open_version` accept a version published without the column; its `images` table then has no `source_name`.
 
 ## Cache layout
 
@@ -75,12 +77,15 @@ sync(client, pins, cache_dir, bucket=bucket,
 
 ## Guarantees
 
-Publish:
+Stage:
 
-- Every put sends `If-None-Match: *`. An existing object with identical bytes counts as written; any other existing object raises `ObjectExists`.
-- Table files are written first and `manifest.json` last. A prefix without a manifest is an incomplete publish.
-- A version that already has a manifest is refused.
+- `stage_dataset` and `stage_taxonomy` write under `<stage_dir>/<bucket>/<key>`, the cache layout, and write nothing to S3.
+- Every file is write-once. An existing file with identical bytes counts as written, so a rerun after a partial stage adopts the tables already there; an existing file with other bytes raises `ObjectExists`.
+- Table files are written first and `manifest.json` last. A version folder without a manifest is an incomplete stage.
+- A version whose `manifest.json` is already staged is refused with `PublishRefused`.
 - A dirty tree (tracked files only), a `HEAD` that no remote branch contains, and a missing `uv.lock` are refused with `PublishRefused`. The manifest records the git SHA and the sha256 of `uv.lock`.
+- With `parents`, `stage_dataset` reads the first parent's manifest and tables from the first of `parent_dirs` that holds the manifest, checks them against the `ParentRef` and the manifest, and records the diff from that parent.
+- `stage_dataset(taxonomy=...)` records the taxonomy pin in the manifest's `taxonomy` field. Without it, `manifest.json` has no `taxonomy` key.
 - The same tables always serialize to the same bytes.
 
 Sync:
@@ -101,11 +106,11 @@ All derive from `errors.SegdataError`.
 
 | Class | Raised when |
 |---|---|
-| `PublishRefused` | The tree is dirty or unpushed, `uv.lock` is missing, or the version exists. |
-| `ObjectExists` | A write-once key exists with different bytes. |
+| `PublishRefused` | The tree is dirty or unpushed, `uv.lock` is missing, or the version is already staged. |
+| `ObjectExists` | A write-once staged file exists with different bytes. |
 | `SchemaValidationError` | A table fails its schema, or the cross-table rules. Also a `ValueError`. |
 | `PinMismatch` | A manifest's sha256 differs from its pin. |
-| `ManifestNotFound` | A pinned manifest is absent from the bucket. |
+| `ManifestNotFound` | A pinned manifest is absent from the bucket, or a parent manifest is in none of the `parent_dirs` given to `stage_dataset`. |
 | `ChecksumMismatch` | A table, image or mask differs from its recorded checksum or size, or a cached resized output has no valid index entry or differs from it. |
 | `ImageChanged` | An image no longer matches its recorded ETag. |
 | `ImageMissing` | An image is absent and the dataset's mode is `fail`. |

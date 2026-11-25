@@ -4,7 +4,7 @@ This runbook takes you from an empty bucket, or an older scrape, to published Co
 
 1. `coralnet-scraper` downloads the public CoralNet sources to S3.
 2. `segdata build coralnet` builds the annotations table, the images table and the label names from that scrape.
-3. `segdata build coralnet raw`, `segdata curate coralnet` and `segdata promote` publish the `coralnet-raw` and `coralnet` dataset versions.
+3. `segdata build coralnet raw`, `segdata taxonomy`, `segdata curate coralnet` and `segdata promote` publish the `coralnet-raw` dataset version, a `mermaid-benthic` taxonomy version and the `coralnet` dataset version.
 
 The package READMEs are the reference for flags, environment variables, exclusion kinds and exit codes; this page gives the order and links to them.
 
@@ -207,9 +207,9 @@ This procedure stages a CoralNet build locally, then publishes it as dataset ver
 - A build run in `etl-outputs/coralnet/<run>/`. See [Build the dataset](#build-the-dataset). `raw` stages `20260623_nogit` unless you pass `--build-run`.
 - A git checkout of this repository. Commit and push before you stage: every stage and publish command refuses a tree with uncommitted changes to tracked files, and a HEAD that no remote branch contains. `raw` checks this before it probes any image.
 - The environment from [Before you start](#before-you-start). `raw` requires `MERMAID_CORALNET_BUCKET` (it raises `ValueError` when unset) and reads `MERMAID_CORALNET_PREFIX`.
-- AWS credentials that read the scrape bucket. `promote` and the taxonomy publish also need credentials that write `mermaid-ic-datasets`.
+- AWS credentials that read the scrape bucket. `promote` also needs credentials that write `mermaid-ic-datasets`.
 - Network access to `api.datamermaid.org`, for the taxonomy and for `curate`, which fetches the CoralNet label mapping.
-- A local stage directory, `<stage>` below. Every `build` and `curate` command writes there and nothing to S3. Use one stage directory for the whole procedure.
+- A local stage directory, `<stage>` below. Every `build`, `taxonomy` and `curate` command writes there and nothing to S3. Use one stage directory for the whole procedure.
 
 Each stage command prints `version:` and `manifest_sha256:`. Record both: they are the pin that the next step takes. `promote` publishes the version you staged, under the same name, so the pin of a staged version is the pin of the published one.
 
@@ -237,7 +237,19 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coral
 
 ### Publish the taxonomy
 
-`curate` checks each mapped benthic attribute id and growth form id against a `mermaid-benthic` taxonomy version on S3, so publish one before you stage the curated version. A taxonomy that lacks an id the API returns stops `curate`: stage and publish a newer one. Stage with `segdata taxonomy --stage-dir <stage>`, then publish with `--tables-from <staged taxonomy folder> --publish`. Record the pin that the publish prints. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
+`curate` checks each mapped benthic attribute id and growth form id against a `mermaid-benthic` taxonomy version on S3, so publish one before you stage the curated version. A taxonomy that lacks an id the API returns stops `curate`: stage and publish a newer one. Stage it, and record the pin it prints:
+
+```bash
+uv run --package segdata-etl segdata taxonomy --stage-dir <stage>
+```
+
+Then publish it under the same name:
+
+```bash
+uv run --package segdata-etl segdata promote --stage-dir <stage> --taxonomy mermaid-benthic --version <tax>
+```
+
+`curate` refuses a taxonomy pin that is only staged. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
 
 ### Stage and publish the curated version
 
@@ -281,7 +293,8 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `FileNotFoundError: no git root holding uv.lock` | Run the command from a git checkout of this repository. |
 | `PublishRefused: HEAD <sha> is not contained in any remote branch` | Push the branch and run again. A raw rerun probes only the images the checkpoint lacks. |
 | `PublishRefused: working tree has uncommitted changes to tracked files` | Commit or discard the changes and run again. |
-| `PublishRefused: s3://.../manifest.json already exists` | Another run published that version name. Run again: the command takes the next free name. |
+| `PublishRefused: ... is already published in mermaid-ic-datasets` (`promote`) | That version is already in the bucket. Nothing was written. Pin the published version. |
+| `PublishRefused: taxonomy ... is not published` | The taxonomy pin is only staged or cached. [Publish the taxonomy](#publish-the-taxonomy) first. |
 | `ObjectConflict` from `promote` (raw) | A destination key under `images/coralnet/` holds an object with a different ETag, size or CRC64NVME than the plan. Nothing was written. Find out what wrote it; `promote` does not replace it. |
 | `PublishRefused: ... is not staged` or `... does not match the manifest` (`promote`) | The `--stage-dir`, `--dataset` or `--version` is wrong, or a staged file changed after staging. Stage the version again. |
 | `SourceChanged` (raw stage) | An original was replaced between its HEAD and its read. Run the same command again. |
