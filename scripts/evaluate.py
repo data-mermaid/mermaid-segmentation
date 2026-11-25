@@ -10,13 +10,17 @@ Runs, on one exported model bundle at the bundle's input size:
                       (classification, each taxonomic rank, the binary concepts together
                       and one by one), per dataset and overall
 
+Every dataset is read from the versions ``--data-config`` pins, in the synced ``--cache-dir``.
+The CoralNet groups scored are the ``--split`` groups of the data config's CoralNet split file
+(``configs/splits/coralnet.csv``); Pacific is the data config's val block.
+
 ``--evals`` selects a subset (default: all five). The probes are fitted on the train
 probe points and scored on ``--split`` (default ``val``). ``--split train`` scores the
 CoralNet train sources and allows only ``coralnet`` and ``val_loss``; the loss is then
 computed on those train images (val transform, the run's ``concept_source_mask``
 applied) and reported as ``train_loss``. ``--images-per-source N`` draws a seeded random
 sample of at most N images per CoralNet source, written to
-``coralnet_<split>_sample.parquet`` and shared by both evals. CoralNet and Pacific report
+``coralnet_<split>_sample.parquet``; both evals read only those images. CoralNet and Pacific report
 class, taxonomic (all / living / coral, accuracy and macro F1), binary-concept and
 hierarchical metrics (consistency, mistake severity, ECE), with ``bleached`` and
 ``anthropogenic`` called out. Each section is written to ``summary.json`` and
@@ -48,55 +52,51 @@ from typing import Any
 import torch
 import yaml
 
-from mermaidseg.config import RESERVED_DATA_KEYS
-from mermaidseg.datasets.local_cache import setup_local_cache
-from mermaidseg.evaluation.gt_mapping import load_benthic_hierarchy
+from mermaidseg.data.config import DataSection, entry_split_groups
+from mermaidseg.data.factory import load_benthic_hierarchy, open_dataset_version
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.reporting import fmt, write_json
 from mermaidseg.inference.bundle import MODEL_JSON, ModelBundle, load_bundle
 from mermaidseg.inference.predictor import CBMPredictor
-from mermaidseg.io import load_section, resolve_repo_path
+from mermaidseg.io import REPO_ROOT, load_section, resolve_repo_path
 from mermaidseg.model.meta import resolve_amp_dtype
 from mermaidseg.run_setup import concept_removal_list
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 logger = logging.getLogger("evaluate")
 
 ALL_EVALS = ["coralnet", "pacific", "coralscapes", "coralscapes39", "val_loss"]
 SPLITS = ["train", "val", "test"]
 TRAIN_SPLIT_EVALS = ["coralnet", "val_loss"]
-_CONFIGS = _REPO_ROOT / "configs"
+_CONFIGS = REPO_ROOT / "configs"
+CORALNET = "coralnet"
+CORALSCAPES = "coralscapes_v2"
 
 
-def _data_section(data_config: str | Path) -> dict:
-    return load_section(data_config, "data")
+def coralnet_groups(section: DataSection, split: str, repo_root: Path = REPO_ROOT) -> list[str]:
+    """The groups of the data config's CoralNet split file whose split is ``split``.
+
+    Raises:
+        ValueError: The coralnet entry has no ``split_file``, or no group has the split.
+    """
+    from mermaidseg.evaluation.coralnet_eval import split_groups
+
+    split_file = section.datasets[CORALNET].split_file
+    if split_file is None:
+        raise ValueError("the data config's coralnet entry has no split_file")
+    return split_groups(repo_root / split_file, split)
 
 
-def _split_field(data: dict, dataset: str, split: str, field: str) -> Any:
-    ds = data.get(dataset)
-    if not isinstance(ds, dict):
-        return None
-    section = ds.get(split)
-    if not isinstance(section, dict):
-        return None
-    return section.get(field)
+def trained_on_scored_groups(section: DataSection, scored: list[str]) -> list[str]:
+    """The scored CoralNet groups that the data config's ``train`` block also selects, sorted.
 
-
-def _coralnet_sources(data: dict, split: str) -> list[int]:
-    """Whitelisted CoralNet sources for ``split``; without one every source would be scored."""
-    sources = _split_field(data, "coralnet", split, "whitelist_sources")
-    if not sources:
-        raise ValueError(f"data config has no coralnet.{split}.whitelist_sources")
-    return sources
-
-
-def _coralnet_manifest(data: dict, split: str) -> str:
-    """Training manifest S3 key for ``split``; the dataset has no default to fall back on."""
-    manifest = _split_field(data, "coralnet", split, "manifest_path")
-    if not manifest:
-        raise ValueError(f"data config has no coralnet.{split}.manifest_path")
-    return manifest
+    A ``None`` selection (every group) overlaps all of ``scored``; an entry with no ``train``
+    block overlaps none.
+    """
+    entry = section.datasets[CORALNET]
+    if entry.train is None:
+        return []
+    train = entry_split_groups(entry, "train", REPO_ROOT)
+    return sorted(scored if train is None else set(scored) & train)
 
 
 def check_split_evals(split: str, evals: list[str]) -> None:
@@ -132,16 +132,19 @@ def concept_names_of(bundle: ModelBundle) -> list[str]:
     return [name for _, name in sorted(bundle.concept_id2name.items())]
 
 
-def coralnet_loss_data_config(data: dict, split: str, image_keep: Path | None) -> dict:
-    """A data config whose only split is ``coralnet.<split>``, as ``val``; the dataset build supplies the eval transform."""
-    block = data["coralnet"][split]
-    if not isinstance(block, dict):
-        raise ValueError(f"data config has no coralnet.{split}")
-    val = {k: v for k, v in block.items() if k != "transform"}
-    if image_keep is not None:
-        val["image_keep"] = str(Path(image_keep).resolve())
-    out = {k: data[k] for k in RESERVED_DATA_KEYS if k in data}
-    out["coralnet"] = {"val": val}
+def coralnet_loss_data_config(data: dict, groups: list[str]) -> dict:
+    """A data config whose only block is a coralnet ``val`` block over ``groups``.
+
+    The coralnet pin, ``resize`` and ``on_missing_images`` and the taxonomy pin come from
+    ``data``; the dataset build supplies the eval transform.
+    """
+    entry = {
+        k: v for k, v in data["datasets"][CORALNET].items() if k not in ("split_file", *SPLITS)
+    }
+    entry["val"] = {"groups": list(groups)}
+    out: dict[str, Any] = {"datasets": {CORALNET: entry}}
+    if data.get("taxonomy") is not None:
+        out["taxonomy"] = data["taxonomy"]
     return {"data": out}
 
 
@@ -156,12 +159,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Exported model bundle directory (model.json + weights.safetensors)",
     )
-    p.add_argument("--cache-dir", default=None, help="local S3 cache root (default: disabled)")
+    p.add_argument(
+        "--cache-dir",
+        required=True,
+        type=Path,
+        help="Directory scripts/sync_data.py synced --data-config into",
+    )
     p.add_argument(
         "--data-config",
         type=Path,
         default=_CONFIGS / "data_config.yaml",
-        help="Sources and splits of every eval, and the val splits of val_loss",
+        help="Dataset pins of every eval, and the val blocks of val_loss",
     )
     p.add_argument(
         "--schema-config",
@@ -219,16 +227,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=_CONFIGS / "eval" / "coralscapes_v2_39_probe_k50.json",
         help="39-class probe points (50 per class)",
-    )
-    p.add_argument(
-        "--benthic-hierarchy-json",
-        type=Path,
-        default=None,
-        help="Benthic-attribute hierarchy for the CoralNet / Pacific class roll-up "
-        "(default: fetched from the MERMAID API and cached in --output-dir)",
-    )
-    p.add_argument(
-        "--coralscapes-root", type=Path, default=None, help="Local CoralscapesV2 mirror root"
     )
     p.add_argument("--svm-c", type=float, default=1.0)
     p.add_argument(
@@ -367,11 +365,9 @@ def main(argv: list[str] | None = None) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    # --- Local S3 cache -----------------------------------------------------
-    data = _data_section(args.data_config)
-    if args.cache_dir is not None:
-        data["local_cache_dir"] = args.cache_dir
-    setup_local_cache(data)
+    data = load_section(args.data_config, "data")
+    section = DataSection.model_validate(data)
+    cache_dir = Path(args.cache_dir)
 
     # --- Model --------------------------------------------------------------
     logger.info("Loading bundle %s ...", args.bundle)
@@ -407,14 +403,10 @@ def main(argv: list[str] | None = None) -> None:
         removed_concepts = run_removed_concepts(bundle.config, concept_mapping_path)
         logger.info("Concept removal of the bundle's run: %d channels", len(removed_concepts))
 
-    # Benthic hierarchy for CoralNet/Pacific class roll-up.
+    # Benthic hierarchy of the pinned taxonomy, for the CoralNet/Pacific class roll-up.
     hierarchy = None
     if "coralnet" in evals or "pacific" in evals:
-        hierarchy = load_benthic_hierarchy(
-            hierarchy_json=args.benthic_hierarchy_json,
-            output_dir=output_dir,
-            fetch_remote=True,
-        )
+        hierarchy = load_benthic_hierarchy(section, cache_dir)
 
     summary: dict = {
         "bundle": str(args.bundle),
@@ -427,17 +419,17 @@ def main(argv: list[str] | None = None) -> None:
     split = args.split
 
     # --- Per-source CoralNet sample, shared by the coralnet eval and the train loss ---
-    sample_path = None
-    uses_sample = "coralnet" in evals or (split == "train" and "val_loss" in evals)
-    if args.images_per_source is not None and uses_sample:
-        from mermaidseg.evaluation.coralnet_eval import write_coralnet_sample
+    sample_ids: list[str] | None = None
+    uses_coralnet = "coralnet" in evals or (split == "train" and "val_loss" in evals)
+    if args.images_per_source is not None and uses_coralnet:
+        from mermaidseg.evaluation.coralnet_eval import coralnet_reader, write_coralnet_sample
 
-        sample_path = write_coralnet_sample(
-            path=output_dir / f"coralnet_{split}_sample.parquet",
-            manifest_path=_coralnet_manifest(data, split),
-            whitelist_sources=_coralnet_sources(data, split),
-            image_blacklist=_split_field(data, "coralnet", split, "image_blacklist"),
-            annotation_overrides=_split_field(data, "coralnet", split, "annotation_overrides"),
+        sample_path = output_dir / f"coralnet_{split}_sample.parquet"
+        sample_ids = write_coralnet_sample(
+            path=sample_path,
+            reader=coralnet_reader(
+                section, cache_dir, groups=coralnet_groups(section, split), split=split
+            ),
             images_per_source=args.images_per_source,
             seed=args.sample_seed,
         )
@@ -455,20 +447,29 @@ def main(argv: list[str] | None = None) -> None:
         _write_summary(output_dir, summary)
 
     if "coralnet" in evals:
-        from mermaidseg.evaluation.coralnet_eval import evaluate_coralnet
+        from mermaidseg.evaluation.coralnet_eval import coralnet_reader, evaluate_coralnet
+
+        overlap = trained_on_scored_groups(section, coralnet_groups(section, split))
+        summary["coralnet_split_in_training"] = bool(overlap)
+        if overlap:
+            logger.warning(
+                "The data config trains on CoralNet groups scored as --split %s: %s",
+                split,
+                overlap,
+            )
 
         _run(
             [f"coralnet_{split}"],
             lambda: {
                 f"coralnet_{split}": evaluate_coralnet(
                     predictor=predictor,
-                    manifest_path=_coralnet_manifest(data, split),
-                    whitelist_sources=_coralnet_sources(data, split),
-                    image_blacklist=_split_field(data, "coralnet", split, "image_blacklist"),
-                    annotation_overrides=_split_field(
-                        data, "coralnet", split, "annotation_overrides"
+                    reader=coralnet_reader(
+                        section,
+                        cache_dir,
+                        groups=coralnet_groups(section, split),
+                        split=split,
+                        image_ids=sample_ids,
                     ),
-                    image_keep=sample_path,
                     id2label=id2label,
                     concept_names=concept_names,
                     taxonomy_csv=concept_mapping_path,
@@ -484,19 +485,14 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     if "pacific" in evals:
-        from mermaidseg.evaluation.pacific_eval import evaluate_pacific
+        from mermaidseg.evaluation.pacific_eval import evaluate_pacific, pacific_reader
 
         _run(
             ["pacific"],
             lambda: {
                 "pacific": evaluate_pacific(
                     predictor=predictor,
-                    whitelist_subsets=_split_field(
-                        data, "pacific_labeled_corals", "val", "whitelist_subsets"
-                    ),
-                    whitelist_sites=_split_field(
-                        data, "pacific_labeled_corals", "val", "whitelist_sites"
-                    ),
+                    reader=pacific_reader(section, cache_dir, REPO_ROOT),
                     id2label=id2label,
                     concept_names=concept_names,
                     taxonomy_csv=concept_mapping_path,
@@ -520,7 +516,7 @@ def main(argv: list[str] | None = None) -> None:
                 for s, result in evaluate_coralscapes_probe(
                     predictor=predictor,
                     probe_json=args.probe_points,
-                    coralscapes_root=args.coralscapes_root,
+                    version=open_dataset_version(section, CORALSCAPES, cache_dir),
                     output_dir=output_dir,
                     concept_names=concept_names,
                     taxonomy_csv=concept_mapping_path,
@@ -542,7 +538,7 @@ def main(argv: list[str] | None = None) -> None:
                 for s, result in evaluate_coralscapes39_probe(
                     predictor=predictor,
                     probe_jsons=[args.coralscapes39_probe],
-                    coralscapes_root=args.coralscapes_root,
+                    version=open_dataset_version(section, CORALSCAPES, cache_dir),
                     output_dir=output_dir,
                     splits=[split],
                     svm_c=args.svm_c,
@@ -557,15 +553,18 @@ def main(argv: list[str] | None = None) -> None:
         loss_key = "val_loss"
         loss_data_config = args.data_config
         loss_max_images = args.val_loss_max_images
+        loss_image_ids = None
         if split == "train":
             loss_key = "train_loss"
             loss_data_config = output_dir / "data_config_coralnet_train.yaml"
             loss_data_config.write_text(
                 yaml.safe_dump(
-                    coralnet_loss_data_config(data, "train", sample_path), sort_keys=False
+                    coralnet_loss_data_config(data, coralnet_groups(section, "train")),
+                    sort_keys=False,
                 )
             )
-            if sample_path is not None:
+            if sample_ids is not None:
+                loss_image_ids = {(CORALNET, "val"): sample_ids}
                 loss_max_images = None
 
         _run(
@@ -574,6 +573,7 @@ def main(argv: list[str] | None = None) -> None:
                 loss_key: evaluate_val_loss(
                     bundle=bundle,
                     data_config=loss_data_config,
+                    cache_dir=cache_dir,
                     output_dir=output_dir,
                     device=device,
                     batch_size=args.batch_size,
@@ -583,7 +583,7 @@ def main(argv: list[str] | None = None) -> None:
                     max_images_per_dataset=loss_max_images,
                     name=loss_key,
                     apply_source_mask=split == "train",
-                    cache_dir=args.cache_dir,
+                    image_ids=loss_image_ids,
                 )
             },
         )

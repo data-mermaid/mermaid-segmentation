@@ -246,8 +246,8 @@ def setup_config(
          "logger": "configs/logger_config.yaml"}
 
     Each file wraps its contents in its section key and is validated against that section's
-    schema (:func:`load_section`). The data config is additionally normalized via
-    ``preprocess_data_config`` (per-dataset default expansion). The result is plain data.
+    schema (:func:`load_section`); the ``data`` section is a
+    :class:`mermaidseg.data.config.DataSection`. The result is plain data.
 
     ``resolution`` sets the square train crop (:func:`apply_resolution`) and ``model.input_size``,
     which sizes the val/test resize (:func:`build_eval_transform`).
@@ -260,7 +260,7 @@ def setup_config(
         data_section = load_section(cast("str | Path", config_path_dict["data"]), "data")
         if resolution is not None:
             apply_resolution(data_section, int(resolution))
-        cfg.update(preprocess_data_config(ConfigDict({"data": data_section})))
+        cfg.data = data_section
     if "model" in config_path_dict:
         cfg.model = load_section(cast("str | Path", config_path_dict["model"]), "model")
         if resolution is not None:

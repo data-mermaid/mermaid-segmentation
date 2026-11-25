@@ -1,8 +1,8 @@
 """Pacific Labeled Corals validation evaluation (per region + aggregate).
 
-Units are the Pacific *sites* (regions): ``heron_reef``, ``line_islands``,
-``nanwan_bay``. The dataset default annotator column (``host`` with ``archived``
-fallback) is used.
+Units are the Pacific *sites* (regions), the image groups of the version: ``heron_reef``,
+``line_islands``, ``nanwan_bay``. The images, and the annotators in priority order, are those of
+the data config's ``pacific_labeled_corals`` val block.
 """
 
 from __future__ import annotations
@@ -11,24 +11,43 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 
-from mermaidseg.datasets.pacific_labeled_corals.pacific_labeled_corals_dataset import (
-    PacificLabeledCoralsDataset,
-)
+from mermaidseg.data.config import DataSection, entry_split_groups
+from mermaidseg.data.factory import open_dataset_version
+from mermaidseg.data.point_dataset import PointDataset
 from mermaidseg.evaluation.gt_mapping import build_class_lookup, build_concept_lookup
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
-from mermaidseg.evaluation.point_datasets import run_point_evaluation
+from mermaidseg.evaluation.point_datasets import reader_annotations, run_point_evaluation
 from mermaidseg.inference.predictor import CBMPredictor
 
 logger = logging.getLogger(__name__)
 
 SOURCE_NAME = "pacific_labeled_corals"
+UNIT_COL = "group"
+
+
+def pacific_reader(section: DataSection, cache_dir: Path, repo_root: Path) -> PointDataset:
+    """Build the Pacific reader of the section's val block.
+
+    Raises:
+        KeyError: The section has no ``pacific_labeled_corals`` dataset.
+        ValueError: The entry has no val block, or the reader refuses its selection.
+    """
+    entry = section.datasets[SOURCE_NAME]
+    groups = entry_split_groups(entry, "val", repo_root)
+    assert entry.val is not None  # entry_split_groups raised otherwise
+    return PointDataset(
+        open_dataset_version(section, SOURCE_NAME, cache_dir),
+        split="val",
+        groups=groups,
+        on_missing_images=entry.on_missing_images,
+        annotators=entry.val.annotators,
+    )
 
 
 def evaluate_pacific(
     *,
     predictor: CBMPredictor,
-    whitelist_subsets: list[str] | None,
-    whitelist_sites: list[str] | None = None,
+    reader: PointDataset,
     id2label: dict[int, str],
     concept_names: list[str],
     taxonomy_csv: str | Path,
@@ -43,8 +62,7 @@ def evaluate_pacific(
 
     Args:
         predictor: Inference wrapper around the model.
-        whitelist_subsets: Dataset subsets to evaluate, or ``None`` for the default.
-        whitelist_sites: Sites to evaluate, or ``None`` for all.
+        reader: Pacific reader (see :func:`pacific_reader`).
         id2label: Target class id to label name.
         concept_names: Model concept channel names.
         taxonomy_csv: Taxonomy CSV the checkpoint was trained with.
@@ -58,33 +76,22 @@ def evaluate_pacific(
     Returns:
         The evaluation result dict.
     """
-    logger.info(
-        "Building Pacific Labeled Corals dataset (subsets=%s sites=%s) ...",
-        whitelist_subsets,
-        whitelist_sites,
-    )
-    base = PacificLabeledCoralsDataset(
-        whitelist_subsets=whitelist_subsets,
-        whitelist_sites=whitelist_sites,
-        transform=None,
-        split="val",
-    )
-    names = base.df_annotations["source_label_name"].astype(str).str.lower().unique().tolist()
+    annotations = reader_annotations(reader)
+    names = annotations["source_label_name"].unique().tolist()
     logger.info(
         "Pacific: %d images, %d annotations, %d distinct labels",
-        len(base.df_images),
-        len(base.df_annotations),
+        len(reader.images),
+        len(annotations),
         len(names),
     )
 
-    class_lookup = build_class_lookup(SOURCE_NAME, names, id2label, hierarchy)
+    class_lookup = build_class_lookup(reader.label_targets, names, id2label, hierarchy)
     concept_lookup = build_concept_lookup(SOURCE_NAME, names, concept_names, taxonomy_csv)
 
     return run_point_evaluation(
         eval_name="pacific_labeled_corals",
-        base_ds=base,
-        unit_col="site",
-        key_cols=["site", "subset", "image_id"],
+        reader=reader,
+        unit_col=UNIT_COL,
         predictor=predictor,
         class_lookup=class_lookup,
         concept_lookup=concept_lookup,

@@ -9,6 +9,8 @@ from typing import Annotated, Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
+from mermaidseg.data.config import DataSection
+
 RESERVED_DATA_KEYS = frozenset({"local_cache_dir", "local_cache_write_through"})
 
 _T = TypeVar("_T")
@@ -116,7 +118,6 @@ class TrainingConfig(_Strict):
     seed: int
     metric_of_interest: str
     loader: LoaderConfig
-    max_load_failure_rate: float
     stall_dump_sec: int
     world_size: int
     grad_accum_steps: int
@@ -169,39 +170,8 @@ class LoggerConfig(
     """The ``logger`` section: the keys of the backend that ``tracker`` names."""
 
 
-class SplitsConfig(_Strict):
-    """A dataset block: split name -> dataset constructor kwargs, or ``null`` to skip it.
-
-    The dataset constructors check the kwargs. An absent split is not built.
-    """
-
-    train: dict[str, Any] | None = None
-    val: dict[str, Any] | None = None
-    test: dict[str, Any] | None = None
-
-
-class DataConfig(_Strict):
-    """The ``data`` section: reserved cache keys, ``default`` and one block per dataset.
-
-    The dataset fields match ``mermaidseg.datasets.factory.DATASET_CLASSES``. An absent dataset is
-    not built. A test keeps the two in sync.
-    """
-
-    local_cache_write_through: bool
-    local_cache_dir: str | None = None
-    default: SplitsConfig | None = None
-    pacific_labeled_corals: SplitsConfig | None = None
-    moorea_labeled_corals: SplitsConfig | None = None
-    catlin_seaview: SplitsConfig | None = None
-    mermaid: SplitsConfig | None = None
-    coralnet: SplitsConfig | None = None
-    coralscapes_v2: SplitsConfig | None = None
-    benthos_yuval: SplitsConfig | None = None
-    ucsd_mosaics: SplitsConfig | None = None
-
-
 SECTION_MODELS: dict[str, type[BaseModel]] = {
-    "data": DataConfig,
+    "data": DataSection,
     "model": ModelConfig,
     "training": TrainingConfig,
     "logger": LoggerConfig,
@@ -211,7 +181,8 @@ SECTION_MODELS: dict[str, type[BaseModel]] = {
 def validate_section(raw: Mapping[str, Any], section: str, source: str | Path) -> dict[str, Any]:
     """Validate a parsed config file that holds one section, and return the section as plain data.
 
-    Keys the file leaves out of an optional block (a dataset, a split) stay absent.
+    Keys the file leaves out of an optional block (a dataset, a split) stay absent. Values are
+    JSON-compatible (a path becomes a string).
 
     Args:
         raw: The parsed file: a mapping whose only key is ``section``.
@@ -230,4 +201,4 @@ def validate_section(raw: Mapping[str, Any], section: str, source: str | Path) -
         validated = SECTION_MODELS[section].model_validate(raw[section])
     except ValidationError as exc:
         raise ValueError(f"{source}: {exc}") from exc
-    return validated.model_dump(exclude_unset=True)
+    return validated.model_dump(mode="json", exclude_unset=True)

@@ -10,7 +10,7 @@ import pytest
 
 from mermaidseg.data import DenseDataset, PointDataset
 from mermaidseg.data.config import DataSection
-from mermaidseg.data.factory import build_datasets
+from mermaidseg.data.factory import build_datasets, open_dataset_version
 from segdata_spec.errors import NotSynced
 from segdata_spec.manifest import Pin
 from tests.mermaidseg.data.conftest import ImageSpec, write_version
@@ -126,3 +126,16 @@ def test_image_ids_subset_a_dataset_and_split(tmp_path: Path) -> None:
     built = _build(section, cache_dir, tmp_path, image_ids={("ds", "val"): ["i2"]})
     assert list(built[("ds", "val")].images["image_id"]) == ["i2"]
     assert len(built[("ds", "train")]) == 2
+
+
+def test_open_dataset_version_opens_the_pinned_version(tmp_path: Path) -> None:
+    cache_dir, pin = _points(tmp_path, [ImageSpec("i1")], [("i1", 1, 1, 5)])
+    version = open_dataset_version(_section(pin, val={"groups": "all"}), "ds", cache_dir)
+    assert version.manifest.version == pin.version
+
+
+def test_open_dataset_version_requires_the_entrys_resize_synced(tmp_path: Path) -> None:
+    cache_dir, pin = _points(tmp_path, [ImageSpec("i1")], [("i1", 1, 1, 5)])
+    section = _section(pin, resize={"max_edge": 4}, val={"groups": "all"})
+    with pytest.raises(NotSynced):
+        open_dataset_version(section, "ds", cache_dir)

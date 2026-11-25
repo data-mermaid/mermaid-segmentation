@@ -18,6 +18,7 @@ import argparse
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from collections.abc import MutableMapping, Sequence
 from pathlib import Path
@@ -33,6 +34,7 @@ CACHE_DIR = Path("/opt/ml/cache")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TRAINER_SCRIPT = "scripts/train.py"
+SYNC_SCRIPT = "scripts/sync_data.py"
 
 OWNED_FLAGS = (
     "--run-name",
@@ -205,6 +207,35 @@ def _require_init_file(train: TrainConfig) -> None:
         raise ValueError(f"init weights {expected} not found; {INIT_DIR} holds {found}")
 
 
+def data_config_arg(args: Sequence[str]) -> str:
+    """Return the last ``--data-config`` value in ``args``, in ``--flag v`` or ``--flag=v`` form.
+
+    The last occurrence wins, as it does for the trainer's argparse.
+
+    Raises:
+        ValueError: If ``args`` carries no ``--data-config``.
+    """
+    for index in reversed(range(len(args))):
+        arg = args[index]
+        if arg == "--data-config" and index + 1 < len(args):
+            return args[index + 1]
+        if arg.startswith("--data-config="):
+            return arg.split("=", 1)[1]
+    raise ValueError("train.args must set --data-config; the cache is synced from it")
+
+
+def build_sync_argv(train: TrainConfig, python: str) -> list[str]:
+    """Build the command that fills the cache the trainer reads, from the run's data config."""
+    return [
+        python,
+        SYNC_SCRIPT,
+        "--data-config",
+        data_config_arg(train.args),
+        "--cache-dir",
+        str(CACHE_DIR),
+    ]
+
+
 def _disk_report(path: Path) -> str:
     """One log line with a directory's capacity, free space, and filesystem device id."""
     usage = shutil.disk_usage(path)
@@ -223,11 +254,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         argv: Command-line arguments; ``sys.argv[1:]`` when None.
 
     Returns:
-        Nothing in practice: the process is replaced by the trainer.
+        The cache sync's exit code when it fails; otherwise nothing, as the process is
+        replaced by the trainer.
 
     Raises:
-        ValueError: If the build git SHA variable is empty or unset, or ``train.init_weights``
-            is set and its file is not in the init channel.
+        ValueError: If the build git SHA variable is empty or unset, ``train.init_weights``
+            is set and its file is not in the init channel, or ``train.args`` has no
+            ``--data-config``.
     """
     _parse_args(argv)
     train = load_run_config(find_run_yaml(CONFIG_DIR)).train
@@ -243,6 +276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "an unknown or dirty tree and export would refuse the finished run"
         )
     _require_init_file(train)
+    sync_argv = build_sync_argv(train, sys.executable)
     env = trainer_env(train, ngpu)
     import boto3
 
@@ -255,6 +289,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_disk_report(directory), flush=True)
     os.environ.update(env)
     os.chdir(REPO_ROOT)
+    print(f"[sagemaker] {shlex.join(sync_argv)}", flush=True)
+    sync = subprocess.run(sync_argv, check=False)
+    if sync.returncode != 0:
+        print(f"[sagemaker] cache sync failed (exit {sync.returncode}); not training", flush=True)
+        return sync.returncode
     print(f"[sagemaker] {shlex.join(command)}", flush=True)
     # exec replaces this process, so tini (PID 1) delivers StopTrainingJob's SIGTERM
     # straight to the trainer (or torchrun).

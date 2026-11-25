@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import functools
 import json
 import multiprocessing
 import os
@@ -19,6 +18,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import numpy as np
+import pyarrow as pa
 import pytest
 import torch
 import torch.distributed as dist
@@ -27,9 +28,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, TensorDataset
 
 import mermaidseg.model.models
 from mermaidseg import training
-from mermaidseg.dataset_reconciliation import registry as registry_module
-from mermaidseg.datasets.factory import build_datasets
-from mermaidseg.datasets.local_cache import create_cache_stats
+from mermaidseg.data.config import DataSection
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import ConfigDict, load_config, resolve_repo_path
 from mermaidseg.logger import Logger
@@ -48,6 +47,7 @@ from mermaidseg.training import (
 from scripts.train import build_parser
 from tests.conftest import cbm_test_config, dinov3_encoder_mocker
 from tests.mermaidseg.conftest import init_gloo, spawn_gloo
+from tests.mermaidseg.data.conftest import ImageSpec, write_taxonomy, write_version
 
 
 def _datasets() -> dict[tuple[str, str], str]:
@@ -59,11 +59,20 @@ def _datasets() -> dict[tuple[str, str], str]:
     }
 
 
-def test_train_datasets_repeat_the_configured_dataset_after_all_trains():
-    data_cfg = ConfigDict(
-        {"a": {"train": {}}, "coralscapes_v2": {"train": {"repeat": 6}}, "b": {"train": {}}}
+def _train_section(**train_blocks: dict[str, Any]) -> DataSection:
+    pin = {"version": "v", "manifest_sha256": "s"}
+    return DataSection.model_validate(
+        {"datasets": {name: {**pin, "train": block} for name, block in train_blocks.items()}}
     )
-    assert _assemble_train_datasets(_datasets(), data_cfg) == [
+
+
+def test_train_datasets_repeat_the_configured_dataset_after_all_trains():
+    section = _train_section(
+        a={"groups": "all"},
+        coralscapes_v2={"groups": "all", "repeat": 6},
+        b={"groups": "all"},
+    )
+    assert _assemble_train_datasets(_datasets(), section) == [
         "a",
         "cs",
         "b",
@@ -73,15 +82,6 @@ def test_train_datasets_repeat_the_configured_dataset_after_all_trains():
         "cs",
         "cs",
     ]
-
-
-@pytest.mark.parametrize("repeat", [0, 2.5, True])
-def test_train_datasets_reject_an_invalid_repeat_naming_the_dataset(repeat):
-    data_cfg = ConfigDict(
-        {"a": {"train": {}}, "coralscapes_v2": {"train": {"repeat": repeat}}, "b": {"train": {}}}
-    )
-    with pytest.raises(ValueError, match="coralscapes_v2"):
-        _assemble_train_datasets(_datasets(), data_cfg)
 
 
 # ---------- shuffle order ----------
@@ -128,28 +128,42 @@ SMOKE_RESOLUTION = 56
 SMOKE_RUN = "smoke"
 
 
-class _SmokeCoralscapesV2(Dataset):
-    """Two fully labelled images per split, one class each, in coralscapes_v2's label space."""
+def _write_smoke_versions(tmp_path: Path) -> dict[str, Any]:
+    """Write a tiny coralscapes_v2 version and the taxonomy into ``<tmp_path>/cache``.
 
-    SOURCE_NAME = "coralscapes_v2"
-
-    def __init__(self, **_split_kwargs: Any) -> None:
-        names = ["pocillopora alive", "sand"]
-        self.source_id2name = dict(enumerate(names, start=1))
-        self.source_name2id = {name: i for i, name in self.source_id2name.items()}
-        self.num_source_classes = len(names) + 1
-        self._global_offset = 0
-
-    def set_global_offset(self, offset: int) -> None:
-        self._global_offset = offset
-
-    def __len__(self) -> int:
-        return 2
-
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        size = (SMOKE_RESOLUTION, SMOKE_RESOLUTION)
-        label = self._global_offset + 1 + idx
-        return torch.zeros(3, *size), torch.full(size, label, dtype=torch.long)
+    Each split holds two fully labelled images, one class each. Returns the data section.
+    """
+    size = (SMOKE_RESOLUTION, SMOKE_RESOLUTION)
+    images = [
+        ImageSpec(f"{split}{k}", group=split, mask=np.full(size, k + 1, np.uint8))
+        for split in ("train", "val")
+        for k in range(2)
+    ]
+    labels = [
+        {"label_id": 1, "name": "pocillopora alive", "mermaid_benthic_attribute": "Pocillopora"},
+        {"label_id": 2, "name": "sand", "mermaid_benthic_attribute": "Sand"},
+    ]
+    cache_dir, _, pin = write_version(
+        tmp_path, kind="dense", images=images, labels=labels, name="coralscapes_v2"
+    )
+    taxonomy = pa.table(
+        {"id": ["1", "2"], "name": ["Pocillopora", "Sand"], "parent_id": [None, None]}
+    )
+    taxonomy_pin = write_taxonomy(cache_dir, tmp_path, taxonomy)
+    return {
+        "taxonomy": {
+            "version": taxonomy_pin.version,
+            "manifest_sha256": taxonomy_pin.manifest_sha256,
+        },
+        "datasets": {
+            "coralscapes_v2": {
+                "version": pin.version,
+                "manifest_sha256": pin.manifest_sha256,
+                "train": {"groups": ["train"]},
+                "val": {"groups": ["val"]},
+            }
+        },
+    }
 
 
 class _FakeWandbRun:
@@ -192,7 +206,10 @@ def _write_section(path: Path, section: str, values: dict[str, Any]) -> str:
 def _smoke_configs(
     tmp_path: Path, epochs: int = 1, training_overrides: dict[str, Any] | None = None
 ) -> list[str]:
-    """Tiny training, model, data and logger YAMLs derived from the final run's configs."""
+    """Tiny training, model, data and logger YAMLs derived from the final run's configs.
+
+    The data config pins tiny versions written into ``<tmp_path>/cache``.
+    """
     training = load_config(resolve_repo_path("configs/training_config_cbm_final.yaml")).training
     training.update(
         epochs=epochs,
@@ -215,10 +232,7 @@ def _smoke_configs(
         lora_target_modules=["q_proj"],
     )
     logger = load_config(resolve_repo_path("configs/logger_config.yaml")).logger
-    data = {
-        "local_cache_write_through": True,
-        "coralscapes_v2": {"train": {"split": "train"}, "val": {"split": "val"}},
-    }
+    data = _write_smoke_versions(tmp_path)
     return [
         "--training-config",
         _write_section(tmp_path / "training.yaml", "training", _plain(training)),
@@ -255,6 +269,8 @@ def test_run_rejects_a_world_size_that_the_launcher_did_not_provide(monkeypatch,
             "1",
             "--output-dir",
             str(tmp_path / "out"),
+            "--cache-dir",
+            str(tmp_path / "cache"),
             *configs,
         ]
     )
@@ -264,8 +280,8 @@ def test_run_rejects_a_world_size_that_the_launcher_did_not_provide(monkeypatch,
 
 def _install_smoke_fakes(
     monkeypatch, tmp_path: Path, mock_dinov3_encoder
-) -> tuple[Path, _FakeWandbRun, list[Any]]:
-    """Patch wandb, the encoder, the cache and the datasets; return cwd, wandb run, cache roots."""
+) -> tuple[Path, _FakeWandbRun]:
+    """Patch wandb and the encoder; return the cwd and the wandb run."""
     workdir = tmp_path / "cwd"
     workdir.mkdir()
     monkeypatch.chdir(workdir)
@@ -276,29 +292,7 @@ def _install_smoke_fakes(
     wandb_run = _FakeWandbRun()
     fake_wandb = _fake_wandb(wandb_run)
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    cache_roots: list[Any] = []
-
-    def _record_cache(data_cfg: Any) -> Any:
-        cache_roots.append(data_cfg.local_cache_dir)
-        return create_cache_stats()
-
-    monkeypatch.setattr(training, "setup_local_cache", _record_cache)
-    monkeypatch.setattr(
-        training,
-        "build_datasets",
-        functools.partial(
-            build_datasets,
-            dataset_classes={"coralscapes_v2": _SmokeCoralscapesV2},
-            verbose=False,
-        ),
-    )
-    # label_roll_up builds the hierarchy through the registry's own binding; keep it offline.
-    monkeypatch.setattr(
-        registry_module,
-        "initialize_benthic_hierarchy",
-        lambda: {"Acropora": "Hard coral", "Hard coral": None},
-    )
-    return workdir, wandb_run, cache_roots
+    return workdir, wandb_run
 
 
 def _smoke_args(
@@ -344,9 +338,7 @@ _FORK_ONLY = pytest.mark.skipif(
 def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     monkeypatch, tmp_path, mock_dinov3_encoder
 ):
-    workdir, wandb_run, cache_roots = _install_smoke_fakes(
-        monkeypatch, tmp_path, mock_dinov3_encoder
-    )
+    workdir, wandb_run = _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
     output_dir = tmp_path / "out"
     cache_dir = tmp_path / "cache"
     sigterm_before = signal.getsignal(signal.SIGTERM)
@@ -375,7 +367,6 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
     assert checkpoint["config"] == resolved
     assert checkpoint["lineage"]["seed"] == 7
     assert not (workdir / "model_checkpoints").exists()
-    assert cache_roots == [str(cache_dir)]
     assert wandb_run.params["cli/num_workers"] == 1
     assert wandb_run.params["cli/output_dir"] == str(output_dir)
     assert wandb_run.params["data/seed"] == 7
@@ -383,7 +374,8 @@ def test_one_step_run_writes_its_checkpoint_under_the_output_dir(
         "lineage/git_sha",
         "lineage/git_dirty",
         "lineage/uv_lock_sha256",
-        "lineage/data_config_sha1",
+        "lineage/datasets/coralscapes_v2/version",
+        "lineage/taxonomy/version",
     }
     assert wandb_run.params["training_concept_mapping_path"] == "configs/class_to_concepts.csv"
     assert wandb_run.exit_code == 0
@@ -412,7 +404,7 @@ def _guard_sigterm(signum: int, frame: Any) -> None:
 def test_run_ends_the_tracker_run_as_failed_when_training_dies_mid_run(
     monkeypatch, tmp_path, mock_dinov3_encoder, train_step, expected_exit
 ):
-    _, wandb_run, _ = _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    _, wandb_run = _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
     monkeypatch.setattr(training, "train_model", train_step)
     # Without run()'s handler, a self-sent SIGTERM would otherwise kill pytest.
     original_sigterm = signal.signal(signal.SIGTERM, _guard_sigterm)
@@ -575,7 +567,6 @@ def test_run_rejects_a_bad_checkpoint_before_building_datasets(monkeypatch, tmp_
     monkeypatch.delenv("WANDB_RUN_ID", raising=False)
     fake_wandb = _fake_wandb(_FakeWandbRun())
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    monkeypatch.setattr(training, "setup_local_cache", _unreachable)
     monkeypatch.setattr(training, "build_datasets", _unreachable)
     bad = tmp_path / "bad.pt"
     bad.write_bytes(b"not a checkpoint")
@@ -686,45 +677,35 @@ def test_init_weights_run_from_a_clean_checkpoint_records_a_shallow_parent(
     assert lineage["parent"] == {"git_sha": "abc123", "git_dirty": False}
 
 
-def test_lineage_params_flatten_the_lineage_dict():
-    lineage = {
+def _lineage(taxonomy: dict[str, str] | None) -> dict[str, Any]:
+    pin = {"version": "v1", "manifest_sha256": "aa11", "resize": None, "images_dropped": 3}
+    return {
         "git_sha": "abc123",
         "git_dirty": False,
         "uv_lock_sha256": "deadbeef",
-        "data_version": {
-            "data_config_sha1": "c0ffee",
-            "manifests": {"coralnet.train": "m/train.parquet", "coralnet.val": "m/val.parquet"},
-            "manifest_sha256": {"coralnet.train": "aa11", "coralnet.val": "bb22"},
-        },
-    }
-    assert _lineage_params(lineage) == {
-        "lineage/git_sha": "abc123",
-        "lineage/git_dirty": False,
-        "lineage/uv_lock_sha256": "deadbeef",
-        "lineage/data_config_sha1": "c0ffee",
-        "lineage/manifests/coralnet.train": "m/train.parquet",
-        "lineage/manifests/coralnet.val": "m/val.parquet",
-        "lineage/manifest_sha256/coralnet.train": "aa11",
-        "lineage/manifest_sha256/coralnet.val": "bb22",
+        "data_version": {"datasets": {"coralnet": pin}, "taxonomy": taxonomy},
     }
 
 
-def test_lineage_params_flatten_a_data_version_without_manifest_sha256():
-    lineage = {
-        "git_sha": "abc123",
-        "git_dirty": False,
-        "uv_lock_sha256": "deadbeef",
-        "data_version": {
-            "data_config_sha1": "c0ffee",
-            "manifests": {"coralnet.train": "m/train.parquet"},
-        },
-    }
-    assert _lineage_params(lineage) == {
+def test_lineage_params_flatten_the_dataset_and_taxonomy_pins():
+    assert _lineage_params(_lineage({"version": "t1", "manifest_sha256": "tt"})) == {
         "lineage/git_sha": "abc123",
         "lineage/git_dirty": False,
         "lineage/uv_lock_sha256": "deadbeef",
-        "lineage/data_config_sha1": "c0ffee",
-        "lineage/manifests/coralnet.train": "m/train.parquet",
+        "lineage/datasets/coralnet/version": "v1",
+        "lineage/datasets/coralnet/manifest_sha256": "aa11",
+        "lineage/taxonomy/version": "t1",
+        "lineage/taxonomy/manifest_sha256": "tt",
+    }
+
+
+def test_lineage_params_leave_out_an_absent_taxonomy():
+    assert _lineage_params(_lineage(None)) == {
+        "lineage/git_sha": "abc123",
+        "lineage/git_dirty": False,
+        "lineage/uv_lock_sha256": "deadbeef",
+        "lineage/datasets/coralnet/version": "v1",
+        "lineage/datasets/coralnet/manifest_sha256": "aa11",
     }
 
 
@@ -850,7 +831,7 @@ class _ScenarioRunner:
             run_dir=output_dir / "model_checkpoints" / SMOKE_RUN,
         )
         with pytest.MonkeyPatch.context() as monkeypatch:
-            _, result.wandb_run, _ = _install_smoke_fakes(
+            _, result.wandb_run = _install_smoke_fakes(
                 monkeypatch, tmp_path, dinov3_encoder_mocker(monkeypatch)
             )
             self._record_seeds(monkeypatch, result.seeds)

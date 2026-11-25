@@ -2,26 +2,24 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
-from mermaidseg.dataset_reconciliation.label_mapping import (
-    CoralNetLabelMappings,
-    parse_coralnet_label_mappings,
-)
+from mermaidseg.data.point_dataset import PointDataset
 from mermaidseg.evaluation import gt_mapping
 from mermaidseg.evaluation.gt_mapping import (
     ConceptLookup,
     build_class_lookup,
     build_concept_lookup,
-    load_benthic_hierarchy,
     point_scopes,
 )
+from segdata_spec.taxonomy import hierarchy_from_table
+from tests.mermaidseg.data.conftest import ImageSpec, open_written
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CSV = _REPO_ROOT / "configs" / "class_to_concepts.csv"
@@ -52,30 +50,59 @@ def test_concept_lookup_matches_schema():
     assert checked > 100
 
 
-def test_class_lookup_direct_and_rollup():
-    from mermaidseg.evaluation.gt_mapping import build_class_lookup
+def _reader(tmp_path: Path) -> PointDataset:
+    """A points version whose labels.parquet maps two labels and leaves one unmapped."""
+    version = open_written(
+        tmp_path,
+        kind="points",
+        images=[ImageSpec("i1")],
+        labels=[
+            {"label_id": 1, "name": "ACRO", "mermaid_benthic_attribute": "Acropora"},
+            {"label_id": 2, "name": "Sand", "mermaid_benthic_attribute": "Sand"},
+            {"label_id": 3, "name": "Shadow", "mermaid_benthic_attribute": None},
+        ],
+        points=[("i1", 0, 0, 1), ("i1", 1, 1, 2), ("i1", 2, 2, 3)],
+    )
+    return PointDataset(version, split="val")
 
-    id2label = {0: "ignore", 1: "acropora", 2: "hard coral", 3: "background", 4: "sand"}
-    # Pacific: 'acropora'->'acropora' (direct); 'other scleractinians'->'hard coral' (direct);
-    # 'unclear'->'background'; unknown label -> 0.
-    hierarchy = {"acropora": "hard coral", "hard coral": None, "background": None}
-    names = ["acropora", "other scleractinians", "unclear", "sand", "totally unknown label"]
-    lk = build_class_lookup("pacific_labeled_corals", names, id2label, hierarchy)
-    assert lk.class_id("acropora") == 1
-    assert lk.class_id("other scleractinians") == 2
-    assert lk.class_id("unclear") == 3
-    assert lk.class_id("sand") == 4
-    assert lk.class_id("totally unknown label") == 0
+
+# Hard coral (1) <- Acroporidae (2) <- Acropora (3); Sand (4) is a root.
+_TAXONOMY = pa.table(
+    {
+        "id": ["1", "2", "3", "4"],
+        "name": ["Hard coral", "Acroporidae", "Acropora", "Sand"],
+        "parent_id": [None, "1", "2", None],
+    }
+)
 
 
-def test_class_lookup_rollup_to_parent():
-    from mermaidseg.evaluation.gt_mapping import build_class_lookup
+def test_a_reader_label_maps_to_its_labels_parquet_target(tmp_path):
+    reader = _reader(tmp_path)
+    id2label = {0: "ignore", 1: "acropora", 2: "sand"}
 
-    # 'acropora' not in id2label -> roll up to parent 'hard coral' which is.
-    id2label = {0: "ignore", 1: "hard coral"}
-    hierarchy = {"acropora": "hard coral", "hard coral": None}
-    lk = build_class_lookup("pacific_labeled_corals", ["acropora"], id2label, hierarchy)
-    assert lk.class_id("acropora") == 1
+    lookup = build_class_lookup(reader.label_targets, ["acro", "sand", "shadow"], id2label)
+
+    assert lookup.name_to_class_id == {"acro": 1, "sand": 2, "shadow": 0}
+
+
+def test_with_roll_up_a_species_maps_to_its_class_subset_ancestor_in_the_taxonomy(tmp_path):
+    reader = _reader(tmp_path)
+    id2label = {0: "ignore", 1: "hard coral", 2: "sand"}
+
+    lookup = build_class_lookup(
+        reader.label_targets, ["acro", "sand"], id2label, hierarchy_from_table(_TAXONOMY)
+    )
+
+    assert lookup.name_to_class_id == {"acro": 1, "sand": 2}
+
+
+def test_without_a_hierarchy_a_target_outside_the_vocabulary_is_ignored():
+    lookup = build_class_lookup(
+        {"ACRO": "Acropora", "hc": "Hard Coral", "gone": None},
+        ["acro", "hc", "gone", "absent"],
+        {0: "ignore", 1: "Hard Coral"},
+    )
+    assert lookup.name_to_class_id == {"acro": 0, "hc": 1, "gone": 0, "absent": 0}
 
 
 @pytest.mark.parametrize(
@@ -93,170 +120,6 @@ def test_class_lookup_rollup_to_parent():
 def test_point_scopes_from_the_concept_table(label, live, coral):
     lookup = build_concept_lookup("coralnet", [label], [], _CSV)
     assert lookup.scopes(label) == (live, coral)
-
-
-def _no_fetch(monkeypatch):
-    """Make a remote hierarchy fetch fail loudly if a test reaches it."""
-
-    def fail():
-        raise AssertionError("hierarchy fetch must not be reached")
-
-    monkeypatch.setattr(gt_mapping, "initialize_benthic_hierarchy", fail)
-
-
-def test_hierarchy_file_wins_over_cache_and_lowercases(tmp_path, monkeypatch):
-    _no_fetch(monkeypatch)
-    explicit = tmp_path / "explicit.json"
-    explicit.write_text(json.dumps({"Acropora": "Hard Coral", "Hard Coral": None, "Sand": ""}))
-    (tmp_path / "benthic_hierarchy.json").write_text(json.dumps({"cached": None}))
-    got = load_benthic_hierarchy(explicit, output_dir=tmp_path)
-    assert got == {"acropora": "hard coral", "hard coral": None, "sand": None}
-
-
-def test_hierarchy_cache_hit_skips_the_fetch(tmp_path, monkeypatch):
-    _no_fetch(monkeypatch)
-    (tmp_path / "benthic_hierarchy.json").write_text(json.dumps({"Porites": "Hard Coral"}))
-    assert load_benthic_hierarchy(output_dir=tmp_path) == {"porites": "hard coral"}
-
-
-def test_hierarchy_is_none_offline_without_a_cache(tmp_path, monkeypatch, caplog):
-    _no_fetch(monkeypatch)
-    with caplog.at_level(logging.WARNING, logger=gt_mapping.logger.name):
-        assert load_benthic_hierarchy(output_dir=tmp_path, fetch_remote=False) is None
-    assert "roll-up OFF" in caplog.text
-
-
-def test_hierarchy_is_none_when_the_fetch_fails(tmp_path, monkeypatch, caplog):
-    def boom():
-        raise ConnectionError("no network")
-
-    monkeypatch.setattr(gt_mapping, "initialize_benthic_hierarchy", boom)
-    with caplog.at_level(logging.WARNING, logger=gt_mapping.logger.name):
-        assert load_benthic_hierarchy(output_dir=tmp_path) is None
-    assert "no network" in caplog.text
-    assert not (tmp_path / "benthic_hierarchy.json").exists()
-
-
-def test_hierarchy_fetch_is_lowercased_and_cached_for_the_next_call(tmp_path, monkeypatch):
-    calls = []
-
-    def fetch():
-        calls.append(1)
-        return {"Acropora": "Hard Coral", "Hard Coral": None}
-
-    monkeypatch.setattr(gt_mapping, "initialize_benthic_hierarchy", fetch)
-    out = tmp_path / "nested" / "dir"
-    expected = {"acropora": "hard coral", "hard coral": None}
-    assert load_benthic_hierarchy(output_dir=out) == expected
-    assert json.loads((out / "benthic_hierarchy.json").read_text()) == expected
-    assert load_benthic_hierarchy(output_dir=out) == expected
-    assert len(calls) == 1
-
-
-def test_hierarchy_fetch_without_output_dir_writes_nothing(tmp_path, monkeypatch):
-    monkeypatch.setattr(gt_mapping, "initialize_benthic_hierarchy", lambda: {"A": None})
-    monkeypatch.chdir(tmp_path)
-    assert load_benthic_hierarchy() == {"a": None}
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_hierarchy_survives_an_unwritable_cache(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(gt_mapping, "initialize_benthic_hierarchy", lambda: {"A": None})
-    blocker = tmp_path / "file"
-    blocker.write_text("not a directory")
-    with caplog.at_level(logging.WARNING, logger=gt_mapping.logger.name):
-        assert load_benthic_hierarchy(output_dir=blocker / "sub") == {"a": None}
-    assert "Failed to cache" in caplog.text
-
-
-def test_source_to_target_map_rejects_an_unwired_source():
-    with pytest.raises(ValueError, match="'unknown_source'"):
-        gt_mapping._source_to_target_map("unknown_source")
-
-
-def test_source_to_target_map_dispatches_each_source_and_lowercases(monkeypatch):
-    fetchers = {
-        "pacific_labeled_corals": "fetch_pacific_labeled_corals_to_mermaid",
-        "benthos_yuval": "fetch_benthos_yuval_to_mermaid",
-        "catlin_seaview": "fetch_catlin_seaview_to_mermaid",
-        "moorea_labeled_corals": "fetch_moorea_labeled_corals_to_mermaid",
-        "ucsd_mosaics": "fetch_ucsd_mosaics_to_mermaid",
-    }
-    for source, attr in fetchers.items():
-        monkeypatch.setattr(
-            gt_mapping, attr, lambda source=source: {"Label": source.upper(), "X": None}
-        )
-    for source in fetchers:
-        # The source name itself is matched case-insensitively.
-        assert gt_mapping._source_to_target_map(source.title()) == {"label": source, "x": None}
-
-
-def _coralnet_rows(rows):
-    records = parse_coralnet_label_mappings(
-        [{"provider_id": i, "benthic_attribute_name": n} for i, n in rows.items()]
-    )
-    return CoralNetLabelMappings(records=records, source="api", fetched_at="t0")
-
-
-def test_coralnet_map_joins_the_api_rows_on_the_label_id(monkeypatch):
-    monkeypatch.setattr(
-        gt_mapping, "load_coralnet_label_mappings", lambda: _coralnet_rows({1: "Acropora"})
-    )
-
-    mapping = gt_mapping._source_to_target_map("CoralNet", {1: "ACRO", 2: "Sand"})
-
-    assert mapping == {"acro": "acropora"}
-
-
-def test_coralnet_map_without_id2name_raises():
-    with pytest.raises(ValueError, match="coralnet_id2name"):
-        gt_mapping._source_to_target_map("coralnet")
-
-
-def test_coralnet_class_lookup_uses_only_the_names_being_evaluated(monkeypatch):
-    # Ids 2 and 3 share a name with different targets, but neither name is evaluated.
-    monkeypatch.setattr(
-        gt_mapping,
-        "load_coralnet_label_mappings",
-        lambda: _coralnet_rows({1: "Acropora", 2: "Sand", 3: "Rubble"}),
-    )
-    id2label = {0: "ignore", 1: "acropora"}
-
-    lookup = build_class_lookup(
-        "coralnet", ["acro"], id2label, None, id2name={1: "Acro", 2: "dup", 3: "DUP"}
-    )
-
-    assert lookup.name_to_class_id == {"acro": 1}
-
-
-def test_coralnet_class_lookup_raises_for_used_names_with_different_targets(monkeypatch):
-    monkeypatch.setattr(
-        gt_mapping,
-        "load_coralnet_label_mappings",
-        lambda: _coralnet_rows({2: "Sand", 3: "Rubble"}),
-    )
-
-    with pytest.raises(ValueError, match="dup"):
-        build_class_lookup(
-            "coralnet", ["dup"], {0: "ignore", 1: "sand"}, None, id2name={2: "dup", 3: "DUP"}
-        )
-
-
-def test_class_lookup_without_hierarchy_maps_only_labels_already_in_the_vocabulary(monkeypatch):
-    monkeypatch.setattr(
-        gt_mapping,
-        "_source_to_target_map",
-        lambda _source, _id2name=None, _used_names=None: {
-            "acro": "acropora",
-            "hc": "hard coral",
-            "gone": None,
-            "sand": "sand",
-        },
-    )
-    id2label = {0: "ignore", 1: "Hard Coral", 2: "sand"}
-    # With no hierarchy 'acropora' cannot roll up to 'hard coral' and is ignored.
-    lookup = build_class_lookup("any", ["ACRO", "hc", "gone", "sand", "absent"], id2label, None)
-    assert lookup.name_to_class_id == {"acro": 0, "hc": 1, "gone": 0, "sand": 2, "absent": 0}
 
 
 def test_concept_lookup_unmapped_label_gives_zeros_and_default_scopes():

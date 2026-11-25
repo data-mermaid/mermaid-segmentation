@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
-from mermaidseg.dataset_reconciliation.label_mapping import source_labels_to_target_labels
+from mermaidseg.dataset_reconciliation.registry import source_labels_to_target_labels
 from mermaidseg.io import ConfigDict
 from mermaidseg.model.data_parallel import (
     ShardStep,

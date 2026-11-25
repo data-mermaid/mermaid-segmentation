@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import multiprocessing as mp
 import shutil
+import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from queue import Empty
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -16,24 +20,158 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as torch_mp
+from botocore.exceptions import ClientError
 
 import mermaidseg.datasets.local_cache
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.datasets.local_cache import CacheStatsHandles, LocalS3Cache, create_cache_stats
 from mermaidseg.export import export_bundle
 from mermaidseg.io import ConfigDict
+from segdata_spec import DATASET_BUCKET
 from tests.conftest import cbm_test_config
 from tests.mermaidseg.inference import _tiny
 
+DS_A = ("datasets", "ds-a", "20261120-aaaaaaa")
+DS_B = ("datasets", "ds-b", "20261121-bbbbbbb")
+TAX = ("taxonomy", "mermaid-benthic", "20261119-ccccccc")
+MANIFESTS = {DS_A: b'{"name": "ds-a"}', DS_B: b'{"name": "ds-b"}', TAX: b'{"name": "tax"}'}
+
+
+class FakeS3:
+    """The ``get_object`` surface of a boto3 S3 client over an in-memory ``(bucket, key)`` map."""
+
+    def __init__(self, objects: dict[tuple[str, str], bytes], error: ClientError | None = None):
+        self.objects = objects
+        self.error = error
+        self.requested: list[tuple[str, str]] = []
+
+    def get_object(self, *, Bucket: str, Key: str, **kwargs: Any) -> dict[str, Any]:
+        self.requested.append((Bucket, Key))
+        if self.error is not None:
+            raise self.error
+        if (Bucket, Key) not in self.objects:
+            raise ClientError(
+                {
+                    "Error": {"Code": "NoSuchKey", "Message": "missing"},
+                    "ResponseMetadata": {"HTTPStatusCode": 404},
+                },
+                "GetObject",
+            )
+        data = self.objects[(Bucket, Key)]
+        return {"Body": io.BytesIO(data), "ContentLength": len(data)}
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def manifest_key(pin: tuple[str, str, str]) -> tuple[str, str]:
+    kind, name, version = pin
+    return (DATASET_BUCKET, f"{kind}/{name}/{version}/manifest.json")
+
+
+def seeded_s3(*, without: tuple[str, str, str] | None = None) -> FakeS3:
+    objects = {manifest_key(pin): data for pin, data in MANIFESTS.items() if pin != without}
+    return FakeS3(objects)
+
+
+def data_version() -> dict:
+    return {
+        "datasets": {
+            "ds-a": {
+                "version": DS_A[2],
+                "manifest_sha256": sha(MANIFESTS[DS_A]),
+                "resize": None,
+                "images_dropped": 0,
+            },
+            "ds-b": {
+                "version": DS_B[2],
+                "manifest_sha256": sha(MANIFESTS[DS_B]),
+                "resize": {"max_side": 512},
+                "images_dropped": 2,
+            },
+        },
+        "taxonomy": {"version": TAX[2], "manifest_sha256": sha(MANIFESTS[TAX])},
+    }
+
+
+def git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def commit(repo: Path, name: str) -> str:
+    (repo / name).write_text(name)
+    git(repo, "add", name)
+    git(repo, "commit", "-m", name)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def repo_with_origin(base: Path) -> tuple[Path, str]:
+    """A repo whose ``origin/main`` tracking ref holds the returned sha."""
+    origin = base / "origin.git"
+    origin.mkdir()
+    git(origin, "init", "--bare", "--initial-branch=main")
+    repo = base / "repo"
+    repo.mkdir()
+    git(repo, "init", "--initial-branch=main")
+    git(repo, "remote", "add", "origin", str(origin))
+    pushed = commit(repo, "pushed.txt")
+    git(repo, "push", "origin", "main")
+    return repo, pushed
+
+
+def deployable_lineage(git_sha: str, **overrides: Any) -> dict:
+    return {
+        "git_sha": git_sha,
+        "git_dirty": False,
+        "resolved_config": _tiny.resolved_config(),
+        "data_version": data_version(),
+        **overrides,
+    }
+
+
+def export_ckpt(checkpoint: Path, out: Path, **overrides: Any) -> Path:
+    """``export_bundle`` with a fully seeded S3 unless the caller passes its own client."""
+    return export_bundle(checkpoint, out, **{"s3_client": seeded_s3(), **overrides})
+
 
 @pytest.fixture(scope="module")
-def run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, torch.nn.Module]:
-    return _tiny.write_run(tmp_path_factory.mktemp("run"))
+def deployable_run(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, Path, str, torch.nn.Module]:
+    """A run with a clean, pinned, pushed lineage: (checkpoint, repo, pushed sha, model)."""
+    base = tmp_path_factory.mktemp("deployable")
+    repo, pushed = repo_with_origin(base)
+    checkpoint, model = _tiny.write_run(base / "run", checkpoint_lineage=deployable_lineage(pushed))
+    return checkpoint, repo, pushed, model
 
 
 @pytest.fixture(scope="module")
-def bundle_dir(run: tuple[Path, torch.nn.Module], tmp_path_factory: pytest.TempPathFactory) -> Path:
-    return export_bundle(run[0], tmp_path_factory.mktemp("out") / "bundle")
+def deployable(
+    deployable_run: tuple[Path, Path, str, torch.nn.Module],
+) -> tuple[Path, Path, str]:
+    """The exportable run's (checkpoint, repo, pushed sha)."""
+    return deployable_run[:3]
+
+
+@pytest.fixture(scope="module")
+def run(deployable_run: tuple[Path, Path, str, torch.nn.Module]) -> tuple[Path, torch.nn.Module]:
+    return deployable_run[0], deployable_run[3]
+
+
+@pytest.fixture(scope="module")
+def bundle_dir(
+    deployable: tuple[Path, Path, str], tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    checkpoint, repo, _ = deployable
+    return export_ckpt(checkpoint, tmp_path_factory.mktemp("out") / "bundle", repo_dir=repo)
 
 
 @pytest.fixture

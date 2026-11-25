@@ -428,7 +428,7 @@ def test_final_runs_the_768_fine_tune_after_the_final_run(repo):
     assert list(runs) == ["cbm_final", "cbm_final_res768"]
     final, hires = runs["cbm_final"], runs["cbm_final_res768"]
     for job in (final, hires):
-        assert _arg(job, "--data-config") == "configs/data_config_trainval.yaml"
+        assert _arg(job, "--data-config") == "configs/data_config.yaml"
     assert _arg(final, "--training-config") == "configs/training_config_cbm_final.yaml"
     assert _opt(final, "dependency") is None
     assert _opt(hires, "dependency") == "afterok:100001"
@@ -440,6 +440,118 @@ def test_final_runs_the_768_fine_tune_after_the_final_run(repo):
     assert _arg(hires, "--batch-size") == "8"
     assert _arg(hires, "--grad-accum-steps") == "4"
     assert "--per-pixel-loss-weight" not in hires + final
+
+
+def _record_calls(repo: Path, uv_exit: int = 0, uv_fails_on: str = "") -> Path:
+    """Replace uv and sbatch with stubs that append their argv to one shared log.
+
+    uv exits ``uv_exit`` for every call, or only for calls whose argv contains ``uv_fails_on``.
+    """
+    calls = repo.parent / "calls.txt"
+    bin_dir = repo.parent / "bin"
+    condition = f'[[ "$*" == *"{uv_fails_on}"* ]] && ' if uv_fails_on else ""
+    (bin_dir / "uv").write_text(
+        f'#!/bin/bash\necho "uv $*" >> "{calls}"\n{condition}exit {uv_exit}\nexit 0\n'
+    )
+    (bin_dir / "sbatch").write_text(f'#!/bin/bash\necho "sbatch $*" >> "{calls}"\necho 12345\n')
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    return calls
+
+
+def _launch_for_real(repo: Path, tmp_path_cache: Path) -> subprocess.CompletedProcess[str]:
+    return _run_launcher(
+        repo,
+        "final",
+        dry_run=False,
+        env_overrides={
+            "MERMAIDSEG_CACHE_DIR": str(tmp_path_cache),
+            "MERMAIDSEG_SCRATCH": str(tmp_path_cache.parent / "scratch"),
+        },
+    )
+
+
+_WARM_CALL = (
+    "uv run --locked python scripts/warm_hf_cache.py "
+    "--model-config configs/model_config_cbm_dpt_lora_vitl.yaml"
+)
+
+
+def test_final_syncs_then_warms_the_encoder_before_any_sbatch(repo):
+    calls = _record_calls(repo)
+    cache = repo.parent / "cache dir"
+
+    result = _launch_for_real(repo, cache)
+
+    assert result.returncode == 0, result.stderr
+    lines = calls.read_text().splitlines()
+    assert lines[:2] == [
+        f"uv run --locked python scripts/sync_data.py "
+        f"--data-config configs/data_config.yaml --cache-dir {cache}",
+        _WARM_CALL,
+    ]
+    assert [line.split()[0] for line in lines[2:]] == ["sbatch", "sbatch"]
+
+
+def test_final_trains_both_jobs_on_the_model_config_it_warmed(repo):
+    calls = _record_calls(repo)
+
+    result = _launch_for_real(repo, repo.parent / "cache")
+
+    assert result.returncode == 0, result.stderr
+    sbatch_lines = [x for x in calls.read_text().splitlines() if x.startswith("sbatch")]
+    assert len(sbatch_lines) == 2
+    for line in sbatch_lines:
+        assert "--model-config configs/model_config_cbm_dpt_lora_vitl.yaml" in line
+
+
+def test_final_warms_the_hf_home_the_jobs_use(repo):
+    bin_dir = repo.parent / "bin"
+    seen = repo.parent / "hf_home.txt"
+    (bin_dir / "uv").write_text(f'#!/bin/bash\necho "$HF_HOME" >> "{seen}"\n')
+    (bin_dir / "uv").chmod(0o755)
+    (bin_dir / "sbatch").write_text("#!/bin/bash\necho 12345\n")
+    (bin_dir / "sbatch").chmod(0o755)
+
+    result = _run_launcher(
+        repo,
+        "final",
+        dry_run=False,
+        env_overrides={
+            "MERMAIDSEG_CACHE_DIR": str(repo.parent / "cache"),
+            "MERMAIDSEG_SCRATCH": "/scratch-x",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert seen.read_text().splitlines()[-1] == "/scratch-x/hf-cache"
+
+
+def test_final_submits_nothing_when_the_sync_fails(repo):
+    calls = _record_calls(repo, uv_exit=3)
+
+    result = _launch_for_real(repo, repo.parent / "cache")
+
+    assert result.returncode != 0
+    assert [line.split()[0] for line in calls.read_text().splitlines()] == ["uv"]
+
+
+def test_final_submits_nothing_when_the_encoder_warm_fails(repo):
+    calls = _record_calls(repo, uv_exit=3, uv_fails_on="warm_hf_cache")
+
+    result = _launch_for_real(repo, repo.parent / "cache")
+
+    assert result.returncode == 1
+    assert [line.split()[0] for line in calls.read_text().splitlines()] == ["uv", "uv"]
+
+
+def test_dry_run_neither_syncs_nor_warms(repo):
+    calls = _record_calls(repo)
+
+    result = _run_launcher(repo, "final")
+
+    assert result.returncode == 0, result.stderr
+    assert not calls.exists() or calls.read_text() == ""
 
 
 def test_dry_run_emits_two_sbatch_lines_with_site_options(repo):
@@ -573,7 +685,9 @@ def _install_numbering_sbatch(repo: Path) -> None:
 
 def test_the_job_id_of_a_real_submission_gates_the_dependent_run(repo):
     _install_numbering_sbatch(repo)
-    result = _run_launcher(repo, "final", dry_run=False)
+    (repo.parent / "bin" / "uv").write_text("#!/bin/bash\nexit 0\n")
+    (repo.parent / "bin" / "uv").chmod(0o755)
+    result = _launch_for_real(repo, repo.parent / "cache")
     assert result.returncode == 0, result.stderr
     submitted = re.findall(r"^  submitted (\d+): sbatch (.*)$", result.stdout, re.MULTILINE)
     assert [job_id for job_id, _ in submitted] == ["5001", "5002"]

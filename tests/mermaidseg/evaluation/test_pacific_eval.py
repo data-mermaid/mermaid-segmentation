@@ -1,50 +1,42 @@
-"""evaluate_pacific: what it asks of the dataset, the lookups and the shared runner."""
+"""Pacific evaluation: the reader of the val block and what evaluate_pacific asks of the runner."""
 
 from __future__ import annotations
 
-import pandas as pd
-
 from mermaidseg.evaluation import pacific_eval
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
+from tests.mermaidseg.evaluation.conftest import write_eval_cache
 
 
-def test_evaluate_pacific_builds_the_val_dataset_lookups_and_runs_per_site(monkeypatch):
-    calls: dict[str, dict] = {}
+def test_the_reader_keeps_the_first_listed_annotator_of_each_point(tmp_path):
+    cache = write_eval_cache(tmp_path)
 
-    class FakeDataset:
-        def __init__(self, **kwargs):
-            calls["dataset"] = kwargs
-            self.df_images = pd.DataFrame({"image_id": ["1"]})
-            self.df_annotations = pd.DataFrame(
-                {"source_label_name": ["Sand", "sand", "Acropora", "SAND"]}
-            )
+    reader = pacific_eval.pacific_reader(cache.section, cache.cache_dir, tmp_path)
 
-    def build_class_lookup(*args):
-        calls["class_lookup"] = {"args": args}
-        return "class-lookup"
+    points = reader.points.sort_values("image_id")
+    assert points[["image_id", "label_id", "annotator"]].to_numpy().tolist() == [
+        ["p1", 1, "host"],
+        ["p2", 2, "archived"],
+    ]
 
-    def build_concept_lookup(*args):
-        calls["concept_lookup"] = {"args": args}
-        return "concept-lookup"
+
+def test_evaluate_pacific_builds_the_lookups_and_runs_per_site(tmp_path, monkeypatch):
+    cache = write_eval_cache(tmp_path)
+    reader = pacific_eval.pacific_reader(cache.section, cache.cache_dir, tmp_path)
+    calls: dict = {}
 
     def run(**kwargs):
-        calls["run"] = kwargs
+        calls.update(kwargs)
         return {"ran": True}
 
-    monkeypatch.setattr(pacific_eval, "PacificLabeledCoralsDataset", FakeDataset)
-    monkeypatch.setattr(pacific_eval, "build_class_lookup", build_class_lookup)
-    monkeypatch.setattr(pacific_eval, "build_concept_lookup", build_concept_lookup)
     monkeypatch.setattr(pacific_eval, "run_point_evaluation", run)
-    hierarchy = {"acropora": None}
 
     result = pacific_eval.evaluate_pacific(
         predictor="predictor",  # type: ignore[arg-type]
-        whitelist_subsets=["a"],
-        whitelist_sites=["heron_reef"],
-        id2label={0: "ignore"},
-        concept_names=["c1"],
-        taxonomy_csv="tax.csv",
-        hierarchy=hierarchy,
+        reader=reader,
+        id2label={0: "ignore", 1: "porites", 2: "sand"},
+        concept_names=[],
+        taxonomy_csv="configs/class_to_concepts.csv",
+        hierarchy=None,
         output_dir="out",
         batch_size=3,
         num_workers=0,
@@ -53,34 +45,18 @@ def test_evaluate_pacific_builds_the_val_dataset_lookups_and_runs_per_site(monke
     )
 
     assert result == {"ran": True}
-    assert calls["dataset"] == {
-        "whitelist_subsets": ["a"],
-        "whitelist_sites": ["heron_reef"],
-        "transform": None,
-        "split": "val",
-    }
-    names = ["sand", "acropora"]
-    assert calls["class_lookup"]["args"] == (
-        "pacific_labeled_corals",
-        names,
-        {0: "ignore"},
-        hierarchy,
-    )
-    assert calls["concept_lookup"]["args"] == ("pacific_labeled_corals", names, ["c1"], "tax.csv")
-    run_kwargs = calls["run"]
-    assert run_kwargs.pop("base_ds").__class__ is FakeDataset
-    assert run_kwargs == {
+    assert calls.pop("class_lookup").name_to_class_id == {"porites": 1, "sand": 2}
+    assert sorted(calls.pop("concept_lookup").name_to_row) == ["porites", "sand"]
+    assert calls.pop("reader") is reader
+    assert calls == {
         "eval_name": "pacific_labeled_corals",
-        "unit_col": "site",
-        "key_cols": ["site", "subset", "image_id"],
+        "unit_col": "group",
         "predictor": "predictor",
-        "class_lookup": "class-lookup",
-        "concept_lookup": "concept-lookup",
-        "concept_names": ["c1"],
-        "id2label": {0: "ignore"},
+        "concept_names": [],
+        "id2label": {0: "ignore", 1: "porites", 2: "sand"},
         "output_dir": "out",
         "binary_concepts": REPORTED_BINARY_CONCEPTS,
-        "taxonomy_csv": "tax.csv",
+        "taxonomy_csv": "configs/class_to_concepts.csv",
         "batch_size": 3,
         "num_workers": 0,
         "max_images_per_unit": 2,

@@ -1,166 +1,239 @@
-"""build_concept_source_mask: main feeds the CoralNet split's annotations to the package and writes the mask."""
+"""build_concept_source_mask: per-source concept counts from a tiny CoralNet version, and the mask."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 import yaml
 
 import scripts.build_concept_source_mask as script
-from mermaidseg.dataset_reconciliation.concept_source_mask import MASK_COLUMNS
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
+from mermaidseg.dataset_reconciliation.concept_source_mask import source_concept_counts
+from segdata_spec.manifest import Pin
+from tests.mermaidseg.conftest import concept_table
+from tests.mermaidseg.data.conftest import ImageSpec, write_version
 
-_COUNTS = pd.DataFrame(
-    {
-        "source_id": ["a", "a", "b"],
-        "concept": ["bleached", "anthropogenic", "bleached"],
-        "n_true": [0, 2, 4],
-        "n_false": [3, 0, 1],
-        "n_not_given": [1, 1, 0],
-    }
-)
-_ANNOTATIONS = pd.DataFrame({"source_id": ["a", "b"], "source_label_name": ["x", "y"]})
+LABELS = {1: "Acropora", 2: "Porites", 3: "Sand", 4: "Bleached Acropora", 5: "Unknown"}
+# Groups s7 and s30 are train, s8 is val: its point must not be counted.
+IMAGES = [
+    ImageSpec("a1", group="s7"),
+    ImageSpec("a2", group="s7"),
+    ImageSpec("b1", group="s30"),
+    ImageSpec("c1", group="s8"),
+]
+POINTS = [
+    ("a1", 0, 0, 1),
+    ("a1", 1, 1, 2),
+    ("a2", 0, 0, 3),
+    ("b1", 0, 0, 4),
+    ("b1", 1, 1, 5),
+    ("c1", 0, 0, 4),
+]
 
 
 @pytest.fixture
-def seen(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Replace dataset building, schema and counting with recorders; keep ``only_false_pairs``."""
-    seen: dict[str, Any] = {}
-    dataset = SimpleNamespace(df_annotations=_ANNOTATIONS, SOURCE_NAME="coralnet")
-
-    def _build_datasets(data: Any, **kwargs: Any) -> dict:
-        seen["build"] = kwargs
-        return {(kwargs["names"][0], kwargs["splits"][0]): dataset}
-
-    def _from_csv(path: Path, *, sources: set[str]) -> str:
-        seen["schema"] = {"path": Path(path), "sources": sources}
-        return "SCHEMA"
-
-    def _counts(df: pd.DataFrame, schema: str, *, dataset_source: str) -> pd.DataFrame:
-        seen["counts"] = {"df": df, "schema": schema, "dataset_source": dataset_source}
-        return _COUNTS
-
-    monkeypatch.setattr(script, "build_datasets", _build_datasets)
-    monkeypatch.setattr(script, "ConceptSchema", SimpleNamespace(from_csv=_from_csv))
-    monkeypatch.setattr(script, "source_concept_counts", _counts)
-    monkeypatch.setattr(
-        script,
-        "setup_local_cache",
-        lambda data: seen.update(
-            cache_dir=data.get("local_cache_dir"), has_cache_key="local_cache_dir" in data
-        ),
+def inputs(tmp_path: Path) -> dict[str, Path]:
+    """The cache, a data config pinning it with a train block over the train groups, concepts."""
+    cache_dir, _, pin = write_version(
+        tmp_path, kind="points", images=IMAGES, labels=LABELS, points=POINTS, name="coralnet"
     )
-    monkeypatch.setattr(script, "_git_commit", lambda: "abc1234")
-    return seen
-
-
-def _write_schema_config(tmp_path: Path) -> Path:
-    """A data config with two configured datasets and one whose splits are all skipped."""
-    path = tmp_path / "schema_config.yaml"
-    path.write_text(
+    split_file = tmp_path / "coralnet.csv"
+    split_file.write_text("group,split\ns7,train\ns30,train\ns8,val\n")
+    data_config = tmp_path / "data_config.yaml"
+    data_config.write_text(
         yaml.safe_dump(
             {
                 "data": {
-                    "local_cache_write_through": False,
-                    "mermaid": {"train": {"annotation_date_cutoff": "2026-08-12"}, "val": None},
-                    "catlin_seaview": {"train": None, "val": {"whitelist_regions": ["ATL"]}},
-                    "benthos_yuval": {"train": None, "val": None},
+                    "datasets": {
+                        "coralnet": {
+                            "version": pin.version,
+                            "manifest_sha256": pin.manifest_sha256,
+                            "split_file": str(split_file),
+                            "train": {"use": ["train"]},
+                        }
+                    }
                 }
             }
         )
     )
-    return path
+    concepts = tmp_path / "concepts.csv"
+    concept_table().to_csv(concepts, index=False)
+    return {"cache_dir": cache_dir, "data_config": data_config, "concepts": concepts}
 
 
-def _run(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
-    monkeypatch.setattr("sys.argv", ["build_concept_source_mask.py", *argv])
-    script.main()
+def _run(inputs: dict[str, Path], out: Path, *extra: str) -> None:
+    script.main(
+        [
+            "--cache-dir",
+            str(inputs["cache_dir"]),
+            "--data-config",
+            str(inputs["data_config"]),
+            "--schema-config",
+            str(inputs["data_config"]),
+            "--concepts",
+            str(inputs["concepts"]),
+            "--out",
+            str(out),
+            *extra,
+        ]
+    )
 
 
-def test_main_builds_the_requested_coralnet_split_without_reading_images(
-    monkeypatch, seen, tmp_path
-):
-    _run(monkeypatch, "--out", str(tmp_path / "mask.csv"), "--split", "val")
+def test_counts_are_per_source_and_concept_over_the_train_groups(inputs, tmp_path):
+    counts_out = tmp_path / "counts.csv"
 
-    assert seen["build"]["names"] == ["coralnet"]
-    assert seen["build"]["splits"] == ["val"]
+    _run(inputs, tmp_path / "mask.csv", "--counts-out", str(counts_out))
 
-
-def test_main_counts_the_datasets_annotations_against_the_schema_of_the_configured_sources(
-    monkeypatch, seen, tmp_path
-):
-    schema_config = _write_schema_config(tmp_path)
-    _run(monkeypatch, "--out", str(tmp_path / "mask.csv"), "--schema-config", str(schema_config))
-
-    assert seen["counts"]["df"] is _ANNOTATIONS
-    assert seen["counts"]["schema"] == "SCHEMA"
-    assert seen["counts"]["dataset_source"] == "coralnet"
-    assert seen["schema"]["sources"] == {"mermaid", "catlin_seaview"}
-
-
-def test_main_writes_only_the_pairs_with_false_points_and_no_true_points(
-    monkeypatch, seen, tmp_path
-):
-    out = tmp_path / "nested" / "mask.csv"
-
-    _run(monkeypatch, "--out", str(out))
-
-    written = pd.read_csv(out)
-    assert list(written.columns) == MASK_COLUMNS
-    assert written.to_dict("records") == [
-        {"source_id": "a", "concept": "bleached", "n_true": 0, "n_false": 3, "n_not_given": 1}
+    # s7: acropora (bleached F, branching T, tubular F), porites (F, F, T), sand (F, F, F).
+    # s30: bleached acropora (T, T, F), unknown (not given everywhere). Concepts follow the
+    # schema's channel order; sources sort numerically.
+    assert pd.read_csv(counts_out).to_numpy().tolist() == [
+        [7, "tubular", 1, 2, 0],
+        [7, "branching", 1, 2, 0],
+        [7, "bleached", 0, 3, 0],
+        [30, "tubular", 0, 1, 1],
+        [30, "branching", 1, 0, 1],
+        [30, "bleached", 1, 0, 1],
     ]
 
 
-def test_main_writes_every_count_to_counts_out_when_given(monkeypatch, seen, tmp_path):
-    counts_out = tmp_path / "counts.csv"
+def test_the_mask_lists_the_pairs_with_false_points_and_no_true_points(inputs, tmp_path):
+    out = tmp_path / "mask.csv"
 
-    _run(monkeypatch, "--out", str(tmp_path / "mask.csv"), "--counts-out", str(counts_out))
+    _run(inputs, out)
 
-    pd.testing.assert_frame_equal(pd.read_csv(counts_out), _COUNTS)
-
-
-def test_main_writes_no_counts_file_without_counts_out(monkeypatch, seen, tmp_path):
-    _run(monkeypatch, "--out", str(tmp_path / "mask.csv"))
-
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["mask.csv", "mask.meta.yaml"]
-
-
-def test_main_records_the_inputs_and_the_masked_counts_in_the_meta_sidecar(
-    monkeypatch, seen, tmp_path
-):
-    _run(monkeypatch, "--out", str(tmp_path / "mask.csv"), "--split", "val")
-
+    assert out.read_text().splitlines() == [
+        "source_id,concept,n_true,n_false,n_not_given",
+        "7,bleached,0,3,0",
+        "30,tubular,0,1,1",
+    ]
     meta = yaml.safe_load((tmp_path / "mask.meta.yaml").read_text())
-    assert meta["rule"] == "only_false"
-    assert meta["dataset"] == "coralnet"
-    assert meta["split"] == "val"
-    assert meta["n_sources"] == 2
-    assert meta["n_binary_concepts"] == 2
-    assert meta["n_pairs"] == 4
-    assert meta["n_masked"] == 1
-    assert meta["n_points"] == len(_ANNOTATIONS)
-    assert meta["git_commit"] == "abc1234"
-    assert len(meta["data_config_sha1"]) == 40
-    assert len(meta["concepts_csv_sha1"]) == 40
+    assert meta["source_ids"] == ["7", "30"]
+    assert (meta["split"], meta["n_points"], meta["n_masked"]) == ("train", 5, 2)
 
 
-def test_main_reports_the_masked_pair_count(monkeypatch, seen, tmp_path, capsys):
-    _run(monkeypatch, "--out", str(tmp_path / "mask.csv"))
-
-    assert "1 of 2 sources x 2 binary concepts = 4 pairs are only_false" in capsys.readouterr().out
-
-
-def test_main_cache_dir_flag_reaches_the_local_cache_setup(monkeypatch, seen, tmp_path):
-    _run(monkeypatch, "--out", str(tmp_path / "mask.csv"), "--cache-dir", "/the/cache")
-
-    assert seen["cache_dir"] == "/the/cache"
+def test_a_group_that_is_not_s_and_a_source_id_raises():
+    with pytest.raises(ValueError, match=r"not s<source id>: \['site'\]"):
+        script.group_source_ids(pd.Series(["s1", "site"]))
 
 
-def test_main_leaves_the_cache_unconfigured_without_cache_dir(monkeypatch, seen, tmp_path):
-    _run(monkeypatch, "--out", str(tmp_path / "mask.csv"))
+def _config(tmp_path: Path, pin: Pin, train: dict[str, Any]) -> Path:
+    """A data config pinning ``pin`` as ``coralnet`` with the ``train`` block."""
+    data_config = tmp_path / "config.yaml"
+    entry = {"version": pin.version, "manifest_sha256": pin.manifest_sha256, "train": train}
+    data_config.write_text(yaml.safe_dump({"data": {"datasets": {"coralnet": entry}}}))
+    return data_config
 
-    assert seen["has_cache_key"] is False
+
+def _inputs(tmp_path: Path, cache_dir: Path, pin: Pin, train: dict[str, Any]) -> dict[str, Path]:
+    concepts = tmp_path / "concepts.csv"
+    concept_table().to_csv(concepts, index=False)
+    return {
+        "cache_dir": cache_dir,
+        "data_config": _config(tmp_path, pin, train),
+        "concepts": concepts,
+    }
+
+
+def test_the_train_blocks_annotator_priority_picks_each_points_label(tmp_path):
+    cache_dir, _, pin = write_version(
+        tmp_path,
+        kind="points",
+        images=[ImageSpec("a1", group="s7")],
+        labels=LABELS,
+        points=[("a1", 0, 0, 1, "a"), ("a1", 0, 0, 3, "b")],
+        name="coralnet",
+    )
+    out = tmp_path / "mask.csv"
+
+    _run(_inputs(tmp_path, cache_dir, pin, {"groups": "all", "annotators": ["b", "a"]}), out)
+
+    # Annotator b's sand wins the shared position; a's acropora would make branching True.
+    assert out.read_text().splitlines()[1:] == [
+        "7,tubular,0,1,0",
+        "7,branching,0,1,0",
+        "7,bleached,0,1,0",
+    ]
+    assert yaml.safe_load((tmp_path / "mask.meta.yaml").read_text())["n_points"] == 1
+
+
+def _points(rows: list[tuple[str, int]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "image_id": [r[0] for r in rows],
+            "row": range(len(rows)),
+            "col": 0,
+            "label_id": [r[1] for r in rows],
+            "annotator": "default",
+        }
+    )
+
+
+SIZED_IMAGES = pd.DataFrame(
+    {"image_id": ["a1", "a2"], "group": ["s7", "s30"], "height": 8, "width": 8}
+)
+
+
+def test_mermaid_points_count_under_the_concept_row_of_their_benthic_attribute(tmp_path):
+    labels = pd.DataFrame(
+        {
+            "label_id": [1, 2],
+            "name": ["Acropora::Branching", "Acropora::"],
+            "mermaid_benthic_attribute": ["Acropora", "Acropora"],
+        }
+    )
+    concepts = tmp_path / "concepts.csv"
+    concept_table().assign(source_dataset_source="mermaid").to_csv(concepts, index=False)
+    schema = ConceptSchema.from_csv(concepts, sources={"mermaid"})
+
+    annotations = script.point_annotations(
+        "mermaid", _points([("a1", 1), ("a1", 2), ("a2", 2)]), SIZED_IMAGES, labels, None, None
+    )
+    counts = source_concept_counts(annotations, schema, dataset_source="mermaid")
+
+    # Acropora: tubular F, branching T, bleached F, at both sources.
+    assert counts.to_numpy().tolist() == [
+        [7, "tubular", 0, 2, 0],
+        [7, "branching", 2, 0, 0],
+        [7, "bleached", 0, 2, 0],
+        [30, "tubular", 0, 1, 0],
+        [30, "branching", 1, 0, 0],
+        [30, "bleached", 0, 1, 0],
+    ]
+
+
+def test_a_point_label_id_missing_from_labels_raises():
+    labels = pd.DataFrame(
+        {"label_id": [1], "name": ["Acropora"], "mermaid_benthic_attribute": [None]}
+    )
+    with pytest.raises(ValueError, match=r"label ids missing from labels.parquet: \[8\]"):
+        script.point_annotations(
+            "coralnet", _points([("a1", 1), ("a1", 8)]), SIZED_IMAGES, labels, None, None
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "error", "message"),
+    [
+        ("points", ValueError, r"groups not in the dataset version: \['s99'\]"),
+        ("dense", SystemExit, "has no points.parquet"),
+    ],
+    ids=["unknown-group", "no-points"],
+)
+def test_main_guards_raise(tmp_path, kind, error, message):
+    dense = kind == "dense"
+    cache_dir, _, pin = write_version(
+        tmp_path,
+        kind=kind,
+        images=[ImageSpec("a1", group="s7", mask=np.ones((8, 8), np.uint8) if dense else None)],
+        labels=LABELS,
+        points=() if dense else [("a1", 0, 0, 1)],
+        name="coralnet",
+    )
+
+    with pytest.raises(error, match=message):
+        _run(_inputs(tmp_path, cache_dir, pin, {"groups": ["s99"]}), tmp_path / "mask.csv")

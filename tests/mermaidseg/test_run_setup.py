@@ -125,6 +125,7 @@ class _SourceDataset:
         self.source_id2name = dict(enumerate(names, start=1))
         self.source_name2id = {name: i for i, name in self.source_id2name.items()}
         self.num_source_classes = len(names) + 1
+        self.label_targets = {"pocillopora alive": "Pocillopora", "sand": "Sand"}
         self.global_offset: int | None = None
 
     def set_global_offset(self, offset: int) -> None:
@@ -137,8 +138,10 @@ def _schema_config(tmp_path: Path, *sources: str) -> Path:
         yaml.safe_dump(
             {
                 "data": {
-                    "local_cache_write_through": True,
-                    **{name: {"train": {"split": "train"}} for name in sources},
+                    "datasets": {
+                        name: {"version": "v", "manifest_sha256": "s", "train": {"groups": "all"}}
+                        for name in sources
+                    }
                 }
             }
         )

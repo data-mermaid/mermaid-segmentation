@@ -6,17 +6,22 @@ checkpoint into a bundle directory that ``mermaidseg.inference.bundle.load_bundl
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import torch
+from botocore.exceptions import ClientError
 from safetensors.torch import save_file
 
+from mermaidseg.data.config import TAXONOMY_NAME
 from mermaidseg.inference.bundle import (
     MODEL_JSON,
     SCHEMA_VERSION,
@@ -27,6 +32,10 @@ from mermaidseg.inference.bundle import (
 )
 from mermaidseg.inference.preprocess import CHANNEL_ORDER, INTERPOLATION
 from mermaidseg.run_setup import read_checkpoint
+from segdata_spec import DATASET_BUCKET
+from segdata_spec._s3 import MANIFEST_NAME, dataset_prefix, is_not_found, taxonomy_prefix
+
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
 # Sections that must not change when a run resumes into an existing sidecar.
 _CONTRACT_KEYS = ("architecture", "id2label", "concept_id2name", "preprocessing")
@@ -148,6 +157,105 @@ def _require_clean_tree(lineage: dict) -> None:
         )
 
 
+def _pins(lineage: dict) -> list[tuple[str, str, str, str]]:
+    """The ``(kind, name, version, manifest_sha256)`` of every pin in ``lineage['data_version']``.
+
+    Raises:
+        ValueError: ``data_version``, its datasets or its taxonomy pin is absent or empty.
+    """
+    data_version = lineage.get("data_version")
+    if not data_version:
+        raise ValueError("the run's lineage has no data_version; its data must be pinned")
+    if not data_version.get("datasets"):
+        raise ValueError("the run's lineage pins no datasets; its data must be pinned")
+    taxonomy = data_version.get("taxonomy")
+    if taxonomy is None:
+        raise ValueError("the run's lineage has no taxonomy pin; its taxonomy must be pinned")
+    pins = [
+        ("datasets", name, entry["version"], entry["manifest_sha256"])
+        for name, entry in data_version["datasets"].items()
+    ]
+    pins.append(("taxonomy", TAXONOMY_NAME, taxonomy["version"], taxonomy["manifest_sha256"]))
+    return pins
+
+
+def _manifest_key(kind: str, name: str, version: str) -> str:
+    prefix = taxonomy_prefix if kind == "taxonomy" else dataset_prefix
+    return prefix(name, version) + MANIFEST_NAME
+
+
+def _require_pinned_manifests(lineage: dict, client: Any) -> None:
+    """Raise ValueError unless every pinned manifest is in the bucket with its recorded sha256."""
+    for kind, name, version, expected in _pins(lineage):
+        key = _manifest_key(kind, name, version)
+        try:
+            data = client.get_object(Bucket=DATASET_BUCKET, Key=key)["Body"].read()
+        except ClientError as exc:
+            if not is_not_found(exc):
+                raise
+            raise ValueError(
+                f"{kind} manifest for {name!r} version {version!r} is missing: "
+                f"s3://{DATASET_BUCKET}/{key}"
+            ) from exc
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != expected:
+            raise ValueError(
+                f"{kind} manifest for {name!r} version {version!r} has sha256 {actual}, "
+                f"but the run recorded {expected}"
+            )
+
+
+def _require_git_checkout(repo_dir: Path) -> None:
+    """Raise ValueError when ``repo_dir`` is not inside a git checkout."""
+    probe = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise ValueError(f"{repo_dir} is not a git checkout: {probe.stderr.strip()}")
+
+
+def _origin_refs_containing(sha: str, repo_dir: Path) -> list[str]:
+    """The ``refs/remotes/origin`` refs that contain ``sha``; empty when it is unknown to git.
+
+    Raises:
+        ValueError: ``repo_dir`` is not a git checkout.
+    """
+    result = subprocess.run(
+        [
+            "git",
+            "for-each-ref",
+            f"--contains={sha}",
+            "--format=%(refname)",
+            "refs/remotes/origin",
+        ],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return result.stdout.split()
+    _require_git_checkout(repo_dir)
+    return []
+
+
+def _require_pushed_commit(lineage: dict, repo_dir: Path) -> None:
+    """Raise ValueError unless the lineage's commit is reachable from a local ``origin/*`` ref."""
+    sha = lineage.get("git_sha")
+    # Only a full sha reaches git, so --contains never sees a ref name or an option.
+    if not isinstance(sha, str) or not _FULL_SHA.fullmatch(sha):
+        raise ValueError(f"git_sha {sha!r} is not a 40-character lowercase hex commit id")
+    if not _origin_refs_containing(sha, repo_dir):
+        raise ValueError(
+            f"commit {sha!r} is not reachable from any origin/* ref; "
+            "run `git fetch origin` and, if it is still missing, the commit must be pushed"
+        )
+
+
 def _require_empty_out_dir(out_dir: Path) -> None:
     if out_dir.exists() and (not out_dir.is_dir() or any(out_dir.iterdir())):
         raise ValueError(f"output directory {out_dir} exists and is not empty")
@@ -205,18 +313,26 @@ def _write_bundle_dir(
         raise
 
 
-def export_bundle(checkpoint: Path, out_dir: Path) -> Path:
+def export_bundle(
+    checkpoint: Path, out_dir: Path, *, s3_client: Any, repo_dir: Path | None = None
+) -> Path:
     """Export ``checkpoint`` into a bundle directory at ``out_dir`` and return it.
 
     The sidecar ``model.json`` beside the checkpoint supplies the architecture, label maps
     and preprocessing; the lineage is the checkpoint's own, from the session that wrote it.
+    ``s3_client`` reads the pinned manifests; ``repo_dir`` (default: the working directory)
+    is the git checkout whose ``origin/*`` refs must contain the lineage's commit.
 
     Raises:
         FileNotFoundError: The sidecar is missing or ``out_dir``'s parent does not exist.
         RuntimeError: The checkpoint cannot be loaded or lacks a required key, ``lineage``
             included; the message names its path.
         ValueError: The checkpoint's tree was dirty or unknown, ``out_dir`` is not empty, or
-            the checkpoint's config differs from its ``lineage.resolved_config``.
+            the checkpoint's config differs from its ``lineage.resolved_config``, the lineage
+            pins no datasets or no taxonomy in ``data_version``, a pinned
+            manifest is missing from the bucket or has another sha256, the lineage's
+            commit is not a full lowercase sha or is not reachable from any local ``origin/*``
+            ref, or ``repo_dir`` is not a git checkout.
     """
     checkpoint, out_dir = Path(checkpoint), Path(out_dir)
     sidecar_path = checkpoint.parent / MODEL_JSON
@@ -231,6 +347,8 @@ def export_bundle(checkpoint: Path, out_dir: Path) -> Path:
     )
     _require_clean_tree(ckpt["lineage"])
     _require_matching_config(ckpt["config"], ckpt["lineage"].get("resolved_config"), checkpoint)
+    _require_pushed_commit(ckpt["lineage"], Path.cwd() if repo_dir is None else Path(repo_dir))
+    _require_pinned_manifests(ckpt["lineage"], s3_client)
     metadata = {
         **sidecar,
         "lineage": ckpt["lineage"],

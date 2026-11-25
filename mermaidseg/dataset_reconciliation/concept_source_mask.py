@@ -23,8 +23,8 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
-from torch.utils.data import Dataset
 
+from mermaidseg.data.base import VersionDataset
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 
@@ -236,26 +236,6 @@ def apply_concept_source_mask(
     return target_concepts * keep_b.to(target_concepts.dtype)[:, :, None, None]
 
 
-class _ConstantSourceRow(Dataset):
-    """Adds a constant keep-table row to a dataset that is not a ``BaseCoralDataset``."""
-
-    def __init__(self, dataset: Dataset, row: int = 0) -> None:
-        self.dataset = dataset
-        self.row = int(row)
-
-    def __len__(self) -> int:
-        return len(self.dataset)  # type: ignore[arg-type]
-
-    def __getitem__(self, idx: int) -> tuple[Any, ...]:
-        return (*self.dataset[idx], self.row)
-
-    def __getattr__(self, name: str) -> Any:
-        # Forward attribute lookups (SOURCE_NAME, split, ...) to the wrapped dataset.
-        if name == "dataset":
-            raise AttributeError(name)
-        return getattr(self.dataset, name)
-
-
 def _check_covered(source_ids: Iterable[Any], mask: ConceptSourceMask) -> None:
     """Raise if any of ``source_ids`` is outside the sources ``mask`` was built from."""
     missing = sorted({str(s) for s in source_ids} - mask.covered_sources, key=_source_sort_key)
@@ -268,31 +248,33 @@ def _check_covered(source_ids: Iterable[Any], mask: ConceptSourceMask) -> None:
         )
 
 
-def attach_source_rows(datasets: Sequence[Dataset], mask: ConceptSourceMask) -> list[Dataset]:
+def _group_source_ids(groups: Iterable[str]) -> list[str]:
+    """Map CoralNet image groups ``s<id>`` to their source ids ``<id>``."""
+    return [str(group).removeprefix("s") for group in groups]
+
+
+def attach_source_rows(
+    datasets: Sequence[VersionDataset], mask: ConceptSourceMask
+) -> list[VersionDataset]:
     """Make every training dataset return ``(image, labels, source_row)``.
 
-    ``BaseCoralDataset`` subclasses return the row from ``_safe_getitem``, so a retry on another
-    image returns that image's row. Datasets of ``mask.dataset`` map each image's ``source_id``;
-    the others, and datasets outside the base class (wrapped), always return row 0.
+    Readers of ``mask.dataset`` map each image's group ``s<id>`` to source ``<id>`` and its
+    keep-table row; the others return row 0. The reader returns the row of the image it loads, so
+    a train-split retry on another image returns that image's row. A dataset listed several times
+    (a repeated train block) is one object and gets the same rows each time.
+
+    Returns:
+        ``datasets``, as a list.
 
     Raises:
         ValueError: A ``mask.dataset`` image comes from a source the mask was not built from. Its
             never-True concepts would silently train as False.
     """
-    from mermaidseg.datasets.base_dataset import BaseCoralDataset
-
-    out: list[Dataset] = []
-    wrapped: dict[int, Dataset] = {}
     for ds in datasets:
-        if isinstance(ds, BaseCoralDataset):
-            if getattr(ds, "SOURCE_NAME", None) == mask.dataset:
-                _check_covered(ds.df_images["source_id"], mask)
-                rows = mask.rows_for(ds.df_images["source_id"])
-                ds.set_source_rows(pd.Series(rows, index=ds.df_images.index))
-            else:
-                ds.set_source_rows(None)
-            out.append(ds)
+        if mask.dataset == ds.SOURCE_NAME:
+            sources = _group_source_ids(ds.images["group"])
+            _check_covered(sources, mask)
+            ds.set_source_rows(mask.rows_for(sources))
         else:
-            # The same dataset object can appear several times (repeated coralscapes_v2).
-            out.append(wrapped.setdefault(id(ds), _ConstantSourceRow(ds, 0)))
-    return out
+            ds.set_source_rows(np.zeros(len(ds.images), dtype=np.int64))
+    return list(datasets)

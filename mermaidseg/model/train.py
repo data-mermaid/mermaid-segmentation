@@ -10,10 +10,7 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader
 
-from mermaidseg.datasets.local_cache import LocalS3Cache
-from mermaidseg.datasets.utils import emit_cache_stats, emit_load_stage_stats
 from mermaidseg.logger import Logger
-from mermaidseg.model.distributed import all_reduce_sum
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel
 from mermaidseg.model.metric_policy import (
@@ -21,57 +18,6 @@ from mermaidseg.model.metric_policy import (
     extract_metric_value,
     metric_direction,
 )
-
-
-def _enforce_load_failure_rate(
-    failures_before: int | None,
-    num_loaded_samples: int,
-    max_rate: float | None,
-    epoch: int,
-    split: str = "train",
-) -> None:
-    """Raise on every rank if this epoch's dataset load-failure rate exceeds ``max_rate``.
-
-    A high rate signals a systemic data problem (bad credentials, missing files, truncated image
-    lists) rather than a few corrupt samples, so we fail fast instead of silently training on a
-    shrunken/biased dataset. The rate is failed load attempts over all load attempts this epoch,
-    summed over ranks: ``failures / (num_loaded_samples + failures)``. Every rank sees the same
-    rate and raises together instead of leaving the others in the next collective, so this is a
-    collective call that every rank must make.
-
-    The rate is approximate at the epoch boundary: loader workers prefetch, so a few batches
-    loaded during validation or before the next epoch's first read can land in the neighbouring
-    epoch's window (both loaders share one failure counter).
-
-    Args:
-        failures_before: ``LocalS3Cache`` failure count read before the epoch, or None if untracked.
-        num_loaded_samples: Samples the loaders delivered this epoch, summed over ranks.
-        max_rate: Largest tolerated failure rate, or None to disable the guard.
-        epoch: Epoch number, for the error message.
-        split: Split name, for the error message.
-
-    Raises:
-        RuntimeError: If the epoch's failure rate is above ``max_rate``.
-    """
-    if max_rate is None:
-        return
-    failures_after = LocalS3Cache.get().load_failure_count()
-    delta = (
-        0 if failures_before is None or failures_after is None else failures_after - failures_before
-    )
-    epoch_failures = int(all_reduce_sum(torch.tensor([delta], dtype=torch.int64)).item())
-    attempts = num_loaded_samples + epoch_failures
-    if attempts == 0:
-        return
-    rate = epoch_failures / attempts
-    if rate > max_rate:
-        raise RuntimeError(
-            f"Epoch {epoch}: {split} load-failure rate {rate:.1%} ({epoch_failures}/{attempts}) "
-            f"exceeds max_load_failure_rate={max_rate:.1%}. This usually indicates a systemic "
-            f"data problem (credentials, missing files, truncated image lists) rather than a few "
-            f"corrupt samples. Inspect the dataset warnings the loader workers emitted; pass "
-            f"max_load_failure_rate=None to disable this guard."
-        )
 
 
 def train_model(
@@ -84,7 +30,6 @@ def train_model(
     start_epoch: int = -1,
     end_epoch: int = -1,
     metric_of_interest: str = "accuracy",
-    max_load_failure_rate: float | None = 0.05,
     train_log_interval: int = 1,
     on_optimizer_step: Callable[[MetaModel], None] | None = None,
     save_best_checkpoint: bool = True,
@@ -106,11 +51,6 @@ def train_model(
             training configuration.
         metric_of_interest: Metric used for checkpointing. Must resolve to ``loss`` or
             ``accuracy`` (classification accuracy).
-        max_load_failure_rate: If set, raise once the per-epoch
-            dataset load-failure rate exceeds this fraction (e.g. 0.05 = 5%), to fail fast on
-            systemic data problems instead of silently training on a shrunken dataset. Set to
-            ``None`` to disable. Only enforced when the shared load stats are attached (see
-            ``setup_local_cache``); otherwise there is no failure count to read.
         train_log_interval: Log per-batch train losses to the logger every
             ``train_log_interval`` iterations (1 = every batch).
         on_optimizer_step: Called from ``train_epoch`` after each successful optimizer update.
@@ -141,7 +81,6 @@ def train_model(
         logging.info("EPOCH: %d", epoch)
 
         meta_model.model.train(True)
-        failures_before = LocalS3Cache.get().load_failure_count()
         train_loss, train_metric_results, train_timing = meta_model.train_epoch(
             train_loader,
             evaluator,
@@ -150,19 +89,10 @@ def train_model(
             epoch=epoch,
             on_optimizer_step=on_optimizer_step,
         )
-        _enforce_load_failure_rate(
-            failures_before, int(train_timing["num_loaded_samples"]), max_load_failure_rate, epoch
-        )
         # Monotonic global-step (iteration) axis for the experiment tracker.
         step = meta_model.global_step
         logging.info("LOSS train %s", train_loss)
         logging.info("TRAIN METRICS: %s", train_metric_results)
-        train_cache_stats = LocalS3Cache.get().snapshot_stats()
-        emit_cache_stats(
-            f"EPOCH {epoch} train cache: {train_cache_stats.s3_fetches} fetched from S3, "
-            f"{train_cache_stats.local_hits} served from local"
-        )
-        emit_load_stage_stats(f"EPOCH {epoch} train", train_cache_stats)
         epoch_loss_dict["train/loss"] = train_loss
         epoch_loss_dict["train/data_loading_sec"] = train_timing["data_loading_sec"]
         epoch_loss_dict["train/forward_sec"] = train_timing["forward_sec"]
@@ -178,12 +108,6 @@ def train_model(
             epoch_loss_dict["validation/time_taken"] = time.time() - val_start
             logging.info("LOSS valid %s", val_loss)
             logging.info("VALID METRICS: %s", val_metric_results)
-            val_cache_stats = LocalS3Cache.get().snapshot_stats()
-            emit_cache_stats(
-                f"EPOCH {epoch} val cache: {val_cache_stats.s3_fetches} fetched from S3, "
-                f"{val_cache_stats.local_hits} served from local"
-            )
-            emit_load_stage_stats(f"EPOCH {epoch} val", val_cache_stats)
 
             epoch_loss_dict["validation/loss"] = val_loss
             metrics_epoch[epoch]["validation_metrics"] = val_metric_results

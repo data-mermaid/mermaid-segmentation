@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -257,7 +258,7 @@ _MAIN_WRITTEN_VARS = (
 )
 
 
-def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final"):
+def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final", events=None, sync_rc=0):
     """Point main at a run YAML and stub every effect; return the execvp calls."""
     (tmp_path / "run.yaml").write_text((_RUNS / f"{run}.yaml").read_text())
     monkeypatch.setattr(entrypoint, "CONFIG_DIR", tmp_path)
@@ -273,7 +274,19 @@ def _stub_main(tmp_path, monkeypatch, ngpu, run="cbm_final"):
     monkeypatch.setattr("boto3.client", lambda *a, **k: object())
     monkeypatch.setattr(entrypoint, "resolve_secrets", lambda *a: None)
     execs: list[list[str]] = []
-    monkeypatch.setattr(os, "execvp", lambda file, argv: execs.append(argv) or 0)
+    log = events if events is not None else []
+
+    def fake_run(argv, **kwargs):
+        log.append(("sync", list(argv)))
+        return SimpleNamespace(returncode=sync_rc)
+
+    def fake_exec(file, argv):
+        log.append(("train", list(argv)))
+        execs.append(argv)
+        return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(os, "execvp", fake_exec)
     return execs
 
 
@@ -289,6 +302,64 @@ def test_main_without_git_sha_raises_before_secrets_or_exec(tmp_path, monkeypatc
     with pytest.raises(ValueError, match=BUILD_GIT_SHA_ENV):
         entrypoint.main([])
 
+    assert execs == []
+
+
+def test_main_syncs_the_cache_with_the_trainers_data_config_before_training(tmp_path, monkeypatch):
+    events: list = []
+    _stub_main(tmp_path, monkeypatch, ngpu=1, events=events)
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+
+    entrypoint.main([])
+
+    assert [kind for kind, _ in events] == ["sync", "train"]
+    sync_argv = events[0][1]
+    assert sync_argv[1].endswith("scripts/sync_data.py")
+    assert launchers._arg(sync_argv, "--data-config") == "configs/data_config.yaml"
+    assert launchers._arg(sync_argv, "--cache-dir") == str(tmp_path / "cache")
+    assert launchers._arg(events[1][1], "--data-config") == "configs/data_config.yaml"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--data-config", "a.yaml", "--data-config", "b.yaml"],
+        ["--data-config=a.yaml", "--data-config=b.yaml"],
+        ["--data-config", "a.yaml", "--data-config=b.yaml"],
+        ["--data-config=a.yaml", "--data-config", "b.yaml"],
+    ],
+)
+def test_data_config_arg_returns_the_last_occurrence_as_argparse_does(args):
+    assert entrypoint.data_config_arg(args) == "b.yaml"
+
+
+def test_main_without_a_data_config_fails_before_the_secrets_are_fetched(tmp_path, monkeypatch):
+    execs = _stub_main(tmp_path, monkeypatch, ngpu=1)
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+    real = entrypoint.load_run_config
+
+    def without_data_config(path):
+        config = real(path)
+        config.train.args = ["--batch-size", "8"]
+        return config
+
+    monkeypatch.setattr(entrypoint, "load_run_config", without_data_config)
+    monkeypatch.setattr(entrypoint, "resolve_secrets", lambda *a: pytest.fail("secrets fetched"))
+
+    with pytest.raises(ValueError, match="--data-config"):
+        entrypoint.main([])
+
+    assert execs == []
+
+
+def test_main_does_not_train_when_the_sync_fails(tmp_path, monkeypatch):
+    events: list = []
+    execs = _stub_main(tmp_path, monkeypatch, ngpu=1, events=events, sync_rc=3)
+    monkeypatch.setenv(BUILD_GIT_SHA_ENV, "abc123")
+
+    assert entrypoint.main([]) == 3
+
+    assert [kind for kind, _ in events] == ["sync"]
     assert execs == []
 
 

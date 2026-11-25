@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import functools
+import multiprocessing as mp
 import random
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 
-from mermaidseg.datasets import make_worker_init_fn
 from mermaidseg.seeding import make_worker_seeder, seed_everything
-from tests.mermaidseg.conftest import run_in_spawned_worker
 
 DRAWS: dict[str, Callable[[], float]] = {
     "random": random.random,
@@ -68,8 +69,20 @@ def test_worker_seeder_differs_across_workers(
     assert _seeded_draw(monkeypatch, draw, 1000, 0) != _seeded_draw(monkeypatch, draw, 1001, 0)
 
 
-def test_worker_seeder_runs_the_inner_init_in_a_spawned_worker(
-    monkeypatch, tmp_path, spawn_cache_stats
-):
-    init_fn = make_worker_seeder(1, make_worker_init_fn(spawn_cache_stats))
-    run_in_spawned_worker(init_fn, tmp_path / "cache", monkeypatch)
+def _write_worker_id(path: Path, worker_id: int) -> None:
+    path.write_text(str(worker_id))
+
+
+def test_worker_seeder_runs_the_inner_init_in_a_spawned_worker(tmp_path):
+    marker = tmp_path / "worker_id"
+    init_fn = make_worker_seeder(1, functools.partial(_write_worker_id, marker))
+    worker = mp.get_context("spawn").Process(target=init_fn, args=(3,))
+    worker.start()
+    try:
+        worker.join(timeout=60)
+        assert worker.exitcode == 0
+    finally:
+        if worker.is_alive():
+            worker.kill()
+            worker.join()
+    assert marker.read_text() == "3"

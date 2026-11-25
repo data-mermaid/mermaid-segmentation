@@ -4,9 +4,10 @@ Two lookups are built per source dataset:
 
 - ``ClassLookup``: source label name -> MERMAID target class id (0 = ignore).
   This replicates training's ``source_to_target`` with ``label_roll_up=True``:
-  the source label is mapped to its MERMAID benthic-attribute name, then rolled
-  up through the benthic-attribute hierarchy until it lands on a class present in
-  the model's ``id2label`` vocabulary.
+  the source label is mapped to its ``mermaid_benthic_attribute`` in the dataset
+  version's ``labels.parquet`` (``VersionDataset.label_targets``), then rolled up
+  through the pinned taxonomy's benthic-attribute hierarchy until it lands on a
+  class present in the model's ``id2label`` vocabulary.
 
 - ``ConceptLookup``: source label name -> length-K concept row in the model's
   concept channel order (values ``0=not_given, 1=False, 2=True``). This
@@ -17,120 +18,20 @@ Two lookups are built per source dataset:
 
 from __future__ import annotations
 
-import json
 import logging
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
-from mermaidseg.dataset_reconciliation.concepts import (
-    initialize_benthic_hierarchy,
-)
-from mermaidseg.dataset_reconciliation.label_mapping import (
-    coralnet_to_mermaid,
-    fetch_benthos_yuval_to_mermaid,
-    fetch_catlin_seaview_to_mermaid,
-    fetch_moorea_labeled_corals_to_mermaid,
-    fetch_pacific_labeled_corals_to_mermaid,
-    fetch_ucsd_mosaics_to_mermaid,
-    load_coralnet_label_mappings,
-)
-from mermaidseg.dataset_reconciliation.registry import roll_up_label
+from segdata_spec.taxonomy import roll_up
 
 logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_TAXA = {"not_given", "not given", "", "nan"}
-
-
-def _source_to_target_map(
-    source_name: str,
-    id2name: Mapping[Any, str | None] | None = None,
-    used_names: Collection[str] | None = None,
-) -> dict[str, str | None]:
-    """Return the ``source_label -> MERMAID target`` map for a source.
-
-    Args:
-        source_name: Source dataset name.
-        id2name: CoralNet label id -> name (the run's ``coralnet_id2name`` JSON); required for
-            ``coralnet``, whose mapping rows are keyed by label id. Ignored for other sources.
-        used_names: Label names in use; ``coralnet`` skips other ids (see ``coralnet_to_mermaid``).
-
-    Raises:
-        ValueError: If the source has no mapping, or ``coralnet`` is given no ``id2name``.
-    """
-    source_name = source_name.lower()
-    raw: Mapping[str, str | None]
-    if source_name == "coralnet":
-        if id2name is None:
-            raise ValueError("The coralnet mapping needs the dataset's coralnet_id2name")
-        raw = coralnet_to_mermaid(id2name, load_coralnet_label_mappings().records, used_names)
-    elif source_name == "pacific_labeled_corals":
-        raw = fetch_pacific_labeled_corals_to_mermaid()
-    elif source_name == "benthos_yuval":
-        raw = fetch_benthos_yuval_to_mermaid()
-    elif source_name == "catlin_seaview":
-        raw = fetch_catlin_seaview_to_mermaid()
-    elif source_name == "moorea_labeled_corals":
-        raw = fetch_moorea_labeled_corals_to_mermaid()
-    elif source_name == "ucsd_mosaics":
-        raw = fetch_ucsd_mosaics_to_mermaid()
-    else:
-        raise ValueError(f"No source->target mapping wired for source {source_name!r}")
-    return {str(k).lower(): (str(v).lower() if v is not None else None) for k, v in raw.items()}
-
-
-def load_benthic_hierarchy(
-    hierarchy_json: str | Path | None = None,
-    output_dir: str | Path | None = None,
-    fetch_remote: bool = True,
-) -> dict[str, str | None] | None:
-    """Load (and cache) the benthic-attribute name->parent hierarchy.
-
-    Precedence: explicit ``hierarchy_json`` file, then a cached
-    ``benthic_hierarchy.json`` in ``output_dir``, then a remote fetch (cached to
-    ``output_dir`` when possible). Returns ``None`` if unavailable (roll-up
-    disabled with a warning).
-    """
-    if hierarchy_json is not None:
-        with Path(hierarchy_json).open() as f:
-            raw = json.load(f)
-        return {k.lower(): (v.lower() if v else None) for k, v in raw.items()}
-
-    cache_path = Path(output_dir) / "benthic_hierarchy.json" if output_dir else None
-    if cache_path is not None and cache_path.is_file():
-        logger.info("Loading cached benthic hierarchy from %s", cache_path)
-        with cache_path.open() as f:
-            raw = json.load(f)
-        return {k.lower(): (v.lower() if v else None) for k, v in raw.items()}
-
-    if not fetch_remote:
-        logger.warning("Benthic hierarchy unavailable (no cache, fetch_remote=False); roll-up OFF.")
-        return None
-
-    try:
-        logger.info("Fetching benthic-attribute hierarchy from MERMAID API ...")
-        hierarchy = initialize_benthic_hierarchy()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Could not fetch benthic hierarchy (%s); roll-up disabled.", e)
-        return None
-
-    hierarchy = {
-        str(k).lower(): (str(v).lower() if v is not None else None) for k, v in hierarchy.items()
-    }
-    if cache_path is not None:
-        try:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            with cache_path.open("w") as f:
-                json.dump(hierarchy, f)
-            logger.info("Cached benthic hierarchy to %s", cache_path)
-        except OSError as e:  # noqa: BLE001
-            logger.warning("Failed to cache benthic hierarchy: %s", e)
-    return hierarchy
 
 
 class ClassLookup:
@@ -158,33 +59,36 @@ class ClassLookup:
 
 
 def build_class_lookup(
-    source_name: str,
+    label_targets: Mapping[str, str | None],
     source_label_names: list[str],
     id2label: dict[int, str],
-    hierarchy: dict[str, str | None] | None = None,
-    id2name: Mapping[Any, str | None] | None = None,
+    hierarchy: Mapping[str, str | None] | None = None,
 ) -> ClassLookup:
     """Build a source-label -> MERMAID class-id lookup (training-style, with roll-up).
 
-    ``id2name`` is the CoralNet label id -> name map, required when ``source_name`` is coralnet.
+    Args:
+        label_targets: Label name -> ``mermaid_benthic_attribute`` of the dataset version
+            (``VersionDataset.label_targets``); ``None`` maps to no target.
+        source_label_names: The label names to look up.
+        id2label: Target class id to label name; id 0 is ignored.
+        hierarchy: Lower-cased benthic-attribute name -> parent name of the pinned taxonomy
+            (``mermaidseg.data.factory.load_benthic_hierarchy``), or ``None`` to disable roll-up.
     """
-    src_to_tgt = _source_to_target_map(source_name, id2name, source_label_names)
+    src_to_tgt = {
+        str(name).lower(): (str(target).lower() if target else None)
+        for name, target in label_targets.items()
+    }
 
     # id2label is the frozen target vocabulary (0 = ignore/background).
     target_label2id = {str(v).lower(): int(k) for k, v in id2label.items() if int(k) != 0}
     subset = set(target_label2id.keys())
+    tree = dict(hierarchy) if hierarchy is not None else {}
 
     name_to_class_id: dict[str, int] = {}
     for src_name in source_label_names:
         key = str(src_name).lower()
         target = src_to_tgt.get(key)
-        if target is None:
-            name_to_class_id[key] = 0
-            continue
-        if hierarchy is not None:
-            rolled = roll_up_label(target, hierarchy, subset)
-        else:
-            rolled = target if target in subset else None
+        rolled = roll_up(target, tree, subset) if target is not None else None
         name_to_class_id[key] = target_label2id.get(rolled, 0) if rolled is not None else 0
 
     return ClassLookup(name_to_class_id, id2label)

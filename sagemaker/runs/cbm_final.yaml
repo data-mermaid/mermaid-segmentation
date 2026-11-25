@@ -3,7 +3,7 @@ job:
   name_prefix: mermaidseg-cbm-final
   image: mermaid-segmentation-jobs:training-latest
   instance_type: ml.g6e.8xlarge
-  volume_gb: 500
+  volume_gb: 1500
   max_runtime_hours: 480
 train:
   run_name: cbm_final
@@ -12,6 +12,8 @@ train:
     - --training-config
     - configs/training_config_cbm_final.yaml
     - --data-config
-    - configs/data_config_trainval.yaml
+    - configs/data_config.yaml
+    - --model-config
+    - configs/model_config_cbm_dpt_lora_vitl.yaml
     - --logger-config
     - configs/logger_config_sagemaker.yaml

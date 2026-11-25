@@ -15,11 +15,12 @@ import torch.distributed as dist
 from torch.utils.data import ConcatDataset, DataLoader
 
 from mermaidseg.config import to_plain_dict
+from mermaidseg.data.config import DataSection
+from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
 from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
-from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local_cache
 from mermaidseg.export import write_sidecar
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
-from mermaidseg.io import resolve_repo_path, setup_config, update_config_with_args
+from mermaidseg.io import REPO_ROOT, resolve_repo_path, setup_config, update_config_with_args
 from mermaidseg.lineage import collect_lineage, data_version, inherit_lineage
 from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.distributed import (
@@ -153,30 +154,27 @@ def make_shuffled_loader(
     return DataLoader(dataset, batch_sampler=sampler, generator=generator, **kwargs)
 
 
-def _assemble_train_datasets(dataset_dict: dict[tuple[str, str], Any], data_cfg: Any) -> list[Any]:
+def _assemble_train_datasets(
+    dataset_dict: dict[tuple[str, str], Any], section: DataSection
+) -> list[Any]:
     """Every train dataset, then each extra copy that ``repeat`` asks for.
 
-    ``repeat: N`` on a train split is the total number of copies of that dataset in
+    ``repeat: N`` on a train block is the total number of copies of that dataset in
     the result: the first sits among the train datasets and ``N - 1`` more are
     appended after all of them. A missing ``repeat`` means 1.
 
     Args:
         dataset_dict: Built datasets keyed by ``(name, split)``.
-        data_cfg: The ``data`` section of the run config.
+        section: The validated ``data`` section of the run.
 
     Returns:
         The train datasets in concatenation order.
-
-    Raises:
-        ValueError: A train split's ``repeat`` is not an int (bools and floats
-            included) or is below 1; the message names the dataset.
     """
     train_items = [(name, ds) for (name, split), ds in dataset_dict.items() if split == "train"]
     datasets = [ds for _, ds in train_items]
     for name, ds in train_items:
-        repeat = data_cfg[name]["train"].get("repeat", 1)
-        if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
-            raise ValueError(f"dataset {name!r}: train repeat must be an int >= 1, got {repeat!r}")
+        block = section.datasets[name].train
+        repeat = block.repeat if block is not None and block.repeat is not None else 1
         datasets.extend([ds] * (repeat - 1))
     return datasets
 
@@ -199,18 +197,13 @@ def _lineage_params(lineage: dict[str, Any]) -> dict[str, Any]:
         "lineage/git_sha": lineage["git_sha"],
         "lineage/git_dirty": lineage["git_dirty"],
         "lineage/uv_lock_sha256": lineage["uv_lock_sha256"],
-        "lineage/data_config_sha1": version["data_config_sha1"],
     }
-    params.update({f"lineage/manifests/{k}": v for k, v in version["manifests"].items()})
-    params.update(
-        {f"lineage/manifest_sha256/{k}": v for k, v in version.get("manifest_sha256", {}).items()}
-    )
-    params.update(
-        {
-            f"lineage/label_mapping_sha256/{k}": v["sha256"]
-            for k, v in version.get("label_mappings", {}).items()
-        }
-    )
+    for name, pin in version["datasets"].items():
+        params[f"lineage/datasets/{name}/version"] = pin["version"]
+        params[f"lineage/datasets/{name}/manifest_sha256"] = pin["manifest_sha256"]
+    if version["taxonomy"] is not None:
+        params["lineage/taxonomy/version"] = version["taxonomy"]["version"]
+        params["lineage/taxonomy/manifest_sha256"] = version["taxonomy"]["manifest_sha256"]
     return params
 
 
@@ -251,9 +244,8 @@ def run(args: argparse.Namespace) -> None:
         args: Parsed arguments from ``scripts/train.py``.
     """
     # -- 0. Environment --------------------------------------------------------
-    # Data is served from the pre-warmed local cache (scripts/prefetch_cache.py) and
-    # metrics go to the tracker that the logger config names. Set MERMAIDSEG_S3_OFFLINE=1
-    # to fail loudly on any cache miss instead of silently falling back to S3.
+    # Data is read from --cache-dir, which scripts/sync_data.py fills from the pinned dataset
+    # versions; metrics go to the tracker that the logger config names.
     check_env()
 
     # -- 1. Config -------------------------------------------------------------
@@ -303,14 +295,14 @@ def run(args: argparse.Namespace) -> None:
     cfg_logger = copy.deepcopy(cfg)
 
     # -- 2. Datasets -----------------------------------------------------------
-    if args.cache_dir is not None:
-        cfg.data.local_cache_dir = args.cache_dir
-    cache_stats = setup_local_cache(cfg.data)
-
-    # Shared build loop (also used by scripts/prefetch_cache.py) so the training job
-    # and the cache-prefetch job always agree on which source objects are needed.
+    cache_dir = Path(args.cache_dir)
+    section = DataSection.model_validate(cfg.data)
     dataset_dict = build_datasets(
-        cfg.data, padding=cfg.training.padding, input_size=cfg.model.input_size
+        section,
+        cache_dir,
+        repo_root=REPO_ROOT,
+        padding=cfg.training.padding,
+        input_size=cfg.model.input_size,
     )
 
     loader_kwargs = {
@@ -322,20 +314,19 @@ def run(args: argparse.Namespace) -> None:
         "drop_last": True,
         "prefetch_factor": cfg.training.loader.prefetch_factor,
     }
-    loader_kwargs["worker_init_fn"] = make_worker_seeder(
-        dist_ctx.rank, make_worker_init_fn(cache_stats)
-    )
+    loader_kwargs["worker_init_fn"] = make_worker_seeder(dist_ctx.rank)
 
     # -- 3. Registry / model / evaluator --------------------------------------
     registry, schema = build_registry(
         dataset_dict,
         cfg.training,
         schema_config=resolve_repo_path(args.concept_schema_config),
+        benthic_hierarchy=load_benthic_hierarchy(section, cache_dir),
         device=device,
     )
     print0(dist_ctx, f"Froze concept channels to the datasets of {args.concept_schema_config}")
 
-    train_datasets = _assemble_train_datasets(dataset_dict, cfg.data)
+    train_datasets = _assemble_train_datasets(dataset_dict, section)
     val_datasets = [ds for (_, split), ds in dataset_dict.items() if split == "val"]
 
     # training.concept_source_mask: zero the targets of source x binary concept pairs listed in the
@@ -375,9 +366,7 @@ def run(args: argparse.Namespace) -> None:
         lineage = collect_lineage(
             resolved_config=to_plain_dict(cfg_logger),
             seed=seed,
-            data_version=data_version(
-                to_plain_dict(cfg_logger.data), dataset_dict, registry.label_mapping_provenance
-            ),
+            data_version=data_version(section, dataset_dict),
         )
         if checkpoint_data is not None:
             lineage = inherit_lineage(lineage, checkpoint_data.get("lineage"))
@@ -583,7 +572,6 @@ def run(args: argparse.Namespace) -> None:
                 start_epoch=epoch,
                 end_epoch=epoch + 1,
                 metric_of_interest=cfg.training.metric_of_interest,
-                max_load_failure_rate=cfg.training.max_load_failure_rate,
                 train_log_interval=cfg.logger.train_log_interval,
                 on_optimizer_step=(
                     _save_step_checkpoint

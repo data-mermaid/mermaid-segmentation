@@ -1,7 +1,7 @@
 """Validation loss of an exported bundle on the val splits of a data config.
 
-Rebuilds the training-time registry (``mermaidseg.run_setup``) on the ``val`` split of every
-dataset in the data config, at the bundle's input size, around the bundle's model, with the
+Rebuilds the training-time registry (``mermaidseg.run_setup``) on the ``val`` block of every
+dataset in the data config, read from the synced cache, at the bundle's input size, around the bundle's model, with the
 training and model sections of the bundle's run config, and averages
 the ``ConceptBottleneckLoss`` components over batches:
 
@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -36,15 +36,16 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
+from mermaidseg.data.config import DataSection
+from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     apply_concept_source_mask,
     attach_source_rows,
 )
-from mermaidseg.datasets import build_datasets, make_worker_init_fn, setup_local_cache
 from mermaidseg.evaluation.reporting import write_json
 from mermaidseg.inference.bundle import ModelBundle
-from mermaidseg.io import ConfigDict, setup_config
+from mermaidseg.io import REPO_ROOT, ConfigDict, setup_config
 from mermaidseg.model.data_parallel import apply_concept_bottleneck_loss
 from mermaidseg.model.distributed import components_to_floats
 from mermaidseg.run_setup import (
@@ -117,6 +118,19 @@ def _check_layout(bundle: ModelBundle, registry: Any, channel_names: list[str]) 
         )
 
 
+def val_blocks_only(section: DataSection) -> DataSection:
+    """Return ``section`` restricted to the datasets with a val block, each without its other blocks."""
+    return section.model_copy(
+        update={
+            "datasets": {
+                name: entry.model_copy(update={"train": None, "test": None})
+                for name, entry in section.datasets.items()
+                if entry.val is not None
+            }
+        }
+    )
+
+
 def _bundle_config(data_config: str | Path, bundle: ModelBundle) -> ConfigDict:
     """Run config: the data section from ``data_config``, model and training from ``bundle``."""
     cfg = setup_config({"data": str(data_config)}, resolution=bundle.input_size[0])
@@ -131,6 +145,7 @@ def evaluate_val_loss(
     *,
     bundle: ModelBundle,
     data_config: str | Path,
+    cache_dir: str | Path,
     output_dir: str | Path,
     device: torch.device,
     batch_size: int = 8,
@@ -143,9 +158,14 @@ def evaluate_val_loss(
     seed: int = 0,
     name: str = "val_loss",
     apply_source_mask: bool = False,
-    cache_dir: str | Path | None = None,
+    image_ids: Mapping[tuple[str, str], Collection[str]] | None = None,
 ) -> dict:
-    """Validation loss components of the loaded ``bundle``, also written to ``<output_dir>/<name>/``."""
+    """Validation loss components of the loaded ``bundle``, also written to ``<output_dir>/<name>/``.
+
+    ``cache_dir`` is the directory ``scripts/sync_data.py`` synced ``data_config`` into, and
+    ``image_ids`` keeps, per ``(dataset, "val")``, only those images (see
+    :func:`mermaidseg.data.factory.build_datasets`).
+    """
     t0 = time.time()
     cfg = _bundle_config(data_config, bundle)
     resolution = bundle.input_size[0]
@@ -155,19 +175,23 @@ def evaluate_val_loss(
     cfg.training.loss.per_pixel_loss_weight = per_pixel_loss_weight
     cfg.training.loss.per_image_loss_weight = per_image_loss_weight
 
-    if cache_dir is not None:
-        cfg.data.local_cache_dir = str(cache_dir)
-    cache_stats = setup_local_cache(cfg.data)
+    section = DataSection.model_validate(cfg.data)
     dataset_dict = build_datasets(
-        cfg.data,
+        val_blocks_only(section),
+        Path(cache_dir),
+        repo_root=REPO_ROOT,
         padding=cfg.training.padding,
         input_size=cfg.model.input_size,
-        splits=["val"],
+        image_ids=image_ids,
     )
     if not dataset_dict:
         raise ValueError(f"{data_config} has no val split")
     registry, schema = build_registry(
-        dataset_dict, cfg.training, schema_config=schema_config, device=device
+        dataset_dict,
+        cfg.training,
+        schema_config=schema_config,
+        benthic_hierarchy=load_benthic_hierarchy(section, Path(cache_dir)),
+        device=device,
     )
     channel_names = [name for _, name in sorted(schema.channel_id2name().items())]
     _check_layout(bundle, registry, channel_names)
@@ -214,9 +238,7 @@ def evaluate_val_loss(
             shuffle=False,
             num_workers=num_workers,
             pin_memory=device.type == "cuda",
-            worker_init_fn=(
-                make_worker_seeder(0, make_worker_init_fn(cache_stats)) if num_workers > 0 else None
-            ),
+            worker_init_fn=make_worker_seeder(0) if num_workers > 0 else None,
             generator=torch.Generator().manual_seed(seed),
         )
         acc = _Accumulator()

@@ -2,8 +2,7 @@
 
 Translates a source-space label (CoralNet label ids, Coralscapes V2 names, other datasets' label
 names) into a MERMAID benthic-attribute target name. CoralNet comes from the MERMAID LabelMapping
-API (or an offline snapshot of it); the other datasets use static dicts. Also holds the GPU helper
-``source_labels_to_target_labels`` used at training time.
+API (or an offline snapshot of it); the other datasets use static dicts.
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 import requests
-import torch
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
@@ -723,27 +721,3 @@ def coralscapes_v2_to_mermaid() -> dict[str, str]:
         "water surface": "background",
         "xeniidae alive": "xeniidae",
     }
-
-
-def source_labels_to_target_labels(
-    source_labels: torch.Tensor,
-    lookup: torch.Tensor,
-) -> torch.Tensor:
-    """Map a global source-label segmentation map to target MERMAID label IDs.
-
-    Pure GPU index op; ``lookup`` must live on the same device as
-    ``source_labels``.
-
-    Args:
-        source_labels: Integer source-label map of shape ``(B, H, W)`` with
-            values in ``[0, N]``.
-        lookup: 1-D long tensor of shape ``(N+1,)`` mapping each global source
-            label (0 = background) to its MERMAID target label ID
-            (0 = background / unmapped).
-
-    Returns:
-        Long tensor of shape ``(B, H, W)`` containing target MERMAID label IDs.
-    """
-    if source_labels.dtype != torch.long:
-        source_labels = source_labels.long()
-    return lookup[source_labels]

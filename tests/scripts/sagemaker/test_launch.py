@@ -129,7 +129,7 @@ def test_build_request_for_res768():
         "ResourceConfig": {
             "InstanceType": "ml.g6e.12xlarge",
             "InstanceCount": 1,
-            "VolumeSizeInGB": 500,
+            "VolumeSizeInGB": 1500,
         },
         "StoppingCondition": {"MaxRuntimeInSeconds": 604800},
         "OutputDataConfig": {

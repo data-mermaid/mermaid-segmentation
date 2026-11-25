@@ -1,7 +1,7 @@
 """Point-annotation evaluation datasets and the shared per-unit runner.
 
-Wraps a point-annotated source dataset (CoralNet / Pacific Labeled Corals) and
-emits, per image, the full-resolution image (resized to the model input size)
+Wraps a :class:`~mermaidseg.data.point_dataset.PointDataset` reader over a synced
+points version (CoralNet / Pacific Labeled Corals) and emits, per image, the full-resolution image (resized to the model input size)
 together with the annotation ``(row, col)`` coordinates in *source* resolution,
 their mapped MERMAID class ids, and their concept rows. The runner batches
 images, runs the CBM, samples predictions exactly at the annotated pixels, and
@@ -19,11 +19,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 from numpy.typing import NDArray
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
-from mermaidseg.datasets.local_cache import LocalS3Cache
+from mermaidseg.data.point_dataset import PointDataset
 from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup
 from mermaidseg.evaluation.hierarchical import HIER_HEADLINE_KEYS, HierarchicalScore
 from mermaidseg.evaluation.metrics import ConceptLayout, MetricBundle, concept_block_from_binary
@@ -38,9 +40,28 @@ logger = logging.getLogger(__name__)
 _LOADER_SEED = 0
 
 
-def _worker_init(_worker_id: int) -> None:
-    """Re-configure the local S3 cache from env in DataLoader worker processes."""
-    LocalS3Cache.configure_from_env()
+def reader_annotations(reader: PointDataset) -> pd.DataFrame:
+    """Return the reader's points as ``image_id, row, col, source_label_name`` (lower-cased).
+
+    The index is the position of each point in ``reader.points``.
+    """
+    labels = reader.version.labels
+    names = dict(
+        zip(
+            labels.column("label_id").to_pylist(),
+            labels.column("name").to_pylist(),
+            strict=True,
+        )
+    )
+    points = reader.points.reset_index(drop=True)
+    return pd.DataFrame(
+        {
+            "image_id": points["image_id"].astype(str),
+            "row": points["row"],
+            "col": points["col"],
+            "source_label_name": points["label_id"].map(names).astype(str).str.lower(),
+        }
+    )
 
 
 class PointEvalDataset(Dataset):
@@ -48,9 +69,8 @@ class PointEvalDataset(Dataset):
 
     def __init__(
         self,
-        base_ds: Any,
+        reader: PointDataset,
         unit_col: str,
-        key_cols: list[str],
         input_size: tuple[int, int],
         mean: Sequence[float],
         std: Sequence[float],
@@ -60,19 +80,16 @@ class PointEvalDataset(Dataset):
         """Sort images by unit and pre-group annotations per image.
 
         Args:
-            base_ds: Point-annotated source dataset exposing ``df_images``,
-                ``df_annotations`` and ``read_image``.
-            unit_col: Image column that defines the evaluation unit.
-            key_cols: Image columns that identify one image's annotations.
+            reader: Reader whose ``images`` and ``points`` are evaluated.
+            unit_col: Column of ``reader.images`` that defines the evaluation unit.
             input_size: ``(height, width)`` the images are resized to.
             mean: Per-channel normalisation mean.
             std: Per-channel normalisation standard deviation.
             class_lookup: Source label to target class id lookup.
             concept_lookup: Source label to concept row lookup.
         """
-        self.base = base_ds
+        self.version = reader.version
         self.unit_col = unit_col
-        self.key_cols = list(key_cols)
         self.class_lookup = class_lookup
         self.concept_lookup = concept_lookup
         self.input_hw = (int(input_size[0]), int(input_size[1]))
@@ -80,21 +97,19 @@ class PointEvalDataset(Dataset):
         self.std = tuple(std)
 
         # Sort images by unit (then key) so units are contiguous -> timely prints.
-        df_images = base_ds.df_images.copy()
-        df_images = df_images.sort_values([unit_col, *key_cols]).reset_index(drop=True)
+        df_images = reader.images.copy()
+        df_images = df_images.sort_values([unit_col, "image_id"]).reset_index(drop=True)
         self.df_images = df_images
 
         # Pre-group annotations by the per-image key for O(1) lookup in workers.
-        ann = base_ds.df_annotations
-        # Values: (rows, cols, label names, ``df_annotations`` index of each point).
-        self._groups: dict[tuple, tuple[NDArray, NDArray, list[str], NDArray]] = {}
-        grouped = ann.groupby(self.key_cols)
-        for key, g in grouped:
-            key_t = key if isinstance(key, tuple) else (key,)
+        ann = reader_annotations(reader)
+        # Values: (rows, cols, label names, ``reader.points`` position of each point).
+        self._groups: dict[str, tuple[NDArray, NDArray, list[str], NDArray]] = {}
+        for image_id, g in ann.groupby("image_id"):
             rows = g["row"].to_numpy()
             cols = g["col"].to_numpy()
-            names = g["source_label_name"].astype(str).str.lower().tolist()
-            self._groups[key_t] = (rows, cols, names, g.index.to_numpy())
+            names = g["source_label_name"].tolist()
+            self._groups[str(image_id)] = (rows, cols, names, g.index.to_numpy())
 
     def __len__(self) -> int:
         """Return the number of images."""
@@ -109,12 +124,10 @@ class PointEvalDataset(Dataset):
         """Return one image with its annotation points; ``ok`` is False on a load failure."""
         row = self.df_images.iloc[idx]
         unit = str(row[self.unit_col])
-        key_t = tuple(row[c] for c in self.key_cols)
+        key_t = str(row["image_id"])
         try:
-            image = self.base.read_image(**row.to_dict())
-            image = np.asarray(image)
-            if image.ndim == 2:
-                image = np.stack([image] * 3, axis=-1)
+            with Image.open(self.version.image_path(row.to_dict())) as handle:
+                image = np.asarray(handle.convert("RGB"))
             h, w = image.shape[:2]
             img_tensor = preprocess(image, self.input_hw, mean=self.mean, std=self.std)
         except Exception as e:  # noqa: BLE001
@@ -278,9 +291,8 @@ def _log_unit(logger_: logging.Logger, unit: str, d: dict) -> None:
 def run_point_evaluation(
     *,
     eval_name: str,
-    base_ds: Any,
+    reader: PointDataset,
     unit_col: str,
-    key_cols: list[str],
     predictor: CBMPredictor,
     class_lookup: ClassLookup,
     concept_lookup: ConceptLookup,
@@ -312,9 +324,8 @@ def run_point_evaluation(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = PointEvalDataset(
-        base_ds=base_ds,
+        reader=reader,
         unit_col=unit_col,
-        key_cols=key_cols,
         input_size=predictor.input_size,
         mean=predictor.mean,
         std=predictor.std,
@@ -336,9 +347,7 @@ def run_point_evaluation(
 
     # Compute unmapped-label reports in the main process (worker copies of the
     # lookups would not propagate their runtime `.unmapped` sets back here).
-    all_names = sorted(
-        base_ds.df_annotations["source_label_name"].astype(str).str.lower().unique().tolist()
-    )
+    all_names = sorted(reader_annotations(reader)["source_label_name"].unique().tolist())
     unmapped_class = sorted(n for n in all_names if class_lookup.name_to_class_id.get(n, 0) == 0)
     unmapped_concept = sorted(n for n in all_names if n not in concept_lookup.name_to_row)
     if unmapped_class:
@@ -376,7 +385,7 @@ def run_point_evaluation(
         num_workers=num_workers,
         collate_fn=_collate,
         pin_memory=(predictor.device.type == "cuda"),
-        worker_init_fn=make_worker_seeder(0, _worker_init) if num_workers > 0 else None,
+        worker_init_fn=make_worker_seeder(0) if num_workers > 0 else None,
         generator=torch.Generator().manual_seed(_LOADER_SEED),
         persistent_workers=num_workers > 0,
     )

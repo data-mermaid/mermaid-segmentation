@@ -141,6 +141,7 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         self.split = split
         self.transform = transform
         self._global_offset = 0
+        self._source_rows: NDArray[np.int64] | None = None
 
         images = _select_groups(version.images.to_pandas(), groups)
         _check_synced(images, version.synced_groups)
@@ -249,6 +250,35 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         self.source_id2label_id = {source_name2id[n]: label for n, label in served.items()}
         self._refresh_source_ids()
 
+    def set_source_rows(self, rows: NDArray[np.int64] | None) -> None:
+        """Set the concept-source-mask row of each image, or ``None`` to return pairs.
+
+        With rows set, items are ``(image, mask, row)``, the row of the image actually returned.
+        See :func:`mermaidseg.dataset_reconciliation.concept_source_mask.attach_source_rows`.
+
+        Raises:
+            ValueError: ``rows`` does not hold one row per image.
+        """
+        if rows is not None and len(rows) != len(self.images):
+            raise ValueError(f"{len(rows)} source rows for {len(self.images)} images")
+        self._source_rows = rows
+
+    @property
+    def label_targets(self) -> dict[str, str | None]:
+        """Label name -> ``mermaid_benthic_attribute`` over ``labels.parquet``.
+
+        A null or empty attribute is ``None``: the label maps to no target.
+        """
+        labels = self.version.labels
+        return {
+            name: attribute or None
+            for name, attribute in zip(
+                labels.column("name").to_pylist(),
+                labels.column("mermaid_benthic_attribute").to_pylist(),
+                strict=True,
+            )
+        }
+
     @property
     def global_offset(self) -> int:
         """The current global offset (default 0)."""
@@ -268,8 +298,8 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
             return transformed["image"].transpose(2, 0, 1), transformed["mask"]
         return image, mask
 
-    def __getitem__(self, idx: int) -> tuple[Any, Any]:
-        """Return ``(image, mask)``.
+    def __getitem__(self, idx: int) -> tuple[Any, ...]:
+        """Return ``(image, mask)``, or ``(image, mask, source_row)`` once source rows are set.
 
         On the train split a sample whose mask has no label is replaced by another random image,
         up to ``len(self)`` loads.
@@ -283,7 +313,9 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         for _ in range(n):
             image, mask = self._load(idx)
             if self.split != "train" or _has_label(mask):
-                return image, mask
+                if self._source_rows is None:
+                    return image, mask
+                return image, mask, int(self._source_rows[idx])
             idx = _next_random_idx(idx, n)
         raise RuntimeError(f"{type(self).__name__}: all {n} items were empty (no labels)")
 

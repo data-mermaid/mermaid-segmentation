@@ -54,7 +54,8 @@ VERSION = "20260101-abc1234"
 class ImageSpec:
     """One image of a fixture version; ``mask`` (a dense label map) sets its size when given.
 
-    ``pixels`` (an ``(h, w, 3)`` uint8 array) is stored losslessly under the ``.jpg`` key.
+    ``pixels`` (an ``(h, w, 3)`` uint8 array) is stored losslessly under the ``.jpg`` key; ``attrs``
+    is the JSON string of the ``images.parquet`` ``attrs`` column.
     """
 
     image_id: str
@@ -64,6 +65,7 @@ class ImageSpec:
     mask: NDArray[np.integer[Any]] | None = None
     pixels: NDArray[np.uint8] | None = None
     source_name: str | None = None
+    attrs: str | None = None
 
 
 PointRow = tuple[str, int, int, int] | tuple[str, int, int, int, str]
@@ -124,7 +126,7 @@ def _images_table(
                 "mask_crc64nvme": nulls,
                 "source_fingerprint": ["fp"] * n,
                 "source_name": pa.array([s.source_name for s in images], pa.string()),
-                "attrs": nulls,
+                "attrs": pa.array([s.attrs for s in images], pa.string()),
             }
         ),
         IMAGES_SCHEMA,
@@ -347,7 +349,12 @@ def publish_points(
     )
 
 
-def publish_taxonomy_version(fake: FakeS3, tmp_path: Path, version: str) -> Pin:
+def publish_taxonomy_version(
+    fake: FakeS3,
+    tmp_path: Path,
+    version: str,
+    benthic_attributes: pa.Table | None = None,
+) -> Pin:
     """Publish taxonomy ``mermaid-benthic`` to ``fake`` under the dataset bucket."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
@@ -358,8 +365,12 @@ def publish_taxonomy_version(fake: FakeS3, tmp_path: Path, version: str) -> Pin:
         name="mermaid-benthic",
         version=version,
         tables={
-            "benthic_attributes.parquet": pa.table(
-                {"id": ["1", "2"], "name": ["Hard coral", "Acropora"], "parent_id": [None, "1"]}
+            "benthic_attributes.parquet": (
+                benthic_attributes
+                if benthic_attributes is not None
+                else pa.table(
+                    {"id": ["1", "2"], "name": ["Hard coral", "Acropora"], "parent_id": [None, "1"]}
+                )
             ),
             "growth_forms.parquet": pa.table({"id": ["9"], "name": ["Branching"]}),
         },
@@ -370,3 +381,16 @@ def publish_taxonomy_version(fake: FakeS3, tmp_path: Path, version: str) -> Pin:
         git=GitState(sha="abcdef1234567", dirty=False, pushed=True),
     )
     return Pin(name="mermaid-benthic", version=version, manifest_sha256=sha)
+
+
+def write_taxonomy(
+    cache_dir: Path, tmp_path: Path, benthic_attributes: pa.Table, version: str = VERSION
+) -> Pin:
+    """Write taxonomy ``mermaid-benthic`` into ``cache_dir``, as ``sync`` would, and return its pin."""
+    fake = FakeS3()
+    pin = publish_taxonomy_version(fake, tmp_path, version, benthic_attributes)
+    for (bucket, key), data in fake.objects.items():
+        path = cache_dir / bucket / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return pin

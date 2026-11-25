@@ -12,7 +12,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import requests
-import torch
 
 from mermaidseg.dataset_reconciliation import label_mapping as lm
 from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import CORALSCAPES_V2_ID2NAME
@@ -367,23 +366,6 @@ def test_live_api_returns_int_keyed_coralnet_rows():
 
     assert mappings.records
     assert all(isinstance(k, int) for k in mappings.records)
-
-
-def test_source_labels_to_target_labels_indexes_the_lookup_for_a_non_square_batch():
-    lookup = torch.tensor([0, 5, 7, 5])
-    labels = torch.tensor([[[1, 0, 2], [3, 2, 0]]])  # (B=1, H=2, W=3)
-
-    out = lm.source_labels_to_target_labels(labels, lookup)
-
-    assert out.tolist() == [[[5, 0, 7], [5, 7, 0]]]
-    assert out.dtype == torch.long
-
-
-def test_source_labels_to_target_labels_accepts_non_long_integer_labels():
-    lookup = torch.tensor([0, 5, 7])
-    labels = torch.tensor([[[2, 1]]], dtype=torch.uint8)
-
-    assert lm.source_labels_to_target_labels(labels, lookup).tolist() == [[[7, 5]]]
 
 
 # --- Golden digest ---

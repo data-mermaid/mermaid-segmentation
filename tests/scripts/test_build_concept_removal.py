@@ -1,9 +1,7 @@
-"""build_concept_removal: main joins CoralNet sources onto the label counts and writes the removed channels."""
+"""build_concept_removal: train label counts from tiny versions' stats, and the removal file."""
 
 from __future__ import annotations
 
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -11,183 +9,220 @@ import pytest
 import yaml
 
 import scripts.build_concept_removal as script
-from mermaidseg.dataset_reconciliation.concept_removal import REMOVAL_COLUMNS, CoverageRule
+from mermaidseg.data.config import DataSection
+from mermaidseg.dataset_reconciliation.concept_removal import REMOVAL_COLUMNS, concept_coverage
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
+from segdata_spec.manifest import Pin
+from tests.mermaidseg.conftest import concept_table
+from tests.mermaidseg.data.conftest import ImageSpec, write_version
 
-_DATA_CONFIG = Path(script.__file__).resolve().parents[1] / "configs" / "data_config.yaml"
-
-_COUNTS = pd.DataFrame(
+IMAGES = pd.DataFrame({"image_id": ["a1", "a2", "v1"], "group": ["s7", "s7", "s9"]})
+LABELS = pd.DataFrame(
     {
-        "dataset": ["coralnet", "coralnet", "mermaid"],
-        "image_id": [1, 2, 7],
-        "label": ["a", "b", "c"],
-        "n": [5, 6, 7],
+        "label_id": [1, 2, 3, 4],
+        "name": ["Acropora", " Sand ", "Unlabeled", "Porites"],
+        "mermaid_benthic_attribute": [None] * 4,
+    }
+)
+LABEL_COUNTS = pd.DataFrame(
+    {
+        "image_id": ["a1", "a1", "a2", "a2", "a2", "v1"],
+        "label_id": [1, 2, 1, 3, 0, 4],
+        "n": [2, 1, 3, 5, 9, 4],
     }
 )
 
 
-def _coverage() -> pd.DataFrame:
-    """Two channels, one removed for too few images."""
-    rows = {
-        "genus__acropora": ("genus", 900, 120, 60, 5, 1, False, False, False),
-        "anthropogenic": ("binary", 20, 4, 0, 1, 0, True, True, False),
-    }
-    frame = pd.DataFrame.from_dict(rows, orient="index", columns=REMOVAL_COLUMNS[1:])
-    frame.index.name = "concept"
-    frame["removed"] = frame[["fails_images", "fails_annotations", "fails_sources"]].any(axis=1)
-    return frame
+def test_coralnet_counts_cover_the_train_groups_without_unlabeled_with_the_source_id():
+    out = script.train_label_counts("coralnet", LABEL_COUNTS, IMAGES, LABELS, {"s7"})
+
+    assert out.to_numpy().tolist() == [
+        ["coralnet", "a1", "acropora", 2, "7"],
+        ["coralnet", "a1", "sand", 1, "7"],
+        ["coralnet", "a2", "acropora", 3, "7"],
+    ]
 
 
-@pytest.fixture
-def seen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
-    """Replace the CoralNet lookup, schema and coverage computation with recorders."""
-    seen: dict[str, Any] = {}
-    counts_path = tmp_path / "counts.parquet"
-    _COUNTS.to_parquet(counts_path)
-    seen["counts_path"] = counts_path
+def test_another_datasets_source_is_its_name_and_no_groups_counts_every_image():
+    out = script.train_label_counts("mermaid", LABEL_COUNTS, IMAGES, LABELS, None)
 
-    def _image_sources(data_config: Path, cache_dir: str | None) -> pd.Series:
-        seen["sources_args"] = (Path(data_config), cache_dir)
-        return pd.Series({"1": "s10", "2": "s20"}, name="source_id")
-
-    def _from_csv(path: Path, *, sources: set[str]) -> str:
-        seen["schema"] = {"path": Path(path), "sources": sources}
-        return "SCHEMA"
-
-    def _coverage_fn(counts: pd.DataFrame, schema: str, rule: CoverageRule) -> pd.DataFrame:
-        seen["coverage"] = {"counts": counts, "schema": schema, "rule": rule}
-        return _coverage()
-
-    monkeypatch.setattr(script, "coralnet_image_sources", _image_sources)
-    monkeypatch.setattr(script, "ConceptSchema", SimpleNamespace(from_csv=_from_csv))
-    monkeypatch.setattr(script, "concept_coverage", _coverage_fn)
-    monkeypatch.setattr(script, "_git_commit", lambda: "abc1234")
-    return seen
+    assert out[["image_id", "label", "source"]].to_numpy().tolist() == [
+        ["a1", "acropora", "mermaid"],
+        ["a1", "sand", "mermaid"],
+        ["a2", "acropora", "mermaid"],
+        ["v1", "porites", "mermaid"],
+    ]
 
 
-def _write_schema_config(tmp_path: Path) -> Path:
-    """A data config with two configured datasets and one whose splits are all skipped."""
-    path = tmp_path / "schema_config.yaml"
-    path.write_text(
+def test_a_counted_label_id_missing_from_labels_raises():
+    counts = pd.DataFrame({"image_id": ["a1"], "label_id": [8], "n": [1]})
+    with pytest.raises(ValueError, match=r"label ids missing from labels.parquet: \[8\]"):
+        script.train_label_counts("coralnet", counts, IMAGES, LABELS, None)
+
+
+def test_mermaid_labels_count_under_the_concept_row_of_their_benthic_attribute(tmp_path):
+    labels = pd.DataFrame(
+        {
+            "label_id": [1, 2],
+            "name": ["Acropora::Branching", "Acropora::"],
+            "mermaid_benthic_attribute": ["Acropora", "Acropora"],
+        }
+    )
+    counts = pd.DataFrame({"image_id": ["a1", "a2"], "label_id": [1, 2], "n": [2, 3]})
+    concepts = tmp_path / "concepts.csv"
+    concept_table().assign(source_dataset_source="mermaid").to_csv(concepts, index=False)
+    schema = ConceptSchema.from_csv(concepts, sources={"mermaid"})
+
+    out = script.train_label_counts("mermaid", counts, IMAGES, labels, None)
+    coverage = concept_coverage(out, schema)
+
+    assert out["label"].tolist() == ["acropora", "acropora"]
+    assert coverage.loc["genus__acropora", ["n_annotations", "n_images"]].tolist() == [5, 2]
+
+
+def _section(pin: Pin, entry: dict[str, Any]) -> DataSection:
+    """A data section pinning ``pin`` as ``coralnet`` with the split blocks of ``entry``."""
+    return DataSection.model_validate(
+        {
+            "datasets": {
+                "coralnet": {
+                    "version": pin.version,
+                    "manifest_sha256": pin.manifest_sha256,
+                    **entry,
+                }
+            }
+        }
+    )
+
+
+ONE_ANNOTATOR = [("a1", 0, 0, 1)]
+
+
+@pytest.mark.parametrize(
+    ("entry", "points", "message"),
+    [
+        (
+            {"train": {"groups": ["s99"]}},
+            ONE_ANNOTATOR,
+            r"groups not in the dataset version: \['s99'\]",
+        ),
+        ({"val": {"groups": "all"}}, ONE_ANNOTATOR, "no dataset has a train block to count"),
+        (
+            {"train": {"groups": "all"}},
+            [("a1", 0, 0, 1, "a"), ("a1", 1, 1, 1, "b")],
+            r"coralnet: several annotators \['a', 'b'\]",
+        ),
+        (
+            {"train": {"groups": "all", "annotators": ["a"]}},
+            [("a1", 0, 0, 1, "a"), ("a1", 1, 1, 1, "b")],
+            r"coralnet: several annotators \['a', 'b'\]",
+        ),
+    ],
+    ids=[
+        "unknown-group",
+        "no-train-block",
+        "several-annotators-none-named",
+        "several-annotators-some-named",
+    ],
+)
+def test_section_train_label_counts_guards_raise(tmp_path, entry, points, message):
+    cache_dir, _, pin = write_version(
+        tmp_path,
+        kind="points",
+        images=[ImageSpec("a1", group="s7")],
+        labels={1: "Acropora"},
+        points=points,
+        name="coralnet",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        script.section_train_label_counts(_section(pin, entry), cache_dir)
+
+
+def test_main_writes_the_channels_that_fail_the_rule_over_the_train_groups(tmp_path):
+    cache_dir, _, pin = write_version(
+        tmp_path,
+        kind="points",
+        images=[
+            ImageSpec(i, group=g) for i, g in zip(IMAGES["image_id"], IMAGES["group"], strict=True)
+        ],
+        labels=dict(zip(LABELS["label_id"], LABELS["name"], strict=True)),
+        points=[("a1", 0, 0, 1), ("a1", 1, 1, 2), ("a2", 0, 0, 1), ("v1", 0, 0, 4)],
+        name="coralnet",
+    )
+    split_file = tmp_path / "coralnet.csv"
+    split_file.write_text("group,split\ns7,train\ns9,val\n")
+    data_config = tmp_path / "data_config.yaml"
+    data_config.write_text(
         yaml.safe_dump(
             {
                 "data": {
-                    "local_cache_write_through": False,
-                    "mermaid": {"train": {"annotation_date_cutoff": "2026-08-12"}, "val": None},
-                    "catlin_seaview": {"train": None, "val": {"whitelist_regions": ["ATL"]}},
-                    "benthos_yuval": {"train": None, "val": None},
+                    "datasets": {
+                        "coralnet": {
+                            "version": pin.version,
+                            "manifest_sha256": pin.manifest_sha256,
+                            "split_file": str(split_file),
+                            "train": {"use": ["train"]},
+                        }
+                    }
                 }
             }
         )
     )
-    return path
+    concepts = tmp_path / "concepts.csv"
+    concept_table().to_csv(concepts, index=False)
+    out = tmp_path / "removal.csv"
 
+    script.main(
+        [
+            "--cache-dir",
+            str(cache_dir),
+            "--data-config",
+            str(data_config),
+            "--schema-config",
+            str(data_config),
+            "--concepts",
+            str(concepts),
+            "--out",
+            str(out),
+            "--min-images",
+            "2",
+            "--min-noncoralnet-images",
+            "99",
+            "--min-annotations",
+            "1",
+            "--min-coralnet-sources",
+            "1",
+        ]
+    )
 
-def _run(
-    monkeypatch: pytest.MonkeyPatch, seen: dict[str, Any], tmp_path: Path, *extra: str
-) -> Path:
-    out = tmp_path / "nested" / "removal.csv"
-    argv = [
-        "build_concept_removal.py",
-        "--data-config",
-        str(_DATA_CONFIG),
-        "--label-counts",
-        str(seen["counts_path"]),
-        "--out",
-        str(out),
-        *extra,
-    ]
-    monkeypatch.setattr("sys.argv", argv)
-    script.main()
-    return out
-
-
-def test_main_maps_coralnet_images_to_sources_and_keeps_other_datasets_as_their_own_source(
-    monkeypatch, seen, tmp_path
-):
-    _run(monkeypatch, seen, tmp_path)
-
-    counts = seen["coverage"]["counts"]
-    assert counts["source"].tolist() == ["s10", "s20", "mermaid"]
-    assert counts["image_id"].tolist() == ["1", "2", "7"]
-    assert seen["coverage"]["schema"] == "SCHEMA"
-
-
-def test_main_passes_the_data_config_and_cache_dir_to_the_coralnet_lookup(
-    monkeypatch, seen, tmp_path
-):
-    _run(monkeypatch, seen, tmp_path, "--cache-dir", "/the/cache")
-
-    data_config, cache_dir = seen["sources_args"]
-    assert data_config == _DATA_CONFIG
-    assert cache_dir == "/the/cache"
-
-
-def test_main_builds_the_schema_from_the_datasets_of_the_schema_config(monkeypatch, seen, tmp_path):
-    schema_config = _write_schema_config(tmp_path)
-    _run(monkeypatch, seen, tmp_path, "--schema-config", str(schema_config))
-
-    assert seen["schema"]["sources"] == {"mermaid", "catlin_seaview"}
-
-
-def test_main_threshold_flags_set_the_coverage_rule(monkeypatch, seen, tmp_path):
-    _run(monkeypatch, seen, tmp_path, "--min-images", "7", "--min-coralnet-sources", "2")
-
-    rule = seen["coverage"]["rule"]
-    assert rule == CoverageRule(min_images=7, min_coralnet_sources=2)
-
-
-def test_main_uses_the_default_rule_without_threshold_flags(monkeypatch, seen, tmp_path):
-    _run(monkeypatch, seen, tmp_path)
-
-    assert seen["coverage"]["rule"] == CoverageRule()
-
-
-def test_main_writes_only_the_removed_channels(monkeypatch, seen, tmp_path):
-    out = _run(monkeypatch, seen, tmp_path)
-
+    # Acropora is in both train images and is kept; sand is in one. The val image's porites
+    # is not counted, so the porites channels have no support.
     written = pd.read_csv(out)
     assert list(written.columns) == REMOVAL_COLUMNS
-    assert written["concept"].tolist() == ["anthropogenic"]
-
-
-def test_main_writes_the_full_coverage_table_when_coverage_out_is_given(
-    monkeypatch, seen, tmp_path
-):
-    coverage_out = tmp_path / "coverage.csv"
-
-    _run(monkeypatch, seen, tmp_path, "--coverage-out", str(coverage_out))
-
-    assert pd.read_csv(coverage_out)["concept"].tolist() == ["genus__acropora", "anthropogenic"]
-
-
-def test_main_records_the_rule_and_the_removal_counts_in_the_meta_sidecar(
-    monkeypatch, seen, tmp_path
-):
-    out = _run(monkeypatch, seen, tmp_path, "--min-images", "7")
-
-    meta = yaml.safe_load(out.with_name("removal.meta.yaml").read_text())
-    assert meta["rule"]["min_images"] == 7
-    assert meta["n_channels"] == 2
-    assert meta["n_removed"] == 1
-    assert meta["removed_by_kind"] == {"binary": 1, "genus": 0}
-    assert meta["channels_by_kind"] == {"binary": 1, "genus": 1}
-    assert meta["datasets_counted"] == ["coralnet", "mermaid"]
-    assert meta["git_commit"] == "abc1234"
-
-
-def test_main_reports_how_many_taxonomic_and_binary_channels_were_removed(
-    monkeypatch, seen, tmp_path, capsys
-):
-    _run(monkeypatch, seen, tmp_path)
-
-    assert "removed 0 of 1 taxonomic and 1 of 1 binary concept channels" in capsys.readouterr().out
-
-
-def test_main_exits_when_a_coralnet_image_has_no_source_in_the_data_config(
-    monkeypatch, seen, tmp_path
-):
-    pd.concat([_COUNTS, _COUNTS.assign(image_id=[99, 98, 97])]).to_parquet(seen["counts_path"])
-
-    with pytest.raises(SystemExit, match="2 CoralNet count rows have no source"):
-        _run(monkeypatch, seen, tmp_path)
-    assert "coverage" not in seen
+    assert written["concept"].tolist() == [
+        "kingdom__none",
+        "phylum__none",
+        "class__none",
+        "order__none",
+        "family__none",
+        "family__poritidae",
+        "genus__none",
+        "genus__porites",
+        "tubular",
+        "bleached",
+    ]
+    assert written.set_index("concept").loc["genus__none"].tolist() == [
+        "genus",
+        1,
+        1,
+        0,
+        1,
+        0,
+        True,
+        False,
+        False,
+    ]
+    meta = yaml.safe_load((tmp_path / "removal.meta.yaml").read_text())
+    assert meta["datasets_counted"] == ["coralnet"]
+    assert meta["dataset_versions"] == {"coralnet": pin.version}

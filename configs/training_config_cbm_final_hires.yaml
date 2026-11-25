@@ -43,7 +43,6 @@ training:
     loader:
         prefetch_factor: 3
         val_prefetch_factor: 2
-    max_load_failure_rate: 0.05
     stall_dump_sec: 180  # seconds one update may run before all stacks are dumped; <= 0 disables
     world_size: 4  # ranks (GPUs); WORLD_SIZE must equal it
     grad_accum_steps: 1

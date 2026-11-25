@@ -7,12 +7,19 @@ from pathlib import Path
 from typing import Any, get_args
 
 from mermaidseg.data.base import VersionDataset
-from mermaidseg.data.config import DATASET_BUCKET, DataSection, Split, entry_split_groups
+from mermaidseg.data.config import (
+    DATASET_BUCKET,
+    TAXONOMY_NAME,
+    DataSection,
+    Split,
+    entry_split_groups,
+)
 from mermaidseg.data.dense_dataset import DenseDataset
 from mermaidseg.data.point_dataset import PointDataset
 from mermaidseg.io import build_eval_transform, compile_transform
 from segdata_spec.manifest import Pin
-from segdata_spec.read import DatasetVersion, open_version
+from segdata_spec.read import DatasetVersion, open_taxonomy, open_version
+from segdata_spec.taxonomy import hierarchy_from_table
 
 
 def _transform_for(
@@ -34,6 +41,18 @@ def _reader(
     if version.manifest.kind == "points":
         return PointDataset(version, split=split, annotators=annotators, padding=padding, **shared)
     return DenseDataset(version, split=split, **shared)
+
+
+def open_dataset_version(section: DataSection, name: str, cache_dir: Path) -> DatasetVersion:
+    """Open the synced version the section pins for dataset ``name``, with the entry's ``resize``.
+
+    Raises:
+        KeyError: The section has no dataset ``name``.
+        segdata_spec.errors.NotSynced: The version was not synced with the entry's ``resize``.
+    """
+    entry = section.datasets[name]
+    pin = Pin(name=name, version=entry.version, manifest_sha256=entry.manifest_sha256)
+    return open_version(cache_dir, DATASET_BUCKET, pin, resize=entry.resize)
 
 
 def build_datasets(
@@ -66,8 +85,7 @@ def build_datasets(
     subsets = image_ids or {}
     datasets: dict[tuple[str, str], VersionDataset] = {}
     for name, entry in section.datasets.items():
-        pin = Pin(name=name, version=entry.version, manifest_sha256=entry.manifest_sha256)
-        version = open_version(cache_dir, DATASET_BUCKET, pin, resize=entry.resize)
+        version = open_dataset_version(section, name, cache_dir)
         for split in get_args(Split):
             block = getattr(entry, split)
             if block is None:
@@ -80,3 +98,23 @@ def build_datasets(
             }
             datasets[(name, split)] = _reader(version, split, shared, padding, block.annotators)
     return datasets
+
+
+def load_benthic_hierarchy(section: DataSection, cache_dir: Path) -> dict[str, str | None] | None:
+    """Return the benthic-attribute hierarchy of the section's pinned taxonomy, or None unpinned.
+
+    Args:
+        section: The validated ``data`` section.
+        cache_dir: The directory ``scripts/sync_data.py`` synced into.
+
+    Returns:
+        Lower-cased name -> parent name (see ``segdata_spec.taxonomy.hierarchy_from_table``).
+
+    Raises:
+        FileNotFoundError: The pinned taxonomy is not in the cache.
+        segdata_spec.errors.PinMismatch: The cached taxonomy differs from the pin.
+    """
+    if section.taxonomy is None:
+        return None
+    pin = Pin(name=TAXONOMY_NAME, **section.taxonomy.model_dump())
+    return hierarchy_from_table(open_taxonomy(cache_dir, DATASET_BUCKET, pin).benthic_attributes)

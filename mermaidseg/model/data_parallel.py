@@ -14,7 +14,7 @@ from torch import nn
 
 from mermaidseg.dataset_reconciliation.concept_source_mask import apply_concept_source_mask
 from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
-from mermaidseg.dataset_reconciliation.label_mapping import source_labels_to_target_labels
+from mermaidseg.dataset_reconciliation.registry import source_labels_to_target_labels
 
 
 def require_divisible_batch(batch_size: int, n_gpus: int) -> int:

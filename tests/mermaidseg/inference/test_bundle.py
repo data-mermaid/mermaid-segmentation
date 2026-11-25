@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 from safetensors.torch import load_file, save_file
 
-from mermaidseg.export import export_bundle
 from mermaidseg.inference.bundle import (
     MODEL_JSON,
     WEIGHTS,
@@ -21,6 +20,7 @@ from mermaidseg.inference.bundle import (
     sha256_file,
 )
 from mermaidseg.inference.predictor import CBMPredictor
+from tests.mermaidseg.conftest import deployable_lineage, export_ckpt, repo_with_origin
 from tests.mermaidseg.inference import _tiny
 
 
@@ -105,8 +105,14 @@ def test_load_refuses_a_foreign_schema_version_task_or_weights_path(
 
 
 def test_predictor_preprocesses_with_the_bundles_own_statistics(tmp_path):
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", mean=[0.5] * 3, std=[0.25] * 3)
-    bundle = load_bundle(export_bundle(checkpoint, tmp_path / "bundle"), "cpu")
+    repo, pushed = repo_with_origin(tmp_path)
+    checkpoint, _ = _tiny.write_run(
+        tmp_path / "run",
+        mean=[0.5] * 3,
+        std=[0.25] * 3,
+        checkpoint_lineage=deployable_lineage(pushed),
+    )
+    bundle = load_bundle(export_ckpt(checkpoint, tmp_path / "bundle", repo_dir=repo), "cpu")
     predictor = CBMPredictor.from_bundle(bundle, amp_dtype=None)
     image = np.random.default_rng(0).integers(0, 256, (40, 50, 3), dtype=np.uint8)
     resized = cv2.resize(image, (64, 64), interpolation=cv2.INTER_LINEAR)

@@ -13,6 +13,7 @@ import pytest
 
 import mermaidseg.evaluation.coralscapes_probe_points as builder
 from mermaidseg.evaluation.coralscapes_probe import label_md5, legacy_label
+from tests.mermaidseg.data.conftest import ImageSpec, open_written
 
 
 def _component(image_index: int, component_index: int, size: int, stem: str, site: str = "site"):
@@ -165,21 +166,28 @@ def test_legacy_label_merges_adjacent_fine_classes_into_one_legacy_component():
 
 
 def test_legacy_build_stores_legacy_ids_and_the_original_label_md5(tmp_path: Path):
-    from PIL import Image
-
     label = np.zeros((builder.EXPECTED_HEIGHT, builder.EXPECTED_WIDTH), dtype=np.uint8)
     label[100:120, 100:120] = 4
     label[400:420, 400:420] = 8
-    site = tmp_path / "gtFine" / "train" / "siteA"
-    site.mkdir(parents=True)
-    Image.fromarray(label).save(site / "siteA_000001_000001_gtFine_labelIds.png")
+    site = '{"site": "siteA"}'
+    version = open_written(
+        tmp_path,
+        kind="dense",
+        images=[
+            ImageSpec("siteA_000001_000001", group="train", mask=label, attrs=site),
+            # A test-group image is not a probe image.
+            ImageSpec("siteA_000002_000001", group="test", mask=np.full_like(label, 4), attrs=site),
+        ],
+        labels={4: "four", 8: "eight"},
+        name="coralscapes_v2",
+    )
 
     lut = np.zeros(96, dtype=np.uint8)
     lut[4] = 2
     lut[8] = 5
     output = tmp_path / "probe.json"
     builder.build_probe_points(
-        local_root=tmp_path,
+        version=version,
         output=output,
         per_class=1,
         min_component_size=4,
@@ -189,6 +197,7 @@ def test_legacy_build_stores_legacy_ids_and_the_original_label_md5(tmp_path: Pat
         class_ids=[2, 5],
     )
     payload = json.loads(output.read_text())
+    assert [(i["site"], i["stem"]) for i in payload["images"]] == [("siteA", "siteA_000001_000001")]
     assert payload["images"][0]["label_md5"] == label_md5(label)
     assert payload["images"][0]["label_md5"] != label_md5(legacy_label(label, lut))
     assert {point["class_id"] for point in payload["images"][0]["points"]} == {2, 5}

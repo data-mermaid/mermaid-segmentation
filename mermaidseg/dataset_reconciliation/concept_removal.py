@@ -79,8 +79,9 @@ def concept_coverage(
     Args:
         counts: One row per ``(dataset, image, label)`` with columns ``dataset``, ``image_id``,
             ``label`` (lowercased source label), ``n`` (points; pixels for dense datasets) and
-            ``source`` (the CoralNet ``source_id`` for CoralNet rows, ignored otherwise), as
-            written by ``scripts/train_label_counts.py`` plus a source column.
+            ``source`` (the CoralNet ``source_id`` for CoralNet rows, ignored otherwise); built
+            by ``scripts/build_concept_removal.py`` from each version's
+            ``stats/label_counts.parquet`` joined to its ``labels.parquet`` names.
         schema: The run's concept schema; a point is True for a channel where its row is 2.
         rule: Coverage thresholds.
         dense_datasets: Datasets whose ``n`` is pixels; they count per mask instead.

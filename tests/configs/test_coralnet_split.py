@@ -1,8 +1,4 @@
-"""Invariants of configs/splits/coralnet.csv and its meta file.
-
-The whitelist-equality test goes away when the whitelists are removed from
-configs/data_config.yaml.
-"""
+"""Invariants of configs/splits/coralnet.csv, its meta file and the data config that uses it."""
 
 from __future__ import annotations
 
@@ -12,6 +8,7 @@ import pandas as pd
 import pytest
 import yaml
 
+from mermaidseg.data.config import DataSection, entry_split_groups, sync_plan
 from segdata_spec.splits import read_split_file
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -28,12 +25,23 @@ def meta() -> dict:
     return yaml.safe_load((_SPLITS / "coralnet.meta.yaml").read_text())
 
 
-@pytest.mark.parametrize("split", ["train", "val", "test"])
-def test_split_sources_equal_data_config_whitelist(split_table, split):
-    cfg = yaml.safe_load((_REPO / "configs" / "data_config.yaml").read_text())
-    whitelist = cfg["data"]["coralnet"][split]["whitelist_sources"]
-    in_split = split_table.loc[split_table["split"] == split, "source_id"]
-    assert sorted(in_split.astype(int)) == sorted(whitelist)
+@pytest.fixture(scope="module")
+def data_cfg() -> dict:
+    return yaml.safe_load((_REPO / "configs" / "data_config.yaml").read_text())["data"]
+
+
+def test_committed_data_config_selects_coralnet_train_val_for_training_and_test_held_out(
+    split_table, data_cfg
+):
+    entry = DataSection.model_validate(data_cfg).datasets["coralnet"]
+    train = entry_split_groups(entry, "train", _REPO)
+    test = entry_split_groups(entry, "test", _REPO)
+
+    assert train is not None and test is not None
+    assert (len(train), len(test)) == (687, 139)
+    assert train == set(split_table.loc[split_table["split"].isin(["train", "val"]), "group"])
+    assert test == set(split_table.loc[split_table["split"] == "test", "group"])
+    assert sync_plan(data_cfg, _REPO).selection["coralnet"] == train | test
 
 
 def test_group_is_s_prefixed_source_id(split_table):

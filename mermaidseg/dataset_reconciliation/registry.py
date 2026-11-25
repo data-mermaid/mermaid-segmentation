@@ -12,14 +12,14 @@ training time:
   benthic-attribute hierarchy).
 
 After construction, each registered dataset has had
-:meth:`BaseCoralDataset.set_global_offset` called on it so that its
+:meth:`VersionDataset.set_global_offset` called on it so that its
 ``__getitem__`` already emits masks in the global source-label space.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any, cast
 
 import numpy as np
@@ -28,47 +28,16 @@ import torch
 from mermaidseg.dataset_reconciliation.concept_schema import (
     ConceptSchema,
     build_source_to_concepts,
+    concept_label_key,
 )
-from mermaidseg.dataset_reconciliation.concepts import initialize_benthic_hierarchy
-from mermaidseg.dataset_reconciliation.label_mapping import (
-    CoralNetLabelMappings,
-    coralnet_to_mermaid,
-    coralscapes_v2_to_mermaid,
-    fetch_benthos_yuval_to_mermaid,
-    fetch_catlin_seaview_to_mermaid,
-    fetch_moorea_labeled_corals_to_mermaid,
-    fetch_pacific_labeled_corals_to_mermaid,
-    fetch_ucsd_mosaics_to_mermaid,
-    load_coralnet_label_mappings,
-)
+from segdata_spec.taxonomy import roll_up
 
 logger = logging.getLogger(__name__)
 
 
-def _identity_source_to_target(dataset: Any) -> dict[str, str]:
-    """Return an identity name->name mapping for the given dataset's source space."""
-    return {name: name for name in dataset.source_name2id}
-
-
-def _static_source_to_target(static: dict[str, str], dataset: Any) -> dict[str, str]:
-    """Filter a static ``source_name -> target_name`` dict to the dataset's source space."""
-    ds_names_lower = {n.lower() for n in dataset.source_name2id}
-    return {name: target for name, target in static.items() if name.lower() in ds_names_lower}
-
-
-_BUILTIN_DEFAULT_FETCHERS = {
-    "mermaid": _identity_source_to_target,
-    "coralscapes_v2": lambda ds: _static_source_to_target(coralscapes_v2_to_mermaid(), ds),
-}
-
-
-_REMOTE_FETCHERS: dict[str, Callable[..., Mapping[str, str | None]]] = {
-    "catlin_seaview": fetch_catlin_seaview_to_mermaid,
-    "moorea_labeled_corals": fetch_moorea_labeled_corals_to_mermaid,
-    "pacific_labeled_corals": fetch_pacific_labeled_corals_to_mermaid,
-    "benthos_yuval": fetch_benthos_yuval_to_mermaid,
-    "ucsd_mosaics": fetch_ucsd_mosaics_to_mermaid,
-}
+def _lowercased_targets(label_targets: Mapping[str, str | None]) -> dict[str, str]:
+    """Return the mapped labels of ``label_targets`` with lower-cased target names."""
+    return {name: target.lower() for name, target in label_targets.items() if target}
 
 
 def roll_up_label(
@@ -95,20 +64,41 @@ def roll_up_label(
     return None
 
 
+def source_labels_to_target_labels(
+    source_labels: torch.Tensor,
+    lookup: torch.Tensor,
+) -> torch.Tensor:
+    """Map a global source-label segmentation map to target MERMAID label IDs.
+
+    Pure GPU index op; ``lookup`` must live on the same device as
+    ``source_labels``.
+
+    Args:
+        source_labels: Integer source-label map of shape ``(B, H, W)`` with
+            values in ``[0, N]``.
+        lookup: 1-D long tensor of shape ``(N+1,)`` mapping each global source
+            label (0 = background) to its MERMAID target label ID
+            (0 = background / unmapped).
+
+    Returns:
+        Long tensor of shape ``(B, H, W)`` containing target MERMAID label IDs.
+    """
+    if source_labels.dtype != torch.long:
+        source_labels = source_labels.long()
+    return lookup[source_labels]
+
+
 class SourceLabelRegistry:
     """Builds a joint global source-label index across a list of source datasets.
 
     Args:
         datasets: List of source datasets (each must expose ``SOURCE_NAME``,
-            ``source_id2name``, ``source_name2id``, and accept
+            ``source_id2name``, ``source_name2id``, ``label_targets``, and accept
             :meth:`set_global_offset`).
         target_labels: Optional ordered list of canonical MERMAID
             benthic-attribute target label names (1..M). If ``None``, defaults
             are derived from the union of mapped target names across all
             datasets (sorted alphabetically).
-        concept_hierarchy: Optional benthic-attribute name->parent-name dict.
-            If supplied (or if ``compute_concepts=True`` and not supplied), it
-            is fetched from the MERMAID API.
         compute_concepts: When ``True``, additionally builds
             ``source_to_concepts`` from ``concept_schema``.
         target_label_subset: Optional list/set of MERMAID target label names
@@ -134,6 +124,7 @@ class SourceLabelRegistry:
         label_roll_up: bool = False,
         target_label_subset: list[str] | set[str] | None = None,
         concept_schema: ConceptSchema | None = None,
+        benthic_hierarchy: Mapping[str, str | None] | None = None,
     ):
         """Assign global offsets and build the source-to-target (and concept) lookups.
 
@@ -145,11 +136,13 @@ class SourceLabelRegistry:
                 ``target_label_subset``.
             target_label_subset: Target label names to retain.
             concept_schema: Concept schema, required with ``compute_concepts``.
+            benthic_hierarchy: Lower-cased benthic-attribute name -> parent name (see
+                ``segdata_spec.taxonomy.hierarchy_from_table``), required with ``label_roll_up``.
 
         Raises:
             ValueError: If there are no datasets, a dataset lacks or repeats ``SOURCE_NAME``,
-                ``label_roll_up`` has no ``target_label_subset``, or ``compute_concepts`` has
-                no ``concept_schema``.
+                ``label_roll_up`` has no ``target_label_subset`` or no ``benthic_hierarchy``,
+                or ``compute_concepts`` has no ``concept_schema``.
         """
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
@@ -164,8 +157,7 @@ class SourceLabelRegistry:
             seen_sources.add(name)
 
         self.datasets = list(datasets)
-        self.coralnet_label_mappings: CoralNetLabelMappings | None = None
-        resolved_maps = self._resolve_source_to_target_maps()
+        resolved_maps = {ds.SOURCE_NAME: _lowercased_targets(ds.label_targets) for ds in datasets}
 
         # Assign each dataset a disjoint offset in the global source-ID space and
         # record the (source, source_name) pair for every global ID. We also
@@ -181,7 +173,7 @@ class SourceLabelRegistry:
             for local_id, source_name in sorted(ds.source_id2name.items()):
                 global_id = local_id + running_offset
                 self.global_id2source[global_id] = (ds.SOURCE_NAME, source_name)
-                ds_target_for_source.append(resolved_maps[ds.SOURCE_NAME].get(source_name.lower()))
+                ds_target_for_source.append(resolved_maps[ds.SOURCE_NAME].get(source_name))
             per_dataset_target_lists.append(ds_target_for_source)
             running_offset += len(ds.source_id2name)
         self.dataset_offsets = offsets
@@ -212,12 +204,11 @@ class SourceLabelRegistry:
         self.num_target_classes = len(self.target_id2label) + 1  # +1 for background
 
         if label_roll_up:
-            benthic_hierarchy = {
-                k.lower(): (v.lower() if v is not None else None)
-                for k, v in initialize_benthic_hierarchy().items()
-            }
             if subset is None:
                 raise ValueError("label_roll_up=True requires target_label_subset to be set")
+            if benthic_hierarchy is None:
+                raise ValueError("label_roll_up=True requires benthic_hierarchy")
+            hierarchy = dict(benthic_hierarchy)
 
         # Dense lookup `global_source_id -> target_class_id`; index 0 stays
         # background, and any source name without a target (or filtered out by
@@ -228,11 +219,9 @@ class SourceLabelRegistry:
         for ds in self.datasets:
             offset = self.dataset_offsets[ds.SOURCE_NAME]
             for local_id, source_name in sorted(ds.source_id2name.items()):
-                target_name = resolved_maps[ds.SOURCE_NAME].get(source_name.lower())
+                target_name = resolved_maps[ds.SOURCE_NAME].get(source_name)
                 if label_roll_up:
-                    target_name = roll_up_label(
-                        target_name, benthic_hierarchy, cast("set[str]", subset)
-                    )
+                    target_name = roll_up(target_name, hierarchy, cast("set[str]", subset))
                 if target_name is None:
                     key = (ds.SOURCE_NAME, source_name.lower())
                     if key not in warned_unmapped:
@@ -291,56 +280,16 @@ class SourceLabelRegistry:
             else:
                 logger.warning(msg + "; check source label keys against the mapping.")
 
-    def _resolve_source_to_target_maps(self) -> dict[str, dict[str, str]]:
-        """Resolve a ``SOURCE_NAME -> {source_name: target_name}`` map per dataset."""
-        resolved: dict[str, dict[str, str]] = {}
-        for ds in self.datasets:
-            name = ds.SOURCE_NAME
-            ds_names_lower = {n.lower() for n in ds.source_name2id}
-            if name == "coralnet":
-                resolved[name] = self._coralnet_source_to_target(ds, ds_names_lower)
-                continue
-            fetcher = _REMOTE_FETCHERS.get(name)
-            if fetcher is not None:
-                resolved[name] = {
-                    src: tgt
-                    for src, tgt in fetcher().items()
-                    if tgt is not None and src.lower() in ds_names_lower
-                }
-                continue
-            if name in _BUILTIN_DEFAULT_FETCHERS:
-                resolved[name] = _BUILTIN_DEFAULT_FETCHERS[name](ds)
-                continue
-            raise ValueError(f"No default source-to-target mapping for SOURCE_NAME='{name}'.")
-        return {
-            src_name: {k.lower(): v.lower() for k, v in m.items()}
-            for src_name, m in resolved.items()
-        }
-
-    def _coralnet_source_to_target(self, ds: Any, ds_names_lower: set[str]) -> dict[str, str]:
-        """Map the CoralNet dataset's label names through the MERMAID LabelMapping rows.
-
-        The rows are fetched once (API online, cached snapshot offline) and kept on
-        ``coralnet_label_mappings`` so the run can record exactly what it used.
-        """
-        if self.coralnet_label_mappings is None:
-            self.coralnet_label_mappings = load_coralnet_label_mappings()
-        return coralnet_to_mermaid(
-            ds.coralnet_id2name, self.coralnet_label_mappings.records, used_names=ds_names_lower
-        )
-
-    @property
-    def label_mapping_provenance(self) -> dict[str, dict[str, Any]]:
-        """Where each API-backed source mapping came from, for run lineage."""
-        if self.coralnet_label_mappings is None:
-            return {}
-        return {"coralnet": self.coralnet_label_mappings.provenance()}
-
     def _build_concepts(self, concept_schema: ConceptSchema) -> None:
         self.concept_value2id = concept_schema.concept_value2id
         self.concept_id2name = concept_schema.channel_id2name()
         self.concept_name2id = {v: k for k, v in self.concept_id2name.items()}
-        self.source_to_concepts = build_source_to_concepts(self.global_id2source, concept_schema)
+        targets = {ds.SOURCE_NAME: ds.label_targets for ds in self.datasets}
+        concept_keys = {
+            gid: (source, concept_label_key(source, name, targets[source].get(name)))
+            for gid, (source, name) in self.global_id2source.items()
+        }
+        self.source_to_concepts = build_source_to_concepts(concept_keys, concept_schema)
 
     @property
     def num_concepts(self) -> int:
