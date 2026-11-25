@@ -57,10 +57,10 @@ def test_run_sync_fills_the_cache_so_a_reader_opens_it(tmp_path: Path) -> None:
     cache_dir = tmp_path / "synced"
     result = run_sync(_plan(pin, None), cache_dir, fake)
     assert result.datasets["ds"].images_dropped == 0
-    ds = PointDataset(open_version(cache_dir, DATASET_BUCKET, pin), split="val")
+    ds = PointDataset(open_version(cache_dir, DATASET_BUCKET, pin), split="val", global_offset=0)
     assert len(ds) == 2
     _, mask = ds[0]
-    assert mask[2, 3] == 1
+    assert mask[2, 3] == 5
 
 
 def test_run_sync_syncs_when_the_split_file_lists_every_group(tmp_path: Path) -> None:
@@ -184,7 +184,9 @@ def test_run_sync_forwards_each_datasets_resize(tmp_path: Path) -> None:
     cache_dir = tmp_path / "synced"
     result = run_sync(_plan(pin, None, resize=spec), cache_dir, fake)
     assert result.datasets["ds"].resize == spec
-    ds = PointDataset(open_version(cache_dir, DATASET_BUCKET, pin, resize=spec), split="val")
+    ds = PointDataset(
+        open_version(cache_dir, DATASET_BUCKET, pin, resize=spec), split="val", global_offset=0
+    )
     image, _ = ds[0]
     assert image.shape == (4, 4, 3)
 

@@ -57,6 +57,7 @@ def coralnet_reader(
     return PointDataset(
         open_dataset_version(section, SOURCE_NAME, cache_dir),
         split=split,
+        global_offset=0,
         groups=groups,
         on_missing_images=entry.on_missing_images,
         image_ids=image_ids,

@@ -16,6 +16,7 @@ import torch
 import yaml
 
 from mermaidseg.config import to_plain_dict
+from mermaidseg.data.base import VersionDataset
 from mermaidseg.dataset_reconciliation.concept_removal import load_concept_removal
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
@@ -23,10 +24,6 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
     load_concept_source_mask,
 )
 from mermaidseg.dataset_reconciliation.registry import SourceLabelRegistry
-from mermaidseg.dataset_reconciliation.split_wiring import (
-    attach_registry,
-    prepare_splits_for_registry,
-)
 from mermaidseg.io import REPO_ROOT, load_section, resolve_repo_path
 from mermaidseg.model.meta import MetaModel
 
@@ -80,7 +77,7 @@ def load_run_concept_source_mask(
 
 
 def build_registry(
-    dataset_dict: Mapping[tuple[str, str], Any],
+    dataset_dict: Mapping[tuple[str, str], VersionDataset],
     training_cfg: Any,
     *,
     schema_config: str | Path = DEFAULT_SCHEMA_CONFIG,
@@ -90,8 +87,9 @@ def build_registry(
     """Label registry over ``dataset_dict``, with concepts frozen to ``schema_config``.
 
     The concept channels come from the dataset names of the ``data`` section of
-    ``schema_config``. The registry is attached to every dataset, which then yields global source
-    labels.
+    ``schema_config``. The registry reads one reader per source: its train split, else the first
+    split listed. Every split of a source shares its global offset (see
+    :func:`mermaidseg.data.factory.source_offsets`), so any split stands for the source.
 
     Args:
         dataset_dict: Built readers keyed by ``(name, split)``.
@@ -105,8 +103,12 @@ def build_registry(
         SystemExit: A built dataset is not in ``schema_config``.
         RuntimeError: The registry and the schema disagree on the number of concept channels.
     """
-    _, registry_datasets = prepare_splits_for_registry(dataset_dict)
-    run_sources = {ds.SOURCE_NAME for ds in registry_datasets}
+    by_source: dict[str, VersionDataset] = {}
+    for (_, split), ds in dataset_dict.items():
+        if ds.source_name not in by_source or split == "train":
+            by_source[ds.source_name] = ds
+    registry_datasets = list(by_source.values())
+    run_sources = set(by_source)
     schema_sources = set(load_section(schema_config, "data")["datasets"])
     missing = run_sources - schema_sources
     if missing:
@@ -131,7 +133,6 @@ def build_registry(
         label_roll_up=training_cfg.label_roll_up,
         benthic_hierarchy=benthic_hierarchy,
     ).to(device)
-    attach_registry(registry, dataset_dict.values())
     if registry.num_concepts != schema.num_channels:
         raise RuntimeError(
             f"registry has {registry.num_concepts} concept channels, schema {schema.num_channels}"

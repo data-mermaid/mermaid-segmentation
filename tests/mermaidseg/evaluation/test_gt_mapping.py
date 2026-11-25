@@ -63,7 +63,7 @@ def _reader(tmp_path: Path) -> PointDataset:
         ],
         points=[("i1", 0, 0, 1), ("i1", 1, 1, 2), ("i1", 2, 2, 3)],
     )
-    return PointDataset(version, split="val")
+    return PointDataset(version, split="val", global_offset=0)
 
 
 # Hard coral (1) <- Acroporidae (2) <- Acropora (3); Sand (4) is a root.

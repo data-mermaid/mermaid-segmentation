@@ -1,9 +1,9 @@
 """Joint source-label registry across multiple source datasets.
 
-The :class:`SourceLabelRegistry` assigns each registered source dataset a
-disjoint range of integer IDs in a global source-label space (with ``0``
-reserved for background) and pre-computes the GPU lookup tensors used at
-training time:
+The :class:`SourceLabelRegistry` reads each registered reader's global offset
+and ``labels.parquet``, so the global source ID of a label is ``offset +
+label_id`` (with ``0`` reserved for background), and pre-computes the GPU
+lookup tensors used at training time:
 
 - ``source_to_target``: ``LongTensor`` of shape ``(N+1,)`` mapping global
   source IDs to MERMAID benthic-attribute target IDs.
@@ -11,20 +11,20 @@ training time:
   source IDs to the per-concept multi-hot row (computed against the MERMAID
   benthic-attribute hierarchy).
 
-After construction, each registered dataset has had
-:meth:`VersionDataset.set_global_offset` called on it so that its
-``__getitem__`` already emits masks in the global source-label space.
+The readers already emit masks in this space; see
+:func:`mermaidseg.data.factory.source_offsets`.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import torch
 
+from mermaidseg.data.base import VersionDataset
 from mermaidseg.dataset_reconciliation.concept_schema import (
     ConceptSchema,
     build_source_to_concepts,
@@ -35,9 +35,18 @@ from segdata_spec.taxonomy import roll_up
 logger = logging.getLogger(__name__)
 
 
-def _lowercased_targets(label_targets: Mapping[str, str | None]) -> dict[str, str]:
-    """Return the mapped labels of ``label_targets`` with lower-cased target names."""
-    return {name: target.lower() for name, target in label_targets.items() if target}
+def _source_rows(ds: VersionDataset) -> list[tuple[int, str, str | None]]:
+    """Return ``(global id, label name, lower-cased target or None)`` per ``labels.parquet`` row."""
+    labels = ds.version.labels
+    return [
+        (ds.global_offset + label_id, name, attribute.lower() if attribute else None)
+        for label_id, name, attribute in zip(
+            labels.column("label_id").to_pylist(),
+            labels.column("name").to_pylist(),
+            labels.column("mermaid_benthic_attribute").to_pylist(),
+            strict=True,
+        )
+    ]
 
 
 def source_labels_to_target_labels(
@@ -68,9 +77,8 @@ class SourceLabelRegistry:
     """Builds a joint global source-label index across a list of source datasets.
 
     Args:
-        datasets: List of source datasets (each must expose ``SOURCE_NAME``,
-            ``source_id2name``, ``source_name2id``, ``label_targets``, and accept
-            :meth:`set_global_offset`).
+        datasets: One reader per source; each label of its ``labels.parquet``
+            gets global ID ``global_offset + label_id``.
         target_labels: Optional ordered list of canonical MERMAID
             benthic-attribute target label names (1..M). If ``None``, defaults
             are derived from the union of mapped target names across all
@@ -82,7 +90,7 @@ class SourceLabelRegistry:
             collapse to background (``0``) in ``source_to_target``.
     """
 
-    datasets: list[Any]
+    datasets: list[VersionDataset]
     target_label2id: dict[str, int]
     target_id2label: dict[int, str]
     num_target_classes: int
@@ -94,7 +102,7 @@ class SourceLabelRegistry:
 
     def __init__(
         self,
-        datasets: list[Any],
+        datasets: list[VersionDataset],
         target_labels: list[str] | None = None,
         compute_concepts: bool = False,
         label_roll_up: bool = False,
@@ -102,10 +110,10 @@ class SourceLabelRegistry:
         concept_schema: ConceptSchema | None = None,
         benthic_hierarchy: Mapping[str, str | None] | None = None,
     ):
-        """Assign global offsets and build the source-to-target (and concept) lookups.
+        """Build the source-to-target (and concept) lookups over the readers' global IDs.
 
         Args:
-            datasets: Source datasets to register.
+            datasets: One reader per source.
             target_labels: Ordered target label names, derived from the datasets if ``None``.
             compute_concepts: Whether to build ``source_to_concepts``.
             label_roll_up: Whether unmapped targets roll up to the nearest ancestor in
@@ -116,7 +124,7 @@ class SourceLabelRegistry:
                 ``segdata_spec.taxonomy.hierarchy_from_table``), required with ``label_roll_up``.
 
         Raises:
-            ValueError: If there are no datasets, a dataset lacks or repeats ``SOURCE_NAME``,
+            ValueError: If there are no datasets, two datasets share a ``source_name``,
                 ``label_roll_up`` has no ``target_label_subset`` or no ``benthic_hierarchy``,
                 or ``compute_concepts`` has no ``concept_schema``.
         """
@@ -125,45 +133,28 @@ class SourceLabelRegistry:
 
         seen_sources: set[str] = set()
         for ds in datasets:
-            name = getattr(ds, "SOURCE_NAME", None)
-            if not name:
-                raise ValueError(f"Dataset {type(ds).__name__} does not declare SOURCE_NAME")
-            if name in seen_sources:
-                raise ValueError(f"Duplicate SOURCE_NAME '{name}' across registered datasets")
-            seen_sources.add(name)
+            if ds.source_name in seen_sources:
+                raise ValueError(
+                    f"Duplicate source_name '{ds.source_name}' across registered datasets"
+                )
+            seen_sources.add(ds.source_name)
 
         self.datasets = list(datasets)
-        resolved_maps = {ds.SOURCE_NAME: _lowercased_targets(ds.label_targets) for ds in datasets}
-
-        # Assign each dataset a disjoint offset in the global source-ID space and
-        # record the (source, source_name) pair for every global ID. We also
-        # accumulate `per_dataset_target_lists` so we can derive a default
-        # `target_labels` below when the caller did not supply one.
-        self.global_id2source = {}
-        per_dataset_target_lists: list[list[str | None]] = []
-        offsets: dict[str, int] = {}
-        running_offset = 0
-        for ds in self.datasets:
-            offsets[ds.SOURCE_NAME] = running_offset
-            ds_target_for_source: list[str | None] = []
-            for local_id, source_name in sorted(ds.source_id2name.items()):
-                global_id = local_id + running_offset
-                self.global_id2source[global_id] = (ds.SOURCE_NAME, source_name)
-                ds_target_for_source.append(resolved_maps[ds.SOURCE_NAME].get(source_name))
-            per_dataset_target_lists.append(ds_target_for_source)
-            running_offset += len(ds.source_id2name)
-        self.dataset_offsets = offsets
-        num_global_source = running_offset
+        rows = {ds.source_name: _source_rows(ds) for ds in self.datasets}
+        self.dataset_offsets = {ds.source_name: ds.global_offset for ds in self.datasets}
+        self.global_id2source = {
+            global_id: (source, name)
+            for source, source_rows in rows.items()
+            for global_id, name, _ in source_rows
+        }
+        max_global_id = max(self.global_id2source, default=0)
 
         # Default target vocabulary: the alphabetical union of every non-null
-        # MERMAID target name produced by the resolved per-dataset maps.
+        # benthic attribute across the registered labels.
         if target_labels is None:
-            target_label_set: set[str] = set()
-            for tgt_list in per_dataset_target_lists:
-                for tgt in tgt_list:
-                    if tgt:
-                        target_label_set.add(tgt)
-            target_labels = sorted(target_label_set)
+            target_labels = sorted(
+                {target for source_rows in rows.values() for _, _, target in source_rows if target}
+            )
 
         target_labels = list(dict.fromkeys(t.lower() for t in target_labels))
 
@@ -187,32 +178,20 @@ class SourceLabelRegistry:
             hierarchy = dict(benthic_hierarchy)
 
         # Dense lookup `global_source_id -> target_class_id`; index 0 stays
-        # background, and any source name without a target (or filtered out by
+        # background, and any label without a target (or filtered out by
         # `subset`) either has an attempted roll up to a parent class or
         # is left as 0 so it collapses to background at train time.
-        source_to_target_np = np.zeros(num_global_source + 1, dtype=np.int64)
-        warned_unmapped: set[tuple[str, str]] = set()
-        for ds in self.datasets:
-            offset = self.dataset_offsets[ds.SOURCE_NAME]
-            for local_id, source_name in sorted(ds.source_id2name.items()):
-                target_name = resolved_maps[ds.SOURCE_NAME].get(source_name)
+        source_to_target_np = np.zeros(max_global_id + 1, dtype=np.int64)
+        for source_rows in rows.values():
+            for global_id, _, target_name in source_rows:
                 if label_roll_up:
                     target_name = roll_up(target_name, hierarchy, cast("set[str]", subset))
                 if target_name is None:
-                    key = (ds.SOURCE_NAME, source_name.lower())
-                    if key not in warned_unmapped:
-                        warned_unmapped.add(key)
-                        print(
-                            f"DEBUG WARNING: unmapped source label (target mapping): "
-                            f"source_dataset={ds.SOURCE_NAME!r} label={source_name.lower()!r}",
-                            flush=True,
-                        )
                     continue
                 if subset is not None and target_name not in subset:
                     continue
-                target_id = self.target_label2id.get(target_name, 0)
-                source_to_target_np[local_id + offset] = target_id
-        self._log_target_coverage(source_to_target_np)
+                source_to_target_np[global_id] = self.target_label2id.get(target_name, 0)
+        self._log_target_coverage(rows, source_to_target_np)
         self.source_to_target = torch.from_numpy(source_to_target_np).long()
         self.source_to_concepts = None
         self.concept_id2name: dict[int, str] | None = None
@@ -223,34 +202,20 @@ class SourceLabelRegistry:
                 raise ValueError("compute_concepts=True requires concept_schema")
             self._build_concepts(concept_schema)
 
-        for ds in self.datasets:
-            ds.set_global_offset(self.dataset_offsets[ds.SOURCE_NAME])
-
-    def _log_target_coverage(self, source_to_target_np: np.ndarray) -> None:
-        """Log, per source, how many source labels (and annotations) reach a target class.
+    @staticmethod
+    def _log_target_coverage(
+        rows: Mapping[str, list[tuple[int, str, str | None]]], source_to_target_np: np.ndarray
+    ) -> None:
+        """Log, per source, how many of its ``labels.parquet`` labels reach a target class.
 
         Warns when none do: a label-key mismatch otherwise sends every pixel of that source to
         background with no error.
         """
-        for ds in self.datasets:
-            offset = self.dataset_offsets[ds.SOURCE_NAME]
-            local_ids = sorted(ds.source_id2name)
-            if not local_ids:
+        for source, source_rows in rows.items():
+            if not source_rows:
                 continue
-            mapped = [source_to_target_np[i + offset] != 0 for i in local_ids]
-            n_mapped = sum(mapped)
-            msg = f"{ds.SOURCE_NAME}: {n_mapped} of {len(local_ids)} source labels"
-            # Dense-mask datasets (Coralscapes, CoralscapesV2, UCSDMosaics) carry no point
-            # annotations, so only label counts are logged for them.
-            annotations = getattr(ds, "df_annotations", None)
-            if annotations is not None and len(annotations):
-                counts = annotations["source_label_name"].value_counts()
-                mapped_names = {
-                    ds.source_id2name[i] for i, ok in zip(local_ids, mapped, strict=True) if ok
-                }
-                share = counts[counts.index.isin(mapped_names)].sum() / len(annotations)
-                msg += f", {share:.1%} of annotations,"
-            msg += " map to a target class"
+            n_mapped = sum(source_to_target_np[global_id] != 0 for global_id, _, _ in source_rows)
+            msg = f"{source}: {n_mapped} of {len(source_rows)} source labels map to a target class"
             if n_mapped:
                 logger.info(msg)
             else:
@@ -260,7 +225,7 @@ class SourceLabelRegistry:
         self.concept_value2id = concept_schema.concept_value2id
         self.concept_id2name = concept_schema.channel_id2name()
         self.concept_name2id = {v: k for k, v in self.concept_id2name.items()}
-        targets = {ds.SOURCE_NAME: ds.label_targets for ds in self.datasets}
+        targets = {ds.source_name: ds.label_targets for ds in self.datasets}
         concept_keys = {
             gid: (source, concept_label_key(source, name, targets[source].get(name)))
             for gid, (source, name) in self.global_id2source.items()
