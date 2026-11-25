@@ -32,14 +32,14 @@ from segdata_etl.common.copy_plan import (
 )
 from segdata_etl.common.copy_plan import probe_image as probe_source_image
 from segdata_etl.common.s3_objects import EXTENSIONS
-from segdata_etl.common.stage import LocalDirS3, next_version
+from segdata_etl.common.stage import next_version
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import probe_git, refuse_unpublishable
 from segdata_spec.layout import cache_path, dataset_prefix
 from segdata_spec.manifest import ImageStore, LabelMapping, ParentRef, SourceInfo
-from segdata_spec.publish import publish_dataset
 from segdata_spec.s3 import is_not_found, is_precondition_failed, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
+from segdata_spec.stage import stage_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -416,10 +416,10 @@ def run(args: argparse.Namespace, client: Any) -> int:
         load_parent_labels(args.stage_dir, args.parent_version),
     )
     rows = [o.row for o in outcomes if o.row is not None]
-    stage = LocalDirS3(args.stage_dir)
     version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
-    manifest, _ = publish_dataset(
-        stage,
+    manifest, _ = stage_dataset(
+        args.stage_dir,
+        parent_dirs=(args.stage_dir,),
         bucket=DATASET_BUCKET,
         dataset=DATASET,
         version=version,

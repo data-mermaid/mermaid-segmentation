@@ -2,7 +2,7 @@
 
 Provides a hand-rolled in-memory ``FakeS3`` that implements the boto3 client surface the package
 touches, including S3 conditional writes and reads, ETags and an ordered call log, plus helpers
-that publish small dataset and taxonomy versions into it.
+that stage small dataset and taxonomy versions and copy them into it.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from PIL import Image
 
 from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
-from segdata_spec.publish import publish_dataset, publish_taxonomy
+from segdata_spec.stage import stage_dataset, stage_taxonomy
 
 
 @pytest.fixture(autouse=True)
@@ -213,6 +213,14 @@ def _repo_dir(tmp_path: Path) -> Path:
     return repo
 
 
+def _upload_staged(client: FakeS3, stage_dir: Path) -> None:
+    """Seed ``client`` with every staged object, standing in for ``segdata promote``."""
+    root = stage_dir / BUCKET
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            client.put(BUCKET, path.relative_to(root).as_posix(), path.read_bytes())
+
+
 def publish_version(
     client: FakeS3,
     tmp_path: Path,
@@ -276,8 +284,10 @@ def publish_version(
                 "annotator": ["default"] * len(points),
             }
         )
-    manifest, sha = publish_dataset(
-        client,
+    stage_dir = tmp_path / "fixture-stage"
+    manifest, sha = stage_dataset(
+        stage_dir,
+        parent_dirs=(stage_dir,),
         bucket=BUCKET,
         dataset="ds",
         version=version,
@@ -291,14 +301,16 @@ def publish_version(
         repo_dir=_repo_dir(tmp_path),
         git=CLEAN_GIT,
     )
+    _upload_staged(client, stage_dir)
     client.calls.clear()
     return manifest, Pin(name="ds", version=version, manifest_sha256=sha)
 
 
 def publish_taxonomy_version(client: FakeS3, tmp_path: Path) -> Pin:
     """Publish taxonomy ``mermaid-benthic`` with a two-level hierarchy; clear the call log."""
-    _, sha = publish_taxonomy(
-        client,
+    stage_dir = tmp_path / "fixture-stage"
+    _, sha = stage_taxonomy(
+        stage_dir,
         bucket=BUCKET,
         name="mermaid-benthic",
         version=TAX_VERSION,
@@ -314,5 +326,6 @@ def publish_taxonomy_version(client: FakeS3, tmp_path: Path) -> Pin:
         repo_dir=_repo_dir(tmp_path),
         git=CLEAN_GIT,
     )
+    _upload_staged(client, stage_dir)
     client.calls.clear()
     return Pin(name="mermaid-benthic", version=TAX_VERSION, manifest_sha256=sha)

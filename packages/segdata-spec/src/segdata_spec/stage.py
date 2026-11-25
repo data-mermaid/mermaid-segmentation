@@ -1,28 +1,33 @@
-"""Publish dataset and taxonomy versions to S3 as write-once objects, manifest last."""
+"""Stage dataset and taxonomy versions as local files, tables first and the manifest last.
+
+``segdata promote`` is the only code that uploads a staged version to S3.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import io
+import os
+import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from botocore.exceptions import ClientError
 
 from segdata_spec.errors import (
     ChecksumMismatch,
+    ManifestNotFound,
     ObjectExists,
     PinMismatch,
     PublishRefused,
     SchemaValidationError,
 )
 from segdata_spec.git import GitState, probe_git, refuse_unpublishable
-from segdata_spec.layout import MANIFEST_NAME, dataset_prefix, taxonomy_prefix
+from segdata_spec.layout import MANIFEST_NAME, cache_path, dataset_prefix, taxonomy_prefix
 from segdata_spec.manifest import (
     DiffFromParent,
     EtlInfo,
@@ -37,7 +42,6 @@ from segdata_spec.manifest import (
     dump_manifest,
     manifest_sha256,
 )
-from segdata_spec.s3 import exists, get_bytes, is_precondition_failed
 from segdata_spec.schema import (
     DATASET_TABLES,
     POINTS_SCHEMA,
@@ -76,33 +80,37 @@ def _file_entries(
     }
 
 
-def _put_new(client: Any, bucket: str, key: str, data: bytes) -> None:
-    """Write ``data`` once; an existing object with identical bytes counts as already written."""
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` through a temporary file in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
-        client.put_object(Bucket=bucket, Key=key, Body=data, IfNoneMatch="*")
-    except ClientError as exc:
-        if not is_precondition_failed(exc):
-            raise
-        existing = get_bytes(client, bucket, key)
-        if hashlib.sha256(existing).digest() != hashlib.sha256(data).digest():
-            raise ObjectExists(f"s3://{bucket}/{key} already exists") from exc
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
-def _refuse_if_published(client: Any, bucket: str, prefix: str) -> None:
-    if exists(client, bucket, prefix + MANIFEST_NAME):
-        raise PublishRefused(f"s3://{bucket}/{prefix}{MANIFEST_NAME} already exists")
+def _write_new(path: Path, data: bytes) -> None:
+    """Write ``data`` once; an existing file with identical bytes counts as already written."""
+    if path.is_file():
+        if path.read_bytes() != data:
+            raise ObjectExists(f"{path} already exists with different bytes")
+        return
+    _atomic_write(path, data)
 
 
-def _write_version(
-    client: Any,
-    bucket: str,
-    prefix: str,
-    blobs: Mapping[str, bytes],
-    manifest_bytes: bytes,
-) -> None:
+def _refuse_if_staged(version_dir: Path) -> None:
+    if (version_dir / MANIFEST_NAME).exists():
+        raise PublishRefused(f"{version_dir / MANIFEST_NAME} is already staged")
+
+
+def _write_version(version_dir: Path, blobs: Mapping[str, bytes], manifest_bytes: bytes) -> None:
     for name, data in blobs.items():
-        _put_new(client, bucket, prefix + name, data)
-    _put_new(client, bucket, prefix + MANIFEST_NAME, manifest_bytes)
+        _write_new(version_dir / name, data)
+    _write_new(version_dir / MANIFEST_NAME, manifest_bytes)
 
 
 def _etl_info(package: str, command: str, git: GitState, lock_sha: str) -> EtlInfo:
@@ -153,33 +161,63 @@ def compute_diff(parent: Mapping[str, pa.Table], child: Mapping[str, pa.Table]) 
     )
 
 
-def fetch_parent_tables(client: Any, bucket: str, parent: ParentRef) -> dict[str, pa.Table]:
-    """Fetch the parent's manifest, images and points tables, verifying each against its pin.
+def _find_parent_manifest(
+    parent_dirs: Sequence[Path], bucket: str, prefix: str
+) -> tuple[Path, bytes]:
+    for directory in parent_dirs:
+        path = cache_path(directory, bucket, prefix + MANIFEST_NAME)
+        if path.is_file():
+            return path.parent, path.read_bytes()
+    searched = ", ".join(str(d) for d in parent_dirs)
+    raise ManifestNotFound(f"{prefix}{MANIFEST_NAME} is in none of: {searched}")
+
+
+def read_parent_tables(
+    parent_dirs: Sequence[Path], bucket: str, parent: ParentRef
+) -> dict[str, bytes]:
+    """Read the parent's images and points tables from the first of ``parent_dirs`` holding its manifest.
+
+    The manifest is checked against ``parent.manifest_sha256`` and each table against the manifest.
+    Returns the table bytes by file name; ``points.parquet`` is absent when the parent lacks it.
 
     Raises:
+        ManifestNotFound: No directory holds the parent's manifest.
         PinMismatch: The parent manifest's sha256 differs from ``parent.manifest_sha256``.
-        ChecksumMismatch: A fetched table's sha256 differs from its entry in the parent manifest.
+        ChecksumMismatch: A table is missing or its sha256 differs from its manifest entry.
     """
     prefix = dataset_prefix(parent.dataset, parent.version)
-    manifest_bytes = get_bytes(client, bucket, prefix + MANIFEST_NAME)
+    version_dir, manifest_bytes = _find_parent_manifest(parent_dirs, bucket, prefix)
     if manifest_sha256(manifest_bytes) != parent.manifest_sha256:
         raise PinMismatch(f"parent manifest {prefix}{MANIFEST_NAME} does not match its pin")
     manifest = Manifest.model_validate_json(manifest_bytes)
-    tables: dict[str, pa.Table] = {}
+    tables: dict[str, bytes] = {}
     for name in ("images.parquet", "points.parquet"):
         entry = manifest.files.get(name)
         if entry is None:
             continue
-        data = get_bytes(client, bucket, prefix + name)
+        path = version_dir / name
+        if not path.is_file():
+            raise ChecksumMismatch(f"{prefix}{name} is missing next to the parent manifest")
+        data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != entry.sha256:
             raise ChecksumMismatch(f"{prefix}{name} does not match the parent manifest")
-        tables[name] = pq.read_table(io.BytesIO(data))
+        tables[name] = data
     return tables
 
 
-def publish_dataset(
-    client: Any,
+def _parent_tables(
+    parent_dirs: Sequence[Path], bucket: str, parent: ParentRef
+) -> dict[str, pa.Table]:
+    return {
+        name: pq.read_table(io.BytesIO(data))
+        for name, data in read_parent_tables(parent_dirs, bucket, parent).items()
+    }
+
+
+def stage_dataset(
+    stage_dir: Path,
     *,
+    parent_dirs: Sequence[Path],
     bucket: str,
     dataset: str,
     version: str,
@@ -195,27 +233,30 @@ def publish_dataset(
     repo_dir: Path,
     git: GitState | None = None,
 ) -> tuple[Manifest, str]:
-    """Publish a dataset version under ``datasets/<dataset>/<version>/``.
+    """Stage a dataset version under ``<stage_dir>/<bucket>/datasets/<dataset>/<version>/``.
 
-    Returns the manifest and its sha256. The tables are written before the manifest.
+    Returns the manifest and its sha256. The tables are written before the manifest. The first parent is
+    read from the first of ``parent_dirs`` that holds it. A rerun after a partial stage adopts tables whose
+    bytes are identical.
 
     Raises:
-        PublishRefused: The tree is dirty or unpushed, or the version already exists.
+        PublishRefused: The tree is dirty or unpushed, or the version's manifest is already staged.
         SchemaValidationError: A table fails its schema or the cross-table rules.
+        ManifestNotFound: No directory in ``parent_dirs`` holds the first parent's manifest.
         PinMismatch: The first parent's manifest differs from its ``ParentRef``.
         ChecksumMismatch: A parent table differs from the parent manifest.
-        ObjectExists: A table or manifest key already exists with different bytes; the manifest is then not written.
+        ObjectExists: A staged table already exists with different bytes; the manifest is then not written.
     """
     state = git or probe_git(repo_dir)
     lock_sha = refuse_unpublishable(state, repo_dir)
     conformed = _conform_all(tables, DATASET_TABLES)
     validate_dataset_tables(kind, conformed)
     blobs = {name: table_bytes(table) for name, table in conformed.items()}
-    prefix = dataset_prefix(dataset, version)
-    _refuse_if_published(client, bucket, prefix)
+    version_dir = cache_path(stage_dir, bucket, dataset_prefix(dataset, version))
+    _refuse_if_staged(version_dir)
     diff = None
     if parents:
-        diff = compute_diff(fetch_parent_tables(client, bucket, parents[0]), conformed)
+        diff = compute_diff(_parent_tables(parent_dirs, bucket, parents[0]), conformed)
     manifest = Manifest(
         schema_version=1,
         dataset=dataset,
@@ -232,12 +273,12 @@ def publish_dataset(
         diff_from_parent=diff,
     )
     manifest_bytes = dump_manifest(manifest)
-    _write_version(client, bucket, prefix, blobs, manifest_bytes)
+    _write_version(version_dir, blobs, manifest_bytes)
     return manifest, manifest_sha256(manifest_bytes)
 
 
-def publish_taxonomy(
-    client: Any,
+def stage_taxonomy(
+    stage_dir: Path,
     *,
     bucket: str,
     name: str,
@@ -249,14 +290,14 @@ def publish_taxonomy(
     repo_dir: Path,
     git: GitState | None = None,
 ) -> tuple[TaxonomyManifest, str]:
-    """Publish a taxonomy version under ``taxonomy/<name>/<version>/``.
+    """Stage a taxonomy version under ``<stage_dir>/<bucket>/taxonomy/<name>/<version>/``.
 
     Returns the manifest and its sha256.
 
     Raises:
-        PublishRefused: The tree is dirty or unpushed, or the version already exists.
+        PublishRefused: The tree is dirty or unpushed, or the version's manifest is already staged.
         SchemaValidationError: A table is missing, unknown or fails its schema.
-        ObjectExists: A table or manifest key already exists with different bytes; the manifest is then not written.
+        ObjectExists: A staged table already exists with different bytes; the manifest is then not written.
     """
     state = git or probe_git(repo_dir)
     lock_sha = refuse_unpublishable(state, repo_dir)
@@ -265,8 +306,8 @@ def publish_taxonomy(
         raise SchemaValidationError(f"missing taxonomy tables: {missing}")
     conformed = _conform_all(tables, TAXONOMY_TABLES)
     blobs = {table_name: table_bytes(table) for table_name, table in conformed.items()}
-    prefix = taxonomy_prefix(name, version)
-    _refuse_if_published(client, bucket, prefix)
+    version_dir = cache_path(stage_dir, bucket, taxonomy_prefix(name, version))
+    _refuse_if_staged(version_dir)
     manifest = TaxonomyManifest(
         schema_version=1,
         name=name,
@@ -277,5 +318,5 @@ def publish_taxonomy(
         files=_file_entries(conformed, blobs),
     )
     manifest_bytes = dump_manifest(manifest)
-    _write_version(client, bucket, prefix, blobs, manifest_bytes)
+    _write_version(version_dir, blobs, manifest_bytes)
     return manifest, manifest_sha256(manifest_bytes)

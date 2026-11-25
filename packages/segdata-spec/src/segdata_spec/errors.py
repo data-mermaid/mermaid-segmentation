@@ -8,11 +8,11 @@ class SegdataError(Exception):
 
 
 class PublishRefused(SegdataError):
-    """Publishing is refused: dirty or unpushed tree, or the version already exists."""
+    """Staging or publishing is refused: dirty or unpushed tree, or the version already exists."""
 
 
 class ObjectExists(SegdataError):
-    """A write-once S3 key already exists with different bytes."""
+    """A write-once staged file already exists with different bytes."""
 
 
 class PinMismatch(SegdataError):

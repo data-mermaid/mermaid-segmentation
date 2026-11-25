@@ -29,8 +29,8 @@ from segdata_spec._marker import SyncMarker, dump_marker
 from segdata_spec.git import GitState
 from segdata_spec.layout import resize_id, synced_marker_dir
 from segdata_spec.manifest import Manifest, Pin, SourceInfo
-from segdata_spec.publish import publish_taxonomy
 from segdata_spec.read import DatasetVersion, open_version
+from segdata_spec.stage import stage_taxonomy
 
 LEGACY_BUCKET = "dev-datamermaid-sm-sources"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
@@ -57,7 +57,7 @@ def mask_png(values: np.ndarray) -> bytes:
 
 
 def publish_fixture_taxonomy(client: Any, repo: Path) -> str:
-    """Publish a three-attribute taxonomy into ``client``'s dataset bucket; return its sha256."""
+    """Stage a three-attribute taxonomy and copy it into ``client``'s dataset bucket; return its sha256."""
     tables = {
         "benthic_attributes.parquet": pa.table(
             {
@@ -68,8 +68,9 @@ def publish_fixture_taxonomy(client: Any, repo: Path) -> str:
         ),
         "growth_forms.parquet": pa.table({"id": ["g1"], "name": ["Branching"]}),
     }
-    _, sha = publish_taxonomy(
-        client,
+    stage_dir = repo.parent / "taxonomy-stage"
+    _, sha = stage_taxonomy(
+        stage_dir,
         bucket=DATASET_BUCKET,
         name="mermaid-benthic",
         version=TAXONOMY_VERSION,
@@ -80,6 +81,9 @@ def publish_fixture_taxonomy(client: Any, repo: Path) -> str:
         repo_dir=repo,
         git=CLEAN_GIT,
     )
+    root = stage_dir / DATASET_BUCKET
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        client.put(DATASET_BUCKET, path.relative_to(root).as_posix(), path.read_bytes())
     return sha
 
 

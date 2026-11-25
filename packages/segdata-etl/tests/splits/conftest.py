@@ -1,59 +1,26 @@
 """Shared fixtures for the split builder and leakage tests.
 
-``FixtureCache`` publishes tiny dataset and taxonomy versions through ``segdata_spec.publish`` into
-an in-memory store and copies every published object into a local cache laid out as ``sync``
-writes it, so ``sync`` then finds every table cached and never calls S3.
+``FixtureCache`` stages tiny dataset and taxonomy versions through ``segdata_spec.stage`` into a local
+cache laid out as ``sync`` writes it, so ``sync`` then finds every table cached and never calls S3.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pyarrow as pa
 import pytest
-from botocore.exceptions import ClientError
 
 from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, ParentRef, Pin, SourceInfo
-from segdata_spec.publish import publish_dataset, publish_taxonomy
+from segdata_spec.stage import stage_dataset, stage_taxonomy
 
 BUCKET = "seg-bucket"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
 STORE = ImageStore(bucket="img-bucket", prefix="images/", owner="segdata")
 SOURCE = SourceInfo(type="test", uri="s3://src/", revision="r1")
-
-
-class _Body:
-    def __init__(self, data: bytes):
-        self._data = data
-
-    def read(self) -> bytes:
-        return self._data
-
-
-@dataclass
-class _MemoryS3:
-    """The ``put_object`` / ``head_object`` / ``get_object`` surface ``publish`` touches."""
-
-    objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
-
-    def put_object(self, *, Bucket: str, Key: str, Body: bytes, **_: Any) -> dict[str, Any]:
-        self.objects[(Bucket, Key)] = bytes(Body)
-        return {}
-
-    def head_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
-        if (Bucket, Key) not in self.objects:
-            raise ClientError(
-                {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
-                "HeadObject",
-            )
-        return {}
-
-    def get_object(self, *, Bucket: str, Key: str, **_: Any) -> dict[str, Any]:
-        return {"Body": _Body(self.objects[(Bucket, Key)])}
 
 
 def images_table(rows: list[tuple[str, str, str | None, int]]) -> pa.Table:
@@ -120,17 +87,10 @@ def benthic_attributes_table(rows: list[tuple[str, str, str | None]]) -> pa.Tabl
 
 @dataclass
 class FixtureCache:
-    """Publishes versions into one shared store and mirrors it into ``cache_dir`` under ``BUCKET``."""
+    """Stages versions into ``cache_dir`` under ``BUCKET``."""
 
     cache_dir: Path
     repo_dir: Path
-    store: _MemoryS3 = field(default_factory=_MemoryS3)
-
-    def _mirror(self) -> None:
-        for (bucket, key), data in self.store.objects.items():
-            path = self.cache_dir / bucket / key
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
 
     def dataset(
         self,
@@ -142,8 +102,9 @@ class FixtureCache:
         label_counts: pa.Table | None = None,
         parents: tuple[ParentRef, ...] = (),
     ) -> Pin:
-        _, sha = publish_dataset(
-            self.store,
+        _, sha = stage_dataset(
+            self.cache_dir,
+            parent_dirs=(self.cache_dir,),
             bucket=BUCKET,
             dataset=name,
             version=version,
@@ -172,12 +133,11 @@ class FixtureCache:
             repo_dir=self.repo_dir,
             git=CLEAN_GIT,
         )
-        self._mirror()
         return Pin(name=name, version=version, manifest_sha256=sha)
 
     def taxonomy(self, version: str, benthic_attributes: pa.Table) -> Pin:
-        _, sha = publish_taxonomy(
-            self.store,
+        _, sha = stage_taxonomy(
+            self.cache_dir,
             bucket=BUCKET,
             name="mermaid-benthic",
             version=version,
@@ -191,7 +151,6 @@ class FixtureCache:
             repo_dir=self.repo_dir,
             git=CLEAN_GIT,
         )
-        self._mirror()
         return Pin(name="mermaid-benthic", version=version, manifest_sha256=sha)
 
 

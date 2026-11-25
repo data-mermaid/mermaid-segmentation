@@ -1,4 +1,6 @@
-"""``segdata promote``: upload one staged dataset version to the write-once dataset bucket.
+"""``segdata promote``: upload one staged dataset or taxonomy version to the write-once dataset bucket.
+
+A taxonomy version has no images: its tables go first and ``manifest.json`` last.
 
 The bucket denies deletes, so everything is checked before the first write. Images go first, then
 the tables, and ``manifest.json`` last: a version is visible only once its manifest exists, and a
@@ -39,8 +41,8 @@ from segdata_etl.common.s3_objects import (
 )
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
-from segdata_spec.layout import MANIFEST_NAME, cache_path, dataset_prefix
-from segdata_spec.manifest import Manifest, manifest_sha256
+from segdata_spec.layout import MANIFEST_NAME, cache_path, dataset_prefix, taxonomy_prefix
+from segdata_spec.manifest import Manifest, TaxonomyManifest, manifest_sha256
 from segdata_spec.s3 import crc64nvme_b64, exists, get_bytes, is_not_found, norm_etag
 
 logger = logging.getLogger(__name__)
@@ -120,7 +122,7 @@ def _table_expectations(tables: Mapping[str, bytes], prefix: str) -> dict[str, _
     }
 
 
-def _read_table(version_dir: Path, name: str, manifest: Manifest) -> bytes:
+def _read_table(version_dir: Path, name: str, manifest: Manifest | TaxonomyManifest) -> bytes:
     """Return the staged bytes of table ``name`` after checking them against the manifest."""
     entry = manifest.files[name]
     path = version_dir / name
@@ -226,9 +228,9 @@ def _check_key_sets(steps: Iterable[_Copy | _Upload], expected: Mapping[str, _Ex
         )
 
 
-def _manifest_published(client: Any, dataset: str, version: str) -> bool:
-    """Return whether the version's ``manifest.json`` exists in the dataset bucket."""
-    return exists(client, DATASET_BUCKET, dataset_prefix(dataset, version) + MANIFEST_NAME)
+def _manifest_published(client: Any, prefix: str) -> bool:
+    """Return whether ``manifest.json`` exists under the version folder ``prefix`` in the dataset bucket."""
+    return exists(client, DATASET_BUCKET, prefix + MANIFEST_NAME)
 
 
 def _check_parents(client: Any, manifest: Manifest) -> list[bytes]:
@@ -330,7 +332,7 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
     steps = _plan_steps(stage_dir, version_dir, expected)
     if steps:
         _check_key_sets(steps, expected)
-    if _manifest_published(client, dataset, version):
+    if _manifest_published(client, prefix):
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
     parent_bodies = _check_parents(client, manifest)
     if not steps:
@@ -430,7 +432,11 @@ def _write_images(
 
 
 def _write_tables(
-    client: Any, version_dir: Path, manifest: Manifest, prefix: str, tally: Counter[str]
+    client: Any,
+    version_dir: Path,
+    manifest: Manifest | TaxonomyManifest,
+    prefix: str,
+    tally: Counter[str],
 ) -> None:
     for name in manifest.files:
         put_new(
@@ -496,4 +502,68 @@ def promote(client: Any, *, stage_dir: Path, dataset: str, version: str, workers
         tally["copied"],
         tally["uploaded"],
         tally["present"],
+    )
+
+
+@dataclass(frozen=True)
+class _TaxonomyPlan:
+    manifest: TaxonomyManifest
+    manifest_bytes: bytes
+    prefix: str
+
+
+def _read_taxonomy_manifest(
+    version_dir: Path, name: str, version: str
+) -> tuple[bytes, TaxonomyManifest]:
+    path = version_dir / MANIFEST_NAME
+    if not path.is_file():
+        raise PublishRefused(f"{path} is not staged")
+    data = path.read_bytes()
+    manifest = TaxonomyManifest.model_validate_json(data)
+    if (manifest.name, manifest.version) != (name, version):
+        raise PublishRefused(
+            f"{path} describes {manifest.name} {manifest.version}, not {name} {version}"
+        )
+    return data, manifest
+
+
+def _taxonomy_preflight(
+    client: Any, stage_dir: Path, name: str, version: str, workers: int
+) -> tuple[_TaxonomyPlan, Path]:
+    """Check the staged taxonomy and the destination keys before the first write."""
+    prefix = taxonomy_prefix(name, version)
+    version_dir = cache_path(stage_dir, DATASET_BUCKET, prefix)
+    manifest_bytes, manifest = _read_taxonomy_manifest(version_dir, name, version)
+    tables = {table: _read_table(version_dir, table, manifest) for table in manifest.files}
+    if _manifest_published(client, prefix):
+        raise PublishRefused(f"taxonomy {name} {version} is already published in {DATASET_BUCKET}")
+    _check_destinations(client, _table_expectations(tables, prefix), workers)
+    return _TaxonomyPlan(manifest, manifest_bytes, prefix), version_dir
+
+
+def promote_taxonomy(
+    client: Any, *, stage_dir: Path, name: str, version: str, workers: int
+) -> None:
+    """Upload the staged taxonomy ``name`` ``version`` to the dataset bucket, tables then manifest.
+
+    Raises:
+        PublishRefused: The staging is missing or names another version, the version is already
+            published, or a destination key holds other content; nothing was written.
+        ChecksumMismatch: A staged table differs from the manifest.
+    """
+    plan, version_dir = _taxonomy_preflight(client, stage_dir, name, version, workers)
+    tally: Counter[str] = Counter()
+    _write_tables(client, version_dir, plan.manifest, plan.prefix, tally)
+    put_new(
+        client,
+        bucket=DATASET_BUCKET,
+        key=plan.prefix + MANIFEST_NAME,
+        body=plan.manifest_bytes,
+        content_type=_JSON,
+    )
+    logger.info(
+        "promoted taxonomy %s %s (manifest sha256 %s)",
+        name,
+        version,
+        manifest_sha256(plan.manifest_bytes),
     )

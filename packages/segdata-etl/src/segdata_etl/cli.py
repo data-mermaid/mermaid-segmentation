@@ -174,7 +174,7 @@ def _add_external_builds(build_sub: Any) -> None:
 
 
 def _add_taxonomy_subcommand(top: Any) -> None:
-    parser = top.add_parser("taxonomy", help="Fetch and publish the MERMAID benthic taxonomy")
+    parser = top.add_parser("taxonomy", help="Fetch and stage the MERMAID benthic taxonomy")
     taxonomy.add_arguments(parser)
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.set_defaults(
@@ -209,9 +209,13 @@ def _add_curate_subcommand(top: Any) -> None:
 
 
 def _add_promote_subcommand(top: Any) -> None:
-    promote = top.add_parser("promote", help="Upload a staged dataset version, write-once")
+    promote = top.add_parser(
+        "promote", help="Upload a staged dataset or taxonomy version, write-once"
+    )
     promote.add_argument("--stage-dir", type=Path, required=True, help="Local stage directory")
-    promote.add_argument("--dataset", required=True)
+    target = promote.add_mutually_exclusive_group(required=True)
+    target.add_argument("--dataset", help="Dataset name to promote")
+    target.add_argument("--taxonomy", help="Taxonomy name to promote")
     promote.add_argument("--version", required=True)
     promote.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     promote.add_argument("-v", "--verbose", action="store_true")
@@ -219,6 +223,15 @@ def _add_promote_subcommand(top: Any) -> None:
 
 
 def _run_promote(args: argparse.Namespace, client: Any) -> int:
+    if args.taxonomy is not None:
+        promote_module.promote_taxonomy(
+            client,
+            stage_dir=args.stage_dir,
+            name=args.taxonomy,
+            version=args.version,
+            workers=args.workers,
+        )
+        return 0
     promote_module.promote(
         client,
         stage_dir=args.stage_dir,

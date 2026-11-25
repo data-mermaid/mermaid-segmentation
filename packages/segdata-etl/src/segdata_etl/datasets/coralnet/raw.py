@@ -48,14 +48,14 @@ from segdata_etl.common.s3_objects import (
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import LocalDirS3, next_version
+from segdata_etl.common.stage import next_version
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import probe_git, refuse_unpublishable
 from segdata_spec.manifest import ParentRef, SourceInfo
-from segdata_spec.publish import fetch_parent_tables, publish_dataset
 from segdata_spec.s3 import crc64nvme_b64, get_bytes, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
+from segdata_spec.stage import read_parent_tables, stage_dataset
 
 from .annotations import _IMAGE_LIST_NAME, derive_image_id
 from .config import DEFAULT_OUTPUT_S3_PREFIX, get_workers
@@ -614,11 +614,14 @@ def run_raw(args: argparse.Namespace) -> int:
     source_bucket, prefix = _source_bucket(), get_prefix()
     client = make_s3_client(workers=workers)
     build = read_build(client, source_bucket, args.build_run, args.source_ids)
-    stage = LocalDirS3(args.stage_dir)
     parent_images = (
         None
         if parent is None
-        else fetch_parent_tables(stage, DATASET_BUCKET, parent)["images.parquet"]
+        else pq.read_table(
+            io.BytesIO(
+                read_parent_tables((args.stage_dir,), DATASET_BUCKET, parent)["images.parquet"]
+            )
+        )
     )
     result = build_raw(
         client,
@@ -630,8 +633,9 @@ def run_raw(args: argparse.Namespace) -> int:
         parent_images=parent_images,
     )
     version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
-    manifest, sha = publish_dataset(
-        stage,
+    manifest, sha = stage_dataset(
+        args.stage_dir,
+        parent_dirs=(args.stage_dir,),
         bucket=DATASET_BUCKET,
         dataset=DATASET,
         version=version,

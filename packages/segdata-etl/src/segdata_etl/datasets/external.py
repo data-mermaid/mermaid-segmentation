@@ -42,16 +42,16 @@ from segdata_etl.common.s3_objects import (
     head_with_checksum,
     md5_hex,
 )
-from segdata_etl.common.stage import DEFAULT_CACHE_DIR, LocalDirS3, next_version
+from segdata_etl.common.stage import DEFAULT_CACHE_DIR, next_version
 from segdata_etl.label_maps.curated import CuratedSource
 from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import GitState
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
-from segdata_spec.publish import publish_dataset
 from segdata_spec.read import Taxonomy, open_taxonomy
 from segdata_spec.s3 import crc64nvme_b64, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
+from segdata_spec.stage import stage_dataset
 from segdata_spec.sync import sync
 
 logger = logging.getLogger(__name__)
@@ -527,8 +527,9 @@ def publish_version(
     uploads: list[StagedFile] = []
     if masks is not None:
         uploads = _stage_masks(args.stage_dir, dataset, probe.images, masks)
-    manifest, sha = publish_dataset(
-        LocalDirS3(args.stage_dir),
+    manifest, sha = stage_dataset(
+        args.stage_dir,
+        parent_dirs=(args.stage_dir,),
         bucket=DATASET_BUCKET,
         dataset=dataset,
         version=version,
