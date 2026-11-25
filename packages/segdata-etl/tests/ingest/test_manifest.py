@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from segdata_etl.common.manifest import Source, build_manifest
-from segdata_etl.common.publish import S3Target
+from segdata_etl.common.release import S3Target
 
 
 def test_build_manifest_has_the_settled_shape():

@@ -40,7 +40,7 @@ from segdata_etl.common.copy_plan import (
     write_copies,
 )
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
-from segdata_etl.common.publishing import count_labels, image_prefix, image_store
+from segdata_etl.common.release import count_labels, image_prefix, image_store
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
     head_with_checksum,

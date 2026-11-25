@@ -21,7 +21,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from segdata_etl.common import publishing
+from segdata_etl.common import release
 from segdata_etl.common.cli_flags import pin_command_parts, pin_flags
 from segdata_etl.common.copy_plan import (
     ImageOutcome,
@@ -35,7 +35,7 @@ from segdata_etl.common.copy_plan import (
 )
 from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
 from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject
-from segdata_etl.common.publishing import image_prefix
+from segdata_etl.common.release import image_prefix
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
     SourceChanged,
@@ -535,7 +535,7 @@ def publish_version(
         version=version,
         kind=kind,
         tables={"images.parquet": pa.Table.from_pylist(rows, schema=IMAGES_SCHEMA), **tables},
-        image_store=publishing.image_store(DATASET_BUCKET, dataset),
+        image_store=release.image_store(DATASET_BUCKET, dataset),
         etl_package="segdata-etl",
         etl_command=build_command(dataset, args),
         source=source,

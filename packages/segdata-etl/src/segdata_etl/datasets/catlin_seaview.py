@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from segdata_etl.common import publishing
+from segdata_etl.common import release
 from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import curated_source, load_curated
@@ -63,7 +63,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
         tables={
             "points.parquet": points,
             "labels.parquet": labels,
-            "stats/label_counts.parquet": publishing.count_labels(points),
+            "stats/label_counts.parquet": release.count_labels(points),
         },
         source=source,
         label_mapping=external.label_mapping_record(

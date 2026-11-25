@@ -22,7 +22,7 @@ from tqdm.auto import tqdm
 from ..common.images import find_undecodable
 from ..common.labels import build_classes_and_colors
 from ..common.manifest import Source, build_manifest
-from ..common.publish import S3Target, list_keys, preflight, publish_dataset, upload_files
+from ..common.release import S3Target, list_keys, preflight, put_raw_release, upload_files
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +264,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
         parquet_columns=PARQUET_COLUMNS,
         ingestion={"damaged_images": damaged, "images_uploaded": uploaded},
     )
-    publish_dataset(
+    put_raw_release(
         client,
         target,
         dataset_name=DATASET_NAME,

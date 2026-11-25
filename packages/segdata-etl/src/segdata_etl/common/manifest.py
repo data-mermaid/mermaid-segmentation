@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from .publish import S3Target, annotations_parquet_name
+from .release import S3Target, annotations_parquet_name
 
 
 @dataclass(frozen=True)
