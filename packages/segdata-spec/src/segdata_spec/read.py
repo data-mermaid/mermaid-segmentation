@@ -203,7 +203,7 @@ def open_version(
 def open_tables(cache_dir: Path, bucket: str, pin: Pin) -> VersionTables:
     """Open the tables of a dataset version that ``sync`` cached, with or without its images.
 
-    ``sync`` must have run for the pin, with ``images=False`` or with any resize spec. The
+    ``sync_tables`` or ``sync`` (with any resize spec) must have run for the pin. The
     tables describe the original images; the manifest is re-verified against ``pin``.
 
     Raises:

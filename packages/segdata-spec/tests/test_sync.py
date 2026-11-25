@@ -48,6 +48,7 @@ from segdata_spec.sync import (
     check_published_manifest,
     sync,
     sync_feature_set,
+    sync_tables,
 )
 
 PREFIX = f"datasets/ds/{VERSION}/"
@@ -893,12 +894,12 @@ def test_check_published_manifest_taxonomy_flag_selects_the_taxonomy_prefix(fake
         check_published_manifest(fake_s3, BUCKET, tax, taxonomy=False)
 
 
-def test_tables_only_sync_caches_tables_and_requests_no_image(fake_s3, tmp_path, cache):
+def test_sync_tables_caches_tables_and_requests_no_image(fake_s3, tmp_path, cache):
     _, dense_pin = publish_version(
         fake_s3, tmp_path, points=None, masks={"a": b"m", "b": b"m", "c": b"m"}
     )
 
-    sync(fake_s3, {"ds": dense_pin}, cache, bucket=BUCKET, images=False)
+    sync_tables(fake_s3, {"ds": dense_pin}, cache, bucket=BUCKET)
 
     assert _image_gets(fake_s3) == []
     assert sorted(key for bucket, key in _gets(fake_s3)) == sorted(
@@ -918,20 +919,14 @@ def test_tables_only_sync_caches_tables_and_requests_no_image(fake_s3, tmp_path,
     assert len(list((cache / "synced" / "tables" / BUCKET / "ds" / VERSION).glob("*.json"))) == 1
 
 
-@pytest.mark.parametrize(
-    "option",
-    [
-        {"selection": {"ds": ["g1"]}},
-        {"resize": {"ds": ResizeSpec(max_edge=2)}},
-        {"on_missing_images": {"ds": "drop"}},
-    ],
-    ids=["selection", "resize", "on_missing_images"],
-)
-def test_tables_only_sync_refuses_image_options_before_any_s3_call(fake_s3, pin, cache, option):
-    with pytest.raises(ValueError, match=next(iter(option))):
-        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, images=False, **option)
+def test_sync_tables_check_split_failure_aborts_before_any_marker(fake_s3, pin, cache):
+    def check_split(name: str, groups: set[str]) -> None:
+        raise ValueError("split does not cover g2")
 
-    assert fake_s3.calls == []
+    with pytest.raises(ValueError, match="split does not cover g2"):
+        sync_tables(fake_s3, {"ds": pin}, cache, bucket=BUCKET, check_split=check_split)
+
+    assert not (cache / "synced").exists()
 
 
 def _feature_gets(client: FakeS3) -> list[str]:

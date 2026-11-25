@@ -21,7 +21,7 @@ from segdata_spec.errors import NotSynced, PinMismatch, SegdataError
 from segdata_spec.manifest import FileEntry, Pin, dump_manifest, manifest_sha256
 from segdata_spec.read import open_feature_set, open_tables, open_taxonomy, open_version
 from segdata_spec.resize import ResizeSpec
-from segdata_spec.sync import sync, sync_feature_set
+from segdata_spec.sync import sync, sync_feature_set, sync_tables
 from segdata_spec.taxonomy import hierarchy_from_table
 
 PREFIX = f"datasets/ds/{VERSION}/"
@@ -274,7 +274,7 @@ def test_open_version_names_an_unparseable_marker_file(fake_s3, tmp_path, cache)
 
 def test_open_tables_reads_a_tables_only_sync_that_open_version_refuses(fake_s3, tmp_path, cache):
     manifest, pin = publish_version(fake_s3, tmp_path)
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, images=False)
+    sync_tables(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
 
     tables = open_tables(cache, BUCKET, pin)
 
@@ -290,7 +290,7 @@ def test_open_tables_reads_a_tables_only_sync_that_open_version_refuses(fake_s3,
 
 def test_open_tables_refuses_a_cache_with_no_marker(fake_s3, tmp_path, cache):
     _, pin = publish_version(fake_s3, tmp_path)
-    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, images=False)
+    sync_tables(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
     shutil.rmtree(cache / "synced")
 
     with pytest.raises(NotSynced):
