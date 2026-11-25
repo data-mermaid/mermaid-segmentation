@@ -5,13 +5,14 @@ the tables, and ``manifest.json`` last: a version is visible only once its manif
 rerun after a crash finds the written objects already present and carries on.
 
 A staged version carries ``copies.jsonl``, ``uploads.jsonl``, or both (a dense dataset copies its
-images from S3 and uploads its masks). Together the two files must name every image and mask key
-in ``images.parquet`` exactly once. Every image and mask is written in the Intelligent-Tiering
-storage class; the tables and the manifest keep the bucket default.
+images from S3 and uploads its masks). Together the two files name each image and mask key in
+``images.parquet`` at most once, and no other key. Every image and mask is written in the
+Intelligent-Tiering storage class; the tables and the manifest keep the bucket default.
 
-A version with neither file is tables-only: it reuses images already published. It needs a
-published parent on the same image store, and every image and mask key in ``images.parquet`` must
-already exist there with the row's ETag, size and CRC64NVME.
+A key in ``images.parquet`` that no plan names is carried: the image is already published. A
+version with carried keys needs a published parent on the same image store, and each carried key
+must already exist there with the row's ETag, size and CRC64NVME. A version with neither file is
+tables-only: every key is carried.
 """
 
 from __future__ import annotations
@@ -219,14 +220,13 @@ def _plan_steps(
 
 
 def _check_key_sets(steps: Iterable[_Copy | _Upload], expected: Mapping[str, _Expected]) -> None:
+    """Refuse a plan key that ``images.parquet`` lacks, or one that two plan lines name."""
     counts = Counter(step.dst_key for step in steps)
-    planned = set(counts)
-    duplicated = sorted(k for k, n in counts.items() if n > 1)
-    if planned != set(expected) or duplicated:
+    extra = counts.keys() - expected.keys()
+    duplicated = [k for k, n in counts.items() if n > 1]
+    if extra or duplicated:
         raise PublishRefused(
-            "plan keys differ from images.parquet: "
-            f"{len(planned - set(expected))} extra, {len(set(expected) - planned)} missing, "
-            f"{len(duplicated)} duplicated"
+            f"plan keys differ from images.parquet: {len(extra)} extra, {len(duplicated)} duplicated"
         )
 
 
@@ -265,10 +265,11 @@ def _check_parents(client: Any, manifest: Manifest) -> list[bytes]:
 
 
 def _check_shared_store(manifest: Manifest, parent_bodies: Iterable[bytes]) -> None:
-    """Refuse a tables-only version unless one parent publishes the same image store."""
+    """Refuse a version with carried keys unless one parent publishes the same image store."""
     if not manifest.parents:
         raise PublishRefused(
-            f"a version with neither {COPIES_NAME} nor {UPLOADS_NAME} needs a published parent"
+            f"a version with images no plan names, or neither {COPIES_NAME} nor {UPLOADS_NAME}, "
+            "needs a published parent"
         )
     stores = [Manifest.model_validate_json(body).image_store for body in parent_bodies]
     if manifest.image_store not in stores:
@@ -345,9 +346,11 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
     if _manifest_published(client, dataset, version):
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
     parent_bodies = _check_parents(client, manifest)
-    if not steps:
+    planned = {s.dst_key for s in steps}
+    carried = {k: v for k, v in expected.items() if k not in planned}
+    if carried:
         _check_shared_store(manifest, parent_bodies)
-        _check_images_present(client, manifest.image_store.bucket, expected, workers)
+        _check_images_present(client, manifest.image_store.bucket, carried, workers)
     file_expected = _table_expectations(tables, prefix)
     _check_destinations(client, {**{s.dst_key: s.expect for s in steps}, **file_expected}, workers)
     return _Plan(manifest, manifest_bytes, steps)
@@ -476,8 +479,8 @@ def promote(client: Any, *, stage_dir: Path, dataset: str, version: str, workers
 
     Raises:
         PublishRefused: The staging is inconsistent or holds no images, the version is already
-            published, a planned key holds other content, or a tables-only version lacks a parent on its image store or an
-            image there; nothing was written.
+            published, a planned key holds other content, or a version with carried images lacks a
+            parent on its image store or an image there; nothing was written.
         ChecksumMismatch: A staged table differs from the manifest.
         ObjectConflict: An object landed with, or already holds, other content than planned.
         SourceChanged: A copy source no longer has the planned ETag.
