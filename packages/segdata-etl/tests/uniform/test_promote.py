@@ -150,14 +150,14 @@ def test_plan_line_without_crc_or_etag_refuses_at_preflight(repo, tmp_path, fiel
     assert fake.calls == []
 
 
-def test_plan_missing_a_line_refuses_at_preflight(repo, tmp_path):  # noqa: F811
+def test_plan_missing_a_line_without_a_parent_refuses_at_preflight(repo, tmp_path):  # noqa: F811
     fake, stage, version = stage_mermaid(tmp_path)
     rewrite_plan(stage, version, lambda lines: lines[1:])
 
-    with pytest.raises(PublishRefused, match="keys"):
+    with pytest.raises(PublishRefused, match="needs a published parent"):
         run_promote(fake, stage, version)
 
-    assert fake.calls == []
+    assert writes(fake) == []
 
 
 @pytest.mark.parametrize(
@@ -600,12 +600,14 @@ def test_key_listed_in_both_plan_files_refuses_before_any_write(monkeypatch, tmp
     assert writes(fake) == []
 
 
-def test_key_in_neither_plan_file_refuses_before_any_write(monkeypatch, tmp_path):
+def test_a_key_in_neither_plan_file_without_a_parent_refuses_before_any_write(
+    monkeypatch, tmp_path
+):
     fake, stage, version = stage_dense(monkeypatch, tmp_path)
     path = version_dir(stage, DENSE, version) / "uploads.jsonl"
     path.write_text("".join(path.read_text().splitlines(keepends=True)[1:]))
 
-    with pytest.raises(PublishRefused, match="1 missing"):
+    with pytest.raises(PublishRefused, match="needs a published parent"):
         run_promote(fake, stage, version, dataset=DENSE)
 
     assert writes(fake) == []
@@ -744,17 +746,55 @@ def test_a_carried_key_is_headed_in_the_image_store_and_never_copied(repo, tmp_p
     assert fake.puts[-1] == f"datasets/mermaid/{version}/manifest.json"
 
 
-@pytest.mark.parametrize("fault", ["missing", "etag"])
+@pytest.mark.parametrize("fault", ["missing", "etag", "size", "crc"])
 def test_a_carried_key_absent_or_changed_refuses_before_any_write(repo, tmp_path, fault):  # noqa: F811
     fake, stage, version, carried = stage_carried(tmp_path)
+    location = (DATASET_BUCKET, carried)
+    planned_etag = fake.etag(*location)
     if fault == "missing":
-        del fake.objects[(DATASET_BUCKET, carried)]
+        del fake.objects[location]
+    elif fault == "etag":
+        fake.etags[location] = quoted_etag(b"other")
+    elif fault == "size":
+        planned_crc = fake.crc(*location)
+        fake.objects[location] += b"x"
+        fake.etags[location] = planned_etag
+        fake.crcs[location] = planned_crc
     else:
-        fake.etags[(DATASET_BUCKET, carried)] = quoted_etag(b"other")
+        fake.crcs[location] = crc64nvme(b"other")
 
     with pytest.raises(PublishRefused, match=carried):
         run_promote(fake, stage, version)
 
+    assert writes(fake) == []
+
+
+def test_only_the_faulty_one_of_two_carried_keys_is_named_and_nothing_is_written(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    store = json.loads((version_dir(stage, "mermaid", version) / "manifest.json").read_bytes())[
+        "image_store"
+    ]
+    lines = [
+        e
+        for e in copy_destinations(stage, version)
+        if "/i1." in e["dst_key"] or "/i2." in e["dst_key"]
+    ]
+    assert len(lines) == 2
+    for line in lines:
+        fake.put(
+            store["bucket"], line["dst_key"], fake.objects[(line["src_bucket"], line["src_key"])]
+        )
+    dropped = {line["dst_key"] for line in lines}
+    rewrite_plan(stage, version, lambda ls: [x for x in ls if x["dst_key"] not in dropped])
+    publish_parent(fake, stage, version)
+    good, bad = (line["dst_key"] for line in lines)
+    fake.etags[(DATASET_BUCKET, bad)] = quoted_etag(b"other")
+    fake.calls.clear()
+
+    with pytest.raises(PublishRefused, match=bad) as refused:
+        run_promote(fake, stage, version)
+
+    assert good not in str(refused.value)
     assert writes(fake) == []
 
 

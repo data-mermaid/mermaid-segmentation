@@ -219,19 +219,14 @@ def _plan_steps(
     return tuple(steps)
 
 
-def _check_key_sets(
-    steps: Iterable[_Copy | _Upload], expected: Mapping[str, _Expected], *, may_carry: bool
-) -> None:
-    """Refuse an extra or duplicated plan key, and a key no plan names unless ``may_carry``."""
+def _check_key_sets(steps: Iterable[_Copy | _Upload], expected: Mapping[str, _Expected]) -> None:
+    """Refuse a plan key that ``images.parquet`` lacks, or one that two plan lines name."""
     counts = Counter(step.dst_key for step in steps)
-    planned = set(counts)
-    duplicated = sorted(k for k, n in counts.items() if n > 1)
-    unplanned = set(expected) - planned
-    if planned - set(expected) or duplicated or (unplanned and not may_carry):
+    extra = counts.keys() - expected.keys()
+    duplicated = [k for k, n in counts.items() if n > 1]
+    if extra or duplicated:
         raise PublishRefused(
-            "plan keys differ from images.parquet: "
-            f"{len(planned - set(expected))} extra, {len(unplanned)} missing, "
-            f"{len(duplicated)} duplicated"
+            f"plan keys differ from images.parquet: {len(extra)} extra, {len(duplicated)} duplicated"
         )
 
 
@@ -347,11 +342,12 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
     expected = _image_expectations(tables["images.parquet"], manifest.image_store.prefix)
     steps = _plan_steps(stage_dir, version_dir, expected)
     if steps:
-        _check_key_sets(steps, expected, may_carry=bool(manifest.parents))
+        _check_key_sets(steps, expected)
     if _manifest_published(client, dataset, version):
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
     parent_bodies = _check_parents(client, manifest)
-    carried = {k: v for k, v in expected.items() if k not in {s.dst_key for s in steps}}
+    planned = {s.dst_key for s in steps}
+    carried = {k: v for k, v in expected.items() if k not in planned}
     if carried:
         _check_shared_store(manifest, parent_bodies)
         _check_images_present(client, manifest.image_store.bucket, carried, workers)
