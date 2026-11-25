@@ -5,7 +5,6 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +14,7 @@ from torch import nn
 
 from mermaidseg.io import ConfigDict
 from mermaidseg.model.meta import MetaModel
+from mermaidseg.model.models import ConceptBottleneckOutput
 from tests.conftest import CBM_CONCEPT_VALUE2ID, NUM_CLASSES, cbm_concept_lookup
 
 
@@ -31,12 +31,12 @@ class FixedOutputsModel(nn.Module):
         self.concept_logits = concept_logits
         self.offset = nn.Parameter(torch.zeros(()))
 
-    def forward(self, images: torch.Tensor) -> SimpleNamespace:
+    def forward(self, images: torch.Tensor) -> ConceptBottleneckOutput:
         batch = images.shape[0]
         logits = self.class_logits.expand(batch, -1, -1, -1) + self.offset
         concept_logits = self.concept_logits.expand(batch, -1, -1, -1) + self.offset
-        return SimpleNamespace(
-            logits=logits, concept_logits=concept_logits, hidden_states=concept_logits.detach()
+        return ConceptBottleneckOutput(
+            logits=logits, concept_logits=concept_logits, concept_probs=concept_logits.detach()
         )
 
 

@@ -41,17 +41,17 @@ def apply_concept_bottleneck_loss(
 
     Args:
         segmentation_outputs: Model output with ``logits``, ``concept_logits``,
-            and ``hidden_states``.
+            and ``concept_probs``.
         loss_fn: Loss returning ``(loss, components)``.
         taxonomic_loss: Optional taxonomy loss added to the total.
         target_labels: Target label map.
         target_concepts: Target concept map.
 
     Returns:
-        The total loss, fp32 logits, detached concept hidden states, and the
+        The total loss, fp32 logits, detached concept probabilities, and the
         loss components for logging.
     """
-    concept_outputs = segmentation_outputs.hidden_states.detach()
+    concept_outputs = segmentation_outputs.concept_probs.detach()
     concept_logits = segmentation_outputs.concept_logits.float()
     outputs = segmentation_outputs.logits.float()
     loss, loss_components = loss_fn(outputs, target_labels, concept_logits, target_concepts)

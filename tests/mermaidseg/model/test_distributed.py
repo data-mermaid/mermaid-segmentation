@@ -78,13 +78,13 @@ class _TinyCBM(nn.Module):
         for param in self.stem.parameters():
             param.requires_grad = False
 
-    def forward(self, x: torch.Tensor) -> SimpleNamespace:
+    def forward(self, x: torch.Tensor) -> models_module.ConceptBottleneckOutput:
         concept_logits = self.concept_head(torch.relu(self.stem(x)))
         concept_outputs = torch.sigmoid(concept_logits)
-        return SimpleNamespace(
+        return models_module.ConceptBottleneckOutput(
             logits=self.classifier(concept_outputs),
             concept_logits=concept_logits,
-            hidden_states=concept_outputs,
+            concept_probs=concept_outputs,
         )
 
 

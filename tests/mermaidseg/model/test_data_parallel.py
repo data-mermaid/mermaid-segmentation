@@ -4,7 +4,6 @@ training-metric cadence."""
 from __future__ import annotations
 
 import copy
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,6 +18,7 @@ from mermaidseg.model.data_parallel import (
     require_divisible_batch,
     shard_targets,
 )
+from mermaidseg.model.models import ConceptBottleneckOutput
 from tests.conftest import CBM_CONCEPT_VALUE2ID, IMAGE_SIZE, NUM_CLASSES
 from tests.mermaidseg.conftest import cbm_meta, concept_keep, source_lookup
 
@@ -48,13 +48,13 @@ class _TinyCBM(nn.Module):
         for param in self.stem.parameters():
             param.requires_grad = False
 
-    def forward(self, x: torch.Tensor) -> SimpleNamespace:
+    def forward(self, x: torch.Tensor) -> ConceptBottleneckOutput:
         concept_logits = self.concept_head(torch.relu(self.stem(x))) * self.scale
         concept_outputs = torch.sigmoid(concept_logits)
-        return SimpleNamespace(
+        return ConceptBottleneckOutput(
             logits=self.classifier(concept_outputs),
             concept_logits=concept_logits,
-            hidden_states=concept_outputs,
+            concept_probs=concept_outputs,
         )
 
 
