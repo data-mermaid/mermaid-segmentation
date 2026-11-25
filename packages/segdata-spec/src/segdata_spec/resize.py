@@ -1,8 +1,6 @@
 """Resize specs and the pure image, mask and point transforms that apply them.
 
-The image path copies the ETL's decode-and-resize. For JPEG and PNG images whose scaled edges are
-at least one pixel, the trainer's resized cache is byte-identical to what the ETL publishes.
-Unlike the ETL, it decodes only JPEG and PNG and clamps a zero edge to one pixel. It must not
+The image path decodes only JPEG and PNG and clamps a zero edge to one pixel. It must not
 import ``segdata_etl``.
 """
 

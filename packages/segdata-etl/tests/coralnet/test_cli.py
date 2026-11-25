@@ -15,13 +15,8 @@ from PIL import Image
 
 from segdata_etl import cli
 from segdata_etl.datasets.coralnet import build
-from segdata_etl.datasets.coralnet.io import make_csv_reader_s3, write_parquet_deterministic
-from segdata_etl.datasets.coralnet.schemas import (
-    ANNOTATIONS_PRIMARY_KEY,
-    ANNOTATIONS_SCHEMA,
-    IMAGES_PRIMARY_KEY,
-    IMAGES_SCHEMA,
-)
+from segdata_etl.datasets.coralnet.io import make_csv_reader_s3
+from segdata_etl.datasets.coralnet.schemas import ANNOTATIONS_SCHEMA
 
 _BUCKET = "b"
 _PREFIX = "coralnet-public-images"
@@ -31,14 +26,12 @@ _PREFIX = "coralnet-public-images"
 def _env(monkeypatch):
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", _BUCKET)
     monkeypatch.delenv("MERMAID_CORALNET_PREFIX", raising=False)
-    monkeypatch.delenv("MERMAID_CORALNET_RESIZED_PREFIX", raising=False)
     monkeypatch.delenv("MERMAID_CORALNET_ETL_WORKERS", raising=False)
 
 
 def _patch_to_fake_s3(monkeypatch, fake_s3):
     """Point every S3 client and CSV reader factory at the in-memory FakeS3."""
     monkeypatch.setattr(build, "make_s3_client", lambda: fake_s3)
-    monkeypatch.setattr(build, "make_resize_s3_client", lambda **_: fake_s3)
     monkeypatch.setattr(
         "segdata_etl.datasets.coralnet.annotations.make_ibis_connection", lambda: object()
     )
@@ -139,52 +132,6 @@ def test_build_images_exits_1_on_missing_object_and_still_writes(
     assert images["image_id"].tolist() == ["10", "11"]
 
 
-def _write_images(path: Path, needs_resize: bool) -> None:
-    df = pd.DataFrame(
-        {
-            "source_id": [1],
-            "image_id": ["10"],
-            "s3_key": [f"{_PREFIX}/s1/images/10.jpg"],
-            "width": [4096 if needs_resize else 800],
-            "height": [3000 if needs_resize else 600],
-            "longest_edge": [4096 if needs_resize else 800],
-            "file_size": [1000],
-            "needs_resize": [needs_resize],
-            "header_status": ["ok"],
-            "error_message": [None],
-        }
-    )
-    write_parquet_deterministic(df, path, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY)
-
-
-@pytest.mark.parametrize(
-    ("needs_resize", "counts", "expected_rc"),
-    [
-        (True, (1, 0, 0), 0),
-        (True, (0, 0, 1), 1),
-        (True, (0, 1, 0), 1),
-        (False, None, 0),
-    ],
-    ids=["all-completed", "any-failed", "any-corrupted", "nothing-to-do"],
-)
-def test_resize_exit_code(monkeypatch, fake_s3, tmp_path, needs_resize, counts, expected_rc):
-    images_path = tmp_path / "images.parquet"
-    _write_images(images_path, needs_resize)
-    _patch_to_fake_s3(monkeypatch, fake_s3)
-    calls: list[int] = []
-
-    def fake_resize_all(df_todo, bucket, **_kwargs):
-        calls.append(len(df_todo))
-        return counts
-
-    monkeypatch.setattr(build, "resize_and_upload_all_images", fake_resize_all)
-
-    rc = cli.main(["build", "coralnet", "resize", "--images", str(images_path), *_common(tmp_path)])
-
-    assert rc == expected_rc
-    assert calls == ([1] if needs_resize else [])
-
-
 def test_cli_all_pipeline_end_to_end(monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path):
     populate(
         fake_s3,
@@ -203,18 +150,16 @@ def test_cli_all_pipeline_end_to_end(monkeypatch, fake_s3, sample_csv_factory, p
     out_dir = tmp_path / "v1"
     ann_df = pd.read_parquet(out_dir / "coralnet_annotations_v1.parquet")
     img_df = pd.read_parquet(out_dir / "coralnet_images_v1.parquet")
-    manifest = pd.read_parquet(out_dir / "coralnet_training_manifest_v1.parquet")
 
     assert len(ann_df) == 4  # 2 imgs * 2 pts
     assert {f.name for f in ANNOTATIONS_SCHEMA}.issubset(set(ann_df.columns))
     assert (img_df["header_status"] == "ok").all()
-    assert (_BUCKET, "dev/images/resized/s1/images/10000.jpg") in fake_s3.objects
-    keys = dict(zip(manifest["image_id"], manifest["image_s3_key"], strict=False))
-    assert keys == {
-        "10000": "dev/images/resized/s1/images/10000.jpg",
-        "10001": f"{_PREFIX}/s1/images/10001.jpg",
-    }
-    assert len(manifest) == 4
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "coralnet_annotations_v1.parquet",
+        "coralnet_id2name_v1.json",
+        "coralnet_images_v1.parquet",
+    ]
+    assert not any(bucket == _BUCKET and "resized" in key for bucket, key in fake_s3.objects)
 
 
 def test_cli_all_runs_every_stage_after_a_failure(
@@ -234,8 +179,8 @@ def test_cli_all_runs_every_stage_after_a_failure(
     rc = cli.main(["build", "coralnet", "all", *_common(tmp_path)])
 
     assert rc == 1
-    manifest = pd.read_parquet(tmp_path / "v1" / "coralnet_training_manifest_v1.parquet")
-    assert sorted(manifest["image_id"].unique().tolist()) == ["10000"]
+    img_df = pd.read_parquet(tmp_path / "v1" / "coralnet_images_v1.parquet")
+    assert img_df["image_id"].tolist() == ["10000", "10001"]
 
 
 @pytest.mark.parametrize("raw", ["", ","])
@@ -271,87 +216,6 @@ def test_build_annotations_exits_1_when_no_sources_produce_rows(monkeypatch, fak
 
     assert rc == 1
     assert (tmp_path / "v1" / "coralnet_annotations_v1.parquet").exists()
-
-
-_MANIFEST_COLUMNS = [
-    "source_id",
-    "image_id",
-    "row",
-    "col",
-    "coralnet_id",
-    "source_label_name",
-    "image_s3_key",
-    "load_width",
-    "load_height",
-    "uses_resized_image",
-]
-
-
-def test_build_manifest_on_empty_inputs_writes_empty_manifest(monkeypatch, fake_s3, tmp_path):
-    ann_path, img_path = tmp_path / "ann.parquet", tmp_path / "img.parquet"
-    write_parquet_deterministic(
-        ANNOTATIONS_SCHEMA.empty_table().to_pandas(),
-        ann_path,
-        ANNOTATIONS_SCHEMA,
-        ANNOTATIONS_PRIMARY_KEY,
-    )
-    write_parquet_deterministic(
-        IMAGES_SCHEMA.empty_table().to_pandas(), img_path, IMAGES_SCHEMA, IMAGES_PRIMARY_KEY
-    )
-    _patch_to_fake_s3(monkeypatch, fake_s3)
-
-    rc = cli.main(
-        [
-            "build",
-            "coralnet",
-            "build-manifest",
-            "--annotations",
-            str(ann_path),
-            "--images",
-            str(img_path),
-            *_common(tmp_path),
-        ]
-    )
-
-    assert rc == 0
-    manifest = pd.read_parquet(tmp_path / "v1" / "coralnet_training_manifest_v1.parquet")
-    assert manifest.empty
-    assert list(manifest.columns) == _MANIFEST_COLUMNS
-
-
-def test_all_rejects_empty_resized_prefix_before_any_stage(monkeypatch, fake_s3, tmp_path):
-    monkeypatch.setenv("MERMAID_CORALNET_RESIZED_PREFIX", "/")
-    _patch_to_fake_s3(monkeypatch, fake_s3)
-    calls: list[str] = []
-    monkeypatch.setattr(build, "build_images", lambda *a, **k: calls.append("build_images"))
-
-    with pytest.raises(ValueError, match="MERMAID_CORALNET_RESIZED_PREFIX"):
-        cli.main(["build", "coralnet", "all", "--source-ids", "1", *_common(tmp_path)])
-
-    assert calls == []
-    assert not (tmp_path / "v1" / "coralnet_annotations_v1.parquet").exists()
-
-
-def test_cli_all_uses_custom_resized_prefix(
-    monkeypatch, fake_s3, sample_csv_factory, populate, tmp_path
-):
-    monkeypatch.setenv("MERMAID_CORALNET_RESIZED_PREFIX", "/custom/pre/")
-    populate(
-        fake_s3,
-        _BUCKET,
-        _PREFIX,
-        1,
-        sample_csv_factory(source_id=1, n_images=1, n_points_per_image=1),
-    )
-    fake_s3.put(_BUCKET, f"{_PREFIX}/s1/images/10000.jpg", _real_jpeg(4096, 3000))
-    _patch_to_fake_s3(monkeypatch, fake_s3)
-
-    rc = cli.main(["build", "coralnet", "all", *_common(tmp_path)])
-
-    assert rc == 0
-    assert (_BUCKET, "custom/pre/resized/s1/images/10000.jpg") in fake_s3.objects
-    manifest = pd.read_parquet(tmp_path / "v1" / "coralnet_training_manifest_v1.parquet")
-    assert manifest["image_s3_key"].tolist() == ["custom/pre/resized/s1/images/10000.jpg"]
 
 
 def _upload_key(tag: str) -> str:
@@ -482,7 +346,6 @@ def test_cli_all_with_an_excluded_source_writes_every_output(
     for name in (
         "coralnet_annotations_v1.parquet",
         "coralnet_images_v1.parquet",
-        "coralnet_training_manifest_v1.parquet",
     ):
         assert (out_dir / name).exists(), name
     assert json.loads((out_dir / "coralnet_id2name_v1.json").read_text()) == {
@@ -494,8 +357,8 @@ def test_cli_all_with_an_excluded_source_writes_every_output(
         "1005": "label_5",
         "1006": "label_6",
     }
-    manifest = pd.read_parquet(out_dir / "coralnet_training_manifest_v1.parquet")
-    assert manifest["source_id"].unique().tolist() == [1]
+    img_df = pd.read_parquet(out_dir / "coralnet_images_v1.parquet")
+    assert img_df["source_id"].unique().tolist() == [1]
 
 
 class _HeadObjectRaises:

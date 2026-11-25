@@ -1,9 +1,8 @@
 """``segdata build coralnet``: build the CoralNet dataset parquets.
 
-Subcommands run one stage each (``build-annotations``, ``build-images``, ``resize``,
-``build-manifest``) or all four in order (``all``). Outputs are written under
-``<output-dir>/<version>/`` and uploaded to ``etl-outputs/coralnet/<version>/`` with
-``--upload-to-s3``. ``resize`` always writes to S3, since the resized images are its output.
+Subcommands run one stage each (``build-annotations``, ``build-images``) or both in order
+(``all``). Outputs are written under ``<output-dir>/<version>/`` and uploaded to
+``etl-outputs/coralnet/<version>/`` with ``--upload-to-s3``.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import ibis
 import pandas as pd
 from botocore.exceptions import ClientError
 
@@ -27,18 +25,10 @@ from .config import (
     DEFAULT_OUTPUT_S3_PREFIX,
     get_bucket,
     get_prefix,
-    get_resized_prefix,
     get_workers,
 )
 from .images import build_images
 from .io import compute_version_tag, make_s3_client, upload_to_s3, write_parquet_deterministic
-from .manifest import build_training_manifest, resized_existence_table
-from .resize import (
-    list_resized_keys,
-    make_resize_s3_client,
-    resize_and_upload_all_images,
-    scan_for_missing_resized_images,
-)
 from .schemas import (
     ANNOTATIONS_PRIMARY_KEY,
     ANNOTATIONS_SCHEMA,
@@ -49,7 +39,6 @@ from .schemas import (
 logger = logging.getLogger("segdata_etl.datasets.coralnet")
 
 _MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
-_RESIZED_IBIS_SCHEMA = ibis.schema({"source_id": "int32", "image_id": "string", "status": "string"})
 
 
 @dataclass(frozen=True)
@@ -64,7 +53,6 @@ class _Run:
     overwrite: bool
     bucket: str
     prefix: str
-    resized_prefix: str
 
     def path(self, kind: str, suffix: str = "parquet") -> Path:
         """Return the local path of this run's ``coralnet_<kind>_<version>.<suffix>``."""
@@ -92,7 +80,6 @@ def _resolve_run(args: argparse.Namespace) -> _Run:
         overwrite=args.overwrite,
         bucket=get_bucket(),
         prefix=get_prefix(),
-        resized_prefix=get_resized_prefix(),
     )
 
 
@@ -185,7 +172,7 @@ def _log_header_statuses(images_df: pd.DataFrame) -> bool:
 def _step_build_images(run: _Run, annotations_path: Path) -> int:
     """Write the images parquet; return 1 when any image has no dimensions.
 
-    Those images (statuses such as ``not_found`` or ``corrupt``) are dropped by the manifest.
+    Those images have statuses such as ``not_found`` or ``corrupt``.
     """
     annotations_df = pd.read_parquet(annotations_path)
     images_df = build_images(
@@ -198,74 +185,6 @@ def _step_build_images(run: _Run, annotations_path: Path) -> int:
     return 0 if _log_header_statuses(images_df) else 1
 
 
-def _step_resize(run: _Run, images_path: Path) -> int:
-    """Resize and upload the missing images; return 1 on any failed or corrupted image."""
-    images_df = pd.read_parquet(images_path)
-    # One client shared by every worker thread, with a pool sized so workers never wait on it.
-    s3_client = make_resize_s3_client(max_pool_connections=run.workers + 4)
-    df_todo = scan_for_missing_resized_images(
-        images_df, bucket=run.bucket, output_prefix=run.resized_prefix, s3_client=s3_client
-    )
-    logger.info("Scan complete: %d images to resize", len(df_todo))
-    if df_todo.empty:
-        logger.info("Nothing to do: every resized image already exists.")
-        return 0
-    _resized, corrupted, failed = resize_and_upload_all_images(
-        df_todo, run.bucket, workers=run.workers, s3_client=s3_client
-    )
-    return 1 if corrupted or failed else 0
-
-
-def _log_manifest_quality(annotations: pd.DataFrame, manifest: pd.DataFrame) -> None:
-    """Log the manifest's row and image counts, and how many the build dropped."""
-    images = manifest.drop_duplicates(["source_id", "image_id"])
-    n_resized = int(images["uses_resized_image"].sum())
-    annotated_images = annotations.drop_duplicates(["source_id", "image_id"])
-    logger.info("=== Training manifest ===")
-    logger.info(
-        "Annotation rows:        %s  (dropped %s)",
-        f"{len(manifest):,}",
-        f"{len(annotations) - len(manifest):,}",
-    )
-    logger.info(
-        "Distinct images:        %s  (dropped %s)",
-        f"{len(images):,}",
-        f"{len(annotated_images) - len(images):,}",
-    )
-    logger.info("  using RESIZED key:    %s", f"{n_resized:,}")
-    logger.info("  using ORIGINAL key:   %s", f"{len(images) - n_resized:,}")
-
-
-def _step_build_manifest(run: _Run, annotations_path: Path, images_path: Path) -> int:
-    """Write the training manifest from the local parquets and the resized objects on S3."""
-    annotations = pd.read_parquet(annotations_path)
-    images = pd.read_parquet(images_path)
-    logger.info(
-        "Images: needs_resize=%s sub_threshold=%s null_dims=%s",
-        f"{int(images['needs_resize'].sum()):,}",
-        f"{int((~images['needs_resize']).sum()):,}",
-        f"{int((images['width'].isna() | images['height'].isna()).sum()):,}",
-    )
-    resized = resized_existence_table(
-        list_resized_keys(make_s3_client(), run.bucket, run.resized_prefix)
-    )
-    logger.info("Resized objects on S3: %s", f"{len(resized):,}")
-    # Explicit schemas keep the join keys typed when an input is empty.
-    manifest = build_training_manifest(
-        annotations=ibis.memtable(annotations, schema=ibis.Schema.from_pyarrow(ANNOTATIONS_SCHEMA)),
-        images=ibis.memtable(images, schema=ibis.Schema.from_pyarrow(IMAGES_SCHEMA)),
-        resized=ibis.memtable(resized, schema=_RESIZED_IBIS_SCHEMA),
-        output_prefix=run.resized_prefix,
-    ).to_pandas()
-    _log_manifest_quality(annotations, manifest)
-    out_path = run.path("training_manifest")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest.to_parquet(out_path, index=False)
-    logger.info("Wrote training manifest: %s (%d rows)", out_path, len(manifest))
-    _maybe_upload(run, out_path)
-    return 0
-
-
 def _cmd_build_annotations(args: argparse.Namespace) -> int:
     return _step_build_annotations(_resolve_run(args), args.source_ids)
 
@@ -274,22 +193,12 @@ def _cmd_build_images(args: argparse.Namespace) -> int:
     return _step_build_images(_resolve_run(args), args.annotations)
 
 
-def _cmd_resize(args: argparse.Namespace) -> int:
-    return _step_resize(_resolve_run(args), args.images)
-
-
-def _cmd_build_manifest(args: argparse.Namespace) -> int:
-    return _step_build_manifest(_resolve_run(args), args.annotations, args.images)
-
-
 def _cmd_all(args: argparse.Namespace) -> int:
-    """Run every stage in order with one version tag; return 1 if any stage returned 1."""
+    """Run both stages in order with one version tag; return 1 if any stage returned 1."""
     run = _resolve_run(args)
-    annotations_path, images_path = run.path("annotations"), run.path("images")
+    annotations_path = run.path("annotations")
     return_codes = [
         _step_build_annotations(run, args.source_ids),
         _step_build_images(run, annotations_path),
-        _step_resize(run, images_path),
-        _step_build_manifest(run, annotations_path, images_path),
     ]
     return max(return_codes)
