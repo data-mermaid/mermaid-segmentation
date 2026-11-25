@@ -1,6 +1,6 @@
 """``segdata curate coralnet``: stage a curated ``coralnet`` version built from ``coralnet-raw``.
 
-Curates raw's points with the committed blacklist and overrides and maps labels by the MERMAID
+Curates raw's points with the packaged blacklist and overrides and maps labels by the MERMAID
 LabelMapping API, checked against the pinned taxonomy. Stages tables only, on raw's image store,
 for ``segdata promote`` to publish. The published ``coralnet`` v1 was built with the frozen
 cleaned_up_rerun mapping at git e6abfad.
@@ -12,6 +12,8 @@ import argparse
 import logging
 import shlex
 from dataclasses import dataclass
+from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +41,7 @@ logger = logging.getLogger(__name__)
 DATASET = "coralnet"
 RAW_DATASET = "coralnet-raw"
 TAXONOMY = "mermaid-benthic"
-CONFIG_DIR = Path("configs") / "coralnet"
+PACKAGED_CONFIG: Traversable = resources.files(__package__) / "data"
 
 
 @dataclass(frozen=True)
@@ -117,7 +119,7 @@ def _pin(args: argparse.Namespace, prefix: str, name: str) -> Pin:
     )
 
 
-def _curate(args: argparse.Namespace, client: Any, bucket: str, repo_root: Path) -> CuratedVersion:
+def _curate(args: argparse.Namespace, client: Any, bucket: str, config_dir: Path) -> CuratedVersion:
     raw_pin = _pin(args, "raw", RAW_DATASET)
     tax_pin = _pin(args, "taxonomy", TAXONOMY)
     require_published_taxonomy(client, bucket, tax_pin)
@@ -130,7 +132,7 @@ def _curate(args: argparse.Namespace, client: Any, bucket: str, repo_root: Path)
         mappings,
         tax.benthic_attributes,
         tax.growth_forms,
-        repo_root / CONFIG_DIR,
+        config_dir,
     )
 
 
@@ -224,7 +226,8 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     git = probe_git(repo_root)
     refuse_unpublishable(git)
-    built = _curate(args, source_client, DATASET_BUCKET, repo_root)
+    with resources.as_file(PACKAGED_CONFIG) as config_dir:
+        built = _curate(args, source_client, DATASET_BUCKET, config_dir)
     version = next_version(
         args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=source_client
     )
