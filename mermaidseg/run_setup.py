@@ -101,7 +101,6 @@ def build_registry(
 
     Raises:
         SystemExit: A built dataset is not in ``schema_config``.
-        RuntimeError: The registry and the schema disagree on the number of concept channels.
     """
     by_source: dict[str, VersionDataset] = {}
     for (_, split), ds in dataset_dict.items():
@@ -128,15 +127,10 @@ def build_registry(
         registry_datasets,
         target_labels=target_labels(training_cfg),
         target_label_subset=training_cfg.class_subset,
-        compute_concepts=training_cfg.training_mode != "standard",
         concept_schema=schema,
         label_roll_up=training_cfg.label_roll_up,
         benthic_hierarchy=benthic_hierarchy,
     ).to(device)
-    if registry.num_concepts != schema.num_channels:
-        raise RuntimeError(
-            f"registry has {registry.num_concepts} concept channels, schema {schema.num_channels}"
-        )
     return registry, schema
 
 
@@ -154,7 +148,7 @@ def build_meta_model(
     return MetaModel(
         run_name=cfg.run_name,
         num_classes=registry.num_target_classes,
-        num_concepts=registry.num_concepts or None,
+        num_concepts=registry.num_concepts,
         device=device,
         model_kwargs=cfg.model.copy(),
         training_kwargs=cfg.training.copy(),

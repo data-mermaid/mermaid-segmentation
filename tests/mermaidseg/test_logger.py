@@ -81,6 +81,7 @@ def fake_tracker(monkeypatch: pytest.MonkeyPatch) -> list[FakeTracker]:
 
 
 def _logger(make_config, meta=None, **kwargs):
+    kwargs.setdefault("id2concept", {})
     lgr = Logger(config=make_config(), meta_model=meta or FakeMetaModel(), **kwargs)
     tracker = lgr.tracker
     assert isinstance(tracker, FakeTracker)
@@ -490,7 +491,9 @@ def test_make_tracker_passes_the_mlflow_experiment_name(mlflow_store):
 class TestLoggerInit:
     def test_log_checkpoint_zero_rejected(self, make_config, fake_meta_model, fake_tracker):
         with pytest.raises(ValueError, match="log_checkpoint must be > 0"):
-            Logger(config=make_config(), meta_model=fake_meta_model, log_checkpoint=0)
+            Logger(
+                id2concept={}, config=make_config(), meta_model=fake_meta_model, log_checkpoint=0
+            )
 
     def test_run_metadata_reaches_the_tracker(self, make_config, fake_tracker):
         meta = FakeMetaModel(run_name="meta-run", num_classes=3, num_concepts=5)
@@ -545,7 +548,7 @@ class TestLoggerInit:
 
         monkeypatch.setitem(mermaidseg.logger.TRACKER_CLASSES, "wandb", _fail)
         with pytest.raises(RuntimeError, match="tracker down"):
-            Logger(config=make_config(), meta_model=FakeMetaModel())
+            Logger(id2concept={}, config=make_config(), meta_model=FakeMetaModel())
 
 
 class TestLoggerLog:
@@ -695,6 +698,7 @@ class TestSaveModelCheckpoint:
     def test_local_checkpoint_skipped_when_disabled(self, tmp_path, make_config, fake_tracker):
         meta = FakeMetaModel(run_name="ckpt-skip")
         lgr = Logger(
+            id2concept={},
             config=make_config(),
             meta_model=meta,
             checkpoint_dir=str(tmp_path),
@@ -709,7 +713,13 @@ class TestSaveModelCheckpoint:
         meta.global_step = 25000
         meta._warmup_iters_completed = 4000
         config = make_config()
-        lgr = Logger(config=config, meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1)
+        lgr = Logger(
+            id2concept={},
+            config=config,
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+            log_checkpoint=1,
+        )
         lgr.save_model_checkpoint(
             meta,
             epoch=0,
@@ -732,6 +742,7 @@ class TestSaveModelCheckpoint:
         for name, kwargs in (("with-lineage", {"lineage": lineage}), ("no-lineage", {})):
             meta = FakeMetaModel(run_name=name)
             lgr = Logger(
+                id2concept={},
                 config=make_config(),
                 meta_model=meta,
                 checkpoint_dir=str(tmp_path),
@@ -753,7 +764,11 @@ class TestSaveModelCheckpoint:
     ):
         meta = FakeMetaModel(run_name="plain-ckpt")
         lgr = Logger(
-            config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1
+            id2concept={},
+            config=make_config(),
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+            log_checkpoint=1,
         )
         metrics = {
             "iou": np.array([0.5, 0.25]),
@@ -777,7 +792,11 @@ class TestSaveModelCheckpoint:
         ptr = weight.data_ptr()
         values = weight.detach().clone()
         lgr = Logger(
-            config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path), log_checkpoint=1
+            id2concept={},
+            config=make_config(),
+            meta_model=meta,
+            checkpoint_dir=str(tmp_path),
+            log_checkpoint=1,
         )
         meta.model.moves.clear()
         saved = _spy_torch_save(monkeypatch)
@@ -799,7 +818,9 @@ class TestSaveModelCheckpoint:
         self, tmp_path, make_config, fake_tracker, monkeypatch
     ):
         meta = FakeMetaModel(run_name="direct-ckpt")
-        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        lgr = Logger(
+            id2concept={}, config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path)
+        )
         saved = _spy_torch_save(monkeypatch)
         replaced = _spy_os_replace(monkeypatch)
         lgr.save_model_checkpoint(meta, epoch=0, metrics_dict={}, checkpoint_name="model_step5")
@@ -812,7 +833,9 @@ class TestSaveModelCheckpoint:
     ):
         meta = FakeMetaModel(run_name="atomic-ckpt")
         meta.global_step = 1000
-        lgr = Logger(config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path))
+        lgr = Logger(
+            id2concept={}, config=make_config(), meta_model=meta, checkpoint_dir=str(tmp_path)
+        )
         saved = _spy_torch_save(monkeypatch)
         replaced = _spy_os_replace(monkeypatch)
         lgr.save_model_checkpoint(
@@ -871,7 +894,7 @@ class TestLoggerLifecycle:
 
     def test_context_manager_sets_the_mlflow_run_status_failed(self, make_config, mlflow_store):
         config = make_config(logger={"tracker": "mlflow", "experiment_name": "exp-s"})
-        lgr = Logger(config=config, meta_model=FakeMetaModel())
+        lgr = Logger(id2concept={}, config=config, meta_model=FakeMetaModel())
         run_id = lgr.run_id
         assert run_id is not None
         with pytest.raises(ValueError, match="boom"), lgr:

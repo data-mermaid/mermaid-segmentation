@@ -165,7 +165,6 @@ def _registry_training_cfg(**overrides) -> ConfigDict:
             "concept_mapping_path": "configs/class_to_concepts.csv",
             "concept_removal": None,
             "class_subset": ["Pocillopora", "Sand"],
-            "training_mode": "concept-bottleneck",
             "label_roll_up": False,
             **overrides,
         }
@@ -195,19 +194,6 @@ def test_build_registry_exits_naming_a_dataset_missing_from_the_concept_schema(t
         build_registry(
             dataset_dict,
             _registry_training_cfg(),
-            schema_config=_schema_config(tmp_path, "coralscapes_v2"),
-        )
-
-
-def test_build_registry_raises_when_the_registry_has_fewer_concepts_than_the_schema(
-    tmp_path, monkeypatch
-):
-    monkeypatch.chdir(tmp_path)
-    # Standard mode builds no concept lookup, so the registry has 0 channels against the schema's.
-    with pytest.raises(RuntimeError, match=r"registry has 0 concept channels, schema \d+"):
-        build_registry(
-            _coralscapes_dataset_dict(tmp_path),
-            _registry_training_cfg(training_mode="standard"),
             schema_config=_schema_config(tmp_path, "coralscapes_v2"),
         )
 

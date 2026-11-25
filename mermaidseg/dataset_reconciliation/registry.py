@@ -83,8 +83,7 @@ class SourceLabelRegistry:
             benthic-attribute target label names (1..M). If ``None``, defaults
             are derived from the union of mapped target names across all
             datasets (sorted alphabetically).
-        compute_concepts: When ``True``, additionally builds
-            ``source_to_concepts`` from ``concept_schema``.
+        concept_schema: Concept schema that ``source_to_concepts`` is built from.
         target_label_subset: Optional list/set of MERMAID target label names
             to retain. Source labels mapped to a target outside the subset
             collapse to background (``0``) in ``source_to_target``.
@@ -95,19 +94,20 @@ class SourceLabelRegistry:
     target_id2label: dict[int, str]
     num_target_classes: int
     source_to_target: torch.Tensor
-    source_to_concepts: torch.Tensor | None
+    source_to_concepts: torch.Tensor
     global_id2source: dict[int, tuple[str, str]]
     dataset_offsets: dict[str, int]
-    concept_value2id: dict[str, dict[str, list[int]]] | None
+    concept_value2id: dict[str, dict[str, list[int]]]
+    concept_id2name: dict[int, str]
+    concept_name2id: dict[str, int]
 
     def __init__(
         self,
         datasets: list[VersionDataset],
+        concept_schema: ConceptSchema,
         target_labels: list[str] | None = None,
-        compute_concepts: bool = False,
         label_roll_up: bool = False,
         target_label_subset: list[str] | set[str] | None = None,
-        concept_schema: ConceptSchema | None = None,
         benthic_hierarchy: Mapping[str, str | None] | None = None,
     ):
         """Build the source-to-target (and concept) lookups over the readers' global IDs.
@@ -115,18 +115,16 @@ class SourceLabelRegistry:
         Args:
             datasets: One reader per source.
             target_labels: Ordered target label names, derived from the datasets if ``None``.
-            compute_concepts: Whether to build ``source_to_concepts``.
             label_roll_up: Whether unmapped targets roll up to the nearest ancestor in
                 ``target_label_subset``.
             target_label_subset: Target label names to retain.
-            concept_schema: Concept schema, required with ``compute_concepts``.
+            concept_schema: Concept schema that ``source_to_concepts`` is built from.
             benthic_hierarchy: Lower-cased benthic-attribute name -> parent name (see
                 ``segdata_spec.taxonomy.hierarchy_from_table``), required with ``label_roll_up``.
 
         Raises:
             ValueError: If there are no datasets, two datasets share a ``source_name``,
-                ``label_roll_up`` has no ``target_label_subset`` or no ``benthic_hierarchy``,
-                or ``compute_concepts`` has no ``concept_schema``.
+                ``label_roll_up`` has no ``target_label_subset`` or no ``benthic_hierarchy``.
         """
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
@@ -193,14 +191,7 @@ class SourceLabelRegistry:
                 source_to_target_np[global_id] = self.target_label2id.get(target_name, 0)
         self._log_target_coverage(rows, source_to_target_np)
         self.source_to_target = torch.from_numpy(source_to_target_np).long()
-        self.source_to_concepts = None
-        self.concept_id2name: dict[int, str] | None = None
-        self.concept_name2id: dict[str, int] | None = None
-        self.concept_value2id: dict[str, dict[str, list[int]]] | None = None
-        if compute_concepts:
-            if concept_schema is None:
-                raise ValueError("compute_concepts=True requires concept_schema")
-            self._build_concepts(concept_schema)
+        self._build_concepts(concept_schema)
 
     @staticmethod
     def _log_target_coverage(
@@ -234,9 +225,7 @@ class SourceLabelRegistry:
 
     @property
     def num_concepts(self) -> int:
-        """Number of concept channels, 0 without concepts."""
-        if self.source_to_concepts is None:
-            return 0
+        """Number of concept channels."""
         return int(self.source_to_concepts.shape[1])
 
     @property
@@ -247,6 +236,5 @@ class SourceLabelRegistry:
     def to(self, device: torch.device | str) -> SourceLabelRegistry:
         """Move the lookup tensors onto ``device`` (in-place) and return self."""
         self.source_to_target = self.source_to_target.to(device)
-        if self.source_to_concepts is not None:
-            self.source_to_concepts = self.source_to_concepts.to(device)
+        self.source_to_concepts = self.source_to_concepts.to(device)
         return self

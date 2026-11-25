@@ -361,10 +361,10 @@ class Logger:
         self,
         config: Any,
         meta_model: MetaModel,
+        id2concept: dict[int, str],
         log_checkpoint: int = 50,
         checkpoint_dir: str = ".",
         id2label: dict | None = None,
-        id2concept: dict | None = None,
         save_local_checkpoints: bool = True,
         lineage: dict | None = None,
     ) -> None:
@@ -417,7 +417,7 @@ class Logger:
         for k, v in (metrics_dict or {}).items():
             if isinstance(v, np.ndarray):
                 if "concept" in k.lower():
-                    id_map = self.id2concept or {}
+                    id_map = self.id2concept
                     fallback = "concept"
                 else:
                     id_map = self.id2label or {}
@@ -432,7 +432,7 @@ class Logger:
     def log_reconciliation(self, registry: "SourceLabelRegistry") -> None:
         """Log the joint :class:`SourceLabelRegistry` artifacts to the tracker.
 
-        Saves ``global_id2source``, ``target_id2label``, ``source_to_target`` and (when present)
+        Saves ``global_id2source``, ``target_id2label``, ``source_to_target``,
         ``concept_id2name`` and the CoralNet label-mapping rows, so runs are self-describing.
         """
         try:
@@ -453,11 +453,10 @@ class Logger:
                 {str(i): int(v) for i, v in enumerate(source_to_target)},
                 "metadata/source_to_target.json",
             )
-            if registry.concept_id2name:
-                self.log_dict(
-                    {str(k): v for k, v in registry.concept_id2name.items()},
-                    "metadata/concept_id2name.json",
-                )
+            self.log_dict(
+                {str(k): v for k, v in registry.concept_id2name.items()},
+                "metadata/concept_id2name.json",
+            )
             self.log_params(
                 {
                     "num_target_classes": int(registry.num_target_classes),
@@ -611,6 +610,5 @@ def _run_params(config: Any, meta_model: MetaModel, log_checkpoint: int) -> dict
             )
     params["model_type"] = meta_model.__class__.__name__
     params["framework"] = "pytorch"
-    if meta_model.num_concepts is not None:
-        params["num_concepts"] = int(meta_model.num_concepts)
+    params["num_concepts"] = int(meta_model.num_concepts)
     return params

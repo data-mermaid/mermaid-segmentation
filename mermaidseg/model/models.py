@@ -298,7 +298,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         *,
         num_classes: int,
         num_concepts: int,
-        concept_value2id: dict[str, dict[str, list[int]]] | None,
+        concept_value2id: dict[str, dict[str, list[int]]],
         concept_feature_dim: int,
         detach_concepts: bool,
         base_encoder: PreTrainedModel,
@@ -365,8 +365,7 @@ class _ConceptBottleneckDPTDINOv3(_DPTDINOv3Base):
         activated_parts = []
 
         for concept in TAXONOMIC_CONCEPTS:
-            # concept_value2id is None only for a model built without concept metadata.
-            concept_values = self.concept_value2id[concept]  # type: ignore[index]
+            concept_values = self.concept_value2id[concept]
             order_concept_length = len(list(concept_values.values())[0])
             chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
             activated_parts.append(torch.softmax(chunk.to(self.dtype), dim=1))
@@ -386,7 +385,7 @@ class ConceptBottleneckDPTLoRADINOv3(_ConceptBottleneckDPTDINOv3):
         num_classes: int,
         num_concepts: int,
         input_size: tuple[int, int],
-        concept_value2id: dict[str, dict[str, list[int]]] | None,
+        concept_value2id: dict[str, dict[str, list[int]]],
         concept_feature_dim: int,
         detach_concepts: bool,
         out_indices: Sequence[int] | None,

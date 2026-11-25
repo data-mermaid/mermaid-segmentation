@@ -72,7 +72,6 @@ def test_unknown_key_raises_naming_the_file(tmp_path: Path, section: str, keys: 
         ("training", ("loss", "type")),
         ("training", ("optimizer", "type")),
         ("training", ("scheduler", "type")),
-        ("training", ("training_mode",)),
         ("logger", ("tracker",)),
     ],
 )

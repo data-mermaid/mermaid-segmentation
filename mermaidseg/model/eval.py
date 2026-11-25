@@ -29,16 +29,14 @@ class Evaluator:
         self,
         num_classes: int,
         device: str | torch.device,
-        calculate_concept_metrics: bool = False,
-        concept_value2id: dict[str, dict[str, list[int]]] | None = None,
+        concept_value2id: dict[str, dict[str, list[int]]],
     ) -> None:
-        """Build the accuracy metrics on the target device.
+        """Build the accuracy and per-concept accuracy metrics on the target device.
 
         Args:
             num_classes: Number of output (target) classes.
             device: Device metrics tensors are moved to.
-            calculate_concept_metrics: Whether to build per-concept accuracy metrics.
-            concept_value2id: Concept name to value-to-id mapping, required for concept metrics.
+            concept_value2id: Concept name to value-to-id mapping.
         """
         self.device = device
         self.num_classes = num_classes
@@ -57,38 +55,24 @@ class Evaluator:
             metric_name: metric.to(device) for metric_name, metric in self.metric_dict.items()
         }
 
-        if calculate_concept_metrics:
-            self.concept_metric_dict = {}
-            if self.concept_value2id is not None:
-                for concept in TAXONOMIC_CONCEPTS:
-                    if concept not in self.concept_value2id:
-                        continue
-                    concept_values = self.concept_value2id[concept]
-                    order_concept_length = len(list(concept_values.values())[0]) + 2
-                    self.concept_metric_dict[f"accuracy/{concept}"] = Accuracy(
-                        task="multiclass",
-                        num_classes=order_concept_length,
-                        ignore_index=0,
-                    ).to(self.device)
-                for concept in self.concept_value2id:
-                    if concept not in TAXONOMIC_CONCEPTS:
-                        self._binary_accuracy_metrics[concept] = Accuracy(
-                            task="multiclass",
-                            num_classes=3,
-                            ignore_index=0,
-                        ).to(self.device)
-
-            self.concept_metric_dict = {
-                metric_name: metric.to(device)
-                for metric_name, metric in self.concept_metric_dict.items()
-            }
-            self._binary_accuracy_metrics = {
-                metric_name: metric.to(device)
-                for metric_name, metric in self._binary_accuracy_metrics.items()
-            }
-        else:
-            self.concept_metric_dict = {}
-            self._binary_accuracy_metrics = {}
+        self.concept_metric_dict: dict[str, Metric] = {}
+        for concept in TAXONOMIC_CONCEPTS:
+            if concept not in self.concept_value2id:
+                continue
+            concept_values = self.concept_value2id[concept]
+            order_concept_length = len(list(concept_values.values())[0]) + 2
+            self.concept_metric_dict[f"accuracy/{concept}"] = Accuracy(
+                task="multiclass",
+                num_classes=order_concept_length,
+                ignore_index=0,
+            ).to(self.device)
+        for concept in self.concept_value2id:
+            if concept not in TAXONOMIC_CONCEPTS:
+                self._binary_accuracy_metrics[concept] = Accuracy(
+                    task="multiclass",
+                    num_classes=3,
+                    ignore_index=0,
+                ).to(self.device)
 
     def compute_concept_metric_results(self) -> dict[str, float]:
         """Compute and reset the concept metrics, returning results by metric name."""
@@ -120,9 +104,6 @@ class Evaluator:
         self, concept_outputs: torch.Tensor, concept_labels: torch.Tensor
     ) -> None:
         """Update concept accuracy metrics for taxonomic and binary concepts."""
-        if self.concept_value2id is None:
-            return
-
         offset = 0
 
         for concept in TAXONOMIC_CONCEPTS:

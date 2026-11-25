@@ -72,6 +72,7 @@ def fixed_meta_model(minimal_config: ConfigDict) -> FixedMetaFactory:
         meta_kwargs.setdefault("concept_value2id", CBM_CONCEPT_VALUE2ID)
         meta_kwargs.setdefault("source_to_concepts_lookup", cbm_concept_lookup())
         meta_kwargs.setdefault("num_concepts", num_concepts)
+        meta_kwargs.setdefault("source_to_target_lookup", torch.arange(NUM_CLASSES))
         return MetaModel(
             run_name="fixed",
             num_classes=NUM_CLASSES,

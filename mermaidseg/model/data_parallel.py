@@ -64,7 +64,7 @@ def apply_concept_bottleneck_loss(
 
 def shard_targets(
     source_labels: torch.Tensor,
-    target_lookup: torch.Tensor | None,
+    target_lookup: torch.Tensor,
     concept_lookup: torch.Tensor,
     concept_keep: torch.Tensor | None = None,
     source_rows: torch.Tensor | None = None,
@@ -72,12 +72,11 @@ def shard_targets(
     """Build target labels and concept maps for one shard on that shard's device.
 
     Same lookups as ``MetaModel._to_target_labels`` and ``_to_concept_labels``.
-    A ``None`` target lookup is the identity, as in ``MetaModel``. With ``concept_keep`` and
-    ``source_rows``, masked source x concept targets are set to 0 (``training.concept_source_mask``).
+    With ``concept_keep`` and ``source_rows``, masked source x concept targets are set to 0 (``training.concept_source_mask``).
 
     Args:
         source_labels: Source label map.
-        target_lookup: Source-to-target label lookup, or ``None`` for identity.
+        target_lookup: Source-to-target label lookup.
         concept_lookup: Source-to-concept lookup.
         concept_keep: Optional source x concept keep mask.
         source_rows: Per-image source rows, required with ``concept_keep``.
@@ -88,10 +87,7 @@ def shard_targets(
     Raises:
         RuntimeError: If ``concept_keep`` is set and ``source_rows`` is ``None``.
     """
-    if target_lookup is None:
-        target_labels = source_labels
-    else:
-        target_labels = source_labels_to_target_labels(source_labels, target_lookup)
+    target_labels = source_labels_to_target_labels(source_labels, target_lookup)
     target_concepts = source_labels_to_concepts(source_labels, concept_lookup)
     if concept_keep is not None:
         if source_rows is None:
@@ -123,7 +119,7 @@ class ShardStep(nn.Module):
         model: nn.Module,
         loss_fn: nn.Module,
         taxonomic_loss: nn.Module | None,
-        target_lookup: torch.Tensor | None,
+        target_lookup: torch.Tensor,
         concept_lookup: torch.Tensor,
         use_amp: bool,
         amp_dtype: torch.dtype,
@@ -135,7 +131,7 @@ class ShardStep(nn.Module):
             model: Segmentation model.
             loss_fn: Concept-bottleneck loss.
             taxonomic_loss: Optional taxonomy loss.
-            target_lookup: Source-to-target label lookup, or ``None`` for identity.
+            target_lookup: Source-to-target label lookup.
             concept_lookup: Source-to-concept lookup.
             use_amp: Whether the forward runs under autocast.
             amp_dtype: Autocast dtype.
@@ -179,7 +175,7 @@ class ShardStep(nn.Module):
         """
         target_labels, target_concepts = shard_targets(
             source_labels,
-            cast("torch.Tensor | None", self.target_lookup),
+            cast("torch.Tensor", self.target_lookup),
             cast("torch.Tensor", self.concept_lookup),
             cast("torch.Tensor | None", self.concept_keep),
             source_rows,

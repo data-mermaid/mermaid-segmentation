@@ -49,6 +49,7 @@ def _sidecar_architecture(tmp_path: Path) -> dict:
         training_kwargs=cbm_test_config().training,
         device="cpu",
         concept_value2id=CBM_CONCEPT_VALUE2ID,  # type: ignore[arg-type]
+        source_to_target_lookup=torch.arange(NUM_CLASSES),
         source_to_concepts_lookup=cbm_concept_lookup(),
         model=torch.nn.Linear(1, 1),
     )

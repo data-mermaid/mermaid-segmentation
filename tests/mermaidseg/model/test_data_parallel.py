@@ -19,7 +19,7 @@ from mermaidseg.model.data_parallel import (
     require_divisible_batch,
     shard_targets,
 )
-from tests.conftest import IMAGE_SIZE
+from tests.conftest import CBM_CONCEPT_VALUE2ID, IMAGE_SIZE, NUM_CLASSES
 from tests.mermaidseg.conftest import cbm_meta, concept_keep, source_lookup
 
 _NUM_SOURCE = 9
@@ -97,9 +97,6 @@ def test_shard_targets_match_the_whole_batch_lookup():
         assert torch.equal(labels, whole_labels[start:end])
         assert torch.equal(shard_concepts, whole_concepts[start:end])
 
-    identity_labels, _ = shard_targets(source_labels, None, concepts)
-    assert torch.equal(identity_labels, source_labels)
-
 
 def test_shard_step_matches_the_single_gpu_loss():
     step = _cpu_step()
@@ -142,7 +139,7 @@ def test_train_epoch_scores_every_nth_microbatch(
         }
     )
     meta = make_meta_model(cfg)
-    evaluator = Evaluator(num_classes=4, device="cpu")
+    evaluator = Evaluator(num_classes=4, device="cpu", concept_value2id=CBM_CONCEPT_VALUE2ID)
     metric = evaluator.metric_dict["accuracy"]
     calls = []
     original_update = metric.update
@@ -183,10 +180,11 @@ def test_shard_step_masks_its_shard(make_meta_model, cbm_schema):
     keep = concept_keep(cbm_schema)
     lookup = source_lookup(cbm_schema)
     bleached = cbm_schema.channel_names.index("bleached")
-    step = ShardStep(meta.model, meta.loss, None, None, lookup, False, torch.bfloat16, keep)
+    target = torch.arange(NUM_CLASSES)
+    step = ShardStep(meta.model, meta.loss, None, target, lookup, False, torch.bfloat16, keep)
     images = torch.randn(2, 3, *IMAGE_SIZE)
     labels = torch.ones(2, *IMAGE_SIZE, dtype=torch.long)
     *_, concepts, _ = step(images, labels, return_maps=True, source_rows=torch.tensor([1, 0]))
     assert (concepts[0, bleached] == 0).all() and (concepts[1, bleached] == 1).all()
     with pytest.raises(RuntimeError, match="no source rows"):
-        shard_targets(labels, None, lookup, keep, None)
+        shard_targets(labels, target, lookup, keep, None)
