@@ -144,6 +144,7 @@ class PointDataset(VersionDataset):
         groups: Collection[str] | None = None,
         transform: Callable[..., dict[str, Any]] | None = None,
         on_missing_images: Literal["fail", "drop"] = "fail",
+        image_ids: Collection[str] | None = None,
         annotators: Sequence[str] | None = None,
         padding: int | None = None,
     ) -> None:
@@ -155,6 +156,7 @@ class PointDataset(VersionDataset):
             groups: Image groups to keep; ``None`` keeps all.
             transform: Called as ``transform(image=, mask=)`` and returning a dict with both.
             on_missing_images: ``"fail"`` or ``"drop"`` images whose files are not cached.
+            image_ids: Keeps only these images of the selection; ``None`` keeps all.
             annotators: Annotators in priority order. A point keeps the labels of the first one
                 that annotated it, and a point with none of them is dropped. ``None`` requires a
                 single annotator in the version.
@@ -173,6 +175,7 @@ class PointDataset(VersionDataset):
             groups=groups,
             transform=transform,
             on_missing_images=on_missing_images,
+            image_ids=image_ids,
         )
         # ``drop`` mode removes images after ``_filter_images``, so their points go here.
         self.points = self.points[self.points["image_id"].isin(self.images["image_id"])]

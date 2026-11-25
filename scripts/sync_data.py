@@ -27,6 +27,7 @@ from pathlib import Path
 
 import boto3
 import yaml
+from botocore.config import Config
 
 from mermaidseg.data.config import sync_plan
 from mermaidseg.data.sync import format_summary, run_sync
@@ -42,10 +43,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--cache-dir", type=Path, required=True, help="directory the versions are downloaded into"
     )
+    p.add_argument(
+        "--workers", type=int, default=16, help="threads downloading images (default: 16)"
+    )
     args = p.parse_args(argv)
     cfg = yaml.safe_load(args.data_config.read_text())
     plan = sync_plan(cfg["data"], REPO_ROOT)
-    result = run_sync(plan, args.cache_dir, boto3.client("s3"))
+    # The client's connection pool must hold one connection per worker.
+    client = boto3.client("s3", config=Config(max_pool_connections=max(args.workers, 10)))
+    result = run_sync(plan, args.cache_dir, client, args.workers)
     print(format_summary(result))
     return 0
 

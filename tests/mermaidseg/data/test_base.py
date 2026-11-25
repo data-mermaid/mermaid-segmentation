@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -305,3 +306,61 @@ def test_split_vocabularies_give_one_mask_id_per_name_across_splits(tmp_path: Pa
     _, val_mask = val[0]
     assert (train_mask[0, 0], train_mask[1, 1], train_mask[2, 2]) == (11, 11, 13)
     assert (val_mask[0, 0], val_mask[1, 1], val_mask[2, 2]) == (12, 12, 13)
+
+
+def _two_group_version(tmp_path: Path) -> DatasetVersion:
+    images = [ImageSpec("i1", group="g1"), ImageSpec("i2", group="g2"), ImageSpec("i3", group="g2")]
+    return _point_version(
+        tmp_path, [("i1", 0, 0, 5), ("i2", 0, 0, 5), ("i3", 0, 0, 5)], images=images
+    )
+
+
+def test_selected_group_missing_from_the_sync_marker_raises(tmp_path: Path) -> None:
+    version = replace(_two_group_version(tmp_path), synced_groups=frozenset({"g1"}))
+    with pytest.raises(ValueError, match=r"\['g2'\].*sync_data\.py"):
+        PointDataset(version, split="val", groups=["g1", "g2"])
+
+
+def test_all_groups_selected_checks_every_group_against_the_marker(tmp_path: Path) -> None:
+    version = replace(_two_group_version(tmp_path), synced_groups=frozenset({"g1"}))
+    with pytest.raises(ValueError, match=r"\['g2'\]"):
+        PointDataset(version, split="val")
+
+
+def test_selection_inside_the_synced_groups_is_accepted(tmp_path: Path) -> None:
+    version = replace(_two_group_version(tmp_path), synced_groups=frozenset({"g1"}))
+    assert len(PointDataset(version, split="val", groups=["g1"])) == 1
+
+
+def test_synced_groups_none_accepts_any_group(tmp_path: Path) -> None:
+    version = _two_group_version(tmp_path)
+    assert version.synced_groups is None
+    assert len(PointDataset(version, split="val")) == 3
+
+
+def test_image_ids_keep_only_the_listed_images(tmp_path: Path) -> None:
+    ds = PointDataset(_two_group_version(tmp_path), split="val", image_ids=["i1", "i3"])
+    assert sorted(ds.images["image_id"]) == ["i1", "i3"]
+    assert sorted(ds.points["image_id"]) == ["i1", "i3"]
+
+
+def test_image_id_outside_the_group_selection_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="i2"):
+        PointDataset(
+            _two_group_version(tmp_path), split="val", groups=["g1"], image_ids=["i1", "i2"]
+        )
+
+
+def test_image_ids_apply_to_dense_readers(tmp_path: Path) -> None:
+    mask = np.zeros((8, 8), np.uint8)
+    mask[0, 0] = 5
+    version = open_written(
+        tmp_path,
+        kind="dense",
+        images=[ImageSpec("i1", mask=mask), ImageSpec("i2", mask=mask)],
+        labels=LABELS,
+    )
+    ds = DenseDataset(version, split="val", image_ids=["i2"])
+    assert list(ds.images["image_id"]) == ["i2"]
+    with pytest.raises(ValueError, match="nope"):
+        DenseDataset(version, split="val", image_ids=["nope"])
