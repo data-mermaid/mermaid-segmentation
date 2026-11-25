@@ -215,3 +215,23 @@ def test_image_ids_apply_to_dense_readers(tmp_path: Path) -> None:
     assert list(ds.images["image_id"]) == ["i2"]
     with pytest.raises(ValueError, match="nope"):
         DenseDataset(version, split="val", global_offset=0, image_ids=["nope"])
+
+
+@pytest.mark.parametrize(
+    ("names", "duplicated"),
+    [(("Acro", "Acro"), "acro"), (("Acro", "acro"), "acro")],
+    ids=["exact", "case-folded"],
+)
+def test_duplicated_label_name_raises_naming_the_dataset(
+    tmp_path: Path, names: tuple[str, str], duplicated: str
+) -> None:
+    version = open_written(
+        tmp_path,
+        kind="points",
+        images=[ImageSpec("i1")],
+        labels={1: names[0], 2: names[1]},
+        points=[("i1", 1, 1, 1)],
+        name="a",
+    )
+    with pytest.raises(ValueError, match=rf"'a'.*{duplicated}"):
+        PointDataset(version, split="val", global_offset=0)

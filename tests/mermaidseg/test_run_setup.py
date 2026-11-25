@@ -198,7 +198,7 @@ def test_build_registry_exits_naming_a_dataset_missing_from_the_concept_schema(t
         )
 
 
-def test_build_registry_registers_the_train_split_even_when_listed_last(tmp_path, monkeypatch):
+def test_build_registry_registers_one_reader_per_source(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     val = _reader(tmp_path, "coralscapes_v2", _CORALSCAPES, split="val")
     train = _reader(tmp_path, "coralscapes_v2", _CORALSCAPES, split="train")

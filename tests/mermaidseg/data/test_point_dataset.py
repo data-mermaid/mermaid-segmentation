@@ -78,10 +78,10 @@ def test_image_without_a_selected_point_is_dropped(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("label_id", "raises"),
-    [(9, False), (10, True)],
-    ids=["max", "above-max"],
+    [(9, False), (10, True), (6, False)],
+    ids=["max", "above-max", "absent-from-labels"],
 )
-def test_point_label_id_above_the_versions_max_raises_naming_it(
+def test_point_label_ids_are_checked_against_the_versions_max(
     tmp_path: Path, label_id: int, raises: bool
 ) -> None:
     version = _write_points(tmp_path, [("i1", 1, 1, label_id)], ["i1"])

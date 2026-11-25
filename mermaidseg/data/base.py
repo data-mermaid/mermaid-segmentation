@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -104,8 +105,9 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
             image_ids: Keeps only these images (an evaluation subset); ``None`` keeps all.
 
         Raises:
-            ValueError: The reader kind differs from the manifest kind, a group is unknown or
-                not in ``version.synced_groups``, or an image id is not in the selection.
+            ValueError: The reader kind differs from the manifest kind, ``labels.parquet`` repeats
+                a name (compared case-folded), a group is unknown or not in
+                ``version.synced_groups``, or an image id is not in the selection.
             FileNotFoundError: A selected file is not cached.
         """
         manifest = version.manifest
@@ -113,6 +115,17 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
             raise ValueError(
                 f"{type(self).__name__} reads {self.KIND!r} versions; "
                 f"{manifest.dataset} {manifest.version} is {manifest.kind!r}"
+            )
+        duplicated = sorted(
+            n
+            for n, count in Counter(
+                name.casefold() for name in version.labels.column("name").to_pylist()
+            ).items()
+            if count > 1
+        )
+        if duplicated:
+            raise ValueError(
+                f"dataset {manifest.dataset!r}: labels.parquet repeats the names {duplicated}"
             )
         self.version = version
         self.source_name = manifest.dataset
