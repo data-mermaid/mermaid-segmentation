@@ -136,7 +136,7 @@ class TaxonomyManifest(_Model):
     files: dict[str, FileEntry]
 
 
-def dump_manifest(manifest: Manifest | TaxonomyManifest) -> bytes:
+def dump_manifest(manifest: _Model) -> bytes:
     """Serialise to JSON in field order, indented, with a trailing newline.
 
     The same model always yields the same bytes, so the sha256 of the published bytes is stable.

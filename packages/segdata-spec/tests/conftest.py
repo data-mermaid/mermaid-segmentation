@@ -19,6 +19,7 @@ import pytest
 from botocore.exceptions import ClientError
 from PIL import Image
 
+from segdata_spec.features import publish_feature_set
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_dataset, publish_taxonomy
 
@@ -315,3 +316,58 @@ def publish_taxonomy_version(client: FakeS3, tmp_path: Path) -> Pin:
     )
     client.calls.clear()
     return Pin(name="mermaid-benthic", version=TAX_VERSION, manifest_sha256=sha)
+
+
+FEATURE_FAMILY = "effnet"
+# image_id -> the bytes of its feature file under features/ds/effnet/.
+FEATURES: dict[str, bytes] = {"a": b"feature-a", "b": b"feature-bb"}
+EXTRACTOR: dict[str, Any] = {
+    "class_path": "spacer.extract_features.EfficientNetExtractor",
+    "crop_size": 224,
+    "feature_dim": 1280,
+    "weights_sha256": "w" * 64,
+    "weights_uri": "s3://weights/a.pt",
+}
+
+
+def feature_key_of(image_id: str) -> str:
+    return f"features/ds/{FEATURE_FAMILY}/{image_id}.featurevector"
+
+
+def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> tuple[Pin, str]:
+    """Publish dataset ``ds`` with images a and b, store their features, publish the set.
+
+    Returns the dataset pin and the feature-set manifest sha256; clears the call log.
+    """
+    _, pin = publish_version(
+        client,
+        tmp_path,
+        images={image_id: IMAGES[image_id] for image_id in FEATURES},
+        points=POINTS,
+    )
+    for image_id, data in FEATURES.items():
+        client.put(BUCKET, feature_key_of(image_id), data)
+    index = pa.table(
+        {
+            "image_id": list(FEATURES),
+            "key": [feature_key_of(i) for i in FEATURES],
+            "etag": [_md5(data) for data in FEATURES.values()],
+            "size": [len(data) for data in FEATURES.values()],
+            "crc64nvme": pa.nulls(len(FEATURES), pa.string()),
+            "n_points": [1] * len(FEATURES),
+        }
+    )
+    sha = publish_feature_set(
+        client,
+        pin,
+        FEATURE_FAMILY,
+        index,
+        EXTRACTOR,
+        bucket=BUCKET,
+        etl_package="segdata-etl",
+        etl_command="segdata features ds",
+        repo_dir=_repo_dir(tmp_path),
+        git=CLEAN_GIT,
+    )
+    client.calls.clear()
+    return pin, sha

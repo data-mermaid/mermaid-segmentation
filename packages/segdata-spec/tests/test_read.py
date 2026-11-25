@@ -12,15 +12,16 @@ from conftest import (
     VERSION,
     jpeg_bytes,
     mask_bytes,
+    publish_feature_set_version,
     publish_taxonomy_version,
     publish_version,
 )
 
 from segdata_spec.errors import NotSynced, PinMismatch, SegdataError
 from segdata_spec.manifest import FileEntry, Pin, dump_manifest, manifest_sha256
-from segdata_spec.read import open_taxonomy, open_version
+from segdata_spec.read import open_feature_set, open_tables, open_taxonomy, open_version
 from segdata_spec.resize import ResizeSpec
-from segdata_spec.sync import sync
+from segdata_spec.sync import sync, sync_feature_set
 from segdata_spec.taxonomy import hierarchy_from_table
 
 PREFIX = f"datasets/ds/{VERSION}/"
@@ -269,3 +270,72 @@ def test_open_version_names_an_unparseable_marker_file(fake_s3, tmp_path, cache)
 
     with pytest.raises(SegdataError, match=re.escape(str(bad))):
         open_version(cache, BUCKET, pin)
+
+
+def test_open_tables_reads_a_tables_only_sync_that_open_version_refuses(fake_s3, tmp_path, cache):
+    manifest, pin = publish_version(fake_s3, tmp_path)
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, images=False)
+
+    tables = open_tables(cache, BUCKET, pin)
+
+    assert tables.manifest == manifest
+    assert tables.images.column("image_id").to_pylist() == ["a", "b", "c"]
+    assert tables.points is not None
+    assert tables.points.column("image_id").to_pylist() == ["a", "b"]
+    assert tables.labels.column("name").to_pylist() == ["x", "y"]
+    assert tables.label_counts.column("n").to_pylist() == [1]
+    with pytest.raises(NotSynced, match="resize ids synced for it: none"):
+        open_version(cache, BUCKET, pin)
+
+
+def test_open_tables_refuses_a_cache_with_no_marker(fake_s3, tmp_path, cache):
+    _, pin = publish_version(fake_s3, tmp_path)
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, images=False)
+    shutil.rmtree(cache / "synced")
+
+    with pytest.raises(NotSynced):
+        open_tables(cache, BUCKET, pin)
+
+
+def test_open_feature_set_reads_a_synced_set(fake_s3, tmp_path, cache):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
+
+    features = open_feature_set(cache, BUCKET, pin, "effnet", sha)
+
+    assert features.index.column("image_id").to_pylist() == ["a", "b"]
+    assert features.path("a") == cache / BUCKET / "features/ds/effnet/a.featurevector"
+    assert features.path("a").read_bytes() == b"feature-a"
+
+
+def test_open_feature_set_refuses_an_unsynced_set(fake_s3, tmp_path, cache):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+
+    with pytest.raises(NotSynced):
+        open_feature_set(cache, BUCKET, pin, "effnet", sha)
+
+
+def test_open_feature_set_refuses_another_set_sha(fake_s3, tmp_path, cache):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
+
+    with pytest.raises(PinMismatch):
+        open_feature_set(cache, BUCKET, pin, "effnet", "0" * 64)
+
+
+def test_open_tables_reads_a_version_synced_with_images(fake_s3, tmp_path, cache):
+    _, pin = publish_version(fake_s3, tmp_path)
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    tables = open_tables(cache, BUCKET, pin)
+
+    assert tables.images.column("image_id").to_pylist() == ["a", "b", "c"]
+
+
+def test_open_feature_set_refuses_a_set_built_for_another_dataset_sha(fake_s3, tmp_path, cache):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
+    other = pin.model_copy(update={"manifest_sha256": "0" * 64})
+
+    with pytest.raises(PinMismatch, match="0" * 64):
+        open_feature_set(cache, BUCKET, other, "effnet", sha)

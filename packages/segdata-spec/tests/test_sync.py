@@ -20,8 +20,10 @@ from conftest import (
     TAX_VERSION,
     VERSION,
     FakeS3,
+    feature_key_of,
     jpeg_bytes,
     mask_bytes,
+    publish_feature_set_version,
     publish_taxonomy_version,
     publish_version,
 )
@@ -30,6 +32,8 @@ from PIL import Image
 from segdata_spec._marker import load_synced
 from segdata_spec.errors import (
     ChecksumMismatch,
+    FeatureIndexInvalid,
+    FeatureMissing,
     ImageChanged,
     ImageMissing,
     ImageUndecodable,
@@ -43,6 +47,7 @@ from segdata_spec.sync import (
     DatasetSyncResult,
     check_published_manifest,
     sync,
+    sync_feature_set,
 )
 
 PREFIX = f"datasets/ds/{VERSION}/"
@@ -886,3 +891,145 @@ def test_check_published_manifest_taxonomy_flag_selects_the_taxonomy_prefix(fake
     assert check_published_manifest(fake_s3, BUCKET, tax, taxonomy=True) is None
     with pytest.raises(ManifestNotFound):
         check_published_manifest(fake_s3, BUCKET, tax, taxonomy=False)
+
+
+def test_tables_only_sync_caches_tables_and_requests_no_image(fake_s3, tmp_path, cache):
+    _, dense_pin = publish_version(
+        fake_s3, tmp_path, points=None, masks={"a": b"m", "b": b"m", "c": b"m"}
+    )
+
+    sync(fake_s3, {"ds": dense_pin}, cache, bucket=BUCKET, images=False)
+
+    assert _image_gets(fake_s3) == []
+    assert sorted(key for bucket, key in _gets(fake_s3)) == sorted(
+        PREFIX + name
+        for name in [
+            "manifest.json",
+            "images.parquet",
+            "labels.parquet",
+            "stats/label_counts.parquet",
+        ]
+    )
+    for name in ["manifest.json", "images.parquet"]:
+        assert (cache / BUCKET / PREFIX / name).read_bytes() == fake_s3.objects[
+            (BUCKET, PREFIX + name)
+        ]
+    assert not (cache / IMG_BUCKET).exists()
+    assert len(list((cache / "synced" / "tables" / BUCKET / "ds" / VERSION).glob("*.json"))) == 1
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        {"selection": {"ds": ["g1"]}},
+        {"resize": {"ds": ResizeSpec(max_edge=2)}},
+        {"on_missing_images": {"ds": "drop"}},
+    ],
+    ids=["selection", "resize", "on_missing_images"],
+)
+def test_tables_only_sync_refuses_image_options_before_any_s3_call(fake_s3, pin, cache, option):
+    with pytest.raises(ValueError, match=next(iter(option))):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, images=False, **option)
+
+    assert fake_s3.calls == []
+
+
+def _feature_gets(client: FakeS3) -> list[str]:
+    return [key for bucket, key in _gets(client) if key.startswith("features/")]
+
+
+def test_sync_feature_set_downloads_only_the_selected_features(fake_s3, tmp_path, cache):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+
+    result = sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET, image_ids=["a"])
+
+    path_a = cache / BUCKET / "features/ds/effnet/a.featurevector"
+    assert result.paths == {"a": path_a}
+    assert path_a.read_bytes() == b"feature-a"
+    assert _feature_gets(fake_s3) == ["features/ds/effnet/a.featurevector"]
+    assert not (cache / BUCKET / "features/ds/effnet/b.featurevector").exists()
+    assert result.index.column("image_id").to_pylist() == ["a", "b"]
+    assert result.manifest.family == "effnet"
+    markers = list((cache / "synced/features/effnet" / BUCKET / "ds" / VERSION).glob("*.json"))
+    assert [json.loads(m.read_bytes()) for m in markers] == [
+        {"feature_set_sha256": sha, "image_ids": ["a"]}
+    ]
+
+
+def test_sync_feature_set_refuses_a_wrong_sha_before_any_feature(fake_s3, tmp_path, cache):
+    pin, _ = publish_feature_set_version(fake_s3, tmp_path)
+
+    with pytest.raises(PinMismatch):
+        sync_feature_set(fake_s3, pin, "effnet", "0" * 64, cache, bucket=BUCKET)
+
+    assert _feature_gets(fake_s3) == []
+
+
+def test_sync_feature_set_refuses_an_unindexed_id_before_any_feature(fake_s3, tmp_path, cache):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+
+    with pytest.raises(FeatureIndexInvalid, match="'z'"):
+        sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET, image_ids=["a", "z"])
+
+    assert _feature_gets(fake_s3) == []
+
+
+@pytest.mark.parametrize(
+    ("tamper", "error"),
+    [
+        (lambda s3: s3.objects.pop((BUCKET, feature_key_of("a"))), FeatureMissing),
+        (lambda s3: s3.put(BUCKET, feature_key_of("a"), b"feature-x"), ImageChanged),
+        (
+            lambda s3: s3.body_overrides.__setitem__((BUCKET, feature_key_of("a")), b"feat"),
+            ChecksumMismatch,
+        ),
+    ],
+    ids=["absent", "replaced", "truncated"],
+)
+def test_sync_feature_set_fails_on_a_bad_feature_and_caches_nothing_for_it(
+    fake_s3, tmp_path, cache, tamper, error
+):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    tamper(fake_s3)
+
+    with pytest.raises(error, match="a.featurevector"):
+        sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET, image_ids=["a"])
+
+    assert not (cache / BUCKET / feature_key_of("a")).exists()
+
+
+def test_sync_feature_set_without_a_selection_syncs_every_feature_and_records_all(
+    fake_s3, tmp_path, cache
+):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+
+    result = sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
+
+    assert result.paths == {
+        "a": cache / BUCKET / "features/ds/effnet/a.featurevector",
+        "b": cache / BUCKET / "features/ds/effnet/b.featurevector",
+    }
+    markers = list((cache / "synced/features/effnet" / BUCKET / "ds" / VERSION).glob("*.json"))
+    assert [json.loads(m.read_bytes()) for m in markers] == [
+        {"feature_set_sha256": sha, "image_ids": "all"}
+    ]
+
+
+def test_sync_feature_set_refuses_a_set_built_for_another_dataset_sha(fake_s3, tmp_path, cache):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    other = pin.model_copy(update={"manifest_sha256": "0" * 64})
+
+    with pytest.raises(PinMismatch, match="0" * 64):
+        sync_feature_set(fake_s3, other, "effnet", sha, cache, bucket=BUCKET)
+
+    assert _feature_gets(fake_s3) == []
+
+
+def test_sync_feature_set_refuses_a_tampered_index_before_any_feature(fake_s3, tmp_path, cache):
+    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    fake_s3.put(BUCKET, f"datasets/ds/{VERSION}/features/effnet/index.parquet", b"not the index")
+
+    with pytest.raises(ChecksumMismatch, match="index.parquet"):
+        sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
+
+    assert _feature_gets(fake_s3) == []
