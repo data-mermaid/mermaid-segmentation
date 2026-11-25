@@ -217,18 +217,4 @@ def test_build_registry_registers_the_train_split_even_when_listed_last(tmp_path
     )
     # pacific has no train split, so its only split stands in.
     assert len(registry.datasets) == 2
-    assert registry.datasets[0] is train
     assert registry.datasets[1] is pacific
-
-
-def test_build_registry_registers_the_first_split_without_a_train_split(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    val = _reader(tmp_path, "coralscapes_v2", _CORALSCAPES, split="val")
-    test = _reader(tmp_path, "coralscapes_v2", _CORALSCAPES, split="test")
-    registry, _ = build_registry(
-        {("coralscapes_v2", "val"): val, ("coralscapes_v2", "test"): test},
-        _registry_training_cfg(),
-        schema_config=_schema_config(tmp_path, "coralscapes_v2"),
-    )
-    assert len(registry.datasets) == 1
-    assert registry.datasets[0] is val

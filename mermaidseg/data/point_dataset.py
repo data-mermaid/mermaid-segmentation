@@ -122,6 +122,21 @@ def select_points(
     return selected
 
 
+def _check_label_ids_in_range(label_ids: NDArray[np.int32], version: DatasetVersion) -> None:
+    """Raise if any point ``label_id`` exceeds the largest ``label_id`` of ``labels.parquet``.
+
+    An id below that maximum but absent from the table stays allowed; it maps to background.
+    """
+    known = version.labels.column("label_id").to_pylist()
+    limit = max(known, default=0)
+    above = np.unique(label_ids[label_ids > limit])
+    if above.size:
+        raise ValueError(
+            f"point label_id {above.tolist()} exceeds the largest label_id {limit} "
+            "in labels.parquet"
+        )
+
+
 class PointDataset(VersionDataset):
     """Point-annotation reader; each item's mask is the image's points, painted with ``padding``.
 
@@ -163,8 +178,9 @@ class PointDataset(VersionDataset):
             padding: Half-size in pixels of the square painted around each point.
 
         Raises:
-            ValueError: ``annotators`` is ``None`` and the version has several annotators, or a
-                point lies outside its image.
+            ValueError: ``annotators`` is ``None`` and the version has several annotators, a
+                point lies outside its image, or a selected point's ``label_id`` exceeds the
+                version's largest ``label_id`` in ``labels.parquet``.
         """
         self.padding = padding
         self._annotators = annotators
@@ -183,6 +199,7 @@ class PointDataset(VersionDataset):
         self._rows = points["row"].to_numpy(dtype=np.intp)
         self._cols = points["col"].to_numpy(dtype=np.intp)
         self._label_ids = points["label_id"].to_numpy(dtype=np.int32)
+        _check_label_ids_in_range(self._label_ids, version)
         self._positions = points.reset_index(drop=True).groupby("image_id", sort=False).indices
 
     def _filter_images(self, images: pd.DataFrame) -> pd.DataFrame:

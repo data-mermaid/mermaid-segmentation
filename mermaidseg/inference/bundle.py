@@ -12,11 +12,10 @@ from pathlib import Path
 
 import torch
 from safetensors.torch import load_file
-from torch import nn
 from transformers import AutoConfig, AutoModel, PreTrainedModel
 
 from mermaidseg.inference.preprocess import CHANNEL_ORDER, INTERPOLATION
-from mermaidseg.model.models import MODEL_CLASSES
+from mermaidseg.model.models import MODEL_CLASSES, ConceptBottleneckDPTLoRADINOv3
 
 MODEL_JSON = "model.json"
 WEIGHTS = "weights.safetensors"
@@ -36,7 +35,7 @@ class ModelBundle:
 
     path: Path
     metadata: dict
-    model: nn.Module
+    model: ConceptBottleneckDPTLoRADINOv3
     device: torch.device
 
     @property

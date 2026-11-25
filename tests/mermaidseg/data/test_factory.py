@@ -169,6 +169,21 @@ def test_source_offsets_reject_a_label_id_below_one_naming_the_source(
         source_offsets(versions)
 
 
+@pytest.mark.parametrize(
+    ("names", "duplicated"),
+    [(("Acro", "Acro"), "acro"), (("Acro", "acro"), "acro")],
+    ids=["exact", "case-folded"],
+)
+def test_source_offsets_reject_a_duplicated_label_name_naming_the_source(
+    tmp_path: Path, names: tuple[str, str], duplicated: str
+) -> None:
+    versions = {
+        "a": _labelled_version(tmp_path, "a", {1: names[0], 2: names[1]}),
+    }
+    with pytest.raises(ValueError, match=rf"'a'.*{duplicated}"):
+        source_offsets(versions)
+
+
 def test_every_split_of_a_source_shares_its_offset(tmp_path: Path) -> None:
     _, _, pin_a = write_version(
         tmp_path,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any, get_args
@@ -44,7 +45,8 @@ def source_offsets(versions: Mapping[str, DatasetVersion]) -> dict[str, int]:
         Source name -> offset.
 
     Raises:
-        ValueError: A source's ``labels.parquet`` holds a ``label_id`` below 1.
+        ValueError: A source's ``labels.parquet`` holds a ``label_id`` below 1, or a ``name``
+            more than once (compared case-folded, as every name lookup lower-cases).
     """
     offsets: dict[str, int] = {}
     running = 0
@@ -55,6 +57,10 @@ def source_offsets(versions: Mapping[str, DatasetVersion]) -> dict[str, int]:
             raise ValueError(
                 f"dataset {name!r}: label_id must be at least 1 (0 is background), got {below_one}"
             )
+        folded = Counter(n.casefold() for n in version.labels.column("name").to_pylist())
+        duplicated = sorted(n for n, count in folded.items() if count > 1)
+        if duplicated:
+            raise ValueError(f"dataset {name!r}: labels.parquet repeats the names {duplicated}")
         offsets[name] = running
         running += max(label_ids, default=0)
     return offsets

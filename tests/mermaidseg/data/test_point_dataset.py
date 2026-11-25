@@ -77,6 +77,20 @@ def test_image_without_a_selected_point_is_dropped(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("label_id", "raises"),
+    [(9, False), (10, True)],
+    ids=["max", "above-max"],
+)
+def test_point_label_id_above_the_versions_max_raises_naming_it(
+    tmp_path: Path, label_id: int, raises: bool
+) -> None:
+    version = _write_points(tmp_path, [("i1", 1, 1, label_id)], ["i1"])
+    expectation = pytest.raises(ValueError, match=str(label_id)) if raises else nullcontext()
+    with expectation:
+        PointDataset(version, split="val", global_offset=0, annotators=["default"])
+
+
+@pytest.mark.parametrize(
     ("row", "col", "raises"),
     [(8, 0, True), (0, 8, True), (-1, 0, True), (7, 7, False)],
     ids=["row=height", "col=width", "negative", "last-pixel"],
