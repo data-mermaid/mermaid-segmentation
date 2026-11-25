@@ -131,6 +131,8 @@ VERSION = "20261120-abcdef1"
 TAX_VERSION = "20261120-1234567"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
 STORE = ImageStore(bucket=IMG_BUCKET, prefix=IMG_PREFIX, owner="segdata")
+# An image store inside BUCKET, as a feature set requires; its store name is ``ds``.
+FEATURE_STORE = ImageStore(bucket=BUCKET, prefix=IMG_PREFIX, owner="segdata")
 SOURCE = SourceInfo(type="test", uri="s3://src/", revision="r1")
 
 # image_id -> (bytes, group); each image's key is "<image_id>.jpg" under IMG_PREFIX.
@@ -228,21 +230,25 @@ def publish_version(
     media_types: dict[str, str] | None = None,
     source_names: dict[str, str] | None = None,
     parents: Sequence[ParentRef] = (),
+    image_store: ImageStore = STORE,
 ) -> tuple[Manifest, Pin]:
     """Store the images (and masks) and publish dataset ``ds``; clear the call log.
 
     ``points=None`` publishes a dense version; ``etags`` gives images explicit ETags;
     ``crcs`` and ``mask_crcs`` record base64 CRC64NVME values by image id; ``sizes`` records
     ``(width, height)`` by image id (default 4x4); ``media_types`` sets the media type by image id
-    (default ``image/jpeg``); ``source_names`` sets ``source_name`` by image id (default null).
+    (default ``image/jpeg``); ``source_names`` sets ``source_name`` by image id (default null);
+    ``image_store`` is where the images live (default: ``STORE``, outside ``BUCKET``).
     """
     etags = etags or {}
     for image_id, (data, _) in images.items():
-        client.put(IMG_BUCKET, f"{IMG_PREFIX}{image_id}.jpg", data)
+        client.put(image_store.bucket, f"{image_store.prefix}{image_id}.jpg", data)
         if image_id in etags:
-            client.set_etag(IMG_BUCKET, f"{IMG_PREFIX}{image_id}.jpg", etags[image_id])
+            client.set_etag(
+                image_store.bucket, f"{image_store.prefix}{image_id}.jpg", etags[image_id]
+            )
     for image_id, data in (masks or {}).items():
-        client.put(IMG_BUCKET, f"{IMG_PREFIX}{image_id}.png", data)
+        client.put(image_store.bucket, f"{image_store.prefix}{image_id}.png", data)
     tables = {
         "images.parquet": _images_table(
             images,
@@ -283,7 +289,7 @@ def publish_version(
         version=version,
         kind="points" if points is not None else "dense",
         tables=tables,
-        image_store=STORE,
+        image_store=image_store,
         etl_package="segdata-etl",
         etl_command="segdata build ds",
         source=SOURCE,
@@ -344,6 +350,7 @@ def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> FeatureSetPin
         tmp_path,
         images={image_id: IMAGES[image_id] for image_id in FEATURES},
         points=POINTS,
+        image_store=FEATURE_STORE,
     )
     for image_id, data in FEATURES.items():
         client.put(BUCKET, feature_key_of(image_id), data)

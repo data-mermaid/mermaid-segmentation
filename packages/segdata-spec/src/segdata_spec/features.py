@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from segdata_spec._s3 import (
     EXTRACTOR_SPEC_NAME,
     FEATURE_INDEX_NAME,
     MANIFEST_NAME,
+    _check_segment,
     dataset_prefix,
     feature_key,
     feature_set_prefix,
@@ -76,9 +78,39 @@ def _identity_differences(stored: Mapping[str, Any], identity: Mapping[str, Any]
     ]
 
 
-def _store_name(image_store: ImageStore) -> str:
-    """Return the last path segment of the image store prefix, e.g. ``coralnet``."""
-    return image_store.prefix.rstrip("/").rsplit("/", 1)[-1]
+_IMAGE_STORE_PREFIX = re.compile(r"images/([^/]+)/")
+
+
+def feature_store_name(image_store: ImageStore, bucket: str) -> str:
+    """Return the store name of ``image_store``, the segment of its ``images/<segment>/`` prefix.
+
+    Raises:
+        ValueError: The image store is outside ``bucket``, its prefix is not exactly
+            ``images/<segment>/``, or the segment is not a lowercase key segment.
+    """
+    match = _IMAGE_STORE_PREFIX.fullmatch(image_store.prefix)
+    if image_store.bucket != bucket or match is None:
+        raise ValueError(
+            f"image store s3://{image_store.bucket}/{image_store.prefix} is not "
+            f"s3://{bucket}/images/<segment>/"
+        )
+    return _check_segment(match.group(1), "image store segment")
+
+
+def feature_file_key(
+    image_store: ImageStore,
+    bucket: str,
+    family: str,
+    image_id: str,
+    suffix: str | None = None,
+) -> str:
+    """Return one image's feature file key, ``features/<store>/<family>/<image_id>[~<suffix>].featurevector``.
+
+    Raises:
+        ValueError: The image store is not a valid store in ``bucket``, or ``family`` or
+            ``suffix`` is not a lowercase key segment.
+    """
+    return feature_key(feature_store_name(image_store, bucket), family, image_id, suffix)
 
 
 def _is_feature_key(key: str, store: str, family: str, image_id: str) -> bool:
@@ -101,7 +133,7 @@ def _check_index(
     """Return how many version images ``index`` leaves out, refusing an invalid index.
 
     Raises:
-        FeatureIndexInvalid: An id is not in the version, an id repeats, a row's ``key`` is not
+        FeatureIndexInvalid: An id is not in the version, an id or a key repeats, a row's ``key`` is not
             its image's file under ``features/<store>/<family>/``, or images are left out and
             ``allow_missing`` is false.
     """
@@ -122,6 +154,8 @@ def _check_index(
             f"{len(bad)} index key(s) are not their image's file under "
             f"{feature_store_prefix(store, family)}: {bad[:10]}"
         )
+    if len(set(keys)) != len(keys):
+        raise FeatureIndexInvalid("index holds a duplicate key: two images name one feature file")
     missing = len(version_ids) - len(ids)
     if missing and not allow_missing:
         raise FeatureIndexInvalid(f"index leaves out {missing} image(s) of the version")
@@ -149,14 +183,27 @@ def _load_version(client: Any, bucket: str, pin: Pin) -> tuple[Manifest, set[str
     return manifest, set(images.column("image_id").to_pylist())
 
 
-def _ensure_extractor_spec(
-    client: Any, bucket: str, key: str, extractor: Mapping[str, Any], identity: Mapping[str, Any]
+def claim_extractor(
+    client: Any,
+    bucket: str,
+    image_store: ImageStore,
+    family: str,
+    extractor: Mapping[str, Any],
 ) -> None:
     """Write the family's extractor spec once, or check the stored one has the same identity.
 
+    Writers call this before writing any ``.featurevector`` into the family, and put feature
+    files with ``If-None-Match: *``.
+
     Raises:
+        ValueError: ``extractor`` lacks an identity key, or the image store or ``family`` is
+            invalid; raised before any S3 call.
         ExtractorMismatch: The stored spec names another identity.
     """
+    key = (
+        feature_store_prefix(feature_store_name(image_store, bucket), family) + EXTRACTOR_SPEC_NAME
+    )
+    identity = _extractor_identity(extractor)
     data = (json.dumps(dict(extractor), indent=2, sort_keys=True) + "\n").encode()
     try:
         client.put_object(Bucket=bucket, Key=key, Body=data, IfNoneMatch="*")
@@ -242,7 +289,8 @@ def publish_feature_set(
     Raises:
         ValueError: ``extractor`` lacks an identity key, ``family`` is not a key segment, or
             the ETL source is not exactly one of ``repo_dir`` (with ``etl_package`` and
-            ``etl_command``) and ``etl``; raised before any S3 call.
+            ``etl_command``) and ``etl``; raised before any S3 call. The dataset's image store
+            is not ``images/<segment>/`` in ``bucket``; raised before any write.
         PublishRefused: With ``repo_dir``, the tree is dirty or unpushed, or has no ``uv.lock``.
         ManifestNotFound: The dataset manifest is absent.
         PinMismatch: The dataset manifest differs from ``pin``.
@@ -255,14 +303,13 @@ def publish_feature_set(
         ExtractorMismatch: The family's stored extractor spec has another identity.
         ObjectExists: The index or manifest key already exists with different bytes.
     """
-    identity = _extractor_identity(extractor)
+    _extractor_identity(extractor)
     prefix = feature_set_prefix(pin.name, pin.version, family)
     etl_info = _resolve_etl(etl, repo_dir, git, etl_package, etl_command)
     dataset, version_ids = _load_version(client, bucket, pin)
     conformed = conform(index, FEATURE_INDEX_SCHEMA)
-    store = _store_name(dataset.image_store)
+    store = feature_store_name(dataset.image_store, bucket)
     missing = _check_index(conformed, version_ids, allow_missing, store, family)
-    store_prefix = feature_store_prefix(store, family)
     index_bytes = table_bytes(conformed)
     manifest = FeatureSetManifest(
         schema_version=1,
@@ -281,7 +328,7 @@ def publish_feature_set(
         created_at=datetime.now(UTC),
     )
     manifest_bytes = dump_manifest(manifest)
-    _ensure_extractor_spec(client, bucket, store_prefix + EXTRACTOR_SPEC_NAME, extractor, identity)
+    claim_extractor(client, bucket, dataset.image_store, family, extractor)
     _write_version(client, bucket, prefix, {FEATURE_INDEX_NAME: index_bytes}, manifest_bytes)
     return FeatureSetPin(
         dataset=pin, family=family, manifest_sha256=manifest_sha256(manifest_bytes)
