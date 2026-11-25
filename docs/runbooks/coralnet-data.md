@@ -223,7 +223,7 @@ Run this step on an EC2 host in `us-east-1`, not a laptop. A full corpus reads f
 uv run --package segdata-etl segdata build coralnet raw --stage-dir <stage> --build-run <run>
 ```
 
-The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, stage that version under the same `<stage>` and add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads the parent from `<stage>`, not from S3.
+The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, stage that version under the same `<stage>` and add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads the parent from `<stage>`, not from S3. With a parent, an image whose scrape original is gone (absent from the scrape listing, or `header_status` `not_found`) keeps the parent's row and gets no copy when the parent holds its `image_id`; `stats.dropped["carried_from_parent"]` counts these images. This lets you delete the scrape originals of already-published images without breaking a later raw build. A carried image whose build size differs from the parent's stops the build with a `ValueError` that names the image ids.
 
 The probe results are checkpointed under `<stage>/checkpoints/`. If the run stops, run the same command again with the same `--stage-dir`: it probes only the images the checkpoint lacks. See [Resume a raw stage](../../packages/segdata-etl/README.md#resume-a-raw-stage).
 
@@ -256,7 +256,7 @@ The curated version applies `annotation_overrides.parquet` and `image_blacklist.
 uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coralnet --version <curated>
 ```
 
-`promote` publishes a tables-only version only when a published parent has the same image store. It HEAD-checks every image key first.
+`promote` publishes a version with carried image keys (no plan names them; a tables-only version carries every key) only when a published parent has the same image store. It HEAD-checks every carried key first.
 
 ### Find the published versions
 
@@ -285,7 +285,7 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `ObjectConflict` from `promote` (raw) | A destination key under `images/coralnet/` holds an object with a different ETag, size or CRC64NVME than the plan. Nothing was written. Find out what wrote it; `promote` does not replace it. |
 | `PublishRefused: ... is not staged` or `... does not match the manifest` (`promote`) | The `--stage-dir`, `--dataset` or `--version` is wrong, or a staged file changed after staging. Stage the version again. |
 | `SourceChanged` (raw stage) | An original was replaced between its HEAD and its read. Run the same command again. |
-| `PublishRefused` from `promote` (tables-only curated version) | No published parent has the same image store, or an image key is missing or differs. Nothing was written. Publish the parent first. |
+| `PublishRefused` from `promote` (version with carried keys, such as a curated version) | No published parent has the same image store, or a carried image key is missing or differs. Nothing was written. Publish the parent first. |
 | `PinMismatch` | A pin's sha256 does not match the manifest in the store. Copy the pin again from the output of the command that published it. |
 | `ValueError` from `curate` listing benthic attribute or growth form ids missing from the taxonomy | The API maps a label to an attribute or growth form that the pinned taxonomy lacks. Nothing was staged. Stage and publish a newer taxonomy, then pin it. |
 | `curate` stops on a connection error or an HTTP error from `api.datamermaid.org` | The label mapping could not be fetched. Nothing was staged. Check network access, then run again. |

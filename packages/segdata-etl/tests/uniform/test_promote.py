@@ -611,6 +611,24 @@ def test_key_in_neither_plan_file_refuses_before_any_write(monkeypatch, tmp_path
     assert writes(fake) == []
 
 
+def publish_parent(
+    fake: FakeS3, stage: Path, version: str, parent_store: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Publish a parent of the staged mermaid version, on its image store or ``parent_store``, and pin it.
+
+    Returns the version's image store.
+    """
+    parent = json.loads((version_dir(stage, "mermaid", version) / "manifest.json").read_bytes())
+    store = parent["image_store"]
+    parent.update(dataset="parent", version=PARENT_VERSION)
+    if parent_store is not None:
+        parent["image_store"] = parent_store
+    parent_bytes = json.dumps(parent).encode()
+    fake.put(DATASET_BUCKET, PARENT_KEY, parent_bytes)
+    pin_parent(stage, version, parent_bytes)
+    return store
+
+
 def stage_tables_only(
     tmp_path: Path, parent_store: dict[str, Any] | None = None
 ) -> tuple[FakeS3, Path, str, dict[str, Any]]:
@@ -619,19 +637,14 @@ def stage_tables_only(
     Its one parent is published with the same image store, or with ``parent_store``.
     """
     fake, stage, version = stage_mermaid(tmp_path)
-    directory = version_dir(stage, "mermaid", version)
-    parent = json.loads((directory / "manifest.json").read_bytes())
-    store = parent["image_store"]
+    store = json.loads((version_dir(stage, "mermaid", version) / "manifest.json").read_bytes())[
+        "image_store"
+    ]
     for line in copy_destinations(stage, version):
         data = fake.objects[(line["src_bucket"], line["src_key"])]
         fake.put(store["bucket"], line["dst_key"], data)
-    (directory / "copies.jsonl").unlink()
-    parent.update(dataset="parent", version=PARENT_VERSION)
-    if parent_store is not None:
-        parent["image_store"] = parent_store
-    parent_bytes = json.dumps(parent).encode()
-    fake.put(DATASET_BUCKET, PARENT_KEY, parent_bytes)
-    pin_parent(stage, version, parent_bytes)
+    (version_dir(stage, "mermaid", version) / "copies.jsonl").unlink()
+    publish_parent(fake, stage, version, parent_store)
     fake.calls.clear()
     return fake, stage, version, store
 
@@ -695,3 +708,61 @@ def test_images_and_masks_land_in_intelligent_tiering_and_tables_keep_the_defaul
     assert len(images) == 4
     assert {classes[k] for k in images} == {"INTELLIGENT_TIERING"}
     assert {classes[k] for k in classes.keys() - images} == {None}
+
+
+def stage_carried(
+    tmp_path: Path, parent_store: dict[str, Any] | None = None
+) -> tuple[FakeS3, Path, str, str]:
+    """Stage a mermaid version whose plan omits image i2, which is already in its image store.
+
+    Returns the fake, the stage dir, the version and the carried key.
+    """
+    fake, stage, version = stage_mermaid(tmp_path)
+    store = json.loads((version_dir(stage, "mermaid", version) / "manifest.json").read_bytes())[
+        "image_store"
+    ]
+    line = next(entry for entry in copy_destinations(stage, version) if "/i2." in entry["dst_key"])
+    fake.put(store["bucket"], line["dst_key"], fake.objects[(line["src_bucket"], line["src_key"])])
+    rewrite_plan(
+        stage, version, lambda lines: [x for x in lines if x["dst_key"] != line["dst_key"]]
+    )
+    publish_parent(fake, stage, version, parent_store)
+    fake.calls.clear()
+    return fake, stage, version, line["dst_key"]
+
+
+def test_a_carried_key_is_headed_in_the_image_store_and_never_copied(repo, tmp_path):  # noqa: F811
+    fake, stage, version, carried = stage_carried(tmp_path)
+
+    run_promote(fake, stage, version)
+
+    assert sorted(call["Key"] for call in fake.copy_calls) == sorted(
+        line["dst_key"] for line in copy_destinations(stage, version)
+    )
+    assert carried not in {call["Key"] for call in fake.copy_calls}
+    assert ("head", DATASET_BUCKET, carried) in [(op, b, k) for op, b, k, _ in fake.calls]
+    assert fake.puts[-1] == f"datasets/mermaid/{version}/manifest.json"
+
+
+@pytest.mark.parametrize("fault", ["missing", "etag"])
+def test_a_carried_key_absent_or_changed_refuses_before_any_write(repo, tmp_path, fault):  # noqa: F811
+    fake, stage, version, carried = stage_carried(tmp_path)
+    if fault == "missing":
+        del fake.objects[(DATASET_BUCKET, carried)]
+    else:
+        fake.etags[(DATASET_BUCKET, carried)] = quoted_etag(b"other")
+
+    with pytest.raises(PublishRefused, match=carried):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_a_key_no_plan_names_with_a_parent_on_another_image_store_refuses(repo, tmp_path):  # noqa: F811
+    other = {"bucket": "elsewhere", "prefix": "", "owner": "external"}
+    fake, stage, version, _ = stage_carried(tmp_path, parent_store=other)
+
+    with pytest.raises(PublishRefused, match="image store"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []

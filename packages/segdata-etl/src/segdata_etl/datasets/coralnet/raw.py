@@ -5,7 +5,8 @@ Each kept original is probed (HEAD, plus a full read for a multipart or CRC-less
 values its server-side copy will carry, and ``copies.jsonl`` plans that copy for ``segdata
 promote``; nothing is written to S3. Width and height come from the build run. Probed rows are
 checkpointed under the stage dir so a rerun probes only the rest, and a parent pin carries forward
-the parent's rows whose listed source ETag is unchanged.
+the parent's rows whose listed source ETag is unchanged. An image the scrape no longer lists but
+the parent holds keeps the parent's row and gets no copy: its object is already published.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from typing import Any
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from coralnet_scraper.config import get_bucket, get_prefix, validate_workers
@@ -78,6 +80,8 @@ _CHECKPOINT_EVERY = 20
 # Bytes read to recognise a PNG signature, the longer of the two supported magic numbers.
 _SNIFF_BYTES = 8
 _SOURCE_MISSING = "source_missing"
+_CARRIED = "carried_from_parent"
+_NOT_FOUND = "not_found"
 _UNSUPPORTED = "unsupported_format"
 _OBJECT_COLUMNS = [
     "image_id",
@@ -101,10 +105,14 @@ class BuildTables:
 
 @dataclass(frozen=True)
 class RawTables:
-    """The ``coralnet-raw`` tables keyed by file name, and the dropped counts by reason."""
+    """The ``coralnet-raw`` tables keyed by file name, the dropped counts by reason, and the carried ids.
+
+    ``carried`` holds the image ids whose rows come from the parent with no scrape original.
+    """
 
     tables: dict[str, pa.Table]
     dropped: dict[str, int]
+    carried: frozenset[str] = frozenset()
 
 
 def _label_name(label_id: str, value: Any) -> str:
@@ -135,22 +143,33 @@ def labels_table(id2name: dict[str, Any]) -> pa.Table:
     return pa.Table.from_pylist(rows, schema=LABELS_SCHEMA)
 
 
-def _select_images(build: BuildTables) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
-    """Return the annotated images with dimensions, their annotations, and the dropped counts."""
+def _select_images(
+    build: BuildTables, parent_ids: frozenset[str]
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], list[str]]:
+    """Return the annotated images with dimensions, their annotations, the dropped counts and carries.
+
+    An annotated image the build reads as ``not_found`` that ``parent_ids`` holds is carried: its
+    points stay and it is not counted as ``no_dimensions``.
+    """
     images, annotations = build.images, build.annotations
-    has_dims = images["header_status"].astype(str).isin(STATUSES_WITH_DIMENSIONS)
+    status = images["header_status"].astype(str)
+    has_dims = status.isin(STATUSES_WITH_DIMENSIONS)
     keys = ["source_id", "image_id"]
     listed = annotations.merge(images[keys], on=keys, how="left", indicator=True)
     with_image = (listed["_merge"] == "both").to_numpy()
+    annotated = images["image_id"].isin(annotations["image_id"][with_image])
+    lost = (status == _NOT_FOUND) & images["image_id"].astype(str).isin(parent_ids) & annotated
     with_dims = images[has_dims]
     kept = with_dims[with_dims["image_id"].isin(annotations["image_id"][with_image])]
-    points = annotations[annotations["image_id"].isin(kept["image_id"]) & with_image]
+    carried = sorted(images["image_id"][lost].astype(str))
+    wanted = annotations["image_id"].isin(kept["image_id"]) | annotations["image_id"].isin(carried)
+    points = annotations[wanted & with_image]
     dropped = {
-        "no_dimensions": int((~has_dims).sum()),
+        "no_dimensions": int((~has_dims & ~lost).sum()),
         "no_annotations": len(with_dims) - len(kept),
         "annotations_without_image": int((~with_image).sum()),
     }
-    return kept, points, dropped
+    return kept, points, dropped, carried
 
 
 def _source_names(image_list: pd.DataFrame) -> pd.DataFrame:
@@ -181,6 +200,44 @@ def _attach_sources(
     rows = rows[~missing].merge(names, on="image_id", how="left")
     rows["source_fingerprint"] = rows["source_fingerprint"].str.strip('"')
     return rows, sorted(kept["image_id"][missing].tolist())
+
+
+def _parent_ids(parent_images: pa.Table | None) -> frozenset[str]:
+    return (
+        frozenset() if parent_images is None else frozenset(parent_images["image_id"].to_pylist())
+    )
+
+
+def _split_carried(missing: list[str], held: frozenset[str]) -> tuple[list[str], list[str]]:
+    """Split the ids absent from the listing into those the parent holds and those it lacks."""
+    return [i for i in missing if i in held], [i for i in missing if i not in held]
+
+
+def _check_carried_sizes(
+    kept: pd.DataFrame, parent_images: pa.Table | None, carried: list[str]
+) -> None:
+    """Refuse a carried id whose build width and height differ from the parent row's.
+
+    Raises:
+        ValueError: At least one carried id has a different build size; the first 10 are named.
+    """
+    if parent_images is None or not carried:
+        return
+    parent = {
+        row["image_id"]: (row["width"], row["height"])
+        for row in parent_images.select(["image_id", "width", "height"]).to_pylist()
+    }
+    built = kept[kept["image_id"].astype(str).isin(carried)]
+    differing = sorted(
+        str(row["image_id"])
+        for row in built.to_dict("records")
+        if parent[str(row["image_id"])] != (row["width"], row["height"])
+    )
+    if differing:
+        raise ValueError(
+            f"{len(differing)} carried images have a build size other than the parent's: "
+            f"{differing[:10]}"
+        )
 
 
 def _image_key(source_id: int, image_id: str, media_type: str) -> str:
@@ -448,20 +505,35 @@ def _select_rows(
     prefix: str,
     workers: int,
     csv_reader: CsvReader | None,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], list[int]]:
-    """Return the kept rows with source fingerprint and name, their points, drops and unlisted."""
-    kept, points, dropped = _select_images(build)
+    parent_images: pa.Table | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], list[int], list[str]]:
+    """Return the kept rows with source fingerprint and name, their points, drops, unlisted, carried.
+
+    The carried ids are those that ``parent_images`` holds and the build or the listing lacks:
+    ``not_found`` header rows and images absent from the listing. They are in no returned row and
+    counted neither as ``no_dimensions`` nor as ``source_missing``.
+
+    Raises:
+        ValueError: A carried image's build size differs from the parent's.
+    """
+    held = _parent_ids(parent_images)
+    kept, points, dropped, lost = _select_images(build, held)
     source_ids = sorted(int(sid) for sid in kept["source_id"].unique())
     etags, names, unlisted = _gather_sources(
         client, source_bucket, prefix, source_ids, workers=workers, csv_reader=csv_reader
     )
-    rows, missing = _attach_sources(kept, etags, names)
+    rows, absent = _attach_sources(kept, etags, names)
+    listed_out, missing = _split_carried(absent, held)
+    _check_carried_sizes(kept, parent_images, listed_out)
+    carried = sorted([*lost, *listed_out])
     if missing:
         logger.warning(
             "%d source originals are missing; dropped image ids: %s", len(missing), missing
         )
     dropped[_SOURCE_MISSING] = len(missing)
-    return rows, points, dropped, unlisted
+    if parent_images is not None:
+        dropped[_CARRIED] = len(carried)
+    return rows, points, dropped, unlisted, carried
 
 
 def _with_objects(rows: pd.DataFrame, objects: pd.DataFrame) -> pd.DataFrame:
@@ -469,6 +541,15 @@ def _with_objects(rows: pd.DataFrame, objects: pd.DataFrame) -> pd.DataFrame:
     keyed = rows.drop(columns=["source_fingerprint"]).assign(_id=rows["image_id"].astype(str))
     found = objects.drop(columns=["image_id"]).assign(_id=objects["image_id"].astype(str))
     return keyed.merge(found, on="_id", how="inner").drop(columns=["_id"])
+
+
+def _with_carried(images: pa.Table, parent_images: pa.Table | None, carried: list[str]) -> pa.Table:
+    """Add the parent's rows of the ``carried`` ids to ``images``, in image_id order."""
+    if parent_images is None or not carried:
+        return images
+    parent_rows = parent_images.filter(pc.is_in(parent_images["image_id"], pa.array(carried)))
+    merged = pa.concat_tables([images, parent_rows.select(images.schema.names).cast(images.schema)])
+    return merged.sort_by("image_id")
 
 
 def build_raw(
@@ -485,19 +566,26 @@ def build_raw(
     """Probe the kept originals and return the ``coralnet-raw`` tables.
 
     Checkpoint rows and ``parent_images`` rows whose image id and source fingerprint match the
-    source listing are reused without any request for that image.
+    source listing are reused without any request for that image. With a parent, an image the
+    listing lacks but the parent holds keeps the parent's row and is counted in
+    ``dropped["carried_from_parent"]``; an image the parent lacks too is ``source_missing``. An
+    image the build reads as ``not_found`` whose id the parent holds is carried the same way: the
+    parent's row, the build's points, counted in ``carried_from_parent`` and not in
+    ``no_dimensions``.
 
     Raises:
-        ValueError: A label name is not a string, or an image_list names an image twice.
+        ValueError: A label name is not a string, an image_list names an image twice, or a carried
+            image's build size differs from the parent's.
         SourceChanged: An original was replaced between its HEAD and its read.
     """
-    rows, points, dropped, unlisted = _select_rows(
+    rows, points, dropped, unlisted, carried = _select_rows(
         client,
         build,
         source_bucket=source_bucket,
         prefix=prefix,
         workers=workers,
         csv_reader=csv_reader,
+        parent_images=parent_images,
     )
     done = _read_checkpoint(checkpoint)
     reused, pending = _split_known(rows, _known_rows(parent_images, done))
@@ -513,14 +601,15 @@ def build_raw(
     _record_drops(outcomes, dropped)
     rows = _with_objects(rows, pd.concat([reused, _kept_frame(outcomes)], ignore_index=True))
     dropped["source_name_missing"] = _count_unnamed(rows, unlisted)
-    point_table, counts = _points_and_counts(points[points["image_id"].isin(rows["image_id"])])
+    point_ids = [*rows["image_id"].astype(str), *carried]
+    point_table, counts = _points_and_counts(points[points["image_id"].astype(str).isin(point_ids)])
     tables = {
-        "images.parquet": _images_table(rows),
+        "images.parquet": _with_carried(_images_table(rows), parent_images, carried),
         "points.parquet": point_table,
         "labels.parquet": labels_table(build.id2name),
         "stats/label_counts.parquet": counts,
     }
-    return RawTables(tables=tables, dropped=dropped)
+    return RawTables(tables=tables, dropped=dropped, carried=frozenset(carried))
 
 
 def _build_key(build_run: str, kind: str, suffix: str) -> str:
@@ -578,10 +667,13 @@ def _source_key(row: Mapping[str, Any]) -> str:
     return source_key
 
 
-def _copies(images: pa.Table, source_bucket: str) -> list[dict[str, Any]]:
-    """Plan each image's server-side copy from the scrape bucket."""
+def _copies(images: pa.Table, source_bucket: str, carried: frozenset[str]) -> list[dict[str, Any]]:
+    """Plan each image's server-side copy from the scrape bucket; a carried image needs none."""
     return copy_plan(
-        images.to_pylist(), src_bucket=source_bucket, src_key=_source_key, dst_prefix=IMAGE_PREFIX
+        [row for row in images.to_pylist() if row["image_id"] not in carried],
+        src_bucket=source_bucket,
+        src_key=_source_key,
+        dst_prefix=IMAGE_PREFIX,
     )
 
 
@@ -655,7 +747,7 @@ def run_raw(args: argparse.Namespace) -> int:
         repo_dir=repo_root,
         git=git,
     )
-    plan = _copies(result.tables["images.parquet"], source_bucket)
+    plan = _copies(result.tables["images.parquet"], source_bucket, result.carried)
     write_copies(args.stage_dir, DATASET, version, plan)
     logger.info(
         "staged %s %s: %d images, %d copies; dropped %s",

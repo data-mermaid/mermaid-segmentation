@@ -188,7 +188,9 @@ The version holds:
 
 An image is kept when it has dimensions in the images parquet, has at least one annotation, has its original on S3, and is a JPEG or PNG. The media type is JPEG when `header_status` is `ok`; otherwise the command reads the first 8 bytes of the original.
 
-The command probes every kept original with a HEAD. It also reads an original in full when it is multipart or has no CRC64NVME checksum, which covers most scraper uploads, and computes the ETag, size and CRC64NVME its copy will carry. No image is copied. `copies.jsonl`, staged beside the tables, plans one server-side copy for each image. With a parent pin, an image whose `image_id` and source ETag match a parent row keeps the parent's key and object fields, and is not probed. The new version lists the parent in `parents`.
+The command probes every kept original with a HEAD. It also reads an original in full when it is multipart or has no CRC64NVME checksum, which covers most scraper uploads, and computes the ETag, size and CRC64NVME its copy will carry. No image is copied. `copies.jsonl`, staged beside the tables, plans one server-side copy for each image except a carried one. With a parent pin, an image whose `image_id` and source ETag match a parent row keeps the parent's key and object fields, and is not probed. The new version lists the parent in `parents`.
+
+With a parent pin, an image the build keeps whose scrape original is gone is carried. The original is gone when the image is absent from the scrape listing, or when its `header_status` is `not_found`. It is carried when the parent holds its `image_id`. The parent's `images.parquet` row is reused unchanged, its points come from the build, and no copy is planned: the object is already published. Without a parent pin, or when the parent lacks the `image_id`, the image is dropped as `source_missing` or `no_dimensions`. A carried image whose build width and height differ from the parent's is refused with a `ValueError` that names the image ids. Because a carried image needs no original, the scrape originals of already-published images can be deleted from the scrape bucket without breaking a later raw build.
 
 Run a full corpus on an EC2 host in `us-east-1`. The full reads dominate the run time and the transfer.
 
@@ -196,10 +198,11 @@ Run a full corpus on an EC2 host in `us-east-1`. The full reads dominate the run
 
 | Key | Unit | Counts |
 |---|---|---|
-| `no_dimensions` | images | Images whose `header_status` carries no dimensions. |
+| `no_dimensions` | images | Images whose `header_status` carries no dimensions, except carried images. |
 | `no_annotations` | images | Images with dimensions and no annotation. |
 | `annotations_without_image` | annotation rows | Annotations whose image is not in the images parquet. |
-| `source_missing` | images | Kept images whose original is not in the source's `images/` folder. |
+| `source_missing` | images | Kept images whose original is not in the source's `images/` folder and that the parent does not hold. |
+| `carried_from_parent` | images | Images kept from the parent's row with no original. Present whenever a parent pin is given. |
 | `unsupported_format` | images | Originals that are neither JPEG nor PNG. |
 | `source_name_missing` | images | Published images with a null `source_name`. These images stay in the version. |
 
@@ -385,15 +388,16 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset <data
 
 `promote` also takes `--workers` (default 16) and `-v`, `--verbose`.
 
-A staged version has one of two shapes:
+A staged version has one of three shapes:
 
-- A version with `copies.jsonl`, `uploads.jsonl` or both. `copies.jsonl` plans server-side copies of images from S3; `uploads.jsonl` plans uploads of staged files. `promote` writes every image and mask in the `INTELLIGENT_TIERING` storage class; tables and the manifest keep the bucket default.
-- A tables-only version, with neither file. It reuses images that are already published. `promote` publishes it only when a published parent has the same image store.
+- A version with `copies.jsonl`, `uploads.jsonl` or both, whose plans name every key in `images.parquet`. `copies.jsonl` plans server-side copies of images from S3; `uploads.jsonl` plans uploads of staged files. `promote` writes every image and mask in the `INTELLIGENT_TIERING` storage class; tables and the manifest keep the bucket default.
+- A version whose plans leave some keys unnamed. An unnamed key is carried: its image is already published. `promote` accepts carried keys only when the version has a parent on the same image store.
+- A tables-only version, with neither file. Every key is carried.
 
 `promote` writes in this order:
 
-1. Preflight, before any write. It checks the staged tables against `manifest.json`, and refuses a manifest whose `stats.n_images` is 0. It checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name exactly the image and mask keys in `images.parquet`, each once, with the same size and checksums, and checks each staged upload file. For a tables-only version, it checks that a published parent has the same image store, then HEADs every image and mask key in `images.parquet` in the bucket: each must exist with the row's ETag, size and CRC64NVME. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
-2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`. A tables-only version writes none.
+1. Preflight, before any write. It checks the staged tables against `manifest.json`, and refuses a manifest whose `stats.n_images` is 0. It checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name each image and mask key in `images.parquet` at most once and no other key, with the same size and checksums, and checks each staged upload file. Every key that no plan names is carried. For a version with carried keys, it checks that a published parent has the same image store, then HEADs each carried key in the dataset bucket: each must exist with the row's ETag, size and CRC64NVME. It refuses a version whose `manifest.json` is already in the bucket. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes.
+2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`. A tables-only version writes none, and a carried key is never written.
 3. The tables.
 4. `manifest.json`.
 
