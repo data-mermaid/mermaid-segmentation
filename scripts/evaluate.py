@@ -14,6 +14,9 @@ Every dataset is read from the versions ``--data-config`` pins, in the synced ``
 The CoralNet groups scored are the ``--split`` groups of the data config's CoralNet split file
 (``configs/splits/coralnet.csv``); Pacific is the data config's val block.
 
+``summary.json`` records ``coralnet_split_in_training`` and ``coralscapes_split_in_training``
+when the data config's train block also selects the scored groups; a warning is logged.
+
 ``--evals`` selects a subset (default: all five). The probes are fitted on the train
 probe points and scored on ``--split`` (default ``val``). ``--split train`` scores the
 CoralNet train sources and allows only ``coralnet`` and ``val_loss``; the loss is then
@@ -54,6 +57,7 @@ import yaml
 
 from mermaidseg.data.config import DataSection, entry_split_groups
 from mermaidseg.data.factory import load_benthic_hierarchy, open_dataset_version
+from mermaidseg.evaluation.coralscapes_probe import _SPLIT_GROUPS
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.reporting import fmt, write_json
 from mermaidseg.inference.bundle import MODEL_JSON, ModelBundle, load_bundle
@@ -97,6 +101,15 @@ def trained_on_scored_groups(section: DataSection, scored: list[str]) -> list[st
         return []
     train = entry_split_groups(entry, "train", REPO_ROOT)
     return sorted(scored if train is None else set(scored) & train)
+
+
+def coralscapes_trained_on_scored(section: DataSection, split: str) -> bool:
+    """Whether the data config's coralscapes_v2 ``train`` block selects the group the probes score."""
+    entry = section.datasets[CORALSCAPES]
+    if entry.train is None:
+        return False
+    train = entry_split_groups(entry, "train", REPO_ROOT)
+    return train is None or _SPLIT_GROUPS[split] in train
 
 
 def check_split_evals(split: str, evals: list[str]) -> None:
@@ -445,6 +458,16 @@ def main(argv: list[str] | None = None) -> None:
             logger.exception("Evaluation %s failed: %s", keys, e)
             summary.update({key: {"error": f"{type(e).__name__}: {e}"} for key in keys})
         _write_summary(output_dir, summary)
+
+    if "coralscapes" in evals or "coralscapes39" in evals:
+        in_training = coralscapes_trained_on_scored(section, split)
+        summary["coralscapes_split_in_training"] = in_training
+        if in_training:
+            logger.warning(
+                "The data config trains on CoralscapesV2 groups scored as --split %s: %s",
+                split,
+                _SPLIT_GROUPS[split],
+            )
 
     if "coralnet" in evals:
         from mermaidseg.evaluation.coralnet_eval import coralnet_reader, evaluate_coralnet

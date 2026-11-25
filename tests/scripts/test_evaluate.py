@@ -177,6 +177,27 @@ def test_no_training_overlap_when_the_coralnet_entry_has_no_train_block(cache):
     assert evaluate_script.trained_on_scored_groups(section, ["s1", "s2"]) == []
 
 
+def _with_coralscapes_train(cache: EvalCache, train: dict[str, Any] | None) -> dict[str, Any]:
+    """The cache's data config with the coralscapes_v2 train block set, or removed for None."""
+    entry = {k: v for k, v in cache.data["datasets"]["coralscapes_v2"].items() if k != "train"}
+    if train is not None:
+        entry["train"] = train
+    return {**cache.data, "datasets": {**cache.data["datasets"], "coralscapes_v2": entry}}
+
+
+@pytest.mark.parametrize("split", ["val", "test"])
+def test_coralscapes_trained_on_scored_when_the_train_block_selects_every_group(cache, split):
+    section = evaluate_script.DataSection.model_validate(
+        _with_coralscapes_train(cache, {"groups": "all"})
+    )
+    assert evaluate_script.coralscapes_trained_on_scored(section, split) is True
+
+
+def test_coralscapes_not_trained_on_scored_when_the_entry_has_no_train_block(cache):
+    section = evaluate_script.DataSection.model_validate(_with_coralscapes_train(cache, None))
+    assert evaluate_script.coralscapes_trained_on_scored(section, "val") is False
+
+
 def test_train_split_allows_only_coralnet_and_loss():
     check = evaluate_script.check_split_evals
     check("train", ["coralnet", "val_loss"])
@@ -865,3 +886,43 @@ def test_default_coralscapes39_probe_file_loads():
     probes = load_legacy_probes([path])
 
     assert 50 in probes
+
+
+def _write_config(tmp_path: Path, data: dict[str, Any]) -> Path:
+    path = tmp_path / "coralscapes_train_config.yaml"
+    path.write_text(yaml.safe_dump({"data": data}))
+    return path
+
+
+def test_main_warns_and_records_when_the_scored_coralscapes_split_is_trained_on(
+    calls, bundle_dir, tmp_path, cache, caplog
+):
+    config = _write_config(
+        tmp_path, _with_coralscapes_train(cache, {"groups": ["train", "validation"]})
+    )
+    with caplog.at_level("WARNING", logger="evaluate"):
+        summary = _main(
+            bundle_dir, tmp_path, cache, config, "--evals", "coralscapes", "--split", "val"
+        )
+
+    assert summary["coralscapes_split_in_training"] is True
+    assert any(
+        "trains on" in r.getMessage() and "validation" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_main_records_no_coralscapes_overlap_for_a_split_the_config_does_not_train_on(
+    calls, bundle_dir, tmp_path, cache, caplog
+):
+    config = _write_config(
+        tmp_path, _with_coralscapes_train(cache, {"groups": ["train", "validation"]})
+    )
+    with caplog.at_level("WARNING", logger="evaluate"):
+        summary = _main(
+            bundle_dir, tmp_path, cache, config, "--evals", "coralscapes39", "--split", "test"
+        )
+
+    assert summary["coralscapes_split_in_training"] is False
+    assert not [
+        r for r in caplog.records if r.levelname == "WARNING" and "trains on" in r.getMessage()
+    ]
