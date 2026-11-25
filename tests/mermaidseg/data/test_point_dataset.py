@@ -268,6 +268,20 @@ def test_set_source_vocabulary_repaints_points_with_the_new_ids(tmp_path: Path) 
                 [0, 0, 0, 0, 0, 0],
             ],
         ),
+        # Padding 2 at the far corner clips at the bottom and right edges.
+        (
+            [(5, 5, 1)],
+            2,
+            0,
+            [
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 1, 1],
+                [0, 0, 0, 1, 1, 1],
+                [0, 0, 0, 1, 1, 1],
+            ],
+        ),
     ],
     ids=[
         "no-padding",
@@ -277,6 +291,7 @@ def test_set_source_vocabulary_repaints_points_with_the_new_ids(tmp_path: Path) 
         "overlap-single-pixel",
         "overlap-padded",
         "padding-1-offset",
+        "far-edge-clip",
     ],
 )
 def test_rasterize_points_paints_literal_mask(
@@ -291,3 +306,12 @@ def test_rasterize_points_paints_literal_mask(
 
     assert mask.dtype == np.int32
     assert mask.tolist() == expected
+
+
+def test_rasterize_points_returns_zeros_for_no_points() -> None:
+    empty = np.array([], dtype=np.int64)
+
+    mask = rasterize_points(empty, empty, empty, (6, 6), 2, 0)
+
+    assert mask.dtype == np.int32
+    assert mask.tolist() == [[0] * 6] * 6
