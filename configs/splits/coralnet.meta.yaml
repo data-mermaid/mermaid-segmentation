@@ -38,8 +38,17 @@ builder:
     restarts: 8
     seed: 0
 
-# Set once the leakage check has run against a published coralnet dataset version.
-checked_against: null
+# The leakage check (`segdata split leakage`) run against a published coralnet version.
+checked_against:
+  dataset: coralnet
+  version: 20261124-cfc389d
+  manifest_sha256: a9de45e16219340929e1fdfb908759cd560407bcff7fb636b8ddd812b269e8a4
+  result:
+    val_images_in_train: 0      # of 44,331
+    test_images_in_train: 0     # of 49,150
+    test_images_in_val: 0       # of 49,150
+    cross_split_group_pairs: 0
+    split_groups_spanning_splits: 0
 
 overrides:
   # Hand edits made after the builder ran: sources moved into train.
