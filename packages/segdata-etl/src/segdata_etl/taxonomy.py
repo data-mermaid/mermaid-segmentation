@@ -20,20 +20,21 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
-from botocore.exceptions import ClientError
 
-from segdata_etl.common.stage import LocalDirS3, next_free_version, refuse_unpublishable
+from segdata_etl.common.stage import LocalDirS3, next_free_version
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import MANIFEST_NAME, is_not_found, taxonomy_prefix
-from segdata_spec.errors import PublishRefused
-from segdata_spec.manifest import Pin, SourceInfo, TaxonomyManifest, manifest_sha256
-from segdata_spec.publish import GitState, probe_git, publish_taxonomy
+from segdata_spec.errors import ManifestNotFound, PinMismatch, PublishRefused
+from segdata_spec.git import GitState, probe_git, refuse_unpublishable
+from segdata_spec.layout import taxonomy_prefix
+from segdata_spec.manifest import Pin, SourceInfo, TaxonomyManifest
+from segdata_spec.publish import publish_taxonomy
 from segdata_spec.schema import (
     BENTHIC_ATTRIBUTES_SCHEMA,
     GROWTH_FORMS_SCHEMA,
     TAXONOMY_TABLES,
     conform,
 )
+from segdata_spec.sync import check_published_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -125,18 +126,17 @@ def require_published_taxonomy(client: Any, bucket: str, pin: Pin) -> None:
     Raises:
         PublishRefused: The manifest is absent from ``bucket`` or does not match the pin.
     """
-    key = taxonomy_prefix(pin.name, pin.version) + MANIFEST_NAME
     try:
-        body: bytes = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-    except ClientError as exc:
-        if is_not_found(exc):
-            raise PublishRefused(
-                f"taxonomy {pin.name} {pin.version} is not published in {bucket}; "
-                "publish it before staging a dataset"
-            ) from exc
-        raise
-    if manifest_sha256(body) != pin.manifest_sha256:
-        raise PublishRefused(f"taxonomy manifest s3://{bucket}/{key} does not match its pin")
+        check_published_manifest(client, bucket, pin, taxonomy=True)
+    except ManifestNotFound as exc:
+        raise PublishRefused(
+            f"taxonomy {pin.name} {pin.version} is not published in {bucket}; "
+            "publish it before staging a dataset"
+        ) from exc
+    except PinMismatch as exc:
+        raise PublishRefused(
+            f"taxonomy manifest in {bucket} does not match its pin: {exc}"
+        ) from exc
 
 
 def find_repo_root(start: Path) -> Path:
@@ -241,7 +241,7 @@ def run_taxonomy(
     _check_mode(args)
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     git = probe_git(repo_root)
-    refuse_unpublishable(git)
+    refuse_unpublishable(git, repo_root)
     staging = args.tables_from is None
     if staging:
         tables, source = _fetch_source(session or requests.Session(), args.base_url)

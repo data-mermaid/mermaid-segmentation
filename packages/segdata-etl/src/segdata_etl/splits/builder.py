@@ -44,8 +44,8 @@ from segdata_etl.splits.inputs import (
     require_crc64nvme,
     sync_tables,
 )
+from segdata_spec.git import GitState, probe_git
 from segdata_spec.manifest import Manifest, Pin
-from segdata_spec.publish import GitState, probe_git
 from segdata_spec.read import open_taxonomy
 from segdata_spec.splits import read_split_file
 from segdata_spec.taxonomy import hierarchy_from_table

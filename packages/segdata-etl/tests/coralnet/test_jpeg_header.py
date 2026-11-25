@@ -61,6 +61,21 @@ def test_read_jpeg_size_from_s3_not_found(fake_s3):
     assert status == "not_found"
 
 
+@pytest.mark.parametrize(("code", "status"), [("NotFound", 404), ("", 404)])
+def test_read_jpeg_size_from_s3_maps_other_missing_key_errors_to_not_found(code, status):
+    class Missing:
+        def get_object(self, **_):
+            raise ClientError(
+                {
+                    "Error": {"Code": code, "Message": code},
+                    "ResponseMetadata": {"HTTPStatusCode": status},
+                },
+                "GetObject",
+            )
+
+    assert read_jpeg_size_from_s3(Missing(), "b", "k") == (None, None, None, "not_found")
+
+
 def test_read_jpeg_size_from_s3_corrupt(fake_s3, jpeg_corrupt_bytes):
     fake_s3.put("b", "corrupt.jpg", jpeg_corrupt_bytes)
     result = read_jpeg_size_from_s3(fake_s3, "b", "corrupt.jpg")

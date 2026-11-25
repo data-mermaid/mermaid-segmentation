@@ -27,16 +27,17 @@ from PIL import Image
 from segdata_etl.common.copy_plan import StagedFile, stage_bytes, write_uploads
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
-    crc64nvme_b64,
     image_size,
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
+from segdata_etl.common.stage import LocalDirS3, next_version
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.git import probe_git, refuse_unpublishable
 from segdata_spec.manifest import ImageStore, LabelMapping, SourceInfo
-from segdata_spec.publish import probe_git, publish_dataset
+from segdata_spec.publish import publish_dataset
+from segdata_spec.s3 import crc64nvme_b64
 from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -336,7 +337,7 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         PublishRefused: The git tree is dirty or unpushed.
     """
     git = probe_git(REPO_ROOT)
-    refuse_unpublishable(git)
+    refuse_unpublishable(git, REPO_ROOT)
     shards = _shards_or_raise(_list_repo_files(source.repo, args.revision), source)
     vocab_path = hf_hub_download(
         source.repo, source.vocab_file, repo_type="dataset", revision=args.revision

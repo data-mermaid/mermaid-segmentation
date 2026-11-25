@@ -20,7 +20,8 @@ from PIL import Image
 
 from mermaidseg.data.config import DATASET_BUCKET
 from segdata_spec._marker import SyncMarker, dump_marker
-from segdata_spec._s3 import resize_id, synced_marker_dir
+from segdata_spec.git import GitState
+from segdata_spec.layout import resize_id, synced_marker_dir
 from segdata_spec.manifest import (
     EtlInfo,
     FileEntry,
@@ -32,7 +33,7 @@ from segdata_spec.manifest import (
     dump_manifest,
     manifest_sha256,
 )
-from segdata_spec.publish import GitState, publish_taxonomy
+from segdata_spec.publish import publish_taxonomy
 from segdata_spec.read import DatasetVersion, open_version
 from segdata_spec.resize import ResizeSpec
 from segdata_spec.schema import (

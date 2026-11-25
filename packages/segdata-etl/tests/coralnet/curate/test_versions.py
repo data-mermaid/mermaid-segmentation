@@ -22,8 +22,9 @@ from segdata_etl.datasets.coralnet.curate import versions
 from segdata_etl.label_maps import coralnet_api
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
+from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
-from segdata_spec.publish import GitState, publish_dataset, publish_taxonomy
+from segdata_spec.publish import publish_dataset, publish_taxonomy
 from segdata_spec.schema import IMAGES_SCHEMA, POINTS_SCHEMA
 
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
@@ -80,6 +81,9 @@ class FakeApiSession:
 
 class NoS3:
     """An S3 client that fails the test on any call."""
+
+    def __init__(self, **_kw: Any) -> None:
+        pass
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"S3 {name} called")
@@ -271,7 +275,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         git=CLEAN_GIT,
     )
     s3.calls.clear()
-    monkeypatch.setattr(cli, "make_s3_client", lambda: s3)
+    monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: s3)
     return World(
         s3=s3,
         stage=tmp_path / "stage",

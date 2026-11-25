@@ -10,14 +10,12 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-import boto3
-from botocore.config import Config
-
 from segdata_spec import DATASET_BUCKET
 
 from . import promote as promote_module
 from . import taxonomy
-from .common.cli_flags import _pin_flags
+from .common.cli_flags import pin_flags
+from .common.s3_objects import make_s3_client
 from .common.stage import DEFAULT_CACHE_DIR
 from .datasets import benthos_yuval as benthos_yuval_build
 from .datasets import catlin_seaview as catlin_seaview_build
@@ -39,8 +37,6 @@ DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
 DEFAULT_WORKERS = 16
 WORKDIR_ROOT = Path("outputs") / "external-datasets"
 
-_BOTO_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
-
 # Each dataset module exports ``add_arguments(parser, *, workdir)`` and ``run(args, client) -> int``; its
 # module name is the subcommand. Adding a dataset is one entry here.
 DATASET_MODULES: tuple[ModuleType, ...] = (
@@ -60,9 +56,9 @@ def default_workdir(dataset: str) -> Path:
     return WORKDIR_ROOT / dataset
 
 
-def make_s3_client() -> Any:
-    """Build a boto3 S3 client with adaptive retries for long-running jobs."""
-    return boto3.client("s3", config=_BOTO_CONFIG)
+def _client_for(args: argparse.Namespace) -> Any:
+    """Build the S3 client, pooled for ``--workers`` threads when the subcommand has the flag."""
+    return make_s3_client(workers=getattr(args, "workers", None))
 
 
 def _shared_parser(dataset: str) -> argparse.ArgumentParser:
@@ -96,9 +92,9 @@ def _split_cache_flags(parser: argparse.ArgumentParser) -> None:
 
 
 def _split_build_flags(parser: argparse.ArgumentParser) -> None:
-    _pin_flags(parser, "", "the curated coralnet dataset")
-    _pin_flags(parser, "raw-", "the coralnet-raw parent")
-    _pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
+    pin_flags(parser, "", "the curated coralnet dataset")
+    pin_flags(parser, "raw-", "the coralnet-raw parent")
+    pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
     _split_cache_flags(parser)
     inputs = {
         "--near-dup-labels": "Near-duplicate pair labels CSV; dup / unsure pairs link sources",
@@ -139,13 +135,13 @@ def _add_split_subcommands(top: Any) -> None:
     split_sub = split.add_subparsers(dest="command", required=True)
     build = split_sub.add_parser("build", help="Build a CoralNet split into --out-dir")
     _split_build_flags(build)
-    build.set_defaults(func=lambda args: split_builder.run(args, make_s3_client()))
+    build.set_defaults(func=lambda args: split_builder.run(args, _client_for(args)))
     leakage = split_sub.add_parser("leakage", help="Check a split file for cross-split images")
     leakage.add_argument("--split-file", type=Path, required=True)
-    _pin_flags(leakage, "", "the coralnet dataset")
+    pin_flags(leakage, "", "the coralnet dataset")
     _split_cache_flags(leakage)
     leakage.add_argument("--out-dir", type=Path, default=None, help="Write the report CSVs here")
-    leakage.set_defaults(func=lambda args: split_leakage.run(args, make_s3_client()))
+    leakage.set_defaults(func=lambda args: split_leakage.run(args, _client_for(args)))
 
 
 # Each external builder module exports ``add_arguments``, ``run(args, client)`` and ``DATASET``.
@@ -169,7 +165,7 @@ _EXTERNAL_BUILDS: tuple[tuple[ModuleType, str], ...] = (
 def _add_external_build(build_sub: Any, module: ModuleType, help_text: str) -> None:
     parser = build_sub.add_parser(module.DATASET, help=help_text, parents=[_uniform_parser()])
     module.add_arguments(parser, workdir=default_workdir(module.DATASET))
-    parser.set_defaults(func=lambda args: module.run(args, make_s3_client()))
+    parser.set_defaults(func=lambda args: module.run(args, _client_for(args)))
 
 
 def _add_external_builds(build_sub: Any) -> None:
@@ -182,22 +178,22 @@ def _add_taxonomy_subcommand(top: Any) -> None:
     taxonomy.add_arguments(parser)
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.set_defaults(
-        func=lambda args: taxonomy.run_taxonomy(args, source_client=make_s3_client())
+        func=lambda args: taxonomy.run_taxonomy(args, source_client=_client_for(args))
     )
 
 
 def _run_curate(args: argparse.Namespace) -> int:
     from .datasets.coralnet.curate import versions
 
-    return versions.run(args, source_client=make_s3_client())
+    return versions.run(args, source_client=_client_for(args))
 
 
 def _add_curate_subcommand(top: Any) -> None:
     curate = top.add_parser("curate", help="Stage a curated dataset version from its parents")
     curate_sub = curate.add_subparsers(dest="dataset", required=True)
     parser = curate_sub.add_parser("coralnet", help="Stage a curated coralnet version")
-    _pin_flags(parser, "raw-", "the coralnet-raw parent")
-    _pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
+    pin_flags(parser, "raw-", "the coralnet-raw parent")
+    pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
     parser.add_argument(
         "--stage-dir", type=Path, required=True, help="Local directory the version is staged in"
     )
@@ -277,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    return int(args.run(args, make_s3_client()))
+    return int(args.run(args, _client_for(args)))
 
 
 if __name__ == "__main__":

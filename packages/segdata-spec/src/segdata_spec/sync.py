@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import io
 import json
@@ -16,7 +15,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
-import awscrt.checksums
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -24,18 +22,6 @@ from botocore.exceptions import ClientError
 from PIL import Image, UnidentifiedImageError
 
 from segdata_spec._marker import SyncMarker, dump_marker, new_marker_path
-from segdata_spec._s3 import (
-    MANIFEST_NAME,
-    cache_path,
-    dataset_prefix,
-    is_not_found,
-    is_precondition_failed,
-    resize_id,
-    resized_cache_path,
-    resized_index_path,
-    synced_marker_dir,
-    taxonomy_prefix,
-)
 from segdata_spec.errors import (
     ChecksumMismatch,
     ImageChanged,
@@ -45,6 +31,16 @@ from segdata_spec.errors import (
     PinMismatch,
     SegdataError,
 )
+from segdata_spec.layout import (
+    MANIFEST_NAME,
+    cache_path,
+    dataset_prefix,
+    resize_id,
+    resized_cache_path,
+    resized_index_path,
+    synced_marker_dir,
+    taxonomy_prefix,
+)
 from segdata_spec.manifest import (
     FileEntry,
     ImageStore,
@@ -53,6 +49,13 @@ from segdata_spec.manifest import (
     TaxonomyManifest,
 )
 from segdata_spec.resize import ResizeSpec, resize_image, resize_mask, scaled_size
+from segdata_spec.s3 import (
+    crc64nvme_b64,
+    get_bytes,
+    is_not_found,
+    is_precondition_failed,
+    norm_etag,
+)
 
 MissingMode = Literal["fail", "drop"]
 
@@ -134,7 +137,7 @@ def _fetch_file(
         if _sha256(data) != expected_sha256:
             raise error(f"cached file {path} does not match its expected sha256")
         return data
-    data = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    data = get_bytes(client, bucket, key)
     if _sha256(data) != expected_sha256:
         raise error(f"s3://{bucket}/{key} does not match its expected sha256")
     _write_atomic(path, data)
@@ -150,11 +153,6 @@ def _fetch_tables(
     }
 
 
-def _crc64nvme_b64(data: bytes) -> str:
-    """Return the CRC64NVME in S3's ``ChecksumCRC64NVME`` form: base64 of the big-endian CRC."""
-    return base64.b64encode(awscrt.checksums.crc64nvme(data).to_bytes(8, "big")).decode()
-
-
 def _object_problem(data: bytes, etag: str, size: int, crc64nvme: str | None) -> str | None:
     """Describe how ``data`` disagrees with the recorded size, ETag and CRC64NVME, or return None.
 
@@ -163,11 +161,11 @@ def _object_problem(data: bytes, etag: str, size: int, crc64nvme: str | None) ->
     """
     if len(data) != size:
         return f"size {len(data)} differs from the recorded {size}"
-    bare = etag.strip('"')
+    bare = norm_etag(etag)
     if "-" not in bare and hashlib.md5(data, usedforsecurity=False).hexdigest() != bare:
         return f"MD5 differs from the recorded ETag {bare}"
     if crc64nvme is not None:
-        computed = _crc64nvme_b64(data)
+        computed = crc64nvme_b64(data)
         if computed != crc64nvme:
             return f"CRC64NVME {computed} differs from the recorded {crc64nvme}"
     return None
@@ -478,7 +476,7 @@ def check_published_manifest(client: Any, bucket: str, pin: Pin, *, taxonomy: bo
     prefix = taxonomy_prefix if taxonomy else dataset_prefix
     key = prefix(pin.name, pin.version) + MANIFEST_NAME
     try:
-        data = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        data = get_bytes(client, bucket, key)
     except ClientError as exc:
         if not is_not_found(exc):
             raise

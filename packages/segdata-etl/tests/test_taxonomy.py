@@ -16,8 +16,9 @@ from s3_fake import FakeS3
 
 from segdata_etl import taxonomy
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.errors import PublishRefused
+from segdata_spec.git import GitState
 from segdata_spec.manifest import Pin
-from segdata_spec.publish import GitState, PublishRefused
 from segdata_spec.read import open_taxonomy
 
 BASE = "https://api.test/v1"

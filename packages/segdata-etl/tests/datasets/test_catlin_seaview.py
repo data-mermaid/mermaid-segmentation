@@ -14,7 +14,7 @@ from s3_fake import FakeS3
 from segdata_etl.datasets import catlin_seaview
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
-from segdata_spec.publish import GitState
+from segdata_spec.git import GitState
 
 from .conftest import (
     CLEAN_GIT,

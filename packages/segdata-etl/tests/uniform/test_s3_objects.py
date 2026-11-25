@@ -8,6 +8,7 @@ from segdata_etl.common.s3_objects import (
     SourceChanged,
     copy_new,
     image_size,
+    make_s3_client,
     put_new,
     sniff_media_type,
 )
@@ -204,3 +205,11 @@ def test_put_new_different_existing_bytes_conflicts(fake_s3):
     with pytest.raises(ObjectConflict):
         put_new(fake_s3, bucket=DST, key="k.json", body=b"{}", content_type="application/json")
     assert fake_s3.objects[(DST, "k.json")] == b"[]"
+
+
+def test_make_s3_client_sizes_the_pool_for_the_workers_plus_headroom():
+    assert make_s3_client(workers=64).meta.config.max_pool_connections == 68
+
+
+def test_make_s3_client_without_workers_keeps_the_default_pool():
+    assert make_s3_client().meta.config.max_pool_connections == 10

@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from botocore.exceptions import ClientError
 from PIL import Image
 
 from segdata_etl import cli
@@ -31,16 +30,18 @@ def _env(monkeypatch):
 
 def _patch_to_fake_s3(monkeypatch, fake_s3):
     """Point every S3 client and CSV reader factory at the in-memory FakeS3."""
-    monkeypatch.setattr(build, "make_s3_client", lambda: fake_s3)
+    monkeypatch.setattr(build, "make_s3_client", lambda *_a, **_kw: fake_s3)
     monkeypatch.setattr(
         "segdata_etl.datasets.coralnet.annotations.make_ibis_connection", lambda: object()
     )
     monkeypatch.setattr(
         "segdata_etl.datasets.coralnet.annotations.make_csv_reader_ibis",
-        lambda _con: make_csv_reader_s3(fake_s3),
+        lambda _con, _client: make_csv_reader_s3(fake_s3),
     )
     monkeypatch.setattr("segdata_etl.datasets.coralnet.images._get_thread_client", lambda: fake_s3)
-    monkeypatch.setattr("segdata_etl.datasets.coralnet.annotations.make_s3_client", lambda: fake_s3)
+    monkeypatch.setattr(
+        "segdata_etl.datasets.coralnet.annotations.make_s3_client", lambda *_a, **_kw: fake_s3
+    )
 
 
 def _real_jpeg(width: int, height: int) -> bytes:
@@ -359,27 +360,6 @@ def test_cli_all_with_an_excluded_source_writes_every_output(
     }
     img_df = pd.read_parquet(out_dir / "coralnet_images_v1.parquet")
     assert img_df["source_id"].unique().tolist() == [1]
-
-
-class _HeadObjectRaises:
-    def __init__(self, code: str):
-        self._code = code
-
-    def head_object(self, *, Bucket, Key):
-        raise ClientError({"Error": {"Code": self._code, "Message": self._code}}, "HeadObject")
-
-
-@pytest.mark.parametrize("code", ["NoSuchKey", "NotFound"])
-def test_s3_object_exists_is_false_for_a_missing_key_code(code):
-    assert build._s3_object_exists(_HeadObjectRaises(code), "b", "k") is False
-
-
-@pytest.mark.parametrize("code", ["403", "500"])
-def test_s3_object_exists_reraises_other_errors(code):
-    with pytest.raises(ClientError) as exc:
-        build._s3_object_exists(_HeadObjectRaises(code), "b", "k")
-
-    assert exc.value.response["Error"]["Code"] == code
 
 
 def test_importing_cli_does_not_load_heavy_dependencies():

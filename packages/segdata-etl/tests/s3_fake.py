@@ -13,7 +13,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from segdata_spec.sync import _crc64nvme_b64
+from segdata_spec.s3 import crc64nvme_b64
 
 
 def client_error(code: str, status: int, op: str) -> ClientError:
@@ -36,7 +36,7 @@ def quoted_etag(data: bytes, *, multipart: bool = False) -> str:
 
 def crc64nvme(data: bytes) -> str:
     """The base64 full-object CRC64NVME S3 reports for ``data``."""
-    return _crc64nvme_b64(data)
+    return crc64nvme_b64(data)
 
 
 class _Body:

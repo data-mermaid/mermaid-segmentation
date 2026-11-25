@@ -6,17 +6,18 @@ that already holds identical content counts as done; any other content is a conf
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import struct
 from dataclasses import dataclass
 from typing import Any
 
-import awscrt.checksums
+import boto3
+from botocore.client import BaseClient
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.jpeg_header import _find_sof_dimensions
-from segdata_spec._s3 import is_not_found, is_precondition_failed
+from segdata_spec.s3 import get_bytes, is_not_found, is_precondition_failed, norm_etag
 
 _JPEG_SOI = b"\xff\xd8\xff"
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -24,6 +25,8 @@ _PNG_IHDR_END = 24
 # File extension, without the dot, of each media type ``sniff_media_type`` returns.
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png"}
 _CRC_ALGORITHM = "CRC64NVME"
+_BOTO_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
+_POOL_HEADROOM = 4
 
 
 class ObjectConflict(Exception):
@@ -54,18 +57,21 @@ class PutResult:
     already_present: bool
 
 
-def crc64nvme_b64(data: bytes) -> str:
-    """Return the CRC64NVME in S3's ``ChecksumCRC64NVME`` form: base64 of the big-endian CRC."""
-    return base64.b64encode(awscrt.checksums.crc64nvme(data).to_bytes(8, "big")).decode()
+def make_s3_client(workers: int | None = None) -> BaseClient:
+    """Build a boto3 S3 client with adaptive retries for long-running jobs.
+
+    ``workers`` sizes the connection pool shared by that many worker threads, plus headroom;
+    ``None`` keeps botocore's default pool.
+    """
+    if workers is None:
+        return boto3.client("s3", config=_BOTO_CONFIG)
+    pool = Config(max_pool_connections=workers + _POOL_HEADROOM)
+    return boto3.client("s3", config=_BOTO_CONFIG.merge(pool))
 
 
 def md5_hex(data: bytes) -> str:
     """Return the MD5 hex digest, the ETag S3 gives a single-part object (unquoted)."""
     return hashlib.md5(data).hexdigest()  # noqa: S324
-
-
-def _norm_etag(etag: str) -> str:
-    return etag.strip('"')
 
 
 def sniff_media_type(head: bytes) -> str | None:
@@ -148,7 +154,7 @@ def copy_new(
         )
     result = response["CopyObjectResult"]
     etag, crc = result["ETag"], result.get("ChecksumCRC64NVME")
-    if _norm_etag(etag) != _norm_etag(expect_etag) or crc != expect_crc64nvme:
+    if norm_etag(etag) != norm_etag(expect_etag) or crc != expect_crc64nvme:
         raise ObjectConflict(
             f"s3://{dst_bucket}/{dst_key} copied with ETag {etag} and CRC64NVME {crc}"
         )
@@ -168,7 +174,7 @@ def _resolve_copy_412(
         raise SourceChanged(f"s3://{src[0]}/{src[1]} no longer matches its ETag") from exc
     etag, size = existing["ETag"], existing["ContentLength"]
     crc = existing.get("ChecksumCRC64NVME")
-    if _norm_etag(etag) != _norm_etag(expect_etag) or size != expect_size or crc != expect_crc:
+    if norm_etag(etag) != norm_etag(expect_etag) or size != expect_size or crc != expect_crc:
         raise ObjectConflict(
             f"s3://{dst[0]}/{dst[1]} exists with ETag {etag}, size {size} and CRC64NVME {crc}"
         ) from exc
@@ -214,7 +220,7 @@ def put_new(
 def _accept_identical(
     client: Any, exc: ClientError, bucket: str, key: str, body: bytes
 ) -> PutResult:
-    existing: bytes = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    existing = get_bytes(client, bucket, key)
     if existing != body:
         raise ObjectConflict(f"s3://{bucket}/{key} already exists with different bytes") from exc
     head = head_with_checksum(client, bucket, key)

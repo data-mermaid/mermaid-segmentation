@@ -18,7 +18,8 @@ from s3_fake import FakeS3, crc64nvme, quoted_etag
 from segdata_etl import cli
 from segdata_etl.datasets import mermaid
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.publish import GitState, PublishRefused
+from segdata_spec.errors import PublishRefused
+from segdata_spec.git import GitState
 from segdata_spec.schema import LABELS_SCHEMA
 
 from .conftest import jpeg_bytes, png_bytes
@@ -591,7 +592,7 @@ def test_stage_dir_is_required_and_dispatches_to_run(monkeypatch, tmp_path):
         return 7
 
     monkeypatch.setattr(mermaid, "run", fake_run)
-    monkeypatch.setattr(cli, "make_s3_client", lambda: object())
+    monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: object())
     code = cli.main(
         ["build", "mermaid", "--stage-dir", str(tmp_path), "--annotation-date-cutoff", CUTOFF]
     )

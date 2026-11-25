@@ -16,6 +16,7 @@ import pandas as pd
 from botocore.client import BaseClient
 
 from segdata_spec.manifest import SourceInfo
+from segdata_spec.s3 import get_bytes, norm_etag
 
 DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
 
@@ -43,16 +44,12 @@ class LegacyDataset:
     objects: dict[str, LegacyObject]
 
 
-def _get_bytes(client: BaseClient, bucket: str, key: str) -> bytes:
-    return client.get_object(Bucket=bucket, Key=key)["Body"].read()
-
-
 def _list_objects(client: BaseClient, bucket: str, prefix: str) -> dict[str, LegacyObject]:
     objects: dict[str, LegacyObject] = {}
     for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
         for item in page.get("Contents", []):
             rel = item["Key"].removeprefix(prefix)
-            objects[rel] = LegacyObject(rel, item["ETag"].strip('"'), int(item["Size"]))
+            objects[rel] = LegacyObject(rel, norm_etag(item["ETag"]), int(item["Size"]))
     return objects
 
 
@@ -65,16 +62,16 @@ def read_legacy(
 ) -> LegacyDataset:
     """Read the annotations, classes, manifest and object listing of a legacy dataset."""
     prefix = prefix if prefix is not None else f"external_validation_datasets/{name}/"
-    manifest_raw = _get_bytes(client, bucket, f"{prefix}manifest.json")
+    manifest_raw = get_bytes(client, bucket, f"{prefix}manifest.json")
     annotations = pd.read_parquet(
-        io.BytesIO(_get_bytes(client, bucket, f"{prefix}{name}_annotations.parquet"))
+        io.BytesIO(get_bytes(client, bucket, f"{prefix}{name}_annotations.parquet"))
     )
     return LegacyDataset(
         name=name,
         bucket=bucket,
         prefix=prefix,
         annotations=annotations,
-        classes=json.loads(_get_bytes(client, bucket, f"{prefix}classes.json")),
+        classes=json.loads(get_bytes(client, bucket, f"{prefix}classes.json")),
         manifest=json.loads(manifest_raw),
         manifest_sha256=hashlib.sha256(manifest_raw).hexdigest(),
         objects=_list_objects(client, bucket, prefix),

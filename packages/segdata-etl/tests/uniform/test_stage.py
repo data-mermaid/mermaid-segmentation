@@ -9,9 +9,8 @@ from s3_fake import FakeS3, quoted_etag
 
 from segdata_etl.common import stage
 from segdata_etl.common.s3_objects import put_new
-from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
-from segdata_spec._s3 import is_not_found, is_precondition_failed
-from segdata_spec.publish import GitState, PublishRefused
+from segdata_etl.common.stage import LocalDirS3, next_version
+from segdata_spec.s3 import is_not_found, is_precondition_failed
 
 
 def test_local_put_round_trips_to_get_and_head(tmp_path):
@@ -90,17 +89,3 @@ def test_next_version_with_a_client_still_honours_the_staged_dir(tmp_path: Path)
     kwargs = {"today": date(2026, 11, 23), "git_sha": "abc1234def5678", "client": FakeS3()}
     (tmp_path / "bkt" / "datasets" / "ds" / "20261123-abc1234").mkdir(parents=True)
     assert next_version(tmp_path, "bkt", "ds", **kwargs) == "20261123-abc1234-2"
-
-
-def test_refuse_unpublishable_refuses_a_dirty_tree():
-    with pytest.raises(PublishRefused, match="uncommitted changes to tracked files"):
-        refuse_unpublishable(GitState(sha="abc", dirty=True, pushed=True))
-
-
-def test_refuse_unpublishable_refuses_an_unpushed_head():
-    with pytest.raises(PublishRefused, match="HEAD abc is not contained in any remote branch"):
-        refuse_unpublishable(GitState(sha="abc", dirty=False, pushed=False))
-
-
-def test_refuse_unpublishable_accepts_a_clean_pushed_tree():
-    assert refuse_unpublishable(GitState(sha="abc", dirty=False, pushed=True)) is None

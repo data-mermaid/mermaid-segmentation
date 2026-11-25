@@ -16,8 +16,9 @@ import pyarrow as pa
 import pytest
 from botocore.exceptions import ClientError
 
+from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, ParentRef, Pin, SourceInfo
-from segdata_spec.publish import GitState, publish_dataset, publish_taxonomy
+from segdata_spec.publish import publish_dataset, publish_taxonomy
 
 BUCKET = "seg-bucket"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)

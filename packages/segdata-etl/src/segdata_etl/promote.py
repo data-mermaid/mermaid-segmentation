@@ -34,14 +34,14 @@ from segdata_etl.common.copy_plan import COPIES_NAME, UPLOADS_NAME
 from segdata_etl.common.s3_objects import (
     ObjectConflict,
     copy_new,
-    crc64nvme_b64,
     head_with_checksum,
     put_new,
 )
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import MANIFEST_NAME, cache_path, dataset_prefix, is_not_found
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
+from segdata_spec.layout import MANIFEST_NAME, cache_path, dataset_prefix
 from segdata_spec.manifest import Manifest, manifest_sha256
+from segdata_spec.s3 import crc64nvme_b64, exists, get_bytes, is_not_found, norm_etag
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +85,6 @@ class _Plan:
     manifest: Manifest
     manifest_bytes: bytes
     steps: tuple[_Copy | _Upload, ...]
-
-
-def _norm_etag(etag: str) -> str:
-    return etag.strip('"')
 
 
 def _read_manifest(version_dir: Path, dataset: str, version: str) -> tuple[bytes, Manifest]:
@@ -163,7 +159,7 @@ def _check_against_row(
 ) -> None:
     same = line["size"] == expect.size and line["crc64nvme"] == expect.crc64nvme
     if check_etag:
-        same = same and _norm_etag(line["etag"]) == _norm_etag(expect.etag)
+        same = same and norm_etag(line["etag"]) == norm_etag(expect.etag)
     if not same:
         raise PublishRefused(f"{where} disagrees with images.parquet")
 
@@ -232,15 +228,7 @@ def _check_key_sets(steps: Iterable[_Copy | _Upload], expected: Mapping[str, _Ex
 
 def _manifest_published(client: Any, dataset: str, version: str) -> bool:
     """Return whether the version's ``manifest.json`` exists in the dataset bucket."""
-    try:
-        client.head_object(
-            Bucket=DATASET_BUCKET, Key=dataset_prefix(dataset, version) + MANIFEST_NAME
-        )
-    except ClientError as exc:
-        if is_not_found(exc):
-            return False
-        raise
-    return True
+    return exists(client, DATASET_BUCKET, dataset_prefix(dataset, version) + MANIFEST_NAME)
 
 
 def _check_parents(client: Any, manifest: Manifest) -> list[bytes]:
@@ -249,7 +237,7 @@ def _check_parents(client: Any, manifest: Manifest) -> list[bytes]:
     for parent in manifest.parents:
         key = dataset_prefix(parent.dataset, parent.version) + MANIFEST_NAME
         try:
-            body = client.get_object(Bucket=DATASET_BUCKET, Key=key)["Body"].read()
+            body = get_bytes(client, DATASET_BUCKET, key)
         except ClientError as exc:
             if is_not_found(exc):
                 raise PublishRefused(
@@ -277,7 +265,7 @@ def _check_shared_store(manifest: Manifest, parent_bodies: Iterable[bytes]) -> N
 
 def _matches(head: Mapping[str, Any], expect: _Expected) -> bool:
     return bool(
-        _norm_etag(head["ETag"]) == _norm_etag(expect.etag)
+        norm_etag(head["ETag"]) == norm_etag(expect.etag)
         and head["ContentLength"] == expect.size
         and head.get("ChecksumCRC64NVME") == expect.crc64nvme
     )
@@ -380,7 +368,7 @@ def _run_upload(client: Any, step: _Upload) -> bool:
     )
     expect = step.expect
     if (
-        _norm_etag(result.etag) != _norm_etag(expect.etag)
+        norm_etag(result.etag) != norm_etag(expect.etag)
         or result.size != expect.size
         or result.crc64nvme != expect.crc64nvme
     ):

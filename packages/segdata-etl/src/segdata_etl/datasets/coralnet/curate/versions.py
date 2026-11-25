@@ -21,7 +21,7 @@ import pyarrow as pa
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.cli_flags import pin_command_parts, pin_values
-from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
+from segdata_etl.common.stage import LocalDirS3, next_version
 from segdata_etl.datasets.coralnet.curate.build import curate
 from segdata_etl.label_maps.coralnet_api import (
     CoralNetLabelMappings,
@@ -31,10 +31,11 @@ from segdata_etl.label_maps.coralnet_api import (
 from segdata_etl.splits.inputs import sync_tables
 from segdata_etl.taxonomy import find_repo_root, require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import is_not_found
+from segdata_spec.git import GitState, probe_git, refuse_unpublishable
 from segdata_spec.manifest import ImageStore, LabelMapping, Manifest, ParentRef, Pin, SourceInfo
-from segdata_spec.publish import GitState, probe_git, publish_dataset
+from segdata_spec.publish import publish_dataset
 from segdata_spec.read import DatasetVersion, open_taxonomy
+from segdata_spec.s3 import is_not_found
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,7 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     git = probe_git(repo_root)
-    refuse_unpublishable(git)
+    refuse_unpublishable(git, repo_root)
     with resources.as_file(PACKAGED_CONFIG) as config_dir:
         built = _curate(args, source_client, DATASET_BUCKET, config_dir)
     version = next_version(

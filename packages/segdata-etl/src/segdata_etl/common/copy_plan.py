@@ -17,13 +17,13 @@ from botocore.exceptions import ClientError
 from segdata_etl.common.s3_objects import (
     ObjectConflict,
     SourceChanged,
-    crc64nvme_b64,
     image_size,
     md5_hex,
     sniff_media_type,
 )
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import cache_path, dataset_prefix, is_precondition_failed
+from segdata_spec.layout import cache_path, dataset_prefix
+from segdata_spec.s3 import crc64nvme_b64, is_precondition_failed, norm_etag
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ def read_whole_object(
     dims = image_size(data)
     if media_type is None or dims is None:
         return None
-    facts = ObjectFacts(md5_hex(data), len(data), crc64nvme_b64(data), head["ETag"].strip('"'))
+    facts = ObjectFacts(md5_hex(data), len(data), crc64nvme_b64(data), norm_etag(head["ETag"]))
     return (media_type, dims[0], dims[1]), facts
 
 
@@ -138,9 +138,9 @@ def probe_image(
     ETag and CRC64NVME a single-part copy will have; the source ETag stays the fingerprint.
     ``build_row`` turns the object facts and header into the dataset's ``images.parquet`` row.
     """
-    source_etag = head["ETag"].strip('"')
+    source_etag = norm_etag(head["ETag"])
     parent = parent_rows.get(image_id)
-    if parent is not None and parent["source_fingerprint"] == source_etag:
+    if parent is not None and norm_etag(parent["source_fingerprint"]) == source_etag:
         return ImageOutcome(image_id, row=parent, carried=True, found_as_jpg=found_as_jpg)
     if needs_full_read(head):
         whole = read_whole_object(client, bucket, source_key, head)

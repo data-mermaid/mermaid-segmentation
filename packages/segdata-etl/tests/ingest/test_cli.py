@@ -38,7 +38,7 @@ def _tiny_moorea_tree(root: Path) -> Path:
 def test_c1_dry_run_exits_zero_and_writes_nothing(
     tmp_path, fake_s3, monkeypatch, dataset, build_tree
 ):
-    monkeypatch.setattr(cli, "make_s3_client", lambda: fake_s3)
+    monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: fake_s3)
     tree = build_tree(tmp_path / "raw")
 
     code = cli.main(["ingest", dataset, "--data-dir", str(tree), "--dry-run"])
@@ -48,7 +48,7 @@ def test_c1_dry_run_exits_zero_and_writes_nothing(
 
 
 def test_c2_second_run_without_overwrite_fails_and_keeps_parquet(tmp_path, fake_s3, monkeypatch):
-    monkeypatch.setattr(cli, "make_s3_client", lambda: fake_s3)
+    monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: fake_s3)
     tree = _tiny_tree(tmp_path / "raw")
     key = (
         cli.DEFAULT_BUCKET,

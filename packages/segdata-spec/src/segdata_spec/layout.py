@@ -1,24 +1,23 @@
-"""S3 key layout, cache paths and error classification shared by publish, sync and read."""
+"""S3 key layout and local cache paths shared by publish, sync and read."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from botocore.exceptions import ClientError
-
 if TYPE_CHECKING:
     from segdata_spec.resize import ResizeSpec
 
 MANIFEST_NAME = "manifest.json"
-_NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
 
 
 def dataset_prefix(name: str, version: str) -> str:
+    """Return the key prefix of a dataset version, ending in ``/``."""
     return f"datasets/{name}/{version}/"
 
 
 def taxonomy_prefix(name: str, version: str) -> str:
+    """Return the key prefix of a taxonomy version, ending in ``/``."""
     return f"taxonomy/{name}/{version}/"
 
 
@@ -64,20 +63,4 @@ def synced_resize_ids(cache_dir: Path, bucket: str, dataset: str, version: str) 
         child.name
         for child in root.iterdir()
         if any(synced_marker_dir(cache_dir, child.name, bucket, dataset, version).glob("*.json"))
-    )
-
-
-def is_not_found(exc: ClientError) -> bool:
-    code = str(exc.response.get("Error", {}).get("Code", ""))
-    return (
-        code in _NOT_FOUND_CODES
-        or exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404
-    )
-
-
-def is_precondition_failed(exc: ClientError) -> bool:
-    code = str(exc.response.get("Error", {}).get("Code", ""))
-    return (
-        code == "PreconditionFailed"
-        or exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412
     )

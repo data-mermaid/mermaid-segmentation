@@ -14,7 +14,8 @@ from s3_fake import FakeS3
 from segdata_etl import cli
 from segdata_etl.common import hf_dense
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.publish import GitState, PublishRefused
+from segdata_spec.errors import PublishRefused
+from segdata_spec.git import GitState
 
 from .conftest import jpeg_bytes
 from .hf_helpers import image_col, install_hub, mask_png

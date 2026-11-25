@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
-import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -16,13 +14,6 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-from segdata_spec._s3 import (
-    MANIFEST_NAME,
-    dataset_prefix,
-    is_not_found,
-    is_precondition_failed,
-    taxonomy_prefix,
-)
 from segdata_spec.errors import (
     ChecksumMismatch,
     ObjectExists,
@@ -30,6 +21,8 @@ from segdata_spec.errors import (
     PublishRefused,
     SchemaValidationError,
 )
+from segdata_spec.git import GitState, probe_git, refuse_unpublishable
+from segdata_spec.layout import MANIFEST_NAME, dataset_prefix, taxonomy_prefix
 from segdata_spec.manifest import (
     DiffFromParent,
     EtlInfo,
@@ -44,6 +37,7 @@ from segdata_spec.manifest import (
     dump_manifest,
     manifest_sha256,
 )
+from segdata_spec.s3 import exists, get_bytes, is_precondition_failed
 from segdata_spec.schema import (
     DATASET_TABLES,
     POINTS_SCHEMA,
@@ -51,54 +45,6 @@ from segdata_spec.schema import (
     conform,
     validate_dataset_tables,
 )
-
-
-@dataclass(frozen=True)
-class GitState:
-    """The state of the ETL repository at publish time."""
-
-    sha: str
-    dirty: bool
-    pushed: bool
-
-
-def _git(repo_dir: Path, *args: str) -> str:
-    result = subprocess.run(  # noqa: S603
-        ["git", "-C", str(repo_dir), *args],  # noqa: S607
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
-
-
-def probe_git(repo_dir: Path) -> GitState:
-    """Read HEAD, tracked-file dirtiness and whether a remote branch contains HEAD."""
-    sha = _git(repo_dir, "rev-parse", "HEAD")
-    dirty = bool(_git(repo_dir, "status", "--porcelain", "--untracked-files=no"))
-    pushed = bool(_git(repo_dir, "branch", "-r", "--contains", "HEAD"))
-    return GitState(sha=sha, dirty=dirty, pushed=pushed)
-
-
-def uv_lock_sha256(repo_dir: Path) -> str | None:
-    """Return the hex sha256 of ``uv.lock`` in ``repo_dir``, or None when it is absent."""
-    lock = repo_dir / "uv.lock"
-    if not lock.is_file():
-        return None
-    return hashlib.sha256(lock.read_bytes()).hexdigest()
-
-
-def _guard_git(repo_dir: Path, git: GitState | None) -> tuple[GitState, str]:
-    """Return the git state and lock hash, refusing a dirty, unpushed or lock-less tree."""
-    state = git or probe_git(repo_dir)
-    if state.dirty:
-        raise PublishRefused("working tree has uncommitted changes to tracked files")
-    if not state.pushed:
-        raise PublishRefused(f"HEAD {state.sha} is not contained in any remote branch")
-    lock = uv_lock_sha256(repo_dir)
-    if lock is None:
-        raise PublishRefused(f"no uv.lock in {repo_dir}")
-    return state, lock
 
 
 def table_bytes(table: pa.Table) -> bytes:
@@ -130,21 +76,6 @@ def _file_entries(
     }
 
 
-def _exists(client: Any, bucket: str, key: str) -> bool:
-    try:
-        client.head_object(Bucket=bucket, Key=key)
-    except ClientError as exc:
-        if is_not_found(exc):
-            return False
-        raise
-    return True
-
-
-def _get_bytes(client: Any, bucket: str, key: str) -> bytes:
-    data: bytes = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-    return data
-
-
 def _put_new(client: Any, bucket: str, key: str, data: bytes) -> None:
     """Write ``data`` once; an existing object with identical bytes counts as already written."""
     try:
@@ -152,13 +83,13 @@ def _put_new(client: Any, bucket: str, key: str, data: bytes) -> None:
     except ClientError as exc:
         if not is_precondition_failed(exc):
             raise
-        existing = _get_bytes(client, bucket, key)
+        existing = get_bytes(client, bucket, key)
         if hashlib.sha256(existing).digest() != hashlib.sha256(data).digest():
             raise ObjectExists(f"s3://{bucket}/{key} already exists") from exc
 
 
 def _refuse_if_published(client: Any, bucket: str, prefix: str) -> None:
-    if _exists(client, bucket, prefix + MANIFEST_NAME):
+    if exists(client, bucket, prefix + MANIFEST_NAME):
         raise PublishRefused(f"s3://{bucket}/{prefix}{MANIFEST_NAME} already exists")
 
 
@@ -230,7 +161,7 @@ def fetch_parent_tables(client: Any, bucket: str, parent: ParentRef) -> dict[str
         ChecksumMismatch: A fetched table's sha256 differs from its entry in the parent manifest.
     """
     prefix = dataset_prefix(parent.dataset, parent.version)
-    manifest_bytes = _get_bytes(client, bucket, prefix + MANIFEST_NAME)
+    manifest_bytes = get_bytes(client, bucket, prefix + MANIFEST_NAME)
     if manifest_sha256(manifest_bytes) != parent.manifest_sha256:
         raise PinMismatch(f"parent manifest {prefix}{MANIFEST_NAME} does not match its pin")
     manifest = Manifest.model_validate_json(manifest_bytes)
@@ -239,7 +170,7 @@ def fetch_parent_tables(client: Any, bucket: str, parent: ParentRef) -> dict[str
         entry = manifest.files.get(name)
         if entry is None:
             continue
-        data = _get_bytes(client, bucket, prefix + name)
+        data = get_bytes(client, bucket, prefix + name)
         if hashlib.sha256(data).hexdigest() != entry.sha256:
             raise ChecksumMismatch(f"{prefix}{name} does not match the parent manifest")
         tables[name] = pq.read_table(io.BytesIO(data))
@@ -275,7 +206,8 @@ def publish_dataset(
         ChecksumMismatch: A parent table differs from the parent manifest.
         ObjectExists: A table or manifest key already exists with different bytes; the manifest is then not written.
     """
-    state, lock_sha = _guard_git(repo_dir, git)
+    state = git or probe_git(repo_dir)
+    lock_sha = refuse_unpublishable(state, repo_dir)
     conformed = _conform_all(tables, DATASET_TABLES)
     validate_dataset_tables(kind, conformed)
     blobs = {name: table_bytes(table) for name, table in conformed.items()}
@@ -326,7 +258,8 @@ def publish_taxonomy(
         SchemaValidationError: A table is missing, unknown or fails its schema.
         ObjectExists: A table or manifest key already exists with different bytes; the manifest is then not written.
     """
-    state, lock_sha = _guard_git(repo_dir, git)
+    state = git or probe_git(repo_dir)
+    lock_sha = refuse_unpublishable(state, repo_dir)
     missing = sorted(set(TAXONOMY_TABLES) - set(tables))
     if missing:
         raise SchemaValidationError(f"missing taxonomy tables: {missing}")

@@ -19,8 +19,9 @@ import pytest
 from botocore.exceptions import ClientError
 from PIL import Image
 
+from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
-from segdata_spec.publish import GitState, publish_dataset, publish_taxonomy
+from segdata_spec.publish import publish_dataset, publish_taxonomy
 
 
 @pytest.fixture(autouse=True)

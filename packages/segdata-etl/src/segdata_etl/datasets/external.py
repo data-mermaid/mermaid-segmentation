@@ -22,7 +22,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from segdata_etl.common import publishing
-from segdata_etl.common.cli_flags import _pin_flags, pin_command_parts
+from segdata_etl.common.cli_flags import pin_command_parts, pin_flags
 from segdata_etl.common.copy_plan import (
     ImageOutcome,
     ObjectFacts,
@@ -39,7 +39,6 @@ from segdata_etl.common.publishing import image_prefix
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
     SourceChanged,
-    crc64nvme_b64,
     head_with_checksum,
     md5_hex,
 )
@@ -47,9 +46,11 @@ from segdata_etl.common.stage import DEFAULT_CACHE_DIR, LocalDirS3, next_version
 from segdata_etl.label_maps.curated import CuratedSource
 from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.git import GitState
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
-from segdata_spec.publish import GitState, publish_dataset
+from segdata_spec.publish import publish_dataset
 from segdata_spec.read import Taxonomy, open_taxonomy
+from segdata_spec.s3 import crc64nvme_b64, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 from segdata_spec.sync import sync
 
@@ -96,7 +97,7 @@ class LegacyProbe:
 
 def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the taxonomy pin, ``--cache-dir`` and ``--legacy-bucket`` every external builder shares."""
-    _pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
+    pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
     parser.add_argument(
         "--cache-dir",
         type=Path,
@@ -376,7 +377,7 @@ def _head_listed(client: Any, legacy: LegacyDataset, image: LegacyImage) -> Mapp
     """
     key = legacy.prefix + image.key
     head = head_with_checksum(client, legacy.bucket, key)
-    if head is None or head["ETag"].strip('"') != image.etag:
+    if head is None or norm_etag(head["ETag"]) != image.etag:
         raise SourceChanged(f"s3://{legacy.bucket}/{key} changed since it was listed")
     return head
 

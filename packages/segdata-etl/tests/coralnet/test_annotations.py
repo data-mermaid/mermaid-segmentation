@@ -9,8 +9,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from segdata_etl.datasets.coralnet.annotations import (
-    _derive_image_id,
     build_annotations,
+    derive_image_id,
     list_source_folders,
 )
 from segdata_etl.datasets.coralnet.io import make_csv_reader_s3, write_parquet_deterministic
@@ -34,7 +34,7 @@ def test_derive_image_id_strips_url_decorations():
     s = pd.Series(
         ["/image/12345/view/", "/image/9/view/", "https://coralnet.ucsd.edu/image/77/view/"]
     )
-    out = _derive_image_id(s).tolist()
+    out = derive_image_id(s).tolist()
     assert out == ["12345", "9", "77"]
 
 

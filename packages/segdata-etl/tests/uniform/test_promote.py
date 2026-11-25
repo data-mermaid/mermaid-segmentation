@@ -289,7 +289,13 @@ def test_cli_requires_its_flags_and_dispatches(monkeypatch, tmp_path):
 
     client = object()
     monkeypatch.setattr(promote, "promote", fake_promote)
-    monkeypatch.setattr(cli, "make_s3_client", lambda: client)
+    pool_workers: list[Any] = []
+
+    def make_client(**kw: Any) -> object:
+        pool_workers.append(kw.get("workers"))
+        return client
+
+    monkeypatch.setattr(cli, "make_s3_client", make_client)
 
     code = cli.main(
         [
@@ -313,6 +319,7 @@ def test_cli_requires_its_flags_and_dispatches(monkeypatch, tmp_path):
         "version": "v",
         "workers": 3,
     }
+    assert pool_workers == [3]
 
 
 def copy_destinations(stage: Path, version: str) -> list[dict[str, Any]]:

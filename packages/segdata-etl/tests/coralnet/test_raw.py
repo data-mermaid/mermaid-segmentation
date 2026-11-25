@@ -22,8 +22,8 @@ from segdata_etl.datasets.coralnet import raw
 from segdata_etl.datasets.coralnet.io import make_csv_reader_s3
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
+from segdata_spec.git import GitState
 from segdata_spec.manifest import Manifest, ParentRef, manifest_sha256
-from segdata_spec.publish import GitState
 
 from .conftest import _make_jpeg_bytes
 
@@ -319,6 +319,18 @@ def test_parent_rows_matching_the_listed_etag_are_reused_without_any_request(
     assert (images["20"]["etag"], images["20"]["crc64nvme"]) == (md5_hex(PNG), crc64nvme(PNG))
     assert source.image_heads() == [_key(2, "20")]
     assert source.image_gets() == [_key(2, "20")]
+
+
+def test_parent_rows_with_a_quoted_fingerprint_are_reused_without_any_request(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    parent = _parent([("10", "s1/10.jpg", quoted_etag(JPEG)), ("20", "s2/20.png", "stale")])
+
+    result = _build(source, tmp_path, parent_images=parent)
+
+    images = {row["image_id"]: row for row in result.tables["images.parquet"].to_pylist()}
+    assert images["10"]["etag"] == "parent-etag"
+    assert source.image_heads() == [_key(2, "20")]
 
 
 def test_carried_rows_keep_the_parents_media_type_unsniffed(
@@ -775,6 +787,25 @@ def test_an_unpublishable_tree_is_refused_before_any_s3_call(
         cli.main(argv)
 
 
+def test_a_tree_without_uv_lock_is_refused_before_any_s3_call_or_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
+    monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
+    monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)
+
+    def no_s3(**_kw: object) -> None:
+        raise AssertionError("the guard must fire before an S3 client is made")
+
+    monkeypatch.setattr(raw, "make_s3_client", no_s3)
+    stage = tmp_path / "stage"
+
+    with pytest.raises(PublishRefused, match="no uv.lock"):
+        cli.main(["build", "coralnet", "raw", "--stage-dir", str(stage)])
+
+    assert not stage.exists()
+
+
 @pytest.mark.parametrize(
     ("flags", "message"),
     [
@@ -806,6 +837,7 @@ def test_raw_flag_misuse_is_a_usage_error(
 def test_a_missing_bucket_env_var_refuses_before_any_s3_client_is_made(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / "uv.lock").write_text("lock")
     monkeypatch.delenv("MERMAID_CORALNET_BUCKET", raising=False)
     monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
     monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)

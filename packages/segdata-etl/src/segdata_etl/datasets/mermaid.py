@@ -32,11 +32,13 @@ from segdata_etl.common.copy_plan import (
 )
 from segdata_etl.common.copy_plan import probe_image as probe_source_image
 from segdata_etl.common.s3_objects import EXTENSIONS
-from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
+from segdata_etl.common.stage import LocalDirS3, next_version
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import cache_path, dataset_prefix, is_not_found, is_precondition_failed
+from segdata_spec.git import probe_git, refuse_unpublishable
+from segdata_spec.layout import cache_path, dataset_prefix
 from segdata_spec.manifest import ImageStore, LabelMapping, ParentRef, SourceInfo
-from segdata_spec.publish import probe_git, publish_dataset
+from segdata_spec.publish import publish_dataset
+from segdata_spec.s3 import is_not_found, is_precondition_failed, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -106,7 +108,7 @@ def read_annotations(client: Any, uri: str) -> AnnotationsFile:
             ) from exc
         raise
     frame = pq.read_table(io.BytesIO(body)).to_pandas()
-    return AnnotationsFile(frame, etag.strip('"'), head["LastModified"].isoformat())
+    return AnnotationsFile(frame, norm_etag(etag), head["LastModified"].isoformat())
 
 
 def apply_cutoff(annotations: pd.DataFrame, cutoff: str) -> tuple[pd.DataFrame, int]:
@@ -401,7 +403,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     """
     parents = _parent_refs(args)
     git = probe_git(REPO_ROOT)
-    refuse_unpublishable(git)
+    refuse_unpublishable(git, REPO_ROOT)
     source = read_annotations(client, args.annotations_uri)
     annotations, n_after_cutoff = apply_cutoff(source.table, args.annotation_date_cutoff)
     parent_rows = load_parent_rows(args.stage_dir, args.parent_version)

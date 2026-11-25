@@ -36,6 +36,7 @@ from coralnet_scraper.s3_io import (
     object_key_labelset_csv,
 )
 
+from ...common.s3_objects import make_s3_client
 from .config import DEFAULT_WORKERS
 from .io import (
     CsvReader,
@@ -44,7 +45,6 @@ from .io import (
     make_csv_reader_s3,
     make_ibis_connection,
     make_marker_check,
-    make_s3_client,
 )
 from .schemas import ANNOTATIONS_PRIMARY_KEY, ANNOTATIONS_SCHEMA, validate
 
@@ -115,7 +115,7 @@ def _get_thread_reader() -> CsvReader:
     """Lazy thread-local ibis-backed reader closure."""
     if not hasattr(_thread_local, "ibis_con"):
         _thread_local.ibis_con = make_ibis_connection()
-        _thread_local.csv_reader = make_csv_reader_ibis(_thread_local.ibis_con)
+        _thread_local.csv_reader = make_csv_reader_ibis(_thread_local.ibis_con, make_s3_client())
     return _thread_local.csv_reader
 
 
@@ -143,7 +143,7 @@ def list_source_folders(client: Any, bucket: str, prefix: str) -> list[int]:
     return sorted(source_ids)
 
 
-def _derive_image_id(image_page: pd.Series) -> pd.Series:
+def derive_image_id(image_page: pd.Series) -> pd.Series:
     """Extract CoralNet image ID from the ``Image Page`` URL fragment.
 
     The fragment looks like ``/image/<id>/view/`` (relative) or
@@ -256,7 +256,7 @@ def _merge_source(
     name_parts = df_images["Name"].astype(str).str.extract(_IMAGE_LIST_NAME)
     df_images = df_images.assign(
         Name=name_parts["stripped"],
-        image_id=_derive_image_id(df_images["Image Page"]),
+        image_id=derive_image_id(df_images["Image Page"]),
         image_status=name_parts["status"],
     )
 
@@ -392,7 +392,7 @@ def _load_sources(
                 # Cancel the queued sources so the error surfaces once the running ones finish.
                 executor.shutdown(wait=False, cancel_futures=True)
                 raise
-    reader = csv_reader or make_csv_reader_ibis(make_ibis_connection())
+    reader = csv_reader or make_csv_reader_ibis(make_ibis_connection(), make_s3_client())
     return {
         sid: _load_source_outcome(reader, marker_check, bucket, prefix, sid)
         for sid in tqdm(source_ids, desc="Reading sources")
@@ -432,7 +432,7 @@ def build_annotations(
     if csv_reader is None and s3_client is not None:
         csv_reader = make_csv_reader_s3(s3_client)
     logger.info("Building annotations from %d sources (workers=%d)", len(source_ids), workers)
-    marker_check = make_marker_check(s3_client or make_s3_client())
+    marker_check = make_marker_check(s3_client or make_s3_client(workers=workers))
     outcomes = _load_sources(list(source_ids), bucket, prefix, workers, csv_reader, marker_check)
 
     exclusions: dict[str, list[int]] = defaultdict(list)

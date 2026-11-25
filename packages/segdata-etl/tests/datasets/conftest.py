@@ -26,9 +26,10 @@ from segdata_etl import cli
 from segdata_etl.label_maps.curated import curated_source
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._marker import SyncMarker, dump_marker
-from segdata_spec._s3 import resize_id, synced_marker_dir
+from segdata_spec.git import GitState
+from segdata_spec.layout import resize_id, synced_marker_dir
 from segdata_spec.manifest import Manifest, Pin, SourceInfo
-from segdata_spec.publish import GitState, publish_taxonomy
+from segdata_spec.publish import publish_taxonomy
 from segdata_spec.read import DatasetVersion, open_version
 
 LEGACY_BUCKET = "dev-datamermaid-sm-sources"

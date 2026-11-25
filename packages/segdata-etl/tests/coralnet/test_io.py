@@ -9,6 +9,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from botocore.exceptions import ClientError
+from s3_fake import FakeS3, client_error
 
 from segdata_etl.datasets.coralnet import io as dataset_io
 from segdata_etl.datasets.coralnet.io import (
@@ -97,11 +99,17 @@ class _StubCon:
         return _StubTable(self._result)
 
 
+def _client_with(key: str = "p/s1/annotations.csv") -> FakeS3:
+    client = FakeS3()
+    client.put("bkt", key, b"a\n1\n")
+    return client
+
+
 def test_read_csv_via_ibis_reads_the_s3_uri_with_the_messy_csv_options():
     df = pd.DataFrame({"a": ["1"]})
     con = _StubCon(df)
 
-    result = read_csv_via_ibis(con, "bkt", "p/s1/annotations.csv")
+    result = read_csv_via_ibis(con, _client_with(), "bkt", "p/s1/annotations.csv")
 
     assert result is df
     assert con.calls == [
@@ -112,21 +120,29 @@ def test_read_csv_via_ibis_reads_the_s3_uri_with_the_messy_csv_options():
     ]
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        "HTTP Error: HTTP GET error on 's3://b/k' (HTTP 404)",
-        "IO Error: Not Found",
-        "NoSuchKey: the key does not exist",
-    ],
-)
-def test_read_csv_via_ibis_maps_a_missing_object_to_none(message):
-    assert read_csv_via_ibis(_StubCon(RuntimeError(message)), "b", "k") is None
+def test_read_csv_via_ibis_returns_none_for_a_missing_object_without_reading():
+    con = _StubCon(pd.DataFrame())
+
+    assert read_csv_via_ibis(con, FakeS3(), "bkt", "p/s1/annotations.csv") is None
+    assert con.calls == []
 
 
-def test_read_csv_via_ibis_reraises_other_errors():
-    with pytest.raises(RuntimeError, match="HTTP 403"):
-        read_csv_via_ibis(_StubCon(RuntimeError("HTTP 403 Forbidden")), "b", "k")
+def test_read_csv_via_ibis_raises_when_the_existence_check_is_denied():
+    class Denied:
+        def head_object(self, **_):
+            raise client_error("AccessDenied", 403, "HeadObject")
+
+    con = _StubCon(pd.DataFrame())
+    with pytest.raises(ClientError):
+        read_csv_via_ibis(con, Denied(), "bkt", "k")
+    assert con.calls == []
+
+
+def test_read_csv_via_ibis_reraises_a_duckdb_failure_on_a_present_object():
+    con = _StubCon(RuntimeError("HTTP 404 Not Found"))
+
+    with pytest.raises(RuntimeError, match="HTTP 404"):
+        read_csv_via_ibis(con, _client_with(), "bkt", "p/s1/annotations.csv")
 
 
 def _git(repo, *args: str) -> str:

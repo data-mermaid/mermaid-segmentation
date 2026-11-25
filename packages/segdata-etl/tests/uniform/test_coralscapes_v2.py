@@ -321,7 +321,7 @@ def test_stage_dir_is_required_and_the_subcommand_dispatches_to_run(monkeypatch,
         return 7
 
     monkeypatch.setattr(module, "run", fake_run)
-    monkeypatch.setattr(cli, "make_s3_client", lambda: object())
+    monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: object())
 
     code = cli.main(["build", name, "--stage-dir", str(tmp_path)])
 

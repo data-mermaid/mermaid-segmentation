@@ -12,12 +12,11 @@ import pandas as pd
 
 from segdata_etl.common import publishing
 from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
-from segdata_etl.common.stage import refuse_unpublishable
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.publish import probe_git
+from segdata_spec.git import probe_git, refuse_unpublishable
 
 DATASET = "pacific_labeled_corals"
 LICENSE = "CC0 1.0 (Dryad)"
@@ -120,7 +119,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     git = probe_git(repo_root)
-    refuse_unpublishable(git)
+    refuse_unpublishable(git, repo_root)
     taxonomy = external.load_taxonomy(
         client,
         DATASET_BUCKET,

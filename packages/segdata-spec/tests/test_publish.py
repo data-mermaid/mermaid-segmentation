@@ -1,5 +1,4 @@
 import hashlib
-import subprocess
 from pathlib import Path
 
 import pyarrow as pa
@@ -13,14 +12,9 @@ from segdata_spec.errors import (
     PublishRefused,
     SchemaValidationError,
 )
+from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
-from segdata_spec.publish import (
-    GitState,
-    compute_diff,
-    probe_git,
-    publish_dataset,
-    publish_taxonomy,
-)
+from segdata_spec.publish import compute_diff, publish_dataset, publish_taxonomy
 
 BUCKET = "seg-bucket"
 VERSION = "20261120-abcdef1"
@@ -204,40 +198,6 @@ def test_dirty_or_unpushed_tree_refuses_before_any_write(fake_s3, repo_dir, git)
         _publish(fake_s3, repo_dir, git=git)
 
     assert fake_s3.objects == {}
-
-
-def _run(cwd: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)  # noqa: S603, S607
-
-
-def test_probe_git_reports_dirty_and_pushed(tmp_path):
-    origin = tmp_path / "origin.git"
-    work = tmp_path / "work"
-    work.mkdir()
-    _run(tmp_path, "init", "--bare", "-b", "main", str(origin))
-    _run(work, "init", "-b", "main")
-    _run(work, "config", "user.name", "t")
-    _run(work, "config", "user.email", "t@example.com")
-    _run(work, "remote", "add", "origin", str(origin))
-    tracked = work / "f.txt"
-    tracked.write_text("one")
-    _run(work, "add", "f.txt")
-    _run(work, "commit", "-m", "one")
-    _run(work, "push", "-u", "origin", "main")
-
-    state = probe_git(work)
-    assert (state.dirty, state.pushed) == (False, True)
-    assert len(state.sha) == 40
-
-    (work / "untracked.txt").write_text("x")
-    assert probe_git(work).dirty is False
-
-    tracked.write_text("two")
-    assert probe_git(work).dirty is True
-
-    _run(work, "commit", "-am", "two")
-    local = probe_git(work)
-    assert (local.dirty, local.pushed) == (False, False)
 
 
 def test_diff_counts_image_and_point_changes():
