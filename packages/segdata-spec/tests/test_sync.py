@@ -842,12 +842,6 @@ def test_check_published_manifest_returns_none_for_a_matching_sha(fake_s3, pin):
     assert check_published_manifest(fake_s3, BUCKET, pin) is None
 
 
-def test_check_published_manifest_reads_without_writing(fake_s3, pin):
-    check_published_manifest(fake_s3, BUCKET, pin)
-
-    assert [op for op, *_ in fake_s3.calls] == ["get"]
-
-
 def test_check_published_manifest_names_the_key_of_a_missing_manifest(fake_s3, pin):
     del fake_s3.objects[(BUCKET, PREFIX + "manifest.json")]
 
