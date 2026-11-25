@@ -111,12 +111,11 @@ class _SourceResult:
     labels: list[tuple[int, str]]
 
 
-def _get_thread_reader() -> CsvReader:
-    """Lazy thread-local ibis-backed reader closure."""
+def _get_thread_reader(client: Any) -> CsvReader:
+    """Return an ibis-backed reader on this thread's DuckDB connection and the shared client."""
     if not hasattr(_thread_local, "ibis_con"):
         _thread_local.ibis_con = make_ibis_connection()
-        _thread_local.csv_reader = make_csv_reader_ibis(_thread_local.ibis_con, make_s3_client())
-    return _thread_local.csv_reader
+    return make_csv_reader_ibis(_thread_local.ibis_con, client)
 
 
 def list_source_folders(client: Any, bucket: str, prefix: str) -> list[int]:
@@ -330,10 +329,12 @@ def _load_source_outcome(
         return e
 
 
-def _load_source_worker(args: tuple[int, MarkerCheck, str, str]) -> tuple[int, _Outcome]:
-    """Load one source on a worker thread with that thread's ibis reader."""
-    source_id, marker_check, bucket, prefix = args
-    outcome = _load_source_outcome(_get_thread_reader(), marker_check, bucket, prefix, source_id)
+def _load_source_worker(args: tuple[int, Any, MarkerCheck, str, str]) -> tuple[int, _Outcome]:
+    """Load one source on a worker thread with that thread's ibis connection."""
+    source_id, client, marker_check, bucket, prefix = args
+    outcome = _load_source_outcome(
+        _get_thread_reader(client), marker_check, bucket, prefix, source_id
+    )
     return source_id, outcome
 
 
@@ -378,11 +379,12 @@ def _load_sources(
     prefix: str,
     workers: int,
     csv_reader: CsvReader | None,
+    client: Any,
     marker_check: MarkerCheck,
 ) -> dict[int, _Outcome]:
-    """Load every source, on a thread pool unless a reader is injected."""
+    """Load every source with the shared ``client``, on a thread pool unless a reader is injected."""
     if workers > 1 and csv_reader is None:
-        work = [(sid, marker_check, bucket, prefix) for sid in source_ids]
+        work = [(sid, client, marker_check, bucket, prefix) for sid in source_ids]
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(_load_source_worker, item) for item in work]
             done = tqdm(as_completed(futures), total=len(futures), desc="Reading sources")
@@ -392,7 +394,7 @@ def _load_sources(
                 # Cancel the queued sources so the error surfaces once the running ones finish.
                 executor.shutdown(wait=False, cancel_futures=True)
                 raise
-    reader = csv_reader or make_csv_reader_ibis(make_ibis_connection(), make_s3_client())
+    reader = csv_reader or make_csv_reader_ibis(make_ibis_connection(), client)
     return {
         sid: _load_source_outcome(reader, marker_check, bucket, prefix, sid)
         for sid in tqdm(source_ids, desc="Reading sources")
@@ -432,8 +434,11 @@ def build_annotations(
     if csv_reader is None and s3_client is not None:
         csv_reader = make_csv_reader_s3(s3_client)
     logger.info("Building annotations from %d sources (workers=%d)", len(source_ids), workers)
-    marker_check = make_marker_check(s3_client or make_s3_client(workers=workers))
-    outcomes = _load_sources(list(source_ids), bucket, prefix, workers, csv_reader, marker_check)
+    client = s3_client or make_s3_client(workers=workers)
+    marker_check = make_marker_check(client)
+    outcomes = _load_sources(
+        list(source_ids), bucket, prefix, workers, csv_reader, client, marker_check
+    )
 
     exclusions: dict[str, list[int]] = defaultdict(list)
     results: dict[int, _SourceResult] = {}

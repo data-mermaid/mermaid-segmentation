@@ -497,7 +497,7 @@ def test_build_annotations_stops_queued_sources_after_a_worker_error(monkeypatch
         release.wait(timeout=1)
         return annotations._SourceExcluded("annotations_missing", "stub")
 
-    monkeypatch.setattr(annotations, "_get_thread_reader", lambda: None)
+    monkeypatch.setattr(annotations, "_get_thread_reader", lambda _client: None)
     monkeypatch.setattr(annotations, "_load_source_outcome", fake_outcome)
 
     with pytest.raises(RuntimeError, match="unexpected"):
@@ -506,3 +506,39 @@ def test_build_annotations_stops_queued_sources_after_a_worker_error(monkeypatch
 
     # Two workers run at most source 1, source 2 and one more before the queue is cancelled.
     assert set(started) <= {1, 2, 3}
+
+
+def test_build_annotations_shares_one_s3_client_across_workers_and_marker_check(monkeypatch):
+    from segdata_etl.datasets.coralnet import annotations
+
+    sentinel = object()
+    made: list[int] = []
+    reader_clients: list[object] = []
+    marker_clients: list[object] = []
+
+    def fake_make_s3_client(**_kwargs):
+        made.append(1)
+        return sentinel
+
+    def fake_make_csv_reader_ibis(_con, client):
+        reader_clients.append(client)
+
+    def fake_make_marker_check(client):
+        marker_clients.append(client)
+
+    monkeypatch.setattr(annotations, "make_s3_client", fake_make_s3_client)
+    monkeypatch.setattr(annotations, "make_ibis_connection", lambda: object())
+    monkeypatch.setattr(annotations, "make_csv_reader_ibis", fake_make_csv_reader_ibis)
+    monkeypatch.setattr(annotations, "make_marker_check", fake_make_marker_check)
+    monkeypatch.setattr(
+        annotations,
+        "_load_source_outcome",
+        lambda *_args: annotations._SourceExcluded("annotations_missing", "stub"),
+    )
+
+    build_annotations([1, 2, 3], bucket="b", prefix="p", workers=2)
+
+    assert len(made) == 1
+    assert marker_clients == [sentinel]
+    assert len(reader_clients) == 3
+    assert all(c is sentinel for c in reader_clients)
