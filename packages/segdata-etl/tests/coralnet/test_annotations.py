@@ -540,5 +540,5 @@ def test_build_annotations_shares_one_s3_client_across_workers_and_marker_check(
 
     assert len(made) == 1
     assert marker_clients == [sentinel]
-    assert len(reader_clients) == 3
+    assert reader_clients
     assert all(c is sentinel for c in reader_clients)

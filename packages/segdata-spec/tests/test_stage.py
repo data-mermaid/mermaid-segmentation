@@ -444,16 +444,19 @@ def _dirty_repo(root: Path) -> Path:
     (root / "uv.lock").write_text("lock")
     (root / "f.txt").write_text("one")
     run("add", ".")
-    run("commit", "-m", "one")
+    run("-c", "commit.gpgsign=false", "commit", "-m", "one")
     (root / "f.txt").write_text("two")
     return root
 
 
 @pytest.mark.parametrize("which", ["dataset", "taxonomy"])
 def test_staging_without_a_git_state_probes_the_repo_and_refuses_a_dirty_one(
-    which, tmp_path, stage_dir
+    which, tmp_path, stage_dir, monkeypatch
 ):
     repo = _dirty_repo(tmp_path / "dirty")
+    not_a_repo = tmp_path / "outside"
+    not_a_repo.mkdir()
+    monkeypatch.chdir(not_a_repo)
 
     with pytest.raises(PublishRefused, match="uncommitted"):
         if which == "dataset":
