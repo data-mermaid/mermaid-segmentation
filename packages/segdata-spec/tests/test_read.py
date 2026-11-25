@@ -298,10 +298,10 @@ def test_open_tables_refuses_a_cache_with_no_marker(fake_s3, tmp_path, cache):
 
 
 def test_open_feature_set_reads_a_synced_set(fake_s3, tmp_path, cache):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
-    sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
+    sync_feature_set(fake_s3, fpin, cache, bucket=BUCKET)
 
-    features = open_feature_set(cache, BUCKET, pin, "effnet", sha)
+    features = open_feature_set(cache, BUCKET, fpin)
 
     assert features.index.column("image_id").to_pylist() == ["a", "b"]
     assert features.path("a") == cache / BUCKET / "features/ds/effnet/a.featurevector"
@@ -309,18 +309,19 @@ def test_open_feature_set_reads_a_synced_set(fake_s3, tmp_path, cache):
 
 
 def test_open_feature_set_refuses_an_unsynced_set(fake_s3, tmp_path, cache):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
 
     with pytest.raises(NotSynced):
-        open_feature_set(cache, BUCKET, pin, "effnet", sha)
+        open_feature_set(cache, BUCKET, fpin)
 
 
 def test_open_feature_set_refuses_another_set_sha(fake_s3, tmp_path, cache):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
-    sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
+    sync_feature_set(fake_s3, fpin, cache, bucket=BUCKET)
+    wrong = fpin.model_copy(update={"manifest_sha256": "0" * 64})
 
     with pytest.raises(PinMismatch):
-        open_feature_set(cache, BUCKET, pin, "effnet", "0" * 64)
+        open_feature_set(cache, BUCKET, wrong)
 
 
 def test_open_tables_reads_a_version_synced_with_images(fake_s3, tmp_path, cache):
@@ -333,9 +334,11 @@ def test_open_tables_reads_a_version_synced_with_images(fake_s3, tmp_path, cache
 
 
 def test_open_feature_set_refuses_a_set_built_for_another_dataset_sha(fake_s3, tmp_path, cache):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
-    sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
-    other = pin.model_copy(update={"manifest_sha256": "0" * 64})
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
+    sync_feature_set(fake_s3, fpin, cache, bucket=BUCKET)
+    other = fpin.model_copy(
+        update={"dataset": fpin.dataset.model_copy(update={"manifest_sha256": "0" * 64})}
+    )
 
     with pytest.raises(PinMismatch, match="0" * 64):
-        open_feature_set(cache, BUCKET, other, "effnet", sha)
+        open_feature_set(cache, BUCKET, other)

@@ -54,6 +54,7 @@ from segdata_spec.errors import (
 )
 from segdata_spec.manifest import (
     FeatureSetManifest,
+    FeatureSetPin,
     FileEntry,
     ImageStore,
     Manifest,
@@ -680,9 +681,7 @@ def _sync_features(
 
 def sync_feature_set(
     client: Any,
-    pin: Pin,
-    family: str,
-    feature_set_sha256: str,
+    pin: FeatureSetPin,
     cache_dir: Path,
     *,
     bucket: str = DATASET_BUCKET,
@@ -699,9 +698,7 @@ def sync_feature_set(
 
     Args:
         client: A boto3 S3 client.
-        pin: The dataset version the set describes.
-        family: The feature family.
-        feature_set_sha256: The sha256 pinning the feature-set manifest.
+        pin: The feature set: its dataset version, family and manifest sha256.
         cache_dir: The local cache root.
         bucket: The dataset bucket.
         image_ids: The images whose features to sync; None syncs every indexed image.
@@ -711,10 +708,10 @@ def sync_feature_set(
         The set manifest, its index, and the cached path of each synced feature by image id.
 
     Raises:
-        ValueError: ``max_workers`` is below 1, ``family`` is not a key segment, or a key would
+        ValueError: ``max_workers`` is below 1, the pin's ``family`` is not a key segment, or a key would
             leave the cache.
-        PinMismatch: The set manifest, downloaded or cached, differs from ``feature_set_sha256``,
-            or records a dataset manifest sha256 other than ``pin``'s.
+        PinMismatch: The set manifest, downloaded or cached, differs from the pin's ``manifest_sha256``,
+            or records a dataset manifest sha256 other than the pin's dataset.
         ChecksumMismatch: The index differs from its manifest entry, or a feature file,
             downloaded or cached, differs from its index row.
         FeatureIndexInvalid: ``image_ids`` names an image not in the index.
@@ -722,13 +719,14 @@ def sync_feature_set(
         ImageChanged: A feature file no longer matches its indexed ETag.
     """
     workers = _resolve_max_workers(max_workers)
-    prefix = feature_set_prefix(pin.name, pin.version, family)
+    dataset, family = pin.dataset, pin.family
+    prefix = feature_set_prefix(dataset.name, dataset.version, family)
     manifest = FeatureSetManifest.model_validate_json(
         _fetch_file(
-            client, cache_dir, bucket, prefix + MANIFEST_NAME, feature_set_sha256, PinMismatch
+            client, cache_dir, bucket, prefix + MANIFEST_NAME, pin.manifest_sha256, PinMismatch
         )
     )
-    _check_dataset_pin(manifest, pin)
+    _check_dataset_pin(manifest, dataset)
     index = pq.read_table(
         io.BytesIO(
             _fetch_tables(client, cache_dir, bucket, prefix, manifest.files)[FEATURE_INDEX_NAME]
@@ -740,8 +738,8 @@ def sync_feature_set(
         .to_pylist()
     )
     _sync_features(client, cache_dir, bucket, rows, workers)
-    directory = synced_feature_marker_dir(cache_dir, family, bucket, pin.name, pin.version)
-    _write_atomic(new_marker_path(directory), dump_feature_marker(feature_set_sha256, image_ids))
+    directory = synced_feature_marker_dir(cache_dir, family, bucket, dataset.name, dataset.version)
+    _write_atomic(new_marker_path(directory), dump_feature_marker(pin.manifest_sha256, image_ids))
     return FeatureSyncResult(
         manifest=manifest,
         index=index,

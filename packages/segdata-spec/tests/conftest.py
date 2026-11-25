@@ -20,7 +20,7 @@ from botocore.exceptions import ClientError
 from PIL import Image
 
 from segdata_spec.features import publish_feature_set
-from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
+from segdata_spec.manifest import FeatureSetPin, ImageStore, Manifest, ParentRef, Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_dataset, publish_taxonomy
 
 
@@ -334,10 +334,10 @@ def feature_key_of(image_id: str) -> str:
     return f"features/ds/{FEATURE_FAMILY}/{image_id}.featurevector"
 
 
-def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> tuple[Pin, str]:
+def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> FeatureSetPin:
     """Publish dataset ``ds`` with images a and b, store their features, publish the set.
 
-    Returns the dataset pin and the feature-set manifest sha256; clears the call log.
+    Returns the feature-set pin; clears the call log.
     """
     _, pin = publish_version(
         client,
@@ -357,7 +357,7 @@ def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> tuple[Pin, st
             "n_points": [1] * len(FEATURES),
         }
     )
-    sha = publish_feature_set(
+    feature_pin = publish_feature_set(
         client,
         pin,
         FEATURE_FAMILY,
@@ -370,4 +370,4 @@ def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> tuple[Pin, st
         git=CLEAN_GIT,
     )
     client.calls.clear()
-    return pin, sha
+    return feature_pin

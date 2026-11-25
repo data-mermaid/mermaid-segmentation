@@ -24,7 +24,7 @@ from segdata_spec.errors import (
     SchemaValidationError,
 )
 from segdata_spec.features import publish_feature_set
-from segdata_spec.manifest import EtlInfo, Pin
+from segdata_spec.manifest import EtlInfo, FeatureSetPin, Pin
 
 SIDECAR = "features/ds/effnet/_extractor_spec.json"
 SET_PREFIX = f"datasets/ds/{VERSION}/features/effnet/"
@@ -50,7 +50,7 @@ def pin(fake_s3: FakeS3, tmp_path: Path) -> Pin:
     return pin
 
 
-def publish(client: FakeS3, tmp_path: Path, pin: Pin, index: pa.Table, **kwargs) -> str:
+def publish(client: FakeS3, tmp_path: Path, pin: Pin, index: pa.Table, **kwargs) -> FeatureSetPin:
     return publish_feature_set(
         client,
         pin,
@@ -70,8 +70,8 @@ def _put_keys(client: FakeS3) -> list[str]:
     return [key for op, _, key, _ in client.calls if op == "put"]
 
 
-def test_publish_writes_sidecar_index_then_manifest_and_returns_its_sha(fake_s3, tmp_path, pin):
-    sha = publish(fake_s3, tmp_path, pin, feature_index(["a", "b"]))
+def test_publish_writes_sidecar_index_then_manifest_and_returns_its_pin(fake_s3, tmp_path, pin):
+    feature_pin = publish(fake_s3, tmp_path, pin, feature_index(["a", "b"]))
 
     assert _put_keys(fake_s3) == [
         SIDECAR,
@@ -80,7 +80,11 @@ def test_publish_writes_sidecar_index_then_manifest_and_returns_its_sha(fake_s3,
     ]
     manifest_bytes = fake_s3.objects[(BUCKET, SET_PREFIX + "manifest.json")]
     index_bytes = fake_s3.objects[(BUCKET, SET_PREFIX + "index.parquet")]
-    assert sha == hashlib.sha256(manifest_bytes).hexdigest()
+    assert feature_pin == FeatureSetPin(
+        dataset=pin,
+        family="effnet",
+        manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+    )
     manifest = json.loads(manifest_bytes)
     assert manifest["stats"] == {"n_images": 2, "n_missing": 0}
     assert manifest["files"]["index.parquet"]["sha256"] == hashlib.sha256(index_bytes).hexdigest()

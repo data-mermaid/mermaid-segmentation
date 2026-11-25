@@ -158,6 +158,14 @@ class FeatureSetManifest(_Model):
     created_at: datetime
 
 
+class FeatureSetPin(_Model):
+    """A data-config reference to one exact feature set: its dataset version, family and manifest."""
+
+    dataset: Pin
+    family: str
+    manifest_sha256: str
+
+
 def _check_dataset_pin(manifest: FeatureSetManifest, pin: Pin) -> None:
     """Raise ``PinMismatch`` unless the feature set was published for exactly ``pin``."""
     recorded = manifest.dataset.manifest_sha256

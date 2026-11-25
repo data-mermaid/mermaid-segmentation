@@ -939,9 +939,9 @@ def _feature_gets(client: FakeS3) -> list[str]:
 
 
 def test_sync_feature_set_downloads_only_the_selected_features(fake_s3, tmp_path, cache):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
 
-    result = sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET, image_ids=["a"])
+    result = sync_feature_set(fake_s3, fpin, cache, bucket=BUCKET, image_ids=["a"])
 
     path_a = cache / BUCKET / "features/ds/effnet/a.featurevector"
     assert result.paths == {"a": path_a}
@@ -952,24 +952,25 @@ def test_sync_feature_set_downloads_only_the_selected_features(fake_s3, tmp_path
     assert result.manifest.family == "effnet"
     markers = list((cache / "synced/features/effnet" / BUCKET / "ds" / VERSION).glob("*.json"))
     assert [json.loads(m.read_bytes()) for m in markers] == [
-        {"feature_set_sha256": sha, "image_ids": ["a"]}
+        {"feature_set_sha256": fpin.manifest_sha256, "image_ids": ["a"]}
     ]
 
 
 def test_sync_feature_set_refuses_a_wrong_sha_before_any_feature(fake_s3, tmp_path, cache):
-    pin, _ = publish_feature_set_version(fake_s3, tmp_path)
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
+    wrong = fpin.model_copy(update={"manifest_sha256": "0" * 64})
 
     with pytest.raises(PinMismatch):
-        sync_feature_set(fake_s3, pin, "effnet", "0" * 64, cache, bucket=BUCKET)
+        sync_feature_set(fake_s3, wrong, cache, bucket=BUCKET)
 
     assert _feature_gets(fake_s3) == []
 
 
 def test_sync_feature_set_refuses_an_unindexed_id_before_any_feature(fake_s3, tmp_path, cache):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
 
     with pytest.raises(FeatureIndexInvalid, match="'z'"):
-        sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET, image_ids=["a", "z"])
+        sync_feature_set(fake_s3, fpin, cache, bucket=BUCKET, image_ids=["a", "z"])
 
     assert _feature_gets(fake_s3) == []
 
@@ -989,11 +990,11 @@ def test_sync_feature_set_refuses_an_unindexed_id_before_any_feature(fake_s3, tm
 def test_sync_feature_set_fails_on_a_bad_feature_and_caches_nothing_for_it(
     fake_s3, tmp_path, cache, tamper, error
 ):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
     tamper(fake_s3)
 
     with pytest.raises(error, match="a.featurevector"):
-        sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET, image_ids=["a"])
+        sync_feature_set(fake_s3, fpin, cache, bucket=BUCKET, image_ids=["a"])
 
     assert not (cache / BUCKET / feature_key_of("a")).exists()
 
@@ -1001,9 +1002,9 @@ def test_sync_feature_set_fails_on_a_bad_feature_and_caches_nothing_for_it(
 def test_sync_feature_set_without_a_selection_syncs_every_feature_and_records_all(
     fake_s3, tmp_path, cache
 ):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
 
-    result = sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
+    result = sync_feature_set(fake_s3, fpin, cache, bucket=BUCKET)
 
     assert result.paths == {
         "a": cache / BUCKET / "features/ds/effnet/a.featurevector",
@@ -1011,25 +1012,27 @@ def test_sync_feature_set_without_a_selection_syncs_every_feature_and_records_al
     }
     markers = list((cache / "synced/features/effnet" / BUCKET / "ds" / VERSION).glob("*.json"))
     assert [json.loads(m.read_bytes()) for m in markers] == [
-        {"feature_set_sha256": sha, "image_ids": "all"}
+        {"feature_set_sha256": fpin.manifest_sha256, "image_ids": "all"}
     ]
 
 
 def test_sync_feature_set_refuses_a_set_built_for_another_dataset_sha(fake_s3, tmp_path, cache):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
-    other = pin.model_copy(update={"manifest_sha256": "0" * 64})
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
+    other = fpin.model_copy(
+        update={"dataset": fpin.dataset.model_copy(update={"manifest_sha256": "0" * 64})}
+    )
 
     with pytest.raises(PinMismatch, match="0" * 64):
-        sync_feature_set(fake_s3, other, "effnet", sha, cache, bucket=BUCKET)
+        sync_feature_set(fake_s3, other, cache, bucket=BUCKET)
 
     assert _feature_gets(fake_s3) == []
 
 
 def test_sync_feature_set_refuses_a_tampered_index_before_any_feature(fake_s3, tmp_path, cache):
-    pin, sha = publish_feature_set_version(fake_s3, tmp_path)
+    fpin = publish_feature_set_version(fake_s3, tmp_path)
     fake_s3.put(BUCKET, f"datasets/ds/{VERSION}/features/effnet/index.parquet", b"not the index")
 
     with pytest.raises(ChecksumMismatch, match="index.parquet"):
-        sync_feature_set(fake_s3, pin, "effnet", sha, cache, bucket=BUCKET)
+        sync_feature_set(fake_s3, fpin, cache, bucket=BUCKET)
 
     assert _feature_gets(fake_s3) == []

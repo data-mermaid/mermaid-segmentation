@@ -34,6 +34,7 @@ from segdata_spec.errors import (
 from segdata_spec.manifest import (
     EtlInfo,
     FeatureSetManifest,
+    FeatureSetPin,
     FeatureSetStats,
     FileEntry,
     ImageStore,
@@ -209,7 +210,7 @@ def publish_feature_set(
     git: GitState | None = None,
     etl: EtlInfo | None = None,
     allow_missing: bool = False,
-) -> str:
+) -> FeatureSetPin:
     """Publish a feature set for a dataset version under ``datasets/<d>/<v>/features/<family>/``.
 
     Every check precedes the first write. The family's ``_extractor_spec.json`` under
@@ -236,7 +237,7 @@ def publish_feature_set(
         allow_missing: Publish an index that leaves out some of the version's images.
 
     Returns:
-        The sha256 of the written feature-set manifest.
+        The feature-set pin: ``pin``, ``family`` and the sha256 of the written manifest.
 
     Raises:
         ValueError: ``extractor`` lacks an identity key, ``family`` is not a key segment, or
@@ -282,4 +283,6 @@ def publish_feature_set(
     manifest_bytes = dump_manifest(manifest)
     _ensure_extractor_spec(client, bucket, store_prefix + EXTRACTOR_SPEC_NAME, extractor, identity)
     _write_version(client, bucket, prefix, {FEATURE_INDEX_NAME: index_bytes}, manifest_bytes)
-    return manifest_sha256(manifest_bytes)
+    return FeatureSetPin(
+        dataset=pin, family=family, manifest_sha256=manifest_sha256(manifest_bytes)
+    )
