@@ -42,7 +42,7 @@ segdata-spec = { workspace = true }
 where = ["src"]
 
 [tool.setuptools.package-data]
-segdata_etl = ["label_maps/curated/*.csv", "label_maps/*.json"]
+segdata_etl = ["label_maps/curated/*.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

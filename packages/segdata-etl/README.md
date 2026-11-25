@@ -6,7 +6,7 @@ Builds the segmentation training data in S3: the CoralNet training manifest, the
 |---|---|
 | `segdata build coralnet <stage>` | Builds the CoralNet training dataset (see [CoralNet](#coralnet)). |
 | `segdata build coralnet raw` | Stages a CoralNet build run as the `coralnet-raw` dataset version (see [Stage coralnet-raw](#stage-coralnet-raw)). |
-| `segdata curate coralnet` | Stages the curated `coralnet` v1 version from `coralnet-raw` (see [Curate coralnet v1](#curate-coralnet-v1)). |
+| `segdata curate coralnet` | Stages a curated `coralnet` version from `coralnet-raw`, with labels mapped through the MERMAID API (see [Curate coralnet](#curate-coralnet)). |
 | `segdata ingest <name>` | Loads a raw external release into the legacy `external_validation_datasets/<name>/` prefix (see [Ingest an external dataset](#ingest-an-external-dataset)). |
 | `segdata build <name>` | Builds an immutable versioned dataset from that legacy prefix (see [Build a versioned external dataset](#build-a-versioned-external-dataset)). |
 | `segdata build <uniform>` | Stages a uniform-format version of `mermaid`, `coralscapes_v2` or `ucsd_mosaics` on disk (see [Uniform datasets](#uniform-datasets)). |
@@ -190,7 +190,7 @@ Two commands stage CoralNet as dataset versions in the [segdata-spec](../segdata
 | Command | Stages | Built from |
 |---|---|---|
 | `segdata build coralnet raw` | `coralnet-raw`, with `copies.jsonl` | A build run under `etl-outputs/coralnet/<run>/`, and the original images of the scrape. |
-| `segdata curate coralnet` | `coralnet` v1, tables only | A `coralnet-raw` version and a `mermaid-benthic` taxonomy version. |
+| `segdata curate coralnet` | `coralnet`, tables only | A `coralnet-raw` version, a `mermaid-benthic` taxonomy version, and the MERMAID LabelMapping API. |
 
 ### Stage directory, version name and publish guard
 
@@ -256,9 +256,11 @@ The checkpoint is written after every 20th batch of 1000 probes, and once after 
 A checkpoint row wins over a parent row for the same image.
 A new commit starts a new checkpoint.
 
-### Curate coralnet v1
+### Curate coralnet
 
-`segdata curate coralnet` stages the `coralnet` v1 version from pinned parents. The version holds tables only, on the image store of raw: no plan file is staged, and no image is read or copied. v1 reproduces the training labels of the `cleaned_up_rerun` model.
+`segdata curate coralnet` stages a `coralnet` version from pinned parents. The version holds tables only, on the image store of raw: no plan file is staged, and no image is read or copied. It maps CoralNet labels only through the MERMAID LabelMapping API, which it fetches at stage time. The command needs network access to `api.datamermaid.org`.
+
+The published `coralnet@20261124-cfc389d` (manifest sha256 `a9de45e16219340929e1fdfb908759cd560407bcff7fb636b8ddd812b269e8a4`) holds the labels the `cleaned_up_rerun` model trained on. It was built at git `cfc389d` with the frozen `cleaned_up_rerun` mapping, against taxonomy `mermaid-benthic@20261124-e6abfad` (sha256 `fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43`). To reproduce that training set, pin that version. The current code cannot stage it again.
 
 ```bash
 uv run --package segdata-etl segdata curate coralnet \
@@ -277,13 +279,15 @@ uv run --package segdata-etl segdata curate coralnet \
 
 A missing pin flag, or one flag of a pin without the other, is a usage error (exit 2). The message names the flags.
 
-The version has one parent, the raw version, and uses its image store.
+The version has one parent, the raw version, and uses its image store. The taxonomy is an input to the label mapping, not a parent.
 
 1. Overrides. For each image in `configs/coralnet/annotation_overrides.parquet`, the override points replace all of that image's raw points. Override points are in the pixel space of the image resized to a longest edge of 2048. For an original whose longest edge is more than 2048, each point is mapped back to original coordinates: a raw point with the same label that scales to the same position gives its exact coordinates; otherwise the command takes the smallest original coordinate that scales to the override position. Overrides of smaller images are used as they are.
 2. Blacklist. The images in `configs/coralnet/image_blacklist.parquet` (by `image_id`) and their points are dropped.
-3. Labels. One row per label of the raw version. The lowercased CoralNet name is looked up in `segdata_etl/label_maps/coralnet_cleaned_up_rerun.json`, a copy of `configs/coralnet_to_mermaid_mapping_temporary.json` at commit `e0d3876`. The target name is resolved to a benthic attribute ID in the pinned taxonomy by name, ignoring case. A target with no match keeps its name with a null ID, and `label_mapping.n_unresolved` counts it. A target that matches more than one attribute stops the run with `ValueError`. `mermaid_growth_form` is null.
+3. Labels. One row per label of the raw version. The command fetches `/v1/classification/labelmappings/?provider=CoralNet` from `api.datamermaid.org` and joins the rows to the raw labels by CoralNet label id. A label with no API record, or a record with no target, stays unmapped: its MERMAID columns are null. `mermaid_growth_form` holds the API record's growth form name, or null when the record has none. Each mapped record must have a benthic attribute id, and its benthic attribute id and growth form id must exist in the pinned taxonomy. Otherwise the command raises `ValueError` listing the labels or ids, and stages nothing. Stage and publish a newer taxonomy, then pin it. An unreachable API or an HTTP error also stops the command with nothing staged.
 
-`stats.dropped` of a v1 version:
+The manifest records the mapping under `label_mapping`: `source` is `mermaid_api`, `sha256` is the digest of the fetched mapping, and `fetched_at`, `n_labels` and `n_mapped` give the fetch time, the raw label count and the mapped count. A later run can fetch a different mapping, so two versions staged from the same pins can differ in labels.
+
+`stats.dropped` of a curated `coralnet` version:
 
 | Key | Unit | Counts |
 |---|---|---|

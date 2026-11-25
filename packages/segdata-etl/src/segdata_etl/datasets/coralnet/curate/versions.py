@@ -1,7 +1,9 @@
 """``segdata curate coralnet``: stage a curated ``coralnet`` version built from ``coralnet-raw``.
 
-Curates raw's points with the committed blacklist and overrides and maps labels by the
-cleaned_up_rerun JSON. Stages tables only, on raw's image store, for ``segdata promote`` to publish.
+Curates raw's points with the committed blacklist and overrides and maps labels by the MERMAID
+LabelMapping API, checked against the pinned taxonomy. Stages tables only, on raw's image store,
+for ``segdata promote`` to publish. The published ``coralnet`` v1 was built with the frozen
+cleaned_up_rerun mapping at git e6abfad.
 """
 
 from __future__ import annotations
@@ -19,7 +21,11 @@ from botocore.exceptions import ClientError
 from segdata_etl.common.cli_flags import pin_command_parts, pin_values
 from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
 from segdata_etl.datasets.coralnet.curate.build import curate
-from segdata_etl.label_maps.coralnet_cleaned_up_rerun import cleaned_up_rerun_labels
+from segdata_etl.label_maps.coralnet_api import (
+    CoralNetLabelMappings,
+    api_labels,
+    fetch_coralnet_label_mappings,
+)
 from segdata_etl.splits.inputs import sync_tables
 from segdata_etl.taxonomy import find_repo_root, require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
@@ -59,21 +65,32 @@ def _source(raw: Manifest) -> SourceInfo:
     return SourceInfo(type="coralnet-scrape", uri=raw.source.uri, revision=raw.source.revision)
 
 
-def build_v1(
-    raw: DatasetVersion, raw_ref: ParentRef, benthic_attributes: pa.Table, config_dir: Path
+def build_curated(
+    raw: DatasetVersion,
+    raw_ref: ParentRef,
+    mappings: CoralNetLabelMappings,
+    benthic_attributes: pa.Table,
+    growth_forms: pa.Table,
+    config_dir: Path,
 ) -> CuratedVersion:
-    """Curate ``raw`` with the configs in ``config_dir`` and map its labels by the JSON.
+    """Curate ``raw`` with the configs in ``config_dir`` and map its labels by the API rows.
 
     Raises:
-        ValueError: ``raw`` has no points table, or a mapped target name matches more than one
-            benthic attribute ignoring case.
+        ValueError: ``raw`` has no points table, a mapped record has no
+            ``benthic_attribute_id``, or a mapped ``benthic_attribute_id`` or ``growth_form_id`` is
+            absent from ``benthic_attributes`` or ``growth_forms``.
     """
     curated = curate(
         raw,
         image_blacklist=config_dir / "image_blacklist.parquet",
         annotation_overrides=config_dir / "annotation_overrides.parquet",
     )
-    labels, mapping = cleaned_up_rerun_labels(id_to_name(raw.labels), benthic_attributes)
+    labels, mapping = api_labels(
+        id_to_name(raw.labels),
+        mappings,
+        set(benthic_attributes.column("id").to_pylist()),
+        set(growth_forms.column("id").to_pylist()),
+    )
     return CuratedVersion(
         tables={
             "images.parquet": curated.images,
@@ -100,16 +117,20 @@ def _pin(args: argparse.Namespace, prefix: str, name: str) -> Pin:
     )
 
 
-def _curate_v1(
-    args: argparse.Namespace, client: Any, bucket: str, repo_root: Path
-) -> CuratedVersion:
+def _curate(args: argparse.Namespace, client: Any, bucket: str, repo_root: Path) -> CuratedVersion:
     raw_pin = _pin(args, "raw", RAW_DATASET)
     tax_pin = _pin(args, "taxonomy", TAXONOMY)
     require_published_taxonomy(client, bucket, tax_pin)
     synced = sync_tables(client, {RAW_DATASET: raw_pin}, args.cache_dir, bucket, tax_pin)
     tax = open_taxonomy(args.cache_dir, bucket, tax_pin)
-    return build_v1(
-        synced[RAW_DATASET], _ref(raw_pin), tax.benthic_attributes, repo_root / CONFIG_DIR
+    mappings = fetch_coralnet_label_mappings()
+    return build_curated(
+        synced[RAW_DATASET],
+        _ref(raw_pin),
+        mappings,
+        tax.benthic_attributes,
+        tax.growth_forms,
+        repo_root / CONFIG_DIR,
     )
 
 
@@ -188,17 +209,22 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
     Raw and the taxonomy are synced from the dataset bucket into ``args.cache_dir``; the sync
     reads the cache first, so ``--cache-dir`` set to the stage dir reads a raw staged there. The
     taxonomy pin must still be published in the dataset bucket, even when the cache holds it. The
-    version reuses raw's image store and stages no copy or upload plan.
+    version reuses raw's image store and stages no copy or upload plan. Labels map by the live
+    MERMAID LabelMapping API, whose digest and fetch time the manifest records. The published v1
+    was built with the frozen cleaned_up_rerun mapping at git e6abfad.
 
     Raises:
         PublishRefused: The git tree is dirty or unpushed, or the taxonomy pin is not published
             in the bucket; nothing is staged.
-        ValueError: A mapped target name matches more than one benthic attribute ignoring case.
+        ValueError: A mapped ``benthic_attribute_id`` is absent from the pinned taxonomy;
+            nothing is staged.
+        requests.RequestException: The LabelMapping API request fails after its retries; the
+            error propagates and nothing is staged.
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     git = probe_git(repo_root)
     refuse_unpublishable(git)
-    built = _curate_v1(args, source_client, DATASET_BUCKET, repo_root)
+    built = _curate(args, source_client, DATASET_BUCKET, repo_root)
     version = next_version(
         args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=source_client
     )

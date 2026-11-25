@@ -1,4 +1,4 @@
-"""``segdata curate coralnet``: the v1 and v2 curated versions staged from raw, then promoted."""
+"""``segdata curate coralnet``: the curated version staged from raw and the API mapping, then promoted."""
 
 from __future__ import annotations
 
@@ -11,12 +11,14 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 import pytest
+import requests
 from s3_fake import FakeS3, crc64nvme, quoted_etag
 
 from segdata_etl import cli, promote
 from segdata_etl.common.copy_plan import COPIES_NAME, UPLOADS_NAME
 from segdata_etl.common.stage import LocalDirS3
 from segdata_etl.datasets.coralnet.curate import versions
+from segdata_etl.label_maps import coralnet_api
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
@@ -30,6 +32,49 @@ RAW_VERSION = "20261101-1111111"
 STAGED_RAW_VERSION = "20261102-3333333"
 KEPT, BLACK, OVERRIDDEN = "10", "11", "12"
 _TABLES = ("images.parquet", "points.parquet", "labels.parquet", "stats/label_counts.parquet")
+API_ROWS = [
+    {
+        "id": "m1",
+        "benthic_attribute_id": "ba-acro",
+        "benthic_attribute_name": "Acropora",
+        "growth_form_id": "g1",
+        "growth_form_name": "Branching",
+        "provider": "CoralNet",
+        "provider_id": 1,
+        "provider_label": "Acropora (branching)",
+    }
+]
+
+
+class _Response:
+    def __init__(self, payload: dict[str, object]):
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> dict[str, object]:
+        return self._payload
+
+
+class FakeApiSession:
+    """The MERMAID LabelMapping API as one page of ``rows``, or an HTTP error."""
+
+    def __init__(self, rows: list[dict[str, object]], error: Exception | None = None):
+        self.rows = rows
+        self.error = error
+
+    def __enter__(self) -> FakeApiSession:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        pass
+
+    def get(self, url: str, timeout: float) -> _Response:
+        assert url == coralnet_api.CORALNET_LABELMAPPINGS_URL
+        if self.error:
+            raise self.error
+        return _Response({"results": self.rows, "next": None})
 
 
 class NoS3:
@@ -203,6 +248,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     )
     monkeypatch.setattr(versions, "find_repo_root", lambda _start: repo)
     monkeypatch.setattr(versions, "probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr(coralnet_api, "_retrying_session", lambda: FakeApiSession(API_ROWS))
 
     s3 = FakeS3()
     for row in _raw_images():
@@ -236,7 +282,11 @@ def _ref(pin: Pin) -> ParentRef:
     return ParentRef(dataset=pin.name, version=pin.version, manifest_sha256=pin.manifest_sha256)
 
 
-def _stage_v1(world: World, cache: Path | None = None) -> tuple[str, Manifest, Pin]:
+def _use_api(monkeypatch: pytest.MonkeyPatch, session: FakeApiSession) -> None:
+    monkeypatch.setattr(coralnet_api, "_retrying_session", lambda: session)
+
+
+def _stage_curated(world: World, cache: Path | None = None) -> tuple[str, Manifest, Pin]:
     world.run(("raw-", world.raw), ("taxonomy-", world.taxonomy), cache=cache)
     ((version, (manifest, pin)),) = world.staged().items()
     return version, manifest, pin
@@ -246,24 +296,32 @@ def _new_keys(s3: FakeS3, before: set[tuple[str, str]]) -> set[str]:
     return {key for bucket, key in set(s3.objects) - before if bucket == DATASET_BUCKET}
 
 
-def test_v1_stages_curated_tables_on_raws_image_store_without_a_plan_or_s3_write(
+def test_curated_stages_curated_tables_on_raws_image_store_without_a_plan_or_s3_write(
     world: World,
 ) -> None:
     before = dict(world.s3.objects)
 
-    version, manifest, _pin = _stage_v1(world)
+    version, manifest, _pin = _stage_curated(world)
 
     assert manifest.parents == (_ref(world.raw),)
     assert manifest.image_store == RAW_STORE
     assert manifest.source == RAW_SOURCE
     assert manifest.label_mapping is not None
-    assert manifest.label_mapping.source == "cleaned_up_rerun_json"
+    assert manifest.label_mapping.source == "mermaid_api"
+    assert manifest.label_mapping.fetched_at is not None
+    assert manifest.label_mapping.sha256 == coralnet_api.coralnet_mapping_digest(
+        coralnet_api.parse_coralnet_label_mappings(API_ROWS)
+    )
+    assert manifest.label_mapping.n_mapped == 1
     assert manifest.stats.dropped["blacklisted_images"] == 1
     labels = world.table(version, "labels.parquet")
     assert sorted(labels["label_id"]) == [1, 2, 3, 4]
     acro = labels[labels["label_id"] == 1].iloc[0]
     assert acro["mermaid_benthic_attribute_id"] == "ba-acro"
-    assert acro["mapping_source"] == "cleaned_up_rerun_json"
+    assert acro["mermaid_benthic_attribute"] == "Acropora"
+    assert acro["mermaid_growth_form"] == "Branching"
+    assert acro["mapping_source"] == "mermaid_api"
+    assert labels[labels["label_id"] != 1]["mermaid_benthic_attribute_id"].isna().all()
     staged = {p.name for p in (world.coralnet_dir() / version).rglob("*") if p.is_file()}
     assert staged == {
         "manifest.json",
@@ -278,20 +336,18 @@ def test_v1_stages_curated_tables_on_raws_image_store_without_a_plan_or_s3_write
     assert world.s3.ops("put") == []
 
 
-def test_staged_v1_promotes_as_a_tables_only_version(world: World) -> None:
-    v1_version, _manifest, _pin = _stage_v1(world)
+def test_staged_curated_version_promotes_as_a_tables_only_version(world: World) -> None:
+    version, _manifest, _pin = _stage_curated(world)
     before = set(world.s3.objects)
 
-    promote.promote(
-        world.s3, stage_dir=world.stage, dataset="coralnet", version=v1_version, workers=2
-    )
+    promote.promote(world.s3, stage_dir=world.stage, dataset="coralnet", version=version, workers=2)
 
-    prefix = f"datasets/coralnet/{v1_version}/"
+    prefix = f"datasets/coralnet/{version}/"
     assert _new_keys(world.s3, before) == {prefix + n for n in (*_TABLES, "manifest.json")}
     assert world.s3.ops("copy") == []
 
 
-def test_v1_against_a_raw_staged_only_in_the_stage_dir_reads_no_raw_from_s3(
+def test_curated_against_a_raw_staged_only_in_the_stage_dir_reads_no_raw_from_s3(
     world: World,
 ) -> None:
     staged_raw = _publish_raw(LocalDirS3(world.stage), STAGED_RAW_VERSION, world.repo)
@@ -303,8 +359,8 @@ def test_v1_against_a_raw_staged_only_in_the_stage_dir_reads_no_raw_from_s3(
     assert [c for c in world.s3.calls if "coralnet-raw" in c[2]] == []
 
 
-def test_v1_refuses_a_taxonomy_cached_but_not_published(world: World) -> None:
-    first, _manifest, _pin = _stage_v1(world)
+def test_curated_refuses_a_taxonomy_cached_but_not_published(world: World) -> None:
+    first, _manifest, _pin = _stage_curated(world)
     for key in [k for k in world.s3.objects if k[1].startswith("taxonomy/")]:
         del world.s3.objects[key]
 
@@ -334,7 +390,7 @@ def test_a_dirty_or_unpushed_tree_is_refused_before_any_s3_call(
 
 
 def test_the_recorded_command_names_the_stage_dir(world: World) -> None:
-    _version, manifest, _pin = _stage_v1(world)
+    _version, manifest, _pin = _stage_curated(world)
 
     command = manifest.etl.command
     assert f"--stage-dir {world.stage}" in command
@@ -347,6 +403,44 @@ def test_the_recorded_command_names_the_stage_dir(world: World) -> None:
         f"--taxonomy-manifest-sha256 {world.taxonomy.manifest_sha256}"
     ) in command
     assert "--label-map" not in command
+
+
+def test_an_api_attribute_absent_from_the_taxonomy_is_refused_and_stages_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_api(monkeypatch, FakeApiSession([{**API_ROWS[0], "benthic_attribute_id": "ba-gone"}]))
+
+    with pytest.raises(ValueError, match="ba-gone"):
+        world.run(("raw-", world.raw), ("taxonomy-", world.taxonomy))
+
+    assert not world.coralnet_dir().exists()
+
+
+def test_an_api_growth_form_absent_from_the_taxonomy_is_refused_and_stages_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_api(monkeypatch, FakeApiSession([{**API_ROWS[0], "growth_form_id": "g-gone"}]))
+
+    with pytest.raises(ValueError, match="g-gone"):
+        world.run(("raw-", world.raw), ("taxonomy-", world.taxonomy))
+
+    assert not world.coralnet_dir().exists()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [requests.HTTPError("503"), requests.ConnectionError("refused"), requests.Timeout("slow")],
+    ids=["http", "connection", "timeout"],
+)
+def test_an_api_request_error_propagates_and_stages_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch, error: requests.RequestException
+) -> None:
+    _use_api(monkeypatch, FakeApiSession([], error=error))
+
+    with pytest.raises(type(error)):
+        world.run(("raw-", world.raw), ("taxonomy-", world.taxonomy))
+
+    assert not world.coralnet_dir().exists()
 
 
 def test_stage_dir_is_required(world: World, capsys: pytest.CaptureFixture[str]) -> None:

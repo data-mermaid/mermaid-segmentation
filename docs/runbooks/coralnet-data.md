@@ -215,7 +215,7 @@ uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
 
 ## Publish CoralNet dataset versions
 
-This procedure stages a CoralNet build locally, then publishes it as dataset versions in `s3://mermaid-ic-datasets/`: `coralnet-raw`, then `coralnet` v1. The flags, the tables and the resume rules are in [CoralNet dataset versions](../../packages/segdata-etl/README.md#coralnet-dataset-versions).
+This procedure stages a CoralNet build locally, then publishes it as dataset versions in `s3://mermaid-ic-datasets/`: `coralnet-raw`, then a curated `coralnet` version whose labels the MERMAID API maps. The flags, the tables and the resume rules are in [CoralNet dataset versions](../../packages/segdata-etl/README.md#coralnet-dataset-versions).
 
 ### Preconditions
 
@@ -223,7 +223,7 @@ This procedure stages a CoralNet build locally, then publishes it as dataset ver
 - A git checkout of this repository. Commit and push before you stage: every stage and publish command refuses a tree with uncommitted changes to tracked files, and a HEAD that no remote branch contains. `raw` checks this before it probes any image.
 - The environment from [Before you start](#before-you-start). `raw` requires `MERMAID_CORALNET_BUCKET` (it raises `ValueError` when unset) and reads `MERMAID_CORALNET_PREFIX`.
 - AWS credentials that read the scrape bucket. `promote` and the taxonomy publish also need credentials that write `mermaid-ic-datasets`.
-- Network access to `api.datamermaid.org` for the taxonomy.
+- Network access to `api.datamermaid.org`, for the taxonomy and for `curate`, which fetches the CoralNet label mapping.
 - A local stage directory, `<stage>` below. Every `build` and `curate` command writes there and nothing to S3. Use one stage directory for the whole procedure.
 
 Each stage command prints `version:` and `manifest_sha256:`. Record both: they are the pin that the next step takes. `promote` publishes the version you staged, under the same name, so the pin of a staged version is the pin of the published one.
@@ -234,7 +234,7 @@ Publishing is irreversible: the bucket denies overwrite and delete. Get approval
 
 Stage a few sources and compare them with the old CoralNet loader before you publish anything. Pick the sources from the `coralnet` `whitelist_sources` in `configs/data_config.yaml`. This check uses a separate stage directory, `<check-stage>`, that you do not promote.
 
-`check_dataset_parity.py` takes a `coralnet` version, so it checks v1. It cannot check `coralnet-raw`.
+`check_dataset_parity.py` takes a `coralnet` version, so it checks the curated version. It cannot check `coralnet-raw`.
 
 1. Stage a raw version of the sources:
 
@@ -243,7 +243,7 @@ Stage a few sources and compare them with the old CoralNet loader before you pub
      --source-ids <id>,<id>,... --build-run <run>
    ```
 
-2. Stage v1 from the raw pin and a published taxonomy pin. Publish the taxonomy first if none exists: see [Publish the versioned datasets](training-datasets.md#publish-the-versioned-datasets), which stages it with `segdata taxonomy --stage-dir` and publishes it with `--tables-from <staged taxonomy folder> --publish`. The command refuses a taxonomy pin that is not published in `mermaid-ic-datasets`, even when `<check-stage>` holds it. `--cache-dir <check-stage>` makes the command read the staged raw version instead of S3:
+2. Stage the curated version from the raw pin and a published taxonomy pin. Publish the taxonomy first if none exists: see [Publish the versioned datasets](training-datasets.md#publish-the-versioned-datasets), which stages it with `segdata taxonomy --stage-dir` and publishes it with `--tables-from <staged taxonomy folder> --publish`. The command refuses a taxonomy pin that is not published in `mermaid-ic-datasets`, even when `<check-stage>` holds it. `--cache-dir <check-stage>` makes the command read the staged raw version instead of S3:
 
    ```bash
    uv run --package segdata-etl segdata curate coralnet \
@@ -269,9 +269,9 @@ Stage a few sources and compare them with the old CoralNet loader before you pub
 
    Expected result:
 
-   Only the mapped labels differ, because v1 maps labels with `cleaned_up_rerun`. `mapped label counts` lists them. `points only in old` and `points only in new` also list points, because a point key includes its mapped label: the two lists hold the same positions with different mapped labels. Images and native label counts are `none`. The script prints `PARITY FAILED` and exits 1.
+   The old loader on main maps labels through the live MERMAID API, as `curate` does, so the script should print `PARITY OK`. A difference appears only where the API changed between the two fetches. `mapped label counts` lists the labels that differ. `points only in old` and `points only in new` list the same positions with different mapped labels, because a point key includes its mapped label. Images and native label counts are `none`. A difference makes the script print `PARITY FAILED` and exit 1.
 
-The same command checks the full-corpus v1 that you stage below: pass the full stage directory as `--cache-dir`, with a data config that lists the whole corpus.
+The same command checks the full-corpus curated version that you stage below: pass the full stage directory as `--cache-dir`, with a data config that lists the whole corpus.
 
 ### Stage the raw version
 
@@ -295,11 +295,11 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coral
 
 ### Publish the taxonomy
 
-v1 resolves its labels against a `mermaid-benthic` taxonomy version on S3, so publish one before you stage v1. The steps are in [Publish the versioned datasets](training-datasets.md#publish-the-versioned-datasets): stage with `segdata taxonomy --stage-dir <stage>`, then publish with `--tables-from <staged taxonomy folder> --publish`. Record the pin that the publish prints. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
+`curate` checks each mapped benthic attribute id and growth form id against a `mermaid-benthic` taxonomy version on S3, so publish one before you stage the curated version. A taxonomy that lacks an id the API returns stops `curate`: stage and publish a newer one. The steps are in [Publish the versioned datasets](training-datasets.md#publish-the-versioned-datasets): stage with `segdata taxonomy --stage-dir <stage>`, then publish with `--tables-from <staged taxonomy folder> --publish`. Record the pin that the publish prints. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
 
-### Stage and publish v1
+### Stage and publish the curated version
 
-Stage v1 against the published raw pin and the published taxonomy pin:
+Stage the curated version against the published raw pin and the published taxonomy pin:
 
 ```bash
 uv run --package segdata-etl segdata curate coralnet \
@@ -308,10 +308,10 @@ uv run --package segdata-etl segdata curate coralnet \
   --taxonomy-version <tax> --taxonomy-manifest-sha256 <sha>
 ```
 
-v1 applies `configs/coralnet/annotation_overrides.parquet` and `configs/coralnet/image_blacklist.parquet` from the checkout. It stages tables only, on the image store of raw, with no plan file. Then publish it:
+The curated version applies `configs/coralnet/annotation_overrides.parquet` and `configs/coralnet/image_blacklist.parquet` from the checkout. It stages tables only, on the image store of raw, with no plan file. Its manifest records the digest and fetch time of the API mapping. If the API is unreachable or returns an HTTP error, the command stops and stages nothing. Then publish it:
 
 ```bash
-uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coralnet --version <v1>
+uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coralnet --version <curated>
 ```
 
 `promote` publishes a tables-only version only when a published parent has the same image store. It HEAD-checks every image key first.
@@ -321,10 +321,13 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coral
 | What | Where |
 |---|---|
 | `coralnet-raw` version | `s3://mermaid-ic-datasets/datasets/coralnet-raw/<version>/` |
-| `coralnet` v1 | `s3://mermaid-ic-datasets/datasets/coralnet/<version>/` |
+| `coralnet` curated version | `s3://mermaid-ic-datasets/datasets/coralnet/<version>/` |
+| `coralnet` v1 (`cleaned_up_rerun` labels) | `s3://mermaid-ic-datasets/datasets/coralnet/20261124-cfc389d/`, manifest sha256 `a9de45e16219340929e1fdfb908759cd560407bcff7fb636b8ddd812b269e8a4` |
 | Taxonomy | `s3://mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>/` |
 | Original images | `s3://mermaid-ic-datasets/images/coralnet/s<source_id>/<image_id>.jpg` or `.png` |
 | Staged versions | The same keys under `<stage>/mermaid-ic-datasets/` |
+
+`coralnet@20261124-cfc389d` holds the labels the `cleaned_up_rerun` model trained on. It was built at git `cfc389d` with the frozen `cleaned_up_rerun` mapping, against taxonomy `mermaid-benthic@20261124-e6abfad` (sha256 `fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43`). To reproduce that training set, pin that version. Do not stage it again: the current code maps through the API.
 
 Each version folder holds `manifest.json` and the tables. `segdata split build` takes the `coralnet` and `coralnet-raw` pins; see [CoralNet split](../../packages/segdata-etl/README.md#coralnet-split).
 
@@ -340,9 +343,10 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `ObjectConflict` from `promote` (raw) | A destination key under `images/coralnet/` holds an object with a different ETag, size or CRC64NVME than the plan. Nothing was written. Find out what wrote it; `promote` does not replace it. |
 | `PublishRefused: ... is not staged` or `... does not match the manifest` (`promote`) | The `--stage-dir`, `--dataset` or `--version` is wrong, or a staged file changed after staging. Stage the version again. |
 | `SourceChanged` (raw stage) | An original was replaced between its HEAD and its read. Run the same command again. |
-| `PublishRefused` from `promote` (tables-only v1) | No published parent has the same image store, or an image key is missing or differs. Nothing was written. Publish the parent first. |
+| `PublishRefused` from `promote` (tables-only curated version) | No published parent has the same image store, or an image key is missing or differs. Nothing was written. Publish the parent first. |
 | `PinMismatch` | A pin's sha256 does not match the manifest in the store. Copy the pin again from the output of the command that published it. |
-| `ValueError: taxonomy has several benthic attributes named (ignoring case): [...]` (v1) | The pinned taxonomy has more than one attribute with a mapped name. v1 cannot be published against that taxonomy version. |
+| `ValueError` from `curate` listing benthic attribute or growth form ids missing from the taxonomy | The API maps a label to an attribute or growth form that the pinned taxonomy lacks. Nothing was staged. Stage and publish a newer taxonomy, then pin it. |
+| `curate` stops on a connection error or an HTTP error from `api.datamermaid.org` | The label mapping could not be fetched. Nothing was staged. Check network access, then run again. |
 | HTTP or connection error from `api.datamermaid.org` (taxonomy) | Run again when the API answers. |
 
 ## When something fails
