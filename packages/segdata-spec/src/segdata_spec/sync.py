@@ -52,13 +52,14 @@ from segdata_spec.errors import (
     PinMismatch,
     SegdataError,
 )
-from segdata_spec.features import FeatureSetManifest, _check_dataset_pin
 from segdata_spec.manifest import (
+    FeatureSetManifest,
     FileEntry,
     ImageStore,
     Manifest,
     Pin,
     TaxonomyManifest,
+    _check_dataset_pin,
 )
 from segdata_spec.resize import ResizeSpec, resize_image, resize_mask, scaled_size
 

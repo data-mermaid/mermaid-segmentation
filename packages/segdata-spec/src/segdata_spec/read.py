@@ -26,8 +26,14 @@ from segdata_spec._s3 import (
     taxonomy_prefix,
 )
 from segdata_spec.errors import NotSynced, PinMismatch
-from segdata_spec.features import FeatureSetManifest, _check_dataset_pin
-from segdata_spec.manifest import Manifest, Pin, TaxonomyManifest, manifest_sha256
+from segdata_spec.manifest import (
+    FeatureSetManifest,
+    Manifest,
+    Pin,
+    TaxonomyManifest,
+    _check_dataset_pin,
+    manifest_sha256,
+)
 from segdata_spec.resize import ResizeSpec, scale_images, scale_points
 
 

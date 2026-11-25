@@ -8,7 +8,7 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -33,11 +33,12 @@ from segdata_spec.errors import (
 )
 from segdata_spec.manifest import (
     EtlInfo,
+    FeatureSetManifest,
+    FeatureSetStats,
     FileEntry,
     ImageStore,
     Manifest,
     Pin,
-    _Model,
     dump_manifest,
     manifest_sha256,
 )
@@ -50,40 +51,11 @@ from segdata_spec.publish import (
     table_bytes,
 )
 from segdata_spec.schema import FEATURE_INDEX_SCHEMA, conform
+from segdata_spec.sync import check_published_manifest
 
 _FEATURE_EXTENSION = ".featurevector"
 # The fields that identify an extractor; two specs with equal values produce the same features.
 EXTRACTOR_IDENTITY_KEYS = ("class_path", "crop_size", "feature_dim", "weights_sha256")
-
-
-class FeatureSetStats(_Model):
-    """Coverage of a feature set: images indexed, and version images it leaves out."""
-
-    n_images: int
-    n_missing: int
-
-
-class FeatureSetManifest(_Model):
-    """``manifest.json`` of a feature set; its sha256 pins the set."""
-
-    schema_version: Literal[1]
-    dataset: Pin
-    family: str
-    extractor: dict[str, Any]
-    files: dict[str, FileEntry]
-    stats: FeatureSetStats
-    etl: EtlInfo
-    created_at: datetime
-
-
-def _check_dataset_pin(manifest: FeatureSetManifest, pin: Pin) -> None:
-    """Raise ``PinMismatch`` unless the feature set was published for exactly ``pin``."""
-    recorded = manifest.dataset.manifest_sha256
-    if recorded != pin.manifest_sha256:
-        raise PinMismatch(
-            f"feature set {manifest.family!r} was published for dataset manifest {recorded}, "
-            f"but the pin expects {pin.manifest_sha256}"
-        )
 
 
 def _extractor_identity(extractor: Mapping[str, Any]) -> dict[str, Any]:
@@ -163,9 +135,6 @@ def _load_version(client: Any, bucket: str, pin: Pin) -> tuple[Manifest, set[str
         PinMismatch: The manifest differs from ``pin``.
         ChecksumMismatch: ``images.parquet`` differs from its manifest entry.
     """
-    # sync imports this module for FeatureSetManifest, so this import waits for the call.
-    from segdata_spec.sync import check_published_manifest
-
     check_published_manifest(client, bucket, pin)
     prefix = dataset_prefix(pin.name, pin.version)
     manifest_bytes = _get_bytes(client, bucket, prefix + MANIFEST_NAME)
