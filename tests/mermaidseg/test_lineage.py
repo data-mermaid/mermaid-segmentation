@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from mermaidseg import lineage
+from mermaidseg.data.config import DataSection
 from mermaidseg.lineage import collect_lineage, data_version, inherit_lineage
 
 
@@ -130,49 +131,53 @@ def test_collect_lineage_carries_the_run_inputs_and_library_versions(monkeypatch
     assert all(isinstance(v, str) for v in result["versions"].values())
 
 
-def test_data_config_sha1_changes_with_a_leaf_not_with_key_order():
-    base = {"a": {"train": {"split": "train"}}, "b": 1}
-    reordered = {"b": 1, "a": {"train": {"split": "train"}}}
-    changed = {"a": {"train": {"split": "val"}}, "b": 1}
-    sha = data_version(base, {})["data_config_sha1"]
-    assert sha == data_version(reordered, {})["data_config_sha1"]
-    assert sha != data_version(changed, {})["data_config_sha1"]
-    assert len(sha) == 40
-
-
-def test_data_version_lists_manifests_of_datasets_that_have_one():
+def test_data_version_pins_each_dataset_and_the_taxonomy_with_drops_summed_per_dataset():
+    section = DataSection.model_validate(
+        {
+            "taxonomy": {"version": "t1", "manifest_sha256": "tt"},
+            "datasets": {
+                "coralnet": {
+                    "version": "v1",
+                    "manifest_sha256": "aa",
+                    "resize": {"max_edge": 2048},
+                    "train": {"groups": ["s1"]},
+                    "test": {"groups": ["s2"]},
+                },
+                "mermaid": {"version": "v2", "manifest_sha256": "bb", "train": {"groups": "all"}},
+            },
+        }
+    )
     datasets = {
-        ("coralnet", "train"): SimpleNamespace(manifest_path="m/train.parquet"),
-        ("coralnet", "val"): SimpleNamespace(manifest_path="m/val.parquet"),
-        ("coralscapes_v2", "train"): SimpleNamespace(),
-    }
-    assert data_version({}, datasets)["manifests"] == {
-        "coralnet.train": "m/train.parquet",
-        "coralnet.val": "m/val.parquet",
+        ("coralnet", "train"): SimpleNamespace(images_dropped=2),
+        ("coralnet", "test"): SimpleNamespace(images_dropped=3),
+        ("mermaid", "train"): SimpleNamespace(images_dropped=0),
     }
 
-
-def test_data_version_lists_manifest_sha256_of_datasets_that_have_one():
-    datasets = {
-        ("coralnet", "train"): SimpleNamespace(
-            manifest_path="m/train.parquet", manifest_sha256="aa11"
-        ),
-        ("coralnet", "val"): SimpleNamespace(manifest_path="m/val.parquet"),
-        ("coralscapes_v2", "train"): SimpleNamespace(),
-    }
-    version = data_version({}, datasets)
-    assert version["manifest_sha256"] == {"coralnet.train": "aa11"}
-    assert version["manifests"] == {
-        "coralnet.train": "m/train.parquet",
-        "coralnet.val": "m/val.parquet",
+    assert data_version(section, datasets) == {
+        "datasets": {
+            "coralnet": {
+                "version": "v1",
+                "manifest_sha256": "aa",
+                "resize": {"max_edge": 2048, "filter": "lanczos", "jpeg_quality": 95},
+                "images_dropped": 5,
+            },
+            "mermaid": {
+                "version": "v2",
+                "manifest_sha256": "bb",
+                "resize": None,
+                "images_dropped": 0,
+            },
+        },
+        "taxonomy": {"version": "t1", "manifest_sha256": "tt"},
     }
 
 
-def test_data_version_records_the_label_mapping_provenance():
-    provenance = {"coralnet": {"source": "api", "sha256": "bb22", "n_records": 3}}
+def test_data_version_without_a_taxonomy_pin_records_none():
+    section = DataSection.model_validate(
+        {"datasets": {"m": {"version": "v", "manifest_sha256": "s", "val": {"groups": "all"}}}}
+    )
 
-    assert data_version({}, {}, provenance)["label_mappings"] == provenance
-    assert data_version({}, {})["label_mappings"] == {}
+    assert data_version(section, {})["taxonomy"] is None
 
 
 @pytest.mark.parametrize(

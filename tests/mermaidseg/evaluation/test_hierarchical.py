@@ -10,7 +10,6 @@ import torch
 import yaml
 
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.datasets.factory import configured_source_names
 from mermaidseg.evaluation.gt_mapping import build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
 
@@ -20,7 +19,7 @@ _CSV = _REPO / "configs" / "class_to_concepts.csv"
 
 def _concept_names() -> list[str]:
     data = yaml.safe_load((_REPO / "configs" / "data_config.yaml").read_text())["data"]
-    schema = ConceptSchema.from_csv(_CSV, sources=configured_source_names(data))
+    schema = ConceptSchema.from_csv(_CSV, sources=set(data["datasets"]))
     return [name for _, name in sorted(schema.channel_id2name().items())]
 
 

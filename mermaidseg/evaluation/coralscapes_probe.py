@@ -31,9 +31,9 @@ negative prediction. Hierarchical metrics (consistency, mistake severity, ECE)
 are computed from the per-rank softmax of the same map against the taxonomy of
 each pixel's class in ``class_to_concepts.csv``.
 
-Probe/eval images are resolved either from a local Cityscapes-style mirror
-(``--coralscapes-root``, matched by stem, md5-verified) or from the HuggingFace
-dataset ``josauder/coralscapesV2`` (matched by label md5).
+Probe and eval images are read from the synced ``coralscapes_v2`` dataset version: a probe
+image is the ``train`` group image whose ``image_id`` is the probe entry's ``stem`` (its label
+md5 is verified), and the ``val`` and ``test`` splits are the ``validation`` and ``test`` groups.
 """
 
 from __future__ import annotations
@@ -50,13 +50,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from numpy.typing import NDArray
+from PIL import Image
 from tqdm import tqdm
 
-from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import (
-    CORALSCAPES_ID2NAME,
-    CORALSCAPES_V2_ID2NAME,
-    coralscapes_v2_to_legacy_lut,
-)
 from mermaidseg.evaluation.gt_mapping import build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
 from mermaidseg.evaluation.metrics import (
@@ -66,6 +62,7 @@ from mermaidseg.evaluation.metrics import (
 )
 from mermaidseg.evaluation.reporting import fmt, write_json
 from mermaidseg.inference.predictor import CBMPredictor
+from segdata_spec.read import DatasetVersion
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +71,281 @@ LEGACY_NUM_CLASSES = 39
 CORALSCAPES_HEIGHT = 1024
 CORALSCAPES_WIDTH = 2048
 SPLITS = ("val", "test")
-_HF_SPLIT_NAMES = {"val": "validation", "test": "test"}
+_SPLIT_GROUPS = {"val": "validation", "test": "test"}
+PROBE_GROUP = "train"
 _TILE = 1024
 _SVM_STRIP_ROWS = 128
 _ALLOWED_CONCEPT_CELLS = ("true", "false", "not_given")
+
+
+# Native CoralscapesV2 class ids; equal to the coralscapes_v2 version's labels.parquet ids.
+CORALSCAPES_V2_ID2NAME: dict[int, str] = {
+    1: "acanthaster planci",
+    2: "acropora alive",
+    3: "acropora bleached",
+    4: "acropora dead",
+    5: "algae covered brain coral",
+    6: "algae covered branching coral",
+    7: "algae covered lobophylliidae",
+    8: "algae covered massive coral",
+    9: "algae covered pocillopora",
+    10: "algae covered porites",
+    11: "algae covered substrate",
+    12: "algae covered table acropora",
+    13: "anemone",
+    14: "background",
+    15: "brain coral alive",
+    16: "brain coral bleached",
+    17: "brain coral dead",
+    18: "branching coral alive",
+    19: "branching coral bleached",
+    20: "branching coral dead",
+    21: "cirrhipathes",
+    22: "dark",
+    23: "dead giant clam",
+    24: "feather worm",
+    25: "fish",
+    26: "fungiidae alive",
+    27: "fungiidae bleached",
+    28: "fungiidae dead",
+    29: "galaxea alive",
+    30: "galaxea bleached",
+    31: "galaxea dead",
+    32: "giant clam",
+    33: "goniopora alive",
+    34: "goniopora dead",
+    35: "hard coral alive",
+    36: "hard coral bleached",
+    37: "hard coral dead",
+    38: "hard substrate",
+    39: "human",
+    40: "human-made structure",
+    41: "leather coral alive",
+    42: "lobophylliidae alive",
+    43: "lobophylliidae bleached",
+    44: "lobophylliidae dead",
+    45: "massive alive",
+    46: "massive bleached",
+    47: "massive dead",
+    48: "meandering coral alive",
+    49: "meandering coral bleached",
+    50: "meandering coral dead",
+    51: "millepora",
+    52: "millepora bleached",
+    53: "millepora dead",
+    54: "nephtheidae alive",
+    55: "other animal",
+    56: "other coral alive",
+    57: "other coral bleached",
+    58: "other coral dead",
+    59: "pavona alive",
+    60: "pavona bleached",
+    61: "pavona dead",
+    62: "pocillopora alive",
+    63: "pocillopora bleached",
+    64: "pocillopora dead",
+    65: "porites alive",
+    66: "porites bleached",
+    67: "porites dead",
+    68: "rubble",
+    69: "sand",
+    70: "sea cucumber",
+    71: "sea urchin",
+    72: "seagrass",
+    73: "seriatopora alive",
+    74: "seriatopora bleached",
+    75: "seriatopora dead",
+    76: "soft coral (malacalcyonacea) alive",
+    77: "soft coral (malacalcyonacea) bleached",
+    78: "sponge",
+    79: "stylophora alive",
+    80: "stylophora bleached",
+    81: "stylophora dead",
+    82: "table acropora alive",
+    83: "table acropora bleached",
+    84: "table acropora dead",
+    85: "thin plate/encrusting coral alive",
+    86: "thin plate/encrusting coral bleached",
+    87: "thin plate/encrusting coral dead",
+    88: "transect line",
+    89: "transect tools",
+    90: "trash",
+    91: "turbinaria",
+    92: "turbinaria dead",
+    93: "water column",
+    94: "water surface",
+    95: "xeniidae alive",
+}
+
+# Legacy column of the CoralscapesV2 dataset card (the paper's 95 -> 39 map).
+# The card calls V1 class 12 "hard substrate"; this repo's Coralscapes ids name
+# that class "unknown hard substrate".
+CORALSCAPES_V2_TO_LEGACY_NAME: dict[str, str] = {
+    "acanthaster planci": "crown of thorn",
+    "acropora alive": "acropora alive",
+    "acropora bleached": "branching bleached",
+    "acropora dead": "branching dead",
+    "algae covered brain coral": "algae covered substrate",
+    "algae covered branching coral": "algae covered substrate",
+    "algae covered lobophylliidae": "algae covered substrate",
+    "algae covered massive coral": "algae covered substrate",
+    "algae covered pocillopora": "algae covered substrate",
+    "algae covered porites": "algae covered substrate",
+    "algae covered substrate": "algae covered substrate",
+    "algae covered table acropora": "algae covered substrate",
+    "anemone": "anemone",
+    "background": "background",
+    "brain coral alive": "meandering alive",
+    "brain coral bleached": "meandering bleached",
+    "brain coral dead": "meandering dead",
+    "branching coral alive": "branching alive",
+    "branching coral bleached": "branching bleached",
+    "branching coral dead": "branching dead",
+    "cirrhipathes": "other coral alive",
+    "dark": "dark",
+    "dead giant clam": "dead clam",
+    "feather worm": "other animal",
+    "fish": "fish",
+    "fungiidae alive": "other coral alive",
+    "fungiidae bleached": "other coral bleached",
+    "fungiidae dead": "other coral dead",
+    "galaxea alive": "other coral alive",
+    "galaxea bleached": "other coral bleached",
+    "galaxea dead": "massive/meandering dead",
+    "giant clam": "clam",
+    "goniopora alive": "other coral alive",
+    "goniopora dead": "other coral dead",
+    "hard coral alive": "other coral alive",
+    "hard coral bleached": "other coral bleached",
+    "hard coral dead": "other coral dead",
+    "hard substrate": "unknown hard substrate",
+    "human": "human",
+    "human-made structure": "unknown hard substrate",
+    "leather coral alive": "other coral alive",
+    "lobophylliidae alive": "meandering alive",
+    "lobophylliidae bleached": "meandering bleached",
+    "lobophylliidae dead": "meandering dead",
+    "massive alive": "massive/meandering alive",
+    "massive bleached": "massive/meandering bleached",
+    "massive dead": "massive/meandering dead",
+    "meandering coral alive": "meandering alive",
+    "meandering coral bleached": "meandering bleached",
+    "meandering coral dead": "meandering dead",
+    "millepora": "millepora",
+    "millepora bleached": "branching bleached",
+    "millepora dead": "branching dead",
+    "nephtheidae alive": "other coral alive",
+    "other animal": "other animal",
+    "other coral alive": "other coral alive",
+    "other coral bleached": "other coral bleached",
+    "other coral dead": "other coral dead",
+    "pavona alive": "other coral alive",
+    "pavona bleached": "other coral bleached",
+    "pavona dead": "other coral dead",
+    "pocillopora alive": "pocillopora alive",
+    "pocillopora bleached": "branching bleached",
+    "pocillopora dead": "branching dead",
+    "porites alive": "massive/meandering alive",
+    "porites bleached": "massive/meandering bleached",
+    "porites dead": "massive/meandering dead",
+    "rubble": "rubble",
+    "sand": "sand",
+    "sea cucumber": "sea cucumber",
+    "sea urchin": "sea urchin",
+    "seagrass": "seagrass",
+    "seriatopora alive": "branching alive",
+    "seriatopora bleached": "branching bleached",
+    "seriatopora dead": "branching dead",
+    "soft coral (malacalcyonacea) alive": "other coral alive",
+    "soft coral (malacalcyonacea) bleached": "other coral bleached",
+    "sponge": "sponge",
+    "stylophora alive": "stylophora alive",
+    "stylophora bleached": "branching bleached",
+    "stylophora dead": "branching dead",
+    "table acropora alive": "table acropora alive",
+    "table acropora bleached": "branching bleached",
+    "table acropora dead": "table acropora dead",
+    "thin plate/encrusting coral alive": "other coral alive",
+    "thin plate/encrusting coral bleached": "other coral bleached",
+    "thin plate/encrusting coral dead": "other coral dead",
+    "transect line": "transect line",
+    "transect tools": "transect tools",
+    "trash": "trash",
+    "turbinaria": "turbinaria",
+    "turbinaria dead": "other coral dead",
+    "water column": "background",
+    "water surface": "background",
+    "xeniidae alive": "other coral alive",
+}
+
+
+# Original Coralscapes (v1) 39 class ids; the target of the 95 -> 39 legacy map.
+CORALSCAPES_ID2NAME: dict[int, str] = {
+    1: "seagrass",
+    2: "trash",
+    3: "other coral dead",
+    4: "other coral bleached",
+    5: "sand",
+    6: "other coral alive",
+    7: "human",
+    8: "transect tools",
+    9: "fish",
+    10: "algae covered substrate",
+    11: "other animal",
+    12: "unknown hard substrate",
+    13: "background",
+    14: "dark",
+    15: "transect line",
+    16: "massive/meandering bleached",
+    17: "massive/meandering alive",
+    18: "rubble",
+    19: "branching bleached",
+    20: "branching dead",
+    21: "millepora",
+    22: "branching alive",
+    23: "massive/meandering dead",
+    24: "clam",
+    25: "acropora alive",
+    26: "sea cucumber",
+    27: "turbinaria",
+    28: "table acropora alive",
+    29: "sponge",
+    30: "anemone",
+    31: "pocillopora alive",
+    32: "table acropora dead",
+    33: "meandering bleached",
+    34: "stylophora alive",
+    35: "sea urchin",
+    36: "meandering alive",
+    37: "meandering dead",
+    38: "crown of thorn",
+    39: "dead clam",
+}
+
+
+def coralscapes_v2_to_legacy_lut() -> NDArray[np.uint8]:
+    """Map a native CoralscapesV2 mask onto the original 39-class ids.
+
+    Index 0 stays 0 (unannotated). Indexes 1..95 are the V1 ids of
+    :data:`CORALSCAPES_V2_TO_LEGACY_NAME`.
+    """
+    legacy_ids = {name: class_id for class_id, name in CORALSCAPES_ID2NAME.items()}
+    fine_names = set(CORALSCAPES_V2_ID2NAME.values())
+    if set(CORALSCAPES_V2_TO_LEGACY_NAME) != fine_names:
+        missing = sorted(fine_names - set(CORALSCAPES_V2_TO_LEGACY_NAME))
+        extra = sorted(set(CORALSCAPES_V2_TO_LEGACY_NAME) - fine_names)
+        raise RuntimeError(
+            f"95-to-39 map does not match the V2 names: missing={missing} extra={extra}"
+        )
+    unknown = sorted(set(CORALSCAPES_V2_TO_LEGACY_NAME.values()) - set(legacy_ids))
+    if unknown:
+        raise RuntimeError(
+            f"95-to-39 map uses names that are not Coralscapes V1 classes: {unknown}"
+        )
+    lut = np.zeros(len(CORALSCAPES_V2_ID2NAME) + 1, dtype=np.uint8)
+    for class_id, name in CORALSCAPES_V2_ID2NAME.items():
+        lut[class_id] = legacy_ids[CORALSCAPES_V2_TO_LEGACY_NAME[name]]
+    return lut
 
 
 def _to_label(arr_like: Any) -> NDArray[np.uint8]:
@@ -255,18 +523,46 @@ def build_coralscapes_concept_codes(csv_path: str | Path, concept: str) -> NDArr
 
 
 # --------------------------------------------------------------------------- #
-# Image sources.
+# Image source.
 # --------------------------------------------------------------------------- #
-class LocalMirrorSource:
-    """Cityscapes-style mirror (leftImg8bit + gtFine/*_labelIds.png)."""
+def _read_rgb(path: Path) -> NDArray[np.uint8]:
+    with Image.open(path) as handle:
+        return np.asarray(handle.convert("RGB"), dtype=np.uint8)
 
-    def __init__(self, root: str | Path):
-        """Point the source at a mirror directory.
+
+def _read_label(path: Path) -> NDArray[np.uint8]:
+    with Image.open(path) as handle:
+        return _to_label(handle)
+
+
+class VersionSource:
+    """Images and native label masks of a synced ``coralscapes_v2`` dataset version."""
+
+    def __init__(self, version: DatasetVersion):
+        """Index the version's images by group.
 
         Args:
-            root: Mirror root holding ``leftImg8bit`` and ``gtFine``.
+            version: The opened ``coralscapes_v2`` version (a dense version).
+
+        Raises:
+            ValueError: The version is not dense.
         """
-        self.root = Path(root)
+        if version.manifest.kind != "dense":
+            raise ValueError(
+                f"Coralscapes probes read a dense version; {version.manifest.dataset} "
+                f"{version.manifest.version} is {version.manifest.kind!r}"
+            )
+        self.version = version
+        self.images = version.images.to_pandas().sort_values("image_id").reset_index(drop=True)
+
+    def _rows(self, group: str) -> list[dict[str, Any]]:
+        return self.images[self.images["group"] == group].to_dict("records")
+
+    def _load(self, row: Mapping[str, Any]) -> tuple[NDArray[np.uint8], NDArray[np.uint8]]:
+        return (
+            _read_rgb(self.version.image_path(row)),
+            _read_label(self.version.mask_path(row)),
+        )
 
     def train_image_label(self, entry: dict) -> tuple[NDArray[np.uint8], NDArray[np.uint8]]:
         """Load the train image and label of a probe-set entry.
@@ -276,119 +572,37 @@ class LocalMirrorSource:
 
         Returns:
             The RGB image and the label map.
-        """
-        site, stem = entry["site"], entry["stem"]
-        from PIL import Image
 
-        img = np.asarray(
-            Image.open(
-                self.root / "leftImg8bit" / "train" / site / f"{stem}_leftImg8bit.png"
-            ).convert("RGB"),
-            dtype=np.uint8,
-        )
-        lab = _to_label(
-            Image.open(self.root / "gtFine" / "train" / site / f"{stem}_gtFine_labelIds.png")
-        )
-        md5 = label_md5(lab)
-        if md5 != entry["label_md5"]:
-            logger.warning(
-                "Label md5 mismatch for %s/%s (probe set may not match this mirror).", site, stem
+        Raises:
+            KeyError: No ``train`` group image has the entry's ``stem`` as ``image_id``.
+            ValueError: The version's label md5 differs from the entry's ``label_md5``.
+        """
+        match = self.images[
+            (self.images["group"] == PROBE_GROUP) & (self.images["image_id"] == entry["stem"])
+        ]
+        if match.empty:
+            raise KeyError(
+                f"Probe image {entry['site']}/{entry['stem']} is not a {PROBE_GROUP!r} image of "
+                f"{self.version.manifest.dataset} {self.version.manifest.version}"
+            )
+        img, lab = self._load(match.iloc[0].to_dict())
+        actual = label_md5(lab)
+        if actual != entry["label_md5"]:
+            raise ValueError(
+                f"Label md5 mismatch for {entry['site']}/{entry['stem']}: the probe set has "
+                f"{entry['label_md5']}, the version's mask has {actual}"
             )
         return img, lab
 
-    def _label_paths(self, split: str) -> list[Path]:
-        return sorted((self.root / "gtFine" / split).glob("*/*_gtFine_labelIds.png"))
-
     def iter_split(self, split: str) -> Iterator[tuple[str, NDArray[np.uint8], NDArray[np.uint8]]]:
-        """Yield ``(image_key, image, label)`` for every image of a split."""
-        from PIL import Image
-
-        for p in self._label_paths(split):
-            site = p.parent.name
-            stem = p.name.replace("_gtFine_labelIds.png", "")
-            img = np.asarray(
-                Image.open(
-                    self.root / "leftImg8bit" / split / site / f"{stem}_leftImg8bit.png"
-                ).convert("RGB"),
-                dtype=np.uint8,
-            )
-            yield f"{site}/{stem}", img, _to_label(Image.open(p))
+        """Yield ``(image_id, image, label)`` for every image of a split, by ``image_id``."""
+        for row in self._rows(_SPLIT_GROUPS[split]):
+            img, lab = self._load(row)
+            yield str(row["image_id"]), img, lab
 
     def num_split(self, split: str) -> int:
         """Return the number of images in a split."""
-        return len(self._label_paths(split))
-
-
-class HFSource:
-    """HuggingFace ``josauder/coralscapesV2`` dataset (default config)."""
-
-    def __init__(self, repo: str = "josauder/coralscapesV2"):
-        """Load the dataset from the HuggingFace hub.
-
-        Args:
-            repo: HuggingFace dataset repository id.
-        """
-        from datasets import load_dataset
-
-        logger.info("Loading HF dataset %s ...", repo)
-        self.ds = load_dataset(repo)
-        self._md5_index: dict[str, int] | None = None
-
-    def _build_index(self) -> None:
-        logger.info("Indexing HF train labels by md5 (%d images) ...", len(self.ds["train"]))
-        idx: dict[str, int] = {}
-        train = self.ds["train"]
-        for i in tqdm(range(len(train)), desc="md5 index"):
-            lab = _to_label(train[i]["label"])
-            idx[label_md5(lab)] = i
-        self._md5_index = idx
-
-    def train_image_label(self, entry: dict) -> tuple[NDArray[np.uint8], NDArray[np.uint8]]:
-        """Find a probe-set entry in the train split by label md5 and load it.
-
-        Args:
-            entry: Probe image entry with ``site``, ``stem`` and ``label_md5``.
-
-        Returns:
-            The RGB image and the label map.
-
-        Raises:
-            KeyError: If no train label matches the md5.
-        """
-        if self._md5_index is None:
-            self._build_index()
-        assert self._md5_index is not None  # set by _build_index
-        i = self._md5_index.get(entry["label_md5"])
-        if i is None:
-            raise KeyError(
-                f"Probe image (site={entry['site']} stem={entry['stem']} md5={entry['label_md5'][:10]}) "
-                "not found in HF train split by md5. The dataset revision may differ from the probe set."
-            )
-        item = self.ds["train"][i]
-        return np.asarray(item["image"].convert("RGB"), dtype=np.uint8), _to_label(item["label"])
-
-    def iter_split(self, split: str) -> Iterator[tuple[str, NDArray[np.uint8], NDArray[np.uint8]]]:
-        """Yield ``(image_key, image, label)`` for every image of a split."""
-        ds = self.ds[_HF_SPLIT_NAMES[split]]
-        for i in range(len(ds)):
-            item = ds[i]
-            yield (
-                str(i),
-                np.asarray(item["image"].convert("RGB"), dtype=np.uint8),
-                _to_label(item["label"]),
-            )
-
-    def num_split(self, split: str) -> int:
-        """Return the number of images in a split."""
-        return len(self.ds[_HF_SPLIT_NAMES[split]])
-
-
-def build_source(coralscapes_root: str | Path | None, hf_repo: str) -> LocalMirrorSource | HFSource:
-    """Return the local mirror if ``coralscapes_root`` is given, else the HuggingFace dataset."""
-    if coralscapes_root is not None:
-        logger.info("Using local CoralscapesV2 mirror at %s", coralscapes_root)
-        return LocalMirrorSource(coralscapes_root)
-    return HFSource(hf_repo)
+        return len(self._rows(_SPLIT_GROUPS[split]))
 
 
 # --------------------------------------------------------------------------- #
@@ -418,7 +632,7 @@ def _sample_activated(
 
 
 def _extract_probe_features(
-    predictor: CBMPredictor, source: LocalMirrorSource | HFSource, images: list[dict]
+    predictor: CBMPredictor, source: VersionSource, images: list[dict]
 ) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
     feats: list[NDArray[np.float32]] = []
     labels: list[int] = []
@@ -519,7 +733,7 @@ def _evaluate_split(
     *,
     split: str,
     predictor: CBMPredictor,
-    source: LocalMirrorSource | HFSource,
+    source: VersionSource,
     weff: torch.Tensor,
     beff: torch.Tensor,
     classes: torch.Tensor,
@@ -638,12 +852,11 @@ def evaluate_coralscapes_probe(
     *,
     predictor: CBMPredictor,
     probe_json: str | Path,
-    coralscapes_root: str | Path | None,
+    version: DatasetVersion,
     output_dir: str | Path,
     concept_names: list[str],
     taxonomy_csv: str | Path,
     splits: Sequence[str] = ("test",),
-    hf_repo: str = "josauder/coralscapesV2",
     svm_c: float = 1.0,
     max_test_images: int | None = None,
     removed_concepts: Sequence[str] = (),
@@ -680,7 +893,7 @@ def evaluate_coralscapes_probe(
         for concept in REPORTED_BINARY_CONCEPTS
     }
 
-    source = build_source(coralscapes_root, hf_repo)
+    source = VersionSource(version)
     kind = "concepts"
     logger.info("=== CoralscapesV2 linear probe: feature kind = %s ===", kind)
     X, y = _extract_probe_features(predictor, source, images)
@@ -799,7 +1012,7 @@ def union_probe_images(probes: Mapping[int, dict]) -> list[dict]:
 
 
 def _extract_legacy_probe_features(
-    predictor: CBMPredictor, source: LocalMirrorSource | HFSource, images: list[dict]
+    predictor: CBMPredictor, source: VersionSource, images: list[dict]
 ) -> dict[int, tuple[NDArray[np.float32], NDArray[np.int64]]]:
     """Sample every k's pixels from one activated map per train image."""
     feats: dict[int, list[NDArray[np.float32]]] = defaultdict(list)
@@ -877,7 +1090,7 @@ def _evaluate_legacy_split(
     *,
     split: str,
     predictor: CBMPredictor,
-    source: LocalMirrorSource | HFSource,
+    source: VersionSource,
     lut: NDArray[np.uint8],
     heads: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     probe_infos: dict[int, dict],
@@ -950,10 +1163,9 @@ def evaluate_coralscapes39_probe(
     *,
     predictor: CBMPredictor,
     probe_jsons: Sequence[str | Path],
-    coralscapes_root: str | Path | None,
+    version: DatasetVersion,
     output_dir: str | Path,
     splits: Sequence[str] = ("test",),
-    hf_repo: str = "josauder/coralscapesV2",
     svm_c: float = 1.0,
     max_test_images: int | None = None,
 ) -> dict[str, dict]:
@@ -974,7 +1186,7 @@ def evaluate_coralscapes39_probe(
     if unknown:
         raise ValueError(f"unknown Coralscapes splits {unknown}; expected a subset of {SPLITS}")
 
-    source = build_source(coralscapes_root, hf_repo)
+    source = VersionSource(version)
     images = union_probe_images(probes)
     features = _extract_legacy_probe_features(predictor, source, images)
     missing = sorted(set(probes) - set(features))

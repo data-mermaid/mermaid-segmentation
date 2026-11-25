@@ -16,6 +16,21 @@ from mermaidseg.dataset_reconciliation.concepts import (
     encode_concept_channels_from_df,
 )
 
+# MERMAID label names are "BA::GF", but class_to_concepts.csv keys their rows by the bare BA.
+TARGET_KEYED_CONCEPT_DATASETS: frozenset[str] = frozenset({"mermaid"})
+
+
+def concept_label_key(dataset: str, label_name: str, target: str | None) -> str:
+    """Return the ``class_to_concepts.csv`` label key of one label of ``dataset``.
+
+    Datasets in ``TARGET_KEYED_CONCEPT_DATASETS`` key by ``target`` (the label's
+    ``mermaid_benthic_attribute``), so labels sharing a benthic attribute share a row; every other
+    dataset keys by ``label_name``. A target-keyed label without a target keeps its name.
+    """
+    if dataset.lower() in TARGET_KEYED_CONCEPT_DATASETS and target:
+        return target
+    return label_name
+
 
 @dataclass(frozen=True)
 class ConceptSchema:

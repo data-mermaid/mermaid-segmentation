@@ -11,12 +11,35 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from botocore.exceptions import ClientError
 from safetensors.torch import load_file, save_file
 
 from mermaidseg import export
-from mermaidseg.export import _untied_cpu_state, export_bundle, write_sidecar
+from mermaidseg.export import _untied_cpu_state, write_sidecar
 from mermaidseg.inference.bundle import MODEL_JSON, WEIGHTS
+from tests.mermaidseg.conftest import (
+    DS_A,
+    DS_B,
+    MANIFESTS,
+    TAX,
+    FakeS3,
+    commit,
+    data_version,
+    deployable_lineage,
+    export_ckpt,
+    git,
+    manifest_key,
+    repo_with_origin,
+    seeded_s3,
+    sha,
+)
 from tests.mermaidseg.inference import _tiny
+
+
+@pytest.fixture(scope="module")
+def run(deployable: tuple[Path, Path, str]) -> tuple[Path, Path]:
+    """The exportable run as (checkpoint, repo), shadowing the shared (checkpoint, model) fixture."""
+    return deployable[0], deployable[1]
 
 
 def _sidecar_kwargs(**overrides):
@@ -132,22 +155,22 @@ def test_bundle_directory_holds_only_the_sidecar_and_weights(bundle_dir):
     assert [p.name for p in bundle_dir.parent.iterdir()] == [bundle_dir.name]
 
 
-def test_exported_metadata_extends_the_sidecar_with_weights_and_checkpoint(run, bundle_dir):
-    sidecar = json.loads((run[0].parent / MODEL_JSON).read_text())
+def test_exported_metadata_extends_the_sidecar_with_weights_and_checkpoint(deployable, bundle_dir):
+    sidecar = json.loads((deployable[0].parent / MODEL_JSON).read_text())
     exported = json.loads((bundle_dir / MODEL_JSON).read_text())
     assert exported == {
         **sidecar,
+        "lineage": deployable_lineage(deployable[2]),
         "weights": "weights.safetensors",
         "checkpoint": {"epoch": 3, "global_step": 42},
         "weights_sha256": hashlib.sha256((bundle_dir / WEIGHTS).read_bytes()).hexdigest(),
     }
 
 
-def test_exported_lineage_is_the_checkpoints_not_the_sidecars(tmp_path):
-    own = {**_tiny.resolved_config()}
-    lineage = {"git_sha": "from-checkpoint", "git_dirty": False, "resolved_config": own}
-    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
-    export_bundle(checkpoint, tmp_path / "out")
+def test_exported_lineage_is_the_checkpoints_not_the_sidecars(deployable, tmp_path):
+    checkpoint, repo, pushed = deployable
+    lineage = deployable_lineage(pushed)
+    export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
     exported = json.loads((tmp_path / "out" / MODEL_JSON).read_text())
     sidecar = json.loads((checkpoint.parent / MODEL_JSON).read_text())
     assert sidecar["lineage"]["git_sha"] == "abc123"
@@ -161,7 +184,7 @@ def test_export_refuses_a_dirty_checkpoint_after_the_sidecar_was_refreshed_clean
     sidecar["lineage"]["git_dirty"] = False
     sidecar_path.write_text(json.dumps(sidecar))
     with pytest.raises(ValueError, match="clean tree"):
-        export_bundle(checkpoint, tmp_path / "out")
+        export_ckpt(checkpoint, tmp_path / "out")
     assert not (tmp_path / "out").exists()
 
 
@@ -171,14 +194,14 @@ def test_export_of_a_checkpoint_without_lineage_raises_naming_its_path(tmp_path)
     del contents["lineage"]
     torch.save(contents, checkpoint)
     with pytest.raises(RuntimeError, match="lineage") as excinfo:
-        export_bundle(checkpoint, tmp_path / "out")
+        export_ckpt(checkpoint, tmp_path / "out")
     assert str(checkpoint) in str(excinfo.value)
 
 
 def test_export_refuses_a_run_from_an_unknown_tree(tmp_path):
     checkpoint, _ = _tiny.write_run(tmp_path / "run", git_dirty=None)
     with pytest.raises(ValueError, match="clean tree"):
-        export_bundle(checkpoint, tmp_path / "out")
+        export_ckpt(checkpoint, tmp_path / "out")
     assert not (tmp_path / "out").exists()
 
 
@@ -187,14 +210,14 @@ def test_export_refuses_a_non_empty_output_directory(run, tmp_path):
     out.mkdir()
     (out / "keep.txt").write_text("x")
     with pytest.raises(ValueError, match="not empty"):
-        export_bundle(run[0], out)
+        export_ckpt(run[0], out)
     assert [p.name for p in out.iterdir()] == ["keep.txt"]
 
 
 def test_export_accepts_an_existing_empty_output_directory(run, tmp_path):
     out = tmp_path / "out"
     out.mkdir()
-    export_bundle(run[0], out)
+    export_ckpt(run[0], out, repo_dir=run[1])
     assert sorted(p.name for p in out.iterdir()) == sorted([MODEL_JSON, WEIGHTS])
 
 
@@ -204,7 +227,7 @@ def test_export_refuses_a_checkpoint_whose_config_differs_from_its_lineage_namin
     other = {**_tiny.resolved_config(), "seed": 1}
     checkpoint, _ = _tiny.write_run(tmp_path / "run", config=other)
     with pytest.raises(ValueError, match="seed"):
-        export_bundle(checkpoint, tmp_path / "out")
+        export_ckpt(checkpoint, tmp_path / "out")
     assert not (tmp_path / "out").exists()
 
 
@@ -227,7 +250,7 @@ def test_export_refuses_configs_that_are_not_both_mappings_without_naming_a_key(
         tmp_path / "run", config=config, checkpoint_lineage=checkpoint_lineage
     )
     with pytest.raises(ValueError, match="does not match its lineage's resolved_config") as raised:
-        export_bundle(checkpoint, tmp_path / "out")
+        export_ckpt(checkpoint, tmp_path / "out")
     assert "at key" not in str(raised.value)
     assert not (tmp_path / "out").exists()
 
@@ -239,7 +262,7 @@ def test_export_of_a_checkpoint_missing_a_required_key_names_the_key_and_its_pat
     del contents[key]
     torch.save(contents, checkpoint)
     with pytest.raises(RuntimeError, match=key) as raised:
-        export_bundle(checkpoint, tmp_path / "out")
+        export_ckpt(checkpoint, tmp_path / "out")
     assert str(checkpoint) in str(raised.value)
     assert not (tmp_path / "out").exists()
 
@@ -248,7 +271,7 @@ def test_export_refuses_an_output_path_that_is_an_existing_file(run, tmp_path):
     out = tmp_path / "out"
     out.write_text("not a directory")
     with pytest.raises(ValueError, match="not empty"):
-        export_bundle(run[0], out)
+        export_ckpt(run[0], out)
     assert out.read_text() == "not a directory"
 
 
@@ -258,7 +281,7 @@ def test_export_without_a_sidecar_raises_naming_its_path(run, tmp_path):
     checkpoint = lone / "model_step1"
     checkpoint.write_bytes(run[0].read_bytes())
     with pytest.raises(FileNotFoundError, match=str(lone / MODEL_JSON)):
-        export_bundle(checkpoint, tmp_path / "out")
+        export_ckpt(checkpoint, tmp_path / "out")
 
 
 def _precious_partial(out: Path) -> Path:
@@ -275,7 +298,7 @@ def test_a_preexisting_partial_sibling_survives_a_failed_export(run, tmp_path):
         patch("mermaidseg.export.save_file", side_effect=OSError("disk full")),
         pytest.raises(OSError, match="disk full"),
     ):
-        export_bundle(run[0], out)
+        export_ckpt(run[0], out, repo_dir=run[1])
     assert [p.name for p in foreign.iterdir()] == ["precious"]
     assert (foreign / "precious").read_text() == "keep"
     assert [p for p in tmp_path.glob("*.partial") if p != foreign] == []
@@ -284,7 +307,7 @@ def test_a_preexisting_partial_sibling_survives_a_failed_export(run, tmp_path):
 
 def test_export_requires_the_output_parent_to_exist_and_creates_nothing(run, tmp_path):
     with pytest.raises(FileNotFoundError, match="missing"):
-        export_bundle(run[0], tmp_path / "missing" / "out")
+        export_ckpt(run[0], tmp_path / "missing" / "out")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -301,7 +324,159 @@ def test_untied_state_round_trips_through_save_file(tmp_path):
 def test_exported_bundle_directory_has_the_mode_a_plain_mkdir_gives(run, tmp_path, umask, mode):
     previous = os.umask(umask)
     try:
-        out = export_bundle(run[0], tmp_path / "out")
+        out = export_ckpt(run[0], tmp_path / "out", repo_dir=run[1])
     finally:
         os.umask(previous)
     assert out.stat().st_mode & 0o777 == mode
+
+
+def test_export_passes_when_every_pin_exists_with_its_sha_and_the_commit_is_on_origin(
+    deployable, tmp_path
+):
+    checkpoint, repo, _ = deployable
+    out = export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
+    assert sorted(p.name for p in out.iterdir()) == [MODEL_JSON, WEIGHTS]
+
+
+def test_export_refuses_a_dataset_manifest_missing_from_the_bucket_naming_dataset_and_version(
+    deployable, tmp_path
+):
+    checkpoint, repo, _ = deployable
+    s3 = seeded_s3(without=DS_B)
+    with pytest.raises(ValueError, match="ds-b") as raised:
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=s3)
+    assert "20261121-bbbbbbb" in str(raised.value)
+    assert not (tmp_path / "out").exists()
+
+
+def test_export_refuses_a_missing_taxonomy_manifest(deployable, tmp_path):
+    checkpoint, repo, _ = deployable
+    s3 = seeded_s3(without=TAX)
+    with pytest.raises(ValueError, match="mermaid-benthic") as raised:
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=s3)
+    assert "20261119-ccccccc" in str(raised.value)
+    assert not (tmp_path / "out").exists()
+
+
+def test_export_refuses_a_manifest_whose_sha_differs_naming_both_hashes(deployable, tmp_path):
+    checkpoint, repo, _ = deployable
+    s3 = seeded_s3()
+    s3.objects[manifest_key(DS_A)] = b"tampered"
+    with pytest.raises(ValueError, match="ds-a") as raised:
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=s3)
+    assert sha(MANIFESTS[DS_A]) in str(raised.value)
+    assert sha(b"tampered") in str(raised.value)
+    assert not (tmp_path / "out").exists()
+
+
+def test_export_refuses_a_commit_only_on_a_local_branch_telling_the_user_to_fetch(tmp_path):
+    repo, _ = repo_with_origin(tmp_path)
+    git(repo, "checkout", "-b", "local-only")
+    local_sha = commit(repo, "local.txt")
+    lineage = deployable_lineage(local_sha)
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
+    with pytest.raises(ValueError, match="git fetch origin") as raised:
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
+    assert local_sha in str(raised.value)
+    assert not (tmp_path / "out").exists()
+
+
+def test_export_refuses_a_commit_the_repository_does_not_know(deployable, tmp_path):
+    _, repo, _ = deployable
+    unknown = "0123456789abcdef0123456789abcdef01234567"
+    lineage = deployable_lineage(unknown)
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
+    with pytest.raises(ValueError, match="git fetch origin"):
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
+
+
+@pytest.mark.parametrize(
+    ("data_version", "named"),
+    [
+        pytest.param(None, "data_version", id="no-data-version"),
+        pytest.param({**data_version(), "datasets": {}}, "datasets", id="empty-datasets"),
+        pytest.param({**data_version(), "taxonomy": None}, "taxonomy", id="null-taxonomy"),
+        pytest.param(
+            {"data_config_sha1": "x", "manifests": {}, "manifest_sha256": {}, "label_mappings": {}},
+            "retrain",
+            id="pre-pinning-lineage",
+        ),
+    ],
+)
+def test_export_refuses_a_lineage_that_does_not_pin_its_data(
+    deployable, tmp_path, data_version, named
+):
+    _, repo, pushed = deployable
+    lineage = deployable_lineage(pushed)
+    if data_version is None:
+        del lineage["data_version"]
+    else:
+        lineage["data_version"] = data_version
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
+    with pytest.raises(ValueError, match="pin") as raised:
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
+    assert named in str(raised.value)
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            ClientError(
+                {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+                "GetObject",
+            ),
+            id="access-denied",
+        ),
+        pytest.param(
+            ClientError(
+                {"Error": {"Code": "InternalError"}, "ResponseMetadata": {"HTTPStatusCode": 500}},
+                "GetObject",
+            ),
+            id="server-error",
+        ),
+    ],
+)
+def test_export_propagates_a_non_404_s3_error_unchanged(deployable, tmp_path, error):
+    checkpoint, repo, _ = deployable
+    with pytest.raises(ClientError):
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=FakeS3({}, error=error))
+    assert not (tmp_path / "out").exists()
+
+
+def test_export_refuses_a_directory_that_is_not_a_git_checkout_saying_so(deployable, tmp_path):
+    checkpoint, _, pushed = deployable
+    not_git = tmp_path / "plain"
+    not_git.mkdir()
+    with pytest.raises(ValueError, match="not a git checkout") as raised:
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=not_git)
+    assert str(not_git) in str(raised.value)
+    assert "git fetch" not in str(raised.value)
+
+
+@pytest.mark.parametrize("sha", ["HEAD", "--all", "A" * 40, "0123abc"])
+def test_export_refuses_a_git_sha_that_is_not_40_lowercase_hex_without_calling_git(
+    deployable, tmp_path, monkeypatch, sha
+):
+    checkpoint, repo, _ = deployable
+    lineage = deployable_lineage(sha)
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
+
+    def no_git(*args, **kwargs):
+        raise AssertionError("git must not run for a malformed sha")
+
+    monkeypatch.setattr(export.subprocess, "run", no_git)
+    with pytest.raises(ValueError, match="40"):
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo)
+
+
+def test_export_refuses_an_unpushed_commit_before_any_s3_call(tmp_path):
+    repo, _ = repo_with_origin(tmp_path)
+    git(repo, "checkout", "-b", "local-only")
+    lineage = deployable_lineage(commit(repo, "local.txt"))
+    checkpoint, _ = _tiny.write_run(tmp_path / "run", checkpoint_lineage=lineage)
+    s3 = seeded_s3()
+    with pytest.raises(ValueError, match="git fetch origin"):
+        export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=s3)
+    assert s3.requested == []

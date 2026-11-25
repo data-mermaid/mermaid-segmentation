@@ -44,7 +44,6 @@ trap 'rm -rf "$LOCAL_TMP"' EXIT
 # No job needs AWS: data comes from the pre-warmed local cache, and a cache miss
 # fails loudly instead of reaching for S3.
 unset AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_DEFAULT_REGION || true
-export MERMAIDSEG_S3_OFFLINE=1
 
 export WANDB_DIR="$REPO/wandb"
 

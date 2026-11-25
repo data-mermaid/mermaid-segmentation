@@ -10,15 +10,8 @@ import pytest
 import torch
 import yaml
 
-from mermaidseg.config import (
-    RESERVED_DATA_KEYS,
-    DataConfig,
-    lookup_class,
-    to_plain_dict,
-    validate_section,
-)
-from mermaidseg.datasets.factory import DATASET_CLASSES
-from mermaidseg.io import load_section, setup_config
+from mermaidseg.config import lookup_class, to_plain_dict, validate_section
+from mermaidseg.io import setup_config
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIGS = _REPO / "configs"
@@ -62,8 +55,8 @@ def _set(*keys: str, value: Any) -> Callable[[dict[str, Any]], None]:
         ("training", ("loader", "unknown")),
         ("model", ("unknown",)),
         ("logger", ("unknown",)),
-        ("data", ("unknown_source",)),
-        ("data", ("coralnet", "vall")),
+        ("data", ("unknown_key",)),
+        ("data", ("datasets", "coralnet", "vall")),
     ],
 )
 def test_unknown_key_raises_naming_the_file(tmp_path: Path, section: str, keys: tuple[str, ...]):
@@ -108,7 +101,7 @@ def test_wandb_key_under_the_mlflow_tracker_raises_naming_the_file():
 
 
 def test_string_none_split_raises(tmp_path: Path):
-    paths = _mutated(tmp_path, "data", _set("mermaid", "val", value="None"))
+    paths = _mutated(tmp_path, "data", _set("datasets", "mermaid", "val", value="None"))
     with pytest.raises(ValueError, match="mermaid.val"):
         setup_config(paths)
 
@@ -129,19 +122,14 @@ def test_lookup_class_rejects_an_unknown_name_listing_the_allowed_names_sorted()
 
 
 @pytest.mark.parametrize(
-    ("data_file", "training_file"),
-    [
-        ("data_config_trainval.yaml", "training_config_cbm_final.yaml"),
-        ("data_config_trainval.yaml", "training_config_cbm_final_hires.yaml"),
-        ("data_config.yaml", "training_config_cbm_final.yaml"),
-    ],
+    "training_file", ["training_config_cbm_final.yaml", "training_config_cbm_final_hires.yaml"]
 )
-def test_resolved_committed_config_loads_under_weights_only_with_the_cutoff_as_text(
-    tmp_path: Path, data_file: str, training_file: str
+def test_resolved_committed_config_loads_under_weights_only_with_paths_as_text(
+    tmp_path: Path, training_file: str
 ):
     cfg = setup_config(
         {
-            "data": str(_CONFIGS / data_file),
+            "data": str(_CONFIGS / _FILES["data"]),
             "training": str(_CONFIGS / training_file),
             "model": str(_CONFIGS / _FILES["model"]),
             "logger": str(_CONFIGS / _FILES["logger"]),
@@ -150,41 +138,24 @@ def test_resolved_committed_config_loads_under_weights_only_with_the_cutoff_as_t
     path = tmp_path / "ckpt.pt"
     torch.save({"config": to_plain_dict(cfg)}, path)
     loaded = torch.load(path, weights_only=True)["config"]
-    cutoffs = [
-        split["annotation_date_cutoff"]
-        for split in loaded["data"]["mermaid"].values()
-        if split is not None and "annotation_date_cutoff" in split
-    ]
-    assert cutoffs and set(cutoffs) == {"2026-08-12"}
-
-
-@pytest.mark.parametrize("data_file", ["data_config.yaml", "data_config_trainval.yaml"])
-def test_committed_coralnet_splits_name_a_manifest(data_file: str):
-    cfg = load_section(_CONFIGS / data_file, "data")
-    splits = {name: s for name, s in cfg["coralnet"].items() if s is not None}
-    assert splits
-    for name, split in splits.items():
-        manifest = split.get("manifest_path")
-        assert isinstance(manifest, str) and manifest, name
-
-
-def test_data_config_dataset_fields_match_the_dataset_registry():
-    fields = set(DataConfig.model_fields) - RESERVED_DATA_KEYS - {"default"}
-    assert fields == set(DATASET_CLASSES)
+    assert loaded["data"]["datasets"]["coralnet"]["split_file"] == "configs/splits/coralnet.csv"
 
 
 _DATA_SECTION = {
-    "local_cache_write_through": False,
-    "mermaid": {"train": {"padding": 0}},
+    "datasets": {
+        "mermaid": {
+            "version": "v",
+            "manifest_sha256": "s",
+            "split_file": "splits.csv",
+            "train": {"use": ["train"]},
+        }
+    }
 }
 
 
-def test_validate_section_returns_plain_dict_without_unset_datasets():
+def test_validate_section_returns_plain_dict_without_unset_keys():
     result = validate_section({"data": _DATA_SECTION}, "data", "cfg.yaml")
-    assert result == {
-        "local_cache_write_through": False,
-        "mermaid": {"train": {"padding": 0}},
-    }
+    assert result == _DATA_SECTION
     assert type(result) is dict
 
 

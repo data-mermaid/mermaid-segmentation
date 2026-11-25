@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from conftest import (
     BUCKET,
     IMG_BUCKET,
@@ -26,16 +27,23 @@ from conftest import (
 )
 from PIL import Image
 
+from segdata_spec._marker import load_synced
 from segdata_spec.errors import (
     ChecksumMismatch,
     ImageChanged,
     ImageMissing,
     ImageUndecodable,
+    ManifestNotFound,
     PinMismatch,
 )
 from segdata_spec.manifest import Pin
 from segdata_spec.resize import ResizeSpec
-from segdata_spec.sync import _IN_FLIGHT_PER_WORKER, DatasetSyncResult, sync
+from segdata_spec.sync import (
+    _IN_FLIGHT_PER_WORKER,
+    DatasetSyncResult,
+    check_published_manifest,
+    sync,
+)
 
 PREFIX = f"datasets/ds/{VERSION}/"
 TABLES = ["images.parquet", "points.parquet", "labels.parquet", "stats/label_counts.parquet"]
@@ -746,3 +754,135 @@ def test_failure_on_the_first_row_bounds_the_rows_submitted_and_cancels_the_rest
 
     assert len(futs) == 2 * _IN_FLIGHT_PER_WORKER
     assert len(_image_gets(fake_s3)) <= 3  # max_workers + 1: rows 0, 1 and at most one more
+
+
+def _marker_files(cache: Path, resize_id: str, name: str = "ds") -> list[Path]:
+    return sorted((cache / "synced" / resize_id / BUCKET / name / VERSION).glob("*.json"))
+
+
+def _markers(cache: Path, resize_id: str, name: str = "ds") -> list[dict[str, Any]]:
+    return [json.loads(path.read_text()) for path in _marker_files(cache, resize_id, name)]
+
+
+def test_sync_with_a_spec_writes_one_marker_file_under_the_spec_id(fake_s3, tmp_path, cache):
+    spec = ResizeSpec(max_edge=32)
+    jpeg = jpeg_bytes(64, 48)
+    _, pin = publish_version(
+        fake_s3,
+        tmp_path,
+        images={"a": (jpeg, "g1"), "b": (jpeg, "g1"), "c": (jpeg, "g2")},
+        sizes={"a": (64, 48), "b": (64, 48), "c": (64, 48)},
+    )
+    fake_s3.objects.pop((IMG_BUCKET, IMG_PREFIX + "c.jpg"))
+
+    sync(
+        fake_s3,
+        {"ds": pin},
+        cache,
+        bucket=BUCKET,
+        selection={"ds": {"g1", "g2"}},
+        on_missing_images={"ds": "drop"},
+        resize={"ds": spec},
+    )
+
+    assert _markers(cache, spec.id) == [
+        {
+            "resize": {"max_edge": 32, "filter": "lanczos", "jpeg_quality": 95},
+            "groups": ["g1", "g2"],
+            "dropped_image_ids": ["c"],
+        }
+    ]
+
+
+def test_sync_without_a_spec_writes_one_marker_file_under_original(fake_s3, pin, cache):
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g2"}})
+
+    assert _markers(cache, "original") == [
+        {"resize": None, "groups": ["g2"], "dropped_image_ids": []}
+    ]
+
+
+def test_sync_without_a_selection_records_all_groups(fake_s3, pin, cache):
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    assert _markers(cache, "original")[0]["groups"] == "all"
+
+
+def test_each_sync_adds_a_marker_file_and_keeps_the_earlier_ones(fake_s3, pin, cache):
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g1"}})
+    first = _marker_files(cache, "original")
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g2"}})
+
+    files = _marker_files(cache, "original")
+    assert len(files) == 2
+    assert set(first) < set(files)
+    assert sorted(m["groups"] for m in _markers(cache, "original")) == [["g1"], ["g2"]]
+
+
+def test_dropped_ids_of_every_sync_are_kept(fake_s3, pin, cache):
+    del fake_s3.objects[(IMG_BUCKET, IMG_PREFIX + "c.jpg")]
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, on_missing_images={"ds": "drop"})
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g1"}})
+
+    marker = load_synced(cache / "synced" / "original" / BUCKET / "ds" / VERSION)
+
+    assert marker.dropped_image_ids == ("c",)
+
+
+def test_a_failed_sync_leaves_no_marker(fake_s3, pin, cache):
+    del fake_s3.objects[(IMG_BUCKET, IMG_PREFIX + "c.jpg")]
+
+    with pytest.raises(ImageMissing):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    assert not (cache / "synced").exists()
+
+
+def test_check_published_manifest_returns_none_for_a_matching_sha(fake_s3, pin):
+    assert check_published_manifest(fake_s3, BUCKET, pin) is None
+
+
+def test_check_published_manifest_names_the_key_of_a_missing_manifest(fake_s3, pin):
+    del fake_s3.objects[(BUCKET, PREFIX + "manifest.json")]
+
+    with pytest.raises(ManifestNotFound, match=re.escape(f"s3://{BUCKET}/{PREFIX}manifest.json")):
+        check_published_manifest(fake_s3, BUCKET, pin)
+
+
+def test_check_published_manifest_gives_both_shas_on_mismatch(fake_s3, pin):
+    fake_s3.objects[(BUCKET, PREFIX + "manifest.json")] = b"tampered"
+    actual = hashlib.sha256(b"tampered").hexdigest()
+
+    with pytest.raises(PinMismatch) as raised:
+        check_published_manifest(fake_s3, BUCKET, pin)
+
+    assert actual in str(raised.value)
+    assert pin.manifest_sha256 in str(raised.value)
+
+
+def test_check_published_manifest_propagates_a_non_404_client_error(fake_s3, pin):
+    denied = ClientError(
+        {
+            "Error": {"Code": "AccessDenied", "Message": "no"},
+            "ResponseMetadata": {"HTTPStatusCode": 403},
+        },
+        "GetObject",
+    )
+
+    def get_object(**kwargs: Any) -> Any:
+        raise denied
+
+    fake_s3.get_object = get_object  # type: ignore[method-assign]
+
+    with pytest.raises(ClientError) as raised:
+        check_published_manifest(fake_s3, BUCKET, pin)
+
+    assert raised.value is denied
+
+
+def test_check_published_manifest_taxonomy_flag_selects_the_taxonomy_prefix(fake_s3, tmp_path):
+    tax = publish_taxonomy_version(fake_s3, tmp_path)
+
+    assert check_published_manifest(fake_s3, BUCKET, tax, taxonomy=True) is None
+    with pytest.raises(ManifestNotFound):
+        check_published_manifest(fake_s3, BUCKET, tax, taxonomy=False)

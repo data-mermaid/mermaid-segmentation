@@ -48,7 +48,7 @@ def test_setup_config_output_is_plain_yaml_data():
     }
     cfg = setup_config(paths, resolution=64)
     assert _non_plain_nodes(cfg) == []
-    train = cfg["data"]["coralnet"]["train"]["transform"]
+    train = cfg["data"]["datasets"]["coralnet"]["train"]["transform"]
     assert list(train) == [
         "SmallestMaxSize",
         "RandomResizedCrop",

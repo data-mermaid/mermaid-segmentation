@@ -45,6 +45,7 @@ class DenseDataset(VersionDataset):
         groups: Collection[str] | None = None,
         transform: Callable[..., dict[str, Any]] | None = None,
         on_missing_images: Literal["fail", "drop"] = "fail",
+        image_ids: Collection[str] | None = None,
     ) -> None:
         """Select images and build the label lookup; arguments as in :class:`VersionDataset`."""
         self._max_label_id = int(max(version.labels.column("label_id").to_pylist(), default=0))
@@ -54,6 +55,7 @@ class DenseDataset(VersionDataset):
             groups=groups,
             transform=transform,
             on_missing_images=on_missing_images,
+            image_ids=image_ids,
         )
         if 0 in self.source_id2label_id.values():
             raise ValueError(

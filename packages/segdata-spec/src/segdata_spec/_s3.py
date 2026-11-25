@@ -45,6 +45,28 @@ def resized_index_path(cache_dir: Path, spec: ResizeSpec, bucket: str, key: str)
     return path.with_name(path.name + ".json")
 
 
+def resize_id(spec: ResizeSpec | None) -> str:
+    """Return ``spec.id``, or ``original`` for images cached as is."""
+    return "original" if spec is None else spec.id
+
+
+def synced_marker_dir(cache_dir: Path, rid: str, bucket: str, dataset: str, version: str) -> Path:
+    """Return ``<cache_dir>/synced/<rid>/<bucket>/<dataset>/<version>``, the sync marker directory."""
+    return cache_path(cache_dir / "synced" / rid, bucket, f"{dataset}/{version}")
+
+
+def synced_resize_ids(cache_dir: Path, bucket: str, dataset: str, version: str) -> list[str]:
+    """Return the sorted resize ids that have a sync marker for this dataset version."""
+    root = cache_dir / "synced"
+    if not root.is_dir():
+        return []
+    return sorted(
+        child.name
+        for child in root.iterdir()
+        if any(synced_marker_dir(cache_dir, child.name, bucket, dataset, version).glob("*.json"))
+    )
+
+
 def is_not_found(exc: ClientError) -> bool:
     code = str(exc.response.get("Error", {}).get("Code", ""))
     return (

@@ -1,10 +1,11 @@
 r"""Build a fixed CoralscapesV2 linear-probe point set.
 
-The builder reads a Cityscapes-style local mirror of ``josauder/coralscapesV2``
-(``leftImg8bit`` + ``gtFine/train/*/*_gtFine_labelIds.png``) and writes a JSON
-file that pins the probe pixels used to train the linear SVM. Evaluation locates
-those images by file stem in the mirror, or by the md5 of the label array in the
-HuggingFace dataset. Nothing here is random: label paths are sorted,
+The builder reads the ``train`` group masks of the synced ``coralscapes_v2``
+dataset version and writes a JSON file that pins the probe pixels used to train
+the linear SVM. An image's ``stem`` is its ``image_id`` in the version and its
+``site`` is ``attrs["site"]``; evaluation locates the images by ``stem`` and
+verifies the md5 of the label array. Nothing here is random: images are sorted
+by site then stem,
 ``scipy.ndimage.label`` is deterministic, and the interior pixel is
 ``numpy.argmax`` of the Euclidean distance transform (first maximum, row-major).
 
@@ -74,12 +75,15 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import (
+from mermaidseg.evaluation.coralscapes_probe import (
     CORALSCAPES_ID2NAME,
     CORALSCAPES_V2_ID2NAME,
+    PROBE_GROUP,
     coralscapes_v2_to_legacy_lut,
+    label_md5,
+    legacy_label,
 )
-from mermaidseg.evaluation.coralscapes_probe import label_md5, legacy_label
+from segdata_spec.read import DatasetVersion
 
 logger = logging.getLogger(__name__)
 
@@ -113,14 +117,28 @@ class ImageRecord(NamedTuple):
     width: int
 
 
-def _label_paths(root: Path, split: str) -> list[Path]:
-    return sorted((root / "gtFine" / split).glob("*/*_gtFine_labelIds.png"))
+def train_records(version: DatasetVersion) -> list[ImageRecord]:
+    """Return the ``train`` group images of ``version``, sorted by site then stem.
 
-
-def _stem_from_label_path(path: Path) -> tuple[str, str]:
-    site = path.parent.name
-    stem = path.name.replace("_gtFine_labelIds.png", "")
-    return site, stem
+    Raises:
+        ValueError: An image's ``attrs`` has no ``site``.
+    """
+    images = version.images.to_pandas()
+    records: list[ImageRecord] = []
+    for row in images[images["group"] == PROBE_GROUP].to_dict("records"):
+        site = json.loads(row["attrs"] or "{}").get("site")
+        if site is None:
+            raise ValueError(f"image {row['image_id']} has no attrs.site")
+        records.append(
+            ImageRecord(
+                path=str(version.mask_path(row)),
+                site=str(site),
+                stem=str(row["image_id"]),
+                height=int(row["height"]),
+                width=int(row["width"]),
+            )
+        )
+    return sorted(records, key=lambda record: (record.site, record.stem))
 
 
 def _load_label(path: Path) -> np.ndarray:
@@ -458,7 +476,7 @@ def _resolve_label_space(
 
 
 def build_probe_points(
-    local_root: Path,
+    version: DatasetVersion,
     output: Path,
     per_class: int,
     min_component_size: int,
@@ -486,26 +504,21 @@ def build_probe_points(
         raise ValueError("class_ids must contain at least one class")
     component_classes = max(probed_ids)
 
-    label_paths = _label_paths(local_root, "train")
-    if not label_paths:
-        raise FileNotFoundError(f"No train labelIds under {local_root}/gtFine/train")
+    manifest = version.manifest
+    records = train_records(version)
+    if not records:
+        raise FileNotFoundError(
+            f"No {PROBE_GROUP!r} images in {manifest.dataset} {manifest.version}"
+        )
     logger.info(
-        "Found %d train label masks under %s (label_space=%s, %d classes, k=%d)",
-        len(label_paths),
-        local_root,
+        "Found %d train label masks in %s %s (label_space=%s, %d classes, k=%d)",
+        len(records),
+        manifest.dataset,
+        manifest.version,
         json_label_space,
         len(probed_ids),
         per_class,
     )
-
-    records: list[ImageRecord] = []
-    for path in label_paths:
-        site, stem = _stem_from_label_path(path)
-        with Image.open(path) as image:
-            width, height = image.size
-        records.append(
-            ImageRecord(path=str(path), site=site, stem=stem, height=int(height), width=int(width))
-        )
 
     by_class = census_train_components(
         records,
@@ -703,7 +716,7 @@ def build_probe_points(
 
     command = (
         "uv run python scripts/build_coralscapes_v2_probe_points.py "
-        f"--local-root {local_root} "
+        f"--data-config <config pinning {manifest.dataset} {manifest.version}> "
         f"--output {output} "
         f"--per-class {per_class} "
         f"--min-component-size {min_component_size} "
@@ -738,7 +751,7 @@ def build_probe_points(
         ),
         "image_height": EXPECTED_HEIGHT,
         "image_width": EXPECTED_WIDTH,
-        "source": f"local_mirror:{local_root}",
+        "source": f"segdata:{manifest.dataset}@{manifest.version}",
         "command": command,
         "id2label": {str(class_id): names[class_id] for class_id in sorted(names)},
         "points_per_class": {str(class_id): int(n) for class_id, n in points_per_class.items()},

@@ -19,6 +19,8 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from mermaidseg.data.config import DATASET_BUCKET
+from segdata_spec._marker import SyncMarker, dump_marker
+from segdata_spec._s3 import resize_id, synced_marker_dir
 from segdata_spec.manifest import (
     EtlInfo,
     FileEntry,
@@ -32,6 +34,7 @@ from segdata_spec.manifest import (
 )
 from segdata_spec.publish import GitState, publish_taxonomy
 from segdata_spec.read import DatasetVersion, open_version
+from segdata_spec.resize import ResizeSpec
 from segdata_spec.schema import (
     IMAGES_SCHEMA,
     LABEL_COUNTS_SCHEMA,
@@ -51,7 +54,8 @@ VERSION = "20260101-abc1234"
 class ImageSpec:
     """One image of a fixture version; ``mask`` (a dense label map) sets its size when given.
 
-    ``pixels`` (an ``(h, w, 3)`` uint8 array) is stored losslessly under the ``.jpg`` key.
+    ``pixels`` (an ``(h, w, 3)`` uint8 array) is stored losslessly under the ``.jpg`` key; ``attrs``
+    is the JSON string of the ``images.parquet`` ``attrs`` column.
     """
 
     image_id: str
@@ -61,6 +65,7 @@ class ImageSpec:
     mask: NDArray[np.integer[Any]] | None = None
     pixels: NDArray[np.uint8] | None = None
     source_name: str | None = None
+    attrs: str | None = None
 
 
 PointRow = tuple[str, int, int, int] | tuple[str, int, int, int, str]
@@ -121,7 +126,7 @@ def _images_table(
                 "mask_crc64nvme": nulls,
                 "source_fingerprint": ["fp"] * n,
                 "source_name": pa.array([s.source_name for s in images], pa.string()),
-                "attrs": nulls,
+                "attrs": pa.array([s.attrs for s in images], pa.string()),
             }
         ),
         IMAGES_SCHEMA,
@@ -247,7 +252,18 @@ def write_version(
     )
     data = dump_manifest(manifest)
     (prefix / "manifest.json").write_bytes(data)
-    return cache_dir, BUCKET, Pin(name=name, version=version, manifest_sha256=manifest_sha256(data))
+    pin = Pin(name=name, version=version, manifest_sha256=manifest_sha256(data))
+    write_sync_marker(cache_dir, BUCKET, pin)
+    return cache_dir, BUCKET, pin
+
+
+def write_sync_marker(
+    cache_dir: Path, bucket: str, pin: Pin, resize: ResizeSpec | None = None
+) -> None:
+    """Mark a hand-written cache version as synced with every group, as ``sync`` would."""
+    directory = synced_marker_dir(cache_dir, resize_id(resize), bucket, pin.name, pin.version)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "marker.json").write_bytes(dump_marker(SyncMarker(resize, None, ())))
 
 
 def open_written(tmp_path: Path, **kwargs: Any) -> DatasetVersion:
@@ -333,7 +349,12 @@ def publish_points(
     )
 
 
-def publish_taxonomy_version(fake: FakeS3, tmp_path: Path, version: str) -> Pin:
+def publish_taxonomy_version(
+    fake: FakeS3,
+    tmp_path: Path,
+    version: str,
+    benthic_attributes: pa.Table | None = None,
+) -> Pin:
     """Publish taxonomy ``mermaid-benthic`` to ``fake`` under the dataset bucket."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
@@ -344,8 +365,12 @@ def publish_taxonomy_version(fake: FakeS3, tmp_path: Path, version: str) -> Pin:
         name="mermaid-benthic",
         version=version,
         tables={
-            "benthic_attributes.parquet": pa.table(
-                {"id": ["1", "2"], "name": ["Hard coral", "Acropora"], "parent_id": [None, "1"]}
+            "benthic_attributes.parquet": (
+                benthic_attributes
+                if benthic_attributes is not None
+                else pa.table(
+                    {"id": ["1", "2"], "name": ["Hard coral", "Acropora"], "parent_id": [None, "1"]}
+                )
             ),
             "growth_forms.parquet": pa.table({"id": ["9"], "name": ["Branching"]}),
         },
@@ -356,3 +381,16 @@ def publish_taxonomy_version(fake: FakeS3, tmp_path: Path, version: str) -> Pin:
         git=GitState(sha="abcdef1234567", dirty=False, pushed=True),
     )
     return Pin(name="mermaid-benthic", version=version, manifest_sha256=sha)
+
+
+def write_taxonomy(
+    cache_dir: Path, tmp_path: Path, benthic_attributes: pa.Table, version: str = VERSION
+) -> Pin:
+    """Write taxonomy ``mermaid-benthic`` into ``cache_dir``, as ``sync`` would, and return its pin."""
+    fake = FakeS3()
+    pin = publish_taxonomy_version(fake, tmp_path, version, benthic_attributes)
+    for (bucket, key), data in fake.objects.items():
+        path = cache_dir / bucket / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return pin

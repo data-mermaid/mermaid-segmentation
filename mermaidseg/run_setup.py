@@ -27,8 +27,7 @@ from mermaidseg.dataset_reconciliation.split_wiring import (
     attach_registry,
     prepare_splits_for_registry,
 )
-from mermaidseg.datasets import configured_source_names
-from mermaidseg.io import REPO_ROOT, resolve_repo_path, setup_config
+from mermaidseg.io import REPO_ROOT, load_section, resolve_repo_path
 from mermaidseg.model.meta import MetaModel
 
 DEFAULT_SCHEMA_CONFIG = REPO_ROOT / "configs" / "data_config.yaml"
@@ -85,15 +84,30 @@ def build_registry(
     training_cfg: Any,
     *,
     schema_config: str | Path = DEFAULT_SCHEMA_CONFIG,
+    benthic_hierarchy: Mapping[str, str | None] | None = None,
     device: torch.device | str = "cpu",
 ) -> tuple[SourceLabelRegistry, ConceptSchema]:
     """Label registry over ``dataset_dict``, with concepts frozen to ``schema_config``.
 
-    The registry is attached to every dataset, which then yields global source labels.
+    The concept channels come from the dataset names of the ``data`` section of
+    ``schema_config``. The registry is attached to every dataset, which then yields global source
+    labels.
+
+    Args:
+        dataset_dict: Built readers keyed by ``(name, split)``.
+        training_cfg: The ``training`` section.
+        schema_config: Data config whose datasets freeze the concept channels.
+        benthic_hierarchy: Benthic-attribute name -> parent name, required with
+            ``training.label_roll_up`` (see ``mermaidseg.data.factory.load_benthic_hierarchy``).
+        device: Device of the registry's lookup tensors.
+
+    Raises:
+        SystemExit: A built dataset is not in ``schema_config``.
+        RuntimeError: The registry and the schema disagree on the number of concept channels.
     """
     _, registry_datasets = prepare_splits_for_registry(dataset_dict)
     run_sources = {ds.SOURCE_NAME for ds in registry_datasets}
-    schema_sources = configured_source_names(setup_config({"data": str(schema_config)}).data)
+    schema_sources = set(load_section(schema_config, "data")["datasets"])
     missing = run_sources - schema_sources
     if missing:
         raise SystemExit(
@@ -115,6 +129,7 @@ def build_registry(
         compute_concepts=training_cfg.training_mode != "standard",
         concept_schema=schema,
         label_roll_up=training_cfg.label_roll_up,
+        benthic_hierarchy=benthic_hierarchy,
     ).to(device)
     attach_registry(registry, dataset_dict.values())
     if registry.num_concepts != schema.num_channels:
@@ -178,10 +193,5 @@ def write_resolved_config(cfg: Any, run_dir: str | Path) -> None:
 
 
 def check_env() -> None:
-    """Print the HF token and cache-offline settings of this environment."""
+    """Print the HF token setting of this environment."""
     print(f"HF_TOKEN            : {'set' if os.getenv('HF_TOKEN') else '(not set)'}")
-    offline = os.getenv("MERMAIDSEG_S3_OFFLINE")
-    print(
-        "MERMAIDSEG_S3_OFFLINE: "
-        + (f"{offline} (cache misses will raise)" if offline else "(not set — S3 fallback enabled)")
-    )

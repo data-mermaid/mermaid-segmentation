@@ -5,17 +5,22 @@ from __future__ import annotations
 import csv
 import json
 import math
+from collections.abc import Callable, Collection
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 import torch
 import yaml
+from numpy.typing import NDArray
+from PIL import Image
 
+from mermaidseg.data.point_dataset import PointDataset
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.datasets.factory import configured_source_names
 from mermaidseg.evaluation.gt_mapping import ClassLookup, ConceptLookup, build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HIER_HEADLINE_KEYS
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
@@ -56,37 +61,71 @@ NUM_CLASSES = 5
 
 def _concept_names() -> list[str]:
     data = yaml.safe_load((_REPO / "configs" / "data_config.yaml").read_text())["data"]
-    schema = ConceptSchema.from_csv(_CSV, sources=configured_source_names(data))
+    schema = ConceptSchema.from_csv(_CSV, sources=set(data["datasets"]))
     return [name for _, name in sorted(schema.channel_id2name().items())]
 
 
-class FakeDataset:
-    """Two CoralNet-like sources with a few 8x8 images and random point labels."""
+def fake_reader(
+    root: Path,
+    images: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    pixels: Callable[[str], NDArray[np.uint8]],
+    fail: Collection[str] = (),
+) -> PointDataset:
+    """The surface of a PointDataset that PointEvalDataset reads; ``fail`` images have no file."""
+    names = sorted({a["source_label_name"] for a in annotations})
+    label_ids = {name: i + 1 for i, name in enumerate(names)}
+    root.mkdir(parents=True, exist_ok=True)
+    for image in images:
+        if image["image_id"] not in fail:
+            Image.fromarray(pixels(image["image_id"])).save(root / f"{image['image_id']}.png")
+    points = pd.DataFrame(
+        [
+            {
+                "image_id": a["image_id"],
+                "row": a["row"],
+                "col": a["col"],
+                "label_id": label_ids[a["source_label_name"]],
+            }
+            for a in annotations
+        ],
+        columns=["image_id", "row", "col", "label_id"],
+    )
+    version = SimpleNamespace(
+        labels=pa.table({"label_id": list(label_ids.values()), "name": list(label_ids)}),
+        image_path=lambda row: root / f"{row['image_id']}.png",
+    )
+    reader = SimpleNamespace(images=pd.DataFrame(images), points=points, version=version)
+    return cast(PointDataset, reader)
 
-    def __init__(self, units: list[str], seed: int = 0):
-        rng = np.random.default_rng(seed)
-        images, anns = [], []
-        for unit in ["10", "20"]:
-            for k in range(3):
-                image_id = f"{unit}_{k}"
-                images.append({"source_id": unit, "image_id": image_id})
-                for _ in range(12):
-                    anns.append(
-                        {
-                            "image_id": image_id,
-                            "row": int(rng.integers(0, SIZE)),
-                            "col": int(rng.integers(0, SIZE)),
-                            "source_label_name": LABELS[int(rng.integers(0, len(LABELS)))],
-                        }
-                    )
-        df_images = pd.DataFrame(images)
-        self.df_images = df_images[df_images["source_id"].isin(units)].reset_index(drop=True)
-        df_ann = pd.DataFrame(anns)
-        self.df_annotations = df_ann[df_ann["image_id"].isin(self.df_images["image_id"])]
 
-    def read_image(self, image_id: str, **_):
-        value = 10 * int(image_id.split("_")[0]) + int(image_id.split("_")[1])
-        return np.full((SIZE, SIZE, 3), value, dtype=np.uint8)
+def fake_annotations(units: list[str], seed: int = 0) -> list[dict[str, Any]]:
+    """Twelve random 8x8 points on each of three images of sources ``10`` and ``20``."""
+    rng = np.random.default_rng(seed)
+    anns: list[dict[str, Any]] = []
+    for unit in ["10", "20"]:
+        for k in range(3):
+            for _ in range(12):
+                anns.append(
+                    {
+                        "image_id": f"{unit}_{k}",
+                        "row": int(rng.integers(0, SIZE)),
+                        "col": int(rng.integers(0, SIZE)),
+                        "source_label_name": LABELS[int(rng.integers(0, len(LABELS)))],
+                    }
+                )
+    return [a for a in anns if a["image_id"].split("_")[0] in units]
+
+
+def fake_coralnet(root: Path, units: list[str]) -> PointDataset:
+    """Sources ``units`` of two CoralNet-like sources; each image is one uniform value."""
+    images = [{"source_id": u, "image_id": f"{u}_{k}"} for u in units for k in range(3)]
+
+    def pixels(image_id: str) -> NDArray[np.uint8]:
+        unit, k = image_id.split("_")
+        return np.full((SIZE, SIZE, 3), 10 * int(unit) + int(k), dtype=np.uint8)
+
+    return fake_reader(root, images, fake_annotations(units), pixels)
 
 
 class StubPredictor:
@@ -122,9 +161,8 @@ def _run(tmp_path: Path, units: list[str], batch_size: int = 2) -> dict:
     concept_lookup = build_concept_lookup("coralnet", LABELS, names, _CSV)
     return run_point_evaluation(
         eval_name="coralnet_val",
-        base_ds=FakeDataset(units),
+        reader=fake_coralnet(tmp_path / "images", units),
         unit_col="source_id",
-        key_cols=["image_id"],
         predictor=cast(CBMPredictor, StubPredictor(len(names))),
         class_lookup=class_lookup,
         concept_lookup=concept_lookup,
@@ -191,7 +229,7 @@ def test_living_and_coral_counts_follow_the_live_column(both):
         "label"
     )
     table = table.set_index("label").loc[LABELS]
-    labels = FakeDataset(["10", "20"]).df_annotations["source_label_name"]
+    labels = pd.DataFrame(fake_annotations(["10", "20"]))["source_label_name"]
     assert labels.isin(DEAD).any() and labels.isin(CORAL).any()
     for rank, rd in both["pooled"]["taxonomic"].items():
         values = table[rank].str.lower()
@@ -227,9 +265,8 @@ def test_images_are_normalised_with_the_predictors_mean_and_std(tmp_path):
     id2label = {i: f"c{i}" for i in range(NUM_CLASSES)}
     run_point_evaluation(
         eval_name="coralnet_val",
-        base_ds=FakeDataset(["10"]),
+        reader=fake_coralnet(tmp_path / "images", ["10"]),
         unit_col="source_id",
-        key_cols=["image_id"],
         predictor=cast(CBMPredictor, predictor),
         class_lookup=ClassLookup(dict.fromkeys(LABELS, 1), id2label),
         concept_lookup=build_concept_lookup("coralnet", LABELS, names, _CSV),
@@ -255,20 +292,12 @@ TINY_MEAN = (0.5, 0.4, 0.3)
 TINY_STD = (0.25, 0.5, 0.1)
 
 
-class TinyDataset:
-    """Images of any shape; ``fail`` lists image ids whose read raises, ``gray`` gives 2-D arrays."""
-
-    def __init__(self, images, annotations, *, fail=(), gray=False):
-        self.df_images = pd.DataFrame(images)
-        self.df_annotations = pd.DataFrame(annotations)
-        self._fail = set(fail)
-        self._gray = gray
-
-    def read_image(self, image_id, **_):
-        if image_id in self._fail:
-            raise OSError(f"cannot read {image_id}")
-        shape = (4, 8) if self._gray else (4, 8, 3)
-        return np.full(shape, 100, dtype=np.uint8)
+def tiny_reader(root, images, annotations, *, fail=(), gray=False):
+    """4x8 images of value 100; ``fail`` images are unreadable, ``gray`` saves one channel."""
+    shape = (4, 8) if gray else (4, 8, 3)
+    return fake_reader(
+        root, images, annotations, lambda _: np.full(shape, 100, dtype=np.uint8), fail=fail
+    )
 
 
 class RowBandPredictor:
@@ -311,13 +340,12 @@ def _tiny_annotations(image_id, points):
     ]
 
 
-def _tiny_run(tmp_path, base_ds, *, concept_names=TINY_CONCEPTS, **kwargs):
+def _tiny_run(tmp_path, reader, *, concept_names=TINY_CONCEPTS, **kwargs):
     class_lookup, concept_lookup = _tiny_lookups()
     return run_point_evaluation(
         eval_name="tiny",
-        base_ds=base_ds,
+        reader=reader,
         unit_col="source_id",
-        key_cols=["image_id"],
         predictor=cast(CBMPredictor, RowBandPredictor()),
         class_lookup=class_lookup,
         concept_lookup=concept_lookup,
@@ -330,12 +358,11 @@ def _tiny_run(tmp_path, base_ds, *, concept_names=TINY_CONCEPTS, **kwargs):
     )
 
 
-def _tiny_dataset_item(base_ds, idx=0):
+def _tiny_dataset_item(reader, idx=0):
     class_lookup, concept_lookup = _tiny_lookups()
     dataset = PointEvalDataset(
-        base_ds,
+        reader,
         "source_id",
-        ["image_id"],
         (4, 4),
         TINY_MEAN,
         TINY_STD,
@@ -349,8 +376,8 @@ def test_points_are_sampled_by_row_and_column_on_a_non_square_image(tmp_path):
     # Source image is 4 rows x 8 columns; predictions vary with the row only.
     # (row, col): (0, 7) top -> 1, (3, 0) bottom -> 2, (1, 3) top -> 1, (2, 5) bottom -> 2.
     points = [(0, 7, "coral"), (3, 0, "sand"), (1, 3, "sand"), (2, 5, "sand")]
-    base = TinyDataset(_tiny_images("a"), _tiny_annotations("a", points))
-    result = _tiny_run(tmp_path, base)
+    reader = tiny_reader(tmp_path / "images", _tiny_images("a"), _tiny_annotations("a", points))
+    result = _tiny_run(tmp_path, reader)
     # Ground truth 1, 2, 2, 2 against predictions 1, 2, 1, 2: three of four correct.
     assert result["pooled"]["num_points"] == 4
     assert result["pooled"]["class_accuracy"] == pytest.approx(0.75)
@@ -369,8 +396,8 @@ def test_points_outside_the_source_image_are_dropped_and_counted(tmp_path):
         (0, -1, "sand"),
         (3, 7, "sand"),
     ]
-    base = TinyDataset(_tiny_images("a"), _tiny_annotations("a", points))
-    item = _tiny_dataset_item(base)
+    reader = tiny_reader(tmp_path / "images", _tiny_images("a"), _tiny_annotations("a", points))
+    item = _tiny_dataset_item(reader)
     assert item["ok"] is True
     assert item["n_out_of_bounds"] == 4
     assert item["rows"].tolist() == [0, 3]
@@ -379,7 +406,7 @@ def test_points_outside_the_source_image_are_dropped_and_counted(tmp_path):
     assert item["ann_idx"].tolist() == [0, 5]
     assert item["class_ids"].tolist() == [1, 2]
     assert item["concept_rows"].tolist() == [[2, 1, 2], [1, 2, 1]]
-    assert _tiny_run(tmp_path, base)["pooled"]["num_points"] == 2
+    assert _tiny_run(tmp_path, reader)["pooled"]["num_points"] == 2
 
 
 def test_an_unreadable_image_is_counted_failed_and_contributes_no_points(tmp_path):
@@ -387,13 +414,13 @@ def test_an_unreadable_image_is_counted_failed_and_contributes_no_points(tmp_pat
     annotations = _tiny_annotations("a", [(0, 0, "coral")]) + _tiny_annotations(
         "b", [(0, 0, "coral"), (1, 1, "sand")]
     )
-    base = TinyDataset(images, annotations, fail={"b"})
-    item = _tiny_dataset_item(base, idx=1)
+    reader = tiny_reader(tmp_path / "images", images, annotations, fail={"b"})
+    item = _tiny_dataset_item(reader, idx=1)
     assert item["ok"] is False
     assert item["rows"].size == 0 and item["concept_rows"].shape == (0, 3)
     assert item["image"].shape == (3, 4, 4)
 
-    result = _tiny_run(tmp_path, base)
+    result = _tiny_run(tmp_path, reader)
     assert (result["images_processed"], result["images_failed"]) == (2, 1)
     assert result["pooled"]["num_points"] == 1
     payload = json.loads((tmp_path / "tiny" / "metrics.json").read_text())
@@ -401,20 +428,23 @@ def test_an_unreadable_image_is_counted_failed_and_contributes_no_points(tmp_pat
 
 
 def test_a_unit_whose_only_image_fails_is_still_reported_with_no_points(tmp_path):
-    base = TinyDataset(
+    reader = tiny_reader(
+        tmp_path / "images",
         _tiny_images("a") + _tiny_images("b", unit="v"),
         _tiny_annotations("a", [(0, 0, "coral")]) + _tiny_annotations("b", [(0, 0, "coral")]),
         fail={"b"},
     )
-    result = _tiny_run(tmp_path, base)
+    result = _tiny_run(tmp_path, reader)
     assert set(result["units"]) == {"u", "v"}
     assert result["units"]["v"]["num_points"] == 0
     assert result["units"]["u"]["num_points"] == 1
 
 
-def test_a_two_dimensional_image_is_stacked_to_three_identical_channels():
-    base = TinyDataset(_tiny_images("a"), _tiny_annotations("a", [(0, 0, "coral")]), gray=True)
-    item = _tiny_dataset_item(base)
+def test_a_one_channel_image_is_read_as_three_identical_channels(tmp_path):
+    reader = tiny_reader(
+        tmp_path / "images", _tiny_images("a"), _tiny_annotations("a", [(0, 0, "coral")]), gray=True
+    )
+    item = _tiny_dataset_item(reader)
     assert item["ok"] is True
     assert (item["H"], item["W"]) == (4, 8)
     expected = torch.tensor(
@@ -433,7 +463,9 @@ def test_max_images_per_unit_keeps_the_first_images_of_each_unit(tmp_path):
         + _tiny_annotations("b1", [(0, 0, "coral")] * 4)
         + _tiny_annotations("b2", [(0, 0, "coral")] * 5)
     )
-    result = _tiny_run(tmp_path, TinyDataset(images, annotations), max_images_per_unit=1)
+    result = _tiny_run(
+        tmp_path, tiny_reader(tmp_path / "images", images, annotations), max_images_per_unit=1
+    )
     assert result["images_processed"] == 2
     assert {u: d["num_points"] for u, d in result["units"].items()} == {"u": 1, "v": 4}
     payload = json.loads((tmp_path / "tiny" / "metrics.json").read_text())
@@ -441,9 +473,11 @@ def test_max_images_per_unit_keeps_the_first_images_of_each_unit(tmp_path):
 
 
 def test_binary_concepts_missing_from_the_concept_names_raise_before_any_output(tmp_path):
-    base = TinyDataset(_tiny_images("a"), _tiny_annotations("a", [(0, 0, "coral")]))
+    reader = tiny_reader(
+        tmp_path / "images", _tiny_images("a"), _tiny_annotations("a", [(0, 0, "coral")])
+    )
     with pytest.raises(RuntimeError, match=r"\['anthropogenic'\]"):
-        _tiny_run(tmp_path, base, binary_concepts=("bleached", "anthropogenic"))
+        _tiny_run(tmp_path, reader, binary_concepts=("bleached", "anthropogenic"))
     assert not (tmp_path / "tiny").exists()
 
 
@@ -454,9 +488,8 @@ def test_unmapped_labels_are_reported_per_lookup_and_written_to_metrics_json(tmp
     annotations = _tiny_annotations("a", [(0, 0, "CORAL"), (1, 1, "sand"), (2, 2, "Mystery")])
     result = run_point_evaluation(
         eval_name="tiny",
-        base_ds=TinyDataset(_tiny_images("a"), annotations),
+        reader=tiny_reader(tmp_path / "images", _tiny_images("a"), annotations),
         unit_col="source_id",
-        key_cols=["image_id"],
         predictor=cast(CBMPredictor, RowBandPredictor()),
         class_lookup=class_lookup,
         concept_lookup=concept_lookup,
@@ -478,7 +511,7 @@ def test_progress_callback_reports_images_processed_after_each_batch(tmp_path):
     calls: list[tuple[int, int]] = []
     _tiny_run(
         tmp_path,
-        TinyDataset(_tiny_images(*ids), annotations),
+        tiny_reader(tmp_path / "images", _tiny_images(*ids), annotations),
         batch_size=2,
         progress_cb=lambda done, total: calls.append((done, total)),
     )

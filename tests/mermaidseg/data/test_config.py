@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from mermaidseg.data.config import TAXONOMY_NAME, sync_plan
+from mermaidseg.data.config import TAXONOMY_NAME, DataSection, entry_split_groups, sync_plan
+from segdata_spec.resize import ResizeSpec
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -111,6 +113,8 @@ def test_on_missing_images_defaults_to_fail_and_carries_drop(tmp_path: Path) -> 
         _entry(train={"groups": "all", "bogus": 1}),
         _entry(train={"groups": "all"}, bogus=1),
         _entry(train={"groups": "all"}, on_missing_images="skip"),
+        _entry(train={"groups": "all", "repeat": 0}),
+        _entry(train={"groups": "all"}, resize={"max_edge": 100, "bogus": 1}),
     ],
     ids=[
         "use-without-split-file",
@@ -119,6 +123,8 @@ def test_on_missing_images_defaults_to_fail_and_carries_drop(tmp_path: Path) -> 
         "unknown-block-key",
         "unknown-entry-key",
         "bad-missing-mode",
+        "repeat-below-one",
+        "unknown-resize-key",
     ],
 )
 def test_invalid_entries_raise(tmp_path: Path, entry: dict[str, Any]) -> None:
@@ -152,3 +158,106 @@ def test_group_on_more_than_one_row_raises(tmp_path: Path, rows: list[str]) -> N
 def test_unknown_section_key_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         sync_plan({"datasets": {}, "bucket": "other"}, tmp_path)
+
+
+def test_section_accepts_resize_block_keys_and_default() -> None:
+    section = DataSection.model_validate(
+        {
+            "default": {"train": {"transform": {"HorizontalFlip": {"p": 0.5}}}},
+            "datasets": {
+                "d": _entry(
+                    resize={"max_edge": 1024, "filter": "bicubic", "jpeg_quality": 90},
+                    train={
+                        "groups": "all",
+                        "transform": {"VerticalFlip": {"p": 1.0}},
+                        "repeat": 3,
+                        "annotators": ["a", "b"],
+                    },
+                )
+            },
+        }
+    )
+    entry = section.datasets["d"]
+    assert entry.resize == ResizeSpec(max_edge=1024, filter="bicubic", jpeg_quality=90)
+    assert entry.train is not None
+    assert (entry.train.transform, entry.train.repeat, entry.train.annotators) == (
+        {"VerticalFlip": {"p": 1.0}},
+        3,
+        ["a", "b"],
+    )
+
+
+def test_default_train_transform_fills_a_train_block_without_one() -> None:
+    cfg = {
+        "default": {"train": {"transform": {"HorizontalFlip": {"p": 0.5}}}},
+        "datasets": {"d": _entry(train={"groups": "all"})},
+    }
+    train = DataSection.model_validate(cfg).datasets["d"].train
+    assert train is not None
+    assert train.transform == {"HorizontalFlip": {"p": 0.5}}
+
+
+def test_a_blocks_own_transform_wins_over_the_default() -> None:
+    cfg = {
+        "default": {"train": {"transform": {"HorizontalFlip": {"p": 0.5}}}},
+        "datasets": {"d": _entry(train={"groups": "all", "transform": {}})},
+    }
+    train = DataSection.model_validate(cfg).datasets["d"].train
+    assert train is not None
+    assert train.transform == {}
+
+
+def test_default_never_creates_a_train_block() -> None:
+    cfg = {
+        "default": {"train": {"transform": {"HorizontalFlip": {"p": 0.5}}}},
+        "datasets": {"d": _entry(val={"groups": "all"})},
+    }
+    entry = DataSection.model_validate(cfg).datasets["d"]
+    assert entry.train is None
+    assert entry.val is not None
+    assert entry.val.transform is None
+
+
+@pytest.mark.parametrize("split", ["val", "test"])
+def test_repeat_on_an_eval_block_raises(split: str) -> None:
+    with pytest.raises(ValidationError, match="repeat"):
+        DataSection.model_validate(
+            {"datasets": {"d": _entry(**{split: {"groups": "all", "repeat": 2}})}}
+        )
+
+
+@pytest.mark.parametrize("split", ["val", "test"])
+def test_transform_on_an_eval_block_raises(split: str) -> None:
+    with pytest.raises(ValidationError, match="transform"):
+        DataSection.model_validate(
+            {"datasets": {"d": _entry(**{split: {"groups": "all", "transform": {}}})}}
+        )
+
+
+def test_default_rejects_unknown_keys() -> None:
+    with pytest.raises(ValidationError):
+        DataSection.model_validate(
+            {
+                "default": {"val": {"transform": {}}},
+                "datasets": {"d": _entry(train={"groups": "all"})},
+            }
+        )
+
+
+def test_entry_split_groups_resolves_one_split_block(tmp_path: Path) -> None:
+    _write_split_file(tmp_path)
+    entry = DataSection.model_validate(
+        {
+            "datasets": {
+                "d": _entry(
+                    split_file="splits/coralnet.csv",
+                    train={"use": ["train"]},
+                    val={"groups": "all"},
+                    test={"groups": ["z"]},
+                )
+            }
+        }
+    ).datasets["d"]
+    assert entry_split_groups(entry, "train", tmp_path) == {"g1", "g3"}
+    assert entry_split_groups(entry, "val", tmp_path) is None
+    assert entry_split_groups(entry, "test", tmp_path) == {"z"}

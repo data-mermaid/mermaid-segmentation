@@ -13,13 +13,13 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 | Caller | Calls |
 |---|---|
 | ETL | `publish.publish_dataset` and `publish.publish_taxonomy`. Each returns the manifest and its sha256, which becomes a `manifest.Pin`. |
-| Trainer | `sync.sync(client, pins, cache_dir, bucket=..., resize=..., max_workers=...)`, which needs S3 access, then `read.open_version(..., resize=...)` and `read.open_taxonomy`, which read only the cache. Also `resize` (`ResizeSpec`, `scaled_size`, `resize_image`, `resize_mask`, `scale_points`, `scale_images`). `scale_images` returns the images table with the resized `width` and `height` and `media_type` `image/jpeg`; `open_version(resize=)` uses it. |
+| Trainer | `sync.sync(client, pins, cache_dir, bucket=..., resize=..., max_workers=...)`, which needs S3 access; `sync.check_published_manifest(client, bucket, pin, taxonomy=...)`, which reads the manifest without caching it; then `read.open_version(..., resize=...)` and `read.open_taxonomy`, which read only the cache. Also `resize` (`ResizeSpec`, `scaled_size`, `resize_image`, `resize_mask`, `scale_points`, `scale_images`). `scale_images` returns the images table with the resized `width` and `height` and `media_type` `image/jpeg`; `open_version(resize=)` uses it. |
 | Both | `taxonomy.roll_up` and `taxonomy.hierarchy_from_table`. |
 | Split builder and trainer | `splits.read_split_file`. The trainer also passes `splits.coverage_checker` to `sync`. |
 
 `resize` copies the ETL's decode-and-resize rather than being called by it. For JPEG and PNG images whose scaled edges are at least 1 px, `test_segdata_spec_parity.py` keeps the two byte-identical. Otherwise they diverge: the spec refuses formats other than JPEG and PNG, which the ETL decodes, and clamps a zero edge to 1 px, where the ETL fails.
 
-`resize` on `sync` maps a dataset name to a `ResizeSpec` or `None`. A dataset that is absent or maps to `None` is cached as is. `DatasetSyncResult.resize` records the spec that was applied, for model lineage. Pass `open_version` the spec that `sync` applied (`DatasetSyncResult.resize`). Nothing checks this: `image_path` and `mask_path` do not check that the file exists, so a mismatch surfaces only when the image is opened. A `ResizeSpec` holds `max_edge`, `filter` (`lanczos`, `bicubic` or `bilinear`) and `jpeg_quality`; its `id` is the first 12 hex characters of a hash of the three fields.
+`resize` on `sync` maps a dataset name to a `ResizeSpec` or `None`. A dataset that is absent or maps to `None` is cached as is. `DatasetSyncResult.resize` records the spec that was applied, for model lineage. After each dataset version syncs, `sync` writes a marker (see Cache layout) that records the resize spec, the synced groups and the dropped image ids. `open_version(..., resize=...)` raises `NotSynced` when the version has no marker for that spec, and the message names the requested resize id and the ids that do have a marker. `DatasetVersion.synced_groups` holds the groups whose images are cached, or `None` when all of them are. Sync never deletes cached images, so `open_version` unions the groups of every marker for the version and spec: a later sync adds its groups, and a tables-only sync (a selection of no groups) adds none. `ResizeSpec` is a training-cache step only: evaluation and serving resize any input to the model's `input_size`, so inference does not apply it. A `ResizeSpec` holds `max_edge`, `filter` (`lanczos`, `bicubic` or `bilinear`) and `jpeg_quality`; its `id` is the first 12 hex characters of a hash of the three fields.
 
 `sync` runs on `max_workers` threads (default `min(8, os.cpu_count())`). Create the boto3 client with `max_pool_connections` of at least `max_workers`.
 
@@ -42,6 +42,8 @@ Images and masks are not under these prefixes. Their keys are `image_store.prefi
 Without a resize spec, `sync` writes every object to `<cache_dir>/<bucket>/<key>`, the same key as on S3, so `read` finds a file from the manifest alone. Manifests and tables always use this layout.
 
 With a spec, `sync` writes each image and mask to `<cache_dir>/resized/<spec id>/<bucket>/<key>` and does not cache the original. Each output has an index file at `<cache_dir>/resized/<spec id>/.index/<bucket>/<key>.json` with the source ETag, the output size, the output sha256 and the output's pixel width and height. Two specs share one cache without interfering.
+
+After a dataset version syncs, `sync` writes a new marker file at `<cache_dir>/synced/<spec id or original>/<bucket>/<dataset>/<version>/<uuid>.json`, with `original` for a dataset that has no spec. The file holds the resize spec (or null), the synced groups (`"all"` when the selection is `None`) and the dropped image ids of that sync. It is written atomically once that version's images verify, so an interrupted multi-dataset sync leaves no marker for the version it was syncing, while markers for versions that finished earlier remain, and `sync` never reads or changes an existing marker, so concurrent syncs of one version do not overwrite each other. `open_version` reads every marker file in the directory and requires at least one. Its groups are the union of the files' groups, where `"all"` absorbs the rest. A marker file that cannot be parsed raises `CorruptSyncMarker` naming its path.
 
 A resized file keeps the source key name, so a key ending `.png` may hold JPEG bytes. Read the format from `media_type` in the images table that `open_version(resize=...)` returns, not from the file extension.
 
@@ -105,6 +107,7 @@ All derive from `errors.SegdataError`.
 | `ObjectExists` | A write-once key exists with different bytes. |
 | `SchemaValidationError` | A table fails its schema, or the cross-table rules. Also a `ValueError`. |
 | `PinMismatch` | A manifest's sha256 differs from its pin. |
+| `ManifestNotFound` | A pinned manifest is absent from the bucket. |
 | `ChecksumMismatch` | A table, image or mask differs from its recorded checksum or size, or a cached resized output has no valid index entry or differs from it. |
 | `ImageChanged` | An image no longer matches its recorded ETag. |
 | `ImageMissing` | An image is absent and the dataset's mode is `fail`. |

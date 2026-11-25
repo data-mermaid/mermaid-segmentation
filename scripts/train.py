@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-config",
         default="configs/data_config.yaml",
-        help="path to the data config YAML (default: train split, deduplicated CoralNet splits)",
+        help="path to the data config YAML (default: the final-run mixture of pinned versions)",
     )
     parser.add_argument(
         "--concept-schema-config",
@@ -82,8 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cache-dir",
-        default=None,
-        help="local S3 cache root (default: cache disabled)",
+        required=True,
+        help="dataset cache root that scripts/sync_data.py filled from the data config's pins",
     )
     parser.add_argument(
         "--checkpoint",

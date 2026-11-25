@@ -12,14 +12,11 @@ import torch
 import yaml
 
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.datasets.coralscapes_v2.coralscapes_v2_dataset import (
-    CORALSCAPES_V2_ID2NAME,
-    coralscapes_v2_to_legacy_lut,
-)
-from mermaidseg.datasets.factory import configured_source_names
 from mermaidseg.evaluation import coralscapes_probe
 from mermaidseg.evaluation.coralscapes_probe import (
+    CORALSCAPES_V2_ID2NAME,
     LEGACY_NUM_CLASSES,
+    VersionSource,
     _class_taxonomy_targets,
     _predict_classes_from_activated,
     _require_label,
@@ -27,9 +24,11 @@ from mermaidseg.evaluation.coralscapes_probe import (
     _sample_activated,
     average_window_logits,
     build_coralscapes_concept_codes,
+    coralscapes_v2_to_legacy_lut,
     coralscapes_windows,
     evaluate_coralscapes39_probe,
     evaluate_coralscapes_probe,
+    label_md5,
     legacy_label,
     load_legacy_probes,
     reassemble_concept_logits,
@@ -38,6 +37,7 @@ from mermaidseg.evaluation.coralscapes_probe import (
 )
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
 from mermaidseg.evaluation.metrics import ClassConfusion
+from tests.mermaidseg.data.conftest import ImageSpec, open_written
 
 _REPO = Path(__file__).resolve().parents[3]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
@@ -79,7 +79,7 @@ def test_unknown_split_raises(tmp_path: Path):
         evaluate_coralscapes_probe(
             predictor=None,  # type: ignore[arg-type]
             probe_json=probe,
-            coralscapes_root=None,
+            version=None,  # type: ignore[arg-type]
             output_dir=tmp_path / "out",
             concept_names=["bleached", "anthropogenic"],
             taxonomy_csv=_CSV,
@@ -403,7 +403,7 @@ def test_load_legacy_probes_rejects_an_empty_list():
 
 def _full_concept_names() -> list[str]:
     data = yaml.safe_load((_REPO / "configs" / "data_config.yaml").read_text())["data"]
-    schema = ConceptSchema.from_csv(_CSV, sources=configured_source_names(data))
+    schema = ConceptSchema.from_csv(_CSV, sources=set(data["datasets"]))
     return [name for _, name in sorted(schema.channel_id2name().items())]
 
 
@@ -426,7 +426,7 @@ def test_a_missing_reported_binary_concept_raises_before_loading_images(tmp_path
         evaluate_coralscapes_probe(
             predictor=None,  # type: ignore[arg-type]
             probe_json=probe,
-            coralscapes_root=None,
+            version=None,  # type: ignore[arg-type]
             output_dir=tmp_path / "out",
             concept_names=["bleached", "sand"],
             taxonomy_csv=_CSV,
@@ -505,7 +505,7 @@ def test_legacy_probe_run_fits_one_svm_per_budget_and_scores_each_in_one_forward
     label = np.full((HEIGHT, WIDTH), v2_for[1], dtype=np.uint8)
     label[:, 512:1024] = v2_for[2]
     label[:, 1536:] = v2_for[3]
-    monkeypatch.setattr(coralscapes_probe, "build_source", lambda *_a: _FakeSource(label))
+    monkeypatch.setattr(coralscapes_probe, "VersionSource", lambda *_a: _FakeSource(label))
 
     def points(class_id, cols):
         return [
@@ -530,7 +530,7 @@ def test_legacy_probe_run_fits_one_svm_per_budget_and_scores_each_in_one_forward
     out = evaluate_coralscapes39_probe(
         predictor=predictor,  # type: ignore[arg-type]
         probe_jsons=probe_paths,
-        coralscapes_root=tmp_path,
+        version=None,  # type: ignore[arg-type]
         output_dir=tmp_path / "out",
         splits=["test"],
     )
@@ -573,3 +573,68 @@ def test_a_two_class_probe_predicts_the_first_class_at_a_score_of_exactly_zero()
     activated = torch.tensor([[[1.0, 2.0, 3.0]], [[0.0, 0.0, 0.0]]])  # (K=2, H=1, W=3)
     pred = _predict_classes_from_activated(activated, weff, beff, classes)
     assert pred.tolist() == [[7, 7, 9]]
+
+
+def _two_band_label(top: int, bottom: int) -> np.ndarray:
+    label = np.full((HEIGHT, WIDTH), bottom, dtype=np.uint8)
+    label[: HEIGHT // 2] = top
+    return label
+
+
+@pytest.fixture
+def version_source(tmp_path: Path) -> VersionSource:
+    """A train image (labels 2 over 5), a validation image (7 over 9) and a test image (all 3)."""
+    site = '{"site": "site1"}'
+    version = open_written(
+        tmp_path,
+        kind="dense",
+        images=[
+            ImageSpec("site1_a", group="train", mask=_two_band_label(2, 5), attrs=site),
+            ImageSpec("site1_b", group="validation", mask=_two_band_label(7, 9), attrs=site),
+            ImageSpec("site1_c", group="test", mask=np.full((HEIGHT, WIDTH), 3, np.uint8)),
+        ],
+        labels={i: CORALSCAPES_V2_ID2NAME[i] for i in (2, 3, 5, 7, 9)},
+        name="coralscapes_v2",
+    )
+    return VersionSource(version)
+
+
+def test_a_probe_entry_reads_the_train_image_with_its_stem_as_image_id(version_source):
+    entry = {"site": "site1", "stem": "site1_a", "label_md5": label_md5(_two_band_label(2, 5))}
+
+    image, label = version_source.train_image_label(entry)
+
+    assert image.shape == (HEIGHT, WIDTH, 3)
+    assert [int(label[r, c]) for r, c in [(0, 0), (511, 2047), (512, 0), (1023, 1000)]] == [
+        2,
+        2,
+        5,
+        5,
+    ]
+
+
+def test_a_probe_stem_that_is_not_a_train_image_raises(version_source):
+    with pytest.raises(KeyError, match="site1_b"):
+        version_source.train_image_label({"site": "site1", "stem": "site1_b", "label_md5": "m"})
+
+
+def test_a_probe_label_md5_that_differs_from_the_version_mask_raises(version_source):
+    actual = label_md5(_two_band_label(2, 5))
+    entry = {"site": "site1", "stem": "site1_a", "label_md5": "0" * 32}
+
+    with pytest.raises(ValueError, match=f"site1_a.*{'0' * 32}.*{actual}"):
+        version_source.train_image_label(entry)
+
+
+@pytest.mark.parametrize(
+    ("split", "image_id", "top", "bottom"), [("val", "site1_b", 7, 9), ("test", "site1_c", 3, 3)]
+)
+def test_a_split_iterates_its_group_with_the_native_label_ids(
+    version_source, split, image_id, top, bottom
+):
+    items = list(version_source.iter_split(split))
+
+    assert version_source.num_split(split) == 1
+    assert [key for key, _, _ in items] == [image_id]
+    label = items[0][2]
+    assert (int(label[0, 0]), int(label[HEIGHT - 1, WIDTH - 1])) == (top, bottom)

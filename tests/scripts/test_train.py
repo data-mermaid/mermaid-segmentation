@@ -8,7 +8,7 @@ import scripts.train as train_script
 from mermaidseg.io import resolve_repo_path
 from scripts.train import build_parser
 
-REQUIRED = ["--num-workers", "8"]
+REQUIRED = ["--num-workers", "8", "--cache-dir", "cache"]
 
 
 CONFIG_FLAGS = (
@@ -37,7 +37,7 @@ def _stub_run(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> list:
 @pytest.mark.parametrize(
     "argv",
     [
-        pytest.param(["--num-workers", "0"], id="zero-num-workers"),
+        pytest.param(["--cache-dir", "cache", "--num-workers", "0"], id="zero-num-workers"),
         pytest.param([*REQUIRED, "--nccl-timeout-min", "0"], id="zero-nccl-timeout"),
         pytest.param([*REQUIRED, "--nccl-timeout-min", "-1"], id="negative-nccl-timeout"),
         pytest.param(
@@ -61,6 +61,7 @@ def test_main_passes_the_parsed_arguments_to_run(monkeypatch):
     train_script.main()
     assert len(received) == 1
     assert received[0].num_workers == 8
+    assert received[0].cache_dir == "cache"
     assert received[0].resolution == 128
     assert received[0].init_weights == "w.pt"
     assert received[0].checkpoint is None
@@ -82,6 +83,6 @@ def test_main_accepts_the_edge_of_each_valid_range(monkeypatch, extra):
 
 
 def test_main_accepts_a_single_data_loader_worker(monkeypatch):
-    received = _stub_run(monkeypatch, ["--num-workers", "1"])
+    received = _stub_run(monkeypatch, ["--cache-dir", "cache", "--num-workers", "1"])
     train_script.main()
     assert received[0].num_workers == 1

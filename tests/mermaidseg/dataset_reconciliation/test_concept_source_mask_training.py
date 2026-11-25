@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import pytest
 import torch
 import yaml
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
+from mermaidseg.data import PointDataset
 from mermaidseg.dataset_reconciliation.concept_removal import (
     CoverageRule,
     apply_concept_removal,
@@ -24,8 +24,8 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import (
     load_concept_source_mask,
     meta_path,
 )
-from mermaidseg.datasets.base_dataset import BaseCoralDataset
 from tests.mermaidseg.conftest import concept_table
+from tests.mermaidseg.data.conftest import ImageSpec, open_written
 from tests.mermaidseg.dataset_reconciliation.test_concept_source_mask import CHANNELS, _schema
 
 BLEACHED = CHANNELS.index("bleached")
@@ -113,60 +113,43 @@ def test_apply_zeroes_only_masked_channels():
 # ---------- datasets ----------
 
 
-class _CropOutCoralNet(BaseCoralDataset):
-    """Two images in two sources; image 0 loses its labels, so asking for it returns image 1."""
-
-    SOURCE_NAME = "coralnet"
-
-    def read_image(self, **row_kwargs) -> np.ndarray:
-        return np.zeros((20, 20, 3), dtype=np.uint8)
-
-    def _load_item(self, idx: int) -> tuple[Any, Any]:
-        image, mask = super()._load_item(idx)
-        if idx == 0:
-            mask = np.zeros_like(mask)
-        return image, mask
+def _crop_top_left(image: Any, mask: Any) -> dict[str, Any]:
+    """Keep the top-left 4x4 corner, as a random crop that misses a point would."""
+    return {"image": image[:4, :4], "mask": mask[:4, :4]}
 
 
-def _coralnet_dataset() -> _CropOutCoralNet:
-    df_annotations = pd.DataFrame(
-        {
-            "image_id": ["img0", "img1"],
-            "source_id": [5, 7],
-            "source_label_name": ["Coral", "Coral"],
-            "row": [5, 5],
-            "col": [5, 5],
-        }
+def _reader(tmp_path, name: str, groups: list[str], **kwargs: Any) -> PointDataset:
+    """A train reader with image ``i<k>`` in ``groups[k]``; image ``i0``'s point is cropped out."""
+    images = [ImageSpec(f"i{k}", group=group) for k, group in enumerate(groups)]
+    points = [("i0", 6, 6, 1)] + [(f"i{k}", 1, 1, 1) for k in range(1, len(groups))]
+    version = open_written(
+        tmp_path / name,
+        kind="points",
+        images=images,
+        labels={1: "Coral"},
+        points=points,
+        name=name,
     )
-    df_images = df_annotations[["image_id", "source_id"]].reset_index(drop=True)
-    return _CropOutCoralNet(df_annotations=df_annotations, df_images=df_images, split="train")
+    return PointDataset(version, split="train", **kwargs)
 
 
-class _PlainDataset(Dataset):
-    SOURCE_NAME = "coralscapes_v2"
-
-    def __len__(self) -> int:
-        return 3
-
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.zeros(3, 4, 4), torch.ones(4, 4, dtype=torch.long)
-
-
-def test_source_row_follows_the_retried_image(tmp_path):
-    ds = _coralnet_dataset()
+def test_coralnet_rows_come_from_the_image_group_and_follow_the_retried_image(tmp_path):
+    ds = _reader(tmp_path, "coralnet", ["s5", "s123"], transform=_crop_top_left)
     image, labels = ds[1]  # unchanged without a mask
     mask = load_concept_source_mask(
-        _write_mask(tmp_path, [("5", "bleached"), ("7", "bleached")]), _schema()
+        _write_mask(tmp_path, [("5", "bleached"), ("123", "bleached")]), _schema()
     )
-    (wrapped,) = attach_source_rows([ds], mask)
-    assert wrapped is ds
-    assert ds[1][2] == mask.row_by_source()["7"]
-    # idx 0 has no labels after the crop, so the train split retries on image 1 (source 7).
-    assert ds[0][2] == mask.row_by_source()["7"]
+
+    (attached,) = attach_source_rows([ds], mask)
+
+    assert attached is ds
+    assert ds[1][2] == mask.row_by_source()["123"]
+    # i0 has no labels after the crop, so the train split retries on i1 (source 123).
+    assert ds[0][2] == mask.row_by_source()["123"]
 
 
 def test_counted_source_without_masked_pairs_gets_row_zero(tmp_path):
-    ds = _coralnet_dataset()
+    ds = _reader(tmp_path, "coralnet", ["s5", "s7"])
     mask = load_concept_source_mask(
         _write_mask(tmp_path, [("5", "bleached")], source_ids=["5", "7"]), _schema()
     )
@@ -175,21 +158,22 @@ def test_counted_source_without_masked_pairs_gets_row_zero(tmp_path):
 
 
 def test_source_the_mask_never_counted_is_refused(tmp_path):
-    ds = _coralnet_dataset()
+    ds = _reader(tmp_path, "coralnet", ["s5", "s7"])
     mask = load_concept_source_mask(_write_mask(tmp_path, [("5", "bleached")]), _schema())
     with pytest.raises(ValueError, match=r"1 coralnet source.*\b7\b"):
         attach_source_rows([ds], mask)
 
 
-def test_other_datasets_get_row_zero(tmp_path):
+def test_other_datasets_get_row_zero_and_a_repeated_dataset_stays_one_object(tmp_path):
     mask = load_concept_source_mask(_write_mask(tmp_path, [("5", "bleached")]), _schema())
-    plain = _PlainDataset()
-    out = attach_source_rows([plain, plain], mask)
-    assert out[0] is out[1]  # a repeated dataset is wrapped once
-    assert len(out[0]) == 3 and out[0].SOURCE_NAME == "coralscapes_v2"
-    assert out[0][0][2] == 0
-    batch = next(iter(DataLoader(out[0], batch_size=2)))
-    assert len(batch) == 3 and batch[2].tolist() == [0, 0]
+    other = _reader(tmp_path, "coralscapes_v2", ["s5", "train"])
+
+    out = attach_source_rows([other, other], mask)
+
+    assert out[0] is other and out[1] is other
+    assert other[1][2] == 0
+    batch = next(iter(DataLoader(other, batch_size=1)))
+    assert len(batch) == 3 and batch[2].tolist() == [0]
 
 
 # ---------- train step ----------

@@ -19,6 +19,10 @@ class PinMismatch(SegdataError):
     """A manifest's sha256 differs from the pin that names it."""
 
 
+class ManifestNotFound(SegdataError):
+    """A pinned manifest is absent from the bucket; the message is its s3:// URI."""
+
+
 class ChecksumMismatch(SegdataError):
     """A file's content differs from the checksum or size recorded for it."""
 
@@ -33,6 +37,14 @@ class ImageMissing(SegdataError):
 
 class ImageUndecodable(SegdataError):
     """An image or mask matches its record but cannot be decoded."""
+
+
+class NotSynced(SegdataError):
+    """A dataset version has no sync marker for the requested resize spec."""
+
+
+class CorruptSyncMarker(SegdataError):
+    """A sync marker file cannot be parsed; the message names its path."""
 
 
 class SchemaValidationError(SegdataError, ValueError):

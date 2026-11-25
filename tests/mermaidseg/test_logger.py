@@ -628,7 +628,6 @@ class TestLoggerDispatch:
         registry.dataset_offsets = {"mermaid": 0}
         registry.source_to_target = torch.tensor([0, 1], dtype=torch.long)
         registry.concept_id2name = {0: "hard"}
-        registry.coralnet_label_mappings.to_json.return_value = {"records": []}
         registry.num_target_classes = 2
         registry.num_global_source_classes = 3
 
@@ -640,34 +639,6 @@ class TestLoggerDispatch:
             ("metadata/dataset_offsets.json", {"mermaid": 0}),
             ("metadata/source_to_target.json", {"0": 0, "1": 1}),
             ("metadata/concept_id2name.json", {"0": "hard"}),
-            ("metadata/label_mappings/coralnet.json", {"records": []}),
-        ]
-        assert tracker.params == [{"num_target_classes": 2, "num_global_source_classes": 3}]
-
-    def test_log_reconciliation_skips_the_coralnet_artifact_without_coralnet_mappings(
-        self, make_config, fake_tracker
-    ):
-        lgr, tracker = _logger(make_config)
-        tracker.params.clear()
-        tracker.dicts.clear()
-        registry = MagicMock()
-        registry.global_id2source = {0: ("mermaid", "coral")}
-        registry.target_id2label = {1: "coral"}
-        registry.dataset_offsets = {"mermaid": 0}
-        registry.source_to_target = torch.tensor([0, 1], dtype=torch.long)
-        registry.concept_id2name = {0: "hard"}
-        registry.coralnet_label_mappings = None
-        registry.num_target_classes = 2
-        registry.num_global_source_classes = 3
-
-        lgr.log_reconciliation(registry)
-
-        assert [path for path, _ in tracker.dicts] == [
-            "metadata/global_id2source.json",
-            "metadata/target_id2label.json",
-            "metadata/dataset_offsets.json",
-            "metadata/source_to_target.json",
-            "metadata/concept_id2name.json",
         ]
         assert tracker.params == [{"num_target_classes": 2, "num_global_source_classes": 3}]
 

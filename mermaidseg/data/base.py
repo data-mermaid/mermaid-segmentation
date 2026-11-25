@@ -28,6 +28,28 @@ def _select_groups(images: pd.DataFrame, groups: Collection[str] | None) -> pd.D
     return images[images["group"].isin(list(groups))]
 
 
+def _check_synced(images: pd.DataFrame, synced_groups: frozenset[str] | None) -> None:
+    """Raise unless every group of ``images`` was synced (``None`` means all were)."""
+    if synced_groups is None:
+        return
+    missing = sorted(set(images["group"]) - synced_groups)
+    if missing:
+        raise ValueError(
+            f"groups not synced into the cache: {missing}; run scripts/sync_data.py "
+            "with a data config that selects them"
+        )
+
+
+def _select_image_ids(images: pd.DataFrame, image_ids: Collection[str] | None) -> pd.DataFrame:
+    """Return the rows whose ``image_id`` is in ``image_ids`` (all rows for ``None``)."""
+    if image_ids is None:
+        return images
+    unknown = sorted(set(image_ids) - set(images["image_id"]))
+    if unknown:
+        raise ValueError(f"image_ids not in the reader's selection: {unknown}")
+    return images[images["image_id"].isin(list(image_ids))]
+
+
 def _ordered_label_ids(counts: pd.Series) -> list[int]:
     """Return the label ids with a positive count, by count descending then id ascending."""
     present = counts[counts > 0]
@@ -51,8 +73,9 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
     (shifted by the global offset), where ``N`` is the number of labels present in the selection.
     Subclasses set ``KIND`` and supply the mask.
 
-    ``__init__`` runs its steps in this order: group selection; ``_filter_images``, which may
-    narrow subclass state (``PointDataset`` narrows ``self.points``); the cache check, through
+    ``__init__`` runs its steps in this order: group selection and the synced-groups check;
+    ``_filter_images``, which may narrow subclass state (``PointDataset`` narrows ``self.points``),
+    then the ``image_ids`` subset; the cache check, through
     ``_row_paths``; ``self.images`` set; ``_label_counts``; the vocabulary; ``_apply_offset``.
 
     Attributes:
@@ -86,6 +109,7 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         groups: Collection[str] | None = None,
         transform: Callable[..., dict[str, Any]] | None = None,
         on_missing_images: Literal["fail", "drop"] = "fail",
+        image_ids: Collection[str] | None = None,
     ) -> None:
         """Select the images, verify the cache and build the vocabulary.
 
@@ -96,9 +120,12 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
             transform: Called as ``transform(image=, mask=)`` and returning a dict with both.
             on_missing_images: ``"fail"`` raises when a selected file is not cached; ``"drop"``
                 removes those images and counts them in ``images_dropped``.
+            image_ids: Keeps only these images (an evaluation subset); ``None`` keeps all. The
+                vocabulary is built from the kept images.
 
         Raises:
-            ValueError: The reader kind differs from the manifest kind, a group is unknown, or
+            ValueError: The reader kind differs from the manifest kind, a group is unknown or
+                not in ``version.synced_groups``, an image id is not in the selection, or
                 two label ids in the selection's vocabulary share a name.
             FileNotFoundError: A selected file is not cached and ``on_missing_images`` is
                 ``"fail"``.
@@ -114,9 +141,11 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         self.split = split
         self.transform = transform
         self._global_offset = 0
+        self._source_rows: NDArray[np.int64] | None = None
 
         images = _select_groups(version.images.to_pandas(), groups)
-        images = self._filter_images(images)
+        _check_synced(images, version.synced_groups)
+        images = _select_image_ids(self._filter_images(images), image_ids)
         selected, self.images_dropped = self._check_cache(images, on_missing_images)
         self.images = selected.reset_index(drop=True)
 
@@ -221,6 +250,35 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         self.source_id2label_id = {source_name2id[n]: label for n, label in served.items()}
         self._refresh_source_ids()
 
+    def set_source_rows(self, rows: NDArray[np.int64] | None) -> None:
+        """Set the concept-source-mask row of each image, or ``None`` to return pairs.
+
+        With rows set, items are ``(image, mask, row)``, the row of the image actually returned.
+        See :func:`mermaidseg.dataset_reconciliation.concept_source_mask.attach_source_rows`.
+
+        Raises:
+            ValueError: ``rows`` does not hold one row per image.
+        """
+        if rows is not None and len(rows) != len(self.images):
+            raise ValueError(f"{len(rows)} source rows for {len(self.images)} images")
+        self._source_rows = rows
+
+    @property
+    def label_targets(self) -> dict[str, str | None]:
+        """Label name -> ``mermaid_benthic_attribute`` over ``labels.parquet``.
+
+        A null or empty attribute is ``None``: the label maps to no target.
+        """
+        labels = self.version.labels
+        return {
+            name: attribute or None
+            for name, attribute in zip(
+                labels.column("name").to_pylist(),
+                labels.column("mermaid_benthic_attribute").to_pylist(),
+                strict=True,
+            )
+        }
+
     @property
     def global_offset(self) -> int:
         """The current global offset (default 0)."""
@@ -240,8 +298,8 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
             return transformed["image"].transpose(2, 0, 1), transformed["mask"]
         return image, mask
 
-    def __getitem__(self, idx: int) -> tuple[Any, Any]:
-        """Return ``(image, mask)``.
+    def __getitem__(self, idx: int) -> tuple[Any, ...]:
+        """Return ``(image, mask)``, or ``(image, mask, source_row)`` once source rows are set.
 
         On the train split a sample whose mask has no label is replaced by another random image,
         up to ``len(self)`` loads.
@@ -255,7 +313,9 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         for _ in range(n):
             image, mask = self._load(idx)
             if self.split != "train" or _has_label(mask):
-                return image, mask
+                if self._source_rows is None:
+                    return image, mask
+                return image, mask, int(self._source_rows[idx])
             idx = _next_random_idx(idx, n)
         raise RuntimeError(f"{type(self).__name__}: all {n} items were empty (no labels)")
 

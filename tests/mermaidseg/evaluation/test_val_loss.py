@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ import yaml
 from torch import nn
 from torch.utils.data import TensorDataset
 
+from mermaidseg.data.config import DataSection
 from mermaidseg.evaluation import val_loss
 from mermaidseg.evaluation.val_loss import (
     _Accumulator,
@@ -18,6 +20,7 @@ from mermaidseg.evaluation.val_loss import (
     _check_layout,
     binary_concept_names,
     evaluate_val_loss,
+    val_blocks_only,
 )
 from mermaidseg.io import ConfigDict
 
@@ -66,7 +69,15 @@ def test_layout_check_names_a_differing_concept():
 def test_bundle_config_takes_run_sections_from_the_bundle_and_data_from_the_file(tmp_path):
     data_yaml = tmp_path / "data.yaml"
     data_yaml.write_text(
-        yaml.safe_dump({"data": {"local_cache_write_through": False, "local_cache_dir": "x"}})
+        yaml.safe_dump(
+            {
+                "data": {
+                    "datasets": {
+                        "ds": {"version": "v1", "manifest_sha256": "x", "val": {"groups": "all"}}
+                    }
+                }
+            }
+        )
     )
     run = {
         "model": {"name": "dpt", "input_size": [8, 8]},
@@ -77,12 +88,36 @@ def test_bundle_config_takes_run_sections_from_the_bundle_and_data_from_the_file
     assert cfg.model.name == "dpt"
     assert cfg.model.input_size == [32, 64]
     assert cfg.training.batch_size == 2
-    assert cfg.data.local_cache_dir == "x"
+    assert cfg.data.datasets.ds.version == "v1"
     cfg.training.pop("taxonomic_loss")
     cfg.training.loss.a = 9
     assert "taxonomic_loss" in run["training"]
     assert run["training"]["loss"] == {"a": 1}
     assert run["model"]["input_size"] == [8, 8]
+
+
+def test_val_blocks_only_keeps_the_val_block_of_each_dataset_that_has_one():
+    section = DataSection.model_validate(
+        {
+            "datasets": {
+                "a": {
+                    "version": "v",
+                    "manifest_sha256": "x",
+                    "train": {"groups": "all"},
+                    "val": {"groups": ["g1"]},
+                    "test": {"groups": ["g2"]},
+                },
+                "b": {"version": "v", "manifest_sha256": "x", "train": {"groups": "all"}},
+            }
+        }
+    )
+
+    kept = val_blocks_only(section)
+
+    assert list(kept.datasets) == ["a"]
+    entry = kept.datasets["a"]
+    assert (entry.train, entry.test) == (None, None)
+    assert entry.val is not None and entry.val.groups == ["g1"]
 
 
 def test_layout_check_reports_a_length_difference_when_one_list_extends_the_other():
@@ -98,13 +133,14 @@ class _Harness:
     def __init__(self, monkeypatch, datasets: dict):
         self.cfg = ConfigDict(
             {
-                "data": {},
+                "data": {"datasets": {}},
                 "model": {"input_size": [8, 8]},
                 "training": {"padding": 0, "taxonomic_loss": {"w": 1}, "loss": {}},
             }
         )
         self.datasets = datasets
         self.meta_cfg = None
+        self.build_args: dict = {}
         registry = SimpleNamespace(
             target_id2label={1: "sand"}, concept_value2id={"bleached": {"not_given": 0}}
         )
@@ -125,8 +161,12 @@ class _Harness:
             return value, None, None, {"classification": value * 2}
 
         monkeypatch.setattr(val_loss, "_bundle_config", lambda *_a: self.cfg)
-        monkeypatch.setattr(val_loss, "setup_local_cache", lambda _data: None)
-        monkeypatch.setattr(val_loss, "build_datasets", lambda *_a, **_k: self.datasets)
+
+        def build_datasets(section, cache_dir, **kwargs):
+            self.build_args = {"cache_dir": cache_dir, **kwargs}
+            return self.datasets
+
+        monkeypatch.setattr(val_loss, "build_datasets", build_datasets)
         monkeypatch.setattr(val_loss, "build_registry", lambda *_a, **_k: (registry, schema))
         monkeypatch.setattr(val_loss, "build_meta_model", build_meta_model)
         monkeypatch.setattr(val_loss, "apply_concept_bottleneck_loss", loss)
@@ -142,6 +182,7 @@ class _Harness:
         return evaluate_val_loss(
             bundle=self.bundle,  # type: ignore[arg-type]
             data_config="data.yaml",
+            cache_dir=kwargs.pop("cache_dir", "/cache"),
             output_dir=tmp_path,
             device=torch.device("cpu"),
             batch_size=1,
@@ -204,7 +245,8 @@ def test_val_loss_overrides_the_run_config_for_scoring(tmp_path, monkeypatch):
     result = harness.run(
         tmp_path,
         name="scored",
-        cache_dir="/cache",
+        cache_dir="/the/cache",
+        image_ids={("ds", "val"): ["i1"]},
         per_pixel_loss_weight=0.25,
         per_image_loss_weight=0.75,
         seed=5,
@@ -218,7 +260,8 @@ def test_val_loss_overrides_the_run_config_for_scoring(tmp_path, monkeypatch):
         0.75,
     )
     assert cfg.training.loss.binary_concept_names == ["bleached"]
-    assert cfg.data.local_cache_dir == "/cache"
+    assert harness.build_args["cache_dir"] == Path("/the/cache")
+    assert harness.build_args["image_ids"] == {("ds", "val"): ["i1"]}
     assert result["settings"] == {
         "data_config": "data.yaml",
         "bundle": "bundle/path",

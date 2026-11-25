@@ -3,7 +3,7 @@ job:
   name_prefix: mermaidseg-cbm-final-res768
   image: mermaid-segmentation-jobs:training-latest
   instance_type: ml.g6e.12xlarge
-  volume_gb: 500
+  volume_gb: 1500
   max_runtime_hours: 168
 train:
   run_name: cbm_final_res768
@@ -14,7 +14,9 @@ train:
     - --resolution
     - "768"
     - --data-config
-    - configs/data_config_trainval.yaml
+    - configs/data_config.yaml
+    - --model-config
+    - configs/model_config_cbm_dpt_lora_vitl.yaml
     - --batch-size
     - "8"
     - --grad-accum-steps
