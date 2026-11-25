@@ -14,10 +14,9 @@ import pandas as pd
 import pyarrow as pa
 import yaml
 
-from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec.manifest import Pin
 from segdata_spec.read import DatasetVersion, open_version
-from segdata_spec.sync import sync
+from segdata_spec.sync import require_published_taxonomy, sync
 from segdata_spec.taxonomy import roll_up
 
 

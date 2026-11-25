@@ -43,7 +43,6 @@ from segdata_etl.common.s3_objects import (
 )
 from segdata_etl.common.stage import DEFAULT_CACHE_DIR, next_version
 from segdata_etl.label_maps.curated import CuratedSource
-from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import GitState
 from segdata_spec.layout import image_prefix
@@ -52,7 +51,7 @@ from segdata_spec.read import Taxonomy, open_taxonomy
 from segdata_spec.s3 import crc64nvme_b64, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
 from segdata_spec.stage import stage_dataset
-from segdata_spec.sync import sync
+from segdata_spec.sync import require_published_taxonomy, sync
 
 logger = logging.getLogger(__name__)
 

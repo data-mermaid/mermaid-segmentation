@@ -19,17 +19,15 @@ import requests
 
 from segdata_etl.common.stage import next_free_version
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.errors import ManifestNotFound, PinMismatch, PublishRefused
 from segdata_spec.git import probe_git, refuse_unpublishable
 from segdata_spec.layout import taxonomy_prefix
-from segdata_spec.manifest import Pin, SourceInfo
+from segdata_spec.manifest import SourceInfo
 from segdata_spec.schema import (
     BENTHIC_ATTRIBUTES_SCHEMA,
     GROWTH_FORMS_SCHEMA,
     conform,
 )
 from segdata_spec.stage import stage_taxonomy
-from segdata_spec.sync import check_published_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -109,30 +107,6 @@ def _check_tables(attributes: pa.Table, growth_forms: pa.Table) -> None:
     unknown = {p for p in attributes["parent_id"].to_pylist() if p is not None} - known
     if unknown:
         raise ValueError(f"benthic attributes name unknown parents: {sorted(unknown)}")
-
-
-def require_published_taxonomy(client: Any, bucket: str, pin: Pin) -> None:
-    """Refuse unless ``bucket`` holds the pinned taxonomy manifest with the pinned sha256.
-
-    ``sync`` trusts a cached manifest, so without this check a staged, unpublished taxonomy in
-    ``--cache-dir`` would pass. ``segdata taxonomy`` names a staged version with its final published
-    name, so a staged pin equals the published pin once ``segdata promote --taxonomy`` has run; this
-    build-time check and that promote are the guard.
-
-    Raises:
-        PublishRefused: The manifest is absent from ``bucket`` or does not match the pin.
-    """
-    try:
-        check_published_manifest(client, bucket, pin, taxonomy=True)
-    except ManifestNotFound as exc:
-        raise PublishRefused(
-            f"taxonomy {pin.name} {pin.version} is not published in {bucket}; "
-            "publish it before staging a dataset"
-        ) from exc
-    except PinMismatch as exc:
-        raise PublishRefused(
-            f"taxonomy manifest in {bucket} does not match its pin: {exc}"
-        ) from exc
 
 
 def find_repo_root(start: Path) -> Path:

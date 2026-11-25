@@ -39,12 +39,12 @@ from segdata_etl.common.s3_objects import (
     head_with_checksum,
     put_new,
 )
-from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
 from segdata_spec.layout import MANIFEST_NAME, cache_path, dataset_prefix, taxonomy_prefix
 from segdata_spec.manifest import Manifest, TaxonomyManifest, manifest_sha256
 from segdata_spec.s3 import crc64nvme_b64, exists, get_bytes, is_not_found, norm_etag
+from segdata_spec.sync import require_published_taxonomy
 
 logger = logging.getLogger(__name__)
 
