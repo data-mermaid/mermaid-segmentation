@@ -28,7 +28,7 @@ from segdata_etl.label_maps.coralnet_api import (
     fetch_coralnet_label_mappings,
 )
 from segdata_etl.splits.inputs import sync_tables
-from segdata_etl.taxonomy import find_repo_root, require_published_taxonomy
+from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import GitState, probe_git, refuse_unpublishable
 from segdata_spec.manifest import ImageStore, LabelMapping, Manifest, ParentRef, Pin, SourceInfo
@@ -121,7 +121,6 @@ def _pin(args: argparse.Namespace, prefix: str, name: str) -> Pin:
 def _curate(args: argparse.Namespace, client: Any, bucket: str, config_dir: Path) -> CuratedVersion:
     raw_pin = _pin(args, "raw", RAW_DATASET)
     tax_pin = _pin(args, "taxonomy", TAXONOMY)
-    require_published_taxonomy(client, bucket, tax_pin)
     synced = sync_tables(client, {RAW_DATASET: raw_pin}, args.cache_dir, bucket, tax_pin)
     tax = open_taxonomy(args.cache_dir, bucket, tax_pin)
     mappings = fetch_coralnet_label_mappings()
@@ -170,6 +169,7 @@ def _stage(
         parents=built.parents,
         label_mapping=built.label_mapping,
         dropped=built.dropped,
+        taxonomy=_pin(args, "taxonomy", TAXONOMY),
         repo_dir=repo_root,
         git=git,
     )

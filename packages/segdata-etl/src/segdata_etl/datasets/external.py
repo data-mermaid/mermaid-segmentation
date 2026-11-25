@@ -22,7 +22,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from segdata_etl.common import release
-from segdata_etl.common.cli_flags import pin_command_parts, pin_flags
+from segdata_etl.common.cli_flags import pin_command_parts, pin_flags, pin_values
 from segdata_etl.common.copy_plan import (
     ImageOutcome,
     ObjectFacts,
@@ -486,6 +486,11 @@ def _legacy_copy_plan(
     )
 
 
+def _taxonomy_pin(args: argparse.Namespace) -> Pin:
+    version, sha = pin_values(args, "taxonomy-")
+    return Pin.model_validate({"name": TAXONOMY_NAME, "version": version, "manifest_sha256": sha})
+
+
 def build_command(dataset: str, args: argparse.Namespace) -> str:
     """Reconstruct ``segdata build <dataset>`` from the options that shape the version."""
     parts = ["segdata", "build", dataset, "--stage-dir", str(args.stage_dir)]
@@ -541,6 +546,7 @@ def publish_version(
         source=source,
         label_mapping=label_mapping,
         dropped=_with_unreadable(dropped, probe),
+        taxonomy=_taxonomy_pin(args),
         repo_dir=repo_root,
         git=git,
     )

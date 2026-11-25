@@ -3,7 +3,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from segdata_spec.manifest import Manifest, dump_manifest
+from segdata_spec.manifest import Manifest, Pin, dump_manifest
 
 SHA = "a" * 64
 
@@ -117,3 +117,21 @@ def test_image_store_prefix_is_empty_or_ends_with_a_slash(prefix, valid):
     else:
         with pytest.raises(ValidationError, match="prefix"):
             Manifest.model_validate(raw)
+
+
+def test_a_manifest_without_a_taxonomy_pin_loads_and_dumps_without_the_key():
+    manifest = Manifest.model_validate(_manifest_dict())
+
+    assert manifest.taxonomy is None
+    assert "taxonomy" not in json.loads(dump_manifest(manifest))
+
+
+def test_a_taxonomy_pin_round_trips_in_the_manifest():
+    pin = {"name": "mermaid-benthic", "version": "20261124-e6abfad", "manifest_sha256": SHA}
+    manifest = Manifest.model_validate({**_manifest_dict(), "taxonomy": pin})
+
+    data = dump_manifest(manifest)
+
+    assert json.loads(data)["taxonomy"] == pin
+    assert Manifest.model_validate_json(data).taxonomy == Pin.model_validate(pin)
+    assert Manifest.model_validate_json(data) == manifest

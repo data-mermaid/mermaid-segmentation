@@ -16,6 +16,7 @@ from segdata_etl.common.s3_objects import ObjectConflict
 from segdata_etl.common.stage import next_version
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
+from segdata_spec.manifest import Manifest, Pin, dump_manifest
 
 from .conftest import jpeg_bytes, png_bytes
 from .test_coralscapes_v2 import IMG_A, IMG_B, MASK, MASK_B
@@ -702,3 +703,48 @@ def test_images_and_masks_land_in_intelligent_tiering_and_tables_keep_the_defaul
     assert len(images) == 4
     assert {classes[k] for k in images} == {"INTELLIGENT_TIERING"}
     assert {classes[k] for k in classes.keys() - images} == {None}
+
+
+TAXONOMY_KEY = "taxonomy/mermaid-benthic/20261124-e6abfad/manifest.json"
+TAXONOMY_BYTES = b'{"published": "taxonomy"}'
+
+
+def pin_taxonomy(stage: Path, version: str, sha: str) -> None:
+    """Rewrite the staged manifest so it pins the taxonomy ``sha``."""
+    path = version_dir(stage, "mermaid", version) / "manifest.json"
+    pin = Pin(name="mermaid-benthic", version="20261124-e6abfad", manifest_sha256=sha)
+    manifest = Manifest.model_validate_json(path.read_bytes())
+    path.write_bytes(dump_manifest(manifest.model_copy(update={"taxonomy": pin})))
+
+
+def test_a_pinned_taxonomy_absent_from_the_bucket_refuses_with_no_writes(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    pin_taxonomy(stage, version, hashlib.sha256(TAXONOMY_BYTES).hexdigest())
+
+    with pytest.raises(PublishRefused, match="not published"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_a_pinned_taxonomy_with_another_sha_refuses_with_no_writes(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    fake.put(DATASET_BUCKET, TAXONOMY_KEY, TAXONOMY_BYTES)
+    pin_taxonomy(stage, version, "0" * 64)
+    fake.calls.clear()
+
+    with pytest.raises(PublishRefused, match="does not match"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_a_pinned_taxonomy_published_with_its_sha_lets_the_promote_proceed(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    fake.put(DATASET_BUCKET, TAXONOMY_KEY, TAXONOMY_BYTES)
+    pin_taxonomy(stage, version, hashlib.sha256(TAXONOMY_BYTES).hexdigest())
+    fake.calls.clear()
+
+    run_promote(fake, stage, version)
+
+    assert (DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json") in fake.objects

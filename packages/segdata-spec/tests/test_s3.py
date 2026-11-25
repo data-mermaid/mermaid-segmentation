@@ -1,6 +1,6 @@
 import pytest
 from botocore.exceptions import ClientError
-from conftest import FakeS3, _client_error
+from spec_helpers import FakeS3, _client_error
 
 from segdata_spec.s3 import exists, is_not_found, norm_etag
 

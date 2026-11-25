@@ -36,6 +36,7 @@ from segdata_spec.manifest import (
     LabelMapping,
     Manifest,
     ParentRef,
+    Pin,
     SourceInfo,
     Stats,
     TaxonomyManifest,
@@ -230,6 +231,7 @@ def stage_dataset(
     parents: Sequence[ParentRef] = (),
     label_mapping: LabelMapping | None = None,
     dropped: Mapping[str, int] | None = None,
+    taxonomy: Pin | None = None,
     repo_dir: Path,
     git: GitState | None = None,
 ) -> tuple[Manifest, str]:
@@ -271,6 +273,7 @@ def stage_dataset(
         files=_file_entries(conformed, blobs),
         stats=_dataset_stats(conformed, dropped or {}),
         diff_from_parent=diff,
+        taxonomy=taxonomy,
     )
     manifest_bytes = dump_manifest(manifest)
     _write_version(version_dir, blobs, manifest_bytes)

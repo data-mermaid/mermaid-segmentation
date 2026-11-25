@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    SerializerFunctionWrapHandler,
+    StringConstraints,
+    model_serializer,
+)
 
 # YYYYMMDD-<etl git sha7>, with -N for a second build on the same day.
 Version = Annotated[str, StringConstraints(pattern=r"^\d{8}-[0-9a-f]{7}(-\d+)?$")]
@@ -122,6 +128,15 @@ class Manifest(_Model):
     files: dict[str, FileEntry]
     stats: Stats
     diff_from_parent: DiffFromParent | None = None
+    taxonomy: Pin | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_taxonomy(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Leave ``taxonomy`` out when unset, so manifests without a pin keep their bytes."""
+        data: dict[str, Any] = handler(self)
+        if self.taxonomy is None:
+            data.pop("taxonomy", None)
+        return data
 
 
 class TaxonomyManifest(_Model):

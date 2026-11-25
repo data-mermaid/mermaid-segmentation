@@ -354,6 +354,12 @@ def test_curated_stages_curated_tables_on_raws_image_store_without_a_plan_or_s3_
     assert world.s3.ops("put") == []
 
 
+def test_curated_records_the_taxonomy_pin_in_the_manifest(world: World) -> None:
+    _version, manifest, _pin = _stage_curated(world)
+
+    assert manifest.taxonomy == world.taxonomy
+
+
 def test_staged_curated_version_promotes_as_a_tables_only_version(world: World) -> None:
     version, _manifest, _pin = _stage_curated(world)
     before = set(world.s3.objects)

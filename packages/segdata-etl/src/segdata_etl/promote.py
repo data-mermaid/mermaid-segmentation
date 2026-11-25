@@ -39,6 +39,7 @@ from segdata_etl.common.s3_objects import (
     head_with_checksum,
     put_new,
 )
+from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, PublishRefused
 from segdata_spec.layout import MANIFEST_NAME, cache_path, dataset_prefix, taxonomy_prefix
@@ -334,6 +335,8 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
         _check_key_sets(steps, expected)
     if _manifest_published(client, prefix):
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
+    if manifest.taxonomy is not None:
+        require_published_taxonomy(client, DATASET_BUCKET, manifest.taxonomy)
     parent_bodies = _check_parents(client, manifest)
     if not steps:
         _check_shared_store(manifest, parent_bodies)

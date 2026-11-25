@@ -26,6 +26,12 @@ from .conftest import (
 SOURCES = [10, 11, 12, 13, 14, 15, 16, 17, 99]
 
 
+@pytest.fixture(autouse=True)
+def _published_taxonomy(monkeypatch: pytest.MonkeyPatch, fixture_cache: FixtureCache) -> None:
+    """Hand the CLI the fake bucket that holds the fixture taxonomy's manifest."""
+    monkeypatch.setattr(cli, "_client_for", lambda _args: fixture_cache.published)
+
+
 def _write_inputs(tmp_path: Path) -> dict[str, Path]:
     paths = {
         "near_dup_labels": tmp_path / "near_dup_labels.csv",

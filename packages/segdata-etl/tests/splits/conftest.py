@@ -7,11 +7,12 @@ cache laid out as ``sync`` writes it, so ``sync`` then finds every table cached 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pyarrow as pa
 import pytest
+from s3_fake import FakeS3
 
 from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, ParentRef, Pin, SourceInfo
@@ -87,10 +88,11 @@ def benthic_attributes_table(rows: list[tuple[str, str, str | None]]) -> pa.Tabl
 
 @dataclass
 class FixtureCache:
-    """Stages versions into ``cache_dir`` under ``BUCKET``."""
+    """Stages versions into ``cache_dir`` under ``BUCKET``; ``published`` holds each taxonomy manifest."""
 
     cache_dir: Path
     repo_dir: Path
+    published: FakeS3 = field(default_factory=FakeS3)
 
     def dataset(
         self,
@@ -151,7 +153,12 @@ class FixtureCache:
             repo_dir=self.repo_dir,
             git=CLEAN_GIT,
         )
-        return Pin(name="mermaid-benthic", version=version, manifest_sha256=sha)
+        pin = Pin(name="mermaid-benthic", version=version, manifest_sha256=sha)
+        manifest = self.cache_dir / BUCKET / "taxonomy" / pin.name / version / "manifest.json"
+        self.published.put(
+            BUCKET, f"taxonomy/{pin.name}/{version}/manifest.json", manifest.read_bytes()
+        )
+        return pin
 
 
 @pytest.fixture

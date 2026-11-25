@@ -160,6 +160,16 @@ def test_build_records_licence_source_dropped_and_command_in_the_manifest(staged
     )
 
 
+def test_build_records_the_taxonomy_pin_in_the_manifest(staged: Staged) -> None:
+    taxonomy = staged.version.manifest.taxonomy
+    assert taxonomy is not None
+    assert (taxonomy.name, taxonomy.version, taxonomy.manifest_sha256) == (
+        "mermaid-benthic",
+        TAXONOMY_VERSION,
+        staged.taxonomy_sha,
+    )
+
+
 def test_build_takes_the_next_suffix_when_the_bucket_already_holds_the_version(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -1,9 +1,20 @@
 from __future__ import annotations
 
-from segdata_etl.splits.inputs import class_counts, images_per_source
+import pytest
+from s3_fake import FakeS3
+
+from segdata_etl.splits.inputs import class_counts, images_per_source, sync_tables
+from segdata_spec.errors import PublishRefused
 from segdata_spec.taxonomy import hierarchy_from_table
 
-from .conftest import benthic_attributes_table, images_table, label_counts_table, labels_table
+from .conftest import (
+    BUCKET,
+    FixtureCache,
+    benthic_attributes_table,
+    images_table,
+    label_counts_table,
+    labels_table,
+)
 
 HIERARCHY = hierarchy_from_table(
     benthic_attributes_table(
@@ -25,3 +36,23 @@ def test_class_counts_roll_up_mapped_labels_into_the_subset():
 
 def test_images_per_source_counts_images_per_source_id():
     assert images_per_source(IMAGES).to_dict() == {10: 2, 20: 1}
+
+
+def test_sync_tables_refuses_a_taxonomy_cached_but_not_published(fixture_cache: FixtureCache):
+    pin = fixture_cache.taxonomy(
+        "20261120-1234567", benthic_attributes_table([("1", "Sand", None)])
+    )
+    nothing_published = FakeS3()
+
+    with pytest.raises(PublishRefused, match="not published"):
+        sync_tables(nothing_published, {}, fixture_cache.cache_dir, BUCKET, pin)
+
+    assert nothing_published.ops("put") == []
+
+
+def test_sync_tables_without_a_taxonomy_reads_no_taxonomy_manifest(fixture_cache: FixtureCache):
+    client = FakeS3()
+
+    assert sync_tables(client, {}, fixture_cache.cache_dir, BUCKET) == {}
+
+    assert [k for _, _, k, _ in client.calls if k.startswith("taxonomy/")] == []

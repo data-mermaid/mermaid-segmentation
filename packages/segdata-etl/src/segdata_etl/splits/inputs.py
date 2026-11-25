@@ -14,6 +14,7 @@ import pandas as pd
 import pyarrow as pa
 import yaml
 
+from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec.manifest import Pin
 from segdata_spec.read import DatasetVersion, open_version
 from segdata_spec.sync import sync
@@ -113,7 +114,13 @@ def sync_tables(
     """Sync the pinned versions' tables and the taxonomy, but no image; open the datasets.
 
     A selection of no groups per dataset makes ``sync`` skip every image and mask.
+
+    Raises:
+        PublishRefused: ``taxonomy`` is given and its manifest is not published in ``bucket`` with
+            the pinned sha256, even when ``cache_dir`` holds it.
     """
+    if taxonomy is not None:
+        require_published_taxonomy(client, bucket, taxonomy)
     no_images: dict[str, list[str]] = {name: [] for name in pins}
     sync(client, pins, cache_dir, bucket=bucket, selection=no_images, taxonomy=taxonomy)
     return {name: open_version(cache_dir, bucket, pin) for name, pin in pins.items()}

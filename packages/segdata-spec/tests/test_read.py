@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
-from conftest import (
+from spec_helpers import (
     BUCKET,
     IMG_BUCKET,
     VERSION,
