@@ -17,7 +17,7 @@ from segdata_spec.schema import LABELS_SCHEMA
 
 from .conftest import ScriptedServer
 
-# The digest mermaidseg's coralnet_mapping_digest gives for _DIGEST_RECORDS.
+# The digest of _DIGEST_RECORDS, pinned so a change to the digest scheme is caught.
 MAIN_DIGEST = "562cc2d876b238eda53a7274f7fc3e4191f1f84c8c9d382f936d37e050985b63"
 
 _ACROPORA = CoralNetLabelMapping(

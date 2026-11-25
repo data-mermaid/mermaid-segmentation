@@ -8,37 +8,20 @@ from coralnet_scraper.config import get_bucket, get_prefix, validate_workers
 
 __all__ = [
     "DEFAULT_OUTPUT_S3_PREFIX",
-    "DEFAULT_RESIZED_PREFIX",
     "DEFAULT_WORKERS",
-    "ENV_RESIZED_PREFIX",
     "ENV_WORKERS",
     "RESIZE_THRESHOLD",
     "get_bucket",
     "get_prefix",
-    "get_resized_prefix",
     "get_workers",
 ]
 
 DEFAULT_OUTPUT_S3_PREFIX = "etl-outputs/coralnet"
-DEFAULT_RESIZED_PREFIX = "dev/images"
 DEFAULT_WORKERS = 16
 # Longest edge in pixels; larger images are resized down to it.
 RESIZE_THRESHOLD = 2048
 
-ENV_RESIZED_PREFIX = "MERMAID_CORALNET_RESIZED_PREFIX"
 ENV_WORKERS = "MERMAID_CORALNET_ETL_WORKERS"
-
-
-def get_resized_prefix() -> str:
-    """Return the key prefix that holds ``resized/``, without surrounding slashes.
-
-    Raises:
-        ValueError: If the prefix is empty after stripping slashes.
-    """
-    prefix = os.getenv(ENV_RESIZED_PREFIX, DEFAULT_RESIZED_PREFIX).strip("/")
-    if not prefix:
-        raise ValueError(f"{ENV_RESIZED_PREFIX} must contain a non-empty key prefix")
-    return prefix
 
 
 def get_workers(default: int = DEFAULT_WORKERS) -> int:

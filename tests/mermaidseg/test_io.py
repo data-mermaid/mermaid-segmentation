@@ -18,7 +18,6 @@ from mermaidseg.io import (
     compile_transform,
     get_parser,
     load_config,
-    preprocess_data_config,
     resolve_repo_path,
     setup_config,
     update_config_with_args,
@@ -108,64 +107,6 @@ def test_relative_path_resolves_to_the_repo_not_the_current_directory(monkeypatc
     assert resolve_repo_path("configs/class_to_concepts.csv") == (
         REPO_ROOT / "configs" / "class_to_concepts.csv"
     )
-
-
-# ---------- preprocess_data_config ----------
-
-
-def _expand(data: dict[str, Any]) -> ConfigDict:
-    return preprocess_data_config(ConfigDict({"data": data})).data
-
-
-def test_a_dataset_inherits_the_default_splits_and_overrides_one_key():
-    expanded = _expand(
-        {
-            "default": {"train": {"split": "train", "repeat": 1}, "val": {"split": "val"}},
-            "ds": {"train": {"repeat": 3}},
-        }
-    )
-    assert expanded == {"ds": {"train": {"split": "train", "repeat": 3}, "val": {"split": "val"}}}
-
-
-def test_a_null_split_override_disables_that_split():
-    expanded = _expand(
-        {"default": {"train": {"split": "train"}, "val": {"split": "val"}}, "ds": {"val": None}}
-    )
-    assert expanded["ds"] == {"train": {"split": "train"}, "val": None}
-
-
-def test_a_dataset_listed_as_null_gets_the_default_splits():
-    expanded = _expand({"default": {"train": {"split": "train"}}, "ds": None})
-    assert expanded == {"ds": {"train": {"split": "train"}}}
-
-
-def test_reserved_data_keys_are_not_expanded_into_datasets():
-    expanded = _expand(
-        {
-            "default": {"train": {"split": "train"}},
-            "local_cache_dir": "/cache",
-            "local_cache_write_through": True,
-            "ds": {},
-        }
-    )
-    assert expanded == {
-        "local_cache_dir": "/cache",
-        "local_cache_write_through": True,
-        "ds": {"train": {"split": "train"}},
-    }
-
-
-def test_datasets_do_not_share_their_expanded_default():
-    expanded = _expand({"default": {"train": {"split": "train"}}, "a": {}, "b": {}})
-    expanded["a"]["train"]["split"] = "changed"
-    assert expanded["b"]["train"]["split"] == "train"
-
-
-def test_a_config_without_default_is_returned_as_a_copy():
-    original = ConfigDict({"data": {"ds": {"train": {"split": "train"}}}})
-    expanded = preprocess_data_config(original)
-    assert expanded == original
-    assert expanded is not original
 
 
 # ---------- ConfigDict ----------

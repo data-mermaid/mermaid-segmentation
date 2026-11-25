@@ -5,34 +5,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from mermaidseg.data import PointDataset
 from mermaidseg.data.point_dataset import rasterize_points
-from mermaidseg.datasets.utils import create_annotation_mask
 from tests.mermaidseg.data.conftest import ImageSpec, open_written
 
 LABELS = {5: "five", 7: "seven", 9: "nine"}
-
-
-@pytest.mark.parametrize("padding", [None, 0, 2])
-def test_rasterize_points_matches_create_annotation_mask(padding: int | None) -> None:
-    # Row 0 exercises the clip; (5, 5) is painted twice and the later "b" wins.
-    points = [(0, 3, "a"), (5, 5, "a"), (6, 6, "b"), (5, 5, "b")]
-    name2id = {"a": 1, "b": 2}
-    frame = pd.DataFrame(points, columns=["row", "col", "source_label_name"])
-    expected = create_annotation_mask(frame, (10, 10), name2id, padding=padding, offset=3)
-    mask = rasterize_points(
-        np.array([p[0] for p in points]),
-        np.array([p[1] for p in points]),
-        np.array([name2id[p[2]] for p in points]),
-        (10, 10),
-        padding,
-        3,
-    )
-    assert mask.dtype == np.int32
-    assert np.array_equal(mask, expected)
 
 
 @pytest.mark.parametrize(
@@ -186,3 +165,153 @@ def test_set_source_vocabulary_repaints_points_with_the_new_ids(tmp_path: Path) 
     ds.set_source_vocabulary({1: "seven", 2: "five"}, {"seven": 1, "five": 2}, 3)
     _, mask = ds[0]
     assert (mask[0, 0], mask[1, 1], mask[2, 2], mask[3, 3]) == (2, 2, 1, 0)
+
+
+@pytest.mark.parametrize(
+    ("points", "padding", "offset", "expected"),
+    [
+        # No padding: one pixel per point.
+        (
+            [(0, 0, 1), (2, 3, 2)],
+            None,
+            0,
+            [
+                [1, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 2, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+            ],
+        ),
+        # Padding 0 paints one pixel, and the offset shifts foreground ids.
+        (
+            [(0, 0, 1), (2, 3, 2)],
+            0,
+            10,
+            [
+                [11, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 12, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+            ],
+        ),
+        # Padding 2 paints [r-2 : r+2, c-2 : c+2], so the end is exclusive.
+        (
+            [(3, 3, 1)],
+            2,
+            0,
+            [
+                [0, 0, 0, 0, 0, 0],
+                [0, 1, 1, 1, 1, 0],
+                [0, 1, 1, 1, 1, 0],
+                [0, 1, 1, 1, 1, 0],
+                [0, 1, 1, 1, 1, 0],
+                [0, 0, 0, 0, 0, 0],
+            ],
+        ),
+        # A point near the top-left clips its start at 0 instead of wrapping.
+        (
+            [(0, 1, 3)],
+            2,
+            0,
+            [
+                [3, 3, 3, 0, 0, 0],
+                [3, 3, 3, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+            ],
+        ),
+        # The later point wins where two coincide.
+        (
+            [(5, 5, 1), (5, 5, 2)],
+            None,
+            0,
+            [
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 2],
+            ],
+        ),
+        # The later point wins on the overlapping part of two padded squares.
+        (
+            [(2, 2, 1), (3, 3, 2)],
+            2,
+            0,
+            [
+                [1, 1, 1, 1, 0, 0],
+                [1, 2, 2, 2, 2, 0],
+                [1, 2, 2, 2, 2, 0],
+                [1, 2, 2, 2, 2, 0],
+                [0, 2, 2, 2, 2, 0],
+                [0, 0, 0, 0, 0, 0],
+            ],
+        ),
+        # Padding 1 with a non-zero offset.
+        (
+            [(4, 4, 2)],
+            1,
+            10,
+            [
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 12, 12, 0],
+                [0, 0, 0, 12, 12, 0],
+                [0, 0, 0, 0, 0, 0],
+            ],
+        ),
+        # Padding 2 at the far corner clips at the bottom and right edges.
+        (
+            [(5, 5, 1)],
+            2,
+            0,
+            [
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 1, 1],
+                [0, 0, 0, 1, 1, 1],
+                [0, 0, 0, 1, 1, 1],
+            ],
+        ),
+    ],
+    ids=[
+        "no-padding",
+        "padding-0-offset",
+        "padding-2",
+        "clip-at-row-0",
+        "overlap-single-pixel",
+        "overlap-padded",
+        "padding-1-offset",
+        "far-edge-clip",
+    ],
+)
+def test_rasterize_points_paints_literal_mask(
+    points: list[tuple[int, int, int]],
+    padding: int | None,
+    offset: int,
+    expected: list[list[int]],
+) -> None:
+    rows, cols, ids = (np.array(axis, dtype=np.int64) for axis in zip(*points, strict=True))
+
+    mask = rasterize_points(rows, cols, ids, (6, 6), padding, offset)
+
+    assert mask.dtype == np.int32
+    assert mask.tolist() == expected
+
+
+def test_rasterize_points_returns_zeros_for_no_points() -> None:
+    empty = np.array([], dtype=np.int64)
+
+    mask = rasterize_points(empty, empty, empty, (6, 6), 2, 0)
+
+    assert mask.dtype == np.int32
+    assert mask.tolist() == [[0] * 6] * 6

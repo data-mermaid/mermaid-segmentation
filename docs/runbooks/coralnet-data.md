@@ -1,9 +1,10 @@
 # Recreate and update the CoralNet data
 
-This runbook takes you from an empty bucket, or an older scrape, to a CoralNet build that training reads. It has two stages:
+This runbook takes you from an empty bucket, or an older scrape, to published CoralNet dataset versions that training pins. It has three stages:
 
 1. `coralnet-scraper` downloads the public CoralNet sources to S3.
-2. `segdata build coralnet` builds the training manifest, the resized images and the label names from that scrape.
+2. `segdata build coralnet` builds the annotations table, the images table and the label names from that scrape.
+3. `segdata build coralnet raw`, `segdata curate coralnet` and `segdata promote` publish the `coralnet-raw` and `coralnet` dataset versions.
 
 The package READMEs are the reference for flags, environment variables, exclusion kinds and exit codes; this page gives the order and links to them.
 
@@ -12,7 +13,7 @@ The package READMEs are the reference for flags, environment variables, exclusio
 - [Update the data](#update-the-data)
 - [Adopt an existing bucket](#adopt-an-existing-bucket)
 - [Tune the request rate](#tune-the-request-rate)
-- [Use the new build in training](#use-the-new-build-in-training)
+- [Train on a published version](#train-on-a-published-version)
 - [Publish CoralNet dataset versions](#publish-coralnet-dataset-versions)
 - [When something fails](#when-something-fails)
 - [Known gaps](#known-gaps)
@@ -28,8 +29,7 @@ The package READMEs are the reference for flags, environment variables, exclusio
   ```
 
   See the scraper's [environment variables](../../packages/coralnet-scraper/README.md#environment-variables) and the build's [environment variables](../../packages/segdata-etl/README.md#environment-variables).
-- **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the `source_bucket` of `CoralNetDataset` (`mermaidseg/datasets/coralnet/coralnet_dataset.py`). See [Use a build in training](../../packages/segdata-etl/README.md#use-a-build-in-training).
-
+- **Bucket.** Set `MERMAID_CORALNET_BUCKET` to the bucket that holds the scrape.
 - **Request rate.** The scraper sends requests without a rate limit unless you set one. To choose a limit, see [Tune the request rate](#tune-the-request-rate).
 
 - **Earlier scraper version.** If the bucket was filled by an earlier scraper version, its source folders have no `_complete.json`. Do [Adopt an existing bucket](#adopt-an-existing-bucket) first. A plain run would scrape every source again.
@@ -53,27 +53,26 @@ See [Run](../../packages/coralnet-scraper/README.md#run) for the flags, the fail
 
 ### Build the dataset
 
-Pick a version tag for the run, for example `20261118_coralnet`. Then run all four steps in one invocation:
+Pick a version tag for the run, for example `20261118_coralnet`. Then run both stages in one invocation:
 
 ```bash
 uv run --package segdata-etl segdata build coralnet all --version-tag <run> --upload-to-s3
 ```
 
-To run the steps one at a time, pass the same `--version-tag` to each. Each invocation computes its own default tag, so without it the outputs land in different run directories. The step order and the flags of each step are in [Run](../../packages/segdata-etl/README.md#run).
+To run the stages one at a time, pass the same `--version-tag` to each. Each invocation computes its own default tag, so without it the outputs land in different run directories. The step order and the flags of each step are in [Run](../../packages/segdata-etl/README.md#run).
 
 Use an unused tag; see [Run](../../packages/segdata-etl/README.md#run).
 
 ### Check the build
 
-1. Read the summary that each step logs: the excluded sources from `build-annotations` (it excludes a source with no `_complete.json` as `not_complete`), the count per `header_status` from `build-images`, and the resized, oversized, corrupted and failed counts from `resize`.
-2. Check the exit code. Exit code 1 from `all` means at least one step reported failures. Every step still runs and writes its outputs.
-3. Confirm that `etl-outputs/coralnet/<run>/` in the bucket holds four files:
+1. Read the summary that each stage logs: the excluded sources from `build-annotations` (it excludes a source with no `_complete.json` as `not_complete`), and the count per `header_status` from `build-images`.
+2. Check the exit code. Exit code 1 from `all` means at least one stage reported failures. Every stage still runs and writes its outputs.
+3. Confirm that `etl-outputs/coralnet/<run>/` in the bucket holds three files:
    - `coralnet_annotations_<run>.parquet`
    - `coralnet_id2name_<run>.json`
    - `coralnet_images_<run>.parquet`
-   - `coralnet_training_manifest_<run>.parquet`
 
-The resized images are not in that directory. `resize` writes them under `<resized prefix>/resized/`, which every run shares. See [Outputs](../../packages/segdata-etl/README.md#outputs) and [Check a build for completeness](../../packages/segdata-etl/README.md#check-a-build-for-completeness).
+See [Outputs](../../packages/segdata-etl/README.md#outputs) and [Check a build for completeness](../../packages/segdata-etl/README.md#check-a-build-for-completeness).
 
 ## Update the data
 
@@ -103,7 +102,7 @@ After any scrape, build again with a version tag that you have not used before:
 uv run --package segdata-etl segdata build coralnet all --version-tag <new-run> --upload-to-s3
 ```
 
-`build-annotations` and `build-images` read every source and every annotated image again. `resize` resizes only the images that have no resized object on S3.
+`build-annotations` and `build-images` read every source and every annotated image again. Then [publish new dataset versions](#publish-coralnet-dataset-versions) from the new run.
 
 Use an unused tag; see [Run](../../packages/segdata-etl/README.md#run).
 
@@ -165,53 +164,39 @@ Results:
 |---|---|---|---|---|---|
 | | | | | | |
 
-## Use the new build in training
+## Train on a published version
 
-### Select the build
+Training pins a published `coralnet` version in `configs/data_config.yaml`. The sync downloads the version and resizes its images to 2048 px at sync time. See [Get the training datasets](training-datasets.md).
 
-Set `manifest_path` on each CoralNet split (`train`, `val` and `test`) in `configs/data_config.yaml`:
+### Pin the version
 
-```yaml
-manifest_path: etl-outputs/coralnet/<run>/coralnet_training_manifest_<run>.parquet
-```
+1. Publish the version. See [Publish CoralNet dataset versions](#publish-coralnet-dataset-versions).
+2. Set `version` and `manifest_sha256` of `datasets.coralnet` in `configs/data_config.yaml` to the pin that `segdata curate coralnet` printed. The data config selects the groups of each split from `configs/splits/coralnet.csv`: `train: {use: [train, val]}` trains on the train and val groups, and `test: {use: [test]}` selects the test groups.
+3. Regenerate the derived configs. See [Regenerate the derived configs](derived-configs.md).
+4. Sync the cache. See [Get the data](training-datasets.md#get-the-data).
 
-Then regenerate the derived configs, starting with `configs/data_config_trainval.yaml`. See [Regenerate the derived configs](derived-configs.md). For the key layout, see [Use a build in training](../../packages/segdata-etl/README.md#use-a-build-in-training).
-
-A new build changes model outputs, so item 7 of the working agreement in [AGENTS.md](../../AGENTS.md#2-working-agreement) applies. Run the evaluation, and put the metrics and the baseline they compare against in the PR.
+A new version changes model outputs, so item 7 of the working agreement in [AGENTS.md](../../AGENTS.md#2-working-agreement) applies. Run the evaluation, and put the metrics and the baseline they compare against in the PR.
 
 ### Add new sources to the splits
 
-Each CoralNet split has a `whitelist_sources` list, and `CoralNetDataset` keeps only the sources on that list. A new source is not in any split until you add its id to a list:
+The split file `configs/splits/coralnet.csv` assigns each CoralNet group (`s<source_id>`) to `train`, `val`, `test` or `excluded`. A sync fails on any group of the pinned version that the file does not list. A group that is `excluded` stays in the version and is not used by a `use:` selection. To add sources:
 
-1. Add the id to a split's `whitelist_sources` in `configs/data_config.yaml`. The id must already be in the manifest chosen under [Select the build](#select-the-build). Otherwise `CoralNetDataset` raises a `ValueError` that names it.
-2. Regenerate the derived configs, starting with `configs/data_config_trainval.yaml`. See [Regenerate the derived configs](derived-configs.md).
+1. Publish a `coralnet` version that holds them, and pin it.
+2. Append rows to `configs/splits/coralnet.csv` by hand. This keeps existing train, val and test membership. Each row has `group` `s<id>`, the `source_id`, its `split`, and a `split_group` that is either a new id not used elsewhere or blank.
+3. Run `segdata split leakage` on the file against the new version. The full command is in [CoralNet split](../../packages/segdata-etl/README.md#coralnet-split).
+4. Regenerate the derived configs. See [Regenerate the derived configs](derived-configs.md).
 
-3. A sync fails on any group that the split file does not list. To add sources without moving existing ones, append rows to `configs/splits/coralnet.csv` by hand. Each row has `group` `s<id>`, the `source_id`, its `split`, and a `split_group` that is either a new id not used elsewhere or blank.
-   `segdata split build` re-runs the assignment over every source, so existing train, val and test membership changes, the test set included. Use it only to re-split on purpose. That is a change to model inputs, so it needs review. If you rebuild, copy `<out-dir>/coralnet.csv` and its meta over the committed files.
-
-   Before you commit, run `segdata split leakage` on `configs/splits/coralnet.csv` against the new version; the full command is in [CoralNet split](../../packages/segdata-etl/README.md#coralnet-split).
+`segdata split build` assigns every source again, so existing train, val and test membership changes, the test set included. Use it only to re-split on purpose. That changes model inputs, so it needs review. If you rebuild, copy `<out-dir>/coralnet.csv` and its meta over the committed files.
 
 ### Map new labels
 
-Training reads the CoralNet mapping from the MERMAID LabelMapping API (`/v1/classification/labelmappings/?provider=CoralNet`). Rows are keyed by CoralNet label id, and the build's `coralnet_id2name_<run>.json` names each id, so a label renamed in CoralNet still maps. A CoralNet label trains as background when the API has no row for its id, or when the row's `benthic_attribute_name` is null (`mermaidseg/dataset_reconciliation/label_mapping.py`, `mermaidseg/dataset_reconciliation/registry.py`). Before training, add the missing rows in MERMAID and fill in `benthic_attribute_name` on rows where it is null. There is no mapping file in this repo to edit.
+The labels of a `coralnet` version are in its `labels.parquet`. `segdata curate coralnet` fills them from the MERMAID LabelMapping API (`/v1/classification/labelmappings/?provider=CoralNet`) at stage time. Rows are keyed by CoralNet label id, and the build's `coralnet_id2name_<run>.json` names each id, so a label renamed in CoralNet still maps. A label that has no API row, or a row with no target, has null MERMAID columns in `labels.parquet`, and training ignores their points (label 0 is the ignore index). Add the missing rows in MERMAID, and fill in the target of rows that have none, before you stage the version. There is no mapping file in this repository to edit.
 
-Each run records the rows it used. `model.json` lineage has `data_version.label_mappings.coralnet` (source, sha256, row count, fetch time), and the tracker run has the rows as `metadata/label_mappings/coralnet.json`. An online run fails if the API call fails; it does not fall back to an old copy.
-
-A change in the API changes the class set of the next run. Compare `metadata/id2label.json` with the baseline run before you compare metrics.
+The version's manifest records the mapping under `label_mapping`: its sha256, fetch time, label count and mapped count. A new version can map differently from an older one, because the API answer changes. Compare the class set of the new run with the baseline run before you compare metrics.
 
 ### Duplicates in new sources
 
-`configs/coralnet/image_blacklist.parquet` and `configs/coralnet/annotation_overrides.parquet` cover only the sources they were built from. Duplicate images in new sources are not removed. See the build's [Known gaps](../../packages/segdata-etl/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
-
-### Warm the offline cache again
-
-An offline run (`MERMAIDSEG_S3_OFFLINE=1`) fails on any cache miss. The new manifest, its id2name JSON and new images are not in a cache that you filled before. When `coralnet` is in the selected datasets, the prefetch also saves the CoralNet LabelMapping rows into the cache (`<cache>/_mermaid_api/classification/labelmappings/coralnet.json`). Only the prefetch writes that snapshot, and an online run does not refresh it. An offline run uses the snapshot and raises `DataLoadError` when it is missing, so fill the cache again to pick up mapping changes. If the API call fails, the prefetch raises and keeps the existing snapshot. Fill it again, using the same data config as the training run. The data config selects the build:
-
-```bash
-uv run python scripts/prefetch_cache.py --cache-dir /path/to/cache
-```
-
-`--data-config` defaults to `configs/data_config.yaml`. For the Slurm command, with `HF_HOME` and the final runs' data config, see [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
+`image_blacklist.parquet` and `annotation_overrides.parquet` in `packages/segdata-etl/src/segdata_etl/datasets/coralnet/curate/data/` cover only the sources they were built from. Duplicate images in new sources are not removed. See the build's [Known gaps](../../packages/segdata-etl/README.md#known-gaps) and [issue #231](https://github.com/data-mermaid/mermaid-segmentation/issues/231).
 
 ## Publish CoralNet dataset versions
 
@@ -229,49 +214,6 @@ This procedure stages a CoralNet build locally, then publishes it as dataset ver
 Each stage command prints `version:` and `manifest_sha256:`. Record both: they are the pin that the next step takes. `promote` publishes the version you staged, under the same name, so the pin of a staged version is the pin of the published one.
 
 Publishing is irreversible: the bucket denies overwrite and delete. Get approval before each `promote`.
-
-### Stage a source subset and check parity
-
-Stage a few sources and compare them with the old CoralNet loader before you publish anything. Pick the sources from the `coralnet` `whitelist_sources` in `configs/data_config.yaml`. This check uses a separate stage directory, `<check-stage>`, that you do not promote.
-
-`check_dataset_parity.py` takes a `coralnet` version, so it checks the curated version. It cannot check `coralnet-raw`.
-
-1. Stage a raw version of the sources:
-
-   ```bash
-   uv run --package segdata-etl segdata build coralnet raw --stage-dir <check-stage> \
-     --source-ids <id>,<id>,... --build-run <run>
-   ```
-
-2. Stage the curated version from the raw pin and a published taxonomy pin. Publish the taxonomy first if none exists: see [Publish the versioned datasets](training-datasets.md#publish-the-versioned-datasets), which stages it with `segdata taxonomy --stage-dir` and publishes it with `--tables-from <staged taxonomy folder> --publish`. The command refuses a taxonomy pin that is not published in `mermaid-ic-datasets`, even when `<check-stage>` holds it. `--cache-dir <check-stage>` makes the command read the staged raw version instead of S3:
-
-   ```bash
-   uv run --package segdata-etl segdata curate coralnet \
-     --stage-dir <check-stage> --cache-dir <check-stage> \
-     --raw-version <raw> --raw-manifest-sha256 <sha> \
-     --taxonomy-version <tax> --taxonomy-manifest-sha256 <sha>
-   ```
-
-3. Copy `configs/data_config.yaml` to a path git ignores, for example `outputs/parity_data_config.yaml`. In the copy, cut the `whitelist_sources` of `coralnet` `train`, `val` and `test` to the staged sources of each split. The old loader reads every source in the list, so without this cut the old side holds sources that you did not stage.
-
-4. Compare the version with the old loader, once for each split that holds staged sources:
-
-   ```bash
-   uv run python scripts/check_dataset_parity.py --no-sync --data-config outputs/parity_data_config.yaml \
-     --dataset coralnet --split <split> --version <version> --manifest-sha256 <sha> \
-     --cache-dir <check-stage> --resize-max-edge 2048
-   ```
-
-   - `--no-sync` reads the staged version from `--cache-dir` with no S3 call for it, and still checks the sha256 of every table.
-   - `--resize-max-edge 2048` scales the new points into the old loader's 2048 px space.
-   - The check compares points only. Native label names are compared lowercased.
-   - The old loader reads its annotations from `dev-datamermaid-sm-sources`, so the default boto3 credentials must read that bucket.
-
-   Expected result:
-
-   The old loader on main maps labels through the live MERMAID API, as `curate` does, so the script should print `PARITY OK`. A difference appears only where the API changed between the two fetches. `mapped label counts` lists the labels that differ. `points only in old` and `points only in new` list the same positions with different mapped labels, because a point key includes its mapped label. Images and native label counts are `none`. A difference makes the script print `PARITY FAILED` and exit 1.
-
-The same command checks the full-corpus curated version that you stage below: pass the full stage directory as `--cache-dir`, with a data config that lists the whole corpus.
 
 ### Stage the raw version
 
@@ -295,7 +237,7 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coral
 
 ### Publish the taxonomy
 
-`curate` checks each mapped benthic attribute id and growth form id against a `mermaid-benthic` taxonomy version on S3, so publish one before you stage the curated version. A taxonomy that lacks an id the API returns stops `curate`: stage and publish a newer one. The steps are in [Publish the versioned datasets](training-datasets.md#publish-the-versioned-datasets): stage with `segdata taxonomy --stage-dir <stage>`, then publish with `--tables-from <staged taxonomy folder> --publish`. Record the pin that the publish prints. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
+`curate` checks each mapped benthic attribute id and growth form id against a `mermaid-benthic` taxonomy version on S3, so publish one before you stage the curated version. A taxonomy that lacks an id the API returns stops `curate`: stage and publish a newer one. Stage with `segdata taxonomy --stage-dir <stage>`, then publish with `--tables-from <staged taxonomy folder> --publish`. Record the pin that the publish prints. See [Taxonomy snapshot](../../packages/segdata-etl/README.md#taxonomy-snapshot).
 
 ### Stage and publish the curated version
 
@@ -308,7 +250,7 @@ uv run --package segdata-etl segdata curate coralnet \
   --taxonomy-version <tax> --taxonomy-manifest-sha256 <sha>
 ```
 
-The curated version applies `configs/coralnet/annotation_overrides.parquet` and `configs/coralnet/image_blacklist.parquet` from the checkout. It stages tables only, on the image store of raw, with no plan file. Its manifest records the digest and fetch time of the API mapping. If the API is unreachable or returns an HTTP error, the command stops and stages nothing. Then publish it:
+The curated version applies `annotation_overrides.parquet` and `image_blacklist.parquet`, which are package data in `packages/segdata-etl/src/segdata_etl/datasets/coralnet/curate/data/`. It stages tables only, on the image store of raw, with no plan file. Its manifest records the digest and fetch time of the API mapping. If the API is unreachable or returns an HTTP error, the command stops and stages nothing. Then publish it:
 
 ```bash
 uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coralnet --version <curated>
@@ -322,12 +264,12 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coral
 |---|---|
 | `coralnet-raw` version | `s3://mermaid-ic-datasets/datasets/coralnet-raw/<version>/` |
 | `coralnet` curated version | `s3://mermaid-ic-datasets/datasets/coralnet/<version>/` |
-| `coralnet` v1 (`cleaned_up_rerun` labels) | `s3://mermaid-ic-datasets/datasets/coralnet/20261124-cfc389d/`, manifest sha256 `a9de45e16219340929e1fdfb908759cd560407bcff7fb636b8ddd812b269e8a4` |
+| `coralnet` v1 (`cleaned_up_rerun` labels) | `s3://mermaid-ic-datasets/datasets/coralnet/20261124-cfc389d/` (manifest sha256 in `configs/data_config.yaml`) |
 | Taxonomy | `s3://mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>/` |
 | Original images | `s3://mermaid-ic-datasets/images/coralnet/s<source_id>/<image_id>.jpg` or `.png` |
 | Staged versions | The same keys under `<stage>/mermaid-ic-datasets/` |
 
-`coralnet@20261124-cfc389d` holds the labels the `cleaned_up_rerun` model trained on. It was built at git `cfc389d` with the frozen `cleaned_up_rerun` mapping, against taxonomy `mermaid-benthic@20261124-e6abfad` (sha256 `fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43`). To reproduce that training set, pin that version. Do not stage it again: the current code maps through the API.
+`coralnet@20261124-cfc389d` holds the labels the `cleaned_up_rerun` model trained on. Its manifest records `label_mapping.source = cleaned_up_rerun_json`. `configs/data_config.yaml` holds its pins. To reproduce that training set, pin that version; curate maps labels through the live API, so a new stage gives a different mapping.
 
 Each version folder holds `manifest.json` and the tables. `segdata split build` takes the `coralnet` and `coralnet-raw` pins; see [CoralNet split](../../packages/segdata-etl/README.md#coralnet-split).
 
@@ -369,9 +311,7 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `build-annotations` excluded a source with `image_list_incomplete` or `label_unnamed` | The source CSVs do not agree with each other. Run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
 | `build-images` reports `not_found` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
-| `build-images` reports `corrupt` | The object on S3 is bad. Delete the corrupt image objects, run `coralnet-scrape invalidate --source-ids <id>`, then run `coralnet-scrape`. `invalidate` deletes the marker and `_partial/`, so the scraper runs the walk and the export again. Only the deleted images download again, because the image stage skips non-empty objects. The manifest drops the image until then. |
-| `resize` reports corrupted or failed images | Run the build again. `resize` retries every image that has no resized object, so a rerun helps only if the cause was transient. The manifest drops an image that needs a resize and has none. |
-| `resize` reports oversized images | The original exceeds twice Pillow's `MAX_IMAGE_PIXELS`, the decompression-bomb error threshold. A rerun skips the image again and `resize` exits 1 again. The manifest drops the image. |
+| `build-images` reports `corrupt` | The object on S3 is bad. Delete the corrupt image objects, run `coralnet-scrape invalidate --source-ids <id>`, then run `coralnet-scrape`. `invalidate` deletes the marker and `_partial/`, so the scraper runs the walk and the export again. Only the deleted images download again, because the image stage skips non-empty objects. `segdata build coralnet raw` drops the image until then. |
 
 After a scrape, always rebuild under a new version tag.
 

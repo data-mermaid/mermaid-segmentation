@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -238,14 +239,17 @@ class World:
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     repo = tmp_path / "repo"
-    (repo / "configs" / "coralnet").mkdir(parents=True)
+    repo.mkdir()
+    config = tmp_path / "curate_config"
+    config.mkdir()
     (repo / "uv.lock").write_text("lock")
     pd.DataFrame({"image_id": [BLACK], "reason": ["exact"]}).to_parquet(
-        repo / "configs" / "coralnet" / "image_blacklist.parquet"
+        config / "image_blacklist.parquet"
     )
     pd.DataFrame({"image_id": [OVERRIDDEN], "row": [7], "col": [8], "coralnet_id": [4]}).to_parquet(
-        repo / "configs" / "coralnet" / "annotation_overrides.parquet"
+        config / "annotation_overrides.parquet"
     )
+    monkeypatch.setattr(versions, "PACKAGED_CONFIG", config)
     monkeypatch.setattr(versions, "find_repo_root", lambda _start: repo)
     monkeypatch.setattr(versions, "probe_git", lambda _dir: CLEAN_GIT)
     monkeypatch.setattr(coralnet_api, "_retrying_session", lambda: FakeApiSession(API_ROWS))
@@ -473,3 +477,31 @@ def test_the_removed_label_map_flag_is_a_usage_error(
     assert exit_info.value.code == 2
     assert "unrecognized arguments" in capsys.readouterr().err
     assert not world.coralnet_dir().exists()
+
+
+def test_packaged_config_holds_both_curate_inputs() -> None:
+    with resources.as_file(versions.PACKAGED_CONFIG) as config_dir:
+        blacklist = pd.read_parquet(config_dir / "image_blacklist.parquet")
+        overrides = pd.read_parquet(config_dir / "annotation_overrides.parquet")
+    assert len(blacklist) > 0
+    assert list(blacklist.columns) == [
+        "source_id",
+        "image_id",
+        "hash",
+        "kept_source_id",
+        "kept_image_id",
+        "reason",
+    ]
+    assert len(overrides) > 0
+    assert list(overrides.columns) == [
+        "source_id",
+        "image_id",
+        "row",
+        "col",
+        "coralnet_id",
+        "category",
+        "has_unmapped",
+        "in_kept",
+        "n_copies_at_loc",
+        "hash",
+    ]

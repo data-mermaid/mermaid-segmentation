@@ -10,7 +10,7 @@ This runbook prepares a checkout on a Slurm cluster so that `slurm/launch_final.
 
 ## Before you start
 
-- Complete [Set up a development environment](set-up-dev-environment.md) on a machine with AWS credentials. Training jobs on the cluster do not use AWS, but you fill the data cache with AWS credentials.
+- Complete [Set up a development environment](set-up-dev-environment.md) on a machine with AWS credentials. Training reads only the local cache and `$MERMAIDSEG_SCRATCH/hf-cache`, so a node without AWS or Hugging Face access still trains. The launcher fills both on the login node, with AWS credentials.
 - Get the Slurm account, QoS and partition that your jobs submit to.
 - Get a wandb API key from [wandb.ai/authorize](https://wandb.ai/authorize). Slurm runs log to wandb.
 
@@ -25,7 +25,7 @@ Choose these directories before you write the env file:
 | Variable | What it holds |
 |---|---|
 | `MERMAIDSEG_SCRATCH` | The scratch root for the relocated home directory and caches |
-| `MERMAIDSEG_CACHE_DIR` | The local S3 data cache that training reads. Training passes it to `scripts/train.py --cache-dir` |
+| `MERMAIDSEG_CACHE_DIR` | The dataset cache that training reads. `scripts/sync_data.py` fills it, and training passes it to `scripts/train.py --cache-dir` |
 | `MERMAIDSEG_LOG_DIR` | The Slurm `slurm-%x-%j.out` and `.err` logs. It must exist before you launch |
 
 ## Clone and install
@@ -94,4 +94,4 @@ bash slurm/launch_final.sh --dry-run
 
 If a Slurm variable is missing, or `MERMAIDSEG_LOG_DIR` does not exist, the launcher stops and names the problem. A dry run prints `would submit: sbatch ...` for each job.
 
-Before the first real launch, fill the data cache. See [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
+A real launch fills the data cache first. See [Fill the data cache](train-on-slurm.md#fill-the-data-cache).

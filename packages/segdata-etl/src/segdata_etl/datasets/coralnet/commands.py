@@ -100,11 +100,11 @@ def _add_source_ids_flag(
 
 
 def add_subcommands(sub: Any) -> None:
-    """Register the ``coralnet`` command and its six stage subcommands on ``sub``."""
+    """Register the ``coralnet`` command and its stage subcommands on ``sub``."""
     coralnet = sub.add_parser(
         "coralnet",
-        help="Build the CoralNet annotations, images and training-manifest parquets",
-        description="Build the CoralNet annotations, images and training-manifest parquets.",
+        help="Build the CoralNet annotations and images parquets",
+        description="Build the CoralNet annotations and images parquets.",
     )
     stages = coralnet.add_subparsers(dest="command", required=True)
 
@@ -117,17 +117,6 @@ def add_subcommands(sub: Any) -> None:
     _add_common_flags(p_imgs)
     p_imgs.add_argument("--annotations", type=Path, required=True, help="Annotations parquet")
     p_imgs.set_defaults(func=_stage("build_images"))
-
-    p_resize = stages.add_parser("resize", help="Resize and upload images missing on S3")
-    _add_common_flags(p_resize)
-    p_resize.add_argument("--images", type=Path, required=True, help="Images parquet")
-    p_resize.set_defaults(func=_stage("resize"))
-
-    p_manifest = stages.add_parser("build-manifest", help="Build the training manifest parquet")
-    _add_common_flags(p_manifest)
-    p_manifest.add_argument("--annotations", type=Path, required=True, help="Annotations parquet")
-    p_manifest.add_argument("--images", type=Path, required=True, help="Images parquet")
-    p_manifest.set_defaults(func=_stage("build_manifest"))
 
     p_all = stages.add_parser("all", help="Run every stage in order with one version tag")
     _add_common_flags(p_all)

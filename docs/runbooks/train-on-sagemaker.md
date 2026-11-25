@@ -4,6 +4,8 @@ This runbook trains the final model as SageMaker training jobs. SageMaker is the
 
 SageMaker jobs are on-demand and do not resume. If a job fails, launch it again from the start.
 
+Before it starts the trainer, the job entrypoint runs `scripts/sync_data.py` with the run's `--data-config` into `/opt/ml/cache`. The job downloads and verifies the pinned dataset versions from `mermaid-ic-datasets` on each start. Training then reads only that cache. The job is online, so it downloads the Hugging Face encoder at start.
+
 - [Before you start](#before-you-start)
 - [Build the training image](#build-the-training-image)
 - [Check the run config](#check-the-run-config)
@@ -16,6 +18,7 @@ SageMaker jobs are on-demand and do not resume. If a job fails, launch it again 
 
 - Complete [Set up a development environment](set-up-dev-environment.md), with the AWS CLI.
 - Make sure the account has the IAM grants, the Hugging Face secret and the GitHub environment. They are listed under Prerequisites in [docker/jobs/README.md](../../docker/jobs/README.md#prerequisites).
+- Make sure the job execution role can read `mermaid-ic-datasets`, the bucket that the data sync downloads from.
 - Raise the account quota "Longest run time for a training job" to at least 480 h. `cbm_final` needs 480 h and `cbm_final_res768` needs 168 h. The default is 5 days.
 - Set the SageMaker variables in `.env`. They are in the "SageMaker launcher" block of `.env.example`:
 
@@ -116,7 +119,7 @@ These targets need the AWS CLI. All of them except `sm-jobs` need `JOB=<training
 
 Metrics go to the MLflow App named by `SM_MLFLOW_TRACKING_ARN`.
 
-On the first run, check where the cache lands. The first lines of the job log show the free disk space for `/opt/ml/cache` and `/opt/ml/checkpoints`.
+The job log shows the sync output, one line per dataset, before training starts. The first lines also show the free disk space for `/opt/ml/cache` and `/opt/ml/checkpoints`. Each run YAML sets `volume_gb: 1500` for the synced datasets and the checkpoints.
 
 If you stop a multi-GPU job, the MLflow run can stay `RUNNING`. See [docker/jobs/README.md](../../docker/jobs/README.md) for why.
 

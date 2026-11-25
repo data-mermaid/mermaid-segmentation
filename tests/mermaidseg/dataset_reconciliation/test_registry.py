@@ -15,7 +15,6 @@ from mermaidseg.dataset_reconciliation import registry as registry_module
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.registry import (
     SourceLabelRegistry,
-    roll_up_label,
     source_labels_to_target_labels,
 )
 from segdata_spec.taxonomy import hierarchy_from_table
@@ -114,30 +113,6 @@ def test_label_roll_up_maps_a_target_onto_its_ancestor_in_the_class_subset(
     )
 
     assert registry.source_to_target.tolist() == expected
-
-
-@pytest.mark.parametrize(
-    ("label", "expected"),
-    [
-        ("acropora", "hard coral"),  # rolls up one level
-        ("hard coral", "hard coral"),  # already in the subset
-        ("porites", "hard coral"),  # rolls up two levels
-        ("sand", None),  # its chain ends at a root outside the subset
-        ("not in hierarchy", None),
-        (None, None),
-    ],
-)
-def test_roll_up_label_returns_the_nearest_ancestor_in_the_subset(label, expected) -> None:
-    hierarchy = {
-        "acropora": "hard coral",
-        "porites": "massive",
-        "massive": "hard coral",
-        "hard coral": None,
-        "sand": "bare",
-        "bare": None,
-    }
-
-    assert roll_up_label(label, hierarchy, {"hard coral"}) == expected
 
 
 def test_label_roll_up_without_a_hierarchy_raises() -> None:

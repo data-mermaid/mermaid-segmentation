@@ -34,6 +34,7 @@ Python code does not read `.env`. Load it into the shell with `set -a; source .e
 scripts/train.py
   -> mermaidseg/training.py
        configs validated by mermaidseg/config.py (strict pydantic models)
+       datasets from mermaidseg/data/, read from the cache that scripts/sync_data.py fills
        labels and concepts from mermaidseg/dataset_reconciliation/
        MetaModel (mermaidseg/model/meta.py), Logger over a wandb or MLflow tracker (mermaidseg/logger.py)
   -> outputs/model_checkpoints/<run>/
@@ -92,7 +93,7 @@ uv run --group lint pre-commit run --all-files
 
 CI runs the equivalent of the first four commands (`.github/workflows/lint.yml`) when Python files, `pyproject.toml` or `uv.lock` change.
 
-The commands that fill the data cache, launch training and follow SageMaker jobs (`make sm-*`) are in the [runbooks](docs/runbooks/README.md).
+The commands that sync the data cache (`scripts/sync_data.py`), launch training and follow SageMaker jobs (`make sm-*`) are in the [runbooks](docs/runbooks/README.md).
 
 ## Model Serialization Strategy
 
@@ -113,16 +114,16 @@ Non-taxonomic concept metrics in `mermaidseg/model/eval.py` are multiclass `Accu
 | [docs/runbooks/README.md](docs/runbooks/README.md) | Index of the runbooks |
 | [docs/runbooks/set-up-dev-environment.md](docs/runbooks/set-up-dev-environment.md) | Setting up a development environment |
 | [docs/runbooks/set-up-slurm.md](docs/runbooks/set-up-slurm.md) | Setting up the Slurm cluster |
-| [docs/runbooks/training-datasets.md](docs/runbooks/training-datasets.md) | Where each dataset comes from, and adding a dataset |
+| [docs/runbooks/training-datasets.md](docs/runbooks/training-datasets.md) | Pinned dataset versions, filling the data cache, and adding a dataset |
 | [docs/runbooks/coralnet-data.md](docs/runbooks/coralnet-data.md) | Recreating or updating the CoralNet data end to end |
-| [docs/runbooks/derived-configs.md](docs/runbooks/derived-configs.md) | Regenerating the train + val data config, concept removal list and concept source mask |
+| [docs/runbooks/derived-configs.md](docs/runbooks/derived-configs.md) | Regenerating the concept removal list and concept source mask |
 | [docs/runbooks/train-on-slurm.md](docs/runbooks/train-on-slurm.md) | Training on Slurm |
 | [docs/runbooks/train-on-sagemaker.md](docs/runbooks/train-on-sagemaker.md) | Training on SageMaker |
 | [docs/runbooks/export-a-model.md](docs/runbooks/export-a-model.md) | Exporting a checkpoint to a bundle |
 | [docs/runbooks/evaluate-a-model.md](docs/runbooks/evaluate-a-model.md) | Evaluating a bundle |
 | [docs/agents-md-sources.md](docs/agents-md-sources.md) | The source of each `AGENTS.md` rule |
 | [packages/coralnet-scraper/README.md](packages/coralnet-scraper/README.md) | The CoralNet scraper |
-| [packages/segdata-etl/README.md](packages/segdata-etl/README.md) | The CoralNet dataset build, and loading the four external datasets into S3 |
+| [packages/segdata-etl/README.md](packages/segdata-etl/README.md) | The CoralNet build, the external datasets with their sources and licences, and publishing dataset versions |
 | [packages/segdata-spec/README.md](packages/segdata-spec/README.md) | The versioned dataset contract: manifest, S3 layout, publish and sync |
 | [docker/jobs/README.md](docker/jobs/README.md) | The SageMaker job image, its build, IAM and quota |
 | [AGENTS.md](AGENTS.md) | Rules for coding agents |

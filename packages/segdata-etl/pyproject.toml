@@ -42,7 +42,7 @@ segdata-spec = { workspace = true }
 where = ["src"]
 
 [tool.setuptools.package-data]
-segdata_etl = ["label_maps/curated/*.csv"]
+segdata_etl = ["label_maps/curated/*.csv", "datasets/coralnet/curate/data/*.parquet"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

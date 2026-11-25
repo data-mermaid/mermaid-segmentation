@@ -40,30 +40,6 @@ def _lowercased_targets(label_targets: Mapping[str, str | None]) -> dict[str, st
     return {name: target.lower() for name, target in label_targets.items() if target}
 
 
-def roll_up_label(
-    label: str | None, benthic_hierarchy: dict[str, str | None], subset: set[str]
-) -> str | None:
-    """Return ``label`` if it is in ``subset``, else its nearest ancestor in ``subset``.
-
-    Args:
-        label: Target label name, or ``None`` for an unmapped label.
-        benthic_hierarchy: Lower-cased name -> parent-name mapping, ``None`` at the roots.
-        subset: Names that may be returned.
-
-    Returns:
-        The label or ancestor in ``subset``, or ``None`` if there is none.
-    """
-    if label in subset:
-        return label
-    if label in benthic_hierarchy:
-        parent = benthic_hierarchy[label]
-        while parent is not None:
-            if parent in subset:
-                return parent
-            parent = benthic_hierarchy[parent]
-    return None
-
-
 def source_labels_to_target_labels(
     source_labels: torch.Tensor,
     lookup: torch.Tensor,
