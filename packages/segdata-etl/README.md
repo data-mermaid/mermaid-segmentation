@@ -106,7 +106,7 @@ Rows with a non-numeric `Row`, `Column` or `Label ID` are dropped with a warning
 
 At the end, `build-annotations` logs a summary at error level: the number of excluded sources, then one line per kind with the sorted source ids, for example `labelset_missing: [3, 4]`.
 
-`build-images` logs the image count per `header_status`. `ok`, `sof_not_found_extended` and `pil_fallback` carry dimensions. `not_found`, `corrupt`, `s3_error` and `worker_exception` do not, and `segdata build coralnet raw` drops those images.
+`build-images` logs the image count per `header_status`. `ok`, `sof_not_found_extended` and `pil_fallback` carry dimensions. `not_found`, `corrupt`, `s3_error` and `worker_exception` do not, and `segdata build coralnet raw` drops those images. A `not_found` image is carried instead when a parent pin holds its `image_id`; see [Stage coralnet-raw](#stage-coralnet-raw).
 
 Exit codes:
 
@@ -190,7 +190,20 @@ An image is kept when it has dimensions in the images parquet, has at least one 
 
 The command probes every kept original with a HEAD. It also reads an original in full when it is multipart or has no CRC64NVME checksum, which covers most scraper uploads, and computes the ETag, size and CRC64NVME its copy will carry. No image is copied. `copies.jsonl`, staged beside the tables, plans one server-side copy for each image except a carried one. With a parent pin, an image whose `image_id` and source ETag match a parent row keeps the parent's key and object fields, and is not probed. The new version lists the parent in `parents`.
 
-With a parent pin, an image the build keeps whose scrape original is gone is carried. The original is gone when the image is absent from the scrape listing, or when its `header_status` is `not_found`. It is carried when the parent holds its `image_id`. The parent's `images.parquet` row is reused unchanged, its points come from the build, and no copy is planned: the object is already published. Without a parent pin, or when the parent lacks the `image_id`, the image is dropped as `source_missing` or `no_dimensions`. A carried image whose build width and height differ from the parent's is refused with a `ValueError` that names the image ids. Because a carried image needs no original, the scrape originals of already-published images can be deleted from the scrape bucket without breaking a later raw build.
+With a parent pin, an image the build keeps whose scrape original is gone is carried. The original is gone when the image is absent from the scrape listing, or when its `header_status` is `not_found`. It is carried when the parent holds its `image_id`. The parent's `images.parquet` row is reused unchanged, its points come from the build, and no copy is planned: the object is already published. Without a parent pin, or when the parent lacks the `image_id`, the image is dropped as `source_missing` or `no_dimensions`. Two checks refuse a carried image with a `ValueError`. Each error names at most 10 image ids.
+
+- A carried image that is absent from the listing, and whose build width and height differ from the parent's, fails the size check.
+- A carried `not_found` image has no build dimensions, so it gets a point-bounds check instead: a point with `row` or `col` below 0, or at or beyond the parent's `height` or `width`, fails it. The message ends "carried images have points outside the parent's size".
+
+Because a carried image needs no original, the scrape originals of already-published images can be deleted without breaking a later raw build. Delete in this order:
+
+1. Publish the parent version.
+2. Stage the new raw version with the parent pin.
+3. Check `carried_from_parent` and `source_missing` in the staged manifest's `stats.dropped`.
+4. Promote the new version.
+5. Delete originals, only those whose `image_id` the published parent holds.
+
+A raw version staged before the originals are deleted still plans copies for the images it reuses from the parent. Promote it before the deletion, or stage it again after.
 
 Run a full corpus on an EC2 host in `us-east-1`. The full reads dominate the run time and the transfer.
 

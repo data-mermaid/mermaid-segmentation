@@ -223,7 +223,17 @@ Run this step on an EC2 host in `us-east-1`, not a laptop. A full corpus reads f
 uv run --package segdata-etl segdata build coralnet raw --stage-dir <stage> --build-run <run>
 ```
 
-The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, stage that version under the same `<stage>` and add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads the parent from `<stage>`, not from S3. With a parent, an image whose scrape original is gone (absent from the scrape listing, or `header_status` `not_found`) keeps the parent's row and gets no copy when the parent holds its `image_id`; `stats.dropped["carried_from_parent"]` counts these images. This lets you delete the scrape originals of already-published images without breaking a later raw build. A carried image whose build size differs from the parent's stops the build with a `ValueError` that names the image ids.
+The command HEADs every kept original. It also reads in full each original that is multipart or has no CRC checksum, which is most scraper uploads, to compute the values the copy carries. It writes the tables and `copies.jsonl` under `<stage>`. No image is copied and nothing is written to S3. `--workers N` sets the concurrency. To reuse the probe results of an earlier `coralnet-raw` version, stage that version under the same `<stage>` and add `--parent-version <v>` and `--parent-manifest-sha256 <sha>`. The command reads the parent from `<stage>`, not from S3. With a parent, an image whose scrape original is gone (absent from the scrape listing, or `header_status` `not_found`) keeps the parent's row and gets no copy when the parent holds its `image_id`; `stats.dropped["carried_from_parent"]` counts these images. This lets you delete the scrape originals of already-published images without breaking a later raw build. A carried image that disagrees with the parent's size stops the build with a `ValueError`; see [When a publish fails](#when-a-publish-fails).
+
+To delete scrape originals safely, go in this order:
+
+1. Publish the parent version.
+2. Stage the new raw version with the parent pin.
+3. Check `carried_from_parent` and `source_missing` in the staged `manifest.json`, under `stats.dropped`.
+4. Promote it.
+5. Delete originals, only those whose `image_id` the published parent holds.
+
+A raw version staged before the deletion still plans copies for the images it reuses from the parent. Promote it before you delete, or stage it again after.
 
 The probe results are checkpointed under `<stage>/checkpoints/`. If the run stops, run the same command again with the same `--stage-dir`: it probes only the images the checkpoint lacks. See [Resume a raw stage](../../packages/segdata-etl/README.md#resume-a-raw-stage).
 
@@ -285,7 +295,10 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `ObjectConflict` from `promote` (raw) | A destination key under `images/coralnet/` holds an object with a different ETag, size or CRC64NVME than the plan. Nothing was written. Find out what wrote it; `promote` does not replace it. |
 | `PublishRefused: ... is not staged` or `... does not match the manifest` (`promote`) | The `--stage-dir`, `--dataset` or `--version` is wrong, or a staged file changed after staging. Stage the version again. |
 | `SourceChanged` (raw stage) | An original was replaced between its HEAD and its read. Run the same command again. |
-| `PublishRefused` from `promote` (version with carried keys, such as a curated version) | No published parent has the same image store, or a carried image key is missing or differs. Nothing was written. Publish the parent first. |
+| `PublishRefused: a version with images no plan names, or neither copies.jsonl nor uploads.jsonl, needs a published parent` (`promote`) | The version has carried keys, as a curated version does, and no published parent. Publish the parent first, then stage the version with the parent pin. Nothing was written. |
+| `PublishRefused` from `promote` (version with carried keys) with another message | The parent's image store differs, or a carried image key is missing or differs. Nothing was written. Publish the parent first. |
+| `PublishRefused: plan keys differ from images.parquet` (`promote`) | `copies.jsonl` or `uploads.jsonl` names a key that is not in `images.parquet`, or names a key twice. Stage the version again. |
+| `ValueError` from `build coralnet raw` naming carried images (size differs from the parent's, or "carried images have points outside the parent's size") | The scrape build disagrees with the published parent for an image it would carry. Each error names at most 10 ids. Do not carry the image. Investigate it. Restore or upload its original so the build probes it, or drop the parent pin. |
 | `PinMismatch` | A pin's sha256 does not match the manifest in the store. Copy the pin again from the output of the command that published it. |
 | `ValueError` from `curate` listing benthic attribute or growth form ids missing from the taxonomy | The API maps a label to an attribute or growth form that the pinned taxonomy lacks. Nothing was staged. Stage and publish a newer taxonomy, then pin it. |
 | `curate` stops on a connection error or an HTTP error from `api.datamermaid.org` | The label mapping could not be fetched. Nothing was staged. Check network access, then run again. |
@@ -309,7 +322,7 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 | `build-annotations` excluded a source with `csv_read_failed` | Rebuild first. If it repeats, run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
 | `build-annotations` excluded a source with `columns_missing` or `annotations_empty` | The CSV on S3 is bad, or, for `annotations_empty`, the source may have no annotations. Run `invalidate --source-ids <id>`, run the scraper without flags to export it again, then rebuild. |
 | `build-annotations` excluded a source with `image_list_incomplete` or `label_unnamed` | The source CSVs do not agree with each other. Run `invalidate --source-ids <id>`, run the scraper without flags, then rebuild. |
-| `build-images` reports `not_found` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. |
+| `build-images` reports `not_found` | The image object is not on S3. Run `invalidate --source-ids <id>` for its source and run the scraper without flags to upload it, then rebuild. For `coralnet-raw` with a parent pin whose published parent holds the image, no re-upload is needed: the build carries the image. |
 | `build-images` reports `s3_error` or `worker_exception` | Rebuild. |
 | `build-images` reports `corrupt` | The object on S3 is bad. Delete the corrupt image objects, run `coralnet-scrape invalidate --source-ids <id>`, then run `coralnet-scrape`. `invalidate` deletes the marker and `_partial/`, so the scraper runs the walk and the export again. Only the deleted images download again, because the image stage skips non-empty objects. `segdata build coralnet raw` drops the image until then. |
 
