@@ -26,8 +26,15 @@ from segdata_spec._s3 import (
     taxonomy_prefix,
 )
 from segdata_spec.errors import NotSynced, PinMismatch
-from segdata_spec.features import FeatureSetManifest, _check_dataset_pin
-from segdata_spec.manifest import Manifest, Pin, TaxonomyManifest, manifest_sha256
+from segdata_spec.manifest import (
+    FeatureSetManifest,
+    FeatureSetPin,
+    Manifest,
+    Pin,
+    TaxonomyManifest,
+    _check_dataset_pin,
+    manifest_sha256,
+)
 from segdata_spec.resize import ResizeSpec, scale_images, scale_points
 
 
@@ -196,7 +203,7 @@ def open_version(
 def open_tables(cache_dir: Path, bucket: str, pin: Pin) -> VersionTables:
     """Open the tables of a dataset version that ``sync`` cached, with or without its images.
 
-    ``sync`` must have run for the pin, with ``images=False`` or with any resize spec. The
+    ``sync_tables`` or ``sync`` (with any resize spec) must have run for the pin. The
     tables describe the original images; the manifest is re-verified against ``pin``.
 
     Raises:
@@ -237,24 +244,25 @@ def open_taxonomy(cache_dir: Path, bucket: str, pin: Pin) -> Taxonomy:
     )
 
 
-def open_feature_set(
-    cache_dir: Path, bucket: str, pin: Pin, family: str, feature_set_sha256: str
-) -> FeatureSet:
+def open_feature_set(cache_dir: Path, bucket: str, pin: FeatureSetPin) -> FeatureSet:
     """Open a feature set that ``sync_feature_set`` cached, re-verifying its manifest sha256.
 
     Raises:
-        NotSynced: No feature-set marker exists for ``pin`` and ``family``.
+        NotSynced: No feature-set marker exists for ``pin``.
         FileNotFoundError: The set manifest or its index is not in the cache.
-        PinMismatch: The cached set manifest differs from ``feature_set_sha256``, or records a
-            dataset manifest sha256 other than ``pin``'s.
+        PinMismatch: The cached set manifest differs from the pin's ``manifest_sha256``, or records a
+            dataset manifest sha256 other than the pin's dataset.
     """
-    directory = synced_feature_marker_dir(cache_dir, family, bucket, pin.name, pin.version)
+    dataset, family = pin.dataset, pin.family
+    directory = synced_feature_marker_dir(cache_dir, family, bucket, dataset.name, dataset.version)
     if not marker_files(directory):
-        raise NotSynced(f"feature set {family!r} of {pin.name} {pin.version} was not synced")
-    prefix = feature_set_prefix(pin.name, pin.version, family)
-    data = _read_pinned_manifest(cache_dir, bucket, prefix, feature_set_sha256)
+        raise NotSynced(
+            f"feature set {family!r} of {dataset.name} {dataset.version} was not synced"
+        )
+    prefix = feature_set_prefix(dataset.name, dataset.version, family)
+    data = _read_pinned_manifest(cache_dir, bucket, prefix, pin.manifest_sha256)
     manifest = FeatureSetManifest.model_validate_json(data)
-    _check_dataset_pin(manifest, pin)
+    _check_dataset_pin(manifest, dataset)
     index = pq.read_table(_require(cache_path(cache_dir, bucket, prefix + FEATURE_INDEX_NAME)))
     ids = index.column("image_id").to_pylist()
     return FeatureSet(

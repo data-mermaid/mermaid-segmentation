@@ -52,13 +52,15 @@ from segdata_spec.errors import (
     PinMismatch,
     SegdataError,
 )
-from segdata_spec.features import FeatureSetManifest, _check_dataset_pin
 from segdata_spec.manifest import (
+    FeatureSetManifest,
+    FeatureSetPin,
     FileEntry,
     ImageStore,
     Manifest,
     Pin,
     TaxonomyManifest,
+    _check_dataset_pin,
 )
 from segdata_spec.resize import ResizeSpec, resize_image, resize_mask, scaled_size
 
@@ -382,13 +384,6 @@ def _check_resize(resize: Mapping[str, ResizeSpec | None], pins: Mapping[str, Pi
         raise ValueError(f"resize names datasets that are not pinned: {unknown}")
 
 
-def _check_tables_only(**options: object) -> None:
-    """Raise ``ValueError`` naming each image option given to a sync that fetches no image."""
-    given = sorted(name for name, value in options.items() if value is not None)
-    if given:
-        raise ValueError(f"images=False syncs no image, so these options do not apply: {given}")
-
-
 def _resolve_max_workers(max_workers: int | None) -> int:
     if max_workers is None:
         return min(8, os.cpu_count() or 1)
@@ -520,6 +515,87 @@ def check_published_manifest(client: Any, bucket: str, pin: Pin, *, taxonomy: bo
         )
 
 
+def _fetch_dataset_tables(
+    client: Any,
+    pins: Mapping[str, Pin],
+    cache_dir: Path,
+    bucket: str,
+    taxonomy: Pin | None,
+) -> tuple[dict[str, Manifest], dict[str, pa.Table]]:
+    """Fetch and verify every manifest, then the taxonomy manifest, then every table.
+
+    Returns each dataset's manifest and its images table, keyed by name.
+    """
+    manifests = {
+        name: Manifest.model_validate_json(
+            _fetch_manifest(client, cache_dir, bucket, dataset_prefix(pin.name, pin.version), pin)
+        )
+        for name, pin in pins.items()
+    }
+    tax_files: Mapping[str, FileEntry] = {}
+    if taxonomy is not None:
+        tax_bytes = _fetch_manifest(
+            client, cache_dir, bucket, taxonomy_prefix(taxonomy.name, taxonomy.version), taxonomy
+        )
+        tax_files = TaxonomyManifest.model_validate_json(tax_bytes).files
+    images = {
+        name: _images_table(
+            _fetch_tables(
+                client,
+                cache_dir,
+                bucket,
+                dataset_prefix(pin.name, pin.version),
+                manifests[name].files,
+            )
+        )
+        for name, pin in pins.items()
+    }
+    if taxonomy is not None:
+        _fetch_tables(
+            client, cache_dir, bucket, taxonomy_prefix(taxonomy.name, taxonomy.version), tax_files
+        )
+    return manifests, images
+
+
+def _run_check_split(
+    images: Mapping[str, pa.Table], check_split: Callable[[str, set[str]], None] | None
+) -> None:
+    if check_split is None:
+        return
+    for name, table in images.items():
+        check_split(name, set(pc.unique(table.column("group")).to_pylist()))
+
+
+def sync_tables(
+    client: Any,
+    pins: Mapping[str, Pin],
+    cache_dir: Path,
+    *,
+    bucket: str = DATASET_BUCKET,
+    taxonomy: Pin | None = None,
+    check_split: Callable[[str, set[str]], None] | None = None,
+) -> SyncResult:
+    """Sync pinned versions' manifests and tables, and no image or mask.
+
+    Manifests, tables and the taxonomy are fetched and verified as ``sync`` does, and
+    ``check_split`` runs per dataset before any marker is written. The marker file for each
+    dataset goes to ``<cache_dir>/synced/tables/<bucket>/<dataset>/<version>/``, recording no
+    groups; ``open_tables`` reads such a version and ``open_version`` does not.
+
+    Raises:
+        PinMismatch: A manifest, downloaded or cached, differs from its pin.
+        ChecksumMismatch: A table, downloaded or cached, differs from its record.
+        ValueError: A published key would leave the cache.
+    """
+    _, images = _fetch_dataset_tables(client, pins, cache_dir, bucket, taxonomy)
+    _run_check_split(images, check_split)
+    results: dict[str, DatasetSyncResult] = {}
+    for name, pin in pins.items():
+        _write_marker(cache_dir, bucket, pin, None, (), (), TABLES_MARKER_ID)
+        results[name] = _dataset_result(pin, (), None)
+    return SyncResult(datasets=results, taxonomy=taxonomy)
+
+
 def sync(
     client: Any,
     pins: Mapping[str, Pin],
@@ -532,7 +608,6 @@ def sync(
     taxonomy: Pin | None = None,
     resize: Mapping[str, ResizeSpec | None] | None = None,
     max_workers: int | None = None,
-    images: bool = True,
 ) -> SyncResult:
     """Sync pinned versions into ``<cache_dir>/<bucket>/<key>``, verifying every file.
 
@@ -554,11 +629,6 @@ def sync(
     A cached output is verified against its sidecar and never re-downloaded. A dataset absent from
     ``resize``, or mapped to None, caches the original bytes.
 
-    With ``images`` false, manifests and tables are fetched and verified as above, no image or
-    mask is requested, and the marker file goes to
-    ``<cache_dir>/synced/tables/<bucket>/<dataset>/<version>/``, recording no groups; ``open_tables``
-    reads such a version and ``open_version`` does not.
-
     Images and masks are synced on ``max_workers`` threads (default ``min(8, os.cpu_count())``),
     with results taken in row order, so the error raised and ``dropped_image_ids`` match a serial
     run. Configure ``client`` with ``max_pool_connections`` of at least ``max_workers``.
@@ -571,8 +641,7 @@ def sync(
         ImageUndecodable: An original to resize matches its record but Pillow cannot decode it.
         ImageChanged: An image or mask no longer matches its recorded ETag.
         ImageMissing: An image or mask is absent and its dataset's mode is ``fail``.
-        ValueError: ``max_workers`` is below 1, or ``images`` is false and ``selection``,
-            ``resize`` or ``on_missing_images`` is given (raised before any S3 call); ``selection`` names
+        ValueError: ``max_workers`` is below 1; ``selection`` names
             a dataset not in ``pins`` or a group absent from its dataset, or ``resize`` names a
             dataset not in ``pins`` (raised before any image); or a published key would leave
             the cache.
@@ -580,55 +649,20 @@ def sync(
             ``Image.MAX_IMAGE_PIXELS``; one between the limit and twice it only warns.
     """
     workers = _resolve_max_workers(max_workers)
-    if not images:
-        _check_tables_only(selection=selection, resize=resize, on_missing_images=on_missing_images)
     selection = selection or {}
     on_missing_images = on_missing_images or {}
     resize = resize or {}
-    manifests = {
-        name: Manifest.model_validate_json(
-            _fetch_manifest(client, cache_dir, bucket, dataset_prefix(pin.name, pin.version), pin)
-        )
-        for name, pin in pins.items()
-    }
-    tax_files: Mapping[str, FileEntry] = {}
-    if taxonomy is not None:
-        tax_bytes = _fetch_manifest(
-            client, cache_dir, bucket, taxonomy_prefix(taxonomy.name, taxonomy.version), taxonomy
-        )
-        tax_files = TaxonomyManifest.model_validate_json(tax_bytes).files
-    image_tables = {
-        name: _images_table(
-            _fetch_tables(
-                client,
-                cache_dir,
-                bucket,
-                dataset_prefix(pin.name, pin.version),
-                manifests[name].files,
-            )
-        )
-        for name, pin in pins.items()
-    }
-    if taxonomy is not None:
-        _fetch_tables(
-            client, cache_dir, bucket, taxonomy_prefix(taxonomy.name, taxonomy.version), tax_files
-        )
-    _check_selection(selection, image_tables)
+    manifests, images = _fetch_dataset_tables(client, pins, cache_dir, bucket, taxonomy)
+    _check_selection(selection, images)
     _check_resize(resize, pins)
-    if check_split is not None:
-        for name, table in image_tables.items():
-            check_split(name, set(pc.unique(table.column("group")).to_pylist()))
+    _run_check_split(images, check_split)
     results: dict[str, DatasetSyncResult] = {}
     for name, pin in pins.items():
-        if not images:
-            _write_marker(cache_dir, bucket, pin, None, (), (), TABLES_MARKER_ID)
-            results[name] = _dataset_result(pin, (), None)
-            continue
         dropped = _sync_images(
             client,
             cache_dir,
             manifests[name].image_store,
-            _select_groups(image_tables[name], selection.get(name)),
+            _select_groups(images[name], selection.get(name)),
             on_missing_images.get(name, "fail"),
             resize.get(name),
             workers,
@@ -679,9 +713,7 @@ def _sync_features(
 
 def sync_feature_set(
     client: Any,
-    pin: Pin,
-    family: str,
-    feature_set_sha256: str,
+    pin: FeatureSetPin,
     cache_dir: Path,
     *,
     bucket: str = DATASET_BUCKET,
@@ -698,9 +730,7 @@ def sync_feature_set(
 
     Args:
         client: A boto3 S3 client.
-        pin: The dataset version the set describes.
-        family: The feature family.
-        feature_set_sha256: The sha256 pinning the feature-set manifest.
+        pin: The feature set: its dataset version, family and manifest sha256.
         cache_dir: The local cache root.
         bucket: The dataset bucket.
         image_ids: The images whose features to sync; None syncs every indexed image.
@@ -710,10 +740,10 @@ def sync_feature_set(
         The set manifest, its index, and the cached path of each synced feature by image id.
 
     Raises:
-        ValueError: ``max_workers`` is below 1, ``family`` is not a key segment, or a key would
+        ValueError: ``max_workers`` is below 1, the pin's ``family`` is not a key segment, or a key would
             leave the cache.
-        PinMismatch: The set manifest, downloaded or cached, differs from ``feature_set_sha256``,
-            or records a dataset manifest sha256 other than ``pin``'s.
+        PinMismatch: The set manifest, downloaded or cached, differs from the pin's ``manifest_sha256``,
+            or records a dataset manifest sha256 other than the pin's dataset.
         ChecksumMismatch: The index differs from its manifest entry, or a feature file,
             downloaded or cached, differs from its index row.
         FeatureIndexInvalid: ``image_ids`` names an image not in the index.
@@ -721,13 +751,14 @@ def sync_feature_set(
         ImageChanged: A feature file no longer matches its indexed ETag.
     """
     workers = _resolve_max_workers(max_workers)
-    prefix = feature_set_prefix(pin.name, pin.version, family)
+    dataset, family = pin.dataset, pin.family
+    prefix = feature_set_prefix(dataset.name, dataset.version, family)
     manifest = FeatureSetManifest.model_validate_json(
         _fetch_file(
-            client, cache_dir, bucket, prefix + MANIFEST_NAME, feature_set_sha256, PinMismatch
+            client, cache_dir, bucket, prefix + MANIFEST_NAME, pin.manifest_sha256, PinMismatch
         )
     )
-    _check_dataset_pin(manifest, pin)
+    _check_dataset_pin(manifest, dataset)
     index = pq.read_table(
         io.BytesIO(
             _fetch_tables(client, cache_dir, bucket, prefix, manifest.files)[FEATURE_INDEX_NAME]
@@ -739,8 +770,8 @@ def sync_feature_set(
         .to_pylist()
     )
     _sync_features(client, cache_dir, bucket, rows, workers)
-    directory = synced_feature_marker_dir(cache_dir, family, bucket, pin.name, pin.version)
-    _write_atomic(new_marker_path(directory), dump_feature_marker(feature_set_sha256, image_ids))
+    directory = synced_feature_marker_dir(cache_dir, family, bucket, dataset.name, dataset.version)
+    _write_atomic(new_marker_path(directory), dump_feature_marker(pin.manifest_sha256, image_ids))
     return FeatureSyncResult(
         manifest=manifest,
         index=index,

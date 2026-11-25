@@ -41,10 +41,10 @@ from segdata_spec import DATASET_BUCKET
 from segdata_spec._s3 import feature_key, feature_store_prefix
 from segdata_spec.features import publish_feature_set
 from segdata_spec.manifest import Pin
-from segdata_spec.publish import GitState, probe_git
+from segdata_spec.publish import GitState, _etl_info, _guard_git, probe_git
 from segdata_spec.read import open_tables
 from segdata_spec.schema import FEATURE_INDEX_SCHEMA
-from segdata_spec.sync import sync
+from segdata_spec.sync import sync_tables
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +310,7 @@ def attach(
         FeatureVectorsInvalid: A vector is unreadable, of another width than the extractor's
             ``feature_dim``, or lacks one of its image's points.
     """
-    sync(client, {pin.name: pin}, cache_dir, bucket=DATASET_BUCKET, images=False)
+    sync_tables(client, {pin.name: pin}, cache_dir, bucket=DATASET_BUCKET)
     tables = open_tables(cache_dir, DATASET_BUCKET, pin)
     if tables.points is None:
         raise ValueError(f"{pin.name} {pin.version} has no points.parquet to check coverage on")
@@ -324,6 +324,8 @@ def attach(
         client, sources, etags, tables.images, tables.points, extractor["feature_dim"], workers
     )
     index = copy_features(client, sources, etags, facts, store, family, workers)
+    state, lock_sha = _guard_git(REPO_ROOT, git)
+    etl = _etl_info("segdata-etl", etl_command, state, lock_sha)
     sha = publish_feature_set(
         client,
         pin,
@@ -331,12 +333,9 @@ def attach(
         index,
         extractor,
         bucket=DATASET_BUCKET,
-        etl_package="segdata-etl",
-        etl_command=etl_command,
-        repo_dir=REPO_ROOT,
-        git=git,
+        etl=etl,
         allow_missing=allow_missing,
-    )
+    ).manifest_sha256
     logger.info(
         "attached %s to %s %s (set manifest sha256 %s): %d vectors, %d missing",
         family,

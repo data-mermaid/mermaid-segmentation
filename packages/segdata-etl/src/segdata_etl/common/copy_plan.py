@@ -40,11 +40,11 @@ _MAX_READ = 1024 * 1024
 
 @dataclass(frozen=True)
 class ImageOutcome:
-    """What probing one source image decided: a row to keep, a row to carry, or a drop reason."""
+    """What probing one source image decided: a row to keep, a row to reuse, or a drop reason."""
 
     image_id: str
     row: dict[str, Any] | None = None
-    carried: bool = False
+    reused: bool = False
     dropped: str | None = None
     found_as_jpg: bool = False
 
@@ -145,7 +145,7 @@ def probe_image(
     source_etag = head["ETag"].strip('"')
     parent = parent_rows.get(image_id)
     if parent is not None and parent["source_fingerprint"] == source_etag:
-        return ImageOutcome(image_id, row=parent, carried=True, found_as_jpg=found_as_jpg)
+        return ImageOutcome(image_id, row=parent, reused=True, found_as_jpg=found_as_jpg)
     if needs_full_read(head):
         whole = read_whole_object(client, bucket, source_key, head)
         header, facts = whole if whole is not None else (None, None)

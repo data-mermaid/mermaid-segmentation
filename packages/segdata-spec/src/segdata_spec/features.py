@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -19,6 +19,7 @@ from segdata_spec._s3 import (
     EXTRACTOR_SPEC_NAME,
     FEATURE_INDEX_NAME,
     MANIFEST_NAME,
+    _check_segment,
     dataset_prefix,
     feature_key,
     feature_set_prefix,
@@ -33,57 +34,23 @@ from segdata_spec.errors import (
 )
 from segdata_spec.manifest import (
     EtlInfo,
+    FeatureSetManifest,
+    FeatureSetPin,
+    FeatureSetStats,
     FileEntry,
     ImageStore,
     Manifest,
     Pin,
-    _Model,
     dump_manifest,
     manifest_sha256,
 )
-from segdata_spec.publish import (
-    GitState,
-    _etl_info,
-    _get_bytes,
-    _guard_git,
-    _write_version,
-    table_bytes,
-)
+from segdata_spec.publish import _get_bytes, _write_version, table_bytes
 from segdata_spec.schema import FEATURE_INDEX_SCHEMA, conform
+from segdata_spec.sync import check_published_manifest
 
 _FEATURE_EXTENSION = ".featurevector"
 # The fields that identify an extractor; two specs with equal values produce the same features.
 EXTRACTOR_IDENTITY_KEYS = ("class_path", "crop_size", "feature_dim", "weights_sha256")
-
-
-class FeatureSetStats(_Model):
-    """Coverage of a feature set: images indexed, and version images it leaves out."""
-
-    n_images: int
-    n_missing: int
-
-
-class FeatureSetManifest(_Model):
-    """``manifest.json`` of a feature set; its sha256 pins the set."""
-
-    schema_version: Literal[1]
-    dataset: Pin
-    family: str
-    extractor: dict[str, Any]
-    files: dict[str, FileEntry]
-    stats: FeatureSetStats
-    etl: EtlInfo
-    created_at: datetime
-
-
-def _check_dataset_pin(manifest: FeatureSetManifest, pin: Pin) -> None:
-    """Raise ``PinMismatch`` unless the feature set was published for exactly ``pin``."""
-    recorded = manifest.dataset.manifest_sha256
-    if recorded != pin.manifest_sha256:
-        raise PinMismatch(
-            f"feature set {manifest.family!r} was published for dataset manifest {recorded}, "
-            f"but the pin expects {pin.manifest_sha256}"
-        )
 
 
 def _extractor_identity(extractor: Mapping[str, Any]) -> dict[str, Any]:
@@ -103,9 +70,39 @@ def _identity_differences(stored: Mapping[str, Any], identity: Mapping[str, Any]
     ]
 
 
-def _store_name(image_store: ImageStore) -> str:
-    """Return the last path segment of the image store prefix, e.g. ``coralnet``."""
-    return image_store.prefix.rstrip("/").rsplit("/", 1)[-1]
+_IMAGE_STORE_PREFIX = re.compile(r"images/([^/]+)/")
+
+
+def feature_store_name(image_store: ImageStore, bucket: str) -> str:
+    """Return the store name of ``image_store``, the segment of its ``images/<segment>/`` prefix.
+
+    Raises:
+        ValueError: The image store is outside ``bucket``, its prefix is not exactly
+            ``images/<segment>/``, or the segment is not a lowercase key segment.
+    """
+    match = _IMAGE_STORE_PREFIX.fullmatch(image_store.prefix)
+    if image_store.bucket != bucket or match is None:
+        raise ValueError(
+            f"image store s3://{image_store.bucket}/{image_store.prefix} is not "
+            f"s3://{bucket}/images/<segment>/"
+        )
+    return _check_segment(match.group(1), "image store segment")
+
+
+def feature_file_key(
+    image_store: ImageStore,
+    bucket: str,
+    family: str,
+    image_id: str,
+    suffix: str | None = None,
+) -> str:
+    """Return one image's feature file key, ``features/<store>/<family>/<image_id>[~<suffix>].featurevector``.
+
+    Raises:
+        ValueError: The image store is not a valid store in ``bucket``, or ``family`` or
+            ``suffix`` is not a lowercase key segment.
+    """
+    return feature_key(feature_store_name(image_store, bucket), family, image_id, suffix)
 
 
 def _is_feature_key(key: str, store: str, family: str, image_id: str) -> bool:
@@ -128,7 +125,7 @@ def _check_index(
     """Return how many version images ``index`` leaves out, refusing an invalid index.
 
     Raises:
-        FeatureIndexInvalid: An id is not in the version, an id repeats, a row's ``key`` is not
+        FeatureIndexInvalid: An id is not in the version, an id or a key repeats, a row's ``key`` is not
             its image's file under ``features/<store>/<family>/``, or images are left out and
             ``allow_missing`` is false.
     """
@@ -149,6 +146,8 @@ def _check_index(
             f"{len(bad)} index key(s) are not their image's file under "
             f"{feature_store_prefix(store, family)}: {bad[:10]}"
         )
+    if len(set(keys)) != len(keys):
+        raise FeatureIndexInvalid("index holds a duplicate key: two images name one feature file")
     missing = len(version_ids) - len(ids)
     if missing and not allow_missing:
         raise FeatureIndexInvalid(f"index leaves out {missing} image(s) of the version")
@@ -163,9 +162,6 @@ def _load_version(client: Any, bucket: str, pin: Pin) -> tuple[Manifest, set[str
         PinMismatch: The manifest differs from ``pin``.
         ChecksumMismatch: ``images.parquet`` differs from its manifest entry.
     """
-    # sync imports this module for FeatureSetManifest, so this import waits for the call.
-    from segdata_spec.sync import check_published_manifest
-
     check_published_manifest(client, bucket, pin)
     prefix = dataset_prefix(pin.name, pin.version)
     manifest_bytes = _get_bytes(client, bucket, prefix + MANIFEST_NAME)
@@ -179,14 +175,27 @@ def _load_version(client: Any, bucket: str, pin: Pin) -> tuple[Manifest, set[str
     return manifest, set(images.column("image_id").to_pylist())
 
 
-def _ensure_extractor_spec(
-    client: Any, bucket: str, key: str, extractor: Mapping[str, Any], identity: Mapping[str, Any]
+def claim_extractor(
+    client: Any,
+    bucket: str,
+    image_store: ImageStore,
+    family: str,
+    extractor: Mapping[str, Any],
 ) -> None:
     """Write the family's extractor spec once, or check the stored one has the same identity.
 
+    Writers call this before writing any ``.featurevector`` into the family, and put feature
+    files with ``If-None-Match: *``.
+
     Raises:
+        ValueError: ``extractor`` lacks an identity key, or the image store or ``family`` is
+            invalid; raised before any S3 call.
         ExtractorMismatch: The stored spec names another identity.
     """
+    key = (
+        feature_store_prefix(feature_store_name(image_store, bucket), family) + EXTRACTOR_SPEC_NAME
+    )
+    identity = _extractor_identity(extractor)
     data = (json.dumps(dict(extractor), indent=2, sort_keys=True) + "\n").encode()
     try:
         client.put_object(Bucket=bucket, Key=key, Body=data, IfNoneMatch="*")
@@ -200,32 +209,6 @@ def _ensure_extractor_spec(
         raise ExtractorMismatch(f"s3://{bucket}/{key} names another extractor: {differences}")
 
 
-def _resolve_etl(
-    etl: EtlInfo | None,
-    repo_dir: Path | None,
-    git: GitState | None,
-    etl_package: str | None,
-    etl_command: str | None,
-) -> EtlInfo:
-    """Return ``etl`` as given, or build it from ``repo_dir`` behind the git guard.
-
-    Raises:
-        ValueError: Both or neither of ``etl`` and ``repo_dir`` are given, or ``repo_dir`` comes
-            without ``etl_package`` and ``etl_command``.
-        PublishRefused: The repository is dirty or unpushed, or has no ``uv.lock``.
-    """
-    if repo_dir is None:
-        if etl is None:
-            raise ValueError("pass exactly one ETL source: repo_dir or etl; got neither")
-        return etl
-    if etl is not None:
-        raise ValueError("pass exactly one ETL source: repo_dir or etl; got both")
-    if etl_package is None or etl_command is None:
-        raise ValueError("repo_dir needs etl_package and etl_command to record the etl")
-    state, lock_sha = _guard_git(repo_dir, git)
-    return _etl_info(etl_package, etl_command, state, lock_sha)
-
-
 def publish_feature_set(
     client: Any,
     pin: Pin,
@@ -234,23 +217,15 @@ def publish_feature_set(
     extractor: Mapping[str, Any],
     *,
     bucket: str,
-    etl_package: str | None = None,
-    etl_command: str | None = None,
-    repo_dir: Path | None = None,
-    git: GitState | None = None,
-    etl: EtlInfo | None = None,
+    etl: EtlInfo,
     allow_missing: bool = False,
-) -> str:
+) -> FeatureSetPin:
     """Publish a feature set for a dataset version under ``datasets/<d>/<v>/features/<family>/``.
 
     Every check precedes the first write. The family's ``_extractor_spec.json`` under
     ``features/<store>/<family>/`` is written once; a stored spec with the same identity
     (``class_path``, ``crop_size``, ``feature_dim``, ``weights_sha256``) is left as is, whatever
     its other keys. Then ``index.parquet``, then ``manifest.json`` last, both write-once.
-
-    The ETL provenance comes from exactly one source: ``repo_dir`` with ``etl_package`` and
-    ``etl_command``, checked like a dataset publish, or a ready ``etl`` recorded verbatim with no
-    git check.
 
     Args:
         client: A boto3 S3 client.
@@ -259,21 +234,16 @@ def publish_feature_set(
         index: One row per indexed image, conforming to ``FEATURE_INDEX_SCHEMA``.
         extractor: The extractor spec; it must hold the four identity keys.
         bucket: The dataset bucket.
-        etl_package: The package that built the features; required with ``repo_dir``.
-        etl_command: The command that built the features; required with ``repo_dir``.
-        repo_dir: The ETL repository, checked for a clean, pushed tree and a ``uv.lock``.
-        git: The repository state; probed from ``repo_dir`` when None.
-        etl: Ready provenance for a caller outside the ETL repository; excludes ``repo_dir``.
+        etl: The ETL provenance, recorded verbatim in the manifest.
         allow_missing: Publish an index that leaves out some of the version's images.
 
     Returns:
-        The sha256 of the written feature-set manifest.
+        The feature-set pin: ``pin``, ``family`` and the sha256 of the written manifest.
 
     Raises:
-        ValueError: ``extractor`` lacks an identity key, ``family`` is not a key segment, or
-            the ETL source is not exactly one of ``repo_dir`` (with ``etl_package`` and
-            ``etl_command``) and ``etl``; raised before any S3 call.
-        PublishRefused: With ``repo_dir``, the tree is dirty or unpushed, or has no ``uv.lock``.
+        ValueError: ``extractor`` lacks an identity key, or ``family`` is not a key segment;
+            raised before any S3 call. The dataset's image store is not ``images/<segment>/``
+            in ``bucket``; raised before any write.
         ManifestNotFound: The dataset manifest is absent.
         PinMismatch: The dataset manifest differs from ``pin``.
         ChecksumMismatch: The dataset's ``images.parquet`` differs from its manifest.
@@ -285,14 +255,12 @@ def publish_feature_set(
         ExtractorMismatch: The family's stored extractor spec has another identity.
         ObjectExists: The index or manifest key already exists with different bytes.
     """
-    identity = _extractor_identity(extractor)
+    _extractor_identity(extractor)
     prefix = feature_set_prefix(pin.name, pin.version, family)
-    etl_info = _resolve_etl(etl, repo_dir, git, etl_package, etl_command)
     dataset, version_ids = _load_version(client, bucket, pin)
     conformed = conform(index, FEATURE_INDEX_SCHEMA)
-    store = _store_name(dataset.image_store)
+    store = feature_store_name(dataset.image_store, bucket)
     missing = _check_index(conformed, version_ids, allow_missing, store, family)
-    store_prefix = feature_store_prefix(store, family)
     index_bytes = table_bytes(conformed)
     manifest = FeatureSetManifest(
         schema_version=1,
@@ -307,10 +275,12 @@ def publish_feature_set(
             )
         },
         stats=FeatureSetStats(n_images=conformed.num_rows, n_missing=missing),
-        etl=etl_info,
+        etl=etl,
         created_at=datetime.now(UTC),
     )
     manifest_bytes = dump_manifest(manifest)
-    _ensure_extractor_spec(client, bucket, store_prefix + EXTRACTOR_SPEC_NAME, extractor, identity)
+    claim_extractor(client, bucket, dataset.image_store, family, extractor)
     _write_version(client, bucket, prefix, {FEATURE_INDEX_NAME: index_bytes}, manifest_bytes)
-    return manifest_sha256(manifest_bytes)
+    return FeatureSetPin(
+        dataset=pin, family=family, manifest_sha256=manifest_sha256(manifest_bytes)
+    )
