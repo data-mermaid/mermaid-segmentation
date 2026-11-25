@@ -71,6 +71,12 @@ class DatasetEntry(_Strict):
             raise ValueError("'repeat' applies to the train block only")
         return self
 
+    @model_validator(mode="after")
+    def _transform_is_train_only(self) -> DatasetEntry:
+        if any(b is not None and b.transform is not None for b in (self.val, self.test)):
+            raise ValueError("'transform' applies to the train block only")
+        return self
+
     def blocks(self) -> list[SplitSelection]:
         """The split blocks the entry defines."""
         return [b for b in (self.train, self.val, self.test) if b is not None]

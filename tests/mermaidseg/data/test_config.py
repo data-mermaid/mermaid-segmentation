@@ -226,6 +226,14 @@ def test_repeat_on_an_eval_block_raises(split: str) -> None:
         )
 
 
+@pytest.mark.parametrize("split", ["val", "test"])
+def test_transform_on_an_eval_block_raises(split: str) -> None:
+    with pytest.raises(ValidationError, match="transform"):
+        DataSection.model_validate(
+            {"datasets": {"d": _entry(**{split: {"groups": "all", "transform": {}}})}}
+        )
+
+
 def test_default_rejects_unknown_keys() -> None:
     with pytest.raises(ValidationError):
         DataSection.model_validate(

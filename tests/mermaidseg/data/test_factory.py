@@ -71,6 +71,18 @@ def test_dense_version_gives_a_dense_dataset(tmp_path: Path) -> None:
     assert isinstance(ds, DenseDataset)
 
 
+def test_annotators_on_a_dense_version_raise(tmp_path: Path) -> None:
+    cache_dir, _, pin = write_version(
+        tmp_path,
+        kind="dense",
+        images=[ImageSpec("i1", mask=np.zeros((8, 8), np.uint8))],
+        labels=LABELS,
+    )
+    section = _section(pin, val={"groups": "all", "annotators": ["a"]})
+    with pytest.raises(ValueError, match="annotators"):
+        _build(section, cache_dir, tmp_path)
+
+
 def test_only_defined_blocks_are_built_and_keyed_by_dataset_and_split(tmp_path: Path) -> None:
     cache_dir, pin = _points(tmp_path, [ImageSpec("i1")], [("i1", 1, 1, 5)])
     section = _section(pin, train={"groups": "all"}, test={"groups": "all"})

@@ -38,6 +38,10 @@ def _reader(
     padding: int,
     annotators: list[str] | None,
 ) -> VersionDataset:
+    if version.manifest.kind != "points" and annotators is not None:
+        raise ValueError(
+            f"dataset {version.manifest.dataset!r}: annotators apply to point datasets only"
+        )
     if version.manifest.kind == "points":
         return PointDataset(version, split=split, annotators=annotators, padding=padding, **shared)
     return DenseDataset(version, split=split, **shared)
@@ -80,7 +84,8 @@ def build_datasets(
 
     Raises:
         segdata_spec.errors.NotSynced: A version was not synced with the entry's ``resize``.
-        ValueError: A reader refuses its selection (see :class:`VersionDataset`).
+        ValueError: A reader refuses its selection (see :class:`VersionDataset`), or a dense
+            dataset's block sets ``annotators``.
     """
     subsets = image_ids or {}
     datasets: dict[tuple[str, str], VersionDataset] = {}
