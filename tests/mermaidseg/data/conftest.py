@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -360,7 +361,7 @@ def publish_taxonomy_version(
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     (repo / "uv.lock").write_bytes(b"lock-bytes")
-    stage_dir = tmp_path / "taxonomy-stage"
+    stage_dir = Path(tempfile.mkdtemp(dir=tmp_path))
     _, sha = stage_taxonomy(
         stage_dir,
         bucket=DATASET_BUCKET,
