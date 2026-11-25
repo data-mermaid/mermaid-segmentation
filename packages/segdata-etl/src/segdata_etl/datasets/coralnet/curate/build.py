@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
-from segdata_etl.common.release import count_labels
+from segdata_etl.common.versions import count_labels
 from segdata_etl.datasets.coralnet.curate.overrides import OverrideStats, apply_overrides
 from segdata_spec.read import DatasetVersion
 from segdata_spec.schema import IMAGES_SCHEMA, POINTS_SCHEMA

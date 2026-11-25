@@ -40,7 +40,6 @@ from segdata_etl.common.copy_plan import (
     write_copies,
 )
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
-from segdata_etl.common.release import count_labels, image_prefix, image_store
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
     head_with_checksum,
@@ -49,9 +48,11 @@ from segdata_etl.common.s3_objects import (
     sniff_media_type,
 )
 from segdata_etl.common.stage import next_version
+from segdata_etl.common.versions import count_labels, image_store
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import probe_git, refuse_unpublishable
+from segdata_spec.layout import image_prefix
 from segdata_spec.manifest import ParentRef, SourceInfo
 from segdata_spec.s3 import crc64nvme_b64, get_bytes, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA

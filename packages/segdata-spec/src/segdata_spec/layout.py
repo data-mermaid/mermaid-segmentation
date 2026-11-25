@@ -21,6 +21,11 @@ def taxonomy_prefix(name: str, version: str) -> str:
     return f"taxonomy/{name}/{version}/"
 
 
+def image_prefix(dataset: str) -> str:
+    """Return the key prefix of ``dataset``'s images, ending in ``/``."""
+    return f"images/{dataset}/"
+
+
 def cache_path(cache_dir: Path, bucket: str, key: str) -> Path:
     """Return ``<cache_dir>/<bucket>/<key>``, refusing a bucket or key that would leave the cache."""
     if bucket in ("", ".", "..") or "/" in bucket:

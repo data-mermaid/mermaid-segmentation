@@ -1,10 +1,10 @@
-"""Tests for the release helpers shared by every versioned-dataset builder."""
+"""Tests for the helpers shared by the versioned-dataset builders."""
 
 from __future__ import annotations
 
 import pyarrow as pa
 
-from segdata_etl.common import release
+from segdata_etl.common import versions
 
 
 def _points(*rows: tuple[str, int, int, int]) -> pa.Table:
@@ -21,7 +21,7 @@ def _points(*rows: tuple[str, int, int, int]) -> pa.Table:
 
 def test_count_labels_counts_points_per_image_and_label_sorted_by_image_then_label() -> None:
     points = _points(("b", 0, 0, 5), ("a", 0, 0, 7), ("a", 1, 1, 5), ("a", 2, 2, 5))
-    assert release.count_labels(points).to_pylist() == [
+    assert versions.count_labels(points).to_pylist() == [
         {"image_id": "a", "label_id": 5, "n": 2},
         {"image_id": "a", "label_id": 7, "n": 1},
         {"image_id": "b", "label_id": 5, "n": 1},

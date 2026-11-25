@@ -1,4 +1,4 @@
-"""Release helpers: S3 JSON and parquet puts, key listing, bulk file upload, and dataset-release tables and paths."""
+"""Raw-ingest writer: S3 JSON and parquet puts, key listing, and bulk file upload."""
 
 from __future__ import annotations
 
@@ -14,13 +14,9 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from segdata_spec.manifest import ImageStore
 from segdata_spec.s3 import exists
-from segdata_spec.schema import LABEL_COUNTS_SCHEMA
 
 logger = logging.getLogger(__name__)
-
-_IMAGES_FOLDER = "images"
 
 
 @dataclass(frozen=True)
@@ -162,29 +158,3 @@ def upload_files(
         # Draining the iterator re-raises the first worker failure.
         list(pool.map(_upload, pending))
     return len(pending)
-
-
-def count_labels(points: pa.Table) -> pa.Table:
-    """Build ``stats/label_counts.parquet``: points per ``(image_id, label_id)``, sorted by both."""
-    counts = (
-        points.group_by(["image_id", "label_id"], use_threads=False)
-        .aggregate([("row", "count")])
-        .sort_by([("image_id", "ascending"), ("label_id", "ascending")])
-    )
-    return pa.table(
-        {
-            "image_id": counts.column("image_id"),
-            "label_id": counts.column("label_id"),
-            "n": counts.column("row_count"),
-        }
-    ).cast(LABEL_COUNTS_SCHEMA)
-
-
-def image_prefix(dataset: str) -> str:
-    """Return the destination key prefix of ``dataset``'s images."""
-    return f"{_IMAGES_FOLDER}/{dataset}/"
-
-
-def image_store(bucket: str, dataset: str) -> ImageStore:
-    """Return the segdata-owned image store of ``dataset`` in ``bucket``."""
-    return ImageStore(bucket=bucket, prefix=image_prefix(dataset), owner="segdata")
