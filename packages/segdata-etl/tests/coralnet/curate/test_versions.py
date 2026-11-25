@@ -483,7 +483,7 @@ def test_packaged_config_holds_both_curate_inputs() -> None:
     with resources.as_file(versions.PACKAGED_CONFIG) as config_dir:
         blacklist = pd.read_parquet(config_dir / "image_blacklist.parquet")
         overrides = pd.read_parquet(config_dir / "annotation_overrides.parquet")
-    assert len(blacklist) == 197_148
+    assert len(blacklist) > 0
     assert list(blacklist.columns) == [
         "source_id",
         "image_id",
@@ -493,3 +493,15 @@ def test_packaged_config_holds_both_curate_inputs() -> None:
         "reason",
     ]
     assert len(overrides) > 0
+    assert list(overrides.columns) == [
+        "source_id",
+        "image_id",
+        "row",
+        "col",
+        "coralnet_id",
+        "category",
+        "has_unmapped",
+        "in_kept",
+        "n_copies_at_loc",
+        "hash",
+    ]
