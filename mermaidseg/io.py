@@ -9,7 +9,7 @@ from typing import Any, cast
 import albumentations as A
 import yaml
 
-from mermaidseg.config import RESERVED_DATA_KEYS, lookup_class, validate_section
+from mermaidseg.config import lookup_class, validate_section
 from mermaidseg.inference.preprocess import CV2_INTERPOLATION, IMAGENET_MEAN, IMAGENET_STD
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -192,27 +192,6 @@ def build_eval_transform(input_size: Sequence[int]) -> A.Compose:
     return A.Compose(
         [A.Resize(height=height, width=width, interpolation=CV2_INTERPOLATION, p=1), _normalize()]
     )
-
-
-def preprocess_data_config(data_cfg_orig: ConfigDict) -> ConfigDict:
-    """Expand the per-dataset ``default`` block of the data config (configs/data_config.yaml).
-
-    Every dataset gets the ``default`` splits, overridden by its own. Reserved keys (e.g.
-    ``local_cache_dir``) under ``data`` are left untouched. Transform specs stay plain data;
-    :func:`compile_transform` compiles them where datasets are built.
-    """
-    data_cfg = data_cfg_orig.copy()
-    if "default" in data_cfg.data:
-        default = data_cfg.data.pop("default", None)
-        for dataset_name in list(data_cfg.data.keys()):
-            if dataset_name in RESERVED_DATA_KEYS:
-                continue
-            dataset_tmp = data_cfg.data.get(dataset_name, None)
-            data_cfg.data[dataset_name] = default.copy() if default is not None else {}
-            if dataset_tmp is not None:
-                data_cfg.data[dataset_name].update(dataset_tmp)
-
-    return data_cfg
 
 
 def apply_resolution(spec: Any, resolution: int) -> Any:

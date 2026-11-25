@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import io
-import multiprocessing as mp
 import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Iterator
 from pathlib import Path
 from queue import Empty
 from typing import Any
@@ -22,9 +20,7 @@ import torch.distributed as dist
 import torch.multiprocessing as torch_mp
 from botocore.exceptions import ClientError
 
-import mermaidseg.datasets.local_cache
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.datasets.local_cache import CacheStatsHandles, LocalS3Cache, create_cache_stats
 from mermaidseg.export import export_bundle
 from mermaidseg.io import ConfigDict
 from segdata_spec import DATASET_BUCKET
@@ -172,14 +168,6 @@ def bundle_dir(
 ) -> Path:
     checkpoint, repo, _ = deployable
     return export_ckpt(checkpoint, tmp_path_factory.mktemp("out") / "bundle", repo_dir=repo)
-
-
-@pytest.fixture
-def reset_local_cache() -> Iterator[None]:
-    """Give the test a fresh ``LocalS3Cache`` singleton and drop it afterwards."""
-    LocalS3Cache.reset_singleton()
-    yield
-    LocalS3Cache.reset_singleton()
 
 
 def init_gloo(rank: int, world_size: int, init_method: str) -> None:
@@ -334,37 +322,3 @@ def concept_keep(schema: ConceptSchema) -> torch.Tensor:
     keep = torch.ones(2, schema.num_channels, dtype=torch.bool)
     keep[1, schema.channel_names.index("bleached")] = False
     return keep
-
-
-BUCKET = "bucket"
-KEY = "image.jpg"
-
-
-def read_cached_object_in_worker(init_fn: Callable[[int], None]) -> None:
-    """A worker body: run the init, then read one object the local cache already holds."""
-    init_fn(0)
-    LocalS3Cache.get().read_bytes(BUCKET, KEY)
-
-
-@pytest.fixture
-def spawn_cache_stats(monkeypatch) -> CacheStatsHandles:
-    """Cache stats whose locks a spawn-started process can inherit, whatever the default."""
-    # A fork-context SemLock cannot be passed to a spawn-context process.
-    monkeypatch.setattr(mermaidseg.datasets.local_cache, "mp", mp.get_context("spawn"))
-    return create_cache_stats()
-
-
-def run_in_spawned_worker(init_fn: Callable[[int], None], cache_root: Path, monkeypatch) -> None:
-    """Run ``read_cached_object_in_worker`` in a spawn-started process over ``cache_root``."""
-    (cache_root / BUCKET).mkdir(parents=True)
-    (cache_root / BUCKET / KEY).write_bytes(b"pixels")
-    monkeypatch.setenv("MERMAIDSEG_LOCAL_CACHE_DIR", str(cache_root))
-    worker = mp.get_context("spawn").Process(target=read_cached_object_in_worker, args=(init_fn,))
-    worker.start()
-    try:
-        worker.join(timeout=60)
-        assert worker.exitcode == 0
-    finally:
-        if worker.is_alive():
-            worker.kill()
-            worker.join()

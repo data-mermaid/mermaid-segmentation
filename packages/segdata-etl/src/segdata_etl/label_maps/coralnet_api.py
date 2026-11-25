@@ -1,8 +1,7 @@
 """CoralNet labels mapped to MERMAID benthic attributes by the MERMAID LabelMapping API.
 
-Fetching, parsing and digesting match ``mermaidseg.dataset_reconciliation.label_mapping``; the
-code is duplicated because ``segdata_etl`` never imports ``mermaidseg``. Rows join on the integer
-CoralNet label id, so a label renamed in CoralNet still maps.
+Rows join on the integer CoralNet label id, so a label renamed in CoralNet still maps. The
+mapping digest hashes the sorted records, so it changes only when a mapping changes.
 """
 
 from __future__ import annotations

@@ -1,17 +1,15 @@
 """Benthic-attribute concept hierarchy and source-label-to-concept mapping.
 
-Exposes the helpers that fetch the MERMAID benthic-attribute hierarchy, build a label/concept matrix
-from a list of label names, and a GPU-friendly ``source_labels_to_concepts`` lookup driven by a
-precomputed ``(N+1, C)`` float tensor (with row 0 as the all-zeros background row).
+Exposes the helpers that build a label/concept matrix from a list of label names, and a
+GPU-friendly ``source_labels_to_concepts`` lookup driven by a precomputed
+``(N+1, C)`` float tensor (with row 0 as the all-zeros background row).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
 
 import pandas as pd
-import requests
 import torch
 
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
@@ -68,38 +66,6 @@ NONCORAL_CONCEPTS = [
     "water surface",
     "water column",
 ]
-
-
-def initialize_benthic_hierarchy(
-    hierarchy_json_url: str = "https://api.datamermaid.org/v1/benthicattributes/",
-) -> dict[str, str | None]:
-    """Fetch and build a benthic-attribute name -> parent-name hierarchy.
-
-    See the original implementation in ``mermaidseg.datasets.concepts`` (now moved here) for full
-    docstring.
-    """
-    response = requests.get(hierarchy_json_url, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    benthic_attributes = data["results"]
-
-    while data["next"]:
-        response = requests.get(data["next"], timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        benthic_attributes.extend(data["results"])
-
-    hierarchy_id_dict: dict[int, int | None] = {}
-    id2name_dict: dict[int | None, str] = {}
-    for attr in benthic_attributes:
-        node_id = attr["id"]
-        parent_id = attr["parent"]
-        hierarchy_id_dict[node_id] = parent_id
-        id2name_dict[node_id] = attr["name"]
-    return {
-        cast("str", id2name_dict.get(node_id)): id2name_dict.get(parent_id)
-        for node_id, parent_id in hierarchy_id_dict.items()
-    }
 
 
 def generate_taxonomic_binary_id_mapping(

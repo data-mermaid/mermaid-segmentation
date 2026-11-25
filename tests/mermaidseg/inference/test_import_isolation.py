@@ -16,7 +16,6 @@ FORBIDDEN_PREFIXES = (
     "mermaidseg.logger",
     "mermaidseg.io",
     "mermaidseg.model.meta",
-    "mermaidseg.datasets",
     "mermaidseg.evaluation",
     "mermaidseg.dataset_reconciliation.concepts",
     "mermaidseg.dataset_reconciliation.registry",

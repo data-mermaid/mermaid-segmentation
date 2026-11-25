@@ -11,8 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
 from mermaidseg.data.config import DataSection
 
-RESERVED_DATA_KEYS = frozenset({"local_cache_dir", "local_cache_write_through"})
-
 _T = TypeVar("_T")
 
 
