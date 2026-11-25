@@ -322,12 +322,12 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset coral
 |---|---|
 | `coralnet-raw` version | `s3://mermaid-ic-datasets/datasets/coralnet-raw/<version>/` |
 | `coralnet` curated version | `s3://mermaid-ic-datasets/datasets/coralnet/<version>/` |
-| `coralnet` v1 (`cleaned_up_rerun` labels) | `s3://mermaid-ic-datasets/datasets/coralnet/20261124-e6abfad/`, manifest sha256 `6589ec7d4dd96779420ad1a02c4953e660ba72f357415eea9bf0a53225bd2729` |
+| `coralnet` v1 (`cleaned_up_rerun` labels) | `s3://mermaid-ic-datasets/datasets/coralnet/20261124-cfc389d/`, manifest sha256 `a9de45e16219340929e1fdfb908759cd560407bcff7fb636b8ddd812b269e8a4` |
 | Taxonomy | `s3://mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>/` |
 | Original images | `s3://mermaid-ic-datasets/images/coralnet/s<source_id>/<image_id>.jpg` or `.png` |
 | Staged versions | The same keys under `<stage>/mermaid-ic-datasets/` |
 
-`coralnet@20261124-e6abfad` holds the labels the `cleaned_up_rerun` model trained on. It was built at git `e6abfad` with the frozen `cleaned_up_rerun` mapping, against taxonomy `mermaid-benthic@20261124-e6abfad` (sha256 `fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43`). To reproduce that training set, pin that version. Do not stage it again: the current code maps through the API.
+`coralnet@20261124-cfc389d` holds the labels the `cleaned_up_rerun` model trained on. It was built at git `cfc389d` with the frozen `cleaned_up_rerun` mapping, against taxonomy `mermaid-benthic@20261124-e6abfad` (sha256 `fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43`). To reproduce that training set, pin that version. Do not stage it again: the current code maps through the API.
 
 Each version folder holds `manifest.json` and the tables. `segdata split build` takes the `coralnet` and `coralnet-raw` pins; see [CoralNet split](../../packages/segdata-etl/README.md#coralnet-split).
 

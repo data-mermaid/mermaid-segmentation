@@ -260,7 +260,7 @@ A new commit starts a new checkpoint.
 
 `segdata curate coralnet` stages a `coralnet` version from pinned parents. The version holds tables only, on the image store of raw: no plan file is staged, and no image is read or copied. It maps CoralNet labels only through the MERMAID LabelMapping API, which it fetches at stage time. The command needs network access to `api.datamermaid.org`.
 
-The published `coralnet@20261124-e6abfad` (manifest sha256 `6589ec7d4dd96779420ad1a02c4953e660ba72f357415eea9bf0a53225bd2729`) holds the labels the `cleaned_up_rerun` model trained on. It was built at git `e6abfad` with the frozen `cleaned_up_rerun` mapping, against taxonomy `mermaid-benthic@20261124-e6abfad` (sha256 `fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43`). To reproduce that training set, pin that version. The current code cannot stage it again.
+The published `coralnet@20261124-cfc389d` (manifest sha256 `a9de45e16219340929e1fdfb908759cd560407bcff7fb636b8ddd812b269e8a4`) holds the labels the `cleaned_up_rerun` model trained on. It was built at git `cfc389d` with the frozen `cleaned_up_rerun` mapping, against taxonomy `mermaid-benthic@20261124-e6abfad` (sha256 `fc12b99c119b0151e6fb02ea7bb9870f423bd220764d5f47b57d2305fc3f6b43`). To reproduce that training set, pin that version. The current code cannot stage it again.
 
 ```bash
 uv run --package segdata-etl segdata curate coralnet \
