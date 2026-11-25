@@ -366,7 +366,7 @@ def run(args: argparse.Namespace) -> None:
         lineage = collect_lineage(
             resolved_config=to_plain_dict(cfg_logger),
             seed=seed,
-            data_version=data_version(section, dataset_dict),
+            data_version=data_version(section),
         )
         if checkpoint_data is not None:
             lineage = inherit_lineage(lineage, checkpoint_data.get("lineage"))

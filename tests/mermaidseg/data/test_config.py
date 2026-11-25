@@ -94,16 +94,6 @@ def test_split_files_map_datasets_that_have_one_to_repo_root_paths(tmp_path: Pat
     assert sync_plan(cfg, tmp_path).split_files == {"with": tmp_path / "splits/coralnet.csv"}
 
 
-def test_on_missing_images_defaults_to_fail_and_carries_drop(tmp_path: Path) -> None:
-    cfg = {
-        "datasets": {
-            "a": _entry(train={"groups": "all"}),
-            "b": _entry(train={"groups": "all"}, on_missing_images="drop"),
-        }
-    }
-    assert sync_plan(cfg, tmp_path).on_missing_images == {"a": "fail", "b": "drop"}
-
-
 @pytest.mark.parametrize(
     "entry",
     [
@@ -112,7 +102,6 @@ def test_on_missing_images_defaults_to_fail_and_carries_drop(tmp_path: Path) -> 
         _entry(train={}),
         _entry(train={"groups": "all", "bogus": 1}),
         _entry(train={"groups": "all"}, bogus=1),
-        _entry(train={"groups": "all"}, on_missing_images="skip"),
         _entry(train={"groups": "all", "repeat": 0}),
         _entry(train={"groups": "all"}, resize={"max_edge": 100, "bogus": 1}),
     ],
@@ -122,7 +111,6 @@ def test_on_missing_images_defaults_to_fail_and_carries_drop(tmp_path: Path) -> 
         "neither",
         "unknown-block-key",
         "unknown-entry-key",
-        "bad-missing-mode",
         "repeat-below-one",
         "unknown-resize-key",
     ],

@@ -40,7 +40,6 @@ def pacific_reader(section: DataSection, cache_dir: Path, repo_root: Path) -> Po
         split="val",
         global_offset=0,
         groups=groups,
-        on_missing_images=entry.on_missing_images,
         annotators=entry.val.annotators,
     )
 

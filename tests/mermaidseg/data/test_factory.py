@@ -126,16 +126,6 @@ def test_entry_resize_is_what_open_version_requires_synced(tmp_path: Path) -> No
         _build(section, cache_dir, tmp_path)
 
 
-def test_on_missing_images_drop_reaches_the_reader(tmp_path: Path) -> None:
-    cache_dir, pin = _points(
-        tmp_path, [ImageSpec("i1"), ImageSpec("i2")], [("i1", 1, 1, 5), ("i2", 1, 1, 5)]
-    )
-    (cache_dir / "img-bucket" / "imgs" / "i2.jpg").unlink()
-    section = _section(pin, on_missing_images="drop", val={"groups": "all"})
-    ds = _build(section, cache_dir, tmp_path)[("ds", "val")]
-    assert (len(ds), ds.images_dropped) == (1, 1)
-
-
 def test_image_ids_subset_a_dataset_and_split(tmp_path: Path) -> None:
     cache_dir, pin = _points(
         tmp_path, [ImageSpec("i1"), ImageSpec("i2")], [("i1", 1, 1, 5), ("i2", 1, 1, 5)]

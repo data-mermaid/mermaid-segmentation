@@ -5,10 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
-from collections.abc import Mapping
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
 
 from mermaidseg.data.config import DataSection
 from mermaidseg.io import REPO_ROOT
@@ -53,28 +51,23 @@ def _uv_lock_sha256() -> str | None:
     return hashlib.sha256(lock.read_bytes()).hexdigest()
 
 
-def data_version(section: DataSection, datasets: Mapping[tuple[str, str], Any]) -> dict:
-    """The pinned dataset and taxonomy versions of a run, and the images each dataset dropped.
+def data_version(section: DataSection) -> dict:
+    """The pinned dataset and taxonomy versions of a run.
 
     Args:
         section: The validated ``data`` section of the run.
-        datasets: Built readers keyed by ``(name, split)``; each has ``images_dropped``.
 
     Returns:
-        ``{"datasets": {name: {"version", "manifest_sha256", "resize", "images_dropped"}},
+        ``{"datasets": {name: {"version", "manifest_sha256", "resize"}},
         "taxonomy": {"version", "manifest_sha256"} | None}``. ``resize`` is the entry's resize spec
-        as a dict, or None; ``images_dropped`` sums the dataset's readers.
+        as a dict, or None.
     """
-    dropped: dict[str, int] = {}
-    for (name, _), ds in datasets.items():
-        dropped[name] = dropped.get(name, 0) + int(ds.images_dropped)
     return {
         "datasets": {
             name: {
                 "version": entry.version,
                 "manifest_sha256": entry.manifest_sha256,
                 "resize": entry.resize.model_dump() if entry.resize is not None else None,
-                "images_dropped": dropped.get(name, 0),
             }
             for name, entry in section.datasets.items()
         },

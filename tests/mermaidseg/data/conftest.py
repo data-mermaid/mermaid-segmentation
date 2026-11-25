@@ -18,7 +18,7 @@ from botocore.exceptions import ClientError
 from numpy.typing import NDArray
 from PIL import Image
 
-from mermaidseg.data.config import DATASET_BUCKET
+from segdata_spec import DATASET_BUCKET
 from segdata_spec._marker import SyncMarker, dump_marker
 from segdata_spec._s3 import resize_id, synced_marker_dir
 from segdata_spec.manifest import (
@@ -263,7 +263,7 @@ def write_sync_marker(
     """Mark a hand-written cache version as synced with every group, as ``sync`` would."""
     directory = synced_marker_dir(cache_dir, resize_id(resize), bucket, pin.name, pin.version)
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "marker.json").write_bytes(dump_marker(SyncMarker(resize, None, ())))
+    (directory / "marker.json").write_bytes(dump_marker(SyncMarker(resize, None)))
 
 
 def open_written(tmp_path: Path, **kwargs: Any) -> DatasetVersion:

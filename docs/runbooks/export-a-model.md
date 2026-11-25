@@ -50,11 +50,11 @@ Bundles exported before the `weights_sha256` key existed have no key, and `load_
 `model.json` records the data of the run under `lineage.data_version`:
 
 ```text
-{"datasets": {<name>: {"version", "manifest_sha256", "resize", "images_dropped"}},
+{"datasets": {<name>: {"version", "manifest_sha256", "resize"}},
  "taxonomy": {"version", "manifest_sha256"}}
 ```
 
-`resize` is the resize spec of the dataset, or null. `images_dropped` counts the images that the run skipped for that dataset.
+`resize` is the resize spec of the dataset, or null.
 
 ## Checkpoints and bundles
 

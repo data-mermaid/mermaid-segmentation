@@ -148,7 +148,7 @@ def concept_names_of(bundle: ModelBundle) -> list[str]:
 def coralnet_loss_data_config(data: dict, groups: list[str]) -> dict:
     """A data config whose only block is a coralnet ``val`` block over ``groups``.
 
-    The coralnet pin, ``resize`` and ``on_missing_images`` and the taxonomy pin come from
+    The coralnet pin, ``resize`` and the taxonomy pin come from
     ``data``; the dataset build supplies the eval transform.
     """
     entry = {

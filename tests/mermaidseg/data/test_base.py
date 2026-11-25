@@ -122,14 +122,6 @@ def test_missing_image_fails_at_construction(tmp_path: Path) -> None:
         PointDataset(version, split="val", global_offset=0)
 
 
-def test_missing_image_is_dropped_and_counted_in_drop_mode(tmp_path: Path) -> None:
-    version = _point_version(tmp_path, [("i1", 0, 0, 5), ("i2", 0, 0, 5)])
-    version.image_path({"key": "i2.jpg"}).unlink()
-    ds = PointDataset(version, split="val", global_offset=0, on_missing_images="drop")
-    assert (len(ds), ds.images_dropped) == (1, 1)
-    assert list(ds.images["image_id"]) == ["i1"]
-
-
 def test_missing_mask_fails_at_construction(tmp_path: Path) -> None:
     mask = np.zeros((8, 8), np.uint8)
     version = open_written(
@@ -142,8 +134,7 @@ def test_missing_mask_fails_at_construction(tmp_path: Path) -> None:
 
 def test_empty_selection_raises_on_access(tmp_path: Path) -> None:
     version = _point_version(tmp_path, [("i1", 0, 0, 5)])
-    version.image_path({"key": "i1.jpg"}).unlink()
-    ds = PointDataset(version, split="val", global_offset=0, on_missing_images="drop")
+    ds = PointDataset(version, split="val", global_offset=0, groups=[])
     with pytest.raises(RuntimeError, match="dataset is empty"):
         ds[0]
 

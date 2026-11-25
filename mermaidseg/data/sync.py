@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from mermaidseg.data.config import DATASET_BUCKET, SyncPlan
+from mermaidseg.data.config import SyncPlan
+from segdata_spec import DATASET_BUCKET
 from segdata_spec.splits import coverage_checker
 from segdata_spec.sync import SyncResult, sync
 
@@ -24,7 +25,6 @@ def run_sync(
         cache_dir,
         bucket=DATASET_BUCKET,
         selection=plan.selection,
-        on_missing_images=plan.on_missing_images,
         check_split=coverage_checker(plan.split_files),
         taxonomy=plan.taxonomy,
         resize=plan.resize,
@@ -33,13 +33,12 @@ def run_sync(
 
 
 def format_summary(result: SyncResult) -> str:
-    """One line per dataset (name, version, resize id, images dropped), then the taxonomy version.
+    """One line per dataset (name, version, resize id), then the taxonomy version.
 
     The resize id is ``original`` for a dataset cached without resizing.
     """
     lines = [
-        f"{name}: version {r.version}, resize {r.resize.id if r.resize else 'original'}, "
-        f"images_dropped {r.images_dropped}"
+        f"{name}: version {r.version}, resize {r.resize.id if r.resize else 'original'}"
         for name, r in result.datasets.items()
     ]
     if result.taxonomy is not None:

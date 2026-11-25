@@ -138,14 +138,6 @@ def test_points_holds_the_selected_rows(tmp_path: Path) -> None:
     ]
 
 
-def test_points_omit_a_dropped_images_points(tmp_path: Path) -> None:
-    points = [("i1", 0, 0, 5), ("i2", 1, 1, 7), ("i2", 2, 2, 7)]
-    version = _write_points(tmp_path, points, ["i1", "i2"])
-    version.image_path({"key": "i2.jpg"}).unlink()
-    ds = PointDataset(version, split="val", global_offset=0, on_missing_images="drop")
-    assert _selected_rows(ds) == [("i1", 0, 0, 5, "default")]
-
-
 def _write_points(tmp_path: Path, points: list[tuple[str, int, int, int]], ids: list[str]) -> Any:
     return open_written(
         tmp_path,

@@ -78,13 +78,11 @@ def data_version() -> dict:
                 "version": DS_A[2],
                 "manifest_sha256": sha(MANIFESTS[DS_A]),
                 "resize": None,
-                "images_dropped": 0,
             },
             "ds-b": {
                 "version": DS_B[2],
                 "manifest_sha256": sha(MANIFESTS[DS_B]),
                 "resize": {"max_side": 512},
-                "images_dropped": 2,
             },
         },
         "taxonomy": {"version": TAX[2], "manifest_sha256": sha(MANIFESTS[TAX])},

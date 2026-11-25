@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 
 from mermaidseg.data import PointDataset
-from mermaidseg.data.config import DATASET_BUCKET, SyncPlan, sync_plan
+from mermaidseg.data.config import SyncPlan, sync_plan
 from mermaidseg.data.sync import format_summary, run_sync
+from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ImageMissing, SplitCoverageError
 from segdata_spec.manifest import Pin
 from segdata_spec.read import open_version
@@ -34,7 +35,6 @@ def _publish(tmp_path: Path) -> tuple[FakeS3, Pin]:
 def _plan(
     pin: Pin,
     groups: set[str] | None,
-    mode: str = "fail",
     split_file: Path | None = None,
     resize: ResizeSpec | None = None,
 ) -> SyncPlan:
@@ -42,7 +42,6 @@ def _plan(
         pins={"ds": pin},
         taxonomy=None,
         selection={"ds": groups},
-        on_missing_images={"ds": mode},  # type: ignore[dict-item]
         split_files={"ds": split_file} if split_file is not None else {},
         resize={"ds": resize},
     )
@@ -55,8 +54,7 @@ def _image_files(cache_dir: Path) -> set[str]:
 def test_run_sync_fills_the_cache_so_a_reader_opens_it(tmp_path: Path) -> None:
     fake, pin = _publish(tmp_path / "pub")
     cache_dir = tmp_path / "synced"
-    result = run_sync(_plan(pin, None), cache_dir, fake)
-    assert result.datasets["ds"].images_dropped == 0
+    run_sync(_plan(pin, None), cache_dir, fake)
     ds = PointDataset(open_version(cache_dir, DATASET_BUCKET, pin), split="val", global_offset=0)
     assert len(ds) == 2
     _, mask = ds[0]
@@ -119,19 +117,7 @@ def test_run_sync_forwards_the_selection(tmp_path: Path) -> None:
     assert _image_files(cache_dir) == {"i1.jpg"}
 
 
-def test_run_sync_forwards_the_missing_mode_and_reports_the_count(tmp_path: Path) -> None:
-    fake, pin = _publish(tmp_path / "pub")
-    del fake.objects[("img-bucket", "imgs/i2.jpg")]
-    cache_dir = tmp_path / "synced"
-    result = run_sync(_plan(pin, None, "drop"), cache_dir, fake)
-    assert result.datasets["ds"].images_dropped == 1
-    assert format_summary(result) == (
-        "ds: version 20260101-abc1234, resize original, images_dropped 1"
-    )
-    assert _image_files(cache_dir) == {"i1.jpg"}
-
-
-def test_run_sync_fails_on_a_missing_image_by_default(tmp_path: Path) -> None:
+def test_run_sync_fails_on_a_missing_image(tmp_path: Path) -> None:
     fake, pin = _publish(tmp_path / "pub")
     del fake.objects[("img-bucket", "imgs/i2.jpg")]
     with pytest.raises(ImageMissing):
@@ -145,7 +131,6 @@ def test_run_sync_forwards_the_taxonomy_pin(tmp_path: Path) -> None:
         pins={"ds": pin},
         taxonomy=taxonomy,
         selection={"ds": set()},
-        on_missing_images={},
         split_files={},
     )
     cache_dir = tmp_path / "synced"
@@ -163,17 +148,17 @@ def test_run_sync_forwards_the_taxonomy_pin(tmp_path: Path) -> None:
 
 
 def test_format_summary_lists_each_dataset_and_the_taxonomy() -> None:
-    def dataset(version: str, dropped: int) -> DatasetSyncResult:
+    def dataset(version: str) -> DatasetSyncResult:
         resize = None if version.startswith("20260101") else _RESIZE_1024
-        return DatasetSyncResult(version, "0" * 64, dropped, ("x",) * dropped, resize)
+        return DatasetSyncResult(version, "0" * 64, resize)
 
     result = SyncResult(
-        datasets={"a": dataset("20260101-abc1234", 0), "b": dataset("20260102-abc1234", 3)},
+        datasets={"a": dataset("20260101-abc1234"), "b": dataset("20260102-abc1234")},
         taxonomy=Pin(name="mermaid-benthic", version="20260103-abc1234", manifest_sha256="1" * 64),
     )
     assert format_summary(result).splitlines() == [
-        "a: version 20260101-abc1234, resize original, images_dropped 0",
-        "b: version 20260102-abc1234, resize 5a451a1295a8, images_dropped 3",
+        "a: version 20260101-abc1234, resize original",
+        "b: version 20260102-abc1234, resize 5a451a1295a8",
         "taxonomy: version 20260103-abc1234",
     ]
 
@@ -201,7 +186,7 @@ def test_summary_shows_the_resize_id_of_a_resized_dataset(tmp_path: Path) -> Non
     fake, pin = _publish(tmp_path / "pub")
     spec = ResizeSpec(max_edge=4)
     result = run_sync(_plan(pin, None, resize=spec), tmp_path / "synced", fake)
-    assert f"resize {spec.id}," in format_summary(result)
+    assert f"resize {spec.id}" in format_summary(result)
 
 
 def test_sync_plan_carries_each_entrys_resize(tmp_path: Path) -> None:

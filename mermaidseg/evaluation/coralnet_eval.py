@@ -53,13 +53,11 @@ def coralnet_reader(
     Raises:
         ValueError: A group is unknown or not synced, or an image id is outside the selection.
     """
-    entry = section.datasets[SOURCE_NAME]
     return PointDataset(
         open_dataset_version(section, SOURCE_NAME, cache_dir),
         split=split,
         global_offset=0,
         groups=groups,
-        on_missing_images=entry.on_missing_images,
         image_ids=image_ids,
     )
 

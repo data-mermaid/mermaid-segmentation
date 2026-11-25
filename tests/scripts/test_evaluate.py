@@ -216,7 +216,6 @@ def test_train_loss_data_config_is_one_coralnet_val_block_over_the_groups():
                 "manifest_sha256": "aa",
                 "split_file": "configs/splits/coralnet.csv",
                 "resize": {"max_edge": 2048},
-                "on_missing_images": "drop",
                 "train": {"use": ["train", "val"]},
                 "test": {"use": ["test"]},
             },
@@ -233,7 +232,6 @@ def test_train_loss_data_config_is_one_coralnet_val_block_over_the_groups():
                     "version": "v1",
                     "manifest_sha256": "aa",
                     "resize": {"max_edge": 2048},
-                    "on_missing_images": "drop",
                     "val": {"groups": ["s1", "s2"]},
                 }
             },

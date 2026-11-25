@@ -16,11 +16,10 @@ _ALL = "all"
 
 @dataclass(frozen=True)
 class SyncMarker:
-    """The resize spec applied, the groups synced (None means all) and the dropped image ids."""
+    """The resize spec applied and the groups synced (None means all)."""
 
     resize: ResizeSpec | None
     groups: frozenset[str] | None
-    dropped_image_ids: tuple[str, ...]
 
 
 def merge_groups(
@@ -36,7 +35,6 @@ def dump_marker(marker: SyncMarker) -> bytes:
     payload = {
         "resize": None if marker.resize is None else marker.resize.model_dump(),
         "groups": _ALL if marker.groups is None else sorted(marker.groups),
-        "dropped_image_ids": list(marker.dropped_image_ids),
     }
     return json.dumps(payload, sort_keys=True, indent=2).encode()
 
@@ -58,21 +56,18 @@ def load_marker(path: Path) -> SyncMarker:
         return SyncMarker(
             resize=None if payload["resize"] is None else ResizeSpec(**payload["resize"]),
             groups=None if groups == _ALL else frozenset(groups),
-            dropped_image_ids=tuple(payload["dropped_image_ids"]),
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise CorruptSyncMarker(f"sync marker {path} is unreadable: {exc!r}") from exc
 
 
 def union_markers(markers: Iterable[SyncMarker]) -> SyncMarker:
-    """Union the markers of one resize spec: groups (None absorbs) and dropped image ids."""
+    """Union the markers of one resize spec: the groups (None absorbs)."""
     items = list(markers)
     groups: frozenset[str] | None = frozenset()
-    dropped: set[str] = set()
     for marker in items:
         groups = merge_groups(groups, marker.groups)
-        dropped.update(marker.dropped_image_ids)
-    return SyncMarker(items[0].resize, groups, tuple(sorted(dropped)))
+    return SyncMarker(items[0].resize, groups)
 
 
 def load_synced(directory: Path) -> SyncMarker:

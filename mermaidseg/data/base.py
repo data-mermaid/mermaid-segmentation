@@ -71,7 +71,6 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         source_name: The dataset name from the manifest.
         global_offset: Added to every foreground ``label_id`` of the mask.
         images: The selected rows of ``images.parquet``, indexed ``0..len-1``.
-        images_dropped: Images removed because a cached file is missing (``drop`` mode).
         split: The split this reader serves.
     """
 
@@ -80,7 +79,6 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
     source_name: str
     global_offset: int
     images: pd.DataFrame
-    images_dropped: int
     split: Literal["train", "val", "test"]
     transform: Callable[..., dict[str, Any]] | None
 
@@ -92,7 +90,6 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         global_offset: int,
         groups: Collection[str] | None = None,
         transform: Callable[..., dict[str, Any]] | None = None,
-        on_missing_images: Literal["fail", "drop"] = "fail",
         image_ids: Collection[str] | None = None,
     ) -> None:
         """Select the images and verify the cache.
@@ -104,15 +101,12 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
                 :func:`mermaidseg.data.factory.source_offsets`).
             groups: Image groups to keep; ``None`` keeps all.
             transform: Called as ``transform(image=, mask=)`` and returning a dict with both.
-            on_missing_images: ``"fail"`` raises when a selected file is not cached; ``"drop"``
-                removes those images and counts them in ``images_dropped``.
             image_ids: Keeps only these images (an evaluation subset); ``None`` keeps all.
 
         Raises:
             ValueError: The reader kind differs from the manifest kind, a group is unknown or
                 not in ``version.synced_groups``, or an image id is not in the selection.
-            FileNotFoundError: A selected file is not cached and ``on_missing_images`` is
-                ``"fail"``.
+            FileNotFoundError: A selected file is not cached.
         """
         manifest = version.manifest
         if manifest.kind != self.KIND:
@@ -130,8 +124,8 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         images = _select_groups(version.images.to_pandas(), groups)
         _check_synced(images, version.synced_groups)
         images = _select_image_ids(self._filter_images(images), image_ids)
-        selected, self.images_dropped = self._check_cache(images, on_missing_images)
-        self.images = selected.reset_index(drop=True)
+        self._check_cache(images)
+        self.images = images.reset_index(drop=True)
 
     def _filter_images(self, images: pd.DataFrame) -> pd.DataFrame:
         """Hook: narrow the group-selected rows before the cache check."""
@@ -145,25 +139,16 @@ class VersionDataset(Dataset[tuple[Any, Any]]):
         """Hook: return the int32 mask of an image, in offset-shifted label ids."""
         raise NotImplementedError
 
-    def _check_cache(
-        self, images: pd.DataFrame, mode: Literal["fail", "drop"]
-    ) -> tuple[pd.DataFrame, int]:
-        """Return the images whose files are all cached, and how many were dropped."""
-        missing_paths: list[Path] = []
-        present: list[bool] = []
-        for row in images.to_dict("records"):
-            absent = [p for p in self._row_paths(row) if not p.is_file()]
-            missing_paths.extend(absent)
-            present.append(not absent)
-        if not missing_paths:
-            return images, 0
-        if mode == "fail":
+    def _check_cache(self, images: pd.DataFrame) -> None:
+        """Raise ``FileNotFoundError`` naming the cached files the images need and lack."""
+        missing_paths = [
+            p for row in images.to_dict("records") for p in self._row_paths(row) if not p.is_file()
+        ]
+        if missing_paths:
             listed = ", ".join(str(p) for p in missing_paths[:_MAX_LISTED_PATHS])
             raise FileNotFoundError(
                 f"{len(missing_paths)} cached file(s) missing, e.g. {listed}; run sync first"
             )
-        kept = images[np.array(present, dtype=bool)]
-        return kept, len(images) - len(kept)
 
     def set_source_rows(self, rows: NDArray[np.int64] | None) -> None:
         """Set the concept-source-mask row of each image, or ``None`` to return pairs.

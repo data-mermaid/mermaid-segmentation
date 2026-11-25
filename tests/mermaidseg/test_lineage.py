@@ -6,7 +6,6 @@ import copy
 import shutil
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -131,7 +130,7 @@ def test_collect_lineage_carries_the_run_inputs_and_library_versions(monkeypatch
     assert all(isinstance(v, str) for v in result["versions"].values())
 
 
-def test_data_version_pins_each_dataset_and_the_taxonomy_with_drops_summed_per_dataset():
+def test_data_version_pins_each_dataset_and_the_taxonomy():
     section = DataSection.model_validate(
         {
             "taxonomy": {"version": "t1", "manifest_sha256": "tt"},
@@ -147,26 +146,14 @@ def test_data_version_pins_each_dataset_and_the_taxonomy_with_drops_summed_per_d
             },
         }
     )
-    datasets = {
-        ("coralnet", "train"): SimpleNamespace(images_dropped=2),
-        ("coralnet", "test"): SimpleNamespace(images_dropped=3),
-        ("mermaid", "train"): SimpleNamespace(images_dropped=0),
-    }
-
-    assert data_version(section, datasets) == {
+    assert data_version(section) == {
         "datasets": {
             "coralnet": {
                 "version": "v1",
                 "manifest_sha256": "aa",
                 "resize": {"max_edge": 2048, "filter": "lanczos", "jpeg_quality": 95},
-                "images_dropped": 5,
             },
-            "mermaid": {
-                "version": "v2",
-                "manifest_sha256": "bb",
-                "resize": None,
-                "images_dropped": 0,
-            },
+            "mermaid": {"version": "v2", "manifest_sha256": "bb", "resize": None},
         },
         "taxonomy": {"version": "t1", "manifest_sha256": "tt"},
     }
@@ -177,7 +164,7 @@ def test_data_version_without_a_taxonomy_pin_records_none():
         {"datasets": {"m": {"version": "v", "manifest_sha256": "s", "val": {"groups": "all"}}}}
     )
 
-    assert data_version(section, {})["taxonomy"] is None
+    assert data_version(section)["taxonomy"] is None
 
 
 @pytest.mark.parametrize(

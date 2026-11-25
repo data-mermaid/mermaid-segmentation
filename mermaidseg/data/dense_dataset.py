@@ -38,7 +38,6 @@ class DenseDataset(VersionDataset):
         global_offset: int,
         groups: Collection[str] | None = None,
         transform: Callable[..., dict[str, Any]] | None = None,
-        on_missing_images: Literal["fail", "drop"] = "fail",
         image_ids: Collection[str] | None = None,
     ) -> None:
         """Select images and build the label lookup; arguments as in :class:`VersionDataset`."""
@@ -48,7 +47,6 @@ class DenseDataset(VersionDataset):
             global_offset=global_offset,
             groups=groups,
             transform=transform,
-            on_missing_images=on_missing_images,
             image_ids=image_ids,
         )
         label_ids = version.labels.column("label_id").to_pylist()

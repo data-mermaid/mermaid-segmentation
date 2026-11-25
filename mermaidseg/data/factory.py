@@ -8,7 +8,6 @@ from typing import Any, get_args
 
 from mermaidseg.data.base import VersionDataset
 from mermaidseg.data.config import (
-    DATASET_BUCKET,
     TAXONOMY_NAME,
     DataSection,
     Split,
@@ -17,6 +16,7 @@ from mermaidseg.data.config import (
 from mermaidseg.data.dense_dataset import DenseDataset
 from mermaidseg.data.point_dataset import PointDataset
 from mermaidseg.io import build_eval_transform, compile_transform
+from segdata_spec import DATASET_BUCKET
 from segdata_spec.manifest import Pin
 from segdata_spec.read import DatasetVersion, open_taxonomy, open_version
 from segdata_spec.taxonomy import hierarchy_from_table
@@ -131,7 +131,6 @@ def build_datasets(
             shared: dict[str, Any] = {
                 "groups": entry_split_groups(entry, split, repo_root),
                 "transform": _transform_for(split, block.transform, input_size),
-                "on_missing_images": entry.on_missing_images,
                 "image_ids": subsets.get((name, split)),
                 "global_offset": offsets[name],
             }
