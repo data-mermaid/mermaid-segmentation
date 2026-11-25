@@ -25,6 +25,8 @@ from s3_fake import FakeS3, crc64nvme
 from segdata_etl import cli
 from segdata_etl.label_maps.curated import curated_source
 from segdata_spec import DATASET_BUCKET
+from segdata_spec._marker import SyncMarker, dump_marker
+from segdata_spec._s3 import resize_id, synced_marker_dir
 from segdata_spec.manifest import Manifest, Pin, SourceInfo
 from segdata_spec.publish import GitState, publish_taxonomy
 from segdata_spec.read import DatasetVersion, open_version
@@ -133,7 +135,15 @@ def stage_version(
     stage = tmp_path / "stage"
     taxonomy_sha = publish_fixture_taxonomy(s3, repo)
     pin = run_builder(builder, build_args(builder, stage, taxonomy_sha), s3, capsys)
+    write_sync_marker(stage, pin)
     return Staged(stage, pin, open_version(stage, DATASET_BUCKET, pin), taxonomy_sha)
+
+
+def write_sync_marker(stage: Path, pin: Pin) -> None:
+    """Mark a staged version as synced with every group, which ``open_version`` requires."""
+    directory = synced_marker_dir(stage, resize_id(None), DATASET_BUCKET, pin.name, pin.version)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "marker.json").write_bytes(dump_marker(SyncMarker(None, None, ())))
 
 
 def plan_lines(stage: Path, pin: Pin, name: str) -> list[dict[str, Any]]:

@@ -44,6 +44,7 @@ from tests.mermaidseg.data.conftest import (
     ImageSpec,
     open_written,
     publish_points,
+    write_sync_marker,
     write_version,
 )
 
@@ -1284,6 +1285,8 @@ def test_run_parity_without_sync_scales_cached_points_into_the_resized_space(
     cache_dir, _, pin = write_version(
         tmp_path, kind="points", images=_WIDE, labels=_LABELS, points=list(_WIDE_POINT)
     )
+    spec = ResizeSpec(max_edge=2048)
+    write_sync_marker(cache_dir, DATASET_BUCKET, pin, spec)
     monkeypatch.setitem(
         registry_module._REMOTE_FETCHERS, "catlin_seaview", lambda: {"Acropora": "Hard Coral"}
     )
@@ -1301,7 +1304,7 @@ def test_run_parity_without_sync_scales_cached_points_into_the_resized_space(
         cache_dir=cache_dir,
         client=_NoClient(),
         annotators=None,
-        resize=ResizeSpec(max_edge=2048),
+        resize=spec,
         sync=False,
     )
 

@@ -26,6 +26,7 @@ from conftest import (
 )
 from PIL import Image
 
+from segdata_spec._marker import load_synced
 from segdata_spec.errors import (
     ChecksumMismatch,
     ImageChanged,
@@ -746,3 +747,85 @@ def test_failure_on_the_first_row_bounds_the_rows_submitted_and_cancels_the_rest
 
     assert len(futs) == 2 * _IN_FLIGHT_PER_WORKER
     assert len(_image_gets(fake_s3)) <= 3  # max_workers + 1: rows 0, 1 and at most one more
+
+
+def _marker_files(cache: Path, resize_id: str, name: str = "ds") -> list[Path]:
+    return sorted((cache / "synced" / resize_id / BUCKET / name / VERSION).glob("*.json"))
+
+
+def _markers(cache: Path, resize_id: str, name: str = "ds") -> list[dict[str, Any]]:
+    return [json.loads(path.read_text()) for path in _marker_files(cache, resize_id, name)]
+
+
+def test_sync_with_a_spec_writes_one_marker_file_under_the_spec_id(fake_s3, tmp_path, cache):
+    spec = ResizeSpec(max_edge=32)
+    jpeg = jpeg_bytes(64, 48)
+    _, pin = publish_version(
+        fake_s3,
+        tmp_path,
+        images={"a": (jpeg, "g1"), "b": (jpeg, "g1"), "c": (jpeg, "g2")},
+        sizes={"a": (64, 48), "b": (64, 48), "c": (64, 48)},
+    )
+    fake_s3.objects.pop((IMG_BUCKET, IMG_PREFIX + "c.jpg"))
+
+    sync(
+        fake_s3,
+        {"ds": pin},
+        cache,
+        bucket=BUCKET,
+        selection={"ds": {"g1", "g2"}},
+        on_missing_images={"ds": "drop"},
+        resize={"ds": spec},
+    )
+
+    assert _markers(cache, spec.id) == [
+        {
+            "resize": {"max_edge": 32, "filter": "lanczos", "jpeg_quality": 95},
+            "groups": ["g1", "g2"],
+            "dropped_image_ids": ["c"],
+        }
+    ]
+
+
+def test_sync_without_a_spec_writes_one_marker_file_under_original(fake_s3, pin, cache):
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g2"}})
+
+    assert _markers(cache, "original") == [
+        {"resize": None, "groups": ["g2"], "dropped_image_ids": []}
+    ]
+
+
+def test_sync_without_a_selection_records_all_groups(fake_s3, pin, cache):
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    assert _markers(cache, "original")[0]["groups"] == "all"
+
+
+def test_each_sync_adds_a_marker_file_and_keeps_the_earlier_ones(fake_s3, pin, cache):
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g1"}})
+    first = _marker_files(cache, "original")
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g2"}})
+
+    files = _marker_files(cache, "original")
+    assert len(files) == 2
+    assert set(first) < set(files)
+    assert sorted(m["groups"] for m in _markers(cache, "original")) == [["g1"], ["g2"]]
+
+
+def test_dropped_ids_of_every_sync_are_kept(fake_s3, pin, cache):
+    del fake_s3.objects[(IMG_BUCKET, IMG_PREFIX + "c.jpg")]
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, on_missing_images={"ds": "drop"})
+    sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET, selection={"ds": {"g1"}})
+
+    marker = load_synced(cache / "synced" / "original" / BUCKET / "ds" / VERSION)
+
+    assert marker.dropped_image_ids == ("c",)
+
+
+def test_a_failed_sync_leaves_no_marker(fake_s3, pin, cache):
+    del fake_s3.objects[(IMG_BUCKET, IMG_PREFIX + "c.jpg")]
+
+    with pytest.raises(ImageMissing):
+        sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
+
+    assert not (cache / "synced").exists()

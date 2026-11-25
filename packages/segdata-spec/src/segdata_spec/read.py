@@ -10,14 +10,18 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from segdata_spec._marker import load_synced, marker_files
 from segdata_spec._s3 import (
     MANIFEST_NAME,
     cache_path,
     dataset_prefix,
+    resize_id,
     resized_cache_path,
+    synced_marker_dir,
+    synced_resize_ids,
     taxonomy_prefix,
 )
-from segdata_spec.errors import PinMismatch
+from segdata_spec.errors import NotSynced, PinMismatch
 from segdata_spec.manifest import Manifest, Pin, TaxonomyManifest, manifest_sha256
 from segdata_spec.resize import ResizeSpec, scale_images, scale_points
 
@@ -27,6 +31,7 @@ class DatasetVersion:
     """A synced dataset version: its manifest, its tables and its cached image paths.
 
     With ``resize`` set, the tables and paths describe the images resized per that spec.
+    ``synced_groups`` is the set of groups whose images ``sync`` cached, or None when all of them.
     """
 
     manifest: Manifest
@@ -36,6 +41,7 @@ class DatasetVersion:
     label_counts: pa.Table
     cache_dir: Path
     resize: ResizeSpec | None = None
+    synced_groups: frozenset[str] | None = None
 
     def _object_path(self, key: str) -> Path:
         store = self.manifest.image_store
@@ -90,21 +96,37 @@ def _read_tables(
     }
 
 
+def _require_marker_dir(cache_dir: Path, bucket: str, pin: Pin, resize: ResizeSpec | None) -> Path:
+    directory = synced_marker_dir(cache_dir, resize_id(resize), bucket, pin.name, pin.version)
+    if marker_files(directory):
+        return directory
+    others = synced_resize_ids(cache_dir, bucket, pin.name, pin.version)
+    raise NotSynced(
+        f"{pin.name} {pin.version} was not synced with resize id {resize_id(resize)!r}; "
+        f"resize ids synced for it: {others or 'none'}"
+    )
+
+
 def open_version(
     cache_dir: Path, bucket: str, pin: Pin, resize: ResizeSpec | None = None
 ) -> DatasetVersion:
     """Open a dataset version that ``sync`` cached, re-verifying its manifest against ``pin``.
 
-    With ``resize``, which must match the spec ``sync`` applied, ``images`` carries the resized
-    ``width`` and ``height`` and ``media_type`` ``image/jpeg``, ``points`` are scaled from the
+    ``sync`` must have run for the pin with the same ``resize`` (None for the original images);
+    the union of its markers supplies ``DatasetVersion.synced_groups``. With ``resize``,
+    ``images`` carries the resized ``width`` and ``height`` and ``media_type`` ``image/jpeg``,
+    ``points`` are scaled from the
     original sizes into the resized pixel grid, and ``image_path`` and ``mask_path`` resolve into
     ``<cache_dir>/resized/<resize.id>/``.
 
     Raises:
+        NotSynced: No marker exists for ``pin`` and ``resize``.
+        CorruptSyncMarker: A marker file cannot be parsed.
         FileNotFoundError: The manifest or a table it lists is not in the cache.
         PinMismatch: The cached manifest differs from ``pin``.
         ValueError: With ``resize``, a point references an ``image_id`` absent from ``images``.
     """
+    marker = load_synced(_require_marker_dir(cache_dir, bucket, pin, resize))
     prefix = dataset_prefix(pin.name, pin.version)
     manifest = Manifest.model_validate_json(_read_pinned_manifest(cache_dir, bucket, prefix, pin))
     tables = _read_tables(cache_dir, bucket, prefix, manifest.files)
@@ -122,6 +144,7 @@ def open_version(
         label_counts=tables["stats/label_counts.parquet"],
         cache_dir=cache_dir,
         resize=resize,
+        synced_groups=marker.groups,
     )
 
 

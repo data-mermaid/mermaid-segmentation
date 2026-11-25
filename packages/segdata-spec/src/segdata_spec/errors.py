@@ -35,6 +35,14 @@ class ImageUndecodable(SegdataError):
     """An image or mask matches its record but cannot be decoded."""
 
 
+class NotSynced(SegdataError):
+    """A dataset version has no sync marker for the requested resize spec."""
+
+
+class CorruptSyncMarker(SegdataError):
+    """A sync marker file cannot be parsed; the message names its path."""
+
+
 class SchemaValidationError(SegdataError, ValueError):
     """A table does not satisfy its declared schema."""
 

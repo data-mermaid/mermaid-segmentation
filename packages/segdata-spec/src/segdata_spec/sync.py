@@ -23,14 +23,17 @@ import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 from PIL import Image, UnidentifiedImageError
 
+from segdata_spec._marker import SyncMarker, dump_marker, new_marker_path
 from segdata_spec._s3 import (
     MANIFEST_NAME,
     cache_path,
     dataset_prefix,
     is_not_found,
     is_precondition_failed,
+    resize_id,
     resized_cache_path,
     resized_index_path,
+    synced_marker_dir,
     taxonomy_prefix,
 )
 from segdata_spec.errors import (
@@ -440,6 +443,20 @@ def _dataset_result(
     )
 
 
+def _write_marker(
+    cache_dir: Path,
+    bucket: str,
+    pin: Pin,
+    spec: ResizeSpec | None,
+    groups: Collection[str] | None,
+    dropped: tuple[str, ...],
+) -> None:
+    """Write this sync's own marker file; markers are never read or rewritten here."""
+    directory = synced_marker_dir(cache_dir, resize_id(spec), bucket, pin.name, pin.version)
+    marker = SyncMarker(spec, None if groups is None else frozenset(groups), dropped)
+    _write_atomic(new_marker_path(directory), dump_marker(marker))
+
+
 def _fetch_manifest(client: Any, cache_dir: Path, bucket: str, prefix: str, pin: Pin) -> bytes:
     return _fetch_file(
         client, cache_dir, bucket, prefix + MANIFEST_NAME, pin.manifest_sha256, PinMismatch
@@ -470,6 +487,12 @@ def sync(
     original is not cached. A sidecar at
     ``<cache_dir>/resized/<spec.id>/.index/<bucket>/<key>.json`` records the source ETag and the
     output's size, sha256 and pixel width and height, and is written before the output.
+
+    After a dataset's images and tables verify, a new marker file in
+    ``<cache_dir>/synced/<spec.id or original>/<bucket>/<dataset>/<version>/`` records the
+    spec, the synced groups (``"all"`` for no selection) and the dropped image ids. Each sync adds
+    its own file and never reads or changes the others; ``open_version`` unions them and requires
+    at least one.
     A cached output is verified against its sidecar and never re-downloaded. A dataset absent from
     ``resize``, or mapped to None, caches the original bytes.
 
@@ -529,20 +552,17 @@ def sync(
     if check_split is not None:
         for name, table in images.items():
             check_split(name, set(pc.unique(table.column("group")).to_pylist()))
-    results = {
-        name: _dataset_result(
-            pin,
-            _sync_images(
-                client,
-                cache_dir,
-                manifests[name].image_store,
-                _select_groups(images[name], selection.get(name)),
-                on_missing_images.get(name, "fail"),
-                resize.get(name),
-                workers,
-            ),
+    results: dict[str, DatasetSyncResult] = {}
+    for name, pin in pins.items():
+        dropped = _sync_images(
+            client,
+            cache_dir,
+            manifests[name].image_store,
+            _select_groups(images[name], selection.get(name)),
+            on_missing_images.get(name, "fail"),
             resize.get(name),
+            workers,
         )
-        for name, pin in pins.items()
-    }
+        _write_marker(cache_dir, bucket, pin, resize.get(name), selection.get(name), dropped)
+        results[name] = _dataset_result(pin, dropped, resize.get(name))
     return SyncResult(datasets=results, taxonomy=taxonomy)

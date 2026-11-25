@@ -259,14 +259,18 @@ def format_report(report: ParityReport) -> str:
     return "\n".join(lines)
 
 
-def sync_tables(client: Any, pin: Pin, cache_dir: Path) -> None:
-    """Download and verify the parquet tables of ``pin`` into ``cache_dir``, and no image."""
+def sync_tables(client: Any, pin: Pin, cache_dir: Path, resize: ResizeSpec | None = None) -> None:
+    """Download and verify the parquet tables of ``pin`` into ``cache_dir``, and no image.
+
+    ``resize`` is the spec the version is later opened with; it selects the sync marker written.
+    """
     sync_versions(
         client,
         {pin.name: pin},
         cache_dir,
         bucket=DATASET_BUCKET,
         selection={pin.name: set()},
+        resize={pin.name: resize},
     )
 
 
@@ -345,7 +349,7 @@ def run_parity(
     _require_old(old, "points")
     pin = Pin(name=dataset, version=version, manifest_sha256=manifest_sha256)
     if sync:
-        sync_tables(client, pin, cache_dir)
+        sync_tables(client, pin, cache_dir, resize)
         version_data = open_version(cache_dir, DATASET_BUCKET, pin, resize)
     else:
         version_data = _open_cached(cache_dir, pin, resize)

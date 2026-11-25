@@ -19,6 +19,8 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from mermaidseg.data.config import DATASET_BUCKET
+from segdata_spec._marker import SyncMarker, dump_marker
+from segdata_spec._s3 import resize_id, synced_marker_dir
 from segdata_spec.manifest import (
     EtlInfo,
     FileEntry,
@@ -32,6 +34,7 @@ from segdata_spec.manifest import (
 )
 from segdata_spec.publish import GitState, publish_taxonomy
 from segdata_spec.read import DatasetVersion, open_version
+from segdata_spec.resize import ResizeSpec
 from segdata_spec.schema import (
     IMAGES_SCHEMA,
     LABEL_COUNTS_SCHEMA,
@@ -247,7 +250,18 @@ def write_version(
     )
     data = dump_manifest(manifest)
     (prefix / "manifest.json").write_bytes(data)
-    return cache_dir, BUCKET, Pin(name=name, version=version, manifest_sha256=manifest_sha256(data))
+    pin = Pin(name=name, version=version, manifest_sha256=manifest_sha256(data))
+    write_sync_marker(cache_dir, BUCKET, pin)
+    return cache_dir, BUCKET, pin
+
+
+def write_sync_marker(
+    cache_dir: Path, bucket: str, pin: Pin, resize: ResizeSpec | None = None
+) -> None:
+    """Mark a hand-written cache version as synced with every group, as ``sync`` would."""
+    directory = synced_marker_dir(cache_dir, resize_id(resize), bucket, pin.name, pin.version)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "marker.json").write_bytes(dump_marker(SyncMarker(resize, None, ())))
 
 
 def open_written(tmp_path: Path, **kwargs: Any) -> DatasetVersion:
