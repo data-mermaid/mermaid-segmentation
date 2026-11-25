@@ -9,7 +9,9 @@ columns:
 
 derived_from:
   # The per-split source sets equal data.coralnet.{train,val,test}.whitelist_sources
-  # in configs/data_config.yaml at this main commit (585 / 102 / 139 sources).
+  # in configs/data_config.yaml at this main commit (585 / 102 / 139 sources), except that
+  # 85 of the 585 train sources are `excluded` here (see below). The file lists
+  # 500 train / 102 val / 139 test / 553 excluded groups.
   whitelists:
     file: configs/data_config.yaml
     commit: dd2b48f05ed0b67fa84fe919e842971e74a604c8
@@ -17,6 +19,15 @@ derived_from:
   split_group:
     file: configs/coralnet/source_splits.csv
     commit: e0d387684ac86e13262e917d9d82aab5e22f0c9d
+  # Excluded groups are not used for training or evaluation. They carry a blank split_group
+  # and sort last by source id. They are of two kinds:
+  # 468 groups of coralnet@20261124-cfc389d that the cleaned_up_rerun split does not list, and
+  # 85 train sources of the cleaned_up_rerun split whose images are all on the image
+  # blacklist, so that version has no images for them.
+  excluded:
+    dataset: coralnet
+    version: 20261124-cfc389d
+    manifest_sha256: a9de45e16219340929e1fdfb908759cd560407bcff7fb636b8ddd812b269e8a4
 
 builder:
   # Last commit that generated source_splits.csv before it was edited by hand.
