@@ -19,6 +19,10 @@ class PinMismatch(SegdataError):
     """A manifest's sha256 differs from the pin that names it."""
 
 
+class ManifestNotFound(SegdataError):
+    """A pinned manifest is absent from the bucket; the message is its s3:// URI."""
+
+
 class ChecksumMismatch(SegdataError):
     """A file's content differs from the checksum or size recorded for it."""
 

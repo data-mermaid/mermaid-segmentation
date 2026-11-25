@@ -41,6 +41,7 @@ from segdata_spec.errors import (
     ImageChanged,
     ImageMissing,
     ImageUndecodable,
+    ManifestNotFound,
     PinMismatch,
     SegdataError,
 )
@@ -461,6 +462,33 @@ def _fetch_manifest(client: Any, cache_dir: Path, bucket: str, prefix: str, pin:
     return _fetch_file(
         client, cache_dir, bucket, prefix + MANIFEST_NAME, pin.manifest_sha256, PinMismatch
     )
+
+
+def check_published_manifest(client: Any, bucket: str, pin: Pin, *, taxonomy: bool = False) -> None:
+    """Check that ``pin``'s manifest is in ``bucket`` with the pinned sha256.
+
+    Reads only: nothing is cached and no table or image is fetched. ``taxonomy`` selects the
+    taxonomy prefix instead of the dataset prefix.
+
+    Raises:
+        ManifestNotFound: The manifest object is absent; the message is its s3:// URI.
+        PinMismatch: The manifest's sha256 differs from ``pin.manifest_sha256``.
+        botocore.exceptions.ClientError: Any S3 error other than not-found.
+    """
+    prefix = taxonomy_prefix if taxonomy else dataset_prefix
+    key = prefix(pin.name, pin.version) + MANIFEST_NAME
+    try:
+        data = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    except ClientError as exc:
+        if not is_not_found(exc):
+            raise
+        raise ManifestNotFound(f"s3://{bucket}/{key}") from exc
+    actual = _sha256(data)
+    if actual != pin.manifest_sha256:
+        raise PinMismatch(
+            f"manifest s3://{bucket}/{key} has sha256 {actual}, but the pin expects "
+            f"{pin.manifest_sha256}"
+        )
 
 
 def sync(

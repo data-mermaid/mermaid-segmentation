@@ -6,7 +6,6 @@ checkpoint into a bundle directory that ``mermaidseg.inference.bundle.load_bundl
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -18,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from botocore.exceptions import ClientError
 from safetensors.torch import save_file
 
 from mermaidseg.data.config import TAXONOMY_NAME
@@ -33,7 +31,9 @@ from mermaidseg.inference.bundle import (
 from mermaidseg.inference.preprocess import CHANNEL_ORDER, INTERPOLATION
 from mermaidseg.run_setup import read_checkpoint
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import MANIFEST_NAME, dataset_prefix, is_not_found, taxonomy_prefix
+from segdata_spec.errors import ManifestNotFound, PinMismatch
+from segdata_spec.manifest import Pin
+from segdata_spec.sync import check_published_manifest
 
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -167,7 +167,10 @@ def _pins(lineage: dict) -> list[tuple[str, str, str, str]]:
     if not data_version:
         raise ValueError("the run's lineage has no data_version; its data must be pinned")
     if not data_version.get("datasets"):
-        raise ValueError("the run's lineage pins no datasets; its data must be pinned")
+        raise ValueError(
+            "the run's lineage pins no datasets; its data must be pinned, "
+            "and a checkpoint trained before dataset pinning must be retrained"
+        )
     taxonomy = data_version.get("taxonomy")
     if taxonomy is None:
         raise ValueError("the run's lineage has no taxonomy pin; its taxonomy must be pinned")
@@ -179,30 +182,18 @@ def _pins(lineage: dict) -> list[tuple[str, str, str, str]]:
     return pins
 
 
-def _manifest_key(kind: str, name: str, version: str) -> str:
-    prefix = taxonomy_prefix if kind == "taxonomy" else dataset_prefix
-    return prefix(name, version) + MANIFEST_NAME
-
-
 def _require_pinned_manifests(lineage: dict, client: Any) -> None:
     """Raise ValueError unless every pinned manifest is in the bucket with its recorded sha256."""
     for kind, name, version, expected in _pins(lineage):
-        key = _manifest_key(kind, name, version)
+        pin = Pin(name=name, version=version, manifest_sha256=expected)
         try:
-            data = client.get_object(Bucket=DATASET_BUCKET, Key=key)["Body"].read()
-        except ClientError as exc:
-            if not is_not_found(exc):
-                raise
+            check_published_manifest(client, DATASET_BUCKET, pin, taxonomy=(kind == "taxonomy"))
+        except ManifestNotFound as exc:
             raise ValueError(
-                f"{kind} manifest for {name!r} version {version!r} is missing: "
-                f"s3://{DATASET_BUCKET}/{key}"
+                f"{kind} manifest for {name!r} version {version!r} is missing: {exc}"
             ) from exc
-        actual = hashlib.sha256(data).hexdigest()
-        if actual != expected:
-            raise ValueError(
-                f"{kind} manifest for {name!r} version {version!r} has sha256 {actual}, "
-                f"but the run recorded {expected}"
-            )
+        except PinMismatch as exc:
+            raise ValueError(f"{kind} manifest for {name!r} version {version!r}: {exc}") from exc
 
 
 def _require_git_checkout(repo_dir: Path) -> None:

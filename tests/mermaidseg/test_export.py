@@ -396,6 +396,11 @@ def test_export_refuses_a_commit_the_repository_does_not_know(deployable, tmp_pa
         pytest.param(None, "data_version", id="no-data-version"),
         pytest.param({**data_version(), "datasets": {}}, "datasets", id="empty-datasets"),
         pytest.param({**data_version(), "taxonomy": None}, "taxonomy", id="null-taxonomy"),
+        pytest.param(
+            {"data_config_sha1": "x", "manifests": {}, "manifest_sha256": {}, "label_mappings": {}},
+            "retrain",
+            id="pre-pinning-lineage",
+        ),
     ],
 )
 def test_export_refuses_a_lineage_that_does_not_pin_its_data(

@@ -13,7 +13,7 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 | Caller | Calls |
 |---|---|
 | ETL | `publish.publish_dataset` and `publish.publish_taxonomy`. Each returns the manifest and its sha256, which becomes a `manifest.Pin`. |
-| Trainer | `sync.sync(client, pins, cache_dir, bucket=..., resize=..., max_workers=...)`, which needs S3 access, then `read.open_version(..., resize=...)` and `read.open_taxonomy`, which read only the cache. Also `resize` (`ResizeSpec`, `scaled_size`, `resize_image`, `resize_mask`, `scale_points`, `scale_images`). `scale_images` returns the images table with the resized `width` and `height` and `media_type` `image/jpeg`; `open_version(resize=)` uses it. |
+| Trainer | `sync.sync(client, pins, cache_dir, bucket=..., resize=..., max_workers=...)`, which needs S3 access; `sync.check_published_manifest(client, bucket, pin, taxonomy=...)`, which reads the manifest without caching it; then `read.open_version(..., resize=...)` and `read.open_taxonomy`, which read only the cache. Also `resize` (`ResizeSpec`, `scaled_size`, `resize_image`, `resize_mask`, `scale_points`, `scale_images`). `scale_images` returns the images table with the resized `width` and `height` and `media_type` `image/jpeg`; `open_version(resize=)` uses it. |
 | Both | `taxonomy.roll_up` and `taxonomy.hierarchy_from_table`. |
 | Split builder and trainer | `splits.read_split_file`. The trainer also passes `splits.coverage_checker` to `sync`. |
 
@@ -107,6 +107,7 @@ All derive from `errors.SegdataError`.
 | `ObjectExists` | A write-once key exists with different bytes. |
 | `SchemaValidationError` | A table fails its schema, or the cross-table rules. Also a `ValueError`. |
 | `PinMismatch` | A manifest's sha256 differs from its pin. |
+| `ManifestNotFound` | A pinned manifest is absent from the bucket. |
 | `ChecksumMismatch` | A table, image or mask differs from its recorded checksum or size, or a cached resized output has no valid index entry or differs from it. |
 | `ImageChanged` | An image no longer matches its recorded ETag. |
 | `ImageMissing` | An image is absent and the dataset's mode is `fail`. |

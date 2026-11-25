@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from conftest import (
     BUCKET,
     IMG_BUCKET,
@@ -32,11 +33,17 @@ from segdata_spec.errors import (
     ImageChanged,
     ImageMissing,
     ImageUndecodable,
+    ManifestNotFound,
     PinMismatch,
 )
 from segdata_spec.manifest import Pin
 from segdata_spec.resize import ResizeSpec
-from segdata_spec.sync import _IN_FLIGHT_PER_WORKER, DatasetSyncResult, sync
+from segdata_spec.sync import (
+    _IN_FLIGHT_PER_WORKER,
+    DatasetSyncResult,
+    check_published_manifest,
+    sync,
+)
 
 PREFIX = f"datasets/ds/{VERSION}/"
 TABLES = ["images.parquet", "points.parquet", "labels.parquet", "stats/label_counts.parquet"]
@@ -829,3 +836,59 @@ def test_a_failed_sync_leaves_no_marker(fake_s3, pin, cache):
         sync(fake_s3, {"ds": pin}, cache, bucket=BUCKET)
 
     assert not (cache / "synced").exists()
+
+
+def test_check_published_manifest_returns_none_for_a_matching_sha(fake_s3, pin):
+    assert check_published_manifest(fake_s3, BUCKET, pin) is None
+
+
+def test_check_published_manifest_reads_without_writing(fake_s3, pin):
+    check_published_manifest(fake_s3, BUCKET, pin)
+
+    assert [op for op, *_ in fake_s3.calls] == ["get"]
+
+
+def test_check_published_manifest_names_the_key_of_a_missing_manifest(fake_s3, pin):
+    del fake_s3.objects[(BUCKET, PREFIX + "manifest.json")]
+
+    with pytest.raises(ManifestNotFound, match=re.escape(f"s3://{BUCKET}/{PREFIX}manifest.json")):
+        check_published_manifest(fake_s3, BUCKET, pin)
+
+
+def test_check_published_manifest_gives_both_shas_on_mismatch(fake_s3, pin):
+    fake_s3.objects[(BUCKET, PREFIX + "manifest.json")] = b"tampered"
+    actual = hashlib.sha256(b"tampered").hexdigest()
+
+    with pytest.raises(PinMismatch) as raised:
+        check_published_manifest(fake_s3, BUCKET, pin)
+
+    assert actual in str(raised.value)
+    assert pin.manifest_sha256 in str(raised.value)
+
+
+def test_check_published_manifest_propagates_a_non_404_client_error(fake_s3, pin):
+    denied = ClientError(
+        {
+            "Error": {"Code": "AccessDenied", "Message": "no"},
+            "ResponseMetadata": {"HTTPStatusCode": 403},
+        },
+        "GetObject",
+    )
+
+    def get_object(**kwargs: Any) -> Any:
+        raise denied
+
+    fake_s3.get_object = get_object  # type: ignore[method-assign]
+
+    with pytest.raises(ClientError) as raised:
+        check_published_manifest(fake_s3, BUCKET, pin)
+
+    assert raised.value is denied
+
+
+def test_check_published_manifest_taxonomy_flag_selects_the_taxonomy_prefix(fake_s3, tmp_path):
+    tax = publish_taxonomy_version(fake_s3, tmp_path)
+
+    assert check_published_manifest(fake_s3, BUCKET, tax, taxonomy=True) is None
+    with pytest.raises(ManifestNotFound):
+        check_published_manifest(fake_s3, BUCKET, tax, taxonomy=False)
