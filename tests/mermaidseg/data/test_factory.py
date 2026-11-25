@@ -6,14 +6,15 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
 import pytest
 
 from mermaidseg.data import DenseDataset, PointDataset
 from mermaidseg.data.config import DataSection
-from mermaidseg.data.factory import build_datasets, open_dataset_version
-from segdata_spec.errors import NotSynced
+from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy, open_dataset_version
+from segdata_spec.errors import NotSynced, PinMismatch
 from segdata_spec.manifest import Pin
-from tests.mermaidseg.data.conftest import ImageSpec, write_version
+from tests.mermaidseg.data.conftest import ImageSpec, write_taxonomy, write_version
 
 LABELS = {5: "five"}
 
@@ -151,3 +152,41 @@ def test_open_dataset_version_requires_the_entrys_resize_synced(tmp_path: Path) 
     section = _section(pin, resize={"max_edge": 4}, val={"groups": "all"})
     with pytest.raises(NotSynced):
         open_dataset_version(section, "ds", cache_dir)
+
+
+def _taxonomy_section(pin: Pin, manifest_sha256: str) -> DataSection:
+    return DataSection.model_validate(
+        {
+            "datasets": {},
+            "taxonomy": {"version": pin.version, "manifest_sha256": manifest_sha256},
+        }
+    )
+
+
+def _write_hard_coral_taxonomy(tmp_path: Path) -> tuple[Path, Pin]:
+    cache_dir = tmp_path / "cache"
+    table = pa.table(
+        {"id": ["1", "2"], "name": ["Hard coral", "Acropora"], "parent_id": [None, "1"]}
+    )
+    return cache_dir, write_taxonomy(cache_dir, tmp_path, table)
+
+
+def test_section_without_taxonomy_has_no_hierarchy(tmp_path: Path) -> None:
+    section = DataSection.model_validate({"datasets": {}})
+    assert load_benthic_hierarchy(section, tmp_path / "cache") is None
+
+
+def test_pinned_taxonomy_gives_the_lower_cased_child_to_parent_hierarchy(tmp_path: Path) -> None:
+    cache_dir, pin = _write_hard_coral_taxonomy(tmp_path)
+    section = _taxonomy_section(pin, pin.manifest_sha256)
+    assert load_benthic_hierarchy(section, cache_dir) == {
+        "hard coral": None,
+        "acropora": "hard coral",
+    }
+
+
+def test_taxonomy_pin_with_a_different_manifest_sha_raises(tmp_path: Path) -> None:
+    cache_dir, pin = _write_hard_coral_taxonomy(tmp_path)
+    section = _taxonomy_section(pin, "0" * 64)
+    with pytest.raises(PinMismatch):
+        load_benthic_hierarchy(section, cache_dir)
