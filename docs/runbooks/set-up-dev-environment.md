@@ -107,16 +107,19 @@ The wandb project comes from `wandb_project` in `configs/logger_config.yaml`. `W
 
 ## Check the setup
 
-Run a short local training. `--num-workers` is required:
+Sync the pinned datasets into a cache directory, then run a short local training. `--cache-dir` and `--num-workers` are required:
 
 ```bash
+uv run python scripts/sync_data.py --data-config configs/data_config.yaml --cache-dir /path/to/cache
 uv run python scripts/train.py --num-workers 4 --cache-dir /path/to/cache
 ```
+
+The sync downloads every pinned dataset version. The final-run data config needs up to the 1500 GB that the SageMaker volume provides, and AWS credentials that read `mermaid-ic-datasets`. See [Get the training datasets](training-datasets.md).
 
 Checkpoints go to `outputs/model_checkpoints/<run>/`. `--output-dir` changes `outputs`. The run writes two files there:
 
 - `config.yaml`: the resolved config, as a record of the settings the run used. Do not pass it back in as a run config.
-- `model.json`, written when the run starts: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version (the data-config hash plus each manifest's S3 key and sha256), resolved config, and the torch, transformers and peft versions). A resumed or warm-started run also records the source checkpoint's git SHA and dirty flag under `parent`. `parent` is absent on a fresh run and `null` when the source checkpoint had no lineage.
+- `model.json`, written when the run starts: the architecture, encoder config, label and concept maps, preprocessing and lineage (git SHA, dirty flag, `uv.lock` hash, seed, data version (each dataset's version, manifest sha256, resize spec and dropped-image count, and the taxonomy pin), resolved config, and the torch, transformers and peft versions). A resumed or warm-started run also records the source checkpoint's git SHA and dirty flag under `parent`. `parent` is absent on a fresh run and `null` when the source checkpoint had no lineage.
 
 The config flags (`--training-config`, `--model-config`, `--data-config`, `--concept-schema-config`, `--logger-config`) take a path relative to the repo root, or an absolute path. The defaults are in `configs/`. `--resolution` sets the train crop size and the model input size. Run `scripts/train.py --help` for resume (`--checkpoint`), init (`--init-weights`) and the other flags.
 

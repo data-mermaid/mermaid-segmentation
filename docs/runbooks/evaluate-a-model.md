@@ -12,9 +12,13 @@ This runbook scores an exported bundle with `scripts/evaluate.py`, the validatio
 ## Before you start
 
 - Export the checkpoint to a bundle. See [Export a model](export-a-model.md).
-- The evaluation reads the same data as training. To read it from the local S3 cache, pass `--cache-dir`. Without `--cache-dir`, the script reads S3 and needs AWS credentials.
-- The benthic hierarchy comes from the MERMAID API, and the script caches it in `--output-dir`. If the machine cannot reach the API, pass a saved copy with `--benthic-hierarchy-json`.
-- A CoralNet evaluation also reads the CoralNet label mapping: from the API online, or from the snapshot that `scripts/prefetch_cache.py` writes offline. `--benthic-hierarchy-json` does not cover it. See [Map new labels](coralnet-data.md#map-new-labels).
+- Fill the cache. `scripts/evaluate.py` needs `--cache-dir`, a directory that `scripts/sync_data.py` filled from the same `--data-config`. The script reads only that cache and makes no data call to S3:
+
+  ```bash
+  uv run python scripts/sync_data.py --data-config configs/data_config.yaml --cache-dir /path/to/cache
+  ```
+
+- The benthic taxonomy comes from the taxonomy version that the data config pins, not from the MERMAID API. The CoralscapesV2 probes read the synced `coralscapes_v2` version.
 
 ## Run the evaluation
 
@@ -44,10 +48,10 @@ Without `--strict`, a failed evaluation is only logged, and the script exits 0. 
 
 Other options:
 
-- `--split` selects the CoralNet sources and the CoralscapesV2 split that the probes score. The default is `val`. `--split train` allows only `coralnet` and `val_loss`, and reports the loss as `train_loss`.
+- `--split` selects the CoralNet groups and the CoralscapesV2 split that the probes score. The default is `val`. The CoralNet groups are the rows with that `split` in the data config's split file (`configs/splits/coralnet.csv`). `--split train` allows only `coralnet` and `val_loss`, and reports the loss as `train_loss`.
 - `--images-per-source N` scores a seeded random sample of at most N images per CoralNet source. `--sample-seed` sets the seed. The sample is written to `coralnet_<split>_sample.parquet`.
 - `--data-config` defaults to `configs/data_config.yaml`. It sets the sources and splits of every evaluation.
-- `--coralscapes-root` reads CoralscapesV2 from a local mirror.
+- `--schema-config` sets the data config whose datasets freeze the concept channels, as in training. The default is `configs/data_config.yaml`.
 - `--max-images-per-unit` and `--max-test-images` limit the data for a quick debug run.
 
 Run the script with `--help` for the rest.
@@ -55,6 +59,8 @@ Run the script with `--help` for the rest.
 ## Read the results
 
 The script writes each section to `summary.json` and `summary.md` in `--output-dir`, and to its own subdirectory, for example `coralnet_val/`.
+
+`summary.json` records `coralnet_split_in_training`. It is true when the data config trains on a CoralNet group that `--split` scores, and the script then logs a warning that names the groups. A score on such a split does not measure generalization.
 
 CoralNet and Pacific report:
 
@@ -73,7 +79,7 @@ A change that alters model outputs must include metrics and the baseline they co
 
 The CoralscapesV2 probe point sets are committed in `configs/eval/`. Scores from different point sets do not compare, so a rebuild breaks comparison with earlier results.
 
-`scripts/build_coralscapes_v2_probe_points.py` rebuilds them from a local mirror of `josauder/coralscapesV2`. Its docstring has the command for each set:
+`scripts/build_coralscapes_v2_probe_points.py` rebuilds them from the `coralscapes_v2` version that the data config pins, read from the synced `--cache-dir`. Its docstring has the command for each set:
 
 | File | Set |
 |---|---|

@@ -17,8 +17,6 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 | Both | `taxonomy.roll_up` and `taxonomy.hierarchy_from_table`. |
 | Split builder and trainer | `splits.read_split_file`. The trainer also passes `splits.coverage_checker` to `sync`. |
 
-`resize` copies the ETL's decode-and-resize rather than being called by it. For JPEG and PNG images whose scaled edges are at least 1 px, `test_segdata_spec_parity.py` keeps the two byte-identical. Otherwise they diverge: the spec refuses formats other than JPEG and PNG, which the ETL decodes, and clamps a zero edge to 1 px, where the ETL fails.
-
 `resize` on `sync` maps a dataset name to a `ResizeSpec` or `None`. A dataset that is absent or maps to `None` is cached as is. `DatasetSyncResult.resize` records the spec that was applied, for model lineage. After each dataset version syncs, `sync` writes a marker (see Cache layout) that records the resize spec, the synced groups and the dropped image ids. `open_version(..., resize=...)` raises `NotSynced` when the version has no marker for that spec, and the message names the requested resize id and the ids that do have a marker. `DatasetVersion.synced_groups` holds the groups whose images are cached, or `None` when all of them are. Sync never deletes cached images, so `open_version` unions the groups of every marker for the version and spec: a later sync adds its groups, and a tables-only sync (a selection of no groups) adds none. `ResizeSpec` is a training-cache step only: evaluation and serving resize any input to the model's `input_size`, so inference does not apply it. A `ResizeSpec` holds `max_edge`, `filter` (`lanczos`, `bicubic` or `bilinear`) and `jpeg_quality`; its `id` is the first 12 hex characters of a hash of the three fields.
 
 `sync` runs on `max_workers` threads (default `min(8, os.cpu_count())`). Create the boto3 client with `max_pool_connections` of at least `max_workers`.
@@ -51,7 +49,7 @@ A resized file keeps the source key name, so a key ending `.png` may hold JPEG b
 
 ## Resize rule
 
-- Images are decoded with JPEG draft mode, then scaled with Lanczos (or the spec's filter) to `int(edge * (max_edge / longest))` on each edge. This is the operation order of the legacy CoralNet resize stage, so a few sizes come out one pixel short, for example 2215 to 2047 at `max_edge=2048`.
+- Images are decoded with JPEG draft mode, then scaled with Lanczos (or the spec's filter) to `int(edge * (max_edge / longest))` on each edge. Because the float product is truncated, a few sizes come out one pixel short, for example 2215 to 2047 at `max_edge=2048`.
 - Originals are decoded only as JPEG or PNG, and masks only as PNG. Any other format fails with `ImageUndecodable`.
 - Each scaled edge is at least 1 px: a 10000x3 image at `max_edge=2048` becomes 2048x1.
 - A JPEG in RGB or L mode within `max_edge` is cached byte for byte. Any other image is re-encoded as JPEG.
@@ -122,5 +120,3 @@ uv run --package segdata-spec --group tests pytest packages/segdata-spec/tests
 ```
 
 The tests use an in-memory S3 fake. `pytest-socket` blocks every host except localhost.
-
-`packages/segdata-etl/tests/test_segdata_spec_parity.py` checks that `resize_image` output is byte-identical to the ETL's decode and resize, and that `scale_points` matches the `row` and `col` the ETL training manifest computes.

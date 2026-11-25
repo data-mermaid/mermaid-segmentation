@@ -13,18 +13,18 @@ Each runbook gives the steps for one task, in order, from the prerequisites to a
 
 | Runbook | Use it to |
 |---|---|
-| [Get the training datasets](training-datasets.md) | Find where each dataset comes from, load one into S3, or add a new dataset |
-| [Recreate and update the CoralNet data](coralnet-data.md) | Scrape CoralNet and build the dataset that training reads |
-| [Regenerate the derived configs](derived-configs.md) | Rebuild the train + val data config, the concept removal list and the concept source mask |
+| [Get the training datasets](training-datasets.md) | Fill the data cache from the pinned dataset versions, add a dataset, or update the MERMAID data |
+| [Recreate and update the CoralNet data](coralnet-data.md) | Scrape CoralNet, then build and publish the CoralNet dataset versions that training pins |
+| [Regenerate the derived configs](derived-configs.md) | Rebuild the concept removal list and the concept source mask from the synced cache |
 
 ## Train, export and evaluate
 
 | Runbook | Use it to |
 |---|---|
-| [Train on Slurm](train-on-slurm.md) | Fill the offline cache and train the final model on the cluster (the default lane) |
+| [Train on Slurm](train-on-slurm.md) | Sync the data cache and train the final model on the cluster (the default lane) |
 | [Train on SageMaker](train-on-sagemaker.md) | Build the image and train the final model as SageMaker jobs (the backup lane) |
 | [Export a model](export-a-model.md) | Turn a checkpoint into a deployable bundle |
-| [Evaluate a model](evaluate-a-model.md) | Score a bundle with the validation suite and compare two models |
+| [Evaluate a model](evaluate-a-model.md) | Score a bundle on the synced data with the validation suite and compare two models |
 
 ## Not written yet
 

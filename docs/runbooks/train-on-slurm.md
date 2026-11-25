@@ -3,7 +3,7 @@
 This runbook trains the final model on the Slurm cluster: `cbm_final` at 256 px, then its 768 px fine-tune `cbm_final_res768`. Slurm is the default training lane. [SageMaker](train-on-sagemaker.md) is the backup, and runs the same `scripts/train.py` command.
 
 - [Before you start](#before-you-start)
-- [Fill the offline data cache](#fill-the-offline-data-cache)
+- [Fill the data cache](#fill-the-data-cache)
 - [Launch the runs](#launch-the-runs)
 - [Follow a run](#follow-a-run)
 - [Continue a run after a time limit or preemption](#continue-a-run-after-a-time-limit-or-preemption)
@@ -15,28 +15,27 @@ This runbook trains the final model on the Slurm cluster: `cbm_final` at 256 px,
 - Complete [Set up the Slurm cluster](set-up-slurm.md).
 - Run every command from the repository root on the cluster.
 - Load the env file into your shell: `set -a; source .env; set +a`.
+- Run the launcher on the login node, where AWS credentials and the Hugging Face hub are reachable.
 
-## Fill the offline data cache
+## Fill the data cache
 
-Batch jobs run offline. `slurm/common.sh` unsets the AWS variables and sets `MERMAIDSEG_S3_OFFLINE=1`, so a cache miss fails the job and does not go to S3. Fill the cache first. This is the only step that needs AWS credentials.
+Training reads only the local cache and `$MERMAIDSEG_SCRATCH/hf-cache`, so a node without AWS or Hugging Face access still trains. The cache at `MERMAIDSEG_CACHE_DIR` holds the dataset versions that `configs/data_config.yaml` pins; `hf-cache` holds the encoder.
 
-Run it on a machine that has AWS credentials, can reach `api.datamermaid.org` (for the CoralNet label mappings) and can write `MERMAIDSEG_CACHE_DIR`. Set `HF_HOME` to the cache that batch jobs use, because the Hugging Face datasets (CoralscapesV2, UCSD Mosaics) download into `HF_HOME`, not into the S3 cache:
+`slurm/launch_final.sh` fills both on the login node before it submits a job:
+
+1. `scripts/sync_data.py --data-config configs/data_config.yaml --cache-dir "$MERMAIDSEG_CACHE_DIR"` downloads and verifies the pinned versions. It resizes CoralNet images to 2048 px at sync time.
+2. `scripts/warm_hf_cache.py --model-config configs/model_config_cbm_dpt_lora_vitl.yaml`, run with `HF_HOME=$MERMAIDSEG_SCRATCH/hf-cache`, downloads the DINOv3 encoder.
+
+If either step fails, the launcher exits and submits nothing. A rerun skips the cached files that pass verification. The launcher needs `MERMAIDSEG_CACHE_DIR` and `MERMAIDSEG_SCRATCH` in `.env`, AWS credentials that read `mermaid-ic-datasets`, and a Hugging Face token (`HF_TOKEN`) with access to DINOv3. `--dry-run` skips both steps.
+
+To fill the cache without launching, run step 1 by hand. `--workers N` sets the number of download threads:
 
 ```bash
-HF_HOME=$MERMAIDSEG_SCRATCH/hf-cache uv run python scripts/prefetch_cache.py \
-    --cache-dir "$MERMAIDSEG_CACHE_DIR" \
-    --data-config configs/data_config_trainval.yaml \
-    --training-config configs/training_config_cbm_final.yaml
+uv run --locked python scripts/sync_data.py --data-config configs/data_config.yaml \
+    --cache-dir "$MERMAIDSEG_CACHE_DIR"
 ```
 
-- Use the same `--data-config` as the training run. The script defaults to `configs/data_config.yaml`, and the final runs use `configs/data_config_trainval.yaml`.
-- `--cache-dir` has no default. Without it the script has nowhere to write.
-- If the compute nodes cannot reach Hugging Face, also pass `--hf-models facebook/dinov3-vitl16-pretrain-lvd1689m` to download the encoder into `HF_HOME`.
-- The script counts load failures and continues. `--fail-fast` stops at the first one.
-
-Run the script with `--help` for `--datasets`, `--splits` and `--workers`.
-
-Fill the cache again after any change to the data: a new CoralNet build, new sources on a whitelist, a new dataset in the data config or a change to the CoralNet label mappings in MERMAID. See [Warm the offline cache again](coralnet-data.md#warm-the-offline-cache-again).
+Each launch syncs again, so a changed pin in the data config is picked up without extra steps.
 
 ## Launch the runs
 
@@ -108,9 +107,9 @@ To keep the new wandb run separate from the old one, change `MERMAIDSEG_WANDB_ID
 |---|---|
 | The launcher says a Slurm variable is not set, or `MERMAIDSEG_LOG_DIR` does not exist | Fix the env file. See [Write the env file](set-up-slurm.md#write-the-env-file). |
 | The job stops with `set WANDB_API_KEY in the secured env file` | Add `WANDB_API_KEY` to the env file that the job reads. |
-| The job fails on a cache miss | The cache does not hold an object that the run needs. [Fill the offline data cache](#fill-the-offline-data-cache) again with the run's data config. |
-| The job stops with a `DataLoadError` that says to run prefetch, for the CoralNet label mapping | The cache has no CoralNet mapping snapshot. Run `scripts/prefetch_cache.py` with `coralnet` among the selected datasets. See [Fill the offline data cache](#fill-the-offline-data-cache). |
-| The prefetch fails with an API error | Check that the prefetch host reaches `api.datamermaid.org`, then run the prefetch again. The existing snapshot is kept. |
+| The launcher prints `cache sync failed; nothing submitted` | Read the error above it. Check the AWS credentials, and that the pins in `configs/data_config.yaml` exist in `mermaid-ic-datasets`. Run the launcher again. |
+| The launcher prints `encoder download failed; nothing submitted` | Check `HF_TOKEN` and access to the DINOv3 repo, then run the launcher again. |
+| The job fails because a dataset is not synced | The cache lacks a version, group or resize that the data config selects. Run the launcher again to sync it. |
 | `cbm_final_res768` runs out of GPU memory | Set `FINAL_768_BATCH` and `FINAL_768_ACCUM` in the shell before you launch. Their product must stay 32, or the launcher refuses. |
 | A job is cancelled about a second after it starts, with no logs | Do not pass parameters with `sbatch --export=ALL,VAR=...`. A site prolog cancels such jobs. Pass them as arguments to `train.sbatch`. |
 | A multi-GPU job times out in a collective | The NCCL flight recorder writes each rank's last collectives to `logs/nccl_trace_<run>_<job id>_rank_*`. |

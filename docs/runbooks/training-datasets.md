@@ -1,154 +1,95 @@
 # Get the training datasets
 
-This runbook says where each dataset in `configs/data_config.yaml` comes from, how to load it into the place that training reads, and how to add a new dataset. CoralNet has its own runbook: [Recreate and update the CoralNet data](coralnet-data.md).
+Training and evaluation read pinned dataset versions from a local cache. `configs/data_config.yaml` pins the versions, `scripts/sync_data.py` fills the cache, and `scripts/train.py` and `scripts/evaluate.py` read only the cache. This runbook says where the versions live, how to fill the cache, and how to add a dataset or update MERMAID.
 
+CoralNet has its own runbook: [Recreate and update the CoralNet data](coralnet-data.md).
+
+- [How a dataset reaches training](#how-a-dataset-reaches-training)
 - [Where each dataset lives](#where-each-dataset-lives)
-- [Get the Hugging Face datasets](#get-the-hugging-face-datasets)
-- [Ingest an external dataset into S3](#ingest-an-external-dataset-into-s3)
-- [Publish the versioned datasets](#publish-the-versioned-datasets)
+- [Get the data](#get-the-data)
+- [Add a dataset](#add-a-dataset)
 - [Update the MERMAID data](#update-the-mermaid-data)
-- [Add a new dataset](#add-a-new-dataset)
+- [Versions that cannot be pinned](#versions-that-cannot-be-pinned)
 - [Known gaps](#known-gaps)
+
+## How a dataset reaches training
+
+1. An ETL module in `packages/segdata-etl` stages a dataset version and `segdata promote` publishes it to the `mermaid-ic-datasets` bucket. The version has a manifest, parquet tables (`images`, `labels`, `points` for point datasets, `stats/label_counts`) and the image files. Each label is mapped to a MERMAID benthic attribute and growth form in `labels.parquet`. The [segdata-spec README](../../packages/segdata-spec/README.md) defines the layout.
+2. The data config pins the version by `version` and `manifest_sha256`. It also pins the taxonomy snapshot that the label roll-up uses, and selects the groups of each split.
+3. `scripts/sync_data.py` downloads each pinned version into the cache and verifies it. For CoralNet it also resizes each image to 2048 px on its longest edge.
+4. The readers in `mermaidseg/data/` open the cache: `PointDataset` for point datasets and `DenseDataset` for mask datasets.
+
+The run records the pins in `model.json` under `lineage.data_version`. See [Data lineage](export-a-model.md#data-lineage).
 
 ## Where each dataset lives
 
-Each dataset class reads its data from one place. The defaults are in the class's constructor in `mermaidseg/datasets/<name>/`.
+| Dataset | Kind | Original source | Used in `data_config.yaml` for |
+|---|---|---|---|
+| `coralnet` | points | [CoralNet](https://coralnet.ucsd.edu/), through `coralnet-scraper` | train (train and val groups of the split file), test |
+| `mermaid` | points | The MERMAID platform | train |
+| `coralscapes_v2` | masks | Hugging Face `josauder/coralscapesV2` | train (train and validation groups), test |
+| `ucsd_mosaics` | masks | Hugging Face `josauder/UCSD-mosaics-mirror` | train |
+| `catlin_seaview` | points | [data.qld.edu.au/public/Q1281](http://data.qld.edu.au/public/Q1281/) | train |
+| `moorea_labeled_corals` | points | EDI package [knb-lter-mcr.5006](https://portal.edirepository.org/nis/mapbrowse?scope=knb-lter-mcr&identifier=5006) | train |
+| `pacific_labeled_corals` | points | Dryad [doi:10.5061/dryad.m5pr3](https://datadryad.org/dataset/doi:10.5061/dryad.m5pr3) | validation |
+| `benthos_yuval` | masks | Dryad [doi:10.5061/dryad.8cz8w9gm3](https://datadryad.org/dataset/doi:10.5061/dryad.8cz8w9gm3) | validation |
 
-| Dataset | Read from | Original source |
-|---|---|---|
-| `coralnet` | `s3://dev-datamermaid-sm-sources/coralnet-public-images/` and the CoralNet build | [CoralNet](https://coralnet.ucsd.edu/). See [coralnet-data.md](coralnet-data.md) |
-| `mermaid` | `s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet` | The MERMAID platform. See [Update the MERMAID data](#update-the-mermaid-data) |
-| `coralscapes_v2` | Hugging Face `josauder/coralscapesV2` | Same |
-| `ucsd_mosaics` | Hugging Face `josauder/UCSD-mosaics-mirror` | Edwards et al. 2017, Alonso et al. 2019 and Raine et al. 2024 |
-| `catlin_seaview` | `s3://dev-datamermaid-sm-sources/external_validation_datasets/catlin_seaview/` | [data.qld.edu.au/public/Q1281](http://data.qld.edu.au/public/Q1281/) (González-Rivero et al., 2019) |
-| `moorea_labeled_corals` | `s3://dev-datamermaid-sm-sources/external_validation_datasets/moorea_labeled_corals/` | EDI package [knb-lter-mcr.5006](https://portal.edirepository.org/nis/mapbrowse?scope=knb-lter-mcr&identifier=5006). Needs a login |
-| `pacific_labeled_corals` | `s3://dev-datamermaid-sm-sources/external_validation_datasets/pacific_labeled_corals/` | Dryad [doi:10.5061/dryad.m5pr3](https://datadryad.org/dataset/doi:10.5061/dryad.m5pr3) |
-| `benthos_yuval` | `s3://dev-datamermaid-sm-sources/external_validation_datasets/benthos_yuval/` | Dryad [doi:10.5061/dryad.8cz8w9gm3](https://datadryad.org/dataset/doi:10.5061/dryad.8cz8w9gm3) |
+Every version is under `s3://mermaid-ic-datasets/datasets/<name>/<version>/`, the taxonomy under `s3://mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>/`, and the image files under the `image_store` prefix of the manifest. The citation, licence and rebuild steps of each external dataset are in the [segdata-etl README](../../packages/segdata-etl/README.md#external-datasets).
 
-The data config selects the subset of each dataset that a split uses, for example `whitelist_regions` for Catlin Seaview or `whitelist_sites` for Benthos. A split set to `null` is skipped.
+## Get the data
 
-## Get the Hugging Face datasets
+Prerequisites: AWS credentials that read `mermaid-ic-datasets`, and disk space for the cache. The SageMaker run YAMLs set `volume_gb: 1500` for the cache and the checkpoints.
 
-`coralscapes_v2` and `ucsd_mosaics` download from Hugging Face the first time a dataset object is built. They go into `HF_HOME`, not into the local S3 cache. You do not load them into S3.
-
-- For a local run, the download happens at the start of the run.
-- For an offline Slurm run, `scripts/prefetch_cache.py` downloads them. Run it with `HF_HOME` set to the cache that batch jobs use. See [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
-
-To read CoralscapesV2 from a local copy, pass the directory as `hf_repo_id`. `scripts/evaluate.py` takes `--coralscapes-root` for the same purpose.
-
-## Ingest an external dataset into S3
-
-Catlin Seaview, Moorea Labeled Corals, Pacific Labeled Corals and Benthos are already in S3. Ingest one again only if its S3 copy is lost, or the original source publishes a new version.
-
-`segdata ingest` in the `segdata-etl` package checks the raw download and writes the parquet, the images and the metadata to the legacy `external_validation_datasets/<name>/` prefix. Training reads that prefix. Its [README](../../packages/segdata-etl/README.md) gives the output contract and every flag. The README of each dataset lists the raw files to download:
-
-| Dataset | Command | Raw files |
-|---|---|---|
-| Catlin Seaview | `catlin_seaview` | The run downloads them. See [the README](../../mermaidseg/datasets/catlin_seaview/README.md#how-to-rebuild) |
-| Moorea Labeled Corals | `moorea_labeled_corals` | [Download by hand](../../mermaidseg/datasets/moorea_labeled_corals/README.md#how-to-rebuild) |
-| Pacific Labeled Corals | `pacific_labeled_corals` | [Download by hand](../../mermaidseg/datasets/pacific_labeled_corals/README.md#how-to-rebuild) |
-| Benthos | `benthos_yuval` | [Download by hand](../../mermaidseg/datasets/benthos_yuval/README.md#how-to-rebuild) |
-
-1. Download the raw files that the dataset's README lists. Catlin Seaview needs no download.
-2. Do a dry run. It writes nothing to S3, and it stops if the parquet or a JSON file is already there. For Catlin Seaview, leave out `--data-dir`, and the run downloads the raw files:
+1. Sync the pinned versions:
 
    ```bash
-   uv run --package segdata-etl segdata ingest <dataset> --data-dir <raw dir> --dry-run
+   uv run python scripts/sync_data.py --data-config configs/data_config.yaml --cache-dir <cache-dir>
    ```
 
-3. Run the same command without `--dry-run`. To replace a dataset that is already in S3, add `--overwrite`.
-4. Fill the offline data cache again. See [Fill the offline data cache](train-on-slurm.md#fill-the-offline-data-cache).
-5. Publish new versions of the dataset. See [Publish the versioned datasets](#publish-the-versioned-datasets).
+   `--workers N` sets the download threads (default 16). The script prints one line per dataset: the version, the resize id (`original` when the dataset is not resized) and the number of dropped images. It prints the taxonomy version last.
 
-## Publish the versioned datasets
+2. Pass the same directory to the run: `scripts/train.py --cache-dir <cache-dir>` or `scripts/evaluate.py --cache-dir <cache-dir>`.
 
-`segdata build <name>` stages an external dataset from its legacy prefix as an immutable versioned dataset, and `segdata taxonomy` stages a snapshot of the MERMAID benthic taxonomy that the dataset labels map to. Staging writes to a local directory only. Publishing writes to the `mermaid-ic-datasets` bucket: `segdata taxonomy --tables-from <folder> --publish` for the taxonomy, `segdata promote` for a dataset. A published version is permanent: the bucket denies overwrite and delete, so a version is write-once. Stage and check first, then publish once.
+The sync checks each manifest against its pinned sha256, each table against the manifest, and each image or mask against its recorded size and checksums. It then writes a marker for each synced version. A reader raises `NotSynced` for a version, group selection or resize that has no marker, so sync with the data config that the run uses. A second sync into the same cache downloads only what is missing.
 
-A version string is `YYYYMMDD-<sha7>`, with `-2`, `-3` for a rebuild on the same day. Each stage and publish command prints `version:` and `manifest_sha256:`. Together they are the pin that consumers use. The package README has the [flags](../../packages/segdata-etl/README.md#build-a-versioned-external-dataset), the [taxonomy options](../../packages/segdata-etl/README.md#taxonomy-snapshot) and the [promote steps](../../packages/segdata-etl/README.md#promote-a-version).
+The launchers sync for you: [Slurm](train-on-slurm.md#fill-the-data-cache) syncs on the login node, and the [SageMaker](train-on-sagemaker.md) entrypoint syncs into `/opt/ml/cache` before training.
 
-The dataset builds read the taxonomy pin from `mermaid-ic-datasets`, so publish the taxonomy before you stage a dataset.
+## Add a dataset
 
-1. Commit and push the code. Staging and publishing both refuse a dirty or unpushed tree.
-2. Stage the taxonomy. This writes no S3 object:
+A new data source adds an ETL module that publishes a version. `mermaidseg` does not change.
 
-   ```bash
-   uv run --package segdata-etl segdata taxonomy --stage-dir <stage dir>
-   ```
-
-3. Review the staged tables. `<staged taxonomy folder>` is `<stage dir>/mermaid-ic-datasets/taxonomy/mermaid-benthic/<version>/`.
-4. Publish the taxonomy to S3 from the staged copy, with no new fetch. The command re-checks the staged tables, publishes them under a new version name (date and git sha) and prints the pin:
-
-   ```bash
-   uv run --package segdata-etl segdata taxonomy --tables-from <staged taxonomy folder> --publish
-   ```
-
-5. Stage each dataset against the published pin. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. The build copies no image. It stages the tables and `copies.jsonl`, and Benthos also stages its masks and `uploads.jsonl`:
-
-   ```bash
-   uv run --package segdata-etl segdata build <name> --stage-dir <stage dir> \
-     --taxonomy-version <v> --taxonomy-manifest-sha256 <sha>
-   ```
-
-   An image whose header cannot be read is dropped with its points. The count is `stats.dropped["image_unreadable_header"]` in the manifest.
-
-6. Check that each staged version loads the same as the legacy dataset. `--no-sync` reads the new version from `--cache-dir`, the stage dir, with no S3 access for it, and still checks the sha256 of each table. The old side loads its annotations, `classes.json` and masks from S3 through `LocalS3Cache`, so the check needs S3 read access unless you pre-fill a local cache (for example with `scripts/prefetch_cache.py`) and set `MERMAIDSEG_LOCAL_CACHE_DIR=<that cache>` and `MERMAIDSEG_S3_OFFLINE=1`. A cache miss then raises instead of calling S3. The points datasets need no images. Benthos reads its staged masks.
-
-   ```bash
-   uv run python scripts/check_dataset_parity.py --no-sync \
-     --cache-dir <stage dir> \
-     --data-config <old data config> --dataset <name> --split <split> \
-     --version <v> --manifest-sha256 <sha>
-   ```
-
-   For `pacific_labeled_corals`, add `--annotator host --annotator archived`.
-
-   The script exits 1 on any difference. Run `--help` for the options.
-7. Publish each dataset to S3. Get explicit approval first:
-
-   ```bash
-   uv run --package segdata-etl segdata promote --stage-dir <stage dir> \
-     --dataset <name> --version <version>
-   ```
-
-The datasets in S3 are new versions built from the same legacy prefix. Training still reads the legacy prefix.
-
-### Superseded versions
-
-These published versions have an `extra_files` key in `manifest.json`. The manifest schema in `packages/segdata-spec/src/segdata_spec/manifest.py` has no such field and forbids unknown keys, so `segdata_spec` cannot read them. Do not pin them; pin a newer version of the same dataset.
-
-| Dataset | Version |
-|---|---|
-| `coralnet` | `20261124-e6abfad` |
-| `catlin_seaview` | `20261124-e6abfad` |
-| `moorea_labeled_corals` | `20261124-e6abfad` |
-| `pacific_labeled_corals` | `20261124-e6abfad` |
-| `benthos_yuval` | `20261124-e6abfad` |
-| `mermaid` | `20261124-e6abfad` |
-| `coralscapes_v2` | `20261124-e6abfad` |
-| `ucsd_mosaics` | `20261124-8a28955` |
+1. Write the ETL module in `packages/segdata-etl/src/segdata_etl/datasets/`, on the pattern of an existing module of the same kind: `catlin_seaview.py` (points), `benthos_yuval.py` or `ucsd_mosaics.py` (masks).
+2. Map its labels to the MERMAID taxonomy. External datasets use a curated CSV in `packages/segdata-etl/src/segdata_etl/label_maps/curated/<name>.csv`. The mapping goes into the published version's `labels.parquet`.
+3. Register the module in `packages/segdata-etl/src/segdata_etl/cli.py` so that `segdata build <name>` runs it.
+4. Stage, check and publish the version. Commit and push first, because staging refuses a dirty or unpushed tree. The commands are in the [segdata-etl README](../../packages/segdata-etl/README.md). Record the `version` and `manifest_sha256` that each command prints.
+5. Add the dataset to `configs/data_config.yaml` with that pin and a `train`, `val` or `test` block that selects its groups.
+6. Add a row for each label to `configs/class_to_concepts.csv`, with the dataset in `source_dataset_source` and the label in `source_label_class_name`.
+7. [Regenerate the derived configs](derived-configs.md).
+8. Sync the cache. See [Get the data](#get-the-data).
 
 ## Update the MERMAID data
 
-`mermaid_confirmed_annotations.parquet` grows as MERMAID users confirm annotations. This repository does not write it. The dataset reads its images from the keys in that parquet.
+`mermaid_confirmed_annotations.parquet` in `s3://coral-reef-training/mermaid/` grows as MERMAID users confirm annotations. This repository does not write it. A `mermaid` dataset version freezes it at a cutoff date.
 
-`annotation_date_cutoff` in the data config freezes the MERMAID training data. The dataset uses only annotations with `updated_on` on or before that date. `MermaidDataset` has no default for it, so the argument is required. `configs/data_config.yaml` and the generated `configs/data_config_trainval.yaml` both set it to `2026-08-12`, the date when MERMAID annotations were last audited for this project.
+1. Stage a new version with the new cutoff. Pass the previous version as the parent so that labels keep their ids and unchanged images are reused:
 
-To train on newer MERMAID annotations:
+   ```bash
+   uv run --package segdata-etl segdata build mermaid --stage-dir <stage> \
+     --annotation-date-cutoff YYYY-MM-DD \
+     --parent-version <v> --parent-manifest-sha256 <sha>
+   ```
 
-1. Set `annotation_date_cutoff` under `mermaid.train` in `configs/data_config.yaml`.
-2. Regenerate the derived configs. See [Regenerate the derived configs](derived-configs.md).
-3. Fill the offline data cache again.
+   The parent version must already be in `<stage>`. See [Stage a version](../../packages/segdata-etl/README.md#stage-a-version) for the flags.
 
-## Add a new dataset
+2. Publish it with `segdata promote --stage-dir <stage> --dataset mermaid --version <version>`. Get approval first: a published version cannot be changed.
+3. Replace the `mermaid` pin in `configs/data_config.yaml` with the printed `version` and `manifest_sha256`.
+4. [Regenerate the derived configs](derived-configs.md).
+5. Sync the cache. See [Get the data](#get-the-data).
 
-1. Write a dataset class in `mermaidseg/datasets/<name>/`, on the pattern of an existing class that reads the same kind of data (point annotations or dense masks).
-2. Add the class to `DATASET_CLASSES` in `mermaidseg/datasets/factory.py`. If the dataset has dense masks, also add it to `NO_PADDING_DATASETS`.
-3. Map its labels into the MERMAID benthic-attribute space. Add a `fetch_<name>_to_mermaid` function to `mermaidseg/dataset_reconciliation/label_mapping.py`, and register it in `_REMOTE_FETCHERS` in `mermaidseg/dataset_reconciliation/registry.py`. If the dataset is scored in evaluation, also add it to `mermaidseg/evaluation/gt_mapping.py`.
-4. Add a row for each label to `configs/class_to_concepts.csv`, with the dataset in `source_dataset_source` and the label in `source_label_class_name`.
-5. Add the dataset and its splits to `configs/data_config.yaml`.
-6. Regenerate the derived configs. See [Regenerate the derived configs](derived-configs.md).
-7. Fill the offline data cache again.
+## Versions that cannot be pinned
+
+A version whose manifest has an `extra_files` key cannot be read: the manifest schema in `packages/segdata-spec/src/segdata_spec/manifest.py` has no such field and forbids unknown keys. Pin a newer version of the same dataset. The current pins are in `configs/data_config.yaml`.
 
 ## Known gaps
 
-- The MERMAID parquet changes in place. A run that uses the same cutoff reads the same annotations only if no annotation older than the cutoff changes after the run.
+- The MERMAID parquet changes in place. A new `mermaid` version with the same cutoff holds the same annotations only if no annotation older than the cutoff changed in between.
