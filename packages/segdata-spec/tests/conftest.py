@@ -20,7 +20,15 @@ from botocore.exceptions import ClientError
 from PIL import Image
 
 from segdata_spec.features import publish_feature_set
-from segdata_spec.manifest import FeatureSetPin, ImageStore, Manifest, ParentRef, Pin, SourceInfo
+from segdata_spec.manifest import (
+    EtlInfo,
+    FeatureSetPin,
+    ImageStore,
+    Manifest,
+    ParentRef,
+    Pin,
+    SourceInfo,
+)
 from segdata_spec.publish import GitState, publish_dataset, publish_taxonomy
 
 
@@ -130,6 +138,13 @@ IMG_PREFIX = "images/ds/"
 VERSION = "20261120-abcdef1"
 TAX_VERSION = "20261120-1234567"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
+READY_ETL = EtlInfo(
+    package="mermaid-classifier",
+    command="extract-features",
+    git_sha="0123456789abcdef",
+    git_dirty=True,
+    uv_lock_sha256="l" * 64,
+)
 STORE = ImageStore(bucket=IMG_BUCKET, prefix=IMG_PREFIX, owner="segdata")
 # An image store inside BUCKET, as a feature set requires; its store name is ``ds``.
 FEATURE_STORE = ImageStore(bucket=BUCKET, prefix=IMG_PREFIX, owner="segdata")
@@ -371,10 +386,7 @@ def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> FeatureSetPin
         index,
         EXTRACTOR,
         bucket=BUCKET,
-        etl_package="segdata-etl",
-        etl_command="segdata features ds",
-        repo_dir=_repo_dir(tmp_path),
-        git=CLEAN_GIT,
+        etl=READY_ETL,
     )
     client.calls.clear()
     return feature_pin

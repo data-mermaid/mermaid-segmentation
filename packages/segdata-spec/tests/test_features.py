@@ -7,15 +7,14 @@ import pyarrow as pa
 import pytest
 from conftest import (
     BUCKET,
-    CLEAN_GIT,
     EXTRACTOR,
     FEATURE_FAMILY,
     FEATURE_STORE,
     IMAGES,
     POINTS,
+    READY_ETL,
     VERSION,
     FakeS3,
-    _repo_dir,
     publish_version,
 )
 
@@ -31,7 +30,7 @@ from segdata_spec.features import (
     feature_store_name,
     publish_feature_set,
 )
-from segdata_spec.manifest import EtlInfo, FeatureSetPin, ImageStore, Pin
+from segdata_spec.manifest import FeatureSetPin, ImageStore, Pin
 
 SIDECAR = "features/ds/effnet/_extractor_spec.json"
 SET_PREFIX = f"datasets/ds/{VERSION}/features/effnet/"
@@ -59,7 +58,7 @@ def pin(fake_s3: FakeS3, tmp_path: Path) -> Pin:
     return pin
 
 
-def publish(client: FakeS3, tmp_path: Path, pin: Pin, index: pa.Table, **kwargs) -> FeatureSetPin:
+def publish(client: FakeS3, pin: Pin, index: pa.Table, **kwargs) -> FeatureSetPin:
     return publish_feature_set(
         client,
         pin,
@@ -67,10 +66,7 @@ def publish(client: FakeS3, tmp_path: Path, pin: Pin, index: pa.Table, **kwargs)
         index,
         kwargs.pop("extractor", EXTRACTOR),
         bucket=BUCKET,
-        etl_package="segdata-etl",
-        etl_command="segdata features ds",
-        repo_dir=_repo_dir(tmp_path),
-        git=CLEAN_GIT,
+        etl=READY_ETL,
         **kwargs,
     )
 
@@ -80,7 +76,7 @@ def _put_keys(client: FakeS3) -> list[str]:
 
 
 def test_publish_writes_sidecar_index_then_manifest_and_returns_its_pin(fake_s3, tmp_path, pin):
-    feature_pin = publish(fake_s3, tmp_path, pin, feature_index(["a", "b"]))
+    feature_pin = publish(fake_s3, pin, feature_index(["a", "b"]))
 
     assert _put_keys(fake_s3) == [
         SIDECAR,
@@ -149,7 +145,7 @@ def test_publish_refuses_a_spec_without_an_identity_key_before_any_s3_call(fake_
     fake_s3.calls.clear()
 
     with pytest.raises(ValueError, match="feature_dim"):
-        publish(fake_s3, tmp_path, pin, feature_index(["a", "b"]), extractor=extractor)
+        publish(fake_s3, pin, feature_index(["a", "b"]), extractor=extractor)
 
     assert fake_s3.calls == []
 
@@ -164,7 +160,7 @@ def test_publish_with_a_stored_extractor_of_another_identity_leaves_no_index_or_
     fake_s3.put(BUCKET, SIDECAR, json.dumps({**EXTRACTOR, "crop_size": 168}).encode())
 
     with pytest.raises(ExtractorMismatch):
-        publish(fake_s3, tmp_path, pin, feature_index(["a", "b"]))
+        publish(fake_s3, pin, feature_index(["a", "b"]))
 
     _assert_no_set_files(fake_s3)
 
@@ -183,7 +179,7 @@ def test_publish_loses_a_sidecar_race_to_another_identity_and_leaves_no_index_or
     monkeypatch.setattr(fake_s3, "put_object", put_after_rival_claims)
 
     with pytest.raises(ExtractorMismatch, match="weights_sha256"):
-        publish(fake_s3, tmp_path, pin, feature_index(["a", "b"]))
+        publish(fake_s3, pin, feature_index(["a", "b"]))
 
     assert fake_s3.objects[(BUCKET, SIDECAR)] == rival
     _assert_no_set_files(fake_s3)
@@ -214,17 +210,17 @@ def test_publish_refuses_an_index_with_bad_ids(fake_s3, tmp_path, pin, ids, a_ke
         index = feature_index(ids, [a_key, *index.column("key").to_pylist()[1:]])
 
     with pytest.raises(FeatureIndexInvalid, match=re.escape(message)):
-        publish(fake_s3, tmp_path, pin, index)
+        publish(fake_s3, pin, index)
 
     assert _put_keys(fake_s3) == []
 
 
 def test_publish_refuses_a_partial_index_unless_allowed(fake_s3, tmp_path, pin):
     with pytest.raises(FeatureIndexInvalid, match="1 image"):
-        publish(fake_s3, tmp_path, pin, feature_index(["a"]))
+        publish(fake_s3, pin, feature_index(["a"]))
     assert _put_keys(fake_s3) == []
 
-    publish(fake_s3, tmp_path, pin, feature_index(["a"]), allow_missing=True)
+    publish(fake_s3, pin, feature_index(["a"]), allow_missing=True)
 
     manifest = json.loads(fake_s3.objects[(BUCKET, SET_PREFIX + "manifest.json")])
     assert manifest["stats"] == {"n_images": 1, "n_missing": 1}
@@ -234,7 +230,7 @@ def test_publish_refuses_a_dataset_pin_with_the_wrong_sha(fake_s3, tmp_path, pin
     wrong = pin.model_copy(update={"manifest_sha256": "0" * 64})
 
     with pytest.raises(PinMismatch):
-        publish(fake_s3, tmp_path, wrong, feature_index(["a", "b"]))
+        publish(fake_s3, wrong, feature_index(["a", "b"]))
 
     assert _put_keys(fake_s3) == []
 
@@ -243,18 +239,9 @@ def test_publish_refuses_an_index_missing_a_column(fake_s3, tmp_path, pin):
     index = feature_index(["a", "b"]).drop_columns(["n_points"])
 
     with pytest.raises(SchemaValidationError, match="n_points"):
-        publish(fake_s3, tmp_path, pin, index)
+        publish(fake_s3, pin, index)
 
     assert _put_keys(fake_s3) == []
-
-
-READY_ETL = EtlInfo(
-    package="mermaid-classifier",
-    command="extract-features",
-    git_sha="0123456789abcdef",
-    git_dirty=True,
-    uv_lock_sha256="l" * 64,
-)
 
 
 def test_publish_with_a_ready_etl_records_it_verbatim(fake_s3, pin):
@@ -272,39 +259,10 @@ def test_publish_with_a_ready_etl_records_it_verbatim(fake_s3, pin):
     assert manifest["etl"] == READY_ETL.model_dump()
 
 
-@pytest.mark.parametrize(
-    "etl_args",
-    [
-        {"etl": READY_ETL, "repo_dir": "REPO", "etl_package": "p", "etl_command": "c"},
-        {},
-        {"repo_dir": "REPO"},
-    ],
-    ids=["both", "neither", "repo-without-package"],
-)
-def test_publish_refuses_an_ambiguous_etl_source_before_any_s3_call(
-    fake_s3, tmp_path, pin, etl_args
-):
-    if "repo_dir" in etl_args:
-        etl_args = {**etl_args, "repo_dir": _repo_dir(tmp_path), "git": CLEAN_GIT}
-
-    with pytest.raises(ValueError, match="etl"):
-        publish_feature_set(
-            fake_s3,
-            pin,
-            FEATURE_FAMILY,
-            feature_index(["a", "b"]),
-            EXTRACTOR,
-            bucket=BUCKET,
-            **etl_args,
-        )
-
-    assert fake_s3.calls == []
-
-
 def test_publish_accepts_a_key_with_a_suffix(fake_s3, tmp_path, pin):
     keys = ["features/ds/effnet/a~p2.featurevector", "features/ds/effnet/b.featurevector"]
 
-    publish(fake_s3, tmp_path, pin, feature_index(["a", "b"], keys))
+    publish(fake_s3, pin, feature_index(["a", "b"], keys))
 
     assert (BUCKET, SET_PREFIX + "manifest.json") in fake_s3.objects
 
@@ -321,7 +279,7 @@ def test_publish_refuses_keys_that_collide_across_images_and_writes_nothing(fake
     shared = "features/ds/effnet/a~x.featurevector"
 
     with pytest.raises(FeatureIndexInvalid, match="duplicate key"):
-        publish(fake_s3, tmp_path, pin, feature_index(["a", "a~x"], [shared, shared]))
+        publish(fake_s3, pin, feature_index(["a", "a~x"], [shared, shared]))
 
     assert _put_keys(fake_s3) == []
 
@@ -332,7 +290,7 @@ def test_publish_refuses_a_dataset_whose_images_are_outside_the_bucket_and_write
     _, external = publish_version(fake_s3, tmp_path, images=TWO_IMAGES, points=POINTS)
 
     with pytest.raises(ValueError, match="bucket"):
-        publish(fake_s3, tmp_path, external, feature_index(["a", "b"]))
+        publish(fake_s3, external, feature_index(["a", "b"]))
 
     assert _put_keys(fake_s3) == []
 

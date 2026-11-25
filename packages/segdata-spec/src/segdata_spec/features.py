@@ -8,7 +8,6 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
@@ -45,14 +44,7 @@ from segdata_spec.manifest import (
     dump_manifest,
     manifest_sha256,
 )
-from segdata_spec.publish import (
-    GitState,
-    _etl_info,
-    _get_bytes,
-    _guard_git,
-    _write_version,
-    table_bytes,
-)
+from segdata_spec.publish import _get_bytes, _write_version, table_bytes
 from segdata_spec.schema import FEATURE_INDEX_SCHEMA, conform
 from segdata_spec.sync import check_published_manifest
 
@@ -217,32 +209,6 @@ def claim_extractor(
         raise ExtractorMismatch(f"s3://{bucket}/{key} names another extractor: {differences}")
 
 
-def _resolve_etl(
-    etl: EtlInfo | None,
-    repo_dir: Path | None,
-    git: GitState | None,
-    etl_package: str | None,
-    etl_command: str | None,
-) -> EtlInfo:
-    """Return ``etl`` as given, or build it from ``repo_dir`` behind the git guard.
-
-    Raises:
-        ValueError: Both or neither of ``etl`` and ``repo_dir`` are given, or ``repo_dir`` comes
-            without ``etl_package`` and ``etl_command``.
-        PublishRefused: The repository is dirty or unpushed, or has no ``uv.lock``.
-    """
-    if repo_dir is None:
-        if etl is None:
-            raise ValueError("pass exactly one ETL source: repo_dir or etl; got neither")
-        return etl
-    if etl is not None:
-        raise ValueError("pass exactly one ETL source: repo_dir or etl; got both")
-    if etl_package is None or etl_command is None:
-        raise ValueError("repo_dir needs etl_package and etl_command to record the etl")
-    state, lock_sha = _guard_git(repo_dir, git)
-    return _etl_info(etl_package, etl_command, state, lock_sha)
-
-
 def publish_feature_set(
     client: Any,
     pin: Pin,
@@ -251,11 +217,7 @@ def publish_feature_set(
     extractor: Mapping[str, Any],
     *,
     bucket: str,
-    etl_package: str | None = None,
-    etl_command: str | None = None,
-    repo_dir: Path | None = None,
-    git: GitState | None = None,
-    etl: EtlInfo | None = None,
+    etl: EtlInfo,
     allow_missing: bool = False,
 ) -> FeatureSetPin:
     """Publish a feature set for a dataset version under ``datasets/<d>/<v>/features/<family>/``.
@@ -265,10 +227,6 @@ def publish_feature_set(
     (``class_path``, ``crop_size``, ``feature_dim``, ``weights_sha256``) is left as is, whatever
     its other keys. Then ``index.parquet``, then ``manifest.json`` last, both write-once.
 
-    The ETL provenance comes from exactly one source: ``repo_dir`` with ``etl_package`` and
-    ``etl_command``, checked like a dataset publish, or a ready ``etl`` recorded verbatim with no
-    git check.
-
     Args:
         client: A boto3 S3 client.
         pin: The published dataset version the features describe.
@@ -276,22 +234,16 @@ def publish_feature_set(
         index: One row per indexed image, conforming to ``FEATURE_INDEX_SCHEMA``.
         extractor: The extractor spec; it must hold the four identity keys.
         bucket: The dataset bucket.
-        etl_package: The package that built the features; required with ``repo_dir``.
-        etl_command: The command that built the features; required with ``repo_dir``.
-        repo_dir: The ETL repository, checked for a clean, pushed tree and a ``uv.lock``.
-        git: The repository state; probed from ``repo_dir`` when None.
-        etl: Ready provenance for a caller outside the ETL repository; excludes ``repo_dir``.
+        etl: The ETL provenance, recorded verbatim in the manifest.
         allow_missing: Publish an index that leaves out some of the version's images.
 
     Returns:
         The feature-set pin: ``pin``, ``family`` and the sha256 of the written manifest.
 
     Raises:
-        ValueError: ``extractor`` lacks an identity key, ``family`` is not a key segment, or
-            the ETL source is not exactly one of ``repo_dir`` (with ``etl_package`` and
-            ``etl_command``) and ``etl``; raised before any S3 call. The dataset's image store
-            is not ``images/<segment>/`` in ``bucket``; raised before any write.
-        PublishRefused: With ``repo_dir``, the tree is dirty or unpushed, or has no ``uv.lock``.
+        ValueError: ``extractor`` lacks an identity key, or ``family`` is not a key segment;
+            raised before any S3 call. The dataset's image store is not ``images/<segment>/``
+            in ``bucket``; raised before any write.
         ManifestNotFound: The dataset manifest is absent.
         PinMismatch: The dataset manifest differs from ``pin``.
         ChecksumMismatch: The dataset's ``images.parquet`` differs from its manifest.
@@ -305,7 +257,6 @@ def publish_feature_set(
     """
     _extractor_identity(extractor)
     prefix = feature_set_prefix(pin.name, pin.version, family)
-    etl_info = _resolve_etl(etl, repo_dir, git, etl_package, etl_command)
     dataset, version_ids = _load_version(client, bucket, pin)
     conformed = conform(index, FEATURE_INDEX_SCHEMA)
     store = feature_store_name(dataset.image_store, bucket)
@@ -324,7 +275,7 @@ def publish_feature_set(
             )
         },
         stats=FeatureSetStats(n_images=conformed.num_rows, n_missing=missing),
-        etl=etl_info,
+        etl=etl,
         created_at=datetime.now(UTC),
     )
     manifest_bytes = dump_manifest(manifest)
