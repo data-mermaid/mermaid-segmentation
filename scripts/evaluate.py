@@ -459,7 +459,7 @@ def main(argv: list[str] | None = None) -> None:
             summary.update({key: {"error": f"{type(e).__name__}: {e}"} for key in keys})
         _write_summary(output_dir, summary)
 
-    if "coralscapes" in evals or "coralscapes39" in evals:
+    if ("coralscapes" in evals or "coralscapes39" in evals) and CORALSCAPES in section.datasets:
         in_training = coralscapes_trained_on_scored(section, split)
         summary["coralscapes_split_in_training"] = in_training
         if in_training:
