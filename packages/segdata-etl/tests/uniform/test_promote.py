@@ -223,6 +223,25 @@ def test_rerun_after_a_crash_finds_the_images_present_and_writes_the_manifest(re
     assert flaky.ops("put")[-1][2] == manifest_key[1]
 
 
+def test_a_manifest_put_by_a_racing_publisher_is_not_overwritten(repo, tmp_path):  # noqa: F811
+    racer = b'{"published": "by another writer"}'
+
+    class RacedManifest(FakeS3):
+        def put_object(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["Key"].endswith("/manifest.json"):
+                self.put(kwargs["Bucket"], kwargs["Key"], racer)
+            return super().put_object(**kwargs)
+
+    fake, stage, version = stage_mermaid(tmp_path)
+    raced = RacedManifest(**{k: getattr(fake, k) for k in ("objects", "crcs", "etags")})
+    manifest_key = (DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json")
+
+    with pytest.raises(ObjectConflict):
+        run_promote(raced, stage, version)
+
+    assert raced.objects[manifest_key] == racer
+
+
 def test_rerun_logs_images_as_already_present(repo, tmp_path, caplog):  # noqa: F811
     fake, stage, version = stage_mermaid(tmp_path)
     for plan in (version_dir(stage, "mermaid", version) / "copies.jsonl").read_text().splitlines():

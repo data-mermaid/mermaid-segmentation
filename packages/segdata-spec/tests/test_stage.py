@@ -1,4 +1,5 @@
 import hashlib
+import subprocess
 from pathlib import Path
 
 import pyarrow as pa
@@ -419,3 +420,46 @@ def test_read_parent_tables_refuses_a_table_that_misses_its_manifest(tmp_path, r
 
     with pytest.raises(ChecksumMismatch, match="points.parquet"):
         read_parent_tables([tmp_path], BUCKET, parent)
+
+
+def test_read_parent_tables_refuses_a_listed_table_missing_from_disk(tmp_path, repo_dir):
+    parent = _parent_version(tmp_path, repo_dir)
+    parent_dir = _version_dir(tmp_path, "datasets/parent/20261101-1234567/")
+    (parent_dir / "images.parquet").unlink()
+
+    with pytest.raises(ChecksumMismatch, match="missing"):
+        read_parent_tables([tmp_path], BUCKET, parent)
+
+
+def _dirty_repo(root: Path) -> Path:
+    """A repo with a committed uv.lock and tracked file, the tracked file then modified."""
+    root.mkdir()
+
+    def run(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)  # noqa: S603, S607
+
+    run("init", "-b", "main")
+    run("config", "user.name", "t")
+    run("config", "user.email", "t@example.com")
+    (root / "uv.lock").write_text("lock")
+    (root / "f.txt").write_text("one")
+    run("add", ".")
+    run("commit", "-m", "one")
+    (root / "f.txt").write_text("two")
+    return root
+
+
+@pytest.mark.parametrize("which", ["dataset", "taxonomy"])
+def test_staging_without_a_git_state_probes_the_repo_and_refuses_a_dirty_one(
+    which, tmp_path, stage_dir
+):
+    repo = _dirty_repo(tmp_path / "dirty")
+
+    with pytest.raises(PublishRefused, match="uncommitted"):
+        if which == "dataset":
+            _stage(stage_dir, repo, git=None)
+        else:
+            kwargs = {**_taxonomy_kwargs(repo, _taxonomy_tables()), "git": None}
+            stage_taxonomy(stage_dir, **kwargs)
+
+    assert _files(stage_dir) == []

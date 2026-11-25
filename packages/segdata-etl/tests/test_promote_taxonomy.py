@@ -108,6 +108,23 @@ def test_a_destination_table_holding_other_bytes_is_refused_before_any_write(sta
     assert _writes(fake) == []
 
 
+def test_rerun_after_a_crash_between_the_tables_and_the_manifest_writes_the_manifest(
+    stage: Path,
+) -> None:
+    staged = {name: (_staged(stage) / name).read_bytes() for name in TABLES}
+    fake = FakeS3({(DATASET_BUCKET, PREFIX + name): data for name, data in staged.items()})
+
+    _promote(fake, stage)
+
+    assert (
+        fake.objects[(DATASET_BUCKET, PREFIX + "manifest.json")]
+        == (_staged(stage) / "manifest.json").read_bytes()
+    )
+    assert _writes(fake)[-1] == PREFIX + "manifest.json"
+    for name, data in staged.items():
+        assert fake.objects[(DATASET_BUCKET, PREFIX + name)] == data
+
+
 def test_promote_taxonomy_flag_runs_the_taxonomy_path(
     stage: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
