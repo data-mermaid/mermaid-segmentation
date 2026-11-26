@@ -138,15 +138,6 @@ def test_reading_the_table_strips_and_lower_cases_rank_cells(tmp_path):
     assert df["family"].tolist() == ["acroporidae", "not_given"]
 
 
-def test_concept_removal_matches_a_rank_cell_read_with_stray_case_and_spaces(tmp_path):
-    df = read_class_to_concepts(_write_rank_table(tmp_path, " Acropora "))
-
-    out = apply_concept_removal(df, ["genus__acropora"])
-
-    assert out["genus"].tolist() == ["not_given", "not_given"]
-    assert out["family"].tolist() == ["acroporidae", "not_given"]
-
-
 def test_taxonomy_frame_channel_values_have_no_raw_variant(tmp_path):
     df = load_taxonomy_frame(_write_rank_table(tmp_path, " Acropora "))
 

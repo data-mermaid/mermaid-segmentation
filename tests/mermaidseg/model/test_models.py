@@ -227,8 +227,9 @@ def test_explicit_out_indices_are_kept_and_must_match_the_stage_count(mock_dinov
         (len(TAXONOMIC_CONCEPTS), {"not_given": 0, "FALSE": 1, "TRUE": 2}),
         (2, {"not_given": 0, "FALSE": 1, "TRUE": 2}),
         (2, {"not_given": 0, "False": 1, "True": 2}),  # keys of a bundle exported from JSON
+        (2, {"not_given": 0, False: 1, True: 2}),  # legacy in-memory mappings
     ],
-    ids=["every_rank", "skipped_ranks", "stringified_bool_keys"],
+    ids=["every_rank", "skipped_ranks", "stringified_bool_keys", "bool_keys"],
 )
 def test_concept_activation_is_a_softmax_per_rank_and_a_sigmoid_on_the_binary_tail(
     mock_dinov3_encoder, n_ranks, binary_keys

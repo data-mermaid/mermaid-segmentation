@@ -225,3 +225,18 @@ def test_table_without_a_live_column_gives_default_scopes_and_warns(tmp_path, ca
 )
 def test_point_scopes_live_column_applies_to_cnidaria_and_echinoderms_only(row, expected):
     assert point_scopes(pd.Series(row)) == expected
+
+
+@pytest.mark.parametrize("rank", ["phylum", "order", "class", "family"])
+def test_point_scopes_rejects_an_invalid_taxonomic_cell(rank):
+    row = {
+        "live": "true",
+        "phylum": "cnidaria",
+        "order": "actiniaria",
+        "class": "hexacorallia",
+        "family": "actiniidae",
+        rank: "not given",
+    }
+
+    with pytest.raises(ValueError, match="invalid taxonomic concept cell"):
+        point_scopes(pd.Series(row))
