@@ -1422,19 +1422,52 @@ def test_verify_existing_marks_a_source_that_passes(http_server, fake_s3):
     fake_s3.put("b", "p/s1/annotations.csv", _ann_csv([("img1.jpg", 1, 1, 7)]).encode())
     fake_s3.put("b", "p/s1/images/1.jpg", b"JPEG1")
 
-    failures = _site_downloader(http_server, fake_s3).verify_existing(1, "b", "p")
+    res = _site_downloader(http_server, fake_s3).verify_existing(1, "b", "p")
 
-    assert failures == []
+    assert res.ok is True
+    assert res.errors == []
     assert json.loads(fake_s3.objects[("b", _MARKER)])["total_images"] == 1
 
 
 def test_verify_existing_writes_no_marker_for_a_source_that_fails(http_server, fake_s3):
     _script_source(http_server, [[1]])
 
-    failures = _site_downloader(http_server, fake_s3).verify_existing(1, "b", "p")
+    res = _site_downloader(http_server, fake_s3).verify_existing(1, "b", "p")
 
-    assert failures == ["annotations_missing", "image_list_missing"]
+    assert res.ok is False
+    assert res.errors == ["annotations_missing", "image_list_missing"]
     assert ("b", _MARKER) not in fake_s3.objects
+
+
+@pytest.mark.parametrize(
+    ("overview", "no_confirmed", "no_images"),
+    [
+        (_fixture("source_zero_confirmed.html"), True, False),
+        (_overview_html(0), False, True),
+    ],
+    ids=["zero-confirmed", "zero-images"],
+)
+def test_verify_existing_skips_a_source_without_confirmed_images_or_images(
+    http_server, fake_s3, overview, no_confirmed, no_images
+):
+    http_server.script("/source/1/", Reply(200, overview.encode()))
+
+    res = _site_downloader(http_server, fake_s3).verify_existing(1, "b", "p")
+
+    assert res.ok is True
+    assert res.errors == []
+    assert res.skipped_no_confirmed is no_confirmed
+    assert res.skipped_no_images is no_images
+    assert ("b", _MARKER) not in fake_s3.objects
+
+
+def test_verify_existing_fails_a_source_whose_overview_lists_no_total(http_server, fake_s3):
+    http_server.script("/source/1/", Reply(200, b"<html><body>No table</body></html>"))
+
+    res = _site_downloader(http_server, fake_s3).verify_existing(1, "b", "p")
+
+    assert res.ok is False
+    assert res.errors == ["overview_total_missing"]
 
 
 # ---------------------------------------------------------------------------

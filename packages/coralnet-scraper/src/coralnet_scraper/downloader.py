@@ -1648,10 +1648,12 @@ class CoralNetDownloader:
         """Return the image count on the source's overview page, or None when it lists none."""
         return parse_image_status_counts(self._get_source_overview_html(source_id)).total_images
 
-    def verify_existing(self, source_id: int, bucket_name: str, s3_prefix: str) -> list[str]:
+    def verify_existing(self, source_id: int, bucket_name: str, s3_prefix: str) -> DownloadResult:
         """Verify a source already on S3 against CoralNet's live image count.
 
-        A source that passes gets its completion marker; nothing is downloaded.
+        The overview supplies both the status counts and the total. A source that passes
+        gets its completion marker; nothing is downloaded. A source with no confirmed images
+        or no images is skipped, and a skip writes no marker.
 
         Args:
             source_id: CoralNet source id.
@@ -1659,17 +1661,27 @@ class CoralNetDownloader:
             s3_prefix: Key prefix of the scrape.
 
         Returns:
-            The verification failure codes; empty when the source passed.
+            ``ok`` with a skip flag for a skipped source; ``ok`` for a source that passed;
+            otherwise the verification failure codes (or ``overview_total_missing``) in
+            ``errors``.
         """
-        total = self.fetch_total_images(source_id)
-        if total is None:
-            return ["overview_total_missing"]
+        counts = parse_image_status_counts(self._get_source_overview_html(source_id))
+        if counts.confirmed == 0:
+            logger.info("Source %s has zero confirmed images on website; skipping", source_id)
+            return DownloadResult(ok=True, skipped_no_confirmed=True)
+        if counts.total_images is None:
+            logger.error("Source %s: overview lists no image count", source_id)
+            return DownloadResult(False, errors=["overview_total_missing"])
+        if counts.total_images == 0:
+            logger.info("Source %s reports zero images; skipping", source_id)
+            return DownloadResult(ok=True, skipped_no_images=True)
         verification = verify_source(
-            self.s3, bucket_name, s3_prefix, source_id, expected_total=total
+            self.s3, bucket_name, s3_prefix, source_id, expected_total=counts.total_images
         )
-        if verification.ok:
-            self._mark_complete(source_id, bucket_name, s3_prefix, verification)
-        return verification.failures
+        if not verification.ok:
+            return DownloadResult(False, errors=verification.failures)
+        self._mark_complete(source_id, bucket_name, s3_prefix, verification)
+        return DownloadResult(True)
 
     def download_source(
         self,

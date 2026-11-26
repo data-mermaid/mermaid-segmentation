@@ -44,7 +44,7 @@ class _FakeDownloader:
         self.session = object()
         self._login_ok = login_ok
         self.totals: dict[int, int | None] = {}
-        self.verify_results: dict[int, list[str] | Exception] = {}
+        self.verify_results: dict[int, DownloadResult | Exception] = {}
         self.verified: list[int] = []
         self.login_calls = 0
 
@@ -58,7 +58,7 @@ class _FakeDownloader:
     def fetch_total_images(self, source_id: int) -> int | None:
         return self.totals[source_id]
 
-    def verify_existing(self, source_id: int, bucket_name: str, s3_prefix: str) -> list[str]:
+    def verify_existing(self, source_id: int, bucket_name: str, s3_prefix: str) -> DownloadResult:
         self.verified.append(source_id)
         result = self.verify_results[source_id]
         if isinstance(result, Exception):
@@ -601,7 +601,10 @@ def test_verify_existing_skips_marked_sources_and_exits_1_listing_failures(
         fake_s3,
         ["verify-existing"],
         discovered=[1, 2, 3],
-        verify_results={2: [], 3: ["annotations_missing", "image_list_missing"]},
+        verify_results={
+            2: DownloadResult(True),
+            3: DownloadResult(False, errors=["annotations_missing", "image_list_missing"]),
+        },
     )
 
     assert code == 1
@@ -613,12 +616,38 @@ def test_verify_existing_skips_marked_sources_and_exits_1_listing_failures(
 
 def test_verify_existing_exits_0_when_every_source_passes(monkeypatch, fake_s3):
     code, dl, _ = _run_command(
-        monkeypatch, fake_s3, ["verify-existing"], discovered=[2, 3], verify_results={2: [], 3: []}
+        monkeypatch,
+        fake_s3,
+        ["verify-existing"],
+        discovered=[2, 3],
+        verify_results={2: DownloadResult(True), 3: DownloadResult(True)},
     )
 
     assert code == 0
     assert dl.verified == [2, 3]
     assert dl.login_calls == 0
+
+
+def test_verify_existing_logs_a_skipped_source_and_does_not_fail_it(monkeypatch, fake_s3, caplog):
+    caplog.set_level(logging.INFO)
+
+    code, dl, _ = _run_command(
+        monkeypatch,
+        fake_s3,
+        ["verify-existing"],
+        discovered=[2, 3],
+        verify_results={
+            2: DownloadResult(True),
+            3: DownloadResult(True, skipped_no_confirmed=True),
+        },
+    )
+
+    assert code == 0
+    assert dl.verified == [2, 3]
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    infos = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+    assert any("Source 3" in m and "skipped" in m for m in infos)
+    assert not any("Source 2" in m and "skipped" in m for m in infos)
 
 
 def test_verify_existing_checks_only_the_given_source_ids(monkeypatch, fake_s3):
@@ -627,7 +656,7 @@ def test_verify_existing_checks_only_the_given_source_ids(monkeypatch, fake_s3):
         fake_s3,
         ["verify-existing", "--source-ids", "1,2"],
         discovered=[1, 2, 3],
-        verify_results={1: [], 2: [], 3: []},
+        verify_results={1: DownloadResult(True), 2: DownloadResult(True), 3: DownloadResult(True)},
     )
 
     assert code == 0
@@ -670,7 +699,7 @@ def test_verify_existing_fails_a_source_reporting_a_missing_overview_total(
         fake_s3,
         ["verify-existing"],
         discovered=[2],
-        verify_results={2: ["overview_total_missing"]},
+        verify_results={2: DownloadResult(False, errors=["overview_total_missing"])},
     )
 
     assert code == 1
@@ -686,7 +715,7 @@ def test_verify_existing_reports_a_raising_source_by_exception_name_and_goes_on(
         fake_s3,
         ["verify-existing"],
         discovered=[2, 3],
-        verify_results={2: ValueError("boom"), 3: []},
+        verify_results={2: ValueError("boom"), 3: DownloadResult(True)},
     )
 
     assert code == 1

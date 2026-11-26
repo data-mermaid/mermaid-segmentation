@@ -369,6 +369,8 @@ def _verify_existing(
 ) -> int:
     """Verify each unmarked source of ``ids`` already on S3; marked ones are skipped.
 
+    Sources with no confirmed images or no images are logged as skipped and are not failures.
+
     Returns:
         1 when any source fails verification, else 0. Each failure is logged as an error.
     """
@@ -377,12 +379,16 @@ def _verify_existing(
         if s3_io.key_exists(s3, bucket, s3_io.object_key_complete_marker(prefix, sid)):
             continue
         try:
-            failures = downloader.verify_existing(sid, bucket, prefix)
+            result = downloader.verify_existing(sid, bucket, prefix)
         except Exception as e:
             logger.exception("Source %s: verification raised", sid)
-            failures = [type(e).__name__]
-        if failures:
-            failed[sid] = failures
+            failed[sid] = [type(e).__name__]
+            continue
+        if result.skipped_no_confirmed or result.skipped_no_images:
+            reason = "no confirmed images" if result.skipped_no_confirmed else "no images"
+            logger.info("Source %s skipped: %s", sid, reason)
+        elif not result.ok:
+            failed[sid] = result.errors
     for sid in sorted(failed):
         logger.error("Source %s not verified: %s", sid, ", ".join(failed[sid]))
     return 1 if failed else 0
