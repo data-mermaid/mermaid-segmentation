@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -19,7 +20,7 @@ from segdata_etl.common.stage import (
     stage_version,
 )
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.errors import ManifestNotFound, PublishRefused
+from segdata_spec.errors import ManifestNotFound, PublishRefused, SchemaValidationError
 from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, ParentRef, SourceInfo
 
@@ -88,14 +89,21 @@ def _tables() -> dict[str, pa.Table]:
     }
 
 
-def _stage(stage_dir: Path, repo_root: Path, **kwargs):
+def _stage(
+    stage_dir: Path,
+    repo_root: Path,
+    *,
+    client: Any = None,
+    tables: dict[str, pa.Table] | None = None,
+    **kwargs,
+):
     return stage_version(
         stage_dir,
         repo=Publishable(root=repo_root, git=GIT),
-        client=None,
+        client=client,
         dataset="ds",
         kind="points",
-        tables=_tables(),
+        tables=_tables() if tables is None else tables,
         image_store=STORE,
         etl_command="segdata build ds",
         source=SOURCE,
@@ -163,6 +171,28 @@ def test_stage_version_stages_names_plans_and_prints(
     assert capsys.readouterr().out == (
         f"version: {staged.version}\nmanifest_sha256: {staged.sha256}\n"
     )
+
+
+def test_stage_version_skips_a_name_the_bucket_already_holds(
+    tmp_path: Path,
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(stage, "datetime", _Clock)
+    client = FakeS3()
+    client.put(DATASET_BUCKET, "datasets/ds/20261124-abcdef1/manifest.json", b"{}")
+
+    staged = _stage(tmp_path / "stage", repo_root, client=client)
+
+    assert staged.version == "20261124-abcdef1-2"
+
+
+def test_stage_version_refuses_tables_that_fail_the_points_schema(tmp_path: Path, repo_root: Path):
+    tables = _tables()
+    tables["points.parquet"] = tables["points.parquet"].drop(["row"])
+
+    with pytest.raises(SchemaValidationError):
+        _stage(tmp_path / "stage", repo_root, tables=tables)
 
 
 def test_stage_version_reads_a_parent_from_the_extra_parent_dirs(tmp_path: Path, repo_root: Path):
