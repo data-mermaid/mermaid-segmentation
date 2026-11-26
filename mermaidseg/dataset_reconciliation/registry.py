@@ -38,15 +38,16 @@ logger = logging.getLogger(__name__)
 def _source_rows(ds: VersionDataset) -> list[tuple[int, str, str | None]]:
     """Return ``(global id, label name, lower-cased target or None)`` per ``labels.parquet`` row."""
     labels = ds.version.labels
-    return [
-        (ds.global_offset + label_id, name, attribute.lower() if attribute else None)
-        for label_id, name, attribute in zip(
-            labels.column("label_id").to_pylist(),
-            labels.column("name").to_pylist(),
-            labels.column("mermaid_benthic_attribute").to_pylist(),
-            strict=True,
-        )
-    ]
+    targets = ds.label_targets
+    rows: list[tuple[int, str, str | None]] = []
+    for label_id, name in zip(
+        labels.column("label_id").to_pylist(),
+        labels.column("name").to_pylist(),
+        strict=True,
+    ):
+        target = targets[name]
+        rows.append((ds.global_offset + label_id, name, target.lower() if target else None))
+    return rows
 
 
 def source_labels_to_target_labels(
