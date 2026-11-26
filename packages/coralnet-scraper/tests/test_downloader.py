@@ -687,17 +687,22 @@ def test_a_walk_short_of_the_overview_total_on_every_attempt_is_walked_again_on_
     assert ("b", _MARKER) in fake_s3.objects
 
 
-def test_prune_deletes_nothing_when_verification_fails(http_server, fake_s3, monkeypatch):
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_deletes_nothing_when_verification_fails(http_server, fake_s3, monkeypatch, dry_run):
     _script_source(http_server, [[1]])
     failed = Verification(failures=["image_missing:1"])
     monkeypatch.setattr(downloader_mod, "verify_source", lambda *a, **k: failed)
     fake_s3.put("b", "p/s1/images/99.jpg", b"OLD")
 
-    res = _site_downloader(http_server, fake_s3).download_source(1, "b", "p", prune=True)
+    res = _site_downloader(http_server, fake_s3).download_source(
+        1, "b", "p", prune=True, dry_run=dry_run
+    )
 
     assert res.errors == ["verification_failed"]
     assert ("delete", "p/s1/images/99.jpg") not in fake_s3.events
     assert ("b", "p/s1/images/99.jpg") in fake_s3.objects
+    assert not [k for _, k in fake_s3.objects if k.startswith("p/s1/_partial/")]
+    assert ("b", _MARKER) not in fake_s3.objects
 
 
 def _overview_counting_two_images(server: ScriptedServer) -> None:

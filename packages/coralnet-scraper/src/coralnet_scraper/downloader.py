@@ -390,8 +390,8 @@ class CoralNetDownloader:
             bucket_name: Destination S3 bucket.
             s3_prefix: Destination key prefix.
             prune: Delete image objects the verified image list lacks, before the marker.
-            dry_run: With ``prune``, log those objects and delete none; verification and the
-                marker run as usual.
+            dry_run: With ``prune``, log those objects and delete none. A source that verifies
+                gets no marker and keeps ``_partial/``.
 
         Returns:
             The outcome, with failure codes in ``errors`` and per-kind image counts in

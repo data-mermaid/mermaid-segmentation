@@ -169,8 +169,9 @@ def run_batch_download(
         is about to be downloaded (skipped sources do not consume it), then the run sleeps once
         and probes that source: an ok result resets the streak and the run continues (a later
         trip gets its own cooldown), an outage failure stops the run. A trip still pending
-        when the sources run out also returns ``stopped="circuit_open"``. Skipped sources and
-        other failures neither count nor reset the streak.
+        when the sources run out also returns ``stopped="circuit_open"``. A source that fails,
+        including a skip check that raises, while a trip is pending stops the run. Skipped
+        sources and other failures neither count nor reset the streak.
     """
     results: dict[int, DownloadResult] = {}
     failure_streak = 0
