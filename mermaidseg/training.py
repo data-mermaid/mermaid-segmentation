@@ -440,7 +440,7 @@ def run(args: argparse.Namespace) -> None:
         logger_context = Logger(
             config=cfg_logger,
             meta_model=meta_model,
-            id2concept=concept_id2name,
+            id2concept=dict(enumerate(schema.channel_names)),
             log_checkpoint=1,
             checkpoint_dir=args.output_dir,
             id2label={0: "ignore", **registry.target_id2label},
