@@ -47,6 +47,19 @@ def _fixture(name: str) -> str:
 
 
 @pytest.mark.parametrize(
+    ("failures", "codes"),
+    [
+        (ImageFailures(missing_url=20, skipped=5), ["images_missing_url", "images_outage"]),
+        (ImageFailures(upload_failed=1), ["images_upload_failed"]),
+        (ImageFailures(), []),
+    ],
+    ids=["missing-url-and-outage", "upload-failed", "none"],
+)
+def test_image_failure_codes_name_each_kind_of_failure(failures, codes):
+    assert downloader_mod._image_failure_codes(failures) == codes
+
+
+@pytest.mark.parametrize(
     ("overview", "no_confirmed", "no_images"),
     [
         (_fixture("source_zero_confirmed.html"), True, False),
@@ -57,9 +70,8 @@ def _fixture(name: str) -> str:
 def test_download_source_skips_a_source_without_confirmed_images_or_images(
     fake_s3, overview, no_confirmed, no_images
 ):
-    dl = CoralNetDownloader("u", "p")
+    dl = CoralNetDownloader("u", "p", s3=fake_s3)
     dl.auth.logged_in = True
-    dl.s3 = fake_s3
     with (
         patch.object(dl.auth, "_get_source_overview_html", return_value=overview),
         patch.object(dl, "download_metadata") as mock_meta,
@@ -84,9 +96,8 @@ def _failing_step_downloader(
     fake_s3, **overrides
 ) -> tuple[CoralNetDownloader, dict[str, MagicMock]]:
     """A downloader whose steps succeed except those overridden; returns it with its mocks."""
-    dl = CoralNetDownloader("u", "p", max_workers=2)
+    dl = CoralNetDownloader("u", "p", max_workers=2, s3=fake_s3)
     dl.auth.logged_in = True
-    dl.s3 = fake_s3
     defaults = {
         "download_metadata": (True, 1234),
         "download_labelset": True,
@@ -515,7 +526,7 @@ def test_two_images_with_the_same_title_are_both_listed(http_server, fake_s3):
     [
         (True, False, False, []),
         (False, False, True, ["orphan_image_objects:1"]),
-        (True, True, True, ["orphan_image_objects:1"]),
+        (True, True, True, None),
     ],
     ids=["prune", "keep", "dry-run"],
 )
@@ -532,7 +543,11 @@ def test_prune_deletes_orphan_objects_before_the_marker(
 
     assert res.ok is True
     assert (("b", "p/s1/images/99.jpg") in fake_s3.objects) is orphan_kept
-    assert json.loads(fake_s3.objects[("b", _MARKER)])["warnings"] == warnings
+    if dry_run:
+        assert ("b", _MARKER) not in fake_s3.objects
+        assert any(k.startswith("p/s1/_partial/") for _, k in fake_s3.objects)
+    else:
+        assert json.loads(fake_s3.objects[("b", _MARKER)])["warnings"] == warnings
     assert any("p/s1/images/99.jpg" in r.getMessage() for r in caplog.records) is dry_run
     if prune and not dry_run:
         assert fake_s3.events.index(("delete", "p/s1/images/99.jpg")) > fake_s3.events.index(

@@ -120,9 +120,8 @@ def _mock_paginated_session(
 
 def test_download_annotations_dispatches_to_paginated_for_large_source(fake_s3):
     """Sources above _PAGINATED_EXPORT_THRESHOLD must use the paginated path."""
-    dl = CoralNetDownloader("u", "p")
+    dl = CoralNetDownloader("u", "p", s3=fake_s3)
     dl.auth.logged_in = True
-    dl.s3 = fake_s3
     refs = _refs({1: [1]})
 
     with patch.object(dl.exporter, "download_annotations_paginated", return_value=True) as mock_pag:
@@ -165,9 +164,8 @@ def _run_bulk_download(
 
     ``export_prep`` lists the export_prep POST outcomes in order (responses or exceptions).
     """
-    dl = CoralNetDownloader("u", "p")
+    dl = CoralNetDownloader("u", "p", s3=fake_s3)
     dl.auth.logged_in = True
-    dl.s3 = fake_s3
 
     def get(url: str, timeout: int | None = None, **_: object) -> requests.Response:
         if "/export/serve/" in url:
@@ -449,9 +447,8 @@ def test_paginated_export_with_parallel_workers_keeps_page_order_when_pages_fini
 
 
 def test_paginated_export_runs_export_workers_page_round_trips_at_once(fake_s3):
-    dl = CoralNetDownloader("u", "p", export_workers=2)
+    dl = CoralNetDownloader("u", "p", export_workers=2, s3=fake_s3)
     dl.auth.logged_in = True
-    dl.s3 = fake_s3
     dl.auth._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
     lock = threading.Lock()
     in_flight = [0]
@@ -483,8 +480,7 @@ def test_paginated_export_runs_export_workers_page_round_trips_at_once(fake_s3):
 
 
 def test_the_first_failed_page_stops_the_pages_not_yet_started(fake_s3):
-    dl = CoralNetDownloader("u", "p", export_workers=3)
-    dl.s3 = fake_s3
+    dl = CoralNetDownloader("u", "p", export_workers=3, s3=fake_s3)
     attempted: list[int] = []
 
     def export_one_page(
@@ -890,3 +886,19 @@ def test_an_unusable_saved_chunk_is_exported_again(paginated_downloader, fake_s3
     assert ok is True
     assert served == {1: 1, 2: 0}
     assert _saved_names(fake_s3, _BULK_KEY) == ["img1.jpg", "img2.jpg"]
+
+
+def test_a_header_only_saved_chunk_of_an_unconfirmed_page_is_kept(paginated_downloader, fake_s3):
+    dl = paginated_downloader
+    refs = _status_refs({1: "Confirmed", 2: "Unconfirmed"})
+    fake_s3.put("b", f"{_PARTIAL}page-1.csv", _rows(1).encode())
+    fake_s3.put("b", f"{_PARTIAL}page-2.csv", _HEADER_ONLY.encode())
+    served, get, post = _serve_by_page({1: [_rows(1)], 2: [_rows(2)]})
+
+    with _mock_paginated_session(dl, get=get, post=post):
+        ok = dl.exporter.download_annotations_paginated(1, "b", "p", refs=refs, page_workers=1)
+
+    assert ok is True
+    assert served == {1: 0, 2: 0}
+    assert _saved_names(fake_s3, ("b", f"{_PARTIAL}page-2.csv")) == []
+    assert _saved_names(fake_s3, _BULK_KEY) == ["img1.jpg"]

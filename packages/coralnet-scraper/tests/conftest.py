@@ -355,9 +355,8 @@ def paginated_downloader(fake_s3) -> CoralNetDownloader:
     server-side session race; that behaviour is exercised by
     ``test_get_export_session_creates_independent_logged_in_session_per_thread``.
     """
-    dl = CoralNetDownloader("u", "p")
+    dl = CoralNetDownloader("u", "p", s3=fake_s3)
     dl.auth.logged_in = True
-    dl.s3 = fake_s3
     dl.auth._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]
     return dl
 
@@ -445,9 +444,8 @@ def _http_response(
 
 
 def _downloader_on(fake_s3) -> CoralNetDownloader:
-    dl = CoralNetDownloader("u", "p", max_workers=3)
+    dl = CoralNetDownloader("u", "p", max_workers=3, s3=fake_s3)
     dl.auth.logged_in = True
-    dl.s3 = fake_s3
     return dl
 
 
@@ -475,9 +473,8 @@ def _view_page(server: ScriptedServer, media_path: str) -> bytes:
 
 
 def _site_downloader(server: ScriptedServer, fake_s3) -> CoralNetDownloader:
-    dl = CoralNetDownloader("u", "p", max_workers=2)
+    dl = CoralNetDownloader("u", "p", max_workers=2, s3=fake_s3)
     dl.auth.logged_in = True
-    dl.s3 = fake_s3
     dl.auth.CORALNET_URL = server.url
     dl.auth.LOGIN_URL = f"{server.url}{_LOGIN_PATH}"
     dl.auth._new_logged_in_session = lambda: dl.session  # type: ignore[method-assign]

@@ -82,6 +82,7 @@ class CoralNetDownloader:
         max_workers: int | None = None,
         export_workers: int | None = None,
         requests_per_second: float | None = None,
+        s3: Any | None = None,
     ) -> None:
         """Create the client and its HTTP and S3 sessions; no network call is made.
 
@@ -94,6 +95,7 @@ class CoralNetDownloader:
                 environment or falls back to 3.
             requests_per_second: Rate limit shared by every CoralNet session; ``None`` reads
                 the environment, where unset means no limit.
+            s3: S3 client every component writes with; ``None`` builds the boto3 client.
 
         Raises:
             ValueError: If a worker count is not an integer of at least 1, or the rate is
@@ -116,23 +118,14 @@ class CoralNetDownloader:
             max_workers=self.max_workers,
             requests_per_second=self.requests_per_second,
         )
-        self._s3 = boto3.client("s3", config=BotoConfig(max_pool_connections=self.max_workers + 4))
-        self.exporter = AnnotationExporter(self.auth, self._s3, export_workers=self.export_workers)
-        self.walker = SourceWalker(self.auth, self._s3, reset_partial=self._reset_partial)
-        self.images = ImageFetcher(self.auth, self._s3, max_workers=self.max_workers)
-
-    @property
-    def s3(self) -> Any:
-        """The S3 client every component writes with."""
-        return self._s3
-
-    @s3.setter
-    def s3(self, client: Any) -> None:
-        """Use ``client`` for this downloader and each of its components."""
-        self._s3 = client
-        self.exporter.s3 = client
-        self.walker.s3 = client
-        self.images.s3 = client
+        self.s3: Any = (
+            s3
+            if s3 is not None
+            else boto3.client("s3", config=BotoConfig(max_pool_connections=self.max_workers + 4))
+        )
+        self.exporter = AnnotationExporter(self.auth, self.s3, export_workers=self.export_workers)
+        self.walker = SourceWalker(self.auth, self.s3, reset_partial=self._reset_partial)
+        self.images = ImageFetcher(self.auth, self.s3, max_workers=self.max_workers)
 
     @property
     def session(self) -> requests.Session:
@@ -568,6 +561,7 @@ class CoralNetDownloader:
         """Verify the source and write its marker when it passes.
 
         With ``prune`` the orphan image objects go first (only logged under ``dry_run``).
+        Under ``dry_run`` a passing source gets no marker and keeps ``_partial/``.
 
         Returns:
             ``["verification_failed"]`` after discarding ``_partial/`` when verification
@@ -590,5 +584,8 @@ class CoralNetDownloader:
             )
             s3_io.delete_prefix(self.s3, bucket_name, s3_io.partial_prefix(s3_prefix, source_id))
             return ["verification_failed"]
+        if dry_run:
+            logger.info("Source %s verified but left unmarked because of the dry run", source_id)
+            return []
         self._mark_complete(source_id, bucket_name, s3_prefix, verification)
         return []

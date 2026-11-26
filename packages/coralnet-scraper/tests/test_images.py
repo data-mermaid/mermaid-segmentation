@@ -25,7 +25,6 @@ from conftest import (
 )
 from PIL import Image
 
-from coralnet_scraper import downloader as downloader_mod
 from coralnet_scraper import images as images_mod
 from coralnet_scraper.downloader import CoralNetDownloader
 from coralnet_scraper.errors import ImageInvalid
@@ -93,7 +92,6 @@ def test_a_run_of_failed_images_stops_the_stage_and_skips_the_rest():
 
     assert failures == ImageFailures(missing_url=20, skipped=5)
     assert len(resolved) < 25 * images_mod._IMAGE_ATTEMPTS
-    assert downloader_mod._image_failure_codes(failures)[-1] == "images_outage"
 
 
 def test_an_image_that_fails_as_stop_is_set_reports_its_failure_and_uploads_nothing():
@@ -119,7 +117,6 @@ def test_a_success_resets_the_image_failure_streak():
     failures, _ = _outage_run(lambda i: i != 20, 39)
 
     assert failures.skipped == 0
-    assert "images_outage" not in downloader_mod._image_failure_codes(failures)
 
 
 def test_download_image_to_s3_retries_a_503_then_uploads_the_bytes(fake_s3, http_server):
