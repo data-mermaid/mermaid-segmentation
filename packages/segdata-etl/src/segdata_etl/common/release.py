@@ -1,4 +1,4 @@
-"""S3 publishing helpers: JSON and parquet puts, key listing and bulk file upload."""
+"""Raw-ingest writer: S3 JSON and parquet puts, key listing, and bulk file upload."""
 
 from __future__ import annotations
 
@@ -13,11 +13,10 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from botocore.exceptions import ClientError
+
+from segdata_spec.s3 import exists
 
 logger = logging.getLogger(__name__)
-
-_MISSING_CODES = {"404", "NoSuchKey", "NotFound"}
 
 
 @dataclass(frozen=True)
@@ -29,16 +28,6 @@ class S3Target:
     dry_run: bool
 
 
-def _key_exists(client: Any, bucket: str, key: str) -> bool:
-    try:
-        client.head_object(Bucket=bucket, Key=key)
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") in _MISSING_CODES:
-            return False
-        raise
-    return True
-
-
 def ensure_absent(client: Any, target: S3Target, names: list[str], *, overwrite: bool) -> None:
     """Raise ``FileExistsError`` if any ``<prefix>/<name>`` exists, unless ``overwrite``.
 
@@ -48,7 +37,7 @@ def ensure_absent(client: Any, target: S3Target, names: list[str], *, overwrite:
         return
     for name in names:
         key = f"{target.prefix}/{name}"
-        if _key_exists(client, target.bucket, key):
+        if exists(client, target.bucket, key):
             raise FileExistsError(
                 f"s3://{target.bucket}/{key} already exists; pass --overwrite to replace it"
             )
@@ -60,7 +49,7 @@ def annotations_parquet_name(dataset_name: str) -> str:
 
 
 def preflight(client: Any, target: S3Target, dataset_name: str, *, overwrite: bool) -> None:
-    """Raise ``FileExistsError`` if any file ``publish_dataset`` writes already exists."""
+    """Raise ``FileExistsError`` if any file ``put_raw_release`` writes already exists."""
     names = [
         annotations_parquet_name(dataset_name),
         "classes.json",
@@ -78,7 +67,7 @@ def _put_bytes(
     if target.dry_run:
         logger.info("[dry-run] would write %s", uri)
         return uri
-    if not overwrite and _key_exists(client, target.bucket, key):
+    if not overwrite and exists(client, target.bucket, key):
         raise FileExistsError(f"{uri} already exists; pass --overwrite to replace it")
     client.put_object(Bucket=target.bucket, Key=key, Body=body, ContentType=content_type)
     logger.info("Wrote %s", uri)
@@ -111,7 +100,7 @@ def put_parquet(
     )
 
 
-def publish_dataset(
+def put_raw_release(
     client: Any,
     target: S3Target,
     *,

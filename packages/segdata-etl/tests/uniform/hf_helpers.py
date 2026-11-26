@@ -13,7 +13,7 @@ import pytest
 from PIL import Image
 
 from segdata_etl.common import hf_dense
-from segdata_spec.publish import GitState
+from segdata_spec.git import GitState
 
 IMAGE_STRUCT = pa.struct([("bytes", pa.binary()), ("path", pa.string())])
 

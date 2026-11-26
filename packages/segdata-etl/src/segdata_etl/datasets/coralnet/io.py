@@ -13,21 +13,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import boto3
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.client import BaseClient
-from botocore.config import Config
-from botocore.exceptions import ClientError
 
 from coralnet_scraper.s3_io import read_csv_s3
+from segdata_spec.s3 import exists
 
 from .schemas import validate
-
-_MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
-
-_BOTO_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
 
 # Returns None when the object is missing, and raises on other errors so the caller can record them.
 CsvReader = Callable[[str, str], "pd.DataFrame | None"]
@@ -35,19 +29,6 @@ CsvReader = Callable[[str, str], "pd.DataFrame | None"]
 
 # Returns whether the object exists, and raises on errors other than a missing key.
 MarkerCheck = Callable[[str, str], bool]
-
-
-def make_s3_client(max_pool_connections: int | None = None) -> BaseClient:
-    """Build a boto3 S3 client with adaptive retries for long-running jobs.
-
-    ``max_pool_connections`` sizes the connection pool shared by worker threads; ``None`` keeps
-    botocore's default of 10.
-    """
-    if max_pool_connections is None:
-        return boto3.client("s3", config=_BOTO_CONFIG)
-    return boto3.client(
-        "s3", config=_BOTO_CONFIG.merge(Config(max_pool_connections=max_pool_connections))
-    )
 
 
 def make_ibis_connection() -> Any:
@@ -64,7 +45,7 @@ def make_ibis_connection() -> Any:
     return con
 
 
-def read_csv_via_ibis(con: Any, bucket: str, key: str) -> pd.DataFrame | None:
+def read_csv_via_ibis(con: Any, client: Any, bucket: str, key: str) -> pd.DataFrame | None:
     """Read a CSV from S3 through ibis + DuckDB httpfs into a pandas DataFrame.
 
     CoralNet CSVs are messy, so several DuckDB defaults are overridden:
@@ -78,28 +59,27 @@ def read_csv_via_ibis(con: Any, bucket: str, key: str) -> pd.DataFrame | None:
 
     Args:
         con: An ibis DuckDB connection from :func:`make_ibis_connection`.
+        client: A boto3 S3 client; a HEAD on the key decides whether the object is missing.
         bucket: S3 bucket name.
         key: Object key of the CSV.
 
     Returns:
-        The CSV as a DataFrame of strings, or ``None`` if DuckDB reports the file as missing.
+        The CSV as a DataFrame of strings, or ``None`` if the object is missing.
+
+    Raises:
+        botocore.exceptions.ClientError: The HEAD failed for a reason other than a missing key.
     """
-    uri = f"s3://{bucket}/{key}"
-    try:
-        table = con.read_csv(uri, null_padding=True, all_varchar=True, quote='"')
-        return table.execute()
-    except Exception as e:
-        msg = str(e)
-        if any(needle in msg for needle in ("HTTP 404", "Not Found", "NoSuchKey")):
-            return None
-        raise
+    if not exists(client, bucket, key):
+        return None
+    table = con.read_csv(f"s3://{bucket}/{key}", null_padding=True, all_varchar=True, quote='"')
+    return table.execute()
 
 
-def make_csv_reader_ibis(con: Any) -> CsvReader:
-    """Build a :data:`CsvReader` closure over an ibis connection."""
+def make_csv_reader_ibis(con: Any, client: Any) -> CsvReader:
+    """Build a :data:`CsvReader` closure over an ibis connection and the client that checks keys."""
 
     def _reader(bucket: str, key: str) -> pd.DataFrame | None:
-        return read_csv_via_ibis(con, bucket, key)
+        return read_csv_via_ibis(con, client, bucket, key)
 
     return _reader
 
@@ -120,13 +100,7 @@ def make_marker_check(client: Any) -> MarkerCheck:
     """Build a :data:`MarkerCheck` that probes object existence with ``head_object``."""
 
     def _check(bucket: str, key: str) -> bool:
-        try:
-            client.head_object(Bucket=bucket, Key=key)
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") in _MISSING_KEY_CODES:
-                return False
-            raise
-        return True
+        return exists(client, bucket, key)
 
     return _check
 

@@ -19,9 +19,9 @@ from tqdm import tqdm
 from coralnet_scraper.s3_io import object_key_image
 
 from ...common.jpeg_header import read_jpeg_size_from_s3
+from ...common.s3_objects import make_s3_client
 from .annotations import derive_unique_images
 from .config import RESIZE_THRESHOLD
-from .io import make_s3_client
 from .schemas import IMAGES_PRIMARY_KEY, IMAGES_SCHEMA, validate
 
 logger = logging.getLogger(__name__)

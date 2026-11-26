@@ -20,6 +20,8 @@ from typing import Final
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
+from segdata_spec.s3 import is_not_found
+
 logger = logging.getLogger(__name__)
 
 # Statuses of read_jpeg_size_from_s3 that carry (width, height); every other status has none.
@@ -118,10 +120,11 @@ def read_jpeg_size_from_s3(
         response = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{first_chunk - 1}")
         head_bytes = response["Body"].read()
     except ClientError as e:
-        code = e.response["Error"].get("Code", "")
-        if code in ("404", "NoSuchKey"):
+        if is_not_found(e):
             return None, None, None, "not_found"
-        logger.warning("ranged get failed for s3://%s/%s: %s", bucket, key, code)
+        logger.warning(
+            "ranged get failed for s3://%s/%s: %s", bucket, key, e.response["Error"].get("Code", "")
+        )
         return None, None, None, "s3_error"
 
     file_size = _file_size_from_content_range(response)

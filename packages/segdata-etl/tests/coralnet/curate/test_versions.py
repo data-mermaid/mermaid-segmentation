@@ -17,14 +17,14 @@ from s3_fake import FakeS3, crc64nvme, quoted_etag
 
 from segdata_etl import cli, promote
 from segdata_etl.common.copy_plan import COPIES_NAME, UPLOADS_NAME
-from segdata_etl.common.stage import LocalDirS3
 from segdata_etl.datasets.coralnet.curate import versions
 from segdata_etl.label_maps import coralnet_api
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
+from segdata_spec.git import GitState
 from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
-from segdata_spec.publish import GitState, publish_dataset, publish_taxonomy
 from segdata_spec.schema import IMAGES_SCHEMA, POINTS_SCHEMA
+from segdata_spec.stage import stage_dataset, stage_taxonomy
 
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
 RAW_STORE = ImageStore(bucket="img-bucket", prefix="coralnet/", owner="segdata")
@@ -80,6 +80,9 @@ class FakeApiSession:
 
 class NoS3:
     """An S3 client that fails the test on any call."""
+
+    def __init__(self, **_kw: Any) -> None:
+        pass
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"S3 {name} called")
@@ -171,9 +174,17 @@ def _taxonomy_tables() -> dict[str, pa.Table]:
     }
 
 
-def _publish_raw(client: Any, version: str, repo: Path) -> Pin:
-    _, sha = publish_dataset(
-        client,
+def _upload_staged(client: FakeS3, stage_dir: Path) -> None:
+    """Seed ``client`` with every staged object, standing in for ``segdata promote``."""
+    root = stage_dir / DATASET_BUCKET
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        client.put(DATASET_BUCKET, path.relative_to(root).as_posix(), path.read_bytes())
+
+
+def _stage_raw(stage_dir: Path, version: str, repo: Path) -> Pin:
+    _, sha = stage_dataset(
+        stage_dir,
+        parent_dirs=(stage_dir,),
         bucket=DATASET_BUCKET,
         dataset="coralnet-raw",
         version=version,
@@ -257,9 +268,10 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     s3 = FakeS3()
     for row in _raw_images():
         s3.put(RAW_STORE.bucket, RAW_STORE.prefix + str(row["key"]), _blob(str(row["image_id"])))
-    raw = _publish_raw(s3, RAW_VERSION, repo)
-    _, tax_sha = publish_taxonomy(
-        s3,
+    seed = tmp_path / "seed"
+    raw = _stage_raw(seed, RAW_VERSION, repo)
+    _, tax_sha = stage_taxonomy(
+        seed,
         bucket=DATASET_BUCKET,
         name="mermaid-benthic",
         version="20261101-2222222",
@@ -270,8 +282,10 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         repo_dir=repo,
         git=CLEAN_GIT,
     )
+    _upload_staged(s3, seed)
     s3.calls.clear()
-    monkeypatch.setattr(cli, "make_s3_client", lambda: s3)
+    monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: s3)
+    # The raw parent is published to S3 only; neither the stage nor the cache dir holds a copy.
     return World(
         s3=s3,
         stage=tmp_path / "stage",
@@ -340,6 +354,12 @@ def test_curated_stages_curated_tables_on_raws_image_store_without_a_plan_or_s3_
     assert world.s3.ops("put") == []
 
 
+def test_curated_records_the_taxonomy_pin_in_the_manifest(world: World) -> None:
+    _version, manifest, _pin = _stage_curated(world)
+
+    assert manifest.taxonomy == world.taxonomy
+
+
 def test_staged_curated_version_promotes_as_a_tables_only_version(world: World) -> None:
     version, _manifest, _pin = _stage_curated(world)
     before = set(world.s3.objects)
@@ -354,7 +374,7 @@ def test_staged_curated_version_promotes_as_a_tables_only_version(world: World) 
 def test_curated_against_a_raw_staged_only_in_the_stage_dir_reads_no_raw_from_s3(
     world: World,
 ) -> None:
-    staged_raw = _publish_raw(LocalDirS3(world.stage), STAGED_RAW_VERSION, world.repo)
+    staged_raw = _stage_raw(world.stage, STAGED_RAW_VERSION, world.repo)
 
     world.run(("raw-", staged_raw), ("taxonomy-", world.taxonomy), cache=world.stage)
 

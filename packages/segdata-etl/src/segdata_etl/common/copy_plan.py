@@ -1,7 +1,8 @@
 """Dataset-independent source probing and the promote plans shared by the staging builders.
 
-``copies.jsonl`` lists server-side copies from a source bucket; ``uploads.jsonl`` lists staged files;
-``features.jsonl`` lists server-side copies of feature vectors, in the shape of ``copies.jsonl``.
+``copies.jsonl`` lists server-side copies from a source bucket; ``uploads.jsonl`` lists staged files.
+A version folder holds the plans of its images, and each ``features/<family>/`` folder the
+``copies.jsonl`` of its feature vectors.
 """
 
 from __future__ import annotations
@@ -18,21 +19,18 @@ from botocore.exceptions import ClientError
 from segdata_etl.common.s3_objects import (
     ObjectConflict,
     SourceChanged,
-    crc64nvme_b64,
     image_size,
     md5_hex,
     sniff_media_type,
 )
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import cache_path, dataset_prefix, is_precondition_failed
+from segdata_spec.layout import cache_path, dataset_prefix
+from segdata_spec.s3 import crc64nvme_b64, is_precondition_failed, norm_etag
 
 logger = logging.getLogger(__name__)
 
 COPIES_NAME = "copies.jsonl"
 UPLOADS_NAME = "uploads.jsonl"
-FEATURES_NAME = "features.jsonl"
-# Staged beside a feature index: the build's choices that promote passes on to the publish.
-FEATURE_STAGE_NAME = "stage.json"
 
 _FIRST_READ = 64 * 1024
 _MAX_READ = 1024 * 1024
@@ -121,7 +119,7 @@ def read_whole_object(
     dims = image_size(data)
     if media_type is None or dims is None:
         return None
-    facts = ObjectFacts(md5_hex(data), len(data), crc64nvme_b64(data), head["ETag"].strip('"'))
+    facts = ObjectFacts(md5_hex(data), len(data), crc64nvme_b64(data), norm_etag(head["ETag"]))
     return (media_type, dims[0], dims[1]), facts
 
 
@@ -138,11 +136,13 @@ def probe_image(
 ) -> ImageOutcome:
     """Decide one image from its source HEAD and, unless a parent row matches, its bytes.
 
+    ``parent_rows`` hold bare source fingerprints, as ``versions.bare_fingerprints`` leaves them.
+
     A multipart ETag or a missing CRC64NVME means the whole object is read, so the row records the
     ETag and CRC64NVME a single-part copy will have; the source ETag stays the fingerprint.
     ``build_row`` turns the object facts and header into the dataset's ``images.parquet`` row.
     """
-    source_etag = head["ETag"].strip('"')
+    source_etag = norm_etag(head["ETag"])
     parent = parent_rows.get(image_id)
     if parent is not None and parent["source_fingerprint"] == source_etag:
         return ImageOutcome(image_id, row=parent, reused=True, found_as_jpg=found_as_jpg)
@@ -189,15 +189,13 @@ def copy_plan(
     return plan
 
 
-def write_copies(
-    stage_dir: Path,
-    dataset: str,
-    version: str,
-    plan: Sequence[Mapping[str, Any]],
-    name: str = COPIES_NAME,
-) -> None:
-    """Write copy plan ``name`` for the staged version, one sorted-key JSON object per line."""
-    path = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version) + name)
+def write_copies(stage_dir: Path, prefix: str, plan: Sequence[Mapping[str, Any]]) -> None:
+    """Write ``copies.jsonl`` under the staged folder ``prefix``, one sorted-key JSON object per line.
+
+    ``prefix`` is a dataset version's prefix, or a feature set's under it.
+    """
+    path = cache_path(stage_dir, DATASET_BUCKET, prefix + COPIES_NAME)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(entry, sort_keys=True) + "\n" for entry in plan))
 
 

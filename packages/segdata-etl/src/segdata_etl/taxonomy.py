@@ -1,15 +1,12 @@
-"""``segdata taxonomy``: stage the MERMAID benthic taxonomy locally, then publish the staged tables.
+"""``segdata taxonomy``: fetch the MERMAID benthic taxonomy and stage a version on disk.
 
-``--stage-dir`` fetches the API and stages a version on disk. ``--tables-from <staged folder> --publish``
-re-checks those tables and publishes them to S3 as a new version, with the staged source revision and the
-exact table bytes.
+The version is named against S3, so the staged name is the published name; ``segdata promote --taxonomy``
+uploads the staged tables write-once.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import io
 import logging
 import shlex
 from datetime import UTC, datetime
@@ -18,22 +15,19 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 import requests
-from botocore.exceptions import ClientError
 
-from segdata_etl.common.stage import LocalDirS3, next_free_version, refuse_unpublishable
+from segdata_etl.common.stage import next_free_version
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import MANIFEST_NAME, is_not_found, taxonomy_prefix
-from segdata_spec.errors import PublishRefused
-from segdata_spec.manifest import Pin, SourceInfo, TaxonomyManifest, manifest_sha256
-from segdata_spec.publish import GitState, probe_git, publish_taxonomy
+from segdata_spec.git import probe_git, refuse_unpublishable
+from segdata_spec.layout import taxonomy_prefix
+from segdata_spec.manifest import SourceInfo
 from segdata_spec.schema import (
     BENTHIC_ATTRIBUTES_SCHEMA,
     GROWTH_FORMS_SCHEMA,
-    TAXONOMY_TABLES,
     conform,
 )
+from segdata_spec.stage import stage_taxonomy
 
 logger = logging.getLogger(__name__)
 
@@ -115,30 +109,6 @@ def _check_tables(attributes: pa.Table, growth_forms: pa.Table) -> None:
         raise ValueError(f"benthic attributes name unknown parents: {sorted(unknown)}")
 
 
-def require_published_taxonomy(client: Any, bucket: str, pin: Pin) -> None:
-    """Refuse unless ``bucket`` holds the pinned taxonomy manifest with the pinned sha256.
-
-    ``sync`` trusts a cached manifest, so without this check a staged, unpublished taxonomy in
-    ``--cache-dir`` would pass. ``segdata taxonomy --publish`` names a new version, so a staged pin
-    never resolves in the bucket.
-
-    Raises:
-        PublishRefused: The manifest is absent from ``bucket`` or does not match the pin.
-    """
-    key = taxonomy_prefix(pin.name, pin.version) + MANIFEST_NAME
-    try:
-        body: bytes = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-    except ClientError as exc:
-        if is_not_found(exc):
-            raise PublishRefused(
-                f"taxonomy {pin.name} {pin.version} is not published in {bucket}; "
-                "publish it before staging a dataset"
-            ) from exc
-        raise
-    if manifest_sha256(body) != pin.manifest_sha256:
-        raise PublishRefused(f"taxonomy manifest s3://{bucket}/{key} does not match its pin")
-
-
 def find_repo_root(start: Path) -> Path:
     """Return the nearest directory at or above ``start`` holding both ``.git`` and ``uv.lock``.
 
@@ -152,43 +122,10 @@ def find_repo_root(start: Path) -> Path:
 
 
 def _command_line(args: argparse.Namespace) -> str:
-    parts = ["segdata", "taxonomy"]
-    if args.tables_from is not None:
-        parts += ["--tables-from", str(args.tables_from), "--publish"]
-    else:
-        parts += ["--stage-dir", str(args.stage_dir)]
-        if args.base_url != DEFAULT_BASE_URL:
-            parts += ["--base-url", args.base_url]
+    parts = ["segdata", "taxonomy", "--stage-dir", str(args.stage_dir)]
+    if args.base_url != DEFAULT_BASE_URL:
+        parts += ["--base-url", args.base_url]
     return shlex.join(parts)
-
-
-def _check_mode(args: argparse.Namespace) -> None:
-    """Refuse flag combinations other than stage (``--stage-dir``) or publish (``--tables-from --publish``)."""
-    if args.tables_from is not None:
-        if not args.publish:
-            raise ValueError("--tables-from only publishes a staged version; add --publish")
-        if args.stage_dir is not None:
-            raise ValueError("--stage-dir stages a fetch; it cannot be combined with --tables-from")
-    elif args.publish:
-        raise ValueError("--publish needs --tables-from <staged folder>; stage first, then publish")
-    elif args.stage_dir is None:
-        raise ValueError(
-            "give --stage-dir to stage, or --tables-from <folder> --publish to publish"
-        )
-
-
-def _read_staged(directory: Path) -> tuple[dict[str, pa.Table], SourceInfo]:
-    manifest = TaxonomyManifest.model_validate_json((directory / "manifest.json").read_bytes())
-    if manifest.name != NAME:
-        raise ValueError(f"{directory} stages {manifest.name!r}, not {NAME!r}")
-    tables: dict[str, pa.Table] = {}
-    for name in TAXONOMY_TABLES:
-        data = (directory / name).read_bytes()
-        if hashlib.sha256(data).hexdigest() != manifest.files[name].sha256:
-            raise ValueError(f"{directory / name} does not match the sha256 in its manifest")
-        tables[name] = pq.read_table(io.BytesIO(data))
-    _check_tables(tables[_BA], tables[_GF])
-    return tables, manifest.source
 
 
 def _fetch_source(
@@ -199,18 +136,31 @@ def _fetch_source(
     return tables, SourceInfo(type="mermaid-api", uri=base_url, revision=fetched_at)
 
 
-def _write_version(
-    args: argparse.Namespace,
-    *,
-    client: Any,
-    version: str,
-    tables: dict[str, pa.Table],
-    source: SourceInfo,
-    repo_root: Path,
-    git: GitState,
+def run_taxonomy(
+    args: argparse.Namespace, *, source_client: Any, session: requests.Session | None = None
 ) -> int:
-    manifest, sha = publish_taxonomy(
-        client,
+    """Fetch the taxonomy and stage it under ``--stage-dir``; print the version and manifest sha256.
+
+    The version is the first free name against the staged folders and the versions in S3
+    (``source_client``), so the staged name is the name ``segdata promote --taxonomy`` publishes.
+
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed.
+        ValueError: The API data fails its checks.
+    """
+    repo_root = find_repo_root(Path(__file__).resolve().parent)
+    git = probe_git(repo_root)
+    refuse_unpublishable(git, repo_root)
+    tables, source = _fetch_source(session or requests.Session(), args.base_url)
+    version = next_free_version(
+        args.stage_dir,
+        DATASET_BUCKET,
+        partial(taxonomy_prefix, NAME),
+        git_sha=git.sha,
+        client=source_client,
+    )
+    manifest, sha = stage_taxonomy(
+        args.stage_dir,
         bucket=DATASET_BUCKET,
         name=NAME,
         version=version,
@@ -221,68 +171,17 @@ def _write_version(
         repo_dir=repo_root,
         git=git,
     )
-    logger.info("wrote taxonomy %s", manifest.version)
+    logger.info("staged taxonomy %s", manifest.version)
     print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0
 
 
-def run_taxonomy(
-    args: argparse.Namespace, *, source_client: Any, session: requests.Session | None = None
-) -> int:
-    """Stage a fetched taxonomy under ``--stage-dir``, or publish a staged one with ``--tables-from``.
-
-    Prints the version and manifest sha256. A staged version is named against the staged folders and the
-    versions in S3; a published one is named against S3 only.
-
-    Raises:
-        ValueError: The flags are not a stage or a publish, or a staged table fails its check.
-        PublishRefused: The git tree is dirty or unpushed.
-    """
-    _check_mode(args)
-    repo_root = find_repo_root(Path(__file__).resolve().parent)
-    git = probe_git(repo_root)
-    refuse_unpublishable(git)
-    staging = args.tables_from is None
-    if staging:
-        tables, source = _fetch_source(session or requests.Session(), args.base_url)
-    else:
-        tables, source = _read_staged(Path(args.tables_from))
-    version = next_free_version(
-        args.stage_dir if staging else None,
-        DATASET_BUCKET,
-        partial(taxonomy_prefix, NAME),
-        git_sha=git.sha,
-        client=source_client,
-    )
-    client = LocalDirS3(args.stage_dir) if staging else source_client
-    return _write_version(
-        args,
-        client=client,
-        version=version,
-        tables=tables,
-        source=source,
-        repo_root=repo_root,
-        git=git,
-    )
-
-
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add ``--stage-dir``, ``--tables-from``, ``--publish`` and ``--base-url``."""
+    """Add ``--stage-dir`` and ``--base-url``."""
     parser.add_argument(
         "--stage-dir",
         type=Path,
-        default=None,
+        required=True,
         help="Fetch the taxonomy and stage a version in this local directory",
-    )
-    parser.add_argument(
-        "--tables-from",
-        type=Path,
-        default=None,
-        help="Staged taxonomy version folder to publish to S3; requires --publish; makes no HTTP call",
-    )
-    parser.add_argument(
-        "--publish",
-        action="store_true",
-        help="Publish the --tables-from version to S3 after re-checking its tables",
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help=argparse.SUPPRESS)

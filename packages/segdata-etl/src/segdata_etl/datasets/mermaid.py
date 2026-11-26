@@ -2,9 +2,9 @@
 
 The build reads the nightly annotations parquet, the source image headers and each image's pyspacer
 feature vector, never writes to S3, and leaves a version under ``--stage-dir`` plus ``copies.jsonl``,
-the plan a later promote step runs to copy the images into the dataset bucket. Beside it,
-``features.jsonl`` plans the copy of the feature vectors, and ``features/<family>/`` in the version
-folder holds the staged feature index and extractor spec that promote publishes as a feature set.
+the plan a later promote step runs to copy the images into the dataset bucket. Under the version
+folder, ``features/<family>/`` holds the staged feature set: its index, its manifest and the
+``copies.jsonl`` of the vectors that promote copies into the family.
 """
 
 from __future__ import annotations
@@ -27,48 +27,37 @@ import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.copy_plan import (
-    FEATURE_STAGE_NAME,
-    FEATURES_NAME,
     ImageOutcome,
     ObjectFacts,
     copy_plan,
-    stage_bytes,
     write_copies,
 )
 from segdata_etl.common.copy_plan import probe_image as probe_source_image
 from segdata_etl.common.featurevector import (
-    FeatureVectorsMissing,
-    Point,
-    VectorFacts,
-    extractor_spec_bytes,
-    points_by_image,
+    gather_features,
     read_extractor_spec,
-    read_vector,
-    refusal,
-    refuse_invalid,
+    stage_features,
 )
 from segdata_etl.common.s3_objects import EXTENSIONS
-from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
+from segdata_etl.common.stage import next_version
+from segdata_etl.common.versions import bare_fingerprints
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import (
-    EXTRACTOR_SPEC_NAME,
-    FEATURE_INDEX_NAME,
+from segdata_spec.features import feature_store_name
+from segdata_spec.git import probe_git, refuse_unpublishable
+from segdata_spec.layout import (
     cache_path,
     dataset_prefix,
     feature_store_prefix,
-    is_not_found,
-    is_precondition_failed,
 )
-from segdata_spec.features import feature_file_key, feature_store_name
-from segdata_spec.manifest import ImageStore, LabelMapping, ParentRef, SourceInfo
-from segdata_spec.publish import probe_git, publish_dataset, table_bytes
+from segdata_spec.manifest import ImageStore, LabelMapping, ParentRef, Pin, SourceInfo
+from segdata_spec.s3 import is_not_found, is_precondition_failed, norm_etag
 from segdata_spec.schema import (
-    FEATURE_INDEX_SCHEMA,
     IMAGES_SCHEMA,
     LABEL_COUNTS_SCHEMA,
     LABELS_SCHEMA,
     POINTS_SCHEMA,
 )
+from segdata_spec.stage import stage_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +67,8 @@ SOURCE_IMAGE_PREFIX = "mermaid/"
 DEFAULT_ANNOTATIONS_URI = f"s3://{SOURCE_BUCKET}/mermaid/mermaid_confirmed_annotations.parquet"
 IMAGE_PREFIX = "images/mermaid/"
 IMAGE_STORE = ImageStore(bucket=DATASET_BUCKET, prefix=IMAGE_PREFIX, owner="segdata")
-FEATURE_SUFFIX = "_featurevector"
+# Each image's pyspacer vector sits beside its source image.
+FEATURE_TEMPLATE = f"s3://{SOURCE_BUCKET}/{SOURCE_IMAGE_PREFIX}{{image_id}}_featurevector"
 DEFAULT_FEATURE_FAMILY = "efficientnet-v1"
 GROUP = "mermaid"
 ANNOTATOR = "default"
@@ -156,7 +146,7 @@ def read_annotations(client: Any, uri: str) -> AnnotationsFile:
             ) from exc
         raise
     frame = pq.read_table(io.BytesIO(body)).to_pandas()
-    return AnnotationsFile(frame, etag.strip('"'), head["LastModified"].isoformat())
+    return AnnotationsFile(frame, norm_etag(etag), head["LastModified"].isoformat())
 
 
 def apply_cutoff(annotations: pd.DataFrame, cutoff: str) -> tuple[pd.DataFrame, int]:
@@ -215,128 +205,6 @@ def _head_source(client: Any, image_id: str) -> tuple[str, Mapping[str, Any]] | 
             raise
         return key, head
     return None
-
-
-def _head_feature(client: Any, image_id: str) -> Mapping[str, Any] | None:
-    """HEAD ``mermaid/<id>_featurevector``; return its HEAD, or None when it is absent."""
-    try:
-        head: Mapping[str, Any] = client.head_object(
-            Bucket=SOURCE_BUCKET, Key=_feature_source_key(image_id)
-        )
-    except ClientError as exc:
-        if is_not_found(exc):
-            return None
-        raise
-    return head
-
-
-def _feature_source_key(image_id: str) -> str:
-    return f"{SOURCE_IMAGE_PREFIX}{image_id}{FEATURE_SUFFIX}"
-
-
-def probe_feature(
-    client: Any, image_id: str, points: Sequence[Point], feature_dim: int
-) -> tuple[str, VectorFacts] | None:
-    """HEAD then read the image's source vector; return its source ETag and facts, or None if absent.
-
-    Raises:
-        SourceChanged: The vector was replaced between its HEAD and its read.
-    """
-    head = _head_feature(client, image_id)
-    if head is None:
-        return None
-    key = _feature_source_key(image_id)
-    facts = read_vector(client, SOURCE_BUCKET, key, head["ETag"], points, feature_dim)
-    return head["ETag"].strip('"'), facts
-
-
-def feature_entries(
-    found: Mapping[str, tuple[str, VectorFacts]], family: str
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return the ``features.jsonl`` lines and the feature index rows, in ``image_id`` order."""
-    plan, index = [], []
-    for image_id in sorted(found):
-        src_etag, facts = found[image_id]
-        key = feature_file_key(IMAGE_STORE, DATASET_BUCKET, family, image_id)
-        plan.append(
-            {
-                "src_bucket": SOURCE_BUCKET,
-                "src_key": _feature_source_key(image_id),
-                "src_etag": src_etag,
-                "etag": facts.etag,
-                "dst_bucket": DATASET_BUCKET,
-                "dst_key": key,
-                "size": facts.size,
-                "crc64nvme": facts.crc64nvme,
-            }
-        )
-        index.append(
-            {
-                "image_id": image_id,
-                "key": key,
-                "etag": facts.etag,
-                "size": facts.size,
-                "crc64nvme": facts.crc64nvme,
-                "n_points": facts.n_points,
-            }
-        )
-    return plan, index
-
-
-def check_features(
-    image_ids: Sequence[str],
-    found: Mapping[str, tuple[str, VectorFacts] | None],
-    allow_missing: bool,
-) -> dict[str, tuple[str, VectorFacts]]:
-    """Return the images' found vectors, refusing missing ones unless allowed and any refused one.
-
-    Raises:
-        FeatureVectorsMissing: An image has no source vector and ``allow_missing`` is false.
-        FeatureVectorsInvalid: A vector is unreadable, of the wrong width or lacks a point.
-    """
-    missing = [i for i in image_ids if found[i] is None]
-    if missing and not allow_missing:
-        raise FeatureVectorsMissing(refusal("have no source feature vector", missing))
-    present = {i: f for i, f in found.items() if f is not None}
-    refuse_invalid(
-        {i: facts for i, (_, facts) in present.items()},
-        {i: f"s3://{SOURCE_BUCKET}/{_feature_source_key(i)}" for i in present},
-    )
-    return present
-
-
-def _probe_features(
-    client: Any, points: Mapping[str, Sequence[Point]], feature_dim: int, workers: int
-) -> dict[str, tuple[str, VectorFacts] | None]:
-    image_ids = sorted(points)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        found = pool.map(lambda i: probe_feature(client, i, points[i], feature_dim), image_ids)
-        return dict(zip(image_ids, found, strict=True))
-
-
-def stage_features(
-    stage_dir: Path,
-    version: str,
-    family: str,
-    plan: Sequence[Mapping[str, Any]],
-    index: Sequence[Mapping[str, Any]],
-    extractor: Mapping[str, Any],
-    allow_missing: bool,
-) -> None:
-    """Stage ``features.jsonl`` and, under ``features/<family>/``, the index, spec and ``stage.json``.
-
-    ``features.jsonl`` sits beside ``copies.jsonl``; ``stage.json`` records ``allow_missing``.
-    """
-    write_copies(stage_dir, DATASET, version, plan, FEATURES_NAME)
-    prefix = f"{dataset_prefix(DATASET, version)}features/{family}/"
-    rows = pa.Table.from_pylist(list(index), schema=FEATURE_INDEX_SCHEMA)
-    stage_bytes(stage_dir, prefix + FEATURE_INDEX_NAME, table_bytes(rows))
-    stage_bytes(stage_dir, prefix + EXTRACTOR_SPEC_NAME, extractor_spec_bytes(extractor))
-    stage_bytes(
-        stage_dir,
-        prefix + FEATURE_STAGE_NAME,
-        (json.dumps({"allow_missing": allow_missing}, sort_keys=True) + "\n").encode(),
-    )
 
 
 def probe_image(
@@ -491,7 +359,7 @@ def load_parent_rows(stage_dir: Path, version: str | None) -> dict[str, dict[str
     path = cache_path(
         stage_dir, DATASET_BUCKET, dataset_prefix(DATASET, version) + "images.parquet"
     )
-    return {row["image_id"]: row for row in pq.read_table(path).to_pylist()}
+    return {row["image_id"]: row for row in bare_fingerprints(pq.read_table(path)).to_pylist()}
 
 
 def load_parent_labels(stage_dir: Path, version: str | None) -> pa.Table | None:
@@ -582,7 +450,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     extractor = read_extractor_spec(args.extractor_spec)
     feature_store_prefix(feature_store_name(IMAGE_STORE, DATASET_BUCKET), args.feature_family)
     git = probe_git(REPO_ROOT)
-    refuse_unpublishable(git)
+    refuse_unpublishable(git, REPO_ROOT)
     source = read_annotations(client, args.annotations_uri)
     annotations, n_after_cutoff = apply_cutoff(source.table, args.annotation_date_cutoff)
     parent_rows = load_parent_rows(args.stage_dir, args.parent_version)
@@ -595,19 +463,30 @@ def run(args: argparse.Namespace, client: Any) -> int:
         load_parent_labels(args.stage_dir, args.parent_version),
     )
     points = points_table(labelled)
-    found = _probe_features(client, points_by_image(points), extractor["feature_dim"], args.workers)
-    features = check_features(sorted(kept), found, args.allow_missing_features)
-    rows = [o.row for o in outcomes if o.row is not None]
-    stage = LocalDirS3(args.stage_dir)
+    images = pa.Table.from_pylist(
+        [o.row for o in outcomes if o.row is not None], schema=IMAGES_SCHEMA
+    )
+    gathered = gather_features(
+        client,
+        images,
+        points,
+        FEATURE_TEMPLATE,
+        image_store=IMAGE_STORE,
+        family=args.feature_family,
+        feature_dim=extractor["feature_dim"],
+        workers=args.workers,
+        allow_missing=args.allow_missing_features,
+    )
     version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
-    manifest, _ = publish_dataset(
-        stage,
+    manifest, sha = stage_dataset(
+        args.stage_dir,
+        parent_dirs=(args.stage_dir,),
         bucket=DATASET_BUCKET,
         dataset=DATASET,
         version=version,
         kind="points",
         tables={
-            "images.parquet": pa.Table.from_pylist(rows, schema=IMAGES_SCHEMA),
+            "images.parquet": images,
             "points.parquet": points,
             "labels.parquet": labels_table(pairs),
             "stats/label_counts.parquet": label_counts_table(labelled),
@@ -633,17 +512,21 @@ def run(args: argparse.Namespace, client: Any) -> int:
         repo_dir=REPO_ROOT,
         git=git,
     )
-    plan = copy_plan(rows, src_bucket=SOURCE_BUCKET, src_key=_source_key, dst_prefix=IMAGE_PREFIX)
-    write_copies(args.stage_dir, DATASET, version, plan)
-    feature_plan, feature_index = feature_entries(features, args.feature_family)
+    plan = copy_plan(
+        images.to_pylist(), src_bucket=SOURCE_BUCKET, src_key=_source_key, dst_prefix=IMAGE_PREFIX
+    )
+    write_copies(args.stage_dir, dataset_prefix(DATASET, version), plan)
     stage_features(
         args.stage_dir,
-        version,
-        args.feature_family,
-        feature_plan,
-        feature_index,
-        extractor,
-        args.allow_missing_features,
+        gathered,
+        dataset_dirs=(args.stage_dir,),
+        dataset=Pin(name=DATASET, version=version, manifest_sha256=sha),
+        family=args.feature_family,
+        extractor=extractor,
+        allow_missing=args.allow_missing_features,
+        command=_command_line(args),
+        repo_dir=REPO_ROOT,
+        git=git,
     )
     jpg_ids = sorted(o.image_id for o in outcomes if o.found_as_jpg and o.row is not None)
     if jpg_ids:
@@ -655,7 +538,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
         manifest.stats.n_images,
         manifest.stats.n_points,
         len(plan),
-        len(feature_plan),
+        len(gathered.copies),
         len(jpg_ids),
         dropped,
     )

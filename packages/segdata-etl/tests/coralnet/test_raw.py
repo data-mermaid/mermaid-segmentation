@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import math
@@ -22,8 +23,8 @@ from segdata_etl.datasets.coralnet import raw
 from segdata_etl.datasets.coralnet.io import make_csv_reader_s3
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
-from segdata_spec.manifest import Manifest, ParentRef, manifest_sha256
-from segdata_spec.publish import GitState
+from segdata_spec.git import GitState
+from segdata_spec.manifest import Manifest, ParentRef, dump_manifest, manifest_sha256
 from segdata_spec.schema import IMAGES_SCHEMA
 
 from .conftest import _make_jpeg_bytes
@@ -1006,6 +1007,25 @@ def test_an_unpublishable_tree_is_refused_before_any_s3_call(
         cli.main(argv)
 
 
+def test_a_tree_without_uv_lock_is_refused_before_any_s3_call_or_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
+    monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
+    monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)
+
+    def no_s3(**_kw: object) -> None:
+        raise AssertionError("the guard must fire before an S3 client is made")
+
+    monkeypatch.setattr(raw, "make_s3_client", no_s3)
+    stage = tmp_path / "stage"
+
+    with pytest.raises(PublishRefused, match="no uv.lock"):
+        cli.main(["build", "coralnet", "raw", "--stage-dir", str(stage)])
+
+    assert not stage.exists()
+
+
 @pytest.mark.parametrize(
     ("flags", "message"),
     [
@@ -1037,6 +1057,7 @@ def test_raw_flag_misuse_is_a_usage_error(
 def test_a_missing_bucket_env_var_refuses_before_any_s3_client_is_made(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / "uv.lock").write_text("lock")
     monkeypatch.delenv("MERMAID_CORALNET_BUCKET", raising=False)
     monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
     monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)
@@ -1056,3 +1077,44 @@ def test_a_missing_bucket_env_var_refuses_before_any_s3_client_is_made(
 
     with pytest.raises(ValueError, match="MERMAID_CORALNET_BUCKET"):
         raw.run_raw(args)
+
+
+def _quote_parent_fingerprints(parent: Path) -> str:
+    """Rewrite a staged parent as an older version that stored quoted source ETags; return its sha."""
+    images = pq.read_table(parent / "images.parquet")
+    column = images.schema.get_field_index("source_fingerprint")
+    quoted = [f'"{fp}"' for fp in images.column(column).to_pylist()]
+    sink = io.BytesIO()
+    pq.write_table(images.set_column(column, "source_fingerprint", pa.array(quoted)), sink)
+    data = sink.getvalue()
+    (parent / "images.parquet").write_bytes(data)
+    manifest = Manifest.model_validate_json((parent / "manifest.json").read_bytes())
+    files = dict(manifest.files)
+    files["images.parquet"] = files["images.parquet"].model_copy(
+        update={"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+    )
+    body = dump_manifest(manifest.model_copy(update={"files": files}))
+    (parent / "manifest.json").write_bytes(body)
+    return manifest_sha256(body)
+
+
+def test_a_parent_with_quoted_fingerprints_is_reused_and_carried_with_bare_ones(
+    staging: RecordingS3, tmp_path: Path
+) -> None:
+    stage = tmp_path / "stage"
+    _stage_raw(stage)
+    parent = _only_version(stage)
+    sha = _quote_parent_fingerprints(parent)
+    (stage / "checkpoints" / "coralnet-raw-run1-abcdef1.parquet").unlink()
+    del staging.objects[(SRC, _key(1, "10"))]
+    staging.gets.clear()
+
+    _stage_raw(stage, "--parent-version", parent.name, "--parent-manifest-sha256", sha)
+
+    (child,) = [p for p in parent.parent.iterdir() if p != parent]
+    new = {r["image_id"]: r for r in pq.read_table(child / "images.parquet").to_pylist()}
+    assert (new["10"]["source_fingerprint"], new["20"]["source_fingerprint"]) == (
+        md5_hex(JPEG),
+        md5_hex(PNG),
+    )
+    assert staging.image_gets() == []

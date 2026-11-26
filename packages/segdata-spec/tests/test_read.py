@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
-from conftest import (
+from spec_helpers import (
     BUCKET,
     IMG_BUCKET,
     VERSION,
@@ -167,7 +167,7 @@ def test_open_version_keeps_source_names(fake_s3, tmp_path, cache, resize):
 def _publish_without_source_name(fake_s3, tmp_path) -> Pin:
     """Rewrite a published version's images table without ``source_name``, as an older ETL did.
 
-    ``publish_dataset`` refuses such a table, so the table and manifest go straight into S3.
+    ``stage_dataset`` refuses such a table, so the table and manifest go straight into S3.
     """
     manifest, pin = publish_version(
         fake_s3, tmp_path, images={"a": (jpeg_bytes(64, 48), "g1")}, sizes={"a": (64, 48)}

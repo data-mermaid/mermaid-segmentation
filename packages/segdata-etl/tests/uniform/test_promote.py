@@ -20,6 +20,7 @@ from segdata_etl.common.s3_objects import ObjectConflict
 from segdata_etl.common.stage import next_version
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import ChecksumMismatch, ExtractorMismatch, PublishRefused
+from segdata_spec.manifest import Manifest, Pin, dump_manifest
 
 from .conftest import jpeg_bytes, png_bytes
 from .test_coralscapes_v2 import IMG_A, IMG_B, MASK, MASK_B
@@ -62,7 +63,6 @@ def stage_mermaid(
     fake.calls.clear()
     version = only_version(stage)
     if not features:
-        (version / "features.jsonl").unlink()
         shutil.rmtree(version / "features")
     return fake, stage, version.name
 
@@ -108,17 +108,17 @@ def test_staged_features_publish_after_the_dataset_manifest(repo, tmp_path):  # 
     prefix = f"datasets/mermaid/{version}/"
     set_prefix = f"{prefix}features/efficientnet-v1/"
     log = [(op, key) for op, _, key, _ in writes(fake)]
-    spec_put = ("put", "features/mermaid/efficientnet-v1/_extractor_spec.json")
     assert [op for op, _ in log[:3]] == ["copy"] * 3
     assert all(key.startswith("images/mermaid/") for _, key in log[:3])
-    assert log[3] == spec_put
-    assert sorted(key for _, key in log[4:7]) == [
+    assert {key for _, key in log[3:7]} == {prefix + t for t in _TABLES}
+    assert log[7:9] == [
+        ("put", prefix + "manifest.json"),
+        ("put", "features/mermaid/efficientnet-v1/_extractor_spec.json"),
+    ]
+    assert sorted(key for _, key in log[9:12]) == [
         f"features/mermaid/efficientnet-v1/{i}.featurevector" for i in ("i1", "i2", "i3")
     ]
-    assert {key for _, key in log[7:11]} == {prefix + t for t in _TABLES}
-    assert log[11:] == [
-        ("put", prefix + "manifest.json"),
-        spec_put,
+    assert log[12:] == [
         ("put", set_prefix + "index.parquet"),
         ("put", set_prefix + "manifest.json"),
     ]
@@ -130,17 +130,22 @@ def test_staged_features_publish_after_the_dataset_manifest(repo, tmp_path):  # 
         set_manifest["dataset"]["manifest_sha256"] == hashlib.sha256(dataset_manifest).hexdigest()
     )
     assert set_manifest["stats"] == {"n_images": 3, "n_missing": 0}
+    assert set_manifest == json.loads(
+        (version_dir(stage, "mermaid", version) / FAMILY_DIR / "manifest.json").read_bytes()
+    )
+    spec = fake.objects[(DATASET_BUCKET, SPEC_KEY)]
+    assert json.loads(spec) == set_manifest["extractor"]
 
 
 SPEC_KEY = "features/mermaid/efficientnet-v1/_extractor_spec.json"
+FAMILY_DIR = "features/efficientnet-v1"
+FEATURE_PLAN = f"{FAMILY_DIR}/copies.jsonl"
 
 
 def test_stored_extractor_spec_of_another_identity_refuses_before_any_write(repo, tmp_path):  # noqa: F811
     fake, stage, version = stage_mermaid(tmp_path, features=True)
-    staged = (
-        version_dir(stage, "mermaid", version) / "features/efficientnet-v1/_extractor_spec.json"
-    )
-    stored = {**json.loads(staged.read_text()), "weights_sha256": "1" * 64}
+    staged = version_dir(stage, "mermaid", version) / FAMILY_DIR / "manifest.json"
+    stored = {**json.loads(staged.read_text())["extractor"], "weights_sha256": "1" * 64}
     fake.put(DATASET_BUCKET, SPEC_KEY, json.dumps(stored).encode())
 
     with pytest.raises(ExtractorMismatch, match="weights_sha256"):
@@ -204,7 +209,24 @@ def test_published_manifest_with_other_bytes_still_refuses_a_staged_feature_vers
     assert writes(fake) == []
 
 
-FAMILY_DIR = "features/efficientnet-v1"
+def test_published_set_manifest_with_other_bytes_refuses_before_any_write(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    fake.put(DATASET_BUCKET, f"datasets/mermaid/{version}/{FAMILY_DIR}/manifest.json", b"{}")
+
+    with pytest.raises(PublishRefused, match="already published.*other bytes"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_family_folder_without_its_manifest_refuses_before_any_s3_call(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    (version_dir(stage, "mermaid", version) / FAMILY_DIR / "manifest.json").unlink()
+
+    with pytest.raises(PublishRefused, match="not fully staged"):
+        run_promote(fake, stage, version)
+
+    assert fake.calls == []
 
 
 def test_allow_missing_build_promotes_a_set_recording_the_missing_image(repo, tmp_path):  # noqa: F811
@@ -221,46 +243,29 @@ def test_allow_missing_build_promotes_a_set_recording_the_missing_image(repo, tm
     }
 
 
-def drop_feature(stage: Path, version: str, image_id: str) -> None:
-    """Remove ``image_id`` from the staged feature index and its line from features.jsonl."""
+def test_staged_index_that_differs_from_its_set_manifest_refuses_before_any_write(
+    repo,  # noqa: F811
+    tmp_path,
+):
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
     index_path = version_dir(stage, "mermaid", version) / FAMILY_DIR / "index.parquet"
     index = pq.read_table(index_path)
-    pq.write_table(index.filter(pc.not_equal(index["image_id"], image_id)), index_path)
-    rewrite_plan(
-        stage,
-        version,
-        lambda lines: [
-            ln for ln in lines if not ln["dst_key"].endswith(f"/{image_id}.featurevector")
-        ],
-        name="features.jsonl",
-    )
+    pq.write_table(index.filter(pc.not_equal(index["image_id"], "i2")), index_path)
 
-
-def test_index_leaving_out_an_image_without_allow_missing_refuses_before_any_write(repo, tmp_path):  # noqa: F811
-    fake, stage, version = stage_mermaid(tmp_path, features=True)
-    drop_feature(stage, version, "i2")
-
-    with pytest.raises(PublishRefused, match="leaves out 1"):
+    with pytest.raises(ChecksumMismatch, match="index.parquet"):
         run_promote(fake, stage, version)
 
     assert writes(fake) == []
 
 
-def test_index_key_outside_the_family_layout_refuses_before_any_write(repo, tmp_path):  # noqa: F811
+def test_set_manifest_pinning_another_dataset_manifest_refuses_before_any_write(repo, tmp_path):  # noqa: F811
     fake, stage, version = stage_mermaid(tmp_path, features=True)
-    index_path = version_dir(stage, "mermaid", version) / FAMILY_DIR / "index.parquet"
-    rows = pq.read_table(index_path).to_pylist()
-    wrong = "features/mermaid/efficientnet-v1/elsewhere.featurevector"
-    rows[0]["key"] = wrong
-    pq.write_table(pa.Table.from_pylist(rows, schema=pq.read_schema(index_path)), index_path)
+    path = version_dir(stage, "mermaid", version) / FAMILY_DIR / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["dataset"]["manifest_sha256"] = "0" * 64
+    path.write_text(json.dumps(manifest))
 
-    def edit(lines):
-        lines[0]["dst_key"] = wrong
-        return lines
-
-    rewrite_plan(stage, version, edit, name="features.jsonl")
-
-    with pytest.raises(PublishRefused, match="elsewhere"):
+    with pytest.raises(PublishRefused, match="is not feature set"):
         run_promote(fake, stage, version)
 
     assert writes(fake) == []
@@ -275,19 +280,24 @@ def _foreign_first_key(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return lines
 
 
-@pytest.mark.parametrize("edit", [_drop_first_line, _foreign_first_key])
-def test_feature_plan_keys_differing_from_the_staged_index_refuse_before_any_call(
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [(_drop_first_line, "carried keys are absent"), (_foreign_first_key, "is not in it")],
+    ids=["unplanned-key-not-in-the-bucket", "key-not-in-the-index"],
+)
+def test_feature_plan_keys_differing_from_the_staged_index_refuse_before_any_write(
     repo,  # noqa: F811
     tmp_path,
     edit,
+    message,
 ):
     fake, stage, version = stage_mermaid(tmp_path, features=True)
-    rewrite_plan(stage, version, edit, name="features.jsonl")
+    rewrite_plan(stage, version, edit, name=FEATURE_PLAN)
 
-    with pytest.raises(PublishRefused, match="feature index"):
+    with pytest.raises(PublishRefused, match=message):
         run_promote(fake, stage, version)
 
-    assert fake.calls == []
+    assert writes(fake) == []
 
 
 def test_copy_landing_with_another_crc_raises_before_any_table_is_put(repo, tmp_path):  # noqa: F811
@@ -314,10 +324,10 @@ def test_published_manifest_refuses_before_any_write(repo, tmp_path):  # noqa: F
     fake.put(DATASET_BUCKET, key, b"{}")
     fake.calls.clear()
 
-    with pytest.raises(PublishRefused, match="already"):
+    with pytest.raises(PublishRefused, match="already published"):
         run_promote(fake, stage, version)
 
-    assert [(op, k) for op, _, k, _ in fake.calls] == [("head", key)]
+    assert [(op, k) for op, _, k, _ in fake.calls] == [("head", key), ("get", key)]
 
 
 def test_staged_table_that_no_longer_matches_the_manifest_refuses_with_no_writes(
@@ -429,6 +439,25 @@ def test_rerun_after_a_crash_finds_the_images_present_and_writes_the_manifest(re
     assert flaky.ops("put")[-1][2] == manifest_key[1]
 
 
+def test_a_manifest_put_by_a_racing_publisher_is_not_overwritten(repo, tmp_path):  # noqa: F811
+    racer = b'{"published": "by another writer"}'
+
+    class RacedManifest(FakeS3):
+        def put_object(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["Key"].endswith("/manifest.json"):
+                self.put(kwargs["Bucket"], kwargs["Key"], racer)
+            return super().put_object(**kwargs)
+
+    fake, stage, version = stage_mermaid(tmp_path)
+    raced = RacedManifest(**{k: getattr(fake, k) for k in ("objects", "crcs", "etags")})
+    manifest_key = (DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json")
+
+    with pytest.raises(ObjectConflict):
+        run_promote(raced, stage, version)
+
+    assert raced.objects[manifest_key] == racer
+
+
 def test_rerun_logs_images_as_already_present(repo, tmp_path, caplog):  # noqa: F811
     fake, stage, version = stage_mermaid(tmp_path)
     for plan in (version_dir(stage, "mermaid", version) / "copies.jsonl").read_text().splitlines():
@@ -496,7 +525,13 @@ def test_cli_requires_its_flags_and_dispatches(monkeypatch, tmp_path):
 
     client = object()
     monkeypatch.setattr(promote, "promote", fake_promote)
-    monkeypatch.setattr(cli, "make_s3_client", lambda: client)
+    pool_workers: list[Any] = []
+
+    def make_client(**kw: Any) -> object:
+        pool_workers.append(kw.get("workers"))
+        return client
+
+    monkeypatch.setattr(cli, "make_s3_client", make_client)
 
     code = cli.main(
         [
@@ -520,6 +555,7 @@ def test_cli_requires_its_flags_and_dispatches(monkeypatch, tmp_path):
         "version": "v",
         "workers": 3,
     }
+    assert pool_workers == [3]
 
 
 def copy_destinations(stage: Path, version: str) -> list[dict[str, Any]]:
@@ -919,6 +955,51 @@ def test_images_and_masks_land_in_intelligent_tiering_and_tables_keep_the_defaul
     assert {classes[k] for k in classes.keys() - images} == {None}
 
 
+TAXONOMY_KEY = "taxonomy/mermaid-benthic/20261124-e6abfad/manifest.json"
+TAXONOMY_BYTES = b'{"published": "taxonomy"}'
+
+
+def pin_taxonomy(stage: Path, version: str, sha: str) -> None:
+    """Rewrite the staged manifest so it pins the taxonomy ``sha``."""
+    path = version_dir(stage, "mermaid", version) / "manifest.json"
+    pin = Pin(name="mermaid-benthic", version="20261124-e6abfad", manifest_sha256=sha)
+    manifest = Manifest.model_validate_json(path.read_bytes())
+    path.write_bytes(dump_manifest(manifest.model_copy(update={"taxonomy": pin})))
+
+
+def test_a_pinned_taxonomy_absent_from_the_bucket_refuses_with_no_writes(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    pin_taxonomy(stage, version, hashlib.sha256(TAXONOMY_BYTES).hexdigest())
+
+    with pytest.raises(PublishRefused, match="not published"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_a_pinned_taxonomy_with_another_sha_refuses_with_no_writes(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    fake.put(DATASET_BUCKET, TAXONOMY_KEY, TAXONOMY_BYTES)
+    pin_taxonomy(stage, version, "0" * 64)
+    fake.calls.clear()
+
+    with pytest.raises(PublishRefused, match="does not match"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_a_pinned_taxonomy_published_with_its_sha_lets_the_promote_proceed(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    fake.put(DATASET_BUCKET, TAXONOMY_KEY, TAXONOMY_BYTES)
+    pin_taxonomy(stage, version, hashlib.sha256(TAXONOMY_BYTES).hexdigest())
+    fake.calls.clear()
+
+    run_promote(fake, stage, version)
+
+    assert (DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json") in fake.objects
+
+
 def stage_carried(
     tmp_path: Path, parent_store: dict[str, Any] | None = None
 ) -> tuple[FakeS3, Path, str, str]:
@@ -1013,3 +1094,90 @@ def test_a_key_no_plan_names_with_a_parent_on_another_image_store_refuses(repo, 
         run_promote(fake, stage, version)
 
     assert writes(fake) == []
+
+
+def test_a_stage_holding_only_a_feature_set_publishes_it_against_the_published_dataset(
+    repo,  # noqa: F811
+    tmp_path,
+):
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    run_promote(fake, stage, version)
+    set_key = f"datasets/mermaid/{version}/{FAMILY_DIR}/manifest.json"
+    del fake.objects[(DATASET_BUCKET, set_key)]
+    folder = version_dir(stage, "mermaid", version)
+    for name in ("manifest.json", "copies.jsonl", *_TABLES):
+        (folder / name).unlink()
+    fake.calls.clear()
+
+    run_promote(fake, stage, version)
+
+    assert [key for _, _, key, _ in writes(fake)][-1] == set_key
+    assert not [k for _, _, k, _ in writes(fake) if k.startswith("images/")]
+
+
+def test_a_stage_holding_only_a_feature_set_of_an_unpublished_dataset_refuses(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    (version_dir(stage, "mermaid", version) / "manifest.json").unlink()
+
+    with pytest.raises(PublishRefused, match="is not published"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_two_staged_families_publish_after_the_dataset_in_family_order(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    folder = version_dir(stage, "mermaid", version) / "features"
+    shutil.copytree(folder / "efficientnet-v1", folder / "a-family")
+    path = folder / "a-family" / "manifest.json"
+    path.write_text(path.read_text().replace('"family": "efficientnet-v1"', '"family": "a-family"'))
+    rewrite_plan(
+        stage,
+        version,
+        lambda lines: [
+            {**ln, "dst_key": ln["dst_key"].replace("efficientnet-v1", "a-family")} for ln in lines
+        ],
+        name="features/a-family/copies.jsonl",
+    )
+    index_path = folder / "a-family" / "index.parquet"
+    rows = pq.read_table(index_path).to_pylist()
+    for row in rows:
+        row["key"] = row["key"].replace("efficientnet-v1", "a-family")
+    data = pa.Table.from_pylist(rows, schema=pq.read_schema(index_path))
+    pq.write_table(data, index_path)
+    manifest = json.loads(path.read_text())
+    blob = index_path.read_bytes()
+    manifest["files"]["index.parquet"].update(
+        sha256=hashlib.sha256(blob).hexdigest(), bytes=len(blob)
+    )
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    run_promote(fake, stage, version)
+
+    set_manifests = [
+        k for _, _, k, _ in writes(fake) if k.endswith("manifest.json") and "/features/" in k
+    ]
+    assert set_manifests == [
+        f"datasets/mermaid/{version}/features/a-family/manifest.json",
+        f"datasets/mermaid/{version}/{FAMILY_DIR}/manifest.json",
+    ]
+
+
+def test_an_index_key_no_copy_names_is_carried_when_the_family_holds_it(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    lines = [
+        json.loads(line)
+        for line in (version_dir(stage, "mermaid", version) / FEATURE_PLAN).read_text().splitlines()
+    ]
+    first = lines[0]
+    fake.put(
+        DATASET_BUCKET, first["dst_key"], fake.objects[(first["src_bucket"], first["src_key"])]
+    )
+    rewrite_plan(stage, version, _drop_first_line, name=FEATURE_PLAN)
+    fake.calls.clear()
+
+    run_promote(fake, stage, version)
+
+    assert first["dst_key"] not in {c["Key"] for c in fake.copy_calls}
+    set_key = f"datasets/mermaid/{version}/{FAMILY_DIR}/manifest.json"
+    assert (DATASET_BUCKET, set_key) in fake.objects

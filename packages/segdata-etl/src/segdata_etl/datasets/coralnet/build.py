@@ -12,14 +12,14 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
-from botocore.exceptions import ClientError
 
 from coralnet_scraper.config import validate_workers
+from segdata_spec.s3 import exists
 
 from ...common.jpeg_header import STATUSES_WITH_DIMENSIONS
+from ...common.s3_objects import make_s3_client
 from .annotations import build_annotations, list_source_folders
 from .config import (
     DEFAULT_OUTPUT_S3_PREFIX,
@@ -28,7 +28,7 @@ from .config import (
     get_workers,
 )
 from .images import build_images
-from .io import compute_version_tag, make_s3_client, upload_to_s3, write_parquet_deterministic
+from .io import compute_version_tag, upload_to_s3, write_parquet_deterministic
 from .schemas import (
     ANNOTATIONS_PRIMARY_KEY,
     ANNOTATIONS_SCHEMA,
@@ -37,8 +37,6 @@ from .schemas import (
 )
 
 logger = logging.getLogger("segdata_etl.datasets.coralnet")
-
-_MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 
 
 @dataclass(frozen=True)
@@ -83,17 +81,6 @@ def _resolve_run(args: argparse.Namespace) -> _Run:
     )
 
 
-def _s3_object_exists(client: Any, bucket: str, key: str) -> bool:
-    """Return whether ``key`` exists in ``bucket``; other S3 errors propagate."""
-    try:
-        client.head_object(Bucket=bucket, Key=key)
-    except ClientError as e:
-        if e.response["Error"]["Code"] in _MISSING_KEY_CODES:
-            return False
-        raise
-    return True
-
-
 def _maybe_upload(run: _Run, local_path: Path) -> None:
     """Upload ``local_path`` to ``etl-outputs/coralnet/<version>/`` when ``--upload-to-s3``.
 
@@ -103,8 +90,8 @@ def _maybe_upload(run: _Run, local_path: Path) -> None:
     if not run.upload:
         return
     key = f"{DEFAULT_OUTPUT_S3_PREFIX}/{run.version}/{local_path.name}"
-    client = make_s3_client()
-    if not run.overwrite and _s3_object_exists(client, run.bucket, key):
+    client = make_s3_client(workers=run.workers)
+    if not run.overwrite and exists(client, run.bucket, key):
         raise RuntimeError(
             f"s3://{run.bucket}/{key} already exists; pass --overwrite to replace it"
         )
@@ -140,7 +127,9 @@ def _step_build_annotations(run: _Run, source_ids: list[int] | None) -> int:
         1 when a source was excluded or no source produced annotation rows, else 0.
     """
     if source_ids is None:
-        source_ids = list_source_folders(make_s3_client(), run.bucket, run.prefix)
+        source_ids = list_source_folders(
+            make_s3_client(workers=run.workers), run.bucket, run.prefix
+        )
     build = build_annotations(source_ids, bucket=run.bucket, prefix=run.prefix, workers=run.workers)
     out_path = run.path("annotations")
     write_parquet_deterministic(

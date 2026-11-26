@@ -21,8 +21,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from segdata_etl.common import publishing
-from segdata_etl.common.cli_flags import _pin_flags, pin_command_parts
+from segdata_etl.common import versions
+from segdata_etl.common.cli_flags import pin_command_parts, pin_flags, pin_values
 from segdata_etl.common.copy_plan import (
     ImageOutcome,
     ObjectFacts,
@@ -35,23 +35,23 @@ from segdata_etl.common.copy_plan import (
 )
 from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
 from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject
-from segdata_etl.common.publishing import image_prefix
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
     SourceChanged,
-    crc64nvme_b64,
     head_with_checksum,
     md5_hex,
 )
-from segdata_etl.common.stage import DEFAULT_CACHE_DIR, LocalDirS3, next_version
+from segdata_etl.common.stage import DEFAULT_CACHE_DIR, next_version
 from segdata_etl.label_maps.curated import CuratedSource
-from segdata_etl.taxonomy import require_published_taxonomy
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.git import GitState
+from segdata_spec.layout import dataset_prefix, image_prefix
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
-from segdata_spec.publish import GitState, publish_dataset
 from segdata_spec.read import Taxonomy, open_taxonomy
+from segdata_spec.s3 import crc64nvme_b64, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
-from segdata_spec.sync import sync
+from segdata_spec.stage import stage_dataset
+from segdata_spec.sync import require_published_taxonomy, sync
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ class LegacyProbe:
 
 def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the taxonomy pin, ``--cache-dir`` and ``--legacy-bucket`` every external builder shares."""
-    _pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
+    pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
     parser.add_argument(
         "--cache-dir",
         type=Path,
@@ -376,7 +376,7 @@ def _head_listed(client: Any, legacy: LegacyDataset, image: LegacyImage) -> Mapp
     """
     key = legacy.prefix + image.key
     head = head_with_checksum(client, legacy.bucket, key)
-    if head is None or head["ETag"].strip('"') != image.etag:
+    if head is None or norm_etag(head["ETag"]) != image.etag:
         raise SourceChanged(f"s3://{legacy.bucket}/{key} changed since it was listed")
     return head
 
@@ -485,6 +485,11 @@ def _legacy_copy_plan(
     )
 
 
+def _taxonomy_pin(args: argparse.Namespace) -> Pin:
+    version, sha = pin_values(args, "taxonomy-")
+    return Pin.model_validate({"name": TAXONOMY_NAME, "version": version, "manifest_sha256": sha})
+
+
 def build_command(dataset: str, args: argparse.Namespace) -> str:
     """Reconstruct ``segdata build <dataset>`` from the options that shape the version."""
     parts = ["segdata", "build", dataset, "--stage-dir", str(args.stage_dir)]
@@ -526,24 +531,26 @@ def publish_version(
     uploads: list[StagedFile] = []
     if masks is not None:
         uploads = _stage_masks(args.stage_dir, dataset, probe.images, masks)
-    manifest, sha = publish_dataset(
-        LocalDirS3(args.stage_dir),
+    manifest, sha = stage_dataset(
+        args.stage_dir,
+        parent_dirs=(args.stage_dir,),
         bucket=DATASET_BUCKET,
         dataset=dataset,
         version=version,
         kind=kind,
         tables={"images.parquet": pa.Table.from_pylist(rows, schema=IMAGES_SCHEMA), **tables},
-        image_store=publishing.image_store(DATASET_BUCKET, dataset),
+        image_store=versions.image_store(DATASET_BUCKET, dataset),
         etl_package="segdata-etl",
         etl_command=build_command(dataset, args),
         source=source,
         label_mapping=label_mapping,
         dropped=_with_unreadable(dropped, probe),
+        taxonomy=_taxonomy_pin(args),
         repo_dir=repo_root,
         git=git,
     )
     plan = _legacy_copy_plan(rows, probe, legacy=legacy, dataset=dataset)
-    write_copies(args.stage_dir, dataset, version, plan)
+    write_copies(args.stage_dir, dataset_prefix(dataset, version), plan)
     if uploads:
         write_uploads(args.stage_dir, dataset, version, uploads)
     logger.info(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -20,7 +21,8 @@ from PIL import Image
 
 from mermaidseg.data.config import DATASET_BUCKET
 from segdata_spec._marker import SyncMarker, dump_marker
-from segdata_spec._s3 import resize_id, synced_marker_dir
+from segdata_spec.git import GitState
+from segdata_spec.layout import resize_id, synced_marker_dir
 from segdata_spec.manifest import (
     EtlInfo,
     FileEntry,
@@ -32,7 +34,6 @@ from segdata_spec.manifest import (
     dump_manifest,
     manifest_sha256,
 )
-from segdata_spec.publish import GitState, publish_taxonomy
 from segdata_spec.read import DatasetVersion, open_version
 from segdata_spec.resize import ResizeSpec
 from segdata_spec.schema import (
@@ -43,6 +44,7 @@ from segdata_spec.schema import (
     conform,
     validate_dataset_tables,
 )
+from segdata_spec.stage import stage_taxonomy
 
 BUCKET = DATASET_BUCKET
 IMAGE_BUCKET = "img-bucket"
@@ -355,12 +357,13 @@ def publish_taxonomy_version(
     version: str,
     benthic_attributes: pa.Table | None = None,
 ) -> Pin:
-    """Publish taxonomy ``mermaid-benthic`` to ``fake`` under the dataset bucket."""
+    """Stage taxonomy ``mermaid-benthic`` and copy it into ``fake`` under the dataset bucket."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     (repo / "uv.lock").write_bytes(b"lock-bytes")
-    _, sha = publish_taxonomy(
-        fake,
+    stage_dir = Path(tempfile.mkdtemp(dir=tmp_path))
+    _, sha = stage_taxonomy(
+        stage_dir,
         bucket=DATASET_BUCKET,
         name="mermaid-benthic",
         version=version,
@@ -380,6 +383,9 @@ def publish_taxonomy_version(
         repo_dir=repo,
         git=GitState(sha="abcdef1234567", dirty=False, pushed=True),
     )
+    root = stage_dir / DATASET_BUCKET
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        fake.objects[(DATASET_BUCKET, path.relative_to(root).as_posix())] = path.read_bytes()
     return Pin(name="mermaid-benthic", version=version, manifest_sha256=sha)
 
 

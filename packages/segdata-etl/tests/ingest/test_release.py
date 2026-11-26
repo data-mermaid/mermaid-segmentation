@@ -7,14 +7,14 @@ import pandas as pd
 import pytest
 from botocore.exceptions import ClientError
 
-from segdata_etl.common.publish import (
+from segdata_etl.common.release import (
     S3Target,
     ensure_absent,
     list_keys,
     preflight,
-    publish_dataset,
     put_json,
     put_parquet,
+    put_raw_release,
     upload_files,
 )
 
@@ -124,8 +124,8 @@ def test_list_keys_returns_keys_under_prefix(fake_s3):
     assert list_keys(fake_s3, B, "ds/") == {"ds/a"}
 
 
-def test_publish_dataset_writes_parquet_then_classes_colors_manifest_last(fake_s3):
-    publish_dataset(
+def test_put_raw_release_writes_parquet_then_classes_colors_manifest_last(fake_s3):
+    put_raw_release(
         fake_s3,
         _target(),
         dataset_name="demo",

@@ -49,7 +49,7 @@ def _image_object_sizes(objects: dict[str, int], images_prefix: str) -> dict[int
     return sizes
 
 
-def _strip_status(name: object) -> str:
+def strip_status(name: object) -> str:
     """Return a thumbnail title without its `` - <status>`` suffix."""
     return _STATUS_SUFFIX.sub("", str(name))
 
@@ -95,10 +95,10 @@ def _list_warnings(image_list: pd.DataFrame, annotated: set[str]) -> list[str]:
     """Return the warnings of the image list: unannotated Confirmed images, duplicate names."""
     titles = [str(n) for n in image_list["Name"].dropna()]
     warnings = []
-    confirmed = {_strip_status(t) for t in titles if t.endswith(" - Confirmed")}
+    confirmed = {strip_status(t) for t in titles if t.endswith(" - Confirmed")}
     if confirmed - annotated:
         warnings.append(f"confirmed_without_annotations:{len(confirmed - annotated)}")
-    duplicated = [name for name, n in Counter(map(_strip_status, titles)).items() if n > 1]
+    duplicated = [name for name, n in Counter(map(strip_status, titles)).items() if n > 1]
     if duplicated:
         warnings.append(f"duplicate_names:{len(duplicated)}")
     return warnings
@@ -138,7 +138,7 @@ def verify_source(
     if _bad_columns(annotations):
         v.failures.append("annotations_bad_columns")
         return v
-    list_names = {_strip_status(n) for n in image_list["Name"].dropna()}
+    list_names = {strip_status(n) for n in image_list["Name"].dropna()}
     v.failures += _check_annotation_names(annotations, list_names)
     annotated = set(annotations["Name"].dropna().astype(str))
     v.warnings += _list_warnings(image_list, annotated)

@@ -42,29 +42,31 @@ from segdata_etl.common.copy_plan import (
     write_copies,
 )
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
-from segdata_etl.common.publishing import count_labels, image_prefix, image_store
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
-    crc64nvme_b64,
     head_with_checksum,
+    make_s3_client,
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
+from segdata_etl.common.stage import next_version
+from segdata_etl.common.versions import bare_fingerprints, count_labels, image_store
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.git import probe_git, refuse_unpublishable
+from segdata_spec.layout import dataset_prefix, image_prefix
 from segdata_spec.manifest import ParentRef, SourceInfo
-from segdata_spec.publish import fetch_parent_tables, probe_git, publish_dataset
+from segdata_spec.s3 import crc64nvme_b64, get_bytes, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
+from segdata_spec.stage import read_parent_tables, stage_dataset
 
-from .annotations import _IMAGE_LIST_NAME, _derive_image_id
+from .annotations import _IMAGE_LIST_NAME, derive_image_id
 from .config import DEFAULT_OUTPUT_S3_PREFIX, get_workers
-from .io import CsvReader, make_csv_reader_s3, make_s3_client
+from .io import CsvReader, make_csv_reader_s3
 
 logger = logging.getLogger(__name__)
 
 DATASET = "coralnet-raw"
-POOL_HEADROOM = 8
 # The images live under the "coralnet" family, not the "coralnet-raw" dataset name.
 _IMAGE_FAMILY = "coralnet"
 IMAGE_PREFIX = image_prefix(_IMAGE_FAMILY)
@@ -180,7 +182,7 @@ def _source_names(image_list: pd.DataFrame) -> pd.DataFrame:
     """
     names = pd.DataFrame(
         {
-            "image_id": _derive_image_id(image_list["Image Page"]),
+            "image_id": derive_image_id(image_list["Image Page"]),
             "source_name": image_list["Name"].astype(str).str.extract(_IMAGE_LIST_NAME)["stripped"],
         }
     ).dropna(subset=["image_id"])
@@ -198,7 +200,7 @@ def _attach_sources(
     rows = kept.assign(source_fingerprint=kept["s3_key"].map(fingerprints))
     missing = rows["source_fingerprint"].isna()
     rows = rows[~missing].merge(names, on="image_id", how="left")
-    rows["source_fingerprint"] = rows["source_fingerprint"].str.strip('"')
+    rows["source_fingerprint"] = rows["source_fingerprint"].map(norm_etag)
     return rows, sorted(kept["image_id"][missing].tolist())
 
 
@@ -457,7 +459,7 @@ def _object_facts(client: Any, bucket: str, key: str, head: Mapping[str, Any]) -
 
     The whole read needs no parseable image header; width and height come from the build run.
     """
-    source_etag = head["ETag"].strip('"')
+    source_etag = norm_etag(head["ETag"])
     if needs_full_read(head):
         data = read_full(client, bucket, key, head["ETag"])
         return ObjectFacts(md5_hex(data), len(data), crc64nvme_b64(data), source_etag)
@@ -652,10 +654,6 @@ def _build_key(build_run: str, kind: str, suffix: str) -> str:
     return f"{DEFAULT_OUTPUT_S3_PREFIX}/{build_run}/coralnet_{kind}_{build_run}.{suffix}"
 
 
-def _get_bytes(client: Any, bucket: str, key: str) -> bytes:
-    return bytes(client.get_object(Bucket=bucket, Key=key)["Body"].read())
-
-
 def read_build(
     client: Any, bucket: str, build_run: str, source_ids: Sequence[int] | None = None
 ) -> BuildTables:
@@ -665,11 +663,11 @@ def read_build(
     """
     frames = {
         kind: pq.read_table(
-            io.BytesIO(_get_bytes(client, bucket, _build_key(build_run, kind, "parquet")))
+            io.BytesIO(get_bytes(client, bucket, _build_key(build_run, kind, "parquet")))
         ).to_pandas()
         for kind in ("annotations", "images")
     }
-    id2name = json.loads(_get_bytes(client, bucket, _build_key(build_run, "id2name", "json")))
+    id2name = json.loads(get_bytes(client, bucket, _build_key(build_run, "id2name", "json")))
     if source_ids is not None:
         frames = {k: f[f["source_id"].isin(source_ids)] for k, f in frames.items()}
     return BuildTables(annotations=frames["annotations"], images=frames["images"], id2name=id2name)
@@ -727,11 +725,6 @@ def _workers(flag: int | None) -> int:
     return get_workers() if flag is None else validate_workers(flag)
 
 
-def _pool_size(workers: int) -> int:
-    """Connections for the shared S3 client: every worker, plus headroom for overlapping pools."""
-    return workers + POOL_HEADROOM
-
-
 def run_raw(args: argparse.Namespace) -> int:
     """Stage a new ``coralnet-raw`` version and its copy plan; print its version and sha256.
 
@@ -743,17 +736,22 @@ def run_raw(args: argparse.Namespace) -> int:
     """
     repo_root = find_repo_root(Path(__file__).resolve().parent)
     git = probe_git(repo_root)
-    refuse_unpublishable(git)
+    refuse_unpublishable(git, repo_root)
     parent = _parent_ref(args)
     workers = _workers(args.workers)
     source_bucket, prefix = _source_bucket(), get_prefix()
-    client = make_s3_client(max_pool_connections=_pool_size(workers))
+    client = make_s3_client(workers=workers)
     build = read_build(client, source_bucket, args.build_run, args.source_ids)
-    stage = LocalDirS3(args.stage_dir)
     parent_images = (
         None
         if parent is None
-        else fetch_parent_tables(stage, DATASET_BUCKET, parent)["images.parquet"]
+        else bare_fingerprints(
+            pq.read_table(
+                io.BytesIO(
+                    read_parent_tables((args.stage_dir,), DATASET_BUCKET, parent)["images.parquet"]
+                )
+            )
+        )
     )
     result = build_raw(
         client,
@@ -765,8 +763,9 @@ def run_raw(args: argparse.Namespace) -> int:
         parent_images=parent_images,
     )
     version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
-    manifest, sha = publish_dataset(
-        stage,
+    manifest, sha = stage_dataset(
+        args.stage_dir,
+        parent_dirs=(args.stage_dir,),
         bucket=DATASET_BUCKET,
         dataset=DATASET,
         version=version,
@@ -784,7 +783,7 @@ def run_raw(args: argparse.Namespace) -> int:
         git=git,
     )
     plan = _copies(result.tables["images.parquet"], source_bucket, result.carried)
-    write_copies(args.stage_dir, DATASET, version, plan)
+    write_copies(args.stage_dir, dataset_prefix(DATASET, version), plan)
     logger.info(
         "staged %s %s: %d images, %d copies; dropped %s",
         DATASET,

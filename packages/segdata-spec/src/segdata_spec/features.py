@@ -1,60 +1,42 @@
-"""Feature sets: write-once pyspacer feature files shared across versions, indexed per version."""
+"""Feature sets: write-once pyspacer feature files shared across versions, indexed per version.
+
+``stage.stage_feature_set`` stages a version's index and set manifest; ``segdata promote`` publishes
+them. ``claim_extractor`` is the one write here: it claims a family for its extractor before any
+feature file is written into it.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import io
 import json
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-from segdata_spec._s3 import (
+from segdata_spec.errors import ExtractorMismatch, FeatureIndexInvalid
+from segdata_spec.layout import (
     EXTRACTOR_SPEC_NAME,
-    FEATURE_INDEX_NAME,
-    MANIFEST_NAME,
-    _check_segment,
-    dataset_prefix,
+    check_segment,
     feature_key,
-    feature_set_prefix,
     feature_store_prefix,
-    is_precondition_failed,
 )
-from segdata_spec.errors import (
-    ChecksumMismatch,
-    ExtractorMismatch,
-    FeatureIndexInvalid,
-    PinMismatch,
-)
-from segdata_spec.manifest import (
-    EtlInfo,
-    FeatureSetManifest,
-    FeatureSetPin,
-    FeatureSetStats,
-    FileEntry,
-    ImageStore,
-    Manifest,
-    Pin,
-    dump_manifest,
-    manifest_sha256,
-)
-from segdata_spec.publish import _get_bytes, _write_version, table_bytes
-from segdata_spec.schema import FEATURE_INDEX_SCHEMA, conform
-from segdata_spec.sync import check_published_manifest
+from segdata_spec.manifest import ImageStore
+from segdata_spec.s3 import get_bytes, is_not_found, is_precondition_failed
 
 _FEATURE_EXTENSION = ".featurevector"
 # The fields that identify an extractor; two specs with equal values produce the same features.
 EXTRACTOR_IDENTITY_KEYS = ("class_path", "crop_size", "feature_dim", "weights_sha256")
 
 
-def _extractor_identity(extractor: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the identity fields of ``extractor``, raising ``ValueError`` when one is absent."""
+def extractor_identity(extractor: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the identity fields of ``extractor``.
+
+    Raises:
+        ValueError: An identity key is absent.
+    """
     missing = [key for key in EXTRACTOR_IDENTITY_KEYS if key not in extractor]
     if missing:
         raise ValueError(f"extractor spec lacks identity keys: {missing}")
@@ -86,7 +68,7 @@ def feature_store_name(image_store: ImageStore, bucket: str) -> str:
             f"image store s3://{image_store.bucket}/{image_store.prefix} is not "
             f"s3://{bucket}/images/<segment>/"
         )
-    return _check_segment(match.group(1), "image store segment")
+    return check_segment(match.group(1), "image store segment")
 
 
 def feature_file_key(
@@ -119,7 +101,7 @@ def _is_feature_key(key: str, store: str, family: str, image_id: str) -> bool:
         return False
 
 
-def _check_index(
+def check_index(
     index: pa.Table, version_ids: set[str], allow_missing: bool, store: str, family: str
 ) -> int:
     """Return how many version images ``index`` leaves out, refusing an invalid index.
@@ -154,25 +136,21 @@ def _check_index(
     return missing
 
 
-def _load_version(client: Any, bucket: str, pin: Pin) -> tuple[Manifest, set[str]]:
-    """Return the published dataset manifest and its image ids, each verified against its pin.
+def extractor_spec_bytes(extractor: Mapping[str, Any]) -> bytes:
+    """Serialise an extractor spec as ``_extractor_spec.json`` holds it: indented, key-sorted JSON."""
+    return (json.dumps(dict(extractor), indent=2, sort_keys=True) + "\n").encode()
 
-    Raises:
-        ManifestNotFound: The manifest is absent.
-        PinMismatch: The manifest differs from ``pin``.
-        ChecksumMismatch: ``images.parquet`` differs from its manifest entry.
-    """
-    check_published_manifest(client, bucket, pin)
-    prefix = dataset_prefix(pin.name, pin.version)
-    manifest_bytes = _get_bytes(client, bucket, prefix + MANIFEST_NAME)
-    if manifest_sha256(manifest_bytes) != pin.manifest_sha256:
-        raise PinMismatch(f"s3://{bucket}/{prefix}{MANIFEST_NAME} does not match the pin")
-    manifest = Manifest.model_validate_json(manifest_bytes)
-    images_bytes = _get_bytes(client, bucket, prefix + "images.parquet")
-    if hashlib.sha256(images_bytes).hexdigest() != manifest.files["images.parquet"].sha256:
-        raise ChecksumMismatch(f"s3://{bucket}/{prefix}images.parquet does not match its manifest")
-    images = pq.read_table(io.BytesIO(images_bytes), columns=["image_id"])
-    return manifest, set(images.column("image_id").to_pylist())
+
+def _extractor_key(image_store: ImageStore, bucket: str, family: str) -> str:
+    return (
+        feature_store_prefix(feature_store_name(image_store, bucket), family) + EXTRACTOR_SPEC_NAME
+    )
+
+
+def _refuse_other_identity(stored: bytes, extractor: Mapping[str, Any], where: str) -> None:
+    differences = _identity_differences(json.loads(stored), extractor_identity(extractor))
+    if differences:
+        raise ExtractorMismatch(f"{where} names another extractor: {differences}")
 
 
 def claim_extractor(
@@ -184,103 +162,53 @@ def claim_extractor(
 ) -> None:
     """Write the family's extractor spec once, or check the stored one has the same identity.
 
-    Writers call this before writing any ``.featurevector`` into the family, and put feature
-    files with ``If-None-Match: *``.
+    Every writer of ``.featurevector`` files calls this before writing any file into the family,
+    and puts feature files with ``If-None-Match: *``. ``segdata promote`` calls it before it copies
+    a staged feature set's vectors; an extraction job outside this repo calls it before it writes
+    vectors into a family directly.
 
     Raises:
         ValueError: ``extractor`` lacks an identity key, or the image store or ``family`` is
             invalid; raised before any S3 call.
         ExtractorMismatch: The stored spec names another identity.
     """
-    key = (
-        feature_store_prefix(feature_store_name(image_store, bucket), family) + EXTRACTOR_SPEC_NAME
-    )
-    identity = _extractor_identity(extractor)
-    data = (json.dumps(dict(extractor), indent=2, sort_keys=True) + "\n").encode()
+    key = _extractor_key(image_store, bucket, family)
+    extractor_identity(extractor)
     try:
-        client.put_object(Bucket=bucket, Key=key, Body=data, IfNoneMatch="*")
+        client.put_object(
+            Bucket=bucket, Key=key, Body=extractor_spec_bytes(extractor), IfNoneMatch="*"
+        )
     except ClientError as exc:
         if not is_precondition_failed(exc):
             raise
     else:
         return
-    differences = _identity_differences(json.loads(_get_bytes(client, bucket, key)), identity)
-    if differences:
-        raise ExtractorMismatch(f"s3://{bucket}/{key} names another extractor: {differences}")
+    _refuse_other_identity(get_bytes(client, bucket, key), extractor, f"s3://{bucket}/{key}")
 
 
-def publish_feature_set(
+def check_claimed_extractor(
     client: Any,
-    pin: Pin,
-    family: str,
-    index: pa.Table,
-    extractor: Mapping[str, Any],
-    *,
     bucket: str,
-    etl: EtlInfo,
-    allow_missing: bool = False,
-) -> FeatureSetPin:
-    """Publish a feature set for a dataset version under ``datasets/<d>/<v>/features/<family>/``.
+    image_store: ImageStore,
+    family: str,
+    extractor: Mapping[str, Any],
+) -> None:
+    """Refuse when the family's stored extractor spec has another identity; write nothing.
 
-    Every check precedes the first write. The family's ``_extractor_spec.json`` under
-    ``features/<store>/<family>/`` is written once; a stored spec with the same identity
-    (``class_path``, ``crop_size``, ``feature_dim``, ``weights_sha256``) is left as is, whatever
-    its other keys. Then ``index.parquet``, then ``manifest.json`` last, both write-once.
-
-    Args:
-        client: A boto3 S3 client.
-        pin: The published dataset version the features describe.
-        family: The feature family, a lowercase key segment.
-        index: One row per indexed image, conforming to ``FEATURE_INDEX_SCHEMA``.
-        extractor: The extractor spec; it must hold the four identity keys.
-        bucket: The dataset bucket.
-        etl: The ETL provenance, recorded verbatim in the manifest.
-        allow_missing: Publish an index that leaves out some of the version's images.
-
-    Returns:
-        The feature-set pin: ``pin``, ``family`` and the sha256 of the written manifest.
+    A family with no stored spec passes: ``claim_extractor`` claims it when the first file is
+    written.
 
     Raises:
-        ValueError: ``extractor`` lacks an identity key, or ``family`` is not a key segment;
-            raised before any S3 call. The dataset's image store is not ``images/<segment>/``
-            in ``bucket``; raised before any write.
-        ManifestNotFound: The dataset manifest is absent.
-        PinMismatch: The dataset manifest differs from ``pin``.
-        ChecksumMismatch: The dataset's ``images.parquet`` differs from its manifest.
-        SchemaValidationError: ``index`` does not conform to ``FEATURE_INDEX_SCHEMA``.
-        FeatureIndexInvalid: ``index`` names an image outside the version, repeats one, gives
-            a ``key`` other than that image's file under ``features/<store>/<family>/``
-            (``<image_id>.featurevector`` or ``<image_id>~<suffix>.featurevector``), or leaves
-            images out without ``allow_missing``.
-        ExtractorMismatch: The family's stored extractor spec has another identity.
-        ObjectExists: The index or manifest key already exists with different bytes.
+        ValueError: ``extractor`` lacks an identity key, or the image store or ``family`` is
+            invalid; raised before any S3 call.
+        ExtractorMismatch: The stored spec names another identity.
     """
-    _extractor_identity(extractor)
-    prefix = feature_set_prefix(pin.name, pin.version, family)
-    dataset, version_ids = _load_version(client, bucket, pin)
-    conformed = conform(index, FEATURE_INDEX_SCHEMA)
-    store = feature_store_name(dataset.image_store, bucket)
-    missing = _check_index(conformed, version_ids, allow_missing, store, family)
-    index_bytes = table_bytes(conformed)
-    manifest = FeatureSetManifest(
-        schema_version=1,
-        dataset=pin,
-        family=family,
-        extractor=dict(extractor),
-        files={
-            FEATURE_INDEX_NAME: FileEntry(
-                sha256=hashlib.sha256(index_bytes).hexdigest(),
-                bytes=len(index_bytes),
-                rows=conformed.num_rows,
-            )
-        },
-        stats=FeatureSetStats(n_images=conformed.num_rows, n_missing=missing),
-        etl=etl,
-        created_at=datetime.now(UTC),
-    )
-    manifest_bytes = dump_manifest(manifest)
-    claim_extractor(client, bucket, dataset.image_store, family, extractor)
-    _write_version(client, bucket, prefix, {FEATURE_INDEX_NAME: index_bytes}, manifest_bytes)
-    return FeatureSetPin(
-        dataset=pin, family=family, manifest_sha256=manifest_sha256(manifest_bytes)
-    )
+    key = _extractor_key(image_store, bucket, family)
+    extractor_identity(extractor)
+    try:
+        stored = get_bytes(client, bucket, key)
+    except ClientError as exc:
+        if is_not_found(exc):
+            return
+        raise
+    _refuse_other_identity(stored, extractor, f"s3://{bucket}/{key}")

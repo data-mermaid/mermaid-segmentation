@@ -13,7 +13,8 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import (
+from PIL import Image
+from spec_helpers import (
     BUCKET,
     IMG_BUCKET,
     IMG_PREFIX,
@@ -27,7 +28,6 @@ from conftest import (
     publish_taxonomy_version,
     publish_version,
 )
-from PIL import Image
 
 from segdata_spec._marker import load_synced
 from segdata_spec.errors import (

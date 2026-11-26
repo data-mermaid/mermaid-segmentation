@@ -11,7 +11,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from segdata_spec._marker import load_synced, marker_files
-from segdata_spec._s3 import (
+from segdata_spec.errors import NotSynced, PinMismatch
+from segdata_spec.layout import (
     FEATURE_INDEX_NAME,
     MANIFEST_NAME,
     TABLES_MARKER_ID,
@@ -25,7 +26,6 @@ from segdata_spec._s3 import (
     synced_resize_ids,
     taxonomy_prefix,
 )
-from segdata_spec.errors import NotSynced, PinMismatch
 from segdata_spec.manifest import (
     FeatureSetManifest,
     FeatureSetPin,

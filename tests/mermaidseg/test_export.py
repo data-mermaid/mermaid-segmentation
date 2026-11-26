@@ -436,9 +436,16 @@ def test_export_refuses_a_lineage_that_does_not_pin_its_data(
             ),
             id="server-error",
         ),
+        pytest.param(
+            ClientError(
+                {"Error": {"Code": "NoSuchBucket"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+                "GetObject",
+            ),
+            id="no-such-bucket",
+        ),
     ],
 )
-def test_export_propagates_a_non_404_s3_error_unchanged(deployable, tmp_path, error):
+def test_export_propagates_a_non_missing_key_s3_error_unchanged(deployable, tmp_path, error):
     checkpoint, repo, _ = deployable
     with pytest.raises(ClientError):
         export_ckpt(checkpoint, tmp_path / "out", repo_dir=repo, s3_client=FakeS3({}, error=error))

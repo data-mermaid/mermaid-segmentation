@@ -46,8 +46,8 @@ from coralnet_scraper.parsers import (
 )
 from coralnet_scraper.verify import (
     Verification,
-    _strip_status,
     orphan_image_keys,
+    strip_status,
     verify_source,
 )
 
@@ -213,7 +213,7 @@ def _export_timestamp(resp: requests.Response) -> str:
 
 def _export_names(refs: list[ImageRef]) -> set[str]:
     """Return the image names an export of ``refs`` may contain: titles without a status."""
-    return {_strip_status(r.name) for r in refs}
+    return {strip_status(r.name) for r in refs}
 
 
 def _check_export_names(df: pd.DataFrame, allowed: set[str]) -> None:

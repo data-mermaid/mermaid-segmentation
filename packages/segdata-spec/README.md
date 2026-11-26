@@ -4,7 +4,7 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 
 ## Scope
 
-- **Owns:** the `manifest.json` and parquet table schemas, the S3 key layout, the local cache layout, publishing a version, syncing pinned versions and their image files into the cache (resizing them there when given a resize spec) or their tables alone, publishing and syncing feature sets, opening synced versions, the benthic-attribute `roll_up`, and the split-file format with its coverage check.
+- **Owns:** the `manifest.json` and parquet table schemas, the S3 key layout, the local cache layout, staging a version as local files, syncing pinned versions and their image files into the cache (resizing them there when given a resize spec) or their tables alone, staging and syncing feature sets and claiming a feature family for its extractor, opening synced versions, the benthic-attribute `roll_up`, and the split-file format with its coverage check.
 - **Does not own:** extracting or converting source data, computing features or writing feature files (the spec reads and verifies feature files and never writes them), choosing versions or pins, choosing the train/val/test split (the package reads and checks a split file; the split is built elsewhere), or publishing and owning the original image files. The ETL puts the originals in S3; the manifest's `image_store` names the bucket and prefix.
 - **Boundary:** the package does not import `mermaidseg`, `coralnet_scraper` or `segdata_etl`, and `mermaidseg/inference` does not import it. The root `tests/test_package_boundaries.py` enforces this. `mermaidseg` imports it (`mermaidseg/data/`).
 
@@ -12,9 +12,10 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 
 | Caller | Calls |
 |---|---|
-| ETL | `publish.publish_dataset` and `publish.publish_taxonomy`. Each returns the manifest and its sha256, which becomes a `manifest.Pin`. `features.publish_feature_set` returns a `manifest.FeatureSetPin` (dataset `Pin`, family, feature-set manifest sha256). A feature writer also calls `features.claim_extractor` before it writes any feature file, and names files with `features.feature_file_key`. |
+| ETL | `stage.stage_dataset` and `stage.stage_taxonomy`, which write a version to a local stage directory. Each returns the manifest and its sha256, which becomes a `manifest.Pin`. `segdata promote` in `segdata-etl` uploads a staged version; `stage.stage_feature_set` stages a feature set the same way and returns a `manifest.FeatureSetPin` (dataset `Pin`, family, feature-set manifest sha256). `features.claim_extractor` is the one S3 write in this package; see [Feature sets](#feature-sets). Also `stage.read_version_tables`, `stage.read_parent_tables`, `git.probe_git` and `git.refuse_unpublishable`. |
 | Trainer | `sync.sync(client, pins, cache_dir, bucket=..., resize=..., max_workers=...)`, which needs S3 access; `sync.check_published_manifest(client, bucket, pin, taxonomy=...)`, which reads the manifest without caching it; then `read.open_version(..., resize=...)`, `read.open_tables` and `read.open_taxonomy`, which read only the cache. For tables without images: `sync.sync_tables` (needs S3 access) in place of `sync.sync`. For features: `sync.sync_feature_set` (needs S3 access) and `read.open_feature_set` (cache only), both taking a `manifest.FeatureSetPin`. Also `resize` (`ResizeSpec`, `scaled_size`, `resize_image`, `resize_mask`, `scale_points`, `scale_images`). `scale_images` returns the images table with the resized `width` and `height` and `media_type` `image/jpeg`; `open_version(resize=)` uses it. |
-| Both | `taxonomy.roll_up` and `taxonomy.hierarchy_from_table`. |
+| ETL | `sync.require_published_taxonomy(client, bucket, pin)`, which raises `PublishRefused` when the taxonomy manifest is absent or does not match the pin. The builders and `promote` in `segdata-etl` call it. |
+| Both | `taxonomy.roll_up` and `taxonomy.hierarchy_from_table`; `layout` for the S3 keys and cache paths; `s3` for `exists`, `get_bytes`, `is_not_found`, `is_precondition_failed`, `norm_etag` and `crc64nvme_b64`. |
 | Split builder and trainer | `splits.read_split_file`. The trainer also passes `splits.coverage_checker` to `sync`. |
 
 `resize` on `sync` maps a dataset name to a `ResizeSpec` or `None`. A dataset that is absent or maps to `None` is cached as is. `DatasetSyncResult.resize` records the spec that was applied, for model lineage. After each dataset version syncs, `sync` writes a marker (see Cache layout) that records the resize spec, the synced groups and the dropped image ids. `open_version(..., resize=...)` raises `NotSynced` when the version has no marker for that spec, and the message names the requested resize id and the ids that do have a marker. `DatasetVersion.synced_groups` holds the groups whose images are cached, or `None` when all of them are. Sync never deletes cached images, so `open_version` unions the groups of every marker for the version and spec: a later sync adds its groups, and a sync whose selection names no groups adds none. `ResizeSpec` is a training-cache step only: evaluation and serving resize any input to the model's `input_size`, so inference does not apply it. A `ResizeSpec` holds `max_edge`, `filter` (`lanczos`, `bicubic` or `bilinear`) and `jpeg_quality`; its `id` is the first 12 hex characters of a hash of the three fields.
@@ -28,6 +29,8 @@ The versioned dataset contract between the ETL that publishes segmentation datas
 | `read.open_feature_set(cache_dir, bucket, pin)` | `pin` is a `FeatureSetPin` | Raises `NotSynced` without a feature marker. Re-verifies the set manifest against `pin.manifest_sha256` and its dataset sha256 against `pin.dataset`. Returns `FeatureSet` (`manifest`, `index`, `path(image_id)`); `path` resolves any indexed image, and only the images `sync_feature_set` selected are cached. |
 
 `sync` runs on `max_workers` threads (default `min(8, os.cpu_count())`). Create the boto3 client with `max_pool_connections` of at least `max_workers`.
+
+`s3.is_not_found` counts an object as missing for the codes `404`, `NoSuchKey` and `NotFound`, or for an HTTP 404 whose code is empty or numeric. Any other code, `NoSuchBucket` included, is not a missing object, so `s3.exists` raises it.
 
 ## S3 layout
 
@@ -45,14 +48,14 @@ features/<store>/<family>/<image_id>[~<suffix>].featurevector
 
 Images and masks are not under these prefixes. Their keys are `image_store.prefix` plus the `key` and `mask_key` columns of `images.parquet`.
 
-`images.parquet` also has a nullable `source_name`: the image's name at its source. It is data only and is never part of a key. Publishers must supply the column (nulls allowed); `publish_dataset` refuses a table without it. `sync` and `open_version` accept a version published without the column; its `images` table then has no `source_name`.
+`images.parquet` also has a nullable `source_name`: the image's name at its source. It is data only and is never part of a key. Publishers must supply the column (nulls allowed); `stage_dataset` refuses a table without it. `sync` and `open_version` accept a version published without the column; its `images` table then has no `source_name`.
 
 ## Feature sets
 
 A feature set holds one pyspacer feature file per image, computed by one extractor, for one dataset version. The files and the per-version index are stored separately.
 
 - **Files:** `features/<store>/<family>/<image_id>[~<suffix>].featurevector`. `feature_store_name(image_store, bucket)` returns `<store>`: the image store must be in the dataset bucket with prefix exactly `images/<store>/`, else `ValueError`. Versions that share an image store share feature files. `feature_file_key(image_store, bucket, family, image_id, suffix=None)` returns a file's key. The family's `_extractor_spec.json` sits beside the files. The writer puts the feature files; the spec never writes a `.featurevector`.
-- **Writers:** call `claim_extractor(client, bucket, image_store, family, extractor)` before writing any `.featurevector` into a family, and put each feature file with `If-None-Match: *` and `ChecksumAlgorithm='CRC64NVME'`, so the object carries a CRC64NVME checksum. `segdata features attach` (segdata-etl) refuses to adopt a family file without one. `claim_extractor` writes `_extractor_spec.json` if it is absent, or checks that the stored one has the same four identity values (see the `extractor` check below), else `ExtractorMismatch`. `publish_feature_set` calls it too.
+- **Writers:** a writer of `.featurevector` files calls `claim_extractor(client, bucket, image_store, family, extractor)` before it writes any file into a family. It puts each file with `If-None-Match: *` and `ChecksumAlgorithm='CRC64NVME'`, so the object carries a CRC64NVME checksum; `segdata features attach` (segdata-etl) refuses to adopt a family file without one. `claim_extractor` writes `_extractor_spec.json` (`extractor_spec_bytes(extractor)`) if it is absent, or checks that the stored one has the same four identity values, else `ExtractorMismatch`. `segdata promote` calls it before it copies a staged set's vectors. An extraction job outside this repository, such as mermaid-classifier's `build_feature_set.py`, calls it and then writes vectors into the family directly; `claim_extractor` is the one S3 write in this package for that reason. `check_claimed_extractor` makes the same check and writes nothing.
 - **Index:** `datasets/<d>/<v>/features/<family>/index.parquet` lists the files that belong to the version. `manifest.json` in the same prefix is written last. It records the dataset `Pin`, the family, the extractor spec, the index's sha256, row count and size, `stats` (`n_images`, `n_missing`) and the ETL provenance. Its sha256 pins the set. `FeatureSetManifest`, `FeatureSetStats` and `FeatureSetPin` are in `manifest.py`. A `FeatureSetPin` holds the dataset `Pin`, the family and the set manifest's sha256.
 - **Names:** `store`, `family` and `suffix` match `[a-z0-9][a-z0-9._-]*` and contain no `..`. `image_id` is not checked against this pattern.
 
@@ -60,7 +63,7 @@ Immutability:
 
 - A published version's manifest and tables never change.
 - Feature sets are add-only. Each set is write-once and pinned by its own sha256, and publishing one does not touch the dataset manifest or any earlier set.
-- A wrong or incomplete feature set cannot be rewritten. Publish the corrected one under a new family name.
+- A wrong or incomplete feature set cannot be rewritten. Stage and publish the corrected one under a new family name.
 - A reader fetches only what a manifest names.
 
 `index.parquet` columns (`schema.FEATURE_INDEX_SCHEMA`):
@@ -74,19 +77,19 @@ Immutability:
 | `crc64nvme` | string | yes |
 | `n_points` | int32 | no |
 
-`publish_feature_set(client, pin, family, index, extractor, *, bucket, etl, allow_missing=False)` returns a `FeatureSetPin`. All checks run before the first write:
+`stage.stage_feature_set(stage_dir, *, dataset_dirs, bucket, dataset, family, index, extractor, allow_missing=False, etl_package, etl_command, repo_dir, git=None)` returns a `FeatureSetPin`. It writes `index.parquet` and then `manifest.json` to `<stage_dir>/<bucket>/datasets/<d>/<v>/features/<family>/`. `segdata promote` publishes those bytes unchanged. All checks run before the first file is written:
 
-- The dataset manifest is verified against `pin` and `images.parquet` against the manifest.
+- The git tree is clean and pushed and has a `uv.lock`, else `PublishRefused`. The manifest records the ETL provenance, as `stage_dataset` does.
+- The dataset manifest is read from the first of `dataset_dirs` that holds it, else `ManifestNotFound`. It is verified against `dataset`, and `images.parquet` against the manifest. Pass the stage directory for a version staged alongside, or the cache that `sync_tables` filled for a published one.
 - `index` conforms to `FEATURE_INDEX_SCHEMA`, else `SchemaValidationError`.
 - The dataset's image store is `images/<store>/` in `bucket`, else `ValueError`.
 - Every `image_id` is an image of the version, and none repeats.
 - Every `key` is that image's own file under `features/<store>/<family>/`: `<image_id>.featurevector` or `<image_id>~<suffix>.featurevector`. No two rows share a `key`.
 - A version image the index leaves out is refused unless `allow_missing` is true. The count is recorded in `stats.n_missing`.
-- `extractor` holds `class_path`, `crop_size`, `feature_dim` and `weights_sha256`, else `ValueError`. If `_extractor_spec.json` exists, it must have the same four values, else `ExtractorMismatch`; its other keys may differ and the stored file is kept. Otherwise it is written from `extractor`.
-- `etl` is recorded in the manifest as given. No git check runs.
-- `_extractor_spec.json`, `index.parquet` and then `manifest.json` are put with `If-None-Match: *`, as in Guarantees.
+- `extractor` holds `class_path`, `crop_size`, `feature_dim` and `weights_sha256`, else `ValueError`. The manifest records it whole; promote writes `_extractor_spec.json` from it.
+- The set is not staged yet, else `PublishRefused`.
 
-The publish does not look at the feature files: it does not check that they exist, that `etag` or `size` match them, or that `n_points` matches the image's points. Point coverage is the writer's job.
+Staging does not look at the feature files: it does not check that they exist, that `etag` or `size` match them, or that `n_points` matches the image's points. The caller checks point coverage; segdata-etl's `gather_features` does.
 
 ## Cache layout
 
@@ -132,12 +135,15 @@ sync(client, pins, cache_dir, bucket=bucket,
 
 ## Guarantees
 
-Publish:
+Stage:
 
-- Every put sends `If-None-Match: *`. An existing object with identical bytes counts as written; any other existing object raises `ObjectExists`.
-- Table files are written first and `manifest.json` last. A prefix without a manifest is an incomplete publish.
-- A version that already has a manifest is refused.
+- `stage_dataset` and `stage_taxonomy` write under `<stage_dir>/<bucket>/<key>`, the cache layout, and write nothing to S3.
+- Every file is write-once. An existing file with identical bytes counts as written, so a rerun after a partial stage adopts the tables already there; an existing file with other bytes raises `ObjectExists`.
+- Table files are written first and `manifest.json` last. A version folder without a manifest is an incomplete stage.
+- A version whose `manifest.json` is already staged is refused with `PublishRefused`.
 - A dirty tree (tracked files only), a `HEAD` that no remote branch contains, and a missing `uv.lock` are refused with `PublishRefused`. The manifest records the git SHA and the sha256 of `uv.lock`.
+- With `parents`, `stage_dataset` reads the first parent's manifest and tables from the first of `parent_dirs` that holds the manifest, checks them against the `ParentRef` and the manifest, and records the diff from that parent.
+- `stage_dataset(taxonomy=...)` records the taxonomy pin in the manifest's `taxonomy` field. Without it, `manifest.json` has no `taxonomy` key.
 - The same tables always serialize to the same bytes.
 
 Sync:
@@ -158,11 +164,11 @@ All derive from `errors.SegdataError`.
 
 | Class | Raised when |
 |---|---|
-| `PublishRefused` | The tree is dirty or unpushed, `uv.lock` is missing, or the version exists. |
-| `ObjectExists` | A write-once key exists with different bytes. |
+| `PublishRefused` | The tree is dirty or unpushed, `uv.lock` is missing, or the version is already staged. |
+| `ObjectExists` | A write-once staged file exists with different bytes. |
 | `SchemaValidationError` | A table fails its schema, or the cross-table rules. Also a `ValueError`. |
 | `PinMismatch` | A manifest's sha256 differs from its pin, or a feature-set manifest differs from its sha256 or records another dataset manifest sha256. |
-| `ManifestNotFound` | A pinned manifest is absent from the bucket. |
+| `ManifestNotFound` | A pinned manifest is absent from the bucket, or a parent manifest is in none of the `parent_dirs` given to `stage_dataset`. |
 | `ChecksumMismatch` | A table, feature index, feature file, image or mask differs from its recorded checksum or size, or a cached resized output has no valid index entry or differs from it. |
 | `ImageChanged` | An image or feature file no longer matches its recorded ETag. |
 | `ImageMissing` | An image is absent and the dataset's mode is `fail`. |

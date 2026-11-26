@@ -1,7 +1,7 @@
 """Shared build for dense datasets staged from a pinned Hugging Face revision.
 
 The build streams parquet shards in small batches, writes each image and mask to the stage unchanged,
-and publishes the version through ``LocalDirS3``. Nothing is written to S3; ``uploads.jsonl`` lists
+and stages the version with ``stage_dataset``. Nothing is written to S3; ``uploads.jsonl`` lists
 the staged files a later promote step uploads.
 """
 
@@ -27,17 +27,18 @@ from PIL import Image
 from segdata_etl.common.copy_plan import StagedFile, stage_bytes, write_uploads
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
-    crc64nvme_b64,
     image_size,
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
+from segdata_etl.common.stage import next_version
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_spec import DATASET_BUCKET
+from segdata_spec.git import probe_git, refuse_unpublishable
 from segdata_spec.manifest import ImageStore, LabelMapping, SourceInfo
-from segdata_spec.publish import probe_git, publish_dataset
+from segdata_spec.s3 import crc64nvme_b64
 from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA
+from segdata_spec.stage import stage_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +337,7 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         PublishRefused: The git tree is dirty or unpushed.
     """
     git = probe_git(REPO_ROOT)
-    refuse_unpublishable(git)
+    refuse_unpublishable(git, REPO_ROOT)
     shards = _shards_or_raise(_list_repo_files(source.repo, args.revision), source)
     vocab_path = hf_hub_download(
         source.repo, source.vocab_file, repo_type="dataset", revision=args.revision
@@ -352,8 +353,9 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
     version = next_version(
         args.stage_dir, DATASET_BUCKET, source.dataset, git_sha=git.sha, client=client
     )
-    manifest, _ = publish_dataset(
-        LocalDirS3(args.stage_dir),
+    manifest, _ = stage_dataset(
+        args.stage_dir,
+        parent_dirs=(args.stage_dir,),
         bucket=DATASET_BUCKET,
         dataset=source.dataset,
         version=version,

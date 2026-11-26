@@ -14,7 +14,7 @@ from s3_fake import FakeS3
 from segdata_etl.datasets import catlin_seaview
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
-from segdata_spec.publish import GitState
+from segdata_spec.git import GitState
 
 from .conftest import (
     CLEAN_GIT,
@@ -157,6 +157,16 @@ def test_build_records_licence_source_dropped_and_command_in_the_manifest(staged
     assert manifest.etl.command == (
         f"segdata build catlin_seaview --stage-dir {staged.stage}"
         f" --taxonomy-version {TAXONOMY_VERSION} --taxonomy-manifest-sha256 {staged.taxonomy_sha}"
+    )
+
+
+def test_build_records_the_taxonomy_pin_in_the_manifest(staged: Staged) -> None:
+    taxonomy = staged.version.manifest.taxonomy
+    assert taxonomy is not None
+    assert (taxonomy.name, taxonomy.version, taxonomy.manifest_sha256) == (
+        "mermaid-benthic",
+        TAXONOMY_VERSION,
+        staged.taxonomy_sha,
     )
 
 
