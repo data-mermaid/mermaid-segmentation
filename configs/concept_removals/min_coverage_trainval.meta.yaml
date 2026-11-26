@@ -23,7 +23,7 @@ datasets_counted:
 - moorea_labeled_corals
 - ucsd_mosaics
 concepts_csv: configs/class_to_concepts.csv
-concepts_csv_sha1: 3a037104b959826b03433555c161d2ae4ad7f5bb
+concepts_csv_sha1: b55540ec6b964a08fbd280dc6f9639a95d3394b9
 schema_config: configs/data_config.yaml
 n_channels: 706
 n_removed: 354
@@ -43,5 +43,6 @@ channels_by_kind:
   kingdom: 6
   order: 72
   phylum: 17
-created: '2026-11-25T03:54:43'
-git_commit: 663c18e
+created: '2026-11-26T10:49:54'
+git_sha: 09357334d2eeb28e64e3d24a6d8540faf63362c6
+git_dirty: false
