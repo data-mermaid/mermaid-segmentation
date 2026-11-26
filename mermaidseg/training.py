@@ -21,7 +21,7 @@ from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_
 from mermaidseg.export import write_sidecar
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import REPO_ROOT, resolve_repo_path, setup_config, update_config_with_args
-from mermaidseg.lineage import collect_lineage, data_version, inherit_lineage
+from mermaidseg.lineage import check_same_data, collect_lineage, data_version, inherit_lineage
 from mermaidseg.logger import Logger, prune_rolling_checkpoints
 from mermaidseg.model.distributed import (
     DistContext,
@@ -297,6 +297,10 @@ def run(args: argparse.Namespace) -> None:
     # -- 2. Datasets -----------------------------------------------------------
     cache_dir = Path(args.cache_dir)
     section = DataSection.model_validate(cfg.data)
+    if args.checkpoint:
+        assert checkpoint_data is not None
+        # A resume continues one run on one dataset; --init-weights may change data.
+        check_same_data(data_version(section), checkpoint_data["lineage"])
     dataset_dict = build_datasets(
         section,
         cache_dir,
@@ -369,7 +373,7 @@ def run(args: argparse.Namespace) -> None:
             data_version=data_version(section),
         )
         if checkpoint_data is not None:
-            lineage = inherit_lineage(lineage, checkpoint_data.get("lineage"))
+            lineage = inherit_lineage(lineage, checkpoint_data["lineage"])
         sidecar_path = write_sidecar(
             run_dir,
             run_name=cfg.run_name,

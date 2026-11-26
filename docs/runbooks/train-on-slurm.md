@@ -81,7 +81,7 @@ The first lines of the job output say whether the job resumes, starts from an in
 
 ## Continue a run after a time limit or preemption
 
-A job has a time limit of 71 h 59 min (`slurm/train.sbatch`). A run that needs more time continues in a new job. Every job of a run continues from the newest checkpoint in `outputs/model_checkpoints/<run>/` (`model_preempt*`, `model_step*` or `model_epoch*`). The trainer writes a rolling `model_preempt<step>` checkpoint every 2000 optimizer steps, so a stopped job loses at most 2000 steps.
+A job has a time limit of 71 h 59 min (`slurm/train.sbatch`). A run that needs more time continues in a new job. Every job of a run continues from the newest checkpoint in `outputs/model_checkpoints/<run>/` (`model_preempt*`, `model_step*` or `model_epoch*`). The trainer writes a rolling `model_preempt<step>` checkpoint every 2000 optimizer steps, so a stopped job loses at most 2000 steps. A resume refuses a data config whose dataset or taxonomy pins differ from the checkpoint's.
 
 To continue a run that stopped, run the launcher again:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime
 import json
 import multiprocessing
 import os
@@ -12,10 +13,11 @@ import subprocess
 import sys
 import time
 import types
+import unittest.mock
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -31,6 +33,7 @@ from mermaidseg import training
 from mermaidseg.data.config import DataSection
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import ConfigDict, load_config, resolve_repo_path
+from mermaidseg.lineage import data_version
 from mermaidseg.logger import Logger
 from mermaidseg.model.distributed import DistContext
 from mermaidseg.run_setup import RESUME_CHECKPOINT_KEYS, read_checkpoint
@@ -45,6 +48,7 @@ from mermaidseg.training import (
     seed_run,
 )
 from scripts.train import build_parser
+from segdata_spec import stage as segdata_stage
 from tests.conftest import cbm_test_config, dinov3_encoder_mocker
 from tests.mermaidseg.conftest import init_gloo, spawn_gloo
 from tests.mermaidseg.data.conftest import ImageSpec, write_taxonomy, write_version
@@ -128,11 +132,25 @@ SMOKE_RESOLUTION = 56
 SMOKE_RUN = "smoke"
 
 
+class _FrozenDatetime(datetime.datetime):
+    """``datetime`` whose ``now`` is fixed, so staged manifests (and their pins) repeat exactly."""
+
+    @classmethod
+    def now(cls, tz: datetime.tzinfo | None = None) -> Self:
+        return cls(2026, 1, 1, tzinfo=tz)
+
+
 def _write_smoke_versions(tmp_path: Path) -> dict[str, Any]:
     """Write a tiny coralscapes_v2 version and the taxonomy into ``<tmp_path>/cache``.
 
-    Each split holds two fully labelled images, one class each. Returns the data section.
+    Each split holds two fully labelled images, one class each. Returns the data section; the
+    pins are the same on every call, as a resume requires.
     """
+    with unittest.mock.patch.object(segdata_stage, "datetime", _FrozenDatetime):
+        return _stage_smoke_versions(tmp_path)
+
+
+def _stage_smoke_versions(tmp_path: Path) -> dict[str, Any]:
     size = (SMOKE_RESOLUTION, SMOKE_RESOLUTION)
     images = [
         ImageSpec(f"{split}{k}", group=split, mask=np.full(size, k + 1, np.uint8))
@@ -488,9 +506,20 @@ def test_group_sigterm_lets_the_enclosing_exit_finish_despite_dying_dataloader_w
     assert scenario.exitcode == 143
 
 
+def _checkpoint_lineage(**overrides: Any) -> dict[str, Any]:
+    return {
+        "git_sha": "abc123",
+        "git_dirty": False,
+        "seed": 1,
+        "data_version": {"datasets": {"ds": {"version": "v1"}}, "taxonomy": None},
+        **overrides,
+    }
+
+
 def _resume_checkpoint(meta) -> dict[str, Any]:
     """A checkpoint with the keys ``Logger.save_model_checkpoint`` writes."""
     return {
+        "lineage": _checkpoint_lineage(),
         "config": {},
         "model_state_dict": meta.model.state_dict(),
         "optimizer_state_dict": meta.optimizer.state_dict(),
@@ -637,6 +666,7 @@ def test_resumed_runs_propagate_a_dirty_ancestor_through_a_shallow_parent(
         assert lineage["parent"] == {
             "git_sha": first_lineage["git_sha"],
             "git_dirty": first_lineage["git_dirty"],
+            "data_version": first_lineage["data_version"],
         }
 
     # A clean third run still inherits the dirty verdict from its parent's own inherited flag.
@@ -645,27 +675,31 @@ def test_resumed_runs_propagate_a_dirty_ancestor_through_a_shallow_parent(
     )
     third = torch.load(run_dir / "model_step3", map_location="cpu", weights_only=True)["lineage"]
     assert third["git_dirty"] is True
-    assert third["parent"] == {"git_sha": resumed["git_sha"], "git_dirty": True}
+    assert third["parent"] == {
+        "git_sha": resumed["git_sha"],
+        "git_dirty": True,
+        "data_version": resumed["data_version"],
+    }
 
 
-def test_init_weights_run_from_a_checkpoint_without_lineage_is_untrusted(
-    run_scenario, marked_checkpoint
+@pytest.mark.parametrize("flag", ["--checkpoint", "--init-weights"])
+def test_a_checkpoint_without_lineage_is_refused_before_training(
+    flag, run_scenario, marked_checkpoint
 ):
-    assert "lineage" not in torch.load(marked_checkpoint.path, weights_only=True)
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        _patch_git_dirty(monkeypatch, False)
-        result = run_scenario(cli=["--init-weights", str(marked_checkpoint.path)])
+    saved = torch.load(marked_checkpoint.path, weights_only=True)
+    del saved["lineage"]
+    source_path = run_scenario.scratch_dir() / "no_lineage.pt"
+    torch.save(saved, source_path)
 
-    lineage = json.loads((result.run_dir / "model.json").read_text())["lineage"]
-    assert lineage["git_dirty"] is None
-    assert "parent" in lineage and lineage["parent"] is None
+    with pytest.raises(RuntimeError, match="lineage"):
+        run_scenario(cli=[flag, str(source_path)])
 
 
 def test_init_weights_run_from_a_clean_checkpoint_records_a_shallow_parent(
     run_scenario, marked_checkpoint
 ):
     saved = torch.load(marked_checkpoint.path, weights_only=True)
-    saved["lineage"] = {"git_sha": "abc123", "git_dirty": False, "seed": 1}
+    saved["lineage"] = _checkpoint_lineage(git_sha="abc123")
     source_path = run_scenario.scratch_dir() / "with_lineage.pt"
     torch.save(saved, source_path)
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -674,7 +708,61 @@ def test_init_weights_run_from_a_clean_checkpoint_records_a_shallow_parent(
 
     lineage = json.loads((result.run_dir / "model.json").read_text())["lineage"]
     assert lineage["git_dirty"] is False
-    assert lineage["parent"] == {"git_sha": "abc123", "git_dirty": False}
+    assert lineage["parent"] == {
+        "git_sha": "abc123",
+        "git_dirty": False,
+        "data_version": saved["lineage"]["data_version"],
+    }
+
+
+def _checkpoint_with_changed_data(first_checkpoint: Path, path: Path) -> dict[str, Any]:
+    """Save a copy of ``first_checkpoint`` that pins another version of its dataset."""
+    saved = torch.load(first_checkpoint, map_location="cpu", weights_only=True)
+    saved["lineage"]["data_version"]["datasets"]["coralscapes_v2"]["version"] = "other-version"
+    torch.save(saved, path)
+    return saved
+
+
+@_FORK_ONLY
+def test_resume_with_changed_data_pins_is_refused_before_building_datasets(
+    monkeypatch, tmp_path, mock_dinov3_encoder
+):
+    _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    output_dir, cache_dir = tmp_path / "out", tmp_path / "cache"
+    training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    changed = tmp_path / "changed.pt"
+    _checkpoint_with_changed_data(
+        output_dir / "model_checkpoints" / SMOKE_RUN / "model_step1", changed
+    )
+
+    def _unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("run() built datasets before checking the data pins")
+
+    monkeypatch.setattr(training, "build_datasets", _unreachable)
+    with pytest.raises(ValueError, match="coralscapes_v2"):
+        training.run(_smoke_args(tmp_path, output_dir, cache_dir, epochs=2, checkpoint=changed))
+
+
+@_FORK_ONLY
+def test_init_weights_from_a_checkpoint_with_other_data_trains_and_records_its_pins(
+    monkeypatch, tmp_path, mock_dinov3_encoder
+):
+    _install_smoke_fakes(monkeypatch, tmp_path, mock_dinov3_encoder)
+    output_dir, cache_dir = tmp_path / "out", tmp_path / "cache"
+    training.run(_smoke_args(tmp_path, output_dir, cache_dir))
+    changed = tmp_path / "changed.pt"
+    saved = _checkpoint_with_changed_data(
+        output_dir / "model_checkpoints" / SMOKE_RUN / "model_step1", changed
+    )
+
+    training.run(
+        _smoke_args(tmp_path, tmp_path / "out2", cache_dir, cli=["--init-weights", str(changed)])
+    )
+
+    sidecar = json.loads(
+        (tmp_path / "out2" / "model_checkpoints" / SMOKE_RUN / "model.json").read_text()
+    )
+    assert sidecar["lineage"]["parent"]["data_version"] == saved["lineage"]["data_version"]
 
 
 def _lineage(taxonomy: dict[str, str] | None) -> dict[str, Any]:
@@ -880,7 +968,10 @@ def fresh_run(run_scenario) -> _RunResult:
 
 
 def _save_resume_checkpoint(meta, path: Path, **overrides: Any) -> Path:
-    torch.save({**_resume_checkpoint(meta), **overrides}, path)
+    """A resumable checkpoint whose lineage pins the data the smoke runs use."""
+    smoke_data = data_version(DataSection.model_validate(_write_smoke_versions(path.parent)))
+    lineage = _checkpoint_lineage(data_version=smoke_data)
+    torch.save({**_resume_checkpoint(meta), "lineage": lineage, **overrides}, path)
     return path
 
 
@@ -895,14 +986,17 @@ def test_seed_run_seeds_the_global_rngs(monkeypatch):
 
 
 def _weights_only_checkpoint(path: Path) -> Path:
-    torch.save({"model_state_dict": torch.nn.Linear(2, 2).state_dict()}, path)
+    torch.save(
+        {"model_state_dict": torch.nn.Linear(2, 2).state_dict(), "lineage": _checkpoint_lineage()},
+        path,
+    )
     return path
 
 
 def test_init_weights_reads_a_file_that_holds_only_model_weights(tmp_path):
     path = _weights_only_checkpoint(tmp_path / "weights.pt")
     args = SimpleNamespace(init_weights=str(path), checkpoint=None)
-    assert set(training._read_run_checkpoint(args)) == {"model_state_dict"}  # type: ignore[arg-type]
+    assert set(training._read_run_checkpoint(args)) == {"model_state_dict", "lineage"}  # type: ignore[arg-type]
 
 
 def test_resume_checkpoint_must_hold_the_optimizer_and_progress_keys(tmp_path):
@@ -925,7 +1019,7 @@ def test_loading_weights_only_keeps_the_fresh_optimizer_and_progress(make_meta_m
         next(iter(source.model.parameters())).add_(1.0)
     target = make_meta_model(cbm_test_config(), run_name="target")
     lr_before = [group["lr"] for group in target.optimizer.param_groups]
-    checkpoint = {"model_state_dict": source.model.state_dict()}
+    checkpoint = {"model_state_dict": source.model.state_dict(), "lineage": _checkpoint_lineage()}
 
     start_epoch = load_training_checkpoint(target, checkpoint, DistContext(), load_optimizer=False)
 

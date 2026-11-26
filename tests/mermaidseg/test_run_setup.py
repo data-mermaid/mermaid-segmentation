@@ -44,7 +44,10 @@ def test_resolved_config_yaml_holds_the_overridden_values(tmp_path):
 
 
 def _save_checkpoint(path: Path, state_dict: dict, config: dict | None = None) -> Path:
-    torch.save({"config": config or {}, "model_state_dict": state_dict}, path)
+    torch.save(
+        {"config": config or {}, "model_state_dict": state_dict, "lineage": {"git_sha": "abc"}},
+        path,
+    )
     return path
 
 

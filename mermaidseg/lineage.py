@@ -106,7 +106,62 @@ def collect_lineage(*, resolved_config: dict, seed: int, data_version: dict) -> 
     }
 
 
-def inherit_lineage(lineage: dict, source: dict | None) -> dict:
+def _pin_differences(
+    label: str, new: dict | None, old: dict | None, fields: tuple[str, ...]
+) -> list[str]:
+    """One line per field of ``fields`` that differs between two pins, naming ``label``."""
+    if new is None or old is None:
+        return [] if new is old else [f"{label}: pinned {old!r} in the checkpoint, {new!r} now"]
+    return [
+        f"{label}: {field} {old.get(field)!r} in the checkpoint, {new.get(field)!r} now"
+        for field in fields
+        if new.get(field) != old.get(field)
+    ]
+
+
+def _data_differences(new: dict, old: dict) -> list[str]:
+    """Every difference between two ``data_version`` dicts, datasets sorted by name."""
+    new_datasets, old_datasets = new.get("datasets") or {}, old.get("datasets") or {}
+    lines = []
+    for name in sorted(new_datasets.keys() | old_datasets.keys()):
+        if name not in old_datasets:
+            lines.append(f"dataset {name!r}: added, not in the checkpoint")
+        elif name not in new_datasets:
+            lines.append(f"dataset {name!r}: removed, pinned in the checkpoint")
+        else:
+            lines += _pin_differences(
+                f"dataset {name!r}",
+                new_datasets[name],
+                old_datasets[name],
+                ("version", "manifest_sha256", "resize"),
+            )
+    lines += _pin_differences(
+        "taxonomy", new.get("taxonomy"), old.get("taxonomy"), ("version", "manifest_sha256")
+    )
+    return lines
+
+
+def check_same_data(data_version: dict, source: dict) -> None:
+    """Refuse a resume whose data pins differ from those of the checkpoint being resumed.
+
+    Args:
+        data_version: The pins of the new session, as returned by ``data_version()``.
+        source: Lineage stored in the checkpoint; its ``data_version`` is the reference.
+
+    Raises:
+        ValueError: Naming every dataset or taxonomy pin (version, manifest_sha256, resize) that
+            differs, and every dataset added or removed.
+    """
+    differences = _data_differences(data_version, source.get("data_version") or {})
+    if differences:
+        raise ValueError(
+            "Resuming a run cannot change its data; the pins differ from the checkpoint's:\n"
+            + "\n".join(differences)
+            + "\nUse --init-weights to start a new run from these weights on other data."
+        )
+
+
+def inherit_lineage(lineage: dict, source: dict) -> dict:
     """Lineage of a session that started from a checkpoint with lineage ``source``.
 
     The source's ``git_dirty`` is already its own inherited verdict, so a dirty ancestor
@@ -114,25 +169,25 @@ def inherit_lineage(lineage: dict, source: dict | None) -> dict:
 
     Args:
         lineage: Lineage of the new session.
-        source: Lineage stored in the checkpoint, or None when the checkpoint has none.
+        source: Lineage stored in the checkpoint.
 
     Returns:
         A new dict with the fields of ``lineage`` plus ``parent`` and a combined ``git_dirty``.
-        ``parent`` is None when ``source`` is None, else a dict holding only the source's
-        ``git_sha`` and ``git_dirty``. ``git_dirty`` is True if either side is True, else None
-        if either side is unknown (including a missing ``source``), else False.
+        ``parent`` is a dict holding only the source's ``git_sha``, ``git_dirty`` and
+        ``data_version``. ``git_dirty`` is True if either side is True, else None if either side
+        is unknown, else False.
     """
     own_dirty = lineage.get("git_dirty")
-    source_dirty = None if source is None else source.get("git_dirty")
+    source_dirty = source.get("git_dirty")
     if own_dirty is True or source_dirty is True:
         git_dirty = True
     elif own_dirty is None or source_dirty is None:
         git_dirty = None
     else:
         git_dirty = False
-    parent = (
-        None
-        if source is None
-        else {"git_sha": source.get("git_sha"), "git_dirty": source.get("git_dirty")}
-    )
+    parent = {
+        "git_sha": source.get("git_sha"),
+        "git_dirty": source_dirty,
+        "data_version": source.get("data_version"),
+    }
     return {**lineage, "git_dirty": git_dirty, "parent": parent}

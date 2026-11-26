@@ -11,7 +11,7 @@ import pytest
 
 from mermaidseg import lineage
 from mermaidseg.data.config import DataSection
-from mermaidseg.lineage import collect_lineage, data_version, inherit_lineage
+from mermaidseg.lineage import check_same_data, collect_lineage, data_version, inherit_lineage
 
 
 def _collect(**overrides):
@@ -176,8 +176,6 @@ def test_data_version_without_a_taxonomy_pin_records_none():
         (False, {"git_dirty": None}, None),
         (None, {"git_dirty": False}, None),
         (False, {}, None),
-        (False, None, None),
-        (True, None, True),
         (None, {"git_dirty": True}, True),
     ],
 )
@@ -185,11 +183,12 @@ def test_inherit_lineage_combines_git_dirty_of_own_and_source(own, source, expec
     assert inherit_lineage({"git_dirty": own}, source)["git_dirty"] is expected
 
 
-def test_inherit_lineage_keeps_only_the_source_sha_and_dirty_flag_without_mutating():
+def test_inherit_lineage_keeps_only_the_source_sha_dirty_flag_and_data_without_mutating():
     own = {"git_dirty": False, "git_sha": "abc", "seed": 7, "resolved_config": {"a": 1}}
     source = {
         "git_dirty": False,
         "git_sha": "old",
+        "data_version": {"datasets": {"d": {"version": "v1"}}, "taxonomy": None},
         "parent": {"git_dirty": True},
         "resolved_config": {"b": 2},
     }
@@ -197,7 +196,11 @@ def test_inherit_lineage_keeps_only_the_source_sha_and_dirty_flag_without_mutati
 
     result = inherit_lineage(own, source)
 
-    assert result["parent"] == {"git_sha": "old", "git_dirty": False}
+    assert result["parent"] == {
+        "git_sha": "old",
+        "git_dirty": False,
+        "data_version": {"datasets": {"d": {"version": "v1"}}, "taxonomy": None},
+    }
     assert {k: result[k] for k in ("git_sha", "seed", "resolved_config")} == {
         "git_sha": "abc",
         "seed": 7,
@@ -207,9 +210,64 @@ def test_inherit_lineage_keeps_only_the_source_sha_and_dirty_flag_without_mutati
     assert source == source_before
 
 
-def test_inherit_lineage_records_a_missing_source_as_a_null_parent():
-    result = inherit_lineage({"git_dirty": False}, None)
-    assert "parent" in result and result["parent"] is None
+def _pins() -> dict:
+    return {
+        "datasets": {
+            "coralnet": {"version": "v1", "manifest_sha256": "a" * 64, "resize": 2048},
+        },
+        "taxonomy": {"version": "t1", "manifest_sha256": "b" * 64},
+    }
+
+
+def test_check_same_data_accepts_identical_pins():
+    assert check_same_data(_pins(), {"data_version": _pins()}) is None
+
+
+def _with_dataset(pins: dict, name: str, **fields) -> dict:
+    out = copy.deepcopy(pins)
+    out["datasets"][name] = {**out["datasets"].get("coralnet", {}), **fields}
+    return out
+
+
+def _changed(**fields) -> dict:
+    return _with_dataset(_pins(), "coralnet", **fields)
+
+
+def _added() -> dict:
+    return _with_dataset(_pins(), "coralscapes")
+
+
+def _removed_source() -> dict:
+    return _with_dataset(_pins(), "coralscapes")
+
+
+def _taxonomy_changed() -> dict:
+    out = _pins()
+    out["taxonomy"] = {"version": "t2", "manifest_sha256": "b" * 64}
+    return out
+
+
+@pytest.mark.parametrize(
+    ("new", "old", "needles"),
+    [
+        pytest.param(_changed(version="v2"), _pins(), ("coralnet", "v1", "v2"), id="version"),
+        pytest.param(
+            _changed(manifest_sha256="c" * 64),
+            _pins(),
+            ("coralnet", "manifest_sha256"),
+            id="manifest",
+        ),
+        pytest.param(_changed(resize=None), _pins(), ("coralnet", "resize"), id="resize"),
+        pytest.param(_added(), _pins(), ("coralscapes",), id="dataset-added"),
+        pytest.param(_pins(), _removed_source(), ("coralscapes",), id="dataset-removed"),
+        pytest.param(_taxonomy_changed(), _pins(), ("taxonomy", "t1", "t2"), id="taxonomy"),
+    ],
+)
+def test_check_same_data_names_every_differing_pin(new, old, needles):
+    with pytest.raises(ValueError) as raised:
+        check_same_data(new, {"data_version": old})
+    for needle in needles:
+        assert needle in str(raised.value)
 
 
 def test_git_state_reports_the_head_sha_and_whether_tracked_files_changed(git_repo):
