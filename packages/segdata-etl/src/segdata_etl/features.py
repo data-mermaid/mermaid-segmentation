@@ -40,9 +40,11 @@ from segdata_etl.common.featurevector import (
 from segdata_etl.common.s3_objects import copy_new, head_with_checksum
 from segdata_etl.common.stage import DEFAULT_CACHE_DIR, refuse_unpublishable
 from segdata_spec import DATASET_BUCKET
+from segdata_spec._s3 import MANIFEST_NAME, feature_set_prefix
+from segdata_spec.errors import PublishRefused
 from segdata_spec.features import claim_extractor, feature_file_key, publish_feature_set
-from segdata_spec.manifest import ImageStore, Pin
-from segdata_spec.publish import GitState, _etl_info, _guard_git, probe_git
+from segdata_spec.manifest import EtlInfo, ImageStore, Pin
+from segdata_spec.publish import probe_git, uv_lock_sha256
 from segdata_spec.read import open_tables
 from segdata_spec.schema import FEATURE_INDEX_SCHEMA
 from segdata_spec.sync import sync_tables
@@ -357,8 +359,7 @@ def attach(
     cache_dir: Path,
     workers: int,
     allow_missing: bool,
-    git: GitState,
-    etl_command: str,
+    etl: EtlInfo,
 ) -> str:
     """Copy the existing vectors of a published version and publish them as feature set ``family``.
 
@@ -371,6 +372,7 @@ def attach(
 
     Raises:
         PinMismatch: The published manifest differs from ``pin``.
+        PublishRefused: The feature set is already published; raised before any write.
         ValueError: The version has no points, the image store or ``family`` is not a valid
             feature store, or the template does not resolve for a row that adopts no file;
             raised before any source call.
@@ -379,6 +381,12 @@ def attach(
             ``feature_dim``, or lacks one of its image's points.
     """
     sync_tables(client, {pin.name: pin}, cache_dir, bucket=DATASET_BUCKET)
+    set_manifest = feature_set_prefix(pin.name, pin.version, family) + MANIFEST_NAME
+    if head_with_checksum(client, DATASET_BUCKET, set_manifest) is not None:
+        raise PublishRefused(
+            f"feature set {family} of {pin.name} {pin.version} is already published in "
+            f"{DATASET_BUCKET}"
+        )
     tables = open_tables(cache_dir, DATASET_BUCKET, pin)
     if tables.points is None:
         raise ValueError(f"{pin.name} {pin.version} has no points.parquet to check coverage on")
@@ -417,8 +425,6 @@ def attach(
         sorted([*copied, *adopted_rows(facts, destinations, adopted)], key=lambda r: r["image_id"]),
         schema=FEATURE_INDEX_SCHEMA,
     )
-    state, lock_sha = _guard_git(REPO_ROOT, git)
-    etl = _etl_info("segdata-etl", etl_command, state, lock_sha)
     sha = publish_feature_set(
         client,
         pin,
@@ -456,15 +462,35 @@ def _command_line(args: argparse.Namespace) -> str:
     return " ".join(parts)
 
 
+def etl_info(command: str) -> EtlInfo:
+    """Return the ETL provenance of ``command`` run from ``REPO_ROOT``.
+
+    Raises:
+        PublishRefused: The git tree is dirty or unpushed, or has no ``uv.lock``.
+    """
+    git = probe_git(REPO_ROOT)
+    refuse_unpublishable(git)
+    lock_sha = uv_lock_sha256(REPO_ROOT)
+    if lock_sha is None:
+        raise PublishRefused(f"no uv.lock in {REPO_ROOT}")
+    return EtlInfo(
+        package="segdata-etl",
+        command=command,
+        git_sha=git.sha,
+        git_dirty=False,
+        uv_lock_sha256=lock_sha,
+    )
+
+
 def run(args: argparse.Namespace, client: Any) -> int:
     """Run ``segdata features attach`` from parsed arguments.
 
     Raises:
-        PublishRefused: The git tree is dirty or unpushed; raised before any S3 call.
+        PublishRefused: The git tree is dirty or unpushed, or has no ``uv.lock``; raised before
+            any S3 call.
     """
     extractor = read_extractor_spec(args.extractor_spec)
-    git = probe_git(REPO_ROOT)
-    refuse_unpublishable(git)
+    etl = etl_info(_command_line(args))
     pin = Pin(name=args.dataset, version=args.version, manifest_sha256=args.manifest_sha256)
     attach(
         client,
@@ -475,7 +501,6 @@ def run(args: argparse.Namespace, client: Any) -> int:
         cache_dir=args.cache_dir,
         workers=args.workers,
         allow_missing=args.allow_missing,
-        git=git,
-        etl_command=_command_line(args),
+        etl=etl,
     )
     return 0

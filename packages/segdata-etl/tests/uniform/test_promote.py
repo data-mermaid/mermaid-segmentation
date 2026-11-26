@@ -183,6 +183,17 @@ def test_rerun_after_a_failed_feature_publish_completes_only_the_feature_set(rep
     assert written[-1] == set_manifest[1]
 
 
+def test_rerun_after_a_completed_feature_promote_refuses_as_already_published(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    run_promote(fake, stage, version)
+    fake.calls.clear()
+
+    with pytest.raises(PublishRefused, match="already published"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
 def test_published_manifest_with_other_bytes_still_refuses_a_staged_feature_version(repo, tmp_path):  # noqa: F811
     fake, stage, version = stage_mermaid(tmp_path, features=True)
     fake.put(DATASET_BUCKET, f"datasets/mermaid/{version}/manifest.json", b"{}")

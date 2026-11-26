@@ -15,8 +15,9 @@ from s3_fake import FakeS3, client_error, crc64nvme, md5_hex
 
 from segdata_etl import cli, features
 from segdata_etl.common.featurevector import FeatureVectorsInvalid, FeatureVectorsMissing
+from segdata_etl.common.s3_objects import ObjectConflict, SourceChanged
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.errors import ExtractorMismatch, PinMismatch
+from segdata_spec.errors import ExtractorMismatch, PinMismatch, PublishRefused
 from segdata_spec.manifest import ImageStore, SourceInfo
 from segdata_spec.publish import GitState, publish_dataset
 
@@ -406,3 +407,90 @@ def test_rerun_after_a_copy_stop_adopts_the_files_already_copied(repo, tmp_path)
 
     assert [c["Key"] for c in fake.copy_calls] == ["features/ds/effnet/b.featurevector"]
     assert [r["image_id"] for r in published_index(fake)] == ["a", "b"]
+
+
+def test_rerun_after_a_published_set_refuses_as_already_published(repo, tmp_path):
+    fake = FakeS3()
+    sha = publish_version(fake, repo)
+    for image_id, (_, pts) in IMAGES.items():
+        seed_vector(fake, image_id, pts)
+    attach(fake, tmp_path, sha)
+    fake.calls.clear()
+
+    with pytest.raises(PublishRefused, match="already published"):
+        attach(fake, tmp_path, sha)
+
+    assert [c for c in fake.calls if c[0] in ("put", "copy")] == []
+
+
+def test_missing_uv_lock_refuses_before_any_s3_call(repo, tmp_path):
+    fake = FakeS3()
+    sha = publish_version(fake, repo)
+    (repo / "uv.lock").unlink()
+
+    with pytest.raises(PublishRefused, match="uv.lock"):
+        attach(fake, tmp_path, sha)
+
+    assert fake.calls == []
+
+
+def test_destination_appearing_with_other_bytes_before_the_copy_conflicts(repo, tmp_path):
+    class PlantsDestination(FakeS3):
+        def copy_object(self, **kwargs: Any) -> dict[str, Any]:
+            self.put(DATASET_BUCKET, kwargs["Key"], b"other bytes")
+            return super().copy_object(**kwargs)
+
+    fake = PlantsDestination()
+    sha = publish_version(fake, repo)
+    for image_id, (_, pts) in IMAGES.items():
+        seed_vector(fake, image_id, pts)
+
+    with pytest.raises(ObjectConflict):
+        attach(fake, tmp_path, sha)
+
+    assert (DATASET_BUCKET, SET_PREFIX + "manifest.json") not in fake.objects
+
+
+def test_source_replaced_after_its_head_stops_before_any_copy(repo, tmp_path):
+    class ReplacesBeforeRead(FakeS3):
+        def get_object(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["Bucket"] == SRC_BUCKET:
+                self.put(SRC_BUCKET, kwargs["Key"], featurevector_bytes([(9, 9)]))
+            return super().get_object(**kwargs)
+
+    fake = ReplacesBeforeRead()
+    sha = publish_version(fake, repo)
+    for image_id, (_, pts) in IMAGES.items():
+        seed_vector(fake, image_id, pts)
+
+    with pytest.raises(SourceChanged):
+        attach(fake, tmp_path, sha)
+
+    assert fake.copy_calls == []
+    assert (DATASET_BUCKET, SET_PREFIX + "manifest.json") not in fake.objects
+
+
+def test_source_replaced_after_verify_stops_at_its_copy(repo, tmp_path):
+    fake = FakeS3()
+    sha = publish_version(fake, repo)
+    for image_id, (_, pts) in IMAGES.items():
+        seed_vector(fake, image_id, pts)
+    fake.source_changes_on_copy[(SRC_BUCKET, "s1/a.featurevector")] = featurevector_bytes([(9, 9)])
+
+    with pytest.raises(SourceChanged):
+        attach(fake, tmp_path, sha)
+
+    assert (DATASET_BUCKET, "features/ds/effnet/a.featurevector") not in fake.objects
+    assert (DATASET_BUCKET, SET_PREFIX + "manifest.json") not in fake.objects
+
+
+def test_vector_of_another_width_is_refused_by_key_with_no_copy(repo, tmp_path):
+    fake = FakeS3()
+    sha = publish_version(fake, repo)
+    fake.put(SRC_BUCKET, "s1/a.featurevector", featurevector_bytes(IMAGES["a"][1], dim=4))
+    seed_vector(fake, "b", IMAGES["b"][1])
+
+    with pytest.raises(FeatureVectorsInvalid, match="a.featurevector: feature width 4, expected 2"):
+        attach(fake, tmp_path, sha)
+
+    assert fake.copy_calls == []

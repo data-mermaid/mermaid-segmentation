@@ -16,7 +16,7 @@ tables-only: every key is carried.
 
 A staged version may also carry ``features.jsonl`` with a feature index and extractor spec under
 ``features/<family>/`` in the version folder: the feature vectors are copied after the images, in the
-bucket's default storage class, and the feature set is published once the dataset manifest exists.
+``STANDARD`` storage class, and the feature set is published once the dataset manifest exists.
 
 A rerun on a version whose manifest is published with the staged bytes, and which stages a feature
 set, writes only the feature copies and the feature set.
@@ -61,6 +61,7 @@ from segdata_spec._s3 import (
     cache_path,
     dataset_prefix,
     feature_key,
+    feature_set_prefix,
     feature_store_prefix,
     is_not_found,
 )
@@ -553,14 +554,20 @@ def _resumes_features(
     """Return whether the published version only lacks its staged feature set; refuse otherwise.
 
     Raises:
-        PublishRefused: The version is published and stages no features, or was published with
-            other manifest bytes.
+        PublishRefused: The version is published and stages no features, was published with
+            other manifest bytes, or already has the staged feature set.
     """
     dataset, version = manifest.dataset, manifest.version
     if not _manifest_published(client, dataset, version):
         return False
     if features is None or _published_bytes(client, dataset, version) != manifest_bytes:
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
+    set_manifest = feature_set_prefix(dataset, version, features.family) + MANIFEST_NAME
+    if head_with_checksum(client, DATASET_BUCKET, set_manifest) is not None:
+        raise PublishRefused(
+            f"feature set {features.family} of {dataset} {version} is already published in "
+            f"{DATASET_BUCKET}"
+        )
     return True
 
 
