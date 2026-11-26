@@ -5,7 +5,8 @@ Each kept original is probed (HEAD, plus a full read for a multipart or CRC-less
 values its server-side copy will carry, and ``copies.jsonl`` plans that copy for ``segdata
 promote``; nothing is written to S3. Width and height come from the build run. Probed rows are
 checkpointed under the stage dir so a rerun probes only the rest, and a parent pin carries forward
-the parent's rows whose listed source ETag is unchanged. An image the scrape no longer lists but
+the parent's rows whose listed source ETag is unchanged; a parent not staged is synced from the
+dataset bucket into the cache dir. An image the scrape no longer lists but
 the parent holds keeps the parent's row and gets no copy: its object is already published.
 """
 
@@ -39,7 +40,6 @@ from segdata_etl.common.copy_plan import (
     copy_plan,
     needs_full_read,
     read_full,
-    write_copies,
 )
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
 from segdata_etl.common.s3_objects import (
@@ -49,16 +49,16 @@ from segdata_etl.common.s3_objects import (
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import next_version
+from segdata_etl.common.stage import publishable_repo, stage_version
 from segdata_etl.common.versions import bare_fingerprints, count_labels, image_store
-from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.git import probe_git, refuse_unpublishable
-from segdata_spec.layout import dataset_prefix, image_prefix
-from segdata_spec.manifest import ParentRef, SourceInfo
+from segdata_spec.errors import ManifestNotFound
+from segdata_spec.layout import image_prefix
+from segdata_spec.manifest import ParentRef, Pin, SourceInfo
 from segdata_spec.s3 import crc64nvme_b64, get_bytes, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
-from segdata_spec.stage import read_parent_tables, stage_dataset
+from segdata_spec.stage import read_parent_tables
+from segdata_spec.sync import sync_tables
 
 from .annotations import _IMAGE_LIST_NAME, derive_image_id
 from .config import DEFAULT_OUTPUT_S3_PREFIX, get_workers
@@ -691,6 +691,27 @@ def _parent_ref(args: argparse.Namespace) -> ParentRef | None:
     )
 
 
+def _read_parent_tables(
+    args: argparse.Namespace, client: Any, parent: ParentRef
+) -> dict[str, bytes]:
+    """Read the parent's tables from the stage dir, else from the cache dir after a sync.
+
+    A parent staged under ``args.stage_dir`` needs no S3 access. Otherwise its manifest and tables
+    are synced from the dataset bucket into ``args.cache_dir``, which the sync reads first.
+
+    Raises:
+        PinMismatch: The staged or cached parent manifest differs from its pin.
+    """
+    try:
+        return read_parent_tables((args.stage_dir,), DATASET_BUCKET, parent)
+    except ManifestNotFound:
+        pin = Pin(
+            name=parent.dataset, version=parent.version, manifest_sha256=parent.manifest_sha256
+        )
+        sync_tables(client, {pin.name: pin}, args.cache_dir, bucket=DATASET_BUCKET)
+        return read_parent_tables((args.stage_dir, args.cache_dir), DATASET_BUCKET, parent)
+
+
 def checkpoint_path(stage_dir: Path, build_run: str, git_sha: str) -> Path:
     """The probe checkpoint of one build run at one commit, beside the staged bucket tree."""
     return stage_dir / "checkpoints" / f"{DATASET}-{build_run}-{git_sha[:_SHA_LENGTH]}.parquet"
@@ -731,12 +752,10 @@ def run_raw(args: argparse.Namespace) -> int:
     Raises:
         PublishRefused: The git tree is dirty or unpushed, or ``uv.lock`` is missing.
         ValueError: ``MERMAID_CORALNET_BUCKET`` is unset.
-        PinMismatch: The staged parent's manifest differs from its pin.
+        PinMismatch: The staged or synced parent's manifest differs from its pin.
         SourceChanged: An original was replaced between its HEAD and its read.
     """
-    repo_root = find_repo_root(Path(__file__).resolve().parent)
-    git = probe_git(repo_root)
-    refuse_unpublishable(git, repo_root)
+    repo = publishable_repo()
     parent = _parent_ref(args)
     workers = _workers(args.workers)
     source_bucket, prefix = _source_bucket(), get_prefix()
@@ -746,11 +765,7 @@ def run_raw(args: argparse.Namespace) -> int:
         None
         if parent is None
         else bare_fingerprints(
-            pq.read_table(
-                io.BytesIO(
-                    read_parent_tables((args.stage_dir,), DATASET_BUCKET, parent)["images.parquet"]
-                )
-            )
+            pq.read_table(io.BytesIO(_read_parent_tables(args, client, parent)["images.parquet"]))
         )
     )
     result = build_raw(
@@ -759,38 +774,24 @@ def run_raw(args: argparse.Namespace) -> int:
         source_bucket=source_bucket,
         prefix=prefix,
         workers=workers,
-        checkpoint=checkpoint_path(args.stage_dir, args.build_run, git.sha),
+        checkpoint=checkpoint_path(args.stage_dir, args.build_run, repo.git.sha),
         parent_images=parent_images,
     )
-    version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
-    manifest, sha = stage_dataset(
+    stage_version(
         args.stage_dir,
-        parent_dirs=(args.stage_dir,),
-        bucket=DATASET_BUCKET,
+        repo=repo,
+        client=client,
         dataset=DATASET,
-        version=version,
         kind="points",
         tables=result.tables,
         image_store=image_store(DATASET_BUCKET, _IMAGE_FAMILY),
-        etl_package="segdata-etl",
         etl_command=_command_line(args),
         source=SourceInfo(
             type="coralnet-scrape", uri=f"s3://{source_bucket}/{prefix}/", revision=args.build_run
         ),
         parents=() if parent is None else (parent,),
+        extra_parent_dirs=(args.cache_dir,),
         dropped=result.dropped,
-        repo_dir=repo_root,
-        git=git,
+        copies=_copies(result.tables["images.parquet"], source_bucket, result.carried),
     )
-    plan = _copies(result.tables["images.parquet"], source_bucket, result.carried)
-    write_copies(args.stage_dir, dataset_prefix(DATASET, version), plan)
-    logger.info(
-        "staged %s %s: %d images, %d copies; dropped %s",
-        DATASET,
-        manifest.version,
-        manifest.stats.n_images,
-        len(plan),
-        result.dropped,
-    )
-    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0

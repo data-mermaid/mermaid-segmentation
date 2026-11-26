@@ -8,7 +8,8 @@ import pyarrow as pa
 import pytest
 from s3_fake import FakeS3
 
-from segdata_etl.common.legacy import LegacyObject
+from segdata_etl.common.copy_plan import ImageHeader
+from segdata_etl.common.ingested import IngestedObject
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import CURATED_SCHEMA, CuratedSource
 from segdata_spec import DATASET_BUCKET
@@ -87,8 +88,8 @@ def _points(*rows: tuple[str, int, int, int]) -> pa.Table:
     )
 
 
-def _objects(*keys: str) -> dict[str, LegacyObject]:
-    return {key: LegacyObject(key, f"etag-{i}", 10) for i, key in enumerate(keys)}
+def _objects(*keys: str) -> dict[str, IngestedObject]:
+    return {key: IngestedObject(key, f"etag-{i}", 10) for i, key in enumerate(keys)}
 
 
 @pytest.mark.parametrize(
@@ -108,67 +109,52 @@ def test_group_folder_identity_refuses_an_image_not_one_folder_deep(key: str) ->
         external.group_folder_identity(key)
 
 
-def test_legacy_images_skips_keys_identify_returns_none_for() -> None:
+def test_ingested_images_skips_keys_identify_returns_none_for() -> None:
     def identify(key: str) -> tuple[str, str] | None:
         return None if key.startswith("skip/") else (key.upper(), "g")
 
-    images = external.legacy_images(_objects("skip/x", "b", "a"), identify)
+    images = external.ingested_images(_objects("skip/x", "b", "a"), identify)
     assert images == [
-        external.LegacyImage(image_id="A", group="g", key="a", etag="etag-2"),
-        external.LegacyImage(image_id="B", group="g", key="b", etag="etag-1"),
+        external.IngestedImage(image_id="A", group="g", key="a", etag="etag-2"),
+        external.IngestedImage(image_id="B", group="g", key="b", etag="etag-1"),
     ]
 
 
-def test_legacy_images_refuses_a_duplicate_image_id_naming_both_keys() -> None:
+def test_ingested_images_refuses_a_duplicate_image_id_naming_both_keys() -> None:
     with pytest.raises(ValueError, match="images/ATL/1001.jpg.*images/PAC_USA/1001.jpg"):
-        external.legacy_images(
+        external.ingested_images(
             _objects("images/ATL/1001.jpg", "images/PAC_USA/1001.jpg"),
             external.group_folder_identity,
         )
 
 
 def test_image_key_takes_png_extension_from_media_type() -> None:
-    image = external.LegacyImage(image_id="7", group="g", key="x/7.png", etag="e")
+    image = external.IngestedImage(image_id="7", group="g", key="x/7.png", etag="e")
     assert external.image_key(image, "image/png") == "g/7.png"
 
 
-SIZES = {"7.jpg": ("image/jpeg", 4, 3)}
-IMAGE_7 = external.LegacyImage(image_id="7", group="g", key="7.jpg", etag="e")
+SIZES = {"7.jpg": ImageHeader("image/jpeg", 4, 3)}
+IMAGE_7 = external.IngestedImage(image_id="7", group="g", key="7.jpg", etag="e")
 
 
-def test_drop_points_outside_keeps_the_last_pixel_and_drops_each_edge_past_it() -> None:
+def test_drop_points_outside_drops_each_edge_past_the_last_pixel_and_counts_them() -> None:
     points = _points(
         ("7", 2, 3, 1), ("7", 3, 0, 2), ("7", 0, 4, 3), ("7", -1, 0, 4), ("7", 0, -1, 5)
     )
-    kept, dropped = external.drop_points_outside(points, [IMAGE_7], SIZES)
-    assert dropped == 4
+    kept, dropped = external.drop_points_outside(points, [IMAGE_7], SIZES, {"a": 1})
     assert kept.column("label_id").to_pylist() == [1]
-
-
-def test_drop_points_outside_keeps_in_bounds_points_in_order_and_counts_the_rest() -> None:
-    points = _points(("7", 2, 3, 1), ("7", 1, 4, 2), ("7", 0, 0, 3), ("7", 3, 1, 4), ("7", 1, 1, 5))
-    kept, dropped = external.drop_points_outside(points, [IMAGE_7], SIZES)
-    assert dropped == 2
-    assert kept.column("label_id").to_pylist() == [1, 3, 5]
     assert kept.schema == points.schema
+    assert dropped == {"a": 1, "points_out_of_bounds": 4}
+
+
+def test_drop_points_outside_adds_no_key_when_every_point_is_inside() -> None:
+    inside = _points(("7", 0, 0, 1))
+    assert external.drop_points_outside(inside, [IMAGE_7], SIZES, {"a": 1}) == (inside, {"a": 1})
 
 
 def test_drop_points_outside_refuses_a_point_whose_image_has_no_size() -> None:
     with pytest.raises(ValueError, match=r"no sniffed size.*'8'"):
-        external.drop_points_outside(_points(("7", 0, 0, 1), ("8", 0, 0, 1)), [IMAGE_7], SIZES)
-
-
-def test_drop_points_outside_and_record_merges_the_count_only_when_points_are_dropped() -> None:
-    inside = _points(("7", 0, 0, 1))
-    assert external.drop_points_outside_and_record(inside, [IMAGE_7], SIZES, {"a": 1}) == (
-        inside,
-        {"a": 1},
-    )
-    kept, dropped = external.drop_points_outside_and_record(
-        _points(("7", 0, 0, 1), ("7", 3, 0, 2)), [IMAGE_7], SIZES, {"a": 1}
-    )
-    assert kept.num_rows == 1
-    assert dropped == {"a": 1, "points_out_of_bounds": 1}
+        external.drop_points_outside(_points(("7", 0, 0, 1), ("8", 0, 0, 1)), [IMAGE_7], SIZES, {})
 
 
 def test_require_known_labels_refuses_a_label_id_missing_from_labels() -> None:

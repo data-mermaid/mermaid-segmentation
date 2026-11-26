@@ -832,8 +832,8 @@ def staging(source: RecordingS3, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(raw, "make_s3_client", lambda **_kw: source)
     monkeypatch.setitem(sys.modules, "ibis", None)
     monkeypatch.setitem(sys.modules, "duckdb", None)
-    monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
-    monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: repo)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: GIT)
     _put_build(source, "run1")
     return source
 
@@ -946,6 +946,38 @@ def test_a_staged_parent_pin_carries_unchanged_images_forward(
     assert staging.image_gets() == [_key(2, "20")]
 
 
+def test_a_published_only_parent_pin_is_synced_into_the_cache_dir(
+    staging: RecordingS3, tmp_path: Path
+) -> None:
+    first = tmp_path / "first-stage"
+    _stage_raw(first)
+    parent = _only_version(first)
+    sha = manifest_sha256((parent / "manifest.json").read_bytes())
+    promote.promote(
+        staging, stage_dir=first, dataset="coralnet-raw", version=parent.name, workers=1
+    )
+    stage, cache = tmp_path / "stage", tmp_path / "cache"
+
+    _stage_raw(
+        stage,
+        "--cache-dir",
+        str(cache),
+        "--parent-version",
+        parent.name,
+        "--parent-manifest-sha256",
+        sha,
+    )
+
+    child = _only_version(stage)
+    manifest = Manifest.model_validate_json((child / "manifest.json").read_bytes())
+    ref = ParentRef(dataset="coralnet-raw", version=parent.name, manifest_sha256=sha)
+    assert manifest.parents == (ref,)
+    assert manifest.diff_from_parent is not None
+    cached = cache / DATASET_BUCKET / "datasets" / "coralnet-raw" / parent.name
+    assert (cached / "manifest.json").read_bytes() == (parent / "manifest.json").read_bytes()
+    assert (cached / "images.parquet").is_file()
+
+
 def test_a_staged_parent_pin_carries_an_image_whose_scrape_original_is_gone(
     staging: RecordingS3, tmp_path: Path
 ) -> None:
@@ -994,8 +1026,8 @@ def test_an_unpublishable_tree_is_refused_before_any_s3_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git: GitState, message: str
 ) -> None:
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
-    monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
-    monkeypatch.setattr(raw, "probe_git", lambda _dir: git)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: tmp_path)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: git)
 
     def no_s3(**_kw: object) -> None:
         raise AssertionError("the guard must fire before an S3 client is made")
@@ -1011,8 +1043,8 @@ def test_a_tree_without_uv_lock_is_refused_before_any_s3_call_or_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
-    monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
-    monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: tmp_path)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: GIT)
 
     def no_s3(**_kw: object) -> None:
         raise AssertionError("the guard must fire before an S3 client is made")
@@ -1059,8 +1091,8 @@ def test_a_missing_bucket_env_var_refuses_before_any_s3_client_is_made(
 ) -> None:
     (tmp_path / "uv.lock").write_text("lock")
     monkeypatch.delenv("MERMAID_CORALNET_BUCKET", raising=False)
-    monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
-    monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: tmp_path)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: GIT)
 
     def no_s3(**_kw: object) -> None:
         raise AssertionError("an unset bucket must be refused before an S3 client is made")

@@ -51,7 +51,7 @@ def test_c2_second_run_without_overwrite_fails_and_keeps_parquet(tmp_path, fake_
     monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: fake_s3)
     tree = _tiny_tree(tmp_path / "raw")
     key = (
-        cli.DEFAULT_BUCKET,
+        "dev-datamermaid-sm-sources",
         "external_validation_datasets/catlin_seaview/catlin_seaview_annotations.parquet",
     )
 

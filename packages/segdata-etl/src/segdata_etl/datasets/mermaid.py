@@ -27,10 +27,10 @@ import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.copy_plan import (
+    ImageHeader,
     ImageOutcome,
     ObjectFacts,
     copy_plan,
-    write_copies,
 )
 from segdata_etl.common.copy_plan import probe_image as probe_source_image
 from segdata_etl.common.featurevector import (
@@ -39,11 +39,10 @@ from segdata_etl.common.featurevector import (
     stage_features,
 )
 from segdata_etl.common.s3_objects import EXTENSIONS
-from segdata_etl.common.stage import next_version
+from segdata_etl.common.stage import publishable_repo, stage_version
 from segdata_etl.common.versions import bare_fingerprints
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.features import feature_store_name
-from segdata_spec.git import probe_git, refuse_unpublishable
 from segdata_spec.layout import (
     cache_path,
     dataset_prefix,
@@ -57,7 +56,6 @@ from segdata_spec.schema import (
     LABELS_SCHEMA,
     POINTS_SCHEMA,
 )
-from segdata_spec.stage import stage_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +70,6 @@ FEATURE_TEMPLATE = f"s3://{SOURCE_BUCKET}/{SOURCE_IMAGE_PREFIX}{{image_id}}_feat
 DEFAULT_FEATURE_FAMILY = "efficientnet-v1"
 GROUP = "mermaid"
 ANNOTATOR = "default"
-
-# The repo root, which holds ``uv.lock`` and the git checkout that built the version.
-REPO_ROOT = Path(__file__).resolve().parents[5]
 
 
 class AnnotationsChanged(Exception):
@@ -159,19 +154,18 @@ def _image_row(
     image_id: str,
     source_key: str,
     facts: ObjectFacts,
-    header: tuple[str, int, int],
+    header: ImageHeader,
     region: tuple[Any, Any],
 ) -> dict[str, Any]:
-    media_type, width, height = header
     return {
         "image_id": image_id,
-        "key": f"{image_id}.{EXTENSIONS[media_type]}",
+        "key": f"{image_id}.{EXTENSIONS[header.media_type]}",
         "etag": facts.etag,
         "size": facts.size,
         "crc64nvme": facts.crc64nvme,
-        "media_type": media_type,
-        "width": width,
-        "height": height,
+        "media_type": header.media_type,
+        "width": header.width,
+        "height": header.height,
         "group": GROUP,
         "mask_key": None,
         "mask_etag": None,
@@ -449,8 +443,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     parents = _parent_refs(args)
     extractor = read_extractor_spec(args.extractor_spec)
     feature_store_prefix(feature_store_name(IMAGE_STORE, DATASET_BUCKET), args.feature_family)
-    git = probe_git(REPO_ROOT)
-    refuse_unpublishable(git, REPO_ROOT)
+    repo = publishable_repo()
     source = read_annotations(client, args.annotations_uri)
     annotations, n_after_cutoff = apply_cutoff(source.table, args.annotation_date_cutoff)
     parent_rows = load_parent_rows(args.stage_dir, args.parent_version)
@@ -477,13 +470,11 @@ def run(args: argparse.Namespace, client: Any) -> int:
         workers=args.workers,
         allow_missing=args.allow_missing_features,
     )
-    version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
-    manifest, sha = stage_dataset(
+    staged = stage_version(
         args.stage_dir,
-        parent_dirs=(args.stage_dir,),
-        bucket=DATASET_BUCKET,
+        repo=repo,
+        client=client,
         dataset=DATASET,
-        version=version,
         kind="points",
         tables={
             "images.parquet": images,
@@ -492,7 +483,6 @@ def run(args: argparse.Namespace, client: Any) -> int:
             "stats/label_counts.parquet": label_counts_table(labelled),
         },
         image_store=IMAGE_STORE,
-        etl_package="segdata-etl",
         etl_command=_command_line(args),
         source=SourceInfo(
             type="mermaid-confirmed-annotations",
@@ -509,37 +499,27 @@ def run(args: argparse.Namespace, client: Any) -> int:
             n_mapped=len(pairs),
         ),
         dropped=dropped,
-        repo_dir=REPO_ROOT,
-        git=git,
+        copies=copy_plan(
+            images.to_pylist(),
+            src_bucket=SOURCE_BUCKET,
+            src_key=_source_key,
+            dst_prefix=IMAGE_PREFIX,
+        ),
     )
-    plan = copy_plan(
-        images.to_pylist(), src_bucket=SOURCE_BUCKET, src_key=_source_key, dst_prefix=IMAGE_PREFIX
-    )
-    write_copies(args.stage_dir, dataset_prefix(DATASET, version), plan)
     stage_features(
         args.stage_dir,
         gathered,
         dataset_dirs=(args.stage_dir,),
-        dataset=Pin(name=DATASET, version=version, manifest_sha256=sha),
+        dataset=Pin(name=DATASET, version=staged.version, manifest_sha256=staged.sha256),
         family=args.feature_family,
         extractor=extractor,
         allow_missing=args.allow_missing_features,
         command=_command_line(args),
-        repo_dir=REPO_ROOT,
-        git=git,
+        repo_dir=repo.root,
+        git=repo.git,
     )
     jpg_ids = sorted(o.image_id for o in outcomes if o.found_as_jpg and o.row is not None)
     if jpg_ids:
         logger.info("images found only as .jpg keys: %s", jpg_ids)
-    logger.info(
-        "staged mermaid %s: %d images, %d points, %d copies, %d feature copies, "
-        "%d found only as .jpg, dropped %s",
-        version,
-        manifest.stats.n_images,
-        manifest.stats.n_points,
-        len(plan),
-        len(gathered.copies),
-        len(jpg_ids),
-        dropped,
-    )
+    logger.info("%d feature copies, %d found only as .jpg", len(gathered.copies), len(jpg_ids))
     return 0

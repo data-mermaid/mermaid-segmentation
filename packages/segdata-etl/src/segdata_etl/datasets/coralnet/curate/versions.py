@@ -2,8 +2,7 @@
 
 Curates raw's points with the packaged blacklist and overrides and maps labels by the MERMAID
 LabelMapping API, checked against the pinned taxonomy. Stages tables only, on raw's image store,
-for ``segdata promote`` to publish. The published ``coralnet`` v1 was built with the frozen
-cleaned_up_rerun mapping at git e6abfad.
+for ``segdata promote`` to publish.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from typing import Any
 import pyarrow as pa
 
 from segdata_etl.common.cli_flags import pin_command_parts, pin_values
-from segdata_etl.common.stage import next_version
+from segdata_etl.common.stage import publishable_repo, stage_version
 from segdata_etl.datasets.coralnet.curate.build import curate
 from segdata_etl.label_maps.coralnet_api import (
     CoralNetLabelMappings,
@@ -28,12 +27,9 @@ from segdata_etl.label_maps.coralnet_api import (
     fetch_coralnet_label_mappings,
 )
 from segdata_etl.splits.inputs import sync_tables
-from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.git import GitState, probe_git, refuse_unpublishable
 from segdata_spec.manifest import ImageStore, LabelMapping, Manifest, ParentRef, Pin, SourceInfo
 from segdata_spec.read import DatasetVersion, open_taxonomy
-from segdata_spec.stage import stage_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -147,34 +143,6 @@ def _command_line(args: argparse.Namespace) -> str:
     return shlex.join(parts)
 
 
-def _stage(
-    args: argparse.Namespace,
-    built: CuratedVersion,
-    version: str,
-    repo_root: Path,
-    git: GitState,
-) -> tuple[Manifest, str]:
-    return stage_dataset(
-        args.stage_dir,
-        parent_dirs=(args.stage_dir, args.cache_dir),
-        bucket=DATASET_BUCKET,
-        dataset=DATASET,
-        version=version,
-        kind="points",
-        tables=built.tables,
-        image_store=built.image_store,
-        etl_package="segdata-etl",
-        etl_command=_command_line(args),
-        source=built.source,
-        parents=built.parents,
-        label_mapping=built.label_mapping,
-        dropped=built.dropped,
-        taxonomy=_pin(args, "taxonomy", TAXONOMY),
-        repo_dir=repo_root,
-        git=git,
-    )
-
-
 def run(args: argparse.Namespace, *, source_client: Any) -> int:
     """Stage the curated version under ``args.stage_dir``; print its version and sha256.
 
@@ -182,8 +150,7 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
     reads the cache first, so ``--cache-dir`` set to the stage dir reads a raw staged there. The
     taxonomy pin must still be published in the dataset bucket, even when the cache holds it. The
     version reuses raw's image store and stages no copy or upload plan. Labels map by the live
-    MERMAID LabelMapping API, whose digest and fetch time the manifest records. The published v1
-    was built with the frozen cleaned_up_rerun mapping at git e6abfad.
+    MERMAID LabelMapping API, whose digest and fetch time the manifest records.
 
     Raises:
         PublishRefused: The git tree is dirty or unpushed, or the taxonomy pin is not published
@@ -193,15 +160,23 @@ def run(args: argparse.Namespace, *, source_client: Any) -> int:
         requests.RequestException: The LabelMapping API request fails after its retries; the
             error propagates and nothing is staged.
     """
-    repo_root = find_repo_root(Path(__file__).resolve().parent)
-    git = probe_git(repo_root)
-    refuse_unpublishable(git, repo_root)
+    repo = publishable_repo()
     with resources.as_file(PACKAGED_CONFIG) as config_dir:
         built = _curate(args, source_client, DATASET_BUCKET, config_dir)
-    version = next_version(
-        args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=source_client
+    stage_version(
+        args.stage_dir,
+        repo=repo,
+        client=source_client,
+        dataset=DATASET,
+        kind="points",
+        tables=built.tables,
+        image_store=built.image_store,
+        etl_command=_command_line(args),
+        source=built.source,
+        parents=built.parents,
+        extra_parent_dirs=(args.cache_dir,),
+        label_mapping=built.label_mapping,
+        dropped=built.dropped,
+        taxonomy=_pin(args, "taxonomy", TAXONOMY),
     )
-    manifest, sha = _stage(args, built, version, repo_root, git)
-    logger.info("staged %s %s under %s", DATASET, manifest.version, args.stage_dir)
-    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0

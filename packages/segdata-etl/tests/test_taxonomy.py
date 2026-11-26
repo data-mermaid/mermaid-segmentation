@@ -186,9 +186,8 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     (root / "uv.lock").write_text("lock")
-    monkeypatch.setattr(taxonomy, "find_repo_root", lambda _start: root)
-    monkeypatch.setattr(taxonomy, "probe_git", lambda _dir: CLEAN_GIT)
-    monkeypatch.setattr("segdata_spec.stage.probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: root)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: CLEAN_GIT)
     return root
 
 
@@ -237,6 +236,23 @@ def test_stage_writes_a_readable_version_under_the_stage_dir_and_nothing_to_s3(
     assert tax.manifest.etl.command == f"segdata taxonomy --stage-dir {stage} --base-url {BASE}"
 
 
+def test_taxonomy_subcommand_stages_the_taxonomy_through_cli_main(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: FakeS3())
+    monkeypatch.setattr(taxonomy.requests, "Session", lambda: FakeSession(_routes()))
+    stage = tmp_path / "stage"
+
+    assert cli.main(["taxonomy", "--stage-dir", str(stage), "--base-url", BASE]) == 0
+
+    out = capsys.readouterr().out
+    assert f"version: {_staged_dir(stage).name}\n" in out
+    assert (_staged_dir(stage) / "manifest.json").is_file()
+
+
 def test_stage_names_a_version_already_in_s3_with_a_counter(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -258,7 +274,7 @@ def test_stage_dir_is_required() -> None:
 def test_a_dirty_or_unpushed_tree_is_refused_before_any_fetch(
     repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: GitState
 ) -> None:
-    monkeypatch.setattr(taxonomy, "probe_git", lambda _dir: state)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: state)
     session = FakeSession({})
     with pytest.raises(PublishRefused):
         taxonomy.run_taxonomy(

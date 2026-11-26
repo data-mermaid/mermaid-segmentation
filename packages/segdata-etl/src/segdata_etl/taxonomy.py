@@ -10,24 +10,19 @@ import argparse
 import logging
 import shlex
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import requests
 
-from segdata_etl.common.stage import next_free_version
-from segdata_spec import DATASET_BUCKET
-from segdata_spec.git import probe_git, refuse_unpublishable
-from segdata_spec.layout import taxonomy_prefix
+from segdata_etl.common.stage import publishable_repo, stage_taxonomy_version
 from segdata_spec.manifest import SourceInfo
 from segdata_spec.schema import (
     BENTHIC_ATTRIBUTES_SCHEMA,
     GROWTH_FORMS_SCHEMA,
     conform,
 )
-from segdata_spec.stage import stage_taxonomy
 
 logger = logging.getLogger(__name__)
 
@@ -109,18 +104,6 @@ def _check_tables(attributes: pa.Table, growth_forms: pa.Table) -> None:
         raise ValueError(f"benthic attributes name unknown parents: {sorted(unknown)}")
 
 
-def find_repo_root(start: Path) -> Path:
-    """Return the nearest directory at or above ``start`` holding both ``.git`` and ``uv.lock``.
-
-    Raises:
-        FileNotFoundError: No such directory exists.
-    """
-    for directory in (start, *start.parents):
-        if (directory / ".git").exists() and (directory / "uv.lock").is_file():
-            return directory
-    raise FileNotFoundError(f"no git root holding uv.lock at or above {start}")
-
-
 def _command_line(args: argparse.Namespace) -> str:
     parts = ["segdata", "taxonomy", "--stage-dir", str(args.stage_dir)]
     if args.base_url != DEFAULT_BASE_URL:
@@ -148,31 +131,17 @@ def run_taxonomy(
         PublishRefused: The git tree is dirty or unpushed.
         ValueError: The API data fails its checks.
     """
-    repo_root = find_repo_root(Path(__file__).resolve().parent)
-    git = probe_git(repo_root)
-    refuse_unpublishable(git, repo_root)
+    repo = publishable_repo()
     tables, source = _fetch_source(session or requests.Session(), args.base_url)
-    version = next_free_version(
+    stage_taxonomy_version(
         args.stage_dir,
-        DATASET_BUCKET,
-        partial(taxonomy_prefix, NAME),
-        git_sha=git.sha,
+        repo=repo,
         client=source_client,
-    )
-    manifest, sha = stage_taxonomy(
-        args.stage_dir,
-        bucket=DATASET_BUCKET,
         name=NAME,
-        version=version,
         tables=tables,
-        etl_package="segdata-etl",
         etl_command=_command_line(args),
         source=source,
-        repo_dir=repo_root,
-        git=git,
     )
-    logger.info("staged taxonomy %s", manifest.version)
-    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0
 
 

@@ -261,8 +261,8 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         config / "annotation_overrides.parquet"
     )
     monkeypatch.setattr(versions, "PACKAGED_CONFIG", config)
-    monkeypatch.setattr(versions, "find_repo_root", lambda _start: repo)
-    monkeypatch.setattr(versions, "probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: repo)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: CLEAN_GIT)
     monkeypatch.setattr(coralnet_api, "_retrying_session", lambda: FakeApiSession(API_ROWS))
 
     s3 = FakeS3()
@@ -404,7 +404,7 @@ def test_curated_refuses_a_taxonomy_cached_but_not_published(world: World) -> No
 def test_a_dirty_or_unpushed_tree_is_refused_before_any_s3_call(
     world: World, monkeypatch: pytest.MonkeyPatch, git: GitState, message: str
 ) -> None:
-    monkeypatch.setattr(versions, "probe_git", lambda _dir: git)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: git)
     monkeypatch.setattr(cli, "make_s3_client", NoS3)
 
     with pytest.raises(PublishRefused, match=message):

@@ -1,6 +1,6 @@
-"""Fixtures shared by the external builder tests: legacy files, a fixture taxonomy, run helpers.
+"""Fixtures shared by the external builder tests: ingested files, a fixture taxonomy, run helpers.
 
-Every builder reads its legacy prefix and the taxonomy from one ``FakeS3`` and stages the version
+Every builder reads its ingest prefix and the taxonomy from one ``FakeS3`` and stages the version
 under a local ``--stage-dir``; the plan files are read back as JSON lines.
 """
 
@@ -23,6 +23,8 @@ from PIL import Image
 from s3_fake import FakeS3, crc64nvme
 
 from segdata_etl import cli
+from segdata_etl.common.manifest import IngestSource, build_manifest
+from segdata_etl.common.release import INGEST_BUCKET, S3Target, ingest_prefix
 from segdata_etl.label_maps.curated import curated_source
 from segdata_spec import DATASET_BUCKET
 from segdata_spec._marker import SyncMarker, dump_marker
@@ -32,9 +34,26 @@ from segdata_spec.manifest import Manifest, Pin, SourceInfo
 from segdata_spec.read import DatasetVersion, open_version
 from segdata_spec.stage import stage_taxonomy
 
-LEGACY_BUCKET = "dev-datamermaid-sm-sources"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
 TAXONOMY_VERSION = "20261101-1234567"
+
+
+def ingest_manifest_bytes(dataset: str, dropped: Mapping[str, int] | None = None) -> bytes:
+    """Return the ``manifest.json`` ``segdata ingest`` writes for ``dataset``, via ``build_manifest``."""
+    manifest = build_manifest(
+        dataset,
+        IngestSource(
+            citation="Fixture et al. (2020)",
+            raw_data_url="https://example.test",
+            license="CC BY 4.0",
+        ),
+        S3Target(INGEST_BUCKET, ingest_prefix(dataset), dry_run=False),
+        image_key_template="images/{image_id}",
+        parquet_columns={},
+        dropped=dict(dropped or {}),
+        images_uploaded=0,
+    )
+    return manifest.model_dump_json().encode()
 
 
 def jpeg(width: int, height: int) -> bytes:
@@ -87,13 +106,13 @@ def publish_fixture_taxonomy(client: Any, repo: Path) -> str:
     return sha
 
 
-def make_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, builder: ModuleType) -> Path:
-    """Create a repo root holding ``uv.lock`` for ``builder``, with a clean pushed git state."""
+def make_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a repo root holding ``uv.lock``, with a clean pushed git state."""
     root = tmp_path / "repo"
     root.mkdir()
     (root / "uv.lock").write_text("lock")
-    monkeypatch.setattr(builder, "find_repo_root", lambda _start: root)
-    monkeypatch.setattr(builder, "probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: root)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: CLEAN_GIT)
     return root
 
 
@@ -157,14 +176,14 @@ def plan_lines(stage: Path, pin: Pin, name: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
-def legacy_etag(data: bytes) -> str:
+def ingested_etag(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()  # noqa: S324
 
 
 def probed_columns(data: bytes, prefix: str = "") -> dict[str, Any]:
     """Return the unquoted etag, size and crc64nvme a single-part object of ``data`` carries."""
     return {
-        f"{prefix}etag": legacy_etag(data),
+        f"{prefix}etag": ingested_etag(data),
         f"{prefix}size": len(data),
         f"{prefix}crc64nvme": crc64nvme(data),
     }
@@ -175,18 +194,18 @@ def no_mask() -> dict[str, Any]:
 
 
 def assert_copies_match_sources(staged: Staged, sources: Mapping[str, tuple[str, bytes]]) -> None:
-    """Assert ``copies.jsonl`` plans one copy per image row, from its legacy object.
+    """Assert ``copies.jsonl`` plans one copy per image row, from its ingested object.
 
-    ``sources`` maps each image id to the full legacy key and the bytes it holds.
+    ``sources`` maps each image id to the full ingested key and the bytes it holds.
     """
     prefix = f"images/{staged.pin.name}/"
     rows = {row["image_id"]: row for row in staged.version.images.to_pylist()}
     assert set(rows) == set(sources)
     expected = [
         {
-            "src_bucket": LEGACY_BUCKET,
+            "src_bucket": INGEST_BUCKET,
             "src_key": sources[image_id][0],
-            "src_etag": legacy_etag(sources[image_id][1]),
+            "src_etag": ingested_etag(sources[image_id][1]),
             "dst_bucket": DATASET_BUCKET,
             "dst_key": prefix + rows[image_id]["key"],
             **probed_columns(sources[image_id][1]),

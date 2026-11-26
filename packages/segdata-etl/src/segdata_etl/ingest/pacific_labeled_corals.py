@@ -23,7 +23,7 @@ import pandas as pd
 
 from ..common.images import find_undecodable
 from ..common.labels import build_classes_and_colors
-from ..common.manifest import Source, build_manifest
+from ..common.manifest import IngestSource, build_manifest
 from ..common.release import S3Target, preflight, put_raw_release, upload_files
 
 logger = logging.getLogger(__name__)
@@ -65,8 +65,7 @@ PARQUET_COLUMNS = {
     },
 }
 
-SOURCE = Source(
-    name=DATASET_NAME,
+SOURCE = IngestSource(
     citation=CITATION,
     raw_data_url=DRYAD_URL,
     license="CC0 1.0 (Dryad)",
@@ -264,16 +263,17 @@ def run(args: argparse.Namespace, client: Any) -> int:
         skip_existing=args.skip_existing_s3,
     )
     manifest = build_manifest(
+        DATASET_NAME,
         SOURCE,
         target,
         image_key_template=f"{target.prefix}/images/{{site}}/{{subset}}/{{image_id}}{{image_ext}}",
         parquet_columns=PARQUET_COLUMNS,
-        ingestion={
-            "excluded_sites": ["moorea"],
-            "images_uploaded": uploaded,
-            "annotations_dropped_unknown_archived": dropped[_DROP_UNKNOWN_ARCHIVED],
-            "annotations_dropped_unmapped_imageid": dropped[_DROP_UNMAPPED_IMAGEID],
+        dropped={
+            "annotations_unknown_archived": dropped[_DROP_UNKNOWN_ARCHIVED],
+            "annotations_unmapped_imageid": dropped[_DROP_UNMAPPED_IMAGEID],
         },
+        images_uploaded=uploaded,
+        details={"excluded_sites": ["moorea"]},
     )
     put_raw_release(
         client,

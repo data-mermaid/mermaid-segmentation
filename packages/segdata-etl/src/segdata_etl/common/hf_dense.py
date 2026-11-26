@@ -24,29 +24,25 @@ import pyarrow.parquet as pq
 from huggingface_hub import HfApi, hf_hub_download
 from PIL import Image
 
-from segdata_etl.common.copy_plan import StagedFile, stage_bytes, write_uploads
+from segdata_etl.common.copy_plan import ImageHeader, StagedFile, stage_bytes
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
     image_size,
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import next_version
+from segdata_etl.common.stage import publishable_repo, stage_version
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.git import probe_git, refuse_unpublishable
 from segdata_spec.manifest import ImageStore, LabelMapping, SourceInfo
 from segdata_spec.s3 import crc64nvme_b64
 from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA
-from segdata_spec.stage import stage_dataset
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 16
 MASK_SUFFIX = "_label.png"
 
-# The repo root, which holds ``uv.lock`` and the git checkout that built the version.
-REPO_ROOT = Path(__file__).resolve().parents[5]
 # A directory holding ``<dataset>.csv`` in place of the packaged curated maps.
 CURATED_ROOT: Path | None = None
 
@@ -126,8 +122,8 @@ def _shards_or_raise(files: Sequence[str], source: DenseSource) -> list[tuple[st
     return shards
 
 
-def read_header(image: bytes, mask: bytes) -> tuple[str, int, int] | None:
-    """Return ``(media_type, width, height)`` of the image, or None if it or the mask is unreadable.
+def read_header(image: bytes, mask: bytes) -> ImageHeader | None:
+    """Return the header of the image, or None if it or the mask is unreadable.
 
     The image must be JPEG or PNG with a readable size and the mask must be PNG.
     """
@@ -135,7 +131,7 @@ def read_header(image: bytes, mask: bytes) -> tuple[str, int, int] | None:
     if media_type is None or sniff_media_type(mask) != _PNG:
         return None
     dims = image_size(image)
-    return None if dims is None else (media_type, dims[0], dims[1])
+    return None if dims is None else ImageHeader(media_type, dims[0], dims[1])
 
 
 class MaskInvalid(ValueError):
@@ -179,21 +175,20 @@ def image_row(
     info: RowInfo,
     image: bytes,
     mask: bytes,
-    header: tuple[str, int, int],
+    header: ImageHeader,
 ) -> dict[str, Any]:
     """Build the ``images.parquet`` row; keys are relative to the dataset's image prefix."""
-    media_type, width, height = header
     etag, size, crc = _object_fields(image)
     mask_etag, mask_size, mask_crc = _object_fields(mask)
     return {
         "image_id": image_id,
-        "key": f"{info.group}/{info.stem}.{EXTENSIONS[media_type]}",
+        "key": f"{info.group}/{info.stem}.{EXTENSIONS[header.media_type]}",
         "etag": etag,
         "size": size,
         "crc64nvme": crc,
-        "media_type": media_type,
-        "width": width,
-        "height": height,
+        "media_type": header.media_type,
+        "width": header.width,
+        "height": header.height,
         "group": info.group,
         "mask_key": f"{info.group}/{info.stem}{MASK_SUFFIX}",
         "mask_etag": mask_etag,
@@ -304,7 +299,7 @@ def _stage_shard(
                 out.unreadable += 1
                 continue
             try:
-                label_counts = label_pixel_counts(mask, header[1:], vocab_ids)
+                label_counts = label_pixel_counts(mask, (header.width, header.height), vocab_ids)
             except MaskInvalid as exc:
                 logger.warning("dropping image %s: invalid mask: %s", image_id, exc)
                 out.mask_invalid += 1
@@ -316,7 +311,9 @@ def _stage_shard(
             out.counts.extend((image_id, label, n) for label, n in sorted(label_counts.items()))
             prefix = source.image_prefix
             out.files.append(
-                StagedFile(prefix + record["key"], record["size"], record["crc64nvme"], header[0])
+                StagedFile(
+                    prefix + record["key"], record["size"], record["crc64nvme"], header.media_type
+                )
             )
             out.files.append(
                 StagedFile(
@@ -336,8 +333,7 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         ObjectConflict: A staged file exists with other bytes.
         PublishRefused: The git tree is dirty or unpushed.
     """
-    git = probe_git(REPO_ROOT)
-    refuse_unpublishable(git, REPO_ROOT)
+    repo = publishable_repo()
     shards = _shards_or_raise(_list_repo_files(source.repo, args.revision), source)
     vocab_path = hf_hub_download(
         source.repo, source.vocab_file, repo_type="dataset", revision=args.revision
@@ -350,15 +346,11 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         local = hf_hub_download(source.repo, name, repo_type="dataset", revision=args.revision)
         _stage_shard(source, args.stage_dir, local, split, ids, vocab.keys(), out)
     dropped = {"image_unreadable_header": out.unreadable, "mask_invalid": out.mask_invalid}
-    version = next_version(
-        args.stage_dir, DATASET_BUCKET, source.dataset, git_sha=git.sha, client=client
-    )
-    manifest, _ = stage_dataset(
+    stage_version(
         args.stage_dir,
-        parent_dirs=(args.stage_dir,),
-        bucket=DATASET_BUCKET,
+        repo=repo,
+        client=client,
         dataset=source.dataset,
-        version=version,
         kind="dense",
         tables={
             "images.parquet": pa.Table.from_pylist(out.rows, schema=IMAGES_SCHEMA),
@@ -366,7 +358,6 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
             "stats/label_counts.parquet": label_counts_table(out.counts),
         },
         image_store=ImageStore(bucket=DATASET_BUCKET, prefix=source.image_prefix, owner="segdata"),
-        etl_package="segdata-etl",
         etl_command=_command_line(source, args),
         source=SourceInfo(
             type="huggingface",
@@ -382,17 +373,7 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
             n_mapped=n_mapped,
         ),
         dropped=dropped,
-        repo_dir=REPO_ROOT,
-        git=git,
-    )
-    write_uploads(args.stage_dir, source.dataset, version, out.files)
-    logger.info(
-        "staged %s %s: %d images, %d files, dropped %s",
-        source.dataset,
-        version,
-        manifest.stats.n_images,
-        len(out.files),
-        dropped,
+        uploads=out.files,
     )
     return 0
 

@@ -20,7 +20,7 @@ import pandas as pd
 from PIL import Image
 
 from ..common.labels import build_classes_and_colors
-from ..common.manifest import Source, build_manifest
+from ..common.manifest import IngestSource, build_manifest
 from ..common.release import S3Target, preflight, put_raw_release, upload_files
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,7 @@ REQUIRED_FILES: tuple[str, ...] = (
     "dictionary_labelsDW.txt",
 )
 
-SOURCE = Source(
-    name=DATASET_NAME,
+SOURCE = IngestSource(
     citation=CITATION,
     raw_data_url=DRYAD_DATASET_URL,
     license="CC0 1.0 (Dryad)",
@@ -270,16 +269,18 @@ def run(args: argparse.Namespace, client: Any) -> int:
         skip_existing=args.skip_existing_s3 and not args.overwrite,
     )
     manifest = build_manifest(
+        DATASET_NAME,
         SOURCE,
         target,
         image_key_template=f"{target.prefix}/images/{{site}}/{{image_id}}.png",
         parquet_columns=PARQUET_COLUMNS,
-        ingestion={
+        dropped={},
+        images_uploaded=images_uploaded,
+        details={
             "excluded_sites": EXCLUDED_SITES,
             "tile_size": TILE,
             "label_key_template": f"{target.prefix}/labels/{{site}}/{{image_id}}.png",
             "num_tiles": num_tiles,
-            "images_uploaded": images_uploaded,
             "labels_uploaded": labels_uploaded,
         },
     )

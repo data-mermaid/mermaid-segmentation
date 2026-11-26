@@ -80,7 +80,7 @@ def install_hub(
     root = tmp_path / "repo"
     root.mkdir()
     (root / "uv.lock").write_bytes(b"lock")
-    monkeypatch.setattr(hf_dense, "REPO_ROOT", root)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: root)
     git = GitState(sha="abcdef1234567", dirty=False, pushed=True)
-    monkeypatch.setattr(hf_dense, "probe_git", lambda _: git)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _: git)
     return hub
