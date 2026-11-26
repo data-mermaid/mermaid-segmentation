@@ -250,3 +250,44 @@ def test_build_refuses_a_mask_replaced_between_listing_and_read(
         benthos_yuval.run(build_args(benthos_yuval, stage, taxonomy_sha), s3)
 
     assert not stage.exists()
+
+
+def test_build_drops_a_tile_with_an_unreadable_header_with_its_mask_and_counts(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    s3 = FakeS3()
+    _ingested(s3)
+    s3.put(INGEST_BUCKET, PREFIX + "images/RS24/0_4.png", b"not an image")
+
+    staged = stage_version(benthos_yuval, s3, repo, tmp_path, capsys)
+
+    assert staged.version.manifest.stats.dropped == {"image_unreadable_header": 1}
+    assert sorted(r["image_id"] for r in staged.version.images.to_pylist()) == [
+        "CR_DoubleWreck_0_0",
+        "RS24_0_0",
+    ]
+    assert not (
+        staged.stage / DATASET_BUCKET / "images/benthos_yuval/RS24/RS24_0_4_mask.png"
+    ).exists()
+    assert [r["dst_key"] for r in plan_lines(staged.stage, staged.pin, "uploads.jsonl")] == [
+        "images/benthos_yuval/CR_DoubleWreck/CR_DoubleWreck_0_0_mask.png",
+        "images/benthos_yuval/RS24/RS24_0_0_mask.png",
+    ]
+    assert staged.version.label_counts.to_pylist() == [
+        {"image_id": "CR_DoubleWreck_0_0", "label_id": 3, "n": 9},
+        {"image_id": "RS24_0_0", "label_id": 1, "n": 7},
+        {"image_id": "RS24_0_0", "label_id": 3, "n": 4},
+    ]
+
+
+def test_build_refuses_a_mask_with_no_tile_before_staging(repo: Path, tmp_path: Path) -> None:
+    s3 = FakeS3()
+    _ingested(s3)
+    s3.put(INGEST_BUCKET, PREFIX + "labels/RS24/9_9.png", mask_png(np.ones((4, 4))))
+    stage = tmp_path / "stage"
+    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
+
+    with pytest.raises(ValueError, match=r"benthos masks.*unexpected \['labels/RS24/9_9.png'\]"):
+        benthos_yuval.run(build_args(benthos_yuval, stage, taxonomy_sha), s3)
+
+    assert not stage.exists()

@@ -176,6 +176,19 @@ def test_build_refuses_inconsistent_annotations_before_staging(
     assert not stage.exists()
 
 
+def test_build_refuses_an_unlabeled_point_before_staging(repo: Path, tmp_path: Path) -> None:
+    s3 = FakeS3()
+    unlabeled = ("heron_reef", "reference", 11, "ref_1", ".JPG", 3, 3, "unlabeled")
+    _ingested(s3, [*ANNOTATIONS, (*unlabeled, NA, NA, NA, NA, NA, NA)])
+    stage = tmp_path / "stage"
+    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
+
+    with pytest.raises(ValueError, match=r"not in labels.parquet: \[0\]"):
+        pacific_labeled_corals.run(build_args(pacific_labeled_corals, stage, taxonomy_sha), s3)
+
+    assert not stage.exists()
+
+
 def test_build_drops_every_annotator_row_of_a_point_past_an_edge_and_counts_the_rows(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

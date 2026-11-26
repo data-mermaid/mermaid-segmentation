@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 from s3_fake import FakeS3
 
+from segdata_etl.common.s3_objects import SourceChanged
 from segdata_etl.datasets import catlin_seaview
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
@@ -140,7 +141,12 @@ def test_build_writes_points_labels_and_counts(staged: Staged) -> None:
         (9, "Loose Substrate: Sand", "ba-sand"),
         (12, "Water", None),
     ]
-    assert version.label_counts.num_rows == 4
+    assert version.label_counts.to_pylist() == [
+        {"image_id": "1001", "label_id": 5, "n": 1},
+        {"image_id": "1001", "label_id": 9, "n": 1},
+        {"image_id": "1002", "label_id": 5, "n": 1},
+        {"image_id": "2001", "label_id": 12, "n": 1},
+    ]
     assert_curated_label_mapping(version.manifest, catlin_seaview.DATASET, version.labels)
 
 
@@ -269,3 +275,26 @@ def test_build_drops_a_point_past_the_right_edge_and_records_it(
     assert version.points.num_rows == len(ANNOTATIONS)
     assert (1, 6) not in {(r["row"], r["col"]) for r in version.points.to_pylist()}
     assert sum(r["n"] for r in version.label_counts.to_pylist()) == len(ANNOTATIONS)
+
+
+def test_build_raises_source_changed_and_stages_nothing_when_an_image_changes_while_probed(
+    repo: Path, tmp_path: Path
+) -> None:
+    s3 = FakeS3()
+    _ingested(s3)
+    key = PREFIX + "images/ATL/1001.jpg"
+    real_get = s3.get_object
+
+    def get_after_replacement(*, Bucket: str, Key: str, **kwargs: object) -> dict[str, object]:
+        if Key == key:
+            s3.put(Bucket, Key, jpeg(9, 9))
+        return real_get(Bucket=Bucket, Key=Key, **kwargs)
+
+    s3.get_object = get_after_replacement  # type: ignore[method-assign]
+    stage = tmp_path / "stage"
+    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
+
+    with pytest.raises(SourceChanged, match="images/ATL/1001.jpg"):
+        catlin_seaview.run(build_args(catlin_seaview, stage, taxonomy_sha), s3)
+
+    assert not stage.exists()
