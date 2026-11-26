@@ -9,12 +9,15 @@ import torch
 
 from mermaidseg.dataset_reconciliation.concept_ranks import binary_offset, rank_slices
 from mermaidseg.dataset_reconciliation.concepts import (
+    apply_concept_removal,
+    concept_kind,
     encode_concept_row,
     generate_binary_concept_id_mapping,
     parse_concept_cell,
     read_class_to_concepts,
     source_labels_to_concepts,
 )
+from tests.mermaidseg.conftest import concept_table
 
 # Row i is the concept vector of label i: label 0 (background) is all zeros.
 LOOKUP = torch.tensor([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
@@ -115,3 +118,59 @@ def test_reading_the_table_keeps_strings_empty_cells_and_lower_cases_the_keys(tm
     assert df["genus"].tolist() == ["", "not_given"]
     assert df["source_dataset_source"].tolist() == ["coralnet", "coralnet"]
     assert df["source_label_class_name"].tolist() == ["acro", "sand"]
+
+
+# ---------- concept_kind ----------
+
+
+@pytest.mark.parametrize(
+    ("channel", "kind"),
+    [
+        ("genus__acropora", "genus"),
+        ("family__poritidae", "family"),
+        ("bleached", "binary"),
+        ("not_a_rank__value", "binary"),
+    ],
+)
+def test_concept_kind_is_the_rank_for_taxa_and_binary_otherwise(channel, kind):
+    assert concept_kind(channel) == kind
+
+
+# ---------- apply_concept_removal ----------
+
+
+def test_removing_a_taxon_sets_only_that_rank_to_not_given():
+    table = concept_table()
+
+    out = apply_concept_removal(table, ["genus__acropora"])
+
+    by_label = out.set_index("source_label_class_name")
+    assert by_label.loc["acropora", "genus"] == "not_given"
+    assert by_label.loc["bleached acropora", "genus"] == "not_given"
+    assert by_label.loc["acropora", "family"] == "acroporidae"  # coarser ranks stay
+    assert by_label.loc["porites", "genus"] == "porites"  # other values stay
+    assert by_label.loc["sand", "genus"] == "none"
+    assert table.set_index("source_label_class_name").loc["acropora", "genus"] == "acropora"
+
+
+def test_removing_a_binary_concept_drops_its_column():
+    out = apply_concept_removal(concept_table(), ["tubular"])
+
+    assert "tubular" not in out.columns
+    assert {"bleached", "branching"} <= set(out.columns)
+
+
+def test_a_repeated_concept_is_removed_once():
+    out = apply_concept_removal(concept_table(), ["genus__acropora", "genus__acropora"])
+
+    assert (out["genus"] != "acropora").all()
+
+
+def test_removing_a_binary_concept_without_a_column_raises():
+    with pytest.raises(ValueError, match="not a column of the concept table"):
+        apply_concept_removal(concept_table().drop(columns="tubular"), ["tubular"])
+
+
+def test_removing_a_taxon_value_with_no_match_raises():
+    with pytest.raises(ValueError, match="no genus == 'nope'"):
+        apply_concept_removal(concept_table(), ["genus__nope"])

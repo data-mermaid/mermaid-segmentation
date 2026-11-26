@@ -20,12 +20,12 @@ from torch.utils.data.dataloader import _BaseDataLoaderIter
 from tqdm import tqdm
 
 from mermaidseg.config import lookup_class
-from mermaidseg.dataset_reconciliation.concept_source_mask import apply_concept_source_mask
 from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
 from mermaidseg.dataset_reconciliation.registry import source_labels_to_target_labels
 from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
 from mermaidseg.inference.predictor import class_predictions
 from mermaidseg.io import ConfigDict, resolve_repo_path
+from mermaidseg.model.concept_masking import apply_concept_source_mask
 from mermaidseg.model.data_parallel import (
     DDPLossStep,
     MetricShard,

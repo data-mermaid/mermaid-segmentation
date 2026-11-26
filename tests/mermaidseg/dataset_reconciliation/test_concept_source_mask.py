@@ -7,15 +7,17 @@ import pandas as pd
 import pytest
 import yaml
 
+from mermaidseg.dataset_reconciliation.artifact_meta import meta_path
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     MASK_COLUMNS,
     _source_sort_key,
     load_concept_source_mask,
-    meta_path,
     only_false_pairs,
+    point_annotations,
     source_concept_counts,
 )
+from tests.mermaidseg.conftest import concept_table
 
 ENC = {"not_given": 0, False: 1, True: 2}
 # Channels: one taxonomic rank (genus, 2 channels) and two binary concepts.
@@ -75,13 +77,6 @@ def test_counts_and_only_false_pairs():
     assert list(zip(masked["source_id"], masked["concept"], strict=True)) == [(1, "bleached")]
 
 
-def test_meta_path_sits_next_to_the_csv(tmp_path):
-    assert (
-        meta_path(tmp_path / "coralnet_only_false.csv")
-        == tmp_path / "coralnet_only_false.meta.yaml"
-    )
-
-
 def test_loading_a_mask_without_its_sidecar_raises_file_not_found(tmp_path):
     path = tmp_path / "mask.csv"
     pd.DataFrame({"source_id": ["1"], "concept": ["bleached"]}).to_csv(path, index=False)
@@ -122,3 +117,67 @@ def test_non_numeric_source_ids_follow_the_numeric_ones_in_the_keep_table(tmp_pa
 
     assert mask.source_ids == ("7", "12", "b")
     assert mask.row_by_source() == {"7": 1, "12": 2, "b": 3}
+
+
+def _point_rows(rows: list[tuple[str, int]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "image_id": [r[0] for r in rows],
+            "row": range(len(rows)),
+            "col": 0,
+            "label_id": [r[1] for r in rows],
+            "annotator": "default",
+        }
+    )
+
+
+SIZED_IMAGES = pd.DataFrame(
+    {"image_id": ["a1", "a2"], "group": ["s7", "s30"], "height": 8, "width": 8}
+)
+
+
+def test_mermaid_points_count_under_the_concept_row_of_their_benthic_attribute(tmp_path):
+    labels = pd.DataFrame(
+        {
+            "label_id": [1, 2],
+            "name": ["Acropora::Branching", "Acropora::"],
+            "mermaid_benthic_attribute": ["Acropora", "Acropora"],
+        }
+    )
+    concepts = tmp_path / "concepts.csv"
+    concept_table().assign(source_dataset_source="mermaid").to_csv(concepts, index=False)
+    schema = ConceptSchema.from_csv(concepts, sources={"mermaid"})
+
+    annotations = point_annotations(
+        "mermaid", _point_rows([("a1", 1), ("a1", 2), ("a2", 2)]), SIZED_IMAGES, labels, None, None
+    )
+    counts = source_concept_counts(annotations, schema, dataset_source="mermaid")
+
+    # Acropora: tubular F, branching T, bleached F, at both sources; sources sort numerically.
+    assert counts.to_numpy().tolist() == [
+        ["7", "tubular", 0, 2, 0],
+        ["7", "branching", 2, 0, 0],
+        ["7", "bleached", 0, 2, 0],
+        ["30", "tubular", 0, 1, 0],
+        ["30", "branching", 1, 0, 0],
+        ["30", "bleached", 0, 1, 0],
+    ]
+
+
+def test_a_point_label_id_missing_from_labels_raises():
+    labels = pd.DataFrame(
+        {"label_id": [1], "name": ["Acropora"], "mermaid_benthic_attribute": [None]}
+    )
+    with pytest.raises(ValueError, match=r"label ids missing from labels.parquet: \[8\]"):
+        point_annotations(
+            "coralnet", _point_rows([("a1", 1), ("a1", 8)]), SIZED_IMAGES, labels, None, None
+        )
+
+
+def test_a_point_group_that_is_not_s_and_a_source_id_raises():
+    labels = pd.DataFrame(
+        {"label_id": [1], "name": ["Acropora"], "mermaid_benthic_attribute": [None]}
+    )
+    images = SIZED_IMAGES.assign(group=["s7", "site"])
+    with pytest.raises(ValueError, match="not s<source id>"):
+        point_annotations("coralnet", _point_rows([("a2", 1)]), images, labels, None, None)

@@ -12,9 +12,8 @@ recomputing it.
 
 from __future__ import annotations
 
-import hashlib
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,7 +24,13 @@ import torch
 import yaml
 
 from mermaidseg.data.base import VersionDataset
-from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
+from mermaidseg.data.point_dataset import select_points
+from mermaidseg.dataset_reconciliation.artifact_meta import (
+    file_sha1,
+    meta_path,
+    source_id_of_group,
+)
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema, concept_keys
 
 logger = logging.getLogger(__name__)
 
@@ -77,25 +82,64 @@ def source_concept_counts(
     )
     counts.columns.name = None
     counts["concept"] = pd.Categorical(counts["concept"], categories=concepts, ordered=True)
-    counts = counts.sort_values(["source_id", "concept"]).reset_index(drop=True)
+    source_order = {
+        source: i
+        for i, source in enumerate(sorted(counts["source_id"].unique(), key=_source_sort_key))
+    }
+    counts = counts.assign(_order=counts["source_id"].map(source_order))
+    counts = counts.sort_values(["_order", "concept"]).reset_index(drop=True)
     counts["concept"] = counts["concept"].astype(str)
     return counts[MASK_COLUMNS].astype({c: np.int64 for c in MASK_COLUMNS if c.startswith("n_")})
+
+
+def point_annotations(
+    dataset: str,
+    points: pd.DataFrame,
+    images: pd.DataFrame,
+    labels: pd.DataFrame,
+    groups: Collection[str] | None,
+    annotators: Sequence[str] | None,
+) -> pd.DataFrame:
+    """Return one row per point of the images in ``groups``: ``source_id``, ``source_label_name``.
+
+    Points are selected by annotator as training selects them (``select_points``), and
+    ``source_label_name`` is each point's concept label key (:func:`concept_keys`).
+
+    Args:
+        dataset: Dataset name.
+        points: ``points.parquet`` rows (``image_id``, ``row``, ``col``, ``label_id``,
+            ``annotator``).
+        images: ``images.parquet`` rows (``image_id``, ``group``, ``height``, ``width``).
+        labels: ``labels.parquet`` rows (``label_id``, ``name``, ``mermaid_benthic_attribute``).
+        groups: Groups to keep; ``None`` keeps all.
+        annotators: The split block's annotators in priority order; ``None`` requires one.
+
+    Raises:
+        ValueError: A group is not in ``images``, a group is not ``s<source id>``, the annotator
+            selection fails, or a point's label id is missing from ``labels``.
+    """
+    if groups is not None:
+        unknown = sorted(set(groups) - set(images["group"]))
+        if unknown:
+            raise ValueError(f"groups not in the dataset version: {unknown}")
+        images = images[images["group"].isin(list(groups))]
+    kept = select_points(points, images, annotators)
+    keys = kept["label_id"].map(concept_keys(dataset, labels))
+    unnamed = sorted(set(kept.loc[keys.isna(), "label_id"]))
+    if unnamed:
+        raise ValueError(f"{dataset}: label ids missing from labels.parquet: {unnamed}")
+    group_of = images.set_index("image_id")["group"]
+    return pd.DataFrame(
+        {
+            "source_id": [source_id_of_group(g) for g in kept["image_id"].map(group_of)],
+            "source_label_name": keys.to_numpy(),
+        }
+    )
 
 
 def only_false_pairs(counts: pd.DataFrame) -> pd.DataFrame:
     """Rows of ``counts`` with False points and no True points: the pairs to mask."""
     return counts[(counts["n_false"] > 0) & (counts["n_true"] == 0)].reset_index(drop=True)
-
-
-def file_sha1(path: str | Path) -> str:
-    """Return the hex SHA-1 digest of a file's bytes."""
-    return hashlib.sha1(Path(path).read_bytes()).hexdigest()
-
-
-def meta_path(mask_csv: str | Path) -> Path:
-    """Sidecar path: ``coralnet_only_false.csv`` -> ``coralnet_only_false.meta.yaml``."""
-    mask_csv = Path(mask_csv)
-    return mask_csv.with_name(mask_csv.stem + ".meta.yaml")
 
 
 # ---------- training side ----------
@@ -147,18 +191,12 @@ def load_concept_source_mask(
       from the run by ``training.concept_removal``) are skipped, anything else is an error;
     - with ``concepts_csv``, its sha1 matches the one recorded in the ``.meta.yaml`` sidecar, so a
       mask built for another concept table is refused;
-    - the sidecar lists the sources the builder counted (``source_ids``).
     """
     path = Path(path)
     meta_file = meta_path(path)
     if not meta_file.is_file():
         raise FileNotFoundError(f"concept source mask {path} has no sidecar {meta_file}")
     meta = yaml.safe_load(meta_file.read_text())
-    if "source_ids" not in meta:
-        raise ValueError(
-            f"{meta_file} has no source_ids, the sources the mask was built from. "
-            "Rebuild it with scripts/build_concept_source_mask.py."
-        )
     if concepts_csv is not None and meta.get("concepts_csv_sha1") != file_sha1(concepts_csv):
         raise ValueError(
             f"{path} was built for a concept table with sha1 {meta.get('concepts_csv_sha1')}, "
@@ -206,24 +244,9 @@ def load_concept_source_mask(
     )
 
 
-def _source_sort_key(source: str) -> tuple[int, int | str]:
+def _source_sort_key(source: Any) -> tuple[int, int | str]:
+    source = str(source)
     return (0, int(source)) if source.isdigit() else (1, source)
-
-
-def apply_concept_source_mask(
-    target_concepts: torch.Tensor,
-    keep: torch.Tensor,
-    source_rows: torch.Tensor,
-) -> torch.Tensor:
-    """Set masked channels of each sample's concept targets to 0 (not_given).
-
-    Args:
-        target_concepts: ``(B, C, H, W)`` concept targets.
-        keep: ``(S + 1, C)`` bool keep table (see :class:`ConceptSourceMask`).
-        source_rows: ``(B,)`` keep-table row of each sample.
-    """
-    keep_b = keep.to(target_concepts.device)[source_rows.to(target_concepts.device).long()]
-    return target_concepts * keep_b.to(target_concepts.dtype)[:, :, None, None]
 
 
 def _check_covered(source_ids: Iterable[Any], mask: ConceptSourceMask) -> None:
@@ -236,11 +259,6 @@ def _check_covered(source_ids: Iterable[Any], mask: ConceptSourceMask) -> None:
             f"{' ...' if len(missing) > 10 else ''}. Rebuild it with "
             "scripts/build_concept_source_mask.py --data-config <this run's data config>."
         )
-
-
-def _group_source_ids(groups: Iterable[str]) -> list[str]:
-    """Map CoralNet image groups ``s<id>`` to their source ids ``<id>``."""
-    return [str(group).removeprefix("s") for group in groups]
 
 
 def attach_source_rows(
@@ -258,11 +276,12 @@ def attach_source_rows(
 
     Raises:
         ValueError: A ``mask.dataset`` image comes from a source the mask was not built from. Its
-            never-True concepts would silently train as False.
+            never-True concepts would silently train as False, or an image group is not
+            ``s<source id>``.
     """
     for ds in datasets:
         if mask.dataset == ds.source_name:
-            sources = _group_source_ids(ds.images["group"])
+            sources = [source_id_of_group(group) for group in ds.images["group"]]
             _check_covered(sources, mask)
             ds.set_source_rows(mask.rows_for(sources))
         else:

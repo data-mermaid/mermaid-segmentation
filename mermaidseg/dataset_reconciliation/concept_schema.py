@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 
 from mermaidseg.dataset_reconciliation.concept_ranks import (
@@ -17,6 +18,7 @@ from mermaidseg.dataset_reconciliation.concept_ranks import (
 )
 from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
+    apply_concept_removal,
     encode_concept_channels_from_df,
     read_class_to_concepts,
 )
@@ -37,6 +39,20 @@ def concept_label_key(dataset: str, label_name: str, target: str | None) -> str:
     if dataset.lower() in TARGET_KEYED_CONCEPT_DATASETS and target:
         return target
     return label_name
+
+
+def concept_keys(dataset: str, labels: pd.DataFrame) -> pd.Series:
+    """Map each ``label_id`` of ``labels`` to its concept label key (see ``concept_label_key``).
+
+    Args:
+        dataset: Dataset name.
+        labels: ``labels.parquet`` rows (``label_id``, ``name``, ``mermaid_benthic_attribute``).
+    """
+    keys = [
+        concept_label_key(dataset, name, target)
+        for name, target in zip(labels["name"], labels["mermaid_benthic_attribute"], strict=True)
+    ]
+    return pd.Series(keys, index=labels["label_id"].to_numpy())
 
 
 @dataclass(frozen=True)
@@ -71,8 +87,6 @@ class ConceptSchema:
         df_run = df[df["source_dataset_source"].isin(sources_lower)].reset_index(drop=True)
         removed_concepts = list(dict.fromkeys(removed_concepts))
         if removed_concepts:
-            from mermaidseg.dataset_reconciliation.concept_removal import apply_concept_removal
-
             _, full_channels, _ = encode_concept_channels_from_df(df_run)
             not_channels = sorted(set(removed_concepts) - set(full_channels))
             if not_channels:

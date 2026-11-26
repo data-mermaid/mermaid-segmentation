@@ -7,7 +7,7 @@ GPU-friendly ``source_labels_to_concepts`` lookup driven by a precomputed
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -229,3 +229,40 @@ def source_labels_to_concepts(
         source_labels = source_labels.long()
     mapped = lookup[source_labels]  # (B, H, W, C)
     return mapped.permute(0, 3, 1, 2).contiguous()
+
+
+NONE_TAXON = "none"
+
+
+def concept_kind(channel: str) -> str:
+    """``genus__acropora`` -> ``genus``; a binary concept -> ``binary``."""
+    rank = channel.split("__", 1)[0] if "__" in channel else None
+    return rank if rank in TAXONOMIC_CONCEPTS else "binary"
+
+
+def apply_concept_removal(df_mapping: pd.DataFrame, concepts: Iterable[str]) -> pd.DataFrame:
+    """Concept table with ``concepts`` removed, before channel encoding.
+
+    ``rank__value`` sets that rank to ``not_given`` where it equals ``value`` (coarser ranks stay);
+    a binary concept's column is dropped. ``rank__none`` cannot be removed: ``none`` marks
+    non-organisms and is not a taxon.
+    """
+    df = df_mapping.copy()
+    concepts = list(dict.fromkeys(concepts))
+    for concept in concepts:
+        kind = concept_kind(concept)
+        if kind == "binary":
+            if concept not in df.columns:
+                raise ValueError(f"cannot remove {concept!r}: not a column of the concept table")
+            df = df.drop(columns=concept)
+            continue
+        value = concept.split("__", 1)[1]
+        if value == NONE_TAXON:
+            raise ValueError(f"cannot remove {concept!r}: 'none' is not a taxon")
+        hit = df[kind].astype(str) == value
+        if not hit.any():
+            raise ValueError(
+                f"cannot remove {concept!r}: no {kind} == {value!r} in the concept table"
+            )
+        df.loc[hit, kind] = "not_given"
+    return df

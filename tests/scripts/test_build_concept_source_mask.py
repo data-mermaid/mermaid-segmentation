@@ -11,8 +11,6 @@ import pytest
 import yaml
 
 import scripts.build_concept_source_mask as script
-from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.dataset_reconciliation.concept_source_mask import source_concept_counts
 from segdata_spec.manifest import Pin
 from tests.mermaidseg.conftest import concept_table
 from tests.mermaidseg.data.conftest import ImageSpec, write_version
@@ -113,12 +111,9 @@ def test_the_mask_lists_the_pairs_with_false_points_and_no_true_points(inputs, t
     ]
     meta = yaml.safe_load((tmp_path / "mask.meta.yaml").read_text())
     assert meta["source_ids"] == ["7", "30"]
+    assert {"git_sha", "git_dirty"} <= set(meta)
+    assert "git_commit" not in meta
     assert (meta["split"], meta["n_points"], meta["n_masked"]) == ("train", 5, 2)
-
-
-def test_a_group_that_is_not_s_and_a_source_id_raises():
-    with pytest.raises(ValueError, match=r"not s<source id>: \['site'\]"):
-        script.group_source_ids(pd.Series(["s1", "site"]))
 
 
 def _config(tmp_path: Path, pin: Pin, train: dict[str, Any]) -> Path:
@@ -159,61 +154,6 @@ def test_the_train_blocks_annotator_priority_picks_each_points_label(tmp_path):
         "7,bleached,0,1,0",
     ]
     assert yaml.safe_load((tmp_path / "mask.meta.yaml").read_text())["n_points"] == 1
-
-
-def _points(rows: list[tuple[str, int]]) -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "image_id": [r[0] for r in rows],
-            "row": range(len(rows)),
-            "col": 0,
-            "label_id": [r[1] for r in rows],
-            "annotator": "default",
-        }
-    )
-
-
-SIZED_IMAGES = pd.DataFrame(
-    {"image_id": ["a1", "a2"], "group": ["s7", "s30"], "height": 8, "width": 8}
-)
-
-
-def test_mermaid_points_count_under_the_concept_row_of_their_benthic_attribute(tmp_path):
-    labels = pd.DataFrame(
-        {
-            "label_id": [1, 2],
-            "name": ["Acropora::Branching", "Acropora::"],
-            "mermaid_benthic_attribute": ["Acropora", "Acropora"],
-        }
-    )
-    concepts = tmp_path / "concepts.csv"
-    concept_table().assign(source_dataset_source="mermaid").to_csv(concepts, index=False)
-    schema = ConceptSchema.from_csv(concepts, sources={"mermaid"})
-
-    annotations = script.point_annotations(
-        "mermaid", _points([("a1", 1), ("a1", 2), ("a2", 2)]), SIZED_IMAGES, labels, None, None
-    )
-    counts = source_concept_counts(annotations, schema, dataset_source="mermaid")
-
-    # Acropora: tubular F, branching T, bleached F, at both sources.
-    assert counts.to_numpy().tolist() == [
-        [7, "tubular", 0, 2, 0],
-        [7, "branching", 2, 0, 0],
-        [7, "bleached", 0, 2, 0],
-        [30, "tubular", 0, 1, 0],
-        [30, "branching", 1, 0, 0],
-        [30, "bleached", 0, 1, 0],
-    ]
-
-
-def test_a_point_label_id_missing_from_labels_raises():
-    labels = pd.DataFrame(
-        {"label_id": [1], "name": ["Acropora"], "mermaid_benthic_attribute": [None]}
-    )
-    with pytest.raises(ValueError, match=r"label ids missing from labels.parquet: \[8\]"):
-        script.point_annotations(
-            "coralnet", _points([("a1", 1), ("a1", 8)]), SIZED_IMAGES, labels, None, None
-        )
 
 
 @pytest.mark.parametrize(

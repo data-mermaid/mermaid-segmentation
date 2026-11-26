@@ -15,6 +15,7 @@ import pandas as pd
 from mermaidseg.data.config import DataSection, Split
 from mermaidseg.data.factory import open_dataset_version
 from mermaidseg.data.point_dataset import PointDataset
+from mermaidseg.dataset_reconciliation.artifact_meta import source_id_of_group
 from mermaidseg.evaluation.gt_mapping import build_class_lookup, build_concept_lookup
 from mermaidseg.evaluation.metrics import REPORTED_BINARY_CONCEPTS
 from mermaidseg.evaluation.point_datasets import reader_annotations, run_point_evaluation
@@ -104,7 +105,7 @@ def write_coralnet_sample(
     pd.DataFrame(
         {
             "dataset": SOURCE_NAME,
-            "source_id": sample[UNIT_COL].astype(str).str.removeprefix("s"),
+            "source_id": sample[UNIT_COL].map(source_id_of_group),
             "image_id": sample["image_id"].astype(str),
         }
     ).to_parquet(path, index=False)

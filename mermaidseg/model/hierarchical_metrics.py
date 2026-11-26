@@ -18,6 +18,7 @@ the default ``score_transform="none"`` is correct. Use ``"softmax"`` for raw log
 from __future__ import annotations
 
 from collections.abc import Mapping
+from itertools import pairwise
 from typing import Literal
 
 import numpy as np
@@ -102,9 +103,7 @@ class HierarchicalMetrics:
         self.min_support = int(min_support)
 
         self._pairs = [
-            (coarse, fine)
-            for coarse, fine in zip(self.ranks, self.ranks[1:], strict=False)
-            if (coarse, fine) in tree.edges
+            (coarse, fine) for coarse, fine in pairwise(self.ranks) if (coarse, fine) in tree.edges
         ]
 
         self._none_index = {r: tree.index_of(r).get(NONE_TAXON) for r in self.ranks}

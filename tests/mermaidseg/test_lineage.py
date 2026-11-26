@@ -210,3 +210,12 @@ def test_inherit_lineage_keeps_only_the_source_sha_and_dirty_flag_without_mutati
 def test_inherit_lineage_records_a_missing_source_as_a_null_parent():
     result = inherit_lineage({"git_dirty": False}, None)
     assert "parent" in result and result["parent"] is None
+
+
+def test_git_state_reports_the_head_sha_and_whether_tracked_files_changed(git_repo):
+    state = lineage.git_state()
+    assert state == {"git_sha": _git(git_repo, "rev-parse", "HEAD").strip(), "git_dirty": False}
+
+    (git_repo / "tracked.txt").write_text("two\n")
+
+    assert lineage.git_state()["git_dirty"] is True

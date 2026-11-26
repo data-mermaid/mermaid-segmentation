@@ -17,6 +17,7 @@ have two parents. The CSV keeps those lineages apart: ``turbinaria_coral`` (Dend
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 
@@ -129,7 +130,7 @@ def audit_taxonomy(
         One :class:`AmbiguityReport` per offending taxon. Empty means the structure is a tree.
     """
     reports: list[AmbiguityReport] = []
-    for coarse, fine in zip(ranks, ranks[1:], strict=False):
+    for coarse, fine in pairwise(ranks):
         sub = df[[coarse, fine, "source_dataset_source"]].dropna(subset=[coarse, fine])
         sub = sub[
             ~sub[coarse].isin((NOT_GIVEN, NONE_TAXON)) & ~sub[fine].isin((NOT_GIVEN, NONE_TAXON))
@@ -185,7 +186,7 @@ def build_taxonomy_tree(
     channels = {rank: channel_values(df, rank) for rank in ranks}
 
     edges: dict[tuple[str, str], dict[str, set[str]]] = {}
-    for coarse, fine in zip(ranks, ranks[1:], strict=False):
+    for coarse, fine in pairwise(ranks):
         sub = df[[coarse, fine]].dropna()
         sub = sub[
             ~sub[coarse].isin((NOT_GIVEN, NONE_TAXON)) & ~sub[fine].isin((NOT_GIVEN, NONE_TAXON))

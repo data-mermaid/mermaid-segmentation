@@ -16,7 +16,7 @@ ranks (a removed genus keeps its family). A removed binary concept loses its cha
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -25,13 +25,23 @@ import pandas as pd
 import scipy.sparse as sp
 import yaml
 
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
-from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
-from mermaidseg.dataset_reconciliation.concept_source_mask import file_sha1, meta_path
+from mermaidseg.data.config import DataSection, entry_split_groups
+from mermaidseg.data.factory import open_dataset_version
+from mermaidseg.dataset_reconciliation.artifact_meta import (
+    file_sha1,
+    meta_path,
+    source_id_of_group,
+)
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema, concept_keys
+from mermaidseg.dataset_reconciliation.concepts import concept_kind
+from mermaidseg.io import REPO_ROOT
 
 DENSE_DATASETS = frozenset({"coralscapes_v2", "ucsd_mosaics", "benthos_yuval"})
 CORALNET = "coralnet"
-NONE_TAXON = "none"
+
+COLUMNS = ["dataset", "image_id", "label", "n", "source"]
+# Labels that mark unannotated points or pixels, never a class.
+IGNORE_LABEL_NAMES: frozenset[str] = frozenset({"unlabeled", "unlabeled / unidentified"})
 
 REMOVAL_COLUMNS = [
     "concept",
@@ -60,12 +70,6 @@ class CoverageRule:
     def as_dict(self) -> dict[str, int]:
         """Return the thresholds as a dict."""
         return asdict(self)
-
-
-def concept_kind(channel: str) -> str:
-    """``genus__acropora`` -> ``genus``; a binary concept -> ``binary``."""
-    rank = channel.split("__", 1)[0] if "__" in channel else None
-    return rank if rank in TAXONOMIC_CONCEPTS else "binary"
 
 
 def concept_coverage(
@@ -172,29 +176,94 @@ def load_concept_removal(path: str | Path, *, concepts_csv: str | Path | None = 
     return df["concept"].tolist()
 
 
-def apply_concept_removal(df_mapping: pd.DataFrame, concepts: Iterable[str]) -> pd.DataFrame:
-    """Concept table with ``concepts`` removed, before channel encoding.
+def train_label_counts(
+    dataset: str,
+    label_counts: pd.DataFrame,
+    images: pd.DataFrame,
+    labels: pd.DataFrame,
+    groups: Collection[str] | None,
+) -> pd.DataFrame:
+    """Return one dataset's per-image label counts over ``groups``, in ``COLUMNS``.
 
-    ``rank__value`` sets that rank to ``not_given`` where it equals ``value`` (coarser ranks stay);
-    a binary concept's column is dropped. ``rank__none`` cannot be removed: ``none`` marks
-    non-organisms and is not a taxon.
+    Args:
+        dataset: Dataset name, written to ``dataset`` (and to ``source`` outside CoralNet).
+        label_counts: ``stats/label_counts.parquet`` rows (``image_id``, ``label_id``, ``n``).
+        images: ``images.parquet`` rows (``image_id``, ``group``).
+        labels: ``labels.parquet`` rows (``label_id``, ``name``).
+        groups: Groups to count; ``None`` counts all.
+
+    Raises:
+        ValueError: A group is not in ``images``, a counted label id has no name, or a CoralNet
+            group is not ``s<source id>``.
     """
-    df = df_mapping.copy()
-    concepts = list(dict.fromkeys(concepts))
-    for concept in concepts:
-        kind = concept_kind(concept)
-        if kind == "binary":
-            if concept not in df.columns:
-                raise ValueError(f"cannot remove {concept!r}: not a column of the concept table")
-            df = df.drop(columns=concept)
+    if groups is not None:
+        unknown = sorted(set(groups) - set(images["group"]))
+        if unknown:
+            raise ValueError(f"{dataset}: groups not in the dataset version: {unknown}")
+        images = images[images["group"].isin(list(groups))]
+    group_of = images.set_index("image_id")["group"]
+    counts = label_counts[
+        label_counts["image_id"].isin(group_of.index) & (label_counts["label_id"] != 0)
+    ]
+    names = counts["label_id"].map(labels.set_index("label_id")["name"])
+    unnamed = sorted(set(counts.loc[names.isna(), "label_id"]))
+    if unnamed:
+        raise ValueError(f"{dataset}: label ids missing from labels.parquet: {unnamed}")
+    ignored = names.astype(str).str.strip().str.lower().isin(IGNORE_LABEL_NAMES).to_numpy()
+    label = counts["label_id"].map(concept_keys(dataset, labels))
+    out = pd.DataFrame(
+        {
+            "dataset": dataset,
+            "image_id": counts["image_id"].astype(str).to_numpy(),
+            "label": label.astype(str).str.strip().str.lower().to_numpy(),
+            "n": counts["n"].to_numpy(),
+        }
+    )
+    out["source"] = (
+        [source_id_of_group(g) for g in counts["image_id"].map(group_of)]
+        if dataset == CORALNET
+        else dataset
+    )
+    return out[~ignored].reset_index(drop=True)[COLUMNS]
+
+
+def require_single_annotator(dataset: str, annotators: Collection[str]) -> None:
+    """Raise if ``annotators`` (a points dataset's ``annotator`` column) holds several names.
+
+    ``stats/label_counts.parquet`` counts every annotator's labels and cannot be filtered by
+    annotator, so a train block, whether or not it names annotators, would count each position
+    once per annotator.
+    """
+    found = sorted(set(annotators))
+    if len(found) > 1:
+        raise ValueError(
+            f"{dataset}: several annotators {found} in points.parquet; "
+            "label counts cannot be filtered by annotator"
+        )
+
+
+def section_train_label_counts(section: DataSection, cache_dir: Path) -> pd.DataFrame:
+    """Concatenate :func:`train_label_counts` over every dataset with a train block.
+
+    Raises:
+        ValueError: No dataset has a train block, or a points dataset has several annotators.
+    """
+    parts = []
+    for name, entry in section.datasets.items():
+        if entry.train is None:
             continue
-        value = concept.split("__", 1)[1]
-        if value == NONE_TAXON:
-            raise ValueError(f"cannot remove {concept!r}: 'none' is not a taxon")
-        hit = df[kind].astype(str) == value
-        if not hit.any():
-            raise ValueError(
-                f"cannot remove {concept!r}: no {kind} == {value!r} in the concept table"
+        version = open_dataset_version(section, name, cache_dir)
+        if version.points is not None:
+            require_single_annotator(name, version.points.column("annotator").to_pylist())
+        parts.append(
+            train_label_counts(
+                name,
+                version.label_counts.to_pandas(),
+                version.images.to_pandas(),
+                version.labels.to_pandas(),
+                entry_split_groups(entry, "train", REPO_ROOT),
             )
-        df.loc[hit, kind] = "not_given"
-    return df
+        )
+    if not parts:
+        raise ValueError("no dataset has a train block to count")
+    return pd.concat(parts, ignore_index=True)

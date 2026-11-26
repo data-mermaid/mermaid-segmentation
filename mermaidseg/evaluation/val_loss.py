@@ -38,13 +38,11 @@ from tqdm import tqdm
 
 from mermaidseg.data.config import DataSection
 from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
-from mermaidseg.dataset_reconciliation.concept_source_mask import (
-    apply_concept_source_mask,
-    attach_source_rows,
-)
+from mermaidseg.dataset_reconciliation.concept_source_mask import attach_source_rows
 from mermaidseg.evaluation.reporting import write_json
 from mermaidseg.inference.bundle import ModelBundle
 from mermaidseg.io import REPO_ROOT, ConfigDict, setup_config
+from mermaidseg.model.concept_masking import apply_concept_source_mask
 from mermaidseg.model.data_parallel import apply_concept_bottleneck_loss
 from mermaidseg.model.distributed import components_to_floats
 from mermaidseg.run_setup import (
