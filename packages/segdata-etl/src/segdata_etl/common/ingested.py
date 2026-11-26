@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 from botocore.client import BaseClient
+from pydantic import ValidationError
 
 from segdata_etl.common.manifest import IngestManifest, read_ingest_manifest
 from segdata_etl.common.release import (
@@ -54,13 +55,38 @@ def _list_objects(client: BaseClient, bucket: str, prefix: str) -> dict[str, Ing
     return objects
 
 
+def _parse_manifest(manifest_raw: bytes, name: str, bucket: str) -> IngestManifest:
+    """Parse the manifest bytes and check it describes the ``name`` ingest prefix."""
+    manifest_uri = f"s3://{bucket}/{ingest_prefix(name)}/{MANIFEST_NAME}"
+    try:
+        manifest = read_ingest_manifest(manifest_raw)
+    except ValidationError as exc:
+        raise ValueError(
+            f"{manifest_uri} is not the manifest shape `segdata ingest` writes; "
+            f"re-run `segdata ingest {name}` for this prefix."
+        ) from exc
+    if manifest.dataset_name != name:
+        raise ValueError(
+            f"{manifest_uri} describes dataset {manifest.dataset_name!r}, expected {name!r}."
+        )
+    if manifest.s3.prefix != ingest_prefix(name):
+        raise ValueError(
+            f"{manifest_uri} records prefix {manifest.s3.prefix!r}, "
+            f"expected {ingest_prefix(name)!r}."
+        )
+    return manifest
+
+
 def read_ingested(client: BaseClient, name: str, *, bucket: str = INGEST_BUCKET) -> IngestedDataset:
     """Read the annotations, classes, manifest and object listing of an ingested dataset.
 
-    Raises ``ValidationError`` when the manifest is not the shape ``segdata ingest`` writes.
+    Raises:
+        ValueError: The manifest is not the shape ``segdata ingest`` writes, or it names a
+            different dataset or prefix than ``name``.
     """
     prefix = f"{ingest_prefix(name)}/"
     manifest_raw = get_bytes(client, bucket, f"{prefix}{MANIFEST_NAME}")
+    manifest = _parse_manifest(manifest_raw, name, bucket)
     annotations = pd.read_parquet(
         io.BytesIO(get_bytes(client, bucket, f"{prefix}{annotations_parquet_name(name)}"))
     )
@@ -70,7 +96,7 @@ def read_ingested(client: BaseClient, name: str, *, bucket: str = INGEST_BUCKET)
         prefix=prefix,
         annotations=annotations,
         classes=json.loads(get_bytes(client, bucket, f"{prefix}{CLASSES_NAME}")),
-        manifest=read_ingest_manifest(manifest_raw),
+        manifest=manifest,
         manifest_sha256=hashlib.sha256(manifest_raw).hexdigest(),
         objects=_list_objects(client, bucket, prefix),
     )

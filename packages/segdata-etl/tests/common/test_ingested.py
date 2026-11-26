@@ -9,6 +9,8 @@ from collections.abc import Iterator
 from typing import Any
 
 import pandas as pd
+import pytest
+from ingest.test_manifest import OLD_CATLIN_MANIFEST
 from PIL import Image
 
 from segdata_etl.common.ingested import (
@@ -153,3 +155,60 @@ def test_source_info_takes_citation_and_license_from_the_manifest() -> None:
     assert info.revision == source_revision(ds)
     assert info.citation == "A. Author 2020"
     assert info.license == "CC BY 4.0"
+
+
+def _with_manifest(manifest_bytes: bytes, bucket: str = BUCKET) -> ListingS3:
+    objects = {(bucket, k): v for (_, k), v in _ingested_objects().items()}
+    objects[(bucket, f"{ingest_prefix('demo')}/manifest.json")] = manifest_bytes
+    return ListingS3(objects)
+
+
+def _manifest_bytes(dataset_name: str = "demo", prefix: str = "external_validation_datasets/demo"):
+    manifest = build_manifest(
+        dataset_name,
+        IngestSource(citation="A. Author 2020", raw_data_url="https://x/y", license="CC BY 4.0"),
+        S3Target(BUCKET, prefix, dry_run=False),
+        image_key_template="images/{group}/{image_id}.jpg",
+        parquet_columns={"image_id": "string"},
+        dropped={},
+        images_uploaded=2,
+    )
+    return manifest.model_dump_json().encode()
+
+
+def test_read_ingested_refuses_a_manifest_of_another_dataset() -> None:
+    client = _with_manifest(_manifest_bytes(dataset_name="other"))
+
+    with pytest.raises(ValueError, match="'other'.*'demo'|'demo'.*'other'"):
+        read_ingested(client, "demo")
+
+
+def test_read_ingested_refuses_a_manifest_with_another_prefix() -> None:
+    client = _with_manifest(_manifest_bytes(prefix="elsewhere/demo"))
+
+    with pytest.raises(ValueError) as exc_info:
+        read_ingested(client, "demo")
+
+    assert "elsewhere/demo" in str(exc_info.value)
+    assert "external_validation_datasets/demo" in str(exc_info.value)
+
+
+def test_read_ingested_refuses_an_old_shape_manifest_with_the_reingest_command() -> None:
+    client = _with_manifest(json.dumps(OLD_CATLIN_MANIFEST).encode())
+
+    with pytest.raises(ValueError) as exc_info:
+        read_ingested(client, "demo")
+
+    message = str(exc_info.value)
+    assert f"s3://{BUCKET}/external_validation_datasets/demo/manifest.json" in message
+    assert "segdata ingest demo" in message
+
+
+def test_read_ingested_does_not_compare_the_bucket() -> None:
+    other_bucket = "copy-bucket"
+    client = _with_manifest(MANIFEST_BYTES, bucket=other_bucket)
+
+    ds = read_ingested(client, "demo", bucket=other_bucket)
+
+    assert ds.bucket == other_bucket
+    assert ds.manifest.s3.bucket == BUCKET

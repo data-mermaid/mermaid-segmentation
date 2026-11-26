@@ -70,8 +70,13 @@ def test_manifest_round_trips_through_json_with_every_field():
 
 
 def test_read_ingest_manifest_refuses_the_old_shape():
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as exc_info:
         read_ingest_manifest(json.dumps(OLD_CATLIN_MANIFEST).encode())
+
+    assert any(
+        e["loc"] == ("source", "license") and e["type"] == "missing"
+        for e in exc_info.value.errors()
+    )
 
 
 def test_ingest_source_requires_a_licence():

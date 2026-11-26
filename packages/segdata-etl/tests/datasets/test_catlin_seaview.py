@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from ingest.test_manifest import OLD_CATLIN_MANIFEST
 from s3_fake import FakeS3
 
 from segdata_etl.common.s3_objects import SourceChanged
@@ -203,6 +204,21 @@ def test_build_refuses_an_unpublishable_tree_before_reading_s3(
         catlin_seaview.run(build_args(catlin_seaview, stage, "0" * 64), s3)
 
     assert s3.calls == []
+    assert not stage.exists()
+
+
+def test_build_refuses_an_old_shape_ingest_manifest_and_names_the_reingest(
+    repo: Path, tmp_path: Path
+) -> None:
+    s3 = FakeS3()
+    _ingested(s3)
+    s3.put(INGEST_BUCKET, PREFIX + "manifest.json", json.dumps(OLD_CATLIN_MANIFEST).encode())
+    stage = tmp_path / "stage"
+    taxonomy_sha = publish_fixture_taxonomy(s3, repo)
+
+    with pytest.raises(ValueError, match="segdata ingest catlin_seaview"):
+        catlin_seaview.run(build_args(catlin_seaview, stage, taxonomy_sha), s3)
+
     assert not stage.exists()
 
 
