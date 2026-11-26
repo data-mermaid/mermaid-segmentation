@@ -127,7 +127,14 @@ def test_main_passes_the_prune_and_dry_run_flags(monkeypatch, fake_s3, argv, pru
     assert (settings["prune"], settings["dry_run"]) == (prune, dry_run)
 
 
-@pytest.mark.parametrize(("argv", "cooldown"), [([], 600.0), (["--breaker-cooldown", "30"], 30.0)])
+@pytest.mark.parametrize(
+    ("argv", "cooldown"),
+    [
+        ([], 600.0),
+        (["--breaker-cooldown", "30"], 30.0),
+        (["--breaker-cooldown", "0"], 0.0),
+    ],
+)
 def test_main_passes_the_breaker_cooldown_and_reports_it(monkeypatch, fake_s3, argv, cooldown):
     _, run, _ = _run_main(monkeypatch, argv, {1: DownloadResult(ok=True)}, fake_s3=fake_s3)
 
@@ -379,8 +386,10 @@ def test_an_empty_discovery_stops_the_run_and_keeps_the_baseline(
         ["--prune", "invalidate", "--changed"],
         ["--dry-run", "verify-existing"],
         ["--breaker-cooldown", "30", "verify-existing"],
-        ["--breaker-cooldown", "0", "invalidate", "--all"],
+        ["--breaker-cooldown", "0", "invalidate", "--all", "--yes"],
         ["--breaker-cooldown", "-1"],
+        ["--breaker-cooldown", "nan"],
+        ["--breaker-cooldown", "inf"],
     ],
 )
 def test_batch_only_flags_are_rejected_with_a_subcommand_or_a_negative_value(argv):

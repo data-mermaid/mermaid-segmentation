@@ -446,3 +446,39 @@ def test_each_trip_gets_its_own_cooldown(fake_s3):
     assert outcome.stopped is None
     assert attempted == list(range(1, 13))
     assert sleep.call_args_list == [call(600), call(600)]
+
+
+def test_a_trip_on_the_last_source_stops_without_a_cooldown(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+    assert sleep.call_args_list == []
+
+
+def test_a_trip_followed_only_by_skipped_sources_stops_without_a_cooldown(fake_s3):
+    _mark(fake_s3, 6)
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+    script[6] = True
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+    assert sleep.call_args_list == []
+
+
+def test_a_non_outage_failure_while_probing_keeps_probing(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+    script.update({6: "verification_failed", 7: False, 8: True})
+
+    with patch.object(bd.time, "sleep") as sleep:
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5, 6, 7]
+    assert sleep.call_args_list == [call(600)]

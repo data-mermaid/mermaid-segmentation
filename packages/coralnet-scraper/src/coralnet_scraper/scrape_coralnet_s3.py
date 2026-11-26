@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 import sys
 import uuid
@@ -229,8 +230,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--yes", action="store_true", help="Confirm --all, which invalidates every source"
     )
     args = p.parse_args(argv)
-    if args.breaker_cooldown is not None and args.breaker_cooldown < 0:
-        p.error("--breaker-cooldown must not be negative")
+    if args.breaker_cooldown is not None and not (
+        math.isfinite(args.breaker_cooldown) and args.breaker_cooldown >= 0
+    ):
+        p.error("--breaker-cooldown must be a non-negative number of seconds")
     if args.command is not None and (
         args.prune or args.allow_source_drop or args.dry_run or args.breaker_cooldown is not None
     ):

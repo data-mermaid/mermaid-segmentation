@@ -165,14 +165,17 @@ def run_batch_download(
         the exception class name, and the run goes on. After
         :data:`CIRCUIT_BREAKER_THRESHOLD` consecutive outage failures (see
         :func:`_is_outage_failure`) the breaker trips. With ``breaker_cooldown_s`` of 0 the run
-        stops with ``stopped="circuit_open"``; otherwise it sleeps once and probes the next
-        source: an ok result resets the streak and the run continues (a later trip gets its own
-        cooldown), an outage failure stops the run. Skipped sources and other failures neither
-        count nor reset the streak.
+        stops with ``stopped="circuit_open"``; otherwise the trip stays pending until a source
+        is about to be downloaded (skipped sources do not consume it), then the run sleeps once
+        and probes that source: an ok result resets the streak and the run continues (a later
+        trip gets its own cooldown), an outage failure stops the run. A trip still pending
+        when the sources run out also returns ``stopped="circuit_open"``. Skipped sources and
+        other failures neither count nor reset the streak.
     """
     results: dict[int, DownloadResult] = {}
     failure_streak = 0
     probing = False
+    trip_pending = False
     skipped_complete = 0
     for sid in tqdm(list(source_ids), desc="CoralNet sources"):
         raised = False
@@ -185,6 +188,10 @@ def run_batch_download(
             ):
                 skipped_complete += 1
                 continue
+            if trip_pending:
+                time.sleep(breaker_cooldown_s)
+                trip_pending = False
+                probing = True
             res = downloader.download_source(
                 sid, bucket_name=bucket, s3_prefix=s3_prefix, prune=prune, dry_run=dry_run
             )
@@ -214,8 +221,10 @@ def run_batch_download(
                 sid,
                 breaker_cooldown_s,
             )
-            time.sleep(breaker_cooldown_s)
-            probing = True
+            trip_pending = True
         if delay_seconds > 0:
             time.sleep(delay_seconds)
+    if trip_pending:
+        logger.error("Stopping the run: the circuit breaker tripped with no source left to probe")
+        return BatchOutcome(results, STOPPED_CIRCUIT_OPEN, skipped_complete)
     return BatchOutcome(results, None, skipped_complete)
