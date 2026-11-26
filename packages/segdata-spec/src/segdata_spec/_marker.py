@@ -39,6 +39,15 @@ def dump_marker(marker: SyncMarker) -> bytes:
     return json.dumps(payload, sort_keys=True, indent=2).encode()
 
 
+def dump_feature_marker(feature_set_sha256: str, image_ids: Collection[str] | None) -> bytes:
+    """Serialise a feature-set sync: the set's sha256 and the ids synced (``"all"`` for None)."""
+    payload = {
+        "feature_set_sha256": feature_set_sha256,
+        "image_ids": _ALL if image_ids is None else sorted(image_ids),
+    }
+    return json.dumps(payload, sort_keys=True, indent=2).encode()
+
+
 def new_marker_path(directory: Path) -> Path:
     """Return a fresh marker file path in ``directory``; every sync writes its own."""
     return directory / f"{uuid.uuid4().hex}.json"

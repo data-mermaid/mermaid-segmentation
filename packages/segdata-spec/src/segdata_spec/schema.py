@@ -76,6 +76,17 @@ GROWTH_FORMS_SCHEMA: pa.Schema = pa.schema(
     ]
 )
 
+FEATURE_INDEX_SCHEMA: pa.Schema = pa.schema(
+    [
+        pa.field("image_id", pa.string(), nullable=False),
+        pa.field("key", pa.string(), nullable=False),
+        pa.field("etag", pa.string(), nullable=False),
+        pa.field("size", pa.int64(), nullable=False),
+        pa.field("crc64nvme", pa.string(), nullable=True),
+        pa.field("n_points", pa.int32(), nullable=False),
+    ]
+)
+
 DATASET_TABLES: dict[str, pa.Schema] = {
     "images.parquet": IMAGES_SCHEMA,
     "points.parquet": POINTS_SCHEMA,
