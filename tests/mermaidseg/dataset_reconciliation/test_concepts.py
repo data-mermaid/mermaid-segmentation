@@ -17,6 +17,7 @@ from mermaidseg.dataset_reconciliation.concepts import (
     read_class_to_concepts,
     source_labels_to_concepts,
 )
+from mermaidseg.dataset_reconciliation.taxonomy_tree import channel_values, load_taxonomy_frame
 from tests.mermaidseg.conftest import concept_table
 
 # Row i is the concept vector of label i: label 0 (background) is all zeros.
@@ -104,20 +105,58 @@ def test_binary_mapping_has_the_three_string_keys_only():
     assert generate_binary_concept_id_mapping(df, "live") == {"not_given": 0, "FALSE": 1, "TRUE": 2}
 
 
-def test_reading_the_table_keeps_strings_empty_cells_and_lower_cases_the_keys(tmp_path):
+def test_reading_the_table_keeps_strings_and_lower_cases_the_keys(tmp_path):
     path = tmp_path / "c.csv"
     path.write_text(
         "source_label_class_name,source_dataset_source,live,genus\n"
-        "Acro,CoralNet,TRUE,\n"
+        "Acro,CoralNet,TRUE,acropora\n"
         "Sand,CoralNet,FALSE,not_given\n"
     )
 
     df = read_class_to_concepts(path)
 
     assert df["live"].tolist() == ["TRUE", "FALSE"]
-    assert df["genus"].tolist() == ["", "not_given"]
+    assert df["genus"].tolist() == ["acropora", "not_given"]
     assert df["source_dataset_source"].tolist() == ["coralnet", "coralnet"]
     assert df["source_label_class_name"].tolist() == ["acro", "sand"]
+
+
+def _write_rank_table(tmp_path, genus_cell, family_cell="ACROPORIDAE"):
+    path = tmp_path / "ranks.csv"
+    path.write_text(
+        "source_label_class_name,source_dataset_source,genus,family\n"
+        f"Acro,CoralNet,{genus_cell},{family_cell}\n"
+        "Sand,CoralNet,not_given,not_given\n"
+    )
+    return path
+
+
+def test_reading_the_table_strips_and_lower_cases_rank_cells(tmp_path):
+    df = read_class_to_concepts(_write_rank_table(tmp_path, " Acropora "))
+
+    assert df["genus"].tolist() == ["acropora", "not_given"]
+    assert df["family"].tolist() == ["acroporidae", "not_given"]
+
+
+def test_concept_removal_matches_a_rank_cell_read_with_stray_case_and_spaces(tmp_path):
+    df = read_class_to_concepts(_write_rank_table(tmp_path, " Acropora "))
+
+    out = apply_concept_removal(df, ["genus__acropora"])
+
+    assert out["genus"].tolist() == ["not_given", "not_given"]
+    assert out["family"].tolist() == ["acroporidae", "not_given"]
+
+
+def test_taxonomy_frame_channel_values_have_no_raw_variant(tmp_path):
+    df = load_taxonomy_frame(_write_rank_table(tmp_path, " Acropora "))
+
+    assert channel_values(df, "genus") == ["acropora"]
+
+
+@pytest.mark.parametrize("cell", ["", "not given", "nan"])
+def test_reading_the_table_rejects_an_invalid_rank_cell(tmp_path, cell):
+    with pytest.raises(ValueError, match="invalid taxonomic concept cell"):
+        read_class_to_concepts(_write_rank_table(tmp_path, cell))
 
 
 # ---------- concept_kind ----------

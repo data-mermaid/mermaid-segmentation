@@ -80,8 +80,14 @@ def read_class_to_concepts(path: str | Path = DEFAULT_CLASS_TO_CONCEPTS_CSV) -> 
     """Read ``class_to_concepts.csv`` with every cell a string and the label keys lower-cased.
 
     ``dtype=str, keep_default_na=False`` keeps pandas from turning a column into bools or NaN.
+    Each taxonomic rank cell is normalised once here by ``parse_concept_cell(rank=True)``
+    (stripped, lower-cased), so later comparisons need no further normalisation. An invalid rank
+    cell (``""``, ``"nan"``, ``"not given"``) raises ``ValueError``.
     """
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    for rank in TAXONOMIC_CONCEPTS:
+        if rank in df.columns:
+            df[rank] = df[rank].map(lambda v: parse_concept_cell(v, rank=True))
     for key in ("source_dataset_source", "source_label_class_name"):
         df[key] = df[key].str.lower()
     return df

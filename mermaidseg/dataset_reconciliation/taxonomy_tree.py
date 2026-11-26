@@ -27,6 +27,7 @@ import pandas as pd
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
+    read_class_to_concepts,
 )
 
 #: Rank order, coarse -> fine. Mirrors the model's active taxonomic channels.
@@ -100,12 +101,11 @@ class TaxonomyTree:
 def load_taxonomy_frame(
     mapping_location: str | Path = DEFAULT_CLASS_TO_CONCEPTS_CSV,
 ) -> pd.DataFrame:
-    """Load the concept-mapping CSV with the same normalisation the registry applies."""
-    df = pd.read_csv(mapping_location).copy()
-    for col in ("source_label_class_name", "source_dataset_source"):
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.lower()
-    return df
+    """Load the concept-mapping CSV through ``read_class_to_concepts``.
+
+    Rank cells arrive stripped and lower-cased; an invalid rank cell raises ``ValueError``.
+    """
+    return read_class_to_concepts(mapping_location)
 
 
 def channel_values(df: pd.DataFrame, rank: str) -> list[str]:
