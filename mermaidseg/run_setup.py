@@ -29,7 +29,7 @@ from mermaidseg.model.meta import MetaModel
 
 DEFAULT_SCHEMA_CONFIG = REPO_ROOT / "configs" / "data_config.yaml"
 
-# Keys `Logger.save_model_checkpoint` writes that a weights-only load and a resume read.
+# Keys `write_checkpoint` writes that a weights-only load and a resume read.
 MODEL_CHECKPOINT_KEYS = ("model_state_dict", "lineage")
 RESUME_CHECKPOINT_KEYS = (
     "model_state_dict",

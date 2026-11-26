@@ -13,7 +13,9 @@ head's distribution ``p`` should equal the fine head's distribution summed per p
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from itertools import pairwise
+from typing import Any
 
 import torch
 
@@ -22,7 +24,9 @@ from mermaidseg.dataset_reconciliation.taxonomy_tree import (
     NONE_TAXON,
     TaxonomyTree,
     build_rank_incidence,
+    build_taxonomy_tree,
 )
+from mermaidseg.io import resolve_repo_path
 from mermaidseg.model.concept_metrics import reduce_masked_loss
 
 logger = logging.getLogger(__name__)
@@ -272,3 +276,26 @@ class TaxonomicLoss(torch.nn.Module):
             total = total + self.kl_weight * kl_value
 
         return total, loss_components
+
+
+def build_taxonomic_loss(
+    training_cfg: Mapping[str, Any], concept_value2id: dict[str, dict[str, list[int]]]
+) -> TaxonomicLoss | None:
+    """The taxonomic term of the ``training`` section, or None when it adds nothing.
+
+    None means the section is absent or its ``kl_weight`` is not positive.
+
+    Args:
+        training_cfg: The ``training`` config section.
+        concept_value2id: Concept name -> value -> channel mapping of the run's registry.
+    """
+    section = training_cfg.get("taxonomic_loss")
+    if section is None or not section["kl_weight"] > 0:
+        return None
+    kwargs = dict(section)
+    # Same tree as the hierarchical metrics.
+    taxonomy = build_taxonomy_tree(
+        resolve_repo_path(training_cfg["concept_mapping_path"]),
+        ambiguity_policy=kwargs.pop("ambiguity_policy"),
+    )
+    return TaxonomicLoss(taxonomy, concept_value2id, **kwargs)

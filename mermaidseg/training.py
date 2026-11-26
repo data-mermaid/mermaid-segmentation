@@ -3,8 +3,8 @@
 import argparse
 import contextlib
 import copy
+import functools
 import json
-import os
 import signal
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import ConcatDataset, DataLoader
 
+from mermaidseg.checkpoint import checkpoint_dir, prune_rolling_checkpoints, write_checkpoint
 from mermaidseg.config import to_plain_dict
 from mermaidseg.data.config import DataSection
 from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
@@ -22,7 +23,7 @@ from mermaidseg.export import write_sidecar
 from mermaidseg.inference.preprocess import IMAGENET_MEAN, IMAGENET_STD
 from mermaidseg.io import REPO_ROOT, resolve_repo_path, setup_config, update_config_with_args
 from mermaidseg.lineage import check_same_data, collect_lineage, data_version, inherit_lineage
-from mermaidseg.logger import Logger, prune_rolling_checkpoints
+from mermaidseg.logger import Logger
 from mermaidseg.model.distributed import (
     DistContext,
     ShardedBatchSampler,
@@ -32,7 +33,7 @@ from mermaidseg.model.distributed import (
 )
 from mermaidseg.model.eval import Evaluator
 from mermaidseg.model.meta import MetaModel, next_epoch_from_checkpoint, restore_warmup_progress
-from mermaidseg.model.train import train_model
+from mermaidseg.model.train import run_epoch
 from mermaidseg.run_setup import (
     MODEL_CHECKPOINT_KEYS,
     RESUME_CHECKPOINT_KEYS,
@@ -286,8 +287,6 @@ def run(args: argparse.Namespace) -> None:
     # Leave the config value untouched when a flag is not given.
     if args.grad_accum_steps is not None:
         cfg.training.grad_accum_steps = args.grad_accum_steps
-    if not cfg.training.taxonomic_loss.kl_weight > 0:
-        cfg.training.pop("taxonomic_loss")
 
     # Encoder, iterations, batch size, and epochs come from the model and training configs.
 
@@ -355,7 +354,7 @@ def run(args: argparse.Namespace) -> None:
 
     print0(dist_ctx, f"train batches: {len(train_loader)}   val batches: {len(val_loader)}")
     concept_id2name = schema.channel_id2name()
-    run_dir = Path(args.output_dir) / "model_checkpoints" / cfg.run_name
+    run_dir = checkpoint_dir(args.output_dir, cfg.run_name)
     if dist_ctx.is_main:
         run_dir.mkdir(parents=True, exist_ok=True)
         write_resolved_config(cfg_logger, run_dir)
@@ -444,12 +443,7 @@ def run(args: argparse.Namespace) -> None:
         logger_context = Logger(
             config=cfg_logger,
             meta_model=meta_model,
-            id2concept=dict(enumerate(schema.channel_names)),
-            log_checkpoint=1,
-            checkpoint_dir=args.output_dir,
             id2label={0: "ignore", **registry.target_id2label},
-            save_local_checkpoints=True,
-            lineage=lineage,
         )
     else:
         logger_context = contextlib.nullcontext(None)
@@ -470,11 +464,7 @@ def run(args: argparse.Namespace) -> None:
                     "model/lora_alpha": cfg.model.lora_alpha,
                     "loss/per_pixel_loss_weight": cfg.training.loss.per_pixel_loss_weight,
                     "loss/per_image_loss_weight": cfg.training.loss.per_image_loss_weight,
-                    "loss/kl_weight": (
-                        cfg.training.taxonomic_loss.kl_weight
-                        if "taxonomic_loss" in cfg.training
-                        else 0.0
-                    ),
+                    "loss/kl_weight": cfg.training.taxonomic_loss.kl_weight,
                     "data/resolution": args.resolution,
                     "train/batch_size": cfg.training.batch_size,
                     "train/grad_accum_steps": int(cfg.training.grad_accum_steps),
@@ -525,78 +515,45 @@ def run(args: argparse.Namespace) -> None:
                 step = int(meta.global_step)
                 # Same predicate on every rank: global_step is updated together.
                 # Steps that do not write return immediately, with no barrier.
-                write_interval = checkpoint_every > 0 and step % checkpoint_every == 0
+                write_interval = step % checkpoint_every == 0
                 write_preempt = preempt_every > 0 and step > 0 and step % preempt_every == 0
                 if not write_interval and not write_preempt:
                     return
 
                 def _write() -> None:
-                    assert (
-                        run_logger is not None
-                    )  # on_main_process runs only where the Logger exists
-                    # Interval checkpoints (eval cadence). Unchanged when preempt_every is 0,
-                    # which is the default.
+                    assert lineage is not None  # on_main_process runs only on rank 0
+                    save = functools.partial(
+                        write_checkpoint,
+                        meta_model=meta,
+                        config=cfg_logger,
+                        lineage=lineage,
+                        epoch=epoch,
+                        epoch_complete=step >= total_updates,
+                        metrics={},
+                    )
                     if write_interval:
-                        run_logger.save_model_checkpoint(
-                            meta,
-                            epoch,
-                            {},
-                            checkpoint_name=f"model_step{step}",
-                            epoch_complete=step >= total_updates,
-                        )
+                        save(run_dir / f"model_step{step}")
                     # One rolling file for preemption. epoch_complete stays false until the
                     # run is finished, so a resume reseeds with seed + global_step and
                     # continues this epoch. Older model_preempt* files are deleted after
-                    # the rename; model_step* and model_epoch* are not.
+                    # the rename; model_step* files are not.
                     if write_preempt:
                         name = f"model_preempt{step}"
-                        run_logger.save_model_checkpoint(
-                            meta,
-                            epoch,
-                            {},
-                            checkpoint_name=name,
-                            epoch_complete=step >= total_updates,
-                            atomic=True,
-                        )
-                        prune_rolling_checkpoints(
-                            os.path.join(
-                                run_logger.checkpoint_dir, "model_checkpoints", meta.run_name
-                            ),
-                            keep_name=name,
-                        )
+                        save(run_dir / name, atomic=True)
+                        prune_rolling_checkpoints(run_dir, keep_name=name)
 
                 on_main_process(_write)
 
-            metrics = train_model(
-                meta_model=meta_model,
-                evaluator=evaluator,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                logger=run_logger,
-                start_epoch=epoch,
-                end_epoch=epoch + 1,
-                metric_of_interest=cfg.training.metric_of_interest,
+            metrics_all[epoch] = run_epoch(
+                meta_model,
+                evaluator,
+                train_loader,
+                val_loader,
+                run_logger,
+                epoch=epoch,
                 train_log_interval=cfg.logger.train_log_interval,
-                on_optimizer_step=(
-                    _save_step_checkpoint
-                    if (dist_ctx.distributed or run_logger is not None)
-                    else None
-                ),
-                save_best_checkpoint=checkpoint_every <= 0,
+                on_optimizer_step=_save_step_checkpoint,
             )
-            metrics_all.update(metrics)
-            # Step-checkpointed runs already saved model_step*.
-            # Other runs still write model_epoch{N} at the end of each epoch.
-            if (
-                run_logger is not None
-                and checkpoint_every <= 0
-                and cfg.training.iterations_per_train_epoch > 1000
-            ):
-                run_logger.save_model_checkpoint(
-                    meta_model,
-                    epoch,
-                    metrics[epoch].get("validation_metrics", {}),
-                )
         if not metrics_all:
             print0(dist_ctx, "No training epochs ran.")
         else:

@@ -248,7 +248,7 @@ def test_val_loss_overrides_the_run_config_for_scoring(tmp_path, monkeypatch):
     )
     cfg = harness.meta_cfg
     assert cfg.run_name == "scored"
-    assert "taxonomic_loss" not in cfg.training
+    assert cfg.training.taxonomic_loss == {"kl_weight": 0.0}
     assert cfg.training.distributed is False
     assert (cfg.training.loss.per_pixel_loss_weight, cfg.training.loss.per_image_loss_weight) == (
         0.25,

@@ -38,7 +38,6 @@ training:
     iterations_per_train_epoch: 10000
     batch_size: 32
     seed: 4
-    metric_of_interest: accuracy
     loader:
         prefetch_factor: 3
         val_prefetch_factor: 2

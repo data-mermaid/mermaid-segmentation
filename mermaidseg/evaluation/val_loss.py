@@ -158,7 +158,8 @@ def evaluate_val_loss(
     cfg = _bundle_config(data_config, bundle)
     resolution = bundle.input_size[0]
     cfg.run_name = name
-    cfg.training.pop("taxonomic_loss", None)
+    # Scoring builds no taxonomic term.
+    cfg.training.taxonomic_loss = {"kl_weight": 0.0}
     cfg.training.distributed = False
     cfg.training.loss.per_pixel_loss_weight = per_pixel_loss_weight
     cfg.training.loss.per_image_loss_weight = per_image_loss_weight

@@ -220,15 +220,6 @@ def all_reduce_mean(tensor: torch.Tensor) -> torch.Tensor:
     return reduced / dist.get_world_size()
 
 
-def all_reduce_sum(tensor: torch.Tensor) -> torch.Tensor:
-    """Sum of ``tensor`` over ranks (a copy; the input is unchanged)."""
-    if not is_distributed():
-        return tensor.clone()
-    reduced = tensor.detach().clone().to(_collective_device())
-    dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
-    return reduced
-
-
 def _key_fingerprint(keys: list[str]) -> int:
     return zlib.crc32("\n".join(keys).encode()) + (len(keys) << 32)
 

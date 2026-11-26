@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import mermaidseg.model.meta as meta_module
 import mermaidseg.model.models as models_module
+import mermaidseg.model.taxonomy_loss as taxonomy_loss_module
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.export import write_sidecar
 from mermaidseg.inference.bundle import MODEL_JSON
@@ -383,7 +384,7 @@ def test_taxonomic_loss_reads_the_mapping_from_the_repo_not_the_current_director
         seen.append(path)
         raise _TreeBuildStop
 
-    monkeypatch.setattr(meta_module, "build_taxonomy_tree", _record)
+    monkeypatch.setattr(taxonomy_loss_module, "build_taxonomy_tree", _record)
     monkeypatch.chdir(tmp_path)
     with pytest.raises(_TreeBuildStop):
         make_meta_model(cfg)

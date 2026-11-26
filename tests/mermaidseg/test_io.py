@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import datetime
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,9 @@ from mermaidseg.io import (
     ConfigDict,
     apply_resolution,
     build_eval_transform,
+    build_train_parser,
+    check_train_args,
     compile_transform,
-    get_parser,
-    load_config,
     resolve_repo_path,
     setup_config,
     update_config_with_args,
@@ -150,47 +151,98 @@ def test_a_missing_attribute_raises_attribute_error_not_key_error():
     assert getattr(cfg, "absent", "fallback") == "fallback"
 
 
-# ---------- load_config ----------
+# ---------- build_train_parser / check_train_args ----------
+
+REQUIRED = ["--num-workers", "8", "--cache-dir", "cache"]
+
+CONFIG_FLAGS = (
+    "training_config",
+    "model_config",
+    "data_config",
+    "concept_schema_config",
+    "logger_config",
+)
 
 
-@pytest.mark.parametrize("content", ["- a\n- b\n", "just a string\n"])
-def test_load_config_rejects_a_file_that_is_not_a_mapping_naming_the_file(tmp_path, content):
-    path = tmp_path / "cfg.yaml"
-    path.write_text(content)
-    with pytest.raises(ValueError, match="cfg.yaml.*mapping"):
-        load_config(path)
+def _parse(*argv: str):
+    return build_train_parser().parse_args([*REQUIRED, *argv])
 
 
-def test_load_config_wraps_a_mapping_file(tmp_path):
-    path = tmp_path / "cfg.yaml"
-    path.write_text("a:\n  b: 1\n")
-    cfg = load_config(path)
-    assert cfg.a.b == 1
+def _parse_and_check(argv: list[str]):
+    parser = build_train_parser()
+    args = parser.parse_args(argv)
+    check_train_args(parser, args)
+    return args
+
+
+def test_config_defaults_point_at_existing_repo_files():
+    args = _parse()
+    for flag in CONFIG_FLAGS:
+        assert resolve_repo_path(getattr(args, flag)).is_file(), flag
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["--cache-dir", "cache", "--num-workers", "0"], id="zero-num-workers"),
+        pytest.param([*REQUIRED, "--nccl-timeout-min", "0"], id="zero-nccl-timeout"),
+        pytest.param([*REQUIRED, "--nccl-timeout-min", "-1"], id="negative-nccl-timeout"),
+        pytest.param(
+            [*REQUIRED, "--preempt-checkpoint-every-steps", "-1"], id="negative-preempt-every"
+        ),
+        pytest.param(
+            [*REQUIRED, "--checkpoint", "x", "--init-weights", "y"], id="checkpoint-and-init"
+        ),
+    ],
+)
+def test_check_train_args_rejects_invalid_arguments_with_exit_2(argv):
+    with pytest.raises(SystemExit) as exit_info:
+        _parse_and_check(argv)
+    assert exit_info.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param([*REQUIRED, "--nccl-timeout-min", "0.01"], id="small-positive-nccl-timeout"),
+        pytest.param([*REQUIRED, "--preempt-checkpoint-every-steps", "0"], id="preempt-disabled"),
+        pytest.param([*REQUIRED, "--checkpoint", "x"], id="checkpoint-alone"),
+        pytest.param([*REQUIRED, "--init-weights", "y"], id="init-weights-alone"),
+        pytest.param(["--cache-dir", "cache", "--num-workers", "1"], id="single-worker"),
+    ],
+)
+def test_check_train_args_accepts_the_edge_of_each_valid_range(argv):
+    assert _parse_and_check(argv).cache_dir == "cache"
 
 
 # ---------- update_config_with_args ----------
 
 
+def _overrides(**given: Any) -> argparse.Namespace:
+    """Parsed flags with the override flags not in ``given`` left unset."""
+    return argparse.Namespace(**{"run_name": None, "batch_size": None, **given})
+
+
 def test_batch_size_flag_overrides_the_training_batch_size_and_keeps_its_siblings():
     cfg = ConfigDict({"run_name": "keep", "training": {"batch_size": 2, "epochs": 5}})
-    args = get_parser().parse_args(["--batch-size", "8"])
+    args = _overrides(batch_size=8)
     update_config_with_args(cfg, args)
     assert cfg == {"run_name": "keep", "training": {"batch_size": 8, "epochs": 5}}
 
 
 def test_run_name_flag_overrides_the_run_name():
     cfg = ConfigDict({"run_name": "old"})
-    update_config_with_args(cfg, get_parser().parse_args(["--run-name", "new"]))
+    update_config_with_args(cfg, _overrides(run_name="new"))
     assert cfg.run_name == "new"
 
 
 def test_flags_that_are_not_given_leave_the_config_untouched():
     cfg = ConfigDict({"run_name": "keep", "training": {"batch_size": 2}})
-    update_config_with_args(cfg, get_parser().parse_args([]))
+    update_config_with_args(cfg, _overrides())
     assert cfg == {"run_name": "keep", "training": {"batch_size": 2}}
 
 
 def test_batch_size_flag_creates_a_missing_training_section():
     cfg = ConfigDict()
-    update_config_with_args(cfg, get_parser().parse_args(["--batch-size", "8"]))
+    update_config_with_args(cfg, _overrides(batch_size=8))
     assert cfg == {"training": {"batch_size": 8}}

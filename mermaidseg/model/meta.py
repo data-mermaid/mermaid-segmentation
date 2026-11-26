@@ -6,13 +6,11 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
 import transformers
-
-# from mermaidseg.model.eval import Evaluator
 from numpy.typing import NDArray
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
@@ -22,9 +20,8 @@ from tqdm import tqdm
 from mermaidseg.config import lookup_class
 from mermaidseg.dataset_reconciliation.concepts import source_labels_to_concepts
 from mermaidseg.dataset_reconciliation.registry import source_labels_to_target_labels
-from mermaidseg.dataset_reconciliation.taxonomy_tree import build_taxonomy_tree
 from mermaidseg.inference.predictor import class_predictions
-from mermaidseg.io import ConfigDict, resolve_repo_path
+from mermaidseg.io import ConfigDict
 from mermaidseg.model.concept_masking import apply_concept_source_mask
 from mermaidseg.model.data_parallel import (
     DDPLossStep,
@@ -42,7 +39,10 @@ from mermaidseg.model.distributed import (
 )
 from mermaidseg.model.loss import LOSS_CLASSES
 from mermaidseg.model.models import MODEL_CLASSES, load_pretrained_encoder
-from mermaidseg.model.taxonomy_loss import TaxonomicLoss
+from mermaidseg.model.taxonomy_loss import build_taxonomic_loss
+
+if TYPE_CHECKING:
+    from mermaidseg.model.eval import Evaluator
 
 logger = logging.getLogger(__name__)
 
@@ -304,22 +304,10 @@ class MetaModel:
         loss_kwargs.setdefault("concept_value2id", self.concept_value2id)
         self.loss = loss_cls(**loss_kwargs)
 
-        # Taxonomic KL coherence term added to the concept loss. The trainer drops the
-        # section when its kl_weight is not positive.
-        self.taxonomic_loss = None
-        taxonomic_cfg = training_kwargs.get("taxonomic_loss")
-        if taxonomic_cfg is not None:
-            taxonomic_kwargs = dict(taxonomic_cfg)
-            # Same tree as the hierarchical metrics.
-            taxonomy = build_taxonomy_tree(
-                resolve_repo_path(training_kwargs.concept_mapping_path),
-                ambiguity_policy=taxonomic_kwargs.pop("ambiguity_policy"),
-            )
-            self.taxonomic_loss = TaxonomicLoss(
-                taxonomy,
-                self.concept_value2id,
-                **taxonomic_kwargs,
-            ).to(device)
+        # Taxonomic KL coherence term added to the concept loss; None when its kl_weight is
+        # not positive.
+        taxonomic_loss = build_taxonomic_loss(training_kwargs, self.concept_value2id)
+        self.taxonomic_loss = taxonomic_loss.to(device) if taxonomic_loss is not None else None
 
         optimizer_cfg = dict(training_kwargs.optimizer)
         optimizer_cls = lookup_class(OPTIMIZER_CLASSES, "optimizer", optimizer_cfg.pop("type"))
@@ -672,8 +660,7 @@ class MetaModel:
     def train_epoch(
         self,
         train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-        evaluator: Any
-        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        evaluator: "Evaluator | None" = None,
         run_logger: Any | None = None,
         log_interval: int = 1,
         epoch: int | None = None,
@@ -976,8 +963,7 @@ class MetaModel:
     def validation_epoch(
         self,
         val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor]],
-        evaluator: Any
-        | None = None,  # TODO: Should be Evaluator - but this leads to circular import, fix
+        evaluator: "Evaluator | None" = None,
     ) -> tuple[float, dict[str, float | NDArray[np.float64]]]:
         """Calculate the validation loss and metrics for one epoch."""
         self.model.eval()
