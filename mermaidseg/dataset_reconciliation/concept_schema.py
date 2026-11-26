@@ -8,13 +8,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import (
+    TAXONOMIC_CONCEPTS,
+    binary_offset,
+    rank_slices,
+)
 from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
     encode_concept_channels_from_df,
+    read_class_to_concepts,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,10 +66,7 @@ class ConceptSchema:
         taxonomic value becomes ``not_given`` at its rank, a removed binary concept loses its column.
         Exactly those channels must disappear; anything else is an error.
         """
-        df = pd.read_csv(path)
-        df = df.copy()
-        df["source_label_class_name"] = df["source_label_class_name"].astype(str).str.lower()
-        df["source_dataset_source"] = df["source_dataset_source"].astype(str).str.lower()
+        df = read_class_to_concepts(path)
         sources_lower = {s.lower() for s in sources}
         df_run = df[df["source_dataset_source"].isin(sources_lower)].reset_index(drop=True)
         removed_concepts = list(dict.fromkeys(removed_concepts))
@@ -115,6 +116,23 @@ class ConceptSchema:
         """Return the length-``C`` concept vector for ``(source, label_name)``."""
         key = (source.lower(), label_name.lower())
         return self.row_by_key.get(key, np.zeros(self.num_channels, dtype=np.float32))
+
+    def rank_slices(self) -> list[tuple[str, int, int]]:
+        """Return ``(rank, offset, width)`` of each taxonomic rank, in channel order."""
+        return rank_slices(self.concept_value2id)
+
+    @property
+    def binary_offset(self) -> int:
+        """Channel index where the binary tail starts."""
+        return binary_offset(self.concept_value2id)
+
+    def binary_names(self) -> list[str]:
+        """Binary concept names in channel order; each is its own single channel."""
+        names = [k for k in self.concept_value2id if k not in TAXONOMIC_CONCEPTS]
+        missing = [n for n in names if n not in self.channel_names]
+        if missing:
+            raise ValueError(f"binary concepts without a channel of the same name: {missing}")
+        return names
 
     def channel_id2name(self) -> dict[int, str]:
         """Map 1-indexed channel id to channel name (e.g. ``kingdom__animalia``)."""

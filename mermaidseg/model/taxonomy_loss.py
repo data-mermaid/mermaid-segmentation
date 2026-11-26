@@ -16,7 +16,7 @@ import logging
 
 import torch
 
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS, rank_slices
 from mermaidseg.dataset_reconciliation.taxonomy_tree import (
     NONE_TAXON,
     TaxonomyTree,
@@ -31,15 +31,10 @@ def taxonomic_rank_slices(
     concept_value2id: dict[str, dict[str, list[int]]],
 ) -> list[tuple[str, int, list[str]]]:
     """Return ``(rank, channel_offset, class_names)`` for each taxonomic rank, in order."""
-    slices = []
-    offset = 0
-    for rank in TAXONOMIC_CONCEPTS:
-        if rank not in concept_value2id:
-            continue
-        class_names = [v for v in concept_value2id[rank] if v != "not_given"]
-        slices.append((rank, offset, class_names))
-        offset += len(class_names)
-    return slices
+    return [
+        (rank, offset, [v for v in concept_value2id[rank] if v != "not_given"])
+        for rank, offset, _ in rank_slices(concept_value2id)
+    ]
 
 
 def _tree_channel_index(taxonomy: TaxonomyTree, rank: str, names: list[str]) -> list[int]:

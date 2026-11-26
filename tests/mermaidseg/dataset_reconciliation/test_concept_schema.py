@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CSV = _REPO_ROOT / "configs" / "class_to_concepts.csv"
@@ -62,3 +65,32 @@ def test_fish_concept_and_taxonomy():
         other["source_dataset_source"], other["source_label_class_name"], strict=True
     ):
         assert int(schema.row_for(source, label)[fish_i]) == 0, (source, label)
+
+
+_BINARY = {"not_given": 0, "FALSE": 1, "TRUE": 2}
+
+
+def _schema(channels: tuple[str, ...]) -> ConceptSchema:
+    return ConceptSchema(
+        channel_names=channels,
+        concept_value2id={
+            "genus": {"not_given": [0, 0], "acropora": [2, 1], "porites": [1, 2]},
+            "bleached": _BINARY,
+            "branching": _BINARY,
+        },
+        num_channels=len(channels),
+        row_by_key={},
+    )
+
+
+def test_binary_names_skip_the_taxonomic_ranks():
+    schema = _schema(("genus__acropora", "genus__porites", "bleached", "branching"))
+
+    assert schema.binary_names() == ["bleached", "branching"]
+
+
+def test_a_binary_concept_without_a_channel_of_its_own_raises():
+    schema = _schema(("genus__acropora", "genus__porites", "branching"))
+
+    with pytest.raises(ValueError, match=r"without a channel of the same name: \['bleached'\]"):
+        schema.binary_names()

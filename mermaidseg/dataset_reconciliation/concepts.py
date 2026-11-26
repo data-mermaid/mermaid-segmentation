@@ -7,10 +7,13 @@ GPU-friendly ``source_labels_to_concepts`` lookup driven by a precomputed
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
+from numpy.typing import NDArray
 
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 
@@ -68,25 +71,79 @@ NONCORAL_CONCEPTS = [
 ]
 
 
+BINARY_CELLS = frozenset({"true", "false", "not_given"})
+_RANK_PLACEHOLDERS = frozenset({"", "nan", "not given"})
+_BINARY_CODES = {"not_given": 0, "false": 1, "true": 2}
+
+
+def read_class_to_concepts(path: str | Path = DEFAULT_CLASS_TO_CONCEPTS_CSV) -> pd.DataFrame:
+    """Read ``class_to_concepts.csv`` with every cell a string and the label keys lower-cased.
+
+    ``dtype=str, keep_default_na=False`` keeps pandas from turning a column into bools or NaN.
+    """
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    for key in ("source_dataset_source", "source_label_class_name"):
+        df[key] = df[key].str.lower()
+    return df
+
+
+def parse_concept_cell(value: object, *, rank: bool) -> str:
+    """Return one concept cell as its lower-cased value.
+
+    A binary cell is ``"true"``, ``"false"`` or ``"not_given"``. A rank cell is ``"not_given"`` or
+    a taxon, which may be ``"none"``. Case and surrounding whitespace are ignored. Any other cell,
+    including ``""``, ``"nan"`` and ``"not given"``, raises ``ValueError``.
+    """
+    cell = value.strip().lower() if isinstance(value, str) else None
+    if cell is None or (cell in _RANK_PLACEHOLDERS if rank else cell not in BINARY_CELLS):
+        kind = "taxonomic" if rank else "binary"
+        raise ValueError(f"invalid {kind} concept cell {value!r}")
+    return cell
+
+
+def encode_concept_row(row: Mapping[str, object], channel_names: Sequence[str]) -> NDArray[np.int8]:
+    """Encode one concept-table row into ``channel_names`` order (0 not_given, 1 False, 2 True).
+
+    A channel ``rank__value`` is 2 when the row has ``value`` at ``rank`` and 1 when it has another
+    value that has a channel. ``not_given``, a value without a channel and a missing column give 0
+    at every channel of the rank. A binary channel reads the column of the same name; a missing
+    column gives 0.
+    """
+    channels = set(channel_names)
+    out = np.zeros(len(channel_names), dtype=np.int8)
+    for i, channel in enumerate(channel_names):
+        rank, sep, value = channel.partition("__")
+        if sep and rank in TAXONOMIC_CONCEPTS:
+            if rank not in row:
+                continue
+            cell = parse_concept_cell(row[rank], rank=True)
+            if cell == value:
+                out[i] = 2
+            elif cell != "not_given" and f"{rank}__{cell}" in channels:
+                out[i] = 1
+        elif channel in row:
+            out[i] = _BINARY_CODES[parse_concept_cell(row[channel], rank=False)]
+    return out
+
+
 def generate_taxonomic_binary_id_mapping(
     df: pd.DataFrame, taxonomic_col: str
 ) -> dict[str, list[int]] | None:
     """Generate binary-style encodings for a taxonomic rank.
 
-    The concrete values for a rank become one column each. ``not_given`` maps to all zeros, ``none``
-    maps to all ones, and each concrete value maps to 2 in its own column and 1 in the others.
+    Every value for a rank except ``not_given`` becomes one column; ``none`` is a value like any
+    other. ``not_given`` maps to all zeros, and each value maps to 2 in its own column and 1 in the
+    others.
     """
     concrete_values = sorted(
-        value for value in df[taxonomic_col].dropna().unique() if value not in ["not_given"]
+        {parse_concept_cell(value, rank=True) for value in df[taxonomic_col].dropna().unique()}
+        - {"not_given"}
     )
     if not concrete_values:
         return None
 
     width = len(concrete_values)
-    mapping: dict[str, list[int]] = {
-        "not_given": [0] * width,
-        # "none": [1] * width,
-    }
+    mapping: dict[str, list[int]] = {"not_given": [0] * width}
     for index, value in enumerate(concrete_values):
         encoded = [1] * width
         encoded[index] = 2
@@ -96,20 +153,15 @@ def generate_taxonomic_binary_id_mapping(
 
 def generate_binary_concept_id_mapping(
     df: pd.DataFrame, taxonomic_col: str
-) -> dict[str | bool, int] | None:
-    """Generate a mapping for one hot (not really) encoded concepts.
+) -> dict[str, int] | None:
+    """Generate the ``not_given`` / ``FALSE`` / ``TRUE`` codes of a binary concept column.
 
-    "not given" is always mapped to 0.
-    If the concept contains both true and false values, then map true to 2 and false to 1.
-    Otherwise, map all values to 0 since they don't represent a meaningful concept.
-    TODO: update FALSE, False once concept mapping is fixed
+    A column holding both true and false values maps ``not_given`` to 0, false to 1 and true to 2.
+    Any other column is not a meaningful concept and has no mapping.
     """
-    unique_values = df[taxonomic_col].dropna().unique()
-
-    if (False in unique_values or "FALSE" in unique_values) and (
-        True in unique_values or "TRUE" in unique_values
-    ):
-        return {"not_given": 0, False: 1, "FALSE": 1, True: 2, "TRUE": 2}
+    cells = {parse_concept_cell(value, rank=False) for value in df[taxonomic_col].dropna().unique()}
+    if {"true", "false"} <= cells:
+        return {"not_given": 0, "FALSE": 1, "TRUE": 2}
     return None
 
 
@@ -126,11 +178,7 @@ def encode_concept_channels_from_df(
         channel_names: ordered channel column names.
         concept_value2id: structure expected by loss/model slicing.
     """
-    meta_cols = ["source_dataset_source", "source_label_class_name"]
-    if "global_id" in df_mapping.columns:
-        meta_cols = ["global_id", *meta_cols]
-
-    encoded_parts: list[pd.DataFrame] = [df_mapping[meta_cols].copy()]
+    meta = df_mapping[["source_dataset_source", "source_label_class_name"]].copy()
     channel_names: list[str] = []
     concept_value2id: dict[str, dict] = {}
 
@@ -138,41 +186,24 @@ def encode_concept_channels_from_df(
         taxonomic_binary_mapping = generate_taxonomic_binary_id_mapping(df_mapping, col)
         if taxonomic_binary_mapping is None:
             continue
-
         concept_value2id[col] = taxonomic_binary_mapping
-        concrete_values = [
-            value for value in taxonomic_binary_mapping if value not in ["not_given"]
-        ]
-
-        mapped = df_mapping[col].map(taxonomic_binary_mapping)
-        mapped = mapped.apply(
-            lambda v, mapping=taxonomic_binary_mapping: (
-                v if isinstance(v, list) else mapping["not_given"]
-            )
+        channel_names.extend(
+            f"{col}__{value}" for value in taxonomic_binary_mapping if value != "not_given"
         )
-        encoded_columns = pd.DataFrame(
-            mapped.tolist(),
-            columns=[f"{col}__{value}" for value in concrete_values],
-            index=df_mapping.index,
-        )
-        encoded_parts.append(encoded_columns)
-        channel_names.extend(encoded_columns.columns.tolist())
 
-    binary_concept_columns = list(MORPHOLOGIC_CONCEPTS + HEALTH_CONCEPTS + NONCORAL_CONCEPTS)
-    binary_encoded: dict[str, pd.Series] = {}
-    for col in binary_concept_columns:
+    for col in MORPHOLOGIC_CONCEPTS + HEALTH_CONCEPTS + NONCORAL_CONCEPTS:
         if col not in df_mapping.columns:
             continue
         binary_mapping = generate_binary_concept_id_mapping(df_mapping, col)
         if binary_mapping is not None:
             concept_value2id[col] = binary_mapping
             channel_names.append(col)
-            binary_encoded[col] = df_mapping[col].map(binary_mapping).fillna(0).astype(int)
 
-    if binary_encoded:
-        encoded_parts.append(pd.DataFrame(binary_encoded, index=df_mapping.index))
-
-    encoded_df = pd.concat(encoded_parts, axis=1)
+    rows = [encode_concept_row(row, channel_names) for row in df_mapping.to_dict("records")]
+    codes = np.stack(rows) if rows else np.zeros((0, len(channel_names)), dtype=np.int8)
+    encoded_df = pd.concat(
+        [meta, pd.DataFrame(codes, columns=channel_names, index=df_mapping.index)], axis=1
+    )
     return encoded_df, channel_names, concept_value2id
 
 

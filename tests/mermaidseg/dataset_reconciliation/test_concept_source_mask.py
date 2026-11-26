@@ -11,7 +11,6 @@ from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     MASK_COLUMNS,
     _source_sort_key,
-    binary_concepts,
     load_concept_source_mask,
     meta_path,
     only_false_pairs,
@@ -51,10 +50,6 @@ def _points(rows: list[tuple[int, str, int]]) -> pd.DataFrame:
     )
 
 
-def test_binary_concepts_skip_taxonomic_ranks():
-    assert binary_concepts(_schema()) == ["bleached", "branching"]
-
-
 def test_counts_and_only_false_pairs():
     ann = _points(
         [
@@ -85,18 +80,6 @@ def test_meta_path_sits_next_to_the_csv(tmp_path):
         meta_path(tmp_path / "coralnet_only_false.csv")
         == tmp_path / "coralnet_only_false.meta.yaml"
     )
-
-
-def test_binary_concept_without_a_channel_of_its_own_raises():
-    schema = ConceptSchema(
-        channel_names=("genus__acropora", "branching"),
-        concept_value2id={"genus": {"not_given": 0, "acropora": 1}, "bleached": ENC},
-        num_channels=2,
-        row_by_key={},
-    )
-
-    with pytest.raises(ValueError, match=r"without a channel of the same name: \['bleached'\]"):
-        binary_concepts(schema)
 
 
 def test_loading_a_mask_without_its_sidecar_raises_file_not_found(tmp_path):

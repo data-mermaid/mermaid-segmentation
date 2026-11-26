@@ -10,11 +10,11 @@ import torch
 from mermaidseg.model.eval import Evaluator
 
 # Channels: kingdom (2), then the binary concepts bleached and sand. Taxonomic values are
-# per-level id lists; binary values are ints keyed by bool, which the annotation does not model.
+# per-level id lists; binary values are ints.
 CONCEPT_VALUE2ID: dict[str, dict[Any, Any]] = {
-    "kingdom": {"not_given": [0, 0], "a": [2, 1]},
-    "bleached": {"not_given": 0, False: 1, True: 2},
-    "sand": {"not_given": 0, False: 1, True: 2},
+    "kingdom": {"not_given": [0, 0], "a": [2, 1], "b": [1, 2]},
+    "bleached": {"not_given": 0, "FALSE": 1, "TRUE": 2},
+    "sand": {"not_given": 0, "FALSE": 1, "TRUE": 2},
 }
 
 

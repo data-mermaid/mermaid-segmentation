@@ -4,7 +4,11 @@ import torch
 from torchmetrics.classification import Accuracy
 from torchmetrics.metric import Metric
 
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import (
+    TAXONOMIC_CONCEPTS,
+    binary_offset,
+    rank_slices,
+)
 from mermaidseg.model.concept_metrics import (
     map_taxonomy_predictions_to_dense,
     map_taxonomy_to_dense,
@@ -56,14 +60,10 @@ class Evaluator:
         }
 
         self.concept_metric_dict: dict[str, Metric] = {}
-        for concept in TAXONOMIC_CONCEPTS:
-            if concept not in self.concept_value2id:
-                continue
-            concept_values = self.concept_value2id[concept]
-            order_concept_length = len(list(concept_values.values())[0]) + 2
+        for concept, _, width in rank_slices(self.concept_value2id):
             self.concept_metric_dict[f"accuracy/{concept}"] = Accuracy(
                 task="multiclass",
-                num_classes=order_concept_length,
+                num_classes=width + 2,
                 ignore_index=0,
             ).to(self.device)
         for concept in self.concept_value2id:
@@ -104,16 +104,9 @@ class Evaluator:
         self, concept_outputs: torch.Tensor, concept_labels: torch.Tensor
     ) -> None:
         """Update concept accuracy metrics for taxonomic and binary concepts."""
-        offset = 0
-
-        for concept in TAXONOMIC_CONCEPTS:
-            if concept not in self.concept_value2id:
-                continue
-            concept_values = self.concept_value2id[concept]
-            order_concept_length = len(list(concept_values.values())[0])
-            concept_labels_order = concept_labels[:, offset : offset + order_concept_length, ...]
-            concept_outputs_order = concept_outputs[:, offset : offset + order_concept_length, ...]
-            offset += order_concept_length
+        for concept, offset, width in rank_slices(self.concept_value2id):
+            concept_labels_order = concept_labels[:, offset : offset + width, ...]
+            concept_outputs_order = concept_outputs[:, offset : offset + width, ...]
 
             concept_labels_order = map_taxonomy_to_dense(concept_labels_order)
             concept_outputs_order = map_taxonomy_predictions_to_dense(concept_outputs_order)
@@ -123,18 +116,19 @@ class Evaluator:
                 continue
             self.concept_metric_dict[metric_key].update(concept_outputs_order, concept_labels_order)
 
-        concept_labels_binary = concept_labels[:, offset:, ...]
-        concept_outputs_binary = concept_outputs[:, offset:, ...]
+        tail = binary_offset(self.concept_value2id)
+        concept_labels_binary = concept_labels[:, tail:, ...]
+        concept_outputs_binary = concept_outputs[:, tail:, ...]
         concept_outputs_binary = (concept_outputs_binary > 0.5).float()
         concept_outputs_binary += 1
-        binary_offset = 0
+        channel = 0
         for concept in self.concept_value2id:
             if concept not in TAXONOMIC_CONCEPTS:
                 if concept not in self._binary_accuracy_metrics:
-                    binary_offset += 1
+                    channel += 1
                     continue
                 self._binary_accuracy_metrics[concept].update(
-                    concept_outputs_binary[:, binary_offset : binary_offset + 1, ...],
-                    concept_labels_binary[:, binary_offset : binary_offset + 1, ...],
+                    concept_outputs_binary[:, channel : channel + 1, ...],
+                    concept_labels_binary[:, channel : channel + 1, ...],
                 )
-                binary_offset += 1
+                channel += 1

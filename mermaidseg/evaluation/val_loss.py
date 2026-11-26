@@ -38,7 +38,6 @@ from tqdm import tqdm
 
 from mermaidseg.data.config import DataSection
 from mermaidseg.data.factory import build_datasets, load_benthic_hierarchy
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_source_mask import (
     apply_concept_source_mask,
     attach_source_rows,
@@ -59,15 +58,6 @@ from mermaidseg.seeding import make_worker_seeder
 logger = logging.getLogger(__name__)
 
 TOTAL_KEY = "loss"
-
-
-def binary_concept_names(concept_value2id: dict[str, Any], channel_names: list[str]) -> list[str]:
-    """Names of the binary channels, which follow the taxonomic ranks (as in the slices)."""
-    offset = 0
-    for rank in TAXONOMIC_CONCEPTS:
-        if rank in concept_value2id:
-            offset += len(next(iter(concept_value2id[rank].values())))
-    return channel_names[offset:]
 
 
 class _Accumulator:
@@ -195,9 +185,7 @@ def evaluate_val_loss(
     )
     channel_names = [name for _, name in sorted(schema.channel_id2name().items())]
     _check_layout(bundle, registry, channel_names)
-    cfg.training.loss.binary_concept_names = binary_concept_names(
-        registry.concept_value2id, channel_names
-    )
+    cfg.training.loss.binary_concept_names = schema.binary_names()
 
     source_mask = None
     if apply_source_mask:

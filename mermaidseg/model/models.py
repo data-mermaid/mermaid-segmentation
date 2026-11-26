@@ -10,7 +10,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoModel, DPTConfig, PreTrainedModel
 from transformers.models.dpt.modeling_dpt import DPTNeck
 
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import binary_offset, rank_slices
 
 
 @dataclass
@@ -261,17 +261,12 @@ class ConceptBottleneckDPTLoRADINOv3(torch.nn.Module):
 
     def concept_outputs_activation(self, concept_outputs: torch.Tensor) -> torch.Tensor:
         """Apply per-rank softmax to taxonomic channels and sigmoid to the binary tail."""
-        offset = 0
-        activated_parts = []
-
-        for concept in TAXONOMIC_CONCEPTS:
-            concept_values = self.concept_value2id[concept]
-            order_concept_length = len(list(concept_values.values())[0])
-            chunk = concept_outputs[:, offset : offset + order_concept_length, ...]
-            activated_parts.append(torch.softmax(chunk.to(self.dtype), dim=1))
-            offset += order_concept_length
-
-        activated_parts.append(torch.sigmoid(concept_outputs[:, offset:, ...].to(self.dtype)))
+        activated_parts = [
+            torch.softmax(concept_outputs[:, offset : offset + width, ...].to(self.dtype), dim=1)
+            for _, offset, width in rank_slices(self.concept_value2id)
+        ]
+        tail = binary_offset(self.concept_value2id)
+        activated_parts.append(torch.sigmoid(concept_outputs[:, tail:, ...].to(self.dtype)))
         return torch.cat(activated_parts, dim=1)
 
 

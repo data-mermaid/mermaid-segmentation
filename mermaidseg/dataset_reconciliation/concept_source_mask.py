@@ -25,7 +25,6 @@ import torch
 import yaml
 
 from mermaidseg.data.base import VersionDataset
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
 
 logger = logging.getLogger(__name__)
@@ -34,15 +33,6 @@ logger = logging.getLogger(__name__)
 NOT_GIVEN, FALSE, TRUE = 0, 1, 2
 
 MASK_COLUMNS = ["source_id", "concept", "n_true", "n_false", "n_not_given"]
-
-
-def binary_concepts(schema: ConceptSchema) -> list[str]:
-    """Binary concept names in channel order; each is its own single channel."""
-    names = [k for k in schema.concept_value2id if k not in TAXONOMIC_CONCEPTS]
-    missing = [n for n in names if n not in schema.channel_names]
-    if missing:
-        raise ValueError(f"binary concepts without a channel of the same name: {missing}")
-    return names
 
 
 def source_concept_counts(
@@ -58,7 +48,7 @@ def source_concept_counts(
     Returns:
         One row per source and binary concept with columns ``MASK_COLUMNS``.
     """
-    concepts = binary_concepts(schema)
+    concepts = schema.binary_names()
     channel = [schema.channel_names.index(c) for c in concepts]
     per_label = (
         df_annotations.groupby(["source_id", "source_label_name"], observed=True)
@@ -181,7 +171,7 @@ def load_concept_source_mask(
     if missing_cols:
         raise ValueError(f"{path} is missing columns {sorted(missing_cols)}")
 
-    binary = set(binary_concepts(schema))
+    binary = set(schema.binary_names())
     removed = set(removed_concepts)
     unknown = sorted(set(df["concept"]) - binary - removed)
     if unknown:

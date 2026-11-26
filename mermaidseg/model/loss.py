@@ -5,7 +5,11 @@ from collections.abc import Iterator
 import torch
 import torch.nn.functional as F
 
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import (
+    TAXONOMIC_CONCEPTS,
+    binary_offset,
+    rank_slices,
+)
 from mermaidseg.model.concept_metrics import (
     calculate_multi_hot_concept_loss,
     calculate_taxonomic_rank_loss,
@@ -19,22 +23,17 @@ def iter_concept_slices(
     concept_outputs: torch.Tensor,
 ) -> Iterator[tuple[str, torch.Tensor, torch.Tensor]]:
     """Yield (name, labels_slice, outputs_slice) per taxonomic rank and for the binary tail."""
-    offset = 0
-    for concept in TAXONOMIC_CONCEPTS:
-        if concept not in concept_value2id:
-            continue
-        concept_values = concept_value2id[concept]
-        order_concept_length = len(list(concept_values.values())[0])
+    for concept, offset, width in rank_slices(concept_value2id):
         yield (
             concept,
-            concept_labels[:, offset : offset + order_concept_length, ...],
-            concept_outputs[:, offset : offset + order_concept_length, ...],
+            concept_labels[:, offset : offset + width, ...],
+            concept_outputs[:, offset : offset + width, ...],
         )
-        offset += order_concept_length
+    tail = binary_offset(concept_value2id)
     yield (
         "multi_hot",
-        concept_labels[:, offset:, ...],
-        concept_outputs[:, offset:, ...],
+        concept_labels[:, tail:, ...],
+        concept_outputs[:, tail:, ...],
     )
 
 

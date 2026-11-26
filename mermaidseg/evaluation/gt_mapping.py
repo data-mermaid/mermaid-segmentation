@@ -10,10 +10,10 @@ Two lookups are built per source dataset:
   class present in the model's ``id2label`` vocabulary.
 
 - ``ConceptLookup``: source label name -> length-K concept row in the model's
-  concept channel order (values ``0=not_given, 1=False, 2=True``). This
-  reproduces ``encode_concept_channels_from_df`` per-row semantics directly from
-  ``class_to_concepts.csv``, independent of the global schema width, so it always
-  aligns to the model's ``concept_id2name`` layout.
+  concept channel order (values ``0=not_given, 1=False, 2=True``). Rows are
+  encoded with ``encode_concept_row`` directly from ``class_to_concepts.csv``,
+  independent of the global schema width, so they always align to the model's
+  ``concept_id2name`` layout.
 """
 
 from __future__ import annotations
@@ -26,12 +26,14 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concepts import (
+    encode_concept_row,
+    parse_concept_cell,
+    read_class_to_concepts,
+)
 from segdata_spec.taxonomy import roll_up
 
 logger = logging.getLogger(__name__)
-
-_PLACEHOLDER_TAXA = {"not_given", "not given", "", "nan"}
 
 
 class ClassLookup:
@@ -94,42 +96,6 @@ def build_class_lookup(
     return ClassLookup(name_to_class_id, id2label)
 
 
-def _cell_str(value: object) -> str:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "not_given"
-    return str(value).strip().lower()
-
-
-def _encode_concept_row(
-    row: pd.Series,
-    concept_names: list[str],
-    ranks: set[str],
-) -> NDArray[np.int8]:
-    """Encode one CSV row into the model concept-channel order (0/1/2 values)."""
-    out = np.zeros(len(concept_names), dtype=np.int8)
-    for i, channel in enumerate(concept_names):
-        if "__" in channel:
-            rank, value = channel.split("__", 1)
-            if rank not in ranks:
-                continue
-            cell = _cell_str(row.get(rank))
-            if cell in _PLACEHOLDER_TAXA:
-                out[i] = 0  # not_given -> all zeros for this rank
-            elif cell == value:
-                out[i] = 2  # active class at this rank
-            else:
-                out[i] = 1  # inactive sibling
-        else:
-            cell = _cell_str(row.get(channel))
-            if cell == "true":
-                out[i] = 2
-            elif cell == "false":
-                out[i] = 1
-            else:
-                out[i] = 0  # not_given / none / missing
-    return out
-
-
 # Phyla whose ``live`` column decides whether a point is living (dead coral keeps its
 # coral taxonomy). Every other taxon is living whenever its taxonomy is not ``none``.
 LIVE_COLUMN_PHYLA = frozenset({"cnidaria", "echinodermata"})
@@ -137,6 +103,11 @@ LIVE_COLUMN_PHYLA = frozenset({"cnidaria", "echinodermata"})
 CORAL_ORDERS = frozenset({"scleractinia", "antipatharia"})
 CORAL_CLASSES = frozenset({"octocorallia"})
 CORAL_FAMILIES = frozenset({"milleporidae", "stylasteridae"})
+
+
+def _scope_cell(row: pd.Series, column: str, *, rank: bool) -> str:
+    """Parsed cell of ``column``; a column the table lacks is ``not_given``."""
+    return parse_concept_cell(row[column], rank=rank) if column in row else "not_given"
 
 
 def point_scopes(row: pd.Series) -> tuple[bool, bool]:
@@ -147,12 +118,12 @@ def point_scopes(row: pd.Series) -> tuple[bool, bool]:
     reject dead corals / echinoderms. ``coral`` marks live corals in
     ``CORAL_ORDERS`` / ``CORAL_CLASSES`` / ``CORAL_FAMILIES``.
     """
-    live_column = _cell_str(row.get("live")) == "true"
-    live = live_column if _cell_str(row.get("phylum")) in LIVE_COLUMN_PHYLA else True
+    live_column = _scope_cell(row, "live", rank=False) == "true"
+    live = live_column if _scope_cell(row, "phylum", rank=True) in LIVE_COLUMN_PHYLA else True
     coral = live_column and (
-        _cell_str(row.get("order")) in CORAL_ORDERS
-        or _cell_str(row.get("class")) in CORAL_CLASSES
-        or _cell_str(row.get("family")) in CORAL_FAMILIES
+        _scope_cell(row, "order", rank=True) in CORAL_ORDERS
+        or _scope_cell(row, "class", rank=True) in CORAL_CLASSES
+        or _scope_cell(row, "family", rank=True) in CORAL_FAMILIES
     )
     return live, coral
 
@@ -204,7 +175,7 @@ def build_concept_lookup(
     csv_path: str | Path,
 ) -> ConceptLookup:
     """Build a source-label -> concept-row lookup aligned to the model channels."""
-    df = pd.read_csv(csv_path)
+    df = read_class_to_concepts(csv_path)
     has_live = "live" in df.columns
     if not has_live:
         logger.warning(
@@ -212,8 +183,6 @@ def build_concept_lookup(
             "and the live-coral scope is empty.",
             csv_path,
         )
-    df["source_label_class_name"] = df["source_label_class_name"].astype(str).str.lower()
-    df["source_dataset_source"] = df["source_dataset_source"].astype(str).str.lower()
     df_src = df[df["source_dataset_source"] == source_name.lower()]
 
     # First row wins for duplicate (source, label) keys.
@@ -223,7 +192,6 @@ def build_concept_lookup(
         if label not in row_by_label:
             row_by_label[label] = row
 
-    ranks = set(TAXONOMIC_CONCEPTS)
     name_to_row: dict[str, NDArray[np.int8]] = {}
     name_to_scope: dict[str, tuple[bool, bool]] = {}
     for src_name in source_label_names:
@@ -231,7 +199,7 @@ def build_concept_lookup(
         row = row_by_label.get(key)
         if row is None:
             continue  # -> zeros (ignored) via ConceptLookup.row
-        name_to_row[key] = _encode_concept_row(row, concept_names, ranks)
+        name_to_row[key] = encode_concept_row(row, concept_names)
         if has_live:
             name_to_scope[key] = point_scopes(row)
 

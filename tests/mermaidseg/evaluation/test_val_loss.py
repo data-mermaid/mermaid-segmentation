@@ -18,19 +18,12 @@ from mermaidseg.evaluation.val_loss import (
     _Accumulator,
     _bundle_config,
     _check_layout,
-    binary_concept_names,
     evaluate_val_loss,
     val_blocks_only,
 )
 from mermaidseg.io import ConfigDict
 
 NAMES = ["bleached", "anthropogenic", "sand"]
-
-
-def test_binary_names_follow_the_taxonomic_channels():
-    value2id = {"kingdom": {"animalia": [1, 0], "plantae": [0, 1]}, "phylum": {"cnidaria": [1]}}
-    channels = ["kingdom__animalia", "kingdom__plantae", "phylum__cnidaria", *NAMES]
-    assert binary_concept_names(value2id, channels) == NAMES
 
 
 def test_accumulator_averages_each_key_over_the_batches_it_appears_in():
@@ -144,7 +137,9 @@ class _Harness:
         registry = SimpleNamespace(
             target_id2label={1: "sand"}, concept_value2id={"bleached": {"not_given": 0}}
         )
-        schema = SimpleNamespace(channel_id2name=lambda: {1: "bleached"})
+        schema = SimpleNamespace(
+            channel_id2name=lambda: {1: "bleached"}, binary_names=lambda: ["bleached"]
+        )
         meta = SimpleNamespace(
             model=nn.Identity(),
             loss=object(),
