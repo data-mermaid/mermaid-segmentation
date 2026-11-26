@@ -8,30 +8,24 @@ version = "0.1.0"
 description = "A package for the segmentation of MERMAID coral data."
 requires-python = ">=3.11.5"
 dependencies = [
-    "albumentations",
-    "boto3",
     "numpy>=1.24,<2",
-    "pandas",
-    "pillow",
-    "torch>=2.4,<2.8",
-    "transformers",
-    "scikit-learn",
-    "scipy",
-    "pyyaml",
-    "tqdm",
-    "torchmetrics",
-    "huggingface-hub>=0.36.2",
     "opencv-python-headless>=4.11.0.86",
     "peft>=0.19.1",
-    "pydantic>=2.13.3",
     "safetensors>=0.7.0",
-    "segdata-spec",
+    "torch>=2.4,<2.8",
+    "transformers",
 ]
 
 [project.optional-dependencies]
+# Everything beyond loading a bundle and predicting: training, data, export, evaluation.
+training = [
+    "albumentations", "boto3", "huggingface-hub>=0.36.2", "pandas", "pillow",
+    "pydantic>=2.13.3", "pyyaml", "scikit-learn", "scipy", "segdata-spec",
+    "torchmetrics", "tqdm",
+]
 # Named after the tracker they install: Slurm uses wandb, the SageMaker image uses mlflow.
-wandb = ["wandb>=0.25.0"]
-mlflow = ["mlflow", "sagemaker-mlflow"]
+wandb = ["mermaidseg[training]", "wandb>=0.25.0"]
+mlflow = ["mermaidseg[training]", "mlflow", "sagemaker-mlflow"]
 
 [dependency-groups]
 tests = [
@@ -48,9 +42,13 @@ dev = [
     {include-group = "tests"},
     {include-group = "lint"},
 ]
+# Installed by default, so a plain `uv sync` or `uv run` keeps the full stack.
+# For an inference-only env: `uv sync --locked --no-default-groups`.
+training = ["mermaidseg[training]"]
 
 [tool.uv]
 required-version = ">=0.11.13"
+default-groups = ["dev", "training"]
 
 [tool.uv.workspace]
 members = ["packages/*"]

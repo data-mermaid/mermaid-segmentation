@@ -54,13 +54,14 @@ You need:
    uv sync --locked --extra wandb
    ```
 
-`uv sync` installs the `dev` group by default. Add `--no-dev` to leave it out.
+A plain `uv sync` installs the default groups, `dev` and `training`. `--no-dev` drops only `dev` and keeps `training`; `--no-default-groups` drops both. `--no-default-groups` gives the inference-only install (`uv sync --locked --no-default-groups`), which can load an exported bundle and predict, but cannot train or export. The `wandb` and `mlflow` extras include `training`, so an install that skips default groups still gets the training stack from either of them.
 
 | Group | Contents |
 |---|---|
 | `tests` | pytest and pytest-cov |
 | `lint` | ruff, pre-commit and mypy |
 | `dev` | `tests` and `lint` |
+| `training` | training, data and export stack; installed by default |
 
 The CoralNet scraper and dataset build are separate uv workspace members. A root `uv sync` does not install them. You need them only to rebuild the CoralNet data; see [Recreate and update the CoralNet data](coralnet-data.md).
 
