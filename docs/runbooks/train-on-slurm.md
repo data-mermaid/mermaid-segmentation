@@ -4,6 +4,7 @@ This runbook trains the final model on the Slurm cluster: `cbm_final` at 256 px,
 
 - [Before you start](#before-you-start)
 - [Fill the data cache](#fill-the-data-cache)
+  - [Use an existing cache](#use-an-existing-cache)
 - [Launch the runs](#launch-the-runs)
 - [Follow a run](#follow-a-run)
 - [Continue a run after a time limit or preemption](#continue-a-run-after-a-time-limit-or-preemption)
@@ -35,7 +36,53 @@ uv run --locked python scripts/sync_data.py --data-config configs/data_config.ya
     --cache-dir "$MERMAIDSEG_CACHE_DIR"
 ```
 
-Each launch syncs again, so a changed pin in the data config is picked up without extra steps.
+Each launch syncs again, so a changed pin in the data config is picked up without extra steps. This does not hold when you pass `--skip-sync`.
+
+### Use an existing cache
+
+If a cache already holds what the data config pins, skip the sync:
+
+```bash
+bash slurm/launch_final.sh --skip-sync [RUN...]
+```
+
+With the flag, the launcher does not run `scripts/sync_data.py`. Instead it runs this check on the login node:
+
+```bash
+uv run --locked python scripts/check_cache.py --data-config configs/data_config.yaml \
+    --cache-dir "$MERMAIDSEG_CACHE_DIR"
+```
+
+The encoder download still runs, so `HF_TOKEN` is still required. AWS credentials are not required. `--dry-run` still skips all of these steps.
+
+`scripts/check_cache.py` reads only the local cache. It makes no S3 calls and reads no image bytes. For each dataset in the data config, it makes the same `build_datasets` call (`mermaidseg/data/factory.py`) that training makes at start-up. The call checks that:
+
+- a sync marker exists for the entry's resize
+- the cached manifest matches the sha256 of the pin
+- the tables are present
+- every group that the config selects exists in the version and was synced
+- every selected image and mask file exists in the cache
+
+The check stats each selected file. On a large cache on shared scratch, it can take a few minutes. That is far faster than the full sync, which reads and hashes every file.
+
+It also checks the pinned taxonomy. It prints one line per dataset, `<name>: version V, resize R, ok` or the error, and reports every dataset, not only the first failure. It exits 1 if any check fails. You can run it by hand with the command above. If it fails, the launcher prints `cache check failed; nothing submitted` and exits 1.
+
+The check does not read image or mask bytes. A file that is corrupted but present is found only when training reads it. A file that was deleted after the sync, for example by an interrupted `rsync` or a scratch purge, fails the check. To verify the bytes, launch without `--skip-sync`.
+
+Use the flag when:
+
+- An earlier launch filled the cache, or a manual `sync_data.py` run with the same data config did.
+- The cache is a copy (`cp` or `rsync`) of such a cache. The sync markers travel with the copy.
+
+A cache that you built by hand, without `sync_data.py`, has no markers and fails the check with `NotSynced`. This is deliberate.
+
+To use a different cache, set `MERMAIDSEG_CACHE_DIR` in `.env`. Both the launcher (`slurm/lib_launch.sh`) and the job (`slurm/common.sh`) source `.env`, so a `MERMAIDSEG_CACHE_DIR=... bash slurm/launch_final.sh` prefix on the command line is overridden when `.env` also sets the variable. To keep the default `.env`, write a second env file and name it:
+
+```bash
+MERMAIDSEG_ENV_FILE=/path/to/other.env bash slurm/launch_final.sh --skip-sync
+```
+
+The launcher and the job both honour `MERMAIDSEG_ENV_FILE`.
 
 ## Launch the runs
 
@@ -53,7 +100,7 @@ Each launch syncs again, so a changed pin in the data config is picked up withou
    bash slurm/launch_final.sh
    ```
 
-To submit only some runs, name them: `bash slurm/launch_final.sh cbm_final`.
+To submit only some runs, name them: `bash slurm/launch_final.sh cbm_final`. To skip the data sync, add `--skip-sync`. See [Use an existing cache](#use-an-existing-cache).
 
 | Run | What it trains | Resources |
 |---|---|---|
@@ -108,6 +155,7 @@ To keep the new wandb run separate from the old one, change `MERMAIDSEG_WANDB_ID
 | The launcher says a Slurm variable is not set, or `MERMAIDSEG_LOG_DIR` does not exist | Fix the env file. See [Write the env file](set-up-slurm.md#write-the-env-file). |
 | The job stops with `set WANDB_API_KEY in the secured env file` | Add `WANDB_API_KEY` to the env file that the job reads. |
 | The launcher prints `cache sync failed; nothing submitted` | Read the error above it. Check the AWS credentials, and that the pins in `configs/data_config.yaml` exist in `mermaid-ic-datasets`. Run the launcher again. |
+| The launcher prints `cache check failed; nothing submitted` | Read the lines above it. Run `scripts/sync_data.py` with the same data config and cache dir, or launch without `--skip-sync`. |
 | The launcher prints `encoder download failed; nothing submitted` | Check `HF_TOKEN` and access to the DINOv3 repo, then run the launcher again. |
 | The job fails because a dataset is not synced | The cache lacks a version, group or resize that the data config selects. Run the launcher again to sync it. |
 | `cbm_final_res768` runs out of GPU memory | Set `FINAL_768_BATCH` and `FINAL_768_ACCUM` in the shell before you launch. Their product must stay 32, or the launcher refuses. |
