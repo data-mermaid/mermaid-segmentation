@@ -452,7 +452,7 @@ A staged version has a feature set when `features.jsonl` exists. Preflight then 
 
 ## Attach a feature set
 
-`segdata features attach` copies feature vectors that already exist, outside `mermaid-ic-datasets`, into a published dataset version as a feature set. The layout of a feature set is in the [segdata-spec README](../segdata-spec/README.md#feature-sets). Use it for a version that was published without features; `build mermaid` stages one with the version. The code is in `segdata_etl/features.py`.
+`segdata features attach` publishes feature vectors that already exist as a feature set of a published dataset version. An image whose file already exists in the family, at `features/<store>/<family>/<image_id>.featurevector` in `mermaid-ic-datasets`, adopts that file; every other image's vector is copied in from the source that the template names. The layout of a feature set is in the [segdata-spec README](../segdata-spec/README.md#feature-sets). Use it for a version that was published without features; `build mermaid` stages one with the version. The code is in `segdata_etl/features.py`.
 
 ```bash
 uv run --package segdata-etl segdata features attach <dataset> \
@@ -461,23 +461,23 @@ uv run --package segdata-etl segdata features attach <dataset> \
   --extractor-spec <spec.json>
 ```
 
-The command syncs the version's tables (not its images) to `--cache-dir`, and writes to `mermaid-ic-datasets` only after every check passes. The sources are only read. `coral-reef-training` is owned by mermaid-api, so nothing in this command writes to it. The command refuses a dirty or unpushed git tree before any S3 call, and records the command line in the set's manifest as its ETL provenance.
+The command syncs the version's tables (not its images) to `--cache-dir`, claims the family's extractor spec, and writes feature files and the set to `mermaid-ic-datasets` only after every other check passes. The sources are only read. `coral-reef-training` is owned by mermaid-api, so nothing in this command writes to it. The command refuses a dirty or unpushed git tree before any S3 call, and records the command line in the set's manifest as its ETL provenance.
 
 | Flag | Default | Effect |
 |---|---|---|
 | `dataset` | required | Published dataset name. |
 | `--version`, `--manifest-sha256` | required | Pin of the published version. The command stops with `PinMismatch` when the published manifest differs. |
 | `--family` | required | Feature family, a lowercase key segment. Published sets are add-only, so a corrected set needs a new family. |
-| `--source-template` | required | `s3://bucket/key` template that names each image's source vector. |
+| `--source-template` | required | `s3://bucket/key` template that names the source vector of each image that adopts no family file. |
 | `--extractor-spec` | required | JSON file with `class_path`, `crop_size`, `feature_dim`, `weights_uri` and `weights_sha256`. |
-| `--allow-missing` | off | Leave out of the set an image whose source vector is absent. Without it, absent sources stop the command. |
+| `--allow-missing` | off | Leave out of the set an image that has neither a family file nor a template source. Without it, such images stop the command. |
 | `--workers` | 16 | Concurrent S3 requests. |
 | `--cache-dir` | `outputs/segdata-cache` | Local cache for the synced tables. |
 | `-v`, `--verbose` | off | Debug logging. |
 
 ### Source template
 
-The template is a Python format string. Its fields are the `images.parquet` row's `image_id`, `key` and `group`, plus every key of the row's `attrs` JSON; a field that is none of these stops the command before any source call. Fields must be plain names (no positional, indexed or dotted fields), and the result must be an `s3://bucket/key` URI. A template that resolves two images to the same source object is refused.
+The template is a Python format string. Its fields are the `images.parquet` row's `image_id`, `key` and `group`, plus every key of the row's `attrs` JSON; a field that is none of these stops the command before any source call. The template is resolved only for images that adopt no family file. Fields must be plain names (no positional, indexed or dotted fields), and the result must be an `s3://bucket/key` URI. A template that resolves two of those images to the same source object is refused.
 
 | Source | Template |
 |---|---|
@@ -488,21 +488,23 @@ The CoralNet template needs `source_id` and `image_id` in the image rows' `attrs
 
 ### Phases
 
-1. Resolve: read the version's `images.parquet` and `points.parquet` and resolve the template for every image. A version without `points.parquet` is refused.
-2. HEAD every source. Absent sources are collected; without `--allow-missing` they stop the command, naming the count and the first ten image ids.
-3. For each `images.parquet` group in turn, GET the sources of that group's images, guarded by the HEAD ETag, and verify them. Only one group's points are held in memory at a time.
-4. Copy each verified vector, server side, to `features/<store>/<family>/<image_id>.featurevector` in `STANDARD` storage class, write-once and guarded by the source ETag.
-5. Publish once: `_extractor_spec.json`, `index.parquet` and the set's `manifest.json`.
+1. Read the version's `images.parquet` and `points.parquet`. A version without `points.parquet` is refused.
+   Claim the family: write `_extractor_spec.json` once, or stop with `ExtractorMismatch` when the stored spec names another extractor. Nothing is adopted or copied into a family claimed by another extractor.
+2. HEAD each image's family file in `mermaid-ic-datasets`. An image whose file exists adopts it: its template source is never called and nothing is copied for it.
+3. Resolve the template for the other images and HEAD their sources. Absent sources are collected; without `--allow-missing` they stop the command, naming the count and the first ten image ids.
+4. For each `images.parquet` group in turn, GET the vectors of that group's images, adopted files and template sources alike, guarded by the HEAD ETag, and verify them. Only one group's points are held in memory at a time.
+5. Copy each verified template source, server side, to `features/<store>/<family>/<image_id>.featurevector` in `STANDARD` storage class, write-once and guarded by the source ETag.
+6. Publish once, indexing adopted and copied files together: `index.parquet` and the set's `manifest.json`.
 
 ### What is verified
 
-A vector is usable when it is a readable npz, its `feat` array is `feature_dim` wide, and it holds every `(row, col)` point that `points.parquet` lists for its image. The command reads all vectors and reports every refused vector, by source key and reason, in one error before it copies any. A source that changes between its HEAD and its read stops the command with `SourceChanged`.
+A vector is usable when it is a readable npz, its `feat` array is `feature_dim` wide, and it holds every `(row, col)` point that `points.parquet` lists for its image. An adopted file must also have the ETag, size and CRC64NVME of its bytes, as a copy must; its index row records them. A file without a CRC64NVME checksum is refused: writers put feature files with `ChecksumAlgorithm='CRC64NVME'`. The command reads all vectors and reports every refused vector, by source key and reason, in one error before it copies any. A source that changes between its HEAD and its read stops the command with `SourceChanged`.
 
-With `--allow-missing`, the images with no source vector are counted in the set's `n_missing` and have no index row.
+With `--allow-missing`, the images with neither a family file nor a source vector are counted in the set's `n_missing` and have no index row.
 
 ### Resume
 
-A copy to a key that already holds the planned content counts as done, and a key that holds other content stops the command with `ObjectConflict`. After a stop during phase 4, run the same command again: the copies already made are kept and the rest are made, then the set is published. The command verifies all sources again on each run.
+A copy to a key that already holds the planned content counts as done, and a key that holds other content stops the command with `ObjectConflict`. After a stop during phase 5, run the same command again: the files already copied are adopted on the rerun and the rest are copied, then the set is published. The command verifies all sources again on each run.
 
 ## Ingest an external dataset
 

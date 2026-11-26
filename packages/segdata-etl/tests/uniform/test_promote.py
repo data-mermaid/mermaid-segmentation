@@ -108,15 +108,17 @@ def test_staged_features_publish_after_the_dataset_manifest(repo, tmp_path):  # 
     prefix = f"datasets/mermaid/{version}/"
     set_prefix = f"{prefix}features/efficientnet-v1/"
     log = [(op, key) for op, _, key, _ in writes(fake)]
-    assert [op for op, _ in log[:6]] == ["copy"] * 6
+    spec_put = ("put", "features/mermaid/efficientnet-v1/_extractor_spec.json")
+    assert [op for op, _ in log[:3]] == ["copy"] * 3
     assert all(key.startswith("images/mermaid/") for _, key in log[:3])
-    assert sorted(key for _, key in log[3:6]) == [
+    assert log[3] == spec_put
+    assert sorted(key for _, key in log[4:7]) == [
         f"features/mermaid/efficientnet-v1/{i}.featurevector" for i in ("i1", "i2", "i3")
     ]
-    assert {key for _, key in log[6:10]} == {prefix + t for t in _TABLES}
-    assert log[10:] == [
+    assert {key for _, key in log[7:11]} == {prefix + t for t in _TABLES}
+    assert log[11:] == [
         ("put", prefix + "manifest.json"),
-        ("put", "features/mermaid/efficientnet-v1/_extractor_spec.json"),
+        spec_put,
         ("put", set_prefix + "index.parquet"),
         ("put", set_prefix + "manifest.json"),
     ]
@@ -148,17 +150,18 @@ def test_stored_extractor_spec_of_another_identity_refuses_before_any_write(repo
 
 
 def test_rerun_after_a_failed_feature_publish_completes_only_the_feature_set(repo, tmp_path):  # noqa: F811
-    class FailsSpecPut(FakeS3):
+    class FailsSetIndexPut(FakeS3):
         failed = False
 
         def put_object(self, **kwargs: Any) -> dict[str, Any]:
-            if kwargs["Key"] == SPEC_KEY and not self.failed:
+            set_index = kwargs["Key"].endswith("/features/efficientnet-v1/index.parquet")
+            if set_index and not self.failed:
                 self.failed = True
                 raise client_error("InternalError", 500, "PutObject")
             return super().put_object(**kwargs)
 
     fake, stage, version = stage_mermaid(tmp_path, features=True)
-    flaky = FailsSpecPut(**{k: getattr(fake, k) for k in ("objects", "crcs", "etags")})
+    flaky = FailsSetIndexPut(**{k: getattr(fake, k) for k in ("objects", "crcs", "etags")})
     with pytest.raises(Exception, match="InternalError"):
         run_promote(flaky, stage, version)
     set_manifest = (

@@ -144,8 +144,3 @@ def read_extractor_spec(path: Path) -> dict[str, Any]:
 def extractor_spec_bytes(spec: Mapping[str, Any]) -> bytes:
     """Serialise an extractor spec as indented, key-sorted JSON."""
     return (json.dumps(dict(spec), indent=2, sort_keys=True) + "\n").encode()
-
-
-def store_name(image_prefix: str) -> str:
-    """Return the last segment of an image store prefix, the ``<store>`` of its feature keys."""
-    return image_prefix.rstrip("/").rsplit("/", 1)[-1]

@@ -45,7 +45,7 @@ from segdata_etl.common.copy_plan import (
     FEATURES_NAME,
     UPLOADS_NAME,
 )
-from segdata_etl.common.featurevector import FEATURE_STORAGE_CLASS, store_name
+from segdata_etl.common.featurevector import FEATURE_STORAGE_CLASS
 from segdata_etl.common.s3_objects import (
     ObjectConflict,
     copy_new,
@@ -70,7 +70,12 @@ from segdata_spec.errors import (
     PublishRefused,
     SchemaValidationError,
 )
-from segdata_spec.features import EXTRACTOR_IDENTITY_KEYS, publish_feature_set
+from segdata_spec.features import (
+    EXTRACTOR_IDENTITY_KEYS,
+    claim_extractor,
+    feature_store_name,
+    publish_feature_set,
+)
 from segdata_spec.manifest import Manifest, Pin, manifest_sha256
 from segdata_spec.schema import FEATURE_INDEX_SCHEMA, conform
 
@@ -420,7 +425,7 @@ def _read_feature_set(version_dir: Path, manifest: Manifest, images: bytes) -> _
     index = _check_staged_index(
         pq.read_table(family_dir / FEATURE_INDEX_NAME),
         version_ids,
-        store_name(manifest.image_store.prefix),
+        feature_store_name(manifest.image_store, DATASET_BUCKET),
         family,
         allow_missing,
     )
@@ -565,7 +570,7 @@ def _check_stored_extractor(client: Any, manifest: Manifest, features: _FeatureS
     Raises:
         ExtractorMismatch: An identity field differs.
     """
-    store = store_name(manifest.image_store.prefix)
+    store = feature_store_name(manifest.image_store, DATASET_BUCKET)
     key = feature_store_prefix(store, features.family) + EXTRACTOR_SPEC_NAME
     try:
         body = client.get_object(Bucket=DATASET_BUCKET, Key=key)["Body"].read()
@@ -742,6 +747,14 @@ def _write_version(
     prefix = dataset_prefix(plan.manifest.dataset, plan.manifest.version)
     _write_images(client, plan.steps, workers, tally)
     if plan.features is not None:
+        # The writer contract: the family is claimed before any file is written into it.
+        claim_extractor(
+            client,
+            DATASET_BUCKET,
+            plan.manifest.image_store,
+            plan.features.family,
+            plan.features.extractor,
+        )
         _write_images(client, plan.features.steps, workers, tally)
     if not plan.dataset_published:
         _write_tables(client, version_dir, plan.manifest, prefix, tally)
@@ -770,8 +783,10 @@ def promote(client: Any, *, stage_dir: Path, dataset: str, version: str, workers
         ChecksumMismatch: A staged table differs from the manifest.
         ObjectConflict: An object landed with, or already holds, other content than planned.
         SourceChanged: A copy source no longer has the planned ETag.
-        ExtractorMismatch: The family's stored extractor spec names another extractor; nothing
-            was written.
+        ExtractorMismatch: Raised from preflight when the stored spec names another extractor,
+            in which case nothing was written; or raised when the family is claimed just before
+            the feature copies because another writer claimed it in between, in which case the
+            image copies are already in place and a rerun continues.
     """
     plan = _preflight(client, stage_dir, dataset, version, workers)
     version_dir = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version))

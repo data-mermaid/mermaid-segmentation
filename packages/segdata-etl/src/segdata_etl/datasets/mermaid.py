@@ -46,7 +46,6 @@ from segdata_etl.common.featurevector import (
     read_vector,
     refusal,
     refuse_invalid,
-    store_name,
 )
 from segdata_etl.common.s3_objects import EXTENSIONS
 from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
@@ -56,11 +55,11 @@ from segdata_spec._s3 import (
     FEATURE_INDEX_NAME,
     cache_path,
     dataset_prefix,
-    feature_key,
     feature_store_prefix,
     is_not_found,
     is_precondition_failed,
 )
+from segdata_spec.features import feature_file_key, feature_store_name
 from segdata_spec.manifest import ImageStore, LabelMapping, ParentRef, SourceInfo
 from segdata_spec.publish import probe_git, publish_dataset, table_bytes
 from segdata_spec.schema import (
@@ -78,6 +77,7 @@ SOURCE_BUCKET = "coral-reef-training"
 SOURCE_IMAGE_PREFIX = "mermaid/"
 DEFAULT_ANNOTATIONS_URI = f"s3://{SOURCE_BUCKET}/mermaid/mermaid_confirmed_annotations.parquet"
 IMAGE_PREFIX = "images/mermaid/"
+IMAGE_STORE = ImageStore(bucket=DATASET_BUCKET, prefix=IMAGE_PREFIX, owner="segdata")
 FEATURE_SUFFIX = "_featurevector"
 DEFAULT_FEATURE_FAMILY = "efficientnet-v1"
 GROUP = "mermaid"
@@ -254,11 +254,10 @@ def feature_entries(
     found: Mapping[str, tuple[str, VectorFacts]], family: str
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return the ``features.jsonl`` lines and the feature index rows, in ``image_id`` order."""
-    store = store_name(IMAGE_PREFIX)
     plan, index = [], []
     for image_id in sorted(found):
         src_etag, facts = found[image_id]
-        key = feature_key(store, family, image_id)
+        key = feature_file_key(IMAGE_STORE, DATASET_BUCKET, family, image_id)
         plan.append(
             {
                 "src_bucket": SOURCE_BUCKET,
@@ -581,7 +580,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     """
     parents = _parent_refs(args)
     extractor = read_extractor_spec(args.extractor_spec)
-    feature_store_prefix(store_name(IMAGE_PREFIX), args.feature_family)
+    feature_store_prefix(feature_store_name(IMAGE_STORE, DATASET_BUCKET), args.feature_family)
     git = probe_git(REPO_ROOT)
     refuse_unpublishable(git)
     source = read_annotations(client, args.annotations_uri)
@@ -613,7 +612,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
             "labels.parquet": labels_table(pairs),
             "stats/label_counts.parquet": label_counts_table(labelled),
         },
-        image_store=ImageStore(bucket=DATASET_BUCKET, prefix=IMAGE_PREFIX, owner="segdata"),
+        image_store=IMAGE_STORE,
         etl_package="segdata-etl",
         etl_command=_command_line(args),
         source=SourceInfo(
