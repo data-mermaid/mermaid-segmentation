@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -89,6 +90,26 @@ def test_a_staged_table_altered_after_staging_is_refused_with_no_writes(stage: P
         _promote(fake, stage)
 
     assert fake.calls == []
+
+
+def test_a_taxonomy_table_edited_after_preflight_is_uploaded_as_checked(
+    stage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeS3()
+    table = _staged(stage) / "growth_forms.parquet"
+    checked = table.read_bytes()
+    real_preflight = promote._taxonomy_preflight
+
+    def edit_after_preflight(*args: Any, **kwargs: Any) -> Any:
+        plan = real_preflight(*args, **kwargs)
+        table.write_bytes(b"edited after preflight")
+        return plan
+
+    monkeypatch.setattr(promote, "_taxonomy_preflight", edit_after_preflight)
+
+    _promote(fake, stage)
+
+    assert fake.objects[(DATASET_BUCKET, PREFIX + "growth_forms.parquet")] == checked
 
 
 def test_a_staged_manifest_describing_another_version_is_refused(stage: Path) -> None:

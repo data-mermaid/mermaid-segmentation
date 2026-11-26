@@ -113,22 +113,24 @@ class _Upload:
 
 @dataclass(frozen=True)
 class _DatasetUnit:
-    """A staged dataset manifest still to publish: its steps and the folder of its tables."""
+    """A staged dataset manifest still to publish: its steps and its checked table bytes."""
 
     manifest: Manifest
     manifest_bytes: bytes
     steps: tuple[_Copy | _Upload, ...]
-    version_dir: Path
+    tables: dict[str, bytes]
+    expected: dict[str, _Expected]
 
 
 @dataclass(frozen=True)
 class _FamilyUnit:
-    """A staged feature set still to publish: its vector copies and the folder of its index."""
+    """A staged feature set still to publish: its vector copies and its checked index bytes."""
 
     manifest: FeatureSetManifest
     manifest_bytes: bytes
     steps: tuple[_Copy, ...]
-    set_dir: Path
+    index: bytes
+    expected: dict[str, _Expected]
 
 
 @dataclass(frozen=True)
@@ -404,24 +406,27 @@ def _staged_dataset(stage_dir: Path, version_dir: Path, dataset: str, version: s
     tables = _verify_tables(version_dir, manifest)
     expected = _image_expectations(tables["images.parquet"], manifest.image_store.prefix)
     steps = _plan_steps(stage_dir, version_dir, expected, "images.parquet", IMAGE_STORAGE_CLASS)
-    return _DatasetUnit(manifest, manifest_bytes, steps, version_dir)
+    return _DatasetUnit(manifest, manifest_bytes, steps, tables, expected)
 
 
-def _staged_family(stage_dir: Path, set_dir: Path) -> tuple[_FamilyUnit, dict[str, _Expected]]:
-    """Read and check one staged feature set and its plan, with no S3 call.
-
-    Returns the unit and the fingerprint of every key in its index.
-    """
+def _staged_family(stage_dir: Path, set_dir: Path) -> _FamilyUnit:
+    """Read and check one staged feature set and its plan, with no S3 call."""
     if (set_dir / UPLOADS_NAME).is_file():
         raise PublishRefused(f"{set_dir / UPLOADS_NAME}: a feature set stages copies only")
     manifest_bytes = (set_dir / MANIFEST_NAME).read_bytes()
     manifest = FeatureSetManifest.model_validate_json(manifest_bytes)
     if manifest.family != set_dir.name:
         raise PublishRefused(f"{set_dir / MANIFEST_NAME} describes family {manifest.family}")
-    expected = _index_expectations(_read_table(set_dir, FEATURE_INDEX_NAME, manifest))
+    if set(manifest.files) != {FEATURE_INDEX_NAME}:
+        extra = sorted(set(manifest.files) - {FEATURE_INDEX_NAME})
+        raise PublishRefused(
+            f"{set_dir / MANIFEST_NAME} lists files other than {FEATURE_INDEX_NAME}: {extra}"
+        )
+    index = _read_table(set_dir, FEATURE_INDEX_NAME, manifest)
+    expected = _index_expectations(index)
     steps = _plan_steps(stage_dir, set_dir, expected, FEATURE_INDEX_NAME, FEATURE_STORAGE_CLASS)
     copies = tuple(step for step in steps if isinstance(step, _Copy))
-    return _FamilyUnit(manifest, manifest_bytes, copies, set_dir), expected
+    return _FamilyUnit(manifest, manifest_bytes, copies, index, expected)
 
 
 def _staged_family_dirs(version_dir: Path) -> list[Path]:
@@ -463,24 +468,23 @@ def _check_dataset(client: Any, unit: _DatasetUnit, workers: int) -> None:
     """Check the dataset unit's taxonomy, parents, carried images and destinations."""
     manifest = unit.manifest
     prefix = dataset_prefix(manifest.dataset, manifest.version)
-    tables = {name: _read_table(unit.version_dir, name, manifest) for name in manifest.files}
-    expected = _image_expectations(tables["images.parquet"], manifest.image_store.prefix)
     if manifest.taxonomy is not None:
         require_published_taxonomy(client, DATASET_BUCKET, manifest.taxonomy)
     parent_bodies = _check_parents(client, manifest)
     planned = {s.dst_key for s in unit.steps}
-    carried = {k: v for k, v in expected.items() if k not in planned}
+    carried = {k: v for k, v in unit.expected.items() if k not in planned}
     if carried:
         _check_shared_store(manifest, parent_bodies)
         _check_present(client, manifest.image_store.bucket, carried, workers)
     destinations = {s.dst_key: s.expect for s in unit.steps}
-    _check_destinations(client, {**destinations, **_table_expectations(tables, prefix)}, workers)
+    _check_destinations(
+        client, {**destinations, **_table_expectations(unit.tables, prefix)}, workers
+    )
 
 
 def _check_family(
     client: Any,
     unit: _FamilyUnit,
-    expected: Mapping[str, _Expected],
     store: ImageStore,
     workers: int,
 ) -> None:
@@ -489,12 +493,11 @@ def _check_family(
     prefix = feature_set_prefix(manifest.dataset.name, manifest.dataset.version, manifest.family)
     check_claimed_extractor(client, DATASET_BUCKET, store, manifest.family, manifest.extractor)
     planned = {s.dst_key for s in unit.steps}
-    carried = {k: v for k, v in expected.items() if k not in planned}
+    carried = {k: v for k, v in unit.expected.items() if k not in planned}
     if carried:
         _check_present(client, DATASET_BUCKET, carried, workers)
-    index = _read_table(unit.set_dir, FEATURE_INDEX_NAME, manifest)
     destinations = {s.dst_key: s.expect for s in unit.steps}
-    tables = _table_expectations({FEATURE_INDEX_NAME: index}, prefix)
+    tables = _table_expectations({FEATURE_INDEX_NAME: unit.index}, prefix)
     _check_destinations(client, {**destinations, **tables}, workers)
 
 
@@ -515,18 +518,19 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
         if (version_dir / MANIFEST_NAME).is_file()
         else None
     )
-    families = [_staged_family(stage_dir, d) for d in _staged_family_dirs(version_dir)]
+    family_dirs = _staged_family_dirs(version_dir)
+    families = [_staged_family(stage_dir, d) for d in family_dirs]
     if staged is None:
         manifest_bytes = _published_dataset(client, version_dir, dataset, version)
         manifest = Manifest.model_validate_json(manifest_bytes)
     else:
         manifest_bytes, manifest = staged.manifest_bytes, staged.manifest
     sha = manifest_sha256(manifest_bytes)
-    for unit, _ in families:
+    for set_dir, unit in zip(family_dirs, families, strict=True):
         pinned = unit.manifest.dataset
         if (pinned.name, pinned.version, pinned.manifest_sha256) != (dataset, version, sha):
             raise PublishRefused(
-                f"{unit.set_dir / MANIFEST_NAME} is not feature set {unit.set_dir.name} of "
+                f"{set_dir / MANIFEST_NAME} is not feature set {set_dir.name} of "
                 f"{dataset} {version} with manifest sha256 {sha}"
             )
     write_dataset = staged is not None and not _published_status(
@@ -538,12 +542,12 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
     if write_dataset and staged is not None:
         _check_dataset(client, staged, workers)
     pending: list[_FamilyUnit] = []
-    for unit, expected in families:
+    for unit in families:
         family = unit.manifest.family
         key = feature_set_prefix(dataset, version, family) + MANIFEST_NAME
         what = f"feature set {family} of {dataset} {version}"
         if not _published_status(client, key, unit.manifest_bytes, what):
-            _check_family(client, unit, expected, manifest.image_store, workers)
+            _check_family(client, unit, manifest.image_store, workers)
             pending.append(unit)
     if not write_dataset and not pending:
         raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
@@ -639,18 +643,14 @@ def _write_images(
 
 
 def _write_tables(
-    client: Any,
-    version_dir: Path,
-    manifest: Manifest | TaxonomyManifest | FeatureSetManifest,
-    prefix: str,
-    tally: Counter[str],
+    client: Any, tables: Mapping[str, bytes], prefix: str, tally: Counter[str]
 ) -> None:
-    for name in manifest.files:
+    for name, body in tables.items():
         put_new(
             client,
             bucket=DATASET_BUCKET,
             key=prefix + name,
-            body=_read_table(version_dir, name, manifest),
+            body=body,
             content_type=_PARQUET,
         )
         tally["tables"] += 1
@@ -663,7 +663,7 @@ def _put_manifest(client: Any, key: str, body: bytes) -> None:
 def _write_dataset(client: Any, unit: _DatasetUnit, workers: int, tally: Counter[str]) -> None:
     prefix = dataset_prefix(unit.manifest.dataset, unit.manifest.version)
     _write_images(client, unit.steps, workers, tally)
-    _write_tables(client, unit.version_dir, unit.manifest, prefix, tally)
+    _write_tables(client, unit.tables, prefix, tally)
     _put_manifest(client, prefix + MANIFEST_NAME, unit.manifest_bytes)
     tally["manifest"] += 1
 
@@ -675,7 +675,7 @@ def _write_family(
     claim_extractor(client, DATASET_BUCKET, store, manifest.family, manifest.extractor)
     _write_images(client, unit.steps, workers, tally)
     prefix = feature_set_prefix(manifest.dataset.name, manifest.dataset.version, manifest.family)
-    _write_tables(client, unit.set_dir, manifest, prefix, tally)
+    _write_tables(client, {FEATURE_INDEX_NAME: unit.index}, prefix, tally)
     _put_manifest(client, prefix + MANIFEST_NAME, unit.manifest_bytes)
     tally["feature sets"] += 1
     logger.info(
@@ -692,11 +692,13 @@ def promote(client: Any, *, stage_dir: Path, dataset: str, version: str, workers
 
     Raises:
         PublishRefused: The staging is inconsistent or holds no images, a ``features/<family>/``
-            folder has no ``manifest.json``, every staged unit is already
+            folder has no ``manifest.json``, a feature set manifest lists files other than
+            ``index.parquet``, every staged unit is already
             published, a unit is published with other bytes, a planned key holds other content, a
             carried image or vector is absent or differs, or a version with carried images lacks a
             parent on its image store; nothing was written.
-        ChecksumMismatch: A staged table differs from its manifest.
+        ChecksumMismatch: A staged table differs from its manifest; raised from preflight, before
+            any write.
         ExtractorMismatch: Raised from preflight when a family's stored spec names another
             extractor, and nothing was written; or when another writer claims the family between
             preflight and the claim, and the units before it are in place for a rerun.
@@ -740,6 +742,7 @@ class _TaxonomyPlan:
     manifest: TaxonomyManifest
     manifest_bytes: bytes
     prefix: str
+    tables: dict[str, bytes]
 
 
 def _read_taxonomy_manifest(
@@ -759,7 +762,7 @@ def _read_taxonomy_manifest(
 
 def _taxonomy_preflight(
     client: Any, stage_dir: Path, name: str, version: str, workers: int
-) -> tuple[_TaxonomyPlan, Path]:
+) -> _TaxonomyPlan:
     """Check the staged taxonomy and the destination keys before the first write."""
     prefix = taxonomy_prefix(name, version)
     version_dir = cache_path(stage_dir, DATASET_BUCKET, prefix)
@@ -768,7 +771,7 @@ def _taxonomy_preflight(
     if _manifest_published(client, prefix):
         raise PublishRefused(f"taxonomy {name} {version} is already published in {DATASET_BUCKET}")
     _check_destinations(client, _table_expectations(tables, prefix), workers)
-    return _TaxonomyPlan(manifest, manifest_bytes, prefix), version_dir
+    return _TaxonomyPlan(manifest, manifest_bytes, prefix, tables)
 
 
 def promote_taxonomy(
@@ -779,11 +782,12 @@ def promote_taxonomy(
     Raises:
         PublishRefused: The staging is missing or names another version, the version is already
             published, or a destination key holds other content; nothing was written.
-        ChecksumMismatch: A staged table differs from the manifest.
+        ChecksumMismatch: A staged table differs from the manifest; raised from preflight, before
+            any write.
     """
-    plan, version_dir = _taxonomy_preflight(client, stage_dir, name, version, workers)
+    plan = _taxonomy_preflight(client, stage_dir, name, version, workers)
     tally: Counter[str] = Counter()
-    _write_tables(client, version_dir, plan.manifest, plan.prefix, tally)
+    _write_tables(client, plan.tables, plan.prefix, tally)
     put_new(
         client,
         bucket=DATASET_BUCKET,

@@ -344,6 +344,63 @@ def test_staged_table_that_no_longer_matches_the_manifest_refuses_with_no_writes
     assert fake.calls == []
 
 
+def test_a_table_edited_after_preflight_is_uploaded_as_checked(monkeypatch, repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path)
+    table = version_dir(stage, "mermaid", version) / "points.parquet"
+    checked = table.read_bytes()
+    real_preflight = promote._preflight
+
+    def edit_after_preflight(*args: Any, **kwargs: Any) -> Any:
+        plan = real_preflight(*args, **kwargs)
+        table.write_bytes(b"edited after preflight")
+        return plan
+
+    monkeypatch.setattr(promote, "_preflight", edit_after_preflight)
+
+    run_promote(fake, stage, version)
+
+    uploaded = fake.objects[(DATASET_BUCKET, f"datasets/mermaid/{version}/points.parquet")]
+    manifest = Manifest.model_validate_json(
+        (version_dir(stage, "mermaid", version) / "manifest.json").read_bytes()
+    )
+    assert uploaded == checked
+    assert hashlib.sha256(uploaded).hexdigest() == manifest.files["points.parquet"].sha256
+
+
+def test_a_feature_index_edited_after_preflight_is_uploaded_as_checked(monkeypatch, repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    index = version_dir(stage, "mermaid", version) / FAMILY_DIR / "index.parquet"
+    checked = index.read_bytes()
+    real_preflight = promote._preflight
+
+    def edit_after_preflight(*args: Any, **kwargs: Any) -> Any:
+        plan = real_preflight(*args, **kwargs)
+        index.write_bytes(b"edited after preflight")
+        return plan
+
+    monkeypatch.setattr(promote, "_preflight", edit_after_preflight)
+
+    run_promote(fake, stage, version)
+
+    uploaded = fake.objects[
+        (DATASET_BUCKET, f"datasets/mermaid/{version}/{FAMILY_DIR}/index.parquet")
+    ]
+    assert uploaded == checked
+
+
+def test_set_manifest_listing_a_file_besides_the_index_refuses_before_any_s3_call(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    path = version_dir(stage, "mermaid", version) / FAMILY_DIR / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["files"]["extra.parquet"] = manifest["files"]["index.parquet"]
+    path.write_text(json.dumps(manifest))
+
+    with pytest.raises(PublishRefused, match="lists files other than"):
+        run_promote(fake, stage, version)
+
+    assert fake.calls == []
+
+
 def rewrite_plan(stage: Path, version: str, edit, name: str = "copies.jsonl") -> None:
     path = version_dir(stage, "mermaid", version) / name
     lines = [json.loads(line) for line in path.read_text().splitlines()]
