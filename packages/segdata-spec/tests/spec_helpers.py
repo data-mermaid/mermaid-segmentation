@@ -16,10 +16,8 @@ import pyarrow as pa
 from botocore.exceptions import ClientError
 from PIL import Image
 
-from segdata_spec.features import publish_feature_set
 from segdata_spec.git import GitState
 from segdata_spec.manifest import (
-    EtlInfo,
     FeatureSetPin,
     ImageStore,
     Manifest,
@@ -27,7 +25,7 @@ from segdata_spec.manifest import (
     Pin,
     SourceInfo,
 )
-from segdata_spec.stage import stage_dataset, stage_taxonomy
+from segdata_spec.stage import stage_dataset, stage_feature_set, stage_taxonomy
 
 
 def _client_error(code: str, status: int, op: str) -> ClientError:
@@ -121,13 +119,6 @@ IMG_PREFIX = "images/ds/"
 VERSION = "20261120-abcdef1"
 TAX_VERSION = "20261120-1234567"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
-READY_ETL = EtlInfo(
-    package="mermaid-classifier",
-    command="extract-features",
-    git_sha="0123456789abcdef",
-    git_dirty=True,
-    uv_lock_sha256="l" * 64,
-)
 STORE = ImageStore(bucket=IMG_BUCKET, prefix=IMG_PREFIX, owner="segdata")
 # An image store inside BUCKET, as a feature set requires; its store name is ``ds``.
 FEATURE_STORE = ImageStore(bucket=BUCKET, prefix=IMG_PREFIX, owner="segdata")
@@ -351,6 +342,40 @@ def feature_key_of(image_id: str) -> str:
     return f"features/ds/{FEATURE_FAMILY}/{image_id}.featurevector"
 
 
+def feature_index(ids: list[str], keys: list[str] | None = None) -> pa.Table:
+    """A feature index for ``ids``: each image's own file unless ``keys`` names others."""
+    return pa.table(
+        {
+            "image_id": ids,
+            "key": keys or [feature_key_of(i) for i in ids],
+            "etag": [_md5(FEATURES.get(i, b"")) for i in ids],
+            "size": [len(FEATURES.get(i, b"")) for i in ids],
+            "crc64nvme": pa.nulls(len(ids), pa.string()),
+            "n_points": [1] * len(ids),
+        }
+    )
+
+
+def stage_features(
+    stage_dir: Path, tmp_path: Path, dataset: Pin, index: pa.Table, **kwargs: Any
+) -> FeatureSetPin:
+    """Stage feature set ``effnet`` of ``dataset``, read from ``fixture-stage`` unless given."""
+    return stage_feature_set(
+        stage_dir,
+        dataset_dirs=kwargs.pop("dataset_dirs", (tmp_path / "fixture-stage",)),
+        bucket=BUCKET,
+        dataset=dataset,
+        family=kwargs.pop("family", FEATURE_FAMILY),
+        index=index,
+        extractor=kwargs.pop("extractor", EXTRACTOR),
+        etl_package="segdata-etl",
+        etl_command="segdata features attach ds",
+        repo_dir=_repo_dir(tmp_path),
+        git=CLEAN_GIT,
+        **kwargs,
+    )
+
+
 def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> FeatureSetPin:
     """Publish dataset ``ds`` with images a and b, store their features, publish the set.
 
@@ -365,24 +390,8 @@ def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> FeatureSetPin
     )
     for image_id, data in FEATURES.items():
         client.put(BUCKET, feature_key_of(image_id), data)
-    index = pa.table(
-        {
-            "image_id": list(FEATURES),
-            "key": [feature_key_of(i) for i in FEATURES],
-            "etag": [_md5(data) for data in FEATURES.values()],
-            "size": [len(data) for data in FEATURES.values()],
-            "crc64nvme": pa.nulls(len(FEATURES), pa.string()),
-            "n_points": [1] * len(FEATURES),
-        }
-    )
-    feature_pin = publish_feature_set(
-        client,
-        pin,
-        FEATURE_FAMILY,
-        index,
-        EXTRACTOR,
-        bucket=BUCKET,
-        etl=READY_ETL,
-    )
+    stage_dir = tmp_path / "fixture-stage"
+    feature_pin = stage_features(stage_dir, tmp_path, pin, feature_index(list(FEATURES)))
+    _upload_staged(client, stage_dir)
     client.calls.clear()
     return feature_pin

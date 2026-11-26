@@ -54,7 +54,7 @@ from segdata_etl.common.versions import bare_fingerprints, count_labels, image_s
 from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import probe_git, refuse_unpublishable
-from segdata_spec.layout import image_prefix
+from segdata_spec.layout import dataset_prefix, image_prefix
 from segdata_spec.manifest import ParentRef, SourceInfo
 from segdata_spec.s3 import crc64nvme_b64, get_bytes, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
@@ -783,7 +783,7 @@ def run_raw(args: argparse.Namespace) -> int:
         git=git,
     )
     plan = _copies(result.tables["images.parquet"], source_bucket, result.carried)
-    write_copies(args.stage_dir, DATASET, version, plan)
+    write_copies(args.stage_dir, dataset_prefix(DATASET, version), plan)
     logger.info(
         "staged %s %s: %d images, %d copies; dropped %s",
         DATASET,

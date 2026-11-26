@@ -45,7 +45,7 @@ from segdata_etl.common.stage import DEFAULT_CACHE_DIR, next_version
 from segdata_etl.label_maps.curated import CuratedSource
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import GitState
-from segdata_spec.layout import image_prefix
+from segdata_spec.layout import dataset_prefix, image_prefix
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
 from segdata_spec.read import Taxonomy, open_taxonomy
 from segdata_spec.s3 import crc64nvme_b64, norm_etag
@@ -550,7 +550,7 @@ def publish_version(
         git=git,
     )
     plan = _legacy_copy_plan(rows, probe, legacy=legacy, dataset=dataset)
-    write_copies(args.stage_dir, dataset, version, plan)
+    write_copies(args.stage_dir, dataset_prefix(dataset, version), plan)
     if uploads:
         write_uploads(args.stage_dir, dataset, version, uploads)
     logger.info(

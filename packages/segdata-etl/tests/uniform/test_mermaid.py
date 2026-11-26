@@ -645,11 +645,11 @@ def test_stage_dir_is_required_and_dispatches_to_run(monkeypatch, tmp_path):
 
 
 def feature_plan(version: Path) -> list[dict[str, Any]]:
-    lines = (version / "features.jsonl").read_text().splitlines()
+    lines = (version / "features" / "efficientnet-v1" / "copies.jsonl").read_text().splitlines()
     return [json.loads(line) for line in lines]
 
 
-def test_build_stages_a_feature_copy_plan_index_and_extractor_spec(repo, tmp_path):
+def test_build_stages_a_feature_set_pinning_the_staged_dataset_with_its_copy_plan(repo, tmp_path):
     fake = FakeS3()
     seed(fake, [ann("i1", "p1", 10, 20), ann("i1", "p2", 30, 40)], {"i1": png_bytes(4, 4)})
     vector = featurevector_bytes([(10, 20), (30, 40), (50, 60)])
@@ -683,7 +683,19 @@ def test_build_stages_a_feature_copy_plan_index_and_extractor_spec(repo, tmp_pat
             "n_points": 2,
         }
     ]
-    assert json.loads((staged / "_extractor_spec.json").read_text()) == EXTRACTOR
+    set_manifest = json.loads((staged / "manifest.json").read_text())
+    dataset_sha = hashlib.sha256((version / "manifest.json").read_bytes()).hexdigest()
+    assert set_manifest["dataset"] == {
+        "name": "mermaid",
+        "version": version.name,
+        "manifest_sha256": dataset_sha,
+    }
+    assert set_manifest["extractor"] == EXTRACTOR
+    assert sorted(p.name for p in staged.iterdir()) == [
+        "copies.jsonl",
+        "index.parquet",
+        "manifest.json",
+    ]
     reads = [c for c in fake.ops("get") if c[2] == "mermaid/i1_featurevector"]
     assert [c[3].get("IfMatch") for c in reads] == ['"src-etag-2"']
 
@@ -763,3 +775,28 @@ def test_load_parent_rows_strips_quotes_from_the_parents_source_fingerprints(tmp
     rows = mermaid.load_parent_rows(tmp_path, version)
 
     assert {i: r["source_fingerprint"] for i, r in rows.items()} == {"a": "e1", "b": "e2"}
+
+
+def test_a_vector_already_in_the_family_is_adopted_and_not_planned_for_copy(repo, tmp_path):
+    fake = FakeS3()
+    seed(
+        fake,
+        [ann("i1", "p1", 1, 1), ann("i2", "p2", 2, 2)],
+        {"i1": png_bytes(4, 4), "i2": png_bytes(4, 4)},
+    )
+    family_key = "features/mermaid/efficientnet-v1/i1.featurevector"
+    fake.put(DATASET_BUCKET, family_key, fake.objects[(SRC_BUCKET, "mermaid/i1_featurevector")])
+    stage = tmp_path / "stage"
+
+    build(fake, stage)
+
+    version = only_version(stage)
+    assert [line["dst_key"] for line in feature_plan(version)] == [
+        "features/mermaid/efficientnet-v1/i2.featurevector"
+    ]
+    index = table(version / "features" / "efficientnet-v1", "index.parquet")
+    assert [r["key"] for r in index] == [
+        family_key,
+        "features/mermaid/efficientnet-v1/i2.featurevector",
+    ]
+    assert not [c for c in fake.ops("get") if c[2] == "mermaid/i1_featurevector"]

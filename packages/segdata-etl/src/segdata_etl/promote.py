@@ -16,12 +16,16 @@ version with carried keys needs a published parent on the same image store, and 
 must already exist there with the row's ETag, size and CRC64NVME. A version with neither file is
 tables-only: every key is carried.
 
-A staged version may also carry ``features.jsonl`` with a feature index and extractor spec under
-``features/<family>/`` in the version folder: the feature vectors are copied after the images, in the
-``STANDARD`` storage class, and the feature set is published once the dataset manifest exists.
+A version folder may also stage feature sets, one per ``features/<family>/`` with ``index.parquet``,
+``manifest.json`` and ``copies.jsonl``. Each is a unit of its own, written after the dataset
+manifest: the family is claimed for the set manifest's extractor, the vectors are copied in the
+``STANDARD`` storage class, then the index and the set manifest go up. A family's keys follow the
+dataset's rule: an index key that its ``copies.jsonl`` does not name is carried and must already
+exist in the dataset bucket with the row's fingerprint.
 
-A rerun on a version whose manifest is published with the staged bytes, and which stages a feature
-set, writes only the feature copies and the feature set.
+A unit whose manifest is already published with the staged bytes is done and skipped, so a rerun
+writes only what remains; one published with other bytes is refused. The dataset manifest need not
+be staged when the version is published: the stage then holds only feature sets.
 """
 
 from __future__ import annotations
@@ -37,16 +41,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, TypeVar
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-from segdata_etl.common.copy_plan import (
-    COPIES_NAME,
-    FEATURE_STAGE_NAME,
-    FEATURES_NAME,
-    UPLOADS_NAME,
-)
+from segdata_etl.common.copy_plan import COPIES_NAME, UPLOADS_NAME
 from segdata_etl.common.featurevector import FEATURE_STORAGE_CLASS
 from segdata_etl.common.s3_objects import (
     ObjectConflict,
@@ -55,32 +53,24 @@ from segdata_etl.common.s3_objects import (
     put_new,
 )
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.errors import (
-    ChecksumMismatch,
-    ExtractorMismatch,
-    PublishRefused,
-    SchemaValidationError,
-)
-from segdata_spec.features import (
-    EXTRACTOR_IDENTITY_KEYS,
-    claim_extractor,
-    feature_store_name,
-    publish_feature_set,
-)
+from segdata_spec.errors import ChecksumMismatch, PublishRefused
+from segdata_spec.features import check_claimed_extractor, claim_extractor
 from segdata_spec.layout import (
-    EXTRACTOR_SPEC_NAME,
     FEATURE_INDEX_NAME,
     MANIFEST_NAME,
     cache_path,
     dataset_prefix,
-    feature_key,
     feature_set_prefix,
-    feature_store_prefix,
     taxonomy_prefix,
 )
-from segdata_spec.manifest import Manifest, Pin, TaxonomyManifest, manifest_sha256
+from segdata_spec.manifest import (
+    FeatureSetManifest,
+    ImageStore,
+    Manifest,
+    TaxonomyManifest,
+    manifest_sha256,
+)
 from segdata_spec.s3 import crc64nvme_b64, exists, get_bytes, is_not_found, norm_etag
-from segdata_spec.schema import FEATURE_INDEX_SCHEMA, conform
 from segdata_spec.sync import require_published_taxonomy
 
 logger = logging.getLogger(__name__)
@@ -122,24 +112,30 @@ class _Upload:
 
 
 @dataclass(frozen=True)
-class _FeatureSet:
-    """A staged feature set: its vector copies, index and extractor spec."""
+class _DatasetUnit:
+    """A staged dataset manifest still to publish: its steps and the folder of its tables."""
 
-    family: str
+    manifest: Manifest
+    manifest_bytes: bytes
+    steps: tuple[_Copy | _Upload, ...]
+    version_dir: Path
+
+
+@dataclass(frozen=True)
+class _FamilyUnit:
+    """A staged feature set still to publish: its vector copies and the folder of its index."""
+
+    manifest: FeatureSetManifest
+    manifest_bytes: bytes
     steps: tuple[_Copy, ...]
-    index: pa.Table
-    extractor: dict[str, Any]
-    allow_missing: bool
+    set_dir: Path
 
 
 @dataclass(frozen=True)
 class _Plan:
-    manifest: Manifest
-    manifest_bytes: bytes
-    steps: tuple[_Copy | _Upload, ...]
-    features: _FeatureSet | None
-    # The dataset manifest is already published with the staged bytes; only features remain.
-    dataset_published: bool = False
+    image_store: ImageStore
+    dataset: _DatasetUnit | None
+    families: tuple[_FamilyUnit, ...]
 
 
 def _read_manifest(version_dir: Path, dataset: str, version: str) -> tuple[bytes, Manifest]:
@@ -175,7 +171,9 @@ def _table_expectations(tables: Mapping[str, bytes], prefix: str) -> dict[str, _
     }
 
 
-def _read_table(version_dir: Path, name: str, manifest: Manifest | TaxonomyManifest) -> bytes:
+def _read_table(
+    version_dir: Path, name: str, manifest: Manifest | TaxonomyManifest | FeatureSetManifest
+) -> bytes:
     """Return the staged bytes of table ``name`` after checking them against the manifest."""
     entry = manifest.files[name]
     path = version_dir / name
@@ -210,25 +208,32 @@ def _require_filled(line: Mapping[str, Any], fields: Iterable[str], where: str) 
 
 
 def _check_against_row(
-    line: Mapping[str, Any], expect: _Expected, check_etag: bool, where: str
+    line: Mapping[str, Any], expect: _Expected, check_etag: bool, where: str, table: str
 ) -> None:
     same = line["size"] == expect.size and line["crc64nvme"] == expect.crc64nvme
     if check_etag:
         same = same and norm_etag(line["etag"]) == norm_etag(expect.etag)
     if not same:
-        raise PublishRefused(f"{where} disagrees with images.parquet")
+        raise PublishRefused(f"{where} disagrees with {table}")
 
 
-def _copy_step(line: Mapping[str, Any], expected: Mapping[str, _Expected], where: str) -> _Copy:
+def _copy_step(
+    line: Mapping[str, Any],
+    expected: Mapping[str, _Expected],
+    where: str,
+    table: str,
+    storage_class: str,
+) -> _Copy:
     _require_filled(line, ("src_etag", "crc64nvme", "etag"), where)
     expect = _Expected(line["etag"], line["size"], line["crc64nvme"])
-    _check_against_row(line, expected[line["dst_key"]], True, where)
+    _check_against_row(line, expected[line["dst_key"]], True, where, table)
     return _Copy(
         line["src_bucket"],
         line["src_key"],
         line["src_etag"],
         line["dst_key"],
         expect,
+        storage_class,
     )
 
 
@@ -238,7 +243,7 @@ def _upload_step(
     _require_filled(line, ("crc64nvme",), where)
     row = expected[line["dst_key"]]
     _require_filled({"etag": row.etag}, ("etag",), f"images.parquet row for {where}")
-    _check_against_row(line, row, False, where)
+    _check_against_row(line, row, False, where, "images.parquet")
     path = cache_path(stage_dir, *line["local_path"].split("/", 1))
     data = path.read_bytes() if path.is_file() else None
     if data is None or len(data) != line["size"] or crc64nvme_b64(data) != line["crc64nvme"]:
@@ -247,195 +252,42 @@ def _upload_step(
 
 
 def _plan_steps(
-    stage_dir: Path, version_dir: Path, expected: Mapping[str, _Expected]
+    stage_dir: Path,
+    plan_dir: Path,
+    expected: Mapping[str, _Expected],
+    table: str,
+    storage_class: str,
 ) -> tuple[_Copy | _Upload, ...]:
-    """Return the steps of every staged plan file, copies before uploads; none when tables-only.
+    """Return the steps of the plan files in ``plan_dir``, copies before uploads.
 
-    The caller checks that the combined destination keys match ``expected`` exactly once each.
+    Every line must name a key of ``expected``, the rows of the staged ``table``, and no key may
+    be named twice.
     """
-    present = [n for n in (COPIES_NAME, UPLOADS_NAME) if (version_dir / n).is_file()]
+    present = [n for n in (COPIES_NAME, UPLOADS_NAME) if (plan_dir / n).is_file()]
     steps: list[_Copy | _Upload] = []
     for name in present:
-        for number, line in enumerate(_read_lines(version_dir / name), start=1):
+        for number, line in enumerate(_read_lines(plan_dir / name), start=1):
             where = f"{name} line {number}"
             if line.get("dst_bucket") != DATASET_BUCKET:
                 raise PublishRefused(f"{where}: destination bucket is not {DATASET_BUCKET}")
             if line.get("dst_key") not in expected:
-                raise PublishRefused(f"plan keys differ from images.parquet: {where} is not in it")
+                raise PublishRefused(f"plan keys differ from {table}: {where} is not in it")
             if name == COPIES_NAME:
-                steps.append(_copy_step(line, expected, where))
+                steps.append(_copy_step(line, expected, where, table, storage_class))
             else:
                 steps.append(_upload_step(stage_dir, line, expected, where))
+    duplicated = [k for k, n in Counter(step.dst_key for step in steps).items() if n > 1]
+    if duplicated:
+        raise PublishRefused(f"plan keys differ from {table}: {len(duplicated)} duplicated")
     return tuple(steps)
 
 
-def _check_key_sets(steps: Iterable[_Copy | _Upload], expected: Mapping[str, _Expected]) -> None:
-    """Refuse a plan key that ``images.parquet`` lacks, or one that two plan lines name."""
-    counts = Counter(step.dst_key for step in steps)
-    extra = counts.keys() - expected.keys()
-    duplicated = [k for k, n in counts.items() if n > 1]
-    if extra or duplicated:
-        raise PublishRefused(
-            f"plan keys differ from images.parquet: {len(extra)} extra, {len(duplicated)} duplicated"
-        )
-
-
-def _staged_family(version_dir: Path) -> str:
-    """Return the one family staged under ``features/`` in the version folder."""
-    root = version_dir / "features"
-    families = sorted(p.name for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
-    if len(families) != 1:
-        raise PublishRefused(
-            f"{FEATURES_NAME} needs exactly one staged feature family under {root}, "
-            f"found {families}"
-        )
-    return families[0]
-
-
-def _index_expectations(index: pa.Table) -> dict[str, _Expected]:
-    """Map each staged feature index key to its row's fingerprint, refusing a repeated key."""
-    rows = index.to_pylist()
-    expected = {row["key"]: _Expected(row["etag"], row["size"], row["crc64nvme"]) for row in rows}
-    if len(expected) != len(rows):
-        raise PublishRefused("the staged feature index repeats a key")
-    return expected
-
-
-def _feature_step(line: Mapping[str, Any], expected: Mapping[str, _Expected], where: str) -> _Copy:
-    _require_filled(line, ("src_etag", "crc64nvme", "etag"), where)
-    if line.get("dst_bucket") != DATASET_BUCKET:
-        raise PublishRefused(f"{where}: destination bucket is not {DATASET_BUCKET}")
-    row = expected.get(line["dst_key"])
-    if row is None:
-        raise PublishRefused(f"{where}: {line['dst_key']} is not in the staged feature index")
-    expect = _Expected(line["etag"], line["size"], line["crc64nvme"])
-    if (norm_etag(expect.etag), expect.size, expect.crc64nvme) != (
-        norm_etag(row.etag),
-        row.size,
-        row.crc64nvme,
-    ):
-        raise PublishRefused(f"{where} disagrees with the staged feature index")
-    return _Copy(
-        line["src_bucket"],
-        line["src_key"],
-        line["src_etag"],
-        line["dst_key"],
-        expect,
-        FEATURE_STORAGE_CLASS,
-    )
-
-
-def _check_feature_keys(steps: Iterable[_Copy], expected: Mapping[str, _Expected]) -> None:
-    counts = Counter(step.dst_key for step in steps)
-    planned = set(counts)
-    duplicated = sorted(k for k, n in counts.items() if n > 1)
-    if planned != set(expected) or duplicated:
-        raise PublishRefused(
-            f"{FEATURES_NAME} keys differ from the staged feature index: "
-            f"{len(planned - set(expected))} extra, {len(set(expected) - planned)} missing, "
-            f"{len(duplicated)} duplicated"
-        )
-
-
-_FEATURE_EXTENSION = ".featurevector"
-
-
-def _is_family_key(key: str, store: str, family: str, image_id: str) -> bool:
-    """Return whether ``key`` is ``image_id``'s feature file in the family, with or without a suffix."""
-    if key == feature_key(store, family, image_id):
-        return True
-    stem = f"{feature_store_prefix(store, family)}{image_id}~"
-    if not (key.startswith(stem) and key.endswith(_FEATURE_EXTENSION)):
-        return False
-    try:
-        return key == feature_key(
-            store, family, image_id, key[len(stem) : -len(_FEATURE_EXTENSION)]
-        )
-    except ValueError:
-        return False
-
-
-def _check_staged_index(
-    index: pa.Table, version_ids: set[str], store: str, family: str, allow_missing: bool
-) -> pa.Table:
-    """Return the staged index conformed, refusing what ``publish_feature_set`` would refuse."""
-    try:
-        conformed = conform(index, FEATURE_INDEX_SCHEMA)
-    except SchemaValidationError as exc:
-        raise PublishRefused(f"the staged feature index does not conform: {exc}") from exc
-    ids = conformed.column("image_id").to_pylist()
-    unknown = sorted(set(ids) - version_ids)
-    if unknown:
-        raise PublishRefused(
-            f"staged feature index ids not in images.parquet: {unknown[:_NAMED_CONFLICTS]}"
-        )
-    if len(set(ids)) != len(ids):
-        raise PublishRefused("the staged feature index repeats an image id")
-    bad = [
-        key
-        for image_id, key in zip(ids, conformed.column("key").to_pylist(), strict=True)
-        if not _is_family_key(key, store, family, image_id)
-    ]
-    if bad:
-        raise PublishRefused(
-            f"{len(bad)} staged feature index key(s) are not their image's file under "
-            f"{feature_store_prefix(store, family)}: {bad[:_NAMED_CONFLICTS]}"
-        )
-    missing = len(version_ids) - len(ids)
-    if missing and not allow_missing:
-        raise PublishRefused(
-            f"the staged feature index leaves out {missing} image(s) and {FEATURE_STAGE_NAME} "
-            "does not allow missing ones"
-        )
-    return conformed
-
-
-def _read_stage(family_dir: Path) -> bool:
-    """Return the staged ``allow_missing`` choice, refusing a missing or malformed sidecar."""
-    path = family_dir / FEATURE_STAGE_NAME
-    if not path.is_file():
-        raise PublishRefused(f"{path} is not staged")
-    allow_missing = json.loads(path.read_text()).get("allow_missing")
-    if not isinstance(allow_missing, bool):
-        raise PublishRefused(f"{path} holds no boolean allow_missing")
-    return allow_missing
-
-
-def _read_extractor(family_dir: Path) -> dict[str, Any]:
-    extractor: dict[str, Any] = json.loads((family_dir / EXTRACTOR_SPEC_NAME).read_text())
-    absent = [name for name in EXTRACTOR_IDENTITY_KEYS if name not in extractor]
-    if absent:
-        raise PublishRefused(f"the staged extractor spec lacks identity keys: {absent}")
-    return extractor
-
-
-def _read_feature_set(version_dir: Path, manifest: Manifest, images: bytes) -> _FeatureSet | None:
-    """Return the staged feature set, or None when the version stages no ``features.jsonl``.
-
-    Every check ``publish_feature_set`` makes on the index and extractor spec runs here, so a
-    bad feature set is refused before the dataset is written.
-    """
-    plan_path = version_dir / FEATURES_NAME
-    if not plan_path.is_file():
-        return None
-    family = _staged_family(version_dir)
-    family_dir = version_dir / "features" / family
-    allow_missing = _read_stage(family_dir)
-    version_ids = set(pq.read_table(BytesIO(images), columns=["image_id"]).column(0).to_pylist())
-    index = _check_staged_index(
-        pq.read_table(family_dir / FEATURE_INDEX_NAME),
-        version_ids,
-        feature_store_name(manifest.image_store, DATASET_BUCKET),
-        family,
-        allow_missing,
-    )
-    expected = _index_expectations(index)
-    steps = tuple(
-        _feature_step(line, expected, f"{FEATURES_NAME} line {number}")
-        for number, line in enumerate(_read_lines(plan_path), start=1)
-    )
-    _check_feature_keys(steps, expected)
-    return _FeatureSet(family, steps, index, _read_extractor(family_dir), allow_missing)
+def _index_expectations(index: bytes) -> dict[str, _Expected]:
+    """Map each feature file key in a staged ``index.parquet`` to its row's fingerprint."""
+    return {
+        row["key"]: _Expected(row["etag"], row["size"], row["crc64nvme"])
+        for row in pq.read_table(BytesIO(index)).to_pylist()
+    }
 
 
 def _manifest_published(client: Any, prefix: str) -> bool:
@@ -496,10 +348,10 @@ def _unmatched_key(client: Any, bucket: str, key: str, expect: _Expected) -> str
     return None if head is not None and _matches(head, expect) else key
 
 
-def _check_images_present(
+def _check_present(
     client: Any, bucket: str, expected: Mapping[str, _Expected], workers: int
 ) -> None:
-    """Refuse unless every expected image and mask key exists in ``bucket`` as planned."""
+    """Refuse unless every carried key exists in ``bucket`` with its staged row's fingerprint."""
     unmatched: list[str] = []
 
     def collect(key: str | None) -> None:
@@ -512,7 +364,7 @@ def _check_images_present(
     if unmatched:
         named = ", ".join(sorted(unmatched)[:_NAMED_CONFLICTS])
         raise PublishRefused(
-            f"{len(unmatched)} image keys are absent from s3://{bucket} or hold other content: "
+            f"{len(unmatched)} carried keys are absent from s3://{bucket} or hold other content: "
             f"{named}"
         )
 
@@ -533,89 +385,157 @@ def _check_destinations(client: Any, planned: Mapping[str, _Expected], workers: 
         )
 
 
-def _resumes_features(
-    client: Any, manifest_bytes: bytes, manifest: Manifest, features: _FeatureSet | None
-) -> bool:
-    """Return whether the published version only lacks its staged feature set; refuse otherwise.
+def _published_status(client: Any, key: str, staged: bytes, what: str) -> bool:
+    """Return whether ``key`` is published with the ``staged`` bytes; False when absent.
 
     Raises:
-        PublishRefused: The version is published and stages no features, was published with
-            other manifest bytes, or already has the staged feature set.
+        PublishRefused: ``key`` is published with other bytes.
     """
-    dataset, version = manifest.dataset, manifest.version
-    prefix = dataset_prefix(dataset, version)
-    if not _manifest_published(client, prefix):
+    if not exists(client, DATASET_BUCKET, key):
         return False
-    if (
-        features is None
-        or get_bytes(client, DATASET_BUCKET, prefix + MANIFEST_NAME) != manifest_bytes
-    ):
-        raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
-    set_manifest = feature_set_prefix(dataset, version, features.family) + MANIFEST_NAME
-    if exists(client, DATASET_BUCKET, set_manifest):
-        raise PublishRefused(
-            f"feature set {features.family} of {dataset} {version} is already published in "
-            f"{DATASET_BUCKET}"
-        )
+    if get_bytes(client, DATASET_BUCKET, key) != staged:
+        raise PublishRefused(f"{what} is already published in {DATASET_BUCKET} with other bytes")
     return True
 
 
-def _check_stored_extractor(client: Any, manifest: Manifest, features: _FeatureSet) -> None:
-    """Refuse when the family's published extractor spec names another identity than the staged one.
-
-    Raises:
-        ExtractorMismatch: An identity field differs.
-    """
-    store = feature_store_name(manifest.image_store, DATASET_BUCKET)
-    key = feature_store_prefix(store, features.family) + EXTRACTOR_SPEC_NAME
-    try:
-        body = get_bytes(client, DATASET_BUCKET, key)
-    except ClientError as exc:
-        if is_not_found(exc):
-            return
-        raise
-    stored = json.loads(body)
-    differences = [
-        f"{name}: stored {stored.get(name)!r}, staged {features.extractor.get(name)!r}"
-        for name in EXTRACTOR_IDENTITY_KEYS
-        if stored.get(name) != features.extractor.get(name)
-    ]
-    if differences:
-        raise ExtractorMismatch(
-            f"s3://{DATASET_BUCKET}/{key} names another extractor: {differences}"
-        )
-
-
-def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers: int) -> _Plan:
-    """Check everything that can be checked before the first write; return the plan."""
-    prefix = dataset_prefix(dataset, version)
-    version_dir = cache_path(stage_dir, DATASET_BUCKET, prefix)
+def _staged_dataset(stage_dir: Path, version_dir: Path, dataset: str, version: str) -> _DatasetUnit:
+    """Read and check the staged dataset version and its plans, with no S3 call."""
     manifest_bytes, manifest = _read_manifest(version_dir, dataset, version)
     tables = _verify_tables(version_dir, manifest)
     expected = _image_expectations(tables["images.parquet"], manifest.image_store.prefix)
-    steps = _plan_steps(stage_dir, version_dir, expected)
-    if steps:
-        _check_key_sets(steps, expected)
-    features = _read_feature_set(version_dir, manifest, tables["images.parquet"])
-    feature_steps = features.steps if features is not None else ()
-    dataset_published = _resumes_features(client, manifest_bytes, manifest, features)
-    if features is not None:
-        _check_stored_extractor(client, manifest, features)
-        if dataset_published:
-            _check_destinations(client, {s.dst_key: s.expect for s in feature_steps}, workers)
-            return _Plan(manifest, manifest_bytes, (), features, dataset_published=True)
+    steps = _plan_steps(stage_dir, version_dir, expected, "images.parquet", IMAGE_STORAGE_CLASS)
+    return _DatasetUnit(manifest, manifest_bytes, steps, version_dir)
+
+
+def _staged_family(stage_dir: Path, set_dir: Path) -> tuple[_FamilyUnit, dict[str, _Expected]]:
+    """Read and check one staged feature set and its plan, with no S3 call.
+
+    Returns the unit and the fingerprint of every key in its index.
+    """
+    if (set_dir / UPLOADS_NAME).is_file():
+        raise PublishRefused(f"{set_dir / UPLOADS_NAME}: a feature set stages copies only")
+    manifest_bytes = (set_dir / MANIFEST_NAME).read_bytes()
+    manifest = FeatureSetManifest.model_validate_json(manifest_bytes)
+    if manifest.family != set_dir.name:
+        raise PublishRefused(f"{set_dir / MANIFEST_NAME} describes family {manifest.family}")
+    expected = _index_expectations(_read_table(set_dir, FEATURE_INDEX_NAME, manifest))
+    steps = _plan_steps(stage_dir, set_dir, expected, FEATURE_INDEX_NAME, FEATURE_STORAGE_CLASS)
+    copies = tuple(step for step in steps if isinstance(step, _Copy))
+    return _FamilyUnit(manifest, manifest_bytes, copies, set_dir), expected
+
+
+def _staged_family_dirs(version_dir: Path) -> list[Path]:
+    root = version_dir / "features"
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.iterdir() if (p / MANIFEST_NAME).is_file())
+
+
+def _published_dataset(client: Any, version_dir: Path, dataset: str, version: str) -> bytes:
+    """Return the published manifest of a version whose stage holds only feature sets.
+
+    Raises:
+        PublishRefused: The version is not published.
+    """
+    try:
+        return get_bytes(client, DATASET_BUCKET, dataset_prefix(dataset, version) + MANIFEST_NAME)
+    except ClientError as exc:
+        if is_not_found(exc):
+            raise PublishRefused(
+                f"{version_dir / MANIFEST_NAME} is not staged and {dataset} {version} is not "
+                f"published in {DATASET_BUCKET}"
+            ) from exc
+        raise
+
+
+def _check_dataset(client: Any, unit: _DatasetUnit, workers: int) -> None:
+    """Check the dataset unit's taxonomy, parents, carried images and destinations."""
+    manifest = unit.manifest
+    prefix = dataset_prefix(manifest.dataset, manifest.version)
+    tables = {name: _read_table(unit.version_dir, name, manifest) for name in manifest.files}
+    expected = _image_expectations(tables["images.parquet"], manifest.image_store.prefix)
     if manifest.taxonomy is not None:
         require_published_taxonomy(client, DATASET_BUCKET, manifest.taxonomy)
     parent_bodies = _check_parents(client, manifest)
-    planned = {s.dst_key for s in steps}
+    planned = {s.dst_key for s in unit.steps}
     carried = {k: v for k, v in expected.items() if k not in planned}
     if carried:
         _check_shared_store(manifest, parent_bodies)
-        _check_images_present(client, manifest.image_store.bucket, carried, workers)
-    file_expected = _table_expectations(tables, prefix)
-    destinations = {s.dst_key: s.expect for s in (*steps, *feature_steps)}
-    _check_destinations(client, {**destinations, **file_expected}, workers)
-    return _Plan(manifest, manifest_bytes, steps, features)
+        _check_present(client, manifest.image_store.bucket, carried, workers)
+    destinations = {s.dst_key: s.expect for s in unit.steps}
+    _check_destinations(client, {**destinations, **_table_expectations(tables, prefix)}, workers)
+
+
+def _check_family(
+    client: Any,
+    unit: _FamilyUnit,
+    expected: Mapping[str, _Expected],
+    store: ImageStore,
+    workers: int,
+) -> None:
+    """Check the family's extractor claim, carried vectors and destinations."""
+    manifest = unit.manifest
+    prefix = feature_set_prefix(manifest.dataset.name, manifest.dataset.version, manifest.family)
+    check_claimed_extractor(client, DATASET_BUCKET, store, manifest.family, manifest.extractor)
+    planned = {s.dst_key for s in unit.steps}
+    carried = {k: v for k, v in expected.items() if k not in planned}
+    if carried:
+        _check_present(client, DATASET_BUCKET, carried, workers)
+    index = _read_table(unit.set_dir, FEATURE_INDEX_NAME, manifest)
+    destinations = {s.dst_key: s.expect for s in unit.steps}
+    tables = _table_expectations({FEATURE_INDEX_NAME: index}, prefix)
+    _check_destinations(client, {**destinations, **tables}, workers)
+
+
+def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers: int) -> _Plan:
+    """Check every staged unit before the first write; return the units still to publish.
+
+    Every staged file is checked before the first S3 call. A unit published with its staged
+    manifest bytes is dropped from the plan.
+
+    Raises:
+        PublishRefused: A unit is inconsistent or published with other bytes, or every staged
+            unit is already published.
+    """
+    version_dir = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version))
+    staged = (
+        _staged_dataset(stage_dir, version_dir, dataset, version)
+        if (version_dir / MANIFEST_NAME).is_file()
+        else None
+    )
+    families = [_staged_family(stage_dir, d) for d in _staged_family_dirs(version_dir)]
+    if staged is None:
+        manifest_bytes = _published_dataset(client, version_dir, dataset, version)
+        manifest = Manifest.model_validate_json(manifest_bytes)
+    else:
+        manifest_bytes, manifest = staged.manifest_bytes, staged.manifest
+    sha = manifest_sha256(manifest_bytes)
+    for unit, _ in families:
+        pinned = unit.manifest.dataset
+        if (pinned.name, pinned.version, pinned.manifest_sha256) != (dataset, version, sha):
+            raise PublishRefused(
+                f"{unit.set_dir / MANIFEST_NAME} is not feature set {unit.set_dir.name} of "
+                f"{dataset} {version} with manifest sha256 {sha}"
+            )
+    write_dataset = staged is not None and not _published_status(
+        client,
+        dataset_prefix(dataset, version) + MANIFEST_NAME,
+        manifest_bytes,
+        f"{dataset} {version}",
+    )
+    if write_dataset and staged is not None:
+        _check_dataset(client, staged, workers)
+    pending: list[_FamilyUnit] = []
+    for unit, expected in families:
+        family = unit.manifest.family
+        key = feature_set_prefix(dataset, version, family) + MANIFEST_NAME
+        what = f"feature set {family} of {dataset} {version}"
+        if not _published_status(client, key, unit.manifest_bytes, what):
+            _check_family(client, unit, expected, manifest.image_store, workers)
+            pending.append(unit)
+    if not write_dataset and not pending:
+        raise PublishRefused(f"{dataset} {version} is already published in {DATASET_BUCKET}")
+    return _Plan(manifest.image_store, staged if write_dataset else None, tuple(pending))
 
 
 def _run_copy(client: Any, step: _Copy) -> bool:
@@ -709,7 +629,7 @@ def _write_images(
 def _write_tables(
     client: Any,
     version_dir: Path,
-    manifest: Manifest | TaxonomyManifest,
+    manifest: Manifest | TaxonomyManifest | FeatureSetManifest,
     prefix: str,
     tally: Counter[str],
 ) -> None:
@@ -724,95 +644,78 @@ def _write_tables(
         tally["tables"] += 1
 
 
-def _publish_features(client: Any, plan: _Plan, features: _FeatureSet) -> str:
-    """Publish the staged feature set against the dataset manifest just written."""
-    pin = Pin(
-        name=plan.manifest.dataset,
-        version=plan.manifest.version,
-        manifest_sha256=manifest_sha256(plan.manifest_bytes),
-    )
-    return publish_feature_set(
-        client,
-        pin,
-        features.family,
-        features.index,
-        features.extractor,
-        bucket=DATASET_BUCKET,
-        etl=plan.manifest.etl,
-        allow_missing=features.allow_missing,
-    ).manifest_sha256
+def _put_manifest(client: Any, key: str, body: bytes) -> None:
+    put_new(client, bucket=DATASET_BUCKET, key=key, body=body, content_type=_JSON)
 
 
-def _write_version(
-    client: Any, plan: _Plan, version_dir: Path, workers: int, tally: Counter[str]
-) -> None:
-    prefix = dataset_prefix(plan.manifest.dataset, plan.manifest.version)
-    _write_images(client, plan.steps, workers, tally)
-    if plan.features is not None:
-        # The writer contract: the family is claimed before any file is written into it.
-        claim_extractor(
-            client,
-            DATASET_BUCKET,
-            plan.manifest.image_store,
-            plan.features.family,
-            plan.features.extractor,
-        )
-        _write_images(client, plan.features.steps, workers, tally)
-    if not plan.dataset_published:
-        _write_tables(client, version_dir, plan.manifest, prefix, tally)
-        put_new(
-            client,
-            bucket=DATASET_BUCKET,
-            key=prefix + MANIFEST_NAME,
-            body=plan.manifest_bytes,
-            content_type=_JSON,
-        )
+def _write_dataset(client: Any, unit: _DatasetUnit, workers: int, tally: Counter[str]) -> None:
+    prefix = dataset_prefix(unit.manifest.dataset, unit.manifest.version)
+    _write_images(client, unit.steps, workers, tally)
+    _write_tables(client, unit.version_dir, unit.manifest, prefix, tally)
+    _put_manifest(client, prefix + MANIFEST_NAME, unit.manifest_bytes)
     tally["manifest"] += 1
-    if plan.features is not None:
-        sha = _publish_features(client, plan, plan.features)
-        logger.info("published feature set %s (manifest sha256 %s)", plan.features.family, sha)
+
+
+def _write_family(
+    client: Any, store: ImageStore, unit: _FamilyUnit, workers: int, tally: Counter[str]
+) -> None:
+    manifest = unit.manifest
+    claim_extractor(client, DATASET_BUCKET, store, manifest.family, manifest.extractor)
+    _write_images(client, unit.steps, workers, tally)
+    prefix = feature_set_prefix(manifest.dataset.name, manifest.dataset.version, manifest.family)
+    _write_tables(client, unit.set_dir, manifest, prefix, tally)
+    _put_manifest(client, prefix + MANIFEST_NAME, unit.manifest_bytes)
+    tally["feature sets"] += 1
+    logger.info(
+        "published feature set %s (manifest sha256 %s)",
+        manifest.family,
+        manifest_sha256(unit.manifest_bytes),
+    )
 
 
 def promote(client: Any, *, stage_dir: Path, dataset: str, version: str, workers: int) -> None:
-    """Upload the staged ``dataset`` ``version`` to the dataset bucket, exactly as staged.
+    """Upload the staged units of ``dataset`` ``version`` to the dataset bucket, exactly as staged.
+
+    The dataset goes first when staged and unpublished, then each staged feature set in family order.
 
     Raises:
-        PublishRefused: The staging is inconsistent or holds no images, the version is already
-            published (unless with the staged manifest bytes and a staged feature set, which then
-            is all that is written), a planned key holds other content, a version with carried
-            images lacks a parent on its image store or an image there, or ``features.jsonl``
-            disagrees with the staged feature index; nothing was written.
-        ChecksumMismatch: A staged table differs from the manifest.
+        PublishRefused: The staging is inconsistent or holds no images, every staged unit is already
+            published, a unit is published with other bytes, a planned key holds other content, a
+            carried image or vector is absent or differs, or a version with carried images lacks a
+            parent on its image store; nothing was written.
+        ChecksumMismatch: A staged table differs from its manifest.
+        ExtractorMismatch: Raised from preflight when a family's stored spec names another
+            extractor, and nothing was written; or when another writer claims the family between
+            preflight and the claim, and the units before it are in place for a rerun.
         ObjectConflict: An object landed with, or already holds, other content than planned.
         SourceChanged: A copy source no longer has the planned ETag.
-        ExtractorMismatch: Raised from preflight when the stored spec names another extractor,
-            in which case nothing was written; or raised when the family is claimed just before
-            the feature copies because another writer claimed it in between, in which case the
-            image copies are already in place and a rerun continues.
     """
     plan = _preflight(client, stage_dir, dataset, version, workers)
-    version_dir = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version))
     tally: Counter[str] = Counter()
     try:
-        _write_version(client, plan, version_dir, workers, tally)
+        if plan.dataset is not None:
+            _write_dataset(client, plan.dataset, workers, tally)
+        for unit in plan.families:
+            _write_family(client, plan.image_store, unit, workers, tally)
     except BaseException:
         logger.error(
-            "promote of %s %s failed: at least %d of %d images and feature vectors and %d of %d "
-            "tables written, manifest %s; rerun to continue",
+            "promote of %s %s failed: %d objects and %d tables written, dataset manifest %s, "
+            "%d of %d feature sets published; rerun to continue",
             dataset,
             version,
             tally["copied"] + tally["uploaded"] + tally["present"],
-            len(plan.steps) + (len(plan.features.steps) if plan.features is not None else 0),
             tally["tables"],
-            len(plan.manifest.files),
-            "written" if tally["manifest"] else "not written",
+            "written" if tally["manifest"] or plan.dataset is None else "not written",
+            tally["feature sets"],
+            len(plan.families),
         )
         raise
     logger.info(
-        "promoted %s %s (manifest sha256 %s): %d copied, %d uploaded, %d already present",
+        "promoted %s %s: dataset %s, %d feature sets; %d copied, %d uploaded, %d already present",
         dataset,
         version,
-        manifest_sha256(plan.manifest_bytes),
+        "published" if plan.dataset is not None else "already published",
+        len(plan.families),
         tally["copied"],
         tally["uploaded"],
         tally["present"],
