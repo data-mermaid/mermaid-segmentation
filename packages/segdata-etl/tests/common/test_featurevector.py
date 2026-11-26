@@ -29,6 +29,23 @@ def featurevector_bytes(points: list[tuple[int, int]], dim: int = 2) -> bytes:
     return buf.getvalue()
 
 
+def npz_bytes(
+    *,
+    rows: np.ndarray | None = None,
+    feat: np.ndarray | None = None,
+) -> bytes:
+    """A one-point ``.featurevector`` at (1, 3), width 2, with ``rows`` or ``feat`` replaced."""
+    buf = io.BytesIO()
+    np.savez(
+        buf,
+        meta=np.array([1, 0, 0], dtype=np.int64),
+        rows=np.array([1], dtype=np.uint16) if rows is None else rows,
+        cols=np.array([3], dtype=np.uint16),
+        feat=np.zeros((1, 2), dtype=np.float64) if feat is None else feat,
+    )
+    return buf.getvalue()
+
+
 def test_vector_points_pairs_rows_with_cols():
     assert vector_points(featurevector_bytes([(1, 3), (2, 4)])) == {(1, 3), (2, 4)}
 
@@ -40,7 +57,11 @@ def test_vector_points_pairs_rows_with_cols():
         (featurevector_bytes([(1, 3)])[:40], [(1, 3)], 2, "unreadable"),
         (featurevector_bytes([(1, 3)], dim=4), [(1, 3)], 1280, "width 4, expected 1280"),
         (featurevector_bytes([(1, 3)]), [(1, 3), (2, 4)], 2, "lacks 1 of 2 point"),
+        (npz_bytes(feat=np.zeros((2, 2))), [(1, 3)], 2, "feat has 2 rows for 1 point"),
+        (npz_bytes(feat=np.zeros((1, 2), dtype=np.int64)), [(1, 3)], 2, "not float"),
+        (npz_bytes(rows=np.array([1.0])), [(1, 3)], 2, "not integer"),
     ],
+    ids=["json", "truncated", "width", "gap", "row-count", "int-feat", "float-rows"],
 )
 def test_vector_problem_names_why_a_vector_is_refused(data, points, dim, reason):
     n_points, problem = vector_problem(data, points, dim)

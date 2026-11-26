@@ -54,14 +54,24 @@ class VectorFacts:
 
 def vector_points(data: bytes) -> set[Point]:
     """Return the ``(row, col)`` points a ``.featurevector`` holds features for."""
-    return _vector_contents(data)[0]
-
-
-def _vector_contents(data: bytes) -> tuple[set[Point], tuple[int, ...]]:
     with np.load(io.BytesIO(data), allow_pickle=False) as npz:
-        rows, cols = npz["rows"].tolist(), npz["cols"].tolist()
-        shape = npz["feat"].shape
-    return set(zip(rows, cols, strict=True)), shape
+        return set(zip(npz["rows"].tolist(), npz["cols"].tolist(), strict=True))
+
+
+def _array_problem(
+    rows: np.ndarray, cols: np.ndarray, feat: np.ndarray, feature_dim: int
+) -> str | None:
+    """Describe how the npz arrays break the ``.featurevector`` layout, or return None."""
+    if not (np.issubdtype(rows.dtype, np.integer) and np.issubdtype(cols.dtype, np.integer)):
+        return f"rows and cols are {rows.dtype} and {cols.dtype}, not integer"
+    if not np.issubdtype(feat.dtype, np.floating):
+        return f"feat is {feat.dtype}, not float"
+    if feat.ndim != 2 or feat.shape[1] != feature_dim:
+        width = feat.shape[1] if feat.ndim == 2 else feat.shape
+        return f"feature width {width}, expected {feature_dim}"
+    if not feat.shape[0] == len(rows) == len(cols):
+        return f"feat has {feat.shape[0]} rows for {len(rows)} point(s)"
+    return None
 
 
 def vector_problem(
@@ -69,17 +79,20 @@ def vector_problem(
 ) -> tuple[int, str | None]:
     """Return the number of distinct ``points`` and why the vector is refused, or None.
 
-    A vector is refused when it is not a readable npz with ``rows``, ``cols`` and ``feat``, when
-    ``feat`` is not ``[n, feature_dim]``, or when it lacks any of ``points``.
+    A vector is refused when it is not a readable npz with ``rows``, ``cols`` and ``feat``; when
+    ``rows`` and ``cols`` are not integer or ``feat`` is not float; when ``feat`` is not
+    ``[len(rows), feature_dim]``; or when it lacks any of ``points``.
     """
     wanted = set(points)
     try:
-        held, shape = _vector_contents(data)
+        with np.load(io.BytesIO(data), allow_pickle=False) as npz:
+            rows, cols, feat = npz["rows"], npz["cols"], npz["feat"]
     except (ValueError, zipfile.BadZipFile, KeyError, OSError) as exc:
         return len(wanted), f"unreadable: {exc}"
-    if len(shape) != 2 or shape[1] != feature_dim:
-        width = shape[1] if len(shape) == 2 else shape
-        return len(wanted), f"feature width {width}, expected {feature_dim}"
+    problem = _array_problem(rows, cols, feat, feature_dim)
+    if problem is not None:
+        return len(wanted), problem
+    held = set(zip(rows.tolist(), cols.tolist(), strict=True))
     lacking = len(wanted - held)
     if lacking:
         return len(wanted), f"lacks {lacking} of {len(wanted)} point(s)"
