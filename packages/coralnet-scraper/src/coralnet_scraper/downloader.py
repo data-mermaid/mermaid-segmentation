@@ -27,6 +27,7 @@ from PIL import Image
 
 from coralnet_scraper import s3_io
 from coralnet_scraper.config import (
+    DEFAULT_PREFIX,
     get_export_workers,
     get_requests_per_second,
     get_scraper_workers,
@@ -605,7 +606,7 @@ class CoralNetDownloader:
         self,
         source_id: int,
         bucket_name: str,
-        s3_prefix: str = "coralnet-public-images",
+        s3_prefix: str = DEFAULT_PREFIX,
         *,
         overview_html: str | None = None,
     ) -> tuple[bool, int]:
@@ -649,7 +650,7 @@ class CoralNetDownloader:
             return False, 0
 
     def download_labelset(
-        self, source_id: int, bucket_name: str, s3_prefix: str = "coralnet-public-images"
+        self, source_id: int, bucket_name: str, s3_prefix: str = DEFAULT_PREFIX
     ) -> bool:
         """Upload the source's labelset as ``labelset.csv``.
 
@@ -701,7 +702,7 @@ class CoralNetDownloader:
         self,
         source_id: int,
         bucket_name: str,
-        s3_prefix: str = "coralnet-public-images",
+        s3_prefix: str = DEFAULT_PREFIX,
         *,
         refs: list[ImageRef],
         total_images: int,
@@ -779,7 +780,7 @@ class CoralNetDownloader:
         self,
         source_id: int,
         bucket_name: str,
-        s3_prefix: str = "coralnet-public-images",
+        s3_prefix: str = DEFAULT_PREFIX,
         *,
         refs: list[ImageRef],
         page_workers: int | None = None,
@@ -1380,7 +1381,7 @@ class CoralNetDownloader:
         refs: list[ImageRef],
         source_id: int,
         bucket_name: str,
-        s3_prefix: str = "coralnet-public-images",
+        s3_prefix: str = DEFAULT_PREFIX,
     ) -> ImageFailures:
         """Download every image of ``refs`` to S3 across :attr:`max_workers` threads.
 
@@ -1584,7 +1585,7 @@ class CoralNetDownloader:
         self,
         source_id: int,
         bucket_name: str,
-        s3_prefix: str = "coralnet-public-images",
+        s3_prefix: str = DEFAULT_PREFIX,
         *,
         prune: bool = False,
     ) -> DownloadResult:

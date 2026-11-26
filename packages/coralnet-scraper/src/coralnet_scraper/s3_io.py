@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 from botocore.exceptions import ClientError
 
-_MISSING_KEY_CODES = ("404", "NoSuchKey")
+_MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 _DELETE_BATCH_SIZE = 1000  # the DeleteObjects API limit
 
 
