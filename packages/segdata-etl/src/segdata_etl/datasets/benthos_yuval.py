@@ -1,4 +1,4 @@
-"""``segdata build benthos_yuval``: stage the legacy Benthos tiles and masks as a dense version."""
+"""``segdata build benthos_yuval``: stage the ingested Benthos tiles and masks as a dense version."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import pyarrow as pa
 from botocore.exceptions import ClientError
 from PIL import Image
 
-from segdata_etl.common.legacy import LegacyDataset, legacy_dropped, read_legacy, source_info
+from segdata_etl.common.ingested import IngestedDataset, read_ingested, source_info
 from segdata_etl.common.s3_objects import SourceChanged
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import curated_source, load_curated
@@ -27,7 +27,6 @@ from segdata_spec.s3 import is_precondition_failed
 from segdata_spec.schema import LABEL_COUNTS_SCHEMA
 
 DATASET = "benthos_yuval"
-LICENSE = "CC0 1.0 (Dryad)"
 _IMAGES_FOLDER = "images"
 _MASKS_FOLDER = "labels"
 _UNLABELED = 0
@@ -60,13 +59,13 @@ def benthos_identity(key: str) -> tuple[str, str] | None:
     if parts[0] != _IMAGES_FOLDER:
         return None
     if len(parts) != 3:
-        raise ValueError(f"legacy image {key!r} is not at images/<site>/<file>")
+        raise ValueError(f"ingested image {key!r} is not at images/<site>/<file>")
     site = parts[1]
     return f"{site}_{PurePosixPath(parts[2]).stem}", site
 
 
-def _with_masks(images: Sequence[external.LegacyImage]) -> list[external.LegacyImage]:
-    """Point each tile at its legacy mask ``labels/<site>/<file>``."""
+def _with_masks(images: Sequence[external.IngestedImage]) -> list[external.IngestedImage]:
+    """Point each tile at its ingested mask ``labels/<site>/<file>``."""
     return [
         replace(image, mask_key=f"{_MASKS_FOLDER}/{image.group}/{PurePosixPath(image.key).name}")
         for image in images
@@ -78,7 +77,7 @@ def _tile_ids(annotations: pd.DataFrame) -> pd.Series:
 
 
 def _tile_labels(annotations: pd.DataFrame, classes: Mapping[str, int]) -> dict[str, set[int]]:
-    """Return the label ids the legacy rows list per tile id, ``unlabeled`` left out.
+    """Return the label ids the ingested rows list per tile id, ``unlabeled`` left out.
 
     Raises:
         ValueError: A ``source_label_name`` is not in ``classes.json``.
@@ -109,25 +108,29 @@ def _mask_stats(png: bytes) -> _MaskStats:
 
 
 def _read_masks(
-    client: Any, images: Sequence[external.LegacyImage], *, legacy: LegacyDataset, workers: int
+    client: Any,
+    images: Sequence[external.IngestedImage],
+    *,
+    ingested: IngestedDataset,
+    workers: int,
 ) -> dict[str, bytes]:
-    """Download each tile's legacy mask on ``workers`` threads, keyed by image id.
+    """Download each tile's ingested mask on ``workers`` threads, keyed by image id.
 
     Raises:
         SourceChanged: A mask's ETag differs from the listing.
     """
 
-    def read(image: external.LegacyImage) -> bytes:
-        key = legacy.prefix + str(image.mask_key)
-        etag = legacy.objects[str(image.mask_key)].etag
+    def read(image: external.IngestedImage) -> bytes:
+        key = ingested.prefix + str(image.mask_key)
+        etag = ingested.objects[str(image.mask_key)].etag
         try:
-            data: bytes = client.get_object(Bucket=legacy.bucket, Key=key, IfMatch=f'"{etag}"')[
+            data: bytes = client.get_object(Bucket=ingested.bucket, Key=key, IfMatch=f'"{etag}"')[
                 "Body"
             ].read()
         except ClientError as exc:
             if is_precondition_failed(exc):
                 raise SourceChanged(
-                    f"s3://{legacy.bucket}/{key} changed since it was listed"
+                    f"s3://{ingested.bucket}/{key} changed since it was listed"
                 ) from exc
             raise
         return data
@@ -140,7 +143,7 @@ def _read_masks(
 def _mask_problem(
     stat: _MaskStats, size: tuple[int, int], listed: set[int], label_ids: Collection[int]
 ) -> str | None:
-    """Describe why a mask disagrees with its image size, the labels or the legacy rows."""
+    """Describe why a mask disagrees with its image size, the labels or the ingested rows."""
     if (stat.width, stat.height) != size:
         return f"mask size {(stat.width, stat.height)} differs from image size {size}"
     present = set(stat.counts) - {_UNLABELED}
@@ -148,12 +151,14 @@ def _mask_problem(
     if unknown:
         return f"mask values not in labels.parquet: {unknown}"
     if present != listed:
-        return f"mask labels {sorted(present)} differ from the legacy rows' labels {sorted(listed)}"
+        return (
+            f"mask labels {sorted(present)} differ from the ingested rows' labels {sorted(listed)}"
+        )
     return None
 
 
 def _require_masks_match(
-    images: Sequence[external.LegacyImage],
+    images: Sequence[external.IngestedImage],
     sniffed: Mapping[str, tuple[str, int, int]],
     stats: Mapping[str, _MaskStats],
     tile_labels: Mapping[str, set[int]],
@@ -205,25 +210,25 @@ def run(args: argparse.Namespace, client: Any) -> int:
         manifest_sha256=args.taxonomy_manifest_sha256,
         cache_dir=args.cache_dir,
     )
-    legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
-    source = source_info(legacy, license_override=LICENSE)
-    dropped = legacy_dropped(DATASET, legacy.manifest)
+    ingested = read_ingested(client, DATASET, bucket=args.ingest_bucket)
+    source = source_info(ingested)
+    dropped = ingested.manifest.ingestion.dropped
     curated = load_curated(DATASET)
-    labels = external.build_labels(legacy.classes, curated, taxonomy.benthic_attributes)
-    images = _with_masks(external.legacy_images(legacy.objects, benthos_identity))
+    labels = external.build_labels(ingested.classes, curated, taxonomy.benthic_attributes)
+    images = _with_masks(external.ingested_images(ingested.objects, benthos_identity))
     external.require_same_ids(
         {image.image_id for image in images},
-        set(_tile_ids(legacy.annotations)),
+        set(_tile_ids(ingested.annotations)),
         what="benthos tiles",
     )
     external.require_same_ids(
-        {key for key in legacy.objects if PurePosixPath(key).parts[0] == _MASKS_FOLDER},
+        {key for key in ingested.objects if PurePosixPath(key).parts[0] == _MASKS_FOLDER},
         {str(image.mask_key) for image in images},
         what="benthos masks",
     )
-    tile_labels = _tile_labels(legacy.annotations, legacy.classes)
-    probe = external.probe_legacy_images(client, images, legacy=legacy, workers=args.workers)
-    masks = _read_masks(client, probe.images, legacy=legacy, workers=args.workers)
+    tile_labels = _tile_labels(ingested.annotations, ingested.classes)
+    probe = external.probe_ingested_images(client, images, ingested=ingested, workers=args.workers)
+    masks = _read_masks(client, probe.images, ingested=ingested, workers=args.workers)
     stats = {image_id: _mask_stats(mask) for image_id, mask in masks.items()}
     label_ids = labels.column("label_id").to_pylist()
     _require_masks_match(probe.images, probe.sniffed, stats, tile_labels, label_ids)
@@ -243,7 +248,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
         repo_root=repo_root,
         client=client,
         probe=probe,
-        legacy=legacy,
+        ingested=ingested,
         args=args,
         masks=masks,
     )

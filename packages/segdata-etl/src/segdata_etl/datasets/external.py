@@ -1,6 +1,6 @@
 """Shared steps of the external dataset version builders (Catlin, Moorea, Pacific, Benthos).
 
-Each builder module reads its legacy ``external_validation_datasets/<name>/`` prefix and calls
+Each builder module reads its ingest ``external_validation_datasets/<name>/`` prefix and calls
 these helpers to build the uniform tables and stage a dataset version under ``--stage-dir``, with
 ``copies.jsonl`` (and, for masks, ``uploads.jsonl``) for ``segdata promote`` to run.
 """
@@ -33,8 +33,9 @@ from segdata_etl.common.copy_plan import (
     write_copies,
     write_uploads,
 )
+from segdata_etl.common.ingested import IngestedDataset, IngestedObject
 from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
-from segdata_etl.common.legacy import DEFAULT_BUCKET, LegacyDataset, LegacyObject
+from segdata_etl.common.release import INGEST_BUCKET
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
     SourceChanged,
@@ -64,10 +65,10 @@ Identify = Callable[[str], tuple[str, str] | None]
 
 
 @dataclass(frozen=True)
-class LegacyImage:
-    """One legacy image object: ``key`` is relative to the legacy prefix, ``etag`` unquoted.
+class IngestedImage:
+    """One ingested image object: ``key`` is relative to the ingest prefix, ``etag`` unquoted.
 
-    ``mask_key`` is the legacy key of the image's PNG mask, relative to the same prefix;
+    ``mask_key`` is the ingested key of the image's PNG mask, relative to the same prefix;
     ``attrs`` holds dataset-specific extras written to ``images.parquet`` as JSON.
     """
 
@@ -80,22 +81,22 @@ class LegacyImage:
 
 
 @dataclass(frozen=True)
-class LegacyProbe:
-    """What probing the legacy images found.
+class IngestedProbe:
+    """What probing the ingested images found.
 
     ``images`` holds the readable images in input order; ``rows`` their ``images.parquet`` rows by
-    image id; ``sniffed`` their ``(media_type, width, height)`` by legacy key; ``unreadable`` the
+    image id; ``sniffed`` their ``(media_type, width, height)`` by ingested key; ``unreadable`` the
     ids of the images whose header could not be read.
     """
 
-    images: list[LegacyImage]
+    images: list[IngestedImage]
     rows: dict[str, dict[str, Any]]
     sniffed: dict[str, tuple[str, int, int]]
     unreadable: list[str]
 
 
 def add_build_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add the taxonomy pin, ``--cache-dir`` and ``--legacy-bucket`` every external builder shares."""
+    """Add the taxonomy pin, ``--cache-dir`` and ``--ingest-bucket`` every external builder shares."""
     pin_flags(parser, "taxonomy-", "the mermaid-benthic taxonomy")
     parser.add_argument(
         "--cache-dir",
@@ -104,7 +105,7 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
         help="Where the taxonomy is synced (default: %(default)s)",
     )
     parser.add_argument(
-        "--legacy-bucket", default=DEFAULT_BUCKET, help="Bucket holding the legacy prefix"
+        "--ingest-bucket", default=INGEST_BUCKET, help="Bucket holding the ingest prefix"
     )
 
 
@@ -202,19 +203,21 @@ def group_folder_identity(key: str) -> tuple[str, str] | None:
     if parts[0] != _IMAGES_FOLDER:
         return None
     if len(parts) != 3:
-        raise ValueError(f"legacy image {key!r} is not at images/<group>/<file>")
+        raise ValueError(f"ingested image {key!r} is not at images/<group>/<file>")
     return PurePosixPath(parts[2]).stem, parts[1]
 
 
-def legacy_images(objects: Mapping[str, LegacyObject], identify: Identify) -> list[LegacyImage]:
+def ingested_images(
+    objects: Mapping[str, IngestedObject], identify: Identify
+) -> list[IngestedImage]:
     """Return the objects ``identify`` names as ``(image_id, group)``, sorted by key.
 
-    ``identify`` takes a key relative to the legacy prefix and returns None to skip it.
+    ``identify`` takes a key relative to the ingest prefix and returns None to skip it.
 
     Raises:
         ValueError: Two objects share an image id.
     """
-    images: dict[str, LegacyImage] = {}
+    images: dict[str, IngestedImage] = {}
     for key in sorted(objects):
         identity = identify(key)
         if identity is None:
@@ -222,7 +225,7 @@ def legacy_images(objects: Mapping[str, LegacyObject], identify: Identify) -> li
         image_id, group = identity
         if image_id in images:
             raise ValueError(f"image id {image_id!r} is both {images[image_id].key} and {key}")
-        images[image_id] = LegacyImage(image_id, group, key, objects[key].etag)
+        images[image_id] = IngestedImage(image_id, group, key, objects[key].etag)
     return list(images.values())
 
 
@@ -240,7 +243,7 @@ def require_known_labels(points: pa.Table, labels: pa.Table) -> None:
 
 
 def _sizes_table(
-    images: Iterable[LegacyImage], sniffed: Mapping[str, tuple[str, int, int]]
+    images: Iterable[IngestedImage], sniffed: Mapping[str, tuple[str, int, int]]
 ) -> pa.Table:
     rows = [(image.image_id, *sniffed[image.key][1:]) for image in images]
     return pa.table(
@@ -254,7 +257,7 @@ def _sizes_table(
 
 def _bounds_join(
     points: pa.Table,
-    images: Iterable[LegacyImage],
+    images: Iterable[IngestedImage],
     sniffed: Mapping[str, tuple[str, int, int]],
 ) -> tuple[pa.Table, pa.ChunkedArray]:
     """Join points to their image sizes; return the join in point order and an ``inside`` mask.
@@ -278,7 +281,7 @@ def _bounds_join(
 
 def drop_points_outside(
     points: pa.Table,
-    images: Iterable[LegacyImage],
+    images: Iterable[IngestedImage],
     sniffed: Mapping[str, tuple[str, int, int]],
 ) -> tuple[pa.Table, int]:
     """Return the points inside their image's sniffed size, in order, and the number dropped.
@@ -300,7 +303,7 @@ def drop_points_outside(
 
 def drop_points_outside_and_record(
     points: pa.Table,
-    images: Iterable[LegacyImage],
+    images: Iterable[IngestedImage],
     sniffed: Mapping[str, tuple[str, int, int]],
     dropped: dict[str, int],
 ) -> tuple[pa.Table, dict[str, int]]:
@@ -333,18 +336,18 @@ def require_same_ids(found: Collection[Any], expected: Collection[Any], *, what:
         )
 
 
-def image_key(image: LegacyImage, media_type: str) -> str:
+def image_key(image: IngestedImage, media_type: str) -> str:
     """Return ``<group>/<image_id>.<ext>``, the key relative to the image store prefix."""
     return f"{image.group}/{image.image_id}.{EXTENSIONS[media_type]}"
 
 
-def _mask_dest_key(image: LegacyImage) -> str:
+def _mask_dest_key(image: IngestedImage) -> str:
     """Return ``<group>/<image_id>_mask.png``, the mask key relative to the image store prefix."""
     return f"{image.group}/{image.image_id}_mask.png"
 
 
 def _image_row(
-    image: LegacyImage, facts: ObjectFacts, header: tuple[str, int, int]
+    image: IngestedImage, facts: ObjectFacts, header: tuple[str, int, int]
 ) -> dict[str, Any]:
     """Build the maskless ``images.parquet`` row of ``image``; ``attrs`` as sorted-key JSON."""
     media_type, width, height = header
@@ -368,32 +371,34 @@ def _image_row(
     }
 
 
-def _head_listed(client: Any, legacy: LegacyDataset, image: LegacyImage) -> Mapping[str, Any]:
-    """HEAD the legacy image with its checksum.
+def _head_listed(client: Any, ingested: IngestedDataset, image: IngestedImage) -> Mapping[str, Any]:
+    """HEAD the ingested image with its checksum.
 
     Raises:
         SourceChanged: The object is gone or its ETag differs from the listing.
     """
-    key = legacy.prefix + image.key
-    head = head_with_checksum(client, legacy.bucket, key)
+    key = ingested.prefix + image.key
+    head = head_with_checksum(client, ingested.bucket, key)
     if head is None or norm_etag(head["ETag"]) != image.etag:
-        raise SourceChanged(f"s3://{legacy.bucket}/{key} changed since it was listed")
+        raise SourceChanged(f"s3://{ingested.bucket}/{key} changed since it was listed")
     return head
 
 
-def _probe_one(client: Any, legacy: LegacyDataset, image: LegacyImage) -> ImageOutcome:
+def _probe_one(client: Any, ingested: IngestedDataset, image: IngestedImage) -> ImageOutcome:
     return probe_image(
         client,
-        legacy.bucket,
+        ingested.bucket,
         image.image_id,
-        legacy.prefix + image.key,
-        _head_listed(client, legacy, image),
+        ingested.prefix + image.key,
+        _head_listed(client, ingested, image),
         {},
         lambda facts, header: _image_row(image, facts, header),
     )
 
 
-def _probe_result(images: Sequence[LegacyImage], outcomes: Sequence[ImageOutcome]) -> LegacyProbe:
+def _probe_result(
+    images: Sequence[IngestedImage], outcomes: Sequence[ImageOutcome]
+) -> IngestedProbe:
     rows = {o.image_id: o.row for o in outcomes if o.row is not None}
     kept = [image for image in images if image.image_id in rows]
     sniffed = {
@@ -405,36 +410,36 @@ def _probe_result(images: Sequence[LegacyImage], outcomes: Sequence[ImageOutcome
         for image in kept
     }
     unreadable = [o.image_id for o in outcomes if o.row is None]
-    return LegacyProbe(images=kept, rows=rows, sniffed=sniffed, unreadable=unreadable)
+    return IngestedProbe(images=kept, rows=rows, sniffed=sniffed, unreadable=unreadable)
 
 
-def probe_legacy_images(
-    client: Any, images: Sequence[LegacyImage], *, legacy: LegacyDataset, workers: int
-) -> LegacyProbe:
-    """HEAD and sniff every legacy image on ``workers`` threads; an unreadable header drops it.
+def probe_ingested_images(
+    client: Any, images: Sequence[IngestedImage], *, ingested: IngestedDataset, workers: int
+) -> IngestedProbe:
+    """HEAD and sniff every ingested image on ``workers`` threads; an unreadable header drops it.
 
     Raises:
         SourceChanged: An image changed since the listing or while it was read.
     """
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        outcomes = list(pool.map(lambda image: _probe_one(client, legacy, image), images))
+        outcomes = list(pool.map(lambda image: _probe_one(client, ingested, image), images))
     return _probe_result(images, outcomes)
 
 
-def drop_unreadable_points(points: pa.Table, probe: LegacyProbe) -> pa.Table:
+def drop_unreadable_points(points: pa.Table, probe: IngestedProbe) -> pa.Table:
     """Return the points whose image the probe kept, in order."""
     kept = pa.array(list(probe.rows), pa.string())
     return points.filter(pc.is_in(points.column("image_id"), value_set=kept))
 
 
-def _with_unreadable(dropped: Mapping[str, int], probe: LegacyProbe) -> dict[str, int]:
+def _with_unreadable(dropped: Mapping[str, int], probe: IngestedProbe) -> dict[str, int]:
     """Merge ``image_unreadable_header`` into ``dropped`` when the probe dropped an image."""
     if not probe.unreadable:
         return dict(dropped)
     return {**dropped, "image_unreadable_header": len(probe.unreadable)}
 
 
-def _mask_columns(image: LegacyImage, mask: bytes) -> dict[str, Any]:
+def _mask_columns(image: IngestedImage, mask: bytes) -> dict[str, Any]:
     """Return the ``mask_*`` columns of ``image``'s row for the mask bytes staged for it."""
     return {
         "mask_key": _mask_dest_key(image),
@@ -445,7 +450,7 @@ def _mask_columns(image: LegacyImage, mask: bytes) -> dict[str, Any]:
 
 
 def _stage_masks(
-    stage_dir: Path, dataset: str, images: Sequence[LegacyImage], masks: Mapping[str, bytes]
+    stage_dir: Path, dataset: str, images: Sequence[IngestedImage], masks: Mapping[str, bytes]
 ) -> list[StagedFile]:
     """Write each image's mask bytes into the stage; return the uploads that publish them.
 
@@ -461,7 +466,7 @@ def _stage_masks(
     return files
 
 
-def _image_rows(probe: LegacyProbe, masks: Mapping[str, bytes] | None) -> list[dict[str, Any]]:
+def _image_rows(probe: IngestedProbe, masks: Mapping[str, bytes] | None) -> list[dict[str, Any]]:
     """Return the kept images' rows in probe order, with mask columns when ``masks`` is given."""
     rows = [probe.rows[image.image_id] for image in probe.images]
     if masks is None:
@@ -472,14 +477,18 @@ def _image_rows(probe: LegacyProbe, masks: Mapping[str, bytes] | None) -> list[d
     ]
 
 
-def _legacy_copy_plan(
-    rows: Sequence[Mapping[str, Any]], probe: LegacyProbe, *, legacy: LegacyDataset, dataset: str
+def _ingested_copy_plan(
+    rows: Sequence[Mapping[str, Any]],
+    probe: IngestedProbe,
+    *,
+    ingested: IngestedDataset,
+    dataset: str,
 ) -> list[dict[str, Any]]:
-    """Plan the copy of each image row from its legacy object into the dataset's image prefix."""
-    source_keys = {image.image_id: legacy.prefix + image.key for image in probe.images}
+    """Plan the copy of each image row from its ingested object into the dataset's image prefix."""
+    source_keys = {image.image_id: ingested.prefix + image.key for image in probe.images}
     return copy_plan(
         rows,
-        src_bucket=legacy.bucket,
+        src_bucket=ingested.bucket,
         src_key=lambda row: source_keys[row["image_id"]],
         dst_prefix=image_prefix(dataset),
     )
@@ -494,8 +503,8 @@ def build_command(dataset: str, args: argparse.Namespace) -> str:
     """Reconstruct ``segdata build <dataset>`` from the options that shape the version."""
     parts = ["segdata", "build", dataset, "--stage-dir", str(args.stage_dir)]
     parts += pin_command_parts(args, "taxonomy-")
-    if args.legacy_bucket != DEFAULT_BUCKET:
-        parts += ["--legacy-bucket", args.legacy_bucket]
+    if args.ingest_bucket != INGEST_BUCKET:
+        parts += ["--ingest-bucket", args.ingest_bucket]
     return shlex.join(parts)
 
 
@@ -510,8 +519,8 @@ def publish_version(
     git: GitState,
     repo_root: Path,
     client: Any,
-    probe: LegacyProbe,
-    legacy: LegacyDataset,
+    probe: IngestedProbe,
+    ingested: IngestedDataset,
     args: argparse.Namespace,
     masks: Mapping[str, bytes] | None = None,
 ) -> int:
@@ -519,7 +528,7 @@ def publish_version(
 
     ``tables`` holds the dataset-specific tables; ``images.parquet`` is built from the probe, and
     ``image_unreadable_header`` joins ``dropped`` when the probe dropped an image. Each image is
-    planned as a copy from the legacy prefix in ``copies.jsonl``. ``masks`` holds each kept
+    planned as a copy from the ingest prefix in ``copies.jsonl``. ``masks`` holds each kept
     image's mask bytes by image id; they are staged and listed in ``uploads.jsonl``.
 
     Raises:
@@ -549,7 +558,7 @@ def publish_version(
         repo_dir=repo_root,
         git=git,
     )
-    plan = _legacy_copy_plan(rows, probe, legacy=legacy, dataset=dataset)
+    plan = _ingested_copy_plan(rows, probe, ingested=ingested, dataset=dataset)
     write_copies(args.stage_dir, dataset_prefix(dataset, version), plan)
     if uploads:
         write_uploads(args.stage_dir, dataset, version, uploads)

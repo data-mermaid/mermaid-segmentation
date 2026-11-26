@@ -1,4 +1,4 @@
-"""``segdata build pacific_labeled_corals`` from a fake legacy prefix into a local stage."""
+"""``segdata build pacific_labeled_corals`` from a fake ingest prefix into a local stage."""
 
 from __future__ import annotations
 
@@ -13,12 +13,13 @@ from s3_fake import FakeS3
 from segdata_etl.datasets import pacific_labeled_corals
 
 from .conftest import (
-    LEGACY_BUCKET,
+    INGEST_BUCKET,
     Staged,
     assert_curated_label_mapping,
     build_args,
+    ingest_manifest_bytes,
+    ingested_etag,
     jpeg,
-    legacy_etag,
     make_repo,
     no_mask,
     probed_columns,
@@ -70,17 +71,16 @@ def _parquet(rows: list[Annotation]) -> bytes:
     return buf.getvalue()
 
 
-def _legacy(s3: FakeS3, annotations: list[Annotation] = ANNOTATIONS) -> None:
-    manifest = {"dataset_name": "pacific_labeled_corals", "source": {"citation": "Beijbom 2015"}}
+def _ingested(s3: FakeS3, annotations: list[Annotation] = ANNOTATIONS) -> None:
     files = {
-        "manifest.json": json.dumps(manifest).encode(),
+        "manifest.json": ingest_manifest_bytes("pacific_labeled_corals"),
         "classes.json": json.dumps(CLASSES).encode(),
         "pacific_labeled_corals_annotations.parquet": _parquet(annotations),
     }
     for (site, subset, image_id, ext), data in IMAGES.items():
         files[f"images/{site}/{subset}/{image_id}{ext}"] = data
     for name, data in files.items():
-        s3.put(LEGACY_BUCKET, PREFIX + name, data)
+        s3.put(INGEST_BUCKET, PREFIX + name, data)
 
 
 @pytest.fixture
@@ -91,7 +91,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def staged(repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Staged:
     s3 = FakeS3()
-    _legacy(s3)
+    _ingested(s3)
     return stage_version(pacific_labeled_corals, s3, repo, tmp_path, capsys)
 
 
@@ -109,7 +109,7 @@ def test_build_groups_images_by_site_with_subset_and_raw_imageid_in_attrs(
             "height": h,
             "group": site,
             **no_mask(),
-            "source_fingerprint": legacy_etag(data),
+            "source_fingerprint": ingested_etag(data),
             "source_name": f"{image_id}{ext}",
             "attrs": f'{{"raw_imageid": {raw}, "subset": "{subset}"}}',
         }
@@ -141,11 +141,10 @@ def test_build_writes_one_point_row_per_present_annotator_and_counts_each(
     ]
 
 
-def test_build_records_the_dryad_licence_and_no_drops(staged: Staged) -> None:
-    manifest = staged.version.manifest
-    assert manifest.source.license == "CC0 1.0 (Dryad)"
-    assert manifest.stats.dropped == {}
-    assert_curated_label_mapping(manifest, pacific_labeled_corals.DATASET, staged.version.labels)
+def test_build_records_the_curated_label_mapping_in_the_manifest(staged: Staged) -> None:
+    assert_curated_label_mapping(
+        staged.version.manifest, pacific_labeled_corals.DATASET, staged.version.labels
+    )
 
 
 @pytest.mark.parametrize(
@@ -167,7 +166,7 @@ def test_build_refuses_inconsistent_annotations_before_staging(
 ) -> None:
     s3 = FakeS3()
     extra = (*changed, ".JPG", *position, "Acropora", NA, NA, NA, NA, NA, NA)
-    _legacy(s3, [*ANNOTATIONS, extra])
+    _ingested(s3, [*ANNOTATIONS, extra])
     stage = tmp_path / "stage"
     taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
@@ -183,7 +182,7 @@ def test_build_drops_every_annotator_row_of_a_point_past_an_edge_and_counts_the_
     s3 = FakeS3()
     # ref_1 is 7 wide, so col 7 is outside; both annotators' rows go, and label 5 would count.
     outside = ("heron_reef", "reference", 11, "ref_1", ".JPG", 1, 7, "Acropora", "Bare substrate")
-    _legacy(s3, [*ANNOTATIONS, (*outside, NA, NA, NA, NA, NA)])
+    _ingested(s3, [*ANNOTATIONS, (*outside, NA, NA, NA, NA, NA)])
 
     version = stage_version(pacific_labeled_corals, s3, repo, tmp_path, capsys).version
 

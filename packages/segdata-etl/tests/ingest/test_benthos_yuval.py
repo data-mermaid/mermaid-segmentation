@@ -15,39 +15,11 @@ from PIL import Image, UnidentifiedImageError
 from segdata_etl.common import images
 from segdata_etl.ingest import benthos_yuval
 
+from .raw_trees import rgb, write_benthos_raw
+
 B = "bkt"
 P = "ds"
 # RS24 uses the default dictionary, CR_DoubleWreck the alt one; ids differ per variant.
-DEFAULT_DICT = "{'Coral': 1, 'Sand': 2}"
-ALT_DICT = "{'Coral': 5, 'Algae': 6}"
-
-
-def _rgb(h: int, w: int) -> np.ndarray:
-    return np.full((h, w, 3), 7, dtype=np.uint8)
-
-
-def _save_png(path: Path, arr: np.ndarray) -> None:
-    Image.fromarray(arr).save(path)
-
-
-def _write_raw(
-    root: Path,
-    *,
-    rs24_mask: np.ndarray,
-    rs24_image: np.ndarray | None = None,
-    dw_mask: np.ndarray | None = None,
-    default_dict: str = DEFAULT_DICT,
-) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    h, w = rs24_mask.shape
-    _save_png(root / "RS24.png", rs24_image if rs24_image is not None else _rgb(h, w))
-    _save_png(root / "ManualRS24.png", rs24_mask)
-    dw = dw_mask if dw_mask is not None else np.full((2, 2), 5, dtype=np.uint8)
-    _save_png(root / "CR_DoubleWreck.png", _rgb(*dw.shape))
-    _save_png(root / "ManualDW.png", dw)
-    (root / "dictionary_labels.txt").write_text(default_dict)
-    (root / "dictionary_labelsDW.txt").write_text(ALT_DICT)
-    return root
 
 
 def _args(tmp_path: Path, data_dir: Path, **overrides) -> argparse.Namespace:
@@ -76,7 +48,7 @@ def _png(fake_s3, key: str) -> Image.Image:
 
 def test_be1_wide_mosaic_tiles_into_full_and_remainder_tile(tmp_path, fake_s3):
     mask = np.full((2, 2049), 1, dtype=np.uint8)
-    root = _write_raw(tmp_path / "raw", rs24_mask=mask)
+    root = write_benthos_raw(tmp_path / "raw", rs24_mask=mask)
 
     assert benthos_yuval.run(_args(tmp_path, root), fake_s3) == 0
 
@@ -88,9 +60,10 @@ def test_be1_wide_mosaic_tiles_into_full_and_remainder_tile(tmp_path, fake_s3):
         f"{P}/labels/RS24/0_2048.png",
     }
     ingestion = json.loads(fake_s3.objects[(B, f"{P}/manifest.json")])["ingestion"]
-    assert ingestion["num_tiles"] == {"RS24": 2, "CR_DoubleWreck": 1}
+    assert ingestion["dropped"] == {}
+    assert ingestion["details"]["num_tiles"] == {"RS24": 2, "CR_DoubleWreck": 1}
     assert ingestion["images_uploaded"] == 3
-    assert ingestion["labels_uploaded"] == 3
+    assert ingestion["details"]["labels_uploaded"] == 3
     assert _png(fake_s3, f"{P}/images/RS24/0_0.png").size == (2048, 2)
     assert _png(fake_s3, f"{P}/images/RS24/0_2048.png").size == (1, 2)
     assert _png(fake_s3, f"{P}/labels/RS24/0_0.png").mode == "L"
@@ -100,7 +73,7 @@ def test_be2_raw_ids_map_to_global_ids_and_unknown_to_zero(tmp_path, fake_s3):
     # classes.json: unlabeled 0, Algae 1, Coral 2, Sand 3. Raw 9 is in no dictionary.
     mask = np.array([[1, 2, 9, 0]], dtype=np.uint8)
     dw = np.array([[5, 6]], dtype=np.uint8)
-    root = _write_raw(tmp_path / "raw", rs24_mask=mask, dw_mask=dw)
+    root = write_benthos_raw(tmp_path / "raw", rs24_mask=mask, dw_mask=dw)
 
     benthos_yuval.run(_args(tmp_path, root), fake_s3)
 
@@ -118,7 +91,7 @@ def test_be2_raw_ids_map_to_global_ids_and_unknown_to_zero(tmp_path, fake_s3):
 
 def test_be3_mismatched_image_and_mask_crop_to_smaller_size(tmp_path, fake_s3):
     mask = np.full((4, 6), 1, dtype=np.uint8)
-    root = _write_raw(tmp_path / "raw", rs24_mask=mask, rs24_image=_rgb(5, 3))
+    root = write_benthos_raw(tmp_path / "raw", rs24_mask=mask, rs24_image=rgb(5, 3))
 
     benthos_yuval.run(_args(tmp_path, root), fake_s3)
 
@@ -127,7 +100,7 @@ def test_be3_mismatched_image_and_mask_crop_to_smaller_size(tmp_path, fake_s3):
 
 
 def test_be4_missing_required_file_is_named(tmp_path, fake_s3):
-    root = _write_raw(tmp_path / "raw", rs24_mask=np.ones((2, 2), dtype=np.uint8))
+    root = write_benthos_raw(tmp_path / "raw", rs24_mask=np.ones((2, 2), dtype=np.uint8))
     (root / "ManualDW.png").unlink()
 
     with pytest.raises(FileNotFoundError, match="ManualDW.png"):
@@ -137,7 +110,7 @@ def test_be4_missing_required_file_is_named(tmp_path, fake_s3):
 def test_be5_parquet_has_one_row_per_tile_and_present_class(tmp_path, fake_s3):
     mask = np.array([[1, 2, 0]], dtype=np.uint8)
     dw = np.full((1, 2), 5, dtype=np.uint8)
-    root = _write_raw(tmp_path / "raw", rs24_mask=mask, dw_mask=dw)
+    root = write_benthos_raw(tmp_path / "raw", rs24_mask=mask, dw_mask=dw)
 
     benthos_yuval.run(_args(tmp_path, root), fake_s3)
 
@@ -160,7 +133,7 @@ def test_be5_parquet_has_one_row_per_tile_and_present_class(tmp_path, fake_s3):
 
 
 def test_be6_label_dictionary_that_is_not_a_dict_raises(tmp_path, fake_s3):
-    root = _write_raw(
+    root = write_benthos_raw(
         tmp_path / "raw", rs24_mask=np.ones((2, 2), dtype=np.uint8), default_dict="[1, 2]"
     )
 
@@ -169,7 +142,7 @@ def test_be6_label_dictionary_that_is_not_a_dict_raises(tmp_path, fake_s3):
 
 
 def test_overwrite_replaces_stale_label_tiles_but_not_stale_images(tmp_path, fake_s3):
-    root = _write_raw(tmp_path / "raw", rs24_mask=np.ones((2, 2), dtype=np.uint8))
+    root = write_benthos_raw(tmp_path / "raw", rs24_mask=np.ones((2, 2), dtype=np.uint8))
     fake_s3.put(B, f"{P}/labels/RS24/0_0.png", b"stale")
     fake_s3.put(B, f"{P}/images/RS24/0_0.png", b"stale")
 
@@ -177,13 +150,13 @@ def test_overwrite_replaces_stale_label_tiles_but_not_stale_images(tmp_path, fak
 
     ingestion = json.loads(fake_s3.objects[(B, f"{P}/manifest.json")])["ingestion"]
     assert ingestion["images_uploaded"] == 1
-    assert ingestion["labels_uploaded"] == 2
+    assert ingestion["details"]["labels_uploaded"] == 2
     assert fake_s3.objects[(B, f"{P}/labels/RS24/0_0.png")] != b"stale"
     assert fake_s3.objects[(B, f"{P}/images/RS24/0_0.png")] == b"stale"
 
 
 def test_existing_manifest_without_overwrite_raises_before_any_write(tmp_path, fake_s3):
-    root = _write_raw(tmp_path / "raw", rs24_mask=np.ones((2, 2), dtype=np.uint8))
+    root = write_benthos_raw(tmp_path / "raw", rs24_mask=np.ones((2, 2), dtype=np.uint8))
     fake_s3.put(B, f"{P}/manifest.json", b"{}")
 
     with pytest.raises(FileExistsError):
@@ -195,7 +168,7 @@ def test_existing_manifest_without_overwrite_raises_before_any_write(tmp_path, f
 def test_run_lifts_pixel_limit_only_while_decoding_mosaics(tmp_path, fake_s3, monkeypatch):
     # A 1-pixel limit makes any mosaic a decompression bomb unless the limit is lifted.
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
-    root = _write_raw(tmp_path / "raw", rs24_mask=np.full((2, 2), 1, dtype=np.uint8))
+    root = write_benthos_raw(tmp_path / "raw", rs24_mask=np.full((2, 2), 1, dtype=np.uint8))
 
     assert benthos_yuval.run(_args(tmp_path, root), fake_s3) == 0
     assert Image.MAX_IMAGE_PIXELS == 1
@@ -203,7 +176,7 @@ def test_run_lifts_pixel_limit_only_while_decoding_mosaics(tmp_path, fake_s3, mo
 
 def test_run_restores_pixel_limit_when_decoding_a_mosaic_fails(tmp_path, fake_s3, monkeypatch):
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
-    root = _write_raw(tmp_path / "raw", rs24_mask=np.full((2, 2), 1, dtype=np.uint8))
+    root = write_benthos_raw(tmp_path / "raw", rs24_mask=np.full((2, 2), 1, dtype=np.uint8))
     (root / "RS24.png").write_bytes(b"not a png")
 
     with pytest.raises(UnidentifiedImageError):

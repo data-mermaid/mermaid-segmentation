@@ -20,7 +20,7 @@ import pandas as pd
 
 from ..common.images import find_undecodable
 from ..common.labels import build_classes_and_colors
-from ..common.manifest import Source, build_manifest
+from ..common.manifest import IngestSource, build_manifest
 from ..common.release import S3Target, preflight, put_raw_release, upload_files
 
 logger = logging.getLogger(__name__)
@@ -42,8 +42,7 @@ PARQUET_COLUMNS = {
     "raw_label_name": "Label exactly as spelled in the raw annotation file.",
 }
 
-SOURCE = Source(
-    name=DATASET_NAME,
+SOURCE = IngestSource(
     citation="Beijbom et al., 'Automated Annotation of Coral Reef Survey Images', IEEE CVPR, 2012.",
     raw_data_url="https://portal.edirepository.org/nis/mapbrowse?scope=knb-lter-mcr&identifier=5006",
     license="CC BY 4.0",
@@ -155,16 +154,14 @@ def run(args: argparse.Namespace, client: Any) -> int:
         client, target, uploads, workers=args.workers, skip_existing=args.skip_existing_s3
     )
     manifest = build_manifest(
+        DATASET_NAME,
         SOURCE,
         target,
         image_key_template=f"{target.prefix}/images/{{year}}/{{image_id}}{{image_ext}}",
         parquet_columns=PARQUET_COLUMNS,
-        ingestion={
-            "damaged_images": damaged,
-            "case_merged_labels": merges,
-            "off_annotations_dropped": n_off,
-            "images_uploaded": uploaded,
-        },
+        dropped={"damaged_images": len(damaged), "off_annotations": n_off},
+        images_uploaded=uploaded,
+        details={"damaged_images": damaged, "case_merged_labels": merges},
     )
     put_raw_release(
         client,

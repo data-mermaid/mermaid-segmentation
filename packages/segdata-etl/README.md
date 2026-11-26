@@ -19,7 +19,7 @@ A new data source is an ETL module in `segdata_etl/datasets/` that publishes a v
 
 ## Scope
 
-**Owns:** turning a CoralNet scrape into the annotations and images tables and the id2name JSON; checking each raw external release and writing it to its S3 prefix; staging the external datasets, the MERMAID benthic taxonomy and the `mermaid`, `coralscapes_v2` and `ucsd_mosaics` versions, and promoting them to `mermaid-ic-datasets`. The CoralNet code is in `segdata_etl/datasets/coralnet/` (the CLI stages are in `build.py`). The curation inputs, `image_blacklist.parquet` and `annotation_overrides.parquet`, are package data in `segdata_etl/datasets/coralnet/curate/data/`. The raw-release ingest modules are in `segdata_etl/ingest/`. The versioned external and uniform dataset modules are in `segdata_etl/datasets/`, with the shared external steps in `datasets/external.py` and the curated label maps in `label_maps/curated/<name>.csv`. `promote` is in `segdata_etl/promote.py`, and `features attach` in `segdata_etl/features.py`. The taxonomy snapshot is `segdata_etl/taxonomy.py`. The shared helpers are in `segdata_etl/common/`: `images.py`, `jpeg_header.py`, `release.py` (the `ingest` S3 writes), `versions.py` (the image store and label counts that the versioned builds share), `labels.py`, `manifest.py`, and for the uniform builds `s3_objects.py`, `stage.py` and `hf_dense.py`:
+**Owns:** turning a CoralNet scrape into the annotations and images tables and the id2name JSON; checking each raw external release and writing it to its S3 prefix; staging the external datasets, the MERMAID benthic taxonomy and the `mermaid`, `coralscapes_v2` and `ucsd_mosaics` versions, and promoting them to `mermaid-ic-datasets`. The CoralNet code is in `segdata_etl/datasets/coralnet/` (the CLI stages are in `build.py`). The curation inputs, `image_blacklist.parquet` and `annotation_overrides.parquet`, are package data in `segdata_etl/datasets/coralnet/curate/data/`. The raw-release ingest modules are in `segdata_etl/ingest/`. The versioned external and uniform dataset modules are in `segdata_etl/datasets/`, with the shared external steps in `datasets/external.py` and the curated label maps in `label_maps/curated/<name>.csv`. `promote` is in `segdata_etl/promote.py`, and `features attach` in `segdata_etl/features.py`. The taxonomy snapshot is `segdata_etl/taxonomy.py`. The shared helpers are in `segdata_etl/common/`: `images.py`, `jpeg_header.py`, `release.py` (the `ingest` S3 writes, and the shared `INGEST_BUCKET`, `ingest_prefix(name)`, `MANIFEST_NAME` and `CLASSES_NAME`), `ingested.py` (the reader of an ingest prefix), `versions.py` (the image store and label counts that the versioned builds share), `labels.py`, `manifest.py` (the typed ingest manifest), and for the uniform builds `s3_objects.py`, `stage.py` and `hf_dense.py`:
   - `s3_objects.py`: write-once S3 copy and put. Each write sends `IfNoneMatch="*"`; a key that already holds the same content counts as done, and other content raises `ObjectConflict`. Also `make_s3_client`, the client every `segdata` command uses: adaptive retries, and for a command with `--workers` a connection pool of the worker count plus 4.
   - `stage.py`: the version naming and the default cache directory. `segdata_spec.stage` writes the staged files.
   - `hf_dense.py`: the shared build of a dense dataset from a pinned Hugging Face revision, used by `coralscapes_v2` and `ucsd_mosaics`.
@@ -534,11 +534,13 @@ Every ingest command writes the same set of files under `s3://<bucket>/<prefix>/
 | Key | Content |
 |---|---|
 | `dataset_name` | The dataset name. |
-| `source.citation`, `source.raw_data_url`, `source.license` | Where the raw release comes from, and its licence. |
+| `source.citation`, `source.raw_data_url`, `source.license` | Where the raw release comes from, and its licence. All three are required. |
 | `created_at_utc` | When the run wrote the manifest. |
 | `s3.bucket`, `s3.prefix`, `s3.annotations_parquet`, `s3.image_key_template` | Where the files are. |
 | `schema.parquet_columns` | Each parquet column and what it holds. |
-| `ingestion` | Facts about this run that differ for each dataset (see [Ingestion keys](#ingestion-keys)). |
+| `ingestion` | What the run did: `dropped` (drop name to count), `images_uploaded` and `details`, which differ for each dataset (see [Ingestion keys](#ingestion-keys)). |
+
+The manifest is a typed model, `IngestManifest` in `segdata_etl/common/manifest.py`. `segdata build` reads it with `read_ingest_manifest`, and refuses a manifest of any other shape with a `ValidationError`. Re-ingest a prefix that holds an older manifest before you build from it.
 
 The defaults are `--bucket dev-datamermaid-sm-sources` and `--prefix external_validation_datasets/<name>`.
 
@@ -547,7 +549,7 @@ The defaults are `--bucket dev-datamermaid-sm-sources` and `--prefix external_va
 A run writes in this order:
 
 1. Before it reads the raw data, the run checks that the parquet, `classes.json`, `colors.json` and `manifest.json` are not on S3. If one is there, the run stops with `FileExistsError`. Pass `--overwrite` to replace them.
-2. The run reads the raw release and checks that every image decodes. JPEGs are decoded at reduced scale (about 1/8 per edge) to bound memory. The full scan data is still read, so truncated JPEGs are still caught. Other formats are fully decoded. Catlin Seaview and Moorea drop each damaged image and its annotations, and record it in `ingestion.damaged_images`. An image over Pillow's decompression-bomb limit (about 179 megapixels) stops the run with `DecompressionBombError` before anything is written to S3. Benthos lifts that limit only while it decodes its two mosaics. Pacific stops with an error before it writes to S3.
+2. The run reads the raw release and checks that every image decodes. JPEGs are decoded at reduced scale (about 1/8 per edge) to bound memory. The full scan data is still read, so truncated JPEGs are still caught. Other formats are fully decoded. Catlin Seaview and Moorea drop each damaged image and its annotations, and record it in `ingestion.dropped` and `ingestion.details`. An image over Pillow's decompression-bomb limit (about 179 megapixels) stops the run with `DecompressionBombError` before anything is written to S3. Benthos lifts that limit only while it decodes its two mosaics. Pacific stops with an error before it writes to S3.
 3. The run uploads the images. An image whose key is already on S3 is skipped, whatever its content. Pass `--no-skip-existing-s3` to upload every image again. `--overwrite` does not change how images are uploaded, except for the Benthos `labels/` tiles: with `--overwrite`, Benthos uploads them again even if their keys exist. Label pixel values are the IDs in `classes.json`, so a rewritten `classes.json` must not keep old masks.
 4. The run writes the parquet, then `classes.json`, then `colors.json`, then `manifest.json`.
 
@@ -557,14 +559,14 @@ A run writes in this order:
 
 ### Ingestion keys
 
-Every dataset records `images_uploaded`: the number of images this run sent to S3, not counting images skipped because their keys exist.
+Every dataset records `ingestion.images_uploaded`: the number of images this run sent to S3, not counting images skipped because their keys exist. `ingestion.dropped` maps each drop name to a count; the build reads it as `stats.dropped`. `ingestion.details` holds the rest.
 
-| Dataset | Keys |
-|---|---|
-| `catlin_seaview` | `damaged_images`: the dropped images. `images_uploaded`: a count for each region. |
-| `moorea_labeled_corals` | `damaged_images`: the dropped images. `case_merged_labels`: raw label to merged label, for labels merged by letter case. `off_annotations_dropped`: the number of annotations dropped because their label is `off`. `images_uploaded`. |
-| `pacific_labeled_corals` | `excluded_sites`. `annotations_dropped_unknown_archived`: annotations dropped because their `archived` label ID is not in the label table. `annotations_dropped_unmapped_imageid`: annotations dropped because their image ID is not in the image map. `images_uploaded`. The run logs each drop count as a warning. |
-| `benthos_yuval` | `excluded_sites`, `tile_size`, `label_key_template`, `num_tiles` (a count for each site), `images_uploaded` and `labels_uploaded`. |
+| Dataset | `dropped` | `details` |
+|---|---|---|
+| `catlin_seaview` | `damaged_images`: the number of dropped images. | `damaged_images`: the dropped images for each region. |
+| `moorea_labeled_corals` | `damaged_images`: the number of dropped images. `off_annotations`: annotations dropped because their label is `off`. | `damaged_images`: the dropped images. `case_merged_labels`: raw label to merged label, for labels merged by letter case. |
+| `pacific_labeled_corals` | `annotations_unknown_archived`: annotations dropped because their `archived` label ID is not in the label table. `annotations_unmapped_imageid`: annotations dropped because their image ID is not in the image map. The run logs each count as a warning. | `excluded_sites`. |
+| `benthos_yuval` | Empty. | `excluded_sites`, `tile_size`, `label_key_template`, `num_tiles` (a count for each site) and `labels_uploaded`. |
 
 ### Run an ingest
 
@@ -601,7 +603,7 @@ The raw files to download and their layout are in [External datasets](#external-
 
 `segdata build <name>` stages an immutable dataset version in the `segdata_spec` uniform format from the prefix that `segdata ingest <name>` wrote. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. The build never writes to S3, and it copies no image. [Promote a version](#promote-a-version) publishes it. The code is in `segdata_etl/datasets/`; the shared steps are in `datasets/external.py`. The format and the publish rules are in the [segdata-spec README](../segdata-spec/README.md).
 
-The build reads the ingest prefix from `--legacy-bucket` and the pinned taxonomy from `mermaid-ic-datasets`, so the taxonomy must be published before you stage a dataset. The build refuses a taxonomy pin whose manifest is not in `mermaid-ic-datasets`, even when `--cache-dir` already holds it. It maps the dataset's labels to the taxonomy with the curated map `segdata_etl/label_maps/curated/<name>.csv`. It stages the tables and the plan file `copies.jsonl` under `<stage>/mermaid-ic-datasets/datasets/<name>/<version>/`. Benthos also stages its masks, with `uploads.jsonl`. The build ends by printing two lines:
+The build reads the ingest prefix from `--ingest-bucket` and the pinned taxonomy from `mermaid-ic-datasets`, so the taxonomy must be published before you stage a dataset. The build refuses a taxonomy pin whose manifest is not in `mermaid-ic-datasets`, even when `--cache-dir` already holds it. It maps the dataset's labels to the taxonomy with the curated map `segdata_etl/label_maps/curated/<name>.csv`. It stages the tables and the plan file `copies.jsonl` under `<stage>/mermaid-ic-datasets/datasets/<name>/<version>/`. Benthos also stages its masks, with `uploads.jsonl`. The build ends by printing two lines:
 
 ```text
 version: <YYYYMMDD-sha7>
@@ -621,10 +623,10 @@ uv run --package segdata-etl segdata build <name> --stage-dir <stage> \
 | `--taxonomy-version`, `--taxonomy-manifest-sha256` | required | Pin of the `mermaid-benthic` taxonomy that the labels map to. |
 | `--cache-dir` | `outputs/segdata-cache` | Where the build syncs the taxonomy from S3. |
 | `--workers` | 16 | Threads for inspecting images. |
-| `--legacy-bucket` | `dev-datamermaid-sm-sources` | Bucket that holds the ingest prefix. |
+| `--ingest-bucket` | `dev-datamermaid-sm-sources` | Bucket that holds the ingest prefix. |
 | `-v`, `--verbose` | off | Debug logging. |
 
-An image whose header cannot be read is dropped with its points. The count is `stats.dropped["image_unreadable_header"]` in the manifest.
+An image whose header cannot be read is dropped with its points. The count is `stats.dropped["image_unreadable_header"]` in the manifest. The other `stats.dropped` counts are copied from the ingest manifest's `ingestion.dropped`. The manifest's `source` records the citation and licence from the ingest manifest's `source`, with `type` `ingest-prefix` (versions published earlier record `legacy-prefix`).
 
 The build refuses a dirty or unpushed git tree. Publish the taxonomy first, then stage each dataset, then [promote](#promote-a-version) it.
 
@@ -656,7 +658,7 @@ Point-annotated photo-quadrats from nine reef regions.
 
 The release has 11,387 images. The per-region image counts sum to 11,357.
 
-**Ingest prefix:** `external_validation_datasets/catlin_seaview/` holds `catlin_seaview_annotations.parquet` (columns `region`, `image_id`, `row`, `col`, `source_label_name`), `images/<region>/<image_id>.jpg`, `classes.json`, `colors.json` and `manifest.json`. `manifest.json` lists the damaged images that the run dropped, by region.
+**Ingest prefix:** `external_validation_datasets/catlin_seaview/` holds `catlin_seaview_annotations.parquet` (columns `region`, `image_id`, `row`, `col`, `source_label_name`), `images/<region>/<image_id>.jpg`, `classes.json`, `colors.json` and `manifest.json`. `manifest.json` lists the damaged images that the run dropped, by region, in `ingestion.details`.
 
 **Rebuild:**
 
@@ -685,7 +687,7 @@ Point-annotated photo-quadrats from the Moorea Coral Reef LTER, 2008 to 2010.
 | 2010 | 689 | 113256 | 120324 | 26 | 53 |
 | **Total** | **2055** | **376628** | **386441** | **29** | **53** |
 
-**Ingest prefix:** `external_validation_datasets/moorea_labeled_corals/` holds `moorea_labeled_corals_annotations.parquet` (columns `year`, `image_id`, `image_ext`, `row`, `col`, `source_label_name`) and `images/<year>/<image_id><image_ext>`. `source_label_name` is the label after case merging: spellings that differ only in case become one label, and the mixed-case spelling is kept. The parquet also has `raw_label_name`, the spelling in the raw file. Points labelled `OFF` (in any case) are not in the parquet. `manifest.json` records the damaged images, the merged spellings and the number of `OFF` points.
+**Ingest prefix:** `external_validation_datasets/moorea_labeled_corals/` holds `moorea_labeled_corals_annotations.parquet` (columns `year`, `image_id`, `image_ext`, `row`, `col`, `source_label_name`) and `images/<year>/<image_id><image_ext>`. `source_label_name` is the label after case merging: spellings that differ only in case become one label, and the mixed-case spelling is kept. The parquet also has `raw_label_name`, the spelling in the raw file. Points labelled `OFF` (in any case) are not in the parquet. `manifest.json` records the damaged images and the merged spellings in `ingestion.details`, and the number of `OFF` points in `ingestion.dropped`.
 
 **Rebuild:** the EDI package needs a login, so download it by hand from the source link. Unzip it so that the layout is:
 

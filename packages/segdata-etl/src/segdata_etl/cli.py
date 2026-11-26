@@ -15,6 +15,7 @@ from segdata_spec import DATASET_BUCKET
 from . import features, taxonomy
 from . import promote as promote_module
 from .common.cli_flags import pin_flags
+from .common.release import INGEST_BUCKET, ingest_prefix
 from .common.s3_objects import make_s3_client
 from .common.stage import DEFAULT_CACHE_DIR
 from .datasets import benthos_yuval as benthos_yuval_build
@@ -33,7 +34,6 @@ from .splits import builder as split_builder
 from .splits import leakage as split_leakage
 from .splits.builder import SplitParams
 
-DEFAULT_BUCKET = "dev-datamermaid-sm-sources"
 DEFAULT_WORKERS = 16
 WORKDIR_ROOT = Path("outputs") / "external-datasets"
 
@@ -63,8 +63,8 @@ def _client_for(args: argparse.Namespace) -> Any:
 
 def _shared_parser(dataset: str) -> argparse.ArgumentParser:
     parent = argparse.ArgumentParser(add_help=False)
-    parent.add_argument("--bucket", default=DEFAULT_BUCKET)
-    parent.add_argument("--prefix", default=f"external_validation_datasets/{dataset}")
+    parent.add_argument("--bucket", default=INGEST_BUCKET)
+    parent.add_argument("--prefix", default=ingest_prefix(dataset))
     parent.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parent.add_argument("--dry-run", action="store_true")
     parent.add_argument(
@@ -146,18 +146,18 @@ def _add_split_subcommands(top: Any) -> None:
 
 # Each external builder module exports ``add_arguments``, ``run(args, client)`` and ``DATASET``.
 _EXTERNAL_BUILDS: tuple[tuple[ModuleType, str], ...] = (
-    (catlin_seaview_build, "Publish the legacy Catlin Seaview prefix as a dataset version"),
+    (catlin_seaview_build, "Stage the ingested Catlin Seaview prefix as a dataset version"),
     (
         moorea_labeled_corals_build,
-        "Publish the legacy Moorea Labeled Corals prefix as a dataset version",
+        "Stage the ingested Moorea Labeled Corals prefix as a dataset version",
     ),
     (
         pacific_labeled_corals_build,
-        "Publish the legacy Pacific Labeled Corals prefix as a dataset version",
+        "Stage the ingested Pacific Labeled Corals prefix as a dataset version",
     ),
     (
         benthos_yuval_build,
-        "Publish the legacy Benthos Yuval tiles and masks as a dense dataset version",
+        "Stage the ingested Benthos Yuval tiles and masks as a dense dataset version",
     ),
 )
 

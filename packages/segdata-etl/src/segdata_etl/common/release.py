@@ -8,7 +8,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 import pyarrow as pa
@@ -16,7 +16,20 @@ import pyarrow.parquet as pq
 
 from segdata_spec.s3 import exists
 
+if TYPE_CHECKING:
+    from .manifest import IngestManifest
+
 logger = logging.getLogger(__name__)
+
+
+INGEST_BUCKET = "dev-datamermaid-sm-sources"
+MANIFEST_NAME = "manifest.json"
+CLASSES_NAME = "classes.json"
+
+
+def ingest_prefix(dataset_name: str) -> str:
+    """Return the key prefix, without a trailing slash, that ``dataset_name`` is ingested under."""
+    return f"external_validation_datasets/{dataset_name}"
 
 
 @dataclass(frozen=True)
@@ -52,9 +65,9 @@ def preflight(client: Any, target: S3Target, dataset_name: str, *, overwrite: bo
     """Raise ``FileExistsError`` if any file ``put_raw_release`` writes already exists."""
     names = [
         annotations_parquet_name(dataset_name),
-        "classes.json",
+        CLASSES_NAME,
         "colors.json",
-        "manifest.json",
+        MANIFEST_NAME,
     ]
     ensure_absent(client, target, names, overwrite=overwrite)
 
@@ -109,7 +122,7 @@ def put_raw_release(
     sort_by: list[str],
     classes: dict[str, Any],
     colors: dict[str, Any],
-    manifest: dict[str, Any],
+    manifest: IngestManifest,
     overwrite: bool,
 ) -> None:
     """Write the dataset files, manifest last so it marks a completed publish."""
@@ -121,9 +134,10 @@ def put_raw_release(
         sort_by=sort_by,
         overwrite=overwrite,
     )
-    put_json(client, target, "classes.json", classes, overwrite=overwrite)
+    put_json(client, target, CLASSES_NAME, classes, overwrite=overwrite)
     put_json(client, target, "colors.json", colors, overwrite=overwrite)
-    put_json(client, target, "manifest.json", manifest, overwrite=overwrite)
+    body = manifest.model_dump_json(indent=2).encode("utf-8")
+    _put_bytes(client, target, MANIFEST_NAME, body, "application/json", overwrite=overwrite)
 
 
 def list_keys(client: Any, bucket: str, prefix: str) -> set[str]:

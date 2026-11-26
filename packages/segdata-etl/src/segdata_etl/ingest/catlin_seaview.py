@@ -21,7 +21,7 @@ from tqdm.auto import tqdm
 
 from ..common.images import find_undecodable
 from ..common.labels import build_classes_and_colors
-from ..common.manifest import Source, build_manifest
+from ..common.manifest import IngestSource, build_manifest
 from ..common.release import S3Target, list_keys, preflight, put_raw_release, upload_files
 
 logger = logging.getLogger(__name__)
@@ -52,8 +52,7 @@ PARQUET_COLUMNS = {
 _REQUIRED_CSV_COLUMNS = ["quadratid", "x", "y", "label_name"]
 _SORT_KEYS = ["region", "image_id", "row", "col"]
 
-SOURCE = Source(
-    name=DATASET_NAME,
+SOURCE = IngestSource(
     citation=(
         "Seaview Survey Photo-quadrat and Image Classification Dataset "
         "(Gonzalez-Rivero et al., 2019)"
@@ -258,11 +257,14 @@ def run(args: argparse.Namespace, client: Any) -> int:
         skip_existing=args.skip_existing_s3,
     )
     manifest = build_manifest(
+        DATASET_NAME,
         SOURCE,
         target,
         image_key_template=f"{target.prefix}/images/{{region}}/{{image_id}}.jpg",
         parquet_columns=PARQUET_COLUMNS,
-        ingestion={"damaged_images": damaged, "images_uploaded": uploaded},
+        dropped={"damaged_images": sum(len(ids) for ids in damaged.values())},
+        images_uploaded=sum(uploaded.values()),
+        details={"damaged_images": damaged},
     )
     put_raw_release(
         client,

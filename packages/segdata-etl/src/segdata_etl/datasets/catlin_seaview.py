@@ -1,4 +1,4 @@
-"""``segdata build catlin_seaview``: stage the legacy Catlin Seaview prefix as a dataset version."""
+"""``segdata build catlin_seaview``: stage the ingested Catlin Seaview prefix as a dataset version."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from segdata_etl.common import versions
-from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
+from segdata_etl.common.ingested import read_ingested, source_info
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_etl.taxonomy import find_repo_root
@@ -15,7 +15,6 @@ from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import probe_git, refuse_unpublishable
 
 DATASET = "catlin_seaview"
-LICENSE = "CC BY-NC-SA 4.0"
 
 
 def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
@@ -40,19 +39,23 @@ def run(args: argparse.Namespace, client: Any) -> int:
         manifest_sha256=args.taxonomy_manifest_sha256,
         cache_dir=args.cache_dir,
     )
-    legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
-    source = source_info(legacy, license_override=LICENSE)
-    dropped = legacy_dropped(DATASET, legacy.manifest)
+    ingested = read_ingested(client, DATASET, bucket=args.ingest_bucket)
+    source = source_info(ingested)
+    dropped = ingested.manifest.ingestion.dropped
     curated = load_curated(DATASET)
-    labels = external.build_labels(legacy.classes, curated, taxonomy.benthic_attributes)
-    points = external.build_points(legacy.annotations.assign(annotator="default"), legacy.classes)
-    images = external.legacy_images(legacy.objects, external.group_folder_identity)
-    annotated = set(zip(legacy.annotations["region"], legacy.annotations["image_id"], strict=True))
+    labels = external.build_labels(ingested.classes, curated, taxonomy.benthic_attributes)
+    points = external.build_points(
+        ingested.annotations.assign(annotator="default"), ingested.classes
+    )
+    images = external.ingested_images(ingested.objects, external.group_folder_identity)
+    annotated = set(
+        zip(ingested.annotations["region"], ingested.annotations["image_id"], strict=True)
+    )
     external.require_same_ids(
         {(image.group, image.image_id) for image in images}, annotated, what="catlin images"
     )
     external.require_known_labels(points, labels)
-    probe = external.probe_legacy_images(client, images, legacy=legacy, workers=args.workers)
+    probe = external.probe_ingested_images(client, images, ingested=ingested, workers=args.workers)
     points = external.drop_unreadable_points(points, probe)
     points, dropped = external.drop_points_outside_and_record(
         points, probe.images, probe.sniffed, dropped
@@ -74,6 +77,6 @@ def run(args: argparse.Namespace, client: Any) -> int:
         repo_root=repo_root,
         client=client,
         probe=probe,
-        legacy=legacy,
+        ingested=ingested,
         args=args,
     )

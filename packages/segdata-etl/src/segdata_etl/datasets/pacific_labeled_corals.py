@@ -1,4 +1,4 @@
-"""``segdata build pacific_labeled_corals``: stage the legacy Pacific prefix as a dataset version."""
+"""``segdata build pacific_labeled_corals``: stage the ingested Pacific prefix as a dataset version."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 
 from segdata_etl.common import versions
-from segdata_etl.common.legacy import legacy_dropped, read_legacy, source_info
+from segdata_etl.common.ingested import read_ingested, source_info
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_etl.taxonomy import find_repo_root
@@ -19,7 +19,6 @@ from segdata_spec import DATASET_BUCKET
 from segdata_spec.git import probe_git, refuse_unpublishable
 
 DATASET = "pacific_labeled_corals"
-LICENSE = "CC0 1.0 (Dryad)"
 ANNOTATORS = ("archived", "host", *(f"visitor{i}" for i in range(1, 6)))
 _IMAGES_FOLDER = "images"
 _SHOWN = 5
@@ -43,18 +42,18 @@ def pacific_identity(key: str) -> tuple[str, str] | None:
     if parts[0] != _IMAGES_FOLDER:
         return None
     if len(parts) != 4:
-        raise ValueError(f"legacy image {key!r} is not at images/<site>/<subset>/<file>")
+        raise ValueError(f"ingested image {key!r} is not at images/<site>/<subset>/<file>")
     return PurePosixPath(parts[3]).stem, parts[1]
 
 
-def _key_subset(image: external.LegacyImage) -> str:
+def _key_subset(image: external.IngestedImage) -> str:
     return PurePosixPath(image.key).parts[2]
 
 
 def _long_annotations(annotations: pd.DataFrame) -> pd.DataFrame:
     """Return one row per non-null annotator column per position, ``annotator`` = column name.
 
-    Rows keep the legacy row order, then the ``ANNOTATORS`` order within a position.
+    Rows keep the ingested row order, then the ``ANNOTATORS`` order within a position.
     """
     melted = annotations.reset_index(names="_position").melt(
         id_vars=["_position", "image_id", "row", "col"],
@@ -69,7 +68,7 @@ def _long_annotations(annotations: pd.DataFrame) -> pd.DataFrame:
 
 
 def _image_attrs(annotations: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    """Return ``{"subset", "raw_imageid"}`` per image id from the legacy annotations.
+    """Return ``{"subset", "raw_imageid"}`` per image id from the ingested annotations.
 
     Raises:
         ValueError: An image id carries more than one ``(subset, raw_imageid)`` pair.
@@ -85,7 +84,7 @@ def _image_attrs(annotations: pd.DataFrame) -> dict[str, dict[str, Any]]:
 
 
 def _require_unique_positions(annotations: pd.DataFrame) -> None:
-    """Refuse a ``(image_id, row, col)`` that appears on more than one legacy row.
+    """Refuse a ``(image_id, row, col)`` that appears on more than one ingested row.
 
     Raises:
         ValueError: Some position is duplicated; the message gives the count and the first few.
@@ -104,8 +103,8 @@ def _annotated_images(annotations: pd.DataFrame) -> set[tuple[str, str, str]]:
 
 
 def _with_attrs(
-    images: Sequence[external.LegacyImage], attrs: dict[str, dict[str, Any]]
-) -> list[external.LegacyImage]:
+    images: Sequence[external.IngestedImage], attrs: dict[str, dict[str, Any]]
+) -> list[external.IngestedImage]:
     return [replace(image, attrs=attrs[image.image_id]) for image in images]
 
 
@@ -127,22 +126,22 @@ def run(args: argparse.Namespace, client: Any) -> int:
         manifest_sha256=args.taxonomy_manifest_sha256,
         cache_dir=args.cache_dir,
     )
-    legacy = read_legacy(client, DATASET, bucket=args.legacy_bucket)
-    source = source_info(legacy, license_override=LICENSE)
-    dropped = legacy_dropped(DATASET, legacy.manifest)
+    ingested = read_ingested(client, DATASET, bucket=args.ingest_bucket)
+    source = source_info(ingested)
+    dropped = ingested.manifest.ingestion.dropped
     curated = load_curated(DATASET)
-    labels = external.build_labels(legacy.classes, curated, taxonomy.benthic_attributes)
-    points = external.build_points(_long_annotations(legacy.annotations), legacy.classes)
-    _require_unique_positions(legacy.annotations)
-    images = external.legacy_images(legacy.objects, pacific_identity)
+    labels = external.build_labels(ingested.classes, curated, taxonomy.benthic_attributes)
+    points = external.build_points(_long_annotations(ingested.annotations), ingested.classes)
+    _require_unique_positions(ingested.annotations)
+    images = external.ingested_images(ingested.objects, pacific_identity)
     external.require_same_ids(
         {(image.group, _key_subset(image), image.image_id) for image in images},
-        _annotated_images(legacy.annotations),
+        _annotated_images(ingested.annotations),
         what="pacific images",
     )
-    images = _with_attrs(images, _image_attrs(legacy.annotations))
+    images = _with_attrs(images, _image_attrs(ingested.annotations))
     external.require_known_labels(points, labels)
-    probe = external.probe_legacy_images(client, images, legacy=legacy, workers=args.workers)
+    probe = external.probe_ingested_images(client, images, ingested=ingested, workers=args.workers)
     points = external.drop_unreadable_points(points, probe)
     # Bounds depend only on (image_id, row, col), so a position leaves with all its annotator
     # rows; points_out_of_bounds counts point rows, as in the other builders.
@@ -166,6 +165,6 @@ def run(args: argparse.Namespace, client: Any) -> int:
         repo_root=repo_root,
         client=client,
         probe=probe,
-        legacy=legacy,
+        ingested=ingested,
         args=args,
     )

@@ -9,33 +9,14 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
-from PIL import Image
 
 from segdata_etl.cli import build_parser
 from segdata_etl.ingest import catlin_seaview
 
+from .raw_trees import CATLIN_CSV_HEADER, jpg_bytes, write_catlin_tree
+
 B = "bkt"
 P = "ds"
-CSV_HEADER = "quadratid,x,y,label_name"
-
-
-def _jpg_bytes() -> bytes:
-    img = Image.effect_noise((64, 64), 80).convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG")
-    return buf.getvalue()
-
-
-def _write_raw_tree(root: Path, csvs: dict[str, str], images: dict[str, bytes]) -> Path:
-    """``csvs`` maps region -> CSV text; ``images`` maps ``region/id`` -> jpg bytes."""
-    (root / "tabular-data").mkdir(parents=True)
-    for region, text in csvs.items():
-        (root / "tabular-data" / f"annotations_{region}.csv").write_text(text)
-    for rel, data in images.items():
-        path = root / f"{rel}.jpg"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-    return root
 
 
 def _args(tmp_path: Path, data_dir: Path | None, **overrides) -> argparse.Namespace:
@@ -68,12 +49,12 @@ def _image_keys(fake_s3) -> list[str]:
 
 
 def test_ca1_two_regions_publish_parquet_images_and_classes(tmp_path, fake_s3):
-    jpg = _jpg_bytes()
-    root = _write_raw_tree(
+    jpg = jpg_bytes(64)
+    root = write_catlin_tree(
         tmp_path / "raw",
         {
-            "ATL": f"{CSV_HEADER}\n1,10.6,3.4,Sand\n1,20,30,Coral\n2,5,6,Sand\n",
-            "PAC_AUS": f"{CSV_HEADER}\n7,1,2,Algae\n",
+            "ATL": f"{CATLIN_CSV_HEADER}\n1,10.6,3.4,Sand\n1,20,30,Coral\n2,5,6,Sand\n",
+            "PAC_AUS": f"{CATLIN_CSV_HEADER}\n7,1,2,Algae\n",
         },
         {"ATL/1": jpg, "ATL/2": jpg, "PAC_AUS/7": jpg},
     )
@@ -105,31 +86,33 @@ def test_ca1_two_regions_publish_parquet_images_and_classes(tmp_path, fake_s3):
         "license": "CC BY-NC-SA 4.0",
     }
     assert manifest["s3"]["image_key_template"] == "ds/images/{region}/{image_id}.jpg"
-    assert manifest["ingestion"]["images_uploaded"]["ATL"] == 2
-    assert manifest["ingestion"]["images_uploaded"]["PAC_AUS"] == 1
+    assert manifest["ingestion"]["images_uploaded"] == 3
+    assert manifest["ingestion"]["dropped"] == {"damaged_images": 0}
 
 
 def test_ca2_truncated_jpg_is_dropped_recorded_and_not_uploaded(tmp_path, fake_s3):
-    jpg = _jpg_bytes()
-    root = _write_raw_tree(
+    jpg = jpg_bytes(64)
+    root = write_catlin_tree(
         tmp_path / "raw",
-        {"ATL": f"{CSV_HEADER}\n1,1,1,Sand\n2,2,2,Coral\n"},
+        {"ATL": f"{CATLIN_CSV_HEADER}\n1,1,1,Sand\n2,2,2,Coral\n"},
         {"ATL/1": jpg, "ATL/2": jpg[: len(jpg) // 2]},
     )
 
     catlin_seaview.run(_args(tmp_path, root), fake_s3)
 
     assert _parquet(fake_s3)["image_id"].tolist() == ["1"]
-    assert _json(fake_s3, "manifest.json")["ingestion"]["damaged_images"]["ATL"] == ["2"]
+    ingestion = _json(fake_s3, "manifest.json")["ingestion"]
+    assert ingestion["dropped"] == {"damaged_images": 1}
+    assert ingestion["details"]["damaged_images"]["ATL"] == ["2"]
     assert _image_keys(fake_s3) == ["ds/images/ATL/1.jpg"]
     assert _json(fake_s3, "classes.json") == {"unlabeled": 0, "Sand": 1}
 
 
 def test_ca3_rows_with_nan_fields_are_dropped(tmp_path, fake_s3):
-    root = _write_raw_tree(
+    root = write_catlin_tree(
         tmp_path / "raw",
-        {"ATL": (f"{CSV_HEADER}\n1,1,1,Sand\n,2,2,Sand\n1,,3,Sand\n1,4,,Sand\n1,5,5,\n")},
-        {"ATL/1": _jpg_bytes()},
+        {"ATL": (f"{CATLIN_CSV_HEADER}\n1,1,1,Sand\n,2,2,Sand\n1,,3,Sand\n1,4,,Sand\n1,5,5,\n")},
+        {"ATL/1": jpg_bytes(64)},
     )
 
     catlin_seaview.run(_args(tmp_path, root), fake_s3)
@@ -138,10 +121,10 @@ def test_ca3_rows_with_nan_fields_are_dropped(tmp_path, fake_s3):
 
 
 def test_ca4_missing_region_csv_is_skipped_others_ingest(tmp_path, fake_s3):
-    root = _write_raw_tree(
+    root = write_catlin_tree(
         tmp_path / "raw",
-        {"IND_CHA": f"{CSV_HEADER}\n3,1,1,Sand\n"},
-        {"IND_CHA/3": _jpg_bytes()},
+        {"IND_CHA": f"{CATLIN_CSV_HEADER}\n3,1,1,Sand\n"},
+        {"IND_CHA/3": jpg_bytes(64)},
     )
 
     catlin_seaview.run(_args(tmp_path, root), fake_s3)
@@ -150,7 +133,7 @@ def test_ca4_missing_region_csv_is_skipped_others_ingest(tmp_path, fake_s3):
 
 
 def test_ca4_no_region_csvs_raises_runtime_error(tmp_path, fake_s3):
-    root = _write_raw_tree(tmp_path / "raw", {}, {})
+    root = write_catlin_tree(tmp_path / "raw", {}, {})
 
     with pytest.raises(RuntimeError, match="nothing to ingest"):
         catlin_seaview.run(_args(tmp_path, root), fake_s3)
@@ -158,7 +141,7 @@ def test_ca4_no_region_csvs_raises_runtime_error(tmp_path, fake_s3):
 
 
 def test_ca5_csv_missing_required_column_raises_naming_it(tmp_path, fake_s3):
-    root = _write_raw_tree(tmp_path / "raw", {"ATL": "quadratid,x,label_name\n1,1,Sand\n"}, {})
+    root = write_catlin_tree(tmp_path / "raw", {"ATL": "quadratid,x,label_name\n1,1,Sand\n"}, {})
 
     with pytest.raises(ValueError, match=r"annotations_ATL\.csv.*\['y'\]"):
         catlin_seaview.run(_args(tmp_path, root), fake_s3)
@@ -178,10 +161,10 @@ def test_data_dir_that_does_not_exist_raises(tmp_path, fake_s3):
 
 
 def test_skip_existing_s3_skips_present_images_and_no_flag_reuploads(tmp_path, fake_s3):
-    root = _write_raw_tree(
+    root = write_catlin_tree(
         tmp_path / "raw",
-        {"ATL": f"{CSV_HEADER}\n1,1,1,Sand\n"},
-        {"ATL/1": _jpg_bytes()},
+        {"ATL": f"{CATLIN_CSV_HEADER}\n1,1,1,Sand\n"},
+        {"ATL/1": jpg_bytes(64)},
     )
     fake_s3.put(B, "ds/images/ATL/1.jpg", b"old")
 
@@ -193,10 +176,10 @@ def test_skip_existing_s3_skips_present_images_and_no_flag_reuploads(tmp_path, f
 
 
 def test_stale_manifest_without_overwrite_raises_before_any_image_upload(tmp_path, fake_s3):
-    root = _write_raw_tree(
+    root = write_catlin_tree(
         tmp_path / "raw",
-        {"ATL": f"{CSV_HEADER}\n1,1,1,Sand\n"},
-        {"ATL/1": _jpg_bytes()},
+        {"ATL": f"{CATLIN_CSV_HEADER}\n1,1,1,Sand\n"},
+        {"ATL/1": jpg_bytes(64)},
     )
     fake_s3.put(B, "ds/manifest.json", b"old")
 
@@ -208,10 +191,10 @@ def test_stale_manifest_without_overwrite_raises_before_any_image_upload(tmp_pat
 
 
 def test_dry_run_writes_nothing(tmp_path, fake_s3):
-    root = _write_raw_tree(
+    root = write_catlin_tree(
         tmp_path / "raw",
-        {"ATL": f"{CSV_HEADER}\n1,1,1,Sand\n"},
-        {"ATL/1": _jpg_bytes()},
+        {"ATL": f"{CATLIN_CSV_HEADER}\n1,1,1,Sand\n"},
+        {"ATL/1": jpg_bytes(64)},
     )
 
     catlin_seaview.run(_args(tmp_path, root, dry_run=True), fake_s3)
@@ -249,11 +232,11 @@ def _download_bodies() -> dict[str, bytes]:
     base = catlin_seaview.BASE_URL
     bodies = {
         f"{base}/tabular-data.zip": _zip_bytes(
-            {"tabular-data/annotations_ATL.csv": f"{CSV_HEADER}\n1,1,1,Sand\n"}
+            {"tabular-data/annotations_ATL.csv": f"{CATLIN_CSV_HEADER}\n1,1,1,Sand\n"}
         )
     }
     for region in catlin_seaview.REGIONS:
-        members = {f"{region}/1.jpg": _jpg_bytes()} if region == "ATL" else {}
+        members = {f"{region}/1.jpg": jpg_bytes(64)} if region == "ATL" else {}
         bodies[f"{base}/annotated-images/{region}.zip"] = _zip_bytes(
             members or {f"{region}/readme.txt": "x"}
         )

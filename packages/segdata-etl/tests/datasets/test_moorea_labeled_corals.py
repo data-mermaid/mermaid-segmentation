@@ -1,4 +1,4 @@
-"""``segdata build moorea_labeled_corals`` from a fake legacy prefix into a local stage."""
+"""``segdata build moorea_labeled_corals`` from a fake ingest prefix into a local stage."""
 
 from __future__ import annotations
 
@@ -15,13 +15,14 @@ from segdata_etl.datasets import moorea_labeled_corals
 from segdata_spec import DATASET_BUCKET
 
 from .conftest import (
-    LEGACY_BUCKET,
+    INGEST_BUCKET,
     Staged,
     assert_copies_match_sources,
     assert_curated_label_mapping,
     build_args,
+    ingest_manifest_bytes,
+    ingested_etag,
     jpeg,
-    legacy_etag,
     make_repo,
     no_mask,
     png,
@@ -55,28 +56,17 @@ def _parquet(rows: list[Annotation]) -> bytes:
     return buf.getvalue()
 
 
-def _legacy(
-    s3: FakeS3, annotations: list[Annotation] = ANNOTATIONS, *, licence: str | None = "CC BY 4.0"
-) -> None:
-    manifest = {
-        "dataset_name": "moorea_labeled_corals",
-        "source": {
-            "citation": "Beijbom et al. (2012)",
-            **({"license": licence} if licence else {}),
-        },
-        "damaged_images": ["x", "y"],
-        "off_annotations_dropped": 13,
-        "case_merged_labels": {"ACROP": "Acrop"},
-    }
+def _ingested(s3: FakeS3, annotations: list[Annotation] = ANNOTATIONS) -> None:
+    dropped = {"damaged_images": 2, "off_annotations": 13}
     files = {
-        "manifest.json": json.dumps(manifest).encode(),
+        "manifest.json": ingest_manifest_bytes("moorea_labeled_corals", dropped),
         "classes.json": json.dumps(CLASSES).encode(),
         "moorea_labeled_corals_annotations.parquet": _parquet(annotations),
     }
     for (year, image_id, ext), data in IMAGES.items():
         files[f"images/{year}/{image_id}{ext}"] = data
     for name, data in files.items():
-        s3.put(LEGACY_BUCKET, PREFIX + name, data)
+        s3.put(INGEST_BUCKET, PREFIX + name, data)
 
 
 @pytest.fixture
@@ -87,7 +77,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def s3() -> FakeS3:
     fake = FakeS3()
-    _legacy(fake)
+    _ingested(fake)
     return fake
 
 
@@ -108,7 +98,7 @@ def test_build_groups_images_by_year_and_keeps_the_png_extension(staged: Staged)
             "height": h,
             "group": year,
             **no_mask(),
-            "source_fingerprint": legacy_etag(data),
+            "source_fingerprint": ingested_etag(data),
             "source_name": f"{image_id}.{ext}",
             "attrs": None,
         }
@@ -120,7 +110,7 @@ def test_build_groups_images_by_year_and_keeps_the_png_extension(staged: Staged)
     ]
 
 
-def test_build_plans_a_copy_of_each_legacy_image(staged: Staged) -> None:
+def test_build_plans_a_copy_of_each_ingested_image(staged: Staged) -> None:
     assert_copies_match_sources(
         staged,
         {
@@ -130,7 +120,7 @@ def test_build_plans_a_copy_of_each_legacy_image(staged: Staged) -> None:
     )
 
 
-def test_staged_version_promotes_with_the_images_copied_from_the_legacy_prefix(
+def test_staged_version_promotes_with_the_images_copied_from_the_ingest_prefix(
     s3: FakeS3, staged: Staged
 ) -> None:
     promote.promote(
@@ -167,37 +157,21 @@ def test_build_takes_point_labels_from_the_case_merged_source_label_name(staged:
     ]
 
 
-def test_build_records_the_legacy_licence_and_drop_counts_in_the_manifest(staged: Staged) -> None:
-    manifest = staged.version.manifest
-    assert manifest.source.license == "CC BY 4.0"
-    assert manifest.stats.dropped == {
-        "damaged_images": 2,
-        "off_annotations": 13,
-    }
-    assert_curated_label_mapping(manifest, moorea_labeled_corals.DATASET, staged.version.labels)
+def test_build_records_the_curated_label_mapping_in_the_manifest(staged: Staged) -> None:
+    assert_curated_label_mapping(
+        staged.version.manifest, moorea_labeled_corals.DATASET, staged.version.labels
+    )
 
 
-@pytest.mark.parametrize(
-    ("annotations", "licence", "message"),
-    [
-        ([a if a[1] != "mcr_b" else ("2009", *a[1:]) for a in ANNOTATIONS], "CC BY 4.0", "2009"),
-        (ANNOTATIONS, None, "no licence"),
-    ],
-    ids=["other-year", "no-licence"],
-)
-def test_build_refuses_an_inconsistent_legacy_prefix_before_staging(
-    repo: Path,
-    tmp_path: Path,
-    annotations: list[Annotation],
-    licence: str | None,
-    message: str,
+def test_build_refuses_an_inconsistent_ingest_prefix_before_staging(
+    repo: Path, tmp_path: Path
 ) -> None:
     s3 = FakeS3()
-    _legacy(s3, annotations, licence=licence)
+    _ingested(s3, [a if a[1] != "mcr_b" else ("2009", *a[1:]) for a in ANNOTATIONS])
     stage = tmp_path / "stage"
     taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="2009"):
         moorea_labeled_corals.run(build_args(moorea_labeled_corals, stage, taxonomy_sha), s3)
 
     assert not stage.exists()
@@ -208,7 +182,7 @@ def test_build_drops_a_point_past_the_bottom_edge_and_records_it(
 ) -> None:
     s3 = FakeS3()
     # mcr_a is 5 high, so row 5 is outside; label 8 would add a count row if it were kept.
-    _legacy(s3, [*ANNOTATIONS, ("2008", "mcr_a", ".jpg", 5, 0, "Sand", "sand")])
+    _ingested(s3, [*ANNOTATIONS, ("2008", "mcr_a", ".jpg", 5, 0, "Sand", "sand")])
 
     version = stage_version(moorea_labeled_corals, s3, repo, tmp_path, capsys).version
 

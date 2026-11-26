@@ -8,7 +8,7 @@ import pyarrow as pa
 import pytest
 from s3_fake import FakeS3
 
-from segdata_etl.common.legacy import LegacyObject
+from segdata_etl.common.ingested import IngestedObject
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import CURATED_SCHEMA, CuratedSource
 from segdata_spec import DATASET_BUCKET
@@ -87,8 +87,8 @@ def _points(*rows: tuple[str, int, int, int]) -> pa.Table:
     )
 
 
-def _objects(*keys: str) -> dict[str, LegacyObject]:
-    return {key: LegacyObject(key, f"etag-{i}", 10) for i, key in enumerate(keys)}
+def _objects(*keys: str) -> dict[str, IngestedObject]:
+    return {key: IngestedObject(key, f"etag-{i}", 10) for i, key in enumerate(keys)}
 
 
 @pytest.mark.parametrize(
@@ -108,32 +108,32 @@ def test_group_folder_identity_refuses_an_image_not_one_folder_deep(key: str) ->
         external.group_folder_identity(key)
 
 
-def test_legacy_images_skips_keys_identify_returns_none_for() -> None:
+def test_ingested_images_skips_keys_identify_returns_none_for() -> None:
     def identify(key: str) -> tuple[str, str] | None:
         return None if key.startswith("skip/") else (key.upper(), "g")
 
-    images = external.legacy_images(_objects("skip/x", "b", "a"), identify)
+    images = external.ingested_images(_objects("skip/x", "b", "a"), identify)
     assert images == [
-        external.LegacyImage(image_id="A", group="g", key="a", etag="etag-2"),
-        external.LegacyImage(image_id="B", group="g", key="b", etag="etag-1"),
+        external.IngestedImage(image_id="A", group="g", key="a", etag="etag-2"),
+        external.IngestedImage(image_id="B", group="g", key="b", etag="etag-1"),
     ]
 
 
-def test_legacy_images_refuses_a_duplicate_image_id_naming_both_keys() -> None:
+def test_ingested_images_refuses_a_duplicate_image_id_naming_both_keys() -> None:
     with pytest.raises(ValueError, match="images/ATL/1001.jpg.*images/PAC_USA/1001.jpg"):
-        external.legacy_images(
+        external.ingested_images(
             _objects("images/ATL/1001.jpg", "images/PAC_USA/1001.jpg"),
             external.group_folder_identity,
         )
 
 
 def test_image_key_takes_png_extension_from_media_type() -> None:
-    image = external.LegacyImage(image_id="7", group="g", key="x/7.png", etag="e")
+    image = external.IngestedImage(image_id="7", group="g", key="x/7.png", etag="e")
     assert external.image_key(image, "image/png") == "g/7.png"
 
 
 SIZES = {"7.jpg": ("image/jpeg", 4, 3)}
-IMAGE_7 = external.LegacyImage(image_id="7", group="g", key="7.jpg", etag="e")
+IMAGE_7 = external.IngestedImage(image_id="7", group="g", key="7.jpg", etag="e")
 
 
 def test_drop_points_outside_keeps_the_last_pixel_and_drops_each_edge_past_it() -> None:

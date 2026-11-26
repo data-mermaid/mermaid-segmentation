@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from botocore.exceptions import ClientError
 
+from segdata_etl.common.manifest import IngestSource, build_manifest
 from segdata_etl.common.release import (
     S3Target,
     ensure_absent,
@@ -133,7 +134,15 @@ def test_put_raw_release_writes_parquet_then_classes_colors_manifest_last(fake_s
         sort_by=["k"],
         classes={"c": 1},
         colors={"c": [0, 0, 0]},
-        manifest={"m": 1},
+        manifest=build_manifest(
+            "demo",
+            IngestSource(citation="c", raw_data_url="u", license="l"),
+            _target(),
+            image_key_template="ds/{image_id}",
+            parquet_columns={},
+            dropped={},
+            images_uploaded=0,
+        ),
         overwrite=False,
     )
     assert list(fake_s3.objects) == [

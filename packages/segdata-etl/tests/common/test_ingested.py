@@ -1,4 +1,4 @@
-"""Tests for the legacy external_validation_datasets prefix reader."""
+"""Tests for the ingest-prefix reader."""
 
 from __future__ import annotations
 
@@ -9,18 +9,18 @@ from collections.abc import Iterator
 from typing import Any
 
 import pandas as pd
-import pytest
 from PIL import Image
 
-from segdata_etl.common.legacy import (
-    LegacyObject,
-    legacy_dropped,
-    read_legacy,
+from segdata_etl.common.ingested import (
+    IngestedObject,
+    read_ingested,
     source_info,
     source_revision,
 )
+from segdata_etl.common.manifest import IngestSource, build_manifest
+from segdata_etl.common.release import INGEST_BUCKET, S3Target, ingest_prefix
 
-BUCKET = "dev-datamermaid-sm-sources"
+BUCKET = INGEST_BUCKET
 
 
 class _Body:
@@ -32,7 +32,7 @@ class _Body:
 
 
 class _Paginator:
-    def __init__(self, client: LegacyS3):
+    def __init__(self, client: ListingS3):
         self._client = client
 
     def paginate(self, *, Bucket: str, Prefix: str) -> Iterator[dict[str, Any]]:  # noqa: N803
@@ -48,7 +48,7 @@ class _Paginator:
         return {"Key": key, "ETag": f'"{etag}"', "Size": len(data)}
 
 
-class LegacyS3:
+class ListingS3:
     """In-memory S3 client with a paginated listing and whole-object GETs."""
 
     def __init__(self, objects: dict[tuple[str, str], bytes], reverse_listing: bool = False):
@@ -75,37 +75,45 @@ def _parquet_bytes() -> bytes:
     return buf.getvalue()
 
 
-MANIFEST = {
-    "source": {"citation": "A. Author 2020", "paper": "P. Paper 2019", "license": "CC BY 4.0"}
-}
+MANIFEST = build_manifest(
+    "demo",
+    IngestSource(citation="A. Author 2020", raw_data_url="https://x/y", license="CC BY 4.0"),
+    S3Target(BUCKET, "external_validation_datasets/demo", dry_run=False),
+    image_key_template="images/{group}/{image_id}.jpg",
+    parquet_columns={"image_id": "string"},
+    dropped={"damaged_images": 4},
+    images_uploaded=2,
+)
+MANIFEST_BYTES = MANIFEST.model_dump_json().encode()
 CLASSES = {"unlabeled": 0, "coral": 1}
 
 
-def _legacy_objects(name: str = "demo", prefix: str | None = None) -> dict[tuple[str, str], bytes]:
-    prefix = prefix or f"external_validation_datasets/{name}/"
+def _ingested_objects(name: str = "demo") -> dict[tuple[str, str], bytes]:
+    prefix = f"{ingest_prefix(name)}/"
     return {
         (BUCKET, f"{prefix}{name}_annotations.parquet"): _parquet_bytes(),
         (BUCKET, f"{prefix}classes.json"): json.dumps(CLASSES).encode(),
-        (BUCKET, f"{prefix}manifest.json"): json.dumps(MANIFEST).encode(),
+        (BUCKET, f"{prefix}manifest.json"): MANIFEST_BYTES,
         (BUCKET, f"{prefix}images/g1/a.jpg"): _image_bytes("JPEG", (7, 5)),
         (BUCKET, f"{prefix}images/g2/b.jpg"): _image_bytes("JPEG", (7, 5), quality=50),
     }
 
 
-def test_read_legacy_returns_tables_manifest_and_stripped_etag_objects() -> None:
-    objects = _legacy_objects()
-    client = LegacyS3(objects)
+def test_read_ingested_returns_tables_manifest_and_stripped_etag_objects() -> None:
+    objects = _ingested_objects()
+    client = ListingS3(objects)
 
-    ds = read_legacy(client, "demo")
+    ds = read_ingested(client, "demo")
 
     jpeg = objects[(BUCKET, "external_validation_datasets/demo/images/g1/a.jpg")]
-    assert ds.bucket == BUCKET
+    assert ds.bucket == "dev-datamermaid-sm-sources"
     assert ds.prefix == "external_validation_datasets/demo/"
     assert ds.annotations["image_id"].tolist() == ["a", "b"]
     assert ds.classes == CLASSES
     assert ds.manifest == MANIFEST
-    assert ds.manifest_sha256 == hashlib.sha256(json.dumps(MANIFEST).encode()).hexdigest()
-    assert ds.objects["images/g1/a.jpg"] == LegacyObject(
+    assert ds.manifest.ingestion.dropped == {"damaged_images": 4}
+    assert ds.manifest_sha256 == hashlib.sha256(MANIFEST_BYTES).hexdigest()
+    assert ds.objects["images/g1/a.jpg"] == IngestedObject(
         key="images/g1/a.jpg",
         etag=hashlib.md5(jpeg).hexdigest(),
         size=len(jpeg),  # noqa: S324
@@ -114,14 +122,14 @@ def test_read_legacy_returns_tables_manifest_and_stripped_etag_objects() -> None
 
 
 def test_source_revision_ignores_listing_order_and_tracks_every_etag() -> None:
-    objects = _legacy_objects()
-    forward = read_legacy(LegacyS3(objects), "demo")
-    backward = read_legacy(LegacyS3(objects, reverse_listing=True), "demo")
+    objects = _ingested_objects()
+    forward = read_ingested(ListingS3(objects), "demo")
+    backward = read_ingested(ListingS3(objects, reverse_listing=True), "demo")
     changed_objects = dict(objects)
     changed_objects[(BUCKET, "external_validation_datasets/demo/images/g2/b.jpg")] = _image_bytes(
         "JPEG", (7, 5), quality=10
     )
-    changed = read_legacy(LegacyS3(changed_objects), "demo")
+    changed = read_ingested(ListingS3(changed_objects), "demo")
 
     lines = "".join(
         f"{o.key}\t{o.etag}\n" for o in sorted(forward.objects.values(), key=lambda o: o.key)
@@ -135,78 +143,13 @@ def test_source_revision_ignores_listing_order_and_tracks_every_etag() -> None:
     assert source_revision(changed) != expected
 
 
-def test_legacy_dropped_counts_catlin_ids_across_regions() -> None:
-    manifest = {
-        "ingestion": {
-            "skipped_damaged_or_missing_image_ids": {"PAC_IDN_PHL": ["a", "b", "c"], "ATL": ["d"]}
-        }
-    }
-
-    assert legacy_dropped("catlin_seaview", manifest) == {"damaged_images": 4}
-
-
-def test_legacy_dropped_counts_moorea_damaged_and_off() -> None:
-    manifest = {
-        "damaged_images": ["2008/a.jpg", "2009/b.jpg"],
-        "off_annotations_dropped": 11,
-        "case_merged_labels": {"Acrop": "acrop", "TURF": "turf", "Sand": "sand"},
-    }
-
-    assert legacy_dropped("moorea_labeled_corals", manifest) == {
-        "damaged_images": 2,
-        "off_annotations": 11,
-    }
-
-
-@pytest.mark.parametrize("name", ["pacific_labeled_corals", "benthos_yuval"])
-def test_legacy_dropped_is_empty_for_datasets_without_drop_counts(name: str) -> None:
-    assert legacy_dropped(name, {"source": {}, "stats": {"s1": 4}}) == {}
-
-
-@pytest.mark.parametrize(
-    ("name", "manifest"),
-    [
-        ("catlin_seaview", {"source": {}}),
-        ("moorea_labeled_corals", {"damaged_images": []}),
-    ],
-)
-def test_legacy_dropped_raises_key_error_when_a_required_field_is_absent(
-    name: str, manifest: dict
-) -> None:
-    with pytest.raises(KeyError):
-        legacy_dropped(name, manifest)
-
-
-def test_source_info_takes_citation_over_paper_and_the_manifest_license() -> None:
-    ds = read_legacy(LegacyS3(_legacy_objects()), "demo")
+def test_source_info_takes_citation_and_license_from_the_manifest() -> None:
+    ds = read_ingested(ListingS3(_ingested_objects()), "demo")
 
     info = source_info(ds)
 
-    assert info.type == "legacy-prefix"
+    assert info.type == "ingest-prefix"
     assert info.uri == f"s3://{BUCKET}/external_validation_datasets/demo/"
     assert info.revision == source_revision(ds)
     assert info.citation == "A. Author 2020"
     assert info.license == "CC BY 4.0"
-
-
-def test_source_info_falls_back_to_paper_and_honours_the_license_override() -> None:
-    objects = _legacy_objects()
-    key = (BUCKET, "external_validation_datasets/demo/manifest.json")
-    objects[key] = json.dumps({"source": {"paper": "P. Paper 2019", "license": "x"}}).encode()
-    ds = read_legacy(LegacyS3(objects), "demo")
-
-    info = source_info(ds, license_override="CC BY-NC-SA 4.0")
-
-    assert info.citation == "P. Paper 2019"
-    assert info.license == "CC BY-NC-SA 4.0"
-
-
-@pytest.mark.parametrize("source", [{"citation": "A. Author 2020"}, {"license": ""}])
-def test_source_info_raises_when_no_licence_is_resolved(source: dict) -> None:
-    objects = _legacy_objects()
-    key = (BUCKET, "external_validation_datasets/demo/manifest.json")
-    objects[key] = json.dumps({"source": source}).encode()
-    ds = read_legacy(LegacyS3(objects), "demo")
-
-    with pytest.raises(ValueError):
-        source_info(ds)

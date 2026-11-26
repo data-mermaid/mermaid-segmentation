@@ -1,4 +1,4 @@
-"""``segdata build catlin_seaview`` from a fake legacy prefix into a local stage."""
+"""``segdata build catlin_seaview`` from a fake ingest prefix into a local stage."""
 
 from __future__ import annotations
 
@@ -18,14 +18,15 @@ from segdata_spec.git import GitState
 
 from .conftest import (
     CLEAN_GIT,
-    LEGACY_BUCKET,
+    INGEST_BUCKET,
     TAXONOMY_VERSION,
     Staged,
     assert_copies_match_sources,
     assert_curated_label_mapping,
     build_args,
+    ingest_manifest_bytes,
+    ingested_etag,
     jpeg,
-    legacy_etag,
     make_repo,
     no_mask,
     probed_columns,
@@ -56,26 +57,21 @@ def _images() -> dict[tuple[str, str], bytes]:
     return {pair: jpeg(*size) for pair, size in IMAGE_SIZES.items()}
 
 
-def _legacy(
+def _ingested(
     s3: FakeS3,
     annotations: list[tuple[str, str, int, int, str]] = ANNOTATIONS,
     images: dict[tuple[str, str], bytes] | None = None,
 ) -> None:
-    """Write a Catlin-shaped legacy prefix into ``s3``; ``images`` replaces the image bytes."""
-    manifest = {
-        "dataset_name": "catlin_seaview",
-        "source": {"paper": "Seaview Survey (2019)", "raw_data_url": "http://example/Q1281"},
-        "ingestion": {"skipped_damaged_or_missing_image_ids": {"ATL": [], "PAC_USA": ["x", "y"]}},
-    }
+    """Write a Catlin-shaped ingest prefix into ``s3``; ``images`` replaces the image bytes."""
     files = {
-        "manifest.json": json.dumps(manifest).encode(),
+        "manifest.json": ingest_manifest_bytes("catlin_seaview", {"damaged_images": 2}),
         "classes.json": json.dumps(CLASSES).encode(),
         "catlin_seaview_annotations.parquet": _parquet(annotations),
     }
     for (region, image_id), data in (images or _images()).items():
         files[f"images/{region}/{image_id}.jpg"] = data
     for name, data in files.items():
-        s3.put(LEGACY_BUCKET, PREFIX + name, data)
+        s3.put(INGEST_BUCKET, PREFIX + name, data)
 
 
 @pytest.fixture
@@ -86,11 +82,11 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def staged(repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Staged:
     s3 = FakeS3()
-    _legacy(s3)
+    _ingested(s3)
     return stage_version(catlin_seaview, s3, repo, tmp_path, capsys)
 
 
-def test_build_writes_image_rows_from_the_legacy_objects(staged: Staged) -> None:
+def test_build_writes_image_rows_from_the_ingested_objects(staged: Staged) -> None:
     def row(region: str, image_id: str) -> dict[str, object]:
         width, height = IMAGE_SIZES[(region, image_id)]
         data = jpeg(width, height)
@@ -103,7 +99,7 @@ def test_build_writes_image_rows_from_the_legacy_objects(staged: Staged) -> None
             "height": height,
             "group": region,
             **no_mask(),
-            "source_fingerprint": legacy_etag(data),
+            "source_fingerprint": ingested_etag(data),
             "source_name": f"{image_id}.jpg",
             "attrs": None,
         }
@@ -116,7 +112,7 @@ def test_build_writes_image_rows_from_the_legacy_objects(staged: Staged) -> None
     assert staged.version.manifest.image_store.prefix == "images/catlin_seaview/"
 
 
-def test_build_plans_a_copy_of_each_legacy_image_and_stages_no_image(staged: Staged) -> None:
+def test_build_plans_a_copy_of_each_ingested_image_and_stages_no_image(staged: Staged) -> None:
     assert_copies_match_sources(
         staged,
         {
@@ -148,12 +144,10 @@ def test_build_writes_points_labels_and_counts(staged: Staged) -> None:
     assert_curated_label_mapping(version.manifest, catlin_seaview.DATASET, version.labels)
 
 
-def test_build_records_licence_source_dropped_and_command_in_the_manifest(staged: Staged) -> None:
+def test_build_records_source_and_command_in_the_manifest(staged: Staged) -> None:
     manifest = staged.version.manifest
     assert manifest.version.endswith("-abcdef1")
-    assert manifest.source.license == "CC BY-NC-SA 4.0"
-    assert manifest.source.uri == f"s3://{LEGACY_BUCKET}/{PREFIX}"
-    assert manifest.stats.dropped == {"damaged_images": 2}
+    assert manifest.source.uri == f"s3://{INGEST_BUCKET}/{PREFIX}"
     assert manifest.etl.command == (
         f"segdata build catlin_seaview --stage-dir {staged.stage}"
         f" --taxonomy-version {TAXONOMY_VERSION} --taxonomy-manifest-sha256 {staged.taxonomy_sha}"
@@ -174,7 +168,7 @@ def test_build_takes_the_next_suffix_when_the_bucket_already_holds_the_version(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     s3 = FakeS3()
-    _legacy(s3)
+    _ingested(s3)
     base = f"{datetime.now(UTC).date():%Y%m%d}-{CLEAN_GIT.sha[:7]}"
     s3.put(DATASET_BUCKET, f"datasets/catlin_seaview/{base}/images.parquet", b"half-promoted")
 
@@ -195,7 +189,7 @@ def test_build_refuses_an_unpublishable_tree_before_reading_s3(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git: GitState
 ) -> None:
     s3 = FakeS3()
-    _legacy(s3)
+    _ingested(s3)
     monkeypatch.setattr(catlin_seaview, "probe_git", lambda _dir: git)
     stage = tmp_path / "stage"
 
@@ -211,7 +205,7 @@ def test_build_drops_an_image_with_an_unreadable_header_and_its_points(
 ) -> None:
     s3 = FakeS3()
     images = _images()
-    _legacy(s3, images={**images, ("ATL", "1002"): b"not an image"})
+    _ingested(s3, images={**images, ("ATL", "1002"): b"not an image"})
 
     staged = stage_version(catlin_seaview, s3, repo, tmp_path, capsys)
 
@@ -247,7 +241,7 @@ def test_build_refuses_inconsistent_annotations_before_staging(
     message: str,
 ) -> None:
     s3 = FakeS3()
-    _legacy(s3, annotations)
+    _ingested(s3, annotations)
     stage = tmp_path / "stage"
     taxonomy_sha = publish_fixture_taxonomy(s3, repo)
 
@@ -262,7 +256,7 @@ def test_build_drops_a_point_past_the_right_edge_and_records_it(
 ) -> None:
     s3 = FakeS3()
     # ATL/1002 is 6 wide, so col 6 is outside; label 12 would add a count row if it were kept.
-    _legacy(s3, [*ANNOTATIONS, ("ATL", "1002", 1, 6, "Water")])
+    _ingested(s3, [*ANNOTATIONS, ("ATL", "1002", 1, 6, "Water")])
 
     version = stage_version(catlin_seaview, s3, repo, tmp_path, capsys).version
 
