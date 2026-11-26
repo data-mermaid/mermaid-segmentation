@@ -124,7 +124,8 @@ class SourceLabelRegistry:
 
         Raises:
             ValueError: If there are no datasets, two datasets share a ``source_name``,
-                ``label_roll_up`` has no ``target_label_subset`` or no ``benthic_hierarchy``.
+                two sources produce the same global id, ``label_roll_up`` has no
+                ``target_label_subset`` or no ``benthic_hierarchy``.
         """
         if not datasets:
             raise ValueError("SourceLabelRegistry requires at least one dataset")
@@ -140,11 +141,16 @@ class SourceLabelRegistry:
         self.datasets = list(datasets)
         rows = {ds.source_name: _source_rows(ds) for ds in self.datasets}
         self.dataset_offsets = {ds.source_name: ds.global_offset for ds in self.datasets}
-        self.global_id2source = {
-            global_id: (source, name)
-            for source, source_rows in rows.items()
-            for global_id, name, _ in source_rows
-        }
+        self.global_id2source = {}
+        for source, source_rows in rows.items():
+            for global_id, name, _ in source_rows:
+                if global_id in self.global_id2source:
+                    raise ValueError(
+                        f"global id {global_id} is produced by both "
+                        f"'{self.global_id2source[global_id][0]}' and '{source}'; "
+                        "give the sources disjoint offsets"
+                    )
+                self.global_id2source[global_id] = (source, name)
         max_global_id = max(self.global_id2source, default=0)
 
         # Default target vocabulary: the alphabetical union of every non-null

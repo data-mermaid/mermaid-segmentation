@@ -121,7 +121,11 @@ def test_target_labels_are_sorted_whatever_the_config_order():
 
 
 def _reader(
-    tmp_path: Path, name: str, labels: dict[int, tuple[str, str]], split: Split = "train"
+    tmp_path: Path,
+    name: str,
+    labels: dict[int, tuple[str, str]],
+    split: Split = "train",
+    global_offset: int = 0,
 ) -> PointDataset:
     """A reader of source ``name`` over ``label_id -> (name, benthic attribute)``."""
     rows = [
@@ -136,7 +140,7 @@ def _reader(
         points=[("i1", 0, 0, min(labels))],
         name=name,
     )
-    return PointDataset(version, split=split, global_offset=0)
+    return PointDataset(version, split=split, global_offset=global_offset)
 
 
 _CORALSCAPES = {1: ("pocillopora alive", "Pocillopora"), 2: ("sand", "Sand")}
@@ -203,7 +207,11 @@ def test_build_registry_registers_one_reader_per_source(tmp_path, monkeypatch):
     val = _reader(tmp_path, "coralscapes_v2", _CORALSCAPES, split="val")
     train = _reader(tmp_path, "coralscapes_v2", _CORALSCAPES, split="train")
     pacific = _reader(
-        tmp_path, "pacific_labeled_corals", {1: ("acropora", "Acropora")}, split="val"
+        tmp_path,
+        "pacific_labeled_corals",
+        {1: ("acropora", "Acropora")},
+        split="val",
+        global_offset=10,
     )
     dataset_dict = {
         ("coralscapes_v2", "val"): val,

@@ -88,6 +88,16 @@ def test_source_to_target_follows_each_rows_benthic_attribute(
     assert registry.source_to_target.tolist() == [0] * 11 + [1, 2, 0, 0]
 
 
+def test_a_gap_id_inside_a_sources_range_maps_to_background(
+    schema: ConceptSchema, tmp_path: Path
+) -> None:
+    reader = _reader(tmp_path, _named({1: "a", 3: "b"}), global_offset=10)
+
+    registry = SourceLabelRegistry([reader], schema)
+
+    assert registry.source_to_target.tolist() == [0] * 11 + [1, 0, 2]
+
+
 def test_lookups_span_the_largest_offset_plus_label_id(
     schema: ConceptSchema, tmp_path: Path
 ) -> None:
@@ -192,6 +202,15 @@ def test_duplicate_source_name_raises(schema: ConceptSchema, tmp_path: Path) -> 
     first = _reader(tmp_path / "1", _named({1: "a"}), name="mermaid")
     second = _reader(tmp_path / "2", _named({1: "b"}), name="mermaid")
     with pytest.raises(ValueError, match="Duplicate source_name 'mermaid'"):
+        SourceLabelRegistry([first, second], schema)
+
+
+def test_two_sources_producing_the_same_global_id_raise_naming_both(
+    schema: ConceptSchema, tmp_path: Path
+) -> None:
+    first = _reader(tmp_path, _named({1: "a"}), name="first")
+    second = _reader(tmp_path, _named({1: "b"}), name="second")
+    with pytest.raises(ValueError, match=r"global id 1.*first.*second"):
         SourceLabelRegistry([first, second], schema)
 
 
