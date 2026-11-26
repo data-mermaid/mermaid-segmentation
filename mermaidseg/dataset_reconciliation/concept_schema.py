@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
     encode_concept_channels_from_df,
 )
+
+logger = logging.getLogger(__name__)
 
 # MERMAID label names are "BA::GF", but class_to_concepts.csv keys their rows by the bare BA.
 TARGET_KEYED_CONCEPT_DATASETS: frozenset[str] = frozenset({"mermaid"})
@@ -130,10 +133,10 @@ def build_source_to_concepts(
         key = (source.lower(), label.lower())
         if key not in schema.row_by_key and key not in warned:
             warned.add(key)
-            print(
-                f"DEBUG WARNING: unmapped source label (concept mapping): "
-                f"source_dataset={key[0]!r} label={key[1]!r}",
-                flush=True,
+            logger.warning(
+                "unmapped source label (concept mapping): source_dataset=%r label=%r",
+                key[0],
+                key[1],
             )
         table[gid] = schema.row_for(source, label)
     return torch.from_numpy(table)
