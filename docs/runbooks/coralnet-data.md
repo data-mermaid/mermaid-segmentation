@@ -135,19 +135,13 @@ Use this once for a bucket that an earlier version of the scraper filled, so it 
       uv run --package coralnet-scraper coralnet-scrape invalidate --source-ids <id>,<id>,...
       ```
 
-   2. Run the scraper with `--prune --dry-run` on the same sources. It logs each orphan key as `would prune orphan image object <key>` and deletes nothing:
+   2. Run the scraper with `--prune --dry-run` on the same sources. It logs each orphan key as `would prune orphan image object <key>` and deletes nothing. A source that verifies is left without a marker:
 
       ```bash
       uv run --package coralnet-scraper coralnet-scrape --prune --dry-run --source-ids <id>,<id>,...
       ```
 
-   3. Check the logged keys. The dry run writes the marker of each source that verifies, so remove the markers again:
-
-      ```bash
-      uv run --package coralnet-scraper coralnet-scrape invalidate --source-ids <id>,<id>,...
-      ```
-
-   4. Run the scraper with `--prune` on the same sources:
+   3. Check the logged keys, then run the scraper with `--prune` on the same sources:
 
       ```bash
       uv run --package coralnet-scraper coralnet-scrape --prune --source-ids <id>,<id>,...
