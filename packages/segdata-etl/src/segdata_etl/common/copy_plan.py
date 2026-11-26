@@ -1,6 +1,7 @@
 """Dataset-independent source probing and the promote plans shared by the staging builders.
 
-``copies.jsonl`` lists server-side copies from a source bucket; ``uploads.jsonl`` lists staged files.
+``copies.jsonl`` lists server-side copies from a source bucket; ``uploads.jsonl`` lists staged files;
+``features.jsonl`` lists server-side copies of feature vectors, in the shape of ``copies.jsonl``.
 """
 
 from __future__ import annotations
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 COPIES_NAME = "copies.jsonl"
 UPLOADS_NAME = "uploads.jsonl"
+FEATURES_NAME = "features.jsonl"
+# Staged beside a feature index: the build's choices that promote passes on to the publish.
+FEATURE_STAGE_NAME = "stage.json"
 
 _FIRST_READ = 64 * 1024
 _MAX_READ = 1024 * 1024
@@ -186,10 +190,14 @@ def copy_plan(
 
 
 def write_copies(
-    stage_dir: Path, dataset: str, version: str, plan: Sequence[Mapping[str, Any]]
+    stage_dir: Path,
+    dataset: str,
+    version: str,
+    plan: Sequence[Mapping[str, Any]],
+    name: str = COPIES_NAME,
 ) -> None:
-    """Write ``copies.jsonl`` for the staged version, one sorted-key JSON object per line."""
-    path = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version) + COPIES_NAME)
+    """Write copy plan ``name`` for the staged version, one sorted-key JSON object per line."""
+    path = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version) + name)
     path.write_text("".join(json.dumps(entry, sort_keys=True) + "\n" for entry in plan))
 
 

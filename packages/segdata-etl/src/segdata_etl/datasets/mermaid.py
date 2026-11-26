@@ -1,8 +1,10 @@
 """``segdata build mermaid``: stage a uniform-format points dataset from MERMAID's confirmed annotations.
 
-The build reads the nightly annotations parquet and the source image headers, never writes to S3, and
-leaves a version under ``--stage-dir`` plus ``copies.jsonl``, the plan a later promote step runs to
-copy the images into the dataset bucket.
+The build reads the nightly annotations parquet, the source image headers and each image's pyspacer
+feature vector, never writes to S3, and leaves a version under ``--stage-dir`` plus ``copies.jsonl``,
+the plan a later promote step runs to copy the images into the dataset bucket. Beside it,
+``features.jsonl`` plans the copy of the feature vectors, and ``features/<family>/`` in the version
+folder holds the staged feature index and extractor spec that promote publishes as a feature set.
 """
 
 from __future__ import annotations
@@ -25,19 +27,48 @@ import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
 from segdata_etl.common.copy_plan import (
+    FEATURE_STAGE_NAME,
+    FEATURES_NAME,
     ImageOutcome,
     ObjectFacts,
     copy_plan,
+    stage_bytes,
     write_copies,
 )
 from segdata_etl.common.copy_plan import probe_image as probe_source_image
+from segdata_etl.common.featurevector import (
+    FeatureVectorsMissing,
+    Point,
+    VectorFacts,
+    extractor_spec_bytes,
+    points_by_image,
+    read_extractor_spec,
+    read_vector,
+    refusal,
+    refuse_invalid,
+)
 from segdata_etl.common.s3_objects import EXTENSIONS
 from segdata_etl.common.stage import LocalDirS3, next_version, refuse_unpublishable
 from segdata_spec import DATASET_BUCKET
-from segdata_spec._s3 import cache_path, dataset_prefix, is_not_found, is_precondition_failed
+from segdata_spec._s3 import (
+    EXTRACTOR_SPEC_NAME,
+    FEATURE_INDEX_NAME,
+    cache_path,
+    dataset_prefix,
+    feature_store_prefix,
+    is_not_found,
+    is_precondition_failed,
+)
+from segdata_spec.features import feature_file_key, feature_store_name
 from segdata_spec.manifest import ImageStore, LabelMapping, ParentRef, SourceInfo
-from segdata_spec.publish import probe_git, publish_dataset
-from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
+from segdata_spec.publish import probe_git, publish_dataset, table_bytes
+from segdata_spec.schema import (
+    FEATURE_INDEX_SCHEMA,
+    IMAGES_SCHEMA,
+    LABEL_COUNTS_SCHEMA,
+    LABELS_SCHEMA,
+    POINTS_SCHEMA,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +77,9 @@ SOURCE_BUCKET = "coral-reef-training"
 SOURCE_IMAGE_PREFIX = "mermaid/"
 DEFAULT_ANNOTATIONS_URI = f"s3://{SOURCE_BUCKET}/mermaid/mermaid_confirmed_annotations.parquet"
 IMAGE_PREFIX = "images/mermaid/"
+IMAGE_STORE = ImageStore(bucket=DATASET_BUCKET, prefix=IMAGE_PREFIX, owner="segdata")
+FEATURE_SUFFIX = "_featurevector"
+DEFAULT_FEATURE_FAMILY = "efficientnet-v1"
 GROUP = "mermaid"
 ANNOTATOR = "default"
 
@@ -78,6 +112,22 @@ def add_arguments(parser: argparse.ArgumentParser, *, workdir: Path) -> None:
     parser.add_argument("--parent-version", default=None, help="Staged version to reuse rows from")
     parser.add_argument(
         "--parent-manifest-sha256", default=None, help="Manifest sha256 of --parent-version"
+    )
+    parser.add_argument(
+        "--feature-family",
+        default=DEFAULT_FEATURE_FAMILY,
+        help="Family the staged feature set is published under (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--allow-missing-features",
+        action="store_true",
+        help="Keep images that have no source feature vector, without a feature",
+    )
+    parser.add_argument(
+        "--extractor-spec",
+        type=Path,
+        required=True,
+        help="JSON file: class_path, crop_size, feature_dim, weights_uri, weights_sha256",
     )
 
 
@@ -165,6 +215,128 @@ def _head_source(client: Any, image_id: str) -> tuple[str, Mapping[str, Any]] | 
             raise
         return key, head
     return None
+
+
+def _head_feature(client: Any, image_id: str) -> Mapping[str, Any] | None:
+    """HEAD ``mermaid/<id>_featurevector``; return its HEAD, or None when it is absent."""
+    try:
+        head: Mapping[str, Any] = client.head_object(
+            Bucket=SOURCE_BUCKET, Key=_feature_source_key(image_id)
+        )
+    except ClientError as exc:
+        if is_not_found(exc):
+            return None
+        raise
+    return head
+
+
+def _feature_source_key(image_id: str) -> str:
+    return f"{SOURCE_IMAGE_PREFIX}{image_id}{FEATURE_SUFFIX}"
+
+
+def probe_feature(
+    client: Any, image_id: str, points: Sequence[Point], feature_dim: int
+) -> tuple[str, VectorFacts] | None:
+    """HEAD then read the image's source vector; return its source ETag and facts, or None if absent.
+
+    Raises:
+        SourceChanged: The vector was replaced between its HEAD and its read.
+    """
+    head = _head_feature(client, image_id)
+    if head is None:
+        return None
+    key = _feature_source_key(image_id)
+    facts = read_vector(client, SOURCE_BUCKET, key, head["ETag"], points, feature_dim)
+    return head["ETag"].strip('"'), facts
+
+
+def feature_entries(
+    found: Mapping[str, tuple[str, VectorFacts]], family: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return the ``features.jsonl`` lines and the feature index rows, in ``image_id`` order."""
+    plan, index = [], []
+    for image_id in sorted(found):
+        src_etag, facts = found[image_id]
+        key = feature_file_key(IMAGE_STORE, DATASET_BUCKET, family, image_id)
+        plan.append(
+            {
+                "src_bucket": SOURCE_BUCKET,
+                "src_key": _feature_source_key(image_id),
+                "src_etag": src_etag,
+                "etag": facts.etag,
+                "dst_bucket": DATASET_BUCKET,
+                "dst_key": key,
+                "size": facts.size,
+                "crc64nvme": facts.crc64nvme,
+            }
+        )
+        index.append(
+            {
+                "image_id": image_id,
+                "key": key,
+                "etag": facts.etag,
+                "size": facts.size,
+                "crc64nvme": facts.crc64nvme,
+                "n_points": facts.n_points,
+            }
+        )
+    return plan, index
+
+
+def check_features(
+    image_ids: Sequence[str],
+    found: Mapping[str, tuple[str, VectorFacts] | None],
+    allow_missing: bool,
+) -> dict[str, tuple[str, VectorFacts]]:
+    """Return the images' found vectors, refusing missing ones unless allowed and any refused one.
+
+    Raises:
+        FeatureVectorsMissing: An image has no source vector and ``allow_missing`` is false.
+        FeatureVectorsInvalid: A vector is unreadable, of the wrong width or lacks a point.
+    """
+    missing = [i for i in image_ids if found[i] is None]
+    if missing and not allow_missing:
+        raise FeatureVectorsMissing(refusal("have no source feature vector", missing))
+    present = {i: f for i, f in found.items() if f is not None}
+    refuse_invalid(
+        {i: facts for i, (_, facts) in present.items()},
+        {i: f"s3://{SOURCE_BUCKET}/{_feature_source_key(i)}" for i in present},
+    )
+    return present
+
+
+def _probe_features(
+    client: Any, points: Mapping[str, Sequence[Point]], feature_dim: int, workers: int
+) -> dict[str, tuple[str, VectorFacts] | None]:
+    image_ids = sorted(points)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        found = pool.map(lambda i: probe_feature(client, i, points[i], feature_dim), image_ids)
+        return dict(zip(image_ids, found, strict=True))
+
+
+def stage_features(
+    stage_dir: Path,
+    version: str,
+    family: str,
+    plan: Sequence[Mapping[str, Any]],
+    index: Sequence[Mapping[str, Any]],
+    extractor: Mapping[str, Any],
+    allow_missing: bool,
+) -> None:
+    """Stage ``features.jsonl`` and, under ``features/<family>/``, the index, spec and ``stage.json``.
+
+    ``features.jsonl`` sits beside ``copies.jsonl``; ``stage.json`` records ``allow_missing``.
+    """
+    write_copies(stage_dir, DATASET, version, plan, FEATURES_NAME)
+    prefix = f"{dataset_prefix(DATASET, version)}features/{family}/"
+    rows = pa.Table.from_pylist(list(index), schema=FEATURE_INDEX_SCHEMA)
+    stage_bytes(stage_dir, prefix + FEATURE_INDEX_NAME, table_bytes(rows))
+    stage_bytes(stage_dir, prefix + EXTRACTOR_SPEC_NAME, extractor_spec_bytes(extractor))
+    stage_bytes(
+        stage_dir,
+        prefix + FEATURE_STAGE_NAME,
+        (json.dumps({"allow_missing": allow_missing}, sort_keys=True) + "\n").encode(),
+    )
 
 
 def probe_image(
@@ -356,6 +528,10 @@ def _command_line(args: argparse.Namespace) -> str:
     if args.parent_version is not None:
         parts.append(f"--parent-version {args.parent_version}")
         parts.append(f"--parent-manifest-sha256 {args.parent_manifest_sha256}")
+    parts.append(f"--feature-family {args.feature_family}")
+    parts.append(f"--extractor-spec {args.extractor_spec}")
+    if args.allow_missing_features:
+        parts.append("--allow-missing-features")
     return " ".join(parts)
 
 
@@ -396,10 +572,15 @@ def run(args: argparse.Namespace, client: Any) -> int:
     Raises:
         ValueError: Only one of the parent flags is given, or a URI is not ``s3://``.
         AnnotationsChanged: The annotations parquet was replaced during the read.
-        SourceChanged: A source image was replaced between its HEAD and its read.
+        SourceChanged: A source image or vector was replaced between its HEAD and its read.
         PublishRefused: The git tree is dirty or unpushed.
+        FeatureVectorsMissing: An image has no feature vector and missing ones are not allowed.
+        FeatureVectorsInvalid: A feature vector is unreadable, of another width than the
+            extractor's ``feature_dim``, or lacks one of its image's points.
     """
     parents = _parent_refs(args)
+    extractor = read_extractor_spec(args.extractor_spec)
+    feature_store_prefix(feature_store_name(IMAGE_STORE, DATASET_BUCKET), args.feature_family)
     git = probe_git(REPO_ROOT)
     refuse_unpublishable(git)
     source = read_annotations(client, args.annotations_uri)
@@ -413,6 +594,9 @@ def run(args: argparse.Namespace, client: Any) -> int:
         annotations[annotations["image_id"].astype(str).isin(kept)],
         load_parent_labels(args.stage_dir, args.parent_version),
     )
+    points = points_table(labelled)
+    found = _probe_features(client, points_by_image(points), extractor["feature_dim"], args.workers)
+    features = check_features(sorted(kept), found, args.allow_missing_features)
     rows = [o.row for o in outcomes if o.row is not None]
     stage = LocalDirS3(args.stage_dir)
     version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
@@ -424,11 +608,11 @@ def run(args: argparse.Namespace, client: Any) -> int:
         kind="points",
         tables={
             "images.parquet": pa.Table.from_pylist(rows, schema=IMAGES_SCHEMA),
-            "points.parquet": points_table(labelled),
+            "points.parquet": points,
             "labels.parquet": labels_table(pairs),
             "stats/label_counts.parquet": label_counts_table(labelled),
         },
-        image_store=ImageStore(bucket=DATASET_BUCKET, prefix=IMAGE_PREFIX, owner="segdata"),
+        image_store=IMAGE_STORE,
         etl_package="segdata-etl",
         etl_command=_command_line(args),
         source=SourceInfo(
@@ -451,15 +635,27 @@ def run(args: argparse.Namespace, client: Any) -> int:
     )
     plan = copy_plan(rows, src_bucket=SOURCE_BUCKET, src_key=_source_key, dst_prefix=IMAGE_PREFIX)
     write_copies(args.stage_dir, DATASET, version, plan)
+    feature_plan, feature_index = feature_entries(features, args.feature_family)
+    stage_features(
+        args.stage_dir,
+        version,
+        args.feature_family,
+        feature_plan,
+        feature_index,
+        extractor,
+        args.allow_missing_features,
+    )
     jpg_ids = sorted(o.image_id for o in outcomes if o.found_as_jpg and o.row is not None)
     if jpg_ids:
         logger.info("images found only as .jpg keys: %s", jpg_ids)
     logger.info(
-        "staged mermaid %s: %d images, %d points, %d copies, %d found only as .jpg, dropped %s",
+        "staged mermaid %s: %d images, %d points, %d copies, %d feature copies, "
+        "%d found only as .jpg, dropped %s",
         version,
         manifest.stats.n_images,
         manifest.stats.n_points,
         len(plan),
+        len(feature_plan),
         len(jpg_ids),
         dropped,
     )

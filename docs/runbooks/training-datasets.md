@@ -76,12 +76,13 @@ A new data source adds an ETL module that publishes a version. `mermaidseg` does
    ```bash
    uv run --package segdata-etl segdata build mermaid --stage-dir <stage> \
      --annotation-date-cutoff YYYY-MM-DD \
-     --parent-version <v> --parent-manifest-sha256 <sha>
+     --parent-version <v> --parent-manifest-sha256 <sha> \
+     --extractor-spec <spec.json>
    ```
 
-   The parent version must already be in `<stage>`. See [Stage a version](../../packages/segdata-etl/README.md#stage-a-version) for the flags.
+   The parent version must already be in `<stage>`. The build also stages a feature set from the feature vectors next to the images in `coral-reef-training`, and stops when an image has none unless you pass `--allow-missing-features`. See [Stage a version](../../packages/segdata-etl/README.md#stage-a-version) and [MERMAID feature set](../../packages/segdata-etl/README.md#mermaid-feature-set) for the flags.
 
-2. Publish it with `segdata promote --stage-dir <stage> --dataset mermaid --version <version>`. Get approval first: a published version cannot be changed.
+2. Publish it with `segdata promote --stage-dir <stage> --dataset mermaid --version <version>`. Get approval first: a published version cannot be changed. Promote writes the images, the feature vectors, the tables and the dataset manifest, then publishes the feature set. If it stops after the dataset manifest, run it again: it writes only the missing feature vectors and the feature set. See [Promote a version](../../packages/segdata-etl/README.md#promote-a-version).
 3. Replace the `mermaid` pin in `configs/data_config.yaml` with the printed `version` and `manifest_sha256`.
 4. [Regenerate the derived configs](derived-configs.md).
 5. Sync the cache. See [Get the data](#get-the-data).
