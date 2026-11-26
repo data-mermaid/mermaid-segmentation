@@ -1046,9 +1046,12 @@ def test_an_overview_outage_fails_with_one_overview_fetch_failure(http_server, f
     assert fake_s3.objects == {}
 
 
-@pytest.mark.parametrize("status", [403, 404])
-def test_an_overview_answering_403_or_404_is_inaccessible_and_not_retried(
-    http_server, fake_s3, status
+@pytest.mark.parametrize(
+    ("status", "errors"),
+    [(403, ["overview_forbidden"]), (404, ["cannot access source 1: HTTP 404"])],
+)
+def test_an_overview_answering_403_or_404_fails_with_its_code_and_is_not_retried(
+    http_server, fake_s3, status, errors
 ):
     http_server.script("/source/1/", Reply(status))
     dl = _site_downloader(http_server, fake_s3)
@@ -1056,7 +1059,7 @@ def test_an_overview_answering_403_or_404_is_inaccessible_and_not_retried(
     res = dl.download_source(1, bucket_name="b", s3_prefix="p")
 
     assert res.ok is False
-    assert res.errors == [f"cannot access source 1: HTTP {status}"]
+    assert res.errors == errors
     assert len(http_server.requests_to("/source/1/")) == 1
     assert fake_s3.objects == {}
 

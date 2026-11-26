@@ -127,6 +127,14 @@ def test_main_passes_the_prune_and_dry_run_flags(monkeypatch, fake_s3, argv, pru
     assert (settings["prune"], settings["dry_run"]) == (prune, dry_run)
 
 
+@pytest.mark.parametrize(("argv", "cooldown"), [([], 600.0), (["--breaker-cooldown", "30"], 30.0)])
+def test_main_passes_the_breaker_cooldown_and_reports_it(monkeypatch, fake_s3, argv, cooldown):
+    _, run, _ = _run_main(monkeypatch, argv, {1: DownloadResult(ok=True)}, fake_s3=fake_s3)
+
+    assert run.call_args.kwargs["breaker_cooldown_s"] == cooldown
+    assert _run_report(fake_s3)["settings"]["breaker_cooldown_s"] == cooldown
+
+
 def test_main_passes_delay_seconds(monkeypatch):
     _, run, _ = _run_main(monkeypatch, ["--delay-seconds", "1.5"])
     assert run.call_args.kwargs["delay_seconds"] == 1.5
@@ -249,6 +257,7 @@ def test_main_reports_a_circuit_breaker_stop(monkeypatch, caplog, fake_s3):
         "prune": True,
         "dry_run": False,
         "allow_source_drop": True,
+        "breaker_cooldown_s": 600.0,
     }
     assert report["transport"] == _TRANSPORT
     assert report["sources"] == {"5": {"ok": False, "errors": ["annotations_failed"]}}
@@ -369,9 +378,12 @@ def test_an_empty_discovery_stops_the_run_and_keeps_the_baseline(
         ["--allow-source-drop", "invalidate", "--all"],
         ["--prune", "invalidate", "--changed"],
         ["--dry-run", "verify-existing"],
+        ["--breaker-cooldown", "30", "verify-existing"],
+        ["--breaker-cooldown", "0", "invalidate", "--all"],
+        ["--breaker-cooldown", "-1"],
     ],
 )
-def test_prune_and_allow_source_drop_are_rejected_with_a_subcommand(argv):
+def test_batch_only_flags_are_rejected_with_a_subcommand_or_a_negative_value(argv):
     with pytest.raises(SystemExit) as exc:
         cli._parse_args(argv)
 

@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 Image.MAX_IMAGE_PIXELS = None  # survey images legitimately exceed Pillow's bomb limit
 
-_SOURCE_INACCESSIBLE_STATUSES = frozenset({403, 404})  # missing or forbidden source overview
+_SOURCE_INACCESSIBLE_STATUS = 404  # a missing source overview; a 403 is a block, not the source
 _PAGE_GET_TIMEOUT = 90  # simple page GETs; CoralNet can be slow under load
 _EXPORT_PREP_TIMEOUT_MIN = 300
 _EXPORT_PREP_TIMEOUT_MAX = 7200  # 2 hours
@@ -1631,7 +1631,9 @@ class CoralNetDownloader:
         except Exception as e:  # noqa: BLE001
             response = e.response if isinstance(e, requests.HTTPError) else None
             status = response.status_code if response is not None else None
-            if status in _SOURCE_INACCESSIBLE_STATUSES:
+            if status == 403:
+                return DownloadResult(False, errors=["overview_forbidden"])
+            if status == _SOURCE_INACCESSIBLE_STATUS:
                 return DownloadResult(False, errors=[f"cannot access source {sid}: HTTP {status}"])
             return DownloadResult(
                 False,

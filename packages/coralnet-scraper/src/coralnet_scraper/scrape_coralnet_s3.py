@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 _NO_ERROR_CODE = "no_error_code"
 _MIN_LISTING_RATIO = 0.95  # a listing below this share of the previous one stops the run
+DEFAULT_BREAKER_COOLDOWN_S = 600.0  # pause after a circuit-breaker trip before probing
 _SOURCE_PREFIX = re.compile(r"/s(\d+)/$")
 
 _IMAGE_COUNT_ATTR = {
@@ -137,6 +138,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--delay-seconds", type=float, default=0.0)
     p.add_argument(
+        "--breaker-cooldown",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Pause this long when the circuit breaker trips, then probe the next source; "
+            f"0 stops at the trip (default: {DEFAULT_BREAKER_COOLDOWN_S:g})"
+        ),
+    )
+    p.add_argument(
         "--scraper-workers",
         type=int,
         default=None,
@@ -218,8 +229,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--yes", action="store_true", help="Confirm --all, which invalidates every source"
     )
     args = p.parse_args(argv)
-    if args.command is not None and (args.prune or args.allow_source_drop or args.dry_run):
-        p.error(f"--prune, --dry-run and --allow-source-drop do not apply to {args.command}")
+    if args.breaker_cooldown is not None and args.breaker_cooldown < 0:
+        p.error("--breaker-cooldown must not be negative")
+    if args.command is not None and (
+        args.prune or args.allow_source_drop or args.dry_run or args.breaker_cooldown is not None
+    ):
+        p.error(
+            "--prune, --dry-run, --allow-source-drop and --breaker-cooldown "
+            f"do not apply to {args.command}"
+        )
     if args.command is None and args.dry_run and not args.prune:
         p.error("--dry-run needs --prune")
     if (
@@ -425,6 +443,9 @@ def main(argv: list[str] | None = None) -> int:
     if not _guard_discovery(s3, bucket, prefix, discovered, allow_drop=args.allow_source_drop):
         return 1
     _warn_if_unadopted(s3, bucket, prefix)
+    breaker_cooldown_s = (
+        DEFAULT_BREAKER_COOLDOWN_S if args.breaker_cooldown is None else args.breaker_cooldown
+    )
     outcome = run_batch_download(
         ids,
         downloader=downloader,
@@ -434,6 +455,7 @@ def main(argv: list[str] | None = None) -> int:
         prune=bool(args.prune),
         dry_run=bool(args.dry_run),
         delay_seconds=float(args.delay_seconds),
+        breaker_cooldown_s=breaker_cooldown_s,
     )
     transport = downloader.transport_stats()
     report = _build_run_report(
@@ -445,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
             "prune": bool(args.prune),
             "dry_run": bool(args.dry_run),
             "allow_source_drop": bool(args.allow_source_drop),
+            "breaker_cooldown_s": breaker_cooldown_s,
         },
         started_at=started_at,
         finished_at=datetime.now(UTC),
