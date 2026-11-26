@@ -5,14 +5,17 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import yaml
 
 from mermaidseg.dataset_reconciliation.artifact_meta import (
+    check_label_keys,
     concept_sidecar_meta,
     meta_path,
     read_sidecar,
     repo_relative,
+    select_groups,
     source_id_of_group,
 )
 from mermaidseg.io import REPO_ROOT
@@ -84,3 +87,37 @@ def test_concept_sidecar_meta_hashes_inputs_and_keeps_the_field_order(tmp_path):
     assert meta["data_config"] == str(data_config.resolve())
     assert meta["schema_config"] == str(schema_config.resolve())
     assert (meta["git_sha"], meta["git_dirty"]) == ("abc", True)
+
+
+IMAGES = pd.DataFrame({"image_id": ["a", "b", "c"], "group": ["s1", "s2", "s3"]})
+
+
+def test_select_groups_keeps_all_images_when_groups_is_none():
+    assert select_groups("coralnet", IMAGES, None) is IMAGES
+
+
+def test_select_groups_keeps_only_the_rows_of_the_given_groups():
+    out = select_groups("coralnet", IMAGES, ["s1", "s3"])
+
+    assert out["image_id"].tolist() == ["a", "c"]
+
+
+def test_select_groups_names_the_dataset_and_the_sorted_unknown_groups():
+    with pytest.raises(
+        ValueError, match=r"coralnet: groups not in the dataset version: \['s8', 's9'\]"
+    ):
+        select_groups("coralnet", IMAGES, ["s9", "s1", "s8"])
+
+
+def test_check_label_keys_passes_when_every_label_has_a_key():
+    check_label_keys("coralnet", pd.Series([1, 2]), pd.Series(["a", "b"]))
+
+
+def test_check_label_keys_names_the_dataset_and_the_sorted_unique_missing_ids():
+    label_ids = pd.Series([9, 1, 9, 4])
+    keys = pd.Series(["x", "y", None, None])
+
+    with pytest.raises(
+        ValueError, match=r"coralnet: label ids missing from labels.parquet: \[4, 9\]"
+    ):
+        check_label_keys("coralnet", label_ids, keys)

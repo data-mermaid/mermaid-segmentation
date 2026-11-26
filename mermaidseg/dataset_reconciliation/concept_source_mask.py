@@ -27,8 +27,10 @@ from mermaidseg.data.config import DataSection, Split, entry_split_groups
 from mermaidseg.data.factory import open_dataset_version
 from mermaidseg.data.point_dataset import select_points
 from mermaidseg.dataset_reconciliation.artifact_meta import (
+    check_label_keys,
     file_sha1,
     read_sidecar,
+    select_groups,
     source_id_of_group,
 )
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema, concept_keys
@@ -120,16 +122,10 @@ def point_annotations(
         ValueError: A group is not in ``images``, a group is not ``s<source id>``, the annotator
             selection fails, or a point's label id is missing from ``labels``.
     """
-    if groups is not None:
-        unknown = sorted(set(groups) - set(images["group"]))
-        if unknown:
-            raise ValueError(f"groups not in the dataset version: {unknown}")
-        images = images[images["group"].isin(list(groups))]
+    images = select_groups(dataset, images, groups)
     kept = select_points(points, images, annotators)
     keys = kept["label_id"].map(concept_keys(dataset, labels))
-    unnamed = sorted(set(kept.loc[keys.isna(), "label_id"]))
-    if unnamed:
-        raise ValueError(f"{dataset}: label ids missing from labels.parquet: {unnamed}")
+    check_label_keys(dataset, kept["label_id"], keys)
     group_of = images.set_index("image_id")["group"]
     return pd.DataFrame(
         {

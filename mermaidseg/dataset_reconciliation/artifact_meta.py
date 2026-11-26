@@ -5,9 +5,10 @@ from __future__ import annotations
 import datetime
 import hashlib
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 
+import pandas as pd
 import yaml
 
 from mermaidseg.io import REPO_ROOT
@@ -20,10 +21,43 @@ def file_sha1(path: str | Path) -> str:
     return hashlib.sha1(Path(path).read_bytes()).hexdigest()
 
 
-def meta_path(mask_csv: str | Path) -> Path:
-    """Sidecar path: ``coralnet_only_false.csv`` -> ``coralnet_only_false.meta.yaml``."""
-    mask_csv = Path(mask_csv)
-    return mask_csv.with_name(mask_csv.stem + ".meta.yaml")
+def meta_path(csv_path: str | Path) -> Path:
+    """Sidecar path: ``min_coverage_trainval.csv`` -> ``min_coverage_trainval.meta.yaml``."""
+    csv_path = Path(csv_path)
+    return csv_path.with_name(csv_path.stem + ".meta.yaml")
+
+
+def select_groups(
+    dataset: str, images: pd.DataFrame, groups: Collection[str] | None
+) -> pd.DataFrame:
+    """Return the ``images`` rows whose ``group`` is in ``groups``; ``None`` keeps all.
+
+    Raises:
+        ValueError: A group is not in ``images``.
+    """
+    if groups is None:
+        return images
+    unknown = sorted(set(groups) - set(images["group"]))
+    if unknown:
+        raise ValueError(f"{dataset}: groups not in the dataset version: {unknown}")
+    return images[images["group"].isin(list(groups))]
+
+
+def check_label_keys(dataset: str, label_ids: pd.Series, keys: pd.Series) -> None:
+    """Check every label id has a key.
+
+    Args:
+        dataset: Dataset name, for the error message.
+        label_ids: Label ids of the points or counts.
+        keys: The key mapped from each label id, aligned with ``label_ids``; NA when the id is
+            missing from ``labels.parquet``.
+
+    Raises:
+        ValueError: A key is NA.
+    """
+    unnamed = sorted(set(label_ids[keys.isna()]))
+    if unnamed:
+        raise ValueError(f"{dataset}: label ids missing from labels.parquet: {unnamed}")
 
 
 def source_id_of_group(group: str) -> str:

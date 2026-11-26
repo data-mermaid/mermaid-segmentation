@@ -27,8 +27,10 @@ import scipy.sparse as sp
 from mermaidseg.data.config import DataSection, entry_split_groups
 from mermaidseg.data.factory import open_dataset_version
 from mermaidseg.dataset_reconciliation.artifact_meta import (
+    check_label_keys,
     file_sha1,
     read_sidecar,
+    select_groups,
     source_id_of_group,
 )
 from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema, concept_keys
@@ -38,7 +40,7 @@ from mermaidseg.io import REPO_ROOT
 DENSE_DATASETS = frozenset({"coralscapes_v2", "ucsd_mosaics", "benthos_yuval"})
 CORALNET = "coralnet"
 
-COLUMNS = ["dataset", "image_id", "label", "n", "source"]
+LABEL_COUNT_COLUMNS = ["dataset", "image_id", "label", "n", "source"]
 # Labels that mark unannotated points or pixels, never a class.
 IGNORE_LABEL_NAMES: frozenset[str] = frozenset({"unlabeled", "unlabeled / unidentified"})
 
@@ -179,7 +181,7 @@ def train_label_counts(
     labels: pd.DataFrame,
     groups: Collection[str] | None,
 ) -> pd.DataFrame:
-    """Return one dataset's per-image label counts over ``groups``, in ``COLUMNS``.
+    """Return one dataset's per-image label counts over ``groups``, in ``LABEL_COUNT_COLUMNS``.
 
     Args:
         dataset: Dataset name, written to ``dataset`` (and to ``source`` outside CoralNet).
@@ -192,21 +194,15 @@ def train_label_counts(
         ValueError: A group is not in ``images``, a counted label id has no name, or a CoralNet
             group is not ``s<source id>``.
     """
-    if groups is not None:
-        unknown = sorted(set(groups) - set(images["group"]))
-        if unknown:
-            raise ValueError(f"{dataset}: groups not in the dataset version: {unknown}")
-        images = images[images["group"].isin(list(groups))]
+    images = select_groups(dataset, images, groups)
     group_of = images.set_index("image_id")["group"]
     counts = label_counts[
         label_counts["image_id"].isin(group_of.index) & (label_counts["label_id"] != 0)
     ]
-    names = counts["label_id"].map(labels.set_index("label_id")["name"])
-    unnamed = sorted(set(counts.loc[names.isna(), "label_id"]))
-    if unnamed:
-        raise ValueError(f"{dataset}: label ids missing from labels.parquet: {unnamed}")
-    ignored = names.astype(str).str.strip().str.lower().isin(IGNORE_LABEL_NAMES).to_numpy()
     label = counts["label_id"].map(concept_keys(dataset, labels))
+    check_label_keys(dataset, counts["label_id"], label)
+    names = counts["label_id"].map(labels.set_index("label_id")["name"])
+    ignored = names.astype(str).str.strip().str.lower().isin(IGNORE_LABEL_NAMES).to_numpy()
     out = pd.DataFrame(
         {
             "dataset": dataset,
@@ -220,7 +216,7 @@ def train_label_counts(
         if dataset == CORALNET
         else dataset
     )
-    return out[~ignored].reset_index(drop=True)[COLUMNS]
+    return out[~ignored].reset_index(drop=True)[LABEL_COUNT_COLUMNS]
 
 
 def require_single_annotator(dataset: str, annotators: Collection[str]) -> None:
