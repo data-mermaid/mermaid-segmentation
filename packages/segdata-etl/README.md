@@ -489,9 +489,8 @@ The template is a Python format string. Its fields are the `images.parquet` row'
 | Source | Template |
 |---|---|
 | MERMAID | `s3://coral-reef-training/mermaid/{image_id}_featurevector` |
-| CoralNet | `s3://2605-coralnet-public-sources/s{source_id}/features/i{image_id}.featurevector` |
 
-The CoralNet template needs `source_id` and `image_id` in the image rows' `attrs`; the command stops before any source call when a row lacks one.
+CoralNet has no template source. mermaid-classifier's `scripts/build_feature_set.py` writes CoralNet vectors straight into the family, so a CoralNet attach adopts every image's family file and never resolves the template.
 
 ### Phases
 
