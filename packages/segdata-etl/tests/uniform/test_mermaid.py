@@ -13,9 +13,11 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.test_featurevector import featurevector_bytes
 from s3_fake import FakeS3, crc64nvme, quoted_etag
 
 from segdata_etl import cli
+from segdata_etl.common.featurevector import FeatureVectorsInvalid, FeatureVectorsMissing
 from segdata_etl.datasets import mermaid
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
@@ -27,6 +29,13 @@ from .conftest import jpeg_bytes, png_bytes
 SRC_BUCKET = "coral-reef-training"
 PARQUET_KEY = "mermaid/mermaid_confirmed_annotations.parquet"
 CUTOFF = "2026-08-12"
+EXTRACTOR = {
+    "class_path": "spacer.EfficientNet",
+    "crop_size": 224,
+    "feature_dim": 2,
+    "weights_uri": "s3://w/effnet.pt",
+    "weights_sha256": "0" * 64,
+}
 BEFORE = datetime(2026, 8, 1, tzinfo=UTC)
 
 _ANNOTATION_SCHEMA = pa.schema(
@@ -85,10 +94,20 @@ def parquet_bytes(rows: list[dict[str, Any]]) -> bytes:
     return sink.getvalue()
 
 
+def feature_source_key(image_id: str) -> str:
+    return f"mermaid/{image_id}_featurevector"
+
+
 def seed(fake: FakeS3, rows: list[dict[str, Any]], images: dict[str, bytes]) -> None:
+    """Seed the annotations, the images, and a vector covering every annotated image's points."""
     fake.put(SRC_BUCKET, PARQUET_KEY, parquet_bytes(rows))
     for image_id, data in images.items():
         fake.put(SRC_BUCKET, f"mermaid/{image_id}.png", data)
+    points: dict[str, list[tuple[int, int]]] = {}
+    for row in rows:
+        points.setdefault(row["image_id"], []).append((row["row"], row["col"]))
+    for image_id, image_points in points.items():
+        fake.put(SRC_BUCKET, feature_source_key(image_id), featurevector_bytes(image_points))
 
 
 @pytest.fixture
@@ -102,6 +121,12 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+def extractor_spec(directory: Path) -> Path:
+    path = directory / "extractor.json"
+    path.write_text(json.dumps(EXTRACTOR))
+    return path
+
+
 def build(fake: FakeS3, stage: Path, *extra: str, cutoff: str = CUTOFF, workers: str = "2") -> int:
     argv = [
         "build",
@@ -112,6 +137,8 @@ def build(fake: FakeS3, stage: Path, *extra: str, cutoff: str = CUTOFF, workers:
         cutoff,
         "--workers",
         workers,
+        "--extractor-spec",
+        str(extractor_spec(stage.parent)),
         *extra,
     ]
     args = cli.build_parser().parse_args(argv)
@@ -539,7 +566,7 @@ def test_child_adding_one_pair_keeps_parent_label_ids_so_no_points_are_removed(r
         ann("i1", "p3", 3, 3, ENCRUSTING),
         ann("i1", "p4", 4, 4, ENCRUSTING),
     ]
-    fake.put(SRC_BUCKET, PARQUET_KEY, parquet_bytes(child_rows))
+    seed(fake, child_rows, {"i1": png_bytes(4, 4)})
 
     build(
         fake,
@@ -577,13 +604,18 @@ def test_large_jpeg_header_extends_the_read(repo, tmp_path):
 
     (row,) = table(only_version(stage), "images.parquet")
     assert (row["width"], row["height"]) == (20, 10)
-    assert len(fake.ops("get")) == 3  # parquet, first range, extended range
+    image_gets = [c for c in fake.ops("get") if c[2] != feature_source_key("big")]
+    assert len(image_gets) == 3  # parquet, first range, extended range
 
 
 def test_stage_dir_is_required_and_dispatches_to_run(monkeypatch, tmp_path):
     parser = cli.build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["build", "mermaid", "--annotation-date-cutoff", CUTOFF])
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["build", "mermaid", "--stage-dir", str(tmp_path), "--annotation-date-cutoff", CUTOFF]
+        )
 
     seen: dict[str, Any] = {}
 
@@ -594,13 +626,113 @@ def test_stage_dir_is_required_and_dispatches_to_run(monkeypatch, tmp_path):
     monkeypatch.setattr(mermaid, "run", fake_run)
     monkeypatch.setattr(cli, "make_s3_client", lambda **_kw: object())
     code = cli.main(
-        ["build", "mermaid", "--stage-dir", str(tmp_path), "--annotation-date-cutoff", CUTOFF]
+        [
+            "build",
+            "mermaid",
+            "--stage-dir",
+            str(tmp_path),
+            "--annotation-date-cutoff",
+            CUTOFF,
+            "--extractor-spec",
+            str(extractor_spec(tmp_path)),
+        ]
     )
 
     assert code == 7
     args = seen["args"]
     assert args.stage_dir == tmp_path
     assert args.annotation_date_cutoff == CUTOFF
+
+
+def feature_plan(version: Path) -> list[dict[str, Any]]:
+    lines = (version / "features.jsonl").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def test_build_stages_a_feature_copy_plan_index_and_extractor_spec(repo, tmp_path):
+    fake = FakeS3()
+    seed(fake, [ann("i1", "p1", 10, 20), ann("i1", "p2", 30, 40)], {"i1": png_bytes(4, 4)})
+    vector = featurevector_bytes([(10, 20), (30, 40), (50, 60)])
+    fake.put(SRC_BUCKET, "mermaid/i1_featurevector", vector, etag='"src-etag-2"')
+    stage = tmp_path / "stage"
+
+    build(fake, stage)
+
+    version = only_version(stage)
+    md5 = hashlib.md5(vector).hexdigest()  # noqa: S324
+    assert feature_plan(version) == [
+        {
+            "src_bucket": SRC_BUCKET,
+            "src_key": "mermaid/i1_featurevector",
+            "src_etag": "src-etag-2",
+            "etag": md5,
+            "dst_bucket": DATASET_BUCKET,
+            "dst_key": "features/mermaid/efficientnet-v1/i1.featurevector",
+            "size": len(vector),
+            "crc64nvme": crc64nvme(vector),
+        }
+    ]
+    staged = version / "features" / "efficientnet-v1"
+    assert table(staged, "index.parquet") == [
+        {
+            "image_id": "i1",
+            "key": "features/mermaid/efficientnet-v1/i1.featurevector",
+            "etag": md5,
+            "size": len(vector),
+            "crc64nvme": crc64nvme(vector),
+            "n_points": 2,
+        }
+    ]
+    assert json.loads((staged / "_extractor_spec.json").read_text()) == EXTRACTOR
+    reads = [c for c in fake.ops("get") if c[2] == "mermaid/i1_featurevector"]
+    assert [c[3].get("IfMatch") for c in reads] == ['"src-etag-2"']
+
+
+def test_missing_feature_vector_fails_the_build_and_stages_nothing(repo, tmp_path):
+    fake = FakeS3()
+    seed(
+        fake,
+        [ann("i1", "p1", 1, 1), ann("i2", "p2", 2, 2)],
+        {"i1": png_bytes(4, 4), "i2": png_bytes(4, 4)},
+    )
+    del fake.objects[(SRC_BUCKET, "mermaid/i2_featurevector")]
+    stage = tmp_path / "stage"
+
+    with pytest.raises(FeatureVectorsMissing, match="i2"):
+        build(fake, stage)
+
+    assert version_dirs(stage) == []
+
+
+def test_allow_missing_features_keeps_the_image_without_a_feature_row(repo, tmp_path):
+    fake = FakeS3()
+    seed(
+        fake,
+        [ann("i1", "p1", 1, 1), ann("i2", "p2", 2, 2)],
+        {"i1": png_bytes(4, 4), "i2": png_bytes(4, 4)},
+    )
+    del fake.objects[(SRC_BUCKET, "mermaid/i2_featurevector")]
+    stage = tmp_path / "stage"
+
+    build(fake, stage, "--allow-missing-features")
+
+    version = only_version(stage)
+    assert [r["image_id"] for r in table(version, "images.parquet")] == ["i1", "i2"]
+    index = table(version / "features" / "efficientnet-v1", "index.parquet")
+    assert [r["image_id"] for r in index] == ["i1"]
+    assert [line["src_key"] for line in feature_plan(version)] == ["mermaid/i1_featurevector"]
+
+
+def test_feature_vector_missing_a_point_fails_the_build(repo, tmp_path):
+    fake = FakeS3()
+    seed(fake, [ann("i1", "p1", 1, 1), ann("i1", "p2", 2, 2)], {"i1": png_bytes(4, 4)})
+    fake.put(SRC_BUCKET, "mermaid/i1_featurevector", featurevector_bytes([(1, 1)]))
+    stage = tmp_path / "stage"
+
+    with pytest.raises(FeatureVectorsInvalid, match="mermaid/i1_featurevector"):
+        build(fake, stage)
+
+    assert version_dirs(stage) == []
 
 
 def _sha256(path: Path) -> str:

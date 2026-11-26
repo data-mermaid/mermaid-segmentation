@@ -24,6 +24,7 @@ from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
 from segdata_spec.git import GitState
 from segdata_spec.manifest import Manifest, ParentRef, manifest_sha256
+from segdata_spec.schema import IMAGES_SCHEMA
 
 from .conftest import _make_jpeg_bytes
 
@@ -347,6 +348,213 @@ def test_carried_rows_keep_the_parents_media_type_unsniffed(
     assert result.dropped["unsupported_format"] == 0
 
 
+CARRIED_ROW = {
+    "image_id": "30",
+    "key": "s1/30.jpg",
+    "etag": "parent-etag",
+    "size": 99,
+    "crc64nvme": "parent-crc",
+    "media_type": "image/jpeg",
+    "width": 3000,
+    "height": 2000,
+    "group": "s1",
+    "mask_key": None,
+    "mask_etag": None,
+    "mask_size": None,
+    "mask_crc64nvme": None,
+    "source_fingerprint": "parent-fingerprint",
+    "source_name": "parent-name.jpg",
+    "attrs": '{"source_id": 1, "source_key": "coralnet-public-images/s1/images/30.jpg"}',
+}
+
+
+def _build_with_unlisted_image(
+    status: str = "ok", width: int | None = 3000, height: int | None = 2000
+) -> raw.BuildTables:
+    """The fixture build plus annotated image 30, which the scrape does not list."""
+    build = _fixture_build()
+    return raw.BuildTables(
+        annotations=pd.concat([build.annotations, _annotations([(1, "30", 4, 5, 200)])]),
+        images=pd.concat([build.images, _images([(1, "30", status, width, height)])]),
+        id2name=ID2NAME,
+    )
+
+
+def _parent_holding(*rows: dict[str, Any]) -> pa.Table:
+    return pa.Table.from_pylist(list(rows), schema=IMAGES_SCHEMA)
+
+
+def test_an_unlisted_image_the_parent_holds_keeps_the_parents_row_and_points_untouched(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    parent = _parent_holding(CARRIED_ROW)
+
+    result = _build(source, tmp_path, _build_with_unlisted_image(), parent)
+
+    images = {row["image_id"]: row for row in result.tables["images.parquet"].to_pylist()}
+    assert list(images) == ["10", "20", "30"]
+    assert images["30"] == CARRIED_ROW
+    assert ("30", 4, 5, 200) in [
+        (p["image_id"], p["row"], p["col"], p["label_id"])
+        for p in result.tables["points.parquet"].to_pylist()
+    ]
+    assert (result.dropped["carried_from_parent"], result.dropped["source_missing"]) == (1, 0)
+    assert result.carried == {"30"}
+    assert all("/30." not in key for key in source.heads + source.gets)
+
+
+def test_a_not_found_build_row_the_parent_holds_is_carried_with_its_points(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    build = _build_with_unlisted_image("not_found", None, None)
+    source.put(SRC, _key(1, "30"), JPEG)
+
+    result = _build(source, tmp_path, build, _parent_holding(CARRIED_ROW))
+
+    images = {row["image_id"]: row for row in result.tables["images.parquet"].to_pylist()}
+    assert images["30"] == CARRIED_ROW
+    assert ("30", 4, 5, 200) in [
+        (p["image_id"], p["row"], p["col"], p["label_id"])
+        for p in result.tables["points.parquet"].to_pylist()
+    ]
+    assert (result.dropped["carried_from_parent"], result.dropped["source_missing"]) == (1, 0)
+    assert result.dropped["no_dimensions"] == 1  # image 21, which the parent lacks
+    assert result.carried == {"30"}
+    assert all("/30." not in key for key in source.heads + source.gets)
+
+
+def test_a_not_found_build_row_the_parent_lacks_is_dropped_as_no_dimensions(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    other = {**CARRIED_ROW, "image_id": "31", "key": "s1/31.jpg"}
+    build = _build_with_unlisted_image("not_found", None, None)
+
+    result = _build(source, tmp_path, build, _parent_holding(other))
+
+    assert "30" not in result.tables["images.parquet"].column("image_id").to_pylist()
+    assert result.dropped["no_dimensions"] == 2
+    assert result.dropped["carried_from_parent"] == 0
+
+
+@pytest.mark.parametrize(
+    ("width", "height"), [(111, 222), (111, 2000), (3000, 222)], ids=["both", "width", "height"]
+)
+def test_a_carried_image_whose_build_size_differs_from_the_parents_is_refused(
+    source: RecordingS3, tmp_path: Path, width: int, height: int
+) -> None:
+    build = _build_with_unlisted_image(width=width, height=height)
+
+    with pytest.raises(ValueError, match=r"1 carried images.*\['30'\]"):
+        _build(source, tmp_path, build, _parent_holding(CARRIED_ROW))
+
+
+@pytest.mark.parametrize(("row", "col"), [(2000, 5), (4, 3000), (-1, 5), (4, -1)])
+def test_a_carried_not_found_image_with_a_point_outside_the_parents_size_is_refused(
+    source: RecordingS3, tmp_path: Path, row: int, col: int
+) -> None:
+    build = _build_with_unlisted_image("not_found", None, None)
+    build = raw.BuildTables(
+        annotations=pd.concat(
+            [
+                build.annotations[build.annotations["image_id"] != "30"],
+                _annotations([(1, "30", row, col, 200)]),
+            ]
+        ),
+        images=build.images,
+        id2name=ID2NAME,
+    )
+    source.put(SRC, _key(1, "30"), JPEG)
+
+    with pytest.raises(ValueError, match=r"1 carried images have points outside.*\['30'\]"):
+        _build(source, tmp_path, build, _parent_holding(CARRIED_ROW))
+
+
+def test_a_carried_not_found_image_with_points_on_the_parents_last_row_and_col_is_kept(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    build = _build_with_unlisted_image("not_found", None, None)
+    build = raw.BuildTables(
+        annotations=pd.concat(
+            [
+                build.annotations[build.annotations["image_id"] != "30"],
+                _annotations([(1, "30", 1999, 2999, 200)]),
+            ]
+        ),
+        images=build.images,
+        id2name=ID2NAME,
+    )
+
+    result = _build(source, tmp_path, build, _parent_holding(CARRIED_ROW))
+
+    assert result.carried == {"30"}
+
+
+def test_an_unannotated_not_found_image_the_parent_holds_is_not_carried(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    build = _build_with_unlisted_image("not_found", None, None)
+    build = raw.BuildTables(
+        annotations=build.annotations[build.annotations["image_id"] != "30"],
+        images=build.images,
+        id2name=ID2NAME,
+    )
+
+    result = _build(source, tmp_path, build, _parent_holding(CARRIED_ROW))
+
+    assert "30" not in result.tables["images.parquet"].column("image_id").to_pylist()
+    assert result.dropped["no_dimensions"] == 2  # images 21 and 30
+    assert result.dropped["carried_from_parent"] == 0
+    assert result.carried == frozenset()
+
+
+def test_only_the_parent_rows_of_carried_ids_join_the_images(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    listed_10 = {**CARRIED_ROW, "image_id": "10", "key": "s1/10.jpg", "source_fingerprint": "stale"}
+    stranger = {**CARRIED_ROW, "image_id": "99", "key": "s1/99.jpg"}
+
+    result = _build(
+        source,
+        tmp_path,
+        _build_with_unlisted_image(),
+        _parent_holding(listed_10, CARRIED_ROW, stranger),
+    )
+
+    assert result.tables["images.parquet"].column("image_id").to_pylist() == ["10", "20", "30"]
+    assert "99" not in result.tables["points.parquet"].column("image_id").to_pylist()
+
+
+def test_a_parent_without_unlisted_images_reports_zero_carried(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    result = _build(source, tmp_path, parent_images=_parent_holding(CARRIED_ROW))
+
+    assert result.dropped["carried_from_parent"] == 0
+    assert result.carried == frozenset()
+
+
+def test_an_unlisted_image_the_parent_lacks_is_still_source_missing(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    other = {**CARRIED_ROW, "image_id": "31", "key": "s1/31.jpg"}
+
+    result = _build(source, tmp_path, _build_with_unlisted_image(), _parent_holding(other))
+
+    assert result.tables["images.parquet"].column("image_id").to_pylist() == ["10", "20"]
+    assert "30" not in result.tables["points.parquet"].column("image_id").to_pylist()
+    assert (result.dropped["carried_from_parent"], result.dropped["source_missing"]) == (0, 1)
+
+
+def test_the_copy_plan_omits_carried_images_and_keeps_listed_ones(
+    source: RecordingS3, tmp_path: Path
+) -> None:
+    result = _build(source, tmp_path, _build_with_unlisted_image(), _parent_holding(CARRIED_ROW))
+
+    plan = raw._copies(result.tables["images.parquet"], SRC, result.carried)
+
+    assert [line["dst_key"] for line in plan] == [DEST_10, DEST_20]
+
+
 def test_annotations_without_an_image_row_are_counted_and_dropped(
     source: RecordingS3, tmp_path: Path
 ) -> None:
@@ -373,6 +581,7 @@ def test_a_missing_source_original_drops_the_image_and_its_points(
     assert result.tables["images.parquet"].column("image_id").to_pylist() == ["10"]
     assert set(result.tables["points.parquet"].column("image_id").to_pylist()) == {"10"}
     assert result.dropped["source_missing"] == 1
+    assert "carried_from_parent" not in result.dropped
 
 
 NO_SOF_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
@@ -746,6 +955,28 @@ def test_a_staged_parent_pin_carries_unchanged_images_forward(
     assert (new[1]["etag"], new[1]["source_fingerprint"]) == (md5_hex(changed), md5_hex(changed))
     assert staging.image_heads() == [_key(2, "20")]
     assert staging.image_gets() == [_key(2, "20")]
+
+
+def test_a_staged_parent_pin_carries_an_image_whose_scrape_original_is_gone(
+    staging: RecordingS3, tmp_path: Path
+) -> None:
+    stage = tmp_path / "stage"
+    _stage_raw(stage)
+    parent = _only_version(stage)
+    sha = manifest_sha256((parent / "manifest.json").read_bytes())
+    (stage / "checkpoints" / "coralnet-raw-run1-abcdef1.parquet").unlink()
+    del staging.objects[(SRC, _key(1, "10"))]
+
+    _stage_raw(stage, "--parent-version", parent.name, "--parent-manifest-sha256", sha)
+
+    (child,) = [p for p in parent.parent.iterdir() if p != parent]
+    manifest = Manifest.model_validate_json((child / "manifest.json").read_bytes())
+    assert manifest.stats.dropped["carried_from_parent"] == 1
+    lines = [json.loads(line) for line in (child / "copies.jsonl").read_text().splitlines()]
+    assert [line["dst_key"] for line in lines] == [DEST_20]
+    old = {r["image_id"]: r for r in pq.read_table(parent / "images.parquet").to_pylist()}
+    new = {r["image_id"]: r for r in pq.read_table(child / "images.parquet").to_pylist()}
+    assert new["10"] == old["10"]
 
 
 def test_a_staged_version_promotes_into_intelligent_tiering_with_the_manifest_last(

@@ -13,16 +13,28 @@ import pyarrow.parquet as pq
 from segdata_spec._marker import load_synced, marker_files
 from segdata_spec.errors import NotSynced, PinMismatch
 from segdata_spec.layout import (
+    FEATURE_INDEX_NAME,
     MANIFEST_NAME,
+    TABLES_MARKER_ID,
     cache_path,
     dataset_prefix,
+    feature_set_prefix,
     resize_id,
     resized_cache_path,
+    synced_feature_marker_dir,
     synced_marker_dir,
     synced_resize_ids,
     taxonomy_prefix,
 )
-from segdata_spec.manifest import Manifest, Pin, TaxonomyManifest, manifest_sha256
+from segdata_spec.manifest import (
+    FeatureSetManifest,
+    FeatureSetPin,
+    Manifest,
+    Pin,
+    TaxonomyManifest,
+    _check_dataset_pin,
+    manifest_sha256,
+)
 from segdata_spec.resize import ResizeSpec, scale_images, scale_points
 
 
@@ -65,6 +77,39 @@ class DatasetVersion:
 
 
 @dataclass(frozen=True)
+class VersionTables:
+    """The manifest and tables of a synced dataset version, without its images."""
+
+    manifest: Manifest
+    images: pa.Table
+    points: pa.Table | None
+    labels: pa.Table
+    label_counts: pa.Table
+
+
+@dataclass(frozen=True)
+class FeatureSet:
+    """A synced feature set: its manifest, its index and the cached feature file of each image.
+
+    ``path`` resolves any indexed image; only the images ``sync_feature_set`` selected are cached.
+    """
+
+    manifest: FeatureSetManifest
+    index: pa.Table
+    cache_dir: Path
+    bucket: str
+    keys: Mapping[str, str]
+
+    def path(self, image_id: str) -> Path:
+        """Return the cached feature file of ``image_id``.
+
+        Raises:
+            KeyError: ``image_id`` is not in the index.
+        """
+        return cache_path(self.cache_dir, self.bucket, self.keys[image_id])
+
+
+@dataclass(frozen=True)
 class Taxonomy:
     """A synced taxonomy version."""
 
@@ -79,10 +124,10 @@ def _require(path: Path) -> Path:
     return path
 
 
-def _read_pinned_manifest(cache_dir: Path, bucket: str, prefix: str, pin: Pin) -> bytes:
+def _read_pinned_manifest(cache_dir: Path, bucket: str, prefix: str, sha256: str) -> bytes:
     path = _require(cache_path(cache_dir, bucket, prefix + MANIFEST_NAME))
     data = path.read_bytes()
-    if manifest_sha256(data) != pin.manifest_sha256:
+    if manifest_sha256(data) != sha256:
         raise PinMismatch(f"cached file {path} does not match the pin")
     return data
 
@@ -107,6 +152,15 @@ def _require_marker_dir(cache_dir: Path, bucket: str, pin: Pin, resize: ResizeSp
     )
 
 
+def _read_version(cache_dir: Path, bucket: str, pin: Pin) -> tuple[Manifest, dict[str, pa.Table]]:
+    """Return the cached manifest, re-verified against ``pin``, and the tables it lists."""
+    prefix = dataset_prefix(pin.name, pin.version)
+    manifest = Manifest.model_validate_json(
+        _read_pinned_manifest(cache_dir, bucket, prefix, pin.manifest_sha256)
+    )
+    return manifest, _read_tables(cache_dir, bucket, prefix, manifest.files)
+
+
 def open_version(
     cache_dir: Path, bucket: str, pin: Pin, resize: ResizeSpec | None = None
 ) -> DatasetVersion:
@@ -127,9 +181,7 @@ def open_version(
         ValueError: With ``resize``, a point references an ``image_id`` absent from ``images``.
     """
     marker = load_synced(_require_marker_dir(cache_dir, bucket, pin, resize))
-    prefix = dataset_prefix(pin.name, pin.version)
-    manifest = Manifest.model_validate_json(_read_pinned_manifest(cache_dir, bucket, prefix, pin))
-    tables = _read_tables(cache_dir, bucket, prefix, manifest.files)
+    manifest, tables = _read_version(cache_dir, bucket, pin)
     images = tables["images.parquet"]
     points = tables.get("points.parquet")
     if resize is not None:
@@ -148,6 +200,32 @@ def open_version(
     )
 
 
+def open_tables(cache_dir: Path, bucket: str, pin: Pin) -> VersionTables:
+    """Open the tables of a dataset version that ``sync`` cached, with or without its images.
+
+    ``sync_tables`` or ``sync`` (with any resize spec) must have run for the pin. The
+    tables describe the original images; the manifest is re-verified against ``pin``.
+
+    Raises:
+        NotSynced: No tables-only or image marker exists for ``pin``.
+        FileNotFoundError: The manifest or a table it lists is not in the cache.
+        PinMismatch: The cached manifest differs from ``pin``.
+    """
+    tables_dir = synced_marker_dir(cache_dir, TABLES_MARKER_ID, bucket, pin.name, pin.version)
+    if not marker_files(tables_dir) and not synced_resize_ids(
+        cache_dir, bucket, pin.name, pin.version
+    ):
+        raise NotSynced(f"{pin.name} {pin.version} has no sync marker; run sync first")
+    manifest, tables = _read_version(cache_dir, bucket, pin)
+    return VersionTables(
+        manifest=manifest,
+        images=tables["images.parquet"],
+        points=tables.get("points.parquet"),
+        labels=tables["labels.parquet"],
+        label_counts=tables["stats/label_counts.parquet"],
+    )
+
+
 def open_taxonomy(cache_dir: Path, bucket: str, pin: Pin) -> Taxonomy:
     """Open a taxonomy version that ``sync`` cached, re-verifying its manifest against ``pin``.
 
@@ -156,11 +234,41 @@ def open_taxonomy(cache_dir: Path, bucket: str, pin: Pin) -> Taxonomy:
         PinMismatch: The cached manifest differs from ``pin``.
     """
     prefix = taxonomy_prefix(pin.name, pin.version)
-    data = _read_pinned_manifest(cache_dir, bucket, prefix, pin)
+    data = _read_pinned_manifest(cache_dir, bucket, prefix, pin.manifest_sha256)
     manifest = TaxonomyManifest.model_validate_json(data)
     tables = _read_tables(cache_dir, bucket, prefix, manifest.files)
     return Taxonomy(
         manifest=manifest,
         benthic_attributes=tables["benthic_attributes.parquet"],
         growth_forms=tables["growth_forms.parquet"],
+    )
+
+
+def open_feature_set(cache_dir: Path, bucket: str, pin: FeatureSetPin) -> FeatureSet:
+    """Open a feature set that ``sync_feature_set`` cached, re-verifying its manifest sha256.
+
+    Raises:
+        NotSynced: No feature-set marker exists for ``pin``.
+        FileNotFoundError: The set manifest or its index is not in the cache.
+        PinMismatch: The cached set manifest differs from the pin's ``manifest_sha256``, or records a
+            dataset manifest sha256 other than the pin's dataset.
+    """
+    dataset, family = pin.dataset, pin.family
+    directory = synced_feature_marker_dir(cache_dir, family, bucket, dataset.name, dataset.version)
+    if not marker_files(directory):
+        raise NotSynced(
+            f"feature set {family!r} of {dataset.name} {dataset.version} was not synced"
+        )
+    prefix = feature_set_prefix(dataset.name, dataset.version, family)
+    data = _read_pinned_manifest(cache_dir, bucket, prefix, pin.manifest_sha256)
+    manifest = FeatureSetManifest.model_validate_json(data)
+    _check_dataset_pin(manifest, dataset)
+    index = pq.read_table(_require(cache_path(cache_dir, bucket, prefix + FEATURE_INDEX_NAME)))
+    ids = index.column("image_id").to_pylist()
+    return FeatureSet(
+        manifest=manifest,
+        index=index,
+        cache_dir=cache_dir,
+        bucket=bucket,
+        keys=dict(zip(ids, index.column("key").to_pylist(), strict=True)),
     )

@@ -14,6 +14,8 @@ from pydantic import (
     model_serializer,
 )
 
+from segdata_spec.errors import PinMismatch
+
 # YYYYMMDD-<etl git sha7>, with -N for a second build on the same day.
 Version = Annotated[str, StringConstraints(pattern=r"^\d{8}-[0-9a-f]{7}(-\d+)?$")]
 
@@ -151,7 +153,45 @@ class TaxonomyManifest(_Model):
     files: dict[str, FileEntry]
 
 
-def dump_manifest(manifest: Manifest | TaxonomyManifest) -> bytes:
+class FeatureSetStats(_Model):
+    """Coverage of a feature set: images indexed, and version images it leaves out."""
+
+    n_images: int
+    n_missing: int
+
+
+class FeatureSetManifest(_Model):
+    """``manifest.json`` of a feature set; its sha256 pins the set."""
+
+    schema_version: Literal[1]
+    dataset: Pin
+    family: str
+    extractor: dict[str, Any]
+    files: dict[str, FileEntry]
+    stats: FeatureSetStats
+    etl: EtlInfo
+    created_at: datetime
+
+
+class FeatureSetPin(_Model):
+    """A data-config reference to one exact feature set: its dataset version, family and manifest."""
+
+    dataset: Pin
+    family: str
+    manifest_sha256: str
+
+
+def _check_dataset_pin(manifest: FeatureSetManifest, pin: Pin) -> None:
+    """Raise ``PinMismatch`` unless the feature set was published for exactly ``pin``."""
+    recorded = manifest.dataset.manifest_sha256
+    if recorded != pin.manifest_sha256:
+        raise PinMismatch(
+            f"feature set {manifest.family!r} was published for dataset manifest {recorded}, "
+            f"but the pin expects {pin.manifest_sha256}"
+        )
+
+
+def dump_manifest(manifest: _Model) -> bytes:
     """Serialise to JSON in field order, indented, with a trailing newline.
 
     The same model always yields the same bytes, so the sha256 of the published bytes is stable.

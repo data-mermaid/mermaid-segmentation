@@ -16,8 +16,17 @@ import pyarrow as pa
 from botocore.exceptions import ClientError
 from PIL import Image
 
+from segdata_spec.features import publish_feature_set
 from segdata_spec.git import GitState
-from segdata_spec.manifest import ImageStore, Manifest, ParentRef, Pin, SourceInfo
+from segdata_spec.manifest import (
+    EtlInfo,
+    FeatureSetPin,
+    ImageStore,
+    Manifest,
+    ParentRef,
+    Pin,
+    SourceInfo,
+)
 from segdata_spec.stage import stage_dataset, stage_taxonomy
 
 
@@ -112,7 +121,16 @@ IMG_PREFIX = "images/ds/"
 VERSION = "20261120-abcdef1"
 TAX_VERSION = "20261120-1234567"
 CLEAN_GIT = GitState(sha="abcdef1234567", dirty=False, pushed=True)
+READY_ETL = EtlInfo(
+    package="mermaid-classifier",
+    command="extract-features",
+    git_sha="0123456789abcdef",
+    git_dirty=True,
+    uv_lock_sha256="l" * 64,
+)
 STORE = ImageStore(bucket=IMG_BUCKET, prefix=IMG_PREFIX, owner="segdata")
+# An image store inside BUCKET, as a feature set requires; its store name is ``ds``.
+FEATURE_STORE = ImageStore(bucket=BUCKET, prefix=IMG_PREFIX, owner="segdata")
 SOURCE = SourceInfo(type="test", uri="s3://src/", revision="r1")
 
 # image_id -> (bytes, group); each image's key is "<image_id>.jpg" under IMG_PREFIX.
@@ -218,21 +236,25 @@ def publish_version(
     media_types: dict[str, str] | None = None,
     source_names: dict[str, str] | None = None,
     parents: Sequence[ParentRef] = (),
+    image_store: ImageStore = STORE,
 ) -> tuple[Manifest, Pin]:
     """Store the images (and masks) and publish dataset ``ds``; clear the call log.
 
     ``points=None`` publishes a dense version; ``etags`` gives images explicit ETags;
     ``crcs`` and ``mask_crcs`` record base64 CRC64NVME values by image id; ``sizes`` records
     ``(width, height)`` by image id (default 4x4); ``media_types`` sets the media type by image id
-    (default ``image/jpeg``); ``source_names`` sets ``source_name`` by image id (default null).
+    (default ``image/jpeg``); ``source_names`` sets ``source_name`` by image id (default null);
+    ``image_store`` is where the images live (default: ``STORE``, outside ``BUCKET``).
     """
     etags = etags or {}
     for image_id, (data, _) in images.items():
-        client.put(IMG_BUCKET, f"{IMG_PREFIX}{image_id}.jpg", data)
+        client.put(image_store.bucket, f"{image_store.prefix}{image_id}.jpg", data)
         if image_id in etags:
-            client.set_etag(IMG_BUCKET, f"{IMG_PREFIX}{image_id}.jpg", etags[image_id])
+            client.set_etag(
+                image_store.bucket, f"{image_store.prefix}{image_id}.jpg", etags[image_id]
+            )
     for image_id, data in (masks or {}).items():
-        client.put(IMG_BUCKET, f"{IMG_PREFIX}{image_id}.png", data)
+        client.put(image_store.bucket, f"{image_store.prefix}{image_id}.png", data)
     tables = {
         "images.parquet": _images_table(
             images,
@@ -275,7 +297,7 @@ def publish_version(
         version=version,
         kind="points" if points is not None else "dense",
         tables=tables,
-        image_store=STORE,
+        image_store=image_store,
         etl_package="segdata-etl",
         etl_command="segdata build ds",
         source=SOURCE,
@@ -311,3 +333,56 @@ def publish_taxonomy_version(client: FakeS3, tmp_path: Path) -> Pin:
     _upload_staged(client, stage_dir)
     client.calls.clear()
     return Pin(name="mermaid-benthic", version=TAX_VERSION, manifest_sha256=sha)
+
+
+FEATURE_FAMILY = "effnet"
+# image_id -> the bytes of its feature file under features/ds/effnet/.
+FEATURES: dict[str, bytes] = {"a": b"feature-a", "b": b"feature-bb"}
+EXTRACTOR: dict[str, Any] = {
+    "class_path": "spacer.extract_features.EfficientNetExtractor",
+    "crop_size": 224,
+    "feature_dim": 1280,
+    "weights_sha256": "w" * 64,
+    "weights_uri": "s3://weights/a.pt",
+}
+
+
+def feature_key_of(image_id: str) -> str:
+    return f"features/ds/{FEATURE_FAMILY}/{image_id}.featurevector"
+
+
+def publish_feature_set_version(client: FakeS3, tmp_path: Path) -> FeatureSetPin:
+    """Publish dataset ``ds`` with images a and b, store their features, publish the set.
+
+    Returns the feature-set pin; clears the call log.
+    """
+    _, pin = publish_version(
+        client,
+        tmp_path,
+        images={image_id: IMAGES[image_id] for image_id in FEATURES},
+        points=POINTS,
+        image_store=FEATURE_STORE,
+    )
+    for image_id, data in FEATURES.items():
+        client.put(BUCKET, feature_key_of(image_id), data)
+    index = pa.table(
+        {
+            "image_id": list(FEATURES),
+            "key": [feature_key_of(i) for i in FEATURES],
+            "etag": [_md5(data) for data in FEATURES.values()],
+            "size": [len(data) for data in FEATURES.values()],
+            "crc64nvme": pa.nulls(len(FEATURES), pa.string()),
+            "n_points": [1] * len(FEATURES),
+        }
+    )
+    feature_pin = publish_feature_set(
+        client,
+        pin,
+        FEATURE_FAMILY,
+        index,
+        EXTRACTOR,
+        bucket=BUCKET,
+        etl=READY_ETL,
+    )
+    client.calls.clear()
+    return feature_pin

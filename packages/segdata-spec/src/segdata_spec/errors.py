@@ -53,3 +53,15 @@ class SchemaValidationError(SegdataError, ValueError):
 
 class SplitCoverageError(SegdataError):
     """A dataset version has groups its split file does not list."""
+
+
+class ExtractorMismatch(SegdataError):
+    """A feature family's stored extractor spec names another extractor identity."""
+
+
+class FeatureIndexInvalid(SegdataError):
+    """A feature index names images outside its version, repeats one, or leaves images out."""
+
+
+class FeatureMissing(SegdataError):
+    """A feature file listed in a feature index is absent from the bucket."""
