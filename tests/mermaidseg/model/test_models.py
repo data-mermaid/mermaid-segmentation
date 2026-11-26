@@ -221,17 +221,39 @@ def test_explicit_out_indices_are_kept_and_must_match_the_stage_count(mock_dinov
         ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(encoder, out_indices=[1, 3]))
 
 
+@pytest.mark.parametrize(
+    ("n_ranks", "binary_keys"),
+    [
+        (len(TAXONOMIC_CONCEPTS), {"not_given": 0, "FALSE": 1, "TRUE": 2}),
+        (2, {"not_given": 0, "FALSE": 1, "TRUE": 2}),
+        (2, {"not_given": 0, "False": 1, "True": 2}),  # keys of a bundle exported from JSON
+        (2, {"not_given": 0, False: 1, True: 2}),  # legacy in-memory mappings
+    ],
+    ids=["every_rank", "skipped_ranks", "stringified_bool_keys", "bool_keys"],
+)
 def test_concept_activation_is_a_softmax_per_rank_and_a_sigmoid_on_the_binary_tail(
-    mock_dinov3_encoder,
+    mock_dinov3_encoder, n_ranks, binary_keys
 ):
-    model = ConceptBottleneckDPTLoRADINOv3(**_model_kwargs(mock_dinov3_encoder(models_module)))
+    # With two ranks, kingdom and genus are present and phylum through family are skipped.
+    present = ["kingdom", "genus"] if n_ranks == 2 else TAXONOMIC_CONCEPTS
+    value2id = {
+        **{rank: {"not_given": [0, 0], "a": [2, 1], "b": [1, 2]} for rank in present},
+        "bleached": binary_keys,
+    }
+    model = ConceptBottleneckDPTLoRADINOv3(
+        **_model_kwargs(
+            mock_dinov3_encoder(models_module),
+            concept_value2id=value2id,
+            num_concepts=2 * n_ranks + 1,
+        )
+    )
     # Rank i scores its two channels (ln(i + 2), 0), so its softmax is ((i + 2) / (i + 3), 1 / (i + 3)).
-    ranks = [[math.log(i + 2), 0.0] for i in range(len(TAXONOMIC_CONCEPTS))]
+    ranks = [[math.log(i + 2), 0.0] for i in range(n_ranks)]
     logits = torch.tensor([value for rank in ranks for value in rank] + [math.log(3.0)])
 
     activated = model.concept_outputs_activation(logits.reshape(1, -1, 1, 1))
 
-    expected = [p for i in range(6) for p in ((i + 2) / (i + 3), 1 / (i + 3))] + [0.75]
+    expected = [p for i in range(n_ranks) for p in ((i + 2) / (i + 3), 1 / (i + 3))] + [0.75]
     assert activated.flatten().tolist() == pytest.approx(expected, rel=1e-6)
 
 

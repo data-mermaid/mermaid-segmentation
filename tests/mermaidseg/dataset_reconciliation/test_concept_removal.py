@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 import pytest
 import yaml
 
+from mermaidseg.data.config import DataSection
+from mermaidseg.dataset_reconciliation.artifact_meta import file_sha1, meta_path
 from mermaidseg.dataset_reconciliation.concept_removal import (
     REMOVAL_COLUMNS,
-    apply_concept_removal,
-    concept_kind,
+    concept_coverage,
     load_concept_removal,
     removed_concepts,
+    section_train_label_counts,
+    train_label_counts,
 )
-from mermaidseg.dataset_reconciliation.concept_source_mask import file_sha1, meta_path
+from mermaidseg.dataset_reconciliation.concept_schema import ConceptSchema
+from segdata_spec.manifest import Pin
 from tests.mermaidseg.conftest import concept_table
+from tests.mermaidseg.data.conftest import ImageSpec, write_version
 
 
 def _write_removal(tmp_path, concepts: list[str], *, sha1: str | None = None):
@@ -96,57 +103,132 @@ def test_removed_concepts_lists_only_removed_rows_with_the_removal_columns():
     assert out["n_annotations"].tolist() == [10, 20]
 
 
-# ---------- concept_kind ----------
+# ---------- train_label_counts ----------
+
+IMAGES = pd.DataFrame({"image_id": ["a1", "a2", "v1"], "group": ["s7", "s7", "s9"]})
+LABELS = pd.DataFrame(
+    {
+        "label_id": [1, 2, 3, 4],
+        "name": ["Acropora", " Sand ", "Unlabeled", "Porites"],
+        "mermaid_benthic_attribute": [None] * 4,
+    }
+)
+LABEL_COUNTS = pd.DataFrame(
+    {
+        "image_id": ["a1", "a1", "a2", "a2", "a2", "v1"],
+        "label_id": [1, 2, 1, 3, 0, 4],
+        "n": [2, 1, 3, 5, 9, 4],
+    }
+)
+
+
+def test_coralnet_counts_cover_the_train_groups_without_unlabeled_with_the_source_id():
+    out = train_label_counts("coralnet", LABEL_COUNTS, IMAGES, LABELS, {"s7"})
+
+    assert out.to_numpy().tolist() == [
+        ["coralnet", "a1", "acropora", 2, "7"],
+        ["coralnet", "a1", "sand", 1, "7"],
+        ["coralnet", "a2", "acropora", 3, "7"],
+    ]
+
+
+def test_a_coralnet_group_that_is_not_s_digits_raises():
+    images = pd.DataFrame({"image_id": ["a1"], "group": ["x12"]})
+    with pytest.raises(ValueError, match="not s<source id>"):
+        train_label_counts("coralnet", LABEL_COUNTS, images, LABELS, None)
+
+
+def test_another_datasets_source_is_its_name_and_no_groups_counts_every_image():
+    out = train_label_counts("mermaid", LABEL_COUNTS, IMAGES, LABELS, None)
+
+    assert out[["image_id", "label", "source"]].to_numpy().tolist() == [
+        ["a1", "acropora", "mermaid"],
+        ["a1", "sand", "mermaid"],
+        ["a2", "acropora", "mermaid"],
+        ["v1", "porites", "mermaid"],
+    ]
+
+
+def test_a_counted_label_id_missing_from_labels_raises():
+    counts = pd.DataFrame({"image_id": ["a1"], "label_id": [8], "n": [1]})
+    with pytest.raises(ValueError, match=r"label ids missing from labels.parquet: \[8\]"):
+        train_label_counts("coralnet", counts, IMAGES, LABELS, None)
+
+
+def test_mermaid_labels_count_under_the_concept_row_of_their_benthic_attribute(tmp_path):
+    labels = pd.DataFrame(
+        {
+            "label_id": [1, 2],
+            "name": ["Acropora::Branching", "Acropora::"],
+            "mermaid_benthic_attribute": ["Acropora", "Acropora"],
+        }
+    )
+    counts = pd.DataFrame({"image_id": ["a1", "a2"], "label_id": [1, 2], "n": [2, 3]})
+    concepts = tmp_path / "concepts.csv"
+    concept_table().assign(source_dataset_source="mermaid").to_csv(concepts, index=False)
+    schema = ConceptSchema.from_csv(concepts, sources={"mermaid"})
+
+    out = train_label_counts("mermaid", counts, IMAGES, labels, None)
+    coverage = concept_coverage(out, schema)
+
+    assert out["label"].tolist() == ["acropora", "acropora"]
+    assert coverage.loc["genus__acropora", ["n_annotations", "n_images"]].tolist() == [5, 2]
+
+
+def _section(pin: Pin, entry: dict[str, Any]) -> DataSection:
+    """A data section pinning ``pin`` as ``coralnet`` with the split blocks of ``entry``."""
+    return DataSection.model_validate(
+        {
+            "datasets": {
+                "coralnet": {
+                    "version": pin.version,
+                    "manifest_sha256": pin.manifest_sha256,
+                    **entry,
+                }
+            }
+        }
+    )
+
+
+ONE_ANNOTATOR = [("a1", 0, 0, 1)]
 
 
 @pytest.mark.parametrize(
-    ("channel", "kind"),
+    ("entry", "points", "message"),
     [
-        ("genus__acropora", "genus"),
-        ("family__poritidae", "family"),
-        ("bleached", "binary"),
-        ("not_a_rank__value", "binary"),
+        (
+            {"train": {"groups": ["s99"]}},
+            ONE_ANNOTATOR,
+            r"groups not in the dataset version: \['s99'\]",
+        ),
+        ({"val": {"groups": "all"}}, ONE_ANNOTATOR, "no dataset has a train block to count"),
+        (
+            {"train": {"groups": "all"}},
+            [("a1", 0, 0, 1, "a"), ("a1", 1, 1, 1, "b")],
+            r"coralnet: several annotators \['a', 'b'\]",
+        ),
+        (
+            {"train": {"groups": "all", "annotators": ["a"]}},
+            [("a1", 0, 0, 1, "a"), ("a1", 1, 1, 1, "b")],
+            r"coralnet: several annotators \['a', 'b'\]",
+        ),
+    ],
+    ids=[
+        "unknown-group",
+        "no-train-block",
+        "several-annotators-none-named",
+        "several-annotators-some-named",
     ],
 )
-def test_concept_kind_is_the_rank_for_taxa_and_binary_otherwise(channel, kind):
-    assert concept_kind(channel) == kind
+def test_section_train_label_counts_guards_raise(tmp_path, entry, points, message):
+    cache_dir, _, pin = write_version(
+        tmp_path,
+        kind="points",
+        images=[ImageSpec("a1", group="s7")],
+        labels={1: "Acropora"},
+        points=points,
+        name="coralnet",
+    )
 
-
-# ---------- apply_concept_removal ----------
-
-
-def test_removing_a_taxon_sets_only_that_rank_to_not_given():
-    table = concept_table()
-
-    out = apply_concept_removal(table, ["genus__acropora"])
-
-    by_label = out.set_index("source_label_class_name")
-    assert by_label.loc["acropora", "genus"] == "not_given"
-    assert by_label.loc["bleached acropora", "genus"] == "not_given"
-    assert by_label.loc["acropora", "family"] == "acroporidae"  # coarser ranks stay
-    assert by_label.loc["porites", "genus"] == "porites"  # other values stay
-    assert by_label.loc["sand", "genus"] == "none"
-    assert table.set_index("source_label_class_name").loc["acropora", "genus"] == "acropora"
-
-
-def test_removing_a_binary_concept_drops_its_column():
-    out = apply_concept_removal(concept_table(), ["tubular"])
-
-    assert "tubular" not in out.columns
-    assert {"bleached", "branching"} <= set(out.columns)
-
-
-def test_a_repeated_concept_is_removed_once():
-    out = apply_concept_removal(concept_table(), ["genus__acropora", "genus__acropora"])
-
-    assert (out["genus"] != "acropora").all()
-
-
-def test_removing_a_binary_concept_without_a_column_raises():
-    with pytest.raises(ValueError, match="not a column of the concept table"):
-        apply_concept_removal(concept_table().drop(columns="tubular"), ["tubular"])
-
-
-def test_removing_a_taxon_value_with_no_match_raises():
-    with pytest.raises(ValueError, match="no genus == 'nope'"):
-        apply_concept_removal(concept_table(), ["genus__nope"])
+    with pytest.raises(ValueError, match=message):
+        section_train_label_counts(_section(pin, entry), cache_dir)

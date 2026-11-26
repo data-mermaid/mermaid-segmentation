@@ -53,6 +53,7 @@ from numpy.typing import NDArray
 from PIL import Image
 from tqdm import tqdm
 
+from mermaidseg.dataset_reconciliation.concepts import parse_concept_cell, read_class_to_concepts
 from mermaidseg.evaluation.gt_mapping import build_concept_lookup
 from mermaidseg.evaluation.hierarchical import HierarchicalScore
 from mermaidseg.evaluation.metrics import (
@@ -75,7 +76,7 @@ _SPLIT_GROUPS = {"val": "validation", "test": "test"}
 PROBE_GROUP = "train"
 _TILE = 1024
 _SVM_STRIP_ROWS = 128
-_ALLOWED_CONCEPT_CELLS = ("true", "false", "not_given")
+_CODE_OF_CELL = {"not_given": 0, "false": 1, "true": 2}
 
 
 # Native CoralscapesV2 class ids; equal to the coralscapes_v2 version's labels.parquet ids.
@@ -455,12 +456,6 @@ def reassemble_concept_logits(
     return average_window_logits(logits, boxes, CORALSCAPES_HEIGHT, CORALSCAPES_WIDTH)
 
 
-def _raw_concept_cell(value: object) -> str:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "nan"
-    return str(value).strip().lower()
-
-
 def build_coralscapes_concept_codes(csv_path: str | Path, concept: str) -> NDArray[np.int8]:
     """Map CoralscapesV2 class id -> binary concept code (0 not_given, 1 FALSE, 2 TRUE).
 
@@ -469,12 +464,8 @@ def build_coralscapes_concept_codes(csv_path: str | Path, concept: str) -> NDArr
     CSV raises: a missing row is not the same thing as ``not_given``. Any cell
     other than TRUE, FALSE, or not_given raises.
     """
-    import pandas as pd
-
     path = Path(csv_path)
-    frame = pd.read_csv(path)
-    frame["source_label_class_name"] = frame["source_label_class_name"].astype(str).str.lower()
-    frame["source_dataset_source"] = frame["source_dataset_source"].astype(str).str.lower()
+    frame = read_class_to_concepts(path)
     source_rows = frame[frame["source_dataset_source"] == "coralscapes_v2"]
 
     codes = np.zeros(NUM_CLASSES + 1, dtype=np.int8)
@@ -489,27 +480,20 @@ def build_coralscapes_concept_codes(csv_path: str | Path, concept: str) -> NDArr
                 f"CoralscapesV2 class {class_id} {name!r} is missing from {path}. "
                 f"A missing row is not {concept}=not_given."
             )
-        cells = {_raw_concept_cell(value) for value in matched[concept].tolist()}
+        try:
+            cells = {parse_concept_cell(value, rank=False) for value in matched[concept]}
+        except ValueError as error:
+            raise RuntimeError(f"CoralscapesV2 class {class_id} {name!r}: {error}") from error
         if len(cells) != 1:
             raise RuntimeError(
                 f"CoralscapesV2 class {class_id} {name!r} has conflicting {concept} cells: "
                 f"{sorted(cells)}"
             )
         cell = next(iter(cells))
-        if cell == "true":
-            codes[class_id] = 2
-            n_true += 1
-        elif cell == "false":
-            codes[class_id] = 1
-            n_false += 1
-        elif cell == "not_given":
-            codes[class_id] = 0
-            n_not_given += 1
-        else:
-            raise RuntimeError(
-                f"CoralscapesV2 class {class_id} {name!r} has {concept} cell {cell!r}. "
-                f"Expected one of {list(_ALLOWED_CONCEPT_CELLS)}."
-            )
+        codes[class_id] = _CODE_OF_CELL[cell]
+        n_true += cell == "true"
+        n_false += cell == "false"
+        n_not_given += cell == "not_given"
     if int(codes[0]) != 0:
         raise RuntimeError(f"label id 0 must stay {concept} code 0 (unannotated, not a class)")
     logger.info(

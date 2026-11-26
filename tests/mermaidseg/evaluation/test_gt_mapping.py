@@ -162,6 +162,34 @@ def test_first_row_wins_for_a_duplicated_label_and_other_sources_are_ignored(tmp
     assert lookup.unmapped == {"bar"}
 
 
+def test_a_taxon_without_a_channel_encodes_as_not_given_at_its_rank(tmp_path):
+    csv_path = _write_concept_csv(
+        tmp_path / "c.csv",
+        [
+            {"source_dataset_source": "src", "source_label_class_name": "foo",
+             "kingdom": "animalia", "genus": "b", "live": "true"},
+        ],
+    )  # fmt: skip
+    channels = ["kingdom__animalia", "genus__a", "genus__c", "live"]
+
+    lookup = build_concept_lookup("src", ["foo"], channels, csv_path)
+
+    assert lookup.row("foo").tolist() == [2, 0, 0, 2]
+
+
+def test_a_concept_cell_that_is_not_a_valid_value_raises_naming_the_cell(tmp_path):
+    csv_path = _write_concept_csv(
+        tmp_path / "c.csv",
+        [
+            {"source_dataset_source": "src", "source_label_class_name": "foo",
+             "kingdom": "animalia", "live": "yes"},
+        ],
+    )  # fmt: skip
+
+    with pytest.raises(ValueError, match="'yes'"):
+        build_concept_lookup("src", ["foo"], _CONCEPT_NAMES, csv_path)
+
+
 def test_table_without_a_live_column_gives_default_scopes_and_warns(tmp_path, caplog):
     coral_row = {
         "source_dataset_source": "src",
@@ -197,3 +225,18 @@ def test_table_without_a_live_column_gives_default_scopes_and_warns(tmp_path, ca
 )
 def test_point_scopes_live_column_applies_to_cnidaria_and_echinoderms_only(row, expected):
     assert point_scopes(pd.Series(row)) == expected
+
+
+@pytest.mark.parametrize("rank", ["phylum", "order", "class", "family"])
+def test_point_scopes_rejects_an_invalid_taxonomic_cell(rank):
+    row = {
+        "live": "true",
+        "phylum": "cnidaria",
+        "order": "actiniaria",
+        "class": "hexacorallia",
+        "family": "actiniidae",
+        rank: "not given",
+    }
+
+    with pytest.raises(ValueError, match="invalid taxonomic concept cell"):
+        point_scopes(pd.Series(row))

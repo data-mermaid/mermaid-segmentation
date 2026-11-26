@@ -94,15 +94,18 @@ def test_masked_cross_entropy_of_a_partial_mask_blends_the_masked_means():
 
 LN4_3 = math.log(4.0 / 3.0)
 # Concept layout: kingdom (2 channels), class (2 channels), then one binary channel.
-RANKS = {"kingdom": {"not_given": [0, 0], "a": [2, 1]}, "class": {"not_given": [0, 0], "a": [2, 1]}}
-CONCEPT_VALUE2ID = {**RANKS, "bleached": {"not_given": 0, False: 1, True: 2}}
+RANKS = {
+    "kingdom": {"not_given": [0, 0], "a": [2, 1], "b": [1, 2]},
+    "class": {"not_given": [0, 0], "a": [2, 1], "b": [1, 2]},
+}
+CONCEPT_VALUE2ID = {**RANKS, "bleached": {"not_given": 0, "FALSE": 1, "TRUE": 2}}
 
 
 def test_iter_concept_slices_offsets_skip_absent_ranks_and_end_with_the_binary_tail():
     value2id = {
-        "kingdom": {"not_given": [0, 0], "a": [2, 1]},
-        "class": {"not_given": [0, 0, 0], "a": [2, 1, 1]},
-        "bleached": {"not_given": 0, False: 1, True: 2},
+        "kingdom": {"not_given": [0, 0], "a": [2, 1], "b": [1, 2]},
+        "class": {"not_given": [0, 0, 0], "a": [2, 1, 1], "b": [1, 2, 1], "c": [1, 1, 2]},
+        "bleached": {"not_given": 0, "FALSE": 1, "TRUE": 2},
     }
     # Channel c holds the constant c, so a slice shows which channels it covers.
     labels = torch.arange(7.0).reshape(1, 7, 1, 1)

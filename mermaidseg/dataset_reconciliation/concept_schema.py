@@ -11,10 +11,16 @@ import numpy as np
 import pandas as pd
 import torch
 
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import (
+    TAXONOMIC_CONCEPTS,
+    binary_offset,
+    rank_slices,
+)
 from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
+    apply_concept_removal,
     encode_concept_channels_from_df,
+    read_class_to_concepts,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +39,20 @@ def concept_label_key(dataset: str, label_name: str, target: str | None) -> str:
     if dataset.lower() in TARGET_KEYED_CONCEPT_DATASETS and target:
         return target
     return label_name
+
+
+def concept_keys(dataset: str, labels: pd.DataFrame) -> pd.Series:
+    """Map each ``label_id`` of ``labels`` to its concept label key (see ``concept_label_key``).
+
+    Args:
+        dataset: Dataset name.
+        labels: ``labels.parquet`` rows (``label_id``, ``name``, ``mermaid_benthic_attribute``).
+    """
+    keys = [
+        concept_label_key(dataset, name, target)
+        for name, target in zip(labels["name"], labels["mermaid_benthic_attribute"], strict=True)
+    ]
+    return pd.Series(keys, index=labels["label_id"].to_numpy())
 
 
 @dataclass(frozen=True)
@@ -62,16 +82,11 @@ class ConceptSchema:
         taxonomic value becomes ``not_given`` at its rank, a removed binary concept loses its column.
         Exactly those channels must disappear; anything else is an error.
         """
-        df = pd.read_csv(path)
-        df = df.copy()
-        df["source_label_class_name"] = df["source_label_class_name"].astype(str).str.lower()
-        df["source_dataset_source"] = df["source_dataset_source"].astype(str).str.lower()
+        df = read_class_to_concepts(path)
         sources_lower = {s.lower() for s in sources}
         df_run = df[df["source_dataset_source"].isin(sources_lower)].reset_index(drop=True)
         removed_concepts = list(dict.fromkeys(removed_concepts))
         if removed_concepts:
-            from mermaidseg.dataset_reconciliation.concept_removal import apply_concept_removal
-
             _, full_channels, _ = encode_concept_channels_from_df(df_run)
             not_channels = sorted(set(removed_concepts) - set(full_channels))
             if not_channels:
@@ -115,6 +130,23 @@ class ConceptSchema:
         """Return the length-``C`` concept vector for ``(source, label_name)``."""
         key = (source.lower(), label_name.lower())
         return self.row_by_key.get(key, np.zeros(self.num_channels, dtype=np.float32))
+
+    def rank_slices(self) -> list[tuple[str, int, int]]:
+        """Return ``(rank, offset, width)`` of each taxonomic rank, in channel order."""
+        return rank_slices(self.concept_value2id)
+
+    @property
+    def binary_offset(self) -> int:
+        """Channel index where the binary tail starts."""
+        return binary_offset(self.concept_value2id)
+
+    def binary_names(self) -> list[str]:
+        """Binary concept names in channel order; each is its own single channel."""
+        names = [k for k in self.concept_value2id if k not in TAXONOMIC_CONCEPTS]
+        missing = [n for n in names if n not in self.channel_names]
+        if missing:
+            raise ValueError(f"binary concepts without a channel of the same name: {missing}")
+        return names
 
     def channel_id2name(self) -> dict[int, str]:
         """Map 1-indexed channel id to channel name (e.g. ``kingdom__animalia``)."""

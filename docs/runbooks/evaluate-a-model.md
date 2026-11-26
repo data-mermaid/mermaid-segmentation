@@ -73,6 +73,8 @@ CoralNet and Pacific report:
 
 Two scores compare only when they come from the same data. Run both bundles with the same `--data-config`, `--split`, `--evals` and, if you use it, the same `--images-per-source` and `--sample-seed`. Then compare the `summary.md` files.
 
+Evaluation counts a taxonomic value with no model channel as `not_given` at its rank, as in training. Scores from before that rule do not compare with scores computed under it.
+
 A change that alters model outputs must include metrics and the baseline they compare against in the PR. See item 7 of the working agreement in [AGENTS.md](../../AGENTS.md#2-working-agreement).
 
 ## Rebuild the probe point sets

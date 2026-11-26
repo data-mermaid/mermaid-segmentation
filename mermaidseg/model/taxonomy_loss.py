@@ -13,10 +13,11 @@ head's distribution ``p`` should equal the fine head's distribution summed per p
 from __future__ import annotations
 
 import logging
+from itertools import pairwise
 
 import torch
 
-from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
+from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS, rank_slices
 from mermaidseg.dataset_reconciliation.taxonomy_tree import (
     NONE_TAXON,
     TaxonomyTree,
@@ -31,15 +32,10 @@ def taxonomic_rank_slices(
     concept_value2id: dict[str, dict[str, list[int]]],
 ) -> list[tuple[str, int, list[str]]]:
     """Return ``(rank, channel_offset, class_names)`` for each taxonomic rank, in order."""
-    slices = []
-    offset = 0
-    for rank in TAXONOMIC_CONCEPTS:
-        if rank not in concept_value2id:
-            continue
-        class_names = [v for v in concept_value2id[rank] if v != "not_given"]
-        slices.append((rank, offset, class_names))
-        offset += len(class_names)
-    return slices
+    return [
+        (rank, offset, [v for v in concept_value2id[rank] if v != "not_given"])
+        for rank, offset, _ in rank_slices(concept_value2id)
+    ]
 
 
 def _tree_channel_index(taxonomy: TaxonomyTree, rank: str, names: list[str]) -> list[int]:
@@ -71,8 +67,7 @@ def build_parent_matrices(
     """
     slices = taxonomic_rank_slices(concept_value2id)
     matrices = {}
-    for r in range(len(slices) - 1):
-        (coarse, _, names_c), (fine, _, names_f) = slices[r], slices[r + 1]
+    for r, ((coarse, _, names_c), (fine, _, names_f)) in enumerate(pairwise(slices)):
         incidence = torch.from_numpy(build_rank_incidence(taxonomy, coarse, fine)).T.float()
         rows = _tree_channel_index(taxonomy, coarse, names_c)
         cols = _tree_channel_index(taxonomy, fine, names_f)
@@ -137,7 +132,7 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
         self.slices = taxonomic_rank_slices(concept_value2id)
 
         matrices = build_parent_matrices(taxonomy, concept_value2id)
-        for r in range(len(self.slices) - 1):
+        for r, _ in enumerate(pairwise(self.slices)):
             parents = matrices[(r, r + 1)]
             coarse_keep = parents.any(dim=1)
             fine_keep = parents.any(dim=0)
@@ -201,7 +196,7 @@ class TaxonomicCoherenceLoss(torch.nn.Module):
 
         loss_components: dict[str, torch.Tensor] = {}
         total = concept_logits.new_zeros(())
-        for r in range(len(self.slices) - 1):
+        for r, _ in enumerate(pairwise(self.slices)):
             coarse = self._rank_logits(concept_logits, r, getattr(self, f"coarse_keep_{r}"))
             fine = self._rank_logits(concept_logits, r + 1, getattr(self, f"fine_keep_{r}"))
             log_p = coarse.log_softmax(dim=1)

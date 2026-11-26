@@ -82,6 +82,15 @@ def test_write_coralnet_sample_writes_and_returns_the_seeded_per_source_sample(t
     assert returned == written["image_id"].tolist()
 
 
+def test_write_coralnet_sample_rejects_a_group_that_is_not_s_digits(tmp_path):
+    cache = write_eval_cache(tmp_path)
+    reader = coralnet_reader(cache.section, cache.cache_dir, groups=["s1"], split="train")
+    reader.images["group"] = "x12"
+
+    with pytest.raises(ValueError, match="not s<source id>"):
+        write_coralnet_sample(path=tmp_path / "k.parquet", reader=reader, images_per_source=2)
+
+
 def test_evaluate_coralnet_maps_labels_through_the_readers_targets(tmp_path, monkeypatch):
     cache = write_eval_cache(tmp_path)
     reader = coralnet_reader(cache.section, cache.cache_dir, groups=["s3"], split="val")

@@ -17,6 +17,7 @@ have two parents. The CSV keeps those lineages apart: ``turbinaria_coral`` (Dend
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 
@@ -26,6 +27,7 @@ import pandas as pd
 from mermaidseg.dataset_reconciliation.concept_ranks import TAXONOMIC_CONCEPTS
 from mermaidseg.dataset_reconciliation.concepts import (
     DEFAULT_CLASS_TO_CONCEPTS_CSV,
+    read_class_to_concepts,
 )
 
 #: Rank order, coarse -> fine. Mirrors the model's active taxonomic channels.
@@ -99,12 +101,11 @@ class TaxonomyTree:
 def load_taxonomy_frame(
     mapping_location: str | Path = DEFAULT_CLASS_TO_CONCEPTS_CSV,
 ) -> pd.DataFrame:
-    """Load the concept-mapping CSV with the same normalisation the registry applies."""
-    df = pd.read_csv(mapping_location).copy()
-    for col in ("source_label_class_name", "source_dataset_source"):
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.lower()
-    return df
+    """Load the concept-mapping CSV through ``read_class_to_concepts``.
+
+    Rank cells arrive stripped and lower-cased; an invalid rank cell raises ``ValueError``.
+    """
+    return read_class_to_concepts(mapping_location)
 
 
 def channel_values(df: pd.DataFrame, rank: str) -> list[str]:
@@ -129,7 +130,7 @@ def audit_taxonomy(
         One :class:`AmbiguityReport` per offending taxon. Empty means the structure is a tree.
     """
     reports: list[AmbiguityReport] = []
-    for coarse, fine in zip(ranks, ranks[1:], strict=False):
+    for coarse, fine in pairwise(ranks):
         sub = df[[coarse, fine, "source_dataset_source"]].dropna(subset=[coarse, fine])
         sub = sub[
             ~sub[coarse].isin((NOT_GIVEN, NONE_TAXON)) & ~sub[fine].isin((NOT_GIVEN, NONE_TAXON))
@@ -185,7 +186,7 @@ def build_taxonomy_tree(
     channels = {rank: channel_values(df, rank) for rank in ranks}
 
     edges: dict[tuple[str, str], dict[str, set[str]]] = {}
-    for coarse, fine in zip(ranks, ranks[1:], strict=False):
+    for coarse, fine in pairwise(ranks):
         sub = df[[coarse, fine]].dropna()
         sub = sub[
             ~sub[coarse].isin((NOT_GIVEN, NONE_TAXON)) & ~sub[fine].isin((NOT_GIVEN, NONE_TAXON))
