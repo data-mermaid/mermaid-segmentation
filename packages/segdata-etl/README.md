@@ -21,7 +21,7 @@ A new data source is an ETL module in `segdata_etl/datasets/` that publishes a v
 
 **Owns:** turning a CoralNet scrape into the annotations and images tables and the id2name JSON; checking each raw external release and writing it to its S3 prefix; staging the external datasets, the MERMAID benthic taxonomy and the `mermaid`, `coralscapes_v2` and `ucsd_mosaics` versions, and promoting them to `mermaid-ic-datasets`. The CoralNet code is in `segdata_etl/datasets/coralnet/` (the CLI stages are in `build.py`). The curation inputs, `image_blacklist.parquet` and `annotation_overrides.parquet`, are package data in `segdata_etl/datasets/coralnet/curate/data/`. The raw-release ingest modules are in `segdata_etl/ingest/`. The versioned external and uniform dataset modules are in `segdata_etl/datasets/`, with the shared external steps in `datasets/external.py` and the curated label maps in `label_maps/curated/<name>.csv`. `promote` is in `segdata_etl/promote.py`, and `features attach` in `segdata_etl/features.py`. The taxonomy snapshot is `segdata_etl/taxonomy.py`. The shared helpers are in `segdata_etl/common/`: `images.py`, `jpeg_header.py`, `release.py` (the `ingest` S3 writes, and the shared `INGEST_BUCKET`, `ingest_prefix(name)`, `MANIFEST_NAME` and `CLASSES_NAME`), `ingested.py` (the reader of an ingest prefix), `versions.py` (the image store and label counts that the versioned builds share), `labels.py`, `manifest.py` (the typed ingest manifest), and for the uniform builds `s3_objects.py`, `stage.py` and `hf_dense.py`:
   - `s3_objects.py`: write-once S3 copy and put. Each write sends `IfNoneMatch="*"`; a key that already holds the same content counts as done, and other content raises `ObjectConflict`. Also `make_s3_client`, the client every `segdata` command uses: adaptive retries, and for a command with `--workers` a connection pool of the worker count plus 4.
-  - `stage.py`: the version naming and the default cache directory. `segdata_spec.stage` writes the staged files.
+  - `stage.py`: the version naming, the default cache directory and the shared staging step. `publishable_repo` finds the repository root (`find_repo_root`), probes the git state and refuses a dirty or unpushed tree. `stage_version` names the version, stages it with `segdata_spec.stage`, writes the copy and upload plans and prints the `version:` and `manifest_sha256:` lines.
   - `hf_dense.py`: the shared build of a dense dataset from a pinned Hugging Face revision, used by `coralscapes_v2` and `ucsd_mosaics`.
 **Does not own:** downloading CoralNet. That is [`coralnet-scraper`](../coralnet-scraper/README.md). Nor the MERMAID parquet or the Hugging Face datasets, except as the sources of the uniform `mermaid`, `coralscapes_v2` and `ucsd_mosaics` builds.
 **Boundary:** The root `tests/test_package_boundaries.py` enforces these rules (run with the root suite): `segdata_etl` does not import `mermaidseg`; `mermaidseg` and `scripts` import neither `segdata_etl` nor `coralnet_scraper`; `coralnet_scraper` imports neither `mermaidseg` nor `segdata_etl`. Only `segdata_etl/datasets/coralnet/` may import `coralnet_scraper`, for its configuration and S3 key layout. The boundary test enforces this, so `common/`, `ingest/` and the external and uniform dataset modules stay free of it. The `segdata` CLI loads the CoralNet build code, and with it `coralnet_scraper` and `ibis`, only when a `build coralnet` stage runs. The argparse wiring is in `datasets/coralnet/commands.py`, which imports neither. A root `uv sync` does not install the package.
@@ -172,11 +172,14 @@ The command reads `coralnet_annotations_<run>.parquet`, `coralnet_images_<run>.p
 | `--stage-dir` | required | Local directory the version is staged in. |
 | `--build-run` | `20260623_nogit` | Build run under `etl-outputs/coralnet/` to stage. |
 | `--source-ids 1,2,3` | all | Keep only these sources of the build run. |
-| `--parent-version`, `--parent-manifest-sha256` | none | A `coralnet-raw` version to reuse, staged under `--stage-dir`. Give both or neither. |
+| `--parent-version`, `--parent-manifest-sha256` | none | A `coralnet-raw` version to reuse, staged under `--stage-dir` or published. Give both or neither. |
+| `--cache-dir` | `outputs/segdata-cache` | Where a published parent that is not staged is synced to. |
 | `--workers` | `MERMAID_CORALNET_ETL_WORKERS`, else 16 | Concurrent S3 workers. |
 | `-v`, `--verbose` | off | Debug logging. |
 
 One flag of the parent pin without the other is a usage error (exit 2) before any S3 read.
+
+A parent staged under `--stage-dir` is read from there and needs no S3 access. Otherwise the command syncs the parent's manifest and tables from `mermaid-ic-datasets` into `--cache-dir` and checks them against the pin, so a published parent needs S3 read access. The stage dir wins when both hold the parent. A manifest that differs from the pin raises `PinMismatch`.
 
 The version holds:
 
@@ -199,7 +202,7 @@ With a parent pin, an image the build keeps whose scrape original is gone is car
 Because a carried image needs no original, the scrape originals of already-published images can be deleted without breaking a later raw build. Delete in this order:
 
 1. Publish the parent version.
-2. Stage the new raw version with the parent pin.
+2. Stage the new raw version with the parent pin. A parent that is not staged is synced into `--cache-dir`.
 3. Check `carried_from_parent` and `source_missing` in the staged manifest's `stats.dropped`.
 4. Promote the new version.
 5. Delete originals, only those whose `image_id` the published parent holds.
@@ -347,7 +350,7 @@ uv run --package segdata-etl segdata split leakage \
 
 ### Stage a version
 
-Run from the repository root. S3 access uses the default boto3 credential chain. Each build reads the bucket to check that its version name is free.
+Run from the repository root. S3 access uses the default boto3 credential chain. Each build refuses a dirty or unpushed git tree before any S3 call, reads the bucket to check that its version name is free, and ends by printing `version: <version>` and `manifest_sha256: <sha256>`.
 
 ```bash
 uv run --package segdata-etl segdata build <dataset> --stage-dir <stage> ...
@@ -399,7 +402,7 @@ A vector that is present but refused (unreadable, wrong width, or missing a poin
 
 The build fails when no file in the pinned revision matches the shard pattern. It also fails when a `.parquet` under the shard directory does not match the pattern. The shard directory is `instances/` for `coralscapes_v2` and `data/` for `ucsd_mosaics`.
 
-The manifest's `stats.dropped` counts what the build left out:
+The manifest's `stats.dropped` counts what the build left out. `image_unreadable_header` is recorded even when it is 0:
 
 | Dataset | Key | Count |
 |---|---|---|
@@ -603,7 +606,7 @@ The raw files to download and their layout are in [External datasets](#external-
 
 `segdata build <name>` stages an immutable dataset version in the `segdata_spec` uniform format from the prefix that `segdata ingest <name>` wrote. `<name>` is `catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` or `benthos_yuval`. The build never writes to S3, and it copies no image. [Promote a version](#promote-a-version) publishes it. The code is in `segdata_etl/datasets/`; the shared steps are in `datasets/external.py`. The format and the publish rules are in the [segdata-spec README](../segdata-spec/README.md).
 
-The build reads the ingest prefix from `--ingest-bucket` and the pinned taxonomy from `mermaid-ic-datasets`, so the taxonomy must be published before you stage a dataset. The build refuses a taxonomy pin whose manifest is not in `mermaid-ic-datasets`, even when `--cache-dir` already holds it. It maps the dataset's labels to the taxonomy with the curated map `segdata_etl/label_maps/curated/<name>.csv`. It stages the tables and the plan file `copies.jsonl` under `<stage>/mermaid-ic-datasets/datasets/<name>/<version>/`. Benthos also stages its masks, with `uploads.jsonl`. The build ends by printing two lines:
+The build reads the ingest prefix from `--ingest-bucket` and the pinned taxonomy from `mermaid-ic-datasets`, so the taxonomy must be published before you stage a dataset. The build refuses a taxonomy pin whose manifest is not in `mermaid-ic-datasets`, even when `--cache-dir` already holds it. It maps the dataset's labels to the taxonomy with the curated map `segdata_etl/label_maps/curated/<name>.csv`. It stages the tables and the plan file `copies.jsonl` under `<stage>/mermaid-ic-datasets/datasets/<name>/<version>/`. Benthos also stages its masks, with `uploads.jsonl`. The build ends by printing two lines, as every build that stages a version does (`build coralnet raw`, the uniform and the external builds):
 
 ```text
 version: <YYYYMMDD-sha7>
@@ -626,9 +629,9 @@ uv run --package segdata-etl segdata build <name> --stage-dir <stage> \
 | `--ingest-bucket` | `dev-datamermaid-sm-sources` | Bucket that holds the ingest prefix. |
 | `-v`, `--verbose` | off | Debug logging. |
 
-An image whose header cannot be read is dropped with its points. The count is `stats.dropped["image_unreadable_header"]` in the manifest. The other `stats.dropped` counts are copied from the ingest manifest's `ingestion.dropped`. The manifest's `source` records the citation and licence from the ingest manifest's `source`, with `type` `ingest-prefix` (versions published earlier record `legacy-prefix`).
+An image whose header cannot be read is dropped with its points. The count is `stats.dropped["image_unreadable_header"]` in the manifest, recorded as 0 when no image was dropped. The other `stats.dropped` counts are copied from the ingest manifest's `ingestion.dropped`. The manifest's `source` records the citation and licence from the ingest manifest's `source`, with `type` `ingest-prefix` (versions published earlier record `legacy-prefix`).
 
-The build refuses a dirty or unpushed git tree. Publish the taxonomy first, then stage each dataset, then [promote](#promote-a-version) it.
+The build refuses a dirty or unpushed git tree before any S3 call. Publish the taxonomy first, then stage each dataset, then [promote](#promote-a-version) it.
 
 ## External datasets
 
