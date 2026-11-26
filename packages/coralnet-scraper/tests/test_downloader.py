@@ -2114,3 +2114,125 @@ def test_validate_image_bytes_returns_the_format_and_leaves_the_buffer_at_the_st
 def test_validate_image_bytes_rejects_an_empty_buffer():
     with pytest.raises(ImageInvalid, match="empty body"):
         validate_image_bytes(io.BytesIO())
+
+
+# ---------------------------------------------------------------------------
+# Header-only exports and unusable saved chunks
+# ---------------------------------------------------------------------------
+
+_HEADER_ONLY = "Name,Row,Column,Label ID\n"
+
+
+def _status_refs(statuses: dict[int, str]) -> list[ImageRef]:
+    """One image ``<n>`` per page ``n``, titled ``img<n>.jpg - <status>``."""
+    return [ImageRef(n, f"img{n}.jpg - {status}", n) for n, status in statuses.items()]
+
+
+def _serve_by_page(answers: dict[int, list[str]]) -> tuple[dict[int, int], Callable, Callable]:
+    """GET/POST handlers for the paginated export; each page serves its answers in order.
+
+    The last answer of a page repeats. Returns the per-page serve counts with the handlers.
+    """
+    served = dict.fromkeys(answers, 0)
+
+    def get(url: str, timeout: int | None = None, **_: object) -> MagicMock | requests.Response:
+        if "/export/serve/" not in url:
+            page = int(url.rsplit("=", 1)[1]) if "?page=" in url else 1
+            return _mock_response(text=_browse_page(f"csrf{page}"))
+        page = int(url.rsplit("=t", 1)[1])
+        queue = answers[page]
+        served[page] += 1
+        return _csv_response(queue[min(served[page], len(queue)) - 1])
+
+    def post(url: str, *, data: dict, **_: object) -> MagicMock:
+        page = data["csrfmiddlewaretoken"].removeprefix("csrf")
+        return _mock_response(json_data={"session_data_timestamp": f"t{page}"})
+
+    return served, get, post
+
+
+def _rows(page: int) -> str:
+    return _ann_csv([(f"img{page}.jpg", page, page, 7)])
+
+
+def _saved_names(fake_s3, key: tuple[str, str]) -> list[str]:
+    return pd.read_csv(io.BytesIO(fake_s3.objects[key]))["Name"].tolist()
+
+
+def test_a_header_only_page_export_with_a_confirmed_image_is_exported_again(
+    paginated_downloader, fake_s3
+):
+    dl = paginated_downloader
+    refs = _status_refs({1: "Confirmed", 2: "Confirmed"})
+    served, get, post = _serve_by_page({1: [_rows(1)], 2: [_HEADER_ONLY, _rows(2)]})
+
+    with _mock_paginated_session(dl, get=get, post=post):
+        ok = dl.download_annotations_paginated(1, "b", "p", refs=refs, page_workers=1)
+
+    assert ok is True
+    assert served[2] == 2
+    assert _saved_names(fake_s3, ("b", f"{_PARTIAL}page-2.csv")) == ["img2.jpg"]
+    assert _saved_names(fake_s3, _BULK_KEY) == ["img1.jpg", "img2.jpg"]
+
+
+def test_a_header_only_page_export_without_a_confirmed_image_is_accepted(
+    paginated_downloader, fake_s3
+):
+    dl = paginated_downloader
+    refs = _status_refs({1: "Confirmed", 2: "Unconfirmed"})
+    served, get, post = _serve_by_page({1: [_rows(1)], 2: [_HEADER_ONLY, _rows(2)]})
+
+    with _mock_paginated_session(dl, get=get, post=post):
+        ok = dl.download_annotations_paginated(1, "b", "p", refs=refs, page_workers=1)
+
+    assert ok is True
+    assert served[2] == 1
+    assert _saved_names(fake_s3, _BULK_KEY) == ["img1.jpg"]
+
+
+def test_a_confirmed_page_that_stays_header_only_fails_the_export(paginated_downloader, fake_s3):
+    dl = paginated_downloader
+    refs = _status_refs({1: "Confirmed", 2: "Confirmed"})
+    served, get, post = _serve_by_page({1: [_rows(1)], 2: [_HEADER_ONLY]})
+
+    with _mock_paginated_session(dl, get=get, post=post):
+        ok = dl.download_annotations_paginated(1, "b", "p", refs=refs, page_workers=1)
+
+    assert ok is False
+    assert served[2] > 1
+    assert _BULK_KEY not in fake_s3.objects
+
+
+def test_a_header_only_bulk_export_with_a_confirmed_image_is_exported_again(
+    paginated_downloader, fake_s3
+):
+    dl = paginated_downloader
+    refs = _status_refs({1: "Confirmed"})
+    served, get, post = _serve_by_page({1: [_HEADER_ONLY, _rows(1)]})
+
+    with _mock_paginated_session(dl, get=get, post=post):
+        ok = dl.download_annotations(1, "b", "p", refs=refs, total_images=1, points_per_image=1)
+
+    assert ok is True
+    assert served[1] == 2
+    assert _saved_names(fake_s3, _BULK_KEY) == ["img1.jpg"]
+
+
+@pytest.mark.parametrize(
+    "saved",
+    [b"", _HEADER_ONLY.encode(), b"Row,Column,Label ID\n1,1,7\n"],
+    ids=["zero-bytes", "header-only", "no-name-column"],
+)
+def test_an_unusable_saved_chunk_is_exported_again(paginated_downloader, fake_s3, saved):
+    dl = paginated_downloader
+    refs = _status_refs({1: "Confirmed", 2: "Confirmed"})
+    fake_s3.put("b", f"{_PARTIAL}page-1.csv", saved)
+    fake_s3.put("b", f"{_PARTIAL}page-2.csv", _rows(2).encode())
+    served, get, post = _serve_by_page({1: [_rows(1)], 2: [_rows(2)]})
+
+    with _mock_paginated_session(dl, get=get, post=post):
+        ok = dl.download_annotations_paginated(1, "b", "p", refs=refs, page_workers=1)
+
+    assert ok is True
+    assert served == {1: 1, 2: 0}
+    assert _saved_names(fake_s3, _BULK_KEY) == ["img1.jpg", "img2.jpg"]

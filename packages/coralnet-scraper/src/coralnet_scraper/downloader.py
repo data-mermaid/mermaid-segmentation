@@ -181,13 +181,42 @@ def decode_export_csv(resp: requests.Response) -> pd.DataFrame:
         df = pd.read_csv(io.StringIO(resp.content.decode("utf-8-sig")))
     except (UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as e:
         raise ContentError(f"export/serve body is not a UTF-8 CSV: {type(e).__name__}") from e
+    _check_export_columns(df)
+    return df
+
+
+def _check_export_columns(df: pd.DataFrame) -> None:
+    """Raise :class:`ContentError` if an export frame has a bad column or a row without a name."""
     if any("<" in str(c) or str(c).startswith("Unnamed") for c in df.columns):
         raise ContentError("export CSV has an HTML or unnamed column")
     if "Name" not in df.columns:
         raise ContentError("export CSV has no Name column")
     if df["Name"].isna().any():
         raise ContentError("export CSV has rows without a Name")
-    return df
+
+
+def _check_export_has_rows(df: pd.DataFrame) -> None:
+    """Raise :class:`ContentError` if an export that must have rows is header-only."""
+    if df.empty:
+        raise ContentError("export has no rows although an image is Confirmed")
+
+
+def _needs_rows(refs: list[ImageRef]) -> bool:
+    """Return whether an export of ``refs`` must have rows: one of them is Confirmed."""
+    return any(r.name.endswith(" - Confirmed") for r in refs)
+
+
+def _is_usable_chunk(chunk: pd.DataFrame | None, page_refs: list[ImageRef]) -> bool:
+    """Return whether a saved page chunk can be reused for the page of ``page_refs``."""
+    if chunk is None:
+        return False
+    try:
+        _check_export_columns(chunk)
+        if _needs_rows(page_refs):
+            _check_export_has_rows(chunk)
+    except ContentError:
+        return False
+    return True
 
 
 def _export_timestamp(resp: requests.Response) -> str:
@@ -725,8 +754,8 @@ class CoralNetDownloader:
 
         Returns:
             True on success; False on failure, after logging the error. The export must
-            pass :func:`decode_export_csv` and name only images of ``refs``; an export that
-            does not, after the attempts of :meth:`_export_validated`, uploads nothing.
+            pass :func:`decode_export_csv`, name only images of ``refs`` and have rows when
+            one of them is Confirmed; an export that does not, after the attempts of :meth:`_export_validated`, uploads nothing.
         """
         try:
             prep_timeout = export_prep_timeout_seconds(total_images, points_per_image)
@@ -767,6 +796,7 @@ class CoralNetDownloader:
                 _export_names(refs),
                 prep_timeout=prep_timeout,
                 serve_timeout=serve_timeout,
+                require_rows=_needs_rows(refs),
             )
             key = s3_io.object_key_annotation_csv(s3_prefix, source_id)
             _upload_csv(self.s3, bucket_name, key, df_annotations)
@@ -791,7 +821,8 @@ class CoralNetDownloader:
         multi-hour blocking wait of the bulk ``image_select_type=all`` export.
         Pages are exported across ``page_workers`` threads, each sleeping
         :data:`_PAGE_DELAY_SECONDS` after a round trip. Each finished page is saved as
-        ``_partial/page-<n>.csv``; a page with a saved chunk is not exported again.
+        ``_partial/page-<n>.csv``; a page with a usable saved chunk is not exported again,
+        and one with an unusable chunk is exported again (see :meth:`_saved_chunk_pages`).
         ``annotations.csv`` is assembled from the chunks in page order once all exist.
 
         Args:
@@ -807,7 +838,7 @@ class CoralNetDownloader:
         """
         try:
             pages = _refs_by_page(refs)
-            saved = self._saved_chunk_pages(source_id, bucket_name, s3_prefix)
+            saved = self._saved_chunk_pages(source_id, bucket_name, s3_prefix, pages)
             todo = {page: page_refs for page, page_refs in pages.items() if page not in saved}
             logger.info(
                 "source %s: paginated export of %d pages, %d already saved",
@@ -835,26 +866,68 @@ class CoralNetDownloader:
             logger.exception("download_annotations_paginated failed source %s", source_id)
             return False
 
-    def _saved_chunk_pages(self, source_id: int, bucket_name: str, s3_prefix: str) -> set[int]:
-        """Return the page numbers whose export chunk is saved in the source's ``_partial/``."""
+    def _saved_chunk_pages(
+        self,
+        source_id: int,
+        bucket_name: str,
+        s3_prefix: str,
+        pages: dict[int, list[ImageRef]],
+    ) -> set[int]:
+        """Return the pages of ``pages`` whose saved export chunk in ``_partial/`` is usable.
+
+        A chunk that cannot be read, lacks a ``Name`` column or has no rows for a page with a
+        Confirmed image is deleted, so its page is exported again. A chunk of a page outside
+        ``pages`` is left alone and not returned.
+        """
         keys = s3_io.object_sizes(self.s3, bucket_name, s3_io.partial_prefix(s3_prefix, source_id))
-        return {int(m.group(1)) for key in keys if (m := _CHUNK_PAGE.search(key))}
+        saved = sorted(
+            page
+            for key in keys
+            if (m := _CHUNK_PAGE.search(key)) and (page := int(m.group(1))) in pages
+        )
+        chunk_keys = [_partial_key(s3_prefix, source_id, f"page-{page}.csv") for page in saved]
+        with ThreadPoolExecutor(max_workers=self.export_workers) as executor:
+            chunks = list(
+                executor.map(lambda k: self._read_saved_chunk(bucket_name, k), chunk_keys)
+            )
+        usable = {
+            page
+            for page, chunk in zip(saved, chunks, strict=True)
+            if _is_usable_chunk(chunk, pages[page])
+        }
+        unusable = [k for page, k in zip(saved, chunk_keys, strict=True) if page not in usable]
+        if unusable:
+            logger.warning("source %s: deleting %d unusable saved chunks", source_id, len(unusable))
+            s3_io.delete_keys(self.s3, bucket_name, unusable)
+        return usable
+
+    def _read_saved_chunk(self, bucket_name: str, key: str) -> pd.DataFrame | None:
+        """Return the saved chunk at ``key``, or None when the key is missing or not a CSV."""
+        try:
+            return s3_io.read_csv_s3(self.s3, bucket_name, key, encoding="utf-8")
+        except (UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError):
+            return None
 
     def _assemble_chunks(
         self, source_id: int, bucket_name: str, s3_prefix: str, pages: list[int]
     ) -> pd.DataFrame:
         """Return the saved export chunks of ``pages`` concatenated in that order.
 
+        The chunks are read across ``self.export_workers`` threads.
+
         Raises:
             FileNotFoundError: If a page has no saved chunk.
         """
-        chunks = []
-        for page in pages:
-            key = _partial_key(s3_prefix, source_id, f"page-{page}.csv")
-            chunk = s3_io.read_csv_s3(self.s3, bucket_name, key)
+        keys = [_partial_key(s3_prefix, source_id, f"page-{page}.csv") for page in pages]
+
+        def read(key: str) -> pd.DataFrame:
+            chunk = s3_io.read_csv_s3(self.s3, bucket_name, key, encoding="utf-8")
             if chunk is None:
                 raise FileNotFoundError(f"s3://{bucket_name}/{key}")
-            chunks.append(chunk)
+            return chunk
+
+        with ThreadPoolExecutor(max_workers=self.export_workers) as executor:
+            chunks = list(executor.map(read, keys))
         return pd.concat(chunks, ignore_index=True)
 
     def _export_pages_parallel(
@@ -953,7 +1026,8 @@ class CoralNetDownloader:
         serve response returns HTML instead of CSV. CoralNet caps ``image_id_list`` at
         100 entries; browse pages have 20.
 
-        ``stop`` ends the export's retries once set (see :meth:`_export_validated`).
+        ``stop`` ends the export's retries once set (see :meth:`_export_validated`). A
+        header-only export of a page with a Confirmed image is exported again.
         """
         form = {
             "image_form_type": "search",
@@ -970,6 +1044,7 @@ class CoralNetDownloader:
             prep_timeout=_PAGE_EXPORT_TIMEOUT,
             serve_timeout=_PAGE_EXPORT_TIMEOUT,
             stop=stop,
+            require_rows=_needs_rows(page_refs),
         )
         time.sleep(_PAGE_DELAY_SECONDS)
         return chunk_df
@@ -985,8 +1060,11 @@ class CoralNetDownloader:
         prep_timeout: int,
         serve_timeout: int,
         stop: threading.Event | None = None,
+        require_rows: bool = False,
     ) -> pd.DataFrame:
         """Return an export whose rows name only ``allowed_names``, retrying the round trip.
+
+        A header-only export is retried like a foreign name when ``require_rows`` is set.
 
         Each further attempt allows ``export_prep`` :data:`_EXPORT_PREP_TIMEOUT_STEP` more
         seconds. A session CoralNet treats as logged out logs in again before the next attempt.
@@ -1004,6 +1082,7 @@ class CoralNetDownloader:
             serve_timeout: Read timeout of the ``export/serve`` GET.
             stop: When set before an attempt after the first, the previous attempt's error
                 is raised without another attempt.
+            require_rows: Whether an export without rows is a content failure.
 
         Raises:
             Exception: The last attempt's error once no attempt is left, it is not
@@ -1034,6 +1113,8 @@ class CoralNetDownloader:
                         expired = True
                         raise
                     _check_export_names(df, allowed_names)
+                    if require_rows:
+                        _check_export_has_rows(df)
                 except Exception as e:
                     last_error = e
                     raise
