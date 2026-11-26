@@ -84,15 +84,21 @@ Run the scraper without flags. It skips each source that has a `_complete.json` 
 
 The scraper skips complete sources, so it does not see changes to them. To pick up the changes:
 
-1. Delete the markers of the sources whose live image count differs from the count in their marker:
+1. List the sources whose live image count differs from the count in their marker. This deletes nothing:
+
+   ```bash
+   uv run --package coralnet-scraper coralnet-scrape invalidate --changed --dry-run
+   ```
+
+2. Check the sources in the `Would invalidate <n> sources` line, then delete their markers:
 
    ```bash
    uv run --package coralnet-scraper coralnet-scrape invalidate --changed
    ```
 
-2. Run the scraper without flags. It redoes the invalidated sources. Image objects already on S3 are skipped.
+3. Run the scraper without flags. It redoes the invalidated sources. Image objects already on S3 are skipped.
 
-`--changed` compares image counts only, so it does not see an annotation change that leaves the count the same. To redo specific sources, use `invalidate --source-ids <id>,<id>,...`. To redo every source, use `invalidate --all`, which forces a full re-export of every source. See [Resume](../../packages/coralnet-scraper/README.md#resume).
+`--changed` compares image counts only, so it does not see an annotation change that leaves the count the same. To redo specific sources, use `invalidate --source-ids <id>,<id>,...`. To redo every source, use `invalidate --all --yes`, which forces a full re-export of every source. Run each with `--dry-run` first. See [Resume](../../packages/coralnet-scraper/README.md#resume).
 
 ### Rebuild under a new version tag
 
@@ -117,7 +123,7 @@ Use this once for a bucket that an earlier version of the scraper filled, so it 
    uv run --package coralnet-scraper coralnet-scrape verify-existing
    ```
 
-   This sends one overview request per source and reads every source's CSVs from S3.
+   This sends one overview request per source and reads every source's CSVs from S3. A source with zero Confirmed images or zero images is logged as skipped, gets no marker, and does not fail the command. Exit code 1 means at least one source failed verification.
 3. Run the scraper without flags. It downloads every source that has no marker again. Image objects already on S3 are skipped.
 
    > **Warning:** `--prune` deletes cannot be undone unless the bucket has S3 versioning enabled. Before step 4, read the `orphan_image_objects:<n>` count in each source's marker.
@@ -129,7 +135,19 @@ Use this once for a bucket that an earlier version of the scraper filled, so it 
       uv run --package coralnet-scraper coralnet-scrape invalidate --source-ids <id>,<id>,...
       ```
 
-   2. Run the scraper with `--prune` on the same sources:
+   2. Run the scraper with `--prune --dry-run` on the same sources. It logs each orphan key as `would prune orphan image object <key>` and deletes nothing:
+
+      ```bash
+      uv run --package coralnet-scraper coralnet-scrape --prune --dry-run --source-ids <id>,<id>,...
+      ```
+
+   3. Check the logged keys. The dry run writes the marker of each source that verifies, so remove the markers again:
+
+      ```bash
+      uv run --package coralnet-scraper coralnet-scrape invalidate --source-ids <id>,<id>,...
+      ```
+
+   4. Run the scraper with `--prune` on the same sources:
 
       ```bash
       uv run --package coralnet-scraper coralnet-scrape --prune --source-ids <id>,<id>,...
@@ -323,7 +341,7 @@ Each version folder holds `manifest.json` and the tables. `segdata split build` 
 |---|---|
 | Scraper exit 1: login failure | Check `CORALNET_USERNAME` and `CORALNET_PASSWORD`, then run again. |
 | Scraper exit 1: a source failed with `cannot access source <id>: …` | The source is missing or private on CoralNet. Running again does not help. The failure does not stop the run. |
-| Scraper stopped with `Run stopped early: circuit_open` (exit 1) | CoralNet is likely down or rejecting requests. Wait, then check the transport tallies in the [run report](../../packages/coralnet-scraper/README.md#run-report). Run the same command again. If the tallies show 429 retries, lower `--requests-per-second`. |
+| Scraper stopped with `Run stopped early: circuit_open` (exit 1) | CoralNet is likely down or rejecting requests, so the [circuit breaker](../../packages/coralnet-scraper/README.md#retries-and-circuit-breaker) stopped the run. Failures such as `overview_forbidden` (HTTP 403) count toward the breaker. Wait, then check the transport tallies in the [run report](../../packages/coralnet-scraper/README.md#run-report). Run the same command again. If the tallies show 429 retries, lower `--requests-per-second`. |
 | Scraper exit 1: a source failed with any other kind, except `verification_failed` | The source has no marker, so run the scraper again without flags. To retry only that source, add `--source-ids <id>`. |
 | Scraper exit 1: a source failed with `verification_failed` | The log lists the [verification codes](../../packages/coralnet-scraper/README.md#verification). The source has no marker and its `_partial/` is discarded. Run the scraper again without flags. If the same codes repeat, check the source on CoralNet. |
 | Scraper exit 1: a source failed with `overview_total_missing` | The source's overview page showed no "Total images" count. Check the source page on CoralNet, then run again. The source is retried on each run until it verifies. |
