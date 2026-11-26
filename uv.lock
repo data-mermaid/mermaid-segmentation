@@ -3717,7 +3717,7 @@ tests = [
 
 [[package]]
 name = "segdata-spec"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/segdata-spec" }
 dependencies = [
     { name = "awscrt" },

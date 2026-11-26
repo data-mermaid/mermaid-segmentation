@@ -13,7 +13,7 @@ A new data source is an ETL module in `segdata_etl/datasets/` that publishes a v
 | `segdata build <name>` | Builds an immutable versioned dataset from that prefix (see [Build a versioned external dataset](#build-a-versioned-external-dataset)). |
 | `segdata build <uniform>` | Stages a uniform-format version of `mermaid`, `coralscapes_v2` or `ucsd_mosaics` on disk (see [Uniform datasets](#uniform-datasets)). |
 | `segdata promote` | Uploads a staged dataset or taxonomy version to `mermaid-ic-datasets` (see [Promote a version](#promote-a-version)). |
-| `segdata features attach` | Copies existing feature vectors into a published version as a feature set (see [Attach a feature set](#attach-a-feature-set)). |
+| `segdata features attach` | Stages existing feature vectors as a feature set of a published version, for `segdata promote` (see [Attach a feature set](#attach-a-feature-set)). |
 | `segdata taxonomy` | Stages the MERMAID benthic taxonomy as a version (see [Taxonomy snapshot](#taxonomy-snapshot)). |
 | `segdata split build`, `segdata split leakage` | Builds and checks the CoralNet split (see [CoralNet split](#coralnet-split)). |
 
@@ -369,7 +369,7 @@ Each dataset:
 
 | Dataset | Flags | Source | Group | Plan file |
 |---|---|---|---|---|
-| `mermaid` | `--annotation-date-cutoff YYYY-MM-DD` (required): keep annotations with `updated_on` on or before that date (UTC); the whole day is included. `--annotations-uri` (default `s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet`). `--parent-version` and `--parent-manifest-sha256`, given together: a staged version whose image rows are reused when the source ETag is unchanged. `--extractor-spec` (required), `--feature-family` and `--allow-missing-features`: see [MERMAID feature set](#mermaid-feature-set). | Images `mermaid/<image_id>.png`, else `.jpg`, in `coral-reef-training`. | `mermaid` for every image. | `copies.jsonl`; `mermaid` also `features.jsonl` |
+| `mermaid` | `--annotation-date-cutoff YYYY-MM-DD` (required): keep annotations with `updated_on` on or before that date (UTC); the whole day is included. `--annotations-uri` (default `s3://coral-reef-training/mermaid/mermaid_confirmed_annotations.parquet`). `--parent-version` and `--parent-manifest-sha256`, given together: a staged version whose image rows are reused when the source ETag is unchanged. `--extractor-spec` (required), `--feature-family` and `--allow-missing-features`: see [MERMAID feature set](#mermaid-feature-set). | Images `mermaid/<image_id>.png`, else `.jpg`, in `coral-reef-training`. | `mermaid` for every image. | `copies.jsonl`; `mermaid` also a feature set |
 | `coralscapes_v2` | `--revision` (default `8a4567b2fbec14882e09aebff63a7a1ca5e24dca`) | `josauder/coralscapesV2`, `instances` config. Licence `apache-2.0`. | The HF split: `train`, `validation` or `test`. | `uploads.jsonl` |
 | `ucsd_mosaics` | `--revision` (default `6a6483841f8ee20bd7d8ee2aa760f10d1e9db704`) | `josauder/UCSD-mosaics-mirror`. Licence CC BY-NC 4.0, under UC San Diego Library's copyright terms. | The `site` column, lowercased. | `uploads.jsonl` |
 
@@ -379,7 +379,7 @@ With `--parent-version`, a pair keeps the `label_id` it has in the parent's `lab
 
 #### MERMAID feature set
 
-`build mermaid` also stages a feature set from the pyspacer feature vectors that the MERMAID platform keeps beside each image, `s3://coral-reef-training/mermaid/<image_id>_featurevector`. The build only reads them. For each kept image it HEADs the vector, reads it, and checks that it is a readable npz, that its width equals the extractor's `feature_dim`, and that it covers every point of the image. The layout of a feature set is in the [segdata-spec README](../segdata-spec/README.md#feature-sets).
+`build mermaid` also stages a feature set from the pyspacer feature vectors that the MERMAID platform keeps beside each image, `s3://coral-reef-training/mermaid/<image_id>_featurevector`. The build gathers the vectors as [`features attach`](#attach-a-feature-set) does, with that path as its source template: a vector already in the family is adopted, and every vector is read and checked before anything is staged. The build writes nothing to S3. The layout of a feature set is in the [segdata-spec README](../segdata-spec/README.md#feature-sets).
 
 | Flag | Default | Effect |
 |---|---|---|
@@ -387,14 +387,13 @@ With `--parent-version`, a pair keeps the `label_id` it has in the parent's `lab
 | `--feature-family` | `efficientnet-v1` | Family the set is published under, a lowercase key segment. |
 | `--allow-missing-features` | off | Keep an image that has no source vector, and leave it out of the feature index. Without the flag, the build stops and names the images. |
 
-A vector that is present but refused (unreadable, wrong width, or missing a point) stops the build whether or not the flag is set. A build that stops stages nothing. The build stages these files besides the tables and `copies.jsonl`, under `<stage>/mermaid-ic-datasets/datasets/mermaid/<version>/`:
+A vector that is present but refused (unreadable, wrong width, or missing a point) stops the build whether or not the flag is set. A build that stops stages nothing. The feature set goes under `<stage>/mermaid-ic-datasets/datasets/mermaid/<version>/features/<family>/`:
 
 | File | Content |
 |---|---|
-| `features.jsonl` | One server-side copy per vector, in the shape of a `copies.jsonl` line, from `coral-reef-training` to `features/<store>/<family>/<image_id>.featurevector` in `mermaid-ic-datasets`. |
-| `features/<family>/index.parquet` | The feature index: one row per copied vector. |
-| `features/<family>/_extractor_spec.json` | The extractor spec from `--extractor-spec`. |
-| `features/<family>/stage.json` | `{"allow_missing": <bool>}`: the value of `--allow-missing-features`, which promote passes to the publish. |
+| `index.parquet` | The feature index: one row per vector, adopted or to copy. |
+| `manifest.json` | The set manifest. It pins the staged dataset manifest and records the extractor spec. Promote publishes these bytes unchanged. |
+| `copies.jsonl` | One server-side copy per vector that is not already in the family, from `coral-reef-training` to `features/<store>/<family>/<image_id>.featurevector` in `mermaid-ic-datasets`. The lines have the shape of the version's `copies.jsonl`. |
 
 `coralscapes_v2` and `ucsd_mosaics` are dense datasets. The build stages each image and mask byte for byte under `<stage>/mermaid-ic-datasets/images/<dataset>/`, and `uploads.jsonl` lists each staged file. Their labels map to MERMAID benthic attributes through the curated CSVs in `segdata_etl/label_maps/curated/` (`coralscapes_v2.csv`, `ucsd_mosaics.csv`; columns `label_id`, `name`, `mermaid_benthic_attribute`).
 
@@ -423,45 +422,52 @@ uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset <data
 
 A staged version has one of three shapes:
 
-- A version with `copies.jsonl`, `uploads.jsonl` or both, whose plans name every key in `images.parquet`. `copies.jsonl` plans server-side copies of images from S3; `uploads.jsonl` plans uploads of staged files. `promote` writes every image and mask in the `INTELLIGENT_TIERING` storage class; tables and the manifest keep the bucket default. Feature vectors, the optional `features.jsonl` (see below), are written in `STANDARD`.
+- A version with `copies.jsonl`, `uploads.jsonl` or both, whose plans name every key in `images.parquet`. `copies.jsonl` plans server-side copies of images from S3; `uploads.jsonl` plans uploads of staged files. `promote` writes every image and mask in the `INTELLIGENT_TIERING` storage class; tables and the manifest keep the bucket default.
 - A version whose plans leave some keys unnamed. An unnamed key is carried: its image is already published. `promote` accepts carried keys only when the version has a parent on the same image store.
 - A tables-only version, with neither file. Every key is carried.
 
+The version folder can also hold feature sets, one folder for each family under `features/`. Each one is a unit of its own; see [Feature sets in promote](#feature-sets-in-promote).
+
 `promote` writes in this order:
 
-1. Preflight, before any write. It checks the staged tables against `manifest.json`, and refuses a manifest whose `stats.n_images` is 0. It checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name each image and mask key in `images.parquet` at most once and no other key, with the same size and checksums, and checks each staged upload file. Every key that no plan names is carried. For a version with carried keys, it checks that a published parent has the same image store, then HEADs each carried key in the dataset bucket: each must exist with the row's ETag, size and CRC64NVME. It refuses a version whose `manifest.json` is already in the bucket, except in the resume case below. When the manifest pins a taxonomy, it refuses the version unless that taxonomy's `manifest.json` is in the bucket with the pinned sha256. It then HEADs every planned destination key: each image, mask and feature key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes. The feature-set checks are under [Feature sets](#feature-sets-in-promote).
+1. Preflight, before any write. It checks the staged tables against `manifest.json`, and refuses a manifest whose `stats.n_images` is 0. It checks that `copies.jsonl` and `uploads.jsonl`, whichever are staged, together name each image and mask key in `images.parquet` at most once and no other key, with the same size and checksums, and checks each staged upload file. Every key that no plan names is carried. For a version with carried keys, it checks that a published parent has the same image store, then HEADs each carried key in the dataset bucket: each must exist with the row's ETag, size and CRC64NVME. It refuses a version whose `manifest.json` is already in the bucket with other bytes. When the manifest pins a taxonomy, it refuses the version unless that taxonomy's `manifest.json` is in the bucket with the pinned sha256. It then HEADs every planned destination key: each image and mask key, and each table key under `datasets/<dataset>/<version>/`. It refuses when a key already exists with a different ETag, size or CRC64NVME, and names up to five such keys. A key that exists with a matching fingerprint passes, so a rerun after a partial failure completes. The feature-set checks are under [Feature sets](#feature-sets-in-promote).
 2. The images and masks: server-side copies for `copies.jsonl`, uploads for `uploads.jsonl`. A tables-only version writes none, and a carried key is never written.
-3. The feature vectors of `features.jsonl`, when staged.
-4. The tables.
-5. `manifest.json`.
-6. The feature set, when staged: `_extractor_spec.json`, `index.parquet` and the set's `manifest.json`, written by the segdata-spec feature-set publish against the dataset manifest just written.
+3. The tables.
+4. `manifest.json`.
+5. Each staged feature set, in family order (see below).
 
-Every write is write-once. A key that already holds the planned content counts as done, and other content stops the run with `ObjectConflict`. A version is visible only when its `manifest.json` exists. If `promote` stops before step 5, run it again: it continues from the objects already written.
+Every write is write-once. A key that already holds the planned content counts as done, and other content stops the run with `ObjectConflict`. A version is visible only when its `manifest.json` exists. If `promote` stops, run it again: it continues from the objects already written.
+
+A unit whose `manifest.json` is already published with the staged bytes is done, and `promote` skips it. A rerun therefore writes only what is left, for example the feature sets after the dataset. A unit published with other bytes is refused. When every staged unit is already published, `promote` refuses the version as already published.
 
 #### Feature sets in promote
 
-A staged version has a feature set when `features.jsonl` exists. Preflight then needs exactly one family folder under `features/` in the version folder, with `index.parquet`, `_extractor_spec.json` and `stage.json`. It refuses, before any write, when:
+Each `features/<family>/` folder that holds a `manifest.json` is a feature set. `segdata_spec.stage.stage_feature_set` wrote it and already checked the index against the version (see the [segdata-spec README](../segdata-spec/README.md#feature-sets)). A stage can hold feature sets without the dataset files: `promote` then reads the dataset manifest from the bucket, and refuses when the version is not published.
 
-- `stage.json` has no boolean `allow_missing`, or the extractor spec lacks one of `class_path`, `crop_size`, `feature_dim` and `weights_sha256`.
-- The index does not conform to the feature index schema, names an image that is not in `images.parquet`, repeats an image or a key, or holds a key that is not that image's file under `features/<store>/<family>/`.
-- The index leaves out an image and `allow_missing` is false.
-- The keys of `features.jsonl` differ from the keys of the index, a line names a bucket other than `mermaid-ic-datasets`, or a line's ETag, size or CRC64NVME differs from the index row.
-- The family's `_extractor_spec.json` is already in the bucket and names another extractor than the staged spec: `ExtractorMismatch`, listing each differing identity field with its stored and staged value. Publish the set under a new family name instead.
+Preflight refuses, before any write, when:
 
-**Resume.** If `manifest.json` is already published and its bytes equal the staged `manifest.json`, and the version stages a feature set, `promote` skips the images, tables and manifest. It checks the feature destinations, copies the vectors and publishes the set. This finishes a run that stopped after step 5. Any other published version is refused: one published with other manifest bytes, or one that stages no feature set.
+- The set manifest pins another dataset manifest than the staged one, or than the published one when no dataset is staged.
+- `index.parquet` differs from its entry in the set manifest (`ChecksumMismatch`).
+- A line of the family's `copies.jsonl` names a key that is not in the index, names a key twice, names a bucket other than `mermaid-ic-datasets`, or differs from its index row in ETag, size or CRC64NVME.
+- An index key that no line names is not already in `mermaid-ic-datasets` with its row's ETag, size and CRC64NVME. Such a key is carried, as a carried image is.
+- The family's `_extractor_spec.json` is already in the bucket and names another extractor than the set manifest: `ExtractorMismatch`, listing each differing identity field. Stage the set under a new family name instead.
+- A planned vector key or the index key already holds other content.
+
+For each set, `promote` claims the family with `segdata_spec.features.claim_extractor`, which writes `_extractor_spec.json` from the set manifest's extractor. It then copies the vectors in the `STANDARD` storage class, puts `index.parquet`, and puts the set's `manifest.json` last.
 
 ## Attach a feature set
 
-`segdata features attach` publishes feature vectors that already exist as a feature set of a published dataset version. An image whose file already exists in the family, at `features/<store>/<family>/<image_id>.featurevector` in `mermaid-ic-datasets`, adopts that file; every other image's vector is copied in from the source that the template names. The layout of a feature set is in the [segdata-spec README](../segdata-spec/README.md#feature-sets). Use it for a version that was published without features; `build mermaid` stages one with the version. The code is in `segdata_etl/features.py`.
+`segdata features attach` stages feature vectors that already exist as a feature set of a published dataset version. `segdata promote` then publishes the set. An image whose file already exists in the family, at `features/<store>/<family>/<image_id>.featurevector` in `mermaid-ic-datasets`, adopts that file. Every other image's vector is copied in from the source that the template names. The layout of a feature set is in the [segdata-spec README](../segdata-spec/README.md#feature-sets). Use it for a version that was published without features; `build mermaid` stages one with the version. The command is in `segdata_etl/features.py`, and the shared gathering code in `segdata_etl/common/featurevector.py`.
 
 ```bash
 uv run --package segdata-etl segdata features attach <dataset> \
   --version <v> --manifest-sha256 <sha> \
   --family <family> --source-template <s3://bucket/key-template> \
-  --extractor-spec <spec.json>
+  --extractor-spec <spec.json> --stage-dir <stage>
+uv run --package segdata-etl segdata promote --stage-dir <stage> --dataset <dataset> --version <v>
 ```
 
-The command syncs the version's tables (not its images) to `--cache-dir`, claims the family's extractor spec, and writes feature files and the set to `mermaid-ic-datasets` only after every other check passes. The sources are only read. `coral-reef-training` is owned by mermaid-api, so nothing in this command writes to it. The command refuses a dirty or unpushed git tree before any S3 call, and records the command line in the set's manifest as its ETL provenance.
+The command syncs the version's tables (not its images) to `--cache-dir` and writes nothing to S3. It reads the sources, the family files and the family's `_extractor_spec.json`. It refuses a dirty or unpushed git tree before any S3 call, and records the command line in the set's manifest as its ETL provenance.
 
 | Flag | Default | Effect |
 |---|---|---|
@@ -470,6 +476,7 @@ The command syncs the version's tables (not its images) to `--cache-dir`, claims
 | `--family` | required | Feature family, a lowercase key segment. Published sets are add-only, so a corrected set needs a new family. |
 | `--source-template` | required | `s3://bucket/key` template that names the source vector of each image that adopts no family file. |
 | `--extractor-spec` | required | JSON file with `class_path`, `crop_size`, `feature_dim`, `weights_uri` and `weights_sha256`. |
+| `--stage-dir` | required | Local directory the set is staged in, under the version's folder. Pass the same directory to `promote`. |
 | `--allow-missing` | off | Leave out of the set an image that has neither a family file nor a template source. Without it, such images stop the command. |
 | `--workers` | 16 | Concurrent S3 requests. |
 | `--cache-dir` | `outputs/segdata-cache` | Local cache for the synced tables. |
@@ -488,23 +495,22 @@ The CoralNet template needs `source_id` and `image_id` in the image rows' `attrs
 
 ### Phases
 
-1. Read the version's `images.parquet` and `points.parquet`. A version without `points.parquet` is refused.
-   Claim the family: write `_extractor_spec.json` once, or stop with `ExtractorMismatch` when the stored spec names another extractor. Nothing is adopted or copied into a family claimed by another extractor.
-2. HEAD each image's family file in `mermaid-ic-datasets`. An image whose file exists adopts it: its template source is never called and nothing is copied for it.
-3. Resolve the template for the other images and HEAD their sources. Absent sources are collected; without `--allow-missing` they stop the command, naming the count and the first ten image ids.
-4. For each `images.parquet` group in turn, GET the vectors of that group's images, adopted files and template sources alike, guarded by the HEAD ETag, and verify them. Only one group's points are held in memory at a time.
-5. Copy each verified template source, server side, to `features/<store>/<family>/<image_id>.featurevector` in `STANDARD` storage class, write-once and guarded by the source ETag.
-6. Publish once, indexing adopted and copied files together: `index.parquet` and the set's `manifest.json`.
+1. Refuse a set that is already published. Read the version's `images.parquet` and `points.parquet`; a version without `points.parquet` is refused.
+2. Read the family's `_extractor_spec.json`, if it exists. Stop with `ExtractorMismatch` when it names another extractor.
+3. HEAD each image's family file in `mermaid-ic-datasets`. An image whose file exists adopts it: its template source is never called and nothing is copied for it.
+4. Resolve the template for the other images and HEAD their sources. Absent sources are collected. Without `--allow-missing` they stop the command, which names the count and the first ten image ids.
+5. For each `images.parquet` group in turn, GET the vectors of that group's images, adopted files and template sources alike, guarded by the HEAD ETag, and verify them. Only one group's points are held in memory at a time.
+6. Stage the set: `index.parquet` with adopted and copied files together, the set's `manifest.json`, and `copies.jsonl` with one write-once copy for each verified template source, guarded by the source ETag.
 
 ### What is verified
 
-A vector is usable when it is a readable npz, its `feat` array is `feature_dim` wide, and it holds every `(row, col)` point that `points.parquet` lists for its image. An adopted file must also have the ETag, size and CRC64NVME of its bytes, as a copy must; its index row records them. A file without a CRC64NVME checksum is refused: writers put feature files with `ChecksumAlgorithm='CRC64NVME'`. The command reads all vectors and reports every refused vector, by source key and reason, in one error before it copies any. A source that changes between its HEAD and its read stops the command with `SourceChanged`.
+A vector is usable when it is a readable npz, its `feat` array is `feature_dim` wide, and it holds every `(row, col)` point that `points.parquet` lists for its image. An adopted file must also have the ETag, size and CRC64NVME of its bytes, as a copy must; its index row records them. A file without a CRC64NVME checksum is refused: writers put feature files with `ChecksumAlgorithm='CRC64NVME'`. The command reads all vectors and reports every refused vector, by source key and reason, in one error before it stages anything. A source that changes between its HEAD and its read stops the command with `SourceChanged`.
 
 With `--allow-missing`, the images with neither a family file nor a source vector are counted in the set's `n_missing` and have no index row.
 
 ### Resume
 
-A copy to a key that already holds the planned content counts as done, and a key that holds other content stops the command with `ObjectConflict`. After a stop during phase 5, run the same command again: the files already copied are adopted on the rerun and the rest are copied, then the set is published. The command verifies all sources again on each run.
+`promote` resumes the set as it resumes a dataset: after a stop, run it again, and the copies already in place count as done. A staged set is never staged again; to restage it, delete its folder from the stage directory first. A rerun of `attach` with a new stage adopts the family files that an earlier promote copied.
 
 ## Ingest an external dataset
 
