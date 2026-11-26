@@ -6,15 +6,22 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
 
 _REPO = Path(__file__).resolve().parents[2]
 _CSV = _REPO / "configs" / "class_to_concepts.csv"
+_DATA_CONFIG = _REPO / "configs" / "data_config.yaml"
 _TAXONOMY = ["kingdom", "phylum", "order", "family", "genus", "species"]
 
 
 @pytest.fixture(scope="module")
 def table() -> pd.DataFrame:
     return pd.read_csv(_CSV, dtype=str, keep_default_na=False)
+
+
+@pytest.fixture(scope="module")
+def configured_datasets() -> set[str]:
+    return set(yaml.safe_load(_DATA_CONFIG.read_text())["data"]["datasets"])
 
 
 # Sediment is sand with rubble left unknown. Branching and calcareous algae has
@@ -75,3 +82,8 @@ def test_chondrilla_is_live(table):
     rows = table[table["source_label_class_name"].str.startswith("chondrilla")]
     assert len(rows) >= 1
     assert (rows["live"] == "TRUE").all()
+
+
+def test_every_source_is_a_configured_dataset(table, configured_datasets):
+    sources = set(table["source_dataset_source"])
+    assert sources <= configured_datasets, sorted(sources - configured_datasets)
