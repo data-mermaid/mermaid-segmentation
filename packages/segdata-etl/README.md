@@ -543,7 +543,7 @@ Every ingest command writes the same set of files under `s3://<bucket>/<prefix>/
 | `schema.parquet_columns` | Each parquet column and what it holds. |
 | `ingestion` | What the run did: `dropped` (drop name to count), `images_uploaded` and `details`, which differ for each dataset (see [Ingestion keys](#ingestion-keys)). |
 
-The manifest is a typed model, `IngestManifest` in `segdata_etl/common/manifest.py`. `segdata build` reads it with `read_ingest_manifest`, and refuses a manifest of any other shape with a `ValidationError`. Re-ingest a prefix that holds an older manifest before you build from it.
+The manifest is a typed model, `IngestManifest` in `segdata_etl/common/manifest.py`. `segdata build` reads it with `read_ingest_manifest`, and raises a `ValueError` in two cases: the manifest is not the shape `segdata ingest` writes (the message names the manifest's S3 path and says to re-run `segdata ingest <name>`), or its `dataset_name` or `s3.prefix` does not match the dataset being built. The bucket is not compared. Re-ingest a prefix that holds an older manifest before you build from it.
 
 The defaults are `--bucket dev-datamermaid-sm-sources` and `--prefix external_validation_datasets/<name>`.
 
@@ -629,6 +629,8 @@ uv run --package segdata-etl segdata build <name> --stage-dir <stage> \
 | `--ingest-bucket` | `dev-datamermaid-sm-sources` | Bucket that holds the ingest prefix. |
 | `-v`, `--verbose` | off | Debug logging. |
 
+`--ingest-bucket` replaces the `--legacy-bucket` flag.
+
 An image whose header cannot be read is dropped with its points. The count is `stats.dropped["image_unreadable_header"]` in the manifest, recorded as 0 when no image was dropped. The other `stats.dropped` counts are copied from the ingest manifest's `ingestion.dropped`. The manifest's `source` records the citation and licence from the ingest manifest's `source`, with `type` `ingest-prefix` (versions published earlier record `legacy-prefix`).
 
 The build refuses a dirty or unpushed git tree before any S3 call. Publish the taxonomy first, then stage each dataset, then [promote](#promote-a-version) it.
@@ -637,7 +639,7 @@ The build refuses a dirty or unpushed git tree before any S3 call. Publish the t
 
 The source, citation, licence and rebuild steps of each dataset that training reads. [Build a versioned external dataset](#build-a-versioned-external-dataset) and [Uniform datasets](#uniform-datasets) stage the published version. The flags of `segdata ingest` are in [Run an ingest](#run-an-ingest).
 
-The four ingested datasets (Catlin Seaview, Moorea, Pacific, Benthos) go through two steps. `segdata ingest` writes the checked raw release to `s3://dev-datamermaid-sm-sources/external_validation_datasets/<name>/`. `segdata build <name>` stages a version from that prefix. Run the ingest again only when the prefix is lost or the source publishes a new release. Every ingest accepts `--dry-run`, which writes nothing to S3. If the parquet or a JSON file is already on S3, the run stops; `--overwrite` replaces them.
+The four ingested datasets (Catlin Seaview, Moorea, Pacific, Benthos) go through two steps. `segdata ingest` writes the checked raw release to `s3://dev-datamermaid-sm-sources/external_validation_datasets/<name>/`. `segdata build <name>` stages a version from that prefix. Run the ingest again only when the prefix is lost or the source publishes a new release. Every ingest accepts `--dry-run`, which writes nothing to S3. If the parquet or a JSON file is already on S3, the run stops; `--overwrite` replaces them. Prefixes ingested before the typed manifest hold the old manifest shape, so re-ingest `external_validation_datasets/catlin_seaview`, `moorea_labeled_corals`, `pacific_labeled_corals` and `benthos_yuval` before you build from them.
 
 ### Catlin Seaview
 
