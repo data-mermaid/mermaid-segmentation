@@ -207,7 +207,7 @@ def run_batch_download(
         if res.ok:
             probing = False
         if failure_streak > previous_streak and failure_streak >= CIRCUIT_BREAKER_THRESHOLD:
-            if probing or breaker_cooldown_s <= 0:
+            if probing or trip_pending or breaker_cooldown_s <= 0:
                 logger.error(
                     "Stopping the run: %d consecutive sources failed (last: %s)",
                     failure_streak,

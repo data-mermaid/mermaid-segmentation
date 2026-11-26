@@ -436,6 +436,28 @@ def test_a_cooldown_then_an_outage_stops_the_run(fake_s3):
     assert sleep.call_args_list == [call(600)]
 
 
+def test_a_raising_skip_check_while_a_trip_is_pending_stops_the_run(fake_s3):
+    script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 6), False)
+    script.update({6: True, 7: True})
+    real = bd.should_skip_download
+
+    def flaky(*, source_id, **kwargs):
+        if source_id == 6:
+            raise RuntimeError("s3 down")
+        return real(source_id=source_id, **kwargs)
+
+    with (
+        patch.object(bd, "should_skip_download", side_effect=flaky),
+        patch.object(bd.time, "sleep") as sleep,
+    ):
+        outcome, attempted = _batch(fake_s3, script, cooldown=600)
+
+    assert outcome.stopped == "circuit_open"
+    assert attempted == [1, 2, 3, 4, 5]
+    assert 7 not in outcome.results
+    assert sleep.call_args_list == []
+
+
 def test_each_trip_gets_its_own_cooldown(fake_s3):
     script: dict[int, bool | str | list[str] | Exception] = dict.fromkeys(range(1, 12), False)
     script.update({6: True, 12: True})
