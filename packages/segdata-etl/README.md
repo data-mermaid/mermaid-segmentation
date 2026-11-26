@@ -442,7 +442,7 @@ A unit whose `manifest.json` is already published with the staged bytes is done,
 
 #### Feature sets in promote
 
-Each `features/<family>/` folder that holds a `manifest.json` is a feature set. `segdata_spec.stage.stage_feature_set` wrote it and already checked the index against the version (see the [segdata-spec README](../segdata-spec/README.md#feature-sets)). A stage can hold feature sets without the dataset files: `promote` then reads the dataset manifest from the bucket, and refuses when the version is not published.
+Each `features/<family>/` folder is a feature set. `promote` refuses a family folder that has no `manifest.json`, because the stage stopped before the set was complete. `segdata_spec.stage.stage_feature_set` wrote it and already checked the index against the version (see the [segdata-spec README](../segdata-spec/README.md#feature-sets)). A stage can hold feature sets without the dataset files: `promote` then reads the dataset manifest from the bucket, and refuses when the version is not published.
 
 Preflight refuses, before any write, when:
 

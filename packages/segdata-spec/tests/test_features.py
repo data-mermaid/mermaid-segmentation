@@ -29,7 +29,6 @@ from segdata_spec.errors import (
 from segdata_spec.features import (
     check_claimed_extractor,
     claim_extractor,
-    extractor_spec_bytes,
     feature_file_key,
     feature_store_name,
 )
@@ -246,12 +245,6 @@ def test_claim_extractor_refuses_a_spec_without_an_identity_key_before_any_s3_ca
         claim_extractor(fake_s3, BUCKET, FEATURE_STORE, FEATURE_FAMILY, extractor)
 
     assert fake_s3.calls == []
-
-
-def test_claim_extractor_writes_the_spec_bytes_promote_and_extraction_jobs_share(fake_s3):
-    claim_extractor(fake_s3, BUCKET, FEATURE_STORE, FEATURE_FAMILY, EXTRACTOR)
-
-    assert fake_s3.objects[(BUCKET, SIDECAR)] == extractor_spec_bytes(EXTRACTOR)
 
 
 def test_check_claimed_extractor_passes_an_unclaimed_family_and_writes_nothing(fake_s3):

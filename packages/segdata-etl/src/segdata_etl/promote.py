@@ -425,10 +425,21 @@ def _staged_family(stage_dir: Path, set_dir: Path) -> tuple[_FamilyUnit, dict[st
 
 
 def _staged_family_dirs(version_dir: Path) -> list[Path]:
+    """Return the staged ``features/<family>/`` folders, each holding its set manifest.
+
+    Raises:
+        PublishRefused: A folder has no ``manifest.json``, so the set was not fully staged.
+    """
     root = version_dir / "features"
     if not root.is_dir():
         return []
-    return sorted(p for p in root.iterdir() if (p / MANIFEST_NAME).is_file())
+    dirs = sorted(root.iterdir())
+    for p in dirs:
+        if not (p / MANIFEST_NAME).is_file():
+            raise PublishRefused(
+                f"{p} holds no {MANIFEST_NAME}: the feature set was not fully staged"
+            )
+    return dirs
 
 
 def _published_dataset(client: Any, version_dir: Path, dataset: str, version: str) -> bytes:
@@ -494,8 +505,9 @@ def _preflight(client: Any, stage_dir: Path, dataset: str, version: str, workers
     manifest bytes is dropped from the plan.
 
     Raises:
-        PublishRefused: A unit is inconsistent or published with other bytes, or every staged
-            unit is already published.
+        PublishRefused: A unit is inconsistent or published with other bytes, a
+            ``features/<family>/`` folder has no ``manifest.json``, or every staged unit is already
+            published.
     """
     version_dir = cache_path(stage_dir, DATASET_BUCKET, dataset_prefix(dataset, version))
     staged = (
@@ -679,7 +691,8 @@ def promote(client: Any, *, stage_dir: Path, dataset: str, version: str, workers
     The dataset goes first when staged and unpublished, then each staged feature set in family order.
 
     Raises:
-        PublishRefused: The staging is inconsistent or holds no images, every staged unit is already
+        PublishRefused: The staging is inconsistent or holds no images, a ``features/<family>/``
+            folder has no ``manifest.json``, every staged unit is already
             published, a unit is published with other bytes, a planned key holds other content, a
             carried image or vector is absent or differs, or a version with carried images lacks a
             parent on its image store; nothing was written.

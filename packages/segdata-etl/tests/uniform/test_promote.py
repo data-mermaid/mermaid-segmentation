@@ -209,6 +209,26 @@ def test_published_manifest_with_other_bytes_still_refuses_a_staged_feature_vers
     assert writes(fake) == []
 
 
+def test_published_set_manifest_with_other_bytes_refuses_before_any_write(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    fake.put(DATASET_BUCKET, f"datasets/mermaid/{version}/{FAMILY_DIR}/manifest.json", b"{}")
+
+    with pytest.raises(PublishRefused, match="already published.*other bytes"):
+        run_promote(fake, stage, version)
+
+    assert writes(fake) == []
+
+
+def test_family_folder_without_its_manifest_refuses_before_any_s3_call(repo, tmp_path):  # noqa: F811
+    fake, stage, version = stage_mermaid(tmp_path, features=True)
+    (version_dir(stage, "mermaid", version) / FAMILY_DIR / "manifest.json").unlink()
+
+    with pytest.raises(PublishRefused, match="not fully staged"):
+        run_promote(fake, stage, version)
+
+    assert fake.calls == []
+
+
 def test_allow_missing_build_promotes_a_set_recording_the_missing_image(repo, tmp_path):  # noqa: F811
     fake, stage, version = stage_mermaid(
         tmp_path, "--allow-missing-features", features=True, drop_vector="i2"
