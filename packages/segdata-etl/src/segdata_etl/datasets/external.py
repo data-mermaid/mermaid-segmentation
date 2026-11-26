@@ -30,8 +30,6 @@ from segdata_etl.common.copy_plan import (
     copy_plan,
     probe_image,
     stage_bytes,
-    write_copies,
-    write_uploads,
 )
 from segdata_etl.common.ingested import IngestedDataset, IngestedObject
 from segdata_etl.common.labels import resolve_taxonomy_name, taxonomy_name_index
@@ -42,16 +40,14 @@ from segdata_etl.common.s3_objects import (
     head_with_checksum,
     md5_hex,
 )
-from segdata_etl.common.stage import DEFAULT_CACHE_DIR, next_version
+from segdata_etl.common.stage import DEFAULT_CACHE_DIR, Publishable, stage_version
 from segdata_etl.label_maps.curated import CuratedSource
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.git import GitState
-from segdata_spec.layout import dataset_prefix, image_prefix
+from segdata_spec.layout import image_prefix
 from segdata_spec.manifest import LabelMapping, Pin, SourceInfo
 from segdata_spec.read import Taxonomy, open_taxonomy
 from segdata_spec.s3 import crc64nvme_b64, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
-from segdata_spec.stage import stage_dataset
 from segdata_spec.sync import require_published_taxonomy, sync
 
 logger = logging.getLogger(__name__)
@@ -516,8 +512,7 @@ def publish_version(
     source: SourceInfo,
     label_mapping: LabelMapping,
     dropped: Mapping[str, int],
-    git: GitState,
-    repo_root: Path,
+    repo: Publishable,
     client: Any,
     probe: IngestedProbe,
     ingested: IngestedDataset,
@@ -535,40 +530,24 @@ def publish_version(
         PublishRefused: The tree is dirty or unpushed, or ``uv.lock`` is missing.
         ObjectConflict: A staged mask file exists with other bytes.
     """
-    version = next_version(args.stage_dir, DATASET_BUCKET, dataset, git_sha=git.sha, client=client)
     rows = _image_rows(probe, masks)
     uploads: list[StagedFile] = []
     if masks is not None:
         uploads = _stage_masks(args.stage_dir, dataset, probe.images, masks)
-    manifest, sha = stage_dataset(
+    stage_version(
         args.stage_dir,
-        parent_dirs=(args.stage_dir,),
-        bucket=DATASET_BUCKET,
+        repo=repo,
+        client=client,
         dataset=dataset,
-        version=version,
         kind=kind,
         tables={"images.parquet": pa.Table.from_pylist(rows, schema=IMAGES_SCHEMA), **tables},
         image_store=versions.image_store(DATASET_BUCKET, dataset),
-        etl_package="segdata-etl",
         etl_command=build_command(dataset, args),
         source=source,
         label_mapping=label_mapping,
         dropped=_with_unreadable(dropped, probe),
         taxonomy=_taxonomy_pin(args),
-        repo_dir=repo_root,
-        git=git,
+        copies=_ingested_copy_plan(rows, probe, ingested=ingested, dataset=dataset),
+        uploads=uploads,
     )
-    plan = _ingested_copy_plan(rows, probe, ingested=ingested, dataset=dataset)
-    write_copies(args.stage_dir, dataset_prefix(dataset, version), plan)
-    if uploads:
-        write_uploads(args.stage_dir, dataset, version, uploads)
-    logger.info(
-        "staged %s %s: %d images, %d copies, %d uploads",
-        dataset,
-        manifest.version,
-        manifest.stats.n_images,
-        len(plan),
-        len(uploads),
-    )
-    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0

@@ -832,8 +832,8 @@ def staging(source: RecordingS3, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(raw, "make_s3_client", lambda **_kw: source)
     monkeypatch.setitem(sys.modules, "ibis", None)
     monkeypatch.setitem(sys.modules, "duckdb", None)
-    monkeypatch.setattr(raw, "find_repo_root", lambda _start: repo)
-    monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: repo)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: GIT)
     _put_build(source, "run1")
     return source
 
@@ -994,8 +994,8 @@ def test_an_unpublishable_tree_is_refused_before_any_s3_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git: GitState, message: str
 ) -> None:
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
-    monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
-    monkeypatch.setattr(raw, "probe_git", lambda _dir: git)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: tmp_path)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: git)
 
     def no_s3(**_kw: object) -> None:
         raise AssertionError("the guard must fire before an S3 client is made")
@@ -1011,8 +1011,8 @@ def test_a_tree_without_uv_lock_is_refused_before_any_s3_call_or_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MERMAID_CORALNET_BUCKET", SRC)
-    monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
-    monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: tmp_path)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: GIT)
 
     def no_s3(**_kw: object) -> None:
         raise AssertionError("the guard must fire before an S3 client is made")
@@ -1059,8 +1059,8 @@ def test_a_missing_bucket_env_var_refuses_before_any_s3_client_is_made(
 ) -> None:
     (tmp_path / "uv.lock").write_text("lock")
     monkeypatch.delenv("MERMAID_CORALNET_BUCKET", raising=False)
-    monkeypatch.setattr(raw, "find_repo_root", lambda _start: tmp_path)
-    monkeypatch.setattr(raw, "probe_git", lambda _dir: GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: tmp_path)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: GIT)
 
     def no_s3(**_kw: object) -> None:
         raise AssertionError("an unset bucket must be refused before an S3 client is made")

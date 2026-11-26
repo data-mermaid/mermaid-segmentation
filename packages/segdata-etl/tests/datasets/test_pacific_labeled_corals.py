@@ -85,7 +85,7 @@ def _ingested(s3: FakeS3, annotations: list[Annotation] = ANNOTATIONS) -> None:
 
 @pytest.fixture
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    return make_repo(tmp_path, monkeypatch, pacific_labeled_corals)
+    return make_repo(tmp_path, monkeypatch)
 
 
 @pytest.fixture

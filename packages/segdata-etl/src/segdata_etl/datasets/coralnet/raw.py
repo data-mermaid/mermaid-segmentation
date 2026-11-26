@@ -39,7 +39,6 @@ from segdata_etl.common.copy_plan import (
     copy_plan,
     needs_full_read,
     read_full,
-    write_copies,
 )
 from segdata_etl.common.jpeg_header import STATUSES_WITH_DIMENSIONS
 from segdata_etl.common.s3_objects import (
@@ -49,16 +48,14 @@ from segdata_etl.common.s3_objects import (
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import next_version
+from segdata_etl.common.stage import publishable_repo, stage_version
 from segdata_etl.common.versions import bare_fingerprints, count_labels, image_store
-from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.git import probe_git, refuse_unpublishable
-from segdata_spec.layout import dataset_prefix, image_prefix
+from segdata_spec.layout import image_prefix
 from segdata_spec.manifest import ParentRef, SourceInfo
 from segdata_spec.s3 import crc64nvme_b64, get_bytes, norm_etag
 from segdata_spec.schema import IMAGES_SCHEMA, LABELS_SCHEMA, POINTS_SCHEMA
-from segdata_spec.stage import read_parent_tables, stage_dataset
+from segdata_spec.stage import read_parent_tables
 
 from .annotations import _IMAGE_LIST_NAME, derive_image_id
 from .config import DEFAULT_OUTPUT_S3_PREFIX, get_workers
@@ -734,9 +731,7 @@ def run_raw(args: argparse.Namespace) -> int:
         PinMismatch: The staged parent's manifest differs from its pin.
         SourceChanged: An original was replaced between its HEAD and its read.
     """
-    repo_root = find_repo_root(Path(__file__).resolve().parent)
-    git = probe_git(repo_root)
-    refuse_unpublishable(git, repo_root)
+    repo = publishable_repo()
     parent = _parent_ref(args)
     workers = _workers(args.workers)
     source_bucket, prefix = _source_bucket(), get_prefix()
@@ -759,38 +754,23 @@ def run_raw(args: argparse.Namespace) -> int:
         source_bucket=source_bucket,
         prefix=prefix,
         workers=workers,
-        checkpoint=checkpoint_path(args.stage_dir, args.build_run, git.sha),
+        checkpoint=checkpoint_path(args.stage_dir, args.build_run, repo.git.sha),
         parent_images=parent_images,
     )
-    version = next_version(args.stage_dir, DATASET_BUCKET, DATASET, git_sha=git.sha, client=client)
-    manifest, sha = stage_dataset(
+    stage_version(
         args.stage_dir,
-        parent_dirs=(args.stage_dir,),
-        bucket=DATASET_BUCKET,
+        repo=repo,
+        client=client,
         dataset=DATASET,
-        version=version,
         kind="points",
         tables=result.tables,
         image_store=image_store(DATASET_BUCKET, _IMAGE_FAMILY),
-        etl_package="segdata-etl",
         etl_command=_command_line(args),
         source=SourceInfo(
             type="coralnet-scrape", uri=f"s3://{source_bucket}/{prefix}/", revision=args.build_run
         ),
         parents=() if parent is None else (parent,),
         dropped=result.dropped,
-        repo_dir=repo_root,
-        git=git,
+        copies=_copies(result.tables["images.parquet"], source_bucket, result.carried),
     )
-    plan = _copies(result.tables["images.parquet"], source_bucket, result.carried)
-    write_copies(args.stage_dir, dataset_prefix(DATASET, version), plan)
-    logger.info(
-        "staged %s %s: %d images, %d copies; dropped %s",
-        DATASET,
-        manifest.version,
-        manifest.stats.n_images,
-        len(plan),
-        result.dropped,
-    )
-    print(f"version: {manifest.version}\nmanifest_sha256: {sha}")
     return 0

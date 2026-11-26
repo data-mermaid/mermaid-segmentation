@@ -86,7 +86,7 @@ def _ingested(
 
 @pytest.fixture
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    return make_repo(tmp_path, monkeypatch, benthos_yuval)
+    return make_repo(tmp_path, monkeypatch)
 
 
 @pytest.fixture

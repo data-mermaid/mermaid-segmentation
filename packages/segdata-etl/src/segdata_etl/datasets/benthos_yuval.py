@@ -18,11 +18,10 @@ from PIL import Image
 
 from segdata_etl.common.ingested import IngestedDataset, read_ingested, source_info
 from segdata_etl.common.s3_objects import SourceChanged
+from segdata_etl.common.stage import publishable_repo
 from segdata_etl.datasets import external
 from segdata_etl.label_maps.curated import curated_source, load_curated
-from segdata_etl.taxonomy import find_repo_root
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.git import probe_git, refuse_unpublishable
 from segdata_spec.s3 import is_precondition_failed
 from segdata_spec.schema import LABEL_COUNTS_SCHEMA
 
@@ -200,9 +199,7 @@ def run(args: argparse.Namespace, client: Any) -> int:
     Raises:
         PublishRefused: The git tree is dirty or unpushed.
     """
-    repo_root = find_repo_root(Path(__file__).resolve().parent)
-    git = probe_git(repo_root)
-    refuse_unpublishable(git, repo_root)
+    repo = publishable_repo()
     taxonomy = external.load_taxonomy(
         client,
         DATASET_BUCKET,
@@ -241,11 +238,10 @@ def run(args: argparse.Namespace, client: Any) -> int:
         },
         source=source,
         label_mapping=external.label_mapping_record(
-            labels, curated_source(DATASET), git_sha=git.sha
+            labels, curated_source(DATASET), git_sha=repo.git.sha
         ),
         dropped=dropped,
-        git=git,
-        repo_root=repo_root,
+        repo=repo,
         client=client,
         probe=probe,
         ingested=ingested,

@@ -24,29 +24,25 @@ import pyarrow.parquet as pq
 from huggingface_hub import HfApi, hf_hub_download
 from PIL import Image
 
-from segdata_etl.common.copy_plan import StagedFile, stage_bytes, write_uploads
+from segdata_etl.common.copy_plan import StagedFile, stage_bytes
 from segdata_etl.common.s3_objects import (
     EXTENSIONS,
     image_size,
     md5_hex,
     sniff_media_type,
 )
-from segdata_etl.common.stage import next_version
+from segdata_etl.common.stage import publishable_repo, stage_version
 from segdata_etl.label_maps.curated import curated_source, load_curated
 from segdata_spec import DATASET_BUCKET
-from segdata_spec.git import probe_git, refuse_unpublishable
 from segdata_spec.manifest import ImageStore, LabelMapping, SourceInfo
 from segdata_spec.s3 import crc64nvme_b64
 from segdata_spec.schema import IMAGES_SCHEMA, LABEL_COUNTS_SCHEMA, LABELS_SCHEMA
-from segdata_spec.stage import stage_dataset
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 16
 MASK_SUFFIX = "_label.png"
 
-# The repo root, which holds ``uv.lock`` and the git checkout that built the version.
-REPO_ROOT = Path(__file__).resolve().parents[5]
 # A directory holding ``<dataset>.csv`` in place of the packaged curated maps.
 CURATED_ROOT: Path | None = None
 
@@ -336,8 +332,7 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         ObjectConflict: A staged file exists with other bytes.
         PublishRefused: The git tree is dirty or unpushed.
     """
-    git = probe_git(REPO_ROOT)
-    refuse_unpublishable(git, REPO_ROOT)
+    repo = publishable_repo()
     shards = _shards_or_raise(_list_repo_files(source.repo, args.revision), source)
     vocab_path = hf_hub_download(
         source.repo, source.vocab_file, repo_type="dataset", revision=args.revision
@@ -350,15 +345,11 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
         local = hf_hub_download(source.repo, name, repo_type="dataset", revision=args.revision)
         _stage_shard(source, args.stage_dir, local, split, ids, vocab.keys(), out)
     dropped = {"image_unreadable_header": out.unreadable, "mask_invalid": out.mask_invalid}
-    version = next_version(
-        args.stage_dir, DATASET_BUCKET, source.dataset, git_sha=git.sha, client=client
-    )
-    manifest, _ = stage_dataset(
+    stage_version(
         args.stage_dir,
-        parent_dirs=(args.stage_dir,),
-        bucket=DATASET_BUCKET,
+        repo=repo,
+        client=client,
         dataset=source.dataset,
-        version=version,
         kind="dense",
         tables={
             "images.parquet": pa.Table.from_pylist(out.rows, schema=IMAGES_SCHEMA),
@@ -366,7 +357,6 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
             "stats/label_counts.parquet": label_counts_table(out.counts),
         },
         image_store=ImageStore(bucket=DATASET_BUCKET, prefix=source.image_prefix, owner="segdata"),
-        etl_package="segdata-etl",
         etl_command=_command_line(source, args),
         source=SourceInfo(
             type="huggingface",
@@ -382,17 +372,7 @@ def run_build(source: DenseSource, args: argparse.Namespace, client: Any) -> int
             n_mapped=n_mapped,
         ),
         dropped=dropped,
-        repo_dir=REPO_ROOT,
-        git=git,
-    )
-    write_uploads(args.stage_dir, source.dataset, version, out.files)
-    logger.info(
-        "staged %s %s: %d images, %d files, dropped %s",
-        source.dataset,
-        version,
-        manifest.stats.n_images,
-        len(out.files),
-        dropped,
+        uploads=out.files,
     )
     return 0
 

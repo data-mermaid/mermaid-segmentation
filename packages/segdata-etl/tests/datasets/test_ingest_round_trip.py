@@ -50,7 +50,7 @@ def _ingest_then_build(
     argv = ["ingest", name, "--data-dir", str(raw), "--workers", "2", *workdir_flags]
     args = cli.build_parser().parse_args(argv)
     assert args.run(args, s3) == 0
-    repo = make_repo(tmp_path, monkeypatch, builder)
+    repo = make_repo(tmp_path, monkeypatch)
     staged: Staged = stage_version(builder, s3, repo, tmp_path, capsys)
     return staged.version.manifest
 

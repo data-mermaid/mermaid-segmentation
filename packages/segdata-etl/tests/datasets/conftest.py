@@ -106,13 +106,13 @@ def publish_fixture_taxonomy(client: Any, repo: Path) -> str:
     return sha
 
 
-def make_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, builder: ModuleType) -> Path:
-    """Create a repo root holding ``uv.lock`` for ``builder``, with a clean pushed git state."""
+def make_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a repo root holding ``uv.lock``, with a clean pushed git state."""
     root = tmp_path / "repo"
     root.mkdir()
     (root / "uv.lock").write_text("lock")
-    monkeypatch.setattr(builder, "find_repo_root", lambda _start: root)
-    monkeypatch.setattr(builder, "probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: root)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: CLEAN_GIT)
     return root
 
 

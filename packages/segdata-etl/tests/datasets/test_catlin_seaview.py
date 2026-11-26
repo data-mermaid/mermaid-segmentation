@@ -76,7 +76,7 @@ def _ingested(
 
 @pytest.fixture
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    return make_repo(tmp_path, monkeypatch, catlin_seaview)
+    return make_repo(tmp_path, monkeypatch)
 
 
 @pytest.fixture
@@ -190,7 +190,7 @@ def test_build_refuses_an_unpublishable_tree_before_reading_s3(
 ) -> None:
     s3 = FakeS3()
     _ingested(s3)
-    monkeypatch.setattr(catlin_seaview, "probe_git", lambda _dir: git)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: git)
     stage = tmp_path / "stage"
 
     with pytest.raises(PublishRefused):

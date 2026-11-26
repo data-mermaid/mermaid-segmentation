@@ -12,7 +12,6 @@ import pytest
 from s3_fake import FakeS3
 
 from segdata_etl import cli
-from segdata_etl.common import hf_dense
 from segdata_spec import DATASET_BUCKET
 from segdata_spec.errors import PublishRefused
 from segdata_spec.git import GitState
@@ -135,7 +134,7 @@ def test_dirty_git_refuses_before_any_shard_download(monkeypatch, tmp_path):
         shards={"data/palwave13-00000-of-00001.parquet": shard("PALWave13", ["a.jpg"])},
     )
     dirty = GitState(sha="abcdef1234567", dirty=True, pushed=True)
-    monkeypatch.setattr(hf_dense, "probe_git", lambda _: dirty)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _: dirty)
     args = cli.build_parser().parse_args(
         ["build", "ucsd_mosaics", "--stage-dir", str(tmp_path / "stage")]
     )

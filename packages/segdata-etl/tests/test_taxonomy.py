@@ -186,9 +186,8 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     (root / "uv.lock").write_text("lock")
-    monkeypatch.setattr(taxonomy, "find_repo_root", lambda _start: root)
-    monkeypatch.setattr(taxonomy, "probe_git", lambda _dir: CLEAN_GIT)
-    monkeypatch.setattr("segdata_spec.stage.probe_git", lambda _dir: CLEAN_GIT)
+    monkeypatch.setattr("segdata_etl.common.stage.find_repo_root", lambda _start: root)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: CLEAN_GIT)
     return root
 
 
@@ -258,7 +257,7 @@ def test_stage_dir_is_required() -> None:
 def test_a_dirty_or_unpushed_tree_is_refused_before_any_fetch(
     repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: GitState
 ) -> None:
-    monkeypatch.setattr(taxonomy, "probe_git", lambda _dir: state)
+    monkeypatch.setattr("segdata_etl.common.stage.probe_git", lambda _dir: state)
     session = FakeSession({})
     with pytest.raises(PublishRefused):
         taxonomy.run_taxonomy(
